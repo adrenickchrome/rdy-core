@@ -3,6 +3,7 @@ mod error;
 mod gate;
 mod io;
 mod materialize;
+mod paths;
 mod query;
 mod session;
 pub mod testkit;
@@ -13,7 +14,7 @@ pub use decide::DecisionInput;
 pub use error::*;
 pub use gate::ProposalInfo;
 pub use io::{ExportSummary, block_from_yaml, block_to_yaml};
-pub use materialize::Materialized;
+pub use materialize::{Materialized, PathMiss};
 pub use query::{Context, ImpactItem, field_json, summary, summary_in};
 pub use session::{Scope, Session, now_ms, rfc3339_now};
 pub use version::{
