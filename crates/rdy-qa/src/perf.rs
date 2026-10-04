@@ -5,7 +5,7 @@ use rdy_model::BlockId;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Measure {
@@ -130,13 +130,16 @@ pub fn machine_class() -> String {
 }
 
 fn measure(op: &str, runs: usize, mut f: impl FnMut(usize)) -> Measure {
-    let mut t: Vec<f64> = (0..runs)
-        .map(|i| {
-            let s = Instant::now();
-            f(i);
-            s.elapsed().as_secs_f64() * 1000.0
-        })
-        .collect();
+    measure_timed(op, runs, |i| {
+        let s = Instant::now();
+        f(i);
+        s.elapsed()
+    })
+}
+
+/// Like [`measure`], but `f` times its own run (so setup can stay outside the timed region).
+fn measure_timed(op: &str, runs: usize, mut f: impl FnMut(usize) -> Duration) -> Measure {
+    let mut t: Vec<f64> = (0..runs).map(|i| f(i).as_secs_f64() * 1000.0).collect();
     t.sort_by(|a, b| a.partial_cmp(b).unwrap());
     Measure {
         op: op.into(),
@@ -144,6 +147,17 @@ fn measure(op: &str, runs: usize, mut f: impl FnMut(usize)) -> Measure {
         p95_ms: t[((t.len() * 95) / 100).min(t.len() - 1)],
         runs,
     }
+}
+
+/// Runs `f` with the engine's canon and view caches dropped first, outside the timed region:
+/// the materialization and graph rebuild that `f` triggers is what gets timed. This is the
+/// agent's real pattern (every write invalidates, so the next read rebuilds); warm reads are
+/// cache hits that no regression could move past the floor.
+fn cold<T>(r: &mut Rdy, f: impl FnOnce(&mut Rdy) -> T) -> (T, Duration) {
+    r.invalidate();
+    let s = Instant::now();
+    let out = f(r);
+    (out, s.elapsed())
 }
 
 /// The fixed workload: a ~10k-block tree project (ids seeded, so it is identical every run),
@@ -208,17 +222,21 @@ pub fn run_workload() -> Vec<Measure> {
         write(&mut r, &view, json!(ops)).expect("flat write");
         land(&mut r, &view).expect("flat land");
     }));
-    out.push(measure("context", 200, |_| {
-        r.context(&va, &claim).expect("context");
+    // reads timed cold: each run rebuilds what a write would have invalidated
+    out.push(measure_timed("context", 20, |_| {
+        cold(&mut r, |r| r.context(&va, &claim).expect("context")).1
     }));
-    out.push(measure("impact", 200, |_| {
-        r.impact(&va, &claim, 3).expect("impact");
+    out.push(measure_timed("impact", 20, |_| {
+        cold(&mut r, |r| r.impact(&va, &claim, 3).expect("impact")).1
     }));
-    out.push(measure("version_position", 200, |_| {
-        r.version_position(&va).expect("position");
+    out.push(measure_timed("version_position", 20, |_| {
+        cold(&mut r, |r| r.version_position(&va).expect("position")).1
     }));
-    out.push(measure("resolve_path", 200, |_| {
-        r.resolve_path(&Scope::Canon, doc_path).expect("resolve");
+    out.push(measure_timed("resolve_path", 20, |_| {
+        cold(&mut r, |r| {
+            r.resolve_path(&Scope::Canon, doc_path).expect("resolve")
+        })
+        .1
     }));
     out.push(measure("tree_full", 20, |_| {
         r.tree(&Scope::Canon, None, None).expect("tree");
@@ -292,6 +310,27 @@ mod tests {
             compare(None, &[m("render", 1e9)])[0].pass,
             "no baseline passes"
         );
+    }
+
+    #[test]
+    fn cold_reads_drop_the_caches_before_the_timed_region_and_rebuild_inside_it() {
+        let (_d, mut r) = crate::fixtures::project();
+        let res = write(&mut r, "work", json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}}
+        ]))
+        .unwrap();
+        let doc = BlockId::parse(&res.created["$d"]).unwrap();
+        let work = Scope::View("work".into());
+        r.context(&work, &doc).unwrap();
+        assert_eq!(r.is_cached(&work), (true, true), "warm before");
+        let mut at_start = None;
+        let (_, took) = cold(&mut r, |r| {
+            at_start = Some(r.is_cached(&work));
+            r.context(&work, &doc).unwrap()
+        });
+        assert_eq!(at_start, Some((false, false)), "the timed body starts cold");
+        assert_eq!(r.is_cached(&work), (true, true), "the body rebuilt");
+        assert!(took > std::time::Duration::ZERO);
     }
 
     #[test]
