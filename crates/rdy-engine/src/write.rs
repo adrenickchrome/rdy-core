@@ -186,6 +186,59 @@ type Built = (Vec<Op>, BTreeMap<String, String>, BTreeSet<BlockId>);
 
 type Prior = (bool, BTreeMap<BlockId, Hash>);
 
+/// Strongly connected components of the graph `deps` (node -> nodes it points at), numbered so
+/// that every component is numbered after all components it points at (Tarjan, iterative).
+fn components(deps: &[Vec<usize>]) -> Vec<usize> {
+    const NONE: usize = usize::MAX;
+    let n = deps.len();
+    let (mut index, mut low, mut comp) = (vec![NONE; n], vec![0; n], vec![NONE; n]);
+    let mut on_stack = vec![false; n];
+    let (mut stack, mut next, mut ncomp) = (vec![], 0, 0);
+    for root in 0..n {
+        if index[root] != NONE {
+            continue;
+        }
+        let mut call = vec![(root, 0usize)];
+        index[root] = next;
+        low[root] = next;
+        next += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        while let Some(&(v, e)) = call.last() {
+            if let Some(&w) = deps[v].get(e) {
+                call.last_mut().expect("frame").1 += 1;
+                if index[w] == NONE {
+                    index[w] = next;
+                    low[w] = next;
+                    next += 1;
+                    stack.push(w);
+                    on_stack[w] = true;
+                    call.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+            } else {
+                call.pop();
+                if let Some(&(u, _)) = call.last() {
+                    low[u] = low[u].min(low[v]);
+                }
+                if low[v] == index[v] {
+                    loop {
+                        let w = stack.pop().expect("on stack");
+                        on_stack[w] = false;
+                        comp[w] = ncomp;
+                        if w == v {
+                            break;
+                        }
+                    }
+                    ncomp += 1;
+                }
+            }
+        }
+    }
+    comp
+}
+
 fn build_ops(pack: &Pack, base: &Materialized, session: &Session, inputs: Vec<OpInput>) -> Result<Built, RdyError> {
     let mut ov = Overlay { base, pending: BTreeMap::new() };
     let mut res = Resolver { placeholders: BTreeMap::new() };
@@ -303,42 +356,74 @@ fn build_ops(pack: &Pack, base: &Materialized, session: &Session, inputs: Vec<Op
         }
     }
 
-    // second pass: references, pins, decision permissions, schema validation
+    // second pass: references, decision permissions, schema validation; pins to blocks outside
+    // this write are set here, pins to blocks touched by it wait for the third pass
+    let slot: BTreeMap<BlockId, usize> = ops
+        .iter()
+        .enumerate()
+        .filter_map(|(i, op)| match op {
+            Op::Create { block } | Op::Update { block, .. } => Some((block.id.clone(), i)),
+            Op::Delete { .. } => None,
+        })
+        .collect();
+    let mut deps: Vec<Vec<usize>> = vec![vec![]; ops.len()];
+    let mut pinsets: Vec<Option<BTreeMap<BlockId, Hash>>> = vec![None; ops.len()];
     let mut issues = vec![];
-    for (op, (is_move, old_pins)) in ops.iter_mut().zip(prior) {
+    for (i, (op, (is_move, old_pins))) in ops.iter().zip(prior).enumerate() {
         let block = match op {
             Op::Create { block } | Op::Update { block, .. } => block,
             Op::Delete { .. } => continue,
         };
-        let mut pins = BTreeMap::new();
+        let mut targets = vec![];
         for tok in block.ref_tokens() {
             if let Some(name) = tok.strip_prefix('$') {
                 return Err(bad(format!("placeholder ${name} is used before it is created"), "create the block earlier in the same batch, or use a real id"));
             }
             let target = BlockId::parse(&tok).map_err(|_| RdyError::new(E_UNKNOWN_REF, format!("{{{{{tok}}}}} in {} is not a block id", block.id), "reference blocks as {{id}}, e.g. {{t-MEDGR}}; find ids with rdy_search"))?;
             let t = ov.get(&target).ok_or_else(|| RdyError::new(E_UNKNOWN_REF, format!("{} references {target}, which does not exist in this view", block.id), "fix the id, or create the target in the same write"))?;
-            if let Some(h) = old_pins.get(&target) {
-                pins.insert(target, *h);
-            } else if !touched.contains(&target) {
-                pins.insert(target, t.version_hash());
-            }
+            targets.push((target, t.version_hash()));
         }
         for link in block.links.values().flatten() {
             let t = ov.get(&link.target).ok_or_else(|| RdyError::new(E_UNKNOWN_REF, format!("{} links to {}, which does not exist in this view", block.id, link.target), "fix the link target id"))?;
-            if let Some(h) = old_pins.get(&link.target) {
-                pins.insert(link.target.clone(), *h);
-            } else if !touched.contains(&link.target) {
-                pins.insert(link.target.clone(), t.version_hash());
-            }
+            targets.push((link.target.clone(), t.version_hash()));
         }
         if !is_move {
-            block.pins = pins;
+            let mut pins = BTreeMap::new();
+            for (target, current) in targets {
+                if let Some(h) = old_pins.get(&target) {
+                    pins.insert(target, *h);
+                } else if let Some(&j) = slot.get(&target) {
+                    deps[i].push(j);
+                } else {
+                    pins.insert(target, current);
+                }
+            }
+            pinsets[i] = Some(pins);
         }
         if block.block_type == decision::DECISION && block.field_str("status") != Some("proposed") && !session.role.can_land() {
             return Err(RdyError::new(E_PERMISSION, format!("{} sets decision status {:?}", block.id, block.field_str("status").unwrap_or("")), "write status: proposed; the decision is accepted when its proposal lands"));
         }
         let parent = block.parent.as_ref().and_then(|p| ov.get(p));
         issues.extend(validate_block(pack, block, parent));
+    }
+
+    // third pass: pin references between blocks of this write to the targets' final versions,
+    // targets first; edges inside a reference cycle stay unpinned
+    let comp = components(&deps);
+    let mut order: Vec<usize> = (0..ops.len()).collect();
+    order.sort_by_key(|&i| comp[i]);
+    for i in order {
+        let Some(mut pins) = pinsets[i].take() else { continue };
+        for &j in &deps[i] {
+            if comp[j] != comp[i]
+                && let Op::Create { block: t } | Op::Update { block: t, .. } = &ops[j]
+            {
+                pins.insert(t.id.clone(), t.version_hash());
+            }
+        }
+        if let Op::Create { block } | Op::Update { block, .. } = &mut ops[i] {
+            block.pins = pins;
+        }
     }
     if has_errors(&issues) {
         let first = issues.iter().find(|i| i.severity == rdy_schema::Severity::Error).expect("an error");
