@@ -67,6 +67,64 @@ pub fn guarded_ids(list_output: &str) -> BTreeMap<String, BTreeSet<String>> {
     out
 }
 
+/// The `--only` area that runs the perf tier alone.
+pub const PERF_AREA: &str = "perf";
+
+/// What one `cargo qa` run executes. The release build of `rdy-cli` always runs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Plan {
+    /// fmt, clippy and the workspace tests (outside `rdy-qa`).
+    pub checks: bool,
+    /// The `rdy-qa` test files (stems) to run.
+    pub files: Vec<String>,
+    /// The `rdy-qa` unit tests.
+    pub lib: bool,
+    /// The perf-regression tier.
+    pub perf: bool,
+    /// The guarded-id listing for the report.
+    pub guarded: bool,
+}
+
+/// The plan for `--only <area>` (or a full run), given the `rdy-qa` test file stems.
+/// - no `--only`: everything (perf unless `--skip-perf`);
+/// - `--only perf`: the build and the perf tier only;
+/// - `--only <area>`: fmt, clippy, the workspace tests, that area's `rdy-qa` test files, the
+///   `rdy-qa` unit tests and the perf tier (unless `--skip-perf`).
+pub fn plan(only: Option<&str>, files: &[String], skip_perf: bool) -> Result<Plan, String> {
+    match only {
+        Some(PERF_AREA) if skip_perf => Err("--only perf with --skip-perf runs nothing".into()),
+        Some(PERF_AREA) => Ok(Plan {
+            checks: false,
+            files: vec![],
+            lib: false,
+            perf: true,
+            guarded: false,
+        }),
+        _ => {
+            let chosen: Vec<String> = files
+                .iter()
+                .filter(|f| only.is_none_or(|a| area_of(f) == a))
+                .cloned()
+                .collect();
+            if let Some(a) = only
+                && chosen.is_empty()
+            {
+                let mut known: BTreeSet<&str> = files.iter().map(|f| area_of(f)).collect();
+                known.insert(PERF_AREA);
+                let known: Vec<&str> = known.into_iter().collect();
+                return Err(format!("unknown area `{a}`; known: {}", known.join(", ")));
+            }
+            Ok(Plan {
+                checks: true,
+                files: chosen,
+                lib: true,
+                perf: !skip_perf,
+                guarded: true,
+            })
+        }
+    }
+}
+
 /// `engine_splitbrain` -> `engine`.
 pub fn area_of(stem: &str) -> &str {
     stem.split('_').next().unwrap_or(stem)
@@ -294,6 +352,45 @@ pub fn json(r: &Report) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_narrows_the_run_and_perf_is_an_area() {
+        let files: Vec<String> = ["cli", "engine", "engine_splitbrain", "mcp"]
+            .map(String::from)
+            .to_vec();
+        let all = plan(None, &files, false).unwrap();
+        assert_eq!(
+            all,
+            Plan {
+                checks: true,
+                files: files.clone(),
+                lib: true,
+                perf: true,
+                guarded: true,
+            }
+        );
+        assert!(!plan(None, &files, true).unwrap().perf, "--skip-perf");
+        let engine = plan(Some("engine"), &files, false).unwrap();
+        assert_eq!(engine.files, vec!["engine", "engine_splitbrain"]);
+        assert!(engine.checks && engine.lib && engine.perf);
+        // `--only perf`: the build and the perf tier, nothing else
+        assert_eq!(
+            plan(Some("perf"), &files, false).unwrap(),
+            Plan {
+                checks: false,
+                files: vec![],
+                lib: false,
+                perf: true,
+                guarded: false,
+            }
+        );
+        assert!(
+            plan(Some("perf"), &files, true).is_err(),
+            "would run nothing"
+        );
+        let e = plan(Some("nope"), &files, false).unwrap_err();
+        assert!(e.contains("perf") && e.contains("engine"), "{e}");
+    }
 
     #[test]
     fn parses_cargo_test_output() {

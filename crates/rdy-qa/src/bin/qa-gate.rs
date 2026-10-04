@@ -13,7 +13,10 @@ struct Args {
     /// Multiply proptest case counts by 10 and run the slow sweeps (before a milestone).
     #[arg(long)]
     deep: bool,
-    /// Run only this area's test files (model, store, schema, engine, io, mcp, cli, render, ...).
+    /// Narrow the run to one area. `perf`: the release build and the perf tier only. Any other
+    /// area (model, store, schema, engine, io, mcp, cli, render, ...): the release build, fmt,
+    /// clippy, the workspace tests, that area's rdy-qa test files, the rdy-qa unit tests and the
+    /// perf tier (unless --skip-perf).
     #[arg(long, value_name = "AREA")]
     only: Option<String>,
     /// Skip the perf-regression tier.
@@ -193,15 +196,13 @@ fn main() {
         let _ = std::fs::remove_file(root().join("target/qa").join(f));
     }
     let mut notes: Vec<String> = vec![];
-    let files = test_files();
-    let areas_known: std::collections::BTreeSet<&str> =
-        files.iter().map(|f| report::area_of(f)).collect();
-    if let Some(a) = &args.only
-        && !areas_known.contains(a.as_str())
-    {
-        eprintln!("unknown area `{a}`; known: {areas_known:?}");
-        std::process::exit(2);
-    }
+    let plan = match report::plan(args.only.as_deref(), &test_files(), args.skip_perf) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
 
     let machine = perf::machine_class();
     let mut gates = vec![];
@@ -225,59 +226,58 @@ fn main() {
         eprintln!("{out}");
     }
 
-    let (ok, out) = step("fmt", cargo(&["fmt", "--all", "--check"]));
-    gate("cargo fmt --all --check", ok, fail_tail(ok, &out));
-    if !ok {
-        eprintln!("{out}");
-    }
+    if plan.checks {
+        let (ok, out) = step("fmt", cargo(&["fmt", "--all", "--check"]));
+        gate("cargo fmt --all --check", ok, fail_tail(ok, &out));
+        if !ok {
+            eprintln!("{out}");
+        }
 
-    let (ok, out) = step(
-        "clippy",
-        cargo(&[
+        let (ok, out) = step(
             "clippy",
-            "--workspace",
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-        ]),
-    );
-    gate("cargo clippy -D warnings", ok, fail_tail(ok, &out));
-    if !ok {
-        eprintln!("{out}");
-    }
+            cargo(&[
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ]),
+        );
+        gate("cargo clippy -D warnings", ok, fail_tail(ok, &out));
+        if !ok {
+            eprintln!("{out}");
+        }
 
-    let (ok, out) = step(
-        "workspace tests",
-        cargo(&["test", "--workspace", "--exclude", "rdy-qa"]),
-    );
-    let run = report::parse_cargo_test(&out);
-    seeds.extend(report::failing_seeds(&out));
-    let mut detail = format!(
-        "{} passed, {} failed, {} ignored",
-        run.passed, run.failed, run.ignored
-    );
-    if !run.failures.is_empty() {
-        detail += &format!("; failing: {}", run.failures.join(", "));
+        let (ok, out) = step(
+            "workspace tests",
+            cargo(&["test", "--workspace", "--exclude", "rdy-qa"]),
+        );
+        let run = report::parse_cargo_test(&out);
+        seeds.extend(report::failing_seeds(&out));
+        let mut detail = format!(
+            "{} passed, {} failed, {} ignored",
+            run.passed, run.failed, run.ignored
+        );
+        if !run.failures.is_empty() {
+            detail += &format!("; failing: {}", run.failures.join(", "));
+        }
+        if !ok {
+            detail += &format!("\n{}", report::tail(&out, 20));
+        }
+        let empty = report::ran_nothing(&run);
+        if empty {
+            detail += " (no tests ran)";
+        }
+        gate(
+            "cargo test --workspace --exclude rdy-qa",
+            ok && !empty,
+            detail,
+        );
     }
-    if !ok {
-        detail += &format!("\n{}", report::tail(&out, 20));
-    }
-    let empty = report::ran_nothing(&run);
-    if empty {
-        detail += " (no tests ran)";
-    }
-    gate(
-        "cargo test --workspace --exclude rdy-qa",
-        ok && !empty,
-        detail,
-    );
 
     // The hardening suite, one test binary at a time so each area reports on its own.
-    for stem in files
-        .iter()
-        .filter(|f| args.only.as_deref().is_none_or(|a| report::area_of(f) == a))
-    {
+    for stem in &plan.files {
         let mut c = cargo(&["test", "-p", "rdy-qa", "--release", "--test", stem]);
         if args.deep {
             c.env("RDY_QA_DEEP", "1");
@@ -308,43 +308,50 @@ fn main() {
         }
     }
 
-    let (ok, out) = step(
-        "rdy-qa unit tests",
-        cargo(&["test", "-p", "rdy-qa", "--release", "--lib"]),
-    );
-    let run = report::parse_cargo_test(&out);
-    seeds.extend(report::failing_seeds(&out));
-    if !ok && run.failures.is_empty() {
-        eprintln!("{out}");
+    if plan.lib {
+        let (ok, out) = step(
+            "rdy-qa unit tests",
+            cargo(&["test", "-p", "rdy-qa", "--release", "--lib"]),
+        );
+        let run = report::parse_cargo_test(&out);
+        seeds.extend(report::failing_seeds(&out));
+        if !ok && run.failures.is_empty() {
+            eprintln!("{out}");
+        }
+        areas.push(Area {
+            name: "lib".into(),
+            passed: run.passed,
+            failed: run.failed,
+            ignored: run.ignored,
+            ok,
+            failures: run.failures,
+        });
     }
-    areas.push(Area {
-        name: "lib".into(),
-        passed: run.passed,
-        failed: run.failed,
-        ignored: run.ignored,
-        ok,
-        failures: run.failures,
-    });
 
-    let (perf_verdicts, perf_note, perf_ok) = if args.skip_perf {
-        (vec![], "Skipped (`--skip-perf`).".to_string(), true)
-    } else {
+    let (perf_verdicts, perf_note, perf_ok) = if plan.perf {
         perf_tier(args.rebaseline, &machine, &mut notes)
+    } else {
+        (vec![], "Skipped (`--skip-perf`).".to_string(), true)
     };
 
-    // The `Running ...` headers go to stderr: merge the streams in order for the area parse.
-    let mut list_cmd = Command::new("sh");
-    list_cmd.args([
-        "-c",
-        "${CARGO:-cargo} test -p rdy-qa --release -- --list 2>&1",
-    ]);
-    let (list_ok, list) = step("list guarded tests", list_cmd);
-    if !list_ok {
-        notes.push(format!(
-            "guarded-id listing failed: {}",
-            report::tail(&list, 5)
-        ));
-    }
+    let guarded = if plan.guarded {
+        // The `Running ...` headers go to stderr: merge the streams in order for the area parse.
+        let mut list_cmd = Command::new("sh");
+        list_cmd.args([
+            "-c",
+            "${CARGO:-cargo} test -p rdy-qa --release -- --list 2>&1",
+        ]);
+        let (list_ok, list) = step("list guarded tests", list_cmd);
+        if !list_ok {
+            notes.push(format!(
+                "guarded-id listing failed: {}",
+                report::tail(&list, 5)
+            ));
+        }
+        report::guarded_ids(&list)
+    } else {
+        BTreeMap::new()
+    };
 
     let dirty = git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
     let mut mode = if args.deep { "deep" } else { "standard" }.to_string();
@@ -365,7 +372,7 @@ fn main() {
         perf_note,
         failing_seeds: seeds,
         notes,
-        guarded: report::guarded_ids(&list),
+        guarded,
     };
 
     let dir = root().join("target/qa");

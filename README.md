@@ -48,3 +48,7 @@ claude mcp add rdy -- rdy mcp --project /path/to/project
 `rdy-qa` hardening suite (model, store, schema, engine, io, mcp, cli, render) and a perf-regression
 tier, and writes `target/qa/report.md`. Flags: `--deep` (before a milestone), `--only <area>`,
 `--skip-perf`, `--rebaseline` (after an intended performance change; commit the baseline diff).
+
+`--only perf` runs the release build and the perf tier only. `--only <area>` for any other area
+keeps fmt, clippy, the workspace tests, the `rdy-qa` unit tests and the perf tier (unless
+`--skip-perf`) and narrows only the hardening suite to that area's test files.
