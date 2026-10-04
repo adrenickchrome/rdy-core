@@ -60,7 +60,7 @@ pub struct SessionParams {
     pub run: Option<String>,
     /// reader, writer or reviewer.
     pub role: String,
-    /// Override the default view for writes.
+    /// Override the default view for writes. A reader may pass "canon" to read canon by default.
     pub view: Option<String>,
 }
 
@@ -99,10 +99,14 @@ pub struct EditorialParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WriteParams {
     pub view: Option<String>,
-    /// Ops: {"op":"create","type":..,"id":"$name"?,"parent":..,"after":..,"fields":{..},"body":..,"links":{..}},
-    /// {"op":"update","id":..,"base":..?,"fields":{..},"unset":[..],"body":..,"links":{..}},
-    /// {"op":"move","id":..,"parent":..?,"after":..}, {"op":"delete","id":..},
-    /// {"op":"rebalance","parent":..?} (re-keys a parent's children; frozen decisions stay put; in one write it must come before any other op on those children, and a child it re-keys can't be edited again in the same write). Ids, parents, afters and link targets also take paths (wallets/transactions); a move without parent goes to the top level (docs and folders).
+    /// Ops, each a JSON object (rdy_schema lists them under "ops"):
+    /// {"op":"create","type":<type>,"id":"$name"?,"parent":<id or path>?,"after":<sibling>?,"fields":{..},"body":".."?,"links":{..}?}
+    /// {"op":"update","id":<id or path>,"base":<version>?,"fields":{..}?,"unset":[<field>]?,"body":".."?,"links":{..}?}
+    /// {"op":"move","id":<id or path>,"base":<version>?,"parent":<id or path>?,"after":<sibling>?}
+    /// {"op":"delete","id":<id or path>,"base":<version>?}
+    /// {"op":"rebalance","parent":<id or path>?}
+    /// links: {"<kind>": [{"target": "<id or path>", "part": "<optional words>"}]}, e.g. {"decided_by": [{"target": "D-W2HXR"}]}.
+    /// Ids, parents, afters and link targets also take paths (wallets/transactions); a move without parent goes to the top level (docs and folders); rebalance re-keys a parent's children (frozen decisions stay put; in one write it must come before any other op on those children, and a child it re-keys can't be edited again in the same write).
     pub ops: Vec<Value>,
     /// The decision this change carries out.
     pub implements: Option<String>,
@@ -244,6 +248,8 @@ fn session(st: &McpState) -> Result<Session, RdyError> {
 fn scope_of(st: &McpState, s: &Option<String>) -> Result<Scope, RdyError> {
     match s {
         Some(text) => st.rdy.resolve_scope(text),
+        // ses1: a reader session whose view is canon reads canon by default
+        None if st.view == "canon" => Ok(Scope::Canon),
         None => Ok(Scope::View(st.view.clone())),
     }
 }
@@ -254,6 +260,50 @@ fn id_of(s: &str) -> Result<BlockId, RdyError> {
 }
 
 const NAME_RULES: &str = "names: 1-64 characters from A-Z a-z 0-9 . _ -; not starting with . or _; not ending .yaml or .yml; not index; not shaped like a block id; not a Windows device name (con, prn, aux, nul, com1-9, lpt1-9); unique among siblings ignoring case. Omit name on create to have one assigned from the title.";
+
+/// Every write op and its JSON shape (`?` marks optional keys). rdy_schema lists them under
+/// "ops", and rdy_write's `ops` description repeats them; a QA test keeps the two in step.
+pub const WRITE_OPS: &[(&str, &str)] = &[
+    (
+        "create",
+        r#"{"op":"create","type":<type>,"id":"$name"?,"parent":<id or path>?,"after":<sibling>?,"fields":{..},"body":".."?,"links":{..}?}"#,
+    ),
+    (
+        "update",
+        r#"{"op":"update","id":<id or path>,"base":<version>?,"fields":{..}?,"unset":[<field>]?,"body":".."?,"links":{..}?}"#,
+    ),
+    (
+        "move",
+        r#"{"op":"move","id":<id or path>,"base":<version>?,"parent":<id or path>?,"after":<sibling>?}"#,
+    ),
+    (
+        "delete",
+        r#"{"op":"delete","id":<id or path>,"base":<version>?}"#,
+    ),
+    ("rebalance", r#"{"op":"rebalance","parent":<id or path>?}"#),
+];
+
+/// doc1: the shape of a block's `links`.
+pub const LINK_SHAPE: &str = r#"links: {"<kind>": [{"target": "<id or path>", "part": "<optional: the words of the target this link is about>"}]}"#;
+pub const LINK_EXAMPLE: &str =
+    r#"{"decided_by": [{"target": "D-W2HXR"}], "describes": [{"target": "wallets/transactions"}]}"#;
+
+fn link_example() -> Value {
+    serde_json::from_str(LINK_EXAMPLE).expect("LINK_EXAMPLE is JSON")
+}
+
+/// Whether `v` has the shape {"<kind>": [{"target": "<id or path>", ...}]}.
+fn links_shape_ok(v: &Value) -> bool {
+    v.as_object().is_some_and(|kinds| {
+        kinds.values().all(|l| {
+            l.as_array().is_some_and(|items| {
+                items
+                    .iter()
+                    .all(|x| x.get("target").is_some_and(Value::is_string))
+            })
+        })
+    })
+}
 
 fn depth_of(nodes: &[TreeNode]) -> usize {
     nodes
@@ -336,11 +386,12 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
             .map(|r| r.replace(':', "-"))
             .unwrap_or_else(|| "work".into()),
     };
-    if view == "canon" {
+    // ses1: a reader may read canon by default; a session that writes needs a view of its own
+    if view == "canon" && role != Role::Reader {
         return Err(RdyError::new(
             E_RESERVED_VIEW,
-            "canon cannot be a session view",
-            "pick another view name",
+            "canon cannot be a writer's or reviewer's session view",
+            "pick another view name; only a reader session may use canon",
         ));
     }
     st.view = view;
@@ -532,6 +583,8 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
                 example["body"] = json!("…");
             }
             let mut out = json!({"type": t, "prefix": def.prefix, "traits": traits(&def.traits), "body": format!("{:?}", def.body).to_lowercase(), "fields": fields, "children": def.children, "example": example});
+            out["links"] =
+                json!({"shape": LINK_SHAPE, "example": link_example(), "kinds": pack.link_types});
             if rdy_model::tree::is_tree_type(&t) {
                 out["example"]["parent"] = json!("<folder id or path; omit for the top level>");
                 out["name_rules"] = json!(NAME_RULES);
@@ -542,6 +595,8 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             "pack": pack.name,
             "types": pack.block_types.iter().map(|(n, d)| json!({"type": n, "prefix": d.prefix, "traits": traits(&d.traits)})).collect::<Vec<_>>(),
             "link_types": pack.link_types,
+            "link_shape": {"shape": LINK_SHAPE, "example": link_example()},
+            "ops": WRITE_OPS.iter().map(|(n, s)| (n.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
             "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT},
             "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
         })),
@@ -563,7 +618,17 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
         .ops
         .into_iter()
         .enumerate()
-        .map(|(i, v)| serde_json::from_value(v).map_err(|e| RdyError::new(E_BAD_INPUT, format!("op {i}: {e}"), "each op needs \"op\" (create, update, move, delete); create needs \"type\"; see rdy_schema for fields")))
+        .map(|(i, v)| {
+            serde_json::from_value(v.clone()).map_err(|e| {
+                // doc1: a malformed links value gets the shape, not the generic hint
+                let fix = if v.get("links").is_some_and(|l| !links_shape_ok(l)) {
+                    format!("write {LINK_SHAPE}, e.g. {LINK_EXAMPLE}")
+                } else {
+                    "each op needs \"op\" (rdy_schema lists them under \"ops\"); create needs \"type\"; see rdy_schema for fields".to_string()
+                };
+                RdyError::new(E_BAD_INPUT, format!("op {i}: {e}"), fix)
+            })
+        })
         .collect::<Result<_, _>>()?;
     let justification = match (p.implements, p.editorial) {
         (Some(_), Some(_)) => {
