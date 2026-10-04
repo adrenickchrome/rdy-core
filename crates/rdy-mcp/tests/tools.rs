@@ -317,3 +317,133 @@ fn compact_read_keeps_one_indented_line_per_block_with_multiline_diagrams() {
         );
     }
 }
+
+fn approver() -> rdy_engine::Session {
+    rdy_engine::Session {
+        actor: "human:founder".into(),
+        run: None,
+        role: rdy_model::Role::Approver,
+    }
+}
+
+/// Seeds the session view, lands it as the founder and tags it v0.1.0; returns the landing id.
+fn land_and_tag(st: &mut McpState) -> String {
+    seed(st);
+    let p = rdy_propose(
+        st,
+        serde_json::from_value(json!({"title": "seed"})).unwrap(),
+    )
+    .unwrap();
+    let landing = st.rdy.land(&approver(), p["id"].as_str().unwrap()).unwrap();
+    st.rdy
+        .tag(&approver(), "v0.1.0", None, Some("first".into()))
+        .unwrap();
+    landing
+}
+
+#[test]
+fn run_ids_with_colons_become_view_names_without() {
+    let (_d, mut st) = state();
+    let r = rdy_session(
+        &mut st,
+        serde_json::from_value(json!({"actor": "agent:x", "run": "batch:7:a", "role": "writer"}))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(r["view"], "batch-7-a");
+    assert_eq!(st.view, "batch-7-a");
+    let e = rdy_session(
+        &mut st,
+        serde_json::from_value(json!({"actor": "agent:x", "role": "writer", "view": "a:b"}))
+            .unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, "E_RESERVED_VIEW");
+}
+
+#[test]
+fn rdy_tags_lists_versions() {
+    let (_d, mut st) = state();
+    start(&mut st);
+    let landing = land_and_tag(&mut st);
+    let mut v = rdy_tags(&mut st, TagsParams::default()).unwrap();
+    v["versions"][0].as_object_mut().unwrap().remove("at_ms");
+    assert_eq!(
+        v,
+        json!({
+            "versions": [{"name": "v0.1.0", "landing": landing, "message": "first", "tagged_by": "human:founder"}],
+            "current": "v0.1.0"
+        })
+    );
+}
+
+#[test]
+fn overview_reports_the_version_position() {
+    let (_d, mut st) = state();
+    start(&mut st);
+    let landing = land_and_tag(&mut st);
+    let ov = rdy_overview(&mut st, serde_json::from_value(json!({})).unwrap()).unwrap();
+    assert_eq!(
+        ov["version_position"],
+        json!({
+            "version": {"name": "v0.1.0", "landing": landing},
+            "landings_since": 0,
+            "view": {"name": "run-7", "unlanded_changes": 0},
+            "frozen": false,
+            "label": "v0.1.0 · view run-7, 0 unlanded changes"
+        })
+    );
+    let ov = rdy_overview(
+        &mut st,
+        serde_json::from_value(json!({"scope": "tag:v0.1.0"})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ov["version_position"]["label"], "v0.1.0 · frozen snapshot");
+}
+
+#[test]
+fn read_as_of_a_version() {
+    let (_d, mut st) = state();
+    start(&mut st);
+    land_and_tag(&mut st);
+    let doc = st
+        .rdy
+        .materialized(&rdy_engine::Scope::Canon)
+        .unwrap()
+        .children(None)[0]
+        .id
+        .to_string();
+    let section = st
+        .rdy
+        .materialized(&rdy_engine::Scope::Canon)
+        .unwrap()
+        .children(Some(&rdy_model::BlockId::parse(&doc).unwrap()))[0]
+        .id
+        .to_string();
+    rdy_write(
+        &mut st,
+        serde_json::from_value(json!({"ops": [
+            {"op": "create", "type": "claim", "parent": section, "body": "Added after the version."}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+    let now = rdy_read(&mut st, serde_json::from_value(json!({"id": doc})).unwrap()).unwrap();
+    assert!(
+        now["text"]
+            .as_str()
+            .unwrap()
+            .contains("Added after the version.")
+    );
+    let then = rdy_read(
+        &mut st,
+        serde_json::from_value(json!({"id": doc, "scope": "tag:v0.1.0"})).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !then["text"]
+            .as_str()
+            .unwrap()
+            .contains("Added after the version.")
+    );
+}

@@ -38,7 +38,7 @@ pub struct SessionParams {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ScopeParams {
-    /// "canon" or a view name. Defaults to the session view.
+    /// "canon", a view name, "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
     pub scope: Option<String>,
     pub max_tokens: Option<usize>,
 }
@@ -46,6 +46,7 @@ pub struct ScopeParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct IdParams {
     pub id: String,
+    /// "canon", a view name, "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
     pub scope: Option<String>,
     /// rdy_read only: compact (default), markdown or yaml.
     pub format: Option<String>,
@@ -247,10 +248,21 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
             ));
         }
     };
-    let view = p
-        .view
-        .or_else(|| p.run.clone())
-        .unwrap_or_else(|| "work".into());
+    let view = match p.view {
+        Some(v) if v.contains(':') => {
+            return Err(RdyError::new(
+                E_RESERVED_VIEW,
+                format!("view names cannot contain ':' ({v:?})"),
+                "pick a view name without ':'",
+            ));
+        }
+        Some(v) => v,
+        None => p
+            .run
+            .as_deref()
+            .map(|r| r.replace(':', "-"))
+            .unwrap_or_else(|| "work".into()),
+    };
     if view == "canon" {
         return Err(RdyError::new(
             E_RESERVED_VIEW,
@@ -270,6 +282,7 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
 pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError> {
     let s = session(st)?;
     let scope = scope_of(st, &p.scope)?;
+    let position = st.rdy.version_position(&scope)?;
     let docs: Vec<Value> = st.rdy.materialized(&scope)?.children(None).iter().map(|d| json!({"id": d.id.to_string(), "title": d.field_str("title"), "doc_type": d.field_str("doc_type")})).collect();
     let store = st.rdy.store();
     let views: Vec<Value> = store
@@ -286,9 +299,20 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
         json!({
             "pack": st.rdy.pack().name, "session": {"actor": s.actor, "view": st.view},
             "canon": {"landings": landings}, "views": views, "docs": docs,
+            "version_position": position,
         }),
         p.max_tokens,
     ))
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct TagsParams {}
+
+pub fn rdy_tags(st: &mut McpState, _p: TagsParams) -> Result<Value, RdyError> {
+    session(st)?;
+    let versions = st.rdy.versions()?;
+    let current = versions.last().map(|v| v.name.clone());
+    Ok(json!({"versions": versions, "current": current}))
 }
 
 pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
@@ -540,7 +564,10 @@ pub fn rdy_revoke(st: &mut McpState, p: RevokeParams) -> Result<Value, RdyError>
 
 pub fn rdy_propose(st: &mut McpState, p: ProposeParams) -> Result<Value, RdyError> {
     let s = session(st)?;
-    let view = p.view.unwrap_or_else(|| st.view.clone());
+    let view = p
+        .view
+        .map(|v| v.strip_prefix("view:").map(String::from).unwrap_or(v))
+        .unwrap_or_else(|| st.view.clone());
     ok(st.rdy.propose(&s, &view, &p.title)?)
 }
 

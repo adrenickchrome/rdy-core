@@ -47,9 +47,18 @@ impl RdyServer {
         self.run(p, tools::rdy_session)
     }
 
-    #[tool(description = "Project overview: pack, docs, views and canon history.")]
+    #[tool(
+        description = "Project overview: pack, docs, views, canon history and the version position (e.g. v1.2.0 + 3 landings)."
+    )]
     fn rdy_overview(&self, Parameters(p): Parameters<ScopeParams>) -> CallToolResult {
         self.run(p, tools::rdy_overview)
+    }
+
+    #[tool(
+        description = "Versions (frozen snapshots of canon, e.g. v1.2.0), oldest first, and the current version. Read one with scope \"tag:<version>\"."
+    )]
+    fn rdy_tags(&self, Parameters(p): Parameters<TagsParams>) -> CallToolResult {
+        self.run(p, tools::rdy_tags)
     }
 
     #[tool(
