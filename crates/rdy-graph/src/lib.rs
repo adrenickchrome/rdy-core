@@ -10,6 +10,32 @@ pub enum EdgeKind {
     Link(String),
 }
 
+impl EdgeKind {
+    /// "contains", "references", or the link's name.
+    pub fn name(&self) -> String {
+        match self {
+            EdgeKind::Contains => "contains".into(),
+            EdgeKind::References => "references".into(),
+            EdgeKind::Link(n) => n.clone(),
+        }
+    }
+}
+
+/// imp1: the edge that first reached an impact item. `from` is the block the item depends on
+/// (the queried block, or an item nearer to it); `kind` is that edge's kind.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Via {
+    pub from: BlockId,
+    pub kind: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ImpactHit {
+    pub depth: u32,
+    pub id: BlockId,
+    pub via: Via,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Edge {
     pub from: BlockId,
@@ -227,6 +253,15 @@ impl Graph {
     }
 
     pub fn impact(&self, id: &BlockId, max_depth: u32) -> Vec<(u32, BlockId)> {
+        self.impact_via(id, max_depth)
+            .into_iter()
+            .map(|h| (h.depth, h.id))
+            .collect()
+    }
+
+    /// Everything that depends on `id`, breadth first up to `max_depth`, each with the edge that
+    /// first reached it; sorted by (depth, id).
+    pub fn impact_via(&self, id: &BlockId, max_depth: u32) -> Vec<ImpactHit> {
         let mut seen = BTreeSet::from([id.clone()]);
         let mut out = vec![];
         let mut queue = VecDeque::from([(0u32, id.clone())]);
@@ -238,11 +273,18 @@ impl Graph {
                 if e.kind == EdgeKind::Contains || !seen.insert(e.from.clone()) {
                     continue;
                 }
-                out.push((d + 1, e.from.clone()));
+                out.push(ImpactHit {
+                    depth: d + 1,
+                    id: e.from.clone(),
+                    via: Via {
+                        from: cur.clone(),
+                        kind: e.kind.name(),
+                    },
+                });
                 queue.push_back((d + 1, e.from.clone()));
             }
         }
-        out.sort();
+        out.sort_by(|a, b| (a.depth, &a.id).cmp(&(b.depth, &b.id)));
         out
     }
 
