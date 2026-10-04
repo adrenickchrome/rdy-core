@@ -344,12 +344,10 @@ impl Store {
         // never trust the manifest's length for an allocation: grow as chunks are read
         let mut out = Vec::new();
         for c in &m.chunks {
-            let (ck, bytes) = self.get_raw(c)?;
-            if ck != kinds::BLOB_CHUNK {
-                return Err(StoreError::Decode(format!(
-                    "chunk {c} of blob {h} is not a blob chunk (object kind {ck})"
-                )));
-            }
+            // a chunk's stored kind is not checked: writes dedupe by hash alone, so a chunk may
+            // share its object with a block or snapshot of the same bytes, and the hash already
+            // proves the bytes
+            let (_, bytes) = self.get_raw(c)?;
             out.extend_from_slice(&bytes);
             if out.len() as u64 > m.len {
                 return Err(StoreError::Decode(format!(

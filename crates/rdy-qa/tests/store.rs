@@ -83,6 +83,52 @@ fn blob1_a_figure_naming_a_non_blob_object_is_not_an_asset() {
     assert_eq!(e.code, "E_NOT_FOUND", "{e}");
 }
 
+/// A chunk dedupes to any stored object with the same bytes (the index is keyed by hash alone),
+/// so the chunk's stored kind may be another kind's; its hash already proves its bytes.
+#[test]
+fn blob1_a_chunk_with_the_bytes_of_another_object_still_reads() {
+    let (_d, mut r) = project();
+    let res = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
+    ])).unwrap();
+    let doc = rdy_model::BlockId::parse(&res.created["$d"]).unwrap();
+    let version = r
+        .block(&Scope::View("work".into()), &doc)
+        .unwrap()
+        .version_hash();
+    let (kind, payload) = r.store().get_raw(&version).unwrap();
+    assert_eq!(kind, kinds::BLOCK);
+    let blob = r.store_mut().put_blob(&payload).unwrap();
+    assert!(r.store().has_blob(&blob).unwrap());
+    assert_eq!(r.store().get_blob(&blob).unwrap(), payload);
+    write(&mut r, "work", json!([{"op": "create", "type": "figure", "parent": res.created["$s"], "fields": {"blob": blob.to_string(), "media_type": "image/png", "alt": "x"}}])).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    r.export(&Scope::View("work".into()), &out.path().join("x"))
+        .unwrap();
+}
+
+/// The reverse direction: a chunk uploaded first with the bytes a later block will have does
+/// not make that block unreadable, and both still read.
+#[test]
+fn blob1_a_chunk_stored_first_does_not_make_a_later_block_unreadable() {
+    let (_d, mut r) = project();
+    let res = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}}
+    ])).unwrap();
+    let doc = rdy_model::BlockId::parse(&res.created["$d"]).unwrap();
+    let block = r.block(&Scope::View("work".into()), &doc).unwrap();
+    let payload = postcard::to_allocvec(&block).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(dir.path()).unwrap();
+    let blob = s.put_blob(&payload).unwrap();
+    let h = s.put(kinds::BLOCK, &block).unwrap();
+    assert_eq!(h, block.version_hash());
+    assert_eq!(s.get_raw(&h).unwrap().0, kinds::BLOB_CHUNK, "deduped");
+    assert_eq!(s.get_block(&h).unwrap(), block);
+    assert_eq!(s.get_blob(&blob).unwrap(), payload);
+}
+
 /// Truncates the last segment at every 97th byte (every 13th in deep mode) of its last write; every cut recovers
 /// and the recovered store accepts a new write.
 #[test]
