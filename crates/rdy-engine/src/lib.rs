@@ -6,6 +6,7 @@ mod materialize;
 mod query;
 mod session;
 pub mod testkit;
+mod version;
 mod write;
 
 pub use decide::DecisionInput;
@@ -15,6 +16,7 @@ pub use io::{ExportSummary, block_from_yaml, block_to_yaml};
 pub use materialize::Materialized;
 pub use query::{Context, ImpactItem, field_json, summary, summary_in};
 pub use session::{Scope, Session, now_ms, rfc3339_now};
+pub use version::{VersionInfo, parse_version};
 pub use write::{LinkInput, OpInput, WriteRequest, WriteResult, json_to_field};
 
 use rdy_model::Op;

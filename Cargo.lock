@@ -1201,6 +1201,7 @@ dependencies = [
  "rdy-model",
  "rdy-schema",
  "rdy-store",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml_ng",

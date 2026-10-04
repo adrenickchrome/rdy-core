@@ -18,6 +18,9 @@ pub const E_HAS_CHILDREN: &str = "E_HAS_CHILDREN";
 pub const E_NOT_FOUND: &str = "E_NOT_FOUND";
 pub const E_IO: &str = "E_IO";
 pub const E_RESERVED_VIEW: &str = "E_RESERVED_VIEW";
+pub const E_TAG_EXISTS: &str = "E_TAG_EXISTS";
+pub const E_BAD_TAG_NAME: &str = "E_BAD_TAG_NAME";
+pub const E_VERSION_ORDER: &str = "E_VERSION_ORDER";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RdyError {
