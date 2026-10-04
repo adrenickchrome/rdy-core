@@ -1,0 +1,107 @@
+//! The store's open path: missing acknowledged frames (seg1), durable new directories (dur1) and
+//! lock errors (lock1).
+use rdy_qa::fixtures::*;
+use rdy_store::{Store, StoreError};
+use serde_json::json;
+use std::path::{Path, PathBuf};
+
+fn seg(store: &Path, n: u32) -> PathBuf {
+    store.join("segments").join(format!("seg-{n:06}.log"))
+}
+
+#[test]
+fn seg1_a_segment_after_a_gap_refuses_to_open() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let h = {
+        let mut s = Store::open(&dir).unwrap();
+        s.put_blob(b"acknowledged").unwrap()
+    };
+    // a later segment exists, but the one before it is gone
+    std::fs::copy(seg(&dir, 0), seg(&dir, 2)).unwrap();
+    let e = Store::open(&dir).err().expect("open must refuse");
+    assert!(matches!(&e, StoreError::MissingFrames { .. }), "{e}");
+    assert!(e.to_string().contains("seg-000001.log"), "{e}");
+    // nothing was rebuilt or truncated: removing the stray segment gives a working store again
+    std::fs::remove_file(seg(&dir, 2)).unwrap();
+    assert_eq!(
+        Store::open(&dir).unwrap().get_blob(&h).unwrap(),
+        b"acknowledged"
+    );
+}
+
+#[test]
+fn seg1_an_index_ahead_of_the_log_refuses_instead_of_rolling_back() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let (first, second, cut) = {
+        let mut s = Store::open(&dir).unwrap();
+        let first = s.put_blob(b"first").unwrap();
+        let cut = std::fs::metadata(seg(&dir, 0)).unwrap().len() as usize;
+        let second = s.put_blob(b"second").unwrap();
+        (first, second, cut)
+    };
+    let full = std::fs::read(seg(&dir, 0)).unwrap();
+    // the second acknowledged write is gone from the log, cut at a frame boundary (not torn)
+    std::fs::write(seg(&dir, 0), &full[..cut]).unwrap();
+    let e = Store::open(&dir)
+        .err()
+        .expect("open must refuse, not reindex over the loss");
+    assert!(matches!(&e, StoreError::MissingFrames { .. }), "{e}");
+    assert!(e.to_string().contains("seg-000000.log"), "{e}");
+    // the index was kept: restoring the segment brings both writes back
+    std::fs::write(seg(&dir, 0), &full).unwrap();
+    let s = Store::open(&dir).unwrap();
+    assert_eq!(s.get_blob(&first).unwrap(), b"first");
+    assert_eq!(s.get_blob(&second).unwrap(), b"second");
+}
+
+#[test]
+fn seg1_rdy_open_names_the_missing_segment_in_its_fix() {
+    let (dir, mut r) = project();
+    write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "fields": {"title": "Kept", "doc_type": "glossary"}}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    drop(r);
+    let store = dir.path().join(".rdy/store");
+    std::fs::copy(seg(&store, 0), seg(&store, 2)).unwrap();
+    let e = rdy_engine::Rdy::open(dir.path())
+        .err()
+        .expect("open must refuse");
+    assert_eq!(e.code, "E_IO", "{e}");
+    assert!(e.fix.contains("seg-000001.log"), "{e}");
+}
+
+/// Review Focus 1: a guard for the new gap check (passes before and after the fix).
+#[test]
+fn seg1_quarantined_tails_are_not_segments() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let h = {
+        let mut s = Store::open(&dir).unwrap();
+        s.put_blob(b"kept").unwrap()
+    };
+    // an unacknowledged torn tail: the next open quarantines it as seg-000000.log.torn-<offset>
+    let mut bytes = std::fs::read(seg(&dir, 0)).unwrap();
+    bytes.extend([0u8; 50]);
+    std::fs::write(seg(&dir, 0), &bytes).unwrap();
+    drop(Store::open(&dir).unwrap());
+    let torn = std::fs::read_dir(dir.join("segments"))
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".torn-")
+        })
+        .count();
+    assert_eq!(torn, 1);
+    assert_eq!(Store::open(&dir).unwrap().get_blob(&h).unwrap(), b"kept");
+}

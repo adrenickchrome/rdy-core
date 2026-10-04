@@ -1,7 +1,7 @@
 use crate::error::StoreError;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
-use crate::segment::{Location, SegmentLog};
+use crate::segment::{Location, SegmentLog, find_gap, seg_path};
 use rdy_model::{Block, Change, Hash, Op};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
@@ -117,10 +117,22 @@ impl Store {
         if lock.try_lock().is_err() {
             return Err(StoreError::Locked(dir.to_path_buf()));
         }
+        let segments = dir.join("segments");
+        // seg1: a gap in the segment numbers means acknowledged frames are missing
+        if let Some((missing, later)) = find_gap(&segments)? {
+            return Err(StoreError::MissingFrames {
+                segment: seg_path(&segments, missing),
+                detail: format!(
+                    "{} exists but {} does not",
+                    seg_path(&segments, later).display(),
+                    seg_path(&segments, missing).display()
+                ),
+            });
+        }
         // the index opens first: its indexed_upto is the acknowledged end of the log, which
         // tells the log which torn frames are an unacknowledged tail
         let (index, acked) = open_index(dir)?;
-        let log = SegmentLog::open_acked(&dir.join("segments"), SEGMENT_MAX, acked)?;
+        let log = SegmentLog::open_acked(&segments, SEGMENT_MAX, acked)?;
         let mut store = Store {
             dir: dir.to_path_buf(),
             log,
@@ -129,11 +141,24 @@ impl Store {
             faults: Faults::default(),
             poisoned: false,
         };
-        if store.index.indexed_upto()? > store.log.end() {
-            store.reindex()?;
-        } else {
-            store.catch_up()?;
+        let (upto, end) = (store.index.indexed_upto()?, store.log.end());
+        if upto > end {
+            // seg1: the index acknowledged frames the log no longer holds. Rebuilding the index
+            // from this log would silently roll canon back (spec §5.10: nothing is deleted).
+            let missing = if upto.segment > end.segment {
+                end.segment + 1
+            } else {
+                end.segment
+            };
+            return Err(StoreError::MissingFrames {
+                segment: seg_path(&segments, missing),
+                detail: format!(
+                    "the index acknowledges writes up to segment {} offset {}, but the log ends at segment {} offset {}",
+                    upto.segment, upto.offset, end.segment, end.offset
+                ),
+            });
         }
+        store.catch_up()?;
         Ok(store)
     }
 

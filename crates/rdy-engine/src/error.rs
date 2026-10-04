@@ -135,6 +135,14 @@ impl From<StoreError> for RdyError {
                     "re-read {id} (rdy_context) and retry your change against its current version"
                 ),
             ),
+            StoreError::MissingFrames { segment, detail } => RdyError::new(
+                E_IO,
+                format!("the store's log is missing acknowledged writes: {detail}"),
+                format!(
+                    "restore {} from backup, then reopen; rdy will not rebuild the index over the loss",
+                    segment.display()
+                ),
+            ),
             StoreError::Io(e) if e.kind() == std::io::ErrorKind::InvalidData => RdyError::new(
                 E_IO,
                 format!("i/o error: {e}"),
