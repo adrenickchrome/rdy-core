@@ -5,3 +5,12 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+rdy-model.workspace = true
+rdy-engine.workspace = true
+rdy-graph.workspace = true
+minijinja.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

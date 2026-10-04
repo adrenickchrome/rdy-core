@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} · {{ site }}</title>
+<style>
+:root { --bg:#fff; --fg:#1b1b1f; --muted:#5f6068; --line:#e3e3e8; --accent:#3a5bd9; --warn:#b54708; --ok:#067647; }
+@media (prefers-color-scheme: dark) { :root { --bg:#141417; --fg:#ececf1; --muted:#a0a0ab; --line:#2b2b31; --accent:#8ea2ff; --warn:#f79009; --ok:#47cd89; } }
+body { background:var(--bg); color:var(--fg); font:16px/1.55 system-ui, sans-serif; margin:0 auto; max-width:860px; padding:24px 16px; }
+a { color:var(--accent); } nav { margin-bottom:24px; color:var(--muted); }
+.block { margin:12px 0; } .meta { color:var(--muted); font-size:13px; }
+.badge { display:inline-block; font-size:12px; padding:1px 8px; border:1px solid var(--line); border-radius:999px; }
+.badge.live, .badge.accepted { color:var(--ok); } .badge.suspect, .badge.superseded, .badge.revoked { color:var(--warn); }
+.ref.missing { color:var(--warn); text-decoration:line-through; }
+.decision { border-left:3px solid var(--accent); padding-left:12px; }
+dl.term dt { font-weight:600; } table { border-collapse:collapse; } td, th { border:1px solid var(--line); padding:4px 8px; }
+pre { background:color-mix(in srgb, var(--fg) 6%, transparent); padding:12px; overflow-x:auto; }
+img { max-width:100%; }
+</style>
+</head>
+<body>
+<nav><a href="{{ root }}index.html">{{ site }}</a></nav>
+{% block content %}{% endblock %}
+{% if mermaid %}<script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs"; mermaid.initialize({ startOnLoad: true });</script>{% endif %}
+</body>
+</html>
