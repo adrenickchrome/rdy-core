@@ -61,10 +61,21 @@ fn export_level(
     blobs: &mut BTreeMap<Hash, BlockId>,
 ) -> Result<(), RdyError> {
     let names = m.names_under(parent);
+    let mut used: BTreeMap<String, &BlockId> = BTreeMap::new();
     for b in m.children(parent) {
         let Some(name) = names.get(&b.id) else {
             continue;
         };
+        if let Some(other) = used.insert(name.to_ascii_lowercase(), &b.id) {
+            return Err(RdyError::new(
+                E_PATH_CLASH,
+                format!(
+                    "{other} and {} are both named {name:?} (ignoring case) under the same parent, so they cannot be exported as files",
+                    b.id
+                ),
+                "rename one of them, then export again",
+            ));
+        }
         let mut head = to_yaml_struct(b);
         head.parent = None;
         head.fields.remove("name");
@@ -166,6 +177,37 @@ fn assign_missing_names(blocks: &mut [Block], existing: &Materialized) {
         set.insert(n.to_ascii_lowercase());
         blocks[i].fields.insert("name".into(), FieldValue::Str(n));
     }
+}
+
+/// Refuses an import whose docs or folders share a name (ignoring case) with each other or with
+/// what the view already holds under the same parent: export would overwrite one with the other.
+fn check_import_names(blocks: &[Block], existing: &Materialized) -> Result<(), RdyError> {
+    let mut seen: BTreeMap<(Option<BlockId>, String), BlockId> = BTreeMap::new();
+    for b in blocks.iter().filter(|b| tree::is_tree_type(&b.block_type)) {
+        let Some(name) = b.field_str("name") else {
+            continue;
+        };
+        let key = (b.parent.clone(), name.to_ascii_lowercase());
+        let mut other = seen.insert(key.clone(), b.id.clone());
+        if other.is_none() {
+            other = existing
+                .names_under(b.parent.as_ref())
+                .into_iter()
+                .find(|(id, n)| *id != b.id && n.to_ascii_lowercase() == key.1)
+                .map(|(id, _)| id);
+        }
+        if let Some(other) = other {
+            return Err(RdyError::new(
+                E_PATH_CLASH,
+                format!(
+                    "{} and {other} are both named {name:?} (ignoring case) under the same parent",
+                    b.id
+                ),
+                "rename one of them in the export files, or import into a fresh view",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn io_err(e: std::io::Error) -> RdyError {
@@ -433,6 +475,7 @@ impl Rdy {
         let scope = Scope::View(view.to_string());
         let existing = self.materialized(&scope)?.clone();
         assign_missing_names(&mut blocks, &existing);
+        check_import_names(&blocks, &existing)?;
         let mut incoming: BTreeMap<BlockId, &Block> = BTreeMap::new();
         for b in &blocks {
             if incoming.insert(b.id.clone(), b).is_some() {

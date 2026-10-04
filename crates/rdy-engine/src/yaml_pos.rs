@@ -12,6 +12,10 @@ pub(crate) enum Seg {
 
 pub(crate) type Positions = BTreeMap<Vec<Seg>, (usize, usize)>;
 
+/// Readers only look up paths of at most this many segments ([Index, Key, Key, Key]); deeper
+/// nodes are tracked but not recorded, which keeps hostile deeply nested input linear.
+const MAX_DEPTH: usize = 4;
+
 enum Frame {
     Seq(usize),
     Map(Option<String>),
@@ -43,9 +47,11 @@ pub(crate) fn positions(text: &str) -> Result<Positions, (usize, usize, String)>
                         _ => String::new(),
                     };
                     *key = Some(k.clone());
-                    let mut p = path.clone();
-                    p.push(Seg::Key(k));
-                    out.entry(p).or_insert(pos);
+                    if path.len() < MAX_DEPTH {
+                        let mut p = path.clone();
+                        p.push(Seg::Key(k));
+                        out.entry(p).or_insert(pos);
+                    }
                     continue;
                 }
                 let nested = match stack.last_mut() {
@@ -60,7 +66,9 @@ pub(crate) fn positions(text: &str) -> Result<Positions, (usize, usize, String)>
                     }
                     None => false,
                 };
-                out.entry(path.clone()).or_insert(pos);
+                if path.len() <= MAX_DEPTH {
+                    out.entry(path.clone()).or_insert(pos);
+                }
                 match ev {
                     Event::SequenceStart(..) => stack.push(Frame::Seq(0)),
                     Event::MappingStart(..) => stack.push(Frame::Map(None)),
@@ -103,5 +111,19 @@ mod tests {
         assert_eq!(p[&vec![Seg::Index(1)]], (6, 3));
         let (line, col, _) = positions("x: 1\n  y: 2\n").unwrap_err();
         assert_eq!((line, col), (2, 4));
+    }
+
+    #[test]
+    fn deep_and_wide_input_records_a_bounded_number_of_entries() {
+        let t = format!(
+            "{}{}{}",
+            "[".repeat(200),
+            "1,".repeat(100_000),
+            "]".repeat(200)
+        );
+        let start = std::time::Instant::now();
+        let p = positions(&t).unwrap();
+        assert!(p.len() < 1000, "{} entries", p.len());
+        assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
     }
 }

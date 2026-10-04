@@ -133,7 +133,12 @@ impl Reader {
         for path in entries {
             let Some(fname) = path.file_name().and_then(|n| n.to_str()).map(String::from) else {
                 self.diags.push(Diagnostic::error(
-                    &format!("{shown}/{}", path.display()),
+                    &format!(
+                        "{shown}/{}",
+                        path.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    ),
                     (1, 1),
                     E_BAD_NAME,
                     "the name is not valid UTF-8",

@@ -763,3 +763,85 @@ fn format_2_import_ignores_hidden_and_non_yaml_files() {
     let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
     b.import(&founder(), "import", out.path()).unwrap();
 }
+
+fn raw_doc(r: &mut Rdy, id: &str, name: &str) {
+    let mut fields = BTreeMap::new();
+    fields.insert("title".to_string(), FieldValue::Str(name.into()));
+    fields.insert("name".to_string(), FieldValue::Str(name.into()));
+    fields.insert("doc_type".to_string(), FieldValue::Str("glossary".into()));
+    let block = Block {
+        id: BlockId::parse(id).unwrap(),
+        block_type: "doc".into(),
+        parent: None,
+        order: "V".into(),
+        fields,
+        body: String::new(),
+        links: Default::default(),
+        pins: Default::default(),
+    };
+    r.store_mut()
+        .commit_to_view(
+            "work",
+            Change {
+                view: "work".into(),
+                ops: vec![Op::Create { block }],
+                deps: vec![],
+                provenance: agent().provenance(),
+                justification: None,
+                message: "raw".into(),
+            },
+        )
+        .unwrap();
+    r.invalidate();
+}
+
+#[test]
+fn import_refuses_names_that_clash_with_the_view_or_each_other() {
+    let mk = |id: &str| {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = Rdy::init(d.path(), "rdy-standard").unwrap();
+        raw_doc(&mut a, id, "x");
+        let out = tempfile::tempdir().unwrap();
+        a.export(&Scope::View("work".into()), out.path()).unwrap();
+        (d, out)
+    };
+    let (_d1, o1) = mk("d-AAAAA");
+    let (_d2, o2) = mk("d-BBBBB");
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    b.import(&founder(), "imp", o1.path()).unwrap();
+    let e = b.import(&founder(), "imp", o2.path()).unwrap_err();
+    assert_eq!(e.code, "E_PATH_CLASH", "{e}");
+    assert!(
+        e.message.contains("d-AAAAA") && e.message.contains("d-BBBBB"),
+        "{e}"
+    );
+    // two clashing docs inside one import (format 1 files carry their names)
+    let o3 = tempfile::tempdir().unwrap();
+    std::fs::write(
+        o3.path().join("rdy-export.yaml"),
+        "format: 1\npack: rdy-standard\nscope: canon\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(o3.path().join("docs")).unwrap();
+    for (id, name) in [("d-CCCCC", "x"), ("d-DDDDD", "X")] {
+        std::fs::write(o3.path().join(format!("docs/{id}.yaml")), format!("- id: {id}\n  type: doc\n  order: V\n  fields:\n    title: T\n    name: {name}\n    doc_type: glossary\n")).unwrap();
+    }
+    let c_dir = tempfile::tempdir().unwrap();
+    let mut c = Rdy::init(c_dir.path(), "rdy-standard").unwrap();
+    let e = c.import(&founder(), "imp", o3.path()).unwrap_err();
+    assert_eq!(e.code, "E_PATH_CLASH", "{e}");
+}
+
+#[test]
+fn export_refuses_sibling_names_that_clash() {
+    let d = tempfile::tempdir().unwrap();
+    let mut a = Rdy::init(d.path(), "rdy-standard").unwrap();
+    raw_doc(&mut a, "d-AAAAA", "x");
+    raw_doc(&mut a, "d-BBBBB", "X");
+    let parent = tempfile::tempdir().unwrap();
+    let out = parent.path().join("exp");
+    let e = a.export(&Scope::View("work".into()), &out).unwrap_err();
+    assert_eq!(e.code, "E_PATH_CLASH", "{e}");
+    assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+}
