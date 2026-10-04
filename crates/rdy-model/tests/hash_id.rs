@@ -48,3 +48,23 @@ fn hash_postcard_round_trip() {
     let bytes = postcard::to_allocvec(&h).unwrap();
     assert_eq!(postcard::from_bytes::<Hash>(&bytes).unwrap(), h);
 }
+
+#[test]
+fn hash_rejects_non_lowercase_hex() {
+    // Uppercase hex is rejected to ensure canonical representation
+    let uppercase = "A".repeat(64);
+    assert!(matches!(uppercase.parse::<Hash>(), Err(IdError::BadHash(_))));
+
+    // Mixed case is also rejected
+    let mixed = "aAbBcCdDeEfF".repeat(5) + "aaBb";
+    assert_eq!(mixed.len(), 64);
+    assert!(matches!(mixed.parse::<Hash>(), Err(IdError::BadHash(_))));
+}
+
+#[test]
+fn hash_rejects_strings_with_plus_signs() {
+    // A 64-char string with '+' should be rejected (from_str_radix accepts it, but it's not canonical)
+    let with_plus = "+f".repeat(32);
+    assert_eq!(with_plus.len(), 64);
+    assert!(matches!(with_plus.parse::<Hash>(), Err(IdError::BadHash(_))));
+}

@@ -36,6 +36,12 @@ impl FromStr for Hash {
         if s.len() != 64 {
             return Err(IdError::BadHash(s.to_string()));
         }
+        // Validate that all characters are lowercase hex digits [0-9a-f]
+        for c in s.chars() {
+            if !matches!(c, '0'..='9' | 'a'..='f') {
+                return Err(IdError::BadHash(s.to_string()));
+            }
+        }
         let mut out = [0u8; 32];
         for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
             let pair = std::str::from_utf8(chunk).map_err(|_| IdError::BadHash(s.to_string()))?;
