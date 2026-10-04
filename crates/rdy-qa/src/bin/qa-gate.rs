@@ -334,16 +334,24 @@ fn main() {
 
     // The `Running ...` headers go to stderr: merge the streams in order for the area parse.
     let mut list_cmd = Command::new("sh");
-    list_cmd.args(["-c", "cargo test -p rdy-qa --release -- --list 2>&1"]);
-    let (_, list) = step("list guarded tests", list_cmd);
+    list_cmd.args([
+        "-c",
+        "${CARGO:-cargo} test -p rdy-qa --release -- --list 2>&1",
+    ]);
+    let (list_ok, list) = step("list guarded tests", list_cmd);
+    if !list_ok {
+        notes.push(format!(
+            "guarded-id listing failed: {}",
+            report::tail(&list, 5)
+        ));
+    }
 
     let dirty = git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
     let mut mode = if args.deep { "deep" } else { "standard" }.to_string();
     if let Some(a) = &args.only {
         mode += &format!(", only {a}");
     }
-    let pass =
-        gates.iter().all(|g| g.pass) && areas.iter().all(|a| a.ok && a.failed == 0) && perf_ok;
+    let pass = report::overall(&gates, &areas, perf_ok);
     let rep = Report {
         revision: git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into()),
         dirty,

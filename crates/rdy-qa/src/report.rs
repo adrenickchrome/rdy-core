@@ -168,7 +168,7 @@ pub fn markdown(r: &Report) -> String {
             s,
             "| {} | {} | {} | {} | {} |",
             a.name,
-            mark(a.ok && a.failed == 0),
+            mark(area_ok(a)),
             a.passed,
             a.failed,
             a.ignored
@@ -237,11 +237,12 @@ pub fn markdown(r: &Report) -> String {
 /// The verdict: every gate passed, every area ran tests and passed, and perf is fine.
 /// A failed binary with no named test, or an area that ran zero tests, is a failure.
 pub fn overall(gates: &[Gate], areas: &[Area], perf_ok: bool) -> bool {
-    gates.iter().all(|g| g.pass)
-        && areas
-            .iter()
-            .all(|a| a.ok && a.failed == 0 && a.passed + a.failed + a.ignored > 0)
-        && perf_ok
+    gates.iter().all(|g| g.pass) && areas.iter().all(area_ok) && perf_ok
+}
+
+/// An area passes when its binaries exited zero, no test failed, and it ran at least one test.
+pub fn area_ok(a: &Area) -> bool {
+    a.ok && a.failed == 0 && a.passed + a.failed + a.ignored > 0
 }
 
 /// True when a parsed test run saw no tests at all (a build that "passed" but ran nothing).
