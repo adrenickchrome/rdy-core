@@ -143,11 +143,17 @@ pub fn budget(v: Value, max_tokens: Option<usize>) -> Value {
         let longest = obj.iter().filter_map(|(k, x)| x.as_str().map(|s| (s.len(), k.clone()))).max().map(|(_, k)| k);
         if let Some(k) = longest {
             let text = obj[&k].as_str().unwrap_or_default().to_string();
-            let keep = (max * 4).saturating_sub(200).min(text.len());
-            let cut = (0..=keep).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
-            obj.insert(k, json!(text[..cut]));
-            obj.insert("truncated".into(), json!(true));
-            obj.insert("omitted".into(), json!(text.len() - cut));
+            let mut keep = (max * 4).saturating_sub(200).min(text.len());
+            loop {
+                let cut = (0..=keep).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
+                obj.insert(k.clone(), json!(text[..cut]));
+                obj.insert("truncated".into(), json!(true));
+                obj.insert("omitted".into(), json!(text.len() - cut));
+                if size(&Value::Object(obj.clone())) <= max || cut == 0 {
+                    break;
+                }
+                keep = cut.saturating_sub((cut / 8).max(1));
+            }
         }
         return v;
     };
@@ -190,10 +196,11 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
         "approver" => return Err(RdyError::new(E_PERMISSION, "approver sessions are not available over MCP", "approvals are made by humans with rdy approve")),
         other => return Err(RdyError::new(E_BAD_INPUT, format!("unknown role {other:?}"), "use reader, writer or reviewer")),
     };
-    st.view = p.view.or_else(|| p.run.clone()).unwrap_or_else(|| "work".into());
-    if st.view == "canon" {
+    let view = p.view.or_else(|| p.run.clone()).unwrap_or_else(|| "work".into());
+    if view == "canon" {
         return Err(RdyError::new(E_RESERVED_VIEW, "canon cannot be a session view", "pick another view name"));
     }
+    st.view = view;
     st.session = Some(Session { actor: p.actor, run: p.run, role });
     Ok(json!({ "view": st.view, "role": p.role }))
 }
@@ -229,6 +236,9 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     let g = st.rdy.graph(&scope)?;
     let root = m.get(&id).ok_or_else(|| RdyError::new(E_UNKNOWN_BLOCK, format!("no block {id}"), "list docs with rdy_overview"))?;
     let format = p.format.as_deref().unwrap_or("compact");
+    if !["compact", "markdown", "yaml"].contains(&format) {
+        return Err(RdyError::new(E_BAD_INPUT, format!("unknown format {format:?}"), "use compact, markdown or yaml"));
+    }
     let mut lines = vec![];
     let mut stack = vec![(root, 0usize)];
     while let Some((b, depth)) = stack.pop() {
@@ -257,7 +267,11 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
             stack.push((c, depth + 1));
         }
     }
-    let sep = if format == "yaml" { "---\n" } else { "\n" };
+    let sep = match format {
+        "yaml" => "---\n",
+        "markdown" => "\n\n",
+        _ => "\n",
+    };
     Ok(budget(json!({"id": id.to_string(), "format": format, "text": lines.join(sep)}), p.max_tokens))
 }
 
@@ -313,7 +327,8 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
         .map(|(i, v)| serde_json::from_value(v).map_err(|e| RdyError::new(E_BAD_INPUT, format!("op {i}: {e}"), "each op needs \"op\" (create, update, move, delete); create needs \"type\"; see rdy_schema for fields")))
         .collect::<Result<_, _>>()?;
     let justification = match (p.implements, p.editorial) {
-        (Some(d), _) => Some(Justification::Implements(id_of(&d)?)),
+        (Some(_), Some(_)) => return Err(RdyError::new(E_BAD_INPUT, "give either implements or editorial, not both", "implements for decision-backed changes, editorial for typo/restructure/clarify")),
+        (Some(d), None) => Some(Justification::Implements(id_of(&d)?)),
         (None, Some(e)) => Some(Justification::Editorial {
             class: match e.class.as_str() {
                 "typo" => EditorialClass::Typo,

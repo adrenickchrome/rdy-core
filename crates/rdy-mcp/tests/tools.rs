@@ -115,3 +115,67 @@ fn budget_truncates_large_lists() {
     let small = budget(json!({"a": 1}), Some(500));
     assert!(small.get("truncated").is_none());
 }
+
+#[test]
+fn budget_bounds_escaped_text() {
+    let text = (0..5000).map(|_| "line \"x\"").collect::<Vec<_>>().join("\n");
+    let out = budget(json!({"text": text}), Some(500));
+    assert_eq!(out["truncated"], true);
+    assert!(serde_json::to_string(&out).unwrap().len() / 4 <= 500);
+}
+
+#[test]
+fn failed_session_leaves_state_unchanged() {
+    let (_d, mut st) = state();
+    start(&mut st);
+    for bad in [json!({"actor": "a", "role": "writer", "view": "canon"}), json!({"actor": "a", "role": "writer", "run": "canon"}), json!({"actor": "a", "role": "boss"})] {
+        assert!(rdy_session(&mut st, serde_json::from_value(bad).unwrap()).is_err());
+        assert_eq!(st.view, "run-7");
+        assert_eq!(st.session.as_ref().unwrap().actor, "agent:designer");
+    }
+}
+
+#[test]
+fn read_rejects_unknown_format_and_yaml_separates() {
+    let (_d, mut st) = state();
+    start(&mut st);
+    let res = seed(&mut st);
+    let doc = res["created"]["$doc"].as_str().unwrap().to_string();
+    let e = rdy_read(&mut st, serde_json::from_value(json!({"id": doc, "format": "xml"})).unwrap()).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT");
+    let y = rdy_read(&mut st, serde_json::from_value(json!({"id": doc, "format": "yaml"})).unwrap()).unwrap();
+    assert!(y["text"].as_str().unwrap().contains("---\n"));
+    let md = rdy_read(&mut st, serde_json::from_value(json!({"id": doc, "format": "markdown"})).unwrap()).unwrap();
+    assert!(md["text"].as_str().unwrap().contains("\n\n"));
+}
+
+#[test]
+fn readers_cannot_write_or_upload() {
+    let (_d, mut st) = state();
+    rdy_session(&mut st, serde_json::from_value(json!({"actor": "agent:r", "role": "reader"})).unwrap()).unwrap();
+    let e = rdy_write(&mut st, serde_json::from_value(json!({"ops": [{"op": "create", "type": "doc", "fields": {"title": "T", "doc_type": "glossary"}}]})).unwrap()).unwrap_err();
+    assert_eq!(e.code, "E_PERMISSION");
+    let e = rdy_asset(&mut st, serde_json::from_value(json!({"data_base64": "aGVsbG8="})).unwrap()).unwrap_err();
+    assert_eq!(e.code, "E_PERMISSION");
+}
+
+#[test]
+fn justification_mapping_and_conflict() {
+    use rdy_model::{Change, EditorialClass, Justification};
+    let (_d, mut st) = state();
+    start(&mut st);
+    let res = seed(&mut st);
+    let c = res["created"]["$c"].as_str().unwrap().to_string();
+    let d = rdy_decide(&mut st, serde_json::from_value(json!({"parent": res["created"]["$s"], "statement": "S"})).unwrap()).unwrap();
+    let did = d["created"]["$decision"].as_str().unwrap().to_string();
+    let e = rdy_write(&mut st, serde_json::from_value(json!({"ops": [{"op": "update", "id": c, "body": "X."}], "implements": did, "editorial": {"class": "typo", "reason": "r"}})).unwrap()).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT");
+    let last = |st: &McpState| {
+        let v = st.rdy.store().view("run-7").unwrap();
+        st.rdy.store().get::<Change>(v.changes.last().unwrap()).unwrap()
+    };
+    rdy_write(&mut st, serde_json::from_value(json!({"ops": [{"op": "update", "id": c, "body": "Edited."}], "editorial": {"class": "clarify", "reason": "why"}})).unwrap()).unwrap();
+    assert_eq!(last(&st).justification, Some(Justification::Editorial { class: EditorialClass::Clarify, reason: "why".into() }));
+    rdy_write(&mut st, serde_json::from_value(json!({"ops": [{"op": "update", "id": c, "body": "Edited again."}], "implements": did})).unwrap()).unwrap();
+    assert_eq!(last(&st).justification, Some(Justification::Implements(rdy_model::BlockId::parse(&did).unwrap())));
+}

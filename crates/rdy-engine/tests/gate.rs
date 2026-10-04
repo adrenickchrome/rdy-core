@@ -155,3 +155,11 @@ fn land_excludes_later_view_changes_and_stamps_the_approver() {
     let last: Change = r.store().get(prop.changes.last().unwrap()).unwrap();
     assert_eq!(last.provenance.actor, "human:founder");
 }
+
+#[test]
+fn readers_cannot_propose() {
+    let (_d, mut r, _s) = setup();
+    let reader = Session { actor: "agent:r".into(), run: None, role: Role::Reader };
+    let e = r.propose(&reader, "work", "nope").unwrap_err();
+    assert_eq!(e.code, E_PERMISSION);
+}

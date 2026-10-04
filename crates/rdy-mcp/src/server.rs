@@ -28,7 +28,7 @@ impl RdyServer {
     }
 
     fn run<P>(&self, p: P, f: fn(&mut McpState, P) -> Result<serde_json::Value, RdyError>) -> CallToolResult {
-        let mut st = self.state.lock().expect("state lock");
+        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
         result(f(&mut st, p))
     }
 

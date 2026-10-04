@@ -72,6 +72,9 @@ impl Rdy {
     }
 
     pub fn propose(&mut self, s: &Session, view: &str, title: &str) -> Result<ProposalInfo, RdyError> {
+        if !s.role.can_write() {
+            return Err(RdyError::new(E_PERMISSION, format!("role {:?} cannot propose", s.role), "start the session as a writer"));
+        }
         let v = self.store.view(view)?;
         if v.changes.is_empty() {
             return Err(RdyError::new(E_BAD_INPUT, format!("view {view:?} has no changes to propose"), "write to the view first"));
