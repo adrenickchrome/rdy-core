@@ -29,8 +29,8 @@ pub struct ImpactItem {
     pub summary: String,
 }
 
-/// A one-line label for `b` (at most 80 chars): its statement, name or title field, else its body,
-/// with whitespace collapsed and each `{{id}}` reference shown as the bare id.
+/// A one-line label for `b` (at most 80 chars): its statement, prompt, name or title field, else
+/// its body, with whitespace collapsed and each `{{id}}` reference shown as the bare id.
 pub fn summary(b: &Block) -> String {
     summarize(b, &|tok| tok.to_string())
 }
@@ -51,7 +51,7 @@ fn summarize(b: &Block, resolve: &dyn Fn(&str) -> String) -> String {
     let keys: &[&str] = if rdy_model::tree::is_tree_type(&b.block_type) {
         &["title", "name"]
     } else {
-        &["statement", "name", "title"]
+        &["statement", "prompt", "name", "title"]
     };
     let (text, mode) = match keys
         .iter()
