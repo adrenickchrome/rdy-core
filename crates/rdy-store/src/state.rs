@@ -94,9 +94,11 @@ impl Store {
         self.commit_to_view_at(name, change, &state)
     }
 
-    /// Like `commit_to_view`, but checks the change against `current`, the caller's copy of the
-    /// view's present state, instead of replaying every change in the view (O(view length)).
-    /// `current` must equal `view_state(name)`.
+    /// Engine-only fast path: like `commit_to_view`, but checks the change against `current`, the
+    /// caller's copy of the view's present state, instead of replaying every change in the view
+    /// (O(view length)). `current` MUST equal `view_state(name)`; a stale or wrong `current` lets
+    /// invalid changes through. Callers that cannot guarantee that must use `commit_to_view`.
+    #[doc(hidden)]
     pub fn commit_to_view_at(&mut self, name: &str, change: Change, current: &StateSnapshot) -> Result<Hash, StoreError> {
         let mut view = self.view(name)?;
         // apply_op only reads and writes the ids the ops name, so seed a small state with those

@@ -5,9 +5,18 @@ use rdy_model::Role;
 use serde_json::json;
 use std::time::{Duration, Instant};
 
-fn p99(mut v: Vec<Duration>) -> Duration {
+fn pct(v: &[Duration], p: usize) -> Duration {
+    let mut v = v.to_vec();
     v.sort();
-    v[(v.len() * 99 / 100).min(v.len() - 1)]
+    v[(v.len() * p / 100).min(v.len() - 1)]
+}
+
+fn p99(v: Vec<Duration>) -> Duration {
+    pct(&v, 99)
+}
+
+fn dist(v: &[Duration]) -> String {
+    format!("p50 {:?} p95 {:?} p99 {:?} max {:?}", pct(v, 50), pct(v, 95), pct(v, 99), v.iter().max().unwrap())
 }
 
 #[test]
@@ -42,7 +51,8 @@ fn spec_11_targets_at_100k_blocks() {
         r.write(&s, WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([{"op": "create", "type": "claim", "parent": parent, "body": "perf"}])).unwrap(), justification: None, message: String::new() }).unwrap();
         writes.push(t.elapsed());
     }
-    let write_p99 = p99(writes);
+    let write_p99 = p99(writes.clone());
+    println!("writes: {}; first 100 mean {:?}, last 100 mean {:?}", dist(&writes), writes[..100].iter().sum::<Duration>() / 100, writes[100..].iter().sum::<Duration>() / 100);
 
     r.graph(&work).unwrap();
     let mut queries = vec![];
@@ -52,7 +62,8 @@ fn spec_11_targets_at_100k_blocks() {
         r.impact(&work, id, 3).unwrap();
         queries.push(t.elapsed() / 2);
     }
-    let query_p99 = p99(queries);
+    let query_p99 = p99(queries.clone());
+    println!("queries: {}", dist(&queries));
 
     // Measure everything first so one run reports every number, then check each target.
     println!("cold start (median of 3) {cold:?} {colds:?} (target < 2 s)");
