@@ -79,7 +79,6 @@ pub(crate) fn read_tree(root: &Path, shown: &str) -> (Vec<Loaded>, Vec<Diagnosti
 }
 
 /// Reads one doc file or `_folder.yaml` as if it were at the top level.
-#[allow(dead_code)] // used by the linter (Task 7)
 pub(crate) fn read_file(path: &Path, shown: &str) -> (Vec<Loaded>, Vec<Diagnostic>) {
     let mut r = Reader::default();
     let fname = path

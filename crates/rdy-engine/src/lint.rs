@@ -1,0 +1,153 @@
+//! `rdy check`: lints format-2 files without touching the store (addendum B §4.1).
+use crate::Materialized;
+use crate::error::*;
+use crate::tree_io::{Diagnostic, Loaded, read_file, read_tree};
+use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
+use rdy_schema::{Pack, Severity, validate_block};
+use std::collections::BTreeMap;
+use std::path::Path;
+
+fn field_tokens(v: &FieldValue, out: &mut Vec<String>) {
+    match v {
+        FieldValue::Str(s) => {
+            out.extend(ref_spans(s, RefMode::Strict).into_iter().map(|s| s.token))
+        }
+        FieldValue::List(items) => items.iter().for_each(|i| field_tokens(i, out)),
+        FieldValue::Map(m) => m.values().for_each(|i| field_tokens(i, out)),
+        _ => {}
+    }
+}
+
+/// Where an issue from validate_block points inside its entry.
+fn issue_at(l: &Loaded, code: &str, message: &str) -> (usize, usize) {
+    let key = |k: &str| l.keys.get(k).copied();
+    let found = match code {
+        "E_UNKNOWN_TYPE" => key("type"),
+        "E_PREFIX" => key("id"),
+        "E_BODY_REQUIRED" | "E_BODY_FORBIDDEN" => key("body"),
+        "E_LINK_TYPE" => key("links"),
+        "E_CHILD_TYPE" | "E_ORPHAN" | "E_MISSING_PARENT" => key("parent"),
+        "E_FIELD_UNKNOWN" | "E_FIELD_KIND" | "E_FIELD_ENUM" | "E_DOC_TYPE" => l
+            .keys
+            .iter()
+            .find(|(k, _)| {
+                k.strip_prefix("fields.")
+                    .is_some_and(|f| message.contains(&format!("{f:?}")))
+            })
+            .map(|(_, at)| *at),
+        _ => None,
+    };
+    found.unwrap_or(l.at)
+}
+
+pub fn check_path(
+    pack: &Pack,
+    canon: Option<&Materialized>,
+    path: &Path,
+) -> Result<Vec<Diagnostic>, RdyError> {
+    if !path.exists() {
+        return Err(RdyError::new(
+            E_NOT_FOUND,
+            format!("{} does not exist", path.display()),
+            "pass a doc file, a _folder.yaml or a directory",
+        ));
+    }
+    let shown = path.display().to_string();
+    let (loaded, mut diags) = if path.is_file() {
+        read_file(path, &shown)
+    } else if path.join("rdy-export.yaml").exists() {
+        read_tree(&path.join("docs"), &format!("{shown}/docs"))
+    } else {
+        read_tree(path, &shown)
+    };
+    let mut first: BTreeMap<BlockId, &Loaded> = BTreeMap::new();
+    for l in &loaded {
+        if let Some(other) = first.get(&l.block.id) {
+            diags.push(Diagnostic::error(
+                &l.file,
+                l.at,
+                E_ALREADY_EXISTS,
+                format!("block {} also appears in {}", l.block.id, other.file),
+                "give one of them a new id, or remove the duplicate",
+            ));
+        } else {
+            first.insert(l.block.id.clone(), l);
+        }
+    }
+    let lookup = |id: &BlockId| -> Option<&Block> {
+        first
+            .get(id)
+            .map(|l| &l.block)
+            .or_else(|| canon.and_then(|m| m.get(id)))
+    };
+    for l in &loaded {
+        let b = &l.block;
+        let parent = b.parent.as_ref().and_then(lookup);
+        for i in validate_block(pack, b, parent) {
+            let at = issue_at(l, i.code, &i.message);
+            diags.push(Diagnostic {
+                file: l.file.clone(),
+                line: at.0,
+                column: at.1,
+                code: i.code.into(),
+                message: i.message,
+                fix: i.fix,
+                severity: i.severity,
+            });
+        }
+        let unknown = |tok: &str| {
+            BlockId::parse(tok)
+                .ok()
+                .and_then(|id| lookup(&id))
+                .is_none()
+        };
+        let mut refs: Vec<(String, String)> = vec![];
+        for (k, v) in &b.fields {
+            let mut toks = vec![];
+            field_tokens(v, &mut toks);
+            refs.extend(toks.into_iter().map(|t| (format!("fields.{k}"), t)));
+        }
+        refs.extend(
+            ref_spans(&b.body, RefMode::for_body(&b.block_type))
+                .into_iter()
+                .map(|s| ("body".to_string(), s.token)),
+        );
+        refs.extend(
+            b.links
+                .values()
+                .flatten()
+                .map(|l| ("links".to_string(), l.target.to_string())),
+        );
+        for (key, tok) in refs {
+            if unknown(&tok) {
+                let at = l.keys.get(&key).copied().unwrap_or(l.at);
+                diags.push(Diagnostic::error(
+                    &l.file,
+                    at,
+                    E_UNKNOWN_REF,
+                    format!(
+                        "{} references {tok}, which is in neither the checked files nor canon",
+                        b.id
+                    ),
+                    "fix the id, or check the files that define it together",
+                ));
+            }
+        }
+    }
+    if let Some(m) = canon {
+        for b in m
+            .blocks
+            .values()
+            .filter(|b| b.block_type == rdy_model::tree::DOC && b.field_str("name").is_none())
+        {
+            diags.push(Diagnostic {
+                file: "canon".into(), line: 1, column: 1, code: "W_NAMELESS_DOC".into(),
+                message: format!("doc {} in canon has no stored name (an M1 doc); its first export→import or write stores one", b.id),
+                fix: format!("write to {} once (any edit) to store its name", b.id),
+                severity: Severity::Warning,
+            });
+        }
+    }
+    diags.sort_by(|a, b| (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column)));
+    Ok(diags)
+}

@@ -327,3 +327,30 @@ fn tags_with_no_versions_says_so() {
     assert!(ok);
     assert_eq!(text.trim(), "no versions yet");
 }
+#[test]
+fn check_exit_codes_and_pack_outside_a_project() {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(
+        t.path().join("ok.yaml"),
+        "- id: d-AAAAA\n  type: doc\n  order: V\n  fields:\n    title: T\n    doc_type: glossary\n",
+    )
+    .unwrap();
+    let (ok, _, err) = rdy(t.path(), &["check", "ok.yaml"]);
+    assert!(!ok && err.contains("E_NO_PROJECT"), "{err}");
+    let (ok, out, _) = rdy(t.path(), &["check", "ok.yaml", "--pack", "rdy-standard"]);
+    assert!(ok && out.contains("ok"), "{out}");
+    std::fs::write(
+        t.path().join("index.yaml"),
+        "- id: d-BBBBB\n  type: doc\n  order: V\n  fields:\n    title: T\n    doc_type: glossary\n",
+    )
+    .unwrap();
+    let (ok, out, _) = rdy(t.path(), &["check", ".", "--pack", "rdy-standard"]);
+    assert!(!ok, "an error exits 1");
+    assert!(out.contains("index.yaml:1:1: E_BAD_NAME"), "{out}");
+    let (_, out, _) = rdy(
+        t.path(),
+        &["--json", "check", ".", "--pack", "rdy-standard"],
+    );
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v[0]["code"], "E_BAD_NAME");
+}

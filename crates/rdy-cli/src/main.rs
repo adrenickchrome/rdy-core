@@ -92,6 +92,13 @@ enum Cmd {
     Fsck,
     /// Run the MCP server over stdio.
     Mcp,
+    /// Lint export-format-2 files (a doc file, a _folder.yaml or a directory) without touching the store.
+    Check {
+        path: PathBuf,
+        /// Check against this pack (required outside a project).
+        #[arg(long)]
+        pack: Option<String>,
+    },
     Pack {
         #[command(subcommand)]
         cmd: PackCmd,
@@ -410,7 +417,75 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     format!("pack {} {} ok", r.pack().name, r.pack().version),
                 )),
                 Cmd::Init { .. } | Cmd::Mcp => unreachable!("handled above"),
+                Cmd::Check { .. } => unreachable!("handled in main"),
             }
+        }
+    }
+}
+
+fn run_check(project: Option<PathBuf>, path: &Path, pack: Option<&str>, as_json: bool) -> ExitCode {
+    let result = (|| -> Result<Vec<Diagnostic>, RdyError> {
+        let cwd = std::env::current_dir()
+            .map_err(|e| RdyError::new(E_IO, e.to_string(), "run from an existing directory"))?;
+        let root = project.unwrap_or_else(|| find_project(&cwd));
+        if root.join(".rdy/config.yaml").exists() {
+            let mut r = Rdy::open(&root)?;
+            let pk = match pack {
+                Some(name) => resolve_pack(&root, name)?,
+                None => r.pack().clone(),
+            };
+            let canon = r.materialized(&Scope::Canon)?.clone();
+            check_path(&pk, Some(&canon), path)
+        } else {
+            let name = pack.ok_or_else(|| {
+                RdyError::new(
+                    E_NO_PROJECT,
+                    "not inside an rdy project",
+                    "run rdy check inside a project, or pass --pack rdy-standard",
+                )
+            })?;
+            let pk = rdy_schema::PackSet::with_builtin()
+                .resolve(name)
+                .map_err(|e| {
+                    RdyError::new(
+                        E_CONFIG,
+                        e.to_string(),
+                        "pass a built-in pack such as rdy-standard",
+                    )
+                })?;
+            check_path(&pk, None, path)
+        }
+    })();
+    match result {
+        Ok(diags) => {
+            if as_json {
+                println!("{}", serde_json::to_string(&diags).unwrap_or_default());
+            } else if diags.is_empty() {
+                println!("ok");
+            } else {
+                for d in &diags {
+                    println!(
+                        "{}:{}:{}: {} {} (fix: {})",
+                        d.file, d.line, d.column, d.code, d.message, d.fix
+                    );
+                }
+            }
+            if diags
+                .iter()
+                .any(|d| d.severity == rdy_schema::Severity::Error)
+            {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(e) => {
+            if as_json {
+                eprintln!("{}", serde_json::to_string(&e).unwrap_or_default());
+            } else {
+                eprintln!("error {}: {}\nfix: {}", e.code, e.message, e.fix);
+            }
+            ExitCode::FAILURE
         }
     }
 }
@@ -418,6 +493,9 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let as_json = cli.json;
+    if let Cmd::Check { path, pack } = &cli.cmd {
+        return run_check(cli.project.clone(), path, pack.as_deref(), as_json);
+    }
     match run(cli) {
         Ok((v, text)) => {
             if v.is_null() {

@@ -2,6 +2,7 @@ mod decide;
 mod error;
 mod gate;
 mod io;
+mod lint;
 mod materialize;
 mod paths;
 mod query;
@@ -16,6 +17,7 @@ pub use decide::DecisionInput;
 pub use error::*;
 pub use gate::ProposalInfo;
 pub use io::{ExportSummary, block_from_yaml, block_to_yaml};
+pub use lint::check_path;
 pub use materialize::{Materialized, PathMiss};
 pub use query::{Context, ImpactItem, field_json, summary, summary_in};
 pub use session::{Scope, Session, now_ms, rfc3339_now};
@@ -50,6 +52,11 @@ pub struct Rdy {
 
 fn io(e: std::io::Error) -> RdyError {
     RdyError::new(E_IO, e.to_string(), "check file permissions and disk space")
+}
+
+/// The named pack as the project at `project` resolves it (its .rdy/packs plus the built-ins).
+pub fn resolve_pack(project: &Path, name: &str) -> Result<Pack, RdyError> {
+    Ok(load_pack(project, name)?.0)
 }
 
 fn load_pack(root: &Path, name: &str) -> Result<(Pack, Vec<String>), RdyError> {
