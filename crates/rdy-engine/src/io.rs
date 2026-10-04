@@ -78,6 +78,11 @@ fn from_yaml_struct(y: BlockYaml) -> Result<Block, RdyError> {
     })
 }
 
+/// Dotfiles (e.g. `.DS_Store`) are never part of an export.
+fn is_hidden(path: &Path) -> bool {
+    path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with('.'))
+}
+
 pub fn block_to_yaml(b: &Block) -> String {
     serde_yaml_ng::to_string(&to_yaml_struct(b)).expect("block yaml")
 }
@@ -89,6 +94,9 @@ pub fn block_from_yaml(text: &str) -> Result<Block, RdyError> {
 
 impl Rdy {
     pub fn export(&mut self, scope: &Scope, out: &Path) -> Result<ExportSummary, RdyError> {
+        if out.exists() && std::fs::read_dir(out).map_err(io_err)?.next().is_some() {
+            return Err(RdyError::new(E_BAD_INPUT, format!("{} is not empty", out.display()), "choose an empty directory (or one that does not exist yet) so no stale files mix into the export"));
+        }
         let m = self.materialized(scope)?.clone();
         std::fs::create_dir_all(out.join("docs")).map_err(io_err)?;
         std::fs::create_dir_all(out.join("blobs")).map_err(io_err)?;
@@ -142,7 +150,7 @@ impl Rdy {
         if blob_dir.exists() {
             for entry in std::fs::read_dir(&blob_dir).map_err(io_err)? {
                 let path = entry.map_err(io_err)?.path();
-                if !path.is_file() {
+                if !path.is_file() || is_hidden(&path) {
                     continue;
                 }
                 let bytes = std::fs::read(&path).map_err(io_err)?;
@@ -157,7 +165,7 @@ impl Rdy {
         for bytes in &blob_bytes {
             self.store.put_blob(bytes)?;
         }
-        let mut files: Vec<_> = std::fs::read_dir(dir.join("docs")).map_err(io_err)?.filter_map(Result::ok).map(|e| e.path()).collect();
+        let mut files: Vec<_> = std::fs::read_dir(dir.join("docs")).map_err(io_err)?.filter_map(Result::ok).map(|e| e.path()).filter(|p| !is_hidden(p) && p.extension().is_some_and(|x| x == "yaml")).collect();
         files.sort();
         let mut blocks: Vec<Block> = vec![];
         for f in files {

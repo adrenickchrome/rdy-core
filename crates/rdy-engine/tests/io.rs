@@ -243,3 +243,34 @@ fn edit_block_respects_decision_rules() {
     e.fields.insert("status".into(), FieldValue::Str("accepted".into()));
     assert_eq!(r.edit_block(&agent(), "work", e).unwrap_err().code, "E_PERMISSION");
 }
+
+#[test]
+fn export_refuses_a_non_empty_directory() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let mut a = rich_project(a_dir.path());
+    std::fs::create_dir_all(out.path().join("docs")).unwrap();
+    std::fs::write(out.path().join("docs/d-STALE.yaml"), "[]").unwrap();
+    let e = a.export(&Scope::Canon, out.path()).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT");
+    assert!(e.fix.contains("empty directory"), "{}", e.fix);
+    assert_eq!(std::fs::read_dir(out.path().join("docs")).unwrap().count(), 1, "nothing written");
+    // a directory that does not exist yet is fine
+    a.export(&Scope::Canon, &out.path().join("fresh")).unwrap();
+}
+
+#[test]
+fn import_skips_dotfiles_and_non_yaml_files() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let mut a = rich_project(a_dir.path());
+    a.export(&Scope::Canon, out.path()).unwrap();
+    std::fs::write(out.path().join("docs/.DS_Store"), [0u8, 1, 2]).unwrap();
+    std::fs::write(out.path().join("docs/README.txt"), "notes").unwrap();
+    std::fs::write(out.path().join("blobs/.DS_Store"), [0u8, 1, 2]).unwrap();
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    b.import(&founder(), "import", out.path()).unwrap();
+    let n = a.materialized(&Scope::Canon).unwrap().blocks.len();
+    assert_eq!(b.materialized(&Scope::View("import".into())).unwrap().blocks.len(), n);
+}
