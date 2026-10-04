@@ -1,12 +1,12 @@
 mod html;
 pub use html::{escape, text_html};
 
-use rdy_engine::{E_IO, Rdy, RdyError, Scope, summary_in};
+use rdy_engine::{E_IO, Materialized, Rdy, RdyError, Scope, summary_in};
 use rdy_graph::{DerivedStatus, EdgeKind};
-use rdy_model::{Block, BlockId, FieldValue, Hash, decision};
+use rdy_model::{Block, BlockId, FieldValue, Hash, decision, tree};
 use serde::Serialize;
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 #[derive(Clone, Debug, Serialize)]
@@ -39,11 +39,148 @@ fn status_word(s: &Option<DerivedStatus>) -> &'static str {
     }
 }
 
+/// A link from page `from` to page `to`, both site-relative.
+fn rel(from: &str, to: &str) -> String {
+    format!("{}{to}", "../".repeat(from.matches('/').count()))
+}
+
+struct Site<'a> {
+    m: &'a Materialized,
+    /// Every folder's and doc's tree path.
+    paths: BTreeMap<BlockId, String>,
+}
+
+impl<'a> Site<'a> {
+    fn new(m: &'a Materialized) -> Site<'a> {
+        fn walk(
+            m: &Materialized,
+            parent: Option<&BlockId>,
+            prefix: &str,
+            out: &mut BTreeMap<BlockId, String>,
+        ) {
+            for (id, name) in m.names_under(parent) {
+                let path = if prefix.is_empty() {
+                    name
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                if m.get(&id).is_some_and(|b| b.block_type == tree::FOLDER) {
+                    walk(m, Some(&id), &path, out);
+                }
+                out.insert(id, path);
+            }
+        }
+        let mut paths = BTreeMap::new();
+        walk(m, None, "", &mut paths);
+        Site { m, paths }
+    }
+
+    /// The page of a folder or doc.
+    fn page(&self, id: &BlockId) -> Option<String> {
+        let p = self.paths.get(id)?;
+        Some(match self.m.get(id)?.block_type == tree::FOLDER {
+            true => format!("{p}/index.html"),
+            false => format!("{p}.html"),
+        })
+    }
+
+    fn label(&self, b: &Block) -> String {
+        b.field_str("title")
+            .filter(|t| !t.is_empty())
+            .map(String::from)
+            .or_else(|| self.m.name_of(&b.id))
+            .unwrap_or_else(|| b.id.to_string())
+    }
+
+    /// The folders and doc from the top level down to `id`, top first.
+    fn chain(&self, id: &BlockId) -> Vec<BlockId> {
+        let mut out = vec![];
+        let mut cur = Some(id.clone());
+        while let Some(c) = cur {
+            if out.len() > self.m.blocks.len() {
+                break;
+            }
+            let Some(b) = self.m.get(&c) else { break };
+            if tree::is_tree_type(&b.block_type) {
+                out.push(c.clone());
+            }
+            cur = b.parent.clone();
+        }
+        out.reverse();
+        out
+    }
+
+    fn crumbs(
+        &self,
+        from: &str,
+        chain: &[BlockId],
+        tail: Option<String>,
+    ) -> Vec<serde_json::Value> {
+        let mut out = vec![json!({"label": "rdy", "href": rel(from, "index.html")})];
+        for (i, id) in chain.iter().enumerate() {
+            let b = self.m.get(id).expect("chain blocks exist");
+            let here = tail.is_none() && i + 1 == chain.len();
+            let href = if here {
+                None
+            } else {
+                self.page(id).map(|p| escape(&rel(from, &p)))
+            };
+            out.push(json!({"label": self.label(b), "href": href}));
+        }
+        if let Some(t) = tail {
+            out.push(json!({"label": t, "href": null}));
+        }
+        out
+    }
+
+    /// Nested list of the tree under `parent`; `expand` decides which folders open.
+    fn list(
+        &self,
+        from: &str,
+        parent: Option<&BlockId>,
+        current: Option<&BlockId>,
+        expand: &dyn Fn(&BlockId) -> bool,
+    ) -> String {
+        let mut s = String::from("<ul>");
+        for b in self
+            .m
+            .children(parent)
+            .into_iter()
+            .filter(|b| tree::is_tree_type(&b.block_type))
+        {
+            let cls = if Some(&b.id) == current {
+                " class=\"current\""
+            } else {
+                ""
+            };
+            let href = self.page(&b.id).map(|p| rel(from, &p)).unwrap_or_default();
+            s.push_str(&format!(
+                "<li{cls}><a href=\"{}\">{}</a>",
+                escape(&href),
+                escape(&self.label(b))
+            ));
+            if b.block_type == tree::FOLDER && expand(&b.id) {
+                s.push_str(&self.list(from, Some(&b.id), current, expand));
+            }
+            s.push_str("</li>");
+        }
+        s.push_str("</ul>");
+        s
+    }
+
+    /// The neighbourhood of `chain`'s last node: ancestors, their siblings, the current folder's children.
+    fn sidebar(&self, from: &str, chain: &[BlockId], current: Option<&BlockId>) -> String {
+        self.list(from, None, current, &|id| chain.contains(id))
+    }
+}
+
 fn env() -> Result<minijinja::Environment<'static>, RdyError> {
     let mut env = minijinja::Environment::new();
     env.add_template("layout.html", include_str!("../templates/layout.html"))
         .map_err(tpl)?;
     env.add_template("index.html", include_str!("../templates/index.html"))
+        .map_err(tpl)?;
+    env.add_template("folder.html", include_str!("../templates/folder.html"))
         .map_err(tpl)?;
     env.add_template("doc.html", include_str!("../templates/doc.html"))
         .map_err(tpl)?;
@@ -72,8 +209,9 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
         .collect();
     let g = rdy.graph(scope)?;
     let env = env()?;
-    let site = "rdy";
-    for d in ["doc", "decision", "assets"] {
+    let site_name = "rdy";
+    let site = Site::new(&m);
+    for d in ["_decision", "_assets"] {
         std::fs::create_dir_all(out.join(d)).map_err(io)?;
     }
     let mut stats = RenderSummary {
@@ -81,25 +219,37 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
         assets: 0,
     };
 
-    // where each block lives, for links
+    // where each block lives, for links from page `from`
     let href_from =
-        |from_doc: Option<&BlockId>, id: &BlockId, prefix: &str| -> Option<(String, String)> {
+        |from: &str, from_doc: Option<&BlockId>, id: &BlockId| -> Option<(String, String)> {
             let b = m.get(id)?;
             let label = summary_in(b, &m);
             if b.block_type == decision::DECISION {
-                return Some((format!("{prefix}decision/{id}.html"), label));
+                return Some((rel(from, &format!("_decision/{id}.html")), label));
+            }
+            if tree::is_tree_type(&b.block_type) {
+                return Some((rel(from, &site.page(id)?), label));
             }
             let doc = m.doc_of(id)?;
             if Some(&doc.id) == from_doc {
                 Some((format!("#{id}"), label))
             } else {
-                Some((format!("{prefix}doc/{}.html#{id}", doc.id), label))
+                Some((format!("{}#{id}", rel(from, &site.page(&doc.id)?)), label))
             }
         };
 
     let mut blobs = BTreeSet::new();
-    let mut doc_rows = vec![];
-    for doc in m.children(None) {
+    let ensure_dir = |page: &str| -> Result<(), RdyError> {
+        if let Some(parent) = out.join(page).parent() {
+            std::fs::create_dir_all(parent).map_err(io)?;
+        }
+        Ok(())
+    };
+    for doc_id in site.paths.keys() {
+        let Some(doc) = m.get(doc_id).filter(|b| b.block_type == tree::DOC) else {
+            continue;
+        };
+        let page_path = site.page(&doc.id).expect("doc has a page");
         let mut items = vec![];
         let mut has_mermaid = false;
         let mut stack: Vec<(&Block, usize)> = m
@@ -109,22 +259,23 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
             .map(|b| (b, 1))
             .collect();
         while let Some((b, depth)) = stack.pop() {
-            let link = |id: &BlockId| href_from(Some(&doc.id), id, "../");
+            let link = |id: &BlockId| href_from(&page_path, Some(&doc.id), id);
             let html = if b.block_type == "figure" {
                 let h = b.field_str("blob").unwrap_or("");
                 let alt = escape(b.field_str("alt").unwrap_or(""));
                 match h.parse::<Hash>() {
                     Ok(hash) if present.contains(&hash) => {
                         blobs.insert(hash);
+                        let src = rel(&page_path, &format!("_assets/{h}"));
                         if b.field_str("media_type")
                             .unwrap_or("")
                             .starts_with("image/")
                         {
                             format!(
-                                "<figure><img src=\"../assets/{h}\" alt=\"{alt}\"><figcaption>{alt}</figcaption></figure>"
+                                "<figure><img src=\"{src}\" alt=\"{alt}\"><figcaption>{alt}</figcaption></figure>"
                             )
                         } else {
-                            format!("<p><a href=\"../assets/{h}\" download>{alt}</a></p>")
+                            format!("<p><a href=\"{src}\" download>{alt}</a></p>")
                         }
                     }
                     _ => format!("<p class=\"asset missing\">missing asset: {alt}</p>"),
@@ -137,7 +288,7 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
                     b,
                     depth,
                     &link,
-                    &format!("../decision/{}.html", b.id),
+                    &rel(&page_path, &format!("_decision/{}.html", b.id)),
                     status_word(&g.status(&b.id)),
                 )
             };
@@ -148,10 +299,47 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
         }
         let title = doc.field_str("title").unwrap_or("").to_string();
         let docj = json!({ "id": doc.id.to_string(), "title": title, "doc_type": doc.field_str("doc_type"), "lifecycle": doc.field_str("lifecycle") });
-        let page = env.get_template("doc.html").map_err(tpl)?.render(json!({ "site": site, "title": title, "root": "../", "version": position.label, "frozen": position.frozen, "mermaid": has_mermaid, "doc": docj, "items": items })).map_err(tpl)?;
-        std::fs::write(out.join("doc").join(format!("{}.html", doc.id)), page).map_err(io)?;
+        let chain = site.chain(&doc.id);
+        let page = env.get_template("doc.html").map_err(tpl)?.render(json!({
+            "site": site_name, "title": title, "version": position.label, "frozen": position.frozen, "mermaid": has_mermaid,
+            "crumbs": site.crumbs(&page_path, &chain, None), "sidebar": site.sidebar(&page_path, &chain, Some(&doc.id)),
+            "doc": docj, "items": items,
+        })).map_err(tpl)?;
+        ensure_dir(&page_path)?;
+        std::fs::write(out.join(&page_path), page).map_err(io)?;
         stats.pages += 1;
-        doc_rows.push(docj);
+    }
+
+    for folder_id in site.paths.keys() {
+        let Some(f) = m.get(folder_id).filter(|b| b.block_type == tree::FOLDER) else {
+            continue;
+        };
+        let page_path = site.page(&f.id).expect("folder has a page");
+        let children: Vec<_> = m
+            .children(Some(&f.id))
+            .into_iter()
+            .filter(|c| tree::is_tree_type(&c.block_type))
+            .filter_map(|c| {
+                let href = escape(&rel(&page_path, &site.page(&c.id)?));
+                let kind = if c.block_type == tree::FOLDER {
+                    "folder"
+                } else {
+                    "doc"
+                };
+                Some(json!({ "href": href, "label": site.label(c), "kind": kind }))
+            })
+            .collect();
+        let label = site.label(f);
+        let fj = json!({ "title": label, "description": f.field_str("description"), "id": f.id.to_string() });
+        let chain = site.chain(&f.id);
+        let page = env.get_template("folder.html").map_err(tpl)?.render(json!({
+            "site": site_name, "title": label, "version": position.label, "frozen": position.frozen, "mermaid": false,
+            "crumbs": site.crumbs(&page_path, &chain, None), "sidebar": site.sidebar(&page_path, &chain, Some(&f.id)),
+            "folder": fj, "children": children,
+        })).map_err(tpl)?;
+        ensure_dir(&page_path)?;
+        std::fs::write(out.join(&page_path), page).map_err(io)?;
+        stats.pages += 1;
     }
 
     let mut decisions = vec![];
@@ -161,9 +349,10 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
         .filter(|b| b.block_type == decision::DECISION)
     {
         let status = status_word(&g.status(&b.id));
+        let dpage = format!("_decision/{}.html", b.id);
         let link_row = |e_kind: &EdgeKind, id: &BlockId, part: &Option<String>| {
             let (href, label) =
-                href_from(None, id, "../").unwrap_or((String::new(), id.to_string()));
+                href_from(&dpage, None, id).unwrap_or((String::new(), id.to_string()));
             let kind = match e_kind {
                 EdgeKind::Link(n) => n.clone(),
                 EdgeKind::References => "references".into(),
@@ -194,22 +383,33 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
         let dj = json!({
             "id": b.id.to_string(), "statement": statement, "status": status, "status_class": status.replace(' ', "-"),
             "decided_at": b.field_str("decided_at"), "authority_basis": b.field_str("authority_basis"),
-            "body": if b.body.is_empty() { String::new() } else { text_html(&b.body, &|id| href_from(None, id, "../")) },
+            "body": if b.body.is_empty() { String::new() } else { text_html(&b.body, &|id| href_from(&dpage, None, id)) },
             "options": options, "outgoing": outgoing, "incoming": incoming,
         });
-        let page = env.get_template("decision.html").map_err(tpl)?.render(json!({ "site": site, "title": statement, "root": "../", "version": position.label, "frozen": position.frozen, "mermaid": false, "d": dj })).map_err(tpl)?;
-        std::fs::write(out.join("decision").join(format!("{}.html", b.id)), page).map_err(io)?;
+        let chain = m
+            .doc_of(&b.id)
+            .map(|d| site.chain(&d.id))
+            .unwrap_or_default();
+        let page = env.get_template("decision.html").map_err(tpl)?.render(json!({
+            "site": site_name, "title": statement, "version": position.label, "frozen": position.frozen, "mermaid": false,
+            "crumbs": site.crumbs(&dpage, &chain, Some(format!("decision {}", b.id))), "sidebar": site.sidebar(&dpage, &chain, None),
+            "d": dj,
+        })).map_err(tpl)?;
+        std::fs::write(out.join(&dpage), page).map_err(io)?;
         stats.pages += 1;
         decisions.push(json!({ "id": b.id.to_string(), "statement": statement, "status": status, "status_class": status.replace(' ', "-") }));
     }
 
-    let page = env.get_template("index.html").map_err(tpl)?.render(json!({ "site": site, "title": "Home", "root": "", "version": position.label, "frozen": position.frozen, "versions": version_rows, "mermaid": false, "docs": doc_rows, "decisions": decisions })).map_err(tpl)?;
+    let page = env.get_template("index.html").map_err(tpl)?.render(json!({
+        "site": site_name, "title": "Home", "version": position.label, "frozen": position.frozen, "versions": version_rows, "mermaid": false,
+        "crumbs": [{"label": "rdy", "href": null}], "tree": site.list("index.html", None, None, &|_| true), "decisions": decisions,
+    })).map_err(tpl)?;
     std::fs::write(out.join("index.html"), page).map_err(io)?;
     stats.pages += 1;
 
     for h in blobs {
         std::fs::write(
-            out.join("assets").join(h.to_string()),
+            out.join("_assets").join(h.to_string()),
             rdy.store().get_blob(&h)?,
         )
         .map_err(io)?;

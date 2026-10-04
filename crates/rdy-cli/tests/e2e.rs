@@ -164,7 +164,7 @@ fn agent_over_mcp_then_human_approves() {
     let site = dir.path().join("site");
     rdy(dir.path(), &["render", "--out", site.to_str().unwrap()]);
     assert!(
-        std::fs::read_to_string(site.join(format!("decision/{did}.html")))
+        std::fs::read_to_string(site.join(format!("_decision/{did}.html")))
             .unwrap()
             .contains("Wallets don")
     );

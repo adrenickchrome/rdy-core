@@ -18,10 +18,12 @@ dl.term dt { font-weight:600; } table { border-collapse:collapse; } td, th { bor
 pre { background:color-mix(in srgb, var(--fg) 6%, transparent); padding:12px; overflow-x:auto; }
 img { max-width:100%; }
 .version { margin-left:8px; color:var(--muted); font-size:13px; } .version.frozen { color:var(--accent); }
+aside.tree { font-size:14px; border-left:2px solid var(--line); padding-left:12px; margin-bottom:24px; } aside.tree ul { list-style:none; padding-left:14px; margin:2px 0; } li.current > a { font-weight:600; color:var(--fg); } .here { color:var(--fg); }
 </style>
 </head>
 <body>
-<nav><a href="{{ root }}index.html">{{ site }}</a> <span class="version{% if frozen %} frozen{% endif %}">{{ version }}</span></nav>
+<nav class="crumbs">{% for c in crumbs %}{% if not loop.first %} / {% endif %}{% if c.href %}<a href="{{ c.href|safe }}">{{ c.label }}</a>{% else %}<span class="here">{{ c.label }}</span>{% endif %}{% endfor %} <span class="version{% if frozen %} frozen{% endif %}">{{ version }}</span></nav>
+{% if sidebar %}<aside class="tree">{{ sidebar|safe }}</aside>{% endif %}
 {% block content %}{% endblock %}
 {% if mermaid %}<script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs"; mermaid.initialize({ startOnLoad: true });</script>{% endif %}
 </body>

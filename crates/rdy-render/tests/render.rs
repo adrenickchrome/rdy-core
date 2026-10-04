@@ -64,10 +64,9 @@ fn renders_docs_decisions_diagrams_and_assets() {
     assert_eq!(summary.pages, 3); // index, one doc, one decision
     assert_eq!(summary.assets, 1);
 
-    let doc_id = &res.created["$doc"];
     let t_id = &res.created["$t"];
     let did = &d.created["$decision"];
-    let doc = std::fs::read_to_string(out.path().join(format!("doc/{doc_id}.html"))).unwrap();
+    let doc = std::fs::read_to_string(out.path().join("identity.html")).unwrap();
     assert!(doc.contains("<title>Identity"));
     assert!(
         doc.contains(&format!("href=\"#{t_id}\">Ledger</a>")),
@@ -77,21 +76,21 @@ fn renders_docs_decisions_diagrams_and_assets() {
     assert!(!doc.contains("<script>alert(1)"));
     assert!(doc.contains("<pre class=\"mermaid\">graph TD\n  A --&gt; B</pre>"));
     assert!(doc.contains("mermaid"));
-    assert!(doc.contains(&format!("src=\"../assets/{blob}\"")) && doc.contains("alt=\"logo\""));
-    assert!(doc.contains(&format!("href=\"../decision/{did}.html\"")));
+    assert!(doc.contains(&format!("src=\"_assets/{blob}\"")) && doc.contains("alt=\"logo\""));
+    assert!(doc.contains(&format!("href=\"_decision/{did}.html\"")));
 
-    let dec = std::fs::read_to_string(out.path().join(format!("decision/{did}.html"))).unwrap();
+    let dec = std::fs::read_to_string(out.path().join(format!("_decision/{did}.html"))).unwrap();
     assert!(dec.contains("Ledger is append-only"));
     assert!(dec.contains("live"));
     assert!(dec.contains("mutable"), "considered options are listed");
 
     let index = std::fs::read_to_string(out.path().join("index.html")).unwrap();
-    assert!(index.contains(&format!("doc/{doc_id}.html")));
+    assert!(index.contains(&"identity.html".to_string()));
     assert!(
         !index.contains("cdn.jsdelivr.net/npm/mermaid"),
         "no diagram script on pages without diagrams"
     );
-    assert!(out.path().join(format!("assets/{blob}")).exists());
+    assert!(out.path().join(format!("_assets/{blob}")).exists());
 }
 
 #[test]
@@ -99,7 +98,7 @@ fn dangling_and_junk_blobs_become_placeholders() {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     let absent = Store::blob_hash(b"never stored").to_string();
-    let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+    r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
         {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Assets", "doc_type": "components"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "S"}},
         {"op": "create", "type": "figure", "parent": "$s", "fields": {"blob": absent, "media_type": "image/png", "alt": "gone"}},
@@ -110,8 +109,7 @@ fn dangling_and_junk_blobs_become_placeholders() {
     let out = tempfile::tempdir().unwrap();
     let summary = render_site(&mut r, &Scope::Canon, out.path()).unwrap();
     assert_eq!(summary.assets, 0);
-    let doc = std::fs::read_to_string(out.path().join(format!("doc/{}.html", res.created["$doc"])))
-        .unwrap();
+    let doc = std::fs::read_to_string(out.path().join("assets.html")).unwrap();
     assert!(doc.contains("<p class=\"asset missing\">missing asset: gone</p>"));
     assert!(doc.contains("<p class=\"asset missing\">missing asset: junk</p>"));
     assert!(!doc.contains("<img"));
@@ -145,11 +143,10 @@ fn hostile_text_is_escaped_in_attribute_contexts() {
     r.land(&founder(), &p.id).unwrap();
     let out = tempfile::tempdir().unwrap();
     render_site(&mut r, &Scope::Canon, out.path()).unwrap();
-    let doc = std::fs::read_to_string(out.path().join(format!("doc/{}.html", res.created["$doc"])))
-        .unwrap();
+    let doc = std::fs::read_to_string(out.path().join("t.html")).unwrap();
     let dec = std::fs::read_to_string(
         out.path()
-            .join(format!("decision/{}.html", d.created["$decision"])),
+            .join(format!("_decision/{}.html", d.created["$decision"])),
     )
     .unwrap();
     let index = std::fs::read_to_string(out.path().join("index.html")).unwrap();
@@ -169,7 +166,7 @@ fn escaped_braces_render_literally_and_diagram_references_become_labels() {
     );
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
-    let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+    r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
         {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Flows", "doc_type": "components"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Components"}},
         {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger & co"}, "body": "Balances."},
@@ -178,8 +175,7 @@ fn escaped_braces_render_literally_and_diagram_references_become_labels() {
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
     let out = tempfile::tempdir().unwrap();
     render_site(&mut r, &Scope::View("work".into()), out.path()).unwrap();
-    let doc = std::fs::read_to_string(out.path().join(format!("doc/{}.html", res.created["$doc"])))
-        .unwrap();
+    let doc = std::fs::read_to_string(out.path().join("flows.html")).unwrap();
     assert!(
         doc.contains(
             "<pre class=\"mermaid\">graph TD\n  A{{Decide?}} --&gt; B[Ledger &amp; co]</pre>"
@@ -220,7 +216,7 @@ fn link_labels_render_references_as_text_on_one_line() {
     r.land(&founder(), &p.id).unwrap();
     let out = tempfile::tempdir().unwrap();
     render_site(&mut r, &Scope::Canon, out.path()).unwrap();
-    let dec = std::fs::read_to_string(out.path().join(format!("decision/{did}.html"))).unwrap();
+    let dec = std::fs::read_to_string(out.path().join(format!("_decision/{did}.html"))).unwrap();
     assert!(
         dec.contains(">Corrections are new entries per Ledger is append-only.</a>"),
         "Referenced by label: {dec}"
@@ -248,11 +244,11 @@ fn small_site(r: &mut Rdy) -> (String, String) {
     (res.created["$doc"].clone(), d.created["$decision"].clone())
 }
 
-fn pages(out: &std::path::Path, doc: &str, did: &str) -> Vec<String> {
+fn pages(out: &std::path::Path, did: &str) -> Vec<String> {
     [
         "index.html".to_string(),
-        format!("doc/{doc}.html"),
-        format!("decision/{did}.html"),
+        "identity.html".to_string(),
+        format!("_decision/{did}.html"),
     ]
     .iter()
     .map(|p| std::fs::read_to_string(out.join(p)).unwrap())
@@ -270,24 +266,24 @@ fn every_page_carries_the_version_label() {
         out
     };
     let out = render(&mut r, &Scope::Canon);
-    for page in pages(out.path(), &doc, &did) {
+    for page in pages(out.path(), &did) {
         assert!(
             page.contains("<span class=\"version\">no version yet</span>"),
             "{page}"
         );
     }
-    assert!(pages(out.path(), &doc, &did)[0].contains("No versions yet."));
+    assert!(pages(out.path(), &did)[0].contains("No versions yet."));
 
     r.tag(&founder(), "v0.1.0", None, Some("first cut".into()))
         .unwrap();
     let out = render(&mut r, &Scope::Canon);
-    for page in pages(out.path(), &doc, &did) {
+    for page in pages(out.path(), &did) {
         assert!(
             page.contains("<span class=\"version\">v0.1.0</span>"),
             "{page}"
         );
     }
-    let index = &pages(out.path(), &doc, &did)[0];
+    let index = &pages(out.path(), &did)[0];
     assert!(
         index.contains("<span class=\"version-name\">v0.1.0</span>"),
         "{index}"
@@ -312,27 +308,144 @@ fn every_page_carries_the_version_label() {
     .unwrap();
     let out = render(&mut r, &Scope::View("work".into()));
     assert!(
-        pages(out.path(), &doc, &did)[1]
+        pages(out.path(), &did)[1]
             .contains("<span class=\"version\">v0.1.0 · view work, 1 unlanded change</span>")
     );
     let p = r.propose(&agent(), "work", "rename").unwrap();
     r.land(&founder(), &p.id).unwrap();
     let out = render(&mut r, &Scope::Canon);
     assert!(
-        pages(out.path(), &doc, &did)[2]
-            .contains("<span class=\"version\">v0.1.0 + 1 landing</span>")
+        pages(out.path(), &did)[2].contains("<span class=\"version\">v0.1.0 + 1 landing</span>")
     );
 
     let at = r.resolve_scope("tag:v0.1.0").unwrap();
     let out = render(&mut r, &at);
-    for page in pages(out.path(), &doc, &did) {
+    for page in pages(out.path(), &did) {
         assert!(
             page.contains("<span class=\"version frozen\">v0.1.0 · frozen snapshot</span>"),
             "{page}"
         );
     }
     assert!(
-        pages(out.path(), &doc, &did)[1].contains("<title>Identity ·"),
+        pages(out.path(), &did)[1].contains("<title>Identity ·"),
         "the snapshot shows the old title"
     );
+}
+
+/// glossary (doc), wallets/ { transactions (doc), balance (doc), cards/ { limits (doc) } }
+fn site_tree(r: &mut Rdy) -> serde_json::Map<String, serde_json::Value> {
+    let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+        {"op": "create", "type": "doc", "id": "$g", "fields": {"title": "Glossary", "doc_type": "glossary"}},
+        {"op": "create", "type": "section", "id": "$gs", "parent": "$g", "fields": {"title": "Terms"}},
+        {"op": "create", "type": "term", "id": "$term", "parent": "$gs", "fields": {"name": "Ledger"}, "body": "Balances."},
+        {"op": "create", "type": "folder", "id": "$w", "fields": {"name": "wallets"}},
+        {"op": "create", "type": "doc", "id": "$t", "parent": "$w", "fields": {"title": "Transactions", "doc_type": "glossary"}},
+        {"op": "create", "type": "section", "id": "$ts", "parent": "$t", "fields": {"title": "Terms"}},
+        {"op": "create", "type": "claim", "id": "$claim", "parent": "$ts", "body": "Posts to the {{$term}}."},
+        {"op": "create", "type": "doc", "id": "$b", "parent": "$w", "fields": {"title": "Balance", "doc_type": "glossary"}},
+        {"op": "create", "type": "folder", "id": "$c", "parent": "$w", "fields": {"name": "cards", "description": "Card products."}},
+        {"op": "create", "type": "doc", "id": "$l", "parent": "$c", "fields": {"title": "Limits", "doc_type": "glossary"}}
+    ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let p = r.propose(&agent(), "work", "tree").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    serde_json::to_value(res.created)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn the_site_mirrors_the_folder_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let ids = site_tree(&mut r);
+    let id = |k: &str| ids[k].as_str().unwrap().to_string();
+    let out = tempfile::tempdir().unwrap();
+    let s = render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    for p in [
+        "index.html",
+        "glossary.html",
+        "wallets/index.html",
+        "wallets/transactions.html",
+        "wallets/balance.html",
+        "wallets/cards/index.html",
+        "wallets/cards/limits.html",
+    ] {
+        assert!(out.path().join(p).exists(), "{p}");
+    }
+    assert_eq!(s.pages, 7);
+    let read = |p: &str| std::fs::read_to_string(out.path().join(p)).unwrap();
+
+    let t = read("wallets/transactions.html");
+    assert!(t.contains("<nav class=\"crumbs\"><a href=\"../index.html\">rdy</a> / <a href=\"../wallets/index.html\">wallets</a> / <span class=\"here\">Transactions</span>"), "{t}");
+    assert!(
+        t.contains(&format!(
+            "href=\"../glossary.html#{}\">Ledger</a>",
+            id("$term")
+        )),
+        "relative link across folders: {t}"
+    );
+    let sidebar = "<aside class=\"tree\"><ul><li><a href=\"../glossary.html\">Glossary</a></li><li><a href=\"../wallets/index.html\">wallets</a><ul><li class=\"current\"><a href=\"../wallets/transactions.html\">Transactions</a></li><li><a href=\"../wallets/balance.html\">Balance</a></li><li><a href=\"../wallets/cards/index.html\">cards</a></li></ul></li></ul></aside>";
+    assert!(t.contains(sidebar), "neighbourhood sidebar: {t}");
+    assert!(
+        !t.contains("limits.html"),
+        "a cousin folder's contents are not shown"
+    );
+
+    let cards = read("wallets/cards/index.html");
+    assert!(cards.contains("Card products."), "{cards}");
+    assert!(
+        cards.contains(
+            "<a href=\"../../wallets/cards/limits.html\">Limits</a> <span class=\"meta\">doc</span>"
+        ),
+        "{cards}"
+    );
+    assert!(cards.contains("<li class=\"current\"><a href=\"../../wallets/cards/index.html\">cards</a><ul><li><a href=\"../../wallets/cards/limits.html\">Limits</a></li></ul></li>"), "the current folder's children: {cards}");
+
+    let index = read("index.html");
+    assert!(index.contains("<span class=\"here\">rdy</span>"));
+    assert!(
+        index.contains("<a href=\"wallets/cards/limits.html\">Limits</a>"),
+        "the index lists the whole tree: {index}"
+    );
+    assert!(!index.contains("<aside"));
+}
+
+#[test]
+fn decisions_and_assets_live_under_underscore_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let blob = r.store_mut().put_blob(b"\x89PNG fake").unwrap().to_string();
+    let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+        {"op": "create", "type": "folder", "id": "$w", "fields": {"name": "wallets"}},
+        {"op": "create", "type": "doc", "id": "$d", "parent": "$w", "fields": {"title": "Design", "doc_type": "decisions-log"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Decisions"}},
+        {"op": "create", "type": "figure", "parent": "$s", "fields": {"blob": blob, "media_type": "image/png", "alt": "logo"}}
+    ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let d = r
+        .decide(
+            &agent(),
+            "work",
+            DecisionInput {
+                parent: res.created["$s"].clone(),
+                statement: "Ledger is append-only".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let did = d.created["$decision"].clone();
+    let p = r.propose(&agent(), "work", "seed").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    let doc = std::fs::read_to_string(out.path().join("wallets/design.html")).unwrap();
+    assert!(doc.contains(&format!("src=\"../_assets/{blob}\"")), "{doc}");
+    assert!(
+        doc.contains(&format!("href=\"../_decision/{did}.html\"")),
+        "{doc}"
+    );
+    assert!(out.path().join(format!("_assets/{blob}")).exists());
+    let dec = std::fs::read_to_string(out.path().join(format!("_decision/{did}.html"))).unwrap();
+    assert!(dec.contains(&format!("<a href=\"../wallets/design.html\">Design</a> / <span class=\"here\">decision {did}</span>")), "{dec}");
 }
