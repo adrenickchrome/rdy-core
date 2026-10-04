@@ -63,7 +63,7 @@ fn export_level(
 ) -> Result<(), RdyError> {
     // `level` folders are above this one; a damaged store may nest deeper than writes allow,
     // and what lies below the limit is left out (the caller reports the missing blocks)
-    if level >= tree::MAX_FOLDER_DEPTH {
+    if level > tree::MAX_FOLDER_DEPTH {
         return Ok(());
     }
     let names = m.names_under(parent);
@@ -542,6 +542,9 @@ impl Rdy {
                     .or_else(|| existing.get(&c))
                     .is_some_and(|p| p.block_type == tree::FOLDER);
                 folders += usize::from(is_folder);
+                if folders > tree::MAX_FOLDER_DEPTH {
+                    break;
+                }
                 cur = parent_of(&c).flatten();
             }
             if folders > tree::MAX_FOLDER_DEPTH {

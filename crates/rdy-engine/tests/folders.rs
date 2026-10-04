@@ -431,3 +431,38 @@ fn tree_walks_survive_a_damaged_store_with_a_very_deep_chain() {
     assert_eq!(e.code, "E_IO", "{e}");
     assert!(e.message.contains("not inside"), "{e}");
 }
+
+#[test]
+fn a_doc_in_the_deepest_folder_exports_and_round_trips() {
+    let (_d, mut r) = project();
+    let res = write(&mut r, "work", chain(32, None)).unwrap();
+    write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "parent": res.created["$f31"], "fields": {"title": "Leaf", "doc_type": "overview"}}
+    ]))
+    .unwrap();
+    let p = r.propose(&agent(), "work", "deep").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let original = r
+        .materialized(&Scope::Canon)
+        .unwrap()
+        .snapshot
+        .blocks
+        .clone();
+
+    let out = tempfile::tempdir().unwrap();
+    let summary = r.export(&Scope::Canon, out.path()).unwrap();
+    assert_eq!(summary.folders, 32);
+    assert_eq!(summary.docs, 1);
+
+    let (_d2, mut b) = project();
+    b.import(&founder(), "import", out.path()).unwrap();
+    let p = b.propose(&founder(), "import", "migrate").unwrap();
+    b.land(&founder(), &p.id).unwrap();
+    let imported = b
+        .materialized(&Scope::Canon)
+        .unwrap()
+        .snapshot
+        .blocks
+        .clone();
+    assert_eq!(imported, original);
+}
