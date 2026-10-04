@@ -180,3 +180,24 @@ fn justification_mapping_and_conflict() {
     rdy_write(&mut st, serde_json::from_value(json!({"ops": [{"op": "update", "id": c, "body": "Edited again."}], "implements": did})).unwrap()).unwrap();
     assert_eq!(last(&st).justification, Some(Justification::Implements(rdy_model::BlockId::parse(&did).unwrap())));
 }
+
+#[test]
+fn compact_read_keeps_one_indented_line_per_block_with_multiline_diagrams() {
+    let (_d, mut st) = state();
+    start(&mut st);
+    let res = rdy_write(&mut st, serde_json::from_value(json!({"ops": [
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Flows", "doc_type": "components"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Login"}},
+        {"op": "create", "type": "diagram", "parent": "$s", "fields": {"lang": "mermaid", "alt": "login flow"}, "body": "flowchart TD\n  A[Start] --> B{{Valid?}}\n  B --> C[Done]"},
+        {"op": "create", "type": "claim", "parent": "$s", "body": "Sessions expire."}
+    ]})).unwrap()).unwrap();
+    let doc = res["created"]["$doc"].as_str().unwrap().to_string();
+    let read = rdy_read(&mut st, serde_json::from_value(json!({"id": doc})).unwrap()).unwrap();
+    let text = read["text"].as_str().unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 4, "one line per block:\n{text}");
+    for (line, depth) in lines.iter().zip([0, 1, 2, 2]) {
+        let indent = "  ".repeat(depth);
+        assert!(line.starts_with(&indent) && !line[indent.len()..].starts_with(' '), "depth {depth} indentation: {line:?}\n{text}");
+    }
+}
