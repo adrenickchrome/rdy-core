@@ -45,12 +45,13 @@ impl Materialized {
 
     pub fn doc_of(&self, id: &BlockId) -> Option<&Block> {
         let mut cur = self.blocks.get(id)?;
-        loop {
+        for _ in 0..=self.blocks.len() {
             if cur.block_type == "doc" {
                 return Some(cur);
             }
             cur = self.blocks.get(cur.parent.as_ref()?)?;
         }
+        None
     }
 
     pub fn apply(&mut self, ops: &[Op]) {

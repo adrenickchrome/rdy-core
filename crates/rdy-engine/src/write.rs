@@ -103,9 +103,9 @@ impl<'a> Overlay<'a> {
         }
     }
 
-    fn children(&self, parent: &BlockId) -> Vec<Block> {
-        let mut out: Vec<Block> = self.base.children(Some(parent)).into_iter().filter(|b| !self.pending.contains_key(&b.id)).cloned().collect();
-        out.extend(self.pending.values().flatten().filter(|b| b.parent.as_ref() == Some(parent)).cloned());
+    fn children(&self, parent: Option<&BlockId>) -> Vec<Block> {
+        let mut out: Vec<Block> = self.base.children(parent).into_iter().filter(|b| !self.pending.contains_key(&b.id)).cloned().collect();
+        out.extend(self.pending.values().flatten().filter(|b| b.parent.as_ref() == parent).cloned());
         out.sort_by(|a, b| (&a.order, &a.id).cmp(&(&b.order, &b.id)));
         out
     }
@@ -153,12 +153,13 @@ fn parse_base(s: &Option<String>) -> Result<Option<Hash>, RdyError> {
     s.as_ref().map(|h| h.parse::<Hash>().map_err(|e| bad(e.to_string(), "pass base as the 64-character version hash from rdy_context"))).transpose()
 }
 
-fn order_after(ov: &Overlay, parent: &BlockId, after: Option<&BlockId>) -> Result<String, RdyError> {
+fn order_after(ov: &Overlay, parent: Option<&BlockId>, after: Option<&BlockId>) -> Result<String, RdyError> {
     let siblings = ov.children(parent);
+    let parent_name = parent.map(|p| p.to_string()).unwrap_or_else(|| "the document root".to_string());
     match after {
         None => Ok(order_between(siblings.last().map(|b| b.order.as_str()), None)),
         Some(a) => {
-            let pos = siblings.iter().position(|b| &b.id == a).ok_or_else(|| bad(format!("{a} is not a child of {parent}"), "pass an `after` id that is a sibling under `parent`, or omit it to append"))?;
+            let pos = siblings.iter().position(|b| &b.id == a).ok_or_else(|| bad(format!("{a} is not a child of {parent_name}"), "pass an `after` id that is a sibling under `parent`, or omit it to append"))?;
             Ok(order_between(Some(&siblings[pos].order), siblings.get(pos + 1).map(|b| b.order.as_str())))
         }
     }
@@ -183,12 +184,15 @@ fn current_for_edit<'b>(ov: &'b Overlay, id: &BlockId, base: &Option<String>, to
 
 type Built = (Vec<Op>, BTreeMap<String, String>, BTreeSet<BlockId>);
 
+type Prior = (bool, BTreeMap<BlockId, Hash>);
+
 fn build_ops(pack: &Pack, base: &Materialized, session: &Session, inputs: Vec<OpInput>) -> Result<Built, RdyError> {
     let mut ov = Overlay { base, pending: BTreeMap::new() };
     let mut res = Resolver { placeholders: BTreeMap::new() };
     let mut ops = vec![];
     let mut created = BTreeMap::new();
     let mut touched = BTreeSet::new();
+    let mut prior: Vec<Prior> = vec![];
 
     for (i, input) in inputs.into_iter().enumerate() {
         match input {
@@ -198,6 +202,9 @@ fn build_ops(pack: &Pack, base: &Materialized, session: &Session, inputs: Vec<Op
                 })?;
                 let new_id = match id.as_deref() {
                     Some(p) if p.starts_with('$') => {
+                        if res.placeholders.contains_key(p) {
+                            return Err(bad(format!("placeholder {p} is defined twice in this write"), "use a different $name for each created block"));
+                        }
                         let mut g = BlockId::new(&def.prefix);
                         while ov.get(&g).is_some() {
                             g = BlockId::new(&def.prefix);
@@ -220,24 +227,25 @@ fn build_ops(pack: &Pack, base: &Materialized, session: &Session, inputs: Vec<Op
                         g
                     }
                 };
+                if touched.contains(&new_id) {
+                    return Err(bad(format!("{new_id} is changed more than once in this write"), "combine the edits into one op"));
+                }
                 if ov.get(&new_id).is_some() {
                     return Err(RdyError::new(E_ALREADY_EXISTS, format!("block {new_id} already exists"), "omit id to let rdy generate one"));
                 }
                 let parent = parent.as_deref().map(|p| res.id(p)).transpose()?;
-                let order = match &parent {
-                    Some(p) => {
-                        if ov.get(p).is_none() {
-                            return Err(RdyError::new(E_UNKNOWN_BLOCK, format!("parent {p} does not exist"), "create the parent first or check its id"));
-                        }
-                        let after = after.as_deref().map(|a| res.id(a)).transpose()?;
-                        order_after(&ov, p, after.as_ref())?
-                    }
-                    None => order_between(base.children(None).last().map(|b| b.order.as_str()), None),
-                };
+                if let Some(p) = &parent
+                    && ov.get(p).is_none()
+                {
+                    return Err(RdyError::new(E_UNKNOWN_BLOCK, format!("parent {p} does not exist"), "create the parent first or check its id"));
+                }
+                let after = after.as_deref().map(|a| res.id(a)).transpose()?;
+                let order = order_after(&ov, parent.as_ref(), after.as_ref())?;
                 let block = Block { id: new_id.clone(), block_type, parent, order, fields: res.fields(fields)?, body: res.text(&body), links: res.links(links)?, pins: BTreeMap::new() };
                 touched.insert(new_id.clone());
                 ov.pending.insert(new_id, Some(block.clone()));
                 ops.push(Op::Create { block });
+                prior.push((false, BTreeMap::new()));
             }
             OpInput::Update { id, base: b, fields, unset, body, links } => {
                 let id = res.id(&id)?;
@@ -253,6 +261,7 @@ fn build_ops(pack: &Pack, base: &Materialized, session: &Session, inputs: Vec<Op
                 if let Some(links) = links {
                     block.links = res.links(links)?;
                 }
+                prior.push((false, cur.pins.clone()));
                 touched.insert(id.clone());
                 ov.pending.insert(id, Some(block.clone()));
                 ops.push(Op::Update { base: base_hash, block });
@@ -266,8 +275,16 @@ fn build_ops(pack: &Pack, base: &Materialized, session: &Session, inputs: Vec<Op
                 if ov.get(&parent).is_none() {
                     return Err(RdyError::new(E_UNKNOWN_BLOCK, format!("parent {parent} does not exist"), "check the parent id"));
                 }
+                let mut walk = Some(parent.clone());
+                while let Some(w) = walk {
+                    if w == id {
+                        return Err(bad(format!("cannot move {id} under itself or one of its descendants"), "choose a parent outside the subtree being moved"));
+                    }
+                    walk = ov.get(&w).and_then(|b| b.parent.clone());
+                }
                 block.parent = Some(parent.clone());
-                block.order = order_after(&ov, &parent, after.as_ref())?;
+                block.order = order_after(&ov, Some(&parent), after.as_ref())?;
+                prior.push((true, block.pins.clone()));
                 touched.insert(id.clone());
                 ov.pending.insert(id, Some(block.clone()));
                 ops.push(Op::Update { base: base_hash, block });
@@ -275,11 +292,12 @@ fn build_ops(pack: &Pack, base: &Materialized, session: &Session, inputs: Vec<Op
             OpInput::Delete { id, base: b } => {
                 let id = res.id(&id)?;
                 let (base_hash, _) = current_for_edit(&ov, &id, &b, &touched)?;
-                if !ov.children(&id).is_empty() {
+                if !ov.children(Some(&id)).is_empty() {
                     return Err(RdyError::new(E_HAS_CHILDREN, format!("{id} still has children"), "delete or move its children first"));
                 }
                 touched.insert(id.clone());
                 ov.pending.insert(id.clone(), None);
+                prior.push((false, BTreeMap::new()));
                 ops.push(Op::Delete { base: base_hash, id });
             }
         }
@@ -287,26 +305,35 @@ fn build_ops(pack: &Pack, base: &Materialized, session: &Session, inputs: Vec<Op
 
     // second pass: references, pins, decision permissions, schema validation
     let mut issues = vec![];
-    for op in ops.iter_mut() {
+    for (op, (is_move, old_pins)) in ops.iter_mut().zip(prior) {
         let block = match op {
             Op::Create { block } | Op::Update { block, .. } => block,
             Op::Delete { .. } => continue,
         };
         let mut pins = BTreeMap::new();
         for tok in block.ref_tokens() {
+            if let Some(name) = tok.strip_prefix('$') {
+                return Err(bad(format!("placeholder ${name} is used before it is created"), "create the block earlier in the same batch, or use a real id"));
+            }
             let target = BlockId::parse(&tok).map_err(|_| RdyError::new(E_UNKNOWN_REF, format!("{{{{{tok}}}}} in {} is not a block id", block.id), "reference blocks as {{id}}, e.g. {{t-MEDGR}}; find ids with rdy_search"))?;
             let t = ov.get(&target).ok_or_else(|| RdyError::new(E_UNKNOWN_REF, format!("{} references {target}, which does not exist in this view", block.id), "fix the id, or create the target in the same write"))?;
-            if !touched.contains(&target) {
+            if let Some(h) = old_pins.get(&target) {
+                pins.insert(target, *h);
+            } else if !touched.contains(&target) {
                 pins.insert(target, t.version_hash());
             }
         }
         for link in block.links.values().flatten() {
             let t = ov.get(&link.target).ok_or_else(|| RdyError::new(E_UNKNOWN_REF, format!("{} links to {}, which does not exist in this view", block.id, link.target), "fix the link target id"))?;
-            if !touched.contains(&link.target) {
+            if let Some(h) = old_pins.get(&link.target) {
+                pins.insert(link.target.clone(), *h);
+            } else if !touched.contains(&link.target) {
                 pins.insert(link.target.clone(), t.version_hash());
             }
         }
-        block.pins = pins;
+        if !is_move {
+            block.pins = pins;
+        }
         if block.block_type == decision::DECISION && block.field_str("status") != Some("proposed") && !session.role.can_land() {
             return Err(RdyError::new(E_PERMISSION, format!("{} sets decision status {:?}", block.id, block.field_str("status").unwrap_or("")), "write status: proposed; the decision is accepted when its proposal lands"));
         }

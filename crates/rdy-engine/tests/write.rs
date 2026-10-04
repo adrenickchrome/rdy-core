@@ -149,3 +149,185 @@ fn missing_skeleton_sections_are_warnings() {
     let codes: Vec<_> = res.warnings.iter().map(|w| w.code).collect();
     assert_eq!(codes, vec!["W_SKELETON_MISSING", "W_SKELETON_MISSING"]); // Summary, Goals
 }
+
+fn approver() -> Session {
+    Session { role: Role::Approver, ..agent() }
+}
+
+fn view_len(r: &Rdy) -> usize {
+    r.store().view("work").unwrap().changes.len()
+}
+
+fn code(r: &mut Rdy, v: serde_json::Value) -> &'static str {
+    r.write(&agent(), req(v)).unwrap_err().code
+}
+
+#[test]
+fn move_into_own_subtree_is_refused() {
+    let (_d, mut r) = project();
+    let res = skeleton(&mut r);
+    let before = view_len(&r);
+    let (doc, terms, ledger) = (res.created["$doc"].clone(), res.created["$terms"].clone(), res.created["$ledger"].clone());
+    assert_eq!(code(&mut r, json!([{"op": "move", "id": terms, "parent": terms}])), "E_BAD_INPUT");
+    assert_eq!(code(&mut r, json!([{"op": "move", "id": terms, "parent": ledger}])), "E_BAD_INPUT");
+    assert_eq!(code(&mut r, json!([{"op": "move", "id": doc, "parent": terms}])), "E_BAD_INPUT");
+    assert_eq!(view_len(&r), before);
+}
+
+#[test]
+fn successful_move_changes_parent_and_order() {
+    let (_d, mut r) = project();
+    let res = skeleton(&mut r);
+    let w = r.write(&agent(), req(json!([
+        {"op": "create", "type": "section", "parent": res.created["$doc"], "fields": {"title": "More"}}
+    ]))).unwrap();
+    let more = w.created["op0"].clone();
+    r.write(&agent(), req(json!([{"op": "move", "id": res.created["$c1"], "parent": more}]))).unwrap();
+    let scope = Scope::View("work".into());
+    let c1 = r.block(&scope, &BlockId::parse(&res.created["$c1"]).unwrap()).unwrap();
+    assert_eq!(c1.parent.unwrap().to_string(), more);
+    let m = r.materialized(&scope).unwrap();
+    assert_eq!(m.children(Some(&BlockId::parse(&more).unwrap())).len(), 1);
+}
+
+#[test]
+fn root_creates_keep_input_order_and_honour_after() {
+    let (_d, mut r) = project();
+    let res = r.write(&agent(), req(json!([
+        {"op": "create", "type": "doc", "id": "$a", "fields": {"title": "A", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$b", "fields": {"title": "B", "doc_type": "glossary"}},
+        {"op": "create", "type": "doc", "id": "$c", "after": "$a", "fields": {"title": "C", "doc_type": "glossary"}}
+    ]))).unwrap();
+    let m = r.materialized(&Scope::View("work".into())).unwrap();
+    let roots: Vec<String> = m.children(None).iter().map(|b| b.id.to_string()).collect();
+    assert_eq!(roots, vec![res.created["$a"].clone(), res.created["$c"].clone(), res.created["$b"].clone()]);
+}
+
+#[test]
+fn after_must_be_a_sibling_even_at_root() {
+    let (_d, mut r) = project();
+    let res = skeleton(&mut r);
+    let before = view_len(&r);
+    let doc = res.created["$doc"].clone();
+    assert_eq!(code(&mut r, json!([{"op": "create", "type": "doc", "after": res.created["$terms"], "fields": {"title": "X", "doc_type": "glossary"}}])), "E_BAD_INPUT");
+    assert_eq!(code(&mut r, json!([{"op": "create", "type": "claim", "parent": doc, "after": res.created["$c1"], "body": "x"}])), "E_BAD_INPUT");
+    assert_eq!(view_len(&r), before);
+}
+
+#[test]
+fn placeholder_misuse_is_bad_input() {
+    let (_d, mut r) = project();
+    let res = skeleton(&mut r);
+    let terms = res.created["$terms"].clone();
+    let e = r.write(&agent(), req(json!([{"op": "create", "type": "claim", "parent": terms, "body": "See {{$later}}."}]))).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT");
+    assert!(e.message.contains("$later"));
+    assert_eq!(code(&mut r, json!([
+        {"op": "create", "type": "claim", "id": "$x", "parent": terms, "body": "one"},
+        {"op": "create", "type": "claim", "id": "$x", "parent": terms, "body": "two"}
+    ])), "E_BAD_INPUT");
+}
+
+#[test]
+fn a_block_cannot_be_touched_twice_including_delete_then_create() {
+    let (_d, mut r) = project();
+    let res = skeleton(&mut r);
+    let c1 = res.created["$c1"].clone();
+    assert_eq!(code(&mut r, json!([
+        {"op": "delete", "id": c1},
+        {"op": "create", "type": "claim", "id": c1, "parent": res.created["$terms"], "body": "again"}
+    ])), "E_BAD_INPUT");
+    assert_eq!(code(&mut r, json!([
+        {"op": "update", "id": c1, "body": "a"},
+        {"op": "update", "id": c1, "body": "b"}
+    ])), "E_BAD_INPUT");
+}
+
+#[test]
+fn updates_keep_existing_pins_and_moves_keep_all_pins() {
+    let (_d, mut r) = project();
+    let res = skeleton(&mut r);
+    let scope = Scope::View("work".into());
+    let (terms, ledger, c1) = (res.created["$terms"].clone(), res.created["$ledger"].clone(), res.created["$c1"].clone());
+    let w = r.write(&agent(), req(json!([
+        {"op": "create", "type": "claim", "parent": terms, "body": format!("About {{{{{ledger}}}}}.")}
+    ]))).unwrap();
+    let pinned = w.created["op0"].clone();
+    let lid = BlockId::parse(&ledger).unwrap();
+    let pid = BlockId::parse(&pinned).unwrap();
+    let v1 = r.block(&scope, &lid).unwrap().version_hash();
+    r.write(&agent(), req(json!([{"op": "update", "id": ledger, "body": "A newer definition."}]))).unwrap();
+    let v2 = r.block(&scope, &lid).unwrap().version_hash();
+    assert_ne!(v1, v2);
+    r.write(&agent(), req(json!([{"op": "update", "id": pinned, "body": format!("Edited about {{{{{ledger}}}}}.")}]))).unwrap();
+    assert_eq!(r.block(&scope, &pid).unwrap().pins[&lid], v1, "existing pin kept on edit");
+    // a reference new in this edit gets the current version
+    r.write(&agent(), req(json!([{"op": "update", "id": c1, "body": format!("Now {{{{{ledger}}}}}.")}]))).unwrap();
+    assert_eq!(r.block(&scope, &BlockId::parse(&c1).unwrap()).unwrap().pins[&lid], v2);
+    // moves keep pins unchanged
+    let sec = r.write(&agent(), req(json!([{"op": "create", "type": "section", "parent": res.created["$doc"], "fields": {"title": "Other"}}]))).unwrap();
+    r.write(&agent(), req(json!([{"op": "move", "id": pinned, "parent": sec.created["op0"]}]))).unwrap();
+    assert_eq!(r.block(&scope, &pid).unwrap().pins[&lid], v1);
+}
+
+#[test]
+fn remaining_rules_have_codes() {
+    let (_d, mut r) = project();
+    let res = skeleton(&mut r);
+    let (terms, c1, ledger) = (res.created["$terms"].clone(), res.created["$c1"].clone(), res.created["$ledger"].clone());
+    assert_eq!(code(&mut r, json!([])), "E_BAD_INPUT");
+    assert_eq!(code(&mut r, json!([{"op": "update", "id": "b-ZZZZZ", "body": "x"}])), "E_UNKNOWN_BLOCK");
+    assert_eq!(code(&mut r, json!([{"op": "create", "type": "claim", "id": c1, "parent": terms, "body": "x"}])), "E_ALREADY_EXISTS");
+    assert_eq!(code(&mut r, json!([{"op": "update", "id": ledger, "fields": {"name": 1.5}}])), "E_BAD_INPUT");
+    assert_eq!(code(&mut r, json!([{"op": "update", "id": c1, "base": "nothex", "body": "x"}])), "E_BAD_INPUT");
+    assert_eq!(code(&mut r, json!([{"op": "create", "type": "claim", "parent": terms, "links": {"refines": [{"target": "t-ZZZZZ"}]}, "body": "x"}])), "E_UNKNOWN_REF");
+}
+
+#[test]
+fn unset_removes_a_field_and_links_accept_placeholders() {
+    let (_d, mut r) = project();
+    let res = skeleton(&mut r);
+    let scope = Scope::View("work".into());
+    let w0 = r.write(&agent(), req(json!([
+        {"op": "create", "type": "requirement", "parent": res.created["$terms"], "fields": {"priority": "must"}, "body": "Must hold."}
+    ]))).unwrap();
+    let req_id = BlockId::parse(&w0.created["op0"]).unwrap();
+    assert!(r.block(&scope, &req_id).unwrap().fields.contains_key("priority"));
+    r.write(&agent(), req(json!([{"op": "update", "id": req_id.to_string(), "unset": ["priority"]}]))).unwrap();
+    assert!(!r.block(&scope, &req_id).unwrap().fields.contains_key("priority"));
+    let w = r.write(&agent(), req(json!([
+        {"op": "create", "type": "claim", "id": "$p", "parent": res.created["$terms"], "body": "Premise."},
+        {"op": "create", "type": "claim", "id": "$q", "parent": res.created["$terms"], "body": "Conclusion.",
+         "links": {"refines": [{"target": "$p"}]}}
+    ]))).unwrap();
+    let q = r.block(&scope, &BlockId::parse(&w.created["$q"]).unwrap()).unwrap();
+    let links: Vec<_> = q.links.values().flatten().collect();
+    assert_eq!(links[0].target.to_string(), w.created["$p"]);
+    assert!(q.pins.is_empty());
+}
+
+#[test]
+fn frozen_decisions_cannot_change() {
+    let (_d, mut r) = project();
+    let res = skeleton(&mut r);
+    let w = r.write(&approver(), req(json!([
+        {"op": "create", "type": "decision", "parent": res.created["$terms"], "fields": {"statement": "Use a ledger", "status": "accepted"}}
+    ]))).unwrap();
+    let e = r.write(&agent(), req(json!([{"op": "update", "id": w.created["op0"], "body": "changed"}]))).unwrap_err();
+    assert_eq!(e.code, "E_FROZEN");
+}
+
+#[test]
+fn a_failing_second_op_writes_nothing() {
+    let (_d, mut r) = project();
+    let res = skeleton(&mut r);
+    let before = view_len(&r);
+    let blocks_before = r.materialized(&Scope::View("work".into())).unwrap().blocks.len();
+    let e = r.write(&agent(), req(json!([
+        {"op": "create", "type": "claim", "id": "$ok", "parent": res.created["$terms"], "body": "Fine."},
+        {"op": "update", "id": "b-ZZZZZ", "body": "x"}
+    ]))).unwrap_err();
+    assert_eq!(e.code, "E_UNKNOWN_BLOCK");
+    assert_eq!(view_len(&r), before);
+    assert_eq!(r.materialized(&Scope::View("work".into())).unwrap().blocks.len(), blocks_before);
+}
