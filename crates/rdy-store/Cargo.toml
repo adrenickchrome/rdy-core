@@ -5,3 +5,12 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+rdy-model.workspace = true
+serde.workspace = true
+postcard.workspace = true
+redb.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true
