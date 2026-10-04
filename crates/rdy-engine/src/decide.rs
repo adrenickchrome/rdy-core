@@ -100,6 +100,7 @@ impl Rdy {
             id: Some("$decision".into()),
             parent: Some(d.parent.clone()),
             after: None,
+            before: None,
             fields: fields_of(&d),
             body: d.body.clone(),
             links,

@@ -30,6 +30,9 @@ pub enum OpInput {
         parent: Option<String>,
         #[serde(default)]
         after: Option<String>,
+        /// first1: a sibling to put this block ahead of (the first child: make it first).
+        #[serde(default)]
+        before: Option<String>,
         #[serde(default)]
         fields: BTreeMap<String, serde_json::Value>,
         #[serde(default)]
@@ -58,6 +61,9 @@ pub enum OpInput {
         parent: Option<String>,
         #[serde(default)]
         after: Option<String>,
+        /// first1: a sibling to put this block ahead of (the first child: make it first).
+        #[serde(default)]
+        before: Option<String>,
     },
     Delete {
         id: String,
@@ -384,6 +390,54 @@ fn order_after(
     })
 }
 
+/// first1: a key just before sibling `before`. Siblings created in parallel views may share a
+/// key, so the new block goes before the whole tie.
+fn order_before(
+    ov: &Overlay,
+    parent: Option<&BlockId>,
+    before: &BlockId,
+) -> Result<String, RdyError> {
+    let parent_name = parent
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "the document root".to_string());
+    let anchor = ov
+        .get(before)
+        .filter(|b| b.parent.as_ref() == parent)
+        .map(|b| (b.order.clone(), b.id.clone()))
+        .ok_or_else(|| {
+            bad(
+                format!("{before} is not a child of {parent_name}"),
+                "pass a `before` id that is a sibling under `parent`, or omit it to append",
+            )
+        })?;
+    ov.with_sibs(parent, |s| {
+        let prev = s
+            .order
+            .range((Bound::Unbounded, Bound::Excluded(&anchor)))
+            .rev()
+            .find(|(o, _)| *o != anchor.0);
+        order_between(prev.map(|(o, _)| o.as_str()), Some(&anchor.0))
+            .map_err(|e| order_error(e, parent))
+    })
+}
+
+/// The order key for a block placed after or before a sibling, or appended.
+fn place(
+    ov: &Overlay,
+    parent: Option<&BlockId>,
+    after: Option<&BlockId>,
+    before: Option<&BlockId>,
+) -> Result<String, RdyError> {
+    match (after, before) {
+        (Some(_), Some(_)) => Err(bad(
+            "give after or before, not both",
+            "after puts the block behind a sibling, before ahead of one",
+        )),
+        (None, Some(b)) => order_before(ov, parent, b),
+        (after, None) => order_after(ov, parent, after),
+    }
+}
+
 fn current_for_edit<'b>(
     ov: &'b Overlay,
     id: &BlockId,
@@ -675,6 +729,7 @@ fn build_ops(
                 id,
                 parent,
                 after,
+                before,
                 fields,
                 body,
                 links,
@@ -747,7 +802,8 @@ fn build_ops(
                     ));
                 }
                 let after = after.as_deref().map(|a| res.id(a)).transpose()?;
-                let order = order_after(&ov, parent.as_ref(), after.as_ref())?;
+                let before = before.as_deref().map(|b| res.id(b)).transpose()?;
+                let order = place(&ov, parent.as_ref(), after.as_ref(), before.as_ref())?;
                 let body = res.text(&body, RefMode::for_body(&block_type));
                 let mut block = Block {
                     id: new_id.clone(),
@@ -831,10 +887,18 @@ fn build_ops(
                 base: b,
                 parent,
                 after,
+                before,
             } => {
                 let id = res.id(&id)?;
                 let parent = parent.as_deref().map(|p| res.id(p)).transpose()?;
                 let after = after.as_deref().map(|a| res.id(a)).transpose()?;
+                let before = before.as_deref().map(|b| res.id(b)).transpose()?;
+                if before.as_ref() == Some(&id) {
+                    return Err(bad(
+                        format!("cannot move {id} before itself"),
+                        "name another sibling as before, or omit it",
+                    ));
+                }
                 let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched)?;
                 let mut block = cur.clone();
                 if block.block_type == tree::DOC
@@ -863,7 +927,7 @@ fn build_ops(
                     }
                 }
                 block.parent = parent.clone();
-                block.order = order_after(&ov, parent.as_ref(), after.as_ref())?;
+                block.order = place(&ov, parent.as_ref(), after.as_ref(), before.as_ref())?;
                 check_name(&ov, &block, i, true)?;
                 if block.block_type == tree::FOLDER {
                     check_depth(&ov, &block, folders_below(&ov, &id))?;

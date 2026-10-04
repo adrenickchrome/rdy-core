@@ -100,13 +100,14 @@ pub struct EditorialParams {
 pub struct WriteParams {
     pub view: Option<String>,
     /// Ops, each a JSON object (rdy_schema lists them under "ops"):
-    /// {"op":"create","type":<type>,"id":"$name"?,"parent":<id or path>?,"after":<sibling>?,"fields":{..}?,"body":".."?,"links":{..}?}
+    /// {"op":"create","type":<type>,"id":"$name"?,"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?,"fields":{..}?,"body":".."?,"links":{..}?}
     /// {"op":"update","id":<id or path>,"base":<version>?,"fields":{..}?,"unset":[<field>]?,"body":".."?,"links":{..}?}
-    /// {"op":"move","id":<id or path>,"base":<version>?,"parent":<id or path>?,"after":<sibling>?}
+    /// {"op":"move","id":<id or path>,"base":<version>?,"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?}
     /// {"op":"delete","id":<id or path>,"base":<version>?}
     /// {"op":"rebalance","parent":<id or path>?}
     /// links: {"<kind>": [{"target": "<id or path>", "part": "<optional words>"}]}, e.g. {"decided_by": [{"target": "D-W2HXR"}]}. An update replaces only the link kinds it names; "<kind>": [] removes that kind.
-    /// Ids, parents, afters and link targets also take paths (wallets/transactions); a move without parent goes to the top level (docs and folders); rebalance re-keys a parent's children (frozen decisions stay put; in one write it must come before any other op on those children, and a child it re-keys can't be edited again in the same write).
+    /// after puts a block behind a sibling and before ahead of one (before the first child makes it first); give one, or neither to append.
+    /// Ids, parents, afters, befores and link targets also take paths (wallets/transactions); a move without parent goes to the top level (docs and folders); rebalance re-keys a parent's children (frozen decisions stay put; in one write it must come before any other op on those children, and a child it re-keys can't be edited again in the same write).
     pub ops: Vec<Value>,
     /// The decision this change carries out.
     pub implements: Option<String>,
@@ -266,7 +267,7 @@ const NAME_RULES: &str = "names: 1-64 characters from A-Z a-z 0-9 . _ -; not sta
 pub const WRITE_OPS: &[(&str, &str)] = &[
     (
         "create",
-        r#"{"op":"create","type":<type>,"id":"$name"?,"parent":<id or path>?,"after":<sibling>?,"fields":{..}?,"body":".."?,"links":{..}?}"#,
+        r#"{"op":"create","type":<type>,"id":"$name"?,"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?,"fields":{..}?,"body":".."?,"links":{..}?}"#,
     ),
     (
         "update",
@@ -274,7 +275,7 @@ pub const WRITE_OPS: &[(&str, &str)] = &[
     ),
     (
         "move",
-        r#"{"op":"move","id":<id or path>,"base":<version>?,"parent":<id or path>?,"after":<sibling>?}"#,
+        r#"{"op":"move","id":<id or path>,"base":<version>?,"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?}"#,
     ),
     (
         "delete",

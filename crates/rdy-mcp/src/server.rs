@@ -125,7 +125,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Atomic batch write of ops (create, update, move, delete, rebalance; rdy_schema lists them under \"ops\"). Use id \"$name\" placeholders to refer to blocks created earlier in the same batch, including {{$name}} inside text. Reference blocks in text as {{id}}. links: {\"<kind>\": [{\"target\": \"<id or path>\"}]}. An update replaces only the link kinds it names; \"<kind>\": [] removes that kind."
+        description = "Atomic batch write of ops (create, update, move, delete, rebalance; rdy_schema lists them under \"ops\"). Place a block with after or before a sibling, or neither to append. Use id \"$name\" placeholders to refer to blocks created earlier in the same batch, including {{$name}} inside text. Reference blocks in text as {{id}}. links: {\"<kind>\": [{\"target\": \"<id or path>\"}]}. An update replaces only the link kinds it names; \"<kind>\": [] removes that kind."
     )]
     fn rdy_write(&self, Parameters(p): Parameters<WriteParams>) -> CallToolResult {
         self.run("rdy_write", p, tools::rdy_write)
