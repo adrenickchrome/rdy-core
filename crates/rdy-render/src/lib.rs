@@ -44,6 +44,9 @@ fn rel(from: &str, to: &str) -> String {
     format!("{}{to}", "../".repeat(from.matches('/').count()))
 }
 
+/// The most entries one list of the sidebar shows (the index's Contents shows all).
+const SIDEBAR_SIBLINGS: usize = 50;
+
 struct Site<'a> {
     m: &'a Materialized,
     /// Every folder's and doc's tree path.
@@ -139,23 +142,43 @@ impl<'a> Site<'a> {
         out
     }
 
-    /// Nested list of the tree under `parent`; `expand` decides which folders open.
+    /// Nested list of the tree under `parent`; `expand` decides which folders open. With `cap`,
+    /// each list shows at most SIDEBAR_SIBLINGS entries around the one on the current path and
+    /// ends with a "+N more" link to the folder's page.
+    /// Hrefs are escaped here in Rust; templates emit the result with `|safe`.
     fn list(
         &self,
         from: &str,
         parent: Option<&BlockId>,
         current: Option<&BlockId>,
         expand: &dyn Fn(&BlockId) -> bool,
+        cap: bool,
     ) -> String {
-        let mut s = String::from("<ul>");
-        for b in self
+        let all: Vec<&Block> = self
             .m
             .children(parent)
             .into_iter()
             // only blocks with a page: past MAX_FOLDER_DEPTH (a damaged store) there are none,
             // which also bounds this recursion
             .filter(|b| tree::is_tree_type(&b.block_type) && self.paths.contains_key(&b.id))
-        {
+            .collect();
+        let (shown, more) = if cap && all.len() > SIDEBAR_SIBLINGS {
+            let here = all
+                .iter()
+                .position(|b| Some(&b.id) == current || expand(&b.id))
+                .unwrap_or(0);
+            let first = here
+                .saturating_sub(SIDEBAR_SIBLINGS / 2)
+                .min(all.len() - SIDEBAR_SIBLINGS);
+            (
+                &all[first..first + SIDEBAR_SIBLINGS],
+                all.len() - SIDEBAR_SIBLINGS,
+            )
+        } else {
+            (&all[..], 0)
+        };
+        let mut s = String::from("<ul>");
+        for b in shown {
             let cls = if Some(&b.id) == current {
                 " class=\"current\""
             } else {
@@ -168,9 +191,18 @@ impl<'a> Site<'a> {
                 escape(&self.label(b))
             ));
             if b.block_type == tree::FOLDER && expand(&b.id) {
-                s.push_str(&self.list(from, Some(&b.id), current, expand));
+                s.push_str(&self.list(from, Some(&b.id), current, expand, cap));
             }
             s.push_str("</li>");
+        }
+        if more > 0 {
+            let target = parent
+                .and_then(|p| self.page(p))
+                .unwrap_or_else(|| "index.html".into());
+            s.push_str(&format!(
+                "<li class=\"more\"><a href=\"{}\">+{more} more</a></li>",
+                escape(&rel(from, &target))
+            ));
         }
         s.push_str("</ul>");
         s
@@ -178,7 +210,7 @@ impl<'a> Site<'a> {
 
     /// The neighbourhood of `chain`'s last node: ancestors, their siblings, the current folder's children.
     fn sidebar(&self, from: &str, chain: &[BlockId], current: Option<&BlockId>) -> String {
-        self.list(from, None, current, &|id| chain.contains(id))
+        self.list(from, None, current, &|id| chain.contains(id), true)
     }
 }
 
@@ -410,7 +442,7 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
 
     let page = env.get_template("index.html").map_err(tpl)?.render(json!({
         "site": site_name, "title": "Home", "version": position.label, "frozen": position.frozen, "versions": version_rows, "mermaid": false,
-        "crumbs": [{"label": "rdy", "href": null}], "tree": site.list("index.html", None, None, &|_| true), "decisions": decisions,
+        "crumbs": [{"label": "rdy", "href": null}], "tree": site.list("index.html", None, None, &|_| true, false), "decisions": decisions,
     })).map_err(tpl)?;
     std::fs::write(out.join("index.html"), page).map_err(io)?;
     stats.pages += 1;

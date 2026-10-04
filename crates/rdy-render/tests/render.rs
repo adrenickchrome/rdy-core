@@ -524,3 +524,44 @@ fn a_damaged_store_with_a_very_deep_chain_renders_without_overflowing() {
     // index + one page per folder down to one past the limit
     assert_eq!(s.pages, 1 + tree::MAX_FOLDER_DEPTH + 1, "{s:?}");
 }
+
+#[test]
+fn the_sidebar_shows_at_most_50_siblings_per_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let ops: Vec<_> = (0..120)
+        .map(|i| json!({"op": "create", "type": "doc", "fields": {"name": format!("doc-{i:03}"), "title": format!("Doc {i:03}"), "doc_type": "glossary"}}))
+        .collect();
+    r.write(
+        &agent(),
+        WriteRequest {
+            view: "work".into(),
+            ops: serde_json::from_value(json!(ops)).unwrap(),
+            justification: None,
+            message: String::new(),
+        },
+    )
+    .unwrap();
+    let out = tempfile::tempdir().unwrap();
+    render_site(&mut r, &Scope::View("work".into()), out.path()).unwrap();
+    let page = std::fs::read_to_string(out.path().join("doc-100.html")).unwrap();
+    let start = page.find("<aside class=\"tree\">").unwrap();
+    let end = page[start..].find("</aside>").unwrap() + start;
+    let sidebar = &page[start..end];
+    assert!(sidebar.matches("<li").count() <= 51, "{sidebar}");
+    assert!(
+        sidebar.contains("<li class=\"current\"><a href=\"doc-100.html\">Doc 100</a>"),
+        "{sidebar}"
+    );
+    assert!(
+        sidebar.contains("<li class=\"more\"><a href=\"index.html\">+70 more</a></li>"),
+        "{sidebar}"
+    );
+    assert!(
+        sidebar.contains("Doc 099") && sidebar.contains("Doc 101"),
+        "neighbours: {sidebar}"
+    );
+    // the index still lists everything
+    let index = std::fs::read_to_string(out.path().join("index.html")).unwrap();
+    assert!(index.contains("Doc 000") && index.contains("Doc 119") && !index.contains("more</a>"));
+}
