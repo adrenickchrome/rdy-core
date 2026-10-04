@@ -29,3 +29,11 @@ fn other_mappings() {
     assert_eq!(RdyError::from(StoreError::Frozen(id())).code, "E_FROZEN");
     assert_eq!(RdyError::from(StoreError::Io(std::io::Error::other("x"))).code, "E_IO");
 }
+
+#[test]
+fn damaged_log_hint_does_not_point_at_commands_that_need_an_open_store() {
+    let e = RdyError::from(StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "corruption at offset 0 ...")));
+    assert_eq!(e.code, "E_IO");
+    assert!(!e.fix.contains("rdy fsck"), "{}", e.fix);
+    assert!(e.fix.contains("message"), "{}", e.fix);
+}

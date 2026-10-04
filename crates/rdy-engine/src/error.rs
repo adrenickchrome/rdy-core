@@ -61,6 +61,7 @@ impl From<StoreError> for RdyError {
             StoreError::NotFound(h) => RdyError::new(E_NOT_FOUND, format!("object {} not found", h.short()), "check the hash"),
             StoreError::UnknownView(v) => RdyError::new(E_NOT_FOUND, format!("no view {v:?}"), "check the view name with rdy status"),
             StoreError::Conflict { id } => RdyError::new(E_STALE_BASE, format!("conflict on {id}"), format!("re-read {id} (rdy_context) and retry your change against its current version")),
+            StoreError::Io(e) if e.kind() == std::io::ErrorKind::InvalidData => RdyError::new(E_IO, format!("i/o error: {e}"), "the store's log is damaged where the message says: move that segment aside or restore it from backup, then reopen"),
             e @ (StoreError::Io(_) | StoreError::Db(_) | StoreError::Decode(_)) => RdyError::new(E_IO, e.to_string(), "run rdy fsck; if the index is damaged run rdy reindex"),
         }
     }
