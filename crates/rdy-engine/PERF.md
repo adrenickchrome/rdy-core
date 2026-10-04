@@ -13,7 +13,7 @@ their own section, "Linux results".
 Reproduce: `cargo test -p rdy-engine --release --test perf_budget -- --ignored --nocapture`
 and `RDY_BENCH_BLOCKS=100000 cargo bench -p rdy-engine`.
 
-Source column: **perf_budget** = `tests/perf_budget.rs` (final run, perf-run4.log); **criterion** = `benches/core.rs`.
+Source column: **perf_budget** = `tests/perf_budget.rs` (cold-start row: the pre-QA run); **criterion** = `benches/core.rs`.
 
 | measurement | target | before fixes | final (100k) | source | status |
 |---|---|---|---|---|---|
@@ -102,8 +102,8 @@ Reading:
 
 ## Cold start
 
-0.6-0.7 s when the OS is idle (final run: 1.40 s, 0.63 s, 0.63 s). The first pass right after generating the project, while the OS is
-still flushing 1.6 GB, took 1.9-2.0 s (the first run of this test saw 2.02 s). The test therefore
-judges the median of three opens and prints all three. Open now verifies the index's page checksums (redb `check_integrity`) and rebuilds a damaged index instead of trusting it; with that check the median is 0.65 s (2.06 s, 0.65 s, 0.64 s). Profile top frames of a cold start: `pread`
+0.6-0.7 s when the OS is idle (pre-QA run: 2.06 s, 0.65 s, 0.64 s; median 0.65 s). The first pass (2.06 s) exceeds the 2 s target: it is taken while the OS is still
+flushing the ~1.6 GB just generated (2.02 s was seen on the first pass before any M1 fixes). The test therefore
+judges the median of three opens and prints all three. Open now verifies the index's page checksums (redb `check_integrity`) and rebuilds a damaged index instead of trusting it; with that check the median is 0.65 s. The check was measured at ~31 ms on a warm 34 MB / 300k-object index; it is not yet measured on a cold page cache (QA follow-up). Profile top frames of a cold start: `pread`
 (reading each block frame), `memcmp` and `redb` point lookups (`Index::object` per block),
 BLAKE3 hash of every block read, `Graph::build`, `BTreeMap::insert`.
