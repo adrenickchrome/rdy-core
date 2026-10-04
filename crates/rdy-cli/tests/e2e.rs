@@ -71,7 +71,8 @@ fn agent_over_mcp_then_human_approves() {
     });
     let mut m = Mcp { child, lines, next: 0 };
     let init = m.call("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "0"}}));
-    assert!(init["result"]["serverInfo"].is_object(), "{init}");
+    assert_eq!(init["result"]["serverInfo"]["name"], "rdy", "{init}");
+    assert_eq!(init["result"]["serverInfo"]["version"], env!("CARGO_PKG_VERSION"), "{init}");
     m.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
     let tools = m.call("tools/list", json!({}));
     let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();

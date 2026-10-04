@@ -2,7 +2,7 @@ use crate::tools::{self, *};
 use rdy_engine::{Rdy, RdyError};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig},
+    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig},
     tool, tool_handler, tool_router, ServerHandler, ServiceExt,
 };
 use std::path::PathBuf;
@@ -76,6 +76,7 @@ impl RdyServer {
 impl ServerHandler for RdyServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("rdy", env!("CARGO_PKG_VERSION")))
             .with_instructions("rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Write with rdy_write; propose with rdy_propose.")
     }
 }
