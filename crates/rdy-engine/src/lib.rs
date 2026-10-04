@@ -207,6 +207,7 @@ impl Rdy {
 pub struct FsckReport {
     pub frames: usize,
     pub landings: usize,
+    pub versions: usize,
 }
 
 impl Rdy {
@@ -216,9 +217,12 @@ impl Rdy {
         for (_, rec) in &landings {
             self.store.get::<rdy_model::StateSnapshot>(&rec.state)?;
         }
+        let chain: Vec<rdy_model::Hash> = landings.iter().map(|(h, _)| *h).collect();
+        let versions = self.check_tags(&chain)?;
         Ok(FsckReport {
             frames,
             landings: landings.len(),
+            versions,
         })
     }
 }

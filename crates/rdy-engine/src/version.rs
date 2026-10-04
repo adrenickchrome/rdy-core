@@ -141,6 +141,72 @@ pub(crate) fn match_prefix(candidates: &[Hash], text: &str) -> Result<Hash, RdyE
 }
 
 impl Rdy {
+    /// Checks every `tag/*` ref (see FsckReport); `chain` is canon's landings, head first.
+    pub(crate) fn check_tags(&self, chain: &[Hash]) -> Result<usize, RdyError> {
+        let mut problems = vec![];
+        let mut good: Vec<(semver::Version, String, usize)> = vec![];
+        for (refname, value) in self.store.refs_with_prefix("tag/")? {
+            let Ok(bytes) = <[u8; 32]>::try_from(value.as_slice()) else {
+                problems.push(format!("{refname}: the ref is not a 32-byte hash"));
+                continue;
+            };
+            let h = Hash(bytes);
+            let tag = match self.store.read_tag(&h) {
+                Ok(t) => t,
+                Err(rdy_store::StoreError::NotFound(_)) => {
+                    problems.push(format!(
+                        "{refname} names {}, which is not in the store",
+                        h.short()
+                    ));
+                    continue;
+                }
+                Err(e) => {
+                    problems.push(format!(
+                        "{refname} names {}, which is not a tag: {e}",
+                        h.short()
+                    ));
+                    continue;
+                }
+            };
+            if refname["tag/".len()..] != tag.name {
+                problems.push(format!("{refname} holds the tag {:?}", tag.name));
+            }
+            let Ok(v) = parse_version(&tag.name) else {
+                problems.push(format!("{refname}: {:?} is not a valid version", tag.name));
+                continue;
+            };
+            let Some(pos) = chain.iter().position(|c| *c == tag.landing) else {
+                problems.push(format!(
+                    "{refname}: landing {} is not in canon's chain",
+                    tag.landing.short()
+                ));
+                continue;
+            };
+            good.push((v, refname, pos));
+        }
+        good.sort_by(|a, b| a.0.cmp_precedence(&b.0));
+        for pair in good.windows(2) {
+            let ((lo, lo_ref, lo_pos), (hi, hi_ref, hi_pos)) = (&pair[0], &pair[1]);
+            if lo.cmp_precedence(hi) == Ordering::Equal {
+                problems.push(format!("{lo_ref} and {hi_ref} denote the same version"));
+            } else if hi_pos > lo_pos {
+                problems.push(format!("{hi_ref} names an earlier landing than {lo_ref}"));
+            }
+        }
+        if problems.is_empty() {
+            return Ok(good.len());
+        }
+        Err(RdyError::new(
+            E_IO,
+            format!(
+                "{} version problem(s): {}",
+                problems.len(),
+                problems.join("; ")
+            ),
+            "a tag ref is damaged or was written outside rdy tag: restore the store from a backup",
+        ))
+    }
+
     /// Every version as (parsed version, tag), in SemVer precedence order. Tag refs whose name is
     /// not a version are skipped here; `rdy fsck` reports them.
     pub(crate) fn version_tags(&self) -> Result<Vec<(semver::Version, Tag)>, RdyError> {
