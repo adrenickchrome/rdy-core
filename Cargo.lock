@@ -1256,6 +1256,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rdy-qa"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "rdy-engine",
+ "rdy-mcp",
+ "rdy-model",
+ "rdy-render",
+ "rdy-schema",
+ "rdy-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "rdy-render"
 version = "0.1.0"
 dependencies = [

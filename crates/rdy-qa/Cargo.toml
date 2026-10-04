@@ -1,0 +1,18 @@
+[package]
+name = "rdy-qa"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+rdy-model.workspace = true
+rdy-schema.workspace = true
+rdy-store.workspace = true
+rdy-engine.workspace = true
+rdy-render.workspace = true
+rdy-mcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+proptest.workspace = true
