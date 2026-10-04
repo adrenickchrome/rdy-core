@@ -3,3 +3,4 @@
 pub mod fixtures;
 pub mod invariants;
 pub mod mcp;
+pub mod perf;
