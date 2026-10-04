@@ -1,5 +1,6 @@
 use crate::error::*;
 use crate::{Materialized, Rdy, Scope, Session};
+use rdy_model::tree;
 use rdy_model::{
     Block, BlockId, Change, FieldValue, Hash, Justification, Link, Op, RefMode, decision,
     order_between, ref_spans,
@@ -73,6 +74,9 @@ pub struct WriteRequest {
 pub struct WriteResult {
     pub change: String,
     pub created: BTreeMap<String, String>,
+    /// Names rdy assigned to created docs and folders, by block id.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub names: BTreeMap<String, String>,
     pub warnings: Vec<Issue>,
 }
 
@@ -307,7 +311,12 @@ fn current_for_edit<'b>(
     Ok((cur_hash, cur))
 }
 
-type Built = (Vec<Op>, BTreeMap<String, String>, BTreeSet<BlockId>);
+type Built = (
+    Vec<Op>,
+    BTreeMap<String, String>,
+    BTreeSet<BlockId>,
+    BTreeMap<String, String>,
+);
 
 type Prior = (bool, BTreeMap<BlockId, Hash>);
 
@@ -364,6 +373,16 @@ fn components(deps: &[Vec<usize>]) -> Vec<usize> {
     comp
 }
 
+/// Lower-cased stored names of the docs and folders directly under `parent` (pending edits included).
+fn sibling_names(ov: &Overlay, parent: Option<&BlockId>) -> BTreeSet<String> {
+    ov.children(parent)
+        .iter()
+        .filter(|b| tree::is_tree_type(&b.block_type))
+        .filter_map(|b| b.field_str("name"))
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
 fn build_ops(
     pack: &Pack,
     base: &Materialized,
@@ -379,6 +398,7 @@ fn build_ops(
     };
     let mut ops = vec![];
     let mut created = BTreeMap::new();
+    let mut names = BTreeMap::new();
     let mut touched = BTreeSet::new();
     let mut prior: Vec<Prior> = vec![];
 
@@ -463,7 +483,7 @@ fn build_ops(
                 let after = after.as_deref().map(|a| res.id(a)).transpose()?;
                 let order = order_after(&ov, parent.as_ref(), after.as_ref())?;
                 let body = res.text(&body, RefMode::for_body(&block_type));
-                let block = Block {
+                let mut block = Block {
                     id: new_id.clone(),
                     block_type,
                     parent,
@@ -473,6 +493,14 @@ fn build_ops(
                     links: res.links(links)?,
                     pins: BTreeMap::new(),
                 };
+                if tree::is_tree_type(&block.block_type) && !block.fields.contains_key("name") {
+                    let base = tree::default_name(block.field_str("title"), &block.id);
+                    let name = tree::dedupe(&base, &sibling_names(&ov, block.parent.as_ref()));
+                    block
+                        .fields
+                        .insert("name".into(), FieldValue::Str(name.clone()));
+                    names.insert(block.id.to_string(), name);
+                }
                 touched.insert(new_id.clone());
                 ov.pending.insert(new_id, Some(block.clone()));
                 ops.push(Op::Create { block });
@@ -692,7 +720,7 @@ fn build_ops(
         e.issues = issues;
         return Err(e);
     }
-    Ok((ops, created, touched))
+    Ok((ops, created, touched, names))
 }
 
 impl Rdy {
@@ -720,7 +748,7 @@ impl Rdy {
         }
         let scope = Scope::View(req.view.clone());
         self.materialized(&scope)?;
-        let (ops, created, touched) = {
+        let (ops, created, touched, names) = {
             let base = self.cache.get(&scope).expect("materialized above");
             build_ops(&self.pack, base, session, req.ops)?
         };
@@ -758,6 +786,7 @@ impl Rdy {
         Ok(WriteResult {
             change: id.to_string(),
             created,
+            names,
             warnings,
         })
     }

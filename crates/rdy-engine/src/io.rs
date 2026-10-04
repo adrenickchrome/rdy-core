@@ -463,6 +463,7 @@ impl Rdy {
         Ok(WriteResult {
             change: id.to_string(),
             created,
+            names: BTreeMap::new(),
             warnings: vec![],
         })
     }

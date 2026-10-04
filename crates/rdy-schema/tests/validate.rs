@@ -115,6 +115,8 @@ fn tree_rules() {
     );
     let mut doc = b("d-AAAAA", "doc", None, "");
     doc.fields
+        .insert("name".into(), FieldValue::Str("identity".into()));
+    doc.fields
         .insert("title".into(), FieldValue::Str("Identity".into()));
     doc.fields
         .insert("doc_type".into(), FieldValue::Str("overview".into()));
@@ -167,4 +169,68 @@ fn hints_keep_the_field_name_case() {
     risk.fields.insert("dueDate".into(), FieldValue::Int(1));
     let kind = validate_block(&p, &risk, Some(&section()));
     assert_eq!(kind[0].fix, "write dueDate as a str value");
+}
+
+fn named(id: &str, ty: &str, parent: Option<&str>, name: &str) -> Block {
+    let mut x = b(id, ty, parent, "");
+    x.fields.insert("name".into(), FieldValue::Str(name.into()));
+    if ty == "doc" {
+        x.fields.insert("title".into(), FieldValue::Str("T".into()));
+        x.fields
+            .insert("doc_type".into(), FieldValue::Str("overview".into()));
+    }
+    x
+}
+
+#[test]
+fn folders_hold_docs_and_folders_only() {
+    let p = pack();
+    let folder = named("fd-AAAAA", "folder", None, "wallets");
+    assert!(
+        validate_block(&p, &folder, None).is_empty(),
+        "a folder may be top level"
+    );
+    let doc = named("d-AAAAA", "doc", Some("fd-AAAAA"), "transactions");
+    assert!(
+        validate_block(&p, &doc, Some(&folder)).is_empty(),
+        "a doc may be in a folder"
+    );
+    let sub = named("fd-BBBBB", "folder", Some("fd-AAAAA"), "cards");
+    assert!(validate_block(&p, &sub, Some(&folder)).is_empty());
+    assert_eq!(
+        codes(&validate_block(
+            &p,
+            &named("d-BBBBB", "doc", Some("s-SECT1"), "x"),
+            Some(&section())
+        )),
+        vec!["E_CHILD_TYPE"]
+    );
+    assert_eq!(
+        codes(&validate_block(
+            &p,
+            &named("fd-CCCCC", "folder", Some("d-AAAAA"), "x"),
+            Some(&doc)
+        )),
+        vec!["E_CHILD_TYPE"]
+    );
+    let mut top_section = section();
+    top_section.parent = None;
+    assert_eq!(
+        codes(&validate_block(&p, &top_section, None)),
+        vec!["E_ORPHAN"]
+    );
+}
+
+#[test]
+fn doc_and_folder_names_are_checked() {
+    let p = pack();
+    let i = validate_block(&p, &named("fd-AAAAA", "folder", None, "has space"), None);
+    assert_eq!(codes(&i), vec!["E_BAD_NAME"]);
+    assert!(i[0].fix.contains("has-space"), "{:?}", i[0]);
+    let mut doc = named("d-AAAAA", "doc", None, "x");
+    doc.fields.remove("name");
+    assert_eq!(
+        codes(&validate_block(&p, &doc, None)),
+        vec!["E_FIELD_REQUIRED"]
+    );
 }

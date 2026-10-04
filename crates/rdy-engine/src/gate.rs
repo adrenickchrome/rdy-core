@@ -70,7 +70,19 @@ impl Rdy {
         deleted.retain(|id| next.get(id).is_none());
         let mut issues = vec![];
         for id in &touched {
-            let Some(b) = next.get(id) else { continue };
+            let Some(found) = next.get(id) else { continue };
+            // a doc from M1 has no stored name; readers give it one, so the gate doesn't require it
+            let named;
+            let b =
+                if found.block_type == rdy_model::tree::DOC && !found.fields.contains_key("name") {
+                    let mut c = found.clone();
+                    let n = rdy_model::tree::default_name(c.field_str("title"), &c.id);
+                    c.fields.insert("name".into(), FieldValue::Str(n));
+                    named = c;
+                    &named
+                } else {
+                    found
+                };
             let parent = b.parent.as_ref().and_then(|p| next.get(p));
             issues.extend(validate_block(&self.pack, b, parent));
             // canon may have moved since the view was written: every target must still exist

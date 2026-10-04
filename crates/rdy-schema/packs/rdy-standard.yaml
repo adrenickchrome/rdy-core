@@ -1,17 +1,10 @@
 name: rdy-standard
 version: "0.1.0"
 link_types: [describes, implements, decided_by, affects]
+default_doc_type: overview
 
 block_types:
-  doc:
-    prefix: d
-    traits: [structural]
-    body: forbidden
-    fields:
-      title: { kind: str, required: true }
-      doc_type: { kind: str, required: true }
-      lifecycle: { kind: enum, values: [draft, stable, deprecated] }
-    children: [section]
+  doc: { prefix: d, traits: [structural], body: forbidden, children: [section] }
   section:
     prefix: s
     traits: [structural]

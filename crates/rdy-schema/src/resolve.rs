@@ -1,5 +1,6 @@
 use crate::pack::*;
 use rdy_model::decision as d;
+use rdy_model::tree;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const STANDARD_YAML: &str = include_str!("../packs/rdy-standard.yaml");
@@ -38,6 +39,7 @@ impl PackSet {
 
     pub fn resolve(&self, name: &str) -> Result<Pack, SchemaError> {
         let mut pack = self.merged(name, &mut Vec::new())?;
+        check_folder_extension(&pack)?;
         inject_engine_types(&mut pack);
         check(&pack)?;
         Ok(pack)
@@ -88,6 +90,9 @@ impl PackSet {
             }
             out.block_types.insert(tname, tdef);
         }
+        if child.default_doc_type.is_some() {
+            out.default_doc_type = child.default_doc_type;
+        }
         out.doc_types.extend(child.doc_types);
         Ok(out)
     }
@@ -102,6 +107,37 @@ fn f(kind: FieldKind, required: bool, values: &[&str]) -> FieldDef {
 }
 
 fn inject_engine_types(pack: &mut Pack) {
+    let doc_core: BTreeMap<String, FieldDef> = [
+        ("name", f(FieldKind::Str, true, &[])),
+        ("title", f(FieldKind::Str, true, &[])),
+        ("doc_type", f(FieldKind::Str, true, &[])),
+        (
+            "lifecycle",
+            f(FieldKind::Enum, false, &["draft", "stable", "deprecated"]),
+        ),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    let folder_core: BTreeMap<String, FieldDef> = [
+        ("name", f(FieldKind::Str, true, &[])),
+        ("title", f(FieldKind::Str, false, &[])),
+        ("description", f(FieldKind::Str, false, &[])),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    force(pack, tree::DOC, "d", Trait::Structural, doc_core);
+    force(pack, tree::FOLDER, "fd", Trait::Structural, folder_core);
+    for t in [tree::DOC, tree::FOLDER] {
+        let def = pack.block_types.get_mut(t).expect("forced above");
+        def.traits = BTreeSet::from([Trait::Structural]);
+        def.body = BodyRule::Forbidden;
+    }
+    pack.block_types
+        .get_mut(tree::FOLDER)
+        .expect("forced above")
+        .children = vec![tree::FOLDER.to_string(), tree::DOC.to_string()];
     let decision_core: BTreeMap<String, FieldDef> = [
         ("statement", f(FieldKind::Str, true, &[])),
         (
@@ -160,6 +196,37 @@ fn inject_engine_types(pack: &mut Pack) {
     }
 }
 
+/// A pack may add optional fields to `folder`, nothing else.
+fn check_folder_extension(pack: &Pack) -> Result<(), SchemaError> {
+    let Some(def) = pack.block_types.get(tree::FOLDER) else {
+        return Ok(());
+    };
+    let refuse = |what: &str| {
+        Err(SchemaError::Invalid(format!(
+            "pack {} cannot redefine folder ({what}); it may only add optional fields",
+            pack.name
+        )))
+    };
+    if def.prefix != "fd" {
+        return refuse("prefix");
+    }
+    if !def.children.is_empty() {
+        return refuse("children");
+    }
+    if def.body == BodyRule::Required {
+        return refuse("body");
+    }
+    if def.traits.iter().any(|t| *t != Trait::Structural) {
+        return refuse("traits");
+    }
+    for (name, fd) in &def.fields {
+        if fd.required || ["name", "title", "description"].contains(&name.as_str()) {
+            return refuse(&format!("field {name}"));
+        }
+    }
+    Ok(())
+}
+
 fn force(pack: &mut Pack, name: &str, prefix: &str, tr: Trait, core: BTreeMap<String, FieldDef>) {
     let def = pack
         .block_types
@@ -206,6 +273,13 @@ fn check(pack: &Pack) -> Result<(), SchemaError> {
                 )));
             }
         }
+    }
+    if let Some(d) = &pack.default_doc_type
+        && !pack.doc_types.contains_key(d)
+    {
+        return Err(SchemaError::Invalid(format!(
+            "default_doc_type {d:?} is not one of the pack's doc_types"
+        )));
     }
     Ok(())
 }

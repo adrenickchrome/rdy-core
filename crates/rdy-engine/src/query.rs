@@ -48,7 +48,12 @@ pub fn summary_in(b: &Block, m: &Materialized) -> String {
 }
 
 fn summarize(b: &Block, resolve: &dyn Fn(&str) -> String) -> String {
-    let (text, mode) = match ["statement", "name", "title"]
+    let keys: &[&str] = if rdy_model::tree::is_tree_type(&b.block_type) {
+        &["title", "name"]
+    } else {
+        &["statement", "name", "title"]
+    };
+    let (text, mode) = match keys
         .iter()
         .find_map(|f| b.field_str(f).filter(|s| !s.is_empty()))
     {

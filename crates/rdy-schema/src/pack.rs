@@ -84,6 +84,9 @@ pub struct Pack {
     pub block_types: BTreeMap<String, BlockTypeDef>,
     #[serde(default)]
     pub doc_types: BTreeMap<String, DocTypeDef>,
+    /// The doc_type `rdy new doc` uses when none is given.
+    #[serde(default)]
+    pub default_doc_type: Option<String>,
 }
 
 impl Pack {

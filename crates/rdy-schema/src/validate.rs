@@ -1,4 +1,5 @@
 use crate::pack::{BodyRule, FieldKind, Pack};
+use rdy_model::tree;
 use rdy_model::{Block, BlockId, FieldValue};
 use serde::Serialize;
 
@@ -150,21 +151,9 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
             ));
         }
     }
-    let is_doc = block.block_type == "doc";
-    match (is_doc, parent, &block.parent) {
-        (true, _, Some(_)) => out.push(err(
-            block,
-            "E_ROOT_PARENT",
-            "a doc cannot have a parent".into(),
-            "remove parent".into(),
-        )),
-        (false, _, None) => out.push(err(
-            block,
-            "E_ORPHAN",
-            format!("{} must have a parent", block.block_type),
-            "set parent to the section that should contain it".into(),
-        )),
-        (false, Some(p), Some(_)) => {
+    let top_ok = tree::is_tree_type(&block.block_type);
+    match (parent, &block.parent) {
+        (Some(p), Some(_)) => {
             let allowed = pack
                 .block_types
                 .get(&p.block_type)
@@ -175,11 +164,15 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
                     block,
                     "E_CHILD_TYPE",
                     format!("a {} cannot contain a {}", p.block_type, block.block_type),
-                    "place it under a section (or another allowed parent type)".into(),
+                    if top_ok {
+                        "put it at the top level or inside a folder".into()
+                    } else {
+                        "place it under a section (or another allowed parent type)".into()
+                    },
                 ));
             }
         }
-        (false, None, Some(pid)) => out.push(err(
+        (None, Some(pid)) => out.push(err(
             block,
             "E_MISSING_PARENT",
             format!("{} has parent {pid}, which does not exist", block.id),
@@ -188,9 +181,29 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
                 block.id
             ),
         )),
-        (true, _, None) => {}
+        (_, None) if top_ok => {}
+        (_, None) => out.push(err(
+            block,
+            "E_ORPHAN",
+            format!("{} must have a parent", block.block_type),
+            "set parent to the section that should contain it".into(),
+        )),
     }
-    if is_doc
+    if top_ok
+        && let Some(name) = block.field_str("name")
+        && let Some(why) = tree::name_problem(name)
+    {
+        out.push(err(
+            block,
+            "E_BAD_NAME",
+            format!("{name:?} is not a valid name: {why}"),
+            format!(
+                "use a name like {:?}",
+                tree::default_name(Some(name), &block.id)
+            ),
+        ));
+    }
+    if block.block_type == tree::DOC
         && let Some(dt) = block.field_str("doc_type")
         && !pack.doc_types.contains_key(dt)
     {
