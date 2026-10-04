@@ -101,7 +101,8 @@ impl Rdy {
         let parent = out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
         std::fs::create_dir_all(parent).map_err(io_err)?;
         // everything is written to a staging directory beside `out` and renamed into place at
-        // the end, so a failed export leaves nothing behind
+        // the end: a failure while writing leaves nothing behind; if the final rename itself
+        // fails, the staging directory is cleared by the next export
         let staging = parent.join(format!(".{}.rdy-export-partial", name.to_string_lossy()));
         if staging.exists() {
             std::fs::remove_dir_all(&staging).map_err(io_err)?;
@@ -113,9 +114,7 @@ impl Rdy {
                 return Err(e);
             }
         };
-        if out.exists() {
-            std::fs::remove_dir(out).map_err(io_err)?;
-        }
+        // POSIX rename atomically replaces an empty directory
         std::fs::rename(&staging, out).map_err(io_err)?;
         Ok(summary)
     }
