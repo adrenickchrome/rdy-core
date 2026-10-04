@@ -76,7 +76,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
         Cmd::Mcp => {
             let rt = tokio::runtime::Runtime::new().map_err(|e| RdyError::new(E_IO, e.to_string(), "retry"))?;
             rt.block_on(rdy_mcp::server::serve_stdio(project)).map_err(|e| RdyError::new(E_IO, e.to_string(), "check the project path"))?;
-            Ok((json!({}), String::new()))
+            Ok((Value::Null, String::new()))
         }
         cmd => {
             let mut r = Rdy::open(&project)?;
@@ -85,9 +85,9 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     let landings = r.store().landings()?.len();
                     let views: Vec<Value> = r.store().refs_with_prefix("view/")?.into_iter().map(|(n, _)| {
                         let name = n.trim_start_matches("view/").to_string();
-                        let changes = r.store().view(&name).map(|v| v.changes.len()).unwrap_or(0);
-                        json!({"name": name, "changes": changes})
-                    }).collect();
+                        let changes = r.store().view(&name)?.changes.len();
+                        Ok(json!({"name": name, "changes": changes}))
+                    }).collect::<Result<_, RdyError>>()?;
                     let suspects = r.suspects(&Scope::Canon)?.len();
                     let text = format!("pack {}\ncanon: {landings} landings, {suspects} suspects\nviews:\n{}", r.pack().name, views.iter().map(|v| format!("  {} ({} changes)", v["name"].as_str().unwrap_or(""), v["changes"])).collect::<Vec<_>>().join("\n"));
                     Ok((json!({"pack": r.pack().name, "landings": landings, "suspects": suspects, "views": views}), text))
@@ -126,14 +126,14 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                 Cmd::Edit { id, view } => {
                     let bid = BlockId::parse(&id).map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "ids look like b-7KQ2M"))?;
                     let block = r.block(&Scope::View(view.clone()), &bid)?;
-                    let tmp = std::env::temp_dir().join(format!("rdy-edit-{id}.yaml"));
-                    std::fs::write(&tmp, block_to_yaml(&block)).map_err(|e| RdyError::new(E_IO, e.to_string(), "check the temp directory"))?;
+                    let tmp = tempfile::Builder::new().prefix("rdy-edit-").suffix(".yaml").tempfile().map_err(|e| RdyError::new(E_IO, e.to_string(), "check the temp directory"))?;
+                    std::fs::write(tmp.path(), block_to_yaml(&block)).map_err(|e| RdyError::new(E_IO, e.to_string(), "check the temp directory"))?;
                     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
-                    let status = std::process::Command::new(&editor).arg(&tmp).status().map_err(|e| RdyError::new(E_IO, format!("{editor}: {e}"), "set $EDITOR"))?;
+                    let status = std::process::Command::new("sh").arg("-c").arg("$EDITOR \"$1\"").arg("sh").arg(tmp.path()).env("EDITOR", &editor).status().map_err(|e| RdyError::new(E_IO, format!("{editor}: {e}"), "set $EDITOR"))?;
                     if !status.success() {
                         return Err(RdyError::new(E_BAD_INPUT, "editor exited with an error; nothing changed", "save and quit the editor normally"));
                     }
-                    let text = std::fs::read_to_string(&tmp).map_err(|e| RdyError::new(E_IO, e.to_string(), "retry"))?;
+                    let text = std::fs::read_to_string(tmp.path()).map_err(|e| RdyError::new(E_IO, e.to_string(), "retry"))?;
                     let res = r.edit_block(&human(Role::Writer), &view, block_from_yaml(&text)?)?;
                     Ok((serde_json::to_value(&res).expect("json"), format!("change {}", hash_short(&res.change))))
                 }
@@ -169,7 +169,8 @@ fn main() -> ExitCode {
     let as_json = cli.json;
     match run(cli) {
         Ok((v, text)) => {
-            if as_json {
+            if v.is_null() {
+            } else if as_json {
                 println!("{v}");
             } else if !text.is_empty() {
                 println!("{text}");
