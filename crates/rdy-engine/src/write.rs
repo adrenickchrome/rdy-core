@@ -64,6 +64,11 @@ pub enum OpInput {
         #[serde(default)]
         base: Option<String>,
     },
+    /// Re-keys a parent's children (omitted parent: the top level); frozen decisions keep theirs.
+    Rebalance {
+        #[serde(default)]
+        parent: Option<String>,
+    },
 }
 
 pub struct WriteRequest {
@@ -105,9 +110,15 @@ fn bad(msg: impl Into<String>, fix: impl Into<String>) -> RdyError {
     RdyError::new(E_BAD_INPUT, msg, fix)
 }
 
-/// Temporary mapping of order-key errors (Task 4 gives them their own codes).
-fn order_err(e: rdy_model::OrderError) -> RdyError {
-    bad(e.to_string(), "rebalance the siblings")
+fn order_error(e: rdy_model::OrderError, parent: Option<&BlockId>) -> RdyError {
+    let p = parent
+        .map(|p| format!("\"{p}\""))
+        .unwrap_or_else(|| "omitted for the top level".into());
+    let fix = format!("rebalance the siblings first: {{\"op\":\"rebalance\",\"parent\":{p}}}");
+    match e {
+        rdy_model::OrderError::TooDeep => RdyError::new(E_ORDER_DEPTH, e.to_string(), fix),
+        other => RdyError::new(E_BAD_INPUT, other.to_string(), fix),
+    }
 }
 
 /// The children of one parent as this write sees them.
@@ -359,10 +370,16 @@ fn order_after(
     });
     let key = key.transpose()?;
     ov.with_sibs(parent, |s| match &key {
-        None => order_between(s.order.last().map(|(o, _)| o.as_str()), None).map_err(order_err),
+        None => order_between(s.order.last().map(|(o, _)| o.as_str()), None)
+            .map_err(|e| order_error(e, parent)),
         Some(k) => {
-            let next = s.order.range((Bound::Excluded(k), Bound::Unbounded)).next();
-            order_between(Some(&k.0), next.map(|(o, _)| o.as_str())).map_err(order_err)
+            // siblings created in parallel views may share a key: insert after the whole tie
+            let next = s
+                .order
+                .range((Bound::Excluded(k), Bound::Unbounded))
+                .find(|(o, _)| *o != k.0);
+            order_between(Some(&k.0), next.map(|(o, _)| o.as_str()))
+                .map_err(|e| order_error(e, parent))
         }
     })
 }
@@ -820,6 +837,84 @@ fn build_ops(
                     base: base_hash,
                     id,
                 });
+            }
+            OpInput::Rebalance { parent } => {
+                let parent = parent.as_deref().map(|p| res.id(p)).transpose()?;
+                if let Some(p) = &parent
+                    && ov.get(p).is_none()
+                {
+                    return Err(RdyError::new(
+                        E_UNKNOWN_BLOCK,
+                        format!("parent {p} does not exist"),
+                        "check the parent id or path",
+                    ));
+                }
+                // sorted by (order, id)
+                let kids: Vec<Block> = ov.with_sibs(parent.as_ref(), |s| {
+                    s.order
+                        .iter()
+                        .filter_map(|(_, id)| ov.get(id).cloned())
+                        .collect()
+                });
+                let mut items = Vec::with_capacity(kids.len());
+                for b in &kids {
+                    if !decision::is_frozen(b) {
+                        // every movable child is re-keyed, so none may be touched by an earlier op
+                        if touched.contains(&b.id) {
+                            return Err(bad(
+                                format!(
+                                    "{} is changed earlier in this write, and rebalance re-keys it",
+                                    b.id
+                                ),
+                                "rebalance in a write of its own",
+                            ));
+                        }
+                        items.push(None);
+                    } else if rdy_model::valid_order_key(&b.order) {
+                        items.push(Some(b.order.clone()));
+                    } else {
+                        let where_ = parent
+                            .as_ref()
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "the top level".into());
+                        return Err(RdyError::new(
+                            E_ORDER_DEPTH,
+                            format!(
+                                "{} is a frozen decision whose order key {:?} is malformed or longer than {} characters, and it cannot be re-keyed",
+                                b.id,
+                                b.order,
+                                rdy_model::MAX_ORDER_KEY_LEN
+                            ),
+                            format!(
+                                "move the movable siblings under {where_} to another parent (they get fresh keys there)"
+                            ),
+                        ));
+                    }
+                }
+                let keys = rdy_model::rebalance_keys(&items)
+                    .map_err(|e| order_error(e, parent.as_ref()))?;
+                for (b, k) in kids.iter().zip(keys) {
+                    if decision::is_frozen(b) || b.order == k {
+                        continue;
+                    }
+                    let (base_hash, cur) = current_for_edit(&ov, &b.id, &None, &touched)?;
+                    let mut block = cur.clone();
+                    // like a move, a doc from M1 stores the name readers already use for it
+                    if block.block_type == tree::DOC
+                        && !block.fields.contains_key("name")
+                        && let Some(n) = ov.base.name_of(&block.id)
+                    {
+                        block.fields.insert("name".into(), FieldValue::Str(n));
+                    }
+                    block.order = k;
+                    prior.push((true, block.pins.clone())); // like a move: pins unchanged
+                    touched.insert(block.id.clone());
+                    ov.set(block.id.clone(), Some(block.clone()));
+                    ops.push(Op::Update {
+                        base: base_hash,
+                        block,
+                    });
+                }
             }
         }
     }

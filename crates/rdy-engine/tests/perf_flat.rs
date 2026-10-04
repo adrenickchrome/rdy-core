@@ -66,7 +66,8 @@ fn nameless(n: usize, lookups: usize) -> (Duration, Duration) {
                 id,
                 block_type: "doc".into(),
                 parent: None,
-                order: format!("V{i:06}"),
+                // valid keys (no trailing 0), as M1 produced
+                order: format!("V{i:06}1"),
                 fields: [
                     ("title".to_string(), FieldValue::Str(format!("Legacy {i}"))),
                     ("doc_type".to_string(), FieldValue::Str("overview".into())),

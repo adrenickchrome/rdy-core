@@ -225,6 +225,19 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
             ),
         ));
     }
+    if !rdy_model::valid_order_key(&block.order) {
+        out.push(err(
+            block,
+            "E_ORDER_KEY",
+            format!(
+                "order key {:?} is malformed or longer than {} characters",
+                block.order,
+                rdy_model::MAX_ORDER_KEY_LEN
+            ),
+            "rebalance the siblings: {\"op\":\"rebalance\",\"parent\":<the parent's id or path>}"
+                .into(),
+        ));
+    }
     out
 }
 
