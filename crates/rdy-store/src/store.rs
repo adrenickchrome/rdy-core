@@ -379,10 +379,18 @@ impl Store {
         Ok(*self.write(items)?.last().expect("manifest hash"))
     }
 
-    /// Whether `h` names a blob (a manifest object) in this store.
+    /// Whether `h` names a blob (a manifest object) in this store. An object of chunk kind
+    /// counts when it reads as a manifest: the index dedupes by hash alone, so a manifest whose
+    /// bytes were first stored as a chunk is that chunk-kind object.
     pub fn has_blob(&self, h: &Hash) -> Result<bool, StoreError> {
         match self.get_raw(h) {
-            Ok((kind, _)) => Ok(kind == kinds::BLOB_MANIFEST),
+            Ok((kinds::BLOB_MANIFEST, _)) => Ok(true),
+            Ok((kinds::BLOB_CHUNK, _)) => match self.get_blob(h) {
+                Ok(_) => Ok(true),
+                Err(StoreError::Decode(_) | StoreError::NotFound(_)) => Ok(false),
+                Err(e) => Err(e),
+            },
+            Ok(_) => Ok(false),
             Err(StoreError::NotFound(_)) => Ok(false),
             Err(e) => Err(e),
         }
@@ -390,7 +398,10 @@ impl Store {
 
     pub fn get_blob(&self, h: &Hash) -> Result<Vec<u8>, StoreError> {
         let (kind, payload) = self.get_raw(h)?;
-        if kind != kinds::BLOB_MANIFEST {
+        // The kind check is defence in depth; the structural checks below are the guard. A
+        // manifest's bytes may have been stored first as a chunk, and writes dedupe by hash
+        // alone, so a chunk-kind object that decodes as a manifest is accepted too.
+        if kind != kinds::BLOB_MANIFEST && kind != kinds::BLOB_CHUNK {
             return Err(StoreError::Decode(format!(
                 "{h} is not a blob (object kind {kind})"
             )));

@@ -257,3 +257,39 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
         }
     }
 }
+
+fn manifest_payload_of(bytes: &[u8]) -> Vec<u8> {
+    postcard::to_allocvec(&BlobManifest {
+        len: bytes.len() as u64,
+        chunks: vec![rdy_model::Hash::of(bytes)],
+    })
+    .unwrap()
+}
+
+#[test]
+fn blob1_a_manifest_preuploaded_as_a_chunk_still_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(dir.path()).unwrap();
+    let bytes = b"an asset whose bytes an agent knew ahead of time".to_vec();
+    // the exact postcard bytes of the manifest `put_blob(bytes)` will write, stored as a chunk
+    let payload = manifest_payload_of(&bytes);
+    let squat = s.write(vec![(kinds::BLOB_CHUNK, payload)]).unwrap()[0];
+    let h = s.put_blob(&bytes).unwrap();
+    assert_eq!(h, squat, "the manifest deduped to the chunk-kind object");
+    assert_eq!(h, Store::blob_hash(&bytes));
+    assert!(s.has_blob(&h).unwrap());
+    assert_eq!(s.get_blob(&h).unwrap(), bytes);
+}
+
+#[test]
+fn blob1_a_manifest_of_another_kind_is_still_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(dir.path()).unwrap();
+    let bytes = b"manifest-shaped bytes under a non-blob kind".to_vec();
+    let payload = manifest_payload_of(&bytes);
+    let other = s.write(vec![(kinds::SNAPSHOT, payload)]).unwrap()[0];
+    s.put_blob(&bytes).unwrap();
+    assert_eq!(Store::blob_hash(&bytes), other);
+    assert!(matches!(s.get_blob(&other), Err(StoreError::Decode(_))));
+    assert!(!s.has_blob(&other).unwrap());
+}
