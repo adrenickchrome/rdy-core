@@ -111,7 +111,7 @@ impl From<StoreError> for RdyError {
             StoreError::UnknownBlock(id) => RdyError::new(
                 E_UNKNOWN_BLOCK,
                 format!("no block {id}"),
-                "check the id with rdy_search or rdy_read",
+                "check the id with rdy_read or rdy_overview (rdy ls on the command line)",
             ),
             StoreError::AlreadyExists(id) => RdyError::new(
                 E_ALREADY_EXISTS,

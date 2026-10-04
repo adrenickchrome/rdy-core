@@ -87,3 +87,69 @@ fn blob2_import_refuses_a_figure_whose_blob_is_not_a_blob() {
     let (_d, mut r) = project();
     r.import(&approver(), "import", t.path()).unwrap();
 }
+
+#[test]
+fn dec1_a_writer_cannot_set_decided_at() {
+    let (_d, mut r, s) = section_project();
+    let e = write(&mut r, "work", json!([{"op": "create", "type": "decision", "parent": s,
+        "fields": {"statement": "Wallets stay", "status": "proposed", "decided_at": "2026-10-04T00:00:00Z"}}]))
+    .unwrap_err();
+    assert_eq!(e.code, "E_PERMISSION", "{e}");
+    let d = r
+        .decide(
+            &writer(),
+            "work",
+            DecisionInput {
+                parent: s.clone(),
+                statement: "Wallets stay".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let did = d.created["$decision"].clone();
+    let e = write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": did, "fields": {"decided_at": "2026-10-04T00:00:00Z"}}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, "E_PERMISSION", "{e}");
+    // other edits of a proposed decision still work, and landing sets decided_at
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": did, "fields": {"statement": "Wallets stay put"}}]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let id = rdy_model::BlockId::parse(&did).unwrap();
+    assert!(
+        r.block(&Scope::Canon, &id)
+            .unwrap()
+            .field_str("decided_at")
+            .is_some()
+    );
+}
+
+#[test]
+fn hint1_fix_hints_name_only_tools_that_exist() {
+    let e = RdyError::from(rdy_store::StoreError::UnknownBlock(
+        rdy_model::BlockId::parse("c-AAAAA").unwrap(),
+    ));
+    assert!(
+        !e.fix.contains("rdy_search") && e.fix.contains("rdy_read"),
+        "{e}"
+    );
+    let (_d, mut r, s) = section_project();
+    let e = write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "claim", "parent": s, "body": "See {{nope}}."}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, "E_UNKNOWN_REF", "{e}");
+    assert!(
+        !e.fix.contains("rdy_search") && e.fix.contains("rdy_read"),
+        "{e}"
+    );
+}

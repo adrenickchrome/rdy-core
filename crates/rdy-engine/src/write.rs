@@ -626,6 +626,29 @@ fn check_asset_blob(pack: &Pack, store: &rdy_store::Store, block: &Block) -> Res
     Ok(())
 }
 
+/// dec1: only the gate writes when a decision was decided (spec §4.3), so a role that can't land
+/// may not set or change `decided_at`, just as it may not set `status`.
+fn check_decided_at(
+    session: &Session,
+    block: &Block,
+    before: Option<&Block>,
+) -> Result<(), RdyError> {
+    if block.block_type != decision::DECISION || session.role.can_land() {
+        return Ok(());
+    }
+    if block.fields.get("decided_at") != before.and_then(|b| b.fields.get("decided_at")) {
+        return Err(RdyError::new(
+            E_PERMISSION,
+            format!(
+                "{} sets decided_at, which only the gate writes when the decision is accepted",
+                block.id
+            ),
+            "remove decided_at; it is set when the proposal lands",
+        ));
+    }
+    Ok(())
+}
+
 fn build_ops(
     pack: &Pack,
     store: &rdy_store::Store,
@@ -748,6 +771,7 @@ fn build_ops(
                 } else {
                     check_name(&ov, &block, i, false)?;
                 }
+                check_decided_at(session, &block, None)?;
                 check_depth(&ov, &block, 0)?;
                 touched.insert(new_id.clone());
                 ov.set(new_id, Some(block.clone()));
@@ -782,6 +806,7 @@ fn build_ops(
                 if let Some(links) = links {
                     block.links = res.links(links)?;
                 }
+                check_decided_at(session, &block, Some(cur))?;
                 prior.push((false, cur.pins.clone()));
                 let renamed = block.field_str("name") != cur.field_str("name");
                 if renamed {
@@ -1001,7 +1026,7 @@ fn build_ops(
                 RdyError::new(
                     E_UNKNOWN_REF,
                     format!("{{{{{tok}}}}} in {} is not a block id", block.id),
-                    "reference blocks as {{id}}, e.g. {{t-MEDGR}}; find ids with rdy_search",
+                    "reference blocks as {{id}}, e.g. {{t-MEDGR}}; find ids with rdy_read or rdy_overview (rdy ls on the command line)",
                 )
             })?;
             let t = ov.get(&target).ok_or_else(|| {
