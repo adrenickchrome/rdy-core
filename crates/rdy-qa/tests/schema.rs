@@ -4,36 +4,77 @@ use rdy_model::{Block, BlockId, FieldValue};
 use rdy_qa::fixtures::cases;
 use rdy_schema::*;
 
+fn outcome(yaml: &str) -> Result<Pack, SchemaError> {
+    let mut set = PackSet::with_builtin();
+    let n = set.add_yaml(yaml)?;
+    set.resolve(&n)
+}
+
 #[test]
 fn schema_hostile_packs_are_refused() {
+    // (pack, substring the refusal must carry)
     let packs = [
-        "name: a\nversion: \"1\"\nextends: b\n---\n", // unknown parent once split below
-        "name: x\nversion: \"1\"\nblock_types:\n  folder: { prefix: zz }\n",
-        "name: y\nversion: \"1\"\nblock_types:\n  t: { prefix: q, fields: { e: { kind: enum } } }\n",
-        "name: z\nversion: \"1\"\nbogus_key: 1\n",
-        "name: w\nversion: \"1\"\nblock_types:\n  t1: { prefix: q }\n  t2: { prefix: q }\n",
+        ("name: a\nversion: \"1\"\nextends: b\n", "unknown pack"),
+        (
+            "name: x\nversion: \"1\"\nblock_types:\n  folder: { prefix: zz }\n",
+            "cannot redefine folder",
+        ),
+        (
+            "name: y\nversion: \"1\"\nblock_types:\n  t: { prefix: q, fields: { e: { kind: enum } } }\n",
+            "has no values",
+        ),
+        ("name: z\nversion: \"1\"\nbogus_key: 1\n", "unknown field"),
+        (
+            "name: w\nversion: \"1\"\nblock_types:\n  t1: { prefix: q }\n  t2: { prefix: q }\n",
+            "used by both",
+        ),
     ];
-    for p in packs {
-        let mut set = PackSet::with_builtin();
-        let r = set.add_yaml(p).and_then(|n| set.resolve(&n).map(|_| ()));
-        assert!(r.is_err(), "{p}");
+    for (p, want) in packs {
+        let e = outcome(p).expect_err(p);
+        assert!(
+            e.to_string().contains(want),
+            "{p}: expected {want:?}, got {e}"
+        );
     }
+    assert!(matches!(
+        outcome(packs[0].0),
+        Err(SchemaError::UnknownPack(_))
+    ));
+    assert!(matches!(outcome(packs[3].0), Err(SchemaError::Yaml(_))));
     let mut set = PackSet::with_builtin();
     set.add_yaml("name: a\nversion: \"1\"\nextends: b\n")
         .unwrap();
     set.add_yaml("name: b\nversion: \"1\"\nextends: a\n")
         .unwrap();
-    assert!(set.resolve("a").is_err(), "a cycle is refused");
+    assert!(
+        matches!(set.resolve("a"), Err(SchemaError::Cycle(_))),
+        "a cycle is refused"
+    );
+
+    // doc: the engine forces its core back; a pack cannot move its prefix or drop its fields
+    let p = outcome("name: d1\nversion: \"1\"\nblock_types:\n  doc: { prefix: zz, fields: { name: { kind: str } } }\n").unwrap();
+    assert_eq!(p.block_types["doc"].prefix, "d", "doc prefix is forced");
+    assert!(
+        p.block_types["doc"].fields["name"].required,
+        "doc core fields are forced"
+    );
+    // section: a pack may legitimately retarget the prefix, but it must not collide with another type
+    let e = outcome("name: s1\nversion: \"1\"\nblock_types:\n  section: { prefix: d }\n")
+        .expect_err("section onto doc's prefix");
+    assert!(e.to_string().contains("used by both"), "{e}");
+
     // a large pack resolves in bounded time
     let mut big = String::from("name: big\nversion: \"1\"\nblock_types:\n");
     for i in 0..2000 {
         big.push_str(&format!("  t{i}: {{ prefix: {} }}\n", prefix(i)));
     }
-    let mut set = PackSet::with_builtin();
     let t = std::time::Instant::now();
-    let n = set.add_yaml(&big).unwrap();
-    let _ = set.resolve(&n);
+    let r = outcome(&big);
     assert!(t.elapsed() < std::time::Duration::from_secs(2));
+    match r {
+        Ok(p) => assert!(p.block_types.len() >= 2000),
+        Err(e) => assert!(e.to_string().contains("prefix"), "{e}"),
+    }
 }
 
 fn prefix(i: usize) -> String {

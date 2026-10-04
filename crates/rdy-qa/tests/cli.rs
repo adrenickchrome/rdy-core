@@ -25,29 +25,38 @@ fn cli_errors_are_clean_on_every_command() {
     std::fs::write(&file, "x").unwrap();
     let f = file.to_str().unwrap();
     let h64 = "a".repeat(64);
-    let bad: Vec<Vec<&str>> = vec![
-        vec!["show", "c-ZZZZZ"],
-        vec!["show", "no/such/path"],
-        vec!["show", "с-ABCDE"],
-        vec!["impact", "c-ZZZZZ"],
-        vec!["propose", "--title", "x"],
-        vec!["approve", "zz"],
-        vec!["approve", &h64],
-        vec!["tag", "not-a-version"],
-        vec!["tag", "v1.0.0"],
-        vec!["render", "--out", f],
-        vec!["export", "--out", f],
-        vec!["import", "/no/such/dir", "--view", "x"],
-        vec!["check", "/no/such/path"],
-        vec!["new", "folder", "has space"],
-        vec!["new", "doc", "index"],
-        vec!["ls", "nope"],
-        vec!["show", "--scope", "tag:v9.9.9", "c-ZZZZZ"],
-        vec!["show", "--scope", "landing:zz", "c-ZZZZZ"],
-        vec!["edit", "c-ZZZZZ"],
-        vec!["status", "--project", "/no/such/project"],
+    let bad: Vec<(&str, Vec<&str>)> = vec![
+        ("E_UNKNOWN_BLOCK", vec!["show", "c-ZZZZZ"]),
+        ("E_UNKNOWN_BLOCK", vec!["show", "no/such/path"]),
+        ("E_UNKNOWN_BLOCK", vec!["show", "с-ABCDE"]),
+        ("E_UNKNOWN_BLOCK", vec!["impact", "c-ZZZZZ"]),
+        ("E_BAD_INPUT", vec!["propose", "--title", "x"]),
+        ("E_BAD_INPUT", vec!["approve", "zz"]),
+        ("E_NOT_FOUND", vec!["approve", &h64]),
+        ("E_BAD_TAG_NAME", vec!["tag", "not-a-version"]),
+        ("E_NOT_FOUND", vec!["tag", "v1.0.0"]),
+        ("E_IO", vec!["render", "--out", f]),
+        ("E_IO", vec!["export", "--out", f]),
+        ("E_BAD_INPUT", vec!["import", "/no/such/dir", "--view", "x"]),
+        ("E_NOT_FOUND", vec!["check", "/no/such/path"]),
+        ("E_BAD_NAME", vec!["new", "folder", "has space"]),
+        ("E_BAD_NAME", vec!["new", "doc", "index"]),
+        ("E_UNKNOWN_BLOCK", vec!["ls", "nope"]),
+        (
+            "E_NOT_FOUND",
+            vec!["show", "--scope", "tag:v9.9.9", "c-ZZZZZ"],
+        ),
+        (
+            "E_NOT_FOUND",
+            vec!["show", "--scope", "landing:zz", "c-ZZZZZ"],
+        ),
+        ("E_UNKNOWN_BLOCK", vec!["edit", "c-ZZZZZ"]),
+        (
+            "E_NO_PROJECT",
+            vec!["status", "--project", "/no/such/project"],
+        ),
     ];
-    for args in &bad {
+    for (code, args) in &bad {
         let (ok, out, err) = rdy(d, args);
         assert!(!ok, "{args:?} should fail: {out}");
         assert!(
@@ -64,10 +73,7 @@ fn cli_errors_are_clean_on_every_command() {
         assert!(!ok);
         let v: serde_json::Value = serde_json::from_str(err.trim())
             .unwrap_or_else(|e| panic!("{args:?}: stderr is not JSON ({e}): {err}"));
-        assert!(
-            v["code"].as_str().is_some_and(|c| c.starts_with("E_")),
-            "{args:?}: {v}"
-        );
+        assert_eq!(v["code"].as_str(), Some(*code), "{args:?}: {v}");
     }
     for args in [
         vec!["status"],
