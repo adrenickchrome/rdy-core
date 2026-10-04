@@ -128,6 +128,16 @@ fn unique(found: impl Iterator<Item = Suspect>) -> Vec<Suspect> {
     best.into_values().collect()
 }
 
+/// sus2: link kinds through which a changed or deleted target makes a block suspect: premises,
+/// and what the block implements or is decided by (spec §6.2: "references and premises").
+/// A superseded or revoked target is suspect through any link.
+const SUSPECT_LINKS: [&str; 4] = [
+    decision::DEPENDS_ON,
+    decision::CONDITIONAL_ON,
+    decision::IMPLEMENTS,
+    decision::DECIDED_BY,
+];
+
 impl Graph {
     pub fn build(blocks: &BTreeMap<BlockId, Block>) -> Graph {
         let mut g = Graph::default();
@@ -338,20 +348,30 @@ impl Graph {
         let reason = match self.status(&e.to) {
             Some(DerivedStatus::Superseded { .. }) => "superseded",
             Some(DerivedStatus::Revoked { .. }) => "revoked",
-            _ => match (e.pin, self.versions.get(&e.to)) {
-                (Some(_), None) => "deleted",
-                (Some(pin), Some(cur)) if pin != *cur => {
-                    let same = match (old(&pin), blocks.get(&e.to)) {
-                        (Some(a), Some(b)) => same_content(&a, b),
-                        _ => false,
-                    };
-                    if same {
-                        return None;
-                    }
-                    "changed"
+            _ => {
+                let premise = match &e.kind {
+                    EdgeKind::References => true,
+                    EdgeKind::Link(n) => SUSPECT_LINKS.contains(&n.as_str()),
+                    EdgeKind::Contains => false,
+                };
+                if !premise {
+                    return None;
                 }
-                _ => return None,
-            },
+                match (e.pin, self.versions.get(&e.to)) {
+                    (Some(_), None) => "deleted",
+                    (Some(pin), Some(cur)) if pin != *cur => {
+                        let same = match (old(&pin), blocks.get(&e.to)) {
+                            (Some(a), Some(b)) => same_content(&a, b),
+                            _ => false,
+                        };
+                        if same {
+                            return None;
+                        }
+                        "changed"
+                    }
+                    _ => return None,
+                }
+            }
         };
         Some(Suspect {
             block: e.from.clone(),

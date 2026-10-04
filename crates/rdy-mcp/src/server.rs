@@ -118,7 +118,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "References and premises whose target changed or was deleted since the block pinned it, or whose decision was superseded or revoked. After checking a \"changed\" suspect, clear it with a repin op in rdy_write."
+        description = "References and premises (depends_on, conditional_on, implements, decided_by) whose target changed or was deleted since the block pinned it, or links of any kind to a decision that was superseded or revoked. After checking a \"changed\" suspect, clear it with a repin op in rdy_write."
     )]
     fn rdy_suspects(&self, Parameters(p): Parameters<ScopeParams>) -> CallToolResult {
         self.run("rdy_suspects", p, tools::rdy_suspects)
