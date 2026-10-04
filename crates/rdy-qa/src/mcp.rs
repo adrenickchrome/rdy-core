@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 pub const DEADLINE: Duration = Duration::from_secs(2);
@@ -34,6 +34,8 @@ impl Reply {
 
 pub struct McpClient {
     child: Child,
+    writer: Sender<String>,
+    written: Receiver<bool>,
     lines: Receiver<String>,
     pending: Vec<Value>,
     next: u64,
@@ -66,15 +68,41 @@ impl McpClient {
         let out = child.stdout.take().expect("stdout");
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            for line in BufReader::new(out).lines() {
-                let Ok(line) = line else { break };
+            let mut out = BufReader::new(out);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match out.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                // invalid UTF-8 becomes a line that fails to parse (skipped), not a dead reader
+                let line = String::from_utf8_lossy(&buf)
+                    .trim_end_matches(['\r', '\n'])
+                    .to_string();
                 if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        // stdin writes happen on their own thread so a server that stops reading cannot block us
+        let mut stdin = child.stdin.take().expect("stdin");
+        let (wtx, wrx) = channel::<String>();
+        let (dtx, drx) = channel::<bool>();
+        std::thread::spawn(move || {
+            for line in wrx {
+                let ok = writeln!(stdin, "{line}")
+                    .and_then(|_| stdin.flush())
+                    .is_ok();
+                if dtx.send(ok).is_err() || !ok {
                     break;
                 }
             }
         });
         let mut c = McpClient {
             child,
+            writer: wtx,
+            written: drx,
             lines: rx,
             pending: vec![],
             next: 0,
@@ -99,12 +127,20 @@ impl McpClient {
     }
 
     pub fn send_raw(&mut self, line: &str) {
-        let stdin = self.child.stdin.as_mut().expect("stdin");
-        if writeln!(stdin, "{line}")
-            .and_then(|_| stdin.flush())
-            .is_err()
-        {
+        self.send_raw_within(line, DEADLINE);
+    }
+
+    /// Write one line to the server, waiting at most `budget` for it to be accepted.
+    pub fn send_raw_within(&mut self, line: &str, budget: Duration) {
+        if self.writer.send(line.to_string()).is_err() {
             self.critical("the server closed its input");
+        }
+        match self.written.recv_timeout(budget) {
+            Ok(true) => {}
+            Ok(false) => self.critical("the server closed its input"),
+            Err(_) => self.critical(&format!(
+                "the server did not accept a request within {budget:?}"
+            )),
         }
     }
 

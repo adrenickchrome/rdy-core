@@ -35,11 +35,20 @@ fn the_client_talks_to_a_real_server_within_deadlines() {
 }
 
 #[test]
-#[should_panic(expected = "CRITICAL")]
+#[should_panic(expected = "no reply to request")]
 fn a_missing_reply_is_critical() {
     let (_d, mut c) = server();
     // a notification has no reply: waiting for one must trip the deadline, not hang
     c.send_raw(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
     let id = c.next_id();
     c.recv(id, std::time::Duration::from_millis(300));
+}
+
+#[test]
+#[should_panic(expected = "did not accept")]
+fn a_stalled_write_is_critical() {
+    let (_d, mut c) = server();
+    // 64 MiB cannot be accepted within a 1 ms budget: the send must trip its deadline, not block
+    let big = "x".repeat(64 << 20);
+    c.send_raw_within(&big, std::time::Duration::from_millis(1));
 }
