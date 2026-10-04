@@ -193,8 +193,9 @@ impl Rdy {
     }
 
     /// Warns when the proposal places blocks (creates or moves) under a parent whose siblings, as
-    /// the view's base saw them, have different order keys in canon now (a rebalance landed since):
-    /// the placed blocks' keys were chosen against the old keys.
+    /// the view's base saw them, have different order keys in canon now: any landed re-key of a
+    /// sibling since then counts, whether a rebalance or an ordinary move of one block. The
+    /// placed blocks' keys were chosen against the old keys.
     fn rekeyed_warnings(
         &mut self,
         view_base: Option<Hash>,

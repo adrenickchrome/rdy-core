@@ -481,6 +481,45 @@ fn ord3_rebalance_landed_under_an_open_proposal_warns_siblings_rekeyed() {
     check(&mut r, &Scope::Canon).unwrap();
 }
 
+/// W_SIBLINGS_REKEYED is broader than rebalance: any landed re-key of a sibling (here an
+/// ordinary move of one block) warns a proposal that places blocks under that parent.
+#[test]
+fn ord3_a_landed_move_of_one_sibling_also_warns_siblings_rekeyed() {
+    let (_d, mut r, s) = section_project();
+    let p = rdy_model::BlockId::parse(&s).unwrap();
+    let first = r.materialized(&Scope::Canon).unwrap().children(Some(&p))[0]
+        .id
+        .to_string();
+    let res = write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "claim", "id": "$c", "parent": s, "body": "second"}]),
+    )
+    .unwrap();
+    let second = res.created["$c"].clone();
+    land(&mut r, "work").unwrap();
+    write(
+        &mut r,
+        "vb",
+        json!([{"op": "create", "type": "claim", "parent": s, "after": first, "body": "from b"}]),
+    )
+    .unwrap();
+    // A moves `first` after `second` (a re-key, no rebalance) and lands first
+    write(
+        &mut r,
+        "va",
+        json!([{"op": "move", "id": first, "parent": s, "after": second}]),
+    )
+    .unwrap();
+    land(&mut r, "va").unwrap();
+    let prop = r.propose(&writer(), "vb", "b").unwrap();
+    assert!(
+        prop.warnings.iter().any(|i| i.code == "W_SIBLINGS_REKEYED"),
+        "{:?}",
+        prop.warnings
+    );
+}
+
 #[test]
 fn ord3_a_frozen_decision_with_a_bad_key_is_told_to_move_its_siblings() {
     let (_d, mut r) = project();
