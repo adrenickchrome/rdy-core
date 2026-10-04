@@ -406,3 +406,13 @@ fn braces_in_code_and_diagrams_are_content_and_escapes_are_literal() {
     // prose keeps strict checking
     assert_eq!(code(&mut r, json!([{"op": "create", "type": "claim", "parent": terms, "body": "{{not an id}}"}])), "E_UNKNOWN_REF");
 }
+
+#[test]
+fn questions_cannot_be_deleted() {
+    let (_d, mut r) = project();
+    let res = skeleton(&mut r);
+    let q = r.write(&agent(), req(json!([{"op": "create", "type": "question", "parent": res.created["$terms"], "fields": {"prompt": "Do wallets move?"}}]))).unwrap().created["op0"].clone();
+    let e = r.write(&agent(), req(json!([{"op": "delete", "id": q}]))).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT");
+    assert!(e.message.contains("never deleted"), "{}", e.message);
+}

@@ -75,3 +75,11 @@ fn scope_parse() {
     assert!(matches!(Scope::parse("canon"), Scope::Canon));
     assert!(matches!(Scope::parse("work"), Scope::View(v) if v == "work"));
 }
+
+#[test]
+fn init_refuses_an_existing_project() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    let e = Rdy::init(dir.path(), "rdy-standard").err().expect("second init must fail");
+    assert_eq!(e.code, "E_ALREADY_EXISTS");
+}

@@ -85,3 +85,26 @@ fn errors_are_specific() {
     assert!(matches!(set.resolve("dup"), Err(SchemaError::Invalid(m)) if m.contains("prefix")));
     assert!(matches!(set.add_yaml("name: [unclosed"), Err(SchemaError::Yaml(_))));
 }
+
+#[test]
+fn pack_yaml_rejects_unknown_keys() {
+    let mut set = PackSet::with_builtin();
+    let e = set.add_yaml(r#"
+name: typo
+version: "1"
+extends: rdy-standard
+block_types:
+  risk:
+    prefix: rk
+    trait: [normative]
+"#).unwrap_err();
+    assert!(e.to_string().contains("trait"), "{e}");
+    for bad in [
+        "name: a\nversion: \"1\"\nlink_type: [x]\n",
+        "name: a\nversion: \"1\"\nblock_types:\n  r:\n    prefix: r\n    fields:\n      f: { kind: str, requird: true }\n",
+        "name: a\nversion: \"1\"\ndoc_types:\n  d:\n    skeleton: [{ title: T, requred: true }]\n",
+        "name: a\nversion: \"1\"\ndoc_types:\n  d:\n    skeleten: []\n",
+    ] {
+        assert!(PackSet::with_builtin().add_yaml(bad).is_err(), "{bad}");
+    }
+}

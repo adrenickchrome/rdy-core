@@ -111,6 +111,9 @@ impl Rdy {
             return Err(RdyError::new(E_PERMISSION, format!("role {:?} cannot land proposals", s.role), "ask an approver to land it"));
         }
         let pid = parse_hash(proposal)?;
+        if self.store.get_raw(&pid)?.0 != rdy_store::kinds::PROPOSAL {
+            return Err(RdyError::new(E_BAD_INPUT, format!("{proposal} is not a proposal"), "pass the id returned by rdy_propose"));
+        }
         let p: Proposal = self.store.get(&pid)?;
         let changes = self.changes_of(&p.changes)?;
 

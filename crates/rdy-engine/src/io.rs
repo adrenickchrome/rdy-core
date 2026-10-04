@@ -235,6 +235,9 @@ impl Rdy {
     pub fn edit_block(&mut self, s: &Session, view: &str, edited: Block) -> Result<WriteResult, RdyError> {
         let scope = Scope::View(view.to_string());
         let cur = self.block(&scope, &edited.id)?;
+        if cur == edited {
+            return Err(RdyError::new(E_BAD_INPUT, format!("nothing changed in {}", edited.id), "change a field, the body or the links, or cancel the edit"));
+        }
         if cur.block_type != edited.block_type || cur.parent != edited.parent || cur.order != edited.order {
             return Err(RdyError::new(E_BAD_INPUT, "type, parent and order cannot be changed by edit", "use a move op to change parent or order"));
         }

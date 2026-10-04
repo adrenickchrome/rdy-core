@@ -274,3 +274,13 @@ fn import_skips_dotfiles_and_non_yaml_files() {
     let n = a.materialized(&Scope::Canon).unwrap().blocks.len();
     assert_eq!(b.materialized(&Scope::View("import".into())).unwrap().blocks.len(), n);
 }
+
+#[test]
+fn edit_block_refuses_a_no_op_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = rich_project(dir.path());
+    let term = r.materialized(&Scope::View("work".into())).unwrap().blocks.values().find(|x| x.block_type == "term").unwrap().clone();
+    let e = r.edit_block(&founder(), "work", term).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT");
+    assert!(e.message.contains("nothing changed"), "{}", e.message);
+}

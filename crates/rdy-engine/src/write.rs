@@ -352,7 +352,10 @@ fn build_ops(pack: &Pack, base: &Materialized, session: &Session, inputs: Vec<Op
             }
             OpInput::Delete { id, base: b } => {
                 let id = res.id(&id)?;
-                let (base_hash, _) = current_for_edit(&ov, &id, &b, &touched)?;
+                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched)?;
+                if cur.block_type == decision::QUESTION {
+                    return Err(bad(format!("{id} is a question: questions are closed by a decision's answers link, never deleted"), format!("record a decision that links answers: {id}")));
+                }
                 if !ov.children(Some(&id)).is_empty() {
                     return Err(RdyError::new(E_HAS_CHILDREN, format!("{id} still has children"), "delete or move its children first"));
                 }

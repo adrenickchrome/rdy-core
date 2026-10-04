@@ -208,3 +208,11 @@ fn land_refuses_orphans_and_dangling_refs_when_canon_moved_after_propose() {
     let canon = r.materialized(&Scope::Canon).unwrap();
     assert!(canon.blocks.values().all(|b| b.block_type != "claim"));
 }
+
+#[test]
+fn land_with_a_hash_that_is_not_a_proposal_is_bad_input() {
+    let (_d, mut r, s) = setup();
+    let section = r.block(&Scope::View("work".into()), &BlockId::parse(&s).unwrap()).unwrap();
+    let e = r.land(&founder(), &section.version_hash().to_string()).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+}

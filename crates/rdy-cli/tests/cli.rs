@@ -123,3 +123,12 @@ fn fsck_detects_corruption() {
     let (ok, _, err) = rdy(dir.path(), &["fsck"]);
     assert!(!ok, "fsck passed on a corrupted segment; stderr: {err}");
 }
+
+#[test]
+fn init_honours_the_project_flag() {
+    let cwd = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    json(cwd.path(), &["--project", target.path().to_str().unwrap(), "init"]);
+    assert!(target.path().join(".rdy/config.yaml").exists());
+    assert!(!cwd.path().join(".rdy").exists());
+}

@@ -37,6 +37,11 @@ fn kind_matches(kind: FieldKind, v: &FieldValue) -> bool {
     )
 }
 
+/// The pack-YAML spelling of a field kind (`str`, `int`, ...).
+fn kind_word(kind: FieldKind) -> String {
+    format!("{kind:?}").to_lowercase()
+}
+
 pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec<Issue> {
     let mut out = vec![];
     let Some(def) = pack.block_types.get(&block.block_type) else {
@@ -50,14 +55,14 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
     for (name, v) in &block.fields {
         match def.fields.get(name) {
             None => out.push(err(block, "E_FIELD_UNKNOWN", format!("type {} has no field {name:?}", block.block_type), format!("remove it, or use one of: {}", def.fields.keys().cloned().collect::<Vec<_>>().join(", ")))),
-            Some(fd) if !kind_matches(fd.kind, v) => out.push(err(block, "E_FIELD_KIND", format!("field {name:?} must be {:?}", fd.kind), format!("write {name} as a {:?} value", fd.kind).to_lowercase())),
+            Some(fd) if !kind_matches(fd.kind, v) => out.push(err(block, "E_FIELD_KIND", format!("field {name:?} must be {:?}", fd.kind), format!("write {name} as a {} value", kind_word(fd.kind)))),
             Some(fd) if fd.kind == FieldKind::Enum && !fd.values.iter().any(|a| Some(a.as_str()) == v.as_str()) => out.push(err(block, "E_FIELD_ENUM", format!("field {name:?} has value {:?}", v.as_str().unwrap_or("")), format!("use one of: {}", fd.values.join(", ")))),
             Some(_) => {}
         }
     }
     for (name, fd) in &def.fields {
         if fd.required && !block.fields.contains_key(name) {
-            out.push(err(block, "E_FIELD_REQUIRED", format!("type {} requires field {name:?}", block.block_type), format!("add {name} ({:?})", fd.kind).to_lowercase()));
+            out.push(err(block, "E_FIELD_REQUIRED", format!("type {} requires field {name:?}", block.block_type), format!("add {name} ({})", kind_word(fd.kind))));
         }
     }
     match def.body {

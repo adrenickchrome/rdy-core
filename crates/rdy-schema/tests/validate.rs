@@ -99,3 +99,16 @@ fn missing_parent_is_an_error() {
     assert_eq!(issues[0].severity, Severity::Error);
     assert!(issues[0].message.contains("s-SECT1"));
 }
+
+#[test]
+fn hints_keep_the_field_name_case() {
+    let mut set = PackSet::with_builtin();
+    let name = set.add_yaml("name: cased\nversion: \"1\"\nextends: rdy-standard\nblock_types:\n  risk:\n    prefix: rk\n    fields:\n      dueDate: { kind: Str, required: true }\n".replace("Str", "str").as_str()).unwrap();
+    let p = set.resolve(&name).unwrap();
+    let mut risk = b("rk-AAAAA", "risk", Some("s-SECT1"), "");
+    let missing = validate_block(&p, &risk, Some(&section()));
+    assert_eq!(missing[0].fix, "add dueDate (str)");
+    risk.fields.insert("dueDate".into(), FieldValue::Int(1));
+    let kind = validate_block(&p, &risk, Some(&section()));
+    assert_eq!(kind[0].fix, "write dueDate as a str value");
+}

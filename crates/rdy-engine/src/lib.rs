@@ -57,6 +57,9 @@ fn load_pack(root: &Path, name: &str) -> Result<Pack, RdyError> {
 impl Rdy {
     pub fn init(project: &Path, pack: &str) -> Result<Rdy, RdyError> {
         let dot = project.join(".rdy");
+        if dot.join("config.yaml").exists() {
+            return Err(RdyError::new(E_ALREADY_EXISTS, format!("{} is already an rdy project", project.display()), "open the existing project, or init a different directory"));
+        }
         std::fs::create_dir_all(dot.join("packs")).map_err(io)?;
         load_pack(project, pack)?;
         let cfg = serde_yaml_ng::to_string(&Config { pack: pack.to_string() }).expect("config yaml");

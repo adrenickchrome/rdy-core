@@ -24,6 +24,7 @@ pub enum FieldKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FieldDef {
     pub kind: FieldKind,
     #[serde(default)]
@@ -42,6 +43,7 @@ pub enum BodyRule {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BlockTypeDef {
     pub prefix: String,
     #[serde(default)]
@@ -55,6 +57,7 @@ pub struct BlockTypeDef {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SkeletonSection {
     pub title: String,
     #[serde(default)]
@@ -62,12 +65,14 @@ pub struct SkeletonSection {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DocTypeDef {
     #[serde(default)]
     pub skeleton: Vec<SkeletonSection>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Pack {
     pub name: String,
     pub version: String,

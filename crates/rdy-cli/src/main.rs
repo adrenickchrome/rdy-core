@@ -69,7 +69,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
     let project = cli.project.clone().unwrap_or_else(|| find_project(&cwd));
     match cli.cmd {
         Cmd::Init { dir, pack } => {
-            let dir = dir.unwrap_or(cwd);
+            let dir = dir.or(cli.project).unwrap_or(cwd);
             Rdy::init(&dir, &pack)?;
             Ok((json!({"project": dir, "pack": pack}), format!("Initialized rdy project in {} (pack {pack})", dir.display())))
         }
