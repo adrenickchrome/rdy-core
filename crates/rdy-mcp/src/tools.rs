@@ -141,6 +141,7 @@ pub struct SupersedeParams {
     pub old: String,
     /// The words of the old decision that this one retires; omit to supersede all of it.
     pub part: Option<String>,
+    /// The new decision. It inherits the old decision's affects, depends_on, conditional_on and refines unless you give that kind; an empty list drops it.
     pub decision: DecideParams,
 }
 
@@ -678,6 +679,17 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
 }
 
 fn decision_input(p: DecideParams) -> DecisionInput {
+    // sup1: a kind given as an empty list is not inherited by rdy_supersede
+    let no_inherit = [
+        ("affects", &p.affects),
+        ("depends_on", &p.depends_on),
+        ("conditional_on", &p.conditional_on),
+        ("refines", &p.refines),
+    ]
+    .into_iter()
+    .filter(|(_, v)| v.as_ref().is_some_and(Vec::is_empty))
+    .map(|(k, _)| k.to_string())
+    .collect();
     DecisionInput {
         parent: p.parent,
         statement: p.statement,
@@ -693,6 +705,7 @@ fn decision_input(p: DecideParams) -> DecisionInput {
         conditional_on: p.conditional_on.unwrap_or_default(),
         refines: p.refines.unwrap_or_default(),
         answers: p.answers.unwrap_or_default(),
+        no_inherit,
     }
 }
 

@@ -713,6 +713,7 @@ impl Rdy {
             change: id.to_string(),
             created,
             names: BTreeMap::new(),
+            inherited: BTreeMap::new(),
             warnings: vec![],
         })
     }

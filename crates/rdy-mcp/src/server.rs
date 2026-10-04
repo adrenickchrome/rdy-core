@@ -137,7 +137,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Propose a decision that supersedes an existing one, wholly or a named part."
+        description = "Propose a decision that supersedes an existing one, wholly or a named part. It inherits the old decision's affects, depends_on, conditional_on and refines links unless you give that kind (an empty list drops it); the result's inherited lists what was copied."
     )]
     fn rdy_supersede(&self, Parameters(p): Parameters<SupersedeParams>) -> CallToolResult {
         self.run("rdy_supersede", p, tools::rdy_supersede)

@@ -100,6 +100,9 @@ pub struct WriteResult {
     /// Names rdy assigned to created docs and folders, by block id.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub names: BTreeMap<String, String>,
+    /// sup1: links rdy_supersede copied from the old decision, by kind.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub inherited: BTreeMap<String, Vec<String>>,
     pub warnings: Vec<Issue>,
 }
 
@@ -1322,6 +1325,7 @@ impl Rdy {
             change: id.to_string(),
             created,
             names,
+            inherited: BTreeMap::new(),
             warnings,
         })
     }

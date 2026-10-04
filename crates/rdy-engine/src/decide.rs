@@ -34,6 +34,9 @@ pub struct DecisionInput {
     pub refines: Vec<String>,
     #[serde(default)]
     pub answers: Vec<String>,
+    /// sup1: link kinds rdy_supersede must not copy from the old decision.
+    #[serde(default)]
+    pub no_inherit: Vec<String>,
 }
 
 fn links_of(d: &DecisionInput) -> BTreeMap<String, Vec<LinkInput>> {
@@ -151,11 +154,37 @@ impl Rdy {
         view: &str,
         old: &str,
         part: Option<String>,
-        d: DecisionInput,
+        mut d: DecisionInput,
     ) -> Result<WriteResult, RdyError> {
         let old_id = self.require_decision(view, old)?;
+        let old_block = self.block(&Scope::View(view.into()), &old_id)?;
+        // sup1: the new decision keeps the old one's scope and premises, kind by kind, unless the
+        // caller gives that kind or lists it in no_inherit
+        let skip = d.no_inherit.clone();
+        let mut inherited = BTreeMap::new();
+        for (kind, mine) in [
+            (decision::AFFECTS, &mut d.affects),
+            (decision::DEPENDS_ON, &mut d.depends_on),
+            (decision::CONDITIONAL_ON, &mut d.conditional_on),
+            (decision::REFINES, &mut d.refines),
+        ] {
+            if !mine.is_empty() || skip.iter().any(|k| k == kind) {
+                continue;
+            }
+            let copied: Vec<String> = old_block
+                .links
+                .get(kind)
+                .into_iter()
+                .flatten()
+                .map(|l| l.target.to_string())
+                .collect();
+            if !copied.is_empty() {
+                *mine = copied.clone();
+                inherited.insert(kind.to_string(), copied);
+            }
+        }
         let msg = format!("supersede {old_id}: {}", d.statement);
-        self.write_decision(
+        let mut res = self.write_decision(
             s,
             view,
             d,
@@ -167,7 +196,9 @@ impl Rdy {
                 },
             )],
             msg,
-        )
+        )?;
+        res.inherited = inherited;
+        Ok(res)
     }
 
     pub fn revoke(
