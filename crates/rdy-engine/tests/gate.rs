@@ -262,3 +262,40 @@ fn deleting_a_parent_that_gained_a_moved_child_in_canon_is_refused() {
     assert!(e.issues.iter().any(|i| i.code == "E_MISSING_PARENT"), "{:?}", e.issues);
     assert_eq!(r.store().canon_head().unwrap(), head);
 }
+
+#[test]
+fn recreating_a_deleted_block_under_its_old_id_is_not_a_dangling_ref() {
+    let (_d, mut r, s) = setup();
+    let t = w(&mut r, &agent(), "work", json!([
+        {"op": "create", "type": "term", "id": "$t", "parent": s, "fields": {"name": "Ledger"}, "body": "Balances."},
+        {"op": "create", "type": "claim", "parent": s, "body": "Uses the {{$t}}."}
+    ])).unwrap().created["$t"].clone();
+    land_work(&mut r, "seed");
+    // run-1 replaces the term: delete it, then create a new term under the same id
+    w(&mut r, &agent(), "run-1", json!([{"op": "delete", "id": t}])).unwrap();
+    w(&mut r, &agent(), "run-1", json!([{"op": "create", "type": "term", "id": t, "parent": s, "fields": {"name": "Ledger"}, "body": "Balances, recomputed."}])).unwrap();
+    let p = r.propose(&agent(), "run-1", "replace term").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    assert_eq!(r.block(&Scope::Canon, &BlockId::parse(&t).unwrap()).unwrap().body, "Balances, recomputed.");
+}
+
+#[test]
+fn recreating_a_deleted_parent_and_child_under_their_old_ids_is_not_an_orphan() {
+    let (_d, mut r, s) = setup();
+    let doc = r.block(&Scope::View("work".into()), &BlockId::parse(&s).unwrap()).unwrap().parent.clone().unwrap().to_string();
+    let res = w(&mut r, &agent(), "work", json!([
+        {"op": "create", "type": "section", "id": "$s2", "parent": doc, "fields": {"title": "Old"}},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s2", "body": "Kept."}
+    ])).unwrap();
+    let (s2, c) = (res.created["$s2"].clone(), res.created["$c"].clone());
+    land_work(&mut r, "seed");
+    w(&mut r, &agent(), "run-1", json!([{"op": "delete", "id": c}, {"op": "delete", "id": s2}])).unwrap();
+    w(&mut r, &agent(), "run-1", json!([
+        {"op": "create", "type": "section", "id": s2, "parent": doc, "fields": {"title": "New"}},
+        {"op": "create", "type": "claim", "id": c, "parent": s2, "body": "Kept, again."}
+    ])).unwrap();
+    let p = r.propose(&agent(), "run-1", "rebuild section").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let claim = r.block(&Scope::Canon, &BlockId::parse(&c).unwrap()).unwrap();
+    assert_eq!(claim.parent.map(|p| p.to_string()), Some(s2));
+}

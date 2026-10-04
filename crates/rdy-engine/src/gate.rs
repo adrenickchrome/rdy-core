@@ -53,6 +53,9 @@ impl Rdy {
                 }
             }
         }
+        // an id deleted and then re-created in this proposal exists in the prospective canon:
+        // it is not deleted
+        deleted.retain(|id| next.get(id).is_none());
         let mut issues = vec![];
         for id in &touched {
             let Some(b) = next.get(id) else { continue };
