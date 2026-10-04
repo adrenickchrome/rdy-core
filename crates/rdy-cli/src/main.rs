@@ -308,6 +308,11 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
+                    let text = if versions.is_empty() {
+                        "no versions yet".to_string()
+                    } else {
+                        text
+                    };
                     Ok((json!({"versions": versions, "current": current}), text))
                 }
                 Cmd::Edit { id, view } => {

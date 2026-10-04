@@ -318,3 +318,12 @@ fn status_warns_about_legacy_colon_views() {
     );
     assert!(p["id"].is_string());
 }
+
+#[test]
+fn tags_with_no_versions_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    json(dir.path(), &["init"]);
+    let (ok, text, _) = rdy(dir.path(), &["tags"]);
+    assert!(ok);
+    assert_eq!(text.trim(), "no versions yet");
+}
