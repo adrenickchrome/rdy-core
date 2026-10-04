@@ -804,7 +804,14 @@ fn build_ops(
                     block.body = res.text(&body, RefMode::for_body(&block.block_type));
                 }
                 if let Some(links) = links {
-                    block.links = res.links(links)?;
+                    // link1: an update replaces only the link kinds it names; "<kind>": [] removes one
+                    for (kind, targets) in res.links(links)? {
+                        if targets.is_empty() {
+                            block.links.remove(&kind);
+                        } else {
+                            block.links.insert(kind, targets);
+                        }
+                    }
                 }
                 check_decided_at(session, &block, Some(cur))?;
                 prior.push((false, cur.pins.clone()));

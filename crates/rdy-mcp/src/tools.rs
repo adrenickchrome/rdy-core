@@ -105,7 +105,7 @@ pub struct WriteParams {
     /// {"op":"move","id":<id or path>,"base":<version>?,"parent":<id or path>?,"after":<sibling>?}
     /// {"op":"delete","id":<id or path>,"base":<version>?}
     /// {"op":"rebalance","parent":<id or path>?}
-    /// links: {"<kind>": [{"target": "<id or path>", "part": "<optional words>"}]}, e.g. {"decided_by": [{"target": "D-W2HXR"}]}.
+    /// links: {"<kind>": [{"target": "<id or path>", "part": "<optional words>"}]}, e.g. {"decided_by": [{"target": "D-W2HXR"}]}. An update replaces only the link kinds it names; "<kind>": [] removes that kind.
     /// Ids, parents, afters and link targets also take paths (wallets/transactions); a move without parent goes to the top level (docs and folders); rebalance re-keys a parent's children (frozen decisions stay put; in one write it must come before any other op on those children, and a child it re-keys can't be edited again in the same write).
     pub ops: Vec<Value>,
     /// The decision this change carries out.
@@ -287,6 +287,9 @@ pub const WRITE_OPS: &[(&str, &str)] = &[
 pub const LINK_SHAPE: &str = r#"links: {"<kind>": [{"target": "<id or path>", "part": "<optional: the words of the target this link is about>"}]}"#;
 pub const LINK_EXAMPLE: &str =
     r#"{"decided_by": [{"target": "D-W2HXR"}], "describes": [{"target": "wallets/transactions"}]}"#;
+
+/// link1: how an update treats links.
+pub const LINK_UPDATE: &str = r#"an update replaces only the link kinds it names; "<kind>": [] removes that kind; kinds it doesn't name are kept"#;
 
 fn link_example() -> Value {
     serde_json::from_str(LINK_EXAMPLE).expect("LINK_EXAMPLE is JSON")
@@ -583,8 +586,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
                 example["body"] = json!("…");
             }
             let mut out = json!({"type": t, "prefix": def.prefix, "traits": traits(&def.traits), "body": format!("{:?}", def.body).to_lowercase(), "fields": fields, "children": def.children, "example": example});
-            out["links"] =
-                json!({"shape": LINK_SHAPE, "example": link_example(), "kinds": pack.link_types});
+            out["links"] = json!({"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE, "kinds": pack.link_types});
             if rdy_model::tree::is_tree_type(&t) {
                 out["example"]["parent"] = json!("<folder id or path; omit for the top level>");
                 out["name_rules"] = json!(NAME_RULES);
@@ -595,7 +597,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             "pack": pack.name,
             "types": pack.block_types.iter().map(|(n, d)| json!({"type": n, "prefix": d.prefix, "traits": traits(&d.traits)})).collect::<Vec<_>>(),
             "link_types": pack.link_types,
-            "link_shape": {"shape": LINK_SHAPE, "example": link_example()},
+            "link_shape": {"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE},
             "ops": WRITE_OPS.iter().map(|(n, s)| (n.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
             "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT},
             "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
