@@ -289,3 +289,21 @@ fn a_byte_flip_anywhere_in_the_index_is_recovered_on_open() {
     }
     assert!(failures.is_empty(), "{} flips were not recovered:\n{}", failures.len(), failures.join("\n"));
 }
+
+#[test]
+fn a_partial_append_leaves_no_bytes_past_the_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(dir.path()).unwrap();
+    s.set_refs(vec![("canon".into(), b"A".to_vec())]).unwrap();
+    let len_before = file_len(&seg0(dir.path()));
+    let torn = block("b-AAAAA", "torn");
+    s.fail_next_append_after(10);
+    assert!(s.put(kinds::BLOCK, &torn).is_err());
+    assert_eq!(file_len(&seg0(dir.path())), len_before, "the partial frame's bytes are discarded");
+    assert_eq!(s.verify().unwrap(), 1, "fsck in the same session sees only the acknowledged frame");
+    s.put(kinds::BLOCK, &block("b-BBBBB", "after")).unwrap();
+    drop(s);
+    let s = Store::open(dir.path()).unwrap();
+    assert_eq!(s.verify().unwrap(), 2);
+    assert!(!s.has(&torn.version_hash()).unwrap());
+}

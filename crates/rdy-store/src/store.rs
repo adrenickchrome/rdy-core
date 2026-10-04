@@ -160,9 +160,10 @@ impl Store {
         }
         let start = self.log.end();
         let result = self.append_and_index(items);
-        if result.is_err() && self.log.end() != start {
-            // nothing past `start` was acknowledged: discard it so a later write or reindex
-            // cannot resurrect it
+        if result.is_err() {
+            // nothing past `start` was acknowledged: discard it — including bytes a partial
+            // append left past the end and a segment a failed roll left behind — so neither a
+            // later write, a verify nor a reindex can see it
             let rollback = if std::mem::take(&mut self.faults.rollback) { Err(std::io::Error::other("injected rollback failure")) } else { self.log.truncate_to(start) };
             if rollback.is_err() {
                 self.poisoned = true;
@@ -205,6 +206,12 @@ impl Store {
     #[doc(hidden)]
     pub fn fail_next_rollback(&mut self) {
         self.faults.rollback = true;
+    }
+
+    /// Test hook: the next appended frame is written only in part, then the write fails.
+    #[doc(hidden)]
+    pub fn fail_next_append_after(&mut self, bytes: usize) {
+        self.log.fail_next_append_after(bytes);
     }
 
     pub fn put<T: Serialize>(&mut self, kind: u8, value: &T) -> Result<Hash, StoreError> {

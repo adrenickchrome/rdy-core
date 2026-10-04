@@ -252,3 +252,39 @@ fn quarantine_never_overwrites_an_earlier_quarantine_file() {
     let q1 = dir.path().join(format!("seg-000000.log.torn-{}.1", b.offset + 44));
     assert_eq!(std::fs::read(q1).unwrap(), vec![9u8; 20]);
 }
+
+#[test]
+fn a_failed_roll_leaves_the_log_unchanged_and_the_next_append_rolls_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    // one 60-byte payload makes a 97-byte frame, so the second append must roll
+    let mut log = SegmentLog::open(dir.path(), 128).unwrap();
+    let (a, _) = log.append(2, &[1; 60]).unwrap();
+    let before = log.end();
+    log.fail_next_roll();
+    assert!(log.append(2, &[2; 60]).is_err());
+    assert_eq!(log.end(), before);
+    assert!(!dir.path().join("seg-000001.log").exists(), "the failed roll's file is removed");
+    let (b, _) = log.append(2, &[3; 60]).unwrap();
+    log.sync().unwrap();
+    assert_eq!(b.segment, 1);
+    assert_eq!(log.read(a).unwrap(), (2, vec![1; 60]));
+    assert_eq!(log.read(b).unwrap(), (2, vec![3; 60]));
+    let end = log.end();
+    drop(log);
+    let log = SegmentLog::open_acked(dir.path(), 128, Some(end)).unwrap();
+    assert_eq!(log.read(a).unwrap(), (2, vec![1; 60]));
+    assert_eq!(log.read(b).unwrap(), (2, vec![3; 60]));
+}
+
+#[test]
+fn truncate_to_removes_a_stray_next_segment() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    log.append(1, b"one").unwrap();
+    log.sync().unwrap();
+    let end = log.end();
+    std::fs::write(dir.path().join("seg-000001.log"), b"").unwrap();
+    log.truncate_to(end).unwrap();
+    assert!(!dir.path().join("seg-000001.log").exists());
+    assert_eq!(log.end(), end);
+}

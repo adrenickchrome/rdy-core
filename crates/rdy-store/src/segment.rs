@@ -19,6 +19,9 @@ pub struct SegmentLog {
     writer: File,
     len: u64,
     max_len: u64,
+    /// Test fault injection (see `fail_next_roll` / `fail_next_append_after`).
+    fail_roll: bool,
+    fail_partial: Option<usize>,
 }
 
 fn seg_path(dir: &Path, id: u32) -> PathBuf {
@@ -140,7 +143,7 @@ impl SegmentLog {
             writer.set_len(offset)?;
             writer.sync_all()?;
         }
-        let log = SegmentLog { dir: dir.to_path_buf(), readers, writer, len: offset, max_len };
+        let log = SegmentLog { dir: dir.to_path_buf(), readers, writer, len: offset, max_len, fail_roll: false, fail_partial: None };
         Ok(log)
     }
 
@@ -163,6 +166,12 @@ impl SegmentLog {
         self.writer.set_len(to.offset)?;
         self.writer.sync_all()?;
         self.len = to.offset;
+        // a roll that failed after creating its file may have left the next segment behind
+        let stray = seg_path(&self.dir, self.current() + 1);
+        if stray.exists() {
+            std::fs::remove_file(&stray)?;
+            sync_dir(&self.dir)?;
+        }
         Ok(())
     }
 
@@ -174,19 +183,57 @@ impl SegmentLog {
         Location { segment: self.current(), offset: self.len }
     }
 
+    /// Test hook: the next roll to a new segment fails after creating the new file.
+    #[doc(hidden)]
+    pub fn fail_next_roll(&mut self) {
+        self.fail_roll = true;
+    }
+
+    /// Test hook: the next append writes only the first `bytes` bytes of its frame, then fails.
+    #[doc(hidden)]
+    pub fn fail_next_append_after(&mut self, bytes: usize) {
+        self.fail_partial = Some(bytes);
+    }
+
+    /// Starts segment `current + 1`. The new writer, reader and length are committed together,
+    /// only once the file and the directory are durable; on any failure the new file is removed
+    /// and the log is exactly as before.
+    fn roll(&mut self) -> io::Result<()> {
+        self.writer.sync_all()?;
+        let path = seg_path(&self.dir, self.readers.len() as u32);
+        let writer = OpenOptions::new().read(true).write(true).create_new(true).open(&path)?;
+        match self.finish_roll(&writer, &path) {
+            Ok(reader) => {
+                self.writer = writer;
+                self.readers.push(reader);
+                self.len = 0;
+                Ok(())
+            }
+            Err(e) => {
+                drop(writer);
+                let _ = std::fs::remove_file(&path);
+                let _ = sync_dir(&self.dir);
+                Err(e)
+            }
+        }
+    }
+
+    fn finish_roll(&mut self, writer: &File, path: &Path) -> io::Result<File> {
+        writer.sync_all()?;
+        if std::mem::take(&mut self.fail_roll) {
+            return Err(io::Error::other("injected roll failure"));
+        }
+        sync_dir(&self.dir)?;
+        File::open(path)
+    }
+
     pub fn append(&mut self, kind: u8, payload: &[u8]) -> io::Result<(Location, Hash)> {
         if payload.len() > u32::MAX as usize {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "payload too large"));
         }
         let frame_len = HEADER + payload.len() as u64;
         if self.len > 0 && self.len + frame_len > self.max_len {
-            self.writer.sync_all()?;
-            let id = self.readers.len() as u32;
-            self.writer = OpenOptions::new().read(true).write(true).create_new(true).open(seg_path(&self.dir, id))?;
-            self.writer.sync_all()?;
-            sync_dir(&self.dir)?;
-            self.readers.push(File::open(seg_path(&self.dir, id))?);
-            self.len = 0;
+            self.roll()?;
         }
         let hash = Hash::of(payload);
         let mut buf = Vec::with_capacity(frame_len as usize);
@@ -194,6 +241,10 @@ impl SegmentLog {
         buf.push(kind);
         buf.extend_from_slice(&hash.0);
         buf.extend_from_slice(payload);
+        if let Some(n) = self.fail_partial.take() {
+            self.writer.write_all_at(&buf[..n.min(buf.len())], self.len)?;
+            return Err(io::Error::other("injected partial append"));
+        }
         self.writer.write_all_at(&buf, self.len)?;
         let loc = Location { segment: self.current(), offset: self.len };
         self.len += frame_len;
