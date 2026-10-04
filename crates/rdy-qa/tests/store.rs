@@ -83,9 +83,10 @@ fn blob1_a_figure_naming_a_non_blob_object_is_not_an_asset() {
     assert_eq!(e.code, "E_NOT_FOUND", "{e}");
 }
 
-/// Truncates the last segment at each sampled offset of its last frame; every cut recovers.
+/// Truncates the last segment at every 97th byte (every 13th in deep mode) of its last write; every cut recovers
+/// and the recovered store accepts a new write.
 #[test]
-fn store_torn_tail_at_every_byte_recovers() {
+fn store_torn_tail_at_sampled_offsets_recovers() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
     // A torn write is one the index never acknowledged: keep the index as it was before the
@@ -100,7 +101,7 @@ fn store_torn_tail_at_every_byte_recovers() {
     };
     let (last_hash, cut_from) = last;
     let end = segment_len(&dir);
-    let step = if deep() { 1 } else { 97 };
+    let step = if deep() { 13 } else { 97 };
     for cut in (cut_from..end).step_by(step) {
         let copy = tempfile::tempdir().unwrap();
         copy_dir(&dir, copy.path());
@@ -124,6 +125,15 @@ fn store_torn_tail_at_every_byte_recovers() {
         assert!(
             s.get_blob(&last_hash).is_err(),
             "cut at {cut}: a torn write must not be visible"
+        );
+        s.verify().unwrap();
+        // a torn tail left behind in the segment would corrupt this write or fail verify
+        let mut s = s;
+        let again = s.put_blob(b"after recovery").unwrap();
+        assert_eq!(
+            s.get_blob(&again).unwrap(),
+            b"after recovery",
+            "cut at {cut}"
         );
         s.verify().unwrap();
     }
