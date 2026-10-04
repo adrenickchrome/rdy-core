@@ -107,3 +107,30 @@ flushing the ~1.6 GB just generated (2.02 s was seen on the first pass before an
 judges the median of three opens and prints all three. Open now verifies the index's page checksums (redb `check_integrity`) and rebuilds a damaged index instead of trusting it; with that check the median is 0.65 s. The check was measured at ~31 ms on a warm 34 MB / 300k-object index; it is not yet measured on a cold page cache (QA follow-up). Profile top frames of a cold start: `pread`
 (reading each block frame), `memcmp` and `redb` point lookups (`Index::object` per block),
 BLAKE3 hash of every block read, `Graph::build`, `BTreeMap::insert`.
+
+## Folders and paths (addendum B)
+
+Measured 2026-10-04, release build, Rust 1.99.0, on the **macOS** configuration of the table at the
+top (Apple M4 Pro, macOS 26.6, internal SSD, APFS).
+
+Shape (`testkit::generate_tree(1000, 10, 8)`): 1,000 folders (10 top level, 990 spread evenly under
+them), 10,000 docs (10 per folder), each with one `Constraints` section of 8 claims, in view `work`:
+about 101,000 blocks (1,000 folders + 10,000 docs + 10,000 sections + 80,000 claims). Generation is
+one write per doc and took 134 s.
+Reproduce: `cargo test -p rdy-engine --release --test perf_folders -- --ignored --nocapture` and
+`cargo test -p rdy-render --release --test render site_size_at_1k_folders -- --ignored --nocapture`.
+
+| measurement | target | result | status |
+|---|---|---|---|
+| `tree` p99 (whole tree, no root, no depth limit; 50 calls) | < 5 ms | 9.77 ms | **missed** |
+| `resolve_path` p99 (200 doc paths, 2 or 3 segments deep) | < 5 ms | 5.1 us | met |
+| site render (full, `render_site`) | < 2 s | 4.18 s | **missed** |
+| site size | - | 11,001 pages, 121,760,413 bytes (about 116 MiB) | informational |
+
+- `tree` misses 5 ms: a full, unlimited-depth walk of 1,000 folders and 10,000 docs takes about 10 ms
+  at p99. `rdy_overview` collapses levels under a token budget (Task 9), so the tool a client
+  normally calls returns far fewer nodes than this measurement; the budgeted call was not measured
+  here. No code was changed to chase the number.
+- The full site render takes 4.18 s against the 2 s target, writing 11,001 pages (one per doc, one
+  per folder, plus the index) and about 116 MiB. No code was changed to chase the number.
+- `resolve_path` is a map lookup and is well under target.

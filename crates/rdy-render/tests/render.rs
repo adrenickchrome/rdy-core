@@ -449,3 +449,34 @@ fn decisions_and_assets_live_under_underscore_directories() {
     let dec = std::fs::read_to_string(out.path().join(format!("_decision/{did}.html"))).unwrap();
     assert!(dec.contains(&format!("<a href=\"../wallets/design.html\">Design</a> / <span class=\"here\">decision {did}</span>")), "{dec}");
 }
+
+#[test]
+#[ignore]
+fn site_size_at_1k_folders() {
+    // cargo test -p rdy-render --release --test render site_size_at_1k_folders -- --ignored --nocapture
+    let dir = tempfile::tempdir().unwrap();
+    rdy_engine::testkit::generate_tree(dir.path(), 1000, 10, 8);
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let t = std::time::Instant::now();
+    let s = render_site(&mut r, &Scope::View("work".into()), out.path()).unwrap();
+    let took = t.elapsed();
+    fn size(p: &std::path::Path) -> u64 {
+        std::fs::read_dir(p)
+            .unwrap()
+            .map(|e| {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    size(&p)
+                } else {
+                    p.metadata().unwrap().len()
+                }
+            })
+            .sum()
+    }
+    println!(
+        "site: {} pages, {} bytes, rendered in {took:?} (spec 11 full render target < 2 s)",
+        s.pages,
+        size(out.path())
+    );
+}

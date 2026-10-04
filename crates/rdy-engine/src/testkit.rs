@@ -93,3 +93,67 @@ pub fn generate(project: &Path, blocks: usize) -> Vec<BlockId> {
     }
     ids
 }
+
+/// A tree-shaped synthetic project: `folders` folders (10 top level, the rest under them), each
+/// with `docs_per_folder` docs of one section holding `claims_per_doc` claims. Returns doc paths.
+pub fn generate_tree(
+    project: &Path,
+    folders: usize,
+    docs_per_folder: usize,
+    claims_per_doc: usize,
+) -> Vec<String> {
+    let mut r = Rdy::init(project, "rdy-standard").expect("init");
+    let s = Session {
+        actor: "agent:bench".into(),
+        run: None,
+        role: Role::Writer,
+    };
+    let w = |r: &mut Rdy, ops: Vec<serde_json::Value>| {
+        r.write(
+            &s,
+            WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(json!(ops)).unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .expect("write")
+    };
+    let top = folders.min(10);
+    let mut folder_paths: Vec<(String, String)> = vec![];
+    let res = w(
+        &mut r,
+        (0..top)
+            .map(|i| json!({"op": "create", "type": "folder", "id": format!("$f{i}"), "fields": {"name": format!("area-{i}")}}))
+            .collect(),
+    );
+    for i in 0..top {
+        folder_paths.push((res.created[&format!("$f{i}")].clone(), format!("area-{i}")));
+    }
+    for i in top..folders {
+        let (pid, ppath) = folder_paths[i % top].clone();
+        let res = w(
+            &mut r,
+            vec![
+                json!({"op": "create", "type": "folder", "parent": pid, "fields": {"name": format!("part-{i}")}}),
+            ],
+        );
+        folder_paths.push((res.created["op0"].clone(), format!("{ppath}/part-{i}")));
+    }
+    let mut docs = vec![];
+    for (fid, fpath) in &folder_paths {
+        for d in 0..docs_per_folder {
+            let mut ops = vec![
+                json!({"op": "create", "type": "doc", "id": "$d", "parent": fid, "fields": {"name": format!("doc-{d}"), "title": format!("Doc {d}"), "doc_type": "constraints"}}),
+                json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Constraints"}}),
+            ];
+            for c in 0..claims_per_doc {
+                ops.push(json!({"op": "create", "type": "claim", "parent": "$s", "body": format!("Claim {c} of doc {d}.")}));
+            }
+            w(&mut r, ops);
+            docs.push(format!("{fpath}/doc-{d}"));
+        }
+    }
+    docs
+}
