@@ -77,8 +77,8 @@ fn write_read_context_round_trip() {
         "indented by depth:\n{text}"
     );
     assert!(
-        text.contains(&format!("{c} claim: Uses the Ledger.")),
-        "references render as the target's summary:\n{text}"
+        text.contains(&format!("{c} claim: Uses the {t}.")),
+        "read1: references stay as bare ids:\n{text}"
     );
 
     let md = rdy_read(

@@ -504,7 +504,7 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
                     "  ".repeat(depth),
                     b.id,
                     b.block_type,
-                    summary_in(b, &m)
+                    compact_summary(b)
                 );
                 if suspects.contains(&b.id) {
                     line.push_str(" [suspect]");

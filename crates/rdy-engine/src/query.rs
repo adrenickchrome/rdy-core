@@ -56,17 +56,23 @@ pub fn summary_in(b: &Block, m: &Materialized) -> String {
 }
 
 fn summarize(b: &Block, resolve: &dyn Fn(&str) -> String) -> String {
+    primary_text(b, resolve).0.chars().take(80).collect()
+}
+
+/// `b`'s primary text (its statement, prompt, name or title field, else its body), with
+/// whitespace collapsed and each reference rendered by `resolve`; and whether it is the body.
+fn primary_text(b: &Block, resolve: &dyn Fn(&str) -> String) -> (String, bool) {
     let keys: &[&str] = if rdy_model::tree::is_tree_type(&b.block_type) {
         &["title", "name"]
     } else {
         &["statement", "prompt", "name", "title"]
     };
-    let (text, mode) = match keys
+    let (text, mode, from_body) = match keys
         .iter()
         .find_map(|f| b.field_str(f).filter(|s| !s.is_empty()))
     {
-        Some(field) => (field, RefMode::Strict),
-        None => (b.body.as_str(), RefMode::for_body(&b.block_type)),
+        Some(field) => (field, RefMode::Strict, false),
+        None => (b.body.as_str(), RefMode::for_body(&b.block_type), true),
     };
     let mut out = String::new();
     if mode == RefMode::Off {
@@ -81,12 +87,33 @@ fn summarize(b: &Block, resolve: &dyn Fn(&str) -> String) -> String {
         }
         out.push_str(&plain(&text[last..]));
     }
-    out.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(80)
-        .collect()
+    (
+        out.split_whitespace().collect::<Vec<_>>().join(" "),
+        from_body,
+    )
+}
+
+/// read1: the compact read's text for `b`: its whole statement, prompt, name or title field, else
+/// the first sentence of its body. References stay as bare ids and nothing is cut at a length:
+/// the read's max_tokens does the cutting.
+pub fn compact_summary(b: &Block) -> String {
+    let (text, from_body) = primary_text(b, &|tok| tok.to_string());
+    if from_body {
+        first_sentence(&text).to_string()
+    } else {
+        text
+    }
+}
+
+/// Up to and including the first `.`, `?` or `!` followed by a space or the end of `text`.
+fn first_sentence(text: &str) -> &str {
+    let bytes = text.as_bytes();
+    for (i, c) in text.char_indices() {
+        if matches!(c, '.' | '?' | '!') && bytes.get(i + 1).is_none_or(|n| *n == b' ') {
+            return &text[..=i];
+        }
+    }
+    text
 }
 
 pub fn field_json(v: &FieldValue) -> serde_json::Value {
