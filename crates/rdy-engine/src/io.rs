@@ -137,6 +137,24 @@ fn read_format_1(dir: &Path) -> Result<Vec<Block>, RdyError> {
         .filter(|p| !is_hidden(p) && p.extension().is_some_and(|x| x == "yaml"))
         .collect();
     files.sort();
+    // A format-1 export is flat: a directory under docs/ is a format-2 tree, and reading it as
+    // format 1 would silently import nothing.
+    if let Some(d) = std::fs::read_dir(dir.join("docs"))
+        .map_err(io_err)?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && !is_hidden(p))
+        .min()
+    {
+        return Err(RdyError::new(
+            E_FILE_FORMAT,
+            format!(
+                "{}: a format-1 export is flat, but docs/ holds a directory (a format-2 tree?)",
+                d.display()
+            ),
+            "set `format: 2` in rdy-export.yaml, or re-export",
+        ));
+    }
     let mut blocks: Vec<Block> = vec![];
     for f in files {
         let text = std::fs::read_to_string(&f).map_err(io_err)?;

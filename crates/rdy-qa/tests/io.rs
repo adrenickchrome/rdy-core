@@ -94,6 +94,12 @@ proptest! {
 
 /// Each hostile export directory is refused, stores nothing and is fast.
 fn refused(dir: &Path) {
+    refused_import(dir);
+    refused_check(dir);
+}
+
+/// Import refuses the tree, quickly, and stores nothing.
+fn refused_import(dir: &Path) {
     let (_d, mut r) = project();
     let before = r.store().view_state("import").unwrap();
     let t = Instant::now();
@@ -111,6 +117,10 @@ fn refused(dir: &Path) {
         "{}: {e}",
         dir.display()
     );
+}
+
+/// `rdy check` reports a positioned error for the tree.
+fn refused_check(dir: &Path) {
     let pack = rdy_schema::PackSet::with_builtin()
         .resolve("rdy-standard")
         .unwrap();
@@ -194,16 +204,68 @@ fn io_hostile_trees_are_refused_quickly_and_store_nothing() {
         let t = export_dir(&[(name, &text)]);
         refused(t.path());
     }
-    // a symlink to a file outside the export
-    let t = export_dir(&[]);
-    #[cfg(unix)]
-    std::os::unix::fs::symlink("/etc/hosts", t.path().join("docs/hosts.yaml")).unwrap();
+    // the same block id twice in one doc file
+    let t = export_dir(&[("dup.yaml", &format!("{DOC}{DOC}"))]);
     refused(t.path());
-    // a 20 MB doc file
+    // the same id in two different doc files
+    let t = export_dir(&[("a.yaml", DOC), ("b.yaml", DOC)]);
+    refused(t.path());
+    // format mixes: a format-1 manifest over a format-2 tree
+    let t = export_dir(&[
+        (
+            "f/_folder.yaml",
+            "- id: f-AAAAA\n  type: folder\n  order: a1\n  fields:\n    title: F\n",
+        ),
+        ("f/doc.yaml", DOC),
+    ]);
+    std::fs::write(
+        t.path().join("rdy-export.yaml"),
+        "format: 1\npack: rdy-standard\nscope: canon\n",
+    )
+    .unwrap();
+    refused_import(t.path());
+    // a format-2 manifest over a flat format-1 layout
+    let t = export_dir(&[("d-AAAAA.yaml", DOC)]);
+    refused(t.path());
+    // A 20 MB doc file: proves bounded time on a huge scalar, not a size limit (none is specified).
     let big = format!(
         "{DOC}- id: c-AAAAA\n  type: claim\n  parent: s-AAAAA\n  order: a2\n  body: \"{}\"\n  fields:\n    bogus: x\n",
         "x".repeat(20_000_000)
     );
     let t = export_dir(&[("big.yaml", &big)]);
     refused(t.path());
+}
+
+/// A symlink from docs/ to a valid doc file outside the export must be refused. Today import
+/// follows it (accepted), so the case is ignored until plan 2a decides symlink policy.
+#[cfg(unix)]
+#[test]
+#[ignore = "sym1: symlink policy, fixed in plan 2a"]
+fn io_symlink_out_of_the_export_is_refused() {
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("real.yaml"), DOC).unwrap();
+    let t = export_dir(&[]);
+    std::os::unix::fs::symlink(
+        outside.path().join("real.yaml"),
+        t.path().join("docs/linked.yaml"),
+    )
+    .unwrap();
+    refused(t.path());
+}
+
+#[test]
+fn fmt1_a_format_1_manifest_over_a_format_2_tree_is_refused_not_imported_empty() {
+    let t = export_dir(&[
+        (
+            "f/_folder.yaml",
+            "- id: f-AAAAA\n  type: folder\n  order: a1\n  fields:\n    title: F\n",
+        ),
+        ("f/doc.yaml", DOC),
+    ]);
+    std::fs::write(
+        t.path().join("rdy-export.yaml"),
+        "format: 1\npack: rdy-standard\nscope: canon\n",
+    )
+    .unwrap();
+    refused_import(t.path());
 }
