@@ -234,3 +234,31 @@ fn doc_and_folder_names_are_checked() {
         vec!["E_FIELD_REQUIRED"]
     );
 }
+
+#[test]
+fn docs_and_folders_sit_only_in_folders_whatever_the_pack_says() {
+    let mut set = PackSet::with_builtin();
+    let name = set
+        .add_yaml(
+            "name: loose\nversion: \"1\"\nextends: rdy-standard\nblock_types:\n  section:\n    prefix: s\n    children: [doc, folder, prose]\n",
+        )
+        .unwrap();
+    let p = set.resolve(&name).unwrap();
+    assert!(
+        p.block_types["section"]
+            .children
+            .contains(&"doc".to_string()),
+        "the pack lists doc under section"
+    );
+    for x in [
+        named("d-BBBBB", "doc", Some("s-SECT1"), "x"),
+        named("fd-BBBBB", "folder", Some("s-SECT1"), "x"),
+    ] {
+        assert_eq!(
+            codes(&validate_block(&p, &x, Some(&section()))),
+            vec!["E_CHILD_TYPE"],
+            "{}",
+            x.block_type
+        );
+    }
+}

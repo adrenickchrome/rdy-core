@@ -45,6 +45,7 @@ fn invalid_names() {
         "Nul.md",
         "com1",
         "LPT9.md",
+        "notes.",
     ] {
         assert!(name_problem(n).is_some(), "{n:?} should be invalid");
     }

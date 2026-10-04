@@ -490,11 +490,10 @@ impl Rdy {
         };
         let scope = Scope::View(view.to_string());
         let existing = self.materialized(&scope)?.clone();
-        assign_missing_names(&mut blocks, &existing);
-        check_import_names(&blocks, &existing)?;
-        let mut incoming: BTreeMap<BlockId, &Block> = BTreeMap::new();
+        // duplicates first: a duplicated doc would otherwise read as a name clash with itself
+        let mut ids = BTreeSet::new();
         for b in &blocks {
-            if incoming.insert(b.id.clone(), b).is_some() {
+            if !ids.insert(&b.id) {
                 return Err(RdyError::new(
                     E_ALREADY_EXISTS,
                     format!("block {} appears more than once in the import", b.id),
@@ -502,6 +501,11 @@ impl Rdy {
                 ));
             }
         }
+        drop(ids);
+        assign_missing_names(&mut blocks, &existing);
+        check_import_names(&blocks, &existing)?;
+        let incoming: BTreeMap<BlockId, &Block> =
+            blocks.iter().map(|b| (b.id.clone(), b)).collect();
         let parent_of = |id: &BlockId| -> Option<Option<BlockId>> {
             incoming
                 .get(id)

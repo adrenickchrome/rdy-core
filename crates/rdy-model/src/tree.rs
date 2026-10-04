@@ -28,6 +28,9 @@ pub fn name_problem(name: &str) -> Option<String> {
     if name.starts_with('.') || name.starts_with('_') {
         return Some("names starting with '.' or '_' are reserved for rdy's own files".into());
     }
+    if name.ends_with('.') {
+        return Some("a name cannot end in '.' (Windows drops it from directory names)".into());
+    }
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".yaml") || lower.ends_with(".yml") {
         return Some("a name cannot end in .yaml or .yml".into());

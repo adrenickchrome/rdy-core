@@ -154,11 +154,15 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
     let top_ok = tree::is_tree_type(&block.block_type);
     match (parent, &block.parent) {
         (Some(p), Some(_)) => {
-            let allowed = pack
-                .block_types
-                .get(&p.block_type)
-                .map(|d| d.children.contains(&block.block_type))
-                .unwrap_or(false);
+            // docs and folders have paths: they sit only in folders, whatever a pack lists
+            let allowed = if top_ok {
+                p.block_type == tree::FOLDER
+            } else {
+                pack.block_types
+                    .get(&p.block_type)
+                    .map(|d| d.children.contains(&block.block_type))
+                    .unwrap_or(false)
+            };
             if !allowed {
                 out.push(err(
                     block,

@@ -931,3 +931,11 @@ fn import_refuses_folders_nested_more_than_32_deep() {
     let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
     b.import(&founder(), "import", out.path()).unwrap();
 }
+
+#[test]
+fn a_duplicated_doc_is_reported_as_a_duplicate_id_not_a_name_clash() {
+    let doc = "- id: d-AAAAB\n  type: doc\n  order: V\n  fields:\n    name: notes\n    title: Notes\n    doc_type: glossary\n";
+    let out = format_1(doc);
+    std::fs::write(out.path().join("docs/copy.yaml"), doc).unwrap();
+    assert_import_fails(out.path(), "E_ALREADY_EXISTS");
+}
