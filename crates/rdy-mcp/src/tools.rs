@@ -224,6 +224,47 @@ fn id_of(s: &str) -> Result<BlockId, RdyError> {
         .map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "ids look like b-7KQ2M"))
 }
 
+const NAME_RULES: &str = "names: 1-64 characters from A-Z a-z 0-9 . _ -; not starting with . or _; not ending .yaml or .yml; not index; not shaped like a block id; not a Windows device name (con, prn, aux, nul, com1-9, lpt1-9); unique among siblings ignoring case. Omit name on create to have one assigned from the title.";
+
+fn depth_of(nodes: &[TreeNode]) -> usize {
+    nodes
+        .iter()
+        .map(|n| 1 + depth_of(&n.children))
+        .max()
+        .unwrap_or(0)
+}
+
+fn count_nodes(ns: &[TreeNode]) -> usize {
+    ns.iter()
+        .map(|n| 1 + n.collapsed + count_nodes(&n.children))
+        .sum()
+}
+
+/// Replaces the children of every node `level` levels down with a count.
+fn collapse_at(nodes: &mut [TreeNode], level: usize) {
+    for n in nodes {
+        if level == 0 {
+            if !n.children.is_empty() {
+                n.collapsed += count_nodes(&n.children);
+                n.children.clear();
+            }
+        } else {
+            collapse_at(&mut n.children, level - 1);
+        }
+    }
+}
+
+/// Collapses the deepest levels first until the tree fits in `max_tokens` (or only roots remain).
+fn fit_tree(mut nodes: Vec<TreeNode>, max_tokens: usize) -> Vec<TreeNode> {
+    let size = |n: &Vec<TreeNode>| serde_json::to_string(n).map(|s| s.len() / 4).unwrap_or(0);
+    let mut depth = depth_of(&nodes);
+    while depth > 1 && size(&nodes) > max_tokens {
+        depth -= 1;
+        collapse_at(&mut nodes, depth - 1);
+    }
+    nodes
+}
+
 fn ok<T: serde::Serialize>(t: T) -> Result<Value, RdyError> {
     Ok(serde_json::to_value(t).expect("serializable"))
 }
@@ -283,7 +324,8 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     let s = session(st)?;
     let scope = scope_of(st, &p.scope)?;
     let position = st.rdy.version_position(&scope)?;
-    let docs: Vec<Value> = st.rdy.materialized(&scope)?.children(None).iter().map(|d| json!({"id": d.id.to_string(), "title": d.field_str("title"), "doc_type": d.field_str("doc_type")})).collect();
+    let max = p.max_tokens.unwrap_or(4000);
+    let tree = fit_tree(st.rdy.tree(&scope, None, None)?, max.saturating_sub(300));
     let store = st.rdy.store();
     let views: Vec<Value> = store
         .refs_with_prefix("view/")?
@@ -298,7 +340,7 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     Ok(budget(
         json!({
             "pack": st.rdy.pack().name, "session": {"actor": s.actor, "view": st.view},
-            "canon": {"landings": landings}, "views": views, "docs": docs,
+            "canon": {"landings": landings}, "views": views, "tree": tree,
             "version_position": position,
         }),
         p.max_tokens,
@@ -318,7 +360,7 @@ pub fn rdy_tags(st: &mut McpState, _p: TagsParams) -> Result<Value, RdyError> {
 pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     session(st)?;
     let scope = scope_of(st, &p.scope)?;
-    let id = id_of(&p.id)?;
+    let id = st.rdy.resolve_id(&scope, &p.id)?;
     let suspects: std::collections::BTreeSet<BlockId> = st
         .rdy
         .suspects(&scope)?
@@ -407,7 +449,8 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
 pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     session(st)?;
     let scope = scope_of(st, &p.scope)?;
-    let ctx = st.rdy.context(&scope, &id_of(&p.id)?)?;
+    let id = st.rdy.resolve_id(&scope, &p.id)?;
+    let ctx = st.rdy.context(&scope, &id)?;
     Ok(budget(
         serde_json::to_value(ctx).expect("context json"),
         p.max_tokens,
@@ -417,9 +460,8 @@ pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
 pub fn rdy_impact(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     session(st)?;
     let scope = scope_of(st, &p.scope)?;
-    let items = st
-        .rdy
-        .impact(&scope, &id_of(&p.id)?, p.depth.unwrap_or(3))?;
+    let id = st.rdy.resolve_id(&scope, &p.id)?;
+    let items = st.rdy.impact(&scope, &id, p.depth.unwrap_or(3))?;
     Ok(budget(json!({"items": items}), p.max_tokens))
 }
 
@@ -464,9 +506,12 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             if def.body == BodyRule::Required {
                 example["body"] = json!("…");
             }
-            Ok(
-                json!({"type": t, "prefix": def.prefix, "traits": traits(&def.traits), "body": format!("{:?}", def.body).to_lowercase(), "fields": fields, "children": def.children, "example": example}),
-            )
+            let mut out = json!({"type": t, "prefix": def.prefix, "traits": traits(&def.traits), "body": format!("{:?}", def.body).to_lowercase(), "fields": fields, "children": def.children, "example": example});
+            if rdy_model::tree::is_tree_type(&t) {
+                out["example"]["parent"] = json!("<folder id or path; omit for the top level>");
+                out["name_rules"] = json!(NAME_RULES);
+            }
+            Ok(out)
         }
         None => Ok(json!({
             "pack": pack.name,

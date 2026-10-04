@@ -447,3 +447,143 @@ fn read_as_of_a_version() {
             .contains("Added after the version.")
     );
 }
+
+fn folder_tree(st: &mut McpState) -> Value {
+    rdy_write(st, serde_json::from_value(json!({"ops": [
+        {"op": "create", "type": "doc", "id": "$g", "fields": {"title": "Glossary", "doc_type": "glossary"}},
+        {"op": "create", "type": "folder", "id": "$w", "fields": {"name": "wallets"}},
+        {"op": "create", "type": "doc", "id": "$t", "parent": "$w", "fields": {"title": "Transactions", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$t", "fields": {"title": "Summary"}},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Moves money."}
+    ]})).unwrap()).unwrap()
+}
+
+#[test]
+fn overview_returns_the_folder_tree() {
+    let (_d, mut st) = state();
+    start(&mut st);
+    let res = folder_tree(&mut st);
+    let c = |k: &str| res["created"][k].as_str().unwrap().to_string();
+    let ov = rdy_overview(&mut st, serde_json::from_value(json!({})).unwrap()).unwrap();
+    assert!(ov.get("docs").is_none());
+    assert_eq!(
+        ov["tree"],
+        json!([
+            {"path": "glossary", "name": "glossary", "id": c("$g"), "type": "doc", "title": "Glossary", "doc_type": "glossary"},
+            {"path": "wallets", "name": "wallets", "id": c("$w"), "type": "folder", "children": [
+                {"path": "wallets/transactions", "name": "transactions", "id": c("$t"), "type": "doc", "title": "Transactions", "doc_type": "overview"}
+            ]}
+        ])
+    );
+}
+
+#[test]
+fn overview_collapses_the_deepest_levels_first() {
+    let (_d, mut st) = state();
+    start(&mut st);
+    let mut ops =
+        vec![json!({"op": "create", "type": "folder", "id": "$a", "fields": {"name": "a"}})];
+    for i in 0..60 {
+        ops.push(json!({"op": "create", "type": "doc", "parent": "$a", "fields": {"title": format!("A long document title number {i}"), "doc_type": "glossary"}}));
+    }
+    rdy_write(
+        &mut st,
+        serde_json::from_value(json!({"ops": ops})).unwrap(),
+    )
+    .unwrap();
+    let ov = rdy_overview(
+        &mut st,
+        serde_json::from_value(json!({"max_tokens": 400})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ov["tree"][0]["path"], "a");
+    assert!(ov["tree"][0].get("children").is_none(), "{}", ov["tree"]);
+    assert_eq!(ov["tree"][0]["collapsed"], 60);
+}
+
+#[test]
+fn tools_take_paths() {
+    let (_d, mut st) = state();
+    start(&mut st);
+    let res = folder_tree(&mut st);
+    let read = rdy_read(
+        &mut st,
+        serde_json::from_value(json!({"id": "wallets/transactions"})).unwrap(),
+    )
+    .unwrap();
+    assert!(read["text"].as_str().unwrap().contains("Moves money."));
+    let ctx = rdy_context(
+        &mut st,
+        serde_json::from_value(json!({"id": "wallets/transactions"})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ctx["id"], res["created"]["$t"]);
+    rdy_impact(
+        &mut st,
+        serde_json::from_value(json!({"id": "glossary"})).unwrap(),
+    )
+    .unwrap();
+    // folders are written with the normal ops; parent takes a path
+    rdy_write(&mut st, serde_json::from_value(json!({"ops": [
+        {"op": "create", "type": "folder", "id": "$x", "parent": "wallets", "fields": {"name": "cards"}},
+        {"op": "move", "id": "glossary", "parent": "wallets/cards"}
+    ]})).unwrap()).unwrap_err(); // $x is not visible to paths in the same write: refused
+    rdy_write(
+        &mut st,
+        serde_json::from_value(json!({"ops": [
+            {"op": "create", "type": "folder", "parent": "wallets", "fields": {"name": "cards"}}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+    rdy_write(
+        &mut st,
+        serde_json::from_value(
+            json!({"ops": [{"op": "move", "id": "glossary", "parent": "wallets/cards"}]}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let ctx = rdy_context(
+        &mut st,
+        serde_json::from_value(json!({"id": "wallets/cards/glossary"})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ctx["id"], res["created"]["$g"]);
+}
+
+#[test]
+fn name_errors_carry_a_corrected_payload_and_schema_explains_names() {
+    let (_d, mut st) = state();
+    start(&mut st);
+    folder_tree(&mut st);
+    let e = rdy_write(
+        &mut st,
+        serde_json::from_value(json!({"ops": [
+            {"op": "create", "type": "folder", "fields": {"name": "Wallets"}}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap_err();
+    let v = error_json(&e);
+    assert_eq!(v["code"], "E_PATH_CLASH");
+    assert_eq!(
+        v["corrected"],
+        json!({"op": 0, "fields": {"name": "Wallets-2"}})
+    );
+    let s = rdy_schema(
+        &mut st,
+        serde_json::from_value(json!({"block_type": "folder"})).unwrap(),
+    )
+    .unwrap();
+    assert!(s["name_rules"].as_str().unwrap().contains("ignoring case"));
+    assert_eq!(s["children"], json!(["folder", "doc"]));
+    let all = rdy_schema(&mut st, serde_json::from_value(json!({})).unwrap()).unwrap();
+    assert!(
+        all["types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["type"] == "folder")
+    );
+}

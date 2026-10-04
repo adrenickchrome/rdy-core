@@ -48,7 +48,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Project overview: pack, docs, views, canon history and the version position (e.g. v1.2.0 + 3 landings)."
+        description = "Project overview: pack, the folder and doc tree, views, canon history and the version position."
     )]
     fn rdy_overview(&self, Parameters(p): Parameters<ScopeParams>) -> CallToolResult {
         self.run(p, tools::rdy_overview)
@@ -62,14 +62,14 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Read a document or subtree as compact lines (default), markdown or yaml. scope is 'canon' or a view name."
+        description = "Read a document, folder or subtree by id or path (e.g. wallets/transactions) as compact lines (default), markdown or yaml. scope is 'canon', a view name, 'tag:<version>' or 'landing:<id>'."
     )]
     fn rdy_read(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
         self.run(p, tools::rdy_read)
     }
 
     #[tool(
-        description = "Everything about one block: fields, body, version (use as base for updates), doc, links in and out, decision status, governing decisions, suspects."
+        description = "By id or path: everything about one block: fields, body, version (use as base for updates), doc, links in and out, decision status, governing decisions, suspects."
     )]
     fn rdy_context(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
         self.run(p, tools::rdy_context)
@@ -83,7 +83,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Blast radius: blocks that depend on, reference or describe the given block, grouped by depth."
+        description = "By id or path: blast radius: blocks that depend on, reference or describe the given block, grouped by depth."
     )]
     fn rdy_impact(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
         self.run(p, tools::rdy_impact)
