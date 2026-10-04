@@ -42,6 +42,20 @@ impl PackSet {
         Ok(pack)
     }
 
+    /// `name` followed by every pack it extends, nearest first.
+    pub fn lineage(&self, name: &str) -> Result<Vec<String>, SchemaError> {
+        let mut out: Vec<String> = vec![];
+        let mut cur = Some(name.to_string());
+        while let Some(n) = cur {
+            if out.contains(&n) {
+                return Err(SchemaError::Cycle(n));
+            }
+            cur = self.raw.get(&n).ok_or_else(|| SchemaError::UnknownPack(n.clone()))?.extends.clone();
+            out.push(n);
+        }
+        Ok(out)
+    }
+
     fn merged(&self, name: &str, seen: &mut Vec<String>) -> Result<Pack, SchemaError> {
         if seen.iter().any(|s| s == name) {
             return Err(SchemaError::Cycle(name.to_string()));

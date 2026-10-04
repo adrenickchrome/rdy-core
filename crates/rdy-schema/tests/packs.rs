@@ -108,3 +108,13 @@ block_types:
         assert!(PackSet::with_builtin().add_yaml(bad).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn lineage_lists_a_pack_and_its_ancestors_nearest_first() {
+    let mut set = PackSet::with_builtin();
+    set.add_yaml("name: team\nversion: \"1\"\nextends: rdy-standard\n").unwrap();
+    set.add_yaml("name: squad\nversion: \"1\"\nextends: team\n").unwrap();
+    assert_eq!(set.lineage("squad").unwrap(), vec!["squad", "team", "rdy-standard"]);
+    assert_eq!(set.lineage("rdy-standard").unwrap(), vec!["rdy-standard"]);
+    assert!(matches!(set.lineage("nope"), Err(SchemaError::UnknownPack(_))));
+}

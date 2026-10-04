@@ -32,6 +32,8 @@ pub struct Rdy {
     root: PathBuf,
     store: Store,
     pack: Pack,
+    /// The project's pack followed by every pack it extends, nearest first.
+    lineage: Vec<String>,
     cache: HashMap<Scope, Materialized>,
     graphs: HashMap<Scope, rdy_graph::Graph>,
 }
@@ -40,7 +42,7 @@ fn io(e: std::io::Error) -> RdyError {
     RdyError::new(E_IO, e.to_string(), "check file permissions and disk space")
 }
 
-fn load_pack(root: &Path, name: &str) -> Result<Pack, RdyError> {
+fn load_pack(root: &Path, name: &str) -> Result<(Pack, Vec<String>), RdyError> {
     let mut set = PackSet::with_builtin();
     let dir = root.join(".rdy/packs");
     if dir.exists() {
@@ -51,7 +53,10 @@ fn load_pack(root: &Path, name: &str) -> Result<Pack, RdyError> {
             set.add_yaml(&text).map_err(|e| RdyError::new(E_CONFIG, format!("{}: {e}", f.display()), "fix the pack file"))?;
         }
     }
-    set.resolve(name).map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "set `pack:` in .rdy/config.yaml to an available pack (rdy-standard is built in)"))
+    let config = |e: rdy_schema::SchemaError| RdyError::new(E_CONFIG, e.to_string(), "set `pack:` in .rdy/config.yaml to an available pack (rdy-standard is built in)");
+    let pack = set.resolve(name).map_err(config)?;
+    let lineage = set.lineage(name).map_err(config)?;
+    Ok((pack, lineage))
 }
 
 impl Rdy {
@@ -74,9 +79,9 @@ impl Rdy {
         }
         let text = std::fs::read_to_string(&cfg_path).map_err(io)?;
         let cfg: Config = serde_yaml_ng::from_str(&text).map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "fix .rdy/config.yaml"))?;
-        let pack = load_pack(project, &cfg.pack)?;
+        let (pack, lineage) = load_pack(project, &cfg.pack)?;
         let store = Store::open(&project.join(".rdy/store"))?;
-        Ok(Rdy { root: project.to_path_buf(), store, pack, cache: HashMap::new(), graphs: HashMap::new() })
+        Ok(Rdy { root: project.to_path_buf(), store, pack, lineage, cache: HashMap::new(), graphs: HashMap::new() })
     }
 
     pub fn root(&self) -> &Path {

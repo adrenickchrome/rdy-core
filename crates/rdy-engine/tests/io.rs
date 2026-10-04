@@ -318,3 +318,55 @@ fn export_creates_missing_parents_and_clears_a_leftover_staging_dir() {
     let names: Vec<_> = std::fs::read_dir(&deeper).unwrap().map(|e| e.unwrap().file_name()).collect();
     assert_eq!(names, vec![std::ffi::OsString::from("exp")]);
 }
+
+fn remove_blob_files(out: &Path) {
+    for f in std::fs::read_dir(out.join("blobs")).unwrap() {
+        std::fs::remove_file(f.unwrap().path()).unwrap();
+    }
+}
+
+#[test]
+fn import_rejects_a_figure_whose_blob_is_missing() {
+    let (_d, out, _a) = setup();
+    remove_blob_files(out.path());
+    assert_import_fails(out.path(), "E_UNKNOWN_REF");
+}
+
+#[test]
+fn import_accepts_a_missing_blob_file_when_the_project_already_has_the_blob() {
+    let (_d, out, _a) = setup();
+    remove_blob_files(out.path());
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    b.store_mut().put_blob(&[0u8, 159, 146, 150, 255]).unwrap();
+    b.import(&founder(), "import", out.path()).unwrap();
+}
+
+#[test]
+fn import_rejects_an_export_from_an_unrelated_pack() {
+    let (_d, out, _a) = setup();
+    std::fs::write(out.path().join("rdy-export.yaml"), "format: 1\npack: other-pack\nscope: canon\n").unwrap();
+    assert_import_fails(out.path(), "E_BAD_INPUT");
+}
+
+#[test]
+fn import_accepts_an_export_into_a_pack_that_extends_its_pack() {
+    let (_d, out, _a) = setup();
+    let b_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(b_dir.path().join(".rdy/packs")).unwrap();
+    std::fs::write(b_dir.path().join(".rdy/packs/team.yaml"), "name: team\nversion: \"1\"\nextends: rdy-standard\n").unwrap();
+    let mut b = Rdy::init(b_dir.path(), "team").unwrap();
+    b.import(&founder(), "import", out.path()).unwrap();
+}
+
+#[test]
+fn a_refused_import_stores_no_blobs() {
+    let (_d, out, _a) = setup();
+    mutate_docs(out.path(), |l| {
+        find(l, "term")["fields"].as_mapping_mut().unwrap().remove("name");
+    });
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    assert_eq!(b.import(&founder(), "import", out.path()).unwrap_err().code, "E_VALIDATION");
+    assert!(!b.store().has(&rdy_store::Store::blob_hash(&[0u8, 159, 146, 150, 255])).unwrap());
+}

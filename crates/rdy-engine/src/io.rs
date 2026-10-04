@@ -174,8 +174,16 @@ impl Rdy {
         if manifest.format != 1 {
             return Err(RdyError::new(E_BAD_INPUT, format!("unsupported export format {}", manifest.format), "this rdy reads export format 1"));
         }
+        if !self.lineage.contains(&manifest.pack) {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("the export was made with pack {:?}; this project uses {:?}, which does not extend it", manifest.pack, self.pack.name),
+                format!("import into a project whose pack is {} or extends it", manifest.pack),
+            ));
+        }
         let blob_dir = dir.join("blobs");
         let mut blob_bytes = vec![];
+        let mut imported_blobs = BTreeSet::new();
         if blob_dir.exists() {
             for entry in std::fs::read_dir(&blob_dir).map_err(io_err)? {
                 let path = entry.map_err(io_err)?.path();
@@ -188,11 +196,9 @@ impl Rdy {
                 if got.to_string() != name {
                     return Err(RdyError::new(E_BAD_INPUT, format!("blob {name} hashes to {got}"), "the export is corrupt; export it again"));
                 }
+                imported_blobs.insert(got);
                 blob_bytes.push(bytes);
             }
-        }
-        for bytes in &blob_bytes {
-            self.store.put_blob(bytes)?;
         }
         let mut files: Vec<_> = std::fs::read_dir(dir.join("docs")).map_err(io_err)?.filter_map(Result::ok).map(|e| e.path()).filter(|p| !is_hidden(p) && p.extension().is_some_and(|x| x == "yaml")).collect();
         files.sort();
@@ -245,6 +251,12 @@ impl Rdy {
                     return Err(RdyError::new(E_UNKNOWN_REF, format!("{} links to {}, which is not in the import", b.id, l.target), "export the whole project"));
                 }
             }
+            if let Some(h) = b.field_str("blob").and_then(|s| s.parse::<Hash>().ok())
+                && !imported_blobs.contains(&h)
+                && !self.store.has(&h)?
+            {
+                return Err(RdyError::new(E_UNKNOWN_REF, format!("{} names blob {h}, which is neither in the export's blobs/ nor in this project", b.id), "export the whole project again: rdy export copies every figure's blob"));
+            }
             let parent = b.parent.as_ref().and_then(|p| incoming.get(p).copied().or_else(|| existing.get(p)));
             issues.extend(validate_block(&self.pack, b, parent));
         }
@@ -252,6 +264,10 @@ impl Rdy {
             let mut e = RdyError::new(E_VALIDATION, "the import does not validate against this project's pack", "fix the listed blocks or use a compatible pack");
             e.issues = issues;
             return Err(e);
+        }
+        // blobs go in only once the import is known to be valid, so a refused import stores nothing
+        for bytes in &blob_bytes {
+            self.store.put_blob(bytes)?;
         }
         let ops: Vec<Op> = blocks.into_iter().map(|block| Op::Create { block }).collect();
         let change = Change { view: view.into(), ops: ops.clone(), deps: vec![], provenance: s.provenance(), justification: None, message: format!("import from {}", dir.display()) };
