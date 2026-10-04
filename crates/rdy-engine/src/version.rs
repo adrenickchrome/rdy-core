@@ -1,9 +1,10 @@
 //! Versions (addendum A): immutable SemVer tags on canon's landings, created only by an approver.
 use crate::error::*;
 use crate::{Rdy, Scope, Session};
-use rdy_model::{Hash, Tag};
+use rdy_model::{Hash, LandingRecord, Tag};
 use serde::Serialize;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 /// How many as-of (`tag:`/`landing:`) snapshots, with their graphs, stay cached at once.
 pub const AS_OF_CACHE_ENTRIES: usize = 4;
@@ -46,6 +47,60 @@ pub fn parse_version(name: &str) -> Result<semver::Version, RdyError> {
         ));
     }
     Ok(v)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct VersionRef {
+    pub name: String,
+    pub landing: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ViewPosition {
+    pub name: String,
+    pub unlanded_changes: u32,
+}
+
+/// Where a scope stands relative to the versions: shown by rdy status, MCP and every rendered page.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct VersionPosition {
+    /// The highest version at or before the scope's base landing.
+    pub version: Option<VersionRef>,
+    /// Landings after that version, up to and including the base landing.
+    pub landings_since: u32,
+    /// For a view: its name and its changes not yet in canon.
+    pub view: Option<ViewPosition>,
+    /// The scope is an as-of snapshot (tag: or landing:), which never changes.
+    pub frozen: bool,
+    pub label: String,
+}
+
+fn plural(n: u32, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+fn label_of(
+    version: &Option<VersionRef>,
+    since: u32,
+    view: &Option<ViewPosition>,
+    frozen: bool,
+) -> String {
+    let mut out = match version {
+        None => "no version yet".to_string(),
+        Some(v) if since == 0 => v.name.clone(),
+        Some(v) => format!("{} + {}", v.name, plural(since, "landing", "landings")),
+    };
+    if let Some(v) = view {
+        out.push_str(&format!(
+            " · view {}, {}",
+            v.name,
+            plural(v.unlanded_changes, "unlanded change", "unlanded changes")
+        ));
+    }
+    if frozen {
+        out.push_str(" · frozen snapshot");
+    }
+    out
 }
 
 /// The candidates `text` names: a full hash, or a unique hex prefix of at least 6 characters.
@@ -214,6 +269,47 @@ impl Rdy {
         };
         self.store.put_tag(&tag)?;
         Ok(info(&tag))
+    }
+
+    /// The version position of `scope` (see `VersionPosition`).
+    pub fn version_position(&self, scope: &Scope) -> Result<VersionPosition, RdyError> {
+        let (base, view) = match scope {
+            Scope::Canon => (self.store.canon_head()?, None),
+            Scope::At(h) => (Some(*h), None),
+            Scope::View(name) => {
+                let v = self.store.view(name)?;
+                let pos = ViewPosition {
+                    name: name.clone(),
+                    unlanded_changes: v.changes.len() as u32,
+                };
+                (v.base, Some(pos))
+            }
+        };
+        // the highest version on each landing (version_tags is in ascending order)
+        let mut on: HashMap<Hash, String> = HashMap::new();
+        for (_, t) in self.version_tags()? {
+            on.insert(t.landing, t.name);
+        }
+        let (mut since, mut cur, mut version) = (0u32, base, None);
+        while let Some(h) = cur {
+            if let Some(name) = on.get(&h) {
+                version = Some(VersionRef {
+                    name: name.clone(),
+                    landing: h.to_string(),
+                });
+                break;
+            }
+            since += 1;
+            cur = self.store.get::<LandingRecord>(&h)?.prev;
+        }
+        let frozen = matches!(scope, Scope::At(_));
+        Ok(VersionPosition {
+            label: label_of(&version, since, &view, frozen),
+            version,
+            landings_since: since,
+            view,
+            frozen,
+        })
     }
 }
 

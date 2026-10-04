@@ -92,10 +92,30 @@ fn spec_11_targets_at_100k_blocks() {
     let query_p99 = p99(queries.clone());
     println!("queries: {}", dist(&queries));
 
+    // The generator never lands, so land the work view once and version the head; then time the
+    // version position (it walks landings back to the highest version at or before its base).
+    let approver = Session {
+        actor: "human:perf".into(),
+        run: None,
+        role: Role::Approver,
+    };
+    let p = r.propose(&s, "work", "seed").unwrap();
+    r.land(&approver, &p.id).unwrap();
+    r.tag(&approver, "v0.1.0", None, None).unwrap();
+    let mut positions = vec![];
+    for _ in 0..200 {
+        let t = Instant::now();
+        r.version_position(&Scope::Canon).unwrap();
+        positions.push(t.elapsed());
+    }
+    let position_p99 = p99(positions.clone());
+    println!("version_position: {}", dist(&positions));
+
     // Measure everything first so one run reports every number, then check each target.
     println!("cold start (median of 3) {cold:?} {colds:?} (target < 2 s)");
     println!("write p99 {write_p99:?} (target < 5 ms)");
     println!("query p99 {query_p99:?} (target < 5 ms)");
+    println!("version_position p99 {position_p99:?} (target < 5 ms)");
     let mut misses = vec![];
     if cold >= Duration::from_secs(2) {
         misses.push(format!("cold start {cold:?} (target < 2 s)"));
@@ -105,6 +125,11 @@ fn spec_11_targets_at_100k_blocks() {
     }
     if query_p99 >= Duration::from_millis(5) {
         misses.push(format!("query p99 {query_p99:?} (target < 5 ms)"));
+    }
+    if position_p99 >= Duration::from_millis(5) {
+        misses.push(format!(
+            "version_position p99 {position_p99:?} (target < 5 ms)"
+        ));
     }
     assert!(
         misses.is_empty(),

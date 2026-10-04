@@ -192,3 +192,126 @@ fn versions_are_listed_oldest_first() {
         "SemVer precedence, not string order"
     );
 }
+
+fn label(r: &Rdy, scope: &Scope) -> String {
+    r.version_position(scope).unwrap().label
+}
+
+#[test]
+fn position_without_versions() {
+    let (_d, r, _) = project(2);
+    let p = r.version_position(&Scope::Canon).unwrap();
+    assert_eq!(p.version, None);
+    assert_eq!(p.landings_since, 2);
+    assert_eq!(p.label, "no version yet");
+    let (_d, r, _) = project(0);
+    assert_eq!(label(&r, &Scope::Canon), "no version yet");
+}
+
+#[test]
+fn position_at_and_after_a_version() {
+    let (_d, mut r, l) = project(1);
+    r.tag(&founder(), "v1.0.0", None, None).unwrap();
+    let p = r.version_position(&Scope::Canon).unwrap();
+    assert_eq!(
+        p.version,
+        Some(VersionRef {
+            name: "v1.0.0".into(),
+            landing: l[0].clone()
+        })
+    );
+    assert_eq!((p.landings_since, p.frozen), (0, false));
+    assert_eq!(p.label, "v1.0.0");
+    land_one(&mut r, "Next");
+    assert_eq!(label(&r, &Scope::Canon), "v1.0.0 + 1 landing");
+    land_one(&mut r, "Next 2");
+    land_one(&mut r, "Next 3");
+    assert_eq!(label(&r, &Scope::Canon), "v1.0.0 + 3 landings");
+    // two versions on one landing: the higher one is shown
+    r.tag(&founder(), "v1.1.0", None, None).unwrap();
+    r.tag(&founder(), "v1.1.1", None, None).unwrap();
+    assert_eq!(label(&r, &Scope::Canon), "v1.1.1");
+}
+
+#[test]
+fn position_of_a_view_with_unlanded_changes() {
+    let (_d, mut r, _) = project(1);
+    r.tag(&founder(), "v1.0.0", None, None).unwrap();
+    for _ in 0..3 {
+        land_one(&mut r, "More");
+    }
+    for t in ["One", "Two"] {
+        r.write(
+            &writer(),
+            WriteRequest {
+                view: "run-1".into(),
+                ops: serde_json::from_value(json!([
+                    {"op": "create", "type": "doc", "fields": {"title": t, "doc_type": "glossary"}}
+                ]))
+                .unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .unwrap();
+    }
+    let p = r.version_position(&Scope::View("run-1".into())).unwrap();
+    assert_eq!(
+        p.view,
+        Some(ViewPosition {
+            name: "run-1".into(),
+            unlanded_changes: 2
+        })
+    );
+    assert_eq!(
+        p.label,
+        "v1.0.0 + 3 landings · view run-1, 2 unlanded changes"
+    );
+}
+
+#[test]
+fn a_view_behind_canon_counts_to_its_own_base() {
+    let (_d, mut r, _) = project(1);
+    r.tag(&founder(), "v1.0.0", None, None).unwrap();
+    r.write(
+        &writer(),
+        WriteRequest {
+            view: "slow".into(),
+            ops: serde_json::from_value(json!([
+                {"op": "create", "type": "doc", "fields": {"title": "Slow", "doc_type": "glossary"}}
+            ]))
+            .unwrap(),
+            justification: None,
+            message: String::new(),
+        },
+    )
+    .unwrap();
+    land_one(&mut r, "Elsewhere"); // canon moves on; view `slow` still rests on v1.0.0
+    assert_eq!(label(&r, &Scope::Canon), "v1.0.0 + 1 landing");
+    assert_eq!(
+        label(&r, &Scope::View("slow".into())),
+        "v1.0.0 · view slow, 1 unlanded change"
+    );
+}
+
+#[test]
+fn position_of_an_as_of_scope_is_frozen() {
+    let (_d, mut r, l) = project(1);
+    r.tag(&founder(), "v1.0.0", None, None).unwrap();
+    let l1 = land_one(&mut r, "B");
+    let l2 = land_one(&mut r, "C");
+    r.tag(&founder(), "v2.0.0", None, None).unwrap();
+    let at = r.resolve_scope("tag:v1.0.0").unwrap();
+    assert_eq!(at, Scope::At(l[0].parse().unwrap()));
+    let p = r.version_position(&at).unwrap();
+    assert!(p.frozen);
+    assert_eq!(p.label, "v1.0.0 · frozen snapshot");
+    assert_eq!(
+        label(&r, &Scope::At(l1.parse().unwrap())),
+        "v1.0.0 + 1 landing · frozen snapshot"
+    );
+    assert_eq!(
+        label(&r, &Scope::At(l2.parse().unwrap())),
+        "v2.0.0 · frozen snapshot"
+    );
+}
