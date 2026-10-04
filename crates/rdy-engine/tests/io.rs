@@ -253,12 +253,33 @@ fn import_rejects_duplicate_id() {
     assert_import_fails(out.path(), "E_ALREADY_EXISTS");
 }
 
+/// A format-1 export holding one doc file with `text`.
+fn format_1(text: &str) -> tempfile::TempDir {
+    let out = tempfile::tempdir().unwrap();
+    std::fs::write(
+        out.path().join("rdy-export.yaml"),
+        "format: 1\npack: rdy-standard\nscope: canon\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(out.path().join("docs")).unwrap();
+    std::fs::write(out.path().join("docs/d-AAAAB.yaml"), text).unwrap();
+    out
+}
+
+const F1_DOC: &str = "- id: d-AAAAB\n  type: doc\n  order: V\n  fields:\n    title: Old Notes\n    doc_type: glossary\n";
+
+// in format 2 a doc file's blocks must lead to its doc (E_FILE_FORMAT); format 1 has no such
+// rule, so the import's own parent checks are exercised with it
 #[test]
 fn import_rejects_dangling_parent() {
     let (_d, out, _a) = setup();
     mutate_docs(out.path(), |l| {
         find(l, "section")["parent"] = "d-ZZZZZ".into()
     });
+    assert_import_fails(out.path(), "E_FILE_FORMAT");
+    let out = format_1(&format!(
+        "{F1_DOC}- id: s-AAAAB\n  type: section\n  parent: d-ZZZZZ\n  order: V\n  fields:\n    title: Terms\n"
+    ));
     assert_import_fails(out.path(), "E_UNKNOWN_BLOCK");
 }
 
@@ -269,6 +290,10 @@ fn import_rejects_parent_cycle() {
         let t = id_of(l, "term");
         find(l, "section")["parent"] = t.into();
     });
+    assert_import_fails(out.path(), "E_FILE_FORMAT");
+    let out = format_1(&format!(
+        "{F1_DOC}- id: s-AAAAB\n  type: section\n  parent: s-AAAAC\n  order: V\n  fields:\n    title: A\n- id: s-AAAAC\n  type: section\n  parent: s-AAAAB\n  order: V\n  fields:\n    title: B\n"
+    ));
     assert_import_fails(out.path(), "E_BAD_INPUT");
 }
 
@@ -279,6 +304,10 @@ fn import_rejects_self_parent() {
         let s = id_of(l, "section");
         find(l, "section")["parent"] = s.into();
     });
+    assert_import_fails(out.path(), "E_FILE_FORMAT");
+    let out = format_1(&format!(
+        "{F1_DOC}- id: s-AAAAB\n  type: section\n  parent: s-AAAAB\n  order: V\n  fields:\n    title: A\n"
+    ));
     assert_import_fails(out.path(), "E_BAD_INPUT");
 }
 
@@ -844,4 +873,35 @@ fn export_refuses_sibling_names_that_clash() {
     let e = a.export(&Scope::View("work".into()), &out).unwrap_err();
     assert_eq!(e.code, "E_PATH_CLASH", "{e}");
     assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn import_refuses_a_second_doc_or_a_folder_inside_a_doc_file() {
+    for ty in ["doc", "folder"] {
+        let (_d, out, _a) = setup();
+        mutate_docs(out.path(), |l| {
+            let head = id_of(l, "doc");
+            let entry: serde_yaml_ng::Value = serde_yaml_ng::from_str(&if ty == "doc" {
+                format!("{{id: d-QQQQQ, type: doc, parent: {head}, order: W, fields: {{name: other, title: Other, doc_type: glossary}}}}")
+            } else {
+                format!("{{id: fd-QQQQQ, type: folder, parent: {head}, order: W}}")
+            })
+            .unwrap();
+            l.push(entry);
+        });
+        assert_import_fails(out.path(), "E_FILE_FORMAT");
+    }
+}
+
+#[test]
+fn import_refuses_an_inner_block_whose_parent_is_in_another_doc_file() {
+    let (_d, out, _a) = setup();
+    let mut head = String::new();
+    mutate_docs(out.path(), |l| head = id_of(l, "doc"));
+    std::fs::write(
+        out.path().join("docs/other.yaml"),
+        format!("- id: d-QQQQQ\n  type: doc\n  order: W\n  fields:\n    title: Other\n    doc_type: glossary\n- id: s-QQQQQ\n  type: section\n  parent: {head}\n  order: V\n  fields:\n    title: Terms\n"),
+    )
+    .unwrap();
+    assert_import_fails(out.path(), "E_FILE_FORMAT");
 }

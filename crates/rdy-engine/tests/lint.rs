@@ -171,3 +171,51 @@ fn json_shape() {
     }
     assert_eq!(first["severity"], "error");
 }
+
+#[test]
+fn a_doc_file_holds_one_doc_and_no_folders() {
+    for (ty, extra) in [
+        (
+            "doc",
+            "  fields:\n    name: other\n    title: Other\n    doc_type: glossary\n",
+        ),
+        ("folder", ""),
+    ] {
+        let t = tempfile::tempdir().unwrap();
+        let id = if ty == "doc" { "d-BBBBB" } else { "fd-BBBBB" };
+        put(
+            t.path(),
+            "x.yaml",
+            &format!("{DOC}- id: {id}\n  type: {ty}\n  parent: d-AAAAA\n  order: W\n{extra}"),
+        );
+        let d = one(t.path());
+        assert_eq!(
+            (d.code.as_str(), d.line, d.column),
+            ("E_FILE_FORMAT", 14, 3),
+            "{ty}: {d:?}"
+        );
+        assert!(d.message.contains("one doc"), "{d:?}");
+    }
+}
+
+#[test]
+fn inner_blocks_stay_inside_their_files_doc() {
+    let t = tempfile::tempdir().unwrap();
+    put(t.path(), "a.yaml", DOC);
+    // s-BBBBB's parent is the doc of another file
+    put(
+        t.path(),
+        "b.yaml",
+        "- id: d-BBBBB\n  type: doc\n  order: W\n  fields:\n    title: Other\n    doc_type: glossary\n- id: s-BBBBB\n  type: section\n  parent: d-AAAAA\n  order: V\n  fields:\n    title: Terms\n",
+    );
+    let d = one(t.path());
+    assert_eq!(
+        (d.code.as_str(), d.line, d.column),
+        ("E_FILE_FORMAT", 9, 3),
+        "{d:?}"
+    );
+    assert!(
+        d.file.ends_with("b.yaml") && d.message.contains("d-AAAAA"),
+        "{d:?}"
+    );
+}

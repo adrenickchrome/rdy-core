@@ -398,6 +398,8 @@ impl Reader {
             ));
             return;
         }
+        let mut head: Option<BlockId> = None;
+        let mut inner: Vec<Loaded> = vec![];
         for (i, v) in items.into_iter().enumerate() {
             let Some(mut l) = self.entry(v, &pos, vec![Seg::Index(i)], shown) else {
                 continue;
@@ -421,8 +423,63 @@ impl Reader {
                 l.block
                     .fields
                     .insert("name".into(), FieldValue::Str(name.into()));
+                head = Some(l.block.id.clone());
+                self.loaded.push(l);
+                continue;
             }
-            self.loaded.push(l);
+            if tree::is_tree_type(&l.block.block_type) {
+                let at = l.keys.get("type").copied().unwrap_or(l.at);
+                self.diags.push(Diagnostic::error(
+                    shown,
+                    at,
+                    E_FILE_FORMAT,
+                    format!(
+                        "{} is a {}, but a doc file holds one doc; put folders and other docs in their own files",
+                        l.block.id, l.block.block_type
+                    ),
+                    "move the entry to its own file (a doc) or directory (a folder)",
+                ));
+                continue;
+            }
+            inner.push(l);
         }
+        // every block after the doc sits inside it: its parents stay in this file and end at the doc
+        if let Some(head) = head {
+            let parents: BTreeMap<&BlockId, Option<&BlockId>> = inner
+                .iter()
+                .map(|l| (&l.block.id, l.block.parent.as_ref()))
+                .collect();
+            for l in &inner {
+                let Some(p) = l.block.parent.as_ref() else {
+                    continue; // validation reports the missing parent (E_ORPHAN)
+                };
+                let mut cur = Some(p);
+                let mut inside = false;
+                for _ in 0..=parents.len() {
+                    match cur {
+                        Some(c) if *c == head => {
+                            inside = true;
+                            break;
+                        }
+                        Some(c) => cur = parents.get(c).copied().flatten(),
+                        None => break,
+                    }
+                }
+                if !inside {
+                    let at = l.keys.get("parent").copied().unwrap_or(l.at);
+                    self.diags.push(Diagnostic::error(
+                        shown,
+                        at,
+                        E_FILE_FORMAT,
+                        format!(
+                            "{} has parent {p}, which does not lead to this file's doc {head}: a doc file holds only its doc and the blocks inside it",
+                            l.block.id
+                        ),
+                        format!("set parent to {head} or a block inside it in this file; a block of another doc belongs in that doc's file"),
+                    ));
+                }
+            }
+        }
+        self.loaded.extend(inner);
     }
 }
