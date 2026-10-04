@@ -41,3 +41,42 @@ fn context_and_suspects_after_landing() {
     let st = r.context(&Scope::Canon, &BlockId::parse(&did).unwrap()).unwrap().status;
     assert!(matches!(st, Some(rdy_graph::DerivedStatus::Superseded { .. })));
 }
+
+fn setup(r: &mut Rdy) -> (String, String) {
+    let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Wallets", "doc_type": "decisions-log"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Decisions"}}
+    ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let s = res.created["$s"].clone();
+    let d = r.decide(&agent(), "work", DecisionInput { parent: s.clone(), statement: "Wallets don't move".into(), ..Default::default() }).unwrap();
+    (s, d.created["$decision"].clone())
+}
+
+#[test]
+fn graph_cache_is_refreshed_after_a_view_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let (s, did) = setup(&mut r);
+    let work = Scope::View("work".into());
+    let id = BlockId::parse(&did).unwrap();
+    assert!(r.context(&work, &id).unwrap().incoming.iter().all(|e| e.kind != rdy_graph::EdgeKind::References));
+    r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+        {"op": "create", "type": "claim", "parent": s, "body": format!("See {{{{{did}}}}}.")}
+    ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let after = r.context(&work, &id).unwrap();
+    assert!(after.incoming.iter().any(|e| e.kind == rdy_graph::EdgeKind::References));
+}
+
+#[test]
+fn graph_cache_is_refreshed_after_landing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let (_s, did) = setup(&mut r);
+    let id = BlockId::parse(&did).unwrap();
+    let p = r.propose(&agent(), "work", "seed").unwrap();
+    // warm the canon caches before landing (decision absent from canon)
+    assert!(r.context(&Scope::Canon, &id).is_err());
+    r.land(&founder(), &p.id).unwrap();
+    let ctx = r.context(&Scope::Canon, &id).unwrap();
+    assert!(matches!(ctx.status, Some(rdy_graph::DerivedStatus::Live)));
+}

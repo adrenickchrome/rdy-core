@@ -189,6 +189,12 @@ impl Graph {
                 if matches!(&e.kind, EdgeKind::Link(n) if n == decision::SUPERSEDES || n == decision::REVOKES) {
                     continue;
                 }
+                // a decision naming, in its text, an id it supersedes or revokes is expected
+                if e.kind == EdgeKind::References
+                    && self.outgoing(&e.from).iter().any(|o| o.to == e.to && matches!(&o.kind, EdgeKind::Link(n) if n == decision::SUPERSEDES || n == decision::REVOKES))
+                {
+                    continue;
+                }
                 let reason = match self.status(&e.to) {
                     Some(DerivedStatus::Superseded { .. }) => Some("superseded"),
                     Some(DerivedStatus::Revoked { .. }) => Some("revoked"),

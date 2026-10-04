@@ -153,17 +153,21 @@ impl Rdy {
         }
 
         // 4. write the acceptance change, then land
-        let target = match accept {
-            None => pid,
-            Some(change) => {
-                let mut p = p;
-                let id = self.store.commit_to_view(&p.view, change)?;
-                p.changes.push(id);
-                self.store.put(rdy_store::kinds::PROPOSAL, &p)?
-            }
-        };
-        let landing = self.store.land(&target, s.provenance())?;
+        let result = (|| -> Result<_, RdyError> {
+            let target = match accept {
+                None => pid,
+                Some(change) => {
+                    let mut p = p;
+                    let id = self.store.commit_to_view(&p.view, change)?;
+                    p.changes.push(id);
+                    self.store.put(rdy_store::kinds::PROPOSAL, &p)?
+                }
+            };
+            Ok(self.store.land(&target, s.provenance())?)
+        })();
+        // the view may have changed even if a later step failed: never leave caches stale
         self.invalidate();
+        let landing = result?;
         Ok(landing.to_string())
     }
 }

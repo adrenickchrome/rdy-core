@@ -94,3 +94,91 @@ fn suspects_ignore_status_only_changes() {
     let s = Graph::build(&blocks).suspects(&blocks, &lookup);
     assert!(s.iter().any(|x| x.reason == "superseded" && x.block.as_str() == "c-CHAMP"));
 }
+
+fn claim_pinned(id: &str, target: &Block) -> Block {
+    let mut c = b(id, "claim", Some("s-SSSSS"));
+    c.body = format!("Per {{{{{}}}}}.", target.id);
+    c.pins.insert(target.id.clone(), target.version_hash());
+    c
+}
+
+fn no_old(_: &Hash) -> Option<Block> {
+    None
+}
+
+#[test]
+fn accepted_revoker_makes_referrers_suspect_proposed_does_not() {
+    let target = dec("D-AAAAA", "accepted");
+    let claim = claim_pinned("c-CHAMP", &target);
+    let mut revoker = dec("D-BBBBB", "accepted");
+    link(&mut revoker, "revokes", "D-AAAAA", None);
+    let blocks = map(vec![target.clone(), claim.clone(), revoker]);
+    let g = Graph::build(&blocks);
+    assert!(matches!(g.status(&target.id), Some(DerivedStatus::Revoked { .. })));
+    let s = g.suspects(&blocks, &no_old);
+    assert!(s.iter().any(|x| x.reason == "revoked" && x.block == claim.id));
+
+    let mut proposed = dec("D-BBBBB", "proposed");
+    link(&mut proposed, "revokes", "D-AAAAA", None);
+    let blocks = map(vec![target, claim, proposed]);
+    let g = Graph::build(&blocks);
+    assert!(g.suspects(&blocks, &no_old).is_empty());
+}
+
+#[test]
+fn pinned_target_absent_is_deleted() {
+    let gone = dec("D-AAAAA", "accepted");
+    let claim = claim_pinned("c-CHAMP", &gone);
+    let blocks = map(vec![claim]);
+    let s = Graph::build(&blocks).suspects(&blocks, &no_old);
+    assert_eq!(s.len(), 1);
+    assert_eq!(s[0].reason, "deleted");
+}
+
+#[test]
+fn partial_supersede_is_not_suspect_and_superseder_is_not_suspect() {
+    let target = dec("D-AAAAA", "accepted");
+    let claim = claim_pinned("c-CHAMP", &target);
+    let mut sup = dec("D-BBBBB", "accepted");
+    link(&mut sup, "supersedes", "D-AAAAA", Some("the moves part"));
+    let blocks = map(vec![target.clone(), claim, sup.clone()]);
+    let g = Graph::build(&blocks);
+    assert!(matches!(g.status(&target.id), Some(DerivedStatus::PartiallySuperseded { .. })));
+    assert!(g.suspects(&blocks, &no_old).is_empty());
+
+    let mut whole = dec("D-BBBBB", "accepted");
+    link(&mut whole, "supersedes", "D-AAAAA", None);
+    let blocks = map(vec![target, whole.clone()]);
+    let s = Graph::build(&blocks).suspects(&blocks, &no_old);
+    assert!(s.iter().all(|x| x.block != whole.id));
+}
+
+#[test]
+fn decision_naming_the_old_id_it_supersedes_is_not_suspect() {
+    let target = dec("D-AAAAA", "accepted");
+    let mut sup = dec("D-BBBBB", "accepted");
+    sup.fields.insert("statement".into(), FieldValue::Str("replaces {{D-AAAAA}}".into()));
+    link(&mut sup, "supersedes", "D-AAAAA", None);
+    sup.pins.insert(target.id.clone(), target.version_hash());
+    let blocks = map(vec![target, sup.clone()]);
+    let g = Graph::build(&blocks);
+    assert!(g.outgoing(&sup.id).iter().any(|e| e.kind == EdgeKind::References), "the reference edge exists");
+    assert!(g.suspects(&blocks, &no_old).iter().all(|x| x.block != sup.id));
+}
+
+#[test]
+fn impact_depth_cutoff_and_diamond() {
+    let t = b("t-MEDGR", "term", Some("s-SSSSS"));
+    let mut x = b("c-XXXXX", "claim", Some("s-SSSSS"));
+    x.body = "{{t-MEDGR}}".into();
+    let mut y = b("c-YYYYY", "claim", Some("s-SSSSS"));
+    y.body = "{{t-MEDGR}}".into();
+    let mut z = b("n-ZZZZZ", "note", Some("s-SSSSS"));
+    z.body = "{{c-XXXXX}} {{c-YYYYY}}".into();
+    let g = Graph::build(&map(vec![t, x, y, z]));
+    let id = BlockId::parse("t-MEDGR").unwrap();
+    let d1: Vec<_> = g.impact(&id, 1).into_iter().map(|(d, i)| (d, i.to_string())).collect();
+    assert_eq!(d1, vec![(1, "c-XXXXX".into()), (1, "c-YYYYY".into())]);
+    let d3: Vec<_> = g.impact(&id, 3).into_iter().map(|(d, i)| (d, i.to_string())).collect();
+    assert_eq!(d3, vec![(1, "c-XXXXX".into()), (1, "c-YYYYY".into()), (2, "n-ZZZZZ".into())]);
+}
