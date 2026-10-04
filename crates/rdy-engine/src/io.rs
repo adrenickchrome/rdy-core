@@ -1,36 +1,38 @@
+use crate::Materialized;
 use crate::error::*;
 use crate::query::field_json;
+use crate::tree_io::{self, FOLDER_FILE};
 use crate::write::{LinkInput, OpInput, WriteRequest, WriteResult};
 use crate::{Rdy, Scope, Session};
-use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Link, Op};
+use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Link, Op, tree};
 use rdy_schema::{has_errors, validate_block};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 #[derive(Serialize, Deserialize)]
-struct LinkYaml {
+pub(crate) struct LinkYaml {
     target: BlockId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     part: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct BlockYaml {
-    id: BlockId,
+pub(crate) struct BlockYaml {
+    pub(crate) id: BlockId,
     #[serde(rename = "type")]
-    block_type: String,
+    pub(crate) block_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    parent: Option<BlockId>,
-    order: String,
+    pub(crate) parent: Option<BlockId>,
+    pub(crate) order: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    fields: BTreeMap<String, serde_yaml_ng::Value>,
+    pub(crate) fields: BTreeMap<String, serde_yaml_ng::Value>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    body: String,
+    pub(crate) body: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    links: BTreeMap<String, Vec<LinkYaml>>,
+    pub(crate) links: BTreeMap<String, Vec<LinkYaml>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pins: BTreeMap<BlockId, String>,
+    pub(crate) pins: BTreeMap<BlockId, String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -43,15 +45,134 @@ struct Manifest {
 #[derive(Clone, Debug, Serialize)]
 pub struct ExportSummary {
     pub docs: usize,
+    pub folders: usize,
     pub blocks: usize,
     pub blobs: usize,
+    pub warnings: Vec<String>,
+}
+
+/// Writes the folders and docs under `parent` into `dir`: a folder is a directory holding
+/// `_folder.yaml`, a doc is `<name>.yaml`. Neither file records the block's name or parent.
+fn export_level(
+    m: &Materialized,
+    parent: Option<&BlockId>,
+    dir: &Path,
+    summary: &mut ExportSummary,
+    blobs: &mut BTreeMap<Hash, BlockId>,
+) -> Result<(), RdyError> {
+    let names = m.names_under(parent);
+    for b in m.children(parent) {
+        let Some(name) = names.get(&b.id) else {
+            continue;
+        };
+        let mut head = to_yaml_struct(b);
+        head.parent = None;
+        head.fields.remove("name");
+        summary.blocks += 1;
+        if b.block_type == tree::FOLDER {
+            let sub = dir.join(name);
+            std::fs::create_dir_all(&sub).map_err(io_err)?;
+            std::fs::write(
+                sub.join(FOLDER_FILE),
+                serde_yaml_ng::to_string(&head).expect("folder yaml"),
+            )
+            .map_err(io_err)?;
+            summary.folders += 1;
+            export_level(m, Some(&b.id), &sub, summary, blobs)?;
+            continue;
+        }
+        if b.field_str("name").is_none() {
+            summary.warnings.push(format!(
+                "doc {} has no stored name: exported as {name}.yaml; importing it stores that name, so its version hash changes once",
+                b.id
+            ));
+        }
+        let mut list = vec![head];
+        let mut stack = m.children(Some(&b.id));
+        stack.reverse();
+        while let Some(c) = stack.pop() {
+            list.push(to_yaml_struct(c));
+            if let Some(h) = c.field_str("blob").and_then(|s| s.parse::<Hash>().ok()) {
+                blobs.entry(h).or_insert_with(|| c.id.clone());
+            }
+            let mut kids = m.children(Some(&c.id));
+            kids.reverse();
+            stack.extend(kids);
+        }
+        summary.blocks += list.len() - 1;
+        summary.docs += 1;
+        std::fs::create_dir_all(dir).map_err(io_err)?;
+        std::fs::write(
+            dir.join(format!("{name}.yaml")),
+            serde_yaml_ng::to_string(&list).expect("doc yaml"),
+        )
+        .map_err(io_err)?;
+    }
+    Ok(())
+}
+
+/// The M1 flat layout: `docs/*.yaml`, one list of blocks per doc.
+fn read_format_1(dir: &Path) -> Result<Vec<Block>, RdyError> {
+    let mut files: Vec<_> = std::fs::read_dir(dir.join("docs"))
+        .map_err(io_err)?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| !is_hidden(p) && p.extension().is_some_and(|x| x == "yaml"))
+        .collect();
+    files.sort();
+    let mut blocks: Vec<Block> = vec![];
+    for f in files {
+        let text = std::fs::read_to_string(&f).map_err(io_err)?;
+        let list: Vec<BlockYaml> = serde_yaml_ng::from_str(&text).map_err(|e| {
+            RdyError::new(
+                E_BAD_INPUT,
+                format!("{}: {e}", f.display()),
+                "fix or re-export the file",
+            )
+        })?;
+        for y in list {
+            blocks.push(from_yaml_struct(y)?);
+        }
+    }
+    Ok(blocks)
+}
+
+/// A format-1 export from M1 has docs without a name: give each the name readers already use,
+/// de-duplicated against names under the same parent in the import and in the view.
+fn assign_missing_names(blocks: &mut [Block], existing: &Materialized) {
+    let mut taken: BTreeMap<Option<BlockId>, BTreeSet<String>> = BTreeMap::new();
+    for b in blocks.iter().filter(|b| tree::is_tree_type(&b.block_type)) {
+        let set = taken.entry(b.parent.clone()).or_insert_with(|| {
+            existing
+                .names_under(b.parent.as_ref())
+                .into_values()
+                .map(|n| n.to_ascii_lowercase())
+                .collect()
+        });
+        if let Some(n) = b.field_str("name") {
+            set.insert(n.to_ascii_lowercase());
+        }
+    }
+    let mut nameless: Vec<usize> = (0..blocks.len())
+        .filter(|&i| blocks[i].block_type == tree::DOC && blocks[i].field_str("name").is_none())
+        .collect();
+    nameless.sort_by(|&a, &b| blocks[a].id.cmp(&blocks[b].id));
+    for i in nameless {
+        let set = taken.entry(blocks[i].parent.clone()).or_default();
+        let n = tree::dedupe(
+            &tree::default_name(blocks[i].field_str("title"), &blocks[i].id),
+            set,
+        );
+        set.insert(n.to_ascii_lowercase());
+        blocks[i].fields.insert("name".into(), FieldValue::Str(n));
+    }
 }
 
 fn io_err(e: std::io::Error) -> RdyError {
     RdyError::new(E_IO, e.to_string(), "check the path and permissions")
 }
 
-fn to_yaml_struct(b: &Block) -> BlockYaml {
+pub(crate) fn to_yaml_struct(b: &Block) -> BlockYaml {
     BlockYaml {
         id: b.id.clone(),
         block_type: b.block_type.clone(),
@@ -86,7 +207,7 @@ fn to_yaml_struct(b: &Block) -> BlockYaml {
     }
 }
 
-fn from_yaml_struct(y: BlockYaml) -> Result<Block, RdyError> {
+pub(crate) fn from_yaml_struct(y: BlockYaml) -> Result<Block, RdyError> {
     let bad = |m: String| RdyError::new(E_BAD_INPUT, m, "fix the YAML and retry");
     Ok(Block {
         id: y.id,
@@ -190,29 +311,14 @@ impl Rdy {
         std::fs::create_dir_all(out.join("blobs")).map_err(io_err)?;
         let mut summary = ExportSummary {
             docs: 0,
+            folders: 0,
             blocks: 0,
             blobs: 0,
+            warnings: vec![],
         };
         // each blob, with the first figure that names it
         let mut blobs = BTreeMap::new();
-        for doc in m.children(None) {
-            let mut list = vec![];
-            let mut stack = vec![doc];
-            while let Some(b) = stack.pop() {
-                list.push(to_yaml_struct(b));
-                if let Some(h) = b.field_str("blob").and_then(|s| s.parse::<Hash>().ok()) {
-                    blobs.entry(h).or_insert_with(|| b.id.clone());
-                }
-                let mut kids = m.children(Some(&b.id));
-                kids.reverse();
-                stack.extend(kids);
-            }
-            summary.blocks += list.len();
-            summary.docs += 1;
-            let text = serde_yaml_ng::to_string(&list).expect("doc yaml");
-            std::fs::write(out.join("docs").join(format!("{}.yaml", doc.id)), text)
-                .map_err(io_err)?;
-        }
+        export_level(&m, None, &out.join("docs"), &mut summary, &mut blobs)?;
         for (h, figure) in &blobs {
             let bytes = self.store.get_blob(h).map_err(|e| match e {
                 rdy_store::StoreError::NotFound(_) => RdyError::new(E_NOT_FOUND, format!("{figure} names blob {h}, which is not in the store"), format!("attach the asset again (rdy_asset) and point {figure} at it, or delete {figure}")),
@@ -228,7 +334,7 @@ impl Rdy {
             Scope::At(h) => format!("landing:{h}"),
         };
         let manifest = Manifest {
-            format: 1,
+            format: 2,
             pack: self.pack.name.clone(),
             scope: scope_name,
         };
@@ -264,11 +370,11 @@ impl Rdy {
                 "re-export the project",
             )
         })?;
-        if manifest.format != 1 {
+        if !(1..=2).contains(&manifest.format) {
             return Err(RdyError::new(
                 E_BAD_INPUT,
                 format!("unsupported export format {}", manifest.format),
-                "this rdy reads export format 1",
+                "this rdy reads export formats 1 and 2",
             ));
         }
         if !self.lineage.contains(&manifest.pack) {
@@ -310,29 +416,23 @@ impl Rdy {
                 blob_bytes.push(bytes);
             }
         }
-        let mut files: Vec<_> = std::fs::read_dir(dir.join("docs"))
-            .map_err(io_err)?
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| !is_hidden(p) && p.extension().is_some_and(|x| x == "yaml"))
-            .collect();
-        files.sort();
-        let mut blocks: Vec<Block> = vec![];
-        for f in files {
-            let text = std::fs::read_to_string(&f).map_err(io_err)?;
-            let list: Vec<BlockYaml> = serde_yaml_ng::from_str(&text).map_err(|e| {
-                RdyError::new(
-                    E_BAD_INPUT,
-                    format!("{}: {e}", f.display()),
-                    "fix or re-export the file",
-                )
-            })?;
-            for y in list {
-                blocks.push(from_yaml_struct(y)?);
+        let mut blocks: Vec<Block> = match manifest.format {
+            1 => read_format_1(dir)?,
+            2 => {
+                let (loaded, diags) = tree_io::read_tree(&dir.join("docs"), "docs");
+                if let Some(d) = diags
+                    .iter()
+                    .find(|d| d.severity == rdy_schema::Severity::Error)
+                {
+                    return Err(d.to_error());
+                }
+                loaded.into_iter().map(|l| l.block).collect()
             }
-        }
+            _ => unreachable!("format checked above"),
+        };
         let scope = Scope::View(view.to_string());
         let existing = self.materialized(&scope)?.clone();
+        assign_missing_names(&mut blocks, &existing);
         let mut incoming: BTreeMap<BlockId, &Block> = BTreeMap::new();
         for b in &blocks {
             if incoming.insert(b.id.clone(), b).is_some() {

@@ -26,14 +26,16 @@ fn rich_project(dir: &std::path::Path) -> Rdy {
         .unwrap()
         .to_string();
     let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
-        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Ünïcødé — design", "doc_type": "components"}},
+        {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "design", "title": "Design"}},
+        {"op": "create", "type": "doc", "id": "$doc", "parent": "$f", "fields": {"title": "Ünïcødé — design", "doc_type": "components"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Components"}},
         {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Line one.\nLine two with \"quotes\" and: colons\n\ttabbed\n"},
         {"op": "create", "type": "diagram", "parent": "$s", "fields": {"lang": "mermaid", "alt": "Flow"}, "body": "graph TD\n  A[{{$t}}] --> B{{Decide?}}\n"},
         {"op": "create", "type": "code", "parent": "$s", "fields": {"lang": "yaml"}, "body": "image: {{ .Values.image }}\n"},
         {"op": "create", "type": "prose", "parent": "$s", "body": "Write \\{{literal}} for braces."},
         {"op": "create", "type": "figure", "parent": "$s", "fields": {"blob": blob, "media_type": "application/octet-stream", "alt": "bytes"}},
-        {"op": "create", "type": "table", "parent": "$s", "fields": {"columns": ["a", "b"], "rows": [[1, true], ["x", null]], "normative": false}}
+        {"op": "create", "type": "table", "parent": "$s", "fields": {"columns": ["a", "b"], "rows": [[1, true], ["x", null]], "normative": false}},
+        {"op": "create", "type": "folder", "parent": "$f", "fields": {"name": "empty"}}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
     let s = res.created["$s"].clone();
     let t = res.created["$t"].clone();
@@ -65,6 +67,7 @@ fn export_import_round_trip_preserves_every_version_hash() {
     let mut a = rich_project(a_dir.path());
     let summary = a.export(&Scope::Canon, out.path()).unwrap();
     assert_eq!(summary.docs, 1);
+    assert_eq!(summary.folders, 2);
     assert_eq!(summary.blobs, 1);
     let original: BTreeMap<BlockId, Hash> = a
         .materialized(&Scope::Canon)
@@ -156,12 +159,7 @@ fn exported(dir: &Path, out: &Path) -> Rdy {
 }
 
 fn doc_file(out: &Path) -> std::path::PathBuf {
-    std::fs::read_dir(out.join("docs"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path()
+    out.join("docs/design/n-c-d-design.yaml")
 }
 
 fn mutate_docs(out: &Path, f: impl FnOnce(&mut Vec<serde_yaml_ng::Value>)) {
@@ -268,8 +266,8 @@ fn import_rejects_dangling_parent() {
 fn import_rejects_parent_cycle() {
     let (_d, out, _a) = setup();
     mutate_docs(out.path(), |l| {
-        let s = id_of(l, "section");
-        find(l, "doc")["parent"] = s.into();
+        let t = id_of(l, "term");
+        find(l, "section")["parent"] = t.into();
     });
     assert_import_fails(out.path(), "E_BAD_INPUT");
 }
@@ -301,7 +299,7 @@ fn import_rejects_unsupported_or_missing_manifest() {
     let (_d, out, _a) = setup();
     std::fs::write(
         out.path().join("rdy-export.yaml"),
-        "format: 2\npack: rdy-standard\nscope: canon\n",
+        "format: 3\npack: rdy-standard\nscope: canon\n",
     )
     .unwrap();
     assert_import_fails(out.path(), "E_BAD_INPUT");
@@ -575,4 +573,193 @@ fn a_refused_import_stores_no_blobs() {
             .has(&rdy_store::Store::blob_hash(&[0u8, 159, 146, 150, 255]))
             .unwrap()
     );
+}
+
+fn files(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(root, &p, out);
+            } else {
+                out.insert(
+                    p.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    std::fs::read(&p).unwrap(),
+                );
+            }
+        }
+    }
+    let mut out = Default::default();
+    walk(root, root, &mut out);
+    out
+}
+
+#[test]
+fn export_writes_the_folder_tree() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    exported(a_dir.path(), out.path());
+    let f = files(out.path());
+    for p in [
+        "rdy-export.yaml",
+        "docs/design/_folder.yaml",
+        "docs/design/n-c-d-design.yaml",
+        "docs/design/empty/_folder.yaml",
+    ] {
+        assert!(
+            f.contains_key(p),
+            "{p} missing from {:?}",
+            f.keys().collect::<Vec<_>>()
+        );
+    }
+    assert!(String::from_utf8_lossy(&f["rdy-export.yaml"]).contains("format: 2"));
+    let folder = String::from_utf8_lossy(&f["docs/design/_folder.yaml"]).to_string();
+    assert!(
+        folder.contains("type: folder") && folder.contains("title: Design"),
+        "{folder}"
+    );
+    assert!(
+        !folder.contains("name:") && !folder.contains("parent:"),
+        "the file system holds name and parent: {folder}"
+    );
+    let doc: Vec<serde_yaml_ng::Value> =
+        serde_yaml_ng::from_slice(&f["docs/design/n-c-d-design.yaml"]).unwrap();
+    assert_eq!(doc[0]["type"].as_str(), Some("doc"));
+    assert!(doc[0].get("parent").is_none() && doc[0]["fields"].get("name").is_none());
+    assert!(
+        doc[1].get("parent").is_some(),
+        "inner blocks keep their parent"
+    );
+}
+
+#[test]
+fn export_import_export_is_byte_identical() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let out1 = tempfile::tempdir().unwrap();
+    let mut a = exported(a_dir.path(), out1.path());
+    let original = a
+        .materialized(&Scope::Canon)
+        .unwrap()
+        .snapshot
+        .blocks
+        .clone();
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    b.import(&founder(), "import", out1.path()).unwrap();
+    let p = b.propose(&founder(), "import", "migrate").unwrap();
+    b.land(&founder(), &p.id).unwrap();
+    assert_eq!(
+        b.materialized(&Scope::Canon).unwrap().snapshot.blocks,
+        original
+    );
+    let out2_dir = tempfile::tempdir().unwrap();
+    let out2 = out2_dir.path().join("again");
+    b.export(&Scope::Canon, &out2).unwrap();
+    assert_eq!(files(&out2), files(out1.path()));
+}
+
+#[test]
+fn a_nameless_m1_doc_exports_with_a_warning_and_imports_named() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let mut a = Rdy::init(a_dir.path(), "rdy-standard").unwrap();
+    let mut fields = BTreeMap::new();
+    fields.insert("title".to_string(), FieldValue::Str("Old Notes".into()));
+    fields.insert("doc_type".to_string(), FieldValue::Str("glossary".into()));
+    let block = Block {
+        id: BlockId::parse("d-AAAAB").unwrap(),
+        block_type: "doc".into(),
+        parent: None,
+        order: "V".into(),
+        fields,
+        body: String::new(),
+        links: Default::default(),
+        pins: Default::default(),
+    };
+    a.store_mut()
+        .commit_to_view(
+            "work",
+            Change {
+                view: "work".into(),
+                ops: vec![Op::Create { block }],
+                deps: vec![],
+                provenance: agent().provenance(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .unwrap();
+    a.invalidate();
+    let out = tempfile::tempdir().unwrap();
+    let s = a.export(&Scope::View("work".into()), out.path()).unwrap();
+    assert_eq!(s.warnings.len(), 1);
+    assert!(s.warnings[0].contains("d-AAAAB"));
+    assert!(out.path().join("docs/old-notes.yaml").exists());
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    b.import(&founder(), "import", out.path()).unwrap();
+    let doc = b
+        .block(
+            &Scope::View("import".into()),
+            &BlockId::parse("d-AAAAB").unwrap(),
+        )
+        .unwrap();
+    assert_eq!(doc.field_str("name"), Some("old-notes"));
+}
+
+#[test]
+fn format_1_exports_still_import_and_get_names() {
+    let out = tempfile::tempdir().unwrap();
+    std::fs::write(
+        out.path().join("rdy-export.yaml"),
+        "format: 1\npack: rdy-standard\nscope: canon\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(out.path().join("docs")).unwrap();
+    std::fs::write(out.path().join("docs/d-AAAAB.yaml"), "- id: d-AAAAB\n  type: doc\n  order: V\n  fields:\n    title: Old Notes\n    doc_type: glossary\n- id: s-AAAAB\n  type: section\n  parent: d-AAAAB\n  order: V\n  fields:\n    title: Terms\n").unwrap();
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    b.import(&founder(), "import", out.path()).unwrap();
+    let doc = b
+        .block(
+            &Scope::View("import".into()),
+            &BlockId::parse("d-AAAAB").unwrap(),
+        )
+        .unwrap();
+    assert_eq!(doc.field_str("name"), Some("old-notes"));
+}
+
+#[test]
+fn name_or_parent_on_a_folder_or_doc_entry_is_refused_with_its_position() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    exported(a_dir.path(), out.path());
+    let folder = out.path().join("docs/design/_folder.yaml");
+    let text = std::fs::read_to_string(&folder).unwrap();
+    std::fs::write(&folder, format!("{text}parent: fd-AAAAA\n")).unwrap();
+    let line = text.lines().count() + 1;
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    let e = b.import(&founder(), "import", out.path()).unwrap_err();
+    assert_eq!(e.code, "E_FILE_FORMAT");
+    assert!(
+        e.message
+            .starts_with(&format!("docs/design/_folder.yaml:{line}:1:")),
+        "{e}"
+    );
+}
+
+#[test]
+fn format_2_import_ignores_hidden_and_non_yaml_files() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    exported(a_dir.path(), out.path());
+    std::fs::write(out.path().join("docs/.DS_Store"), [0u8, 1]).unwrap();
+    std::fs::write(out.path().join("docs/design/README.md"), "notes").unwrap();
+    std::fs::create_dir_all(out.path().join("docs/.git/objects")).unwrap();
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    b.import(&founder(), "import", out.path()).unwrap();
 }

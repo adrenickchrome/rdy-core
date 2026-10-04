@@ -7,8 +7,10 @@ mod paths;
 mod query;
 mod session;
 pub mod testkit;
+mod tree_io;
 mod version;
 mod write;
+mod yaml_pos;
 
 pub use decide::DecisionInput;
 pub use error::*;
@@ -17,6 +19,7 @@ pub use io::{ExportSummary, block_from_yaml, block_to_yaml};
 pub use materialize::{Materialized, PathMiss};
 pub use query::{Context, ImpactItem, field_json, summary, summary_in};
 pub use session::{Scope, Session, now_ms, rfc3339_now};
+pub use tree_io::Diagnostic;
 pub use version::{
     AS_OF_CACHE_ENTRIES, VersionInfo, VersionPosition, VersionRef, ViewPosition, parse_version,
 };

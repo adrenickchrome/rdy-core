@@ -370,8 +370,15 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     Ok((
                         serde_json::to_value(&s).expect("json"),
                         format!(
-                            "exported {} docs, {} blocks, {} blobs",
-                            s.docs, s.blocks, s.blobs
+                            "exported {} docs in {} folders, {} blocks, {} blobs{}",
+                            s.docs,
+                            s.folders,
+                            s.blocks,
+                            s.blobs,
+                            s.warnings
+                                .iter()
+                                .map(|w| format!("\nwarning: {w}"))
+                                .collect::<String>()
                         ),
                     ))
                 }
