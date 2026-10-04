@@ -163,3 +163,48 @@ fn readers_cannot_propose() {
     let e = r.propose(&reader, "work", "nope").unwrap_err();
     assert_eq!(e.code, E_PERMISSION);
 }
+
+fn w(r: &mut Rdy, s: &Session, view: &str, ops: serde_json::Value) -> Result<WriteResult, RdyError> {
+    r.write(s, WriteRequest { view: view.into(), ops: serde_json::from_value(ops).unwrap(), justification: None, message: String::new() })
+}
+
+/// Seeds canon with section S and term T, then: run-2 adds a claim under S referencing T,
+/// run-1 deletes T and S. Returns (dir, rdy, run-2 session).
+fn two_views() -> (tempfile::TempDir, Rdy, Session) {
+    let (d, mut r, s) = setup();
+    let t = w(&mut r, &agent(), "work", json!([{"op": "create", "type": "term", "id": "$t", "parent": s, "fields": {"name": "Ledger"}, "body": "Balances."}])).unwrap().created["$t"].clone();
+    let p = r.propose(&agent(), "work", "seed").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let run2 = Session { actor: "agent:designer".into(), run: Some("run-2".into()), role: Role::Writer };
+    w(&mut r, &run2, "run-2", json!([{"op": "create", "type": "claim", "parent": s, "body": "Uses the {{" .to_string() + &t + "}}."}])).unwrap();
+    w(&mut r, &agent(), "run-1", json!([{"op": "delete", "id": t}, {"op": "delete", "id": s}])).unwrap();
+    (d, r, run2)
+}
+
+#[test]
+fn propose_refuses_orphans_and_dangling_refs_after_canon_moved() {
+    let (_d, mut r, run2) = two_views();
+    let p1 = r.propose(&agent(), "run-1", "remove").unwrap();
+    r.land(&founder(), &p1.id).unwrap();
+    let head = r.store().canon_head().unwrap();
+    let e = r.propose(&run2, "run-2", "add claim").unwrap_err();
+    assert_eq!(e.code, "E_VALIDATION");
+    assert!(e.issues.iter().any(|i| i.code == "E_MISSING_PARENT"), "{:?}", e.issues);
+    assert!(e.issues.iter().any(|i| i.code == "E_DANGLING_REF"), "{:?}", e.issues);
+    assert_eq!(r.store().canon_head().unwrap(), head);
+}
+
+#[test]
+fn land_refuses_orphans_and_dangling_refs_when_canon_moved_after_propose() {
+    let (_d, mut r, run2) = two_views();
+    let p2 = r.propose(&run2, "run-2", "add claim").unwrap();
+    let p1 = r.propose(&agent(), "run-1", "remove").unwrap();
+    r.land(&founder(), &p1.id).unwrap();
+    let head = r.store().canon_head().unwrap();
+    let e = r.land(&founder(), &p2.id).unwrap_err();
+    assert_eq!(e.code, "E_VALIDATION");
+    assert!(e.issues.iter().any(|i| i.code == "E_MISSING_PARENT"), "{:?}", e.issues);
+    assert_eq!(r.store().canon_head().unwrap(), head);
+    let canon = r.materialized(&Scope::Canon).unwrap();
+    assert!(canon.blocks.values().all(|b| b.block_type != "claim"));
+}

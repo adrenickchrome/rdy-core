@@ -90,3 +90,12 @@ fn skeleton_gaps_are_warnings() {
     assert!(gaps[0].message.contains("Summary"));
     assert!(!has_errors(&gaps));
 }
+
+#[test]
+fn missing_parent_is_an_error() {
+    let p = pack();
+    let issues = validate_block(&p, &b("c-AAAAA", "claim", Some("s-SECT1"), "x"), None);
+    assert_eq!(codes(&issues), vec!["E_MISSING_PARENT"]);
+    assert_eq!(issues[0].severity, Severity::Error);
+    assert!(issues[0].message.contains("s-SECT1"));
+}

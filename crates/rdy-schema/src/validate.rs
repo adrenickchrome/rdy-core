@@ -80,7 +80,8 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
                 out.push(err(block, "E_CHILD_TYPE", format!("a {} cannot contain a {}", p.block_type, block.block_type), "place it under a section (or another allowed parent type)".into()));
             }
         }
-        _ => {}
+        (false, None, Some(pid)) => out.push(err(block, "E_MISSING_PARENT", format!("{} has parent {pid}, which does not exist", block.id), format!("move {} under an existing block, or recreate {pid}", block.id))),
+        (true, _, None) => {}
     }
     if is_doc && let Some(dt) = block.field_str("doc_type") && !pack.doc_types.contains_key(dt) {
         out.push(err(block, "E_DOC_TYPE", format!("unknown doc_type {dt:?}"), format!("use one of: {}", pack.doc_types.keys().cloned().collect::<Vec<_>>().join(", "))));

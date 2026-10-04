@@ -1,6 +1,6 @@
 use crate::error::*;
 use crate::{rfc3339_now, Materialized, Rdy, Scope, Session};
-use rdy_model::{decision, BlockId, Change, FieldValue, Hash, Op, Proposal};
+use rdy_model::{decision, Block, BlockId, Change, FieldValue, Hash, Op, Proposal};
 use rdy_schema::{validate_block, Issue, Severity};
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -15,6 +15,11 @@ pub struct ProposalInfo {
 
 fn parse_hash(s: &str) -> Result<Hash, RdyError> {
     s.parse().map_err(|_| RdyError::new(E_BAD_INPUT, format!("{s:?} is not a proposal id"), "pass the id returned by rdy_propose"))
+}
+
+/// Every block id `b` points at: inline references and link targets.
+fn targets(b: &Block) -> BTreeSet<BlockId> {
+    b.ref_tokens().iter().filter_map(|t| BlockId::parse(t).ok()).chain(b.links.values().flatten().map(|l| l.target.clone())).collect()
 }
 
 impl Rdy {
@@ -53,11 +58,22 @@ impl Rdy {
             let Some(b) = next.get(id) else { continue };
             let parent = b.parent.as_ref().and_then(|p| next.get(p));
             issues.extend(validate_block(&self.pack, b, parent));
+            // canon may have moved since the view was written: every target must still exist
+            for target in targets(b) {
+                if next.get(&target).is_none() && !deleted.contains(&target) {
+                    issues.push(Issue {
+                        severity: Severity::Error,
+                        code: "E_DANGLING_REF",
+                        block: Some(b.id.clone()),
+                        message: format!("{} references {target}, which does not exist in canon", b.id),
+                        fix: format!("remove the reference to {target} from {}, or restore {target} in the same view", b.id),
+                    });
+                }
+            }
         }
         if !deleted.is_empty() {
             for b in next.blocks.values() {
-                let refs: BTreeSet<BlockId> = b.ref_tokens().iter().filter_map(|t| BlockId::parse(t).ok()).chain(b.links.values().flatten().map(|l| l.target.clone())).collect();
-                for gone in refs.intersection(&deleted) {
+                for gone in targets(b).intersection(&deleted) {
                     issues.push(Issue {
                         severity: Severity::Error,
                         code: "E_DANGLING_REF",
