@@ -371,7 +371,7 @@ impl Rdy {
             build_ops(&self.pack, base, session, req.ops)?
         };
         let change = Change { view: req.view.clone(), ops: ops.clone(), deps: vec![], provenance: session.provenance(), justification: req.justification, message: req.message };
-        let id = self.store.commit_to_view(&req.view, change)?;
+        let id = self.store.commit_to_view_at(&req.view, change, &self.cache[&scope].snapshot)?;
         self.update_cache(&req.view, &ops);
 
         let m = self.cache.get(&scope).expect("cached");

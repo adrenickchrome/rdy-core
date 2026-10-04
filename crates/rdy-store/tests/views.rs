@@ -116,3 +116,24 @@ fn history_and_as_of_survive_reopen() {
     let canon = s.blocks(&s.canon_state().unwrap()).unwrap();
     assert_eq!(canon[&b2.id], b2);
 }
+
+#[test]
+fn commit_with_known_state_checks_against_that_state_without_replaying() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(dir.path()).unwrap();
+    let v1 = block("b-AAAAA", "claim", "one");
+    let v2 = block("b-AAAAA", "claim", "two");
+    s.commit_to_view("w", change("w", vec![Op::Create { block: v1.clone() }])).unwrap();
+    let state = s.view_state("w").unwrap();
+
+    // a duplicate create and a stale update are refused against the supplied state
+    assert!(matches!(s.commit_to_view_at("w", change("w", vec![Op::Create { block: v1.clone() }]), &state), Err(StoreError::AlreadyExists(_))));
+    let stale = change("w", vec![Op::Update { base: v2.version_hash(), block: block("b-AAAAA", "claim", "three") }]);
+    assert!(matches!(s.commit_to_view_at("w", stale, &state), Err(StoreError::StaleBase { .. })));
+    assert_eq!(s.view("w").unwrap().changes.len(), 1, "nothing written");
+
+    // a valid change lands and the view replays to the same state the caller would compute
+    s.commit_to_view_at("w", change("w", vec![Op::Update { base: v1.version_hash(), block: v2.clone() }]), &state).unwrap();
+    assert_eq!(s.view_state("w").unwrap().blocks[&v2.id], v2.version_hash());
+    assert_eq!(s.view("w").unwrap().changes.len(), 2);
+}

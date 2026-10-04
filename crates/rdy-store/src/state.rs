@@ -90,8 +90,26 @@ impl Store {
     }
 
     pub fn commit_to_view(&mut self, name: &str, change: Change) -> Result<Hash, StoreError> {
+        let state = self.view_state(name)?;
+        self.commit_to_view_at(name, change, &state)
+    }
+
+    /// Like `commit_to_view`, but checks the change against `current`, the caller's copy of the
+    /// view's present state, instead of replaying every change in the view (O(view length)).
+    /// `current` must equal `view_state(name)`.
+    pub fn commit_to_view_at(&mut self, name: &str, change: Change, current: &StateSnapshot) -> Result<Hash, StoreError> {
         let mut view = self.view(name)?;
-        let mut state = self.view_state(name)?;
+        // apply_op only reads and writes the ids the ops name, so seed a small state with those
+        let mut state = StateSnapshot::default();
+        for op in &change.ops {
+            let id = match op {
+                Op::Create { block } | Op::Update { block, .. } => &block.id,
+                Op::Delete { id, .. } => id,
+            };
+            if let Some(v) = current.blocks.get(id) {
+                state.blocks.insert(id.clone(), *v);
+            }
+        }
         for op in &change.ops {
             apply_op(self, &mut state, op)?;
         }
