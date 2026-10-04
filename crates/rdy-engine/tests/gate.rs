@@ -89,3 +89,69 @@ fn rfc3339_shape() {
     assert_eq!(t.len(), 20);
     assert!(t.starts_with("20") && t.ends_with('Z') && &t[10..11] == "T");
 }
+
+fn upd(r: &mut Rdy, view: &str, id: &str, fields: serde_json::Value) -> Result<WriteResult, RdyError> {
+    r.write(&agent(), WriteRequest { view: view.into(), ops: serde_json::from_value(json!([{"op": "update", "id": id, "fields": fields}])).unwrap(), justification: None, message: String::new() })
+}
+
+#[test]
+fn land_refuses_when_view_edited_a_proposed_decision_after_propose() {
+    let (_d, mut r, s) = setup();
+    let res = r.decide(&agent(), "work", DecisionInput { parent: s, statement: "A".into(), ..Default::default() }).unwrap();
+    let did = res.created["$decision"].clone();
+    let p = r.propose(&agent(), "work", "p").unwrap();
+    upd(&mut r, "work", &did, json!({"statement": "A2"})).unwrap();
+    let head = r.store().canon_head().unwrap();
+    let n = r.store().view("work").unwrap().changes.len();
+    let e = r.land(&founder(), &p.id).unwrap_err();
+    assert_eq!(e.code, "E_STALE_BASE");
+    assert!(e.message.contains(&did));
+    assert!(e.fix.contains("propose again"));
+    assert_eq!(r.store().view("work").unwrap().changes.len(), n);
+    assert_eq!(r.block(&Scope::View("work".into()), &BlockId::parse(&did).unwrap()).unwrap().field_str("status"), Some("proposed"));
+    assert_eq!(r.store().canon_head().unwrap(), head);
+}
+
+#[test]
+fn revoke_links_and_requires_a_decision() {
+    let (_d, mut r, s) = setup();
+    let res = r.decide(&agent(), "work", DecisionInput { parent: s.clone(), statement: "A".into(), ..Default::default() }).unwrap();
+    let did = res.created["$decision"].clone();
+    let p = r.propose(&agent(), "work", "p").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let rv = r.revoke(&agent(), "work", &did, "no longer true", &s).unwrap();
+    let b = r.block(&Scope::View("work".into()), &BlockId::parse(&rv.created["$decision"]).unwrap()).unwrap();
+    assert_eq!(b.links["revokes"][0].target.to_string(), did);
+    assert_eq!(b.field_str("statement"), Some(format!("Revoke {did}: no longer true").as_str()));
+    assert_eq!(r.revoke(&agent(), "work", &s, "x", &s).unwrap_err().code, "E_BAD_INPUT");
+}
+
+#[test]
+fn propose_detects_stale_base_early() {
+    let (_d, mut r, s) = setup();
+    let p = r.propose(&agent(), "work", "skeleton").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    upd(&mut r, "a", &s, json!({"title": "A"})).unwrap();
+    upd(&mut r, "b", &s, json!({"title": "B"})).unwrap();
+    let pb = r.propose(&agent(), "b", "b").unwrap();
+    r.land(&founder(), &pb.id).unwrap();
+    assert_eq!(r.propose(&agent(), "a", "a").unwrap_err().code, "E_STALE_BASE");
+}
+
+#[test]
+fn land_excludes_later_view_changes_and_stamps_the_approver() {
+    let (_d, mut r, s) = setup();
+    let res = r.decide(&agent(), "work", DecisionInput { parent: s.clone(), statement: "A".into(), ..Default::default() }).unwrap();
+    let did = BlockId::parse(&res.created["$decision"]).unwrap();
+    let p = r.propose(&agent(), "work", "p").unwrap();
+    let later = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([{"op": "create", "type": "claim", "id": "$c", "parent": s, "body": "later"}])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let cid = BlockId::parse(&later.created["$c"]).unwrap();
+    let landing = r.land(&founder(), &p.id).unwrap();
+    assert!(r.block(&Scope::Canon, &cid).is_err());
+    assert!(r.block(&Scope::View("work".into()), &cid).is_ok());
+    assert_eq!(r.block(&Scope::Canon, &did).unwrap().field_str("status"), Some("accepted"));
+    let rec: LandingRecord = r.store().get(&landing.parse().unwrap()).unwrap();
+    let prop: Proposal = r.store().get(&rec.proposal).unwrap();
+    let last: Change = r.store().get(prop.changes.last().unwrap()).unwrap();
+    assert_eq!(last.provenance.actor, "human:founder");
+}

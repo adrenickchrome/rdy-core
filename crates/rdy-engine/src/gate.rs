@@ -1,11 +1,9 @@
 use crate::error::*;
-use crate::write::{OpInput, WriteRequest};
 use crate::{rfc3339_now, Materialized, Rdy, Scope, Session};
-use rdy_model::{decision, BlockId, Change, Hash, Op, Proposal};
+use rdy_model::{decision, BlockId, Change, FieldValue, Hash, Op, Proposal};
 use rdy_schema::{validate_block, Issue, Severity};
 use serde::Serialize;
-use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ProposalInfo {
@@ -94,11 +92,14 @@ impl Rdy {
             return Err(RdyError::new(E_PERMISSION, format!("role {:?} cannot land proposals", s.role), "ask an approver to land it"));
         }
         let pid = parse_hash(proposal)?;
-        let mut p: Proposal = self.store.get(&pid)?;
+        let p: Proposal = self.store.get(&pid)?;
         let changes = self.changes_of(&p.changes)?;
 
-        // decisions created or updated by this proposal that are still proposed in the view
-        let view = Scope::View(p.view.clone());
+        // 1. prospective canon: canon + the proposal's own changes
+        let mut prospective: Materialized = self.materialized(&Scope::Canon)?.clone();
+        for c in &changes {
+            prospective.apply(&c.ops);
+        }
         let mut ids = BTreeSet::new();
         for c in &changes {
             for op in &c.ops {
@@ -109,24 +110,57 @@ impl Rdy {
                 }
             }
         }
-        let mut accept_ops = vec![];
         let now = rfc3339_now();
+        let mut accept_ops = vec![];
+        let mut stale = vec![];
+        let view = Scope::View(p.view.clone());
         for id in ids {
-            if let Some(b) = self.materialized(&view)?.get(&id)
-                && decision::status(b) == Some(decision::DecisionStatus::Proposed)
-            {
-                let mut fields = BTreeMap::new();
-                fields.insert("status".to_string(), json!("accepted"));
-                fields.insert("decided_at".to_string(), json!(now));
-                accept_ops.push(OpInput::Update { id: id.to_string(), base: None, fields, unset: vec![], body: None, links: None });
+            let Some(b) = prospective.get(&id) else { continue };
+            if decision::status(b) != Some(decision::DecisionStatus::Proposed) {
+                continue;
             }
+            // 2. the view must not have moved on from the proposal's version
+            let in_view = self.materialized(&view)?.get(&id).map(|v| v.version_hash());
+            if in_view != Some(b.version_hash()) {
+                stale.push(RdyError::new(E_STALE_BASE, format!("decision {id} changed in view {:?} after the proposal was made", p.view), format!("the view has later edits to {id}; propose again to include them")));
+                continue;
+            }
+            let mut acc = b.clone();
+            acc.fields.insert("status".into(), FieldValue::Str("accepted".into()));
+            acc.fields.insert("decided_at".into(), FieldValue::Str(now.clone()));
+            accept_ops.push(Op::Update { base: b.version_hash(), block: acc });
         }
-        let target = if accept_ops.is_empty() {
-            pid
-        } else {
-            let res = self.write(s, WriteRequest { view: p.view.clone(), ops: accept_ops, justification: None, message: format!("accept decisions in {}", p.title) })?;
-            p.changes.push(parse_hash(&res.change)?);
-            self.store.put(rdy_store::kinds::PROPOSAL, &p)?
+        if let Some(e) = stale.into_iter().next() {
+            return Err(e);
+        }
+
+        // 3. dry run: validate the final change list before writing anything
+        let accept = (!accept_ops.is_empty()).then(|| Change {
+            view: p.view.clone(),
+            ops: accept_ops,
+            deps: vec![],
+            provenance: s.provenance(),
+            justification: None,
+            message: format!("accept decisions in {}", p.title),
+        });
+        let mut all = changes;
+        all.extend(accept.clone());
+        let issues = self.prospective_issues(&all)?;
+        if let Some(first) = issues.iter().find(|i| i.severity == Severity::Error) {
+            let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
+            e.issues = issues;
+            return Err(e);
+        }
+
+        // 4. write the acceptance change, then land
+        let target = match accept {
+            None => pid,
+            Some(change) => {
+                let mut p = p;
+                let id = self.store.commit_to_view(&p.view, change)?;
+                p.changes.push(id);
+                self.store.put(rdy_store::kinds::PROPOSAL, &p)?
+            }
         };
         let landing = self.store.land(&target, s.provenance())?;
         self.invalidate();
