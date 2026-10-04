@@ -288,3 +288,12 @@ fn truncate_to_removes_a_stray_next_segment() {
     assert!(!dir.path().join("seg-000001.log").exists());
     assert_eq!(log.end(), end);
 }
+
+#[test]
+fn reading_at_an_absurd_offset_is_an_error_not_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    log.append(1, b"one").unwrap();
+    log.sync().unwrap();
+    assert!(log.read(Location { segment: 0, offset: u64::MAX - 3 }).is_err());
+}

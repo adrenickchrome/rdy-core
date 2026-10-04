@@ -35,19 +35,19 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
 
 /// Reads the frame at `offset`, or returns None if it is torn or corrupt.
 fn read_frame(f: &File, offset: u64, file_len: u64) -> io::Result<Option<(u8, Hash, Vec<u8>)>> {
-    if offset + HEADER > file_len {
+    let Some(payload_start) = offset.checked_add(HEADER).filter(|end| *end <= file_len) else {
         return Ok(None);
-    }
+    };
     let mut header = [0u8; HEADER as usize];
     f.read_exact_at(&mut header, offset)?;
     let len = u32::from_le_bytes(header[0..4].try_into().unwrap()) as u64;
-    if offset + HEADER + len > file_len {
+    if payload_start.checked_add(len).is_none_or(|end| end > file_len) {
         return Ok(None);
     }
     let kind = header[4];
     let hash = Hash(header[5..37].try_into().unwrap());
     let mut payload = vec![0u8; len as usize];
-    f.read_exact_at(&mut payload, offset + HEADER)?;
+    f.read_exact_at(&mut payload, payload_start)?;
     if Hash::of(&payload) != hash {
         return Ok(None);
     }
@@ -196,8 +196,8 @@ impl SegmentLog {
     }
 
     /// Starts segment `current + 1`. The new writer, reader and length are committed together,
-    /// only once the file and the directory are durable; on any failure the new file is removed
-    /// and the log is exactly as before.
+    /// only once the file and the directory are durable; on any failure the log is exactly as
+    /// before and the new file is removed best-effort (`truncate_to` sweeps a leftover next segment).
     fn roll(&mut self) -> io::Result<()> {
         self.writer.sync_all()?;
         let path = seg_path(&self.dir, self.readers.len() as u32);
