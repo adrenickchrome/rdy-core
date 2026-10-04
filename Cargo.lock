@@ -418,6 +418,7 @@ name = "rdy-engine"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "rdy-graph",
  "rdy-model",
  "rdy-schema",
  "rdy-store",
@@ -431,6 +432,10 @@ dependencies = [
 [[package]]
 name = "rdy-graph"
 version = "0.1.0"
+dependencies = [
+ "rdy-model",
+ "serde",
+]
 
 [[package]]
 name = "rdy-mcp"

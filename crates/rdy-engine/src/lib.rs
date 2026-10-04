@@ -2,6 +2,7 @@ mod decide;
 mod error;
 mod gate;
 mod materialize;
+mod query;
 mod session;
 mod write;
 
@@ -9,6 +10,7 @@ pub use decide::DecisionInput;
 pub use error::*;
 pub use gate::ProposalInfo;
 pub use materialize::Materialized;
+pub use query::{field_json, summary, Context, ImpactItem};
 pub use session::{now_ms, rfc3339_now, Scope, Session};
 pub use write::{json_to_field, LinkInput, OpInput, WriteRequest, WriteResult};
 
@@ -28,6 +30,7 @@ pub struct Rdy {
     store: Store,
     pack: Pack,
     cache: HashMap<Scope, Materialized>,
+    graphs: HashMap<Scope, rdy_graph::Graph>,
 }
 
 fn io(e: std::io::Error) -> RdyError {
@@ -67,7 +70,7 @@ impl Rdy {
         let cfg: Config = serde_yaml_ng::from_str(&text).map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "fix .rdy/config.yaml"))?;
         let pack = load_pack(project, &cfg.pack)?;
         let store = Store::open(&project.join(".rdy/store"))?;
-        Ok(Rdy { root: project.to_path_buf(), store, pack, cache: HashMap::new() })
+        Ok(Rdy { root: project.to_path_buf(), store, pack, cache: HashMap::new(), graphs: HashMap::new() })
     }
 
     pub fn root(&self) -> &Path {
@@ -97,9 +100,11 @@ impl Rdy {
 
     pub fn invalidate(&mut self) {
         self.cache.clear();
+        self.graphs.clear();
     }
 
     pub(crate) fn update_cache(&mut self, view: &str, ops: &[Op]) {
+        self.graphs.remove(&Scope::View(view.to_string()));
         if let Some(m) = self.cache.get_mut(&Scope::View(view.to_string())) {
             m.apply(ops);
         }
