@@ -160,6 +160,28 @@ fn cold<T>(r: &mut Rdy, f: impl FnOnce(&mut Rdy) -> T) -> (T, Duration) {
     (out, s.elapsed())
 }
 
+/// Landings in the `version_position` fixture. With no version tag, `version_position` walks
+/// every one of them, so this is what makes the op long enough to measure.
+pub const DEEP_LANDINGS: usize = 2000;
+
+/// A project whose canon is [`DEEP_LANDINGS`] landings deep and carries no version tag.
+fn deep_history(parent: &std::path::Path) -> Rdy {
+    let proj = parent.join("deep");
+    std::fs::create_dir_all(&proj).expect("mkdir");
+    let mut r = Rdy::init(&proj, "rdy-standard").expect("init");
+    for i in 0..DEEP_LANDINGS {
+        let view = format!("d{i}");
+        write(
+            &mut r,
+            &view,
+            json!([{"op": "create", "type": "doc", "fields": {"name": format!("deep-{i}"), "title": format!("Deep {i}"), "doc_type": "constraints"}}]),
+        )
+        .expect("deep write");
+        land(&mut r, &view).expect("deep land");
+    }
+    r
+}
+
 /// The fixed workload: a ~10k-block tree project (ids seeded, so it is identical every run),
 /// timed op by op. Takes a few minutes in release (every write fsyncs).
 pub fn run_workload() -> Vec<Measure> {
@@ -199,6 +221,8 @@ pub fn run_workload() -> Vec<Measure> {
 
     let va = Scope::View("va".into());
     let mut out = vec![];
+    // built once, outside every timer, and before the heavy ops so it stays small on disk
+    let mut deep = deep_history(dir.path());
 
     out.push(measure("write_single", 30, |i| {
         write(
@@ -229,8 +253,12 @@ pub fn run_workload() -> Vec<Measure> {
     out.push(measure_timed("impact", 20, |_| {
         cold(&mut r, |r| r.impact(&va, &claim, 3).expect("impact")).1
     }));
+    // no version tag on this chain, so every run walks all of its landings
     out.push(measure_timed("version_position", 20, |_| {
-        cold(&mut r, |r| r.version_position(&va).expect("position")).1
+        cold(&mut deep, |r| {
+            r.version_position(&Scope::Canon).expect("position")
+        })
+        .1
     }));
     out.push(measure_timed("resolve_path", 20, |_| {
         cold(&mut r, |r| {
