@@ -216,3 +216,49 @@ fn land_with_a_hash_that_is_not_a_proposal_is_bad_input() {
     let e = r.land(&founder(), &section.version_hash().to_string()).unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT", "{e}");
 }
+
+fn land_work(r: &mut Rdy, title: &str) {
+    let p = r.propose(&agent(), "work", title).unwrap();
+    r.land(&founder(), &p.id).unwrap();
+}
+
+#[test]
+fn propose_refuses_deleting_a_parent_that_gained_a_child_in_canon() {
+    let (_d, mut r, s) = setup();
+    land_work(&mut r, "seed");
+    let run2 = Session { actor: "agent:designer".into(), run: Some("run-2".into()), role: Role::Writer };
+    // run-1 deletes S while S is childless in its view
+    w(&mut r, &agent(), "run-1", json!([{"op": "delete", "id": s}])).unwrap();
+    // run-2 adds a claim under S and lands first
+    w(&mut r, &run2, "run-2", json!([{"op": "create", "type": "claim", "parent": s, "body": "A claim."}])).unwrap();
+    let p2 = r.propose(&run2, "run-2", "add claim").unwrap();
+    r.land(&founder(), &p2.id).unwrap();
+    let head = r.store().canon_head().unwrap();
+    let e = r.propose(&agent(), "run-1", "remove S").unwrap_err();
+    assert_eq!(e.code, "E_VALIDATION");
+    assert!(e.issues.iter().any(|i| i.code == "E_MISSING_PARENT"), "{:?}", e.issues);
+    assert_eq!(r.store().canon_head().unwrap(), head);
+}
+
+#[test]
+fn deleting_a_parent_that_gained_a_moved_child_in_canon_is_refused() {
+    let (_d, mut r, s) = setup();
+    let doc = r.block(&Scope::View("work".into()), &BlockId::parse(&s).unwrap()).unwrap().parent.clone().unwrap().to_string();
+    let res = w(&mut r, &agent(), "work", json!([
+        {"op": "create", "type": "section", "id": "$s2", "parent": doc, "fields": {"title": "Other"}},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s2", "body": "Movable."}
+    ])).unwrap();
+    let c = res.created["$c"].clone();
+    land_work(&mut r, "seed");
+    let run2 = Session { actor: "agent:designer".into(), run: Some("run-2".into()), role: Role::Writer };
+    w(&mut r, &agent(), "run-1", json!([{"op": "delete", "id": s}])).unwrap();
+    w(&mut r, &run2, "run-2", json!([{"op": "move", "id": c, "parent": s}])).unwrap();
+    let p1 = r.propose(&agent(), "run-1", "remove S").unwrap();
+    let p2 = r.propose(&run2, "run-2", "move claim").unwrap();
+    r.land(&founder(), &p2.id).unwrap();
+    let head = r.store().canon_head().unwrap();
+    let e = r.land(&founder(), &p1.id).unwrap_err();
+    assert_eq!(e.code, "E_VALIDATION");
+    assert!(e.issues.iter().any(|i| i.code == "E_MISSING_PARENT"), "{:?}", e.issues);
+    assert_eq!(r.store().canon_head().unwrap(), head);
+}

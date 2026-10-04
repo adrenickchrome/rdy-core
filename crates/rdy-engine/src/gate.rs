@@ -73,6 +73,15 @@ impl Rdy {
         }
         if !deleted.is_empty() {
             for b in next.blocks.values() {
+                if let Some(parent) = b.parent.as_ref().filter(|p| deleted.contains(*p)) {
+                    issues.push(Issue {
+                        severity: Severity::Error,
+                        code: "E_MISSING_PARENT",
+                        block: Some(b.id.clone()),
+                        message: format!("{} has parent {parent}, which this proposal deletes", b.id),
+                        fix: format!("move or delete {} in the same view, or don't delete {parent}", b.id),
+                    });
+                }
                 for gone in targets(b).intersection(&deleted) {
                     issues.push(Issue {
                         severity: Severity::Error,
