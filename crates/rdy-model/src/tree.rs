@@ -64,8 +64,9 @@ pub fn slug(title: &str) -> String {
             in_run = true;
         }
     }
-    let cut: String = out.trim_matches('-').chars().take(NAME_MAX).collect();
-    cut.trim_end_matches('-').to_string()
+    let edge = |c: char| matches!(c, '-' | '.');
+    let cut: String = out.trim_matches(edge).chars().take(NAME_MAX).collect();
+    cut.trim_end_matches(edge).to_string()
 }
 
 /// The name a new doc or folder gets when none is given.

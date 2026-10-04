@@ -62,6 +62,8 @@ fn slugs() {
         "only runs outside the allowed set collapse"
     );
     assert_eq!(slug("日本語"), "");
+    assert_eq!(slug("Intro."), "intro");
+    assert_eq!(slug("...Notes"), "notes");
     let long = slug(&format!("{} tail", "x".repeat(63)));
     assert_eq!(
         long,
@@ -82,6 +84,7 @@ fn default_names() {
     );
     assert_eq!(default_name(Some("CON"), &id), "untitled-7kq2m");
     assert_eq!(default_name(None, &id), "untitled-7kq2m");
+    assert_eq!(default_name(Some("Version 1.2..."), &id), "version-1.2");
 }
 
 #[test]
