@@ -119,3 +119,24 @@ fn corrupt_frame_in_sealed_segment_detected_on_scan() {
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
 }
 
+
+#[test]
+fn mid_segment_corruption_refuses_to_open_and_leaves_file_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    log.append(1, b"first-frame").unwrap();
+    log.append(1, b"second-frame").unwrap();
+    log.append(1, b"third-frame").unwrap();
+    log.sync().unwrap();
+    drop(log);
+    let path = dir.path().join("seg-000000.log");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[37 + 3] ^= 0xff; // inside the first frame's payload
+    std::fs::write(&path, &bytes).unwrap();
+
+    let err = SegmentLog::open(dir.path(), 1 << 20).err().expect("open must fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    let msg = err.to_string();
+    assert!(msg.contains("seg-000000.log") && msg.contains("offset 0"), "{msg}");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}

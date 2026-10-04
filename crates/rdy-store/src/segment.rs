@@ -51,6 +51,18 @@ fn read_frame(f: &File, offset: u64, file_len: u64) -> io::Result<Option<(u8, Ha
     Ok(Some((kind, hash, payload)))
 }
 
+/// True if the invalid frame at `offset` is consistent with a torn final write:
+/// an incomplete header, a length running past EOF, or a bad hash on the final frame.
+fn is_torn_tail(f: &File, offset: u64, file_len: u64) -> io::Result<bool> {
+    if offset + HEADER > file_len {
+        return Ok(true);
+    }
+    let mut len_bytes = [0u8; 4];
+    f.read_exact_at(&mut len_bytes, offset)?;
+    let end = offset + HEADER + u32::from_le_bytes(len_bytes) as u64;
+    Ok(end >= file_len)
+}
+
 impl SegmentLog {
     pub fn open(dir: &Path, max_len: u64) -> io::Result<SegmentLog> {
         std::fs::create_dir_all(dir)?;
@@ -69,6 +81,15 @@ impl SegmentLog {
         let mut offset = 0;
         while let Some((_, _, payload)) = read_frame(&writer, offset, file_len)? {
             offset += HEADER + payload.len() as u64;
+        }
+        if offset < file_len && !is_torn_tail(&writer, offset, file_len)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "corrupt frame in {} at offset {offset} with data after it; refusing to truncate (run rdy fsck)",
+                    seg_path(dir, last).display()
+                ),
+            ));
         }
         if offset < file_len {
             writer.set_len(offset)?;
