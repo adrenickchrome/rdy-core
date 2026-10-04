@@ -1,0 +1,114 @@
+use crate::error::*;
+use crate::write::{LinkInput, OpInput, WriteRequest, WriteResult};
+use crate::{rfc3339_now, Rdy, Scope, Session};
+use rdy_model::{decision, BlockId};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct DecisionInput {
+    pub parent: String,
+    pub statement: String,
+    #[serde(default)]
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub authority_basis: Option<String>,
+    #[serde(default)]
+    pub attested_by: Option<String>,
+    #[serde(default)]
+    pub reversibility: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub review_by: Option<String>,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub affects: Vec<String>,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub conditional_on: Vec<String>,
+    #[serde(default)]
+    pub refines: Vec<String>,
+    #[serde(default)]
+    pub answers: Vec<String>,
+}
+
+fn links_of(d: &DecisionInput) -> BTreeMap<String, Vec<LinkInput>> {
+    let mut links = BTreeMap::new();
+    for (name, ids) in [
+        (decision::AFFECTS, &d.affects),
+        (decision::DEPENDS_ON, &d.depends_on),
+        (decision::CONDITIONAL_ON, &d.conditional_on),
+        (decision::REFINES, &d.refines),
+        (decision::ANSWERS, &d.answers),
+    ] {
+        if !ids.is_empty() {
+            links.insert(name.to_string(), ids.iter().map(|t| LinkInput { target: t.clone(), part: None }).collect());
+        }
+    }
+    links
+}
+
+fn fields_of(d: &DecisionInput) -> BTreeMap<String, Value> {
+    let mut f = BTreeMap::new();
+    f.insert("statement".into(), json!(d.statement));
+    f.insert("status".into(), json!("proposed"));
+    f.insert("recorded_at".into(), json!(rfc3339_now()));
+    if !d.options.is_empty() {
+        f.insert("options".into(), json!(d.options));
+    }
+    for (k, v) in [("authority_basis", &d.authority_basis), ("attested_by", &d.attested_by), ("reversibility", &d.reversibility), ("kind", &d.kind), ("review_by", &d.review_by)] {
+        if let Some(v) = v {
+            f.insert(k.into(), json!(v));
+        }
+    }
+    f
+}
+
+impl Rdy {
+    fn write_decision(&mut self, s: &Session, view: &str, d: DecisionInput, extra: Vec<(String, LinkInput)>, message: String) -> Result<WriteResult, RdyError> {
+        let mut links = links_of(&d);
+        for (name, l) in extra {
+            links.entry(name).or_default().push(l);
+        }
+        let op = OpInput::Create {
+            block_type: decision::DECISION.into(),
+            id: Some("$decision".into()),
+            parent: Some(d.parent.clone()),
+            after: None,
+            fields: fields_of(&d),
+            body: d.body.clone(),
+            links,
+        };
+        self.write(s, WriteRequest { view: view.into(), ops: vec![op], justification: None, message })
+    }
+
+    pub fn decide(&mut self, s: &Session, view: &str, d: DecisionInput) -> Result<WriteResult, RdyError> {
+        let msg = format!("decide: {}", d.statement);
+        self.write_decision(s, view, d, vec![], msg)
+    }
+
+    fn require_decision(&mut self, view: &str, id: &str) -> Result<BlockId, RdyError> {
+        let bid = BlockId::parse(id).map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "pass a decision id like D-W2HXR"))?;
+        let b = self.block(&Scope::View(view.into()), &bid)?;
+        if b.block_type != decision::DECISION {
+            return Err(RdyError::new(E_BAD_INPUT, format!("{id} is a {}, not a decision", b.block_type), "only decisions can be superseded or revoked"));
+        }
+        Ok(bid)
+    }
+
+    pub fn supersede(&mut self, s: &Session, view: &str, old: &str, part: Option<String>, d: DecisionInput) -> Result<WriteResult, RdyError> {
+        let old_id = self.require_decision(view, old)?;
+        let msg = format!("supersede {old_id}: {}", d.statement);
+        self.write_decision(s, view, d, vec![(decision::SUPERSEDES.into(), LinkInput { target: old_id.to_string(), part })], msg)
+    }
+
+    pub fn revoke(&mut self, s: &Session, view: &str, target: &str, reason: &str, parent: &str) -> Result<WriteResult, RdyError> {
+        let tid = self.require_decision(view, target)?;
+        let d = DecisionInput { parent: parent.into(), statement: format!("Revoke {tid}: {reason}"), ..Default::default() };
+        self.write_decision(s, view, d, vec![(decision::REVOKES.into(), LinkInput { target: tid.to_string(), part: None })], format!("revoke {tid}"))
+    }
+}

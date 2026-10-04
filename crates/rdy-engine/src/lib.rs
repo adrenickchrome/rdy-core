@@ -1,11 +1,15 @@
+mod decide;
 mod error;
+mod gate;
 mod materialize;
 mod session;
 mod write;
 
+pub use decide::DecisionInput;
 pub use error::*;
+pub use gate::ProposalInfo;
 pub use materialize::Materialized;
-pub use session::{now_ms, Scope, Session};
+pub use session::{now_ms, rfc3339_now, Scope, Session};
 pub use write::{json_to_field, LinkInput, OpInput, WriteRequest, WriteResult};
 
 use rdy_model::Op;
