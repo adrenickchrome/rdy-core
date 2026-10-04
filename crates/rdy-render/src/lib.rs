@@ -246,7 +246,7 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
         .values()
         .filter(|b| b.block_type == "figure")
         .filter_map(|b| b.field_str("blob")?.parse::<Hash>().ok())
-        .filter(|h| rdy.store().get_blob(h).is_ok())
+        .filter(|h| rdy.store().has_blob(h).unwrap_or(false))
         .collect();
     let g = rdy.graph(scope)?;
     let env = env()?;

@@ -378,8 +378,20 @@ impl Rdy {
             ));
         }
         for (h, figure) in &blobs {
+            let not_found = || {
+                RdyError::new(
+                    E_NOT_FOUND,
+                    format!("{figure} names blob {h}, which is not a blob in the store"),
+                    format!(
+                        "attach the asset again (rdy_asset) and point {figure} at it, or delete {figure}"
+                    ),
+                )
+            };
+            if !self.store.has_blob(h)? {
+                return Err(not_found());
+            }
             let bytes = self.store.get_blob(h).map_err(|e| match e {
-                rdy_store::StoreError::NotFound(_) => RdyError::new(E_NOT_FOUND, format!("{figure} names blob {h}, which is not in the store"), format!("attach the asset again (rdy_asset) and point {figure} at it, or delete {figure}")),
+                rdy_store::StoreError::NotFound(_) => not_found(),
                 other => other.into(),
             })?;
             std::fs::write(out.join("blobs").join(h.to_string()), bytes).map_err(io_err)?;
@@ -598,7 +610,7 @@ impl Rdy {
             }
             if let Some(h) = b.field_str("blob").and_then(|s| s.parse::<Hash>().ok())
                 && !imported_blobs.contains(&h)
-                && !self.store.has(&h)?
+                && !self.store.has_blob(&h)?
             {
                 return Err(RdyError::new(
                     E_UNKNOWN_REF,

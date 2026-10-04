@@ -324,11 +324,46 @@ impl Store {
         Ok(*self.write(items)?.last().expect("manifest hash"))
     }
 
+    /// Whether `h` names a blob (a manifest object) in this store.
+    pub fn has_blob(&self, h: &Hash) -> Result<bool, StoreError> {
+        match self.get_raw(h) {
+            Ok((kind, _)) => Ok(kind == kinds::BLOB_MANIFEST),
+            Err(StoreError::NotFound(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn get_blob(&self, h: &Hash) -> Result<Vec<u8>, StoreError> {
-        let m: BlobManifest = self.get(h)?;
-        let mut out = Vec::with_capacity(m.len as usize);
+        let (kind, payload) = self.get_raw(h)?;
+        if kind != kinds::BLOB_MANIFEST {
+            return Err(StoreError::Decode(format!(
+                "{h} is not a blob (object kind {kind})"
+            )));
+        }
+        let m: BlobManifest = decode(&payload)?;
+        // never trust the manifest's length for an allocation: grow as chunks are read
+        let mut out = Vec::new();
         for c in &m.chunks {
-            out.extend(self.get_raw(c)?.1);
+            let (ck, bytes) = self.get_raw(c)?;
+            if ck != kinds::BLOB_CHUNK {
+                return Err(StoreError::Decode(format!(
+                    "chunk {c} of blob {h} is not a blob chunk (object kind {ck})"
+                )));
+            }
+            out.extend_from_slice(&bytes);
+            if out.len() as u64 > m.len {
+                return Err(StoreError::Decode(format!(
+                    "blob {h} is longer than its manifest's {} bytes",
+                    m.len
+                )));
+            }
+        }
+        if out.len() as u64 != m.len {
+            return Err(StoreError::Decode(format!(
+                "blob {h} has {} bytes, its manifest says {}",
+                out.len(),
+                m.len
+            )));
         }
         Ok(out)
     }
