@@ -105,19 +105,19 @@ impl Rdy {
                 }
                 walk = next.get(&p).and_then(|x| x.parent.clone());
             }
-            if rdy_model::tree::is_tree_type(&b.block_type) {
-                let names = next.names_under(b.parent.as_ref());
-                if let Some(mine) = names.get(id).map(|n| n.to_ascii_lowercase()) {
-                    for (other, n) in &names {
-                        if other != id && n.to_ascii_lowercase() == mine {
-                            issues.push(Issue {
-                                severity: Severity::Error,
-                                code: "E_PATH_CLASH",
-                                block: Some(id.clone()),
-                                message: format!("{id} and {other} would both be named {n:?} in the same folder (ignoring case)"),
-                                fix: format!("rename {id} in this view"),
-                            });
-                        }
+            // the derived names under each parent are cached in `next`, so this is a lookup
+            if rdy_model::tree::is_tree_type(&b.block_type)
+                && let Some(n) = next.name_of(id)
+            {
+                for other in next.named(b.parent.as_ref(), &n.to_ascii_lowercase()) {
+                    if &other != id {
+                        issues.push(Issue {
+                            severity: Severity::Error,
+                            code: "E_PATH_CLASH",
+                            block: Some(id.clone()),
+                            message: format!("{id} and {other} would both be named {n:?} in the same folder (ignoring case)"),
+                            fix: format!("rename {id} in this view"),
+                        });
                     }
                 }
             }

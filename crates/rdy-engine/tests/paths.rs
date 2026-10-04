@@ -249,6 +249,19 @@ fn nameless_docs_have_effective_names() {
         r.resolve_path(&work, "notes-2").unwrap().as_str(),
         "d-BBBBB"
     );
+    // the derived names are cached per parent: renaming d-AAAAA frees "notes" for d-BBBBB
+    write(
+        &mut r,
+        json!([{"op": "update", "id": "d-AAAAA", "fields": {"name": "alpha"}}]),
+    );
+    assert_eq!(
+        r.path_of(&work, &BlockId::parse("d-BBBBB").unwrap())
+            .unwrap()
+            .as_deref(),
+        Some("notes")
+    );
+    assert_eq!(r.resolve_path(&work, "notes").unwrap().as_str(), "d-BBBBB");
+    assert_eq!(r.resolve_path(&work, "alpha").unwrap().as_str(), "d-AAAAA");
 }
 
 #[test]

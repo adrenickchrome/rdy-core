@@ -74,7 +74,12 @@ pub fn default_name(title: Option<&str>, id: &BlockId) -> String {
 
 /// `base`, or `base-2`, `base-3`, … — the first that is not in `taken` (lower-cased names).
 pub fn dedupe(base: &str, taken: &BTreeSet<String>) -> String {
-    if !taken.contains(&base.to_ascii_lowercase()) {
+    dedupe_with(base, |lower| taken.contains(lower))
+}
+
+/// As [`dedupe`], with `taken` answering for one lower-cased name.
+pub fn dedupe_with(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(&base.to_ascii_lowercase()) {
         return base.to_string();
     }
     (2u32..)
@@ -83,6 +88,6 @@ pub fn dedupe(base: &str, taken: &BTreeSet<String>) -> String {
             let stem: String = base.chars().take(NAME_MAX - suffix.len()).collect();
             format!("{stem}{suffix}")
         })
-        .find(|c| !taken.contains(&c.to_ascii_lowercase()))
+        .find(|c| !taken(&c.to_ascii_lowercase()))
         .expect("a free suffix exists")
 }

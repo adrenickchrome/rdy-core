@@ -224,6 +224,13 @@ fn names_clash_ignoring_case_across_docs_and_folders() {
     )
     .unwrap_err();
     assert_eq!(e.code, "E_PATH_CLASH");
+    // a move takes no fields: no corrected payload; the fix says to rename first
+    assert_eq!(e.corrected, None);
+    assert!(
+        e.fix.contains("rename") && e.fix.contains("update"),
+        "{}",
+        e.fix
+    );
 }
 
 #[test]

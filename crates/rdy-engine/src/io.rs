@@ -191,10 +191,9 @@ fn check_import_names(blocks: &[Block], existing: &Materialized) -> Result<(), R
         let mut other = seen.insert(key.clone(), b.id.clone());
         if other.is_none() {
             other = existing
-                .names_under(b.parent.as_ref())
+                .named(b.parent.as_ref(), &key.1)
                 .into_iter()
-                .find(|(id, n)| *id != b.id && n.to_ascii_lowercase() == key.1)
-                .map(|(id, _)| id);
+                .find(|id| *id != b.id);
         }
         if let Some(other) = other {
             return Err(RdyError::new(

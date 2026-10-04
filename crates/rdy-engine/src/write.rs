@@ -7,7 +7,9 @@ use rdy_model::{
 };
 use rdy_schema::{Issue, Pack, has_errors, skeleton_gaps, validate_block};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct LinkInput {
@@ -103,13 +105,64 @@ fn bad(msg: impl Into<String>, fix: impl Into<String>) -> RdyError {
     RdyError::new(E_BAD_INPUT, msg, fix)
 }
 
-/// Pending edits layered over a materialized view.
+/// The children of one parent as this write sees them.
+#[derive(Default)]
+struct Sibs {
+    order: BTreeSet<(String, BlockId)>,
+    /// Lower-cased name → the docs and folders using it.
+    names: BTreeMap<String, BTreeSet<BlockId>>,
+}
+
+impl Sibs {
+    fn add(&mut self, b: &Block, name: Option<String>) {
+        self.order.insert((b.order.clone(), b.id.clone()));
+        if let Some(n) = name {
+            self.names
+                .entry(n.to_ascii_lowercase())
+                .or_default()
+                .insert(b.id.clone());
+        }
+    }
+
+    fn drop(&mut self, b: &Block, name: Option<String>) {
+        self.order.remove(&(b.order.clone(), b.id.clone()));
+        if let Some(n) = name {
+            let lower = n.to_ascii_lowercase();
+            if let Some(set) = self.names.get_mut(&lower) {
+                set.remove(&b.id);
+                if set.is_empty() {
+                    self.names.remove(&lower);
+                }
+            }
+        }
+    }
+
+    /// A doc or folder other than `except` named `lower` (lower-cased).
+    fn holder(&self, lower: &str, except: Option<&BlockId>) -> Option<&BlockId> {
+        self.names.get(lower)?.iter().find(|id| Some(*id) != except)
+    }
+}
+
+/// Pending edits layered over a materialized view. The children of a parent are indexed on first
+/// use and kept current as edits are added, so each name check or append is a lookup.
 struct Overlay<'a> {
     base: &'a Materialized,
     pending: BTreeMap<BlockId, Option<Block>>,
+    /// Ids of pending (not deleted) blocks, by parent.
+    pending_kids: BTreeMap<Option<BlockId>, BTreeSet<BlockId>>,
+    sibs: RefCell<BTreeMap<Option<BlockId>, Sibs>>,
 }
 
 impl<'a> Overlay<'a> {
+    fn new(base: &'a Materialized) -> Overlay<'a> {
+        Overlay {
+            base,
+            pending: BTreeMap::new(),
+            pending_kids: BTreeMap::new(),
+            sibs: RefCell::default(),
+        }
+    }
+
     fn get(&self, id: &BlockId) -> Option<&Block> {
         match self.pending.get(id) {
             Some(p) => p.as_ref(),
@@ -117,23 +170,63 @@ impl<'a> Overlay<'a> {
         }
     }
 
-    fn children(&self, parent: Option<&BlockId>) -> Vec<Block> {
-        let mut out: Vec<Block> = self
-            .base
-            .children(parent)
-            .into_iter()
-            .filter(|b| !self.pending.contains_key(&b.id))
-            .cloned()
-            .collect();
-        out.extend(
-            self.pending
-                .values()
-                .flatten()
-                .filter(|b| b.parent.as_ref() == parent)
-                .cloned(),
-        );
-        out.sort_by(|a, b| (&a.order, &a.id).cmp(&(&b.order, &b.id)));
-        out
+    /// The name `b` goes by: its stored name or, for a doc from M1 still under its parent in the
+    /// view, the name readers give it.
+    fn name(&self, b: &Block) -> Option<String> {
+        if !tree::is_tree_type(&b.block_type) {
+            return None;
+        }
+        if let Some(n) = b.field_str("name") {
+            return Some(n.to_string());
+        }
+        self.base
+            .get(&b.id)
+            .filter(|old| old.parent == b.parent)
+            .and_then(|_| self.base.name_of(&b.id))
+    }
+
+    fn with_sibs<R>(&self, parent: Option<&BlockId>, f: impl FnOnce(&Sibs) -> R) -> R {
+        let key = parent.cloned();
+        let mut all = self.sibs.borrow_mut();
+        let sibs = all.entry(key.clone()).or_insert_with(|| {
+            let mut s = Sibs::default();
+            for b in self.base.children(parent) {
+                if !self.pending.contains_key(&b.id) {
+                    s.add(b, self.name(b));
+                }
+            }
+            for id in self.pending_kids.get(&key).into_iter().flatten() {
+                if let Some(Some(b)) = self.pending.get(id) {
+                    s.add(b, self.name(b));
+                }
+            }
+            s
+        });
+        f(sibs)
+    }
+
+    /// Records `id`'s new state (None: deleted).
+    fn set(&mut self, id: BlockId, new: Option<Block>) {
+        if let Some(old) = self.get(&id).cloned() {
+            let name = self.name(&old);
+            if let Some(s) = self.sibs.get_mut().get_mut(&old.parent) {
+                s.drop(&old, name);
+            }
+            if let Some(set) = self.pending_kids.get_mut(&old.parent) {
+                set.remove(&id);
+            }
+        }
+        if let Some(b) = &new {
+            let name = self.name(b);
+            if let Some(s) = self.sibs.get_mut().get_mut(&b.parent) {
+                s.add(b, name);
+            }
+            self.pending_kids
+                .entry(b.parent.clone())
+                .or_default()
+                .insert(id.clone());
+        }
+        self.pending.insert(id, new);
     }
 }
 
@@ -245,28 +338,28 @@ fn order_after(
     parent: Option<&BlockId>,
     after: Option<&BlockId>,
 ) -> Result<String, RdyError> {
-    let siblings = ov.children(parent);
     let parent_name = parent
         .map(|p| p.to_string())
         .unwrap_or_else(|| "the document root".to_string());
-    match after {
-        None => Ok(order_between(
-            siblings.last().map(|b| b.order.as_str()),
-            None,
-        )),
-        Some(a) => {
-            let pos = siblings.iter().position(|b| &b.id == a).ok_or_else(|| {
+    let key = after.map(|a| {
+        ov.get(a)
+            .filter(|b| b.parent.as_ref() == parent)
+            .map(|b| (b.order.clone(), b.id.clone()))
+            .ok_or_else(|| {
                 bad(
                     format!("{a} is not a child of {parent_name}"),
                     "pass an `after` id that is a sibling under `parent`, or omit it to append",
                 )
-            })?;
-            Ok(order_between(
-                Some(&siblings[pos].order),
-                siblings.get(pos + 1).map(|b| b.order.as_str()),
-            ))
+            })
+    });
+    let key = key.transpose()?;
+    ov.with_sibs(parent, |s| match &key {
+        None => Ok(order_between(s.order.last().map(|(o, _)| o.as_str()), None)),
+        Some(k) => {
+            let next = s.order.range((Bound::Excluded(k), Bound::Unbounded)).next();
+            Ok(order_between(Some(&k.0), next.map(|(o, _)| o.as_str())))
         }
-    }
+    })
 }
 
 fn current_for_edit<'b>(
@@ -374,58 +467,48 @@ fn components(deps: &[Vec<usize>]) -> Vec<usize> {
     comp
 }
 
-/// Lower-cased name → id of every doc and folder under `parent` (pending edits included), except `except`.
-fn sibling_names(
-    ov: &Overlay,
-    parent: Option<&BlockId>,
-    except: Option<&BlockId>,
-) -> BTreeMap<String, BlockId> {
-    let effective = ov.base.names_under(parent);
-    ov.children(parent)
-        .into_iter()
-        .filter(|b| tree::is_tree_type(&b.block_type) && Some(&b.id) != except)
-        .filter_map(|b| {
-            let n = b
-                .field_str("name")
-                .map(String::from)
-                .or_else(|| effective.get(&b.id).cloned())?;
-            Some((n.to_ascii_lowercase(), b.id.clone()))
-        })
-        .collect()
-}
-
 /// Checks a doc's or folder's name: valid, and unique among its siblings ignoring case.
-fn check_name(ov: &Overlay, block: &Block, op: usize) -> Result<(), RdyError> {
+fn check_name(ov: &Overlay, block: &Block, op: usize, is_move: bool) -> Result<(), RdyError> {
     if !tree::is_tree_type(&block.block_type) {
         return Ok(());
     }
     let Some(name) = block.field_str("name") else {
         return Ok(()); // validation reports the missing field
     };
-    let siblings = sibling_names(ov, block.parent.as_ref(), Some(&block.id));
-    let taken: BTreeSet<String> = siblings.keys().cloned().collect();
-    if let Some(why) = tree::name_problem(name) {
-        let fixed = tree::dedupe(&tree::default_name(Some(name), &block.id), &taken);
-        return Err(RdyError::new(
-            E_BAD_NAME,
-            format!("{name:?} is not a valid name: {why}"),
-            format!("use a name like {fixed:?}"),
-        )
-        .with_corrected(serde_json::json!({"op": op, "fields": {"name": fixed}})));
-    }
-    if let Some(other) = siblings.get(&name.to_ascii_lowercase()) {
-        let fixed = tree::dedupe(name, &taken);
-        return Err(RdyError::new(
-            E_PATH_CLASH,
-            format!(
-                "{} would be named {name:?}, which {other} already uses here (names are unique ignoring case)",
-                block.id
-            ),
-            format!("choose another name, e.g. {fixed:?}"),
-        )
-        .with_corrected(serde_json::json!({"op": op, "fields": {"name": fixed}})));
-    }
-    Ok(())
+    let me = Some(&block.id);
+    ov.with_sibs(block.parent.as_ref(), |sibs| {
+        let taken = |lower: &str| sibs.holder(lower, me).is_some();
+        if let Some(why) = tree::name_problem(name) {
+            let fixed = tree::dedupe_with(&tree::default_name(Some(name), &block.id), taken);
+            return Err(RdyError::new(
+                E_BAD_NAME,
+                format!("{name:?} is not a valid name: {why}"),
+                format!("use a name like {fixed:?}"),
+            )
+            .with_corrected(serde_json::json!({"op": op, "fields": {"name": fixed}})));
+        }
+        if let Some(other) = sibs.holder(&name.to_ascii_lowercase(), me) {
+            let fixed = tree::dedupe_with(name, taken);
+            let err = RdyError::new(
+                E_PATH_CLASH,
+                format!(
+                    "{} would be named {name:?}, which {other} already uses here (names are unique ignoring case)",
+                    block.id
+                ),
+                if is_move {
+                    format!("a move takes no fields: rename {} first with an update (e.g. to {fixed:?}), then move it", block.id)
+                } else {
+                    format!("choose another name, e.g. {fixed:?}")
+                },
+            );
+            return Err(if is_move {
+                err
+            } else {
+                err.with_corrected(serde_json::json!({"op": op, "fields": {"name": fixed}}))
+            });
+        }
+        Ok(())
+    })
 }
 
 fn build_ops(
@@ -434,10 +517,7 @@ fn build_ops(
     session: &Session,
     inputs: Vec<OpInput>,
 ) -> Result<Built, RdyError> {
-    let mut ov = Overlay {
-        base,
-        pending: BTreeMap::new(),
-    };
+    let mut ov = Overlay::new(base);
     let mut res = Resolver {
         placeholders: BTreeMap::new(),
         base,
@@ -541,19 +621,18 @@ fn build_ops(
                 };
                 if tree::is_tree_type(&block.block_type) && !block.fields.contains_key("name") {
                     let base = tree::default_name(block.field_str("title"), &block.id);
-                    let taken: BTreeSet<String> = sibling_names(&ov, block.parent.as_ref(), None)
-                        .into_keys()
-                        .collect();
-                    let name = tree::dedupe(&base, &taken);
+                    let name = ov.with_sibs(block.parent.as_ref(), |s| {
+                        tree::dedupe_with(&base, |lower| s.holder(lower, None).is_some())
+                    });
                     block
                         .fields
                         .insert("name".into(), FieldValue::Str(name.clone()));
                     names.insert(block.id.to_string(), name);
                 } else {
-                    check_name(&ov, &block, i)?;
+                    check_name(&ov, &block, i, false)?;
                 }
                 touched.insert(new_id.clone());
-                ov.pending.insert(new_id, Some(block.clone()));
+                ov.set(new_id, Some(block.clone()));
                 ops.push(Op::Create { block });
                 prior.push((false, BTreeMap::new()));
             }
@@ -588,10 +667,10 @@ fn build_ops(
                 prior.push((false, cur.pins.clone()));
                 let renamed = block.field_str("name") != cur.field_str("name");
                 if renamed {
-                    check_name(&ov, &block, i)?;
+                    check_name(&ov, &block, i, false)?;
                 }
                 touched.insert(id.clone());
-                ov.pending.insert(id, Some(block.clone()));
+                ov.set(id, Some(block.clone()));
                 ops.push(Op::Update {
                     base: base_hash,
                     block,
@@ -635,10 +714,10 @@ fn build_ops(
                 }
                 block.parent = parent.clone();
                 block.order = order_after(&ov, parent.as_ref(), after.as_ref())?;
-                check_name(&ov, &block, i)?;
+                check_name(&ov, &block, i, true)?;
                 prior.push((true, block.pins.clone()));
                 touched.insert(id.clone());
-                ov.pending.insert(id, Some(block.clone()));
+                ov.set(id, Some(block.clone()));
                 ops.push(Op::Update {
                     base: base_hash,
                     block,
@@ -655,7 +734,7 @@ fn build_ops(
                         format!("record a decision that links answers: {id}"),
                     ));
                 }
-                if !ov.children(Some(&id)).is_empty() {
+                if ov.with_sibs(Some(&id), |s| !s.order.is_empty()) {
                     return Err(RdyError::new(
                         E_HAS_CHILDREN,
                         format!("{id} still has children"),
@@ -663,7 +742,7 @@ fn build_ops(
                     ));
                 }
                 touched.insert(id.clone());
-                ov.pending.insert(id.clone(), None);
+                ov.set(id.clone(), None);
                 prior.push((false, BTreeMap::new()));
                 ops.push(Op::Delete {
                     base: base_hash,
