@@ -180,13 +180,7 @@ impl Store {
     }
 
     pub fn commit_change(&mut self, mut change: Change, refs: Vec<(String, Vec<u8>)>) -> Result<Hash, StoreError> {
-        let mut deps = BTreeSet::new();
-        for op in &change.ops {
-            if let Some(base) = op.base() {
-                deps.insert(self.index.producer(&base)?.ok_or(StoreError::NotFound(base))?);
-            }
-        }
-        change.deps = deps.into_iter().collect();
+        change.deps = self.change_deps(&change)?;
         let mut items = vec![];
         for op in &change.ops {
             if let Op::Create { block } | Op::Update { block, .. } = op {
@@ -201,6 +195,16 @@ impl Store {
 }
 
 impl Store {
+    pub(crate) fn change_deps(&self, change: &Change) -> Result<Vec<Hash>, StoreError> {
+        let mut deps = BTreeSet::new();
+        for op in &change.ops {
+            if let Some(base) = op.base() {
+                deps.insert(self.index.producer(&base)?.ok_or(StoreError::NotFound(base))?);
+            }
+        }
+        Ok(deps.into_iter().collect())
+    }
+
     pub(crate) fn ref_items_pub(&self, refs: Vec<(String, Vec<u8>)>) -> Vec<(u8, Vec<u8>)> {
         self.ref_items(refs)
     }

@@ -95,20 +95,17 @@ impl Store {
         for op in &change.ops {
             apply_op(self, &mut state, op)?;
         }
-        // The view record must name the change id, which depends on deps; compute deps exactly as
-        // commit_change will, so the change and its view update land in one atomic write.
+        // The view record must name the change id, which depends on deps; use the same
+        // computation as commit_change so the change and its view update land in one write.
         let mut probe = change.clone();
-        let mut deps = std::collections::BTreeSet::new();
-        for op in &probe.ops {
-            if let Some(base) = op.base() {
-                deps.insert(self.producer(&base)?.ok_or(StoreError::NotFound(base))?);
-            }
-        }
-        probe.deps = deps.into_iter().collect();
-        view.changes.push(probe.id());
+        probe.deps = self.change_deps(&probe)?;
+        let expected = probe.id();
+        view.changes.push(expected);
         let rec = postcard::to_allocvec(&view).expect("encode view");
         let id = self.commit_change(change, vec![(view_ref(name), rec)])?;
-        debug_assert_eq!(Some(&id), view.changes.last());
+        if id != expected {
+            return Err(StoreError::Decode(format!("change id mismatch: view names {expected}, written {id}")));
+        }
         Ok(id)
     }
 
