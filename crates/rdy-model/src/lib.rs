@@ -13,5 +13,5 @@ pub use canon::{LandingRecord, Proposal, StateSnapshot, Tag};
 pub use change::{Change, EditorialClass, Justification, Op, Provenance, Role};
 pub use hash::Hash;
 pub use id::{BlockId, CROCKFORD, IdError};
-pub use order::order_between;
+pub use order::{MAX_ORDER_KEY_LEN, OrderError, order_between, rebalance_keys, valid_order_key};
 pub use value::FieldValue;

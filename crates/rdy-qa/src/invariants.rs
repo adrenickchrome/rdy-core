@@ -1,6 +1,8 @@
 //! The invariant checker (spec §3): what must always hold in canon or a view.
 use rdy_engine::{Rdy, Scope};
-use rdy_model::{Block, BlockId, FieldValue, LandingRecord, StateSnapshot, decision, tree};
+use rdy_model::{
+    Block, BlockId, FieldValue, LandingRecord, StateSnapshot, decision, tree, valid_order_key,
+};
 use rdy_schema::{Severity, validate_block};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -17,15 +19,6 @@ fn v(rule: &'static str, block: Option<&BlockId>, detail: impl Into<String>) -> 
         block: block.cloned(),
         detail: detail.into(),
     }
-}
-
-/// Order keys: non-empty, at most 24 bytes, base-62 digits only, no trailing `0`.
-/// Replaced by `rdy_model::valid_order_key` in Task 3.
-fn valid_order_key(k: &str) -> bool {
-    !k.is_empty()
-        && k.len() <= 24
-        && k.bytes().all(|c| c.is_ascii_alphanumeric())
-        && !k.ends_with('0')
 }
 
 pub fn check(r: &mut Rdy, scope: &Scope) -> Result<(), Vec<Violation>> {

@@ -105,6 +105,11 @@ fn bad(msg: impl Into<String>, fix: impl Into<String>) -> RdyError {
     RdyError::new(E_BAD_INPUT, msg, fix)
 }
 
+/// Temporary mapping of order-key errors (Task 4 gives them their own codes).
+fn order_err(e: rdy_model::OrderError) -> RdyError {
+    bad(e.to_string(), "rebalance the siblings")
+}
+
 /// The children of one parent as this write sees them.
 #[derive(Default)]
 struct Sibs {
@@ -354,10 +359,10 @@ fn order_after(
     });
     let key = key.transpose()?;
     ov.with_sibs(parent, |s| match &key {
-        None => Ok(order_between(s.order.last().map(|(o, _)| o.as_str()), None)),
+        None => order_between(s.order.last().map(|(o, _)| o.as_str()), None).map_err(order_err),
         Some(k) => {
             let next = s.order.range((Bound::Excluded(k), Bound::Unbounded)).next();
-            Ok(order_between(Some(&k.0), next.map(|(o, _)| o.as_str())))
+            order_between(Some(&k.0), next.map(|(o, _)| o.as_str())).map_err(order_err)
         }
     })
 }
