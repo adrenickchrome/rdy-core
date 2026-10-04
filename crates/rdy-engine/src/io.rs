@@ -56,10 +56,16 @@ pub struct ExportSummary {
 fn export_level(
     m: &Materialized,
     parent: Option<&BlockId>,
+    level: usize,
     dir: &Path,
     summary: &mut ExportSummary,
     blobs: &mut BTreeMap<Hash, BlockId>,
 ) -> Result<(), RdyError> {
+    // `level` folders are above this one; a damaged store may nest deeper than writes allow,
+    // and what lies below the limit is left out (the caller reports the missing blocks)
+    if level >= tree::MAX_FOLDER_DEPTH {
+        return Ok(());
+    }
     let names = m.names_under(parent);
     let mut used: BTreeMap<String, &BlockId> = BTreeMap::new();
     for b in m.children(parent) {
@@ -89,7 +95,7 @@ fn export_level(
             )
             .map_err(io_err)?;
             summary.folders += 1;
-            export_level(m, Some(&b.id), &sub, summary, blobs)?;
+            export_level(m, Some(&b.id), level + 1, &sub, summary, blobs)?;
             continue;
         }
         if b.field_str("name").is_none() {
@@ -359,7 +365,18 @@ impl Rdy {
         };
         // each blob, with the first figure that names it
         let mut blobs = BTreeMap::new();
-        export_level(&m, None, &out.join("docs"), &mut summary, &mut blobs)?;
+        export_level(&m, None, 0, &out.join("docs"), &mut summary, &mut blobs)?;
+        if summary.blocks != m.blocks.len() {
+            let missing = m.blocks.len() - summary.blocks.min(m.blocks.len());
+            return Err(RdyError::new(
+                E_IO,
+                format!(
+                    "{missing} blocks are not inside any folder or doc reachable from the top level (or lie more than {} folders deep), so they cannot be exported",
+                    tree::MAX_FOLDER_DEPTH
+                ),
+                "run rdy fsck; move or delete those blocks, then export again",
+            ));
+        }
         for (h, figure) in &blobs {
             let bytes = self.store.get_blob(h).map_err(|e| match e {
                 rdy_store::StoreError::NotFound(_) => RdyError::new(E_NOT_FOUND, format!("{figure} names blob {h}, which is not in the store"), format!("attach the asset again (rdy_asset) and point {figure} at it, or delete {figure}")),
@@ -505,6 +522,7 @@ impl Rdy {
                 ));
             }
             let mut seen = BTreeSet::from([b.id.clone()]);
+            let mut folders = usize::from(b.block_type == tree::FOLDER);
             let mut cur = b.parent.clone();
             while let Some(c) = cur {
                 if !seen.insert(c.clone()) {
@@ -514,7 +532,27 @@ impl Rdy {
                         "fix the parent fields in the export",
                     ));
                 }
+                let is_folder = incoming
+                    .get(&c)
+                    .copied()
+                    .or_else(|| existing.get(&c))
+                    .is_some_and(|p| p.block_type == tree::FOLDER);
+                folders += usize::from(is_folder);
                 cur = parent_of(&c).flatten();
+            }
+            if folders > tree::MAX_FOLDER_DEPTH {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    format!(
+                        "{} sits {folders} folders deep (at most {} allowed)",
+                        b.id,
+                        tree::MAX_FOLDER_DEPTH
+                    ),
+                    format!(
+                        "keep folders at most {} deep: move it higher in the export",
+                        tree::MAX_FOLDER_DEPTH
+                    ),
+                ));
             }
         }
         let mut issues = vec![];

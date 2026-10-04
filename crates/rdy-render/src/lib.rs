@@ -52,12 +52,18 @@ struct Site<'a> {
 
 impl<'a> Site<'a> {
     fn new(m: &'a Materialized) -> Site<'a> {
+        // `level` folders are above `parent`'s children; only a damaged store nests deeper than
+        // MAX_FOLDER_DEPTH, and what lies below it gets no page
         fn walk(
             m: &Materialized,
             parent: Option<&BlockId>,
             prefix: &str,
+            level: usize,
             out: &mut BTreeMap<BlockId, String>,
         ) {
+            if level > tree::MAX_FOLDER_DEPTH {
+                return;
+            }
             for (id, name) in m.names_under(parent) {
                 let path = if prefix.is_empty() {
                     name
@@ -65,13 +71,13 @@ impl<'a> Site<'a> {
                     format!("{prefix}/{name}")
                 };
                 if m.get(&id).is_some_and(|b| b.block_type == tree::FOLDER) {
-                    walk(m, Some(&id), &path, out);
+                    walk(m, Some(&id), &path, level + 1, out);
                 }
                 out.insert(id, path);
             }
         }
         let mut paths = BTreeMap::new();
-        walk(m, None, "", &mut paths);
+        walk(m, None, "", 0, &mut paths);
         Site { m, paths }
     }
 
@@ -146,7 +152,9 @@ impl<'a> Site<'a> {
             .m
             .children(parent)
             .into_iter()
-            .filter(|b| tree::is_tree_type(&b.block_type))
+            // only blocks with a page: past MAX_FOLDER_DEPTH (a damaged store) there are none,
+            // which also bounds this recursion
+            .filter(|b| tree::is_tree_type(&b.block_type) && self.paths.contains_key(&b.id))
         {
             let cls = if Some(&b.id) == current {
                 " class=\"current\""

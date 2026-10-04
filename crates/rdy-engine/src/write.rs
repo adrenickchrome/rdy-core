@@ -467,6 +467,67 @@ fn components(deps: &[Vec<usize>]) -> Vec<usize> {
     comp
 }
 
+/// How many folders are on the chain from `parent` up, stopping past `tree::MAX_FOLDER_DEPTH`.
+fn folders_from(ov: &Overlay, parent: Option<&BlockId>) -> usize {
+    let mut n = 0;
+    let mut cur = parent.and_then(|p| ov.get(p));
+    for _ in 0..=ov.base.blocks.len() + ov.pending.len() {
+        let Some(b) = cur else { break };
+        if b.block_type == tree::FOLDER {
+            n += 1;
+            if n > tree::MAX_FOLDER_DEPTH {
+                break;
+            }
+        }
+        cur = b.parent.as_ref().and_then(|p| ov.get(p));
+    }
+    n
+}
+
+/// How many levels of folders lie below `id` in this write's view; stops past the limit.
+fn folders_below(ov: &Overlay, id: &BlockId) -> usize {
+    let mut deepest = 0;
+    let mut stack = vec![(id.clone(), 0usize)];
+    while let Some((cur, level)) = stack.pop() {
+        deepest = deepest.max(level);
+        if level > tree::MAX_FOLDER_DEPTH {
+            continue;
+        }
+        let kids: Vec<BlockId> = ov.with_sibs(Some(&cur), |s| {
+            s.order.iter().map(|(_, k)| k.clone()).collect()
+        });
+        for k in kids {
+            if ov.get(&k).is_some_and(|b| b.block_type == tree::FOLDER) {
+                stack.push((k, level + 1));
+            }
+        }
+    }
+    deepest
+}
+
+/// Refuses a folder or doc that would sit (or hold folders) more than `MAX_FOLDER_DEPTH` deep.
+fn check_depth(ov: &Overlay, block: &Block, below: usize) -> Result<(), RdyError> {
+    if !tree::is_tree_type(&block.block_type) {
+        return Ok(());
+    }
+    let own = usize::from(block.block_type == tree::FOLDER);
+    let depth = folders_from(ov, block.parent.as_ref()) + own + below;
+    if depth > tree::MAX_FOLDER_DEPTH {
+        return Err(bad(
+            format!(
+                "{} would put folders {depth} deep (at most {} allowed)",
+                block.id,
+                tree::MAX_FOLDER_DEPTH
+            ),
+            format!(
+                "keep folders at most {} deep: put it higher in the tree",
+                tree::MAX_FOLDER_DEPTH
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Checks a doc's or folder's name: valid, and unique among its siblings ignoring case.
 fn check_name(ov: &Overlay, block: &Block, op: usize, is_move: bool) -> Result<(), RdyError> {
     if !tree::is_tree_type(&block.block_type) {
@@ -631,6 +692,7 @@ fn build_ops(
                 } else {
                     check_name(&ov, &block, i, false)?;
                 }
+                check_depth(&ov, &block, 0)?;
                 touched.insert(new_id.clone());
                 ov.set(new_id, Some(block.clone()));
                 ops.push(Op::Create { block });
@@ -715,6 +777,11 @@ fn build_ops(
                 block.parent = parent.clone();
                 block.order = order_after(&ov, parent.as_ref(), after.as_ref())?;
                 check_name(&ov, &block, i, true)?;
+                if block.block_type == tree::FOLDER {
+                    check_depth(&ov, &block, folders_below(&ov, &id))?;
+                } else {
+                    check_depth(&ov, &block, 0)?;
+                }
                 prior.push((true, block.pins.clone()));
                 touched.insert(id.clone());
                 ov.set(id, Some(block.clone()));

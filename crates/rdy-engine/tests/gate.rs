@@ -626,3 +626,48 @@ fn the_gate_refuses_a_parent_cycle_made_by_two_views() {
         e.issues
     );
 }
+
+/// Ops creating `n` nested folders named `{prefix}0/{prefix}1/…`, the first under `parent`.
+fn folder_chain(prefix: &str, n: usize, parent: Option<&str>) -> serde_json::Value {
+    json!((0..n)
+        .map(|i| {
+            let p = if i == 0 {
+                parent.map(String::from)
+            } else {
+                Some(format!("${prefix}{}", i - 1))
+            };
+            json!({"op": "create", "type": "folder", "id": format!("${prefix}{i}"), "parent": p, "fields": {"name": format!("{prefix}{i}")}})
+        })
+        .collect::<Vec<_>>())
+}
+
+#[test]
+fn the_gate_refuses_folders_nested_too_deep_by_two_views() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let mut seed = folder_chain("q", 16, None);
+    seed.as_array_mut()
+        .unwrap()
+        .push(json!({"op": "create", "type": "folder", "id": "$p", "fields": {"name": "p"}}));
+    let res = w(&mut r, &agent(), "work", seed).unwrap();
+    land_work(&mut r, "seed");
+    let (p, q15) = (res.created["$p"].clone(), res.created["$q15"].clone());
+    // a: 16 folders under p (depths 2..17); b: p under q15 (depth 17). Each alone is fine.
+    w(&mut r, &agent(), "a", folder_chain("c", 16, Some(&p))).unwrap();
+    w(
+        &mut r,
+        &agent(),
+        "b",
+        json!([{"op": "move", "id": p, "parent": q15}]),
+    )
+    .unwrap();
+    let pa = r.propose(&agent(), "a", "a").unwrap();
+    r.land(&founder(), &pa.id).unwrap();
+    let e = r.propose(&agent(), "b", "b").unwrap_err();
+    assert_eq!(e.code, "E_VALIDATION");
+    assert!(
+        e.issues.iter().any(|i| i.code == "E_TOO_DEEP"),
+        "{:?}",
+        e.issues
+    );
+}

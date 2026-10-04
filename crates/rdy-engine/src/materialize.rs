@@ -245,6 +245,42 @@ impl Materialized {
         Some(parts.join("/"))
     }
 
+    /// How many folders are on `id`'s chain, itself included; stops counting past
+    /// `tree::MAX_FOLDER_DEPTH + 1` (and on a parent loop in a damaged store).
+    pub fn folder_depth(&self, id: &BlockId) -> usize {
+        let mut n = 0;
+        let mut cur = self.get(id);
+        for _ in 0..=self.blocks.len() {
+            let Some(b) = cur else { break };
+            if b.block_type == tree::FOLDER {
+                n += 1;
+                if n > tree::MAX_FOLDER_DEPTH {
+                    break;
+                }
+            }
+            cur = b.parent.as_ref().and_then(|p| self.get(p));
+        }
+        n
+    }
+
+    /// How many levels of folders lie below `id` (0: none); stops past `tree::MAX_FOLDER_DEPTH`.
+    pub fn folder_height(&self, id: &BlockId) -> usize {
+        let mut deepest = 0;
+        let mut stack = vec![(id.clone(), 0usize)];
+        while let Some((cur, level)) = stack.pop() {
+            deepest = deepest.max(level);
+            if level > tree::MAX_FOLDER_DEPTH {
+                continue;
+            }
+            for c in self.children(Some(&cur)) {
+                if c.block_type == tree::FOLDER {
+                    stack.push((c.id.clone(), level + 1));
+                }
+            }
+        }
+        deepest
+    }
+
     pub fn child_named(
         &self,
         parent: Option<&BlockId>,

@@ -5,6 +5,9 @@ use std::collections::BTreeSet;
 pub const DOC: &str = "doc";
 pub const FOLDER: &str = "folder";
 pub const NAME_MAX: usize = 64;
+/// How deep folders may nest: the number of folders on a block's chain, a top-level folder
+/// being at depth 1. Keeps tree walks shallow and exported paths short.
+pub const MAX_FOLDER_DEPTH: usize = 32;
 
 /// Docs and folders have names and paths; every other block lives inside a doc.
 pub fn is_tree_type(block_type: &str) -> bool {

@@ -480,3 +480,47 @@ fn site_size_at_1k_folders() {
         size(out.path())
     );
 }
+
+#[test]
+fn a_damaged_store_with_a_very_deep_chain_renders_without_overflowing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let mut ops = vec![];
+    let mut parent: Option<BlockId> = None;
+    for i in 0..5000 {
+        let id = BlockId::parse(&format!("fd-{i:05}")).unwrap();
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert("name".to_string(), FieldValue::Str("f".into()));
+        ops.push(Op::Create {
+            block: Block {
+                id: id.clone(),
+                block_type: "folder".into(),
+                parent: parent.clone(),
+                order: "V".into(),
+                fields,
+                body: String::new(),
+                links: Default::default(),
+                pins: Default::default(),
+            },
+        });
+        parent = Some(id);
+    }
+    r.store_mut()
+        .commit_to_view(
+            "work",
+            Change {
+                view: "work".into(),
+                ops,
+                deps: vec![],
+                provenance: agent().provenance(),
+                justification: None,
+                message: "damaged".into(),
+            },
+        )
+        .unwrap();
+    r.invalidate();
+    let out = tempfile::tempdir().unwrap();
+    let s = render_site(&mut r, &Scope::View("work".into()), out.path()).unwrap();
+    // index + one page per folder down to one past the limit
+    assert_eq!(s.pages, 1 + tree::MAX_FOLDER_DEPTH + 1, "{s:?}");
+}

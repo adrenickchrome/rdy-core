@@ -85,19 +85,45 @@ pub struct TreeNode {
     pub collapsed: usize,
 }
 
+/// Folders and docs below `id` (iterative: a damaged store may nest very deep).
 fn count_below(m: &Materialized, id: &BlockId) -> usize {
-    m.children(Some(id))
-        .into_iter()
-        .filter(|b| tree::is_tree_type(&b.block_type))
-        .map(|b| 1 + count_below(m, &b.id))
-        .sum()
+    let mut n = 0;
+    let mut stack = vec![id.clone()];
+    // each block is visited at most once unless the store holds a parent loop
+    for _ in 0..=m.blocks.len() {
+        let Some(cur) = stack.pop() else { break };
+        for c in m.children(Some(&cur)) {
+            if tree::is_tree_type(&c.block_type) {
+                n += 1;
+                stack.push(c.id.clone());
+            }
+        }
+    }
+    n
 }
 
-fn node(m: &Materialized, b: &Block, path: String, name: String, depth: Option<u32>) -> TreeNode {
+/// `level` is how many folders are above `b`; below `tree::MAX_FOLDER_DEPTH` (only a damaged
+/// store nests deeper) the tree is collapsed rather than walked.
+fn node(
+    m: &Materialized,
+    b: &Block,
+    path: String,
+    name: String,
+    depth: Option<u32>,
+    level: usize,
+) -> TreeNode {
+    let depth = if level >= tree::MAX_FOLDER_DEPTH {
+        Some(0)
+    } else {
+        depth
+    };
     let (children, collapsed) = match (b.block_type == tree::FOLDER, depth) {
         (false, _) => (vec![], 0),
         (true, Some(0)) => (vec![], count_below(m, &b.id)),
-        (true, d) => (nodes_under(m, Some(&b.id), &path, d.map(|d| d - 1)), 0),
+        (true, d) => (
+            nodes_under(m, Some(&b.id), &path, d.map(|d| d - 1), level + 1),
+            0,
+        ),
     };
     TreeNode {
         name,
@@ -117,6 +143,7 @@ fn nodes_under(
     parent: Option<&BlockId>,
     prefix: &str,
     depth: Option<u32>,
+    level: usize,
 ) -> Vec<TreeNode> {
     let names = m.names_under(parent);
     m.children(parent)
@@ -128,7 +155,7 @@ fn nodes_under(
             } else {
                 format!("{prefix}/{name}")
             };
-            Some(node(m, b, path, name, depth))
+            Some(node(m, b, path, name, depth, level))
         })
         .collect()
 }
@@ -142,13 +169,14 @@ impl Rdy {
     ) -> Result<Vec<TreeNode>, RdyError> {
         let m = self.materialized(scope)?;
         let Some(p) = path else {
-            return Ok(nodes_under(m, None, "", depth));
+            return Ok(nodes_under(m, None, "", depth, 0));
         };
         let id = resolve_in(m, p)?;
         let b = m.get(&id).expect("resolved");
         let full = m.path_of(&id).unwrap_or_default();
         let name = m.name_of(&id).unwrap_or_default();
-        Ok(vec![node(m, b, full, name, depth)])
+        let level = m.folder_depth(&id) - usize::from(b.block_type == tree::FOLDER);
+        Ok(vec![node(m, b, full, name, depth, level)])
     }
 
     pub fn new_folder(

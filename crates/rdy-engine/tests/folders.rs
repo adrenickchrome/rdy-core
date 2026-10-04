@@ -323,3 +323,111 @@ fn a_nameless_doc_gets_its_effective_name_on_first_write() {
         "the path didn't change"
     );
 }
+
+/// Ops creating a chain of `n` nested folders f0/f1/…, the first under `parent`.
+fn chain(n: usize, parent: Option<&str>) -> serde_json::Value {
+    json!((0..n)
+        .map(|i| {
+            let p = if i == 0 {
+                parent.map(String::from)
+            } else {
+                Some(format!("$f{}", i - 1))
+            };
+            json!({"op": "create", "type": "folder", "id": format!("$f{i}"), "parent": p, "fields": {"name": format!("f{i}")}})
+        })
+        .collect::<Vec<_>>())
+}
+
+#[test]
+fn folders_nest_at_most_32_deep() {
+    assert_eq!(tree::MAX_FOLDER_DEPTH, 32);
+    let (_d, mut r) = project();
+    let e = write(&mut r, "work", chain(33, None)).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+    assert!(e.fix.contains("at most 32 deep"), "{e}");
+    let res = write(&mut r, "work", chain(32, None)).unwrap();
+    let deepest = res.created["$f31"].clone();
+    // a doc in the deepest folder is fine; another folder is not
+    write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "parent": deepest, "fields": {"title": "Leaf", "doc_type": "overview"}}
+    ]))
+    .unwrap();
+    let e = write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "folder", "parent": deepest, "fields": {"name": "x"}}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT");
+    // moving a two-deep subtree under f30 would put its lower folder at depth 33
+    let pair = write(&mut r, "work", chain(2, None)).unwrap_err();
+    assert_eq!(pair.code, "E_PATH_CLASH", "f0 exists at the top level");
+    let pair = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "folder", "id": "$a", "fields": {"name": "a"}},
+            {"op": "create", "type": "folder", "id": "$b", "parent": "$a", "fields": {"name": "b"}}
+        ]),
+    )
+    .unwrap();
+    let e = write(
+        &mut r,
+        "work",
+        json!([{"op": "move", "id": pair.created["$a"], "parent": res.created["$f30"]}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "move", "id": pair.created["$a"], "parent": res.created["$f29"]}]),
+    )
+    .unwrap();
+}
+
+#[test]
+fn tree_walks_survive_a_damaged_store_with_a_very_deep_chain() {
+    let (_d, mut r) = project();
+    let mut ops = vec![];
+    let mut parent: Option<BlockId> = None;
+    for i in 0..5000 {
+        let id = BlockId::parse(&format!("fd-{:05}", i)).unwrap();
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert("name".to_string(), FieldValue::Str(format!("f{i}")));
+        ops.push(Op::Create {
+            block: Block {
+                id: id.clone(),
+                block_type: "folder".into(),
+                parent: parent.clone(),
+                order: "V".into(),
+                fields,
+                body: String::new(),
+                links: Default::default(),
+                pins: Default::default(),
+            },
+        });
+        parent = Some(id);
+    }
+    r.store_mut()
+        .commit_to_view(
+            "work",
+            Change {
+                view: "work".into(),
+                ops,
+                deps: vec![],
+                provenance: agent().provenance(),
+                justification: None,
+                message: "damaged".into(),
+            },
+        )
+        .unwrap();
+    r.invalidate();
+    let work = Scope::View("work".into());
+    let t = r.tree(&work, None, None).unwrap();
+    assert_eq!(t.len(), 1);
+    let out = tempfile::tempdir().unwrap();
+    let e = r.export(&work, &out.path().join("x")).unwrap_err();
+    assert_eq!(e.code, "E_IO", "{e}");
+    assert!(e.message.contains("not inside"), "{e}");
+}

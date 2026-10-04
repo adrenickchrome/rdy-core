@@ -105,6 +105,27 @@ impl Rdy {
                 }
                 walk = next.get(&p).and_then(|x| x.parent.clone());
             }
+            if rdy_model::tree::is_tree_type(&b.block_type) {
+                let mut depth = next.folder_depth(id);
+                if b.block_type == rdy_model::tree::FOLDER {
+                    depth += next.folder_height(id);
+                }
+                if depth > rdy_model::tree::MAX_FOLDER_DEPTH {
+                    issues.push(Issue {
+                        severity: Severity::Error,
+                        code: "E_TOO_DEEP",
+                        block: Some(id.clone()),
+                        message: format!(
+                            "{id} would put folders {depth} deep (at most {} allowed)",
+                            rdy_model::tree::MAX_FOLDER_DEPTH
+                        ),
+                        fix: format!(
+                            "keep folders at most {} deep: move {id} higher in this view",
+                            rdy_model::tree::MAX_FOLDER_DEPTH
+                        ),
+                    });
+                }
+            }
             // the derived names under each parent are cached in `next`, so this is a lookup
             if rdy_model::tree::is_tree_type(&b.block_type)
                 && let Some(n) = next.name_of(id)

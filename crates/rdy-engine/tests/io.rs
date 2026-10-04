@@ -905,3 +905,29 @@ fn import_refuses_an_inner_block_whose_parent_is_in_another_doc_file() {
     .unwrap();
     assert_import_fails(out.path(), "E_FILE_FORMAT");
 }
+
+#[test]
+fn import_refuses_folders_nested_more_than_32_deep() {
+    let out = tempfile::tempdir().unwrap();
+    std::fs::write(
+        out.path().join("rdy-export.yaml"),
+        "format: 2\npack: rdy-standard\nscope: canon\n",
+    )
+    .unwrap();
+    let mut dir = out.path().join("docs");
+    for i in 0..33 {
+        dir = dir.join(format!("f{i}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("_folder.yaml"),
+            format!("id: fd-{i:05}\ntype: folder\norder: V\n"),
+        )
+        .unwrap();
+    }
+    assert_import_fails(out.path(), "E_BAD_INPUT");
+    // 32 deep imports
+    std::fs::remove_dir_all(dir).unwrap();
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    b.import(&founder(), "import", out.path()).unwrap();
+}
