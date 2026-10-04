@@ -226,3 +226,113 @@ fn link_labels_render_references_as_text_on_one_line() {
         "Referenced by label: {dec}"
     );
 }
+
+fn small_site(r: &mut Rdy) -> (String, String) {
+    let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Identity", "doc_type": "decisions-log"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Decisions"}}
+    ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let d = r
+        .decide(
+            &agent(),
+            "work",
+            DecisionInput {
+                parent: res.created["$s"].clone(),
+                statement: "Ledger is append-only".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let p = r.propose(&agent(), "work", "seed").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    (res.created["$doc"].clone(), d.created["$decision"].clone())
+}
+
+fn pages(out: &std::path::Path, doc: &str, did: &str) -> Vec<String> {
+    [
+        "index.html".to_string(),
+        format!("doc/{doc}.html"),
+        format!("decision/{did}.html"),
+    ]
+    .iter()
+    .map(|p| std::fs::read_to_string(out.join(p)).unwrap())
+    .collect()
+}
+
+#[test]
+fn every_page_carries_the_version_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let (doc, did) = small_site(&mut r);
+    let render = |r: &mut Rdy, scope: &Scope| {
+        let out = tempfile::tempdir().unwrap();
+        render_site(r, scope, out.path()).unwrap();
+        out
+    };
+    let out = render(&mut r, &Scope::Canon);
+    for page in pages(out.path(), &doc, &did) {
+        assert!(
+            page.contains("<span class=\"version\">no version yet</span>"),
+            "{page}"
+        );
+    }
+    assert!(pages(out.path(), &doc, &did)[0].contains("No versions yet."));
+
+    r.tag(&founder(), "v0.1.0", None, Some("first cut".into()))
+        .unwrap();
+    let out = render(&mut r, &Scope::Canon);
+    for page in pages(out.path(), &doc, &did) {
+        assert!(
+            page.contains("<span class=\"version\">v0.1.0</span>"),
+            "{page}"
+        );
+    }
+    let index = &pages(out.path(), &doc, &did)[0];
+    assert!(
+        index.contains("<span class=\"version-name\">v0.1.0</span>"),
+        "{index}"
+    );
+    assert!(
+        index.contains("first cut") && index.contains("<span class=\"badge\">current</span>"),
+        "{index}"
+    );
+
+    r.write(
+        &agent(),
+        WriteRequest {
+            view: "work".into(),
+            ops: serde_json::from_value(json!([
+                {"op": "update", "id": doc, "fields": {"title": "Identity v2"}}
+            ]))
+            .unwrap(),
+            justification: None,
+            message: String::new(),
+        },
+    )
+    .unwrap();
+    let out = render(&mut r, &Scope::View("work".into()));
+    assert!(
+        pages(out.path(), &doc, &did)[1]
+            .contains("<span class=\"version\">v0.1.0 · view work, 1 unlanded change</span>")
+    );
+    let p = r.propose(&agent(), "work", "rename").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let out = render(&mut r, &Scope::Canon);
+    assert!(
+        pages(out.path(), &doc, &did)[2]
+            .contains("<span class=\"version\">v0.1.0 + 1 landing</span>")
+    );
+
+    let at = r.resolve_scope("tag:v0.1.0").unwrap();
+    let out = render(&mut r, &at);
+    for page in pages(out.path(), &doc, &did) {
+        assert!(
+            page.contains("<span class=\"version frozen\">v0.1.0 · frozen snapshot</span>"),
+            "{page}"
+        );
+    }
+    assert!(
+        pages(out.path(), &doc, &did)[1].contains("<title>Identity ·"),
+        "the snapshot shows the old title"
+    );
+}

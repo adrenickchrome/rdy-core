@@ -5,4 +5,6 @@
 <ul>{% for d in docs %}<li><a href="doc/{{ d.id }}.html">{{ d.title }}</a> <span class="meta">{% if d.doc_type %}{{ d.doc_type }}{% endif %}{% if d.lifecycle %} · {{ d.lifecycle }}{% endif %}</span></li>{% endfor %}</ul>
 <h2>Decisions</h2>
 <ul>{% for x in decisions %}<li><a href="decision/{{ x.id }}.html">{{ x.statement }}</a> <span class="badge {{ x.status_class }}">{{ x.status }}</span></li>{% endfor %}</ul>
+<h2>Versions</h2>
+{% if versions %}<ul>{% for v in versions %}<li><span class="version-name">{{ v.name }}</span> <span class="meta">landing {{ v.landing_short }}{% if v.message %} · {{ v.message }}{% endif %}</span>{% if v.current %} <span class="badge">current</span>{% endif %}</li>{% endfor %}</ul>{% else %}<p class="meta">No versions yet.</p>{% endif %}
 {% endblock %}

@@ -53,6 +53,13 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
 }
 
 pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
+    let position = rdy.version_position(scope)?;
+    let versions = rdy.versions()?;
+    let current = versions.last().map(|v| v.name.clone());
+    let version_rows: Vec<_> = versions
+        .iter()
+        .map(|v| json!({ "name": v.name, "landing_short": &v.landing[..12], "message": v.message, "current": Some(&v.name) == current.as_ref() }))
+        .collect();
     let m = rdy.materialized(scope)?.clone();
     let suspects: BTreeSet<BlockId> = rdy.suspects(scope)?.into_iter().map(|s| s.block).collect();
     // figure blobs that exist in the store (checked before `g` borrows `rdy`)
@@ -141,7 +148,7 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
         }
         let title = doc.field_str("title").unwrap_or("").to_string();
         let docj = json!({ "id": doc.id.to_string(), "title": title, "doc_type": doc.field_str("doc_type"), "lifecycle": doc.field_str("lifecycle") });
-        let page = env.get_template("doc.html").map_err(tpl)?.render(json!({ "site": site, "title": title, "root": "../", "mermaid": has_mermaid, "doc": docj, "items": items })).map_err(tpl)?;
+        let page = env.get_template("doc.html").map_err(tpl)?.render(json!({ "site": site, "title": title, "root": "../", "version": position.label, "frozen": position.frozen, "mermaid": has_mermaid, "doc": docj, "items": items })).map_err(tpl)?;
         std::fs::write(out.join("doc").join(format!("{}.html", doc.id)), page).map_err(io)?;
         stats.pages += 1;
         doc_rows.push(docj);
@@ -190,13 +197,13 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
             "body": if b.body.is_empty() { String::new() } else { text_html(&b.body, &|id| href_from(None, id, "../")) },
             "options": options, "outgoing": outgoing, "incoming": incoming,
         });
-        let page = env.get_template("decision.html").map_err(tpl)?.render(json!({ "site": site, "title": statement, "root": "../", "mermaid": false, "d": dj })).map_err(tpl)?;
+        let page = env.get_template("decision.html").map_err(tpl)?.render(json!({ "site": site, "title": statement, "root": "../", "version": position.label, "frozen": position.frozen, "mermaid": false, "d": dj })).map_err(tpl)?;
         std::fs::write(out.join("decision").join(format!("{}.html", b.id)), page).map_err(io)?;
         stats.pages += 1;
         decisions.push(json!({ "id": b.id.to_string(), "statement": statement, "status": status, "status_class": status.replace(' ', "-") }));
     }
 
-    let page = env.get_template("index.html").map_err(tpl)?.render(json!({ "site": site, "title": "Home", "root": "", "mermaid": false, "docs": doc_rows, "decisions": decisions })).map_err(tpl)?;
+    let page = env.get_template("index.html").map_err(tpl)?.render(json!({ "site": site, "title": "Home", "root": "", "version": position.label, "frozen": position.frozen, "versions": version_rows, "mermaid": false, "docs": doc_rows, "decisions": decisions })).map_err(tpl)?;
     std::fs::write(out.join("index.html"), page).map_err(io)?;
     stats.pages += 1;
 
