@@ -21,6 +21,9 @@ pub const E_RESERVED_VIEW: &str = "E_RESERVED_VIEW";
 pub const E_TAG_EXISTS: &str = "E_TAG_EXISTS";
 pub const E_BAD_TAG_NAME: &str = "E_BAD_TAG_NAME";
 pub const E_VERSION_ORDER: &str = "E_VERSION_ORDER";
+pub const E_BAD_NAME: &str = "E_BAD_NAME";
+pub const E_PATH_CLASH: &str = "E_PATH_CLASH";
+pub const E_FILE_FORMAT: &str = "E_FILE_FORMAT";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RdyError {
@@ -28,6 +31,9 @@ pub struct RdyError {
     pub message: String,
     pub fix: String,
     pub issues: Vec<Issue>,
+    /// A corrected payload the caller can resend, where rdy can compute one safely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corrected: Option<serde_json::Value>,
 }
 
 impl RdyError {
@@ -37,7 +43,13 @@ impl RdyError {
             message: message.into(),
             fix: fix.into(),
             issues: vec![],
+            corrected: None,
         }
+    }
+
+    pub fn with_corrected(mut self, v: serde_json::Value) -> RdyError {
+        self.corrected = Some(v);
+        self
     }
 }
 

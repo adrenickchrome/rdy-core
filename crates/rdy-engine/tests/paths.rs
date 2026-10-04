@@ -191,6 +191,7 @@ fn paths_follow_renames_and_moves() {
         r.path_of(&work, &id(&res, "$t")).unwrap().as_deref(),
         Some("purses/transactions")
     );
+    assert!(r.resolve_path(&work, "wallets").is_err());
     write(
         &mut r,
         json!([{"op": "move", "id": res.created["$t"], "parent": res.created["$c"]}]),
@@ -203,6 +204,7 @@ fn paths_follow_renames_and_moves() {
         r.resolve_path(&work, "purses/cards/transactions").unwrap(),
         id(&res, "$t")
     );
+    assert!(r.resolve_path(&work, "purses/transactions").is_err());
 }
 
 #[test]

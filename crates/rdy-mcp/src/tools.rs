@@ -73,7 +73,7 @@ pub struct WriteParams {
     pub view: Option<String>,
     /// Ops: {"op":"create","type":..,"id":"$name"?,"parent":..,"after":..,"fields":{..},"body":..,"links":{..}},
     /// {"op":"update","id":..,"base":..?,"fields":{..},"unset":[..],"body":..,"links":{..}},
-    /// {"op":"move","id":..,"parent":..,"after":..}, {"op":"delete","id":..}.
+    /// {"op":"move","id":..,"parent":..?,"after":..}, {"op":"delete","id":..}. Ids, parents, afters and link targets also take paths (wallets/transactions); a move without parent goes to the top level (docs and folders).
     pub ops: Vec<Value>,
     /// The decision this change carries out.
     pub implements: Option<String>,

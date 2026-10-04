@@ -52,7 +52,8 @@ pub enum OpInput {
         id: String,
         #[serde(default)]
         base: Option<String>,
-        parent: String,
+        #[serde(default)]
+        parent: Option<String>,
         #[serde(default)]
         after: Option<String>,
     },
@@ -136,11 +137,12 @@ impl<'a> Overlay<'a> {
     }
 }
 
-struct Resolver {
+struct Resolver<'a> {
     placeholders: BTreeMap<String, BlockId>,
+    base: &'a Materialized,
 }
 
-impl Resolver {
+impl Resolver<'_> {
     fn id(&self, s: &str) -> Result<BlockId, RdyError> {
         if let Some(name) = s.strip_prefix('$') {
             return self.placeholders.get(s).cloned().ok_or_else(|| {
@@ -150,12 +152,11 @@ impl Resolver {
                 )
             });
         }
-        BlockId::parse(s).map_err(|e| {
-            bad(
-                e.to_string(),
-                "ids look like b-7KQ2M; find them with rdy_read or rdy_search",
-            )
-        })
+        match BlockId::parse(s) {
+            Ok(id) => Ok(id),
+            // not an id: a folder or doc path, read in the view as it was before this write
+            Err(_) => crate::paths::resolve_in(self.base, s),
+        }
     }
 
     /// Replaces `{{$name}}` references (as `mode` reads them) with the created ids.
@@ -373,14 +374,58 @@ fn components(deps: &[Vec<usize>]) -> Vec<usize> {
     comp
 }
 
-/// Lower-cased stored names of the docs and folders directly under `parent` (pending edits included).
-fn sibling_names(ov: &Overlay, parent: Option<&BlockId>) -> BTreeSet<String> {
+/// Lower-cased name → id of every doc and folder under `parent` (pending edits included), except `except`.
+fn sibling_names(
+    ov: &Overlay,
+    parent: Option<&BlockId>,
+    except: Option<&BlockId>,
+) -> BTreeMap<String, BlockId> {
+    let effective = ov.base.names_under(parent);
     ov.children(parent)
-        .iter()
-        .filter(|b| tree::is_tree_type(&b.block_type))
-        .filter_map(|b| b.field_str("name"))
-        .map(str::to_ascii_lowercase)
+        .into_iter()
+        .filter(|b| tree::is_tree_type(&b.block_type) && Some(&b.id) != except)
+        .filter_map(|b| {
+            let n = b
+                .field_str("name")
+                .map(String::from)
+                .or_else(|| effective.get(&b.id).cloned())?;
+            Some((n.to_ascii_lowercase(), b.id.clone()))
+        })
         .collect()
+}
+
+/// Checks a doc's or folder's name: valid, and unique among its siblings ignoring case.
+fn check_name(ov: &Overlay, block: &Block, op: usize) -> Result<(), RdyError> {
+    if !tree::is_tree_type(&block.block_type) {
+        return Ok(());
+    }
+    let Some(name) = block.field_str("name") else {
+        return Ok(()); // validation reports the missing field
+    };
+    let siblings = sibling_names(ov, block.parent.as_ref(), Some(&block.id));
+    let taken: BTreeSet<String> = siblings.keys().cloned().collect();
+    if let Some(why) = tree::name_problem(name) {
+        let fixed = tree::dedupe(&tree::default_name(Some(name), &block.id), &taken);
+        return Err(RdyError::new(
+            E_BAD_NAME,
+            format!("{name:?} is not a valid name: {why}"),
+            format!("use a name like {fixed:?}"),
+        )
+        .with_corrected(serde_json::json!({"op": op, "fields": {"name": fixed}})));
+    }
+    if let Some(other) = siblings.get(&name.to_ascii_lowercase()) {
+        let fixed = tree::dedupe(name, &taken);
+        return Err(RdyError::new(
+            E_PATH_CLASH,
+            format!(
+                "{} would be named {name:?}, which {other} already uses here (names are unique ignoring case)",
+                block.id
+            ),
+            format!("choose another name, e.g. {fixed:?}"),
+        )
+        .with_corrected(serde_json::json!({"op": op, "fields": {"name": fixed}})));
+    }
+    Ok(())
 }
 
 fn build_ops(
@@ -395,6 +440,7 @@ fn build_ops(
     };
     let mut res = Resolver {
         placeholders: BTreeMap::new(),
+        base,
     };
     let mut ops = vec![];
     let mut created = BTreeMap::new();
@@ -495,11 +541,16 @@ fn build_ops(
                 };
                 if tree::is_tree_type(&block.block_type) && !block.fields.contains_key("name") {
                     let base = tree::default_name(block.field_str("title"), &block.id);
-                    let name = tree::dedupe(&base, &sibling_names(&ov, block.parent.as_ref()));
+                    let taken: BTreeSet<String> = sibling_names(&ov, block.parent.as_ref(), None)
+                        .into_keys()
+                        .collect();
+                    let name = tree::dedupe(&base, &taken);
                     block
                         .fields
                         .insert("name".into(), FieldValue::Str(name.clone()));
                     names.insert(block.id.to_string(), name);
+                } else {
+                    check_name(&ov, &block, i)?;
                 }
                 touched.insert(new_id.clone());
                 ov.pending.insert(new_id, Some(block.clone()));
@@ -517,6 +568,13 @@ fn build_ops(
                 let id = res.id(&id)?;
                 let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched)?;
                 let mut block = cur.clone();
+                // a doc from M1 stores the name readers already use for it on its first write
+                if block.block_type == tree::DOC
+                    && !block.fields.contains_key("name")
+                    && let Some(n) = ov.base.name_of(&id)
+                {
+                    block.fields.insert("name".into(), FieldValue::Str(n));
+                }
                 block.fields.extend(res.fields(fields)?);
                 for k in unset {
                     block.fields.remove(&k);
@@ -528,6 +586,10 @@ fn build_ops(
                     block.links = res.links(links)?;
                 }
                 prior.push((false, cur.pins.clone()));
+                let renamed = block.field_str("name") != cur.field_str("name");
+                if renamed {
+                    check_name(&ov, &block, i)?;
+                }
                 touched.insert(id.clone());
                 ov.pending.insert(id, Some(block.clone()));
                 ops.push(Op::Update {
@@ -542,29 +604,38 @@ fn build_ops(
                 after,
             } => {
                 let id = res.id(&id)?;
-                let parent = res.id(&parent)?;
+                let parent = parent.as_deref().map(|p| res.id(p)).transpose()?;
                 let after = after.as_deref().map(|a| res.id(a)).transpose()?;
                 let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched)?;
                 let mut block = cur.clone();
-                if ov.get(&parent).is_none() {
-                    return Err(RdyError::new(
-                        E_UNKNOWN_BLOCK,
-                        format!("parent {parent} does not exist"),
-                        "check the parent id",
-                    ));
+                if block.block_type == tree::DOC
+                    && !block.fields.contains_key("name")
+                    && let Some(n) = ov.base.name_of(&id)
+                {
+                    block.fields.insert("name".into(), FieldValue::Str(n));
                 }
-                let mut walk = Some(parent.clone());
-                while let Some(w) = walk {
-                    if w == id {
-                        return Err(bad(
-                            format!("cannot move {id} under itself or one of its descendants"),
-                            "choose a parent outside the subtree being moved",
+                if let Some(p) = &parent {
+                    if ov.get(p).is_none() {
+                        return Err(RdyError::new(
+                            E_UNKNOWN_BLOCK,
+                            format!("parent {p} does not exist"),
+                            "check the parent id",
                         ));
                     }
-                    walk = ov.get(&w).and_then(|b| b.parent.clone());
+                    let mut walk = Some(p.clone());
+                    while let Some(w) = walk {
+                        if w == id {
+                            return Err(bad(
+                                format!("cannot move {id} under itself or one of its descendants"),
+                                "choose a parent outside the subtree being moved",
+                            ));
+                        }
+                        walk = ov.get(&w).and_then(|b| b.parent.clone());
+                    }
                 }
-                block.parent = Some(parent.clone());
-                block.order = order_after(&ov, Some(&parent), after.as_ref())?;
+                block.parent = parent.clone();
+                block.order = order_after(&ov, parent.as_ref(), after.as_ref())?;
+                check_name(&ov, &block, i)?;
                 prior.push((true, block.pins.clone()));
                 touched.insert(id.clone());
                 ov.pending.insert(id, Some(block.clone()));
