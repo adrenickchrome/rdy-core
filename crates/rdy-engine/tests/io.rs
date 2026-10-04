@@ -284,3 +284,37 @@ fn edit_block_refuses_a_no_op_edit() {
     assert_eq!(e.code, "E_BAD_INPUT");
     assert!(e.message.contains("nothing changed"), "{}", e.message);
 }
+
+#[test]
+fn export_of_a_figure_whose_blob_is_missing_fails_and_writes_nothing() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let mut a = Rdy::init(a_dir.path(), "rdy-standard").unwrap();
+    let missing = rdy_store::Store::blob_hash(b"never stored").to_string();
+    let res = a.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "D", "doc_type": "components"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "S"}},
+        {"op": "create", "type": "figure", "id": "$f", "parent": "$s", "fields": {"blob": missing, "media_type": "application/octet-stream", "alt": "gone"}}
+    ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let out = parent.path().join("exp");
+    let e = a.export(&Scope::View("work".into()), &out).unwrap_err();
+    assert_eq!(e.code, "E_NOT_FOUND", "{e}");
+    assert!(e.message.contains(&res.created["$f"]), "names the figure: {e}");
+    assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0, "nothing written, no staging dir left behind");
+}
+
+#[test]
+fn export_creates_missing_parents_and_clears_a_leftover_staging_dir() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut a = rich_project(a_dir.path());
+    let deeper = root.path().join("nested/deeper");
+    // an interrupted earlier export left its staging dir behind
+    std::fs::create_dir_all(deeper.join(".exp.rdy-export-partial/docs")).unwrap();
+    std::fs::write(deeper.join(".exp.rdy-export-partial/docs/d-STALE.yaml"), "[]").unwrap();
+    a.export(&Scope::Canon, &deeper.join("exp")).unwrap();
+    assert!(!deeper.join("exp/docs/d-STALE.yaml").exists());
+    assert!(deeper.join("exp/rdy-export.yaml").exists());
+    let names: Vec<_> = std::fs::read_dir(&deeper).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("exp")]);
+}

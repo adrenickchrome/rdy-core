@@ -97,18 +97,43 @@ impl Rdy {
         if out.exists() && std::fs::read_dir(out).map_err(io_err)?.next().is_some() {
             return Err(RdyError::new(E_BAD_INPUT, format!("{} is not empty", out.display()), "choose an empty directory (or one that does not exist yet) so no stale files mix into the export"));
         }
+        let name = out.file_name().ok_or_else(|| RdyError::new(E_BAD_INPUT, format!("{} does not name a directory", out.display()), "pass a directory path such as ./export"))?;
+        let parent = out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent).map_err(io_err)?;
+        // everything is written to a staging directory beside `out` and renamed into place at
+        // the end, so a failed export leaves nothing behind
+        let staging = parent.join(format!(".{}.rdy-export-partial", name.to_string_lossy()));
+        if staging.exists() {
+            std::fs::remove_dir_all(&staging).map_err(io_err)?;
+        }
+        let summary = match self.write_export(scope, &staging) {
+            Ok(summary) => summary,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(e);
+            }
+        };
+        if out.exists() {
+            std::fs::remove_dir(out).map_err(io_err)?;
+        }
+        std::fs::rename(&staging, out).map_err(io_err)?;
+        Ok(summary)
+    }
+
+    fn write_export(&mut self, scope: &Scope, out: &Path) -> Result<ExportSummary, RdyError> {
         let m = self.materialized(scope)?.clone();
         std::fs::create_dir_all(out.join("docs")).map_err(io_err)?;
         std::fs::create_dir_all(out.join("blobs")).map_err(io_err)?;
         let mut summary = ExportSummary { docs: 0, blocks: 0, blobs: 0 };
-        let mut blobs = BTreeSet::new();
+        // each blob, with the first figure that names it
+        let mut blobs = BTreeMap::new();
         for doc in m.children(None) {
             let mut list = vec![];
             let mut stack = vec![doc];
             while let Some(b) = stack.pop() {
                 list.push(to_yaml_struct(b));
                 if let Some(h) = b.field_str("blob").and_then(|s| s.parse::<Hash>().ok()) {
-                    blobs.insert(h);
+                    blobs.entry(h).or_insert_with(|| b.id.clone());
                 }
                 let mut kids = m.children(Some(&b.id));
                 kids.reverse();
@@ -119,8 +144,12 @@ impl Rdy {
             let text = serde_yaml_ng::to_string(&list).expect("doc yaml");
             std::fs::write(out.join("docs").join(format!("{}.yaml", doc.id)), text).map_err(io_err)?;
         }
-        for h in &blobs {
-            std::fs::write(out.join("blobs").join(h.to_string()), self.store.get_blob(h)?).map_err(io_err)?;
+        for (h, figure) in &blobs {
+            let bytes = self.store.get_blob(h).map_err(|e| match e {
+                rdy_store::StoreError::NotFound(_) => RdyError::new(E_NOT_FOUND, format!("{figure} names blob {h}, which is not in the store"), format!("attach the asset again (rdy_asset) and point {figure} at it, or delete {figure}")),
+                other => other.into(),
+            })?;
+            std::fs::write(out.join("blobs").join(h.to_string()), bytes).map_err(io_err)?;
             summary.blobs += 1;
         }
         let scope_name = match scope {
