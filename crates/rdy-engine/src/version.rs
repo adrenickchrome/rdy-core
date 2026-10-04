@@ -170,6 +170,7 @@ impl Rdy {
             };
             if refname["tag/".len()..] != tag.name {
                 problems.push(format!("{refname} holds the tag {:?}", tag.name));
+                continue;
             }
             let Ok(v) = parse_version(&tag.name) else {
                 problems.push(format!("{refname}: {:?} is not a valid version", tag.name));
@@ -208,13 +209,18 @@ impl Rdy {
     }
 
     /// Every version as (parsed version, tag), in SemVer precedence order. Tag refs whose name is
-    /// not a version are skipped here; `rdy fsck` reports them.
+    /// not a version, and refs that cannot be read as a tag, are skipped here so one damaged ref
+    /// does not fail every read; `rdy fsck` reports them.
     pub(crate) fn version_tags(&self) -> Result<Vec<(semver::Version, Tag)>, RdyError> {
         let mut out: Vec<(semver::Version, Tag)> = self
             .store
-            .tags()?
+            .refs_with_prefix("tag/")?
             .into_iter()
-            .filter_map(|(_, _, t)| parse_version(&t.name).ok().map(|v| (v, t)))
+            .filter_map(|(_, value)| {
+                let bytes = <[u8; 32]>::try_from(value.as_slice()).ok()?;
+                let t = self.store.read_tag(&Hash(bytes)).ok()?;
+                parse_version(&t.name).ok().map(|v| (v, t))
+            })
             .collect();
         out.sort_by(|a, b| a.0.cmp_precedence(&b.0));
         Ok(out)
@@ -255,6 +261,13 @@ impl Rdy {
             return Ok(Scope::At(self.resolve_landing(id)?));
         }
         let view = text.strip_prefix("view:").unwrap_or(text);
+        if view.is_empty() {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "a view name is empty",
+                "name a view, e.g. view:work",
+            ));
+        }
         Ok(Scope::View(view.to_string()))
     }
 
@@ -276,15 +289,16 @@ impl Rdy {
         }
         let version = parse_version(name)?;
         let chain: Vec<Hash> = self.store.landings()?.into_iter().map(|(h, _)| h).collect();
+        let head = *chain.first().ok_or_else(|| {
+            RdyError::new(
+                E_NOT_FOUND,
+                "canon has no landings to version",
+                "land a proposal first",
+            )
+        })?;
         let target = match landing {
             Some(text) => match_prefix(&chain, text)?,
-            None => *chain.first().ok_or_else(|| {
-                RdyError::new(
-                    E_NOT_FOUND,
-                    "canon has no landings to version",
-                    "land a proposal first",
-                )
-            })?,
+            None => head,
         };
         let existing = self.version_tags()?;
         if let Some((_, t)) = existing

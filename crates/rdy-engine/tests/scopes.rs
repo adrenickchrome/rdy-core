@@ -225,3 +225,32 @@ fn the_fifth_as_of_scope_evicts_the_least_recently_used() {
     assert!(!r.is_cached(&Scope::At(l[3])).0);
     assert!(r.is_cached(&Scope::At(l[2])).0);
 }
+
+#[test]
+fn a_bogus_as_of_scope_does_not_evict_cached_snapshots() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let l: Vec<Hash> = (0..4)
+        .map(|i| land_one(&mut r, &format!("D{i}")).parse().unwrap())
+        .collect();
+    for h in &l {
+        r.materialized(&Scope::At(*h)).unwrap();
+    }
+    let e = r.materialized(&Scope::At(Hash([7; 32]))).unwrap_err();
+    assert_eq!(e.code, "E_NOT_FOUND");
+    for h in &l {
+        assert!(r.is_cached(&Scope::At(*h)).0, "{h} was evicted");
+    }
+}
+
+#[test]
+fn an_empty_view_name_is_bad_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    for text in ["view:", ""] {
+        let e = r.resolve_scope(text).unwrap_err();
+        assert_eq!(e.code, "E_BAD_INPUT", "{text:?}");
+        assert!(e.fix.contains("view:work"), "{e}");
+    }
+    assert!(matches!(r.resolve_scope("view:work"), Ok(Scope::View(_))));
+}

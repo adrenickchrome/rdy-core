@@ -315,3 +315,31 @@ fn position_of_an_as_of_scope_is_frozen() {
         "v2.0.0 · frozen snapshot"
     );
 }
+
+#[test]
+fn a_damaged_tag_ref_does_not_break_version_reads() {
+    let (_d, mut r, l) = project(1);
+    r.tag(&founder(), "v0.1.0", Some(&l[0]), None).unwrap();
+    r.store_mut()
+        .set_refs(vec![("tag/v9.0.0".into(), b"garbage".to_vec())])
+        .unwrap();
+    let names: Vec<String> = r.versions().unwrap().into_iter().map(|v| v.name).collect();
+    assert_eq!(names, ["v0.1.0"]);
+    assert_eq!(label(&r, &Scope::Canon), "v0.1.0");
+    assert!(matches!(
+        r.resolve_scope("tag:v0.1.0").unwrap(),
+        Scope::At(_)
+    ));
+    let e = r.fsck().unwrap_err();
+    assert!(e.message.contains("tag/v9.0.0"), "{e}");
+}
+
+#[test]
+fn tagging_an_explicit_landing_on_an_empty_canon_says_to_land_first() {
+    let (_d, mut r, _) = project(0);
+    let e = r
+        .tag(&founder(), "v0.1.0", Some("abcdef"), None)
+        .unwrap_err();
+    assert_eq!(e.code, "E_NOT_FOUND");
+    assert!(e.fix.contains("land a proposal first"), "{e}");
+}

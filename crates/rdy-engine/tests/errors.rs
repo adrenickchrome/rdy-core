@@ -191,5 +191,10 @@ fn fsck_reports_tags_written_around_the_rules() {
     r.store_mut()
         .set_refs(vec![("tag/v9.9.9".into(), h.0.to_vec())])
         .unwrap();
-    assert!(fsck_message(&r).contains("tag/v9.9.9"));
+    let m = fsck_message(&r);
+    assert!(m.contains("tag/v9.9.9"));
+    assert!(
+        m.starts_with("1 version problem(s)"),
+        "one bad ref, one message: {m}"
+    );
 }

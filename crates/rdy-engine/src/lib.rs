@@ -143,21 +143,24 @@ impl Rdy {
     }
 
     pub fn materialized(&mut self, scope: &Scope) -> Result<&Materialized, RdyError> {
-        if let Scope::At(h) = scope {
-            self.touch_as_of(*h);
-        }
         if !self.cache.contains_key(scope) {
             let snapshot = match scope {
                 Scope::Canon => self.store.canon_state()?,
                 Scope::View(v) => self.store.view_state(v)?,
                 Scope::At(h) => {
-                    if self.store.get_raw(h).map(|(k, _)| k).ok() != Some(rdy_store::kinds::LANDING)
-                    {
-                        return Err(RdyError::new(
+                    let not_landing = || {
+                        RdyError::new(
                             E_NOT_FOUND,
                             format!("{} is not a landing", h.short()),
                             "read as of a version (tag:<version>) or a landing in rdy log (landing:<id>)",
-                        ));
+                        )
+                    };
+                    match self.store.get_raw(h) {
+                        Ok((k, _)) if k == rdy_store::kinds::LANDING => {}
+                        Ok(_) | Err(rdy_store::StoreError::NotFound(_)) => {
+                            return Err(not_landing());
+                        }
+                        Err(e) => return Err(e.into()),
                     }
                     self.store.snapshot_at(h)?
                 }
@@ -165,6 +168,9 @@ impl Rdy {
             let blocks = self.store.blocks(&snapshot)?;
             self.cache
                 .insert(scope.clone(), Materialized::build(snapshot, blocks));
+        }
+        if let Scope::At(h) = scope {
+            self.touch_as_of(*h);
         }
         Ok(&self.cache[scope])
     }

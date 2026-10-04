@@ -227,6 +227,9 @@ impl Store {
             .collect()
     }
 
+    /// Does not check for an existing `tag/<name>` ref (it would be overwritten): the engine's
+    /// E_TAG_EXISTS check is the guard.
+    ///
     /// Writes `tag` and the ref `tag/<name>` → its hash in one atomic write.
     pub fn put_tag(&mut self, tag: &Tag) -> Result<Hash, StoreError> {
         let bytes = postcard::to_allocvec(tag).expect("encode tag");
@@ -253,7 +256,7 @@ impl Store {
             .into_iter()
             .map(|(name, value)| {
                 let h = crate::index::hash_from(&value, "tag ref")?;
-                let name = name.trim_start_matches("tag/").to_string();
+                let name = name.strip_prefix("tag/").unwrap_or(&name).to_string();
                 Ok((name, h, self.read_tag(&h)?))
             })
             .collect()
