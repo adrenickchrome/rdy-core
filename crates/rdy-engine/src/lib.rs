@@ -1,10 +1,12 @@
 mod error;
 mod materialize;
 mod session;
+mod write;
 
 pub use error::*;
 pub use materialize::Materialized;
 pub use session::{now_ms, Scope, Session};
+pub use write::{json_to_field, LinkInput, OpInput, WriteRequest, WriteResult};
 
 use rdy_model::Op;
 use rdy_schema::{Pack, PackSet};
@@ -93,7 +95,6 @@ impl Rdy {
         self.cache.clear();
     }
 
-    #[allow(dead_code)] // used by write path (Task 12)
     pub(crate) fn update_cache(&mut self, view: &str, ops: &[Op]) {
         if let Some(m) = self.cache.get_mut(&Scope::View(view.to_string())) {
             m.apply(ops);
