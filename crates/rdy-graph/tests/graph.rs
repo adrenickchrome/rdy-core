@@ -182,3 +182,20 @@ fn impact_depth_cutoff_and_diamond() {
     let d3: Vec<_> = g.impact(&id, 3).into_iter().map(|(d, i)| (d, i.to_string())).collect();
     assert_eq!(d3, vec![(1, "c-XXXXX".into()), (1, "c-YYYYY".into()), (2, "n-ZZZZZ".into())]);
 }
+
+#[test]
+fn suspects_of_matches_the_whole_scope_suspects_filtered_to_one_block() {
+    let target = dec("D-AAAAA", "accepted");
+    let claim = claim_pinned("c-CHAMP", &target);
+    let other = claim_pinned("c-THREE", &target);
+    let mut revoker = dec("D-BBBBB", "accepted");
+    link(&mut revoker, "revokes", "D-AAAAA", None);
+    let blocks = map(vec![target, claim.clone(), other.clone(), revoker.clone()]);
+    let g = Graph::build(&blocks);
+    for b in blocks.values() {
+        let expect: Vec<_> = g.suspects(&blocks, &no_old).into_iter().filter(|s| s.block == b.id).collect();
+        assert_eq!(g.suspects_of(&b.id, &blocks, &no_old), expect, "{}", b.id);
+    }
+    assert_eq!(g.suspects_of(&claim.id, &blocks, &no_old).len(), 1);
+    assert!(g.suspects_of(&revoker.id, &blocks, &no_old).is_empty());
+}

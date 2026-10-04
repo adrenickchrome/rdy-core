@@ -64,9 +64,9 @@ impl Rdy {
 
     pub fn context(&mut self, scope: &Scope, id: &BlockId) -> Result<Context, RdyError> {
         let block = self.block(scope, id)?;
-        let all_suspects = self.suspects(scope)?;
-        let m = &self.cache[scope];
-        let g = &self.graphs[scope];
+        self.graph(scope)?;
+        let (m, g, store) = (&self.cache[scope], &self.graphs[scope], &self.store);
+        let suspects = g.suspects_of(id, &m.blocks, &|h| store.get_block(h).ok());
         Ok(Context {
             id: block.id.to_string(),
             block_type: block.block_type.clone(),
@@ -80,7 +80,7 @@ impl Rdy {
             incoming: g.incoming(id).to_vec(),
             status: g.status(id),
             governing: g.governing(id).iter().map(|d| d.to_string()).collect(),
-            suspects: all_suspects.into_iter().filter(|s| &s.block == id).collect(),
+            suspects,
         })
     }
 

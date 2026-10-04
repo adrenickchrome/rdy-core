@@ -179,42 +179,46 @@ impl Graph {
     }
 
     pub fn suspects(&self, blocks: &BTreeMap<BlockId, Block>, old: &dyn Fn(&Hash) -> Option<Block>) -> Vec<Suspect> {
-        let mut out = vec![];
-        for edges in self.out.values() {
-            for e in edges {
-                if e.kind == EdgeKind::Contains {
-                    continue;
-                }
-                // a superseding or revoking decision's own link is the cause, not a suspect
-                if matches!(&e.kind, EdgeKind::Link(n) if n == decision::SUPERSEDES || n == decision::REVOKES) {
-                    continue;
-                }
-                // a decision naming, in its text, an id it supersedes or revokes is expected
-                if e.kind == EdgeKind::References
-                    && self.outgoing(&e.from).iter().any(|o| o.to == e.to && matches!(&o.kind, EdgeKind::Link(n) if n == decision::SUPERSEDES || n == decision::REVOKES))
-                {
-                    continue;
-                }
-                let reason = match self.status(&e.to) {
-                    Some(DerivedStatus::Superseded { .. }) => Some("superseded"),
-                    Some(DerivedStatus::Revoked { .. }) => Some("revoked"),
-                    _ => match (e.pin, self.versions.get(&e.to)) {
-                        (Some(_), None) => Some("deleted"),
-                        (Some(pin), Some(cur)) if pin != *cur => {
-                            let same = match (old(&pin), blocks.get(&e.to)) {
-                                (Some(a), Some(b)) => same_content(&a, b),
-                                _ => false,
-                            };
-                            if same { None } else { Some("changed") }
-                        }
-                        _ => None,
-                    },
-                };
-                if let Some(r) = reason {
-                    out.push(Suspect { block: e.from.clone(), target: e.to.clone(), reason: r.into() });
-                }
-            }
+        self.out.values().flatten().filter_map(|e| self.edge_suspect(e, blocks, old)).collect()
+    }
+
+    /// The suspects whose `block` is `id`: checks only that block's own outgoing edges.
+    pub fn suspects_of(&self, id: &BlockId, blocks: &BTreeMap<BlockId, Block>, old: &dyn Fn(&Hash) -> Option<Block>) -> Vec<Suspect> {
+        self.outgoing(id).iter().filter_map(|e| self.edge_suspect(e, blocks, old)).collect()
+    }
+
+    fn edge_suspect(&self, e: &Edge, blocks: &BTreeMap<BlockId, Block>, old: &dyn Fn(&Hash) -> Option<Block>) -> Option<Suspect> {
+        if e.kind == EdgeKind::Contains {
+            return None;
         }
-        out
+        // a superseding or revoking decision's own link is the cause, not a suspect
+        if matches!(&e.kind, EdgeKind::Link(n) if n == decision::SUPERSEDES || n == decision::REVOKES) {
+            return None;
+        }
+        // a decision naming, in its text, an id it supersedes or revokes is expected
+        if e.kind == EdgeKind::References
+            && self.outgoing(&e.from).iter().any(|o| o.to == e.to && matches!(&o.kind, EdgeKind::Link(n) if n == decision::SUPERSEDES || n == decision::REVOKES))
+        {
+            return None;
+        }
+        let reason = match self.status(&e.to) {
+            Some(DerivedStatus::Superseded { .. }) => "superseded",
+            Some(DerivedStatus::Revoked { .. }) => "revoked",
+            _ => match (e.pin, self.versions.get(&e.to)) {
+                (Some(_), None) => "deleted",
+                (Some(pin), Some(cur)) if pin != *cur => {
+                    let same = match (old(&pin), blocks.get(&e.to)) {
+                        (Some(a), Some(b)) => same_content(&a, b),
+                        _ => false,
+                    };
+                    if same {
+                        return None;
+                    }
+                    "changed"
+                }
+                _ => return None,
+            },
+        };
+        Some(Suspect { block: e.from.clone(), target: e.to.clone(), reason: reason.into() })
     }
 }
