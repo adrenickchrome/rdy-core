@@ -1,7 +1,7 @@
 mod html;
 pub use html::{escape, text_html};
 
-use rdy_engine::{summary, Rdy, RdyError, Scope, E_IO};
+use rdy_engine::{summary_in, Rdy, RdyError, Scope, E_IO};
 use rdy_graph::{DerivedStatus, EdgeKind};
 use rdy_model::{decision, Block, BlockId, FieldValue, Hash};
 use serde::Serialize;
@@ -66,7 +66,7 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
     // where each block lives, for links
     let href_from = |from_doc: Option<&BlockId>, id: &BlockId, prefix: &str| -> Option<(String, String)> {
         let b = m.get(id)?;
-        let label = summary(b);
+        let label = summary_in(b, &m);
         if b.block_type == decision::DECISION {
             return Some((format!("{prefix}decision/{id}.html"), label));
         }

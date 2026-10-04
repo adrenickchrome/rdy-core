@@ -55,6 +55,7 @@ fn write_read_context_round_trip() {
     let text = read["text"].as_str().unwrap();
     assert!(text.contains(&format!("{t} term: Ledger")));
     assert!(text.contains(&format!("  {c} claim:")), "indented by depth:\n{text}");
+    assert!(text.contains(&format!("{c} claim: Uses the Ledger.")), "references render as the target's summary:\n{text}");
 
     let md = rdy_read(&mut st, serde_json::from_value(json!({"id": doc, "scope": "run-7", "format": "markdown"})).unwrap()).unwrap();
     assert!(md["text"].as_str().unwrap().contains("# Identity"));

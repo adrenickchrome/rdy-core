@@ -1,7 +1,7 @@
 use crate::error::*;
-use crate::{Rdy, Scope};
+use crate::{Materialized, Rdy, Scope};
 use rdy_graph::{DerivedStatus, Edge, Graph, Suspect};
-use rdy_model::{Block, BlockId, FieldValue};
+use rdy_model::{ref_spans, Block, BlockId, FieldValue, RefMode};
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
@@ -29,9 +29,37 @@ pub struct ImpactItem {
     pub summary: String,
 }
 
+/// A one-line label for `b` (at most 80 chars): its statement, name or title field, else its body,
+/// with whitespace collapsed and each `{{id}}` reference shown as the bare id.
 pub fn summary(b: &Block) -> String {
-    let text = ["statement", "name", "title"].iter().find_map(|f| b.field_str(f).filter(|s| !s.is_empty())).unwrap_or(b.body.as_str());
-    text.chars().take(80).collect()
+    summarize(b, &|tok| tok.to_string())
+}
+
+/// Like [`summary`], but each `{{id}}` reference to a block in `m` is shown as that block's own
+/// [`summary`] (never expanded further); unknown targets show the bare id.
+pub fn summary_in(b: &Block, m: &Materialized) -> String {
+    summarize(b, &|tok| BlockId::parse(tok).ok().and_then(|id| m.get(&id)).map(summary).unwrap_or_else(|| tok.to_string()))
+}
+
+fn summarize(b: &Block, resolve: &dyn Fn(&str) -> String) -> String {
+    let (text, mode) = match ["statement", "name", "title"].iter().find_map(|f| b.field_str(f).filter(|s| !s.is_empty())) {
+        Some(field) => (field, RefMode::Strict),
+        None => (b.body.as_str(), RefMode::for_body(&b.block_type)),
+    };
+    let mut out = String::new();
+    if mode == RefMode::Off {
+        out.push_str(text);
+    } else {
+        let plain = |s: &str| s.replace("\\{{", "{{");
+        let mut last = 0;
+        for span in ref_spans(text, mode) {
+            out.push_str(&plain(&text[last..span.range.start]));
+            out.push_str(&resolve(&span.token));
+            last = span.range.end;
+        }
+        out.push_str(&plain(&text[last..]));
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(80).collect()
 }
 
 pub fn field_json(v: &FieldValue) -> serde_json::Value {
@@ -90,7 +118,7 @@ impl Rdy {
         let (g, m) = (&self.graphs[scope], &self.cache[scope]);
         Ok(g.impact(id, depth)
             .into_iter()
-            .filter_map(|(d, bid)| m.get(&bid).map(|b| ImpactItem { depth: d, id: bid.to_string(), block_type: b.block_type.clone(), summary: summary(b) }))
+            .filter_map(|(d, bid)| m.get(&bid).map(|b| ImpactItem { depth: d, id: bid.to_string(), block_type: b.block_type.clone(), summary: summary_in(b, m) }))
             .collect())
     }
 }

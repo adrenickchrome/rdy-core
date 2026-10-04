@@ -13,7 +13,7 @@ pub use error::*;
 pub use gate::ProposalInfo;
 pub use io::{block_from_yaml, block_to_yaml, ExportSummary};
 pub use materialize::Materialized;
-pub use query::{field_json, summary, Context, ImpactItem};
+pub use query::{field_json, summary, summary_in, Context, ImpactItem};
 pub use session::{now_ms, rfc3339_now, Scope, Session};
 pub use write::{json_to_field, LinkInput, OpInput, WriteRequest, WriteResult};
 

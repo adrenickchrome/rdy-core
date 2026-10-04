@@ -128,3 +128,25 @@ fn escaped_braces_render_literally_and_diagram_references_become_labels() {
     assert!(doc.contains("<pre class=\"mermaid\">graph TD\n  A{{Decide?}} --&gt; B[Ledger &amp; co]</pre>"), "{doc}");
     assert!(doc.contains(r"x: \{{ .Values.image }}"), "code is shown verbatim");
 }
+
+#[test]
+fn link_labels_render_references_as_text_on_one_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Ledger", "doc_type": "components"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "S"}}
+    ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let s = res.created["$s"].clone();
+    let d = r.decide(&agent(), "work", DecisionInput { parent: s.clone(), statement: "Ledger is append-only".into(), ..Default::default() }).unwrap();
+    let did = d.created["$decision"].clone();
+    r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+        {"op": "create", "type": "claim", "parent": s, "body": format!("Corrections are\nnew entries per {{{{{did}}}}}.")}
+    ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let p = r.propose(&agent(), "work", "seed").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    let dec = std::fs::read_to_string(out.path().join(format!("decision/{did}.html"))).unwrap();
+    assert!(dec.contains(">Corrections are new entries per Ledger is append-only.</a>"), "Referenced by label: {dec}");
+}

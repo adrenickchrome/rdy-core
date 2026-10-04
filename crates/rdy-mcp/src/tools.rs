@@ -253,7 +253,7 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
                 _ => b.body.clone(),
             }),
             _ => {
-                let mut line = format!("{}{} {}: {}", "  ".repeat(depth), b.id, b.block_type, summary(b));
+                let mut line = format!("{}{} {}: {}", "  ".repeat(depth), b.id, b.block_type, summary_in(b, &m));
                 if suspects.contains(&b.id) {
                     line.push_str(" [suspect]");
                 }
