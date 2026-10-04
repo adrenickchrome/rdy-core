@@ -79,6 +79,15 @@ impl Store {
         self.index.apply(&entries, self.log.end())
     }
 
+    /// Reads and hash-checks every frame in every segment; returns the frame count.
+    pub fn verify(&self) -> Result<usize, StoreError> {
+        let frames = self.log.scan_from(Location { segment: 0, offset: 0 })?;
+        for (loc, _, _) in &frames {
+            self.log.read(*loc)?;
+        }
+        Ok(frames.len())
+    }
+
     pub fn reindex(&mut self) -> Result<(), StoreError> {
         let path = self.dir.join("index.redb");
         let tmp = self.dir.join("index.redb.tmp");

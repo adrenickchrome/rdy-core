@@ -112,3 +112,20 @@ impl Rdy {
         }
     }
 }
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct FsckReport {
+    pub frames: usize,
+    pub landings: usize,
+}
+
+impl Rdy {
+    pub fn fsck(&self) -> Result<FsckReport, RdyError> {
+        let frames = self.store.verify()?;
+        let landings = self.store.landings()?;
+        for (_, rec) in &landings {
+            self.store.get::<rdy_model::StateSnapshot>(&rec.state)?;
+        }
+        Ok(FsckReport { frames, landings: landings.len() })
+    }
+}
