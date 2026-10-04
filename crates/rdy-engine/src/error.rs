@@ -24,6 +24,7 @@ pub const E_VERSION_ORDER: &str = "E_VERSION_ORDER";
 pub const E_BAD_NAME: &str = "E_BAD_NAME";
 pub const E_PATH_CLASH: &str = "E_PATH_CLASH";
 pub const E_FILE_FORMAT: &str = "E_FILE_FORMAT";
+pub const E_ALREADY_LANDED: &str = "E_ALREADY_LANDED";
 /// No order key fits between two siblings within `MAX_ORDER_KEY_LEN`.
 pub const E_ORDER_DEPTH: &str = "E_ORDER_DEPTH";
 /// A tool panicked.

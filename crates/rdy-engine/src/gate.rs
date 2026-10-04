@@ -45,6 +45,23 @@ impl Rdy {
             .collect()
     }
 
+    /// The landing that already carried any of `p`'s changes into canon. Landing removes a
+    /// proposal's changes from its view, so a proposal whose changes are all still in its view
+    /// has not landed, and the common case costs one view read.
+    fn landed_as(&self, p: &Proposal) -> Result<Option<Hash>, RdyError> {
+        let in_view = self.store.view(&p.view)?.changes;
+        if p.changes.iter().all(|c| in_view.contains(c)) {
+            return Ok(None);
+        }
+        for (landing, rec) in self.store.landings()? {
+            let landed: Proposal = self.store.get(&rec.proposal)?;
+            if p.changes.iter().any(|c| landed.changes.contains(c)) {
+                return Ok(Some(landing));
+            }
+        }
+        Ok(None)
+    }
+
     /// Validates the canon that would result from landing `changes`.
     fn prospective_issues(&mut self, changes: &[Change]) -> Result<Vec<Issue>, RdyError> {
         // replay onto canon to surface E_STALE_BASE / E_FROZEN early
@@ -328,6 +345,20 @@ impl Rdy {
             ));
         }
         let p: Proposal = self.store.get(&pid)?;
+        // land1: a landed change is already in canon; replaying it would only fail obscurely
+        if let Some(landing) = self.landed_as(&p)? {
+            return Err(RdyError::new(
+                E_ALREADY_LANDED,
+                format!(
+                    "proposal {} already landed as landing {landing}",
+                    pid.short()
+                ),
+                format!(
+                    "nothing to do: see it in rdy log; to land later work from view {:?}, propose the view again",
+                    p.view
+                ),
+            ));
+        }
         let changes = self.changes_of(&p.changes)?;
 
         // 1. prospective canon: canon + the proposal's own changes
