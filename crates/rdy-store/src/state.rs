@@ -2,7 +2,8 @@ use crate::Store;
 use crate::error::StoreError;
 use crate::kinds;
 use rdy_model::{
-    Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance, StateSnapshot, decision,
+    Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance, StateSnapshot, Tag,
+    decision,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -15,6 +16,10 @@ pub struct ViewRecord {
 
 fn view_ref(name: &str) -> String {
     format!("view/{name}")
+}
+
+fn tag_ref(name: &str) -> String {
+    format!("tag/{name}")
 }
 
 pub fn apply_op(store: &Store, state: &mut StateSnapshot, op: &Op) -> Result<(), StoreError> {
@@ -219,6 +224,38 @@ impl Store {
             .blocks
             .iter()
             .map(|(id, v)| Ok((id.clone(), self.get_block(v)?)))
+            .collect()
+    }
+
+    /// Writes `tag` and the ref `tag/<name>` → its hash in one atomic write.
+    pub fn put_tag(&mut self, tag: &Tag) -> Result<Hash, StoreError> {
+        let bytes = postcard::to_allocvec(tag).expect("encode tag");
+        let id = Hash::of(&bytes);
+        let mut items = vec![(kinds::TAG, bytes)];
+        items.extend(self.ref_items_pub(vec![(tag_ref(&tag.name), id.0.to_vec())]));
+        self.write(items)?;
+        Ok(id)
+    }
+
+    pub fn read_tag(&self, h: &Hash) -> Result<Tag, StoreError> {
+        let (kind, payload) = self.get_raw(h)?;
+        if kind != kinds::TAG {
+            return Err(StoreError::Decode(format!(
+                "{h} is not a tag (object kind {kind})"
+            )));
+        }
+        postcard::from_bytes(&payload).map_err(|e| StoreError::Decode(e.to_string()))
+    }
+
+    /// Every `tag/*` ref as (name, tag hash, tag), in ref-name order.
+    pub fn tags(&self) -> Result<Vec<(String, Hash, Tag)>, StoreError> {
+        self.refs_with_prefix("tag/")?
+            .into_iter()
+            .map(|(name, value)| {
+                let h = crate::index::hash_from(&value, "tag ref")?;
+                let name = name.trim_start_matches("tag/").to_string();
+                Ok((name, h, self.read_tag(&h)?))
+            })
             .collect()
     }
 }
