@@ -45,16 +45,23 @@ impl From<StoreError> for RdyError {
     fn from(e: StoreError) -> Self {
         match e {
             StoreError::Locked(p) => RdyError::new(E_LOCKED, format!("the project store at {} is open in another rdy process", p.display()), "close the other rdy process (or MCP server) and retry"),
-            StoreError::StaleBase { id, expected, actual } => RdyError::new(
+            StoreError::StaleBase { id, expected, actual: Some(actual) } => RdyError::new(
                 E_STALE_BASE,
-                format!("{id} changed since you read it: your base is {}, current is {}", expected.short(), actual.map(|a| a.short()).unwrap_or_else(|| "deleted".into())),
-                format!("re-read {id} (rdy_context) and retry with base={}", actual.map(|a| a.to_string()).unwrap_or_default()),
+                format!("{id} changed since you read it: your base is {}, current is {}", expected.short(), actual.short()),
+                format!("re-read {id} (rdy_context) and retry with base={actual}"),
+            ),
+            StoreError::StaleBase { id, expected, actual: None } => RdyError::new(
+                E_STALE_BASE,
+                format!("{id} was deleted since you read it (your base was {})", expected.short()),
+                format!("{id} was deleted since you read it; recreate it or drop this op"),
             ),
             StoreError::Frozen(id) => RdyError::new(E_FROZEN, format!("{id} is an accepted or rejected decision and cannot change"), format!("write a new decision that supersedes or revokes {id}")),
             StoreError::UnknownBlock(id) => RdyError::new(E_UNKNOWN_BLOCK, format!("no block {id}"), "check the id with rdy_search or rdy_read"),
             StoreError::AlreadyExists(id) => RdyError::new(E_ALREADY_EXISTS, format!("block {id} already exists"), "omit id to let rdy generate one"),
             StoreError::NotFound(h) => RdyError::new(E_NOT_FOUND, format!("object {} not found", h.short()), "check the hash"),
-            other => RdyError::new(E_IO, other.to_string(), "run rdy fsck; if the index is damaged run rdy reindex"),
+            StoreError::UnknownView(v) => RdyError::new(E_NOT_FOUND, format!("no view {v:?}"), "check the view name with rdy status"),
+            StoreError::Conflict { id } => RdyError::new(E_STALE_BASE, format!("conflict on {id}"), format!("re-read {id} (rdy_context) and retry your change against its current version")),
+            e @ (StoreError::Io(_) | StoreError::Db(_) | StoreError::Decode(_)) => RdyError::new(E_IO, e.to_string(), "run rdy fsck; if the index is damaged run rdy reindex"),
         }
     }
 }
