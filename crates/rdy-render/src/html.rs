@@ -59,9 +59,10 @@ pub fn block_html(b: &Block, depth: usize, link: &dyn Fn(&BlockId) -> Option<(St
         "section" => format!("<h{lvl}>{}</h{lvl}>{}", f("title"), if b.body.is_empty() { String::new() } else { format!("<p>{body}</p>") }, lvl = (depth + 1).min(6)),
         "term" | "component" | "actor" | "interface" => format!("<dl class=\"term\"><dt>{}</dt><dd>{body}</dd></dl>", f("name")),
         "decision" => format!(
-            "<div class=\"decision\"><a href=\"{}\">{}</a> <span class=\"badge {status}\">{status}</span></div>",
+            "<div class=\"decision\"><a href=\"{}\">{}</a> <span class=\"badge {}\">{status}</span></div>",
             escape(decision_href),
-            text_html(b.field_str("statement").unwrap_or(""), link)
+            text_html(b.field_str("statement").unwrap_or(""), link),
+            status.replace(' ', "-")
         ),
         "question" => format!("<p><strong>Open question:</strong> {}</p>", text_html(b.field_str("prompt").unwrap_or(""), link)),
         "diagram" => format!("<figure><pre class=\"mermaid\">{}</pre><figcaption>{}</figcaption></figure>", escape(&b.body), f("alt")),

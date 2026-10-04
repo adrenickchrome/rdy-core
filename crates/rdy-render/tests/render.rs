@@ -1,6 +1,7 @@
 use rdy_engine::*;
 use rdy_model::*;
 use rdy_render::*;
+use rdy_store::Store;
 use serde_json::json;
 
 fn agent() -> Session { Session { actor: "agent:a".into(), run: None, role: Role::Writer } }
@@ -57,4 +58,54 @@ fn renders_docs_decisions_diagrams_and_assets() {
     assert!(index.contains(&format!("doc/{doc_id}.html")));
     assert!(!index.contains("cdn.jsdelivr.net/npm/mermaid"), "no diagram script on pages without diagrams");
     assert!(out.path().join(format!("assets/{blob}")).exists());
+}
+
+#[test]
+fn dangling_and_junk_blobs_become_placeholders() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let absent = Store::blob_hash(b"never stored").to_string();
+    let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Assets", "doc_type": "components"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "S"}},
+        {"op": "create", "type": "figure", "parent": "$s", "fields": {"blob": absent, "media_type": "image/png", "alt": "gone"}},
+        {"op": "create", "type": "figure", "parent": "$s", "fields": {"blob": "not-a-hash", "media_type": "image/png", "alt": "junk"}}
+    ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let p = r.propose(&agent(), "work", "seed").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let summary = render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    assert_eq!(summary.assets, 0);
+    let doc = std::fs::read_to_string(out.path().join(format!("doc/{}.html", res.created["$doc"]))).unwrap();
+    assert!(doc.contains("<p class=\"asset missing\">missing asset: gone</p>"));
+    assert!(doc.contains("<p class=\"asset missing\">missing asset: junk</p>"));
+    assert!(!doc.contains("<img"));
+}
+
+#[test]
+fn hostile_text_is_escaped_in_attribute_contexts() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let blob = r.store_mut().put_blob(b"img").unwrap().to_string();
+    let evil = "x\" onerror=\"alert(1)\" <b>";
+    let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "T", "doc_type": "components"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "S"}},
+        {"op": "create", "type": "figure", "parent": "$s", "fields": {"blob": blob, "media_type": "image/png", "alt": evil}},
+        {"op": "create", "type": "code", "parent": "$s", "fields": {"lang": evil}, "body": "x"}
+    ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let d = r.decide(&agent(), "work", DecisionInput { parent: res.created["$s"].clone(), statement: evil.into(), options: vec![evil.into()], ..Default::default() }).unwrap();
+    let p = r.propose(&agent(), "work", "seed").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    let doc = std::fs::read_to_string(out.path().join(format!("doc/{}.html", res.created["$doc"]))).unwrap();
+    let dec = std::fs::read_to_string(out.path().join(format!("decision/{}.html", d.created["$decision"]))).unwrap();
+    let index = std::fs::read_to_string(out.path().join("index.html")).unwrap();
+    for page in [&doc, &dec, &index] {
+        assert!(!page.contains("onerror=\"alert"), "attribute breakout");
+        assert!(!page.contains("<b>"), "raw tag");
+    }
+    assert!(doc.contains("alt=\"x&quot; onerror=&quot;alert(1)&quot; &lt;b&gt;\""));
+    assert!(doc.contains("language-x&quot; onerror=&quot;alert(1)&quot; &lt;b&gt;"));
 }

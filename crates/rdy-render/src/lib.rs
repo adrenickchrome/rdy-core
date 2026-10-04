@@ -47,6 +47,14 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
 pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
     let m = rdy.materialized(scope)?.clone();
     let suspects: BTreeSet<BlockId> = rdy.suspects(scope)?.into_iter().map(|s| s.block).collect();
+    // figure blobs that exist in the store (checked before `g` borrows `rdy`)
+    let present: BTreeSet<Hash> = m
+        .blocks
+        .values()
+        .filter(|b| b.block_type == "figure")
+        .filter_map(|b| b.field_str("blob")?.parse::<Hash>().ok())
+        .filter(|h| rdy.store().get_blob(h).is_ok())
+        .collect();
     let g = rdy.graph(scope)?;
     let env = env()?;
     let site = "rdy";
@@ -80,14 +88,17 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
             let link = |id: &BlockId| href_from(Some(&doc.id), id, "../");
             let html = if b.block_type == "figure" {
                 let h = b.field_str("blob").unwrap_or("");
-                if let Ok(hash) = h.parse::<Hash>() {
-                    blobs.insert(hash);
-                }
                 let alt = escape(b.field_str("alt").unwrap_or(""));
-                if b.field_str("media_type").unwrap_or("").starts_with("image/") {
-                    format!("<figure><img src=\"../assets/{}\" alt=\"{alt}\"><figcaption>{alt}</figcaption></figure>", escape(h))
-                } else {
-                    format!("<p><a href=\"../assets/{}\" download>{alt}</a></p>", escape(h))
+                match h.parse::<Hash>() {
+                    Ok(hash) if present.contains(&hash) => {
+                        blobs.insert(hash);
+                        if b.field_str("media_type").unwrap_or("").starts_with("image/") {
+                            format!("<figure><img src=\"../assets/{h}\" alt=\"{alt}\"><figcaption>{alt}</figcaption></figure>")
+                        } else {
+                            format!("<p><a href=\"../assets/{h}\" download>{alt}</a></p>")
+                        }
+                    }
+                    _ => format!("<p class=\"asset missing\">missing asset: {alt}</p>"),
                 }
             } else {
                 if b.block_type == "diagram" {
@@ -114,14 +125,14 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
         let link_row = |e_kind: &EdgeKind, id: &BlockId, part: &Option<String>| {
             let (href, label) = href_from(None, id, "../").unwrap_or((String::new(), id.to_string()));
             let kind = match e_kind { EdgeKind::Link(n) => n.clone(), EdgeKind::References => "references".into(), EdgeKind::Contains => "contains".into() };
-            json!({ "kind": kind, "href": href, "label": label, "part": part })
+            json!({ "kind": kind, "href": href, "label": label, "part": part, "missing": href.is_empty() })
         };
         let outgoing: Vec<_> = g.outgoing(&b.id).iter().filter(|e| e.kind != EdgeKind::Contains).map(|e| link_row(&e.kind, &e.to, &e.part)).collect();
         let incoming: Vec<_> = g.incoming(&b.id).iter().filter(|e| e.kind != EdgeKind::Contains).map(|e| link_row(&e.kind, &e.from, &e.part)).collect();
         let options: Vec<String> = match b.fields.get("options") { Some(FieldValue::List(o)) => o.iter().filter_map(|x| x.as_str().map(String::from)).collect(), _ => vec![] };
         let statement = b.field_str("statement").unwrap_or("").to_string();
         let dj = json!({
-            "id": b.id.to_string(), "statement": statement, "status": status,
+            "id": b.id.to_string(), "statement": statement, "status": status, "status_class": status.replace(' ', "-"),
             "decided_at": b.field_str("decided_at"), "authority_basis": b.field_str("authority_basis"),
             "body": if b.body.is_empty() { String::new() } else { text_html(&b.body, &|id| href_from(None, id, "../")) },
             "options": options, "outgoing": outgoing, "incoming": incoming,
@@ -129,7 +140,7 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
         let page = env.get_template("decision.html").map_err(tpl)?.render(json!({ "site": site, "title": statement, "root": "../", "mermaid": false, "d": dj })).map_err(tpl)?;
         std::fs::write(out.join("decision").join(format!("{}.html", b.id)), page).map_err(io)?;
         stats.pages += 1;
-        decisions.push(json!({ "id": b.id.to_string(), "statement": statement, "status": status }));
+        decisions.push(json!({ "id": b.id.to_string(), "statement": statement, "status": status, "status_class": status.replace(' ', "-") }));
     }
 
     let page = env.get_template("index.html").map_err(tpl)?.render(json!({ "site": site, "title": "Home", "root": "", "mermaid": false, "docs": doc_rows, "decisions": decisions })).map_err(tpl)?;

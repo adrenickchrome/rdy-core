@@ -478,6 +478,7 @@ dependencies = [
  "rdy-engine",
  "rdy-graph",
  "rdy-model",
+ "rdy-store",
  "serde",
  "serde_json",
  "tempfile",

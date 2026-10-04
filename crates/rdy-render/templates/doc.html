@@ -1,7 +1,7 @@
 {% extends "layout.html" %}
 {% block content %}
 <h1>{{ doc.title }}</h1>
-<p class="meta">{{ doc.doc_type }}{% if doc.lifecycle %} · {{ doc.lifecycle }}{% endif %} · {{ doc.id }}</p>
+<p class="meta">{% if doc.doc_type %}{{ doc.doc_type }}{% endif %}{% if doc.lifecycle %} · {{ doc.lifecycle }}{% endif %} · {{ doc.id }}</p>
 {% for item in items %}<div class="block {{ item.block_type }}" id="{{ item.id }}">{{ item.html|safe }}{% if item.suspect %} <span class="badge suspect">suspect</span>{% endif %}</div>
 {% endfor %}
 {% endblock %}

@@ -1,9 +1,9 @@
 {% extends "layout.html" %}
 {% block content %}
 <h1>{{ d.statement }}</h1>
-<p><span class="badge {{ d.status }}">{{ d.status }}</span> <span class="meta">{{ d.id }}{% if d.decided_at %} · decided {{ d.decided_at }}{% endif %}{% if d.authority_basis %} · basis: {{ d.authority_basis }}{% endif %}</span></p>
+<p><span class="badge {{ d.status_class }}">{{ d.status }}</span> <span class="meta">{{ d.id }}{% if d.decided_at %} · decided {{ d.decided_at }}{% endif %}{% if d.authority_basis %} · basis: {{ d.authority_basis }}{% endif %}</span></p>
 {% if d.body %}<div>{{ d.body|safe }}</div>{% endif %}
 {% if d.options %}<h2>Considered options</h2><ul>{% for o in d.options %}<li>{{ o }}</li>{% endfor %}</ul>{% endif %}
-{% if d.outgoing %}<h2>Links</h2><ul>{% for l in d.outgoing %}<li>{{ l.kind }} <a href="{{ l.href }}">{{ l.label }}</a>{% if l.part %} (part: “{{ l.part }}”){% endif %}</li>{% endfor %}</ul>{% endif %}
-{% if d.incoming %}<h2>Referenced by</h2><ul>{% for l in d.incoming %}<li>{{ l.kind }} <a href="{{ l.href }}">{{ l.label }}</a></li>{% endfor %}</ul>{% endif %}
+{% if d.outgoing %}<h2>Links</h2><ul>{% for l in d.outgoing %}<li>{{ l.kind }} {% if l.missing %}<span class="ref missing">{{ l.label }}</span>{% else %}<a href="{{ l.href }}">{{ l.label }}</a>{% endif %}{% if l.part %} (part: “{{ l.part }}”){% endif %}</li>{% endfor %}</ul>{% endif %}
+{% if d.incoming %}<h2>Referenced by</h2><ul>{% for l in d.incoming %}<li>{{ l.kind }} {% if l.missing %}<span class="ref missing">{{ l.label }}</span>{% else %}<a href="{{ l.href }}">{{ l.label }}</a>{% endif %}</li>{% endfor %}</ul>{% endif %}
 {% endblock %}
