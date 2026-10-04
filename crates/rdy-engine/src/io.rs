@@ -728,6 +728,15 @@ impl Rdy {
                 "change a field, the body or the links, or cancel the edit",
             ));
         }
+        // edit1: pins are rdy's record of what a block was checked against; an edit carries
+        // fields, body and links only, so a pin change would commit an update that changes nothing
+        if cur.pins != edited.pins {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("the edit changes the pins of {}", edited.id),
+                "pins are set by rdy; remove the pins change",
+            ));
+        }
         if cur.block_type != edited.block_type
             || cur.parent != edited.parent
             || cur.order != edited.order
