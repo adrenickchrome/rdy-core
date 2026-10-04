@@ -16,6 +16,52 @@ pub struct Store {
     log: SegmentLog,
     index: Index,
     _lock: File,
+    faults: Faults,
+    /// Set when a failed write could not be rolled back; every later write fails until reopen.
+    poisoned: bool,
+}
+
+/// Opens the index and reads its acknowledged boundary (None if it has none yet). A damaged
+/// index is renamed to `index.redb.damaged-<n>` and replaced by an empty one, which the caller
+/// rebuilds from the log; the boundary is then unknown.
+fn open_index(dir: &Path) -> Result<(Index, Option<Location>), StoreError> {
+    let path = dir.join("index.redb");
+    let opened = Index::open(&path).and_then(|i| {
+        let acked = i.acknowledged()?;
+        Ok((i, acked))
+    });
+    match opened {
+        Ok(ok) => Ok(ok),
+        Err(_) => {
+            set_aside(&path)?;
+            Ok((Index::open(&path)?, None))
+        }
+    }
+}
+
+/// Moves `path` to the first free `<path>.damaged-<n>`, never overwriting an existing file.
+fn set_aside(path: &Path) -> Result<(), StoreError> {
+    for n in 0u32.. {
+        let mut name = path.file_name().expect("index file name").to_os_string();
+        name.push(format!(".damaged-{n}"));
+        match std::fs::hard_link(path, path.with_file_name(name)) {
+            Ok(()) => {
+                std::fs::remove_file(path)?;
+                File::open(path.parent().expect("store dir"))?.sync_all()?;
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    unreachable!("u32 suffixes exhausted")
+}
+
+/// Test-only fault injection (see `fail_next_index_apply`).
+#[derive(Default)]
+struct Faults {
+    index_apply: bool,
+    rollback: bool,
 }
 
 fn encode<T: Serialize>(v: &T) -> Vec<u8> {
@@ -54,9 +100,11 @@ impl Store {
         if lock.try_lock().is_err() {
             return Err(StoreError::Locked(dir.to_path_buf()));
         }
-        let log = SegmentLog::open(&dir.join("segments"), SEGMENT_MAX)?;
-        let index = Index::open(&dir.join("index.redb"))?;
-        let mut store = Store { dir: dir.to_path_buf(), log, index, _lock: lock };
+        // the index opens first: its indexed_upto is the acknowledged end of the log, which
+        // tells the log which torn frames are an unacknowledged tail
+        let (index, acked) = open_index(dir)?;
+        let log = SegmentLog::open_acked(&dir.join("segments"), SEGMENT_MAX, acked)?;
+        let mut store = Store { dir: dir.to_path_buf(), log, index, _lock: lock, faults: Faults::default(), poisoned: false };
         if store.index.indexed_upto()? > store.log.end() {
             store.reindex()?;
         } else {
@@ -102,6 +150,23 @@ impl Store {
     }
 
     pub fn write(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
+        if self.poisoned {
+            return Err(StoreError::Io(std::io::Error::other("an earlier failed write could not be rolled back; reopen the store")));
+        }
+        let start = self.log.end();
+        let result = self.append_and_index(items);
+        if result.is_err() && self.log.end() != start {
+            // nothing past `start` was acknowledged: discard it so a later write or reindex
+            // cannot resurrect it
+            let rollback = if std::mem::take(&mut self.faults.rollback) { Err(std::io::Error::other("injected rollback failure")) } else { self.log.truncate_to(start) };
+            if rollback.is_err() {
+                self.poisoned = true;
+            }
+        }
+        result
+    }
+
+    fn append_and_index(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
         let mut hashes = Vec::with_capacity(items.len());
         let mut entries = vec![];
         let mut seen = BTreeSet::new();
@@ -117,9 +182,24 @@ impl Store {
         }
         if !entries.is_empty() {
             self.log.sync()?;
+            if std::mem::take(&mut self.faults.index_apply) {
+                return Err(StoreError::Db("injected index failure".into()));
+            }
             self.index.apply(&entries, self.log.end())?;
         }
         Ok(hashes)
+    }
+
+    /// Test hook: the next write's index update fails after its frames are appended.
+    #[doc(hidden)]
+    pub fn fail_next_index_apply(&mut self) {
+        self.faults.index_apply = true;
+    }
+
+    /// Test hook: the next rollback of a failed write fails, poisoning the store.
+    #[doc(hidden)]
+    pub fn fail_next_rollback(&mut self) {
+        self.faults.rollback = true;
     }
 
     pub fn put<T: Serialize>(&mut self, kind: u8, value: &T) -> Result<Hash, StoreError> {

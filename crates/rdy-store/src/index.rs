@@ -106,15 +106,14 @@ impl Index {
         Ok(out)
     }
 
-    pub fn indexed_upto(&self) -> Result<Location, StoreError> {
+    /// The acknowledged end of the log, or None if this index has never applied a write.
+    pub fn acknowledged(&self) -> Result<Option<Location>, StoreError> {
         let r = self.db.begin_read().map_err(db)?;
         let t = r.open_table(META).map_err(db)?;
-        match t.get("indexed_upto").map_err(db)? {
-            Some(v) => dec(v.value()),
-            None => Ok(Location {
-                segment: 0,
-                offset: 0,
-            }),
-        }
+        t.get("indexed_upto").map_err(db)?.map(|v| dec(v.value())).transpose()
+    }
+
+    pub fn indexed_upto(&self) -> Result<Location, StoreError> {
+        Ok(self.acknowledged()?.unwrap_or(Location { segment: 0, offset: 0 }))
     }
 }

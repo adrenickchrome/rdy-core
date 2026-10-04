@@ -95,3 +95,127 @@ fn reindex_rebuilds_everything_including_refs() {
     s.reindex().unwrap();
     assert_eq!(s.get_ref("canon").unwrap(), Some(b"A".to_vec()));
 }
+
+fn seg0(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("segments/seg-000000.log")
+}
+
+fn file_len(p: &std::path::Path) -> u64 {
+    std::fs::metadata(p).unwrap().len()
+}
+
+/// A well-formed log frame: length, kind, payload hash, payload.
+fn frame(kind: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = (payload.len() as u32).to_le_bytes().to_vec();
+    out.push(kind);
+    out.extend_from_slice(&Hash::of(payload).0);
+    out.extend_from_slice(payload);
+    out
+}
+
+#[test]
+fn failed_index_apply_rolls_back_frames_so_reindex_cannot_resurrect_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(dir.path()).unwrap();
+    s.set_refs(vec![("canon".into(), b"A".to_vec())]).unwrap();
+    let len_before = file_len(&seg0(dir.path()));
+    let frames_before = s.verify().unwrap();
+
+    let v1 = block("b-AAAAA", "never acknowledged");
+    s.fail_next_index_apply();
+    assert!(s.commit_change(change(vec![Op::Create { block: v1.clone() }]), vec![("canon".into(), b"B".to_vec())]).is_err());
+    assert_eq!(file_len(&seg0(dir.path())), len_before);
+    assert_eq!(s.get_ref("canon").unwrap(), Some(b"A".to_vec()));
+
+    // the store keeps working, and the next write lands where the failed one started
+    s.set_refs(vec![("other".into(), b"x".to_vec())]).unwrap();
+    drop(s);
+    let mut s = Store::open(dir.path()).unwrap();
+    s.reindex().unwrap();
+    assert_eq!(s.get_ref("canon").unwrap(), Some(b"A".to_vec()));
+    assert!(!s.has(&v1.version_hash()).unwrap());
+    assert_eq!(s.verify().unwrap(), frames_before + 1);
+}
+
+#[test]
+fn failed_rollback_poisons_the_store_until_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(dir.path()).unwrap();
+    s.set_refs(vec![("canon".into(), b"A".to_vec())]).unwrap();
+    s.fail_next_index_apply();
+    s.fail_next_rollback();
+    assert!(s.set_refs(vec![("canon".into(), b"B".to_vec())]).is_err());
+    let e = s.set_refs(vec![("other".into(), b"x".to_vec())]).unwrap_err();
+    assert!(e.to_string().contains("reopen"), "{e}");
+    drop(s);
+    let mut s = Store::open(dir.path()).unwrap();
+    s.set_refs(vec![("other".into(), b"x".to_vec())]).unwrap();
+}
+
+#[test]
+fn damaged_index_is_set_aside_and_rebuilt_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let v1 = block("b-AAAAA", "one");
+    {
+        let mut s = Store::open(dir.path()).unwrap();
+        s.put(kinds::BLOCK, &v1).unwrap();
+        s.set_refs(vec![("canon".into(), b"A".to_vec())]).unwrap();
+    }
+    for round in 0..2 {
+        let idx = dir.path().join("index.redb");
+        let mut bytes = std::fs::read(&idx).unwrap();
+        bytes[..512].fill(0xAB);
+        std::fs::write(&idx, bytes).unwrap();
+        let s = Store::open(dir.path()).unwrap();
+        assert_eq!(s.get_block(&v1.version_hash()).unwrap(), v1);
+        assert_eq!(s.get_ref("canon").unwrap(), Some(b"A".to_vec()));
+        let damaged = std::fs::read_dir(dir.path()).unwrap().filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().starts_with("index.redb.damaged-")).count();
+        assert_eq!(damaged, round + 1);
+    }
+}
+
+#[test]
+fn torn_unacknowledged_batch_with_a_valid_later_frame_is_quarantined() {
+    let dir = tempfile::tempdir().unwrap();
+    let v1 = block("b-AAAAA", "acknowledged");
+    {
+        let mut s = Store::open(dir.path()).unwrap();
+        s.put(kinds::BLOCK, &v1).unwrap();
+    }
+    let seg = seg0(dir.path());
+    let acked = file_len(&seg);
+    // one unacknowledged batch: its first frame torn to zeros, its second frame intact
+    let mut bytes = std::fs::read(&seg).unwrap();
+    bytes.extend(vec![0u8; 37 + 10]);
+    bytes.extend(frame(kinds::BLOCK, b"later-frame-of-the-same-batch"));
+    std::fs::write(&seg, &bytes).unwrap();
+
+    let s = Store::open(dir.path()).unwrap();
+    assert_eq!(s.get_block(&v1.version_hash()).unwrap(), v1);
+    assert_eq!(file_len(&seg), acked);
+    assert!(!s.has(&Hash::of(b"later-frame-of-the-same-batch")).unwrap());
+    let q = dir.path().join(format!("segments/seg-000000.log.torn-{acked}"));
+    assert_eq!(std::fs::read(q).unwrap(), &bytes[acked as usize..]);
+}
+
+#[test]
+fn corruption_below_the_acknowledged_boundary_refuses_to_open() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut s = Store::open(dir.path()).unwrap();
+        s.put(kinds::BLOCK, &block("b-AAAAA", "one")).unwrap();
+        s.put(kinds::BLOCK, &block("b-BBBBB", "two")).unwrap();
+    }
+    let seg = seg0(dir.path());
+    let mut bytes = std::fs::read(&seg).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff; // inside the last acknowledged frame
+    std::fs::write(&seg, &bytes).unwrap();
+
+    let e = Store::open(dir.path()).err().expect("open must refuse");
+    let StoreError::Io(io) = &e else { panic!("{e}") };
+    assert_eq!(io.kind(), std::io::ErrorKind::InvalidData);
+    let msg = e.to_string();
+    assert!(msg.contains("seg-000000.log") && msg.contains("move the damaged segment aside"), "{msg}");
+    assert_eq!(std::fs::read(&seg).unwrap(), bytes);
+}

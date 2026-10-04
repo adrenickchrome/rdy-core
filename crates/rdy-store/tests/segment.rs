@@ -209,3 +209,46 @@ fn torn_tail_is_quarantined_before_truncation() {
     assert_eq!(std::fs::read(q).unwrap(), &bytes[b.offset as usize..cut]);
     assert_eq!(std::fs::metadata(&path).unwrap().len(), b.offset);
 }
+
+#[test]
+fn truncate_to_discards_frames_and_segments_created_after_the_point() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 128).unwrap();
+    let (a, _) = log.append(1, &[1; 40]).unwrap();
+    log.sync().unwrap();
+    let start = log.end();
+    for i in 0..4u8 {
+        log.append(2, &[i; 60]).unwrap();
+    }
+    assert!(log.end().segment > start.segment);
+    log.truncate_to(start).unwrap();
+    assert_eq!(log.end(), start);
+    assert!(!dir.path().join("seg-000001.log").exists());
+    assert_eq!(log.read(a).unwrap().1, vec![1; 40]);
+    let (b, _) = log.append(3, b"after").unwrap();
+    assert_eq!(b, start);
+    log.sync().unwrap();
+    drop(log);
+    let log = SegmentLog::open(dir.path(), 128).unwrap();
+    assert_eq!(log.scan_from(Location { segment: 0, offset: 0 }).unwrap().len(), 2);
+}
+
+#[test]
+fn quarantine_never_overwrites_an_earlier_quarantine_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    let (b, _) = log.append(1, b"keep-me").unwrap();
+    log.sync().unwrap();
+    drop(log);
+    let path = dir.path().join("seg-000000.log");
+    let q = dir.path().join(format!("seg-000000.log.torn-{}", b.offset + 44));
+    std::fs::write(&q, b"earlier evidence").unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.extend_from_slice(&[9u8; 20]);
+    std::fs::write(&path, &bytes).unwrap();
+
+    SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    assert_eq!(std::fs::read(&q).unwrap(), b"earlier evidence");
+    let q1 = dir.path().join(format!("seg-000000.log.torn-{}.1", b.offset + 44));
+    assert_eq!(std::fs::read(q1).unwrap(), vec![9u8; 20]);
+}

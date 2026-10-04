@@ -73,13 +73,21 @@ fn valid_frame_after(f: &File, offset: u64, file_len: u64) -> io::Result<bool> {
     Ok(false)
 }
 
-/// Copies `[offset, file_len)` to `<seg>.torn-<offset>` and fsyncs it and the directory.
+/// Copies `[offset, file_len)` to `<seg>.torn-<offset>` (or `.torn-<offset>.<n>` if that name is
+/// taken; an existing quarantine file is never overwritten) and fsyncs it and the directory.
 fn quarantine(f: &File, dir: &Path, seg: &Path, offset: u64, file_len: u64) -> io::Result<()> {
     let mut buf = vec![0u8; (file_len - offset) as usize];
     f.read_exact_at(&mut buf, offset)?;
-    let mut name = seg.file_name().unwrap().to_os_string();
-    name.push(format!(".torn-{offset}"));
-    let q = File::create(dir.join(name))?;
+    let base = format!("{}.torn-{offset}", seg.file_name().unwrap().to_string_lossy());
+    let mut n = 0u32;
+    let q = loop {
+        let name = if n == 0 { base.clone() } else { format!("{base}.{n}") };
+        match OpenOptions::new().write(true).create_new(true).open(dir.join(name)) {
+            Ok(q) => break q,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => return Err(e),
+        }
+    };
     q.write_all_at(&buf, 0)?;
     q.sync_all()?;
     sync_dir(dir)
@@ -87,6 +95,16 @@ fn quarantine(f: &File, dir: &Path, seg: &Path, offset: u64, file_len: u64) -> i
 
 impl SegmentLog {
     pub fn open(dir: &Path, max_len: u64) -> io::Result<SegmentLog> {
+        SegmentLog::open_acked(dir, max_len, None)
+    }
+
+    /// Opens the log, repairing a torn tail. `acked` is the end of the acknowledged log (the
+    /// index's `indexed_upto`), or None when unknown. In the last segment, corruption at or
+    /// beyond `acked` belongs to an unacknowledged batch: it is quarantined and truncated even if
+    /// valid frames follow (one batch is fsynced once, so its frames can tear independently).
+    /// Corruption below `acked` damages acknowledged data and is refused. With `acked` unknown,
+    /// the tail is truncated only if no valid frame follows the corruption.
+    pub fn open_acked(dir: &Path, max_len: u64, acked: Option<Location>) -> io::Result<SegmentLog> {
         std::fs::create_dir_all(dir)?;
         let mut readers = vec![];
         while seg_path(dir, readers.len() as u32).exists() {
@@ -104,22 +122,48 @@ impl SegmentLog {
         while let Some((_, _, payload)) = read_frame(&writer, offset, file_len)? {
             offset += HEADER + payload.len() as u64;
         }
-        if offset < file_len && valid_frame_after(&writer, offset, file_len)? {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "corruption at offset {offset} with valid frames after it in {}; refusing to truncate (run rdy fsck)",
-                    seg_path(dir, last).display()
-                ),
-            ));
-        }
         if offset < file_len {
+            let unacknowledged = match acked {
+                Some(a) => a.segment < last || (a.segment == last && offset >= a.offset),
+                None => !valid_frame_after(&writer, offset, file_len)?,
+            };
+            if !unacknowledged {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "corruption at offset {offset} in {} damages acknowledged data; refusing to truncate. Frames before offset {offset} are intact: move the damaged segment aside or restore it from backup, then reopen",
+                        seg_path(dir, last).display()
+                    ),
+                ));
+            }
             quarantine(&writer, dir, &seg_path(dir, last), offset, file_len)?;
             writer.set_len(offset)?;
             writer.sync_all()?;
         }
         let log = SegmentLog { dir: dir.to_path_buf(), readers, writer, len: offset, max_len };
         Ok(log)
+    }
+
+    /// Discards everything appended at or after `to`, which must not be before the start of the
+    /// segment that was current when the failed batch began. Segments created after `to` are
+    /// removed. Only for rolling back frames that were never acknowledged.
+    pub fn truncate_to(&mut self, to: Location) -> io::Result<()> {
+        if to.segment > self.current() || (to.segment == self.current() && to.offset > self.len) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("cannot truncate to {to:?}: past the end {:?}", self.end())));
+        }
+        if to.segment < self.current() {
+            self.writer = OpenOptions::new().read(true).write(true).open(seg_path(&self.dir, to.segment))?;
+            while self.current() > to.segment {
+                let id = self.current();
+                self.readers.pop();
+                std::fs::remove_file(seg_path(&self.dir, id))?;
+            }
+            sync_dir(&self.dir)?;
+        }
+        self.writer.set_len(to.offset)?;
+        self.writer.sync_all()?;
+        self.len = to.offset;
+        Ok(())
     }
 
     fn current(&self) -> u32 {
