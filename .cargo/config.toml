@@ -1,0 +1,2 @@
+[alias]
+qa = "run -p rdy-qa --release --bin qa-gate --"

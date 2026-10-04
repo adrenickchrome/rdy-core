@@ -56,7 +56,7 @@ pub fn compare(baseline: Option<&Baseline>, measured: &[Measure]) -> Vec<Verdict
         .iter()
         .map(|m| {
             let base = baseline.and_then(|b| b.ops.get(&m.op)).map(|b| b.median_ms);
-            let margin = if m.op.starts_with("write") {
+            let margin = if m.op.starts_with("write") || m.op.starts_with("propose") {
                 0.50
             } else {
                 0.25
@@ -147,7 +147,7 @@ fn measure(op: &str, runs: usize, mut f: impl FnMut(usize)) -> Measure {
 }
 
 /// The fixed workload: a ~10k-block tree project (ids seeded, so it is identical every run),
-/// timed op by op. Takes about a minute in release.
+/// timed op by op. Takes a few minutes in release (every write fsyncs).
 pub fn run_workload() -> Vec<Measure> {
     rdy_model::seed_ids_for_tests(0x7064_6566);
     let dir = tempfile::tempdir().expect("tempdir");
@@ -194,13 +194,13 @@ pub fn run_workload() -> Vec<Measure> {
         )
         .expect("write");
     }));
-    out.push(measure("write_batch_200", 5, |i| {
+    out.push(measure("write_batch_200", 9, |i| {
         let ops: Vec<_> = (0..200)
             .map(|c| json!({"op": "create", "type": "claim", "parent": section, "body": format!("Batch {i} claim {c}.")}))
             .collect();
         write(&mut r, "va", json!(ops)).expect("batch");
     }));
-    out.push(measure("propose_land_500_flat", 3, |i| {
+    out.push(measure("propose_land_500_flat", 5, |i| {
         let view = format!("flat{i}");
         let ops: Vec<_> = (0..500)
             .map(|d| json!({"op": "create", "type": "doc", "fields": {"name": format!("flat-{i}-{d}"), "title": format!("Flat {i} {d}"), "doc_type": "constraints"}}))
@@ -223,11 +223,11 @@ pub fn run_workload() -> Vec<Measure> {
     out.push(measure("tree_full", 20, |_| {
         r.tree(&Scope::Canon, None, None).expect("tree");
     }));
-    out.push(measure("render", 3, |i| {
+    out.push(measure("render", 5, |i| {
         let site = dir.path().join(format!("site{i}"));
         rdy_render::render_site(&mut r, &Scope::Canon, &site).expect("render");
     }));
-    out.push(measure("export_import", 3, |i| {
+    out.push(measure("export_import", 5, |i| {
         let export = dir.path().join(format!("export{i}"));
         r.export(&Scope::Canon, &export).expect("export");
         let fresh = dir.path().join(format!("fresh{i}"));
@@ -266,6 +266,10 @@ mod tests {
                 ("context".to_string(), m("context", 0.01)),
                 ("render".to_string(), m("render", 100.0)),
                 ("write_single".to_string(), m("write_single", 20.0)),
+                (
+                    "propose_land_500_flat".to_string(),
+                    m("propose_land_500_flat", 20.0),
+                ),
             ]
             .into(),
         };
@@ -275,11 +279,13 @@ mod tests {
                 m("context", 0.05),
                 m("render", 126.0),
                 m("write_single", 29.0),
+                m("propose_land_500_flat", 29.0),
             ],
         );
         assert!(v[0].pass, "+400% but under 2 ms absolute");
         assert!(!v[1].pass, "+26% and +26 ms");
         assert!(v[2].pass, "writes get a 50% margin");
+        assert!(v[3].pass, "proposals fsync too, so they get it as well");
         let v = compare(Some(&base), &[m("write_single", 31.0)]);
         assert!(!v[0].pass);
         assert!(

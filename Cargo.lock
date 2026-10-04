@@ -1259,6 +1259,7 @@ dependencies = [
 name = "rdy-qa"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "postcard",
  "proptest",
  "rdy-engine",
