@@ -1,0 +1,103 @@
+name: rdy-standard
+version: "0.1.0"
+link_types: [describes, implements, decided_by, affects]
+
+block_types:
+  doc:
+    prefix: d
+    traits: [structural]
+    body: forbidden
+    fields:
+      title: { kind: str, required: true }
+      doc_type: { kind: str, required: true }
+      lifecycle: { kind: enum, values: [draft, stable, deprecated] }
+    children: [section]
+  section:
+    prefix: s
+    traits: [structural]
+    fields:
+      title: { kind: str, required: true }
+      lifecycle: { kind: enum, values: [draft, stable, deprecated] }
+    children: [section, prose, claim, requirement, constraint, term, component, actor, interface, flow, example, note, rationale, table, diagram, figure, code, decision, question]
+  prose:       { prefix: p,  traits: [informative], body: required }
+  claim:       { prefix: c,  traits: [normative, describes], body: required }
+  requirement:
+    prefix: r
+    traits: [normative, describes]
+    body: required
+    fields:
+      priority: { kind: enum, values: [must, should, may] }
+  constraint:  { prefix: k,  traits: [normative, describes], body: required }
+  term:
+    prefix: t
+    traits: [defines]
+    body: required
+    fields:
+      name: { kind: str, required: true }
+  component:
+    prefix: m
+    traits: [defines]
+    fields:
+      name: { kind: str, required: true }
+  actor:
+    prefix: a
+    traits: [defines]
+    fields:
+      name: { kind: str, required: true }
+  interface:
+    prefix: i
+    traits: [defines, normative]
+    fields:
+      name: { kind: str, required: true }
+  flow:
+    prefix: f
+    traits: [normative, describes]
+    fields:
+      name: { kind: str, required: true }
+      steps: { kind: list, required: true }
+  example:     { prefix: e,  traits: [informative], body: required }
+  note:        { prefix: n,  traits: [informative], body: required }
+  rationale:   { prefix: ra, traits: [informative], body: required }
+  table:
+    prefix: tb
+    traits: [informative]
+    fields:
+      columns: { kind: list, required: true }
+      rows: { kind: list, required: true }
+      normative: { kind: bool }
+  diagram:
+    prefix: dg
+    traits: [asset, informative]
+    body: required
+    fields:
+      lang: { kind: enum, values: [mermaid, d2], required: true }
+      alt: { kind: str, required: true }
+  figure:
+    prefix: fg
+    traits: [asset, informative]
+    body: forbidden
+    fields:
+      blob: { kind: str, required: true }
+      media_type: { kind: str, required: true }
+      alt: { kind: str, required: true }
+  code:
+    prefix: cd
+    traits: [informative]
+    body: required
+    fields:
+      lang: { kind: str, required: true }
+
+doc_types:
+  overview:
+    skeleton:
+      - { title: Summary, required: true }
+      - { title: Goals, required: true }
+      - { title: Non-goals, required: false }
+      - { title: Context, required: false }
+  principles:     { skeleton: [{ title: Principles, required: true }] }
+  constraints:    { skeleton: [{ title: Constraints, required: true }] }
+  components:     { skeleton: [{ title: Components, required: true }, { title: Interfaces, required: false }] }
+  flows:          { skeleton: [{ title: Flows, required: true }] }
+  glossary:       { skeleton: [{ title: Terms, required: true }] }
+  decisions-log:  { skeleton: [{ title: Decisions, required: true }] }
+  open-questions: { skeleton: [{ title: Questions, required: true }] }

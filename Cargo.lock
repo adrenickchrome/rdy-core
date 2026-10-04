@@ -439,6 +439,12 @@ version = "0.1.0"
 [[package]]
 name = "rdy-schema"
 version = "0.1.0"
+dependencies = [
+ "rdy-model",
+ "serde",
+ "serde_yaml_ng",
+ "thiserror",
+]
 
 [[package]]
 name = "rdy-store"
