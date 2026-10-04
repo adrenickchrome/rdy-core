@@ -36,6 +36,14 @@ fn cell(s: &str) -> String {
     s.replace('|', "\\|").replace('\n', " ")
 }
 
+/// Figure alt text safe inside `![..]`: backslash, `[` and `]` escaped, line breaks as spaces.
+fn alt_text(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace(['\n', '\r'], " ")
+}
+
 /// A fenced code block whose fence is longer than any backtick run in `body` (at least 3).
 fn fenced(lang: &str, body: &str) -> String {
     let (mut longest, mut run) = (0, 0);
@@ -43,6 +51,13 @@ fn fenced(lang: &str, body: &str) -> String {
         run = if c == '`' { run + 1 } else { 0 };
         longest = longest.max(run);
     }
+    // the info string: no backticks, ends at the first whitespace
+    let lang: String = lang
+        .chars()
+        .filter(|c| *c != '`')
+        .skip_while(|c| c.is_whitespace())
+        .take_while(|c| !c.is_whitespace())
+        .collect();
     let fence = "`".repeat((longest + 1).max(3));
     format!("{fence}{lang}\n{body}\n{fence}")
 }
@@ -107,7 +122,7 @@ pub fn block_markdown(
         }
         "figure" => format!(
             "`{id}` ![{}](rdy-blob:{}) ({})",
-            f("alt").replace('\\', "\\\\").replace(']', "\\]"),
+            alt_text(&f("alt")),
             f("blob"),
             f("media_type")
         ),

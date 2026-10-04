@@ -24,6 +24,8 @@ fn md1_markdown_carries_every_blocks_content_and_id() {
         {"op": "create", "type": "table", "parent": "$sub", "fields": {"columns": ["Term", "Meaning"], "rows": [["Ledger", "Balances | net"]]}},
         {"op": "create", "type": "figure", "parent": "$sub", "fields": {"blob": blob, "media_type": "image/png", "alt": "chart"}},
         {"op": "create", "type": "figure", "parent": "$sub", "fields": {"blob": blob, "media_type": "image/png", "alt": "a]b\\c"}},
+        {"op": "create", "type": "figure", "parent": "$sub", "fields": {"blob": blob, "media_type": "image/png", "alt": "x[y\nz"}},
+        {"op": "create", "type": "code", "parent": "$sub", "fields": {"lang": "r`u st\nx"}, "body": "fn main() {}"},
         {"op": "create", "type": "code", "parent": "$sub", "fields": {"lang": "md"}, "body": "before\n```\nnot a fence end\n````\nafter"}
     ]))
     .unwrap();
@@ -82,6 +84,16 @@ fn md1_markdown_carries_every_blocks_content_and_id() {
     assert!(
         text.contains(&format!("![a\\]b\\\\c](rdy-blob:{blob}) (image/png)")),
         "alt escape in:\n{text}"
+    );
+    // `[` is escaped and a newline becomes a space
+    assert!(
+        text.contains(&format!("![x\\[y z](rdy-blob:{blob}) (image/png)")),
+        "alt [ and newline in:\n{text}"
+    );
+    // a lang with a backtick or whitespace is cut down to a valid info string
+    assert!(
+        text.contains("```ru\nfn main() {}\n```"),
+        "lang in:\n{text}"
     );
     let ids: Vec<String> = st
         .rdy
