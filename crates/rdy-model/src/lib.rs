@@ -5,6 +5,7 @@ pub mod decision;
 mod hash;
 mod id;
 mod order;
+pub mod tree;
 mod value;
 
 pub use block::{Block, Link, RefMode, RefSpan, hash_of, ref_spans};
