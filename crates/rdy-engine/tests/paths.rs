@@ -250,3 +250,110 @@ fn nameless_docs_have_effective_names() {
         "d-BBBBB"
     );
 }
+
+#[test]
+fn new_folder_and_doc_create_missing_parents_in_one_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let before = r.store().view("work").unwrap().changes.len();
+    let res = r
+        .new_doc(
+            &agent(),
+            "work",
+            "wallets/cards/limits",
+            None,
+            Some("Card limits"),
+        )
+        .unwrap();
+    assert_eq!(
+        r.store().view("work").unwrap().changes.len(),
+        before + 1,
+        "one change"
+    );
+    let work = Scope::View("work".into());
+    let doc = r.resolve_path(&work, "wallets/cards/limits").unwrap();
+    let b = r.block(&work, &doc).unwrap();
+    assert_eq!(
+        (b.field_str("title"), b.field_str("doc_type")),
+        (Some("Card limits"), Some("overview"))
+    );
+    let sections: Vec<String> = r
+        .materialized(&work)
+        .unwrap()
+        .children(Some(&doc))
+        .iter()
+        .filter_map(|s| s.field_str("title").map(String::from))
+        .collect();
+    assert_eq!(sections, ["Summary", "Goals", "Non-goals", "Context"]);
+    assert!(res.created.values().any(|v| v == doc.as_str()));
+    r.new_folder(&agent(), "work", "wallets/archive").unwrap();
+    assert_eq!(
+        r.new_folder(&agent(), "work", "Wallets/Cards")
+            .unwrap_err()
+            .code,
+        "E_PATH_CLASH"
+    );
+    assert_eq!(
+        r.new_doc(&agent(), "work", "wallets/cards/limits/x", None, None)
+            .unwrap_err()
+            .code,
+        "E_BAD_INPUT",
+        "limits is a doc"
+    );
+    let g = r
+        .new_doc(&agent(), "work", "glossary", Some("glossary"), None)
+        .unwrap();
+    let gid = BlockId::parse(
+        &g.created
+            .values()
+            .find(|v| v.starts_with("d-"))
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        r.block(&work, &gid).unwrap().field_str("title"),
+        Some("glossary")
+    );
+}
+
+#[test]
+fn new_doc_needs_a_type_when_the_pack_has_no_default() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".rdy/packs")).unwrap();
+    std::fs::write(dir.path().join(".rdy/packs/plain.yaml"), "name: plain\nversion: \"1\"\nblock_types:\n  doc: { prefix: d, children: [section] }\n  section: { prefix: s, fields: { title: { kind: str, required: true } } }\ndoc_types:\n  memo: { skeleton: [{ title: Body, required: true }] }\n").unwrap();
+    let mut r = Rdy::init(dir.path(), "plain").unwrap();
+    let e = r
+        .new_doc(&agent(), "work", "notes", None, None)
+        .unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT");
+    assert!(e.fix.contains("memo"), "{e}");
+    r.new_doc(&agent(), "work", "notes", Some("memo"), None)
+        .unwrap();
+}
+
+#[test]
+fn tree_lists_folders_and_docs_with_depth() {
+    let (_d, mut r, res) = tree();
+    let work = Scope::View("work".into());
+    let all = r.tree(&work, None, None).unwrap();
+    assert_eq!(
+        all.iter().map(|n| n.path.as_str()).collect::<Vec<_>>(),
+        ["wallets", "glossary"]
+    );
+    assert_eq!(
+        all[0]
+            .children
+            .iter()
+            .map(|n| n.path.as_str())
+            .collect::<Vec<_>>(),
+        ["wallets/transactions", "wallets/cards"]
+    );
+    assert_eq!(all[0].children[0].doc_type.as_deref(), Some("overview"));
+    let shallow = r.tree(&work, None, Some(0)).unwrap();
+    assert!(shallow[0].children.is_empty());
+    assert_eq!(shallow[0].collapsed, 2);
+    let sub = r.tree(&work, Some("wallets/cards"), None).unwrap();
+    assert_eq!(sub.len(), 1);
+    assert_eq!(sub[0].id, res.created["$c"]);
+}

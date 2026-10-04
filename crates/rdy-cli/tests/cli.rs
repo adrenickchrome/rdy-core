@@ -354,3 +354,48 @@ fn check_exit_codes_and_pack_outside_a_project() {
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v[0]["code"], "E_BAD_NAME");
 }
+
+#[test]
+fn new_ls_and_paths_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    json(dir.path(), &["init"]);
+    let f = json(dir.path(), &["new", "folder", "wallets/cards"]);
+    assert_eq!(
+        f["created"].as_object().unwrap().len(),
+        2,
+        "wallets and cards"
+    );
+    json(
+        dir.path(),
+        &[
+            "new",
+            "doc",
+            "wallets/transactions",
+            "--title",
+            "Transactions",
+        ],
+    );
+    let (ok, _, err) = rdy(dir.path(), &["new", "doc", "wallets/transactions"]);
+    assert!(!ok && err.contains("E_PATH_CLASH"), "{err}");
+    let ls = json(dir.path(), &["ls", "--scope", "work"]);
+    assert_eq!(ls[0]["path"], "wallets");
+    let (_, text, _) = rdy(dir.path(), &["ls", "--scope", "work"]);
+    assert!(
+        text.contains("wallets/  folder") && text.contains("  transactions  doc"),
+        "{text}"
+    );
+    let p = json(
+        dir.path(),
+        &["propose", "--view", "work", "--title", "tree"],
+    );
+    json(dir.path(), &["approve", p["id"].as_str().unwrap()]);
+    let show = json(dir.path(), &["show", "wallets/transactions"]);
+    assert_eq!(show["fields"]["title"], "Transactions");
+    json(dir.path(), &["tag", "v0.1.0"]);
+    let old = json(
+        dir.path(),
+        &["show", "--scope", "tag:v0.1.0", "wallets/transactions"],
+    );
+    assert_eq!(old["id"], show["id"]);
+    assert!(json(dir.path(), &["impact", "wallets/transactions"]).is_array());
+}

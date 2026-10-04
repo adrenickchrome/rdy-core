@@ -19,6 +19,7 @@ pub use gate::ProposalInfo;
 pub use io::{ExportSummary, block_from_yaml, block_to_yaml};
 pub use lint::check_path;
 pub use materialize::{Materialized, PathMiss};
+pub use paths::TreeNode;
 pub use query::{Context, ImpactItem, field_json, summary, summary_in};
 pub use session::{Scope, Session, now_ms, rfc3339_now};
 pub use tree_io::Diagnostic;

@@ -12,6 +12,10 @@ rdy status
 rdy propose --view run-1 --title "first pass"
 rdy approve <proposal-id>     # lands it in canon; proposed decisions become accepted
 rdy render --out site/
+rdy new folder wallets            # folders group docs; paths work wherever ids do
+rdy new doc wallets/transactions  # a doc built from its pack skeleton
+rdy ls                            # the folder and doc tree
+rdy check export/                 # lint exported (format 2) files
 rdy tag v0.1.0 -m "first cut"  # freeze canon's head as a version (approver)
 rdy tags                       # list versions
 rdy show <id> --scope tag:v0.1.0   # read as of a version (also landing:<id>)

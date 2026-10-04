@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use rdy_engine::*;
-use rdy_model::{BlockId, Role};
+use rdy_model::Role;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -31,6 +31,7 @@ enum Cmd {
     },
     Status,
     Show {
+        /// An id or a path such as wallets/transactions.
         id: String,
         /// canon, a view name, tag:<version>, landing:<id> or view:<name>.
         #[arg(long, default_value = "canon")]
@@ -38,6 +39,7 @@ enum Cmd {
     },
     Log,
     Impact {
+        /// An id or a path such as wallets/transactions.
         id: String,
         #[arg(long, default_value_t = 3)]
         depth: u32,
@@ -64,7 +66,21 @@ enum Cmd {
     },
     /// List versions, oldest first.
     Tags,
+    /// Create a folder or a doc at a path (missing folders are created too).
+    New {
+        #[command(subcommand)]
+        what: NewCmd,
+    },
+    /// List the folder and doc tree.
+    Ls {
+        path: Option<String>,
+        #[arg(long, default_value = "canon")]
+        scope: String,
+        #[arg(long)]
+        depth: Option<u32>,
+    },
     Edit {
+        /// An id or a path such as wallets/transactions.
         id: String,
         #[arg(long, default_value = "work")]
         view: String,
@@ -103,6 +119,48 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PackCmd,
     },
+}
+
+#[derive(Subcommand)]
+enum NewCmd {
+    Folder {
+        path: String,
+        #[arg(long, default_value = "work")]
+        view: String,
+    },
+    Doc {
+        path: String,
+        #[arg(long = "type")]
+        doc_type: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long, default_value = "work")]
+        view: String,
+    },
+}
+
+fn ls_text(nodes: &[TreeNode], depth: usize, out: &mut Vec<String>) {
+    for n in nodes {
+        let mut line = format!(
+            "{}{}{}  {}  {}",
+            "  ".repeat(depth),
+            n.name,
+            if n.block_type == "folder" { "/" } else { "" },
+            n.block_type,
+            n.id
+        );
+        if let Some(t) = &n.doc_type {
+            line.push_str(&format!("  {t}"));
+        }
+        if let Some(l) = &n.lifecycle {
+            line.push_str(&format!(" · {l}"));
+        }
+        if n.collapsed > 0 {
+            line.push_str(&format!("  (+{} more)", n.collapsed));
+        }
+        out.push(line);
+        ls_text(&n.children, depth + 1, out);
+    }
 }
 
 #[derive(Subcommand)]
@@ -205,10 +263,8 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     ))
                 }
                 Cmd::Show { id, scope } => {
-                    let bid = BlockId::parse(&id).map_err(|e| {
-                        RdyError::new(E_BAD_INPUT, e.to_string(), "ids look like b-7KQ2M")
-                    })?;
                     let scope = r.resolve_scope(&scope)?;
+                    let bid = r.resolve_id(&scope, &id)?;
                     let ctx = r.context(&scope, &bid)?;
                     let text = format!(
                         "{} {} (version {})\n{}\n{}",
@@ -219,6 +275,51 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                         ctx.body
                     );
                     Ok((serde_json::to_value(&ctx).expect("json"), text))
+                }
+                Cmd::New { what } => {
+                    let (kind, path, res) = match what {
+                        NewCmd::Folder { path, view } => (
+                            "folder",
+                            path.clone(),
+                            r.new_folder(&human(Role::Writer), &view, &path)?,
+                        ),
+                        NewCmd::Doc {
+                            path,
+                            doc_type,
+                            title,
+                            view,
+                        } => (
+                            "doc",
+                            path.clone(),
+                            r.new_doc(
+                                &human(Role::Writer),
+                                &view,
+                                &path,
+                                doc_type.as_deref(),
+                                title.as_deref(),
+                            )?,
+                        ),
+                    };
+                    let last = res
+                        .created
+                        .values()
+                        .rfind(|v| v.starts_with(if kind == "doc" { "d-" } else { "fd-" }))
+                        .cloned()
+                        .unwrap_or_default();
+                    Ok((
+                        serde_json::to_value(&res).expect("json"),
+                        format!("created {kind} {path} ({last})"),
+                    ))
+                }
+                Cmd::Ls { path, scope, depth } => {
+                    let scope = r.resolve_scope(&scope)?;
+                    let nodes = r.tree(&scope, path.as_deref(), depth)?;
+                    let mut lines = vec![];
+                    ls_text(&nodes, 0, &mut lines);
+                    Ok((
+                        serde_json::to_value(&nodes).expect("json"),
+                        lines.join("\n"),
+                    ))
                 }
                 Cmd::Log => {
                     let mut rows = vec![];
@@ -246,10 +347,8 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     Ok((Value::Array(rows), text))
                 }
                 Cmd::Impact { id, depth, scope } => {
-                    let bid = BlockId::parse(&id).map_err(|e| {
-                        RdyError::new(E_BAD_INPUT, e.to_string(), "ids look like b-7KQ2M")
-                    })?;
                     let scope = r.resolve_scope(&scope)?;
+                    let bid = r.resolve_id(&scope, &id)?;
                     let items = r.impact(&scope, &bid, depth)?;
                     let text = items
                         .iter()
@@ -323,10 +422,9 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     Ok((json!({"versions": versions, "current": current}), text))
                 }
                 Cmd::Edit { id, view } => {
-                    let bid = BlockId::parse(&id).map_err(|e| {
-                        RdyError::new(E_BAD_INPUT, e.to_string(), "ids look like b-7KQ2M")
-                    })?;
-                    let block = r.block(&Scope::View(view.clone()), &bid)?;
+                    let scope = Scope::View(view.clone());
+                    let bid = r.resolve_id(&scope, &id)?;
+                    let block = r.block(&scope, &bid)?;
                     let tmp = tempfile::Builder::new()
                         .prefix("rdy-edit-")
                         .suffix(".yaml")
