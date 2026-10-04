@@ -51,16 +51,38 @@ fn read_frame(f: &File, offset: u64, file_len: u64) -> io::Result<Option<(u8, Ha
     Ok(Some((kind, hash, payload)))
 }
 
-/// True if the invalid frame at `offset` is consistent with a torn final write:
-/// an incomplete header, a length running past EOF, or a bad hash on the final frame.
-fn is_torn_tail(f: &File, offset: u64, file_len: u64) -> io::Result<bool> {
-    if offset + HEADER > file_len {
-        return Ok(true);
+/// True if any valid frame (header parses, fits within EOF, payload hash verifies)
+/// starts after `offset`. A genuine torn tail never has one.
+fn valid_frame_after(f: &File, offset: u64, file_len: u64) -> io::Result<bool> {
+    let mut buf = vec![0u8; (file_len - offset) as usize];
+    f.read_exact_at(&mut buf, offset)?;
+    let h = HEADER as usize;
+    for pos in 1..buf.len() {
+        if pos + h > buf.len() {
+            break;
+        }
+        let len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
+        let Some(end) = (pos + h).checked_add(len) else { continue };
+        if end > buf.len() {
+            continue;
+        }
+        if Hash::of(&buf[pos + h..end]).0 == buf[pos + 5..pos + 37] {
+            return Ok(true);
+        }
     }
-    let mut len_bytes = [0u8; 4];
-    f.read_exact_at(&mut len_bytes, offset)?;
-    let end = offset + HEADER + u32::from_le_bytes(len_bytes) as u64;
-    Ok(end >= file_len)
+    Ok(false)
+}
+
+/// Copies `[offset, file_len)` to `<seg>.torn-<offset>` and fsyncs it and the directory.
+fn quarantine(f: &File, dir: &Path, seg: &Path, offset: u64, file_len: u64) -> io::Result<()> {
+    let mut buf = vec![0u8; (file_len - offset) as usize];
+    f.read_exact_at(&mut buf, offset)?;
+    let mut name = seg.file_name().unwrap().to_os_string();
+    name.push(format!(".torn-{offset}"));
+    let q = File::create(dir.join(name))?;
+    q.write_all_at(&buf, 0)?;
+    q.sync_all()?;
+    sync_dir(dir)
 }
 
 impl SegmentLog {
@@ -82,16 +104,17 @@ impl SegmentLog {
         while let Some((_, _, payload)) = read_frame(&writer, offset, file_len)? {
             offset += HEADER + payload.len() as u64;
         }
-        if offset < file_len && !is_torn_tail(&writer, offset, file_len)? {
+        if offset < file_len && valid_frame_after(&writer, offset, file_len)? {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "corrupt frame in {} at offset {offset} with data after it; refusing to truncate (run rdy fsck)",
+                    "corruption at offset {offset} with valid frames after it in {}; refusing to truncate (run rdy fsck)",
                     seg_path(dir, last).display()
                 ),
             ));
         }
         if offset < file_len {
+            quarantine(&writer, dir, &seg_path(dir, last), offset, file_len)?;
             writer.set_len(offset)?;
             writer.sync_all()?;
         }

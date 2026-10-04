@@ -28,7 +28,15 @@ fn rolls_to_a_new_segment_when_full() {
     }
     drop(log);
     let log = SegmentLog::open(dir.path(), 128).unwrap();
-    assert_eq!(log.scan_from(Location { segment: 0, offset: 0 }).unwrap().len(), 10);
+    assert_eq!(
+        log.scan_from(Location {
+            segment: 0,
+            offset: 0
+        })
+        .unwrap()
+        .len(),
+        10
+    );
 }
 
 #[test]
@@ -42,7 +50,10 @@ fn torn_tail_is_truncated_and_acknowledged_writes_survive() {
     drop(log);
 
     // simulate a crash mid-frame: a header claiming 100 bytes, then only 3 bytes of payload
-    let mut f = OpenOptions::new().append(true).open(dir.path().join("seg-000000.log")).unwrap();
+    let mut f = OpenOptions::new()
+        .append(true)
+        .open(dir.path().join("seg-000000.log"))
+        .unwrap();
     f.write_all(&100u32.to_le_bytes()).unwrap();
     f.write_all(&[1u8]).unwrap();
     f.write_all(&[0u8; 32]).unwrap();
@@ -60,7 +71,12 @@ fn torn_tail_is_truncated_and_acknowledged_writes_survive() {
 
     // reopen and verify all three frames are intact
     let log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
-    let frames = log.scan_from(Location { segment: 0, offset: 0 }).unwrap();
+    let frames = log
+        .scan_from(Location {
+            segment: 0,
+            offset: 0,
+        })
+        .unwrap();
     assert_eq!(frames.len(), 3);
     assert_eq!(log.read(a).unwrap().1, b"first");
     assert_eq!(log.read(b).unwrap().1, b"second");
@@ -114,11 +130,13 @@ fn corrupt_frame_in_sealed_segment_detected_on_scan() {
 
     // scan should detect the corruption in the sealed segment
     let log = SegmentLog::open(dir.path(), 128).unwrap();
-    let result = log.scan_from(Location { segment: 0, offset: 0 });
+    let result = log.scan_from(Location {
+        segment: 0,
+        offset: 0,
+    });
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
 }
-
 
 #[test]
 fn mid_segment_corruption_refuses_to_open_and_leaves_file_untouched() {
@@ -134,9 +152,60 @@ fn mid_segment_corruption_refuses_to_open_and_leaves_file_untouched() {
     bytes[37 + 3] ^= 0xff; // inside the first frame's payload
     std::fs::write(&path, &bytes).unwrap();
 
-    let err = SegmentLog::open(dir.path(), 1 << 20).err().expect("open must fail");
+    let err = SegmentLog::open(dir.path(), 1 << 20)
+        .err()
+        .expect("open must fail");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     let msg = err.to_string();
-    assert!(msg.contains("seg-000000.log") && msg.contains("offset 0"), "{msg}");
+    assert!(
+        msg.contains("seg-000000.log") && msg.contains("offset 0"),
+        "{msg}"
+    );
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn corrupted_length_field_with_valid_frames_after_refuses_to_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    log.append(1, b"first-frame").unwrap();
+    log.append(1, b"second-frame").unwrap();
+    log.append(1, b"third-frame").unwrap();
+    log.sync().unwrap();
+    drop(log);
+    let path = dir.path().join("seg-000000.log");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[3] ^= 0xff; // high byte of the first frame's length
+    std::fs::write(&path, &bytes).unwrap();
+
+    let err = SegmentLog::open(dir.path(), 1 << 20)
+        .err()
+        .expect("open must fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    let msg = err.to_string();
+    assert!(
+        msg.contains("seg-000000.log") && msg.contains("offset 0"),
+        "{msg}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
+fn torn_tail_is_quarantined_before_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    log.append(1, b"keep-me").unwrap();
+    let (b, _) = log.append(1, b"torn-payload-here").unwrap();
+    log.sync().unwrap();
+    drop(log);
+    let path = dir.path().join("seg-000000.log");
+    let bytes = std::fs::read(&path).unwrap();
+    let cut = bytes.len() - 5;
+    std::fs::write(&path, &bytes[..cut]).unwrap();
+
+    let log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    assert_eq!(log.end(), b);
+    let q = dir.path().join(format!("seg-000000.log.torn-{}", b.offset));
+    assert_eq!(std::fs::read(q).unwrap(), &bytes[b.offset as usize..cut]);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), b.offset);
 }
