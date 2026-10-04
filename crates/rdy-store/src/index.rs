@@ -27,9 +27,28 @@ fn dec(bytes: &[u8]) -> Result<Location, StoreError> {
     postcard::from_bytes(bytes).map_err(|e| StoreError::Decode(e.to_string()))
 }
 
+/// A 32-byte hash stored as an index value; anything else is damage, reported as a decode error.
+pub(crate) fn hash_from(bytes: &[u8], what: &str) -> Result<Hash, StoreError> {
+    <[u8; 32]>::try_from(bytes).map(Hash).map_err(|_| StoreError::Decode(format!("{what} is {} bytes, expected a 32-byte hash", bytes.len())))
+}
+
 impl Index {
     pub fn open(path: &Path) -> Result<Index, StoreError> {
-        let database = Database::create(path).map_err(db)?;
+        Index::with_tables(Database::create(path).map_err(db)?)
+    }
+
+    /// Opens the index and verifies every page checksum (about 30 ms per 300k objects). A file
+    /// that fails the check, or that redb had to repair, is an error: the caller sets it aside
+    /// and rebuilds it from the log rather than trusting it.
+    pub fn open_checked(path: &Path) -> Result<Index, StoreError> {
+        let mut database = Database::create(path).map_err(db)?;
+        if !database.check_integrity().map_err(db)? {
+            return Err(StoreError::Db("index failed its integrity check".into()));
+        }
+        Index::with_tables(database)
+    }
+
+    fn with_tables(database: Database) -> Result<Index, StoreError> {
         let w = database.begin_write().map_err(db)?;
         {
             w.open_table(OBJECTS).map_err(db)?;
@@ -81,9 +100,10 @@ impl Index {
     pub fn producer(&self, version: &Hash) -> Result<Option<Hash>, StoreError> {
         let r = self.db.begin_read().map_err(db)?;
         let t = r.open_table(PRODUCERS).map_err(db)?;
-        Ok(t.get(&version.0[..])
-            .map_err(db)?
-            .map(|v| Hash(v.value().try_into().expect("32-byte hash"))))
+        match t.get(&version.0[..]).map_err(db)? {
+            Some(v) => Ok(Some(hash_from(v.value(), "producer entry")?)),
+            None => Ok(None),
+        }
     }
 
     pub fn get_ref(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {

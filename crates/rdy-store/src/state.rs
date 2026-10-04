@@ -48,7 +48,7 @@ fn check_base(store: &Store, state: &StateSnapshot, id: &BlockId, base: Hash) ->
 
 impl Store {
     pub fn canon_head(&self) -> Result<Option<Hash>, StoreError> {
-        Ok(self.get_ref("canon")?.map(|b| Hash(b.try_into().expect("32-byte canon ref"))))
+        self.get_ref("canon")?.map(|b| crate::index::hash_from(&b, "canon ref")).transpose()
     }
 
     pub fn snapshot_at(&self, landing: &Hash) -> Result<StateSnapshot, StoreError> {

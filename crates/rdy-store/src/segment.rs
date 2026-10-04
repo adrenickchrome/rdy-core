@@ -204,13 +204,16 @@ impl SegmentLog {
         self.writer.sync_data()
     }
 
-    pub fn read(&self, loc: Location) -> io::Result<(u8, Vec<u8>)> {
+    /// Reads the frame at `loc` with the payload hash its header carries (already verified).
+    pub fn read_hashed(&self, loc: Location) -> io::Result<(u8, Hash, Vec<u8>)> {
         let f = self.readers.get(loc.segment as usize).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such segment"))?;
         let file_len = f.metadata()?.len();
-        match read_frame(f, loc.offset, file_len)? {
-            Some((kind, _, payload)) => Ok((kind, payload)),
-            None => Err(io::Error::new(io::ErrorKind::InvalidData, format!("corrupt or missing frame at {loc:?}"))),
-        }
+        read_frame(f, loc.offset, file_len)?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("corrupt or missing frame at {loc:?}")))
+    }
+
+    pub fn read(&self, loc: Location) -> io::Result<(u8, Vec<u8>)> {
+        let (kind, _, payload) = self.read_hashed(loc)?;
+        Ok((kind, payload))
     }
 
     pub fn scan_from(&self, from: Location) -> io::Result<Vec<(Location, u8, Hash)>> {

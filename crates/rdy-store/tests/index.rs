@@ -66,3 +66,21 @@ fn apply_persists_across_reopen() {
         }
     );
 }
+
+#[test]
+fn a_malformed_producer_entry_is_a_decode_error_not_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+    drop(Index::open(&path).unwrap());
+    {
+        let db = redb::Database::create(&path).unwrap();
+        let w = db.begin_write().unwrap();
+        {
+            let mut t = w.open_table(redb::TableDefinition::<&[u8], &[u8]>::new("producers")).unwrap();
+            t.insert(&[7u8; 32][..], &b"short"[..]).unwrap();
+        }
+        w.commit().unwrap();
+    }
+    let idx = Index::open(&path).unwrap();
+    assert!(matches!(idx.producer(&Hash([7u8; 32])), Err(rdy_store::StoreError::Decode(_))));
+}

@@ -219,3 +219,73 @@ fn corruption_below_the_acknowledged_boundary_refuses_to_open() {
     assert!(msg.contains("seg-000000.log") && msg.contains("move the damaged segment aside"), "{msg}");
     assert_eq!(std::fs::read(&seg).unwrap(), bytes);
 }
+
+#[test]
+fn a_malformed_canon_ref_is_a_decode_error_not_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(dir.path()).unwrap();
+    s.set_refs(vec![("canon".into(), b"A".to_vec())]).unwrap();
+    assert!(matches!(s.canon_head(), Err(StoreError::Decode(_))));
+    // every reader of canon goes through canon_head
+    assert!(matches!(s.view("work"), Err(StoreError::Decode(_))));
+    assert!(matches!(s.landings(), Err(StoreError::Decode(_))));
+}
+
+#[test]
+fn an_index_that_points_a_hash_at_another_object_is_an_error_not_wrong_data() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let b_dir = tempfile::tempdir().unwrap();
+    // same id and body length: both frames sit at the same location in their logs
+    let va = block("b-AAAAA", "one");
+    let vb = block("b-AAAAA", "two");
+    Store::open(a_dir.path()).unwrap().put(kinds::BLOCK, &va).unwrap();
+    Store::open(b_dir.path()).unwrap().put(kinds::BLOCK, &vb).unwrap();
+    std::fs::copy(b_dir.path().join("index.redb"), a_dir.path().join("index.redb")).unwrap();
+    let s = Store::open(a_dir.path()).unwrap();
+    assert!(matches!(s.get_block(&vb.version_hash()), Err(StoreError::Decode(_))), "must not return {:?}", va.body);
+}
+
+/// Flips one byte at ~400 evenly spaced offsets of index.redb. Every flip must be survived:
+/// open succeeds and every object and ref reads back exactly (the index is derived from the log,
+/// so a damaged one is rebuilt, never trusted, and never a panic).
+#[test]
+fn a_byte_flip_anywhere_in_the_index_is_recovered_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let blocks: Vec<Block> = (0..50).map(|i| block(&format!("b-{i:05}"), &format!("body {i}"))).collect();
+    {
+        let mut s = Store::open(dir.path()).unwrap();
+        for b in &blocks {
+            s.put(kinds::BLOCK, b).unwrap();
+        }
+        s.set_refs(vec![("canon".into(), blocks[0].version_hash().0.to_vec())]).unwrap();
+    }
+    let idx = dir.path().join("index.redb");
+    let pristine = std::fs::read(&idx).unwrap();
+    let step = (pristine.len() / 400).max(1);
+    let mut failures = vec![];
+    for off in (0..pristine.len()).step_by(step) {
+        let mut bytes = pristine.clone();
+        bytes[off] ^= 0xFF;
+        std::fs::write(&idx, &bytes).unwrap();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
+            let s = Store::open(dir.path()).map_err(|e| e.to_string())?;
+            for b in &blocks {
+                if s.get_block(&b.version_hash()).map_err(|e| e.to_string())? != *b {
+                    return Err(format!("{} read back different", b.id));
+                }
+            }
+            if s.canon_head().map_err(|e| e.to_string())? != Some(blocks[0].version_hash()) {
+                return Err("canon ref lost".into());
+            }
+            Ok(())
+        }));
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => failures.push(format!("offset {off}: {e}")),
+            Err(_) => failures.push(format!("offset {off}: panicked")),
+        }
+        // the next round starts from the undamaged index; set-aside copies just accumulate
+        std::fs::write(&idx, &pristine).unwrap();
+    }
+    assert!(failures.is_empty(), "{} flips were not recovered:\n{}", failures.len(), failures.join("\n"));
+}

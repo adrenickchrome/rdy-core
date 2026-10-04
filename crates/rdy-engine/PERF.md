@@ -17,7 +17,7 @@ Source column: **perf_budget** = `tests/perf_budget.rs` (final run, perf-run4.lo
 
 | measurement | target | before fixes | final (100k) | source | status |
 |---|---|---|---|---|---|
-| cold start (open + materialize + graph) | < 2 s | 2.02 s (first pass, right after generation) | 0.63 s median of 3 (1.40 s, 0.63 s, 0.63 s) | perf_budget | met |
+| cold start (open + materialize + graph) | < 2 s | 2.02 s (first pass, right after generation) | 0.65 s median of 3 (2.06 s, 0.65 s, 0.64 s) | perf_budget | met |
 | cold open + graph | - | - | 791 ms (10k blocks: 101 ms) | criterion | informational |
 | query p99 (`context` + `impact`, 200 probes) | < 5 ms | not measured (`context` scanned every edge) | 3.5 us (p50 2.2 us, p95 3.1 us, max 7.1 us) | perf_budget | met |
 | `context` / `impact` mean | - | - | 1.55 us / 373 ns (10k: 1.40 us / 324 ns) | criterion | informational |
@@ -104,6 +104,6 @@ Reading:
 
 0.6-0.7 s when the OS is idle (final run: 1.40 s, 0.63 s, 0.63 s). The first pass right after generating the project, while the OS is
 still flushing 1.6 GB, took 1.9-2.0 s (the first run of this test saw 2.02 s). The test therefore
-judges the median of three opens and prints all three. Profile top frames of a cold start: `pread`
+judges the median of three opens and prints all three. Open now verifies the index's page checksums (redb `check_integrity`) and rebuilds a damaged index instead of trusting it; with that check the median is 0.65 s (2.06 s, 0.65 s, 0.64 s). Profile top frames of a cold start: `pread`
 (reading each block frame), `memcmp` and `redb` point lookups (`Index::object` per block),
 BLAKE3 hash of every block read, `Graph::build`, `BTreeMap::insert`.

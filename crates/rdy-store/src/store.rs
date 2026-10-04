@@ -21,15 +21,20 @@ pub struct Store {
     poisoned: bool,
 }
 
-/// Opens the index and reads its acknowledged boundary (None if it has none yet). A damaged
-/// index is renamed to `index.redb.damaged-<n>` and replaced by an empty one, which the caller
-/// rebuilds from the log; the boundary is then unknown.
+/// Opens the index, verifies its integrity and reads its acknowledged boundary (None if it has
+/// none yet). An index that fails to open, fails the check, or makes redb panic is renamed to
+/// `index.redb.damaged-<n>` and replaced by an empty one, which the caller rebuilds from the
+/// log; the boundary is then unknown.
 fn open_index(dir: &Path) -> Result<(Index, Option<Location>), StoreError> {
     let path = dir.join("index.redb");
-    let opened = Index::open(&path).and_then(|i| {
-        let acked = i.acknowledged()?;
-        Ok((i, acked))
-    });
+    // redb can panic on a corrupt page instead of returning an error; that is damage too
+    let opened = std::panic::catch_unwind(|| {
+        Index::open_checked(&path).and_then(|i| {
+            let acked = i.acknowledged()?;
+            Ok((i, acked))
+        })
+    })
+    .unwrap_or_else(|_| Err(StoreError::Db("index panicked while opening".into())));
     match opened {
         Ok(ok) => Ok(ok),
         Err(_) => {
@@ -208,7 +213,11 @@ impl Store {
 
     pub fn get_raw(&self, h: &Hash) -> Result<(u8, Vec<u8>), StoreError> {
         let loc = self.index.object(h)?.ok_or(StoreError::NotFound(*h))?;
-        Ok(self.log.read(loc)?)
+        let (kind, found, payload) = self.log.read_hashed(loc)?;
+        if found != *h {
+            return Err(StoreError::Decode(format!("the index places {h} at {loc:?}, which holds {found}; run rdy reindex")));
+        }
+        Ok((kind, payload))
     }
 
     pub fn get<T: DeserializeOwned>(&self, h: &Hash) -> Result<T, StoreError> {

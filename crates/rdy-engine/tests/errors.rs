@@ -37,3 +37,14 @@ fn damaged_log_hint_does_not_point_at_commands_that_need_an_open_store() {
     assert!(!e.fix.contains("rdy fsck"), "{}", e.fix);
     assert!(e.fix.contains("message"), "{}", e.fix);
 }
+
+#[test]
+fn a_malformed_canon_ref_is_an_io_error_not_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+    r.store_mut().set_refs(vec![("canon".into(), b"not a hash".to_vec())]).unwrap();
+    let e = r.materialized(&rdy_engine::Scope::Canon).map(|_| ()).unwrap_err();
+    assert_eq!(e.code, "E_IO", "{e}");
+    assert!(e.message.contains("canon ref"), "{e}");
+    assert_eq!(r.fsck().unwrap_err().code, "E_IO");
+}
