@@ -74,9 +74,16 @@ enum Cmd {
         view: u8,
         parent: u16,
     },
+    /// A proposed decision under a pool section; it is accepted (frozen) when its view lands.
+    Decide {
+        view: u8,
+        parent: u16,
+    },
     Land {
         view: u8,
     },
+    /// An approver tags canon's head as the next version, if canon moved since the last tag.
+    Tag,
 }
 
 const NAMES: [&str; 4] = ["alpha", "Alpha", "beta", "gamma"];
@@ -104,9 +111,11 @@ fn cmd() -> impl Strategy<Value = Cmd> {
         1 => (v.clone(), 1u8..4, mp.clone(), mp, any::<bool>()).prop_map(|(a, d, pick, to, tree)| Cmd::Crosswise { a, b: (a + d) % 4, pick, to, tree }),
         1 => (v.clone(), any::<u16>()).prop_map(|(view, pick)| Cmd::Delete { view, pick }),
         2 => (v.clone(), p.clone()).prop_map(|(view, pick)| Cmd::Edit { view, pick }),
-        2 => (v.clone(), p.clone(), name()).prop_map(|(view, pick, name)| Cmd::Rename { view, pick, name }),
+        4 => (v.clone(), p.clone(), name()).prop_map(|(view, pick, name)| Cmd::Rename { view, pick, name }),
         3 => (v.clone(), p.clone()).prop_map(|(view, parent)| Cmd::Rebalance { view, parent }),
+        2 => (v.clone(), p.clone()).prop_map(|(view, parent)| Cmd::Decide { view, parent }),
         3 => v.prop_map(|view| Cmd::Land { view }),
+        1 => Just(Cmd::Tag),
     ]
 }
 
@@ -151,6 +160,7 @@ struct Stats {
     land_refused: BTreeMap<String, usize>,
     write_refused: BTreeMap<String, usize>,
     siblings_rekeyed: usize,
+    tags: usize,
 }
 
 struct Sim<'a> {
@@ -158,6 +168,16 @@ struct Sim<'a> {
     /// a slot whose landing was refused is abandoned: it continues under a fresh view name
     generation: [u32; 4],
     stats: &'a RefCell<Stats>,
+    /// versions tagged so far: (name, snapshot id at tagging time)
+    tags: Vec<(String, rdy_model::Hash)>,
+    tagged_head: Option<rdy_model::Hash>,
+}
+
+/// Codes that are defects whenever they appear: a caught panic, or a malformed order key in a
+/// project only the engine has written. (`E_ORDER_DEPTH` is a legitimate refusal.)
+fn unexpected(e: &RdyError) -> bool {
+    [E_INTERNAL, "E_ORDER_KEY"].contains(&e.code)
+        || e.issues.iter().any(|i| i.code == "E_ORDER_KEY")
 }
 
 fn kind(c: &Cmd) -> &'static str {
@@ -172,7 +192,9 @@ fn kind(c: &Cmd) -> &'static str {
         Cmd::Edit { .. } => "edit",
         Cmd::Rename { .. } => "rename",
         Cmd::Rebalance { .. } => "rebalance",
+        Cmd::Decide { .. } => "decide",
         Cmd::Land { .. } => "land",
+        Cmd::Tag => "tag",
     }
 }
 
@@ -215,6 +237,9 @@ impl Sim<'_> {
                 }
                 Ok(true)
             }
+            Err(e) if unexpected(&e) => Err(TestCaseError::fail(format!(
+                "after {c:?}, a write to {view} failed unexpectedly: {e:?}"
+            ))),
             Err(e) => {
                 *self
                     .stats
@@ -229,12 +254,17 @@ impl Sim<'_> {
 
     fn land(&mut self, slot: u8, c: &Cmd) -> Result<(), TestCaseError> {
         let view = self.view(slot);
-        let res = self.r.propose(&writer(), &view, &view).and_then(|p| {
-            let warned = p.warnings.iter().any(|i| i.code == "W_SIBLINGS_REKEYED");
-            self.r
-                .land_report(&approver(), &p.id)
-                .map(|l| warned || l.warnings.iter().any(|i| i.code == "W_SIBLINGS_REKEYED"))
-        });
+        let res = match self.r.propose(&writer(), &view, &view) {
+            // an empty view has nothing to propose: not a conflict
+            Err(e) if e.code == E_BAD_INPUT => return Ok(()),
+            Err(e) => Err(e),
+            Ok(p) => {
+                let warned = p.warnings.iter().any(|i| i.code == "W_SIBLINGS_REKEYED");
+                self.r
+                    .land_report(&approver(), &p.id)
+                    .map(|l| warned || l.warnings.iter().any(|i| i.code == "W_SIBLINGS_REKEYED"))
+            }
+        };
         match res {
             Ok(rekeyed) => {
                 let mut s = self.stats.borrow_mut();
@@ -246,9 +276,14 @@ impl Sim<'_> {
                         "after {c:?} ({view}), canon broke: {x:?}"
                     )));
                 }
+                self.check_tags(c)?;
             }
-            // an empty view has nothing to propose: not a conflict
-            Err(e) if e.code == E_BAD_INPUT => {}
+            // a freshly made proposal is never bad input to land
+            Err(e) if unexpected(&e) || e.code == E_BAD_INPUT => {
+                return Err(TestCaseError::fail(format!(
+                    "after {c:?}, landing {view} failed unexpectedly: {e:?}"
+                )));
+            }
             Err(e) => {
                 *self
                     .stats
@@ -257,8 +292,59 @@ impl Sim<'_> {
                     .entry(refusal(&e))
                     .or_default() += 1;
                 self.generation[slot as usize] += 1;
+                if let Err(x) = check(&mut self.r, &Scope::Canon) {
+                    return Err(TestCaseError::fail(format!(
+                        "after refused {c:?} ({view}: {}), canon broke: {x:?}",
+                        e.code
+                    )));
+                }
             }
         }
+        Ok(())
+    }
+
+    /// Every earlier version still reads exactly as it did when tagged, and the newest passes
+    /// the checker.
+    fn check_tags(&mut self, c: &Cmd) -> Result<(), TestCaseError> {
+        for (name, snap) in self.tags.clone() {
+            let scope = self
+                .r
+                .resolve_scope(&format!("tag:{name}"))
+                .map_err(|e| TestCaseError::fail(format!("after {c:?}, tag {name}: {e}")))?;
+            let now = self.r.materialized(&scope).unwrap().snapshot.id();
+            if now != snap {
+                return Err(TestCaseError::fail(format!(
+                    "after {c:?}, version {name} changed: tagged {snap}, now {now}"
+                )));
+            }
+        }
+        if let Some((name, _)) = self.tags.last().cloned() {
+            let scope = self.r.resolve_scope(&format!("tag:{name}")).unwrap();
+            if let Err(x) = check(&mut self.r, &scope) {
+                return Err(TestCaseError::fail(format!(
+                    "after {c:?}, version {name} broke: {x:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn tag(&mut self, c: &Cmd) -> Result<(), TestCaseError> {
+        let head = self.r.store().canon_head().unwrap();
+        if head.is_none() || head == self.tagged_head {
+            return Ok(());
+        }
+        let name = format!("v0.{}.0", self.tags.len() + 1);
+        if let Err(e) = self.r.tag(&approver(), &name, None, None) {
+            return Err(TestCaseError::fail(format!(
+                "after {c:?}, tagging {name} failed: {e:?}"
+            )));
+        }
+        let scope = self.r.resolve_scope(&format!("tag:{name}")).unwrap();
+        let snap = self.r.materialized(&scope).unwrap().snapshot.id();
+        self.tags.push((name, snap));
+        self.tagged_head = head;
+        self.stats.borrow_mut().tags += 1;
         Ok(())
     }
 
@@ -333,7 +419,7 @@ impl Sim<'_> {
                 to,
             } => {
                 let sc = self.scope(*vi);
-                let all = ids(&mut self.r, &sc, &["claim", "section"]);
+                let all = ids(&mut self.r, &sc, &["claim", "decision", "section"]);
                 let parents = ids(&mut self.r, &sc, &["section", "doc"]);
                 (
                     *vi,
@@ -394,7 +480,11 @@ impl Sim<'_> {
                 (
                     *vi,
                     pick(
-                        &ids(&mut self.r, &sc, &["claim", "section", "doc", "folder"]),
+                        &ids(
+                            &mut self.r,
+                            &sc,
+                            &["claim", "decision", "section", "doc", "folder"],
+                        ),
                         *p,
                     )
                     .map(|id| json!({"op": "delete", "id": id})),
@@ -405,7 +495,7 @@ impl Sim<'_> {
                 let body = format!("edited in {}", self.view(*vi));
                 (
                     *vi,
-                    pick(&ids(&mut self.r, &sc, &["claim"]), *p)
+                    pick(&ids(&mut self.r, &sc, &["claim", "decision"]), *p)
                         .map(|id| json!({"op": "update", "id": id, "body": body})),
                 )
             }
@@ -425,7 +515,49 @@ impl Sim<'_> {
                         .map(|p| json!({"op": "rebalance", "parent": p})),
                 )
             }
+            Cmd::Decide { view: vi, parent } => {
+                let sc = self.scope(*vi);
+                let Some(p) = pick(&ids(&mut self.r, &sc, &["section"]), *parent) else {
+                    return Ok(());
+                };
+                let view = self.view(*vi);
+                let d = DecisionInput {
+                    parent: p,
+                    statement: format!("decided in {view}"),
+                    ..Default::default()
+                };
+                match self.r.decide(&writer(), &view, d) {
+                    Ok(_) => {
+                        *self
+                            .stats
+                            .borrow_mut()
+                            .writes_ok
+                            .entry("decide")
+                            .or_default() += 1;
+                        if let Err(x) = check(&mut self.r, &sc) {
+                            return Err(TestCaseError::fail(format!(
+                                "after {c:?}, view {view} broke: {x:?}"
+                            )));
+                        }
+                    }
+                    Err(e) if unexpected(&e) => {
+                        return Err(TestCaseError::fail(format!(
+                            "after {c:?}, a decision in {view} failed unexpectedly: {e:?}"
+                        )));
+                    }
+                    Err(e) => {
+                        *self
+                            .stats
+                            .borrow_mut()
+                            .write_refused
+                            .entry(refusal(&e))
+                            .or_default() += 1;
+                    }
+                }
+                return Ok(());
+            }
             Cmd::Land { view: vi } => return self.land(*vi, c),
+            Cmd::Tag => return self.tag(c),
         };
         if let Some(op) = op {
             self.write(slot, json!([op]), c)?;
@@ -451,6 +583,8 @@ fn engine_split_brain_histories_keep_every_invariant() {
             r,
             generation: [0; 4],
             stats: &stats,
+            tags: vec![],
+            tagged_head: None,
         };
         for c in &cmds {
             sim.apply(c)?;
@@ -478,4 +612,9 @@ fn engine_split_brain_histories_keep_every_invariant() {
         s.siblings_rekeyed >= 1,
         "no W_SIBLINGS_REKEYED seen: {s:#?}"
     );
+    assert!(
+        s.write_refused.get(E_FROZEN).copied().unwrap_or(0) >= 1,
+        "no write was refused as E_FROZEN: {s:#?}"
+    );
+    assert!(s.tags >= 2, "fewer than 2 versions tagged: {s:#?}");
 }
