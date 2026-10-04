@@ -8,6 +8,29 @@ use serde_json::{Value, json};
 
 pub const E_NO_SESSION: &str = "E_NO_SESSION";
 
+/// The most ops one `rdy_write` may carry.
+pub const MAX_OPS_PER_WRITE: usize = 5_000;
+/// The longest JSON-RPC request line the stdio server passes on.
+pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+/// The largest asset (decoded bytes) `rdy_asset` accepts.
+pub const MAX_ASSET_BYTES: usize = 64 * 1024 * 1024;
+/// The largest `max_tokens` any read may ask for.
+pub const MAX_TOKENS_LIMIT: usize = 100_000;
+
+fn limit(what: impl Into<String>, fix: impl Into<String>) -> RdyError {
+    RdyError::new(E_LIMIT, what, fix)
+}
+
+fn check_tokens(max_tokens: Option<usize>) -> Result<(), RdyError> {
+    match max_tokens {
+        Some(n) if n > MAX_TOKENS_LIMIT => Err(limit(
+            format!("max_tokens {n} is over the limit of {MAX_TOKENS_LIMIT}"),
+            format!("ask for at most {MAX_TOKENS_LIMIT} tokens and page through the rest"),
+        )),
+        _ => Ok(()),
+    }
+}
+
 pub struct McpState {
     pub rdy: Rdy,
     pub session: Option<Session>,
@@ -271,6 +294,9 @@ fn ok<T: serde::Serialize>(t: T) -> Result<Value, RdyError> {
 }
 
 pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyError> {
+    if std::env::var("RDY_TEST_HOOKS").is_ok_and(|v| v == "1") && p.actor == "__rdy_test_panic__" {
+        panic!("test hook: deliberate panic")
+    }
     let role = match p.role.as_str() {
         "reader" => Role::Reader,
         "writer" => Role::Writer,
@@ -322,6 +348,7 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
 }
 
 pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError> {
+    check_tokens(p.max_tokens)?;
     let s = session(st)?;
     let scope = scope_of(st, &p.scope)?;
     let position = st.rdy.version_position(&scope)?;
@@ -359,6 +386,7 @@ pub fn rdy_tags(st: &mut McpState, _p: TagsParams) -> Result<Value, RdyError> {
 }
 
 pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
+    check_tokens(p.max_tokens)?;
     session(st)?;
     let scope = scope_of(st, &p.scope)?;
     let id = st.rdy.resolve_id(&scope, &p.id)?;
@@ -448,6 +476,7 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
 }
 
 pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
+    check_tokens(p.max_tokens)?;
     session(st)?;
     let scope = scope_of(st, &p.scope)?;
     let id = st.rdy.resolve_id(&scope, &p.id)?;
@@ -459,6 +488,7 @@ pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
 }
 
 pub fn rdy_impact(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
+    check_tokens(p.max_tokens)?;
     session(st)?;
     let scope = scope_of(st, &p.scope)?;
     let id = st.rdy.resolve_id(&scope, &p.id)?;
@@ -467,6 +497,7 @@ pub fn rdy_impact(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
 }
 
 pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError> {
+    check_tokens(p.max_tokens)?;
     session(st)?;
     let scope = scope_of(st, &p.scope)?;
     Ok(budget(
@@ -518,6 +549,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             "pack": pack.name,
             "types": pack.block_types.iter().map(|(n, d)| json!({"type": n, "prefix": d.prefix, "traits": traits(&d.traits)})).collect::<Vec<_>>(),
             "link_types": pack.link_types,
+            "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "max_tokens": MAX_TOKENS_LIMIT},
             "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
         })),
     }
@@ -525,6 +557,15 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
 
 pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
     let s = session(st)?;
+    if p.ops.len() > MAX_OPS_PER_WRITE {
+        return Err(limit(
+            format!(
+                "{} ops in one write; the limit is {MAX_OPS_PER_WRITE}",
+                p.ops.len()
+            ),
+            "split the write into batches",
+        ));
+    }
     let ops: Vec<OpInput> = p
         .ops
         .into_iter()
@@ -626,6 +667,15 @@ pub fn rdy_asset(st: &mut McpState, p: AssetParams) -> Result<Value, RdyError> {
             "start the session as a writer",
         ));
     }
+    let too_big = || {
+        limit(
+            format!("the asset is over the limit of {MAX_ASSET_BYTES} bytes"),
+            format!("upload assets of at most {MAX_ASSET_BYTES} bytes"),
+        )
+    };
+    if p.data_base64.len() > MAX_ASSET_BYTES / 3 * 4 + 4 {
+        return Err(too_big());
+    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&p.data_base64)
         .map_err(|e| {
@@ -635,6 +685,9 @@ pub fn rdy_asset(st: &mut McpState, p: AssetParams) -> Result<Value, RdyError> {
                 "send the file as standard base64",
             )
         })?;
+    if bytes.len() > MAX_ASSET_BYTES {
+        return Err(too_big());
+    }
     let h = st.rdy.store_mut().put_blob(&bytes)?;
     Ok(
         json!({"hash": h.to_string(), "bytes": bytes.len(), "use": "set a figure block's `blob` field to this hash"}),
