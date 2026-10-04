@@ -14,17 +14,25 @@ rdy approve <proposal-id>     # lands it in canon; proposed decisions become acc
 rdy render --out site/
 ```
 
+In M1, `rdy mcp` holds the project's store while it runs, so run the human commands (`rdy status`, `rdy propose`, `rdy approve`, ...) after the agent session ends. A shared multi-client daemon arrives in M2.
+
 Claude Code MCP config:
 
 ```json
-{ "mcpServers": { "rdy": { "command": "rdy", "args": ["mcp"], "cwd": "/path/to/project" } } }
+{ "mcpServers": { "rdy": { "command": "rdy", "args": ["mcp", "--project", "/path/to/project"] } } }
+```
+
+or:
+
+```bash
+claude mcp add rdy -- rdy mcp --project /path/to/project
 ```
 
 ## Concepts
 
 - **Blocks**: typed, id-stable units (claims, terms, decisions, sections...). Every edit makes a new content-addressed version.
-- **Views**: where writes happen. **Canon**: the accepted design, advanced only by landing a proposal.
+- **Views**: where writes happen. An agent session writes to a view named after its `run` (e.g. `run-1`), which is why the quick start proposes `--view run-1`; the CLI default view is `work`. **Canon**: the accepted design, advanced only by landing a proposal.
 - **Decisions**: immutable once accepted; superseded or revoked only by new decisions.
 - **Schema packs**: the document skeleton and block types; `rdy-standard` is built in and replaceable.
 
-Design spec: see `docs/superpowers/specs/2026-10-03-rdy-design.md` in the research folder.
+Design spec: see [`docs/design/2026-10-03-rdy-design.md`](docs/design/2026-10-03-rdy-design.md) (copied from the research folder).

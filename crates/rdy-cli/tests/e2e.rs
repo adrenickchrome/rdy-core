@@ -1,10 +1,12 @@
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{Receiver, channel};
+use std::time::{Duration, Instant};
 
 struct Mcp {
     child: std::process::Child,
-    out: BufReader<std::process::ChildStdout>,
+    lines: Receiver<String>,
     next: u64,
 }
 
@@ -27,8 +29,10 @@ impl Mcp {
         let id = self.next;
         self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
         loop {
-            let mut line = String::new();
-            assert!(self.out.read_line(&mut line).unwrap() > 0, "server closed stdout");
+            let line = self
+                .lines
+                .recv_timeout(Duration::from_secs(30))
+                .unwrap_or_else(|e| panic!("no response to {method} within 30s (or server closed stdout): {e}"));
             let v: Value = serde_json::from_str(&line).unwrap();
             if v["id"] == json!(id) {
                 return v;
@@ -57,7 +61,15 @@ fn agent_over_mcp_then_human_approves() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_rdy")).arg("mcp").current_dir(dir.path()).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     let out = BufReader::new(child.stdout.take().unwrap());
-    let mut m = Mcp { child, out, next: 0 };
+    let (tx, lines) = channel();
+    std::thread::spawn(move || {
+        for line in out.lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut m = Mcp { child, lines, next: 0 };
     let init = m.call("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "0"}}));
     assert!(init["result"]["serverInfo"].is_object(), "{init}");
     m.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
@@ -81,7 +93,18 @@ fn agent_over_mcp_then_human_approves() {
     let p = m.tool("rdy_propose", json!({"title": "wallet ruling"}));
     let pid = p["id"].as_str().unwrap().to_string();
     drop(m.child.stdin.take());
-    m.child.wait().unwrap(); // releases the store lock
+    // Wait for exit (releases the store lock), bounded.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if m.child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if Instant::now() > deadline {
+            let _ = m.child.kill();
+            panic!("rdy mcp did not exit within 10s after stdin closed");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 
     let landed = rdy(dir.path(), &["approve", &pid]);
     assert!(landed["landing"].is_string());
