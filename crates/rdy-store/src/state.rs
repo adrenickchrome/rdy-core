@@ -1,7 +1,9 @@
+use crate::Store;
 use crate::error::StoreError;
 use crate::kinds;
-use crate::Store;
-use rdy_model::{decision, Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance, StateSnapshot};
+use rdy_model::{
+    Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance, StateSnapshot, decision,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -35,10 +37,19 @@ pub fn apply_op(store: &Store, state: &mut StateSnapshot, op: &Op) -> Result<(),
     Ok(())
 }
 
-fn check_base(store: &Store, state: &StateSnapshot, id: &BlockId, base: Hash) -> Result<(), StoreError> {
+fn check_base(
+    store: &Store,
+    state: &StateSnapshot,
+    id: &BlockId,
+    base: Hash,
+) -> Result<(), StoreError> {
     let actual = state.blocks.get(id).copied();
     if actual != Some(base) {
-        return Err(StoreError::StaleBase { id: id.clone(), expected: base, actual });
+        return Err(StoreError::StaleBase {
+            id: id.clone(),
+            expected: base,
+            actual,
+        });
     }
     if decision::is_frozen(&store.get_block(&base)?) {
         return Err(StoreError::Frozen(id.clone()));
@@ -48,7 +59,9 @@ fn check_base(store: &Store, state: &StateSnapshot, id: &BlockId, base: Hash) ->
 
 impl Store {
     pub fn canon_head(&self) -> Result<Option<Hash>, StoreError> {
-        self.get_ref("canon")?.map(|b| crate::index::hash_from(&b, "canon ref")).transpose()
+        self.get_ref("canon")?
+            .map(|b| crate::index::hash_from(&b, "canon ref"))
+            .transpose()
     }
 
     pub fn snapshot_at(&self, landing: &Hash) -> Result<StateSnapshot, StoreError> {
@@ -69,12 +82,21 @@ impl Store {
 
     pub fn view(&self, name: &str) -> Result<ViewRecord, StoreError> {
         match self.get_ref(&view_ref(name))? {
-            Some(bytes) => postcard::from_bytes(&bytes).map_err(|e| StoreError::Decode(e.to_string())),
-            None => Ok(ViewRecord { base: self.canon_head()?, changes: vec![] }),
+            Some(bytes) => {
+                postcard::from_bytes(&bytes).map_err(|e| StoreError::Decode(e.to_string()))
+            }
+            None => Ok(ViewRecord {
+                base: self.canon_head()?,
+                changes: vec![],
+            }),
         }
     }
 
-    fn replay(&self, mut state: StateSnapshot, changes: &[Hash]) -> Result<StateSnapshot, StoreError> {
+    fn replay(
+        &self,
+        mut state: StateSnapshot,
+        changes: &[Hash],
+    ) -> Result<StateSnapshot, StoreError> {
         for c in changes {
             let change: Change = self.get(c)?;
             for op in &change.ops {
@@ -99,7 +121,12 @@ impl Store {
     /// (O(view length)). `current` MUST equal `view_state(name)`; a stale or wrong `current` lets
     /// invalid changes through. Callers that cannot guarantee that must use `commit_to_view`.
     #[doc(hidden)]
-    pub fn commit_to_view_at(&mut self, name: &str, change: Change, current: &StateSnapshot) -> Result<Hash, StoreError> {
+    pub fn commit_to_view_at(
+        &mut self,
+        name: &str,
+        change: Change,
+        current: &StateSnapshot,
+    ) -> Result<Hash, StoreError> {
         let mut view = self.view(name)?;
         // apply_op only reads and writes the ids the ops name, so seed a small state with those
         let mut state = StateSnapshot::default();
@@ -124,14 +151,21 @@ impl Store {
         let rec = postcard::to_allocvec(&view).expect("encode view");
         let id = self.commit_change(change, vec![(view_ref(name), rec)])?;
         if id != expected {
-            return Err(StoreError::Decode(format!("change id mismatch: view names {expected}, written {id}")));
+            return Err(StoreError::Decode(format!(
+                "change id mismatch: view names {expected}, written {id}"
+            )));
         }
         Ok(id)
     }
 
     pub fn propose(&mut self, view: &str, title: &str, by: Provenance) -> Result<Hash, StoreError> {
         let v = self.view(view)?;
-        let p = Proposal { title: title.to_string(), view: view.to_string(), changes: v.changes, provenance: by };
+        let p = Proposal {
+            title: title.to_string(),
+            view: view.to_string(),
+            changes: v.changes,
+            provenance: by,
+        };
         self.put(kinds::PROPOSAL, &p)
     }
 
@@ -140,15 +174,29 @@ impl Store {
         let head = self.canon_head()?;
         let state = self.replay(self.canon_state()?, &p.changes)?;
         let snap = postcard::to_allocvec(&state).expect("encode snapshot");
-        let rec = LandingRecord { proposal: *proposal, prev: head, state: state.id(), approved_by: approver };
+        let rec = LandingRecord {
+            proposal: *proposal,
+            prev: head,
+            state: state.id(),
+            approved_by: approver,
+        };
         let landing_id = rec.id();
         let mut view = self.view(&p.view)?;
         view.changes.retain(|c| !p.changes.contains(c));
         view.base = Some(landing_id);
-        let mut items = vec![(kinds::SNAPSHOT, snap), (kinds::LANDING, postcard::to_allocvec(&rec).expect("encode landing"))];
+        let mut items = vec![
+            (kinds::SNAPSHOT, snap),
+            (
+                kinds::LANDING,
+                postcard::to_allocvec(&rec).expect("encode landing"),
+            ),
+        ];
         let refs = vec![
             ("canon".to_string(), landing_id.0.to_vec()),
-            (view_ref(&p.view), postcard::to_allocvec(&view).expect("encode view")),
+            (
+                view_ref(&p.view),
+                postcard::to_allocvec(&view).expect("encode view"),
+            ),
         ];
         items.extend(self.ref_items_pub(refs));
         self.write(items)?;
@@ -167,6 +215,10 @@ impl Store {
     }
 
     pub fn blocks(&self, state: &StateSnapshot) -> Result<BTreeMap<BlockId, Block>, StoreError> {
-        state.blocks.iter().map(|(id, v)| Ok((id.clone(), self.get_block(v)?))).collect()
+        state
+            .blocks
+            .iter()
+            .map(|(id, v)| Ok((id.clone(), self.get_block(v)?)))
+            .collect()
     }
 }

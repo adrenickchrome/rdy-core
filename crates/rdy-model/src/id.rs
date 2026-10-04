@@ -19,12 +19,16 @@ pub struct BlockId(String);
 impl BlockId {
     pub fn new(prefix: &str) -> BlockId {
         assert!(valid_prefix(prefix), "invalid id prefix {prefix:?}");
-        let body: String = (0..5).map(|_| CROCKFORD[rand::random_range(0..32)] as char).collect();
+        let body: String = (0..5)
+            .map(|_| CROCKFORD[rand::random_range(0..32)] as char)
+            .collect();
         BlockId(format!("{prefix}-{body}"))
     }
 
     pub fn parse(s: &str) -> Result<BlockId, IdError> {
-        let (prefix, body) = s.split_once('-').ok_or_else(|| IdError::BadPrefix(s.to_string()))?;
+        let (prefix, body) = s
+            .split_once('-')
+            .ok_or_else(|| IdError::BadPrefix(s.to_string()))?;
         if !valid_prefix(prefix) {
             return Err(IdError::BadPrefix(s.to_string()));
         }

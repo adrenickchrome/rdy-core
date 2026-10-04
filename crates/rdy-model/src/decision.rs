@@ -34,5 +34,8 @@ pub fn status(b: &Block) -> Option<DecisionStatus> {
 }
 
 pub fn is_frozen(b: &Block) -> bool {
-    matches!(status(b), Some(DecisionStatus::Accepted | DecisionStatus::Rejected))
+    matches!(
+        status(b),
+        Some(DecisionStatus::Accepted | DecisionStatus::Rejected)
+    )
 }

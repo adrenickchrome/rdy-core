@@ -1,4 +1,4 @@
-use crate::{hash_of, Block, BlockId, Hash};
+use crate::{Block, BlockId, Hash, hash_of};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,7 +36,10 @@ pub enum EditorialClass {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Justification {
     Implements(BlockId),
-    Editorial { class: EditorialClass, reason: String },
+    Editorial {
+        class: EditorialClass,
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

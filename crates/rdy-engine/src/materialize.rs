@@ -10,7 +10,11 @@ pub struct Materialized {
 
 impl Materialized {
     pub fn build(snapshot: StateSnapshot, blocks: BTreeMap<BlockId, Block>) -> Materialized {
-        let mut m = Materialized { snapshot, blocks: BTreeMap::new(), children: BTreeMap::new() };
+        let mut m = Materialized {
+            snapshot,
+            blocks: BTreeMap::new(),
+            children: BTreeMap::new(),
+        };
         for (_, b) in blocks {
             m.insert(b);
         }
@@ -18,7 +22,10 @@ impl Materialized {
     }
 
     fn insert(&mut self, b: Block) {
-        self.children.entry(b.parent.clone()).or_default().insert((b.order.clone(), b.id.clone()));
+        self.children
+            .entry(b.parent.clone())
+            .or_default()
+            .insert((b.order.clone(), b.id.clone()));
         self.snapshot.blocks.insert(b.id.clone(), b.version_hash());
         self.blocks.insert(b.id.clone(), b);
     }
@@ -39,7 +46,11 @@ impl Materialized {
     pub fn children(&self, parent: Option<&BlockId>) -> Vec<&Block> {
         self.children
             .get(&parent.cloned())
-            .map(|set| set.iter().filter_map(|(_, id)| self.blocks.get(id)).collect())
+            .map(|set| {
+                set.iter()
+                    .filter_map(|(_, id)| self.blocks.get(id))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

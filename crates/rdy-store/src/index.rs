@@ -29,7 +29,12 @@ fn dec(bytes: &[u8]) -> Result<Location, StoreError> {
 
 /// A 32-byte hash stored as an index value; anything else is damage, reported as a decode error.
 pub(crate) fn hash_from(bytes: &[u8], what: &str) -> Result<Hash, StoreError> {
-    <[u8; 32]>::try_from(bytes).map(Hash).map_err(|_| StoreError::Decode(format!("{what} is {} bytes, expected a 32-byte hash", bytes.len())))
+    <[u8; 32]>::try_from(bytes).map(Hash).map_err(|_| {
+        StoreError::Decode(format!(
+            "{what} is {} bytes, expected a 32-byte hash",
+            bytes.len()
+        ))
+    })
 }
 
 impl Index {
@@ -130,10 +135,16 @@ impl Index {
     pub fn acknowledged(&self) -> Result<Option<Location>, StoreError> {
         let r = self.db.begin_read().map_err(db)?;
         let t = r.open_table(META).map_err(db)?;
-        t.get("indexed_upto").map_err(db)?.map(|v| dec(v.value())).transpose()
+        t.get("indexed_upto")
+            .map_err(db)?
+            .map(|v| dec(v.value()))
+            .transpose()
     }
 
     pub fn indexed_upto(&self) -> Result<Location, StoreError> {
-        Ok(self.acknowledged()?.unwrap_or(Location { segment: 0, offset: 0 }))
+        Ok(self.acknowledged()?.unwrap_or(Location {
+            segment: 0,
+            offset: 0,
+        }))
     }
 }

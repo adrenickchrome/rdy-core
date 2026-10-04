@@ -1,7 +1,7 @@
 use crate::error::*;
-use crate::{rfc3339_now, Materialized, Rdy, Scope, Session};
-use rdy_model::{decision, Block, BlockId, Change, FieldValue, Hash, Op, Proposal};
-use rdy_schema::{validate_block, Issue, Severity};
+use crate::{Materialized, Rdy, Scope, Session, rfc3339_now};
+use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Op, Proposal, decision};
+use rdy_schema::{Issue, Severity, validate_block};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
@@ -14,17 +14,29 @@ pub struct ProposalInfo {
 }
 
 fn parse_hash(s: &str) -> Result<Hash, RdyError> {
-    s.parse().map_err(|_| RdyError::new(E_BAD_INPUT, format!("{s:?} is not a proposal id"), "pass the id returned by rdy_propose"))
+    s.parse().map_err(|_| {
+        RdyError::new(
+            E_BAD_INPUT,
+            format!("{s:?} is not a proposal id"),
+            "pass the id returned by rdy_propose",
+        )
+    })
 }
 
 /// Every block id `b` points at: inline references and link targets.
 fn targets(b: &Block) -> BTreeSet<BlockId> {
-    b.ref_tokens().iter().filter_map(|t| BlockId::parse(t).ok()).chain(b.links.values().flatten().map(|l| l.target.clone())).collect()
+    b.ref_tokens()
+        .iter()
+        .filter_map(|t| BlockId::parse(t).ok())
+        .chain(b.links.values().flatten().map(|l| l.target.clone()))
+        .collect()
 }
 
 impl Rdy {
     fn changes_of(&self, ids: &[Hash]) -> Result<Vec<Change>, RdyError> {
-        ids.iter().map(|h| self.store.get::<Change>(h).map_err(RdyError::from)).collect()
+        ids.iter()
+            .map(|h| self.store.get::<Change>(h).map_err(RdyError::from))
+            .collect()
     }
 
     /// Validates the canon that would result from landing `changes`.
@@ -81,8 +93,14 @@ impl Rdy {
                         severity: Severity::Error,
                         code: "E_MISSING_PARENT",
                         block: Some(b.id.clone()),
-                        message: format!("{} has parent {parent}, which this proposal deletes", b.id),
-                        fix: format!("move or delete {} in the same view, or don't delete {parent}", b.id),
+                        message: format!(
+                            "{} has parent {parent}, which this proposal deletes",
+                            b.id
+                        ),
+                        fix: format!(
+                            "move or delete {} in the same view, or don't delete {parent}",
+                            b.id
+                        ),
                     });
                 }
                 for gone in targets(b).intersection(&deleted) {
@@ -99,13 +117,26 @@ impl Rdy {
         Ok(issues)
     }
 
-    pub fn propose(&mut self, s: &Session, view: &str, title: &str) -> Result<ProposalInfo, RdyError> {
+    pub fn propose(
+        &mut self,
+        s: &Session,
+        view: &str,
+        title: &str,
+    ) -> Result<ProposalInfo, RdyError> {
         if !s.role.can_write() {
-            return Err(RdyError::new(E_PERMISSION, format!("role {:?} cannot propose", s.role), "start the session as a writer"));
+            return Err(RdyError::new(
+                E_PERMISSION,
+                format!("role {:?} cannot propose", s.role),
+                "start the session as a writer",
+            ));
         }
         let v = self.store.view(view)?;
         if v.changes.is_empty() {
-            return Err(RdyError::new(E_BAD_INPUT, format!("view {view:?} has no changes to propose"), "write to the view first"));
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("view {view:?} has no changes to propose"),
+                "write to the view first",
+            ));
         }
         let changes = self.changes_of(&v.changes)?;
         let issues = self.prospective_issues(&changes)?;
@@ -115,16 +146,29 @@ impl Rdy {
             return Err(e);
         }
         let id = self.store.propose(view, title, s.provenance())?;
-        Ok(ProposalInfo { id: id.to_string(), title: title.into(), changes: v.changes.len(), warnings: issues })
+        Ok(ProposalInfo {
+            id: id.to_string(),
+            title: title.into(),
+            changes: v.changes.len(),
+            warnings: issues,
+        })
     }
 
     pub fn land(&mut self, s: &Session, proposal: &str) -> Result<String, RdyError> {
         if !s.role.can_land() {
-            return Err(RdyError::new(E_PERMISSION, format!("role {:?} cannot land proposals", s.role), "ask an approver to land it"));
+            return Err(RdyError::new(
+                E_PERMISSION,
+                format!("role {:?} cannot land proposals", s.role),
+                "ask an approver to land it",
+            ));
         }
         let pid = parse_hash(proposal)?;
         if self.store.get_raw(&pid)?.0 != rdy_store::kinds::PROPOSAL {
-            return Err(RdyError::new(E_BAD_INPUT, format!("{proposal} is not a proposal"), "pass the id returned by rdy_propose"));
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("{proposal} is not a proposal"),
+                "pass the id returned by rdy_propose",
+            ));
         }
         let p: Proposal = self.store.get(&pid)?;
         let changes = self.changes_of(&p.changes)?;
@@ -149,20 +193,34 @@ impl Rdy {
         let mut stale = vec![];
         let view = Scope::View(p.view.clone());
         for id in ids {
-            let Some(b) = prospective.get(&id) else { continue };
+            let Some(b) = prospective.get(&id) else {
+                continue;
+            };
             if decision::status(b) != Some(decision::DecisionStatus::Proposed) {
                 continue;
             }
             // 2. the view must not have moved on from the proposal's version
             let in_view = self.materialized(&view)?.get(&id).map(|v| v.version_hash());
             if in_view != Some(b.version_hash()) {
-                stale.push(RdyError::new(E_STALE_BASE, format!("decision {id} changed in view {:?} after the proposal was made", p.view), format!("the view has later edits to {id}; propose again to include them")));
+                stale.push(RdyError::new(
+                    E_STALE_BASE,
+                    format!(
+                        "decision {id} changed in view {:?} after the proposal was made",
+                        p.view
+                    ),
+                    format!("the view has later edits to {id}; propose again to include them"),
+                ));
                 continue;
             }
             let mut acc = b.clone();
-            acc.fields.insert("status".into(), FieldValue::Str("accepted".into()));
-            acc.fields.insert("decided_at".into(), FieldValue::Str(now.clone()));
-            accept_ops.push(Op::Update { base: b.version_hash(), block: acc });
+            acc.fields
+                .insert("status".into(), FieldValue::Str("accepted".into()));
+            acc.fields
+                .insert("decided_at".into(), FieldValue::Str(now.clone()));
+            accept_ops.push(Op::Update {
+                base: b.version_hash(),
+                block: acc,
+            });
         }
         if let Some(e) = stale.into_iter().next() {
             return Err(e);

@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub fn hash_of<T: Serialize>(t: &T) -> Hash {
-    Hash::of(&postcard::to_allocvec(t).expect("postcard encoding of an in-memory value cannot fail"))
+    Hash::of(
+        &postcard::to_allocvec(t).expect("postcard encoding of an in-memory value cannot fail"),
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,7 +37,10 @@ impl Block {
 
     /// Every `{{token}}` this block's body and string fields contain, under `RefMode` rules.
     pub fn ref_tokens(&self) -> BTreeSet<String> {
-        let mut out: BTreeSet<String> = ref_spans(&self.body, RefMode::for_body(&self.block_type)).into_iter().map(|s| s.token).collect();
+        let mut out: BTreeSet<String> = ref_spans(&self.body, RefMode::for_body(&self.block_type))
+            .into_iter()
+            .map(|s| s.token)
+            .collect();
         for v in self.fields.values() {
             scan_value(v, &mut out);
         }
@@ -86,11 +91,16 @@ pub fn ref_spans(text: &str, mode: RefMode) -> Vec<RefSpan> {
             pos = start + 2;
             continue;
         }
-        let Some(len) = text[start + 2..].find("}}") else { break };
+        let Some(len) = text[start + 2..].find("}}") else {
+            break;
+        };
         let end = start + 2 + len + 2;
         let token = text[start + 2..start + 2 + len].trim();
         if mode == RefMode::Strict || token.starts_with('$') || BlockId::parse(token).is_ok() {
-            out.push(RefSpan { range: start..end, token: token.to_string() });
+            out.push(RefSpan {
+                range: start..end,
+                token: token.to_string(),
+            });
         }
         pos = end;
     }
@@ -99,7 +109,9 @@ pub fn ref_spans(text: &str, mode: RefMode) -> Vec<RefSpan> {
 
 fn scan_value(v: &FieldValue, out: &mut BTreeSet<String>) {
     match v {
-        FieldValue::Str(s) => out.extend(ref_spans(s, RefMode::Strict).into_iter().map(|s| s.token)),
+        FieldValue::Str(s) => {
+            out.extend(ref_spans(s, RefMode::Strict).into_iter().map(|s| s.token))
+        }
         FieldValue::List(items) => items.iter().for_each(|i| scan_value(i, out)),
         FieldValue::Map(m) => m.values().for_each(|i| scan_value(i, out)),
         _ => {}

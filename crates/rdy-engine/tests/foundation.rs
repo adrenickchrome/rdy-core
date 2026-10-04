@@ -40,14 +40,21 @@ fn open_without_project_and_locking_errors() {
 #[test]
 fn unknown_pack_is_a_config_error() {
     let dir = tempfile::tempdir().unwrap();
-    assert_eq!(Rdy::init(dir.path(), "nope").err().unwrap().code, "E_CONFIG");
+    assert_eq!(
+        Rdy::init(dir.path(), "nope").err().unwrap().code,
+        "E_CONFIG"
+    );
 }
 
 #[test]
 fn custom_pack_files_are_loaded() {
     let dir = tempfile::tempdir().unwrap();
     drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
-    std::fs::write(dir.path().join(".rdy/packs/team.yaml"), "name: team\nversion: \"1\"\nextends: rdy-standard\n").unwrap();
+    std::fs::write(
+        dir.path().join(".rdy/packs/team.yaml"),
+        "name: team\nversion: \"1\"\nextends: rdy-standard\n",
+    )
+    .unwrap();
     std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: team\n").unwrap();
     assert_eq!(Rdy::open(dir.path()).unwrap().pack().name, "team");
 }
@@ -57,15 +64,28 @@ fn materialized_children_are_ordered_and_apply_is_incremental() {
     let mut m = Materialized::build(StateSnapshot::default(), BTreeMap::new());
     let a = blk("c-AAAAA", Some("s-PPPPP"), "W");
     let b = blk("c-BBBBB", Some("s-PPPPP"), "V");
-    m.apply(&[Op::Create { block: a.clone() }, Op::Create { block: b.clone() }]);
+    m.apply(&[
+        Op::Create { block: a.clone() },
+        Op::Create { block: b.clone() },
+    ]);
     let parent = BlockId::parse("s-PPPPP").unwrap();
-    let ids: Vec<_> = m.children(Some(&parent)).iter().map(|b| b.id.as_str().to_string()).collect();
+    let ids: Vec<_> = m
+        .children(Some(&parent))
+        .iter()
+        .map(|b| b.id.as_str().to_string())
+        .collect();
     assert_eq!(ids, vec!["c-BBBBB", "c-AAAAA"]);
     let mut moved = a.clone();
     moved.order = "U".into();
-    m.apply(&[Op::Update { base: a.version_hash(), block: moved }]);
+    m.apply(&[Op::Update {
+        base: a.version_hash(),
+        block: moved,
+    }]);
     assert_eq!(m.children(Some(&parent))[0].id.as_str(), "c-AAAAA");
-    m.apply(&[Op::Delete { base: b.version_hash(), id: b.id.clone() }]);
+    m.apply(&[Op::Delete {
+        base: b.version_hash(),
+        id: b.id.clone(),
+    }]);
     assert_eq!(m.children(Some(&parent)).len(), 1);
     assert_eq!(m.snapshot.blocks.len(), 1);
 }
@@ -80,6 +100,8 @@ fn scope_parse() {
 fn init_refuses_an_existing_project() {
     let dir = tempfile::tempdir().unwrap();
     drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
-    let e = Rdy::init(dir.path(), "rdy-standard").err().expect("second init must fail");
+    let e = Rdy::init(dir.path(), "rdy-standard")
+        .err()
+        .expect("second init must fail");
     assert_eq!(e.code, "E_ALREADY_EXISTS");
 }

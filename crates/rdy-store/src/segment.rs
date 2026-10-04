@@ -41,7 +41,10 @@ fn read_frame(f: &File, offset: u64, file_len: u64) -> io::Result<Option<(u8, Ha
     let mut header = [0u8; HEADER as usize];
     f.read_exact_at(&mut header, offset)?;
     let len = u32::from_le_bytes(header[0..4].try_into().unwrap()) as u64;
-    if payload_start.checked_add(len).is_none_or(|end| end > file_len) {
+    if payload_start
+        .checked_add(len)
+        .is_none_or(|end| end > file_len)
+    {
         return Ok(None);
     }
     let kind = header[4];
@@ -65,7 +68,9 @@ fn valid_frame_after(f: &File, offset: u64, file_len: u64) -> io::Result<bool> {
             break;
         }
         let len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
-        let Some(end) = (pos + h).checked_add(len) else { continue };
+        let Some(end) = (pos + h).checked_add(len) else {
+            continue;
+        };
         if end > buf.len() {
             continue;
         }
@@ -81,11 +86,22 @@ fn valid_frame_after(f: &File, offset: u64, file_len: u64) -> io::Result<bool> {
 fn quarantine(f: &File, dir: &Path, seg: &Path, offset: u64, file_len: u64) -> io::Result<()> {
     let mut buf = vec![0u8; (file_len - offset) as usize];
     f.read_exact_at(&mut buf, offset)?;
-    let base = format!("{}.torn-{offset}", seg.file_name().unwrap().to_string_lossy());
+    let base = format!(
+        "{}.torn-{offset}",
+        seg.file_name().unwrap().to_string_lossy()
+    );
     let mut n = 0u32;
     let q = loop {
-        let name = if n == 0 { base.clone() } else { format!("{base}.{n}") };
-        match OpenOptions::new().write(true).create_new(true).open(dir.join(name)) {
+        let name = if n == 0 {
+            base.clone()
+        } else {
+            format!("{base}.{n}")
+        };
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(name))
+        {
             Ok(q) => break q,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
             Err(e) => return Err(e),
@@ -119,7 +135,10 @@ impl SegmentLog {
             readers.push(File::open(seg_path(dir, 0))?);
         }
         let last = (readers.len() - 1) as u32;
-        let writer = OpenOptions::new().read(true).write(true).open(seg_path(dir, last))?;
+        let writer = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(seg_path(dir, last))?;
         let file_len = writer.metadata()?.len();
         let mut offset = 0;
         while let Some((_, _, payload)) = read_frame(&writer, offset, file_len)? {
@@ -143,7 +162,15 @@ impl SegmentLog {
             writer.set_len(offset)?;
             writer.sync_all()?;
         }
-        let log = SegmentLog { dir: dir.to_path_buf(), readers, writer, len: offset, max_len, fail_roll: false, fail_partial: None };
+        let log = SegmentLog {
+            dir: dir.to_path_buf(),
+            readers,
+            writer,
+            len: offset,
+            max_len,
+            fail_roll: false,
+            fail_partial: None,
+        };
         Ok(log)
     }
 
@@ -152,10 +179,16 @@ impl SegmentLog {
     /// removed. Only for rolling back frames that were never acknowledged.
     pub fn truncate_to(&mut self, to: Location) -> io::Result<()> {
         if to.segment > self.current() || (to.segment == self.current() && to.offset > self.len) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("cannot truncate to {to:?}: past the end {:?}", self.end())));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("cannot truncate to {to:?}: past the end {:?}", self.end()),
+            ));
         }
         if to.segment < self.current() {
-            self.writer = OpenOptions::new().read(true).write(true).open(seg_path(&self.dir, to.segment))?;
+            self.writer = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(seg_path(&self.dir, to.segment))?;
             while self.current() > to.segment {
                 let id = self.current();
                 self.readers.pop();
@@ -180,7 +213,10 @@ impl SegmentLog {
     }
 
     pub fn end(&self) -> Location {
-        Location { segment: self.current(), offset: self.len }
+        Location {
+            segment: self.current(),
+            offset: self.len,
+        }
     }
 
     /// Test hook: the next roll to a new segment fails after creating the new file.
@@ -201,7 +237,11 @@ impl SegmentLog {
     fn roll(&mut self) -> io::Result<()> {
         self.writer.sync_all()?;
         let path = seg_path(&self.dir, self.readers.len() as u32);
-        let writer = OpenOptions::new().read(true).write(true).create_new(true).open(&path)?;
+        let writer = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
         match self.finish_roll(&writer, &path) {
             Ok(reader) => {
                 self.writer = writer;
@@ -229,7 +269,10 @@ impl SegmentLog {
 
     pub fn append(&mut self, kind: u8, payload: &[u8]) -> io::Result<(Location, Hash)> {
         if payload.len() > u32::MAX as usize {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "payload too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "payload too large",
+            ));
         }
         let frame_len = HEADER + payload.len() as u64;
         if self.len > 0 && self.len + frame_len > self.max_len {
@@ -242,11 +285,15 @@ impl SegmentLog {
         buf.extend_from_slice(&hash.0);
         buf.extend_from_slice(payload);
         if let Some(n) = self.fail_partial.take() {
-            self.writer.write_all_at(&buf[..n.min(buf.len())], self.len)?;
+            self.writer
+                .write_all_at(&buf[..n.min(buf.len())], self.len)?;
             return Err(io::Error::other("injected partial append"));
         }
         self.writer.write_all_at(&buf, self.len)?;
-        let loc = Location { segment: self.current(), offset: self.len };
+        let loc = Location {
+            segment: self.current(),
+            offset: self.len,
+        };
         self.len += frame_len;
         Ok((loc, hash))
     }
@@ -257,9 +304,17 @@ impl SegmentLog {
 
     /// Reads the frame at `loc` with the payload hash its header carries (already verified).
     pub fn read_hashed(&self, loc: Location) -> io::Result<(u8, Hash, Vec<u8>)> {
-        let f = self.readers.get(loc.segment as usize).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such segment"))?;
+        let f = self
+            .readers
+            .get(loc.segment as usize)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such segment"))?;
         let file_len = f.metadata()?.len();
-        read_frame(f, loc.offset, file_len)?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("corrupt or missing frame at {loc:?}")))
+        read_frame(f, loc.offset, file_len)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("corrupt or missing frame at {loc:?}"),
+            )
+        })
     }
 
     pub fn read(&self, loc: Location) -> io::Result<(u8, Vec<u8>)> {
@@ -274,11 +329,21 @@ impl SegmentLog {
             let file_len = f.metadata()?.len();
             let mut offset = if seg == from.segment { from.offset } else { 0 };
             while let Some((kind, hash, payload)) = read_frame(f, offset, file_len)? {
-                out.push((Location { segment: seg, offset }, kind, hash));
+                out.push((
+                    Location {
+                        segment: seg,
+                        offset,
+                    },
+                    kind,
+                    hash,
+                ));
                 offset += HEADER + payload.len() as u64;
             }
             if offset < file_len {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("corrupt frame in segment {seg} at offset {offset}")));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("corrupt frame in segment {seg} at offset {offset}"),
+                ));
             }
         }
         Ok(out)

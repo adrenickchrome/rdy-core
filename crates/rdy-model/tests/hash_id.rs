@@ -21,17 +21,30 @@ fn new_ids_have_prefix_and_five_crockford_chars() {
     let s = id.as_str();
     assert!(s.starts_with("D-"));
     assert_eq!(s.len(), 7);
-    assert!(s[2..].chars().all(|c| "0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(c)));
+    assert!(
+        s[2..]
+            .chars()
+            .all(|c| "0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(c))
+    );
     assert_eq!(id.prefix(), "D");
 }
 
 #[test]
 fn parse_accepts_valid_and_rejects_invalid() {
     assert_eq!(BlockId::parse("b-7KQ2M").unwrap().as_str(), "b-7KQ2M");
-    assert!(matches!(BlockId::parse("7KQ2M"), Err(IdError::BadPrefix(_))));
-    assert!(matches!(BlockId::parse("toolong-7KQ2M"), Err(IdError::BadPrefix(_))));
+    assert!(matches!(
+        BlockId::parse("7KQ2M"),
+        Err(IdError::BadPrefix(_))
+    ));
+    assert!(matches!(
+        BlockId::parse("toolong-7KQ2M"),
+        Err(IdError::BadPrefix(_))
+    ));
     assert!(matches!(BlockId::parse("b-7KQ2"), Err(IdError::BadBody(_))));
-    assert!(matches!(BlockId::parse("b-7KQ2I"), Err(IdError::BadBody(_)))); // I is not Crockford
+    assert!(matches!(
+        BlockId::parse("b-7KQ2I"),
+        Err(IdError::BadBody(_))
+    )); // I is not Crockford
 }
 
 #[test]
@@ -53,7 +66,10 @@ fn hash_postcard_round_trip() {
 fn hash_rejects_non_lowercase_hex() {
     // Uppercase hex is rejected to ensure canonical representation
     let uppercase = "A".repeat(64);
-    assert!(matches!(uppercase.parse::<Hash>(), Err(IdError::BadHash(_))));
+    assert!(matches!(
+        uppercase.parse::<Hash>(),
+        Err(IdError::BadHash(_))
+    ));
 
     // Mixed case is also rejected
     let mixed = "aAbBcCdDeEfF".repeat(5) + "aaBb";
@@ -66,5 +82,8 @@ fn hash_rejects_strings_with_plus_signs() {
     // A 64-char string with '+' should be rejected (from_str_radix accepts it, but it's not canonical)
     let with_plus = "+f".repeat(32);
     assert_eq!(with_plus.len(), 64);
-    assert!(matches!(with_plus.parse::<Hash>(), Err(IdError::BadHash(_))));
+    assert!(matches!(
+        with_plus.parse::<Hash>(),
+        Err(IdError::BadHash(_))
+    ));
 }

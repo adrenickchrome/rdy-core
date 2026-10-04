@@ -88,6 +88,9 @@ pub struct Pack {
 
 impl Pack {
     pub fn type_for_prefix(&self, prefix: &str) -> Option<&str> {
-        self.block_types.iter().find(|(_, t)| t.prefix == prefix).map(|(n, _)| n.as_str())
+        self.block_types
+            .iter()
+            .find(|(_, t)| t.prefix == prefix)
+            .map(|(n, _)| n.as_str())
     }
 }

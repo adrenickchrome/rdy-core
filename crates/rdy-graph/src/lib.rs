@@ -25,9 +25,16 @@ pub enum DerivedStatus {
     Proposed,
     Rejected,
     Live,
-    PartiallySuperseded { by: Vec<BlockId>, parts: Vec<String> },
-    Superseded { by: Vec<BlockId> },
-    Revoked { by: Vec<BlockId> },
+    PartiallySuperseded {
+        by: Vec<BlockId>,
+        parts: Vec<String>,
+    },
+    Superseded {
+        by: Vec<BlockId>,
+    },
+    Revoked {
+        by: Vec<BlockId>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -69,17 +76,35 @@ impl Graph {
             }
             let mut edges = vec![];
             if let Some(p) = &b.parent {
-                edges.push(Edge { from: p.clone(), to: b.id.clone(), kind: EdgeKind::Contains, part: None, pin: None });
+                edges.push(Edge {
+                    from: p.clone(),
+                    to: b.id.clone(),
+                    kind: EdgeKind::Contains,
+                    part: None,
+                    pin: None,
+                });
             }
             for tok in b.ref_tokens() {
                 if let Ok(t) = BlockId::parse(&tok) {
                     let pin = b.pins.get(&t).copied();
-                    edges.push(Edge { from: b.id.clone(), to: t, kind: EdgeKind::References, part: None, pin });
+                    edges.push(Edge {
+                        from: b.id.clone(),
+                        to: t,
+                        kind: EdgeKind::References,
+                        part: None,
+                        pin,
+                    });
                 }
             }
             for (name, links) in &b.links {
                 for l in links {
-                    edges.push(Edge { from: b.id.clone(), to: l.target.clone(), kind: EdgeKind::Link(name.clone()), part: l.part.clone(), pin: b.pins.get(&l.target).copied() });
+                    edges.push(Edge {
+                        from: b.id.clone(),
+                        to: l.target.clone(),
+                        kind: EdgeKind::Link(name.clone()),
+                        part: l.part.clone(),
+                        pin: b.pins.get(&l.target).copied(),
+                    });
                 }
             }
             for e in edges {
@@ -140,18 +165,25 @@ impl Graph {
     }
 
     fn is_live(&self, id: &BlockId) -> bool {
-        matches!(self.status(id), Some(DerivedStatus::Live | DerivedStatus::PartiallySuperseded { .. }))
+        matches!(
+            self.status(id),
+            Some(DerivedStatus::Live | DerivedStatus::PartiallySuperseded { .. })
+        )
     }
 
     pub fn governing(&self, id: &BlockId) -> Vec<BlockId> {
         let mut out = BTreeSet::new();
         for e in self.outgoing(id) {
-            if matches!(&e.kind, EdgeKind::Link(n) if n == decision::DECIDED_BY || n == decision::IMPLEMENTS) && self.is_live(&e.to) {
+            if matches!(&e.kind, EdgeKind::Link(n) if n == decision::DECIDED_BY || n == decision::IMPLEMENTS)
+                && self.is_live(&e.to)
+            {
                 out.insert(e.to.clone());
             }
         }
         for e in self.incoming(id) {
-            if matches!(&e.kind, EdgeKind::Link(n) if n == decision::AFFECTS) && self.is_live(&e.from) {
+            if matches!(&e.kind, EdgeKind::Link(n) if n == decision::AFFECTS)
+                && self.is_live(&e.from)
+            {
                 out.insert(e.from.clone());
             }
         }
@@ -178,21 +210,43 @@ impl Graph {
         out
     }
 
-    pub fn suspects(&self, blocks: &BTreeMap<BlockId, Block>, old: &dyn Fn(&Hash) -> Option<Block>) -> Vec<Suspect> {
-        self.out.values().flatten().filter_map(|e| self.edge_suspect(e, blocks, old)).collect()
+    pub fn suspects(
+        &self,
+        blocks: &BTreeMap<BlockId, Block>,
+        old: &dyn Fn(&Hash) -> Option<Block>,
+    ) -> Vec<Suspect> {
+        self.out
+            .values()
+            .flatten()
+            .filter_map(|e| self.edge_suspect(e, blocks, old))
+            .collect()
     }
 
     /// The suspects whose `block` is `id`: checks only that block's own outgoing edges.
-    pub fn suspects_of(&self, id: &BlockId, blocks: &BTreeMap<BlockId, Block>, old: &dyn Fn(&Hash) -> Option<Block>) -> Vec<Suspect> {
-        self.outgoing(id).iter().filter_map(|e| self.edge_suspect(e, blocks, old)).collect()
+    pub fn suspects_of(
+        &self,
+        id: &BlockId,
+        blocks: &BTreeMap<BlockId, Block>,
+        old: &dyn Fn(&Hash) -> Option<Block>,
+    ) -> Vec<Suspect> {
+        self.outgoing(id)
+            .iter()
+            .filter_map(|e| self.edge_suspect(e, blocks, old))
+            .collect()
     }
 
-    fn edge_suspect(&self, e: &Edge, blocks: &BTreeMap<BlockId, Block>, old: &dyn Fn(&Hash) -> Option<Block>) -> Option<Suspect> {
+    fn edge_suspect(
+        &self,
+        e: &Edge,
+        blocks: &BTreeMap<BlockId, Block>,
+        old: &dyn Fn(&Hash) -> Option<Block>,
+    ) -> Option<Suspect> {
         if e.kind == EdgeKind::Contains {
             return None;
         }
         // a superseding or revoking decision's own link is the cause, not a suspect
-        if matches!(&e.kind, EdgeKind::Link(n) if n == decision::SUPERSEDES || n == decision::REVOKES) {
+        if matches!(&e.kind, EdgeKind::Link(n) if n == decision::SUPERSEDES || n == decision::REVOKES)
+        {
             return None;
         }
         // a decision naming, in its text, an id it supersedes or revokes is expected
@@ -219,6 +273,10 @@ impl Graph {
                 _ => return None,
             },
         };
-        Some(Suspect { block: e.from.clone(), target: e.to.clone(), reason: reason.into() })
+        Some(Suspect {
+            block: e.from.clone(),
+            target: e.to.clone(),
+            reason: reason.into(),
+        })
     }
 }

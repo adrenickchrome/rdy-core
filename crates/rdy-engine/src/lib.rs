@@ -1,21 +1,21 @@
 mod decide;
-mod io;
 mod error;
 mod gate;
+mod io;
 mod materialize;
 mod query;
 mod session;
-mod write;
 pub mod testkit;
+mod write;
 
 pub use decide::DecisionInput;
 pub use error::*;
 pub use gate::ProposalInfo;
-pub use io::{block_from_yaml, block_to_yaml, ExportSummary};
+pub use io::{ExportSummary, block_from_yaml, block_to_yaml};
 pub use materialize::Materialized;
-pub use query::{field_json, summary, summary_in, Context, ImpactItem};
-pub use session::{now_ms, rfc3339_now, Scope, Session};
-pub use write::{json_to_field, LinkInput, OpInput, WriteRequest, WriteResult};
+pub use query::{Context, ImpactItem, field_json, summary, summary_in};
+pub use session::{Scope, Session, now_ms, rfc3339_now};
+pub use write::{LinkInput, OpInput, WriteRequest, WriteResult, json_to_field};
 
 use rdy_model::Op;
 use rdy_schema::{Pack, PackSet};
@@ -46,14 +46,33 @@ fn load_pack(root: &Path, name: &str) -> Result<(Pack, Vec<String>), RdyError> {
     let mut set = PackSet::with_builtin();
     let dir = root.join(".rdy/packs");
     if dir.exists() {
-        let mut files: Vec<_> = std::fs::read_dir(&dir).map_err(io)?.filter_map(Result::ok).map(|e| e.path()).collect();
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .map_err(io)?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .collect();
         files.sort();
-        for f in files.into_iter().filter(|f| f.extension().is_some_and(|x| x == "yaml" || x == "yml")) {
+        for f in files
+            .into_iter()
+            .filter(|f| f.extension().is_some_and(|x| x == "yaml" || x == "yml"))
+        {
             let text = std::fs::read_to_string(&f).map_err(io)?;
-            set.add_yaml(&text).map_err(|e| RdyError::new(E_CONFIG, format!("{}: {e}", f.display()), "fix the pack file"))?;
+            set.add_yaml(&text).map_err(|e| {
+                RdyError::new(
+                    E_CONFIG,
+                    format!("{}: {e}", f.display()),
+                    "fix the pack file",
+                )
+            })?;
         }
     }
-    let config = |e: rdy_schema::SchemaError| RdyError::new(E_CONFIG, e.to_string(), "set `pack:` in .rdy/config.yaml to an available pack (rdy-standard is built in)");
+    let config = |e: rdy_schema::SchemaError| {
+        RdyError::new(
+            E_CONFIG,
+            e.to_string(),
+            "set `pack:` in .rdy/config.yaml to an available pack (rdy-standard is built in)",
+        )
+    };
     let pack = set.resolve(name).map_err(config)?;
     let lineage = set.lineage(name).map_err(config)?;
     Ok((pack, lineage))
@@ -63,11 +82,18 @@ impl Rdy {
     pub fn init(project: &Path, pack: &str) -> Result<Rdy, RdyError> {
         let dot = project.join(".rdy");
         if dot.join("config.yaml").exists() {
-            return Err(RdyError::new(E_ALREADY_EXISTS, format!("{} is already an rdy project", project.display()), "open the existing project, or init a different directory"));
+            return Err(RdyError::new(
+                E_ALREADY_EXISTS,
+                format!("{} is already an rdy project", project.display()),
+                "open the existing project, or init a different directory",
+            ));
         }
         std::fs::create_dir_all(dot.join("packs")).map_err(io)?;
         load_pack(project, pack)?;
-        let cfg = serde_yaml_ng::to_string(&Config { pack: pack.to_string() }).expect("config yaml");
+        let cfg = serde_yaml_ng::to_string(&Config {
+            pack: pack.to_string(),
+        })
+        .expect("config yaml");
         std::fs::write(dot.join("config.yaml"), cfg).map_err(io)?;
         Rdy::open(project)
     }
@@ -75,13 +101,25 @@ impl Rdy {
     pub fn open(project: &Path) -> Result<Rdy, RdyError> {
         let cfg_path = project.join(".rdy/config.yaml");
         if !cfg_path.exists() {
-            return Err(RdyError::new(E_NO_PROJECT, format!("{} is not an rdy project", project.display()), "run rdy init in the project directory"));
+            return Err(RdyError::new(
+                E_NO_PROJECT,
+                format!("{} is not an rdy project", project.display()),
+                "run rdy init in the project directory",
+            ));
         }
         let text = std::fs::read_to_string(&cfg_path).map_err(io)?;
-        let cfg: Config = serde_yaml_ng::from_str(&text).map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "fix .rdy/config.yaml"))?;
+        let cfg: Config = serde_yaml_ng::from_str(&text)
+            .map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "fix .rdy/config.yaml"))?;
         let (pack, lineage) = load_pack(project, &cfg.pack)?;
         let store = Store::open(&project.join(".rdy/store"))?;
-        Ok(Rdy { root: project.to_path_buf(), store, pack, lineage, cache: HashMap::new(), graphs: HashMap::new() })
+        Ok(Rdy {
+            root: project.to_path_buf(),
+            store,
+            pack,
+            lineage,
+            cache: HashMap::new(),
+            graphs: HashMap::new(),
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -104,7 +142,8 @@ impl Rdy {
                 Scope::View(v) => self.store.view_state(v)?,
             };
             let blocks = self.store.blocks(&snapshot)?;
-            self.cache.insert(scope.clone(), Materialized::build(snapshot, blocks));
+            self.cache
+                .insert(scope.clone(), Materialized::build(snapshot, blocks));
         }
         Ok(&self.cache[scope])
     }
@@ -135,6 +174,9 @@ impl Rdy {
         for (_, rec) in &landings {
             self.store.get::<rdy_model::StateSnapshot>(&rec.state)?;
         }
-        Ok(FsckReport { frames, landings: landings.len() })
+        Ok(FsckReport {
+            frames,
+            landings: landings.len(),
+        })
     }
 }

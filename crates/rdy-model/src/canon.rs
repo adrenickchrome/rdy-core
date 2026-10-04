@@ -1,4 +1,4 @@
-use crate::{hash_of, BlockId, Hash, Provenance};
+use crate::{BlockId, Hash, Provenance, hash_of};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

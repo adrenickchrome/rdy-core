@@ -1,5 +1,5 @@
 use proptest::prelude::*;
-use rdy_model::{order_between, FieldValue};
+use rdy_model::{FieldValue, order_between};
 
 #[test]
 fn first_key_is_middle_digit() {

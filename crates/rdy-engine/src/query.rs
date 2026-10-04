@@ -1,7 +1,7 @@
 use crate::error::*;
 use crate::{Materialized, Rdy, Scope};
 use rdy_graph::{DerivedStatus, Edge, Graph, Suspect};
-use rdy_model::{ref_spans, Block, BlockId, FieldValue, RefMode};
+use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
@@ -38,11 +38,20 @@ pub fn summary(b: &Block) -> String {
 /// Like [`summary`], but each `{{id}}` reference to a block in `m` is shown as that block's own
 /// [`summary`] (never expanded further); unknown targets show the bare id.
 pub fn summary_in(b: &Block, m: &Materialized) -> String {
-    summarize(b, &|tok| BlockId::parse(tok).ok().and_then(|id| m.get(&id)).map(summary).unwrap_or_else(|| tok.to_string()))
+    summarize(b, &|tok| {
+        BlockId::parse(tok)
+            .ok()
+            .and_then(|id| m.get(&id))
+            .map(summary)
+            .unwrap_or_else(|| tok.to_string())
+    })
 }
 
 fn summarize(b: &Block, resolve: &dyn Fn(&str) -> String) -> String {
-    let (text, mode) = match ["statement", "name", "title"].iter().find_map(|f| b.field_str(f).filter(|s| !s.is_empty())) {
+    let (text, mode) = match ["statement", "name", "title"]
+        .iter()
+        .find_map(|f| b.field_str(f).filter(|s| !s.is_empty()))
+    {
         Some(field) => (field, RefMode::Strict),
         None => (b.body.as_str(), RefMode::for_body(&b.block_type)),
     };
@@ -59,7 +68,12 @@ fn summarize(b: &Block, resolve: &dyn Fn(&str) -> String) -> String {
         }
         out.push_str(&plain(&text[last..]));
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(80).collect()
+    out.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(80)
+        .collect()
 }
 
 pub fn field_json(v: &FieldValue) -> serde_json::Value {
@@ -70,7 +84,9 @@ pub fn field_json(v: &FieldValue) -> serde_json::Value {
         FieldValue::Int(i) => J::from(*i),
         FieldValue::Str(s) => J::String(s.clone()),
         FieldValue::List(l) => J::Array(l.iter().map(field_json).collect()),
-        FieldValue::Map(m) => J::Object(m.iter().map(|(k, v)| (k.clone(), field_json(v))).collect()),
+        FieldValue::Map(m) => {
+            J::Object(m.iter().map(|(k, v)| (k.clone(), field_json(v))).collect())
+        }
     }
 }
 
@@ -99,11 +115,21 @@ impl Rdy {
             id: block.id.to_string(),
             block_type: block.block_type.clone(),
             version: block.version_hash().to_string(),
-            fields: serde_json::Value::Object(block.fields.iter().map(|(k, v)| (k.clone(), field_json(v))).collect()),
+            fields: serde_json::Value::Object(
+                block
+                    .fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), field_json(v)))
+                    .collect(),
+            ),
             body: block.body.clone(),
             doc: m.doc_of(id).map(|d| d.id.to_string()),
             parent: block.parent.as_ref().map(|p| p.to_string()),
-            children: m.children(Some(id)).iter().map(|c| c.id.to_string()).collect(),
+            children: m
+                .children(Some(id))
+                .iter()
+                .map(|c| c.id.to_string())
+                .collect(),
             outgoing: g.outgoing(id).to_vec(),
             incoming: g.incoming(id).to_vec(),
             status: g.status(id),
@@ -112,13 +138,25 @@ impl Rdy {
         })
     }
 
-    pub fn impact(&mut self, scope: &Scope, id: &BlockId, depth: u32) -> Result<Vec<ImpactItem>, RdyError> {
+    pub fn impact(
+        &mut self,
+        scope: &Scope,
+        id: &BlockId,
+        depth: u32,
+    ) -> Result<Vec<ImpactItem>, RdyError> {
         self.block(scope, id)?;
         self.graph(scope)?;
         let (g, m) = (&self.graphs[scope], &self.cache[scope]);
         Ok(g.impact(id, depth)
             .into_iter()
-            .filter_map(|(d, bid)| m.get(&bid).map(|b| ImpactItem { depth: d, id: bid.to_string(), block_type: b.block_type.clone(), summary: summary_in(b, m) }))
+            .filter_map(|(d, bid)| {
+                m.get(&bid).map(|b| ImpactItem {
+                    depth: d,
+                    id: bid.to_string(),
+                    block_type: b.block_type.clone(),
+                    summary: summary_in(b, m),
+                })
+            })
             .collect())
     }
 }

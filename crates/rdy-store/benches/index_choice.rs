@@ -7,7 +7,9 @@ use rdy_store::index::{Index, IndexEntry};
 use rdy_store::segment::Location;
 
 fn keys() -> Vec<Hash> {
-    (0..100_000u32).map(|i| Hash::of(&i.to_le_bytes())).collect()
+    (0..100_000u32)
+        .map(|i| Hash::of(&i.to_le_bytes()))
+        .collect()
 }
 
 /// The same 12-byte value for both engines: u32 segment + u64 offset, little endian.
@@ -37,16 +39,52 @@ fn redb(c: &mut Criterion) {
             let dir = tempfile::tempdir().unwrap();
             let idx = Index::open(&dir.path().join("i.redb")).unwrap();
             for (n, chunk) in ks.chunks(10).enumerate() {
-                let entries: Vec<IndexEntry> = chunk.iter().map(|h| IndexEntry::Object(*h, Location { segment: 0, offset: n as u64 })).collect();
-                idx.apply(&entries, Location { segment: 0, offset: n as u64 }).unwrap();
+                let entries: Vec<IndexEntry> = chunk
+                    .iter()
+                    .map(|h| {
+                        IndexEntry::Object(
+                            *h,
+                            Location {
+                                segment: 0,
+                                offset: n as u64,
+                            },
+                        )
+                    })
+                    .collect();
+                idx.apply(
+                    &entries,
+                    Location {
+                        segment: 0,
+                        offset: n as u64,
+                    },
+                )
+                .unwrap();
             }
         })
     });
     let dir = tempfile::tempdir().unwrap();
     let idx = Index::open(&dir.path().join("i.redb")).unwrap();
     for (n, chunk) in ks.chunks(1000).enumerate() {
-        let entries: Vec<IndexEntry> = chunk.iter().map(|h| IndexEntry::Object(*h, Location { segment: 0, offset: n as u64 })).collect();
-        idx.apply(&entries, Location { segment: 0, offset: n as u64 }).unwrap();
+        let entries: Vec<IndexEntry> = chunk
+            .iter()
+            .map(|h| {
+                IndexEntry::Object(
+                    *h,
+                    Location {
+                        segment: 0,
+                        offset: n as u64,
+                    },
+                )
+            })
+            .collect();
+        idx.apply(
+            &entries,
+            Location {
+                segment: 0,
+                offset: n as u64,
+            },
+        )
+        .unwrap();
     }
     let order = shuffled(&ks);
     c.bench_function("redb_get_100k", |b| {
@@ -64,7 +102,9 @@ fn fjall(c: &mut Criterion) {
         b.iter(|| {
             let dir = tempfile::tempdir().unwrap();
             let db = Database::builder(dir.path()).open().unwrap();
-            let objects = db.keyspace("objects", KeyspaceCreateOptions::default).unwrap();
+            let objects = db
+                .keyspace("objects", KeyspaceCreateOptions::default)
+                .unwrap();
             for (n, chunk) in ks.chunks(10).enumerate() {
                 let mut batch = db.batch().durability(Some(PersistMode::SyncAll));
                 for h in chunk {
@@ -76,7 +116,9 @@ fn fjall(c: &mut Criterion) {
     });
     let dir = tempfile::tempdir().unwrap();
     let db = Database::builder(dir.path()).open().unwrap();
-    let objects = db.keyspace("objects", KeyspaceCreateOptions::default).unwrap();
+    let objects = db
+        .keyspace("objects", KeyspaceCreateOptions::default)
+        .unwrap();
     for (n, chunk) in ks.chunks(1000).enumerate() {
         let mut batch = db.batch().durability(Some(PersistMode::SyncAll));
         for h in chunk {

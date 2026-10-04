@@ -17,13 +17,20 @@ fn b(id: &str, ty: &str, parent: Option<&str>) -> Block {
 
 fn dec(id: &str, status: &str) -> Block {
     let mut d = b(id, "decision", Some("s-SSSSS"));
-    d.fields.insert("status".into(), FieldValue::Str(status.into()));
-    d.fields.insert("statement".into(), FieldValue::Str(format!("statement of {id}")));
+    d.fields
+        .insert("status".into(), FieldValue::Str(status.into()));
+    d.fields.insert(
+        "statement".into(),
+        FieldValue::Str(format!("statement of {id}")),
+    );
     d
 }
 
 fn link(block: &mut Block, name: &str, target: &str, part: Option<&str>) {
-    block.links.entry(name.into()).or_default().push(Link { target: BlockId::parse(target).unwrap(), part: part.map(Into::into) });
+    block.links.entry(name.into()).or_default().push(Link {
+        target: BlockId::parse(target).unwrap(),
+        part: part.map(Into::into),
+    });
 }
 
 fn map(blocks: Vec<Block>) -> BTreeMap<BlockId, Block> {
@@ -40,16 +47,34 @@ fn derived_decision_status() {
     let mut proposed = dec("D-CCCCC", "proposed");
     link(&mut proposed, "revokes", "D-BBBBB", None);
     let g = Graph::build(&map(vec![old, partial_old, new, proposed]));
-    assert!(matches!(g.status(&BlockId::parse("D-AAAAA").unwrap()), Some(DerivedStatus::Superseded { .. })));
-    assert!(matches!(g.status(&BlockId::parse("D-PPPPP").unwrap()), Some(DerivedStatus::PartiallySuperseded { parts, .. }) if parts == vec!["and moves".to_string()]));
-    assert!(matches!(g.status(&BlockId::parse("D-BBBBB").unwrap()), Some(DerivedStatus::Live)), "a proposed revocation does not count");
-    assert!(matches!(g.status(&BlockId::parse("D-CCCCC").unwrap()), Some(DerivedStatus::Proposed)));
+    assert!(matches!(
+        g.status(&BlockId::parse("D-AAAAA").unwrap()),
+        Some(DerivedStatus::Superseded { .. })
+    ));
+    assert!(
+        matches!(g.status(&BlockId::parse("D-PPPPP").unwrap()), Some(DerivedStatus::PartiallySuperseded { parts, .. }) if parts == vec!["and moves".to_string()])
+    );
+    assert!(
+        matches!(
+            g.status(&BlockId::parse("D-BBBBB").unwrap()),
+            Some(DerivedStatus::Live)
+        ),
+        "a proposed revocation does not count"
+    );
+    assert!(matches!(
+        g.status(&BlockId::parse("D-CCCCC").unwrap()),
+        Some(DerivedStatus::Proposed)
+    ));
     assert_eq!(g.status(&BlockId::parse("s-SSSSS").unwrap()), None);
 }
 
 #[test]
 fn edges_impact_and_governing() {
-    let term = { let mut t = b("t-MEDGR", "term", Some("s-SSSSS")); t.body = "Balances.".into(); t };
+    let term = {
+        let mut t = b("t-MEDGR", "term", Some("s-SSSSS"));
+        t.body = "Balances.".into();
+        t
+    };
     let mut claim = b("c-CHAMP", "claim", Some("s-SSSSS"));
     claim.body = "On the {{t-MEDGR}}.".into();
     link(&mut claim, "decided_by", "D-AAAAA", None);
@@ -57,32 +82,76 @@ fn edges_impact_and_governing() {
     note.body = "See {{c-CHAMP}}.".into();
     let mut d = dec("D-AAAAA", "accepted");
     link(&mut d, "affects", "t-MEDGR", None);
-    let g = Graph::build(&map(vec![term, claim, note, d, b("s-SSSSS", "section", Some("d-DDDDD"))]));
+    let g = Graph::build(&map(vec![
+        term,
+        claim,
+        note,
+        d,
+        b("s-SSSSS", "section", Some("d-DDDDD")),
+    ]));
     let ledger = BlockId::parse("t-MEDGR").unwrap();
-    assert_eq!(g.incoming(&ledger).iter().filter(|e| matches!(e.kind, EdgeKind::References)).count(), 1);
-    let ids: Vec<(u32, String)> = g.impact(&ledger, 3).into_iter().map(|(d, id)| (d, id.to_string())).collect();
-    assert_eq!(ids, vec![(1, "D-AAAAA".into()), (1, "c-CHAMP".into()), (2, "n-N0TE1".into())]);
-    assert_eq!(g.governing(&BlockId::parse("c-CHAMP").unwrap()), vec![BlockId::parse("D-AAAAA").unwrap()]);
-    assert_eq!(g.governing(&ledger), vec![BlockId::parse("D-AAAAA").unwrap()]);
+    assert_eq!(
+        g.incoming(&ledger)
+            .iter()
+            .filter(|e| matches!(e.kind, EdgeKind::References))
+            .count(),
+        1
+    );
+    let ids: Vec<(u32, String)> = g
+        .impact(&ledger, 3)
+        .into_iter()
+        .map(|(d, id)| (d, id.to_string()))
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            (1, "D-AAAAA".into()),
+            (1, "c-CHAMP".into()),
+            (2, "n-N0TE1".into())
+        ]
+    );
+    assert_eq!(
+        g.governing(&BlockId::parse("c-CHAMP").unwrap()),
+        vec![BlockId::parse("D-AAAAA").unwrap()]
+    );
+    assert_eq!(
+        g.governing(&ledger),
+        vec![BlockId::parse("D-AAAAA").unwrap()]
+    );
 }
 
 #[test]
 fn suspects_ignore_status_only_changes() {
     let proposed = dec("D-AAAAA", "proposed");
     let mut accepted = proposed.clone();
-    accepted.fields.insert("status".into(), FieldValue::Str("accepted".into()));
-    accepted.fields.insert("decided_at".into(), FieldValue::Str("2026-10-03T00:00:00Z".into()));
+    accepted
+        .fields
+        .insert("status".into(), FieldValue::Str("accepted".into()));
+    accepted.fields.insert(
+        "decided_at".into(),
+        FieldValue::Str("2026-10-03T00:00:00Z".into()),
+    );
     let mut claim = b("c-CHAMP", "claim", Some("s-SSSSS"));
     claim.body = "Per {{D-AAAAA}}.".into();
-    claim.pins.insert(proposed.id.clone(), proposed.version_hash());
+    claim
+        .pins
+        .insert(proposed.id.clone(), proposed.version_hash());
     let old = proposed.clone();
-    let lookup = move |h: &Hash| if *h == old.version_hash() { Some(old.clone()) } else { None };
+    let lookup = move |h: &Hash| {
+        if *h == old.version_hash() {
+            Some(old.clone())
+        } else {
+            None
+        }
+    };
 
     let blocks = map(vec![accepted.clone(), claim.clone()]);
     assert!(Graph::build(&blocks).suspects(&blocks, &lookup).is_empty());
 
     let mut edited = accepted.clone();
-    edited.fields.insert("statement".into(), FieldValue::Str("different".into()));
+    edited
+        .fields
+        .insert("statement".into(), FieldValue::Str("different".into()));
     let blocks = map(vec![edited, claim.clone()]);
     let s = Graph::build(&blocks).suspects(&blocks, &lookup);
     assert_eq!(s.len(), 1);
@@ -92,7 +161,10 @@ fn suspects_ignore_status_only_changes() {
     link(&mut sup, "supersedes", "D-AAAAA", None);
     let blocks = map(vec![accepted, claim, sup]);
     let s = Graph::build(&blocks).suspects(&blocks, &lookup);
-    assert!(s.iter().any(|x| x.reason == "superseded" && x.block.as_str() == "c-CHAMP"));
+    assert!(
+        s.iter()
+            .any(|x| x.reason == "superseded" && x.block.as_str() == "c-CHAMP")
+    );
 }
 
 fn claim_pinned(id: &str, target: &Block) -> Block {
@@ -114,9 +186,15 @@ fn accepted_revoker_makes_referrers_suspect_proposed_does_not() {
     link(&mut revoker, "revokes", "D-AAAAA", None);
     let blocks = map(vec![target.clone(), claim.clone(), revoker]);
     let g = Graph::build(&blocks);
-    assert!(matches!(g.status(&target.id), Some(DerivedStatus::Revoked { .. })));
+    assert!(matches!(
+        g.status(&target.id),
+        Some(DerivedStatus::Revoked { .. })
+    ));
     let s = g.suspects(&blocks, &no_old);
-    assert!(s.iter().any(|x| x.reason == "revoked" && x.block == claim.id));
+    assert!(
+        s.iter()
+            .any(|x| x.reason == "revoked" && x.block == claim.id)
+    );
 
     let mut proposed = dec("D-BBBBB", "proposed");
     link(&mut proposed, "revokes", "D-AAAAA", None);
@@ -143,7 +221,10 @@ fn partial_supersede_is_not_suspect_and_superseder_is_not_suspect() {
     link(&mut sup, "supersedes", "D-AAAAA", Some("the moves part"));
     let blocks = map(vec![target.clone(), claim, sup.clone()]);
     let g = Graph::build(&blocks);
-    assert!(matches!(g.status(&target.id), Some(DerivedStatus::PartiallySuperseded { .. })));
+    assert!(matches!(
+        g.status(&target.id),
+        Some(DerivedStatus::PartiallySuperseded { .. })
+    ));
     assert!(g.suspects(&blocks, &no_old).is_empty());
 
     let mut whole = dec("D-BBBBB", "accepted");
@@ -157,13 +238,25 @@ fn partial_supersede_is_not_suspect_and_superseder_is_not_suspect() {
 fn decision_naming_the_old_id_it_supersedes_is_not_suspect() {
     let target = dec("D-AAAAA", "accepted");
     let mut sup = dec("D-BBBBB", "accepted");
-    sup.fields.insert("statement".into(), FieldValue::Str("replaces {{D-AAAAA}}".into()));
+    sup.fields.insert(
+        "statement".into(),
+        FieldValue::Str("replaces {{D-AAAAA}}".into()),
+    );
     link(&mut sup, "supersedes", "D-AAAAA", None);
     sup.pins.insert(target.id.clone(), target.version_hash());
     let blocks = map(vec![target, sup.clone()]);
     let g = Graph::build(&blocks);
-    assert!(g.outgoing(&sup.id).iter().any(|e| e.kind == EdgeKind::References), "the reference edge exists");
-    assert!(g.suspects(&blocks, &no_old).iter().all(|x| x.block != sup.id));
+    assert!(
+        g.outgoing(&sup.id)
+            .iter()
+            .any(|e| e.kind == EdgeKind::References),
+        "the reference edge exists"
+    );
+    assert!(
+        g.suspects(&blocks, &no_old)
+            .iter()
+            .all(|x| x.block != sup.id)
+    );
 }
 
 #[test]
@@ -177,10 +270,25 @@ fn impact_depth_cutoff_and_diamond() {
     z.body = "{{c-XXXXX}} {{c-YYYYY}}".into();
     let g = Graph::build(&map(vec![t, x, y, z]));
     let id = BlockId::parse("t-MEDGR").unwrap();
-    let d1: Vec<_> = g.impact(&id, 1).into_iter().map(|(d, i)| (d, i.to_string())).collect();
+    let d1: Vec<_> = g
+        .impact(&id, 1)
+        .into_iter()
+        .map(|(d, i)| (d, i.to_string()))
+        .collect();
     assert_eq!(d1, vec![(1, "c-XXXXX".into()), (1, "c-YYYYY".into())]);
-    let d3: Vec<_> = g.impact(&id, 3).into_iter().map(|(d, i)| (d, i.to_string())).collect();
-    assert_eq!(d3, vec![(1, "c-XXXXX".into()), (1, "c-YYYYY".into()), (2, "n-ZZZZZ".into())]);
+    let d3: Vec<_> = g
+        .impact(&id, 3)
+        .into_iter()
+        .map(|(d, i)| (d, i.to_string()))
+        .collect();
+    assert_eq!(
+        d3,
+        vec![
+            (1, "c-XXXXX".into()),
+            (1, "c-YYYYY".into()),
+            (2, "n-ZZZZZ".into())
+        ]
+    );
 }
 
 #[test]
@@ -193,7 +301,11 @@ fn suspects_of_matches_the_whole_scope_suspects_filtered_to_one_block() {
     let blocks = map(vec![target, claim.clone(), other.clone(), revoker.clone()]);
     let g = Graph::build(&blocks);
     for b in blocks.values() {
-        let expect: Vec<_> = g.suspects(&blocks, &no_old).into_iter().filter(|s| s.block == b.id).collect();
+        let expect: Vec<_> = g
+            .suspects(&blocks, &no_old)
+            .into_iter()
+            .filter(|s| s.block == b.id)
+            .collect();
         assert_eq!(g.suspects_of(&b.id, &blocks, &no_old), expect, "{}", b.id);
     }
     assert_eq!(g.suspects_of(&claim.id, &blocks, &no_old).len(), 1);

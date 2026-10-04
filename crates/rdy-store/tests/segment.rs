@@ -230,7 +230,15 @@ fn truncate_to_discards_frames_and_segments_created_after_the_point() {
     log.sync().unwrap();
     drop(log);
     let log = SegmentLog::open(dir.path(), 128).unwrap();
-    assert_eq!(log.scan_from(Location { segment: 0, offset: 0 }).unwrap().len(), 2);
+    assert_eq!(
+        log.scan_from(Location {
+            segment: 0,
+            offset: 0
+        })
+        .unwrap()
+        .len(),
+        2
+    );
 }
 
 #[test]
@@ -241,7 +249,9 @@ fn quarantine_never_overwrites_an_earlier_quarantine_file() {
     log.sync().unwrap();
     drop(log);
     let path = dir.path().join("seg-000000.log");
-    let q = dir.path().join(format!("seg-000000.log.torn-{}", b.offset + 44));
+    let q = dir
+        .path()
+        .join(format!("seg-000000.log.torn-{}", b.offset + 44));
     std::fs::write(&q, b"earlier evidence").unwrap();
     let mut bytes = std::fs::read(&path).unwrap();
     bytes.extend_from_slice(&[9u8; 20]);
@@ -249,7 +259,9 @@ fn quarantine_never_overwrites_an_earlier_quarantine_file() {
 
     SegmentLog::open(dir.path(), 1 << 20).unwrap();
     assert_eq!(std::fs::read(&q).unwrap(), b"earlier evidence");
-    let q1 = dir.path().join(format!("seg-000000.log.torn-{}.1", b.offset + 44));
+    let q1 = dir
+        .path()
+        .join(format!("seg-000000.log.torn-{}.1", b.offset + 44));
     assert_eq!(std::fs::read(q1).unwrap(), vec![9u8; 20]);
 }
 
@@ -263,7 +275,10 @@ fn a_failed_roll_leaves_the_log_unchanged_and_the_next_append_rolls_cleanly() {
     log.fail_next_roll();
     assert!(log.append(2, &[2; 60]).is_err());
     assert_eq!(log.end(), before);
-    assert!(!dir.path().join("seg-000001.log").exists(), "the failed roll's file is removed");
+    assert!(
+        !dir.path().join("seg-000001.log").exists(),
+        "the failed roll's file is removed"
+    );
     let (b, _) = log.append(2, &[3; 60]).unwrap();
     log.sync().unwrap();
     assert_eq!(b.segment, 1);
@@ -295,5 +310,11 @@ fn reading_at_an_absurd_offset_is_an_error_not_a_panic() {
     let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
     log.append(1, b"one").unwrap();
     log.sync().unwrap();
-    assert!(log.read(Location { segment: 0, offset: u64::MAX - 3 }).is_err());
+    assert!(
+        log.read(Location {
+            segment: 0,
+            offset: u64::MAX - 3
+        })
+        .is_err()
+    );
 }

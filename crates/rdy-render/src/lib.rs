@@ -1,9 +1,9 @@
 mod html;
 pub use html::{escape, text_html};
 
-use rdy_engine::{summary_in, Rdy, RdyError, Scope, E_IO};
+use rdy_engine::{E_IO, Rdy, RdyError, Scope, summary_in};
 use rdy_graph::{DerivedStatus, EdgeKind};
-use rdy_model::{decision, Block, BlockId, FieldValue, Hash};
+use rdy_model::{Block, BlockId, FieldValue, Hash, decision};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -20,7 +20,11 @@ fn io(e: std::io::Error) -> RdyError {
 }
 
 fn tpl(e: minijinja::Error) -> RdyError {
-    RdyError::new(E_IO, format!("template error: {e}"), "this is a bug in rdy-render templates")
+    RdyError::new(
+        E_IO,
+        format!("template error: {e}"),
+        "this is a bug in rdy-render templates",
+    )
 }
 
 fn status_word(s: &Option<DerivedStatus>) -> &'static str {
@@ -37,10 +41,14 @@ fn status_word(s: &Option<DerivedStatus>) -> &'static str {
 
 fn env() -> Result<minijinja::Environment<'static>, RdyError> {
     let mut env = minijinja::Environment::new();
-    env.add_template("layout.html", include_str!("../templates/layout.html")).map_err(tpl)?;
-    env.add_template("index.html", include_str!("../templates/index.html")).map_err(tpl)?;
-    env.add_template("doc.html", include_str!("../templates/doc.html")).map_err(tpl)?;
-    env.add_template("decision.html", include_str!("../templates/decision.html")).map_err(tpl)?;
+    env.add_template("layout.html", include_str!("../templates/layout.html"))
+        .map_err(tpl)?;
+    env.add_template("index.html", include_str!("../templates/index.html"))
+        .map_err(tpl)?;
+    env.add_template("doc.html", include_str!("../templates/doc.html"))
+        .map_err(tpl)?;
+    env.add_template("decision.html", include_str!("../templates/decision.html"))
+        .map_err(tpl)?;
     Ok(env)
 }
 
@@ -61,29 +69,38 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
     for d in ["doc", "decision", "assets"] {
         std::fs::create_dir_all(out.join(d)).map_err(io)?;
     }
-    let mut stats = RenderSummary { pages: 0, assets: 0 };
+    let mut stats = RenderSummary {
+        pages: 0,
+        assets: 0,
+    };
 
     // where each block lives, for links
-    let href_from = |from_doc: Option<&BlockId>, id: &BlockId, prefix: &str| -> Option<(String, String)> {
-        let b = m.get(id)?;
-        let label = summary_in(b, &m);
-        if b.block_type == decision::DECISION {
-            return Some((format!("{prefix}decision/{id}.html"), label));
-        }
-        let doc = m.doc_of(id)?;
-        if Some(&doc.id) == from_doc {
-            Some((format!("#{id}"), label))
-        } else {
-            Some((format!("{prefix}doc/{}.html#{id}", doc.id), label))
-        }
-    };
+    let href_from =
+        |from_doc: Option<&BlockId>, id: &BlockId, prefix: &str| -> Option<(String, String)> {
+            let b = m.get(id)?;
+            let label = summary_in(b, &m);
+            if b.block_type == decision::DECISION {
+                return Some((format!("{prefix}decision/{id}.html"), label));
+            }
+            let doc = m.doc_of(id)?;
+            if Some(&doc.id) == from_doc {
+                Some((format!("#{id}"), label))
+            } else {
+                Some((format!("{prefix}doc/{}.html#{id}", doc.id), label))
+            }
+        };
 
     let mut blobs = BTreeSet::new();
     let mut doc_rows = vec![];
     for doc in m.children(None) {
         let mut items = vec![];
         let mut has_mermaid = false;
-        let mut stack: Vec<(&Block, usize)> = m.children(Some(&doc.id)).into_iter().rev().map(|b| (b, 1)).collect();
+        let mut stack: Vec<(&Block, usize)> = m
+            .children(Some(&doc.id))
+            .into_iter()
+            .rev()
+            .map(|b| (b, 1))
+            .collect();
         while let Some((b, depth)) = stack.pop() {
             let link = |id: &BlockId| href_from(Some(&doc.id), id, "../");
             let html = if b.block_type == "figure" {
@@ -92,8 +109,13 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
                 match h.parse::<Hash>() {
                     Ok(hash) if present.contains(&hash) => {
                         blobs.insert(hash);
-                        if b.field_str("media_type").unwrap_or("").starts_with("image/") {
-                            format!("<figure><img src=\"../assets/{h}\" alt=\"{alt}\"><figcaption>{alt}</figcaption></figure>")
+                        if b.field_str("media_type")
+                            .unwrap_or("")
+                            .starts_with("image/")
+                        {
+                            format!(
+                                "<figure><img src=\"../assets/{h}\" alt=\"{alt}\"><figcaption>{alt}</figcaption></figure>"
+                            )
                         } else {
                             format!("<p><a href=\"../assets/{h}\" download>{alt}</a></p>")
                         }
@@ -104,7 +126,13 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
                 if b.block_type == "diagram" {
                     has_mermaid = true;
                 }
-                html::block_html(b, depth, &link, &format!("../decision/{}.html", b.id), status_word(&g.status(&b.id)))
+                html::block_html(
+                    b,
+                    depth,
+                    &link,
+                    &format!("../decision/{}.html", b.id),
+                    status_word(&g.status(&b.id)),
+                )
             };
             items.push(json!({ "id": b.id.to_string(), "block_type": b.block_type, "html": html, "suspect": suspects.contains(&b.id) }));
             for c in m.children(Some(&b.id)).into_iter().rev() {
@@ -120,16 +148,41 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
     }
 
     let mut decisions = vec![];
-    for b in m.blocks.values().filter(|b| b.block_type == decision::DECISION) {
+    for b in m
+        .blocks
+        .values()
+        .filter(|b| b.block_type == decision::DECISION)
+    {
         let status = status_word(&g.status(&b.id));
         let link_row = |e_kind: &EdgeKind, id: &BlockId, part: &Option<String>| {
-            let (href, label) = href_from(None, id, "../").unwrap_or((String::new(), id.to_string()));
-            let kind = match e_kind { EdgeKind::Link(n) => n.clone(), EdgeKind::References => "references".into(), EdgeKind::Contains => "contains".into() };
+            let (href, label) =
+                href_from(None, id, "../").unwrap_or((String::new(), id.to_string()));
+            let kind = match e_kind {
+                EdgeKind::Link(n) => n.clone(),
+                EdgeKind::References => "references".into(),
+                EdgeKind::Contains => "contains".into(),
+            };
             json!({ "kind": kind, "href": href, "label": label, "part": part, "missing": href.is_empty() })
         };
-        let outgoing: Vec<_> = g.outgoing(&b.id).iter().filter(|e| e.kind != EdgeKind::Contains).map(|e| link_row(&e.kind, &e.to, &e.part)).collect();
-        let incoming: Vec<_> = g.incoming(&b.id).iter().filter(|e| e.kind != EdgeKind::Contains).map(|e| link_row(&e.kind, &e.from, &e.part)).collect();
-        let options: Vec<String> = match b.fields.get("options") { Some(FieldValue::List(o)) => o.iter().filter_map(|x| x.as_str().map(String::from)).collect(), _ => vec![] };
+        let outgoing: Vec<_> = g
+            .outgoing(&b.id)
+            .iter()
+            .filter(|e| e.kind != EdgeKind::Contains)
+            .map(|e| link_row(&e.kind, &e.to, &e.part))
+            .collect();
+        let incoming: Vec<_> = g
+            .incoming(&b.id)
+            .iter()
+            .filter(|e| e.kind != EdgeKind::Contains)
+            .map(|e| link_row(&e.kind, &e.from, &e.part))
+            .collect();
+        let options: Vec<String> = match b.fields.get("options") {
+            Some(FieldValue::List(o)) => o
+                .iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect(),
+            _ => vec![],
+        };
         let statement = b.field_str("statement").unwrap_or("").to_string();
         let dj = json!({
             "id": b.id.to_string(), "statement": statement, "status": status, "status_class": status.replace(' ', "-"),
@@ -148,7 +201,11 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
     stats.pages += 1;
 
     for h in blobs {
-        std::fs::write(out.join("assets").join(h.to_string()), rdy.store().get_blob(&h)?).map_err(io)?;
+        std::fs::write(
+            out.join("assets").join(h.to_string()),
+            rdy.store().get_blob(&h)?,
+        )
+        .map_err(io)?;
         stats.assets += 1;
     }
     Ok(stats)

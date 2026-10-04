@@ -3,7 +3,7 @@ use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
 use crate::segment::{Location, SegmentLog};
 use rdy_model::{Block, Change, Hash, Op};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -78,14 +78,22 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, StoreError> {
 }
 
 /// The single code path that turns a log frame into index entries, used both live and when rebuilding.
-fn entries_for_frame(kind: u8, hash: Hash, loc: Location, payload: &[u8]) -> Result<Vec<IndexEntry>, StoreError> {
+fn entries_for_frame(
+    kind: u8,
+    hash: Hash,
+    loc: Location,
+    payload: &[u8],
+) -> Result<Vec<IndexEntry>, StoreError> {
     let mut out = vec![IndexEntry::Object(hash, loc)];
     match kind {
         kinds::CHANGE => {
             let change: Change = decode(payload)?;
             for op in &change.ops {
                 if let Op::Create { block } | Op::Update { block, .. } = op {
-                    out.push(IndexEntry::Producer { version: block.version_hash(), change: hash });
+                    out.push(IndexEntry::Producer {
+                        version: block.version_hash(),
+                        change: hash,
+                    });
                 }
             }
         }
@@ -101,7 +109,11 @@ fn entries_for_frame(kind: u8, hash: Hash, loc: Location, payload: &[u8]) -> Res
 impl Store {
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
         std::fs::create_dir_all(dir)?;
-        let lock = OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("lock"))?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("lock"))?;
         if lock.try_lock().is_err() {
             return Err(StoreError::Locked(dir.to_path_buf()));
         }
@@ -109,7 +121,14 @@ impl Store {
         // tells the log which torn frames are an unacknowledged tail
         let (index, acked) = open_index(dir)?;
         let log = SegmentLog::open_acked(&dir.join("segments"), SEGMENT_MAX, acked)?;
-        let mut store = Store { dir: dir.to_path_buf(), log, index, _lock: lock, faults: Faults::default(), poisoned: false };
+        let mut store = Store {
+            dir: dir.to_path_buf(),
+            log,
+            index,
+            _lock: lock,
+            faults: Faults::default(),
+            poisoned: false,
+        };
         if store.index.indexed_upto()? > store.log.end() {
             store.reindex()?;
         } else {
@@ -134,7 +153,10 @@ impl Store {
 
     /// Reads and hash-checks every frame in every segment; returns the frame count.
     pub fn verify(&self) -> Result<usize, StoreError> {
-        let frames = self.log.scan_from(Location { segment: 0, offset: 0 })?;
+        let frames = self.log.scan_from(Location {
+            segment: 0,
+            offset: 0,
+        })?;
         for (loc, _, _) in &frames {
             self.log.read(*loc)?;
         }
@@ -156,7 +178,9 @@ impl Store {
 
     pub fn write(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
         if self.poisoned {
-            return Err(StoreError::Io(std::io::Error::other("an earlier failed write could not be rolled back; reopen the store")));
+            return Err(StoreError::Io(std::io::Error::other(
+                "an earlier failed write could not be rolled back; reopen the store",
+            )));
         }
         let start = self.log.end();
         let result = self.append_and_index(items);
@@ -164,7 +188,11 @@ impl Store {
             // nothing past `start` was acknowledged: discard it — including bytes a partial
             // append left past the end and a segment a failed roll left behind — so neither a
             // later write, a verify nor a reindex can see it
-            let rollback = if std::mem::take(&mut self.faults.rollback) { Err(std::io::Error::other("injected rollback failure")) } else { self.log.truncate_to(start) };
+            let rollback = if std::mem::take(&mut self.faults.rollback) {
+                Err(std::io::Error::other("injected rollback failure"))
+            } else {
+                self.log.truncate_to(start)
+            };
             if rollback.is_err() {
                 self.poisoned = true;
             }
@@ -179,7 +207,9 @@ impl Store {
         for (kind, payload) in items {
             let hash = Hash::of(&payload);
             hashes.push(hash);
-            if kind != kinds::REF_UPDATE && (seen.contains(&hash) || self.index.object(&hash)?.is_some()) {
+            if kind != kinds::REF_UPDATE
+                && (seen.contains(&hash) || self.index.object(&hash)?.is_some())
+            {
                 continue;
             }
             seen.insert(hash);
@@ -222,7 +252,9 @@ impl Store {
         let loc = self.index.object(h)?.ok_or(StoreError::NotFound(*h))?;
         let (kind, found, payload) = self.log.read_hashed(loc)?;
         if found != *h {
-            return Err(StoreError::Decode(format!("the index places {h} at {loc:?}, which holds {found}; run rdy reindex")));
+            return Err(StoreError::Decode(format!(
+                "the index places {h} at {loc:?}, which holds {found}; run rdy reindex"
+            )));
         }
         Ok((kind, payload))
     }
@@ -244,7 +276,10 @@ impl Store {
         refs.into_iter()
             .enumerate()
             .map(|(i, (name, value))| {
-                let at = Location { segment: at.segment, offset: at.offset + i as u64 };
+                let at = Location {
+                    segment: at.segment,
+                    offset: at.offset + i as u64,
+                };
                 (kinds::REF_UPDATE, encode(&RefUpdate { name, value, at }))
             })
             .collect()
@@ -267,13 +302,25 @@ impl Store {
     /// The hash `put_blob` would return for these bytes, without storing anything.
     pub fn blob_hash(bytes: &[u8]) -> Hash {
         let chunks: Vec<Hash> = bytes.chunks(CHUNK).map(Hash::of).collect();
-        Hash::of(&encode(&BlobManifest { len: bytes.len() as u64, chunks }))
+        Hash::of(&encode(&BlobManifest {
+            len: bytes.len() as u64,
+            chunks,
+        }))
     }
 
     pub fn put_blob(&mut self, bytes: &[u8]) -> Result<Hash, StoreError> {
-        let mut items: Vec<(u8, Vec<u8>)> = bytes.chunks(CHUNK).map(|c| (kinds::BLOB_CHUNK, c.to_vec())).collect();
+        let mut items: Vec<(u8, Vec<u8>)> = bytes
+            .chunks(CHUNK)
+            .map(|c| (kinds::BLOB_CHUNK, c.to_vec()))
+            .collect();
         let chunks: Vec<Hash> = items.iter().map(|(_, c)| Hash::of(c)).collect();
-        items.push((kinds::BLOB_MANIFEST, encode(&BlobManifest { len: bytes.len() as u64, chunks })));
+        items.push((
+            kinds::BLOB_MANIFEST,
+            encode(&BlobManifest {
+                len: bytes.len() as u64,
+                chunks,
+            }),
+        ));
         Ok(*self.write(items)?.last().expect("manifest hash"))
     }
 
@@ -290,7 +337,11 @@ impl Store {
         self.index.producer(version)
     }
 
-    pub fn commit_change(&mut self, mut change: Change, refs: Vec<(String, Vec<u8>)>) -> Result<Hash, StoreError> {
+    pub fn commit_change(
+        &mut self,
+        mut change: Change,
+        refs: Vec<(String, Vec<u8>)>,
+    ) -> Result<Hash, StoreError> {
         change.deps = self.change_deps(&change)?;
         let mut items = vec![];
         for op in &change.ops {
@@ -310,7 +361,11 @@ impl Store {
         let mut deps = BTreeSet::new();
         for op in &change.ops {
             if let Some(base) = op.base() {
-                deps.insert(self.index.producer(&base)?.ok_or(StoreError::NotFound(base))?);
+                deps.insert(
+                    self.index
+                        .producer(&base)?
+                        .ok_or(StoreError::NotFound(base))?,
+                );
             }
         }
         Ok(deps.into_iter().collect())

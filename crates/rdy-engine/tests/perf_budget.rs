@@ -1,6 +1,6 @@
 //! Run with: cargo test -p rdy-engine --release --test perf_budget -- --ignored
 //! Uses 100k blocks (spec 11). Ignored by default because generating the project takes a while.
-use rdy_engine::{testkit, Rdy, Scope, Session, WriteRequest};
+use rdy_engine::{Rdy, Scope, Session, WriteRequest, testkit};
 use rdy_model::Role;
 use serde_json::json;
 use std::time::{Duration, Instant};
@@ -16,7 +16,13 @@ fn p99(v: Vec<Duration>) -> Duration {
 }
 
 fn dist(v: &[Duration]) -> String {
-    format!("p50 {:?} p95 {:?} p99 {:?} max {:?}", pct(v, 50), pct(v, 95), pct(v, 99), v.iter().max().unwrap())
+    format!(
+        "p50 {:?} p95 {:?} p99 {:?} max {:?}",
+        pct(v, 50),
+        pct(v, 95),
+        pct(v, 99),
+        v.iter().max().unwrap()
+    )
 }
 
 #[test]
@@ -43,16 +49,37 @@ fn spec_11_targets_at_100k_blocks() {
     sorted.sort();
     let cold = sorted[1];
 
-    let s = Session { actor: "agent:perf".into(), run: None, role: Role::Writer };
+    let s = Session {
+        actor: "agent:perf".into(),
+        run: None,
+        role: Role::Writer,
+    };
     let parent = r.block(&work, &ids[0]).unwrap().parent.unwrap().to_string();
     let mut writes = vec![];
     for _ in 0..200 {
         let t = Instant::now();
-        r.write(&s, WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([{"op": "create", "type": "claim", "parent": parent, "body": "perf"}])).unwrap(), justification: None, message: String::new() }).unwrap();
+        r.write(
+            &s,
+            WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(
+                    json!([{"op": "create", "type": "claim", "parent": parent, "body": "perf"}]),
+                )
+                .unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .unwrap();
         writes.push(t.elapsed());
     }
     let write_p99 = p99(writes.clone());
-    println!("writes: {}; first 100 mean {:?}, last 100 mean {:?}", dist(&writes), writes[..100].iter().sum::<Duration>() / 100, writes[100..].iter().sum::<Duration>() / 100);
+    println!(
+        "writes: {}; first 100 mean {:?}, last 100 mean {:?}",
+        dist(&writes),
+        writes[..100].iter().sum::<Duration>() / 100,
+        writes[100..].iter().sum::<Duration>() / 100
+    );
 
     r.graph(&work).unwrap();
     let mut queries = vec![];
@@ -79,5 +106,9 @@ fn spec_11_targets_at_100k_blocks() {
     if query_p99 >= Duration::from_millis(5) {
         misses.push(format!("query p99 {query_p99:?} (target < 5 ms)"));
     }
-    assert!(misses.is_empty(), "spec 11 targets missed: {}", misses.join("; "));
+    assert!(
+        misses.is_empty(),
+        "spec 11 targets missed: {}",
+        misses.join("; ")
+    );
 }

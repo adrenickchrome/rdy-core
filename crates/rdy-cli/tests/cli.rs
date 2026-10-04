@@ -2,8 +2,17 @@ use serde_json::Value;
 use std::process::Command;
 
 fn rdy(dir: &std::path::Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_rdy")).args(args).current_dir(dir).env("RDY_ACTOR", "human:tester").output().unwrap();
-    (out.status.success(), String::from_utf8_lossy(&out.stdout).into(), String::from_utf8_lossy(&out.stderr).into())
+    let out = Command::new(env!("CARGO_BIN_EXE_rdy"))
+        .args(args)
+        .current_dir(dir)
+        .env("RDY_ACTOR", "human:tester")
+        .output()
+        .unwrap();
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into(),
+        String::from_utf8_lossy(&out.stderr).into(),
+    )
 }
 
 fn json(dir: &std::path::Path, args: &[&str]) -> Value {
@@ -19,14 +28,21 @@ fn init_status_and_errors() {
     let dir = tempfile::tempdir().unwrap();
     let (ok, _, err) = rdy(dir.path(), &["status"]);
     assert!(!ok);
-    assert!(err.contains("E_NO_PROJECT") && err.contains("rdy init"), "{err}");
+    assert!(
+        err.contains("E_NO_PROJECT") && err.contains("rdy init"),
+        "{err}"
+    );
     json(dir.path(), &["init"]);
     let st = json(dir.path(), &["status"]);
     assert_eq!(st["pack"], "rdy-standard");
     assert_eq!(st["landings"], 0);
     let sub = dir.path().join("deep/er");
     std::fs::create_dir_all(&sub).unwrap();
-    assert_eq!(json(&sub, &["status"])["pack"], "rdy-standard", "project found by walking up");
+    assert_eq!(
+        json(&sub, &["status"])["pack"],
+        "rdy-standard",
+        "project found by walking up"
+    );
 }
 
 #[test]
@@ -38,20 +54,28 @@ fn import_propose_approve_render_fsck() {
         use rdy_engine::*;
         use rdy_model::Role;
         let mut r = Rdy::init(src.path(), "rdy-standard").unwrap();
-        let w = Session { actor: "agent:a".into(), run: None, role: Role::Writer };
+        let w = Session {
+            actor: "agent:a".into(),
+            run: None,
+            role: Role::Writer,
+        };
         r.write(&w, WriteRequest { view: "work".into(), ops: serde_json::from_value(serde_json::json!([
             {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Hello", "doc_type": "glossary"}},
             {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
             {"op": "create", "type": "term", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Balances."}
         ])).unwrap(), justification: None, message: String::new() }).unwrap();
-        r.export(&Scope::View("work".into()), export.path()).unwrap();
+        r.export(&Scope::View("work".into()), export.path())
+            .unwrap();
     }
     let dir = tempfile::tempdir().unwrap();
     json(dir.path(), &["init"]);
     let ex = export.path().to_str().unwrap();
     // import needs an approver; the CLI import runs as approver because it can carry accepted decisions
     json(dir.path(), &["import", ex, "--view", "migrate"]);
-    let p = json(dir.path(), &["propose", "--view", "migrate", "--title", "migrate"]);
+    let p = json(
+        dir.path(),
+        &["propose", "--view", "migrate", "--title", "migrate"],
+    );
     let pid = p["id"].as_str().unwrap().to_string();
     let landed = json(dir.path(), &["approve", &pid]);
     assert_eq!(landed["landing"].as_str().unwrap().len(), 64);
@@ -67,8 +91,18 @@ fn import_propose_approve_render_fsck() {
 }
 
 fn rdy_env(dir: &std::path::Path, editor: &str, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_rdy")).args(args).current_dir(dir).env("RDY_ACTOR", "human:tester").env("EDITOR", editor).output().unwrap();
-    (out.status.success(), String::from_utf8_lossy(&out.stdout).into(), String::from_utf8_lossy(&out.stderr).into())
+    let out = Command::new(env!("CARGO_BIN_EXE_rdy"))
+        .args(args)
+        .current_dir(dir)
+        .env("RDY_ACTOR", "human:tester")
+        .env("EDITOR", editor)
+        .output()
+        .unwrap();
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into(),
+        String::from_utf8_lossy(&out.stderr).into(),
+    )
 }
 
 fn project_with_term() -> (tempfile::TempDir, String) {
@@ -76,7 +110,11 @@ fn project_with_term() -> (tempfile::TempDir, String) {
     use rdy_model::Role;
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
-    let w = Session { actor: "agent:a".into(), run: None, role: Role::Writer };
+    let w = Session {
+        actor: "agent:a".into(),
+        run: None,
+        role: Role::Writer,
+    };
     let res = r.write(&w, WriteRequest { view: "work".into(), ops: serde_json::from_value(serde_json::json!([
         {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Hello", "doc_type": "glossary"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
@@ -97,12 +135,18 @@ fn edit_runs_editor_with_args_and_failure_changes_nothing() {
     let editor = format!("{} --flag", script.display());
     let (ok, _, err) = rdy_env(dir.path(), &editor, &["edit", &id, "--view", "work"]);
     assert!(ok, "{err}");
-    assert_eq!(json(dir.path(), &["show", &id, "--scope", "work"])["body"], "Edited by script");
+    assert_eq!(
+        json(dir.path(), &["show", &id, "--scope", "work"])["body"],
+        "Edited by script"
+    );
 
     let (dir2, id2) = project_with_term();
     let (ok, _, _) = rdy_env(dir2.path(), "false", &["edit", &id2, "--view", "work"]);
     assert!(!ok);
-    assert_eq!(json(dir2.path(), &["show", &id2, "--scope", "work"])["body"], "Balances.");
+    assert_eq!(
+        json(dir2.path(), &["show", &id2, "--scope", "work"])["body"],
+        "Balances."
+    );
 }
 
 #[test]
@@ -128,7 +172,10 @@ fn fsck_detects_corruption() {
 fn init_honours_the_project_flag() {
     let cwd = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
-    json(cwd.path(), &["--project", target.path().to_str().unwrap(), "init"]);
+    json(
+        cwd.path(),
+        &["--project", target.path().to_str().unwrap(), "init"],
+    );
     assert!(target.path().join(".rdy/config.yaml").exists());
     assert!(!cwd.path().join(".rdy").exists());
 }

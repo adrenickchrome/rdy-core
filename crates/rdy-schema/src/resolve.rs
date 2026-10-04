@@ -29,7 +29,8 @@ impl PackSet {
     }
 
     pub fn add_yaml(&mut self, yaml: &str) -> Result<String, SchemaError> {
-        let pack: Pack = serde_yaml_ng::from_str(yaml).map_err(|e| SchemaError::Yaml(e.to_string()))?;
+        let pack: Pack =
+            serde_yaml_ng::from_str(yaml).map_err(|e| SchemaError::Yaml(e.to_string()))?;
         let name = pack.name.clone();
         self.raw.insert(name.clone(), pack);
         Ok(name)
@@ -50,7 +51,12 @@ impl PackSet {
             if out.contains(&n) {
                 return Err(SchemaError::Cycle(n));
             }
-            cur = self.raw.get(&n).ok_or_else(|| SchemaError::UnknownPack(n.clone()))?.extends.clone();
+            cur = self
+                .raw
+                .get(&n)
+                .ok_or_else(|| SchemaError::UnknownPack(n.clone()))?
+                .extends
+                .clone();
             out.push(n);
         }
         Ok(out)
@@ -61,8 +67,14 @@ impl PackSet {
             return Err(SchemaError::Cycle(name.to_string()));
         }
         seen.push(name.to_string());
-        let child = self.raw.get(name).ok_or_else(|| SchemaError::UnknownPack(name.to_string()))?.clone();
-        let Some(parent_name) = child.extends.clone() else { return Ok(child) };
+        let child = self
+            .raw
+            .get(name)
+            .ok_or_else(|| SchemaError::UnknownPack(name.to_string()))?
+            .clone();
+        let Some(parent_name) = child.extends.clone() else {
+            return Ok(child);
+        };
         let mut out = self.merged(&parent_name, seen)?;
         out.name = child.name;
         out.version = child.version;
@@ -82,17 +94,40 @@ impl PackSet {
 }
 
 fn f(kind: FieldKind, required: bool, values: &[&str]) -> FieldDef {
-    FieldDef { kind, required, values: values.iter().map(|s| s.to_string()).collect() }
+    FieldDef {
+        kind,
+        required,
+        values: values.iter().map(|s| s.to_string()).collect(),
+    }
 }
 
 fn inject_engine_types(pack: &mut Pack) {
     let decision_core: BTreeMap<String, FieldDef> = [
         ("statement", f(FieldKind::Str, true, &[])),
-        ("status", f(FieldKind::Enum, true, &["proposed", "accepted", "rejected"])),
+        (
+            "status",
+            f(FieldKind::Enum, true, &["proposed", "accepted", "rejected"]),
+        ),
         ("options", f(FieldKind::List, false, &[])),
-        ("authority_basis", f(FieldKind::Enum, false, &["direct_ruling", "recorded_ruling", "precedent", "elimination", "none"])),
+        (
+            "authority_basis",
+            f(
+                FieldKind::Enum,
+                false,
+                &[
+                    "direct_ruling",
+                    "recorded_ruling",
+                    "precedent",
+                    "elimination",
+                    "none",
+                ],
+            ),
+        ),
         ("attested_by", f(FieldKind::Str, false, &[])),
-        ("reversibility", f(FieldKind::Enum, false, &["one_way", "two_way"])),
+        (
+            "reversibility",
+            f(FieldKind::Enum, false, &["one_way", "two_way"]),
+        ),
         ("decided_at", f(FieldKind::Str, false, &[])),
         ("recorded_at", f(FieldKind::Str, false, &[])),
         ("review_by", f(FieldKind::Str, false, &[])),
@@ -103,23 +138,39 @@ fn inject_engine_types(pack: &mut Pack) {
     .map(|(k, v)| (k.to_string(), v))
     .collect();
     let question_core: BTreeMap<String, FieldDef> =
-        [("prompt".to_string(), f(FieldKind::Str, true, &[]))].into_iter().collect();
+        [("prompt".to_string(), f(FieldKind::Str, true, &[]))]
+            .into_iter()
+            .collect();
 
     force(pack, d::DECISION, "D", Trait::Normative, decision_core);
     force(pack, d::QUESTION, "Q", Trait::Informative, question_core);
-    for l in [d::SUPERSEDES, d::REFINES, d::DEPENDS_ON, d::CONDITIONAL_ON, d::REVOKES, d::ANSWERS, d::DECIDED_BY, d::IMPLEMENTS, d::DESCRIBES, d::AFFECTS] {
+    for l in [
+        d::SUPERSEDES,
+        d::REFINES,
+        d::DEPENDS_ON,
+        d::CONDITIONAL_ON,
+        d::REVOKES,
+        d::ANSWERS,
+        d::DECIDED_BY,
+        d::IMPLEMENTS,
+        d::DESCRIBES,
+        d::AFFECTS,
+    ] {
         pack.link_types.insert(l.to_string());
     }
 }
 
 fn force(pack: &mut Pack, name: &str, prefix: &str, tr: Trait, core: BTreeMap<String, FieldDef>) {
-    let def = pack.block_types.entry(name.to_string()).or_insert_with(|| BlockTypeDef {
-        prefix: prefix.to_string(),
-        traits: BTreeSet::new(),
-        fields: BTreeMap::new(),
-        children: vec![],
-        body: BodyRule::Optional,
-    });
+    let def = pack
+        .block_types
+        .entry(name.to_string())
+        .or_insert_with(|| BlockTypeDef {
+            prefix: prefix.to_string(),
+            traits: BTreeSet::new(),
+            fields: BTreeMap::new(),
+            children: vec![],
+            body: BodyRule::Optional,
+        });
     def.prefix = prefix.to_string();
     def.traits.insert(tr);
     def.fields.extend(core);
@@ -128,20 +179,31 @@ fn force(pack: &mut Pack, name: &str, prefix: &str, tr: Trait, core: BTreeMap<St
 fn check(pack: &Pack) -> Result<(), SchemaError> {
     let mut prefixes = BTreeMap::new();
     for (name, t) in &pack.block_types {
-        if !(1..=3).contains(&t.prefix.len()) || !t.prefix.bytes().all(|b| b.is_ascii_alphabetic()) {
-            return Err(SchemaError::Invalid(format!("type {name:?} has invalid prefix {:?}", t.prefix)));
+        if !(1..=3).contains(&t.prefix.len()) || !t.prefix.bytes().all(|b| b.is_ascii_alphabetic())
+        {
+            return Err(SchemaError::Invalid(format!(
+                "type {name:?} has invalid prefix {:?}",
+                t.prefix
+            )));
         }
         if let Some(other) = prefixes.insert(t.prefix.clone(), name.clone()) {
-            return Err(SchemaError::Invalid(format!("prefix {:?} used by both {other:?} and {name:?}", t.prefix)));
+            return Err(SchemaError::Invalid(format!(
+                "prefix {:?} used by both {other:?} and {name:?}",
+                t.prefix
+            )));
         }
         for c in &t.children {
             if !pack.block_types.contains_key(c) {
-                return Err(SchemaError::Invalid(format!("type {name:?} allows unknown child type {c:?}")));
+                return Err(SchemaError::Invalid(format!(
+                    "type {name:?} allows unknown child type {c:?}"
+                )));
             }
         }
         for (fname, fd) in &t.fields {
             if fd.kind == FieldKind::Enum && fd.values.is_empty() {
-                return Err(SchemaError::Invalid(format!("enum field {name}.{fname} has no values")));
+                return Err(SchemaError::Invalid(format!(
+                    "enum field {name}.{fname} has no values"
+                )));
             }
         }
     }

@@ -38,7 +38,10 @@ fn field_and_link_insertion_order_does_not_change_the_hash() {
 #[test]
 fn ref_tokens_come_from_body_and_string_fields() {
     let mut b = claim("settles on the {{ t-MEDGR }} per {{D-W2HXR}}; {{not an id}} and {single}");
-    b.fields.insert("note".into(), FieldValue::List(vec![FieldValue::Str("see {{c-WXMET}}".into())]));
+    b.fields.insert(
+        "note".into(),
+        FieldValue::List(vec![FieldValue::Str("see {{c-WXMET}}".into())]),
+    );
     let toks: Vec<String> = b.ref_tokens().into_iter().collect();
     assert_eq!(toks, vec!["D-W2HXR", "c-WXMET", "not an id", "t-MEDGR"]);
 }
@@ -51,7 +54,13 @@ fn unterminated_reference_is_not_a_token() {
 #[test]
 fn blocks_round_trip_postcard() {
     let mut b = claim("ünïcødé\nsecond line");
-    b.links.insert("decided_by".into(), vec![Link { target: BlockId::parse("D-W2HXR").unwrap(), part: None }]);
+    b.links.insert(
+        "decided_by".into(),
+        vec![Link {
+            target: BlockId::parse("D-W2HXR").unwrap(),
+            part: None,
+        }],
+    );
     let bytes = postcard::to_allocvec(&b).unwrap();
     assert_eq!(postcard::from_bytes::<Block>(&bytes).unwrap(), b);
 }
@@ -71,13 +80,20 @@ fn reference_scanning_is_type_aware_and_honours_escapes() {
     // code bodies are never scanned; their fields still are
     let mut code = typed("code", "image: {{ .Values.image }} {{t-MEDGR}}");
     assert!(code.ref_tokens().is_empty());
-    code.fields.insert("caption".into(), FieldValue::Str("see {{t-MEDGR}}".into()));
+    code.fields
+        .insert("caption".into(), FieldValue::Str("see {{t-MEDGR}}".into()));
     assert_eq!(code.ref_tokens(), set(&["t-MEDGR"]));
     // diagram bodies: only id-shaped tokens and placeholders count
-    let dg = typed("diagram", "graph TD\n  A{{Decide?}} --> B[{{t-MEDGR}}] --> C[{{$t}}] --> D{{ yes }}");
+    let dg = typed(
+        "diagram",
+        "graph TD\n  A{{Decide?}} --> B[{{t-MEDGR}}] --> C[{{$t}}] --> D{{ yes }}",
+    );
     assert_eq!(dg.ref_tokens(), set(&["$t", "t-MEDGR"]));
     // prose: \{{ is a literal, everything else is strict
-    assert_eq!(claim(r"Write \{{literal}} for braces; see {{t-MEDGR}}.").ref_tokens(), set(&["t-MEDGR"]));
+    assert_eq!(
+        claim(r"Write \{{literal}} for braces; see {{t-MEDGR}}.").ref_tokens(),
+        set(&["t-MEDGR"])
+    );
     assert_eq!(claim("{{not an id}}").ref_tokens(), set(&["not an id"]));
     assert_eq!(typed("diagram", r"A\{{t-MEDGR}}").ref_tokens(), set(&[]));
 }

@@ -1,7 +1,10 @@
 const DIGITS: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 fn idx(c: u8) -> usize {
-    DIGITS.iter().position(|&d| d == c).expect("order key digit outside base-62")
+    DIGITS
+        .iter()
+        .position(|&d| d == c)
+        .expect("order key digit outside base-62")
 }
 
 pub fn order_between(a: Option<&str>, b: Option<&str>) -> String {

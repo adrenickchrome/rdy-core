@@ -1,10 +1,13 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use rdy_engine::{testkit, Rdy, Scope, Session, WriteRequest};
+use criterion::{Criterion, criterion_group, criterion_main};
+use rdy_engine::{Rdy, Scope, Session, WriteRequest, testkit};
 use rdy_model::Role;
 use serde_json::json;
 
 fn blocks() -> usize {
-    std::env::var("RDY_BENCH_BLOCKS").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000)
+    std::env::var("RDY_BENCH_BLOCKS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10_000)
 }
 
 fn bench(c: &mut Criterion) {
@@ -14,7 +17,11 @@ fn bench(c: &mut Criterion) {
     let work = Scope::View("work".into());
     r.materialized(&work).unwrap();
     r.graph(&work).unwrap();
-    let s = Session { actor: "agent:bench".into(), run: None, role: Role::Writer };
+    let s = Session {
+        actor: "agent:bench".into(),
+        run: None,
+        role: Role::Writer,
+    };
     let parent = r.block(&work, &ids[0]).unwrap().parent.unwrap().to_string();
 
     c.bench_function("write_commit_one_claim", |b| {
@@ -24,8 +31,12 @@ fn bench(c: &mut Criterion) {
     });
     r.graph(&work).unwrap();
     let probe = ids[ids.len() / 2].clone();
-    c.bench_function("context_query", |b| b.iter(|| r.context(&work, &probe).unwrap()));
-    c.bench_function("impact_query", |b| b.iter(|| r.impact(&work, &ids[0], 3).unwrap()));
+    c.bench_function("context_query", |b| {
+        b.iter(|| r.context(&work, &probe).unwrap())
+    });
+    c.bench_function("impact_query", |b| {
+        b.iter(|| r.impact(&work, &ids[0], 3).unwrap())
+    });
     drop(r);
     c.bench_function("cold_open_materialize_graph", |b| {
         b.iter(|| {

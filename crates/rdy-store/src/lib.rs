@@ -7,4 +7,4 @@ mod store;
 pub use error::StoreError;
 pub use store::Store;
 mod state;
-pub use state::{apply_op, ViewRecord};
+pub use state::{ViewRecord, apply_op};

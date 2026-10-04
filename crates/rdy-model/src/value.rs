@@ -26,14 +26,25 @@ impl FieldValue {
             Yaml::Bool(b) => FieldValue::Bool(*b),
             Yaml::Number(n) => match n.as_i64() {
                 Some(i) => FieldValue::Int(i),
-                None => return Err(format!("number {n} is not an integer: floats are not supported, write it as a string")),
+                None => {
+                    return Err(format!(
+                        "number {n} is not an integer: floats are not supported, write it as a string"
+                    ));
+                }
             },
             Yaml::String(s) => FieldValue::Str(s.clone()),
-            Yaml::Sequence(items) => FieldValue::List(items.iter().map(FieldValue::from_yaml).collect::<Result<_, _>>()?),
+            Yaml::Sequence(items) => FieldValue::List(
+                items
+                    .iter()
+                    .map(FieldValue::from_yaml)
+                    .collect::<Result<_, _>>()?,
+            ),
             Yaml::Mapping(m) => {
                 let mut out = BTreeMap::new();
                 for (k, v) in m {
-                    let k = k.as_str().ok_or_else(|| format!("map key {k:?} must be a string"))?;
+                    let k = k
+                        .as_str()
+                        .ok_or_else(|| format!("map key {k:?} must be a string"))?;
                     out.insert(k.to_string(), FieldValue::from_yaml(v)?);
                 }
                 FieldValue::Map(out)
@@ -48,7 +59,9 @@ impl FieldValue {
             FieldValue::Bool(b) => Yaml::Bool(*b),
             FieldValue::Int(i) => Yaml::Number((*i).into()),
             FieldValue::Str(s) => Yaml::String(s.clone()),
-            FieldValue::List(items) => Yaml::Sequence(items.iter().map(FieldValue::to_yaml).collect()),
+            FieldValue::List(items) => {
+                Yaml::Sequence(items.iter().map(FieldValue::to_yaml).collect())
+            }
             FieldValue::Map(m) => {
                 let mut out = serde_yaml_ng::Mapping::new();
                 for (k, v) in m {
