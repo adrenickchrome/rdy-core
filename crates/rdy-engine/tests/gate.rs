@@ -555,3 +555,74 @@ fn recreating_a_deleted_parent_and_child_under_their_old_ids_is_not_an_orphan() 
         .unwrap();
     assert_eq!(claim.parent.map(|p| p.to_string()), Some(s2));
 }
+
+#[test]
+fn the_gate_refuses_names_that_clash_after_another_landing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    w(
+        &mut r,
+        &agent(),
+        "a",
+        json!([{"op": "create", "type": "folder", "fields": {"name": "Wallets"}}]),
+    )
+    .unwrap();
+    w(
+        &mut r,
+        &agent(),
+        "b",
+        json!([{"op": "create", "type": "folder", "fields": {"name": "wallets"}}]),
+    )
+    .unwrap();
+    let p = r.propose(&agent(), "a", "a").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let e = r.propose(&agent(), "b", "b").unwrap_err();
+    assert_eq!(e.code, "E_VALIDATION");
+    assert!(
+        e.issues.iter().any(|i| i.code == "E_PATH_CLASH"),
+        "{:?}",
+        e.issues
+    );
+}
+
+#[test]
+fn the_gate_refuses_a_parent_cycle_made_by_two_views() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let res = w(
+        &mut r,
+        &agent(),
+        "work",
+        json!([
+            {"op": "create", "type": "folder", "id": "$x", "fields": {"name": "x"}},
+            {"op": "create", "type": "folder", "id": "$y", "fields": {"name": "y"}}
+        ]),
+    )
+    .unwrap();
+    let p = r.propose(&agent(), "work", "seed").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let (x, y) = (res.created["$x"].clone(), res.created["$y"].clone());
+    w(
+        &mut r,
+        &agent(),
+        "a",
+        json!([{"op": "move", "id": x, "parent": y}]),
+    )
+    .unwrap();
+    w(
+        &mut r,
+        &agent(),
+        "b",
+        json!([{"op": "move", "id": y, "parent": x}]),
+    )
+    .unwrap();
+    let p = r.propose(&agent(), "a", "a").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let e = r.propose(&agent(), "b", "b").unwrap_err();
+    assert_eq!(e.code, "E_VALIDATION");
+    assert!(
+        e.issues.iter().any(|i| i.code == "E_PARENT_CYCLE"),
+        "{:?}",
+        e.issues
+    );
+}

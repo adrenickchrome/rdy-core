@@ -85,6 +85,42 @@ impl Rdy {
                 };
             let parent = b.parent.as_ref().and_then(|p| next.get(p));
             issues.extend(validate_block(&self.pack, b, parent));
+            // two views can each be fine alone and clash or loop once both are in canon
+            let mut walk = b.parent.clone();
+            for _ in 0..=next.blocks.len() {
+                let Some(p) = walk else { break };
+                if &p == id {
+                    issues.push(Issue {
+                        severity: Severity::Error,
+                        code: "E_PARENT_CYCLE",
+                        block: Some(id.clone()),
+                        message: format!(
+                            "{id} would be inside itself: its parents loop back to it"
+                        ),
+                        fix: format!(
+                            "move {id} (or one of its parents) to a place outside its own subtree"
+                        ),
+                    });
+                    break;
+                }
+                walk = next.get(&p).and_then(|x| x.parent.clone());
+            }
+            if rdy_model::tree::is_tree_type(&b.block_type) {
+                let names = next.names_under(b.parent.as_ref());
+                if let Some(mine) = names.get(id).map(|n| n.to_ascii_lowercase()) {
+                    for (other, n) in &names {
+                        if other != id && n.to_ascii_lowercase() == mine {
+                            issues.push(Issue {
+                                severity: Severity::Error,
+                                code: "E_PATH_CLASH",
+                                block: Some(id.clone()),
+                                message: format!("{id} and {other} would both be named {n:?} in the same folder (ignoring case)"),
+                                fix: format!("rename {id} in this view"),
+                            });
+                        }
+                    }
+                }
+            }
             // canon may have moved since the view was written: every target must still exist
             for target in targets(b) {
                 if next.get(&target).is_none() && !deleted.contains(&target) {
