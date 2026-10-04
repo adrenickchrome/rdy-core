@@ -112,12 +112,12 @@ fn hidden(name: &str) -> bool {
     name.starts_with('.')
 }
 
-fn is_symlink(path: &Path) -> bool {
+pub(crate) fn is_symlink(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 /// sym1: a link could read outside the tree or loop; it is refused, never followed.
-fn link_diag(shown: &str) -> Diagnostic {
+pub(crate) fn link_diag(shown: &str) -> Diagnostic {
     Diagnostic::error(
         shown,
         (1, 1),

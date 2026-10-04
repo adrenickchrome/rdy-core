@@ -68,3 +68,34 @@ fn sym1_a_symlink_loop_is_refused_quickly() {
     symlink(t.path().join("docs"), t.path().join("docs/loop")).unwrap();
     refuses_the_link(t.path());
 }
+
+#[test]
+fn sym1_a_symlinked_docs_root_is_refused() {
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("x.yaml"), DOC).unwrap();
+    let t = export_dir();
+    std::fs::remove_dir(t.path().join("docs")).unwrap();
+    symlink(outside.path(), t.path().join("docs")).unwrap();
+    refuses_the_link(t.path());
+}
+
+#[test]
+fn sym1_a_symlinked_blobs_root_or_manifest_is_refused_by_import() {
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("big"), b"not a blob").unwrap();
+    let t = export_dir();
+    symlink(outside.path(), t.path().join("blobs")).unwrap();
+    let (_d, mut r) = project();
+    let e = r.import(&approver(), "import", t.path()).unwrap_err();
+    assert_eq!(e.code, "E_FILE_FORMAT", "{e}");
+    assert!(e.message.contains("symbolic link"), "{e}");
+
+    let t = export_dir();
+    let real = outside.path().join("m.yaml");
+    std::fs::write(&real, "format: 2\npack: rdy-standard\nscope: canon\n").unwrap();
+    std::fs::remove_file(t.path().join("rdy-export.yaml")).unwrap();
+    symlink(&real, t.path().join("rdy-export.yaml")).unwrap();
+    let e = r.import(&approver(), "import", t.path()).unwrap_err();
+    assert_eq!(e.code, "E_FILE_FORMAT", "{e}");
+    assert!(e.message.contains("symbolic link"), "{e}");
+}

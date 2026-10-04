@@ -55,8 +55,20 @@ pub fn check_path(
     let shown = path.display().to_string();
     let (loaded, mut diags) = if path.is_file() {
         read_file(path, &shown)
-    } else if path.join("rdy-export.yaml").exists() {
-        read_tree(&path.join("docs"), &format!("{shown}/docs"))
+    } else if std::fs::symlink_metadata(path.join("rdy-export.yaml")).is_ok() {
+        // sym1: the export's own manifest and docs root are never followed
+        let mut diags = vec![];
+        for name in ["rdy-export.yaml", "docs"] {
+            let p = path.join(name);
+            if crate::tree_io::is_symlink(&p) {
+                diags.push(crate::tree_io::link_diag(&format!("{shown}/{name}")));
+            }
+        }
+        if diags.is_empty() {
+            read_tree(&path.join("docs"), &format!("{shown}/docs"))
+        } else {
+            (vec![], diags)
+        }
     } else {
         read_tree(path, &shown)
     };

@@ -459,6 +459,10 @@ impl Rdy {
             ));
         }
         crate::write::writable_view(view)?;
+        // sym1: the export's own root entries are never followed either
+        for root in ["rdy-export.yaml", "docs", "blobs"] {
+            refuse_symlink(&dir.join(root))?;
+        }
         let manifest_path = dir.join("rdy-export.yaml");
         let manifest_text = std::fs::read_to_string(&manifest_path).map_err(|e| {
             RdyError::new(
