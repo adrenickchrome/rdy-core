@@ -14,6 +14,7 @@ pub const REF_UPDATE: u8 = 8;
 pub struct RefUpdate {
     pub name: String,
     pub value: Vec<u8>,
+    pub at: crate::segment::Location,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
