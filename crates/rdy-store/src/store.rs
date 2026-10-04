@@ -1,4 +1,5 @@
 use crate::error::StoreError;
+use crate::fsutil;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
 use crate::segment::{Location, SegmentLog, find_gap, seg_path};
@@ -19,6 +20,8 @@ pub struct Store {
     faults: Faults,
     /// Set when a failed write could not be rolled back; every later write fails until reopen.
     poisoned: bool,
+    /// Directories open fsynced because it created something in them (dur1).
+    synced: Vec<PathBuf>,
 }
 
 /// Opens the index, verifies its integrity and reads its acknowledged boundary (None if it has
@@ -60,6 +63,18 @@ fn set_aside(path: &Path) -> Result<(), StoreError> {
         }
     }
     unreachable!("u32 suffixes exhausted")
+}
+
+/// The error for a failed `try_lock` on the store's lock file: only `WouldBlock` (another process
+/// holds the lock) is `Locked`; anything else (e.g. a file system without locking) is I/O.
+pub fn lock_error(dir: &Path, e: std::fs::TryLockError) -> StoreError {
+    match e {
+        std::fs::TryLockError::WouldBlock => StoreError::Locked(dir.to_path_buf()),
+        std::fs::TryLockError::Error(e) => StoreError::Io(std::io::Error::new(
+            e.kind(),
+            format!("cannot lock {}: {e}", dir.join("lock").display()),
+        )),
+    }
 }
 
 /// Test-only fault injection (see `fail_next_index_apply`).
@@ -108,16 +123,19 @@ fn entries_for_frame(
 
 impl Store {
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
-        std::fs::create_dir_all(dir)?;
+        // dur1: each directory created here is fsynced into its parent before any write is acked
+        let mut synced = fsutil::create_dir_durable(dir)?;
+        let segments = dir.join("segments");
+        synced.extend(fsutil::create_dir_durable(&segments)?);
+        let fresh = !dir.join("index.redb").exists() || !dir.join("lock").exists();
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(dir.join("lock"))?;
-        if lock.try_lock().is_err() {
-            return Err(StoreError::Locked(dir.to_path_buf()));
+        if let Err(e) = lock.try_lock() {
+            return Err(lock_error(dir, e)); // lock1
         }
-        let segments = dir.join("segments");
         // seg1: a gap in the segment numbers means acknowledged frames are missing
         if let Some((missing, later)) = find_gap(&segments)? {
             return Err(StoreError::MissingFrames {
@@ -132,6 +150,11 @@ impl Store {
         // the index opens first: its indexed_upto is the acknowledged end of the log, which
         // tells the log which torn frames are an unacknowledged tail
         let (index, acked) = open_index(dir)?;
+        if fresh {
+            // dur1: the new lock and index files' entries in the store directory
+            fsutil::sync_dir(dir)?;
+            synced.push(dir.to_path_buf());
+        }
         let log = SegmentLog::open_acked(&segments, SEGMENT_MAX, acked)?;
         let mut store = Store {
             dir: dir.to_path_buf(),
@@ -140,6 +163,7 @@ impl Store {
             _lock: lock,
             faults: Faults::default(),
             poisoned: false,
+            synced,
         };
         let (upto, end) = (store.index.indexed_upto()?, store.log.end());
         if upto > end {
@@ -160,6 +184,12 @@ impl Store {
         }
         store.catch_up()?;
         Ok(store)
+    }
+
+    /// Test hook: the directories `open` fsynced because it created something in them.
+    #[doc(hidden)]
+    pub fn durable_dirs(&self) -> &[PathBuf] {
+        &self.synced
     }
 
     pub fn dir(&self) -> &Path {

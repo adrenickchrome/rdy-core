@@ -1,3 +1,4 @@
+use crate::fsutil::sync_dir;
 use rdy_model::Hash;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -59,11 +60,6 @@ pub fn find_gap(dir: &Path) -> io::Result<Option<(u32, u32)>> {
         }
     }
     Ok(None)
-}
-
-fn sync_dir(dir: &Path) -> io::Result<()> {
-    let d = File::open(dir)?;
-    d.sync_all()
 }
 
 /// Reads the frame at `offset`, or returns None if it is torn or corrupt.
@@ -157,7 +153,7 @@ impl SegmentLog {
     /// Corruption below `acked` damages acknowledged data and is refused. With `acked` unknown,
     /// the tail is truncated only if no valid frame follows the corruption.
     pub fn open_acked(dir: &Path, max_len: u64, acked: Option<Location>) -> io::Result<SegmentLog> {
-        std::fs::create_dir_all(dir)?;
+        crate::fsutil::create_dir_durable(dir)?;
         // seg1: a segment past a gap holds acknowledged frames the log would otherwise skip
         if let Some((missing, later)) = find_gap(dir)? {
             return Err(io::Error::new(

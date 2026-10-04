@@ -106,7 +106,8 @@ impl Rdy {
                 "open the existing project, or init a different directory",
             ));
         }
-        std::fs::create_dir_all(dot.join("packs")).map_err(io)?;
+        // dur1: .rdy and .rdy/packs are fsynced into their parents (the store adds .rdy/store)
+        rdy_store::fsutil::create_dir_durable(&dot.join("packs")).map_err(io)?;
         load_pack(project, pack)?;
         let cfg = serde_yaml_ng::to_string(&Config {
             pack: pack.to_string(),

@@ -105,3 +105,73 @@ fn seg1_quarantined_tails_are_not_segments() {
     assert_eq!(torn, 1);
     assert_eq!(Store::open(&dir).unwrap().get_blob(&h).unwrap(), b"kept");
 }
+
+#[test]
+fn dur1_opening_a_new_store_fsyncs_every_directory_it_created() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("a/b/store");
+    let s = Store::open(&dir).unwrap();
+    let synced: std::collections::BTreeSet<PathBuf> = s.durable_dirs().iter().cloned().collect();
+    for want in [
+        base.path().to_path_buf(),
+        base.path().join("a"),
+        base.path().join("a/b"),
+        dir.clone(),
+    ] {
+        assert!(
+            synced.contains(&want),
+            "{} not fsynced: {synced:?}",
+            want.display()
+        );
+    }
+    drop(s);
+    let s = Store::open(&dir).unwrap();
+    assert!(
+        s.durable_dirs().is_empty(),
+        "a reopen creates nothing: {:?}",
+        s.durable_dirs()
+    );
+}
+
+#[test]
+fn dur1_create_dir_durable_reports_the_parents_it_synced() {
+    let base = tempfile::tempdir().unwrap();
+    let deep = base.path().join("x/y");
+    let got = rdy_store::fsutil::create_dir_durable(&deep).unwrap();
+    assert_eq!(got, vec![base.path().to_path_buf(), base.path().join("x")]);
+    assert!(deep.is_dir());
+    assert!(
+        rdy_store::fsutil::create_dir_durable(&deep)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn lock1_only_a_held_lock_is_e_locked() {
+    let dir = Path::new("/projects/p/.rdy/store");
+    assert!(matches!(
+        rdy_store::lock_error(dir, std::fs::TryLockError::WouldBlock),
+        StoreError::Locked(_)
+    ));
+    let e = rdy_store::lock_error(
+        dir,
+        std::fs::TryLockError::Error(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "locking is not supported on this file system",
+        )),
+    );
+    assert!(matches!(&e, StoreError::Io(_)), "{e}");
+    let e = rdy_engine::RdyError::from(e);
+    assert_eq!(e.code, "E_IO", "{e}");
+    assert!(e.message.contains("locking is not supported"), "{e}");
+}
+
+#[test]
+fn lock1_a_second_open_is_still_e_locked() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let _held = Store::open(&dir).unwrap();
+    let e = Store::open(&dir).err().expect("the second open is refused");
+    assert!(matches!(e, StoreError::Locked(_)), "{e}");
+}
