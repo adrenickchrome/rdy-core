@@ -1,6 +1,6 @@
 use base64::Engine;
 use rdy_engine::*;
-use rdy_model::{BlockId, EditorialClass, Justification, Role, decision};
+use rdy_model::{BlockId, EditorialClass, Justification, Role};
 use rdy_schema::{BodyRule, Trait};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -430,24 +430,12 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
         });
         match format {
             "yaml" => lines.push(block_to_yaml(b)),
-            "markdown" => lines.push(match b.block_type.as_str() {
-                "doc" => format!("# {}", b.field_str("title").unwrap_or("")),
-                "section" => format!(
-                    "{} {}",
-                    "#".repeat((depth + 1).min(6)),
-                    b.field_str("title").unwrap_or("")
-                ),
-                "term" | "component" | "actor" | "interface" => {
-                    format!("**{}** — {}", b.field_str("name").unwrap_or(""), b.body)
-                }
-                t if t == decision::DECISION => format!(
-                    "> decision {}: {} [{}]",
-                    b.id,
-                    b.field_str("statement").unwrap_or(""),
-                    status.clone().unwrap_or_default()
-                ),
-                _ => b.body.clone(),
-            }),
+            "markdown" => lines.push(crate::markdown::block_markdown(
+                b,
+                &m,
+                crate::markdown::doc_depth(&m, b),
+                status.as_deref(),
+            )),
             _ => {
                 let mut line = format!(
                     "{}{} {}: {}",
