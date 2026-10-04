@@ -111,7 +111,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "By id or path: blast radius: blocks that depend on, reference or describe the given block, by depth. Each item's via says which edge reached it: via.kind (references or a link name) to via.from."
+        description = "By id or path: blast radius: blocks that depend on the given block through references or dependency links (depends_on, conditional_on, implements, decided_by, describes, affects), by depth. Decisions that refine or supersede it are listed at depth 1 and not followed. Each item's via says which edge reached it: via.kind (references or a link name) to via.from."
     )]
     fn rdy_impact(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
         self.run("rdy_impact", p, tools::rdy_impact)
