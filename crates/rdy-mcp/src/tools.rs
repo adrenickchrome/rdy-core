@@ -14,6 +14,11 @@ pub const MAX_OPS_PER_WRITE: usize = 5_000;
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 /// The largest asset (decoded bytes) `rdy_asset` accepts.
 pub const MAX_ASSET_BYTES: usize = 64 * 1024 * 1024;
+/// Room left in a request line for the JSON-RPC envelope around an asset's base64.
+pub const REQUEST_ENVELOPE_MARGIN: usize = 4096;
+/// The largest asset (raw bytes) whose base64 fits in one stdio request line with its envelope;
+/// over stdio this, not [`MAX_ASSET_BYTES`], is the effective limit.
+pub const MAX_ASSET_BYTES_STDIO: usize = (MAX_REQUEST_BYTES - REQUEST_ENVELOPE_MARGIN) / 4 * 3;
 /// The largest `max_tokens` any read may ask for.
 pub const MAX_TOKENS_LIMIT: usize = 100_000;
 
@@ -549,7 +554,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             "pack": pack.name,
             "types": pack.block_types.iter().map(|(n, d)| json!({"type": n, "prefix": d.prefix, "traits": traits(&d.traits)})).collect::<Vec<_>>(),
             "link_types": pack.link_types,
-            "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "max_tokens": MAX_TOKENS_LIMIT},
+            "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT},
             "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
         })),
     }

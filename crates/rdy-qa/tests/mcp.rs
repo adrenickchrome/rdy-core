@@ -107,6 +107,9 @@ fn mcp2_write_ops_and_max_tokens_are_limited() {
     );
     let limits = c.call("rdy_schema", json!({})).ok();
     assert_eq!(limits["limits"]["ops_per_write"], 5_000);
+    assert_eq!(limits["limits"]["asset_bytes"], 64 * 1024 * 1024);
+    // over stdio the 16 MiB request line binds first: the largest raw asset whose base64 fits
+    assert_eq!(limits["limits"]["asset_bytes_stdio"], 12_579_840);
     c.alive();
 }
 
@@ -119,6 +122,25 @@ fn mcp2_an_oversized_request_gets_a_reply_and_the_server_lives() {
     // a 17 MiB line needs more than the default 2 s write deadline; 10 s is its named budget
     c.send_raw_within(
         &format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"rdy_write","arguments":{{"message":"{big}","ops":[]}}}}}}"#),
+        Duration::from_secs(10),
+    );
+    let reply = c.recv(id, Duration::from_secs(10));
+    assert!(
+        reply.to_string().contains("rdy_request_too_large"),
+        "{reply}"
+    );
+    c.alive();
+}
+
+#[test]
+fn mcp2_an_oversized_request_with_the_id_last_gets_a_reply() {
+    // the TypeScript SDK writes `id` after `params`, so it sits at the end of a huge line
+    let (_d, mut c) = server();
+    session(&mut c);
+    let id = c.next_id();
+    let big = "x".repeat(17 * 1024 * 1024);
+    c.send_raw_within(
+        &format!(r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"rdy_write","arguments":{{"message":"{big}","ops":[{{"op":"edit","id":"c-ABCDE","body":"b"}}]}}}},"id":{id}}}"#),
         Duration::from_secs(10),
     );
     let reply = c.recv(id, Duration::from_secs(10));

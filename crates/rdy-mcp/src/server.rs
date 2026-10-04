@@ -190,42 +190,181 @@ impl ServerHandler for RdyServer {
     }
 }
 
-/// The JSON-RPC id in the first bytes of a request line, as raw JSON (a number or a string).
-fn request_id(prefix: &[u8]) -> Option<String> {
-    let s = String::from_utf8_lossy(prefix);
-    let at = s.find("\"id\"")? + 4;
-    let rest = s[at..].trim_start().strip_prefix(':')?.trim_start();
-    if let Some(q) = rest.strip_prefix('"') {
-        let end = q.find('"')?;
-        return Some(format!("\"{}\"", &q[..end]));
-    }
-    let n: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '-')
-        .collect();
-    (!n.is_empty()).then_some(n)
+/// The longest id value [`IdScanner`] will capture; a longer one counts as no id.
+const MAX_ID_BYTES: usize = 1024;
+
+/// Finds the JSON-RPC `"id"` of a request line in one pass, in constant memory, without
+/// buffering the line: it tracks string and escape state and nesting depth, and captures the
+/// value of the `"id"` key of the top-level object wherever it occurs (the TypeScript SDK
+/// writes it after `params`). Keys and values at deeper levels are ignored.
+#[derive(Default)]
+struct IdScanner {
+    depth: usize,
+    top_is_object: bool,
+    in_string: bool,
+    escaped: bool,
+    /// At depth 1 of the top-level object, the next string is a key.
+    expect_key: bool,
+    /// Bytes of the depth-1 key being read (capped: only `id` matters).
+    key: Option<Vec<u8>>,
+    /// The depth-1 key just closed was `id`; `Some` until its `:`.
+    key_was_id: Option<bool>,
+    /// After `"id":`, waiting for the value's first byte.
+    value_is_id: bool,
+    /// The raw bytes of the id value being captured.
+    capture: Option<Vec<u8>>,
+    capture_is_string: bool,
+    /// The first valid top-level id, as JSON.
+    id: Option<String>,
 }
 
-/// Copies `r` to `w` line by line. A line longer than `max` bytes is never buffered whole: if a
-/// JSON-RPC `"id"` can be read from its first 4 KiB it is replaced by a call to the unlisted
-/// [`REQUEST_TOO_LARGE`] tool (so the client gets an error reply for its id); otherwise dropped.
+impl IdScanner {
+    fn feed(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.byte(b);
+        }
+    }
+
+    fn byte(&mut self, b: u8) {
+        if self.in_string {
+            // keep up to 4 bytes: `id` plus its closing quote is 3, so 4 tells `id` from `idx`
+            if let Some(k) = &mut self.key
+                && k.len() < 4
+            {
+                k.push(b);
+            }
+            if self.capture_is_string
+                && let Some(c) = &mut self.capture
+            {
+                c.push(b);
+            }
+            if self.escaped {
+                self.escaped = false;
+            } else if b == b'\\' {
+                self.escaped = true;
+            } else if b == b'"' {
+                self.in_string = false;
+                if let Some(k) = self.key.take() {
+                    self.key_was_id = Some(k == b"id\"");
+                }
+                if self.capture_is_string {
+                    self.finish_capture();
+                }
+            }
+            if self
+                .capture
+                .as_ref()
+                .is_some_and(|c| c.len() > MAX_ID_BYTES)
+            {
+                self.capture = None;
+                self.capture_is_string = false;
+            }
+            return;
+        }
+        if let Some(c) = &mut self.capture {
+            if matches!(b, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E') {
+                c.push(b);
+                if c.len() > MAX_ID_BYTES {
+                    self.capture = None;
+                }
+                return;
+            }
+            self.finish_capture();
+        }
+        if b.is_ascii_whitespace() {
+            return;
+        }
+        let at_top = self.depth == 1 && self.top_is_object;
+        if at_top && self.value_is_id {
+            self.value_is_id = false;
+            if b == b'"' {
+                self.capture = Some(vec![b]);
+                self.capture_is_string = true;
+            } else if b == b'-' || b.is_ascii_digit() {
+                self.capture = Some(vec![b]);
+                return;
+            }
+        }
+        match b {
+            b'"' => {
+                self.in_string = true;
+                if at_top && self.expect_key {
+                    self.expect_key = false;
+                    self.key = Some(Vec::new());
+                }
+            }
+            b'{' | b'[' => {
+                self.depth += 1;
+                if self.depth == 1 {
+                    self.top_is_object = b == b'{';
+                    self.expect_key = self.top_is_object;
+                }
+            }
+            b'}' | b']' => self.depth = self.depth.saturating_sub(1),
+            b':' if at_top => self.value_is_id = self.key_was_id.take().unwrap_or(false),
+            b',' if at_top => self.expect_key = true,
+            _ => {}
+        }
+    }
+
+    fn finish_capture(&mut self) {
+        self.capture_is_string = false;
+        let Some(raw) = self.capture.take() else {
+            return;
+        };
+        if self.id.is_some() {
+            return;
+        }
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw)
+            && (v.is_string() || v.is_number())
+        {
+            self.id = Some(v.to_string());
+        }
+    }
+
+    /// The id found, once the whole line has been fed.
+    fn finish(mut self) -> Option<String> {
+        self.finish_capture();
+        self.id
+    }
+}
+
+/// The reply-producing call for an oversized line whose id the scanner found.
+async fn answer_oversized<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    scan: IdScanner,
+) -> std::io::Result<()> {
+    if let Some(id) = scan.finish() {
+        let call = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"{REQUEST_TOO_LARGE}\",\"arguments\":{{}}}}}}\n"
+        );
+        w.write_all(call.as_bytes()).await?;
+    }
+    Ok(())
+}
+
+/// Copies `r` to `w` line by line. A line longer than `max` bytes is never buffered whole: its
+/// bytes are fed to an [`IdScanner`] and drained. If the line has a top-level JSON-RPC `"id"`
+/// it is replaced by a call to the unlisted [`REQUEST_TOO_LARGE`] tool (so the client gets an
+/// error reply for its id); otherwise it is dropped.
 pub async fn pump_lines<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     r: R,
     mut w: W,
     max: usize,
 ) -> std::io::Result<()> {
-    const HEAD: usize = 4096;
     let mut r = BufReader::new(r);
     let mut line: Vec<u8> = Vec::new();
-    let mut over = false;
-    let mut head: Vec<u8> = Vec::new();
+    // `Some` while draining an oversized line
+    let mut over: Option<IdScanner> = None;
     loop {
         let buf = r.fill_buf().await?;
         if buf.is_empty() {
-            if !over && !line.is_empty() {
-                w.write_all(&line).await?;
-                w.flush().await?;
+            match over.take() {
+                Some(scan) => answer_oversized(&mut w, scan).await?,
+                None if !line.is_empty() => w.write_all(&line).await?,
+                None => {}
             }
+            w.flush().await?;
             return Ok(());
         }
         let (chunk, done) = match buf.iter().position(|&b| b == b'\n') {
@@ -233,33 +372,27 @@ pub async fn pump_lines<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             None => (buf, false),
         };
         let n = chunk.len();
-        if !over {
-            line.extend_from_slice(chunk);
-            // `max` counts the line without its newline
-            if line.len() > max + 1 || (!done && line.len() > max) {
-                over = true;
-                head = line[..line.len().min(HEAD)].to_vec();
-                line = Vec::new();
+        match &mut over {
+            Some(scan) => scan.feed(chunk),
+            None => {
+                line.extend_from_slice(chunk);
+                // `max` counts the line without its newline
+                if line.len() > max + 1 || (!done && line.len() > max) {
+                    let mut scan = IdScanner::default();
+                    scan.feed(&line);
+                    over = Some(scan);
+                    line = Vec::new();
+                }
             }
-        } else if head.len() < HEAD {
-            head.extend_from_slice(&chunk[..chunk.len().min(HEAD - head.len())]);
         }
         r.consume(n);
         if done {
-            if over {
-                if let Some(id) = request_id(&head) {
-                    let call = format!(
-                        "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"{REQUEST_TOO_LARGE}\",\"arguments\":{{}}}}}}\n"
-                    );
-                    w.write_all(call.as_bytes()).await?;
-                }
-            } else {
-                w.write_all(&line).await?;
+            match over.take() {
+                Some(scan) => answer_oversized(&mut w, scan).await?,
+                None => w.write_all(&line).await?,
             }
             w.flush().await?;
             line.clear();
-            head.clear();
-            over = false;
         }
     }
 }
@@ -305,5 +438,152 @@ mod tests {
         // no id to answer: dropped
         let out = pump(&format!("{}\n{{\"c\":3}}\n", "z".repeat(100)), 64).await;
         assert_eq!(out.lines().collect::<Vec<_>>(), vec!["{\"c\":3}"]);
+    }
+}
+
+#[cfg(test)]
+mod mcp1_id_tests {
+    use super::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::ReadBuf;
+
+    /// Yields its data `n` bytes per read, so a line arrives in many chunks.
+    struct Chunked {
+        data: Vec<u8>,
+        pos: usize,
+        n: usize,
+    }
+
+    impl AsyncRead for Chunked {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let end = (self.pos + self.n)
+                .min(self.data.len())
+                .min(self.pos + buf.remaining());
+            let (pos, data) = (self.pos, std::mem::take(&mut self.data));
+            buf.put_slice(&data[pos..end]);
+            self.data = data;
+            self.pos = end;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    async fn pump_with(r: impl AsyncRead + Unpin, max: usize) -> Vec<serde_json::Value> {
+        let mut w = Vec::new();
+        pump_lines(r, &mut w, max).await.unwrap();
+        String::from_utf8(w)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+            .collect()
+    }
+
+    fn too_large(v: &serde_json::Value) -> bool {
+        v["params"]["name"] == REQUEST_TOO_LARGE
+    }
+
+    fn big() -> String {
+        "y".repeat(10_000)
+    }
+
+    #[tokio::test]
+    async fn mcp1_the_id_after_a_large_params_gets_the_reply() {
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"rdy_asset","arguments":{{"data_base64":"{}"}}}},"id":42}}"#,
+            big()
+        );
+        let out = pump_with(format!("{line}\n{{\"b\":2}}\n").as_bytes(), 64).await;
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(too_large(&out[0]));
+        assert_eq!(out[0]["id"], 42);
+        assert_eq!(out[1]["b"], 2);
+    }
+
+    #[tokio::test]
+    async fn mcp1_an_id_inside_params_does_not_take_the_reply() {
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"name":"rdy_write","arguments":{{"ops":[{{"op":"edit","id":"c-ABCDE","body":"{}"}}],"id":5}}}},"id":"req-9"}}"#,
+            big()
+        );
+        let out = pump_with(format!("{line}\n").as_bytes(), 64).await;
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(too_large(&out[0]));
+        assert_eq!(out[0]["id"], "req-9");
+    }
+
+    #[tokio::test]
+    async fn mcp1_a_string_id_with_an_escaped_quote_is_answered_verbatim() {
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":"a\"b\\","method":"tools/call","params":{{"x":"{}"}}}}"#,
+            big()
+        );
+        let out = pump_with(format!("{line}\n").as_bytes(), 64).await;
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0]["id"], "a\"b\\");
+    }
+
+    #[tokio::test]
+    async fn mcp1_a_line_in_small_chunks_keeps_its_id() {
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"x":"{}","id":1}},"id":-17}}"#,
+            big()
+        );
+        let data = format!("{{\"a\":1}}\n{line}\n{{\"b\":2}}\n").into_bytes();
+        let out = pump_with(Chunked { data, pos: 0, n: 5 }, 64).await;
+        assert_eq!(out.len(), 3, "{out:?}");
+        assert_eq!(out[0]["a"], 1);
+        assert_eq!(out[1]["id"], -17);
+        assert!(too_large(&out[1]));
+        assert_eq!(out[2]["b"], 2);
+    }
+
+    #[tokio::test]
+    async fn mcp1_a_crlf_line_keeps_its_id() {
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"x":"{}"}},"id":3}}"#,
+            big()
+        );
+        let out = pump_with(format!("{line}\r\n{{\"b\":2}}\r\n").as_bytes(), 64).await;
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[0]["id"], 3);
+        assert_eq!(out[1]["b"], 2);
+    }
+
+    #[tokio::test]
+    async fn mcp1_an_oversized_last_line_without_a_newline_is_answered() {
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"x":"{}"}},"id":11}}"#,
+            big()
+        );
+        let out = pump_with(line.as_bytes(), 64).await;
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0]["id"], 11);
+    }
+
+    #[tokio::test]
+    async fn mcp1_no_valid_top_level_id_is_dropped() {
+        for line in [
+            format!(r#"{{"params":{{"id":1,"x":"{}"}}}}"#, big()),
+            format!(r#"{{"id":true,"x":"{}"}}"#, big()),
+            format!(r#"[{{"id":1,"x":"{}"}}]"#, big()),
+            format!(r#"{{"idx":1,"ids":2,"i":3,"x":"{}"}}"#, big()),
+        ] {
+            let out = pump_with(format!("{line}\n{{\"c\":3}}\n").as_bytes(), 64).await;
+            assert_eq!(out.len(), 1, "{line:.40}: {out:?}");
+            assert_eq!(out[0]["c"], 3);
+        }
+    }
+
+    #[test]
+    fn mcp2_the_stdio_asset_limit_fits_one_request() {
+        assert_eq!(tools::MAX_ASSET_BYTES_STDIO, 12_579_840);
+        let b64 = tools::MAX_ASSET_BYTES_STDIO.div_ceil(3) * 4;
+        assert!(b64 + 4096 <= tools::MAX_REQUEST_BYTES);
+        let next = (tools::MAX_ASSET_BYTES_STDIO + 3).div_ceil(3) * 4;
+        assert!(next + 4096 > tools::MAX_REQUEST_BYTES);
     }
 }
