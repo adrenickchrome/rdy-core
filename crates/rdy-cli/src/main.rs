@@ -377,11 +377,12 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     Ok((serde_json::to_value(&p).expect("json"), text))
                 }
                 Cmd::Approve { proposal } => {
-                    let landing = r.land(&human(Role::Approver), &proposal)?;
-                    Ok((
-                        json!({"landing": landing}),
-                        format!("landed {}", hash_short(&landing)),
-                    ))
+                    let l = r.land_report(&human(Role::Approver), &proposal)?;
+                    let mut text = format!("landed {}", hash_short(&l.landing));
+                    for w in &l.warnings {
+                        text.push_str(&format!("\nwarning {}: {}", w.code, w.message));
+                    }
+                    Ok((json!({"landing": l.landing, "warnings": l.warnings}), text))
                 }
                 Cmd::Tag {
                     version,

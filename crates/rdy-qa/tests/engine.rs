@@ -105,6 +105,23 @@ fn ord3_inserting_at_one_spot_hits_the_cap_then_rebalance_restores_room() {
 #[test]
 fn ord3_rebalance_keeps_frozen_decisions_as_anchors() {
     let (_d, mut r, s) = section_project();
+    let p = rdy_model::BlockId::parse(&s).unwrap();
+    let first = r.materialized(&Scope::Canon).unwrap().children(Some(&p))[0]
+        .id
+        .to_string();
+    // movables before the anchor, one of them squeezed in between two others
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "claim", "parent": s, "body": "second"}]),
+    )
+    .unwrap();
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "claim", "parent": s, "after": first, "body": "mid"}]),
+    )
+    .unwrap();
     let d = r
         .decide(
             &writer(),
@@ -122,17 +139,53 @@ fn ord3_rebalance_keeps_frozen_decisions_as_anchors() {
     // a rebalance re-keys every movable child, so it can't share a write with an op that already touched one
     let e = write(&mut r, "work", json!([{"op": "create", "type": "claim", "parent": s, "body": "x"}, {"op": "rebalance", "parent": s}])).unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+    // movables after the anchor, one squeezed in between the anchor and another
     write(
         &mut r,
         "work",
-        json!([{"op": "create", "type": "claim", "parent": s, "body": "x"}]),
+        json!([{"op": "create", "type": "claim", "parent": s, "body": "y"}]),
     )
     .unwrap();
-    write(&mut r, "work", json!([{"op": "rebalance", "parent": s}])).unwrap();
-    assert_eq!(
-        r.block(&Scope::View("work".into()), &did).unwrap().order,
-        frozen_order
+    write(&mut r, "work", json!([{"op": "create", "type": "claim", "parent": s, "after": did.to_string(), "body": "x"}])).unwrap();
+    let work = Scope::View("work".into());
+    let ids = |r: &mut Rdy| -> Vec<(String, String, String)> {
+        r.materialized(&work)
+            .unwrap()
+            .children(Some(&p))
+            .iter()
+            .map(|b| (b.id.to_string(), b.order.clone(), b.body.clone()))
+            .collect()
+    };
+    let before = ids(&mut r);
+    let order_of =
+        |v: &[(String, String, String)]| v.iter().map(|(id, _, _)| id.clone()).collect::<Vec<_>>();
+    let movable_keys = |v: &[(String, String, String)]| {
+        v.iter()
+            .filter(|(id, _, _)| *id != did.to_string())
+            .map(|(_, k, _)| k.clone())
+            .collect::<Vec<_>>()
+    };
+    let anchor_at = before
+        .iter()
+        .position(|(id, _, _)| *id == did.to_string())
+        .unwrap();
+    assert!(
+        anchor_at > 0 && anchor_at < before.len() - 1,
+        "movables on both sides: {before:?}"
     );
+    write(&mut r, "work", json!([{"op": "rebalance", "parent": s}])).unwrap();
+    let after = ids(&mut r);
+    assert_eq!(order_of(&after), order_of(&before), "child order unchanged");
+    assert_ne!(
+        movable_keys(&after),
+        movable_keys(&before),
+        "movable keys re-keyed: {after:?}"
+    );
+    assert!(
+        movable_keys(&after).iter().all(|k| k.len() <= 4),
+        "{after:?}"
+    );
+    assert_eq!(r.block(&work, &did).unwrap().order, frozen_order);
     land(&mut r, "work").unwrap();
     check(&mut r, &Scope::Canon).unwrap();
 }
@@ -285,4 +338,193 @@ fn ord3_rebalance_at_the_top_level_keeps_m1_doc_names() {
     let b = r.block(&work, &id).unwrap();
     assert_eq!(b.field_str("name"), Some(name.as_str()), "{b:?}");
     check(&mut r, &work).unwrap();
+}
+
+#[test]
+fn ord3_rebalance_between_tied_frozen_decisions_is_order_depth() {
+    let (_d, mut r) = project();
+    raw_commit(
+        &mut r,
+        "work",
+        vec![
+            raw(
+                "d-AAAAA",
+                "doc",
+                None,
+                "V",
+                &[("name", "legacy"), ("title", "L"), ("doc_type", "glossary")],
+                "",
+            ),
+            raw(
+                "s-AAAAA",
+                "section",
+                Some("d-AAAAA"),
+                "V",
+                &[("title", "Terms")],
+                "",
+            ),
+            raw(
+                "D-AAAAA",
+                "decision",
+                Some("s-AAAAA"),
+                "V",
+                &[("status", "accepted"), ("statement", "A")],
+                "",
+            ),
+            // movable (proposed), and between the two frozen ones by id
+            raw(
+                "D-BBBBB",
+                "decision",
+                Some("s-AAAAA"),
+                "V",
+                &[("status", "proposed"), ("statement", "B")],
+                "",
+            ),
+            raw(
+                "D-CCCCC",
+                "decision",
+                Some("s-AAAAA"),
+                "V",
+                &[("status", "accepted"), ("statement", "C")],
+                "",
+            ),
+        ],
+    );
+    let e = write(
+        &mut r,
+        "work",
+        json!([{"op": "rebalance", "parent": "s-AAAAA"}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, "E_ORDER_DEPTH", "{e}");
+    assert!(!e.fix.contains("\"op\":\"rebalance\""), "{e}");
+    assert!(
+        e.fix
+            .contains("move the movable siblings under s-AAAAA to another parent"),
+        "{e}"
+    );
+}
+
+#[test]
+fn ord3_a_rebalance_that_changes_nothing_is_refused() {
+    let (_d, mut r, s) = section_project();
+    // one appended child: already tidy
+    let e = write(&mut r, "work", json!([{"op": "rebalance", "parent": s}])).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+    assert!(
+        e.message
+            .contains(&format!("nothing to rebalance under {s}")),
+        "{e}"
+    );
+    // no children at all
+    let res = write(&mut r, "work", json!([{"op": "create", "type": "section", "id": "$e", "parent": s, "fields": {"title": "Empty"}}])).unwrap();
+    let empty = res.created["$e"].clone();
+    let e = write(
+        &mut r,
+        "work",
+        json!([{"op": "rebalance", "parent": empty}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+    // a no-op rebalance alongside a real op is fine
+    write(&mut r, "work", json!([{"op": "rebalance", "parent": empty}, {"op": "create", "type": "claim", "parent": s, "body": "more"}])).unwrap();
+}
+
+#[test]
+fn ord3_rebalance_landed_under_an_open_proposal_warns_siblings_rekeyed() {
+    let (_d, mut r, s) = section_project();
+    let p = rdy_model::BlockId::parse(&s).unwrap();
+    let first = r.materialized(&Scope::Canon).unwrap().children(Some(&p))[0]
+        .id
+        .to_string();
+    // make the parent untidy in canon so a rebalance has work to do
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "claim", "parent": s, "body": "second"}]),
+    )
+    .unwrap();
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "claim", "parent": s, "after": first, "body": "mid"}]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    // B places a block relative to the current keys
+    write(
+        &mut r,
+        "vb",
+        json!([{"op": "create", "type": "claim", "parent": s, "after": first, "body": "from b"}]),
+    )
+    .unwrap();
+    // A rebalances and lands first
+    write(&mut r, "va", json!([{"op": "rebalance", "parent": s}])).unwrap();
+    land(&mut r, "va").unwrap();
+    let prop = r.propose(&writer(), "vb", "b").unwrap();
+    let w = prop
+        .warnings
+        .iter()
+        .find(|i| i.code == "W_SIBLINGS_REKEYED")
+        .unwrap_or_else(|| panic!("{:?}", prop.warnings));
+    assert_eq!(w.severity, rdy_schema::Severity::Warning);
+    assert!(w.message.contains(&s), "{w:?}");
+    let landed = r.land_report(&approver(), &prop.id).unwrap();
+    assert!(
+        landed
+            .warnings
+            .iter()
+            .any(|i| i.code == "W_SIBLINGS_REKEYED"),
+        "{:?}",
+        landed.warnings
+    );
+    check(&mut r, &Scope::Canon).unwrap();
+}
+
+#[test]
+fn ord3_a_frozen_decision_with_a_bad_key_is_told_to_move_its_siblings() {
+    let (_d, mut r) = project();
+    raw_commit(
+        &mut r,
+        "work",
+        vec![
+            raw(
+                "d-AAAAA",
+                "doc",
+                None,
+                "V",
+                &[("name", "legacy"), ("title", "L"), ("doc_type", "glossary")],
+                "",
+            ),
+            raw(
+                "s-AAAAA",
+                "section",
+                Some("d-AAAAA"),
+                "V",
+                &[("title", "Terms")],
+                "",
+            ),
+            raw(
+                "D-AAAAA",
+                "decision",
+                Some("s-AAAAA"),
+                &"z".repeat(30),
+                &[("status", "accepted"), ("statement", "A")],
+                "",
+            ),
+        ],
+    );
+    let e = r.propose(&writer(), "work", "legacy").unwrap_err();
+    let i = e
+        .issues
+        .iter()
+        .find(|i| i.code == "E_ORDER_KEY")
+        .unwrap_or_else(|| panic!("{e:?}"));
+    assert!(
+        i.fix.contains("frozen")
+            && i.fix
+                .contains("move its movable siblings to another parent"),
+        "{i:?}"
+    );
+    assert!(!i.fix.contains("rebalance"), "{i:?}");
 }

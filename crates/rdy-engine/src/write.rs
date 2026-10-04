@@ -610,6 +610,7 @@ fn build_ops(
     let mut names = BTreeMap::new();
     let mut touched = BTreeSet::new();
     let mut prior: Vec<Prior> = vec![];
+    let mut noop_rebalances: Vec<String> = vec![];
 
     for (i, input) in inputs.into_iter().enumerate() {
         match input {
@@ -856,6 +857,13 @@ fn build_ops(
                         .filter_map(|(_, id)| ov.get(id).cloned())
                         .collect()
                 });
+                let where_ = parent
+                    .as_ref()
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "the top level".into());
+                let move_fix = format!(
+                    "move the movable siblings under {where_} to another parent (they get fresh keys there)"
+                );
                 let mut items = Vec::with_capacity(kids.len());
                 for b in &kids {
                     if !decision::is_frozen(b) {
@@ -873,10 +881,6 @@ fn build_ops(
                     } else if rdy_model::valid_order_key(&b.order) {
                         items.push(Some(b.order.clone()));
                     } else {
-                        let where_ = parent
-                            .as_ref()
-                            .map(|p| p.to_string())
-                            .unwrap_or_else(|| "the top level".into());
                         return Err(RdyError::new(
                             E_ORDER_DEPTH,
                             format!(
@@ -885,14 +889,19 @@ fn build_ops(
                                 b.order,
                                 rdy_model::MAX_ORDER_KEY_LEN
                             ),
-                            format!(
-                                "move the movable siblings under {where_} to another parent (they get fresh keys there)"
-                            ),
+                            move_fix,
                         ));
                     }
                 }
-                let keys = rdy_model::rebalance_keys(&items)
-                    .map_err(|e| order_error(e, parent.as_ref()))?;
+                // frozen anchors can leave no room for the movables between them (ties, depth)
+                let keys = rdy_model::rebalance_keys(&items).map_err(|e| {
+                    RdyError::new(
+                        E_ORDER_DEPTH,
+                        format!("cannot re-key the children of {where_} around its frozen decisions: {e}"),
+                        move_fix.clone(),
+                    )
+                })?;
+                let before = ops.len();
                 for (b, k) in kids.iter().zip(keys) {
                     if decision::is_frozen(b) || b.order == k {
                         continue;
@@ -915,8 +924,18 @@ fn build_ops(
                         block,
                     });
                 }
+                if ops.len() == before {
+                    noop_rebalances.push(where_);
+                }
             }
         }
+    }
+    // only rebalances that changed nothing: refuse rather than commit an empty change
+    if ops.is_empty() && !noop_rebalances.is_empty() {
+        return Err(bad(
+            format!("nothing to rebalance under {}", noop_rebalances.join(", ")),
+            "the children's keys are already short and in order; no write is needed",
+        ));
     }
 
     // second pass: references, decision permissions, schema validation; pins to blocks outside

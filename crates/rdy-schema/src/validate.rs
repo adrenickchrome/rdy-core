@@ -234,8 +234,12 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
                 block.order,
                 rdy_model::MAX_ORDER_KEY_LEN
             ),
-            "rebalance the siblings: {\"op\":\"rebalance\",\"parent\":<the parent's id or path>}"
-                .into(),
+            if rdy_model::decision::is_frozen(block) {
+                "this decision is frozen and can't be re-keyed; move its movable siblings to another parent".into()
+            } else {
+                "rebalance the siblings: {\"op\":\"rebalance\",\"parent\":<the parent's id or path>}"
+                    .into()
+            },
         ));
     }
     out

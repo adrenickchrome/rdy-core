@@ -13,6 +13,12 @@ pub struct ProposalInfo {
     pub warnings: Vec<Issue>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct LandInfo {
+    pub landing: String,
+    pub warnings: Vec<Issue>,
+}
+
 fn parse_hash(s: &str) -> Result<Hash, RdyError> {
     s.parse().map_err(|_| {
         RdyError::new(
@@ -186,6 +192,80 @@ impl Rdy {
         Ok(issues)
     }
 
+    /// Warns when the proposal places blocks (creates or moves) under a parent whose siblings, as
+    /// the view's base saw them, have different order keys in canon now (a rebalance landed since):
+    /// the placed blocks' keys were chosen against the old keys.
+    fn rekeyed_warnings(
+        &mut self,
+        view_base: Option<Hash>,
+        changes: &[Change],
+    ) -> Result<Vec<Issue>, RdyError> {
+        let mut parents: BTreeSet<Option<BlockId>> = BTreeSet::new();
+        for c in changes {
+            for op in &c.ops {
+                match op {
+                    Op::Create { block } => {
+                        parents.insert(block.parent.clone());
+                    }
+                    Op::Update { base, block } => {
+                        let old = self.store.get_block(base)?;
+                        if old.parent != block.parent || old.order != block.order {
+                            parents.insert(block.parent.clone());
+                        }
+                    }
+                    Op::Delete { .. } => {}
+                }
+            }
+        }
+        if parents.is_empty() {
+            return Ok(vec![]);
+        }
+        let base = match view_base {
+            Some(l) => self.store.snapshot_at(&l)?,
+            None => rdy_model::StateSnapshot::default(),
+        };
+        // canon's children that the base also had, at a different version: (parent, id, base, order)
+        let canon = self.materialized(&Scope::Canon)?;
+        let mut changed = vec![];
+        for p in &parents {
+            for sib in canon.children(p.as_ref()) {
+                if let Some(h) = base.blocks.get(&sib.id)
+                    && *h != sib.version_hash()
+                {
+                    changed.push((p.clone(), sib.id.clone(), *h, sib.order.clone()));
+                }
+            }
+        }
+        let mut out = vec![];
+        for p in parents {
+            let mut rekeyed = None;
+            for (_, id, h, order) in changed.iter().filter(|c| c.0 == p) {
+                if self.store.get_block(h)?.order != *order {
+                    rekeyed = Some(id.clone());
+                    break;
+                }
+            }
+            if let Some(sib) = rekeyed {
+                let at = p
+                    .as_ref()
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "the top level".into());
+                out.push(Issue {
+                    severity: Severity::Warning,
+                    code: "W_SIBLINGS_REKEYED",
+                    block: p.clone(),
+                    message: format!(
+                        "the children of {at} were re-keyed in canon since this view was based on it (e.g. {sib}): check the order of the blocks this proposal places there"
+                    ),
+                    fix: format!(
+                        "after landing, read the children of {at} and move any block this proposal placed out of order"
+                    ),
+                });
+            }
+        }
+        Ok(out)
+    }
+
     pub fn propose(
         &mut self,
         s: &Session,
@@ -208,12 +288,13 @@ impl Rdy {
             ));
         }
         let changes = self.changes_of(&v.changes)?;
-        let issues = self.prospective_issues(&changes)?;
+        let mut issues = self.prospective_issues(&changes)?;
         if let Some(first) = issues.iter().find(|i| i.severity == Severity::Error) {
             let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
             e.issues = issues;
             return Err(e);
         }
+        issues.extend(self.rekeyed_warnings(v.base, &changes)?);
         let id = self.store.propose(view, title, s.provenance())?;
         Ok(ProposalInfo {
             id: id.to_string(),
@@ -223,7 +304,13 @@ impl Rdy {
         })
     }
 
+    /// Lands a proposal; returns the landing id.
     pub fn land(&mut self, s: &Session, proposal: &str) -> Result<String, RdyError> {
+        self.land_report(s, proposal).map(|l| l.landing)
+    }
+
+    /// Lands a proposal; returns the landing id and the gate's warnings.
+    pub fn land_report(&mut self, s: &Session, proposal: &str) -> Result<LandInfo, RdyError> {
         if !s.role.can_land() {
             return Err(RdyError::new(
                 E_PERMISSION,
@@ -306,12 +393,14 @@ impl Rdy {
         });
         let mut all = changes;
         all.extend(accept.clone());
-        let issues = self.prospective_issues(&all)?;
+        let mut issues = self.prospective_issues(&all)?;
         if let Some(first) = issues.iter().find(|i| i.severity == Severity::Error) {
             let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
             e.issues = issues;
             return Err(e);
         }
+        let view_base = self.store.view(&p.view)?.base;
+        issues.extend(self.rekeyed_warnings(view_base, &all)?);
 
         // 4. write the acceptance change, then land
         let result = (|| -> Result<_, RdyError> {
@@ -329,6 +418,9 @@ impl Rdy {
         // the view may have changed even if a later step failed: never leave caches stale
         self.invalidate();
         let landing = result?;
-        Ok(landing.to_string())
+        Ok(LandInfo {
+            landing: landing.to_string(),
+            warnings: issues,
+        })
     }
 }

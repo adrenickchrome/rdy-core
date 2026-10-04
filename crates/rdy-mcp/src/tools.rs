@@ -74,7 +74,7 @@ pub struct WriteParams {
     /// Ops: {"op":"create","type":..,"id":"$name"?,"parent":..,"after":..,"fields":{..},"body":..,"links":{..}},
     /// {"op":"update","id":..,"base":..?,"fields":{..},"unset":[..],"body":..,"links":{..}},
     /// {"op":"move","id":..,"parent":..?,"after":..}, {"op":"delete","id":..},
-    /// {"op":"rebalance","parent":..?} (re-keys a parent's children; frozen decisions stay put). Ids, parents, afters and link targets also take paths (wallets/transactions); a move without parent goes to the top level (docs and folders).
+    /// {"op":"rebalance","parent":..?} (re-keys a parent's children; frozen decisions stay put; in one write it must come before any other op on those children, and a child it re-keys can't be edited again in the same write). Ids, parents, afters and link targets also take paths (wallets/transactions); a move without parent goes to the top level (docs and folders).
     pub ops: Vec<Value>,
     /// The decision this change carries out.
     pub implements: Option<String>,
