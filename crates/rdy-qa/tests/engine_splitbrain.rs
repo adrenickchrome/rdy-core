@@ -566,6 +566,25 @@ impl Sim<'_> {
     }
 }
 
+/// Seeds this thread's block ids for one case; unseeds them on drop, even if the case fails.
+struct SeededIds;
+
+impl SeededIds {
+    fn new(key: &str) -> SeededIds {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut h);
+        rdy_model::seed_ids_for_tests(h.finish());
+        SeededIds
+    }
+}
+
+impl Drop for SeededIds {
+    fn drop(&mut self) {
+        rdy_model::unseed_ids_for_tests();
+    }
+}
+
 #[test]
 fn engine_split_brain_histories_keep_every_invariant() {
     let stats = RefCell::new(Stats::default());
@@ -577,6 +596,9 @@ fn engine_split_brain_histories_keep_every_invariant() {
     };
     let mut runner = TestRunner::new(config);
     let result = runner.run(&proptest::collection::vec(cmd(), 1..64), |cmds| {
+        // block ids come from a generator seeded by the case itself, so every case (and every
+        // shrink step) replays identically and the coverage counters are deterministic
+        let _ids = SeededIds::new(&format!("{cmds:?}"));
         let (_d, mut r) = project();
         base(&mut r);
         let mut sim = Sim {
@@ -595,26 +617,36 @@ fn engine_split_brain_histories_keep_every_invariant() {
         panic!("{e}");
     }
 
-    // coverage minimums (fast-mode floors; deep mode sees about ten times as much)
+    // Coverage floors. Block ids are seeded per case, so the fast run's counters are exact and
+    // repeatable; the floors sit at about 70% of the seeded fast run (shown in brackets), so a
+    // generator change that loses coverage fails here. Deep mode sees about ten times as much.
     let s = stats.into_inner();
     eprintln!("split-brain coverage: {s:#?}");
-    assert!(
-        s.effective_rebalances >= 10,
-        "too few effective rebalances: {s:#?}"
-    );
-    let refused: usize = s.land_refused.values().sum();
-    assert!(refused >= 10, "too few refused landings: {s:#?}");
-    assert!(
-        s.land_refused.len() >= 3,
-        "refused landings cover fewer than 3 codes: {s:#?}"
-    );
-    assert!(
-        s.siblings_rekeyed >= 1,
-        "no W_SIBLINGS_REKEYED seen: {s:#?}"
-    );
-    assert!(
-        s.write_refused.get(E_FROZEN).copied().unwrap_or(0) >= 1,
-        "no write was refused as E_FROZEN: {s:#?}"
-    );
-    assert!(s.tags >= 2, "fewer than 2 versions tagged: {s:#?}");
+    let land = |code: &str| s.land_refused.get(code).copied().unwrap_or(0);
+    let floors = [
+        ("effective rebalances [23]", s.effective_rebalances, 16),
+        ("refused landings [36]", s.land_refused.values().sum(), 25),
+        ("refused-landing codes [4]", s.land_refused.len(), 3),
+        ("E_STALE_BASE landings [19]", land("E_STALE_BASE"), 13),
+        (
+            "E_PARENT_CYCLE landings [7]",
+            land("E_VALIDATION/E_PARENT_CYCLE"),
+            4,
+        ),
+        (
+            "E_PATH_CLASH landings [8]",
+            land("E_VALIDATION/E_PATH_CLASH"),
+            5,
+        ),
+        ("W_SIBLINGS_REKEYED [7]", s.siblings_rekeyed, 4),
+        (
+            "E_FROZEN writes [5]",
+            s.write_refused.get(E_FROZEN).copied().unwrap_or(0),
+            3,
+        ),
+        ("versions tagged [28]", s.tags, 19),
+    ];
+    for (what, got, min) in floors {
+        assert!(got >= min, "{what}: {got} < floor {min}: {s:#?}");
+    }
 }

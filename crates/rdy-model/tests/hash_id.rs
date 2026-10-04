@@ -87,3 +87,29 @@ fn hash_rejects_strings_with_plus_signs() {
         Err(IdError::BadHash(_))
     ));
 }
+
+#[test]
+fn seeded_ids_replay_the_same_sequence_and_unseeded_ids_stay_valid() {
+    use rdy_model::{seed_ids_for_tests, unseed_ids_for_tests};
+    let run = |seed| {
+        seed_ids_for_tests(seed);
+        let ids: Vec<String> = (0..50).map(|_| BlockId::new("c").to_string()).collect();
+        unseed_ids_for_tests();
+        ids
+    };
+    let a = run(7);
+    assert_eq!(a, run(7));
+    assert_ne!(a, run(8));
+    for id in &a {
+        BlockId::parse(id).unwrap();
+    }
+    let unseeded: Vec<BlockId> = (0..50).map(|_| BlockId::new("c")).collect();
+    for id in &unseeded {
+        BlockId::parse(id.as_str()).unwrap();
+    }
+    // unseeded ids are random again, not the seeded sequence
+    assert_ne!(
+        unseeded.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+        a
+    );
+}

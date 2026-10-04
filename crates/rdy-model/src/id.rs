@@ -1,5 +1,39 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::cell::Cell;
 use std::fmt;
+
+thread_local! {
+    /// splitmix64 state for test-seeded ids on this thread; `None`: ids are random.
+    static SEEDED: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// Tests only: make `BlockId::new` on this thread draw from a deterministic generator seeded
+/// with `seed`, so a test's ids replay exactly. Undo with [`unseed_ids_for_tests`].
+#[doc(hidden)]
+pub fn seed_ids_for_tests(seed: u64) {
+    SEEDED.with(|s| s.set(Some(seed)));
+}
+
+/// Tests only: return this thread's `BlockId::new` to random ids.
+#[doc(hidden)]
+pub fn unseed_ids_for_tests() {
+    SEEDED.with(|s| s.set(None));
+}
+
+/// A digit in `0..32`: from the seeded splitmix64 stream if this thread has one, else random.
+fn next_digit() -> usize {
+    SEEDED.with(|s| match s.get() {
+        None => rand::random_range(0..32),
+        Some(state) => {
+            let state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            s.set(Some(state));
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            ((z ^ (z >> 31)) >> 59) as usize
+        }
+    })
+}
 
 pub const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
@@ -19,9 +53,7 @@ pub struct BlockId(String);
 impl BlockId {
     pub fn new(prefix: &str) -> BlockId {
         assert!(valid_prefix(prefix), "invalid id prefix {prefix:?}");
-        let body: String = (0..5)
-            .map(|_| CROCKFORD[rand::random_range(0..32)] as char)
-            .collect();
+        let body: String = (0..5).map(|_| CROCKFORD[next_digit()] as char).collect();
         BlockId(format!("{prefix}-{body}"))
     }
 
