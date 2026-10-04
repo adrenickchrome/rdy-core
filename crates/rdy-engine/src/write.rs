@@ -75,6 +75,15 @@ pub enum OpInput {
         #[serde(default)]
         parent: Option<String>,
     },
+    /// sus3: re-pins a block's references and links to their targets' current versions.
+    Repin {
+        id: String,
+        #[serde(default)]
+        base: Option<String>,
+        /// The targets to re-pin; empty: every block it references or links to.
+        #[serde(default)]
+        targets: Vec<String>,
+    },
 }
 
 pub struct WriteRequest {
@@ -721,6 +730,7 @@ fn build_ops(
     let mut touched = BTreeSet::new();
     let mut prior: Vec<Prior> = vec![];
     let mut noop_rebalances: Vec<String> = vec![];
+    let mut repinned: Vec<BlockId> = vec![];
 
     for (i, input) in inputs.into_iter().enumerate() {
         match input {
@@ -1057,6 +1067,55 @@ fn build_ops(
                     noop_rebalances.push(where_);
                 }
             }
+            OpInput::Repin {
+                id,
+                base: b,
+                targets,
+            } => {
+                let id = res.id(&id)?;
+                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched)?;
+                let cited: BTreeSet<BlockId> = cur
+                    .ref_tokens()
+                    .iter()
+                    .filter_map(|t| BlockId::parse(t).ok())
+                    .chain(cur.links.values().flatten().map(|l| l.target.clone()))
+                    .collect();
+                let wanted: Vec<BlockId> = if targets.is_empty() {
+                    cited.iter().cloned().collect()
+                } else {
+                    targets
+                        .iter()
+                        .map(|t| res.id(t))
+                        .collect::<Result<_, _>>()?
+                };
+                let mut block = cur.clone();
+                for t in &wanted {
+                    if !cited.contains(t) {
+                        return Err(bad(
+                            format!("{id} does not reference or link to {t}"),
+                            "repin only targets the block cites; rdy_context lists its suspects",
+                        ));
+                    }
+                    let target = ov.get(t).ok_or_else(|| {
+                        RdyError::new(
+                            E_UNKNOWN_REF,
+                            format!("{id} cites {t}, which does not exist in this view"),
+                            format!(
+                                "remove the reference or link to {t} from {id} instead of re-pinning it"
+                            ),
+                        )
+                    })?;
+                    block.pins.insert(t.clone(), target.version_hash());
+                }
+                repinned.extend(wanted);
+                prior.push((true, block.pins.clone())); // pins set here; the second pass keeps them
+                touched.insert(id.clone());
+                ov.set(id, Some(block.clone()));
+                ops.push(Op::Update {
+                    base: base_hash,
+                    block,
+                });
+            }
         }
     }
     // only rebalances that changed nothing: refuse rather than commit an empty change
@@ -1064,6 +1123,14 @@ fn build_ops(
         return Err(bad(
             format!("nothing to rebalance under {}", noop_rebalances.join(", ")),
             "the children's keys are already short and in order; no write is needed",
+        ));
+    }
+
+    // sus3: a repin to a block this write also changes would pin a version that never lands
+    if let Some(t) = repinned.iter().find(|t| touched.contains(*t)) {
+        return Err(bad(
+            format!("{t} changes in this write, so a repin to it would pin an old version"),
+            "repin in a separate write, after the write that changes the target",
         ));
     }
 
