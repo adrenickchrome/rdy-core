@@ -282,11 +282,10 @@ fn ord3_import_and_check_refuse_an_order_key_over_24_characters() {
     assert_eq!(r.store().view_state("import").unwrap(), before);
 }
 
-/// A symlink from docs/ to a valid doc file outside the export must be refused. Today import
-/// follows it (accepted), so the case is ignored until plan 2a decides symlink policy.
+/// A symlink from docs/ to a valid doc file outside the export must be refused (sym1): rdy
+/// never follows links in an export, and names the link at line 1.
 #[cfg(unix)]
 #[test]
-#[ignore = "sym1: symlink policy, fixed in plan 2a"]
 fn io_symlink_out_of_the_export_is_refused() {
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("real.yaml"), DOC).unwrap();

@@ -112,6 +112,21 @@ fn hidden(name: &str) -> bool {
     name.starts_with('.')
 }
 
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// sym1: a link could read outside the tree or loop; it is refused, never followed.
+fn link_diag(shown: &str) -> Diagnostic {
+    Diagnostic::error(
+        shown,
+        (1, 1),
+        E_FILE_FORMAT,
+        format!("{shown} is a symbolic link; rdy does not follow links in an export"),
+        "replace the link with the file or folder it points to",
+    )
+}
+
 impl Reader {
     fn dir(&mut self, dir: &Path, shown: &str, parent: Option<&BlockId>) {
         let mut entries: Vec<_> = match std::fs::read_dir(dir) {
@@ -149,6 +164,10 @@ impl Reader {
                 continue;
             }
             let here = format!("{shown}/{fname}");
+            if is_symlink(&path) {
+                self.diags.push(link_diag(&here));
+                continue;
+            }
             let name = if path.is_dir() {
                 fname.clone()
             } else if fname == FOLDER_FILE {
@@ -172,6 +191,10 @@ impl Reader {
             if path.is_dir() {
                 let ff = path.join(FOLDER_FILE);
                 let ff_shown = format!("{here}/{FOLDER_FILE}");
+                if is_symlink(&ff) {
+                    self.diags.push(link_diag(&ff_shown));
+                    continue;
+                }
                 if !ff.exists() {
                     self.diags.push(Diagnostic::error(
                         &ff_shown,

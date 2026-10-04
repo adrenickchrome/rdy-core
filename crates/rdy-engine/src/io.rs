@@ -157,6 +157,7 @@ fn read_format_1(dir: &Path) -> Result<Vec<Block>, RdyError> {
     }
     let mut blocks: Vec<Block> = vec![];
     for f in files {
+        refuse_symlink(&f)?;
         let text = std::fs::read_to_string(&f).map_err(io_err)?;
         let list: Vec<BlockYaml> = serde_yaml_ng::from_str(&text).map_err(|e| {
             RdyError::new(
@@ -318,6 +319,21 @@ fn is_hidden(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.starts_with('.'))
+}
+
+/// sym1: import never follows a symbolic link out of the export.
+fn refuse_symlink(path: &Path) -> Result<(), RdyError> {
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(RdyError::new(
+            E_FILE_FORMAT,
+            format!(
+                "{} is a symbolic link; rdy does not follow links in an export",
+                path.display()
+            ),
+            "replace the link with the file it points to",
+        ));
+    }
+    Ok(())
 }
 
 pub fn block_to_yaml(b: &Block) -> String {
@@ -484,6 +500,7 @@ impl Rdy {
         if blob_dir.exists() {
             for entry in std::fs::read_dir(&blob_dir).map_err(io_err)? {
                 let path = entry.map_err(io_err)?.path();
+                refuse_symlink(&path)?;
                 if !path.is_file() || is_hidden(&path) {
                     continue;
                 }
