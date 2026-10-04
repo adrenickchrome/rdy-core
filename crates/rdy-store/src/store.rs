@@ -12,6 +12,11 @@ use std::path::{Path, PathBuf};
 const SEGMENT_MAX: u64 = 64 * 1024 * 1024;
 const CHUNK: usize = 1024 * 1024;
 
+/// The largest blob a chunk-kind object may stand for as a manifest: an agent chose that object's
+/// bytes, so its `len` is not trusted to size the work of reading it. Matches the largest asset
+/// `rdy_asset` accepts.
+pub const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
+
 pub struct Store {
     dir: PathBuf,
     log: SegmentLog,
@@ -380,13 +385,15 @@ impl Store {
     }
 
     /// Whether `h` names a blob (a manifest object) in this store. An object of chunk kind
-    /// counts when it reads as a manifest: the index dedupes by hash alone, so a manifest whose
-    /// bytes were first stored as a chunk is that chunk-kind object.
+    /// counts when it is exactly the manifest `put_blob` would have written for a blob that is
+    /// all here: the index dedupes by hash alone, so a manifest whose bytes were first stored as
+    /// a chunk is that chunk-kind object. That check reads at most `MAX_BLOB_BYTES`, one chunk at
+    /// a time, and keeps none of it.
     pub fn has_blob(&self, h: &Hash) -> Result<bool, StoreError> {
         match self.get_raw(h) {
             Ok((kinds::BLOB_MANIFEST, _)) => Ok(true),
-            Ok((kinds::BLOB_CHUNK, _)) => match self.get_blob(h) {
-                Ok(_) => Ok(true),
+            Ok((kinds::BLOB_CHUNK, _)) => match self.read_blob(h, &mut |_| {}) {
+                Ok(()) => Ok(true),
                 Err(StoreError::Decode(_) | StoreError::NotFound(_)) => Ok(false),
                 Err(e) => Err(e),
             },
@@ -397,6 +404,15 @@ impl Store {
     }
 
     pub fn get_blob(&self, h: &Hash) -> Result<Vec<u8>, StoreError> {
+        let mut out = Vec::new();
+        self.read_blob(h, &mut |chunk| out.extend_from_slice(chunk))?;
+        Ok(out)
+    }
+
+    /// Validates the manifest at `h` against what `put_blob` writes, then hands each chunk to
+    /// `sink` in order. Nothing is read before the manifest is known to be canonical and, for a
+    /// chunk-kind object (whose bytes an agent chose), within `MAX_BLOB_BYTES`.
+    fn read_blob(&self, h: &Hash, sink: &mut dyn FnMut(&[u8])) -> Result<(), StoreError> {
         let (kind, payload) = self.get_raw(h)?;
         // The kind check is defence in depth; the structural checks below are the guard. A
         // manifest's bytes may have been stored first as a chunk, and writes dedupe by hash
@@ -407,29 +423,45 @@ impl Store {
             )));
         }
         let m: BlobManifest = decode(&payload)?;
-        // never trust the manifest's length for an allocation: grow as chunks are read
-        let mut out = Vec::new();
+        // postcard ignores trailing bytes; a manifest that is not its own canonical encoding
+        // is not what `put_blob` wrote, and would not re-import under its own name
+        if encode(&m) != payload {
+            return Err(StoreError::Decode(format!(
+                "{h} is not a canonical blob manifest"
+            )));
+        }
+        if kind == kinds::BLOB_CHUNK && m.len > MAX_BLOB_BYTES {
+            return Err(StoreError::Decode(format!(
+                "{h} claims a blob of {} bytes, over the limit of {MAX_BLOB_BYTES}",
+                m.len
+            )));
+        }
+        // the chunk count `put_blob` would produce, checked before anything is allocated or read
+        if m.chunks.len() as u64 != m.len.div_ceil(CHUNK as u64) {
+            return Err(StoreError::Decode(format!(
+                "blob {h} lists {} chunks for {} bytes",
+                m.chunks.len(),
+                m.len
+            )));
+        }
+        let mut left = m.len;
         for c in &m.chunks {
             // a chunk's stored kind is not checked: writes dedupe by hash alone, so a chunk may
             // share its object with a block or snapshot of the same bytes, and the hash already
             // proves the bytes
             let (_, bytes) = self.get_raw(c)?;
-            out.extend_from_slice(&bytes);
-            if out.len() as u64 > m.len {
+            // every chunk but the last is a full chunk, as `put_blob` cuts them
+            let want = left.min(CHUNK as u64);
+            if bytes.len() as u64 != want {
                 return Err(StoreError::Decode(format!(
-                    "blob {h} is longer than its manifest's {} bytes",
-                    m.len
+                    "blob {h} has a chunk of {} bytes where {want} are due",
+                    bytes.len()
                 )));
             }
+            left -= want;
+            sink(&bytes);
         }
-        if out.len() as u64 != m.len {
-            return Err(StoreError::Decode(format!(
-                "blob {h} has {} bytes, its manifest says {}",
-                out.len(),
-                m.len
-            )));
-        }
-        Ok(out)
+        Ok(())
     }
 
     pub fn producer(&self, version: &Hash) -> Result<Option<Hash>, StoreError> {

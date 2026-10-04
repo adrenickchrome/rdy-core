@@ -6,6 +6,6 @@ pub mod segment;
 mod store;
 
 pub use error::StoreError;
-pub use store::{Store, lock_error};
+pub use store::{MAX_BLOB_BYTES, Store, lock_error};
 mod state;
 pub use state::{ViewRecord, apply_op};

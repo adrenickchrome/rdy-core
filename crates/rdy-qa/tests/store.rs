@@ -293,3 +293,141 @@ fn blob1_a_manifest_of_another_kind_is_still_refused() {
     assert!(matches!(s.get_blob(&other), Err(StoreError::Decode(_))));
     assert!(!s.has_blob(&other).unwrap());
 }
+
+const MIB: usize = 1024 * 1024;
+
+/// Stores `payload` as a chunk (the object an agent's `rdy_asset` upload makes) and returns its hash.
+fn upload_as_chunk(s: &mut Store, payload: Vec<u8>) -> rdy_model::Hash {
+    s.write(vec![(kinds::BLOB_CHUNK, payload)]).unwrap()[0]
+}
+
+/// A chunk-kind object that decodes as a manifest is not trusted to be honest: an agent chose its
+/// bytes. These forged manifests are refused by structure, before any chunk is read.
+#[test]
+fn blob1_a_forged_chunk_kind_manifest_is_not_a_blob() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(dir.path()).unwrap();
+    let big = vec![9u8; MIB];
+    let hc = upload_as_chunk(&mut s, big.clone());
+    let small = upload_as_chunk(&mut s, vec![1u8; 10]);
+    let manifest = |len: u64, chunks: Vec<rdy_model::Hash>| {
+        postcard::to_allocvec(&BlobManifest { len, chunks }).unwrap()
+    };
+    let n = 30_000usize;
+    let forged: Vec<(&str, Vec<u8>)> = vec![
+        // ~30 GiB of one repeated chunk, in a payload of under 1 MiB
+        ("huge len", manifest((n * MIB) as u64, vec![hc; n])),
+        // trailing bytes after a canonical empty manifest
+        ("trailing bytes", {
+            let mut p = manifest(0, vec![]);
+            p.extend_from_slice(&[0xde, 0xad]);
+            p
+        }),
+        // two small chunks where one full chunk is due
+        ("short chunk", manifest(20, vec![small, small])),
+        // a first chunk that is not a full chunk
+        (
+            "not on a chunk boundary",
+            manifest((MIB + 10) as u64, vec![small, hc]),
+        ),
+        // a length over the store's cap, with chunks to match
+        (
+            "over the cap",
+            manifest(
+                rdy_store::MAX_BLOB_BYTES + MIB as u64,
+                vec![hc; (rdy_store::MAX_BLOB_BYTES as usize / MIB) + 1],
+            ),
+        ),
+    ];
+    for (what, payload) in forged {
+        let h = upload_as_chunk(&mut s, payload);
+        let t = std::time::Instant::now();
+        assert!(!s.has_blob(&h).unwrap(), "{what}");
+        assert!(
+            matches!(s.get_blob(&h), Err(StoreError::Decode(_))),
+            "{what}"
+        );
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(2),
+            "{what} took {:?}",
+            t.elapsed()
+        );
+    }
+}
+
+/// A chunk-kind manifest that is exactly what `put_blob` writes for its blob is still fine, even
+/// when it repeats a chunk and so is long for its payload.
+#[test]
+fn blob1_a_chunk_kind_manifest_that_is_canonical_still_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(dir.path()).unwrap();
+    let bytes = vec![5u8; 3 * MIB + 7];
+    let payload = postcard::to_allocvec(&BlobManifest {
+        len: bytes.len() as u64,
+        chunks: bytes.chunks(MIB).map(rdy_model::Hash::of).collect(),
+    })
+    .unwrap();
+    let squat = upload_as_chunk(&mut s, payload);
+    let h = s.put_blob(&bytes).unwrap();
+    assert_eq!(h, squat);
+    assert!(s.has_blob(&h).unwrap());
+    assert_eq!(s.get_blob(&h).unwrap(), bytes);
+}
+
+/// A figure naming a forged chunk-kind manifest is refused at write, so export never meets it.
+#[test]
+fn blob1_a_figure_naming_a_forged_manifest_is_refused_at_write() {
+    let (_d, mut r) = project();
+    let res = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
+    ])).unwrap();
+    let hc = upload_as_chunk(r.store_mut(), vec![9u8; MIB]);
+    let n = 30_000usize;
+    let mut trailing = postcard::to_allocvec(&BlobManifest {
+        len: 0,
+        chunks: vec![],
+    })
+    .unwrap();
+    trailing.extend_from_slice(&[1, 0, 0xde, 0xad]);
+    let payloads = [
+        postcard::to_allocvec(&BlobManifest {
+            len: (n * MIB) as u64,
+            chunks: vec![hc; n],
+        })
+        .unwrap(),
+        trailing,
+    ];
+    for payload in payloads {
+        let h = upload_as_chunk(r.store_mut(), payload);
+        let t = std::time::Instant::now();
+        let e = write(&mut r, "work", json!([{"op": "create", "type": "figure", "parent": res.created["$s"], "fields": {"blob": h.to_string(), "media_type": "image/png", "alt": "x"}}])).unwrap_err();
+        assert_eq!(e.code, "E_VALIDATION", "{e}");
+        assert!(t.elapsed() < std::time::Duration::from_secs(2));
+    }
+}
+
+/// Whatever `has_blob` accepts must export and re-import under its own name.
+#[test]
+fn blob1_a_pre_uploaded_manifest_survives_write_export_import() {
+    let (_d, mut r) = project();
+    let res = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
+    ])).unwrap();
+    let bytes = b"pixels an agent could predict".to_vec();
+    upload_as_chunk(r.store_mut(), manifest_payload_of(&bytes));
+    let h = r.store_mut().put_blob(&bytes).unwrap();
+    write(&mut r, "work", json!([{"op": "create", "type": "figure", "parent": res.created["$s"], "fields": {"blob": h.to_string(), "media_type": "image/png", "alt": "x"}}])).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let dir = out.path().join("x");
+    r.export(&Scope::View("work".into()), &dir).unwrap();
+    assert_eq!(
+        std::fs::read(dir.join("blobs").join(h.to_string())).unwrap(),
+        bytes
+    );
+    let (_d2, mut fresh) = project();
+    fresh.import(&approver(), "import", &dir).unwrap();
+    assert!(fresh.store().has_blob(&h).unwrap());
+    assert_eq!(fresh.store().get_blob(&h).unwrap(), bytes);
+}
