@@ -211,8 +211,11 @@ fn session(st: &McpState) -> Result<Session, RdyError> {
     })
 }
 
-fn scope_of(st: &McpState, s: &Option<String>) -> Scope {
-    Scope::parse(s.as_deref().unwrap_or(&st.view))
+fn scope_of(st: &McpState, s: &Option<String>) -> Result<Scope, RdyError> {
+    match s {
+        Some(text) => st.rdy.resolve_scope(text),
+        None => Ok(Scope::View(st.view.clone())),
+    }
 }
 
 fn id_of(s: &str) -> Result<BlockId, RdyError> {
@@ -266,7 +269,7 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
 
 pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError> {
     let s = session(st)?;
-    let scope = scope_of(st, &p.scope);
+    let scope = scope_of(st, &p.scope)?;
     let docs: Vec<Value> = st.rdy.materialized(&scope)?.children(None).iter().map(|d| json!({"id": d.id.to_string(), "title": d.field_str("title"), "doc_type": d.field_str("doc_type")})).collect();
     let store = st.rdy.store();
     let views: Vec<Value> = store
@@ -290,7 +293,7 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
 
 pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     session(st)?;
-    let scope = scope_of(st, &p.scope);
+    let scope = scope_of(st, &p.scope)?;
     let id = id_of(&p.id)?;
     let suspects: std::collections::BTreeSet<BlockId> = st
         .rdy
@@ -379,7 +382,7 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
 
 pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     session(st)?;
-    let scope = scope_of(st, &p.scope);
+    let scope = scope_of(st, &p.scope)?;
     let ctx = st.rdy.context(&scope, &id_of(&p.id)?)?;
     Ok(budget(
         serde_json::to_value(ctx).expect("context json"),
@@ -389,7 +392,7 @@ pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
 
 pub fn rdy_impact(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     session(st)?;
-    let scope = scope_of(st, &p.scope);
+    let scope = scope_of(st, &p.scope)?;
     let items = st
         .rdy
         .impact(&scope, &id_of(&p.id)?, p.depth.unwrap_or(3))?;
@@ -398,7 +401,7 @@ pub fn rdy_impact(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
 
 pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError> {
     session(st)?;
-    let scope = scope_of(st, &p.scope);
+    let scope = scope_of(st, &p.scope)?;
     Ok(budget(
         json!({"items": st.rdy.suspects(&scope)?}),
         p.max_tokens,

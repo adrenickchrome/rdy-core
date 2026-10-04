@@ -30,16 +30,8 @@ impl Session {
 pub enum Scope {
     Canon,
     View(String),
-}
-
-impl Scope {
-    pub fn parse(s: &str) -> Scope {
-        if s == "canon" {
-            Scope::Canon
-        } else {
-            Scope::View(s.to_string())
-        }
-    }
+    /// Canon as of a landing in canon's chain (a version or a landing id). Read-only.
+    At(rdy_model::Hash),
 }
 
 /// UTC RFC 3339 timestamp with second precision, e.g. 2026-10-03T19:35:01Z.

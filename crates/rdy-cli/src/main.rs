@@ -177,7 +177,8 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     let bid = BlockId::parse(&id).map_err(|e| {
                         RdyError::new(E_BAD_INPUT, e.to_string(), "ids look like b-7KQ2M")
                     })?;
-                    let ctx = r.context(&Scope::parse(&scope), &bid)?;
+                    let scope = r.resolve_scope(&scope)?;
+                    let ctx = r.context(&scope, &bid)?;
                     let text = format!(
                         "{} {} (version {})\n{}\n{}",
                         ctx.id,
@@ -207,7 +208,8 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     let bid = BlockId::parse(&id).map_err(|e| {
                         RdyError::new(E_BAD_INPUT, e.to_string(), "ids look like b-7KQ2M")
                     })?;
-                    let items = r.impact(&Scope::parse(&scope), &bid, depth)?;
+                    let scope = r.resolve_scope(&scope)?;
+                    let items = r.impact(&scope, &bid, depth)?;
                     let text = items
                         .iter()
                         .map(|i| {
@@ -282,14 +284,16 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     ))
                 }
                 Cmd::Render { out, scope } => {
-                    let s = rdy_render::render_site(&mut r, &Scope::parse(&scope), &out)?;
+                    let scope = r.resolve_scope(&scope)?;
+                    let s = rdy_render::render_site(&mut r, &scope, &out)?;
                     Ok((
                         serde_json::to_value(&s).expect("json"),
                         format!("rendered {} pages to {}", s.pages, out.display()),
                     ))
                 }
                 Cmd::Export { out, scope } => {
-                    let s = r.export(&Scope::parse(&scope), &out)?;
+                    let scope = r.resolve_scope(&scope)?;
+                    let s = r.export(&scope, &out)?;
                     Ok((
                         serde_json::to_value(&s).expect("json"),
                         format!(

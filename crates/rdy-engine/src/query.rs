@@ -92,8 +92,9 @@ pub fn field_json(v: &FieldValue) -> serde_json::Value {
 
 impl Rdy {
     pub fn graph(&mut self, scope: &Scope) -> Result<&Graph, RdyError> {
+        self.materialized(scope)?;
         if !self.graphs.contains_key(scope) {
-            let g = Graph::build(&self.materialized(scope)?.blocks);
+            let g = Graph::build(&self.cache[scope].blocks);
             self.graphs.insert(scope.clone(), g);
         }
         Ok(&self.graphs[scope])

@@ -714,13 +714,7 @@ impl Rdy {
                 "start the session as a writer",
             ));
         }
-        if req.view == "canon" {
-            return Err(RdyError::new(
-                E_RESERVED_VIEW,
-                "canon cannot be written directly",
-                "write to a view and land it with rdy_propose",
-            ));
-        }
+        writable_view(&req.view)?;
         if req.ops.is_empty() {
             return Err(bad("no ops given", "pass at least one op"));
         }
@@ -767,4 +761,26 @@ impl Rdy {
             warnings,
         })
     }
+}
+
+/// Views that can receive writes: not `canon`, and no `:` (reserved for scope kinds such as
+/// `tag:` and `landing:`; legacy M1 views with `:` stay readable and proposable via `view:<name>`).
+pub(crate) fn writable_view(name: &str) -> Result<(), RdyError> {
+    if name == "canon" {
+        return Err(RdyError::new(
+            E_RESERVED_VIEW,
+            "canon cannot be written directly",
+            "write to a view and land it with rdy_propose",
+        ));
+    }
+    if name.contains(':') {
+        return Err(RdyError::new(
+            E_RESERVED_VIEW,
+            format!(
+                "view names cannot contain ':' ({name:?}): ':' introduces scope kinds such as tag: and landing:"
+            ),
+            "write to a view name without ':' (for example replace it with '-')",
+        ));
+    }
+    Ok(())
 }

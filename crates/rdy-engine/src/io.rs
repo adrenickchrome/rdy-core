@@ -223,7 +223,9 @@ impl Rdy {
         }
         let scope_name = match scope {
             Scope::Canon => "canon".to_string(),
+            Scope::View(v) if v.contains(':') => format!("view:{v}"),
             Scope::View(v) => v.clone(),
+            Scope::At(h) => format!("landing:{h}"),
         };
         let manifest = Manifest {
             format: 1,
@@ -246,13 +248,7 @@ impl Rdy {
                 "run the import as an approver session",
             ));
         }
-        if view == "canon" {
-            return Err(RdyError::new(
-                E_RESERVED_VIEW,
-                "canon cannot be written directly",
-                "import into a view, then propose and land it",
-            ));
-        }
+        crate::write::writable_view(view)?;
         let manifest_path = dir.join("rdy-export.yaml");
         let manifest_text = std::fs::read_to_string(&manifest_path).map_err(|e| {
             RdyError::new(

@@ -16,13 +16,13 @@ pub use io::{ExportSummary, block_from_yaml, block_to_yaml};
 pub use materialize::Materialized;
 pub use query::{Context, ImpactItem, field_json, summary, summary_in};
 pub use session::{Scope, Session, now_ms, rfc3339_now};
-pub use version::{VersionInfo, parse_version};
+pub use version::{AS_OF_CACHE_ENTRIES, VersionInfo, parse_version};
 pub use write::{LinkInput, OpInput, WriteRequest, WriteResult, json_to_field};
 
 use rdy_model::Op;
 use rdy_schema::{Pack, PackSet};
 use rdy_store::Store;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -38,6 +38,8 @@ pub struct Rdy {
     lineage: Vec<String>,
     cache: HashMap<Scope, Materialized>,
     graphs: HashMap<Scope, rdy_graph::Graph>,
+    /// As-of scopes in least-recently-used order (front = oldest); at most AS_OF_CACHE_ENTRIES.
+    as_of_lru: VecDeque<rdy_model::Hash>,
 }
 
 fn io(e: std::io::Error) -> RdyError {
@@ -121,6 +123,7 @@ impl Rdy {
             lineage,
             cache: HashMap::new(),
             graphs: HashMap::new(),
+            as_of_lru: VecDeque::new(),
         })
     }
 
@@ -138,10 +141,24 @@ impl Rdy {
     }
 
     pub fn materialized(&mut self, scope: &Scope) -> Result<&Materialized, RdyError> {
+        if let Scope::At(h) = scope {
+            self.touch_as_of(*h);
+        }
         if !self.cache.contains_key(scope) {
             let snapshot = match scope {
                 Scope::Canon => self.store.canon_state()?,
                 Scope::View(v) => self.store.view_state(v)?,
+                Scope::At(h) => {
+                    if self.store.get_raw(h).map(|(k, _)| k).ok() != Some(rdy_store::kinds::LANDING)
+                    {
+                        return Err(RdyError::new(
+                            E_NOT_FOUND,
+                            format!("{} is not a landing", h.short()),
+                            "read as of a version (tag:<version>) or a landing in rdy log (landing:<id>)",
+                        ));
+                    }
+                    self.store.snapshot_at(h)?
+                }
             };
             let blocks = self.store.blocks(&snapshot)?;
             self.cache
@@ -150,9 +167,30 @@ impl Rdy {
         Ok(&self.cache[scope])
     }
 
+    /// Marks an as-of scope as used, evicting the least recently used beyond the cap (with its graph).
+    fn touch_as_of(&mut self, h: rdy_model::Hash) {
+        self.as_of_lru.retain(|x| *x != h);
+        self.as_of_lru.push_back(h);
+        while self.as_of_lru.len() > AS_OF_CACHE_ENTRIES {
+            let old = self.as_of_lru.pop_front().expect("over the cap");
+            self.cache.remove(&Scope::At(old));
+            self.graphs.remove(&Scope::At(old));
+        }
+    }
+
+    /// Drops cached canon and view state. As-of snapshots never change, so they are kept.
     pub fn invalidate(&mut self) {
-        self.cache.clear();
-        self.graphs.clear();
+        self.cache.retain(|s, _| matches!(s, Scope::At(_)));
+        self.graphs.retain(|s, _| matches!(s, Scope::At(_)));
+    }
+
+    /// Test hook: whether `scope`'s materialization and graph are cached.
+    #[doc(hidden)]
+    pub fn is_cached(&self, scope: &Scope) -> (bool, bool) {
+        (
+            self.cache.contains_key(scope),
+            self.graphs.contains_key(scope),
+        )
     }
 
     pub(crate) fn update_cache(&mut self, view: &str, ops: &[Op]) {

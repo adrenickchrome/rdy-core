@@ -1,9 +1,12 @@
 //! Versions (addendum A): immutable SemVer tags on canon's landings, created only by an approver.
 use crate::error::*;
-use crate::{Rdy, Session};
+use crate::{Rdy, Scope, Session};
 use rdy_model::{Hash, Tag};
 use serde::Serialize;
 use std::cmp::Ordering;
+
+/// How many as-of (`tag:`/`landing:`) snapshots, with their graphs, stay cached at once.
+pub const AS_OF_CACHE_ENTRIES: usize = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VersionInfo {
@@ -105,6 +108,33 @@ impl Rdy {
     pub fn resolve_landing(&self, text: &str) -> Result<Hash, RdyError> {
         let chain: Vec<Hash> = self.store.landings()?.into_iter().map(|(h, _)| h).collect();
         match_prefix(&chain, text)
+    }
+
+    /// Reads scope text: `canon`, `tag:<version>`, `landing:<id>`, `view:<name>`, or a view name.
+    pub fn resolve_scope(&self, text: &str) -> Result<Scope, RdyError> {
+        if text == "canon" {
+            return Ok(Scope::Canon);
+        }
+        if let Some(name) = text.strip_prefix("tag:") {
+            let want = parse_version(name)?;
+            return self
+                .version_tags()?
+                .into_iter()
+                .find(|(v, _)| v.cmp_precedence(&want) == Ordering::Equal)
+                .map(|(_, t)| Scope::At(t.landing))
+                .ok_or_else(|| {
+                    RdyError::new(
+                        E_NOT_FOUND,
+                        format!("no version {name}"),
+                        "list versions with rdy tags",
+                    )
+                });
+        }
+        if let Some(id) = text.strip_prefix("landing:") {
+            return Ok(Scope::At(self.resolve_landing(id)?));
+        }
+        let view = text.strip_prefix("view:").unwrap_or(text);
+        Ok(Scope::View(view.to_string()))
     }
 
     /// Names a landing (default: canon's head) as version `name`. Approver only; the version must
