@@ -236,6 +236,52 @@ fn io_hostile_trees_are_refused_quickly_and_store_nothing() {
     refused(t.path());
 }
 
+/// ORD-3: import and `rdy check` refuse an order key over 24 characters with `E_ORDER_KEY`
+/// (and only that), while a key of exactly 24 is accepted.
+#[test]
+fn ord3_import_and_check_refuse_an_order_key_over_24_characters() {
+    let with_key = |key: &str| {
+        DOC.replace(
+            "order: a1\n  fields:\n    title: Terms",
+            &format!("order: {key}\n  fields:\n    title: Terms"),
+        )
+    };
+    let pack = rdy_schema::PackSet::with_builtin()
+        .resolve("rdy-standard")
+        .unwrap();
+    assert_eq!(rdy_model::MAX_ORDER_KEY_LEN, 24);
+    // the boundary: 24 characters is valid everywhere
+    let ok = export_dir(&[("glossary.yaml", &with_key(&"z".repeat(24)))]);
+    let diags = check_path(&pack, None, ok.path()).unwrap();
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != rdy_schema::Severity::Error),
+        "{diags:?}"
+    );
+    let (_d, mut r) = project();
+    r.import(&approver(), "import", ok.path()).unwrap();
+    // 25 characters: refused by both, for the key
+    let long = export_dir(&[("glossary.yaml", &with_key(&"z".repeat(25)))]);
+    let diags = check_path(&pack, None, long.path()).unwrap();
+    let errors: Vec<_> = diags
+        .iter()
+        .filter(|d| d.severity == rdy_schema::Severity::Error)
+        .collect();
+    assert!(!errors.is_empty(), "{diags:?}");
+    assert!(errors.iter().all(|d| d.code == "E_ORDER_KEY"), "{errors:?}");
+    assert!(errors.iter().all(|d| d.line > 0), "{errors:?}");
+    let (_d, mut r) = project();
+    let before = r.store().view_state("import").unwrap();
+    let e = r.import(&approver(), "import", long.path()).unwrap_err();
+    assert!(
+        e.code == "E_ORDER_KEY" || e.issues.iter().any(|i| i.code == "E_ORDER_KEY"),
+        "{e:?}"
+    );
+    r.invalidate();
+    assert_eq!(r.store().view_state("import").unwrap(), before);
+}
+
 /// A symlink from docs/ to a valid doc file outside the export must be refused. Today import
 /// follows it (accepted), so the case is ignored until plan 2a decides symlink policy.
 #[cfg(unix)]
