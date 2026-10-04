@@ -1,7 +1,15 @@
 # Performance record (spec 11)
 
-Measured 2026-10-03 on an Apple M4 Pro (macOS, Darwin 25.6, APFS), release build, 100,000 blocks
-(claims in docs of 10 sections x 100 claims, written in batches by `testkit::generate`).
+Measured 2026-10-03, release build, Rust 1.99.0, 100,000 blocks (claims in docs of 10 sections x
+100 claims, written in batches by `testkit::generate`), on two configurations:
+
+| config | CPU / RAM | OS | storage | durable flush cost (4 KB write + flush) |
+|---|---|---|---|---|
+| **macOS** | Apple M4 Pro | macOS 26 (Darwin 25.6) | internal SSD, APFS | `F_FULLFSYNC` 4.1 ms |
+| **Linux** | x86_64, 8 cores, 30 GB | Ubuntu 24.04.5 LTS, kernel 6.17 | consumer NVMe SSD (no power-loss protection), ext4 | `fdatasync` p50 2.5 ms, p99 2.8 ms, max 5.9 ms |
+
+The macOS numbers below are the detailed record (profiles, fixes, criterion); the Linux results have
+their own section, "Linux results".
 Reproduce: `cargo test -p rdy-engine --release --test perf_budget -- --ignored --nocapture`
 and `RDY_BENCH_BLOCKS=100000 cargo bench -p rdy-engine`.
 
@@ -13,7 +21,7 @@ Source column: **perf_budget** = `tests/perf_budget.rs` (final run, perf-run4.lo
 | cold open + graph | - | - | 791 ms (10k blocks: 101 ms) | criterion | informational |
 | query p99 (`context` + `impact`, 200 probes) | < 5 ms | not measured (`context` scanned every edge) | 3.5 us (p50 2.2 us, p95 3.1 us, max 7.1 us) | perf_budget | met |
 | `context` / `impact` mean | - | - | 1.55 us / 373 ns (10k: 1.40 us / 324 ns) | criterion | informational |
-| write p99 (one-claim commit, 200 writes) | < 5 ms | grows with view length, 18 ms avg at 8k blocks | 23.3 ms p99 (p50 10.6 ms, p95 11.5 ms, max 24.3 ms) | perf_budget | **missed on macOS** |
+| write p99 (one-claim commit, 200 writes) | < 5 ms | grows with view length, 18 ms avg at 8k blocks | 23.3 ms p99 (p50 10.6 ms, p95 11.5 ms, max 24.3 ms) | perf_budget | **missed** (macOS; Linux also missed, see below) |
 | write mean | - | - | 11.7 ms (10k: 11.0 ms) | criterion | informational |
 
 ## Fixes made
@@ -29,7 +37,7 @@ Source column: **perf_budget** = `tests/perf_budget.rs` (final run, perf-run4.lo
 
 **The 5 ms write p99 target is unattainable on macOS with ack-after-`F_FULLFSYNC`, even with one
 fsync per write**: one 4.1 ms fsync plus about 2 ms of other work is about 6 ms mean. The target is
-unchanged. **A Linux/NVMe run is required before spec 11 can be considered met**; it has not been done.
+unchanged. The Linux run (section "Linux results") also misses p99, by about 2x, on consumer NVMe.
 
 Profile of a single-claim write at 100k blocks (macOS `sample`, 2019 samples in `Rdy::write`):
 
@@ -48,12 +56,45 @@ about 2x the median: fsync variance (two fsyncs, each occasionally slow), not rd
 view record is visible but small: mean of the first 100 writes 10.5 ms, last 100 writes 11.0 ms,
 about 0.5 ms over 200 writes.
 
+## Linux results
+
+Configuration: see the **Linux** row of the configuration table at the top. Same commit, toolchain
+and test as macOS (`cargo test -p rdy-engine --release --test perf_budget -- --ignored --nocapture`).
+The full workspace suite also passes on this configuration (166 passed, 1 ignored).
+
+| run | write p50 | write p95 | write p99 | write max | query p99 | cold start (median of 3) |
+|---|---|---|---|---|---|---|
+| 1 (first run after build) | 4.71 ms | 5.53 ms | 29.79 ms | 326.3 ms | 2.66 us | 0.48 s (0.71, 0.47, 0.48 s) |
+| 2 | 4.64 ms | 4.78 ms | 9.51 ms | 30.1 ms | 2.78 us | 0.48 s (0.49, 0.48, 0.48 s) |
+| 3 | 5.10 ms | 5.31 ms | 10.86 ms | 31.0 ms | 2.74 us | 0.47 s (0.49, 0.47, 0.47 s) |
+
+Targets: cold start < 2 s **met**; query p99 < 5 ms **met**; write p99 < 5 ms **missed** (about 10 ms
+on steady runs). Query p50 is about 1.65 us.
+
+Reading:
+
+- The disk sets the floor. A write does two durable flushes (segment log, then the redb index
+  commit); at about 2.5 ms per `fdatasync` on this drive that is about 5 ms before any rdy work, which
+  is why the write median sits right at the target.
+- The tail (p99 about 2x the median, occasional ~30 ms maxima) matches occasional slow flushes from
+  ext4 journal commits and redb page allocation landing on a write, not rdy CPU time. The 326 ms
+  maximum appeared once, on the first run after the build, and did not recur.
+- The view-record growth is not visible at this scale on Linux (first-100 vs last-100 write means:
+  5.2 vs 8.1 ms on run 1, 4.9 vs 4.8 ms and 5.5 vs 4.9 ms on runs 2 and 3).
+- With one flush per write (below), the floor on this configuration drops to about 2.5 ms, which
+  should bring p99 near or under 5 ms. Drives with power-loss protection flush in well under 0.1 ms,
+  where the target is comfortably reachable.
+
 ## What would help (M2 work, deferred, not done here)
 
 - **One fsync per write instead of two.** Commit the redb index at non-immediate durability and
   catch the index up from the log on open (the log is the source of truth). This changes the
-  store's crash story and needs a design decision. Even so, one 4.1 ms fsync plus about 2 ms is
-  about 6 ms on macOS, so it does not by itself meet 5 ms there.
+  store's crash story and needs a design decision. On the Linux configuration it halves the flush
+  floor (about 5 ms to about 2.5 ms) and is the change most likely to meet the target there. On macOS
+  one 4.1 ms fsync plus about 2 ms is still about 6 ms, so it does not by itself meet 5 ms there.
+- **Consider restating the target per hardware class** if p99 still misses on consumer NVMe after
+  the one-flush change, e.g. "p99 < 5 ms on NVMe with power-loss protection; < 10 ms on consumer
+  NVMe".
 - **A chained view record.** The view record lists every change hash in the view, so each write
   re-encodes, hashes and appends O(changes) bytes (about 350 KB at 11k changes). Disk growth is
   quadratic in the number of changes: the 100k project is 1.6 GB. A chained or incremental record
