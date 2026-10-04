@@ -565,3 +565,38 @@ fn the_sidebar_shows_at_most_50_siblings_per_list() {
     let index = std::fs::read_to_string(out.path().join("index.html")).unwrap();
     assert!(index.contains("Doc 000") && index.contains("Doc 119") && !index.contains("more</a>"));
 }
+
+#[test]
+fn hostile_folder_and_doc_titles_are_escaped_in_tree_pages() {
+    let evil = "<script>x</script>\"'&";
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+        {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "evil", "title": evil, "description": evil}},
+        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "inner", "title": evil, "doc_type": "glossary"}},
+        {"op": "create", "type": "section", "parent": "$d", "fields": {"title": evil}}
+    ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    render_site(&mut r, &Scope::View("work".into()), out.path()).unwrap();
+    for page in ["evil/index.html", "evil/inner.html", "index.html"] {
+        let html = std::fs::read_to_string(out.path().join(page)).unwrap();
+        assert!(!html.contains("<script>x"), "{page}: {html}");
+        assert!(!html.contains("\"'&"), "{page}: {html}");
+        assert!(html.contains("&lt;script&gt;x"), "{page}: {html}");
+    }
+    let inner = std::fs::read_to_string(out.path().join("evil/inner.html")).unwrap();
+    let part = |open: &str, close: &str| {
+        let a = inner.find(open).unwrap();
+        inner[a..a + inner[a..].find(close).unwrap()].to_string()
+    };
+    for (what, region) in [
+        ("crumbs", part("<nav class=\"crumbs\">", "</nav>")),
+        ("sidebar", part("<aside class=\"tree\">", "</aside>")),
+    ] {
+        assert_eq!(
+            region.matches("&lt;script&gt;x").count(),
+            2,
+            "{what} shows the folder and the doc, escaped: {region}"
+        );
+    }
+}

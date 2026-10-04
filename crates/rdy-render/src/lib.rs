@@ -119,6 +119,7 @@ impl<'a> Site<'a> {
         out
     }
 
+    /// Hrefs are escaped here in Rust and emitted with `|safe`; labels go through autoescape.
     fn crumbs(
         &self,
         from: &str,
@@ -145,7 +146,7 @@ impl<'a> Site<'a> {
     /// Nested list of the tree under `parent`; `expand` decides which folders open. With `cap`,
     /// each list shows at most SIDEBAR_SIBLINGS entries around the one on the current path and
     /// ends with a "+N more" link to the folder's page.
-    /// Hrefs are escaped here in Rust; templates emit the result with `|safe`.
+    /// Hrefs and labels are escaped here in Rust; templates emit the result with `|safe`.
     fn list(
         &self,
         from: &str,
