@@ -1,7 +1,7 @@
 use rdy_model::Hash;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
@@ -23,6 +23,11 @@ pub struct SegmentLog {
 
 fn seg_path(dir: &Path, id: u32) -> PathBuf {
     dir.join(format!("seg-{id:06}.log"))
+}
+
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    let d = File::open(dir)?;
+    d.sync_all()
 }
 
 /// Reads the frame at `offset`, or returns None if it is torn or corrupt.
@@ -55,6 +60,7 @@ impl SegmentLog {
         }
         if readers.is_empty() {
             File::create(seg_path(dir, 0))?.sync_all()?;
+            sync_dir(dir)?;
             readers.push(File::open(seg_path(dir, 0))?);
         }
         let last = (readers.len() - 1) as u32;
@@ -68,15 +74,8 @@ impl SegmentLog {
             writer.set_len(offset)?;
             writer.sync_all()?;
         }
-        let mut log = SegmentLog { dir: dir.to_path_buf(), readers, writer, len: offset, max_len };
-        log.seek_end()?;
+        let log = SegmentLog { dir: dir.to_path_buf(), readers, writer, len: offset, max_len };
         Ok(log)
-    }
-
-    fn seek_end(&mut self) -> io::Result<()> {
-        use std::io::{Seek, SeekFrom};
-        self.writer.seek(SeekFrom::Start(self.len))?;
-        Ok(())
     }
 
     fn current(&self) -> u32 {
@@ -88,11 +87,16 @@ impl SegmentLog {
     }
 
     pub fn append(&mut self, kind: u8, payload: &[u8]) -> io::Result<(Location, Hash)> {
+        if payload.len() > u32::MAX as usize {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "payload too large"));
+        }
         let frame_len = HEADER + payload.len() as u64;
         if self.len > 0 && self.len + frame_len > self.max_len {
             self.writer.sync_all()?;
             let id = self.readers.len() as u32;
             self.writer = OpenOptions::new().read(true).write(true).create_new(true).open(seg_path(&self.dir, id))?;
+            self.writer.sync_all()?;
+            sync_dir(&self.dir)?;
             self.readers.push(File::open(seg_path(&self.dir, id))?);
             self.len = 0;
         }
@@ -102,7 +106,7 @@ impl SegmentLog {
         buf.push(kind);
         buf.extend_from_slice(&hash.0);
         buf.extend_from_slice(payload);
-        self.writer.write_all(&buf)?;
+        self.writer.write_all_at(&buf, self.len)?;
         let loc = Location { segment: self.current(), offset: self.len };
         self.len += frame_len;
         Ok((loc, hash))
@@ -130,6 +134,9 @@ impl SegmentLog {
             while let Some((kind, hash, payload)) = read_frame(f, offset, file_len)? {
                 out.push((Location { segment: seg, offset }, kind, hash));
                 offset += HEADER + payload.len() as u64;
+            }
+            if offset < file_len {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("corrupt frame in segment {seg} at offset {offset}")));
             }
         }
         Ok(out)

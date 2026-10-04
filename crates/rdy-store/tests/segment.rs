@@ -55,6 +55,16 @@ fn torn_tail_is_truncated_and_acknowledged_writes_survive() {
     assert_eq!(log.read(b).unwrap().1, b"second");
     let (c, _) = log.append(1, b"third").unwrap();
     assert_eq!(c, end_before);
+    log.sync().unwrap();
+    drop(log);
+
+    // reopen and verify all three frames are intact
+    let log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    let frames = log.scan_from(Location { segment: 0, offset: 0 }).unwrap();
+    assert_eq!(frames.len(), 3);
+    assert_eq!(log.read(a).unwrap().1, b"first");
+    assert_eq!(log.read(b).unwrap().1, b"second");
+    assert_eq!(log.read(c).unwrap().1, b"third");
 }
 
 #[test]
@@ -71,7 +81,41 @@ fn corrupt_last_frame_is_dropped() {
     bytes[last] ^= 0xff;
     std::fs::write(&path, bytes).unwrap();
 
-    let log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
     assert_eq!(log.end(), b);
     assert_eq!(log.read(a).unwrap().1, b"good");
+    let (c, _) = log.append(1, b"new").unwrap();
+    log.sync().unwrap();
+    drop(log);
+
+    // reopen and verify the new frame persists
+    let log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    assert_eq!(log.read(a).unwrap().1, b"good");
+    assert_eq!(log.read(c).unwrap().1, b"new");
 }
+
+#[test]
+fn corrupt_frame_in_sealed_segment_detected_on_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 128).unwrap();
+    let _a = log.append(1, &[0; 50]).unwrap().0;
+    let _b = log.append(1, &[1; 50]).unwrap().0;
+    let _c = log.append(1, &[2; 50]).unwrap().0;
+    log.sync().unwrap();
+    drop(log);
+
+    // corrupt a byte in the middle frame (seg-000001.log)
+    let path = dir.path().join("seg-000001.log");
+    let mut bytes = std::fs::read(&path).unwrap();
+    // flip a byte in the middle of the payload (37-byte header + 25 bytes into 50-byte payload)
+    let corruption_point = 37 + 25;
+    bytes[corruption_point] ^= 0xff;
+    std::fs::write(&path, bytes).unwrap();
+
+    // scan should detect the corruption in the sealed segment
+    let log = SegmentLog::open(dir.path(), 128).unwrap();
+    let result = log.scan_from(Location { segment: 0, offset: 0 });
+    assert!(result.is_err());
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+}
+
