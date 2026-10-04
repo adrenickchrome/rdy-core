@@ -6,6 +6,7 @@ mod materialize;
 mod query;
 mod session;
 mod write;
+pub mod testkit;
 
 pub use decide::DecisionInput;
 pub use error::*;

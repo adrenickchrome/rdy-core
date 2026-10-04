@@ -14,3 +14,9 @@ thiserror.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 proptest.workspace = true
+criterion.workspace = true
+fjall = "3"
+
+[[bench]]
+name = "index_choice"
+harness = false
