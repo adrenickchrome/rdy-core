@@ -131,17 +131,31 @@ impl Rdy {
         if view == "canon" {
             return Err(RdyError::new(E_RESERVED_VIEW, "canon cannot be written directly", "import into a view, then propose and land it"));
         }
+        let manifest_path = dir.join("rdy-export.yaml");
+        let manifest_text = std::fs::read_to_string(&manifest_path).map_err(|e| RdyError::new(E_BAD_INPUT, format!("{}: {e}", manifest_path.display()), "point import at a directory made by rdy export"))?;
+        let manifest: Manifest = serde_yaml_ng::from_str(&manifest_text).map_err(|e| RdyError::new(E_BAD_INPUT, format!("rdy-export.yaml: {e}"), "re-export the project"))?;
+        if manifest.format != 1 {
+            return Err(RdyError::new(E_BAD_INPUT, format!("unsupported export format {}", manifest.format), "this rdy reads export format 1"));
+        }
         let blob_dir = dir.join("blobs");
+        let mut blob_bytes = vec![];
         if blob_dir.exists() {
             for entry in std::fs::read_dir(&blob_dir).map_err(io_err)? {
                 let path = entry.map_err(io_err)?.path();
+                if !path.is_file() {
+                    continue;
+                }
                 let bytes = std::fs::read(&path).map_err(io_err)?;
-                let got = self.store.put_blob(&bytes)?;
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                let got = rdy_store::Store::blob_hash(&bytes);
                 if got.to_string() != name {
                     return Err(RdyError::new(E_BAD_INPUT, format!("blob {name} hashes to {got}"), "the export is corrupt; export it again"));
                 }
+                blob_bytes.push(bytes);
             }
+        }
+        for bytes in &blob_bytes {
+            self.store.put_blob(bytes)?;
         }
         let mut files: Vec<_> = std::fs::read_dir(dir.join("docs")).map_err(io_err)?.filter_map(Result::ok).map(|e| e.path()).collect();
         files.sort();
@@ -155,7 +169,28 @@ impl Rdy {
         }
         let scope = Scope::View(view.to_string());
         let existing = self.materialized(&scope)?.clone();
-        let incoming: BTreeMap<BlockId, &Block> = blocks.iter().map(|b| (b.id.clone(), b)).collect();
+        let mut incoming: BTreeMap<BlockId, &Block> = BTreeMap::new();
+        for b in &blocks {
+            if incoming.insert(b.id.clone(), b).is_some() {
+                return Err(RdyError::new(E_ALREADY_EXISTS, format!("block {} appears more than once in the import", b.id), "remove the duplicate from the export files"));
+            }
+        }
+        let parent_of = |id: &BlockId| -> Option<Option<BlockId>> { incoming.get(id).map(|b| b.parent.clone()).or_else(|| existing.get(id).map(|b| b.parent.clone())) };
+        for b in &blocks {
+            if let Some(p) = &b.parent
+                && parent_of(p).is_none()
+            {
+                return Err(RdyError::new(E_UNKNOWN_BLOCK, format!("{} has parent {p}, which is in neither the import nor the view", b.id), "export the whole project"));
+            }
+            let mut seen = BTreeSet::from([b.id.clone()]);
+            let mut cur = b.parent.clone();
+            while let Some(c) = cur {
+                if !seen.insert(c.clone()) {
+                    return Err(RdyError::new(E_BAD_INPUT, format!("{} is part of a parent cycle", b.id), "fix the parent fields in the export"));
+                }
+                cur = parent_of(&c).flatten();
+            }
+        }
         let mut issues = vec![];
         for b in &blocks {
             if existing.get(&b.id).is_some() {

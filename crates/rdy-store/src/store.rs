@@ -159,6 +159,12 @@ impl Store {
         self.index.refs_with_prefix(prefix)
     }
 
+    /// The hash `put_blob` would return for these bytes, without storing anything.
+    pub fn blob_hash(bytes: &[u8]) -> Hash {
+        let chunks: Vec<Hash> = bytes.chunks(CHUNK).map(Hash::of).collect();
+        Hash::of(&encode(&BlobManifest { len: bytes.len() as u64, chunks }))
+    }
+
     pub fn put_blob(&mut self, bytes: &[u8]) -> Result<Hash, StoreError> {
         let mut items: Vec<(u8, Vec<u8>)> = bytes.chunks(CHUNK).map(|c| (kinds::BLOB_CHUNK, c.to_vec())).collect();
         let chunks: Vec<Hash> = items.iter().map(|(_, c)| Hash::of(c)).collect();

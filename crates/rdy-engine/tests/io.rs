@@ -77,3 +77,167 @@ fn single_block_yaml_round_trip_and_edit() {
     assert_eq!(r.edit_block(&founder(), "work", moved).unwrap_err().code, "E_BAD_INPUT");
     assert_eq!(block_from_yaml("id: [").unwrap_err().code, "E_BAD_INPUT");
 }
+
+// ---- import failure paths ----
+
+use std::path::Path;
+
+fn exported(dir: &Path, out: &Path) -> Rdy {
+    let mut a = rich_project(dir);
+    a.export(&Scope::Canon, out).unwrap();
+    a
+}
+
+fn doc_file(out: &Path) -> std::path::PathBuf {
+    std::fs::read_dir(out.join("docs")).unwrap().next().unwrap().unwrap().path()
+}
+
+fn mutate_docs(out: &Path, f: impl FnOnce(&mut Vec<serde_yaml_ng::Value>)) {
+    let p = doc_file(out);
+    let mut list: Vec<serde_yaml_ng::Value> = serde_yaml_ng::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    f(&mut list);
+    std::fs::write(&p, serde_yaml_ng::to_string(&list).unwrap()).unwrap();
+}
+
+fn find<'a>(list: &'a mut [serde_yaml_ng::Value], ty: &str) -> &'a mut serde_yaml_ng::Value {
+    list.iter_mut().find(|v| v["type"].as_str() == Some(ty)).unwrap()
+}
+
+fn id_of(list: &[serde_yaml_ng::Value], ty: &str) -> String {
+    list.iter().find(|v| v["type"].as_str() == Some(ty)).unwrap()["id"].as_str().unwrap().to_string()
+}
+
+fn assert_import_fails(out: &Path, code: &str) {
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    let before = b.store().view_state("import").unwrap().blocks.clone();
+    let err = b.import(&founder(), "import", out).unwrap_err();
+    assert_eq!(err.code, code, "{err}");
+    b.invalidate();
+    assert_eq!(b.store().view_state("import").unwrap().blocks, before, "failed import must not change the view");
+    assert!(b.materialized(&Scope::View("import".into())).unwrap().blocks.is_empty());
+}
+
+fn setup() -> (tempfile::TempDir, tempfile::TempDir, Rdy) {
+    let d = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let a = exported(d.path(), out.path());
+    (d, out, a)
+}
+
+#[test]
+fn import_rejects_corrupt_blob() {
+    let (_d, out, _a) = setup();
+    let f = std::fs::read_dir(out.path().join("blobs")).unwrap().next().unwrap().unwrap().path();
+    std::fs::write(&f, b"tampered").unwrap();
+    assert_import_fails(out.path(), "E_BAD_INPUT");
+}
+
+#[test]
+fn import_rejects_unknown_reference() {
+    let (_d, out, _a) = setup();
+    mutate_docs(out.path(), |l| find(l, "diagram")["body"] = "see {{t-ZZZZZ}}".into());
+    assert_import_fails(out.path(), "E_UNKNOWN_REF");
+}
+
+#[test]
+fn import_rejects_unknown_link_target() {
+    let (_d, out, _a) = setup();
+    mutate_docs(out.path(), |l| find(l, "claim")["links"]["describes"][0]["target"] = "t-ZZZZZ".into());
+    assert_import_fails(out.path(), "E_UNKNOWN_REF");
+}
+
+#[test]
+fn import_rejects_duplicate_id() {
+    let (_d, out, _a) = setup();
+    mutate_docs(out.path(), |l| {
+        let last = l.last().unwrap().clone();
+        l.push(last);
+    });
+    assert_import_fails(out.path(), "E_ALREADY_EXISTS");
+}
+
+#[test]
+fn import_rejects_dangling_parent() {
+    let (_d, out, _a) = setup();
+    mutate_docs(out.path(), |l| find(l, "section")["parent"] = "d-ZZZZZ".into());
+    assert_import_fails(out.path(), "E_UNKNOWN_BLOCK");
+}
+
+#[test]
+fn import_rejects_parent_cycle() {
+    let (_d, out, _a) = setup();
+    mutate_docs(out.path(), |l| {
+        let s = id_of(l, "section");
+        find(l, "doc")["parent"] = s.into();
+    });
+    assert_import_fails(out.path(), "E_BAD_INPUT");
+}
+
+#[test]
+fn import_rejects_self_parent() {
+    let (_d, out, _a) = setup();
+    mutate_docs(out.path(), |l| {
+        let s = id_of(l, "section");
+        find(l, "section")["parent"] = s.into();
+    });
+    assert_import_fails(out.path(), "E_BAD_INPUT");
+}
+
+#[test]
+fn import_rejects_invalid_block() {
+    let (_d, out, _a) = setup();
+    mutate_docs(out.path(), |l| {
+        find(l, "term")["fields"].as_mapping_mut().unwrap().remove("name");
+    });
+    assert_import_fails(out.path(), "E_VALIDATION");
+}
+
+#[test]
+fn import_rejects_unsupported_or_missing_manifest() {
+    let (_d, out, _a) = setup();
+    std::fs::write(out.path().join("rdy-export.yaml"), "format: 2\npack: rdy-standard\nscope: canon\n").unwrap();
+    assert_import_fails(out.path(), "E_BAD_INPUT");
+    std::fs::remove_file(out.path().join("rdy-export.yaml")).unwrap();
+    assert_import_fails(out.path(), "E_BAD_INPUT");
+}
+
+#[test]
+fn edit_block_applies_field_unset_and_links_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = rich_project(dir.path());
+    let claim = r.materialized(&Scope::Canon).unwrap().blocks.values().find(|x| x.block_type == "claim").unwrap().clone();
+    let mut e = claim.clone();
+    e.links.clear();
+    r.edit_block(&founder(), "work", e).unwrap();
+    assert!(r.block(&Scope::View("work".into()), &claim.id).unwrap().links.is_empty());
+
+    let sec = r.materialized(&Scope::Canon).unwrap().blocks.values().find(|x| x.block_type == "section").unwrap().clone();
+    let mut e = sec.clone();
+    e.fields.insert("title".into(), FieldValue::Str("Renamed".into()));
+    e.fields.insert("lifecycle".into(), FieldValue::Str("stable".into()));
+    r.edit_block(&founder(), "work", e).unwrap_or_else(|x| panic!("{x}"));
+    let got = r.block(&Scope::View("work".into()), &sec.id).unwrap();
+    assert_eq!(got.field_str("title"), Some("Renamed"));
+    let mut e = got.clone();
+    e.fields.remove("lifecycle");
+    r.edit_block(&founder(), "work", e).unwrap();
+    assert!(!r.block(&Scope::View("work".into()), &sec.id).unwrap().fields.contains_key("lifecycle"));
+}
+
+#[test]
+fn edit_block_respects_decision_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = rich_project(dir.path());
+    let dec = r.materialized(&Scope::Canon).unwrap().blocks.values().find(|x| x.block_type == "decision").unwrap().clone();
+    assert_eq!(dec.field_str("status"), Some("accepted"));
+    let mut e = dec.clone();
+    e.body = "changed".into();
+    assert_eq!(r.edit_block(&founder(), "work", e).unwrap_err().code, "E_FROZEN");
+
+    let res = r.decide(&agent(), "work", DecisionInput { parent: dec.parent.clone().unwrap().to_string(), statement: "Another".into(), options: vec!["x".into(), "y".into()], ..Default::default() }).unwrap();
+    let id = BlockId::parse(res.created.values().next().unwrap()).unwrap();
+    let mut e = r.block(&Scope::View("work".into()), &id).unwrap();
+    e.fields.insert("status".into(), FieldValue::Str("accepted".into()));
+    assert_eq!(r.edit_block(&agent(), "work", e).unwrap_err().code, "E_PERMISSION");
+}
