@@ -1,0 +1,11 @@
+[package]
+name = "rdy-cli"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+
+[[bin]]
+name = "rdy"
+path = "src/main.rs"

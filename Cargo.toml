@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.89"
+version = "0.1.0"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+rdy-model = { path = "crates/rdy-model" }
+rdy-schema = { path = "crates/rdy-schema" }
+rdy-store = { path = "crates/rdy-store" }
+rdy-graph = { path = "crates/rdy-graph" }
+rdy-engine = { path = "crates/rdy-engine" }
+rdy-render = { path = "crates/rdy-render" }
+rdy-mcp = { path = "crates/rdy-mcp" }
+blake3 = "1.8"
+postcard = { version = "1.1", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+redb = "4"
+minijinja = "2"
+rmcp = { version = "3", features = ["server", "transport-io"] }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+rand = "0.10"
+schemars = "1"
+anyhow = "1"
+proptest = "1"
+criterion = "0.8"
+tempfile = "3"

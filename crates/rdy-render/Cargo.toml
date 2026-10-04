@@ -1,0 +1,7 @@
+[package]
+name = "rdy-render"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
