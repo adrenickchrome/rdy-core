@@ -1,4 +1,4 @@
-use rdy_model::{Block, BlockId, FieldValue};
+use rdy_model::{ref_spans, Block, BlockId, FieldValue, RefMode};
 
 pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -15,29 +15,35 @@ pub fn escape(s: &str) -> String {
     out
 }
 
-/// Escapes `text`, then replaces `{{id}}` references with links. Braces survive escaping unchanged.
+/// Escapes `text` and replaces `{{id}}` references with links; `\{{` renders as a literal `{{`.
 pub fn text_html(text: &str, link: &dyn Fn(&BlockId) -> Option<(String, String)>) -> String {
-    refs_html(&escape(text), link).replace('\n', "<br>")
+    with_refs(text, RefMode::Strict, &|tok| match BlockId::parse(tok).ok().and_then(|id| link(&id)) {
+        Some((href, label)) => format!("<a href=\"{}\">{}</a>", escape(&href), escape(&label)),
+        None => format!("<span class=\"ref missing\">{}</span>", escape(tok)),
+    })
+    .replace('\n', "<br>")
 }
 
-fn refs_html(escaped: &str, link: &dyn Fn(&BlockId) -> Option<(String, String)>) -> String {
+/// Escaped diagram source with each id-shaped `{{id}}` replaced by the target's label, so the
+/// diagram renderer sees plain text; other `{{…}}` (e.g. Mermaid hexagons) is kept as written.
+pub fn diagram_source(text: &str, link: &dyn Fn(&BlockId) -> Option<(String, String)>) -> String {
+    with_refs(text, RefMode::IdShaped, &|tok| match BlockId::parse(tok).ok().and_then(|id| link(&id)) {
+        Some((_, label)) => escape(&label),
+        None => escape(tok),
+    })
+}
+
+/// Escapes the text between references (turning `\{{` into `{{`) and renders each reference with `r`.
+fn with_refs(text: &str, mode: RefMode, r: &dyn Fn(&str) -> String) -> String {
+    let plain = |s: &str| escape(&s.replace("\\{{", "{{"));
     let mut out = String::new();
-    let mut rest = escaped;
-    while let Some(start) = rest.find("{{") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        let Some(end) = after.find("}}") else {
-            out.push_str(&rest[start..]);
-            return out;
-        };
-        let tok = after[..end].trim();
-        match BlockId::parse(tok).ok().and_then(|id| link(&id)) {
-            Some((href, label)) => out.push_str(&format!("<a href=\"{}\">{}</a>", escape(&href), escape(&label))),
-            None => out.push_str(&format!("<span class=\"ref missing\">{tok}</span>")),
-        }
-        rest = &after[end + 2..];
+    let mut last = 0;
+    for span in ref_spans(text, mode) {
+        out.push_str(&plain(&text[last..span.range.start]));
+        out.push_str(&r(&span.token));
+        last = span.range.end;
     }
-    out.push_str(rest);
+    out.push_str(&plain(&text[last..]));
     out
 }
 
@@ -65,7 +71,7 @@ pub fn block_html(b: &Block, depth: usize, link: &dyn Fn(&BlockId) -> Option<(St
             status.replace(' ', "-")
         ),
         "question" => format!("<p><strong>Open question:</strong> {}</p>", text_html(b.field_str("prompt").unwrap_or(""), link)),
-        "diagram" => format!("<figure><pre class=\"mermaid\">{}</pre><figcaption>{}</figcaption></figure>", escape(&b.body), f("alt")),
+        "diagram" => format!("<figure><pre class=\"mermaid\">{}</pre><figcaption>{}</figcaption></figure>", diagram_source(&b.body, link), f("alt")),
         "code" => format!("<pre><code class=\"language-{}\">{}</code></pre>", f("lang"), escape(&b.body)),
         "table" => {
             let cols = match b.fields.get("columns") { Some(FieldValue::List(c)) => c.clone(), _ => vec![] };

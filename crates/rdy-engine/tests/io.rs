@@ -13,7 +13,9 @@ fn rich_project(dir: &std::path::Path) -> Rdy {
         {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Ünïcødé — design", "doc_type": "components"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Components"}},
         {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Line one.\nLine two with \"quotes\" and: colons\n\ttabbed\n"},
-        {"op": "create", "type": "diagram", "parent": "$s", "fields": {"lang": "mermaid", "alt": "Flow"}, "body": "graph TD\n  A[{{$t}}] --> B\n"},
+        {"op": "create", "type": "diagram", "parent": "$s", "fields": {"lang": "mermaid", "alt": "Flow"}, "body": "graph TD\n  A[{{$t}}] --> B{{Decide?}}\n"},
+        {"op": "create", "type": "code", "parent": "$s", "fields": {"lang": "yaml"}, "body": "image: {{ .Values.image }}\n"},
+        {"op": "create", "type": "prose", "parent": "$s", "body": "Write \\{{literal}} for braces."},
         {"op": "create", "type": "figure", "parent": "$s", "fields": {"blob": blob, "media_type": "application/octet-stream", "alt": "bytes"}},
         {"op": "create", "type": "table", "parent": "$s", "fields": {"columns": ["a", "b"], "rows": [[1, true], ["x", null]], "normative": false}}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();

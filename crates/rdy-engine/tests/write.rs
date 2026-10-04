@@ -381,3 +381,28 @@ fn reference_cycles_in_one_write_stay_unpinned_on_the_cycle_edges_only() {
     assert_eq!(a.pins[&t.id], t.version_hash());
     assert!(b.pins.is_empty());
 }
+
+#[test]
+fn braces_in_code_and_diagrams_are_content_and_escapes_are_literal() {
+    let (_d, mut r) = project();
+    let res = skeleton(&mut r);
+    let scope = Scope::View("work".into());
+    let (terms, ledger) = (res.created["$terms"].clone(), res.created["$ledger"].clone());
+    let w = r.write(&agent(), req(json!([
+        {"op": "create", "type": "term", "id": "$w", "parent": terms, "fields": {"name": "Wallet"}, "body": "Holds a balance."},
+        {"op": "create", "type": "diagram", "id": "$dg", "parent": terms, "fields": {"lang": "mermaid", "alt": "flow"},
+         "body": format!("graph TD\n  A{{{{Decide?}}}} --> B[{{{{{ledger}}}}}] --> C[{{{{$w}}}}]\n")},
+        {"op": "create", "type": "code", "id": "$cd", "parent": terms, "fields": {"lang": "yaml"}, "body": "image: {{ .Values.image }}\nname: {{$w}}\n"},
+        {"op": "create", "type": "claim", "id": "$c", "parent": terms, "body": r"Write \{{literal}} to show braces."}
+    ]))).unwrap();
+    let get = |r: &mut Rdy, k: &str| r.block(&scope, &BlockId::parse(&w.created[k]).unwrap()).unwrap();
+    let (wallet, dg, cd, c) = (get(&mut r, "$w"), get(&mut r, "$dg"), get(&mut r, "$cd"), get(&mut r, "$c"));
+    assert_eq!(dg.body, format!("graph TD\n  A{{{{Decide?}}}} --> B[{{{{{ledger}}}}}] --> C[{{{{{}}}}}]\n", wallet.id), "placeholders substitute in diagrams");
+    assert_eq!(dg.pins.len(), 2);
+    assert_eq!(cd.body, "image: {{ .Values.image }}\nname: {{$w}}\n", "code bodies are left alone");
+    assert!(cd.pins.is_empty());
+    assert_eq!(c.body, r"Write \{{literal}} to show braces.");
+    assert!(c.pins.is_empty());
+    // prose keeps strict checking
+    assert_eq!(code(&mut r, json!([{"op": "create", "type": "claim", "parent": terms, "body": "{{not an id}}"}])), "E_UNKNOWN_REF");
+}

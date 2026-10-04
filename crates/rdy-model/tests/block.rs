@@ -55,3 +55,29 @@ fn blocks_round_trip_postcard() {
     let bytes = postcard::to_allocvec(&b).unwrap();
     assert_eq!(postcard::from_bytes::<Block>(&bytes).unwrap(), b);
 }
+
+fn typed(block_type: &str, body: &str) -> Block {
+    let mut b = claim(body);
+    b.block_type = block_type.into();
+    b
+}
+
+fn set(items: &[&str]) -> std::collections::BTreeSet<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn reference_scanning_is_type_aware_and_honours_escapes() {
+    // code bodies are never scanned; their fields still are
+    let mut code = typed("code", "image: {{ .Values.image }} {{t-MEDGR}}");
+    assert!(code.ref_tokens().is_empty());
+    code.fields.insert("caption".into(), FieldValue::Str("see {{t-MEDGR}}".into()));
+    assert_eq!(code.ref_tokens(), set(&["t-MEDGR"]));
+    // diagram bodies: only id-shaped tokens and placeholders count
+    let dg = typed("diagram", "graph TD\n  A{{Decide?}} --> B[{{t-MEDGR}}] --> C[{{$t}}] --> D{{ yes }}");
+    assert_eq!(dg.ref_tokens(), set(&["$t", "t-MEDGR"]));
+    // prose: \{{ is a literal, everything else is strict
+    assert_eq!(claim(r"Write \{{literal}} for braces; see {{t-MEDGR}}.").ref_tokens(), set(&["t-MEDGR"]));
+    assert_eq!(claim("{{not an id}}").ref_tokens(), set(&["not an id"]));
+    assert_eq!(typed("diagram", r"A\{{t-MEDGR}}").ref_tokens(), set(&[]));
+}

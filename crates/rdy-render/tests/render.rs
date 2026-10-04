@@ -109,3 +109,22 @@ fn hostile_text_is_escaped_in_attribute_contexts() {
     assert!(doc.contains("alt=\"x&quot; onerror=&quot;alert(1)&quot; &lt;b&gt;\""));
     assert!(doc.contains("language-x&quot; onerror=&quot;alert(1)&quot; &lt;b&gt;"));
 }
+
+#[test]
+fn escaped_braces_render_literally_and_diagram_references_become_labels() {
+    assert_eq!(text_html(r"Write \{{literal}} or {{t-N0PE1}}", &|_| None), "Write {{literal}} or <span class=\"ref missing\">t-N0PE1</span>");
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Flows", "doc_type": "components"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Components"}},
+        {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger & co"}, "body": "Balances."},
+        {"op": "create", "type": "diagram", "parent": "$s", "fields": {"lang": "mermaid", "alt": "flow"}, "body": "graph TD\n  A{{Decide?}} --> B[{{$t}}]"},
+        {"op": "create", "type": "code", "parent": "$s", "fields": {"lang": "yaml"}, "body": r"x: \{{ .Values.image }}"}
+    ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    render_site(&mut r, &Scope::View("work".into()), out.path()).unwrap();
+    let doc = std::fs::read_to_string(out.path().join(format!("doc/{}.html", res.created["$doc"]))).unwrap();
+    assert!(doc.contains("<pre class=\"mermaid\">graph TD\n  A{{Decide?}} --&gt; B[Ledger &amp; co]</pre>"), "{doc}");
+    assert!(doc.contains(r"x: \{{ .Values.image }}"), "code is shown verbatim");
+}

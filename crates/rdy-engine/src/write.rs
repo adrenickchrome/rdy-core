@@ -1,6 +1,6 @@
 use crate::error::*;
 use crate::{Materialized, Rdy, Scope, Session};
-use rdy_model::{decision, order_between, Block, BlockId, Change, FieldValue, Hash, Justification, Link, Op};
+use rdy_model::{decision, order_between, ref_spans, Block, BlockId, Change, FieldValue, Hash, Justification, Link, Op, RefMode};
 use rdy_schema::{has_errors, skeleton_gaps, validate_block, Issue, Pack};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -123,17 +123,24 @@ impl Resolver {
         BlockId::parse(s).map_err(|e| bad(e.to_string(), "ids look like b-7KQ2M; find them with rdy_read or rdy_search"))
     }
 
-    fn text(&self, s: &str) -> String {
-        let mut out = s.to_string();
-        for (name, id) in &self.placeholders {
-            out = out.replace(&format!("{{{{{name}}}}}"), &format!("{{{{{id}}}}}"));
+    /// Replaces `{{$name}}` references (as `mode` reads them) with the created ids.
+    fn text(&self, s: &str, mode: RefMode) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut last = 0;
+        for span in ref_spans(s, mode) {
+            if let Some(id) = self.placeholders.get(&span.token) {
+                out.push_str(&s[last..span.range.start]);
+                out.push_str(&format!("{{{{{id}}}}}"));
+                last = span.range.end;
+            }
         }
+        out.push_str(&s[last..]);
         out
     }
 
     fn value(&self, v: FieldValue) -> FieldValue {
         match v {
-            FieldValue::Str(s) => FieldValue::Str(self.text(&s)),
+            FieldValue::Str(s) => FieldValue::Str(self.text(&s, RefMode::Strict)),
             FieldValue::List(items) => FieldValue::List(items.into_iter().map(|i| self.value(i)).collect()),
             FieldValue::Map(m) => FieldValue::Map(m.into_iter().map(|(k, v)| (k, self.value(v))).collect()),
             other => other,
@@ -294,7 +301,8 @@ fn build_ops(pack: &Pack, base: &Materialized, session: &Session, inputs: Vec<Op
                 }
                 let after = after.as_deref().map(|a| res.id(a)).transpose()?;
                 let order = order_after(&ov, parent.as_ref(), after.as_ref())?;
-                let block = Block { id: new_id.clone(), block_type, parent, order, fields: res.fields(fields)?, body: res.text(&body), links: res.links(links)?, pins: BTreeMap::new() };
+                let body = res.text(&body, RefMode::for_body(&block_type));
+                let block = Block { id: new_id.clone(), block_type, parent, order, fields: res.fields(fields)?, body, links: res.links(links)?, pins: BTreeMap::new() };
                 touched.insert(new_id.clone());
                 ov.pending.insert(new_id, Some(block.clone()));
                 ops.push(Op::Create { block });
@@ -309,7 +317,7 @@ fn build_ops(pack: &Pack, base: &Materialized, session: &Session, inputs: Vec<Op
                     block.fields.remove(&k);
                 }
                 if let Some(body) = body {
-                    block.body = res.text(&body);
+                    block.body = res.text(&body, RefMode::for_body(&block.block_type));
                 }
                 if let Some(links) = links {
                     block.links = res.links(links)?;

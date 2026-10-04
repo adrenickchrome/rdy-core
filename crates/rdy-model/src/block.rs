@@ -33,9 +33,9 @@ impl Block {
         self.fields.get(name).and_then(FieldValue::as_str)
     }
 
+    /// Every `{{token}}` this block's body and string fields contain, under `RefMode` rules.
     pub fn ref_tokens(&self) -> BTreeSet<String> {
-        let mut out = BTreeSet::new();
-        scan(&self.body, &mut out);
+        let mut out: BTreeSet<String> = ref_spans(&self.body, RefMode::for_body(&self.block_type)).into_iter().map(|s| s.token).collect();
         for v in self.fields.values() {
             scan_value(v, &mut out);
         }
@@ -43,25 +43,65 @@ impl Block {
     }
 }
 
-fn scan_value(v: &FieldValue, out: &mut BTreeSet<String>) {
-    match v {
-        FieldValue::Str(s) => scan(s, out),
-        FieldValue::List(items) => items.iter().for_each(|i| scan_value(i, out)),
-        FieldValue::Map(m) => m.values().for_each(|i| scan_value(i, out)),
-        _ => {}
+/// How `{{…}}` in a text is read. In every mode `\{{` is an escape for a literal `{{`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefMode {
+    /// Every `{{…}}` is a reference (prose bodies and all string fields).
+    Strict,
+    /// Only id-shaped tokens and `$placeholder`s are references; other `{{…}}` is content
+    /// (diagram source, e.g. a Mermaid hexagon `A{{Decide?}}`).
+    IdShaped,
+    /// Nothing is a reference (code bodies).
+    Off,
+}
+
+impl RefMode {
+    /// The mode for the body of a block of `block_type`; fields are always `Strict`.
+    pub fn for_body(block_type: &str) -> RefMode {
+        match block_type {
+            "code" => RefMode::Off,
+            "diagram" => RefMode::IdShaped,
+            _ => RefMode::Strict,
+        }
     }
 }
 
-fn scan(text: &str, out: &mut BTreeSet<String>) {
-    let mut rest = text;
-    while let Some(start) = rest.find("{{") {
-        let after = &rest[start + 2..];
-        match after.find("}}") {
-            Some(end) => {
-                out.insert(after[..end].trim().to_string());
-                rest = &after[end + 2..];
-            }
-            None => break,
+/// One reference in a text: `range` covers the whole `{{…}}`, `token` is its trimmed content.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefSpan {
+    pub range: std::ops::Range<usize>,
+    pub token: String,
+}
+
+/// The references in `text`, in order, under `mode`.
+pub fn ref_spans(text: &str, mode: RefMode) -> Vec<RefSpan> {
+    let mut out = vec![];
+    if mode == RefMode::Off {
+        return out;
+    }
+    let mut pos = 0;
+    while let Some(found) = text[pos..].find("{{") {
+        let start = pos + found;
+        if text[..start].ends_with('\\') {
+            pos = start + 2;
+            continue;
         }
+        let Some(len) = text[start + 2..].find("}}") else { break };
+        let end = start + 2 + len + 2;
+        let token = text[start + 2..start + 2 + len].trim();
+        if mode == RefMode::Strict || token.starts_with('$') || BlockId::parse(token).is_ok() {
+            out.push(RefSpan { range: start..end, token: token.to_string() });
+        }
+        pos = end;
+    }
+    out
+}
+
+fn scan_value(v: &FieldValue, out: &mut BTreeSet<String>) {
+    match v {
+        FieldValue::Str(s) => out.extend(ref_spans(s, RefMode::Strict).into_iter().map(|s| s.token)),
+        FieldValue::List(items) => items.iter().for_each(|i| scan_value(i, out)),
+        FieldValue::Map(m) => m.values().for_each(|i| scan_value(i, out)),
+        _ => {}
     }
 }
