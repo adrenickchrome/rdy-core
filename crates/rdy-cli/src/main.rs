@@ -198,6 +198,28 @@ fn hash_short(s: &str) -> &str {
     &s[..s.len().min(12)]
 }
 
+/// show1: a decision's derived status in words, e.g. "superseded by D-3K0TY" or "live".
+fn status_words(status: &Value) -> Option<String> {
+    let word = status["status"].as_str()?.replace('_', " ");
+    let list = |k: &str| -> Vec<String> {
+        status[k]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (by, parts) = (list("by"), list("parts"));
+    Some(match (by.is_empty(), parts.is_empty()) {
+        (true, _) => word,
+        (false, true) => format!("{word} by {}", by.join(", ")),
+        (false, false) => format!("{word} by {} (parts: {})", by.join(", "), parts.join("; ")),
+    })
+}
+
 fn run(cli: Cli) -> Result<(Value, String), RdyError> {
     let cwd = std::env::current_dir()
         .map_err(|e| RdyError::new(E_IO, e.to_string(), "run from an existing directory"))?;
@@ -266,15 +288,30 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     let scope = r.resolve_scope(&scope)?;
                     let bid = r.resolve_id(&scope, &id)?;
                     let ctx = r.context(&scope, &bid)?;
-                    let text = format!(
-                        "{} {} (version {})\n{}\n{}",
+                    let json = serde_json::to_value(&ctx).expect("json");
+                    let status = status_words(&json["status"]);
+                    let mut fields = json["fields"].clone();
+                    if status.is_some()
+                        && let Some(f) = fields.as_object_mut()
+                    {
+                        // the stored status ("accepted") would contradict the derived one
+                        f.remove("status");
+                    }
+                    let mut text = format!(
+                        "{} {} (version {})\n",
                         ctx.id,
                         ctx.block_type,
-                        hash_short(&ctx.version),
-                        serde_json::to_string_pretty(&ctx.fields).unwrap_or_default(),
-                        ctx.body
+                        hash_short(&ctx.version)
                     );
-                    Ok((serde_json::to_value(&ctx).expect("json"), text))
+                    if let Some(s) = &status {
+                        text.push_str(&format!("status: {s}\n"));
+                    }
+                    text.push_str(&format!(
+                        "{}\n{}",
+                        serde_json::to_string_pretty(&fields).unwrap_or_default(),
+                        ctx.body
+                    ));
+                    Ok((json, text))
                 }
                 Cmd::New { what } => {
                     let (kind, path, res) = match what {
@@ -354,11 +391,8 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                         .iter()
                         .map(|i| {
                             format!(
-                                "{}{} {}: {}",
-                                "  ".repeat(i.depth as usize),
-                                i.id,
-                                i.block_type,
-                                i.summary
+                                "depth {}  {} {}: {}  [{} {}]",
+                                i.depth, i.id, i.block_type, i.summary, i.via.kind, i.via.from
                             )
                         })
                         .collect::<Vec<_>>()

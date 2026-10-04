@@ -27,10 +27,18 @@ pub struct ImpactItem {
     pub id: String,
     pub block_type: String,
     pub summary: String,
+    pub via: ImpactVia,
 }
 
-/// A one-line label for `b` (at most 80 chars): its statement, name or title field, else its body,
-/// with whitespace collapsed and each `{{id}}` reference shown as the bare id.
+/// The edge that first reached an impact item: the item depends on `from` through `kind`.
+#[derive(Clone, Debug, Serialize)]
+pub struct ImpactVia {
+    pub from: String,
+    pub kind: String,
+}
+
+/// A one-line label for `b` (at most 80 chars): its statement, prompt, name or title field, else
+/// its body, with whitespace collapsed and each `{{id}}` reference shown as the bare id.
 pub fn summary(b: &Block) -> String {
     summarize(b, &|tok| tok.to_string())
 }
@@ -51,7 +59,7 @@ fn summarize(b: &Block, resolve: &dyn Fn(&str) -> String) -> String {
     let keys: &[&str] = if rdy_model::tree::is_tree_type(&b.block_type) {
         &["title", "name"]
     } else {
-        &["statement", "name", "title"]
+        &["statement", "prompt", "name", "title"]
     };
     let (text, mode) = match keys
         .iter()
@@ -153,14 +161,18 @@ impl Rdy {
         self.block(scope, id)?;
         self.graph(scope)?;
         let (g, m) = (&self.graphs[scope], &self.cache[scope]);
-        Ok(g.impact(id, depth)
+        Ok(g.impact_via(id, depth)
             .into_iter()
-            .filter_map(|(d, bid)| {
-                m.get(&bid).map(|b| ImpactItem {
-                    depth: d,
-                    id: bid.to_string(),
+            .filter_map(|h| {
+                m.get(&h.id).map(|b| ImpactItem {
+                    depth: h.depth,
+                    id: h.id.to_string(),
                     block_type: b.block_type.clone(),
                     summary: summary_in(b, m),
+                    via: ImpactVia {
+                        from: h.via.from.to_string(),
+                        kind: h.via.kind,
+                    },
                 })
             })
             .collect())

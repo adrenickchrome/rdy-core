@@ -93,17 +93,58 @@ fn renders_docs_decisions_diagrams_and_assets() {
     assert!(out.path().join(format!("_assets/{blob}")).exists());
 }
 
+/// Commits `blocks` to `view` straight through the store, past the write path's checks: an older
+/// project can hold figures whose blob is missing or junk.
+fn raw_create(r: &mut Rdy, view: &str, blocks: Vec<Block>) {
+    let change = Change {
+        view: view.into(),
+        ops: blocks
+            .into_iter()
+            .map(|block| Op::Create { block })
+            .collect(),
+        deps: vec![],
+        provenance: agent().provenance(),
+        justification: None,
+        message: "raw".into(),
+    };
+    r.store_mut().commit_to_view(view, change).unwrap();
+    r.invalidate();
+}
+
+fn raw_figure(id: &str, parent: &str, order: &str, blob: &str, alt: &str) -> Block {
+    Block {
+        id: BlockId::parse(id).unwrap(),
+        block_type: "figure".into(),
+        parent: Some(BlockId::parse(parent).unwrap()),
+        order: order.into(),
+        fields: [("blob", blob), ("media_type", "image/png"), ("alt", alt)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), FieldValue::Str(v.to_string())))
+            .collect(),
+        body: String::new(),
+        links: Default::default(),
+        pins: Default::default(),
+    }
+}
+
 #[test]
 fn dangling_and_junk_blobs_become_placeholders() {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     let absent = Store::blob_hash(b"never stored").to_string();
-    r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+    let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
         {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Assets", "doc_type": "components"}},
-        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "S"}},
-        {"op": "create", "type": "figure", "parent": "$s", "fields": {"blob": absent, "media_type": "image/png", "alt": "gone"}},
-        {"op": "create", "type": "figure", "parent": "$s", "fields": {"blob": "not-a-hash", "media_type": "image/png", "alt": "junk"}}
+        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "S"}}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let s = res.created["$s"].clone();
+    raw_create(
+        &mut r,
+        "work",
+        vec![
+            raw_figure("fg-AAAAA", &s, "a1", &absent, "gone"),
+            raw_figure("fg-BBBBB", &s, "a2", "not-a-hash", "junk"),
+        ],
+    );
     let p = r.propose(&agent(), "work", "seed").unwrap();
     r.land(&founder(), &p.id).unwrap();
     let out = tempfile::tempdir().unwrap();

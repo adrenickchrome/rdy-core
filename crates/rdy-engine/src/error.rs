@@ -24,6 +24,7 @@ pub const E_VERSION_ORDER: &str = "E_VERSION_ORDER";
 pub const E_BAD_NAME: &str = "E_BAD_NAME";
 pub const E_PATH_CLASH: &str = "E_PATH_CLASH";
 pub const E_FILE_FORMAT: &str = "E_FILE_FORMAT";
+pub const E_ALREADY_LANDED: &str = "E_ALREADY_LANDED";
 /// No order key fits between two siblings within `MAX_ORDER_KEY_LEN`.
 pub const E_ORDER_DEPTH: &str = "E_ORDER_DEPTH";
 /// A tool panicked.
@@ -111,7 +112,7 @@ impl From<StoreError> for RdyError {
             StoreError::UnknownBlock(id) => RdyError::new(
                 E_UNKNOWN_BLOCK,
                 format!("no block {id}"),
-                "check the id with rdy_search or rdy_read",
+                "check the id with rdy_read or rdy_overview (rdy ls on the command line)",
             ),
             StoreError::AlreadyExists(id) => RdyError::new(
                 E_ALREADY_EXISTS,
@@ -133,6 +134,14 @@ impl From<StoreError> for RdyError {
                 format!("conflict on {id}"),
                 format!(
                     "re-read {id} (rdy_context) and retry your change against its current version"
+                ),
+            ),
+            StoreError::MissingFrames { segment, detail } => RdyError::new(
+                E_IO,
+                format!("the store's log is missing acknowledged writes: {detail}"),
+                format!(
+                    "restore {} from backup, then reopen; rdy will not rebuild the index over the loss",
+                    segment.display()
                 ),
             ),
             StoreError::Io(e) if e.kind() == std::io::ErrorKind::InvalidData => RdyError::new(

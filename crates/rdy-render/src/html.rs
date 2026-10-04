@@ -28,14 +28,32 @@ pub fn text_html(text: &str, link: &dyn Fn(&BlockId) -> Option<(String, String)>
     .replace('\n', "<br>")
 }
 
-/// Escaped diagram source with each id-shaped `{{id}}` replaced by the target's label, so the
-/// diagram renderer sees plain text; other `{{…}}` (e.g. Mermaid hexagons) is kept as written.
+/// mer1: escapes a label for Mermaid. Characters Mermaid reads as syntax become `#<code>;` entity
+/// codes, which Mermaid decodes before parsing and shows as the characters; line breaks become
+/// spaces. `&` is left to the HTML escape.
+fn mermaid_label(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' | '#' | ';' | '<' | '>' | '[' | ']' | '(' | ')' | '{' | '}' | '|' | '`' => {
+                out.push_str(&format!("#{};", c as u32))
+            }
+            '\n' | '\r' => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Escaped diagram source with each id-shaped `{{id}}` replaced by the target's label, escaped for
+/// Mermaid and then for HTML, so the diagram renderer sees plain text; other `{{…}}` (e.g. Mermaid
+/// hexagons) is kept as written.
 pub fn diagram_source(text: &str, link: &dyn Fn(&BlockId) -> Option<(String, String)>) -> String {
     with_refs(text, RefMode::IdShaped, &|tok| match BlockId::parse(tok)
         .ok()
         .and_then(|id| link(&id))
     {
-        Some((_, label)) => escape(&label),
+        Some((_, label)) => escape(&mermaid_label(&label)),
         None => escape(tok),
     })
 }

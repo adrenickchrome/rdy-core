@@ -29,6 +29,8 @@ pub enum StoreError {
     Conflict { id: BlockId },
     #[error("block {0} is a frozen decision and cannot change")]
     Frozen(BlockId),
+    #[error("acknowledged writes are missing from the log ({}): {detail}", .segment.display())]
+    MissingFrames { segment: PathBuf, detail: String },
 }
 
 pub(crate) fn db<E: std::fmt::Display>(e: E) -> StoreError {

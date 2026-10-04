@@ -1,7 +1,8 @@
 use crate::error::StoreError;
+use crate::fsutil;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
-use crate::segment::{Location, SegmentLog};
+use crate::segment::{Location, SegmentLog, find_gap, seg_path};
 use rdy_model::{Block, Change, Hash, Op};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
@@ -11,6 +12,11 @@ use std::path::{Path, PathBuf};
 const SEGMENT_MAX: u64 = 64 * 1024 * 1024;
 const CHUNK: usize = 1024 * 1024;
 
+/// The largest blob a chunk-kind object may stand for as a manifest: an agent chose that object's
+/// bytes, so its `len` is not trusted to size the work of reading it. Matches the largest asset
+/// `rdy_asset` accepts.
+pub const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
+
 pub struct Store {
     dir: PathBuf,
     log: SegmentLog,
@@ -19,6 +25,8 @@ pub struct Store {
     faults: Faults,
     /// Set when a failed write could not be rolled back; every later write fails until reopen.
     poisoned: bool,
+    /// Directories open fsynced because it created something in them (dur1).
+    synced: Vec<PathBuf>,
 }
 
 /// Opens the index, verifies its integrity and reads its acknowledged boundary (None if it has
@@ -60,6 +68,18 @@ fn set_aside(path: &Path) -> Result<(), StoreError> {
         }
     }
     unreachable!("u32 suffixes exhausted")
+}
+
+/// The error for a failed `try_lock` on the store's lock file: only `WouldBlock` (another process
+/// holds the lock) is `Locked`; anything else (e.g. a file system without locking) is I/O.
+pub fn lock_error(dir: &Path, e: std::fs::TryLockError) -> StoreError {
+    match e {
+        std::fs::TryLockError::WouldBlock => StoreError::Locked(dir.to_path_buf()),
+        std::fs::TryLockError::Error(e) => StoreError::Io(std::io::Error::new(
+            e.kind(),
+            format!("cannot lock {}: {e}", dir.join("lock").display()),
+        )),
+    }
 }
 
 /// Test-only fault injection (see `fail_next_index_apply`).
@@ -108,19 +128,39 @@ fn entries_for_frame(
 
 impl Store {
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
-        std::fs::create_dir_all(dir)?;
+        // dur1: each directory created here is fsynced into its parent before any write is acked
+        let mut synced = fsutil::create_dir_durable(dir)?;
+        let segments = dir.join("segments");
+        synced.extend(fsutil::create_dir_durable(&segments)?);
+        let fresh = !dir.join("index.redb").exists() || !dir.join("lock").exists();
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(dir.join("lock"))?;
-        if lock.try_lock().is_err() {
-            return Err(StoreError::Locked(dir.to_path_buf()));
+        if let Err(e) = lock.try_lock() {
+            return Err(lock_error(dir, e)); // lock1
+        }
+        // seg1: a gap in the segment numbers means acknowledged frames are missing
+        if let Some((missing, later)) = find_gap(&segments)? {
+            return Err(StoreError::MissingFrames {
+                segment: seg_path(&segments, missing),
+                detail: format!(
+                    "{} exists but {} does not",
+                    seg_path(&segments, later).display(),
+                    seg_path(&segments, missing).display()
+                ),
+            });
         }
         // the index opens first: its indexed_upto is the acknowledged end of the log, which
         // tells the log which torn frames are an unacknowledged tail
         let (index, acked) = open_index(dir)?;
-        let log = SegmentLog::open_acked(&dir.join("segments"), SEGMENT_MAX, acked)?;
+        if fresh {
+            // dur1: the new lock and index files' entries in the store directory
+            fsutil::sync_dir(dir)?;
+            synced.push(dir.to_path_buf());
+        }
+        let log = SegmentLog::open_acked(&segments, SEGMENT_MAX, acked)?;
         let mut store = Store {
             dir: dir.to_path_buf(),
             log,
@@ -128,13 +168,33 @@ impl Store {
             _lock: lock,
             faults: Faults::default(),
             poisoned: false,
+            synced,
         };
-        if store.index.indexed_upto()? > store.log.end() {
-            store.reindex()?;
-        } else {
-            store.catch_up()?;
+        let (upto, end) = (store.index.indexed_upto()?, store.log.end());
+        if upto > end {
+            // seg1: the index acknowledged frames the log no longer holds. Rebuilding the index
+            // from this log would silently roll canon back (spec §5.10: nothing is deleted).
+            let missing = if upto.segment > end.segment {
+                end.segment + 1
+            } else {
+                end.segment
+            };
+            return Err(StoreError::MissingFrames {
+                segment: seg_path(&segments, missing),
+                detail: format!(
+                    "the index acknowledges writes up to segment {} offset {}, but the log ends at segment {} offset {}",
+                    upto.segment, upto.offset, end.segment, end.offset
+                ),
+            });
         }
+        store.catch_up()?;
         Ok(store)
+    }
+
+    /// Test hook: the directories `open` fsynced because it created something in them.
+    #[doc(hidden)]
+    pub fn durable_dirs(&self) -> &[PathBuf] {
+        &self.synced
     }
 
     pub fn dir(&self) -> &Path {
@@ -324,46 +384,84 @@ impl Store {
         Ok(*self.write(items)?.last().expect("manifest hash"))
     }
 
-    /// Whether `h` names a blob (a manifest object) in this store.
+    /// Whether `h` names a blob (a manifest object) in this store. An object of chunk kind
+    /// counts when it is exactly the manifest `put_blob` would have written for a blob that is
+    /// all here: the index dedupes by hash alone, so a manifest whose bytes were first stored as
+    /// a chunk is that chunk-kind object. That check reads at most `MAX_BLOB_BYTES`, one chunk at
+    /// a time, and keeps none of it.
     pub fn has_blob(&self, h: &Hash) -> Result<bool, StoreError> {
         match self.get_raw(h) {
-            Ok((kind, _)) => Ok(kind == kinds::BLOB_MANIFEST),
+            Ok((kinds::BLOB_MANIFEST, _)) => Ok(true),
+            Ok((kinds::BLOB_CHUNK, _)) => match self.read_blob(h, &mut |_| {}) {
+                Ok(()) => Ok(true),
+                Err(StoreError::Decode(_) | StoreError::NotFound(_)) => Ok(false),
+                Err(e) => Err(e),
+            },
+            Ok(_) => Ok(false),
             Err(StoreError::NotFound(_)) => Ok(false),
             Err(e) => Err(e),
         }
     }
 
     pub fn get_blob(&self, h: &Hash) -> Result<Vec<u8>, StoreError> {
+        let mut out = Vec::new();
+        self.read_blob(h, &mut |chunk| out.extend_from_slice(chunk))?;
+        Ok(out)
+    }
+
+    /// Validates the manifest at `h` against what `put_blob` writes, then hands each chunk to
+    /// `sink` in order. Nothing is read before the manifest is known to be canonical and, for a
+    /// chunk-kind object (whose bytes an agent chose), within `MAX_BLOB_BYTES`.
+    fn read_blob(&self, h: &Hash, sink: &mut dyn FnMut(&[u8])) -> Result<(), StoreError> {
         let (kind, payload) = self.get_raw(h)?;
-        if kind != kinds::BLOB_MANIFEST {
+        // The kind check is defence in depth; the structural checks below are the guard. A
+        // manifest's bytes may have been stored first as a chunk, and writes dedupe by hash
+        // alone, so a chunk-kind object that decodes as a manifest is accepted too.
+        if kind != kinds::BLOB_MANIFEST && kind != kinds::BLOB_CHUNK {
             return Err(StoreError::Decode(format!(
                 "{h} is not a blob (object kind {kind})"
             )));
         }
         let m: BlobManifest = decode(&payload)?;
-        // never trust the manifest's length for an allocation: grow as chunks are read
-        let mut out = Vec::new();
+        // postcard ignores trailing bytes; a manifest that is not its own canonical encoding
+        // is not what `put_blob` wrote, and would not re-import under its own name
+        if encode(&m) != payload {
+            return Err(StoreError::Decode(format!(
+                "{h} is not a canonical blob manifest"
+            )));
+        }
+        if kind == kinds::BLOB_CHUNK && m.len > MAX_BLOB_BYTES {
+            return Err(StoreError::Decode(format!(
+                "{h} claims a blob of {} bytes, over the limit of {MAX_BLOB_BYTES}",
+                m.len
+            )));
+        }
+        // the chunk count `put_blob` would produce, checked before anything is allocated or read
+        if m.chunks.len() as u64 != m.len.div_ceil(CHUNK as u64) {
+            return Err(StoreError::Decode(format!(
+                "blob {h} lists {} chunks for {} bytes",
+                m.chunks.len(),
+                m.len
+            )));
+        }
+        let mut left = m.len;
         for c in &m.chunks {
             // a chunk's stored kind is not checked: writes dedupe by hash alone, so a chunk may
             // share its object with a block or snapshot of the same bytes, and the hash already
             // proves the bytes
             let (_, bytes) = self.get_raw(c)?;
-            out.extend_from_slice(&bytes);
-            if out.len() as u64 > m.len {
+            // every chunk but the last is a full chunk, as `put_blob` cuts them
+            let want = left.min(CHUNK as u64);
+            if bytes.len() as u64 != want {
                 return Err(StoreError::Decode(format!(
-                    "blob {h} is longer than its manifest's {} bytes",
-                    m.len
+                    "blob {h} has a chunk of {} bytes where {want} are due",
+                    bytes.len()
                 )));
             }
+            left -= want;
+            sink(&bytes);
         }
-        if out.len() as u64 != m.len {
-            return Err(StoreError::Decode(format!(
-                "blob {h} has {} bytes, its manifest says {}",
-                out.len(),
-                m.len
-            )));
-        }
-        Ok(out)
+        Ok(())
     }
 
     pub fn producer(&self, version: &Hash) -> Result<Option<Hash>, StoreError> {

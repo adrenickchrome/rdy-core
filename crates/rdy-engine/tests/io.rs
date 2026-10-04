@@ -494,16 +494,40 @@ fn export_of_a_figure_whose_blob_is_missing_fails_and_writes_nothing() {
     let missing = rdy_store::Store::blob_hash(b"never stored").to_string();
     let res = a.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
         {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "D", "doc_type": "components"}},
-        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "S"}},
-        {"op": "create", "type": "figure", "id": "$f", "parent": "$s", "fields": {"blob": missing, "media_type": "application/octet-stream", "alt": "gone"}}
+        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "S"}}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    // an older project can hold such a figure: commit it past the write path's blob check
+    let figure = Block {
+        id: BlockId::parse("fg-AAAAA").unwrap(),
+        block_type: "figure".into(),
+        parent: Some(BlockId::parse(&res.created["$s"]).unwrap()),
+        order: "a1".into(),
+        fields: [
+            ("blob", missing.as_str()),
+            ("media_type", "application/octet-stream"),
+            ("alt", "gone"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), FieldValue::Str(v.to_string())))
+        .collect(),
+        body: String::new(),
+        links: BTreeMap::new(),
+        pins: BTreeMap::new(),
+    };
+    let change = Change {
+        view: "work".into(),
+        ops: vec![Op::Create { block: figure }],
+        deps: vec![],
+        provenance: agent().provenance(),
+        justification: None,
+        message: "raw".into(),
+    };
+    a.store_mut().commit_to_view("work", change).unwrap();
+    a.invalidate();
     let out = parent.path().join("exp");
     let e = a.export(&Scope::View("work".into()), &out).unwrap_err();
     assert_eq!(e.code, "E_NOT_FOUND", "{e}");
-    assert!(
-        e.message.contains(&res.created["$f"]),
-        "names the figure: {e}"
-    );
+    assert!(e.message.contains("fg-AAAAA"), "names the figure: {e}");
     assert_eq!(
         std::fs::read_dir(parent.path()).unwrap().count(),
         0,

@@ -20,7 +20,7 @@ pub use io::{ExportSummary, block_from_yaml, block_to_yaml};
 pub use lint::check_path;
 pub use materialize::{Materialized, PathMiss};
 pub use paths::TreeNode;
-pub use query::{Context, ImpactItem, field_json, summary, summary_in};
+pub use query::{Context, ImpactItem, ImpactVia, field_json, summary, summary_in};
 pub use session::{Scope, Session, now_ms, rfc3339_now};
 pub use tree_io::Diagnostic;
 pub use version::{
@@ -75,13 +75,15 @@ fn load_pack(root: &Path, name: &str) -> Result<(Pack, Vec<String>), RdyError> {
             .filter(|f| f.extension().is_some_and(|x| x == "yaml" || x == "yml"))
         {
             let text = std::fs::read_to_string(&f).map_err(io)?;
-            set.add_yaml(&text).map_err(|e| {
-                RdyError::new(
-                    E_CONFIG,
-                    format!("{}: {e}", f.display()),
-                    "fix the pack file",
-                )
-            })?;
+            set.add_yaml_from(&text, &f.display().to_string())
+                .map_err(|e| match e {
+                    rdy_schema::SchemaError::Duplicate { .. } => RdyError::new(
+                        E_CONFIG,
+                        e.to_string(),
+                        "give each pack its own name; to change a pack, write a differently named pack that extends it",
+                    ),
+                    e => RdyError::new(E_CONFIG, format!("{}: {e}", f.display()), "fix the pack file"),
+                })?;
         }
     }
     let config = |e: rdy_schema::SchemaError| {
@@ -106,7 +108,8 @@ impl Rdy {
                 "open the existing project, or init a different directory",
             ));
         }
-        std::fs::create_dir_all(dot.join("packs")).map_err(io)?;
+        // dur1: .rdy and .rdy/packs are fsynced into their parents (the store adds .rdy/store)
+        rdy_store::fsutil::create_dir_durable(&dot.join("packs")).map_err(io)?;
         load_pack(project, pack)?;
         let cfg = serde_yaml_ng::to_string(&Config {
             pack: pack.to_string(),

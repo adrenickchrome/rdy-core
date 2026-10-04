@@ -594,8 +594,64 @@ fn check_name(ov: &Overlay, block: &Block, op: usize, is_move: bool) -> Result<(
     })
 }
 
+/// blob2: an asset block's `blob` must parse as a hash naming a blob (a manifest) in the store.
+/// The check keys on the type's `asset` trait, not on any field named `blob`.
+fn check_asset_blob(pack: &Pack, store: &rdy_store::Store, block: &Block) -> Result<(), RdyError> {
+    let is_asset = pack
+        .block_types
+        .get(&block.block_type)
+        .is_some_and(|d| d.traits.contains(&rdy_schema::Trait::Asset));
+    let Some(v) = block.fields.get("blob").filter(|_| is_asset) else {
+        return Ok(());
+    };
+    let fix = "upload the file with rdy_asset and set blob to the hash it returns";
+    let Some(h) = v.as_str().and_then(|s| s.parse::<Hash>().ok()) else {
+        return Err(RdyError::new(
+            E_VALIDATION,
+            format!(
+                "{}'s blob {:?} is not a blob hash",
+                block.id,
+                v.as_str().unwrap_or("(not a string)")
+            ),
+            fix,
+        ));
+    };
+    if !store.has_blob(&h)? {
+        return Err(RdyError::new(
+            E_VALIDATION,
+            format!("{}'s blob {h} is not a blob in this project", block.id),
+            fix,
+        ));
+    }
+    Ok(())
+}
+
+/// dec1: only the gate writes when a decision was decided (spec §4.3), so a role that can't land
+/// may not set or change `decided_at`, just as it may not set `status`.
+fn check_decided_at(
+    session: &Session,
+    block: &Block,
+    before: Option<&Block>,
+) -> Result<(), RdyError> {
+    if block.block_type != decision::DECISION || session.role.can_land() {
+        return Ok(());
+    }
+    if block.fields.get("decided_at") != before.and_then(|b| b.fields.get("decided_at")) {
+        return Err(RdyError::new(
+            E_PERMISSION,
+            format!(
+                "{} sets decided_at, which only the gate writes when the decision is accepted",
+                block.id
+            ),
+            "remove decided_at; it is set when the proposal lands",
+        ));
+    }
+    Ok(())
+}
+
 fn build_ops(
     pack: &Pack,
+    store: &rdy_store::Store,
     base: &Materialized,
     session: &Session,
     inputs: Vec<OpInput>,
@@ -715,6 +771,7 @@ fn build_ops(
                 } else {
                     check_name(&ov, &block, i, false)?;
                 }
+                check_decided_at(session, &block, None)?;
                 check_depth(&ov, &block, 0)?;
                 touched.insert(new_id.clone());
                 ov.set(new_id, Some(block.clone()));
@@ -749,6 +806,7 @@ fn build_ops(
                 if let Some(links) = links {
                     block.links = res.links(links)?;
                 }
+                check_decided_at(session, &block, Some(cur))?;
                 prior.push((false, cur.pins.clone()));
                 let renamed = block.field_str("name") != cur.field_str("name");
                 if renamed {
@@ -968,7 +1026,7 @@ fn build_ops(
                 RdyError::new(
                     E_UNKNOWN_REF,
                     format!("{{{{{tok}}}}} in {} is not a block id", block.id),
-                    "reference blocks as {{id}}, e.g. {{t-MEDGR}}; find ids with rdy_search",
+                    "reference blocks as {{id}}, e.g. {{t-MEDGR}}; find ids with rdy_read or rdy_overview (rdy ls on the command line)",
                 )
             })?;
             let t = ov.get(&target).ok_or_else(|| {
@@ -1025,6 +1083,9 @@ fn build_ops(
         }
         let parent = block.parent.as_ref().and_then(|p| ov.get(p));
         issues.extend(validate_block(pack, block, parent));
+        if !is_move {
+            check_asset_blob(pack, store, block)?;
+        }
     }
 
     // third pass: pin references between blocks of this write to the targets' final versions,
@@ -1086,7 +1147,7 @@ impl Rdy {
         self.materialized(&scope)?;
         let (ops, created, touched, names) = {
             let base = self.cache.get(&scope).expect("materialized above");
-            build_ops(&self.pack, base, session, req.ops)?
+            build_ops(&self.pack, &self.store, base, session, req.ops)?
         };
         let change = Change {
             view: req.view.clone(),

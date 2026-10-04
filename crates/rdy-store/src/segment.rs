@@ -1,3 +1,4 @@
+use crate::fsutil::sync_dir;
 use rdy_model::Hash;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -24,13 +25,41 @@ pub struct SegmentLog {
     fail_partial: Option<usize>,
 }
 
-fn seg_path(dir: &Path, id: u32) -> PathBuf {
+/// The path of segment `id` in `dir`.
+pub fn seg_path(dir: &Path, id: u32) -> PathBuf {
     dir.join(format!("seg-{id:06}.log"))
 }
 
-fn sync_dir(dir: &Path) -> io::Result<()> {
-    let d = File::open(dir)?;
-    d.sync_all()
+/// If the segment files in `dir` skip a number: the first missing number and the next number
+/// present after it. Only `seg-<digits>.log` names count; quarantined `.torn-` copies don't.
+pub fn find_gap(dir: &Path) -> io::Result<Option<(u32, u32)>> {
+    if !dir.exists() {
+        return Ok(None);
+    }
+    let mut ids: Vec<u32> = vec![];
+    for entry in std::fs::read_dir(dir)? {
+        let name = entry?.file_name();
+        let Some(n) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("seg-"))
+            .and_then(|n| n.strip_suffix(".log"))
+        else {
+            continue;
+        };
+        if n.len() >= 6
+            && n.bytes().all(|b| b.is_ascii_digit())
+            && let Ok(id) = n.parse()
+        {
+            ids.push(id);
+        }
+    }
+    ids.sort_unstable();
+    for (want, have) in (0u32..).zip(&ids) {
+        if *have != want {
+            return Ok(Some((want, *have)));
+        }
+    }
+    Ok(None)
 }
 
 /// Reads the frame at `offset`, or returns None if it is torn or corrupt.
@@ -124,7 +153,18 @@ impl SegmentLog {
     /// Corruption below `acked` damages acknowledged data and is refused. With `acked` unknown,
     /// the tail is truncated only if no valid frame follows the corruption.
     pub fn open_acked(dir: &Path, max_len: u64, acked: Option<Location>) -> io::Result<SegmentLog> {
-        std::fs::create_dir_all(dir)?;
+        crate::fsutil::create_dir_durable(dir)?;
+        // seg1: a segment past a gap holds acknowledged frames the log would otherwise skip
+        if let Some((missing, later)) = find_gap(dir)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} is missing but {} exists: acknowledged frames are missing; restore the missing segment from backup, then reopen",
+                    seg_path(dir, missing).display(),
+                    seg_path(dir, later).display()
+                ),
+            ));
+        }
         let mut readers = vec![];
         while seg_path(dir, readers.len() as u32).exists() {
             readers.push(File::open(seg_path(dir, readers.len() as u32))?);

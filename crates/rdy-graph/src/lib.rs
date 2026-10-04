@@ -10,13 +10,49 @@ pub enum EdgeKind {
     Link(String),
 }
 
+impl EdgeKind {
+    /// "contains", "references", or the link's name.
+    pub fn name(&self) -> String {
+        match self {
+            EdgeKind::Contains => "contains".into(),
+            EdgeKind::References => "references".into(),
+            EdgeKind::Link(n) => n.clone(),
+        }
+    }
+}
+
+/// imp1: the edge that first reached an impact item. `from` is the block the item depends on
+/// (the queried block, or an item nearer to it); `kind` is that edge's kind.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Via {
+    pub from: BlockId,
+    pub kind: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ImpactHit {
+    pub depth: u32,
+    pub id: BlockId,
+    pub via: Via,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Edge {
     pub from: BlockId,
     pub to: BlockId,
     pub kind: EdgeKind,
     pub part: Option<String>,
+    /// pin1: printed as hex like every other hash in rdy's JSON. Only the output changes;
+    /// `Hash`'s own (postcard) serialization, which hashes depend on, does not.
+    #[serde(serialize_with = "pin_hex")]
     pub pin: Option<Hash>,
+}
+
+fn pin_hex<S: serde::Serializer>(pin: &Option<Hash>, s: S) -> Result<S::Ok, S::Error> {
+    match pin {
+        Some(h) => s.serialize_some(&h.to_string()),
+        None => s.serialize_none(),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -64,6 +100,32 @@ pub fn same_content(a: &Block, b: &Block) -> bool {
         x
     };
     strip(a) == strip(b)
+}
+
+/// How strong a suspect's reason is: revoked, then superseded, then deleted, then changed.
+fn rank(reason: &str) -> u8 {
+    match reason {
+        "revoked" => 4,
+        "superseded" => 3,
+        "deleted" => 2,
+        _ => 1,
+    }
+}
+
+/// sus1: one suspect per (block, target), keeping the strongest reason, so a block that both
+/// references and links to a target counts once.
+fn unique(found: impl Iterator<Item = Suspect>) -> Vec<Suspect> {
+    let mut best: BTreeMap<(BlockId, BlockId), Suspect> = BTreeMap::new();
+    for s in found {
+        let key = (s.block.clone(), s.target.clone());
+        match best.get(&key) {
+            Some(b) if rank(&b.reason) >= rank(&s.reason) => {}
+            _ => {
+                best.insert(key, s);
+            }
+        }
+    }
+    best.into_values().collect()
 }
 
 impl Graph {
@@ -191,6 +253,15 @@ impl Graph {
     }
 
     pub fn impact(&self, id: &BlockId, max_depth: u32) -> Vec<(u32, BlockId)> {
+        self.impact_via(id, max_depth)
+            .into_iter()
+            .map(|h| (h.depth, h.id))
+            .collect()
+    }
+
+    /// Everything that depends on `id`, breadth first up to `max_depth`, each with the edge that
+    /// first reached it; sorted by (depth, id).
+    pub fn impact_via(&self, id: &BlockId, max_depth: u32) -> Vec<ImpactHit> {
         let mut seen = BTreeSet::from([id.clone()]);
         let mut out = vec![];
         let mut queue = VecDeque::from([(0u32, id.clone())]);
@@ -202,11 +273,18 @@ impl Graph {
                 if e.kind == EdgeKind::Contains || !seen.insert(e.from.clone()) {
                     continue;
                 }
-                out.push((d + 1, e.from.clone()));
+                out.push(ImpactHit {
+                    depth: d + 1,
+                    id: e.from.clone(),
+                    via: Via {
+                        from: cur.clone(),
+                        kind: e.kind.name(),
+                    },
+                });
                 queue.push_back((d + 1, e.from.clone()));
             }
         }
-        out.sort();
+        out.sort_by(|a, b| (a.depth, &a.id).cmp(&(b.depth, &b.id)));
         out
     }
 
@@ -215,11 +293,12 @@ impl Graph {
         blocks: &BTreeMap<BlockId, Block>,
         old: &dyn Fn(&Hash) -> Option<Block>,
     ) -> Vec<Suspect> {
-        self.out
-            .values()
-            .flatten()
-            .filter_map(|e| self.edge_suspect(e, blocks, old))
-            .collect()
+        unique(
+            self.out
+                .values()
+                .flatten()
+                .filter_map(|e| self.edge_suspect(e, blocks, old)),
+        )
     }
 
     /// The suspects whose `block` is `id`: checks only that block's own outgoing edges.
@@ -229,10 +308,11 @@ impl Graph {
         blocks: &BTreeMap<BlockId, Block>,
         old: &dyn Fn(&Hash) -> Option<Block>,
     ) -> Vec<Suspect> {
-        self.outgoing(id)
-            .iter()
-            .filter_map(|e| self.edge_suspect(e, blocks, old))
-            .collect()
+        unique(
+            self.outgoing(id)
+                .iter()
+                .filter_map(|e| self.edge_suspect(e, blocks, old)),
+        )
     }
 
     fn edge_suspect(

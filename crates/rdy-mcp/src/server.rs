@@ -69,7 +69,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Start a session: who you are (actor), your run, and role (reader, writer, reviewer). Required before other tools. Your writes go to a view named after your run."
+        description = "Start a session: who you are (actor), your run, and role (reader, writer, reviewer). Required before other tools. Your writes go to a view named after your run; a reader may pass view \"canon\" to read canon by default."
     )]
     fn rdy_session(&self, Parameters(p): Parameters<SessionParams>) -> CallToolResult {
         self.run("rdy_session", p, tools::rdy_session)
@@ -111,7 +111,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "By id or path: blast radius: blocks that depend on, reference or describe the given block, grouped by depth."
+        description = "By id or path: blast radius: blocks that depend on, reference or describe the given block, by depth. Each item's via says which edge reached it: via.kind (references or a link name) to via.from."
     )]
     fn rdy_impact(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
         self.run("rdy_impact", p, tools::rdy_impact)
@@ -125,7 +125,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Atomic batch write of create/update/move/delete ops. Use id \"$name\" placeholders to refer to blocks created earlier in the same batch, including {{$name}} inside text. Reference blocks in text as {{id}}."
+        description = "Atomic batch write of ops (create, update, move, delete, rebalance; rdy_schema lists them under \"ops\"). Use id \"$name\" placeholders to refer to blocks created earlier in the same batch, including {{$name}} inside text. Reference blocks in text as {{id}}. links: {\"<kind>\": [{\"target\": \"<id or path>\"}]}."
     )]
     fn rdy_write(&self, Parameters(p): Parameters<WriteParams>) -> CallToolResult {
         self.run("rdy_write", p, tools::rdy_write)

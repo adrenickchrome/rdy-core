@@ -157,6 +157,7 @@ fn read_format_1(dir: &Path) -> Result<Vec<Block>, RdyError> {
     }
     let mut blocks: Vec<Block> = vec![];
     for f in files {
+        refuse_symlink(&f)?;
         let text = std::fs::read_to_string(&f).map_err(io_err)?;
         let list: Vec<BlockYaml> = serde_yaml_ng::from_str(&text).map_err(|e| {
             RdyError::new(
@@ -320,6 +321,21 @@ fn is_hidden(path: &Path) -> bool {
         .is_some_and(|n| n.starts_with('.'))
 }
 
+/// sym1: import never follows a symbolic link out of the export.
+fn refuse_symlink(path: &Path) -> Result<(), RdyError> {
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(RdyError::new(
+            E_FILE_FORMAT,
+            format!(
+                "{} is a symbolic link; rdy does not follow links in an export",
+                path.display()
+            ),
+            "replace the link with the file it points to",
+        ));
+    }
+    Ok(())
+}
+
 pub fn block_to_yaml(b: &Block) -> String {
     serde_yaml_ng::to_string(&to_yaml_struct(b)).expect("block yaml")
 }
@@ -443,6 +459,10 @@ impl Rdy {
             ));
         }
         crate::write::writable_view(view)?;
+        // sym1: the export's own root entries are never followed either
+        for root in ["rdy-export.yaml", "docs", "blobs"] {
+            refuse_symlink(&dir.join(root))?;
+        }
         let manifest_path = dir.join("rdy-export.yaml");
         let manifest_text = std::fs::read_to_string(&manifest_path).map_err(|e| {
             RdyError::new(
@@ -484,6 +504,7 @@ impl Rdy {
         if blob_dir.exists() {
             for entry in std::fs::read_dir(&blob_dir).map_err(io_err)? {
                 let path = entry.map_err(io_err)?.path();
+                refuse_symlink(&path)?;
                 if !path.is_file() || is_hidden(&path) {
                     continue;
                 }
@@ -626,18 +647,29 @@ impl Rdy {
                     ));
                 }
             }
-            if let Some(h) = b.field_str("blob").and_then(|s| s.parse::<Hash>().ok())
-                && !imported_blobs.contains(&h)
-                && !self.store.has_blob(&h)?
-            {
-                return Err(RdyError::new(
-                    E_UNKNOWN_REF,
-                    format!(
-                        "{} names blob {h}, which is neither in the export's blobs/ nor in this project",
-                        b.id
-                    ),
-                    "export the whole project again: rdy export copies every figure's blob",
-                ));
+            // blob2: an asset block's blob must be in the export's blobs/ or a blob in this
+            // project; non-asset types may have a field named blob that is not an asset
+            let is_asset = self
+                .pack
+                .block_types
+                .get(&b.block_type)
+                .is_some_and(|d| d.traits.contains(&rdy_schema::Trait::Asset));
+            if is_asset && let Some(v) = b.fields.get("blob") {
+                let known = match v.as_str().and_then(|s| s.parse::<Hash>().ok()) {
+                    Some(h) => imported_blobs.contains(&h) || self.store.has_blob(&h)?,
+                    None => false,
+                };
+                if !known {
+                    return Err(RdyError::new(
+                        E_UNKNOWN_REF,
+                        format!(
+                            "{} names blob {}, which is neither in the export's blobs/ nor a blob in this project",
+                            b.id,
+                            v.as_str().unwrap_or("(not a string)")
+                        ),
+                        "export the whole project again: rdy export copies every figure's blob",
+                    ));
+                }
             }
             let parent = b
                 .parent
@@ -698,6 +730,15 @@ impl Rdy {
                 E_BAD_INPUT,
                 format!("nothing changed in {}", edited.id),
                 "change a field, the body or the links, or cancel the edit",
+            ));
+        }
+        // edit1: pins are rdy's record of what a block was checked against; an edit carries
+        // fields, body and links only, so a pin change would commit an update that changes nothing
+        if cur.pins != edited.pins {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("the edit changes the pins of {}", edited.id),
+                "pins are set by rdy; remove the pins change",
             ));
         }
         if cur.block_type != edited.block_type
