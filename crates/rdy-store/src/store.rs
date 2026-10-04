@@ -199,3 +199,9 @@ impl Store {
         Ok(self.write(items)?[change_pos])
     }
 }
+
+impl Store {
+    pub(crate) fn ref_items_pub(&self, refs: Vec<(String, Vec<u8>)>) -> Vec<(u8, Vec<u8>)> {
+        self.ref_items(refs)
+    }
+}
