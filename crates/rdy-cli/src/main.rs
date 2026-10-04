@@ -32,6 +32,7 @@ enum Cmd {
     Status,
     Show {
         id: String,
+        /// canon, a view name, tag:<version>, landing:<id> or view:<name>.
         #[arg(long, default_value = "canon")]
         scope: String,
     },
@@ -40,6 +41,7 @@ enum Cmd {
         id: String,
         #[arg(long, default_value_t = 3)]
         depth: u32,
+        /// canon, a view name, tag:<version>, landing:<id> or view:<name>.
         #[arg(long, default_value = "canon")]
         scope: String,
     },
@@ -52,6 +54,16 @@ enum Cmd {
     Approve {
         proposal: String,
     },
+    /// Name a landing (default: canon's head) as a version, e.g. v1.2.0. Approver only.
+    Tag {
+        version: String,
+        #[arg(long)]
+        landing: Option<String>,
+        #[arg(short = 'm', long)]
+        message: Option<String>,
+    },
+    /// List versions, oldest first.
+    Tags,
     Edit {
         id: String,
         #[arg(long, default_value = "work")]
@@ -60,12 +72,14 @@ enum Cmd {
     Render {
         #[arg(long)]
         out: PathBuf,
+        /// canon, a view name, tag:<version>, landing:<id> or view:<name>.
         #[arg(long, default_value = "canon")]
         scope: String,
     },
     Export {
         #[arg(long)]
         out: PathBuf,
+        /// canon, a view name, tag:<version>, landing:<id> or view:<name>.
         #[arg(long, default_value = "canon")]
         scope: String,
     },
@@ -144,32 +158,42 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
             match cmd {
                 Cmd::Status => {
                     let landings = r.store().landings()?.len();
-                    let views: Vec<Value> = r
-                        .store()
-                        .refs_with_prefix("view/")?
-                        .into_iter()
-                        .map(|(n, _)| {
-                            let name = n.trim_start_matches("view/").to_string();
-                            let changes = r.store().view(&name)?.changes.len();
-                            Ok(json!({"name": name, "changes": changes}))
-                        })
-                        .collect::<Result<_, RdyError>>()?;
+                    let canon = r.version_position(&Scope::Canon)?;
+                    let mut warnings = vec![];
+                    let mut views = vec![];
+                    for (n, _) in r.store().refs_with_prefix("view/")? {
+                        let name = n.trim_start_matches("view/").to_string();
+                        if name.contains(':') {
+                            warnings.push(format!(
+                                "view {name:?} has ':' in its name (reserved for scopes since addendum A): read it as view:{name}, propose it with --view view:{name}; it can't receive new writes"
+                            ));
+                        }
+                        let changes = r.store().view(&name)?.changes.len();
+                        let pos = r.version_position(&Scope::View(name.clone()))?;
+                        views.push(
+                            json!({"name": name, "changes": changes, "version_position": pos}),
+                        );
+                    }
                     let suspects = r.suspects(&Scope::Canon)?.len();
-                    let text = format!(
-                        "pack {}\ncanon: {landings} landings, {suspects} suspects\nviews:\n{}",
+                    let mut text = format!(
+                        "pack {}\ncanon: {} ({landings} landings, {suspects} suspects)\nviews:\n{}",
                         r.pack().name,
+                        canon.label,
                         views
                             .iter()
                             .map(|v| format!(
-                                "  {} ({} changes)",
+                                "  {}: {}",
                                 v["name"].as_str().unwrap_or(""),
-                                v["changes"]
+                                v["version_position"]["label"].as_str().unwrap_or("")
                             ))
                             .collect::<Vec<_>>()
                             .join("\n")
                     );
+                    for w in &warnings {
+                        text.push_str(&format!("\nwarning: {w}"));
+                    }
                     Ok((
-                        json!({"pack": r.pack().name, "landings": landings, "suspects": suspects, "views": views}),
+                        json!({"pack": r.pack().name, "landings": landings, "suspects": suspects, "version_position": canon, "views": views, "warnings": warnings}),
                         text,
                     ))
                 }
@@ -192,15 +216,25 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                 Cmd::Log => {
                     let mut rows = vec![];
                     let mut text = String::new();
+                    let mut tags: std::collections::HashMap<String, Vec<String>> =
+                        Default::default();
+                    for v in r.versions()? {
+                        tags.entry(v.landing.clone()).or_default().push(v.name);
+                    }
                     for (id, rec) in r.store().landings()? {
                         let p: rdy_model::Proposal = r.store().get(&rec.proposal)?;
+                        let names = tags.get(&id.to_string()).cloned().unwrap_or_default();
                         text.push_str(&format!(
-                            "{}  {}  by {}\n",
+                            "{}  {}  by {}",
                             id.short(),
                             p.title,
                             rec.approved_by.actor
                         ));
-                        rows.push(json!({"landing": id.to_string(), "title": p.title, "approved_by": rec.approved_by.actor, "at_ms": rec.approved_by.at_ms, "changes": p.changes.len()}));
+                        if !names.is_empty() {
+                            text.push_str(&format!("  [{}]", names.join(", ")));
+                        }
+                        text.push('\n');
+                        rows.push(json!({"landing": id.to_string(), "title": p.title, "approved_by": rec.approved_by.actor, "at_ms": rec.approved_by.at_ms, "changes": p.changes.len(), "tags": names}));
                     }
                     Ok((Value::Array(rows), text))
                 }
@@ -226,6 +260,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     Ok((serde_json::to_value(&items).expect("json"), text))
                 }
                 Cmd::Propose { title, view } => {
+                    let view = view.strip_prefix("view:").unwrap_or(&view).to_string();
                     let p = r.propose(&human(Role::Writer), &view, &title)?;
                     let text = format!(
                         "proposal {} ({} changes)\napprove with: rdy approve {}",
@@ -241,6 +276,39 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                         json!({"landing": landing}),
                         format!("landed {}", hash_short(&landing)),
                     ))
+                }
+                Cmd::Tag {
+                    version,
+                    landing,
+                    message,
+                } => {
+                    let v = r.tag(
+                        &human(Role::Approver),
+                        &version,
+                        landing.as_deref(),
+                        message,
+                    )?;
+                    let text = format!("version {} → landing {}", v.name, hash_short(&v.landing));
+                    Ok((serde_json::to_value(&v).expect("json"), text))
+                }
+                Cmd::Tags => {
+                    let versions = r.versions()?;
+                    let current = versions.last().map(|v| v.name.clone());
+                    let text = versions
+                        .iter()
+                        .map(|v| {
+                            let mut line = format!("{}  {}", v.name, hash_short(&v.landing));
+                            if let Some(m) = &v.message {
+                                line.push_str(&format!("  {m}"));
+                            }
+                            if Some(&v.name) == current.as_ref() {
+                                line.push_str("  (current)");
+                            }
+                            line
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Ok((json!({"versions": versions, "current": current}), text))
                 }
                 Cmd::Edit { id, view } => {
                     let bid = BlockId::parse(&id).map_err(|e| {
@@ -317,7 +385,10 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     let f = r.fsck()?;
                     Ok((
                         serde_json::to_value(&f).expect("json"),
-                        format!("ok: {} frames, {} landings", f.frames, f.landings),
+                        format!(
+                            "ok: {} frames, {} landings, {} versions",
+                            f.frames, f.landings, f.versions
+                        ),
                     ))
                 }
                 Cmd::Pack {

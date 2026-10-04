@@ -12,6 +12,9 @@ rdy status
 rdy propose --view run-1 --title "first pass"
 rdy approve <proposal-id>     # lands it in canon; proposed decisions become accepted
 rdy render --out site/
+rdy tag v0.1.0 -m "first cut"  # freeze canon's head as a version (approver)
+rdy tags                       # list versions
+rdy show <id> --scope tag:v0.1.0   # read as of a version (also landing:<id>)
 ```
 
 In M1, `rdy mcp` holds the project's store while it runs, so run the human commands (`rdy status`, `rdy propose`, `rdy approve`, ...) after the agent session ends. A shared multi-client daemon arrives in M2.

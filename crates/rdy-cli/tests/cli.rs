@@ -179,3 +179,142 @@ fn init_honours_the_project_flag() {
     assert!(target.path().join(".rdy/config.yaml").exists());
     assert!(!cwd.path().join(".rdy").exists());
 }
+
+fn seed_and_land(dir: &std::path::Path, title: &str) -> String {
+    use rdy_engine::*;
+    use rdy_model::Role;
+    let mut r = Rdy::open(dir).unwrap();
+    let w = Session {
+        actor: "agent:a".into(),
+        run: None,
+        role: Role::Writer,
+    };
+    let a = Session {
+        actor: "human:tester".into(),
+        run: None,
+        role: Role::Approver,
+    };
+    let doc = r
+        .materialized(&Scope::Canon)
+        .unwrap()
+        .children(None)
+        .first()
+        .map(|d| d.id.to_string());
+    let ops = match doc {
+        None => {
+            serde_json::json!([{"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "glossary"}}])
+        }
+        Some(d) => serde_json::json!([{"op": "update", "id": d, "fields": {"title": title}}]),
+    };
+    let res = r
+        .write(
+            &w,
+            WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(ops).unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .unwrap();
+    let p = r.propose(&w, "work", title).unwrap();
+    r.land(&a, &p.id).unwrap();
+    res.created.values().next().cloned().unwrap_or_default()
+}
+
+#[test]
+fn versions_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    json(dir.path(), &["init"]);
+    let doc = seed_and_land(dir.path(), "First title");
+    let v = json(dir.path(), &["tag", "v0.1.0", "-m", "first cut"]);
+    assert_eq!(v["name"], "v0.1.0");
+    assert_eq!(v["message"], "first cut");
+    let (ok, _, err) = rdy(dir.path(), &["tag", "0.1.0"]);
+    assert!(!ok && err.contains("E_TAG_EXISTS"), "{err}");
+
+    let tags = json(dir.path(), &["tags"]);
+    assert_eq!(tags["current"], "v0.1.0");
+    assert_eq!(tags["versions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        json(dir.path(), &["status"])["version_position"]["label"],
+        "v0.1.0"
+    );
+
+    seed_and_land(dir.path(), "Second title");
+    let st = json(dir.path(), &["status"]);
+    assert_eq!(st["version_position"]["label"], "v0.1.0 + 1 landing");
+    let (_, text, _) = rdy(dir.path(), &["status"]);
+    assert!(text.contains("canon: v0.1.0 + 1 landing"), "{text}");
+
+    let log = json(dir.path(), &["log"]);
+    assert_eq!(
+        log[0]["tags"],
+        serde_json::json!([]),
+        "newest landing first"
+    );
+    assert_eq!(log[1]["tags"], serde_json::json!(["v0.1.0"]));
+    let (_, text, _) = rdy(dir.path(), &["log"]);
+    assert!(text.contains("[v0.1.0]"), "{text}");
+
+    let old = json(dir.path(), &["show", &doc, "--scope", "tag:v0.1.0"]);
+    assert_eq!(old["fields"]["title"], "First title");
+    assert_eq!(
+        json(dir.path(), &["show", &doc])["fields"]["title"],
+        "Second title"
+    );
+    let (ok, _, err) = rdy(dir.path(), &["show", &doc, "--scope", "tag:v9.9.9"]);
+    assert!(!ok && err.contains("E_NOT_FOUND"), "{err}");
+    assert_eq!(json(dir.path(), &["fsck"])["versions"], 1);
+}
+
+#[test]
+fn status_warns_about_legacy_colon_views() {
+    let dir = tempfile::tempdir().unwrap();
+    json(dir.path(), &["init"]);
+    {
+        use rdy_model::*;
+        let mut r = rdy_engine::Rdy::open(dir.path()).unwrap();
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert("title".to_string(), FieldValue::Str("Legacy".into()));
+        fields.insert("doc_type".to_string(), FieldValue::Str("glossary".into()));
+        let block = Block {
+            id: BlockId::parse("d-AAAAB").unwrap(),
+            block_type: "doc".into(),
+            parent: None,
+            order: "V".into(),
+            fields,
+            body: String::new(),
+            links: Default::default(),
+            pins: Default::default(),
+        };
+        let prov = Provenance {
+            actor: "agent:a".into(),
+            run: None,
+            role: Role::Writer,
+            at_ms: 0,
+        };
+        r.store_mut()
+            .commit_to_view(
+                "old:view",
+                Change {
+                    view: "old:view".into(),
+                    ops: vec![Op::Create { block }],
+                    deps: vec![],
+                    provenance: prov,
+                    justification: None,
+                    message: String::new(),
+                },
+            )
+            .unwrap();
+    }
+    let st = json(dir.path(), &["status"]);
+    let warnings = st["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].as_str().unwrap().contains("old:view"));
+    let p = json(
+        dir.path(),
+        &["propose", "--view", "view:old:view", "--title", "legacy"],
+    );
+    assert!(p["id"].is_string());
+}
