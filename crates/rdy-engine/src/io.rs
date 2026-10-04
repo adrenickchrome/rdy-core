@@ -626,18 +626,29 @@ impl Rdy {
                     ));
                 }
             }
-            if let Some(h) = b.field_str("blob").and_then(|s| s.parse::<Hash>().ok())
-                && !imported_blobs.contains(&h)
-                && !self.store.has_blob(&h)?
-            {
-                return Err(RdyError::new(
-                    E_UNKNOWN_REF,
-                    format!(
-                        "{} names blob {h}, which is neither in the export's blobs/ nor in this project",
-                        b.id
-                    ),
-                    "export the whole project again: rdy export copies every figure's blob",
-                ));
+            // blob2: an asset block's blob must be in the export's blobs/ or a blob in this
+            // project; non-asset types may have a field named blob that is not an asset
+            let is_asset = self
+                .pack
+                .block_types
+                .get(&b.block_type)
+                .is_some_and(|d| d.traits.contains(&rdy_schema::Trait::Asset));
+            if is_asset && let Some(v) = b.fields.get("blob") {
+                let known = match v.as_str().and_then(|s| s.parse::<Hash>().ok()) {
+                    Some(h) => imported_blobs.contains(&h) || self.store.has_blob(&h)?,
+                    None => false,
+                };
+                if !known {
+                    return Err(RdyError::new(
+                        E_UNKNOWN_REF,
+                        format!(
+                            "{} names blob {}, which is neither in the export's blobs/ nor a blob in this project",
+                            b.id,
+                            v.as_str().unwrap_or("(not a string)")
+                        ),
+                        "export the whole project again: rdy export copies every figure's blob",
+                    ));
+                }
             }
             let parent = b
                 .parent

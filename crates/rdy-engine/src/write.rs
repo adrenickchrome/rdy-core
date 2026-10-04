@@ -594,8 +594,41 @@ fn check_name(ov: &Overlay, block: &Block, op: usize, is_move: bool) -> Result<(
     })
 }
 
+/// blob2: an asset block's `blob` must parse as a hash naming a blob (a manifest) in the store.
+/// The check keys on the type's `asset` trait, not on any field named `blob`.
+fn check_asset_blob(pack: &Pack, store: &rdy_store::Store, block: &Block) -> Result<(), RdyError> {
+    let is_asset = pack
+        .block_types
+        .get(&block.block_type)
+        .is_some_and(|d| d.traits.contains(&rdy_schema::Trait::Asset));
+    let Some(v) = block.fields.get("blob").filter(|_| is_asset) else {
+        return Ok(());
+    };
+    let fix = "upload the file with rdy_asset and set blob to the hash it returns";
+    let Some(h) = v.as_str().and_then(|s| s.parse::<Hash>().ok()) else {
+        return Err(RdyError::new(
+            E_VALIDATION,
+            format!(
+                "{}'s blob {:?} is not a blob hash",
+                block.id,
+                v.as_str().unwrap_or("(not a string)")
+            ),
+            fix,
+        ));
+    };
+    if !store.has_blob(&h)? {
+        return Err(RdyError::new(
+            E_VALIDATION,
+            format!("{}'s blob {h} is not a blob in this project", block.id),
+            fix,
+        ));
+    }
+    Ok(())
+}
+
 fn build_ops(
     pack: &Pack,
+    store: &rdy_store::Store,
     base: &Materialized,
     session: &Session,
     inputs: Vec<OpInput>,
@@ -1025,6 +1058,9 @@ fn build_ops(
         }
         let parent = block.parent.as_ref().and_then(|p| ov.get(p));
         issues.extend(validate_block(pack, block, parent));
+        if !is_move {
+            check_asset_blob(pack, store, block)?;
+        }
     }
 
     // third pass: pin references between blocks of this write to the targets' final versions,
@@ -1086,7 +1122,7 @@ impl Rdy {
         self.materialized(&scope)?;
         let (ops, created, touched, names) = {
             let base = self.cache.get(&scope).expect("materialized above");
-            build_ops(&self.pack, base, session, req.ops)?
+            build_ops(&self.pack, &self.store, base, session, req.ops)?
         };
         let change = Change {
             view: req.view.clone(),

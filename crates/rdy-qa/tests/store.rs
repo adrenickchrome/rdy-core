@@ -71,7 +71,22 @@ fn blob1_a_figure_naming_a_non_blob_object_is_not_an_asset() {
         .unwrap()
         .version_hash()
         .to_string();
-    write(&mut r, "work", json!([{"op": "create", "type": "figure", "parent": res.created["$s"], "fields": {"blob": not_a_blob, "media_type": "image/png", "alt": "x"}}])).unwrap();
+    raw_commit(
+        &mut r,
+        "work",
+        vec![raw(
+            "fg-AAAAA",
+            "figure",
+            Some(&res.created["$s"]),
+            "a1",
+            &[
+                ("blob", &not_a_blob),
+                ("media_type", "image/png"),
+                ("alt", "x"),
+            ],
+            "",
+        )],
+    );
     let site = tempfile::tempdir().unwrap();
     rdy_render::render_site(&mut r, &Scope::View("work".into()), site.path()).unwrap();
     let page = std::fs::read_to_string(site.path().join("tx.html")).unwrap();
