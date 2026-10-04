@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Export trees: symbolic links (sym1).
 use rdy_engine::check_path;
 use rdy_qa::fixtures::*;
@@ -98,4 +99,22 @@ fn sym1_a_symlinked_blobs_root_or_manifest_is_refused_by_import() {
     let e = r.import(&approver(), "import", t.path()).unwrap_err();
     assert_eq!(e.code, "E_FILE_FORMAT", "{e}");
     assert!(e.message.contains("symbolic link"), "{e}");
+}
+
+#[test]
+fn sym1_a_symlinked_manifest_is_refused_by_check() {
+    let outside = tempfile::tempdir().unwrap();
+    let real = outside.path().join("m.yaml");
+    std::fs::write(&real, "format: 2\npack: rdy-standard\nscope: canon\n").unwrap();
+    let t = export_dir();
+    std::fs::remove_file(t.path().join("rdy-export.yaml")).unwrap();
+    symlink(&real, t.path().join("rdy-export.yaml")).unwrap();
+    let diags = check_path(&pack(), None, t.path()).unwrap();
+    assert!(
+        diags.iter().any(|d| d.code == "E_FILE_FORMAT"
+            && d.line == 1
+            && d.message.contains("symbolic link")
+            && d.message.contains("rdy-export.yaml")),
+        "{diags:?}"
+    );
 }

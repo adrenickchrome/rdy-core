@@ -36,6 +36,17 @@ fn cell(s: &str) -> String {
     s.replace('|', "\\|").replace('\n', " ")
 }
 
+/// A fenced code block whose fence is longer than any backtick run in `body` (at least 3).
+fn fenced(lang: &str, body: &str) -> String {
+    let (mut longest, mut run) = (0, 0);
+    for c in body.chars() {
+        run = if c == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat((longest + 1).max(3));
+    format!("{fence}{lang}\n{body}\n{fence}")
+}
+
 /// One block as markdown. `depth` is its depth below its doc ([`doc_depth`]); `status` is a
 /// decision's derived status.
 pub fn block_markdown(
@@ -96,12 +107,12 @@ pub fn block_markdown(
         }
         "figure" => format!(
             "`{id}` ![{}](rdy-blob:{}) ({})",
-            f("alt"),
+            f("alt").replace('\\', "\\\\").replace(']', "\\]"),
             f("blob"),
             f("media_type")
         ),
-        "diagram" => format!("`{id}` {}\n\n```{}\n{}\n```", f("alt"), f("lang"), b.body),
-        "code" => format!("`{id}`\n\n```{}\n{}\n```", f("lang"), b.body),
+        "diagram" => format!("`{id}` {}\n\n{}", f("alt"), fenced(&f("lang"), &b.body)),
+        "code" => format!("`{id}`\n\n{}", fenced(&f("lang"), &b.body)),
         "table" => {
             let cols = list(b, "columns");
             let mut out = vec![format!("`{id}`"), String::new()];

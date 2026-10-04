@@ -100,7 +100,7 @@ pub struct EditorialParams {
 pub struct WriteParams {
     pub view: Option<String>,
     /// Ops, each a JSON object (rdy_schema lists them under "ops"):
-    /// {"op":"create","type":<type>,"id":"$name"?,"parent":<id or path>?,"after":<sibling>?,"fields":{..},"body":".."?,"links":{..}?}
+    /// {"op":"create","type":<type>,"id":"$name"?,"parent":<id or path>?,"after":<sibling>?,"fields":{..}?,"body":".."?,"links":{..}?}
     /// {"op":"update","id":<id or path>,"base":<version>?,"fields":{..}?,"unset":[<field>]?,"body":".."?,"links":{..}?}
     /// {"op":"move","id":<id or path>,"base":<version>?,"parent":<id or path>?,"after":<sibling>?}
     /// {"op":"delete","id":<id or path>,"base":<version>?}
@@ -266,7 +266,7 @@ const NAME_RULES: &str = "names: 1-64 characters from A-Z a-z 0-9 . _ -; not sta
 pub const WRITE_OPS: &[(&str, &str)] = &[
     (
         "create",
-        r#"{"op":"create","type":<type>,"id":"$name"?,"parent":<id or path>?,"after":<sibling>?,"fields":{..},"body":".."?,"links":{..}?}"#,
+        r#"{"op":"create","type":<type>,"id":"$name"?,"parent":<id or path>?,"after":<sibling>?,"fields":{..}?,"body":".."?,"links":{..}?}"#,
     ),
     (
         "update",

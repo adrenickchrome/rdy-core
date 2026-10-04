@@ -22,7 +22,9 @@ fn md1_markdown_carries_every_blocks_content_and_id() {
         {"op": "create", "type": "question", "parent": "$sub", "fields": {"prompt": "Who approves refunds?"}},
         {"op": "create", "type": "flow", "parent": "$sub", "fields": {"name": "Checkout", "steps": ["Open wallet", "Pay"]}},
         {"op": "create", "type": "table", "parent": "$sub", "fields": {"columns": ["Term", "Meaning"], "rows": [["Ledger", "Balances | net"]]}},
-        {"op": "create", "type": "figure", "parent": "$sub", "fields": {"blob": blob, "media_type": "image/png", "alt": "chart"}}
+        {"op": "create", "type": "figure", "parent": "$sub", "fields": {"blob": blob, "media_type": "image/png", "alt": "chart"}},
+        {"op": "create", "type": "figure", "parent": "$sub", "fields": {"blob": blob, "media_type": "image/png", "alt": "a]b\\c"}},
+        {"op": "create", "type": "code", "parent": "$sub", "fields": {"lang": "md"}, "body": "before\n```\nnot a fence end\n````\nafter"}
     ]))
     .unwrap();
     let sub = res.created["$sub"].clone();
@@ -71,6 +73,16 @@ fn md1_markdown_carries_every_blocks_content_and_id() {
     ] {
         assert!(text.contains(&want), "missing {want:?} in:\n{text}");
     }
+    // a code body holding ``` lines stays inside a longer fence
+    assert!(
+        text.contains("`````md\nbefore\n```\nnot a fence end\n````\nafter\n`````"),
+        "code fence in:\n{text}"
+    );
+    // `]` and `\` in alt text cannot end the image syntax early
+    assert!(
+        text.contains(&format!("![a\\]b\\\\c](rdy-blob:{blob}) (image/png)")),
+        "alt escape in:\n{text}"
+    );
     let ids: Vec<String> = st
         .rdy
         .materialized(&Scope::View("work".into()))
