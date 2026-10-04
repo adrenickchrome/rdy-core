@@ -1,6 +1,6 @@
 //! The gate report: cargo-test output parsing, guarded defect ids, and the markdown / JSON
 //! rendering that `cargo qa` writes to `target/qa/`.
-use crate::perf::Verdict;
+use crate::perf::{Baseline, Measure, Verdict};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -119,6 +119,8 @@ pub struct Report {
     /// What happened to perf: skipped, recorded a baseline, compared, or why it failed.
     pub perf_note: String,
     pub failing_seeds: Vec<String>,
+    /// Observations that do not affect the verdict (baseline drift, a failed listing).
+    pub notes: Vec<String>,
     pub guarded: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -206,6 +208,13 @@ pub fn markdown(r: &Report) -> String {
         }
     }
 
+    if !r.notes.is_empty() {
+        let _ = writeln!(s, "\n## Notes\n");
+        for n in &r.notes {
+            let _ = writeln!(s, "- {n}");
+        }
+    }
+
     let _ = writeln!(s, "\n## Failing seeds\n");
     if r.failing_seeds.is_empty() {
         let _ = writeln!(s, "None.");
@@ -223,6 +232,58 @@ pub fn markdown(r: &Report) -> String {
         let _ = writeln!(s, "- {}: {}", area, ids.join(", "));
     }
     s
+}
+
+/// The verdict: every gate passed, every area ran tests and passed, and perf is fine.
+/// A failed binary with no named test, or an area that ran zero tests, is a failure.
+pub fn overall(gates: &[Gate], areas: &[Area], perf_ok: bool) -> bool {
+    gates.iter().all(|g| g.pass)
+        && areas
+            .iter()
+            .all(|a| a.ok && a.failed == 0 && a.passed + a.failed + a.ignored > 0)
+        && perf_ok
+}
+
+/// True when a parsed test run saw no tests at all (a build that "passed" but ran nothing).
+pub fn ran_nothing(run: &TestRun) -> bool {
+    run.passed + run.failed + run.ignored == 0
+}
+
+/// The last `n` non-empty lines of `out`, for a failed gate's detail.
+pub fn tail(out: &str, n: usize) -> String {
+    let lines: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
+/// Parses the baseline file text. An error means the file is unusable and must not be
+/// rewritten.
+pub fn parse_baselines(text: &str) -> Result<BTreeMap<String, Baseline>, String> {
+    #[derive(serde::Deserialize)]
+    struct File {
+        classes: BTreeMap<String, Baseline>,
+    }
+    serde_json::from_str::<File>(text)
+        .map(|f| f.classes)
+        .map_err(|e| e.to_string())
+}
+
+/// Ops measured but absent from the baseline, and baseline ops no longer measured.
+pub fn baseline_drift(base: &Baseline, measured: &[Measure]) -> Vec<String> {
+    let mut notes = vec![];
+    for m in measured.iter().filter(|m| !base.ops.contains_key(&m.op)) {
+        notes.push(format!(
+            "perf op `{}` is measured but not in the baseline",
+            m.op
+        ));
+    }
+    for op in base
+        .ops
+        .keys()
+        .filter(|o| !measured.iter().any(|m| &m.op == *o))
+    {
+        notes.push(format!("baseline op `{op}` is no longer measured"));
+    }
+    notes
 }
 
 pub fn json(r: &Report) -> String {
@@ -247,5 +308,81 @@ mod tests {
         let g = guarded_ids(list);
         assert_eq!(g["engine"], ["ord1".to_string()].into());
         assert_eq!(g["store"], ["blob1".to_string()].into());
+    }
+
+    fn area(ok: bool, passed: usize, failed: usize) -> Area {
+        Area {
+            name: "a".into(),
+            passed,
+            failed,
+            ok,
+            ..Area::default()
+        }
+    }
+
+    fn gate(pass: bool) -> Gate {
+        Gate {
+            name: "g".into(),
+            pass,
+            detail: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_verdict_fails_on_anything_wrong() {
+        assert!(overall(&[gate(true)], &[area(true, 3, 0)], true));
+        assert!(
+            !overall(&[gate(false)], &[area(true, 3, 0)], true),
+            "failed gate"
+        );
+        assert!(
+            !overall(&[gate(true)], &[area(false, 3, 0)], true),
+            "binary failed, no named test"
+        );
+        assert!(
+            !overall(&[gate(true)], &[area(true, 0, 0)], true),
+            "zero tests"
+        );
+        assert!(
+            !overall(&[gate(true)], &[area(true, 3, 1)], true),
+            "failed test"
+        );
+        assert!(
+            !overall(&[gate(true)], &[area(true, 3, 0)], false),
+            "perf failure"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_baseline_is_an_error_and_a_good_one_parses() {
+        assert!(parse_baselines("{ not json").is_err());
+        assert!(parse_baselines("{}").is_err());
+        assert!(parse_baselines("{\"classes\": {}}").unwrap().is_empty());
+    }
+
+    #[test]
+    fn drift_names_added_and_removed_ops() {
+        let m = |op: &str| Measure {
+            op: op.into(),
+            median_ms: 1.0,
+            p95_ms: 1.0,
+            runs: 1,
+        };
+        let base = Baseline {
+            machine: "x".into(),
+            ops: [
+                ("old".to_string(), m("old")),
+                ("same".to_string(), m("same")),
+            ]
+            .into(),
+        };
+        let d = baseline_drift(&base, &[m("same"), m("new")]);
+        assert_eq!(d.len(), 2);
+        assert!(d[0].contains("`new`") && d[1].contains("`old`"));
+    }
+
+    #[test]
+    fn tail_keeps_the_last_lines() {
+        assert_eq!(tail("a\n\nb\nc\n", 2), "b\nc");
     }
 }

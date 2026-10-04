@@ -81,16 +81,14 @@ fn baseline_path() -> PathBuf {
 
 type Classes = BTreeMap<String, Baseline>;
 
-fn read_baselines() -> Classes {
-    #[derive(serde::Deserialize)]
-    struct File {
-        classes: Classes,
+/// An absent file is an empty map; a present but unreadable or unparseable file is an error
+/// (and is never rewritten).
+fn read_baselines() -> Result<Classes, String> {
+    match std::fs::read_to_string(baseline_path()) {
+        Ok(text) => report::parse_baselines(&text).map_err(|e| format!("qa-baseline.json: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Classes::new()),
+        Err(e) => Err(format!("qa-baseline.json: {e}")),
     }
-    std::fs::read_to_string(baseline_path())
-        .ok()
-        .and_then(|s| serde_json::from_str::<File>(&s).ok())
-        .map(|f| f.classes)
-        .unwrap_or_default()
 }
 
 fn write_baselines(classes: &Classes) -> std::io::Result<()> {
@@ -100,7 +98,11 @@ fn write_baselines(classes: &Classes) -> std::io::Result<()> {
 }
 
 /// Runs the perf workload and compares it; returns (verdicts, note, ok).
-fn perf_tier(rebaseline: bool, machine: &str) -> (Vec<perf::Verdict>, String, bool) {
+fn perf_tier(
+    rebaseline: bool,
+    machine: &str,
+    notes: &mut Vec<String>,
+) -> (Vec<perf::Verdict>, String, bool) {
     eprintln!("==> perf (qa-perf)");
     let out = cargo(&["run", "-q", "-p", "rdy-qa", "--release", "--bin", "qa-perf"])
         .current_dir(root())
@@ -124,7 +126,19 @@ fn perf_tier(rebaseline: bool, machine: &str) -> (Vec<perf::Verdict>, String, bo
         _ => return (vec![], "qa-perf printed no measurements".into(), false),
     };
 
-    let mut classes = read_baselines();
+    if measures.is_empty() {
+        return (vec![], "qa-perf measured nothing".into(), false);
+    }
+    let mut classes = match read_baselines() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                vec![],
+                format!("Baseline unusable, left untouched: {e}"),
+                false,
+            );
+        }
+    };
     let missing = !classes.contains_key(machine);
     let verdicts;
     let note;
@@ -152,16 +166,33 @@ fn perf_tier(rebaseline: bool, machine: &str) -> (Vec<perf::Verdict>, String, bo
             format!("Rebaselined `{machine}` in crates/rdy-qa/qa-baseline.json (commit the diff).")
         };
     } else {
-        verdicts = perf::compare(classes.get(machine), &measures);
+        let base = classes.get(machine);
+        if let Some(b) = base {
+            notes.extend(report::baseline_drift(b, &measures));
+        }
+        verdicts = perf::compare(base, &measures);
         note = format!("Compared against the baseline for `{machine}`.");
     }
     let ok = verdicts.iter().all(|v| v.pass);
     (verdicts, note, ok)
 }
 
+fn fail_tail(ok: bool, out: &str) -> String {
+    if ok {
+        String::new()
+    } else {
+        report::tail(out, 20)
+    }
+}
+
 fn main() {
     let args = Args::parse();
     let start = Instant::now();
+    // A crashed run must not leave a stale verdict behind.
+    for f in ["report.md", "report.json"] {
+        let _ = std::fs::remove_file(root().join("target/qa").join(f));
+    }
+    let mut notes: Vec<String> = vec![];
     let files = test_files();
     let areas_known: std::collections::BTreeSet<&str> =
         files.iter().map(|f| report::area_of(f)).collect();
@@ -189,13 +220,13 @@ fn main() {
         "build rdy-cli",
         cargo(&["build", "--release", "-p", "rdy-cli"]),
     );
-    gate("cargo build --release -p rdy-cli", ok, String::new());
+    gate("cargo build --release -p rdy-cli", ok, fail_tail(ok, &out));
     if !ok {
         eprintln!("{out}");
     }
 
     let (ok, out) = step("fmt", cargo(&["fmt", "--all", "--check"]));
-    gate("cargo fmt --all --check", ok, String::new());
+    gate("cargo fmt --all --check", ok, fail_tail(ok, &out));
     if !ok {
         eprintln!("{out}");
     }
@@ -211,7 +242,7 @@ fn main() {
             "warnings",
         ]),
     );
-    gate("cargo clippy -D warnings", ok, String::new());
+    gate("cargo clippy -D warnings", ok, fail_tail(ok, &out));
     if !ok {
         eprintln!("{out}");
     }
@@ -229,7 +260,18 @@ fn main() {
     if !run.failures.is_empty() {
         detail += &format!("; failing: {}", run.failures.join(", "));
     }
-    gate("cargo test --workspace --exclude rdy-qa", ok, detail);
+    if !ok {
+        detail += &format!("\n{}", report::tail(&out, 20));
+    }
+    let empty = report::ran_nothing(&run);
+    if empty {
+        detail += " (no tests ran)";
+    }
+    gate(
+        "cargo test --workspace --exclude rdy-qa",
+        ok && !empty,
+        detail,
+    );
 
     // The hardening suite, one test binary at a time so each area reports on its own.
     for stem in files
@@ -287,7 +329,7 @@ fn main() {
     let (perf_verdicts, perf_note, perf_ok) = if args.skip_perf {
         (vec![], "Skipped (`--skip-perf`).".to_string(), true)
     } else {
-        perf_tier(args.rebaseline, &machine)
+        perf_tier(args.rebaseline, &machine, &mut notes)
     };
 
     // The `Running ...` headers go to stderr: merge the streams in order for the area parse.
@@ -314,6 +356,7 @@ fn main() {
         perf: perf_verdicts,
         perf_note,
         failing_seeds: seeds,
+        notes,
         guarded: report::guarded_ids(&list),
     };
 
