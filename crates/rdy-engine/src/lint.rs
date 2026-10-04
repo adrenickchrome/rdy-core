@@ -135,15 +135,24 @@ pub fn check_path(
         }
     }
     if let Some(m) = canon {
-        for b in m
+        let nameless: Vec<&BlockId> = m
             .blocks
             .values()
             .filter(|b| b.block_type == rdy_model::tree::DOC && b.field_str("name").is_none())
-        {
+            .map(|b| &b.id)
+            .collect();
+        // one summary, not one warning per doc on every check
+        if let Some(first) = nameless.first() {
+            let n = nameless.len();
+            let (docs, have) = if n == 1 {
+                ("doc", "has")
+            } else {
+                ("docs", "have")
+            };
             diags.push(Diagnostic {
                 file: "canon".into(), line: 1, column: 1, code: "W_NAMELESS_DOC".into(),
-                message: format!("doc {} in canon has no stored name (an M1 doc); its first export→import or write stores one", b.id),
-                fix: format!("write to {} once (any edit) to store its name", b.id),
+                message: format!("{n} {docs} in canon {have} no stored name (from M1, e.g. {first}); the first export→import or write of each stores one"),
+                fix: "write to each once (any edit) to store its name; rdy export lists them".into(),
                 severity: Severity::Warning,
             });
         }

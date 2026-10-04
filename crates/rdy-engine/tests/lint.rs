@@ -219,3 +219,112 @@ fn inner_blocks_stay_inside_their_files_doc() {
         "{d:?}"
     );
 }
+
+#[test]
+fn inside_a_project_canon_resolves_references_and_parents() {
+    use rdy_model::*;
+    use serde_json::json;
+    let agent = Session {
+        actor: "agent:a".into(),
+        run: None,
+        role: Role::Writer,
+    };
+    let founder = Session {
+        actor: "human:founder".into(),
+        run: None,
+        role: Role::Approver,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let res = r
+        .write(
+            &agent,
+            WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(json!([
+                    {"op": "create", "type": "folder", "id": "$w", "fields": {"name": "wallets"}},
+                    {"op": "create", "type": "doc", "id": "$t", "parent": "$w", "fields": {"title": "Transactions", "doc_type": "glossary"}},
+                    {"op": "create", "type": "section", "id": "$s", "parent": "$t", "fields": {"title": "Terms"}}
+                ]))
+                .unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .unwrap();
+    // two docs from M1, without a stored name
+    let legacy: Vec<Op> = ["d-AAAAB", "d-AAAAC"]
+        .iter()
+        .map(|id| Op::Create {
+            block: Block {
+                id: BlockId::parse(id).unwrap(),
+                block_type: "doc".into(),
+                parent: None,
+                order: "V".into(),
+                fields: [
+                    ("title".to_string(), FieldValue::Str("Old".into())),
+                    ("doc_type".to_string(), FieldValue::Str("glossary".into())),
+                ]
+                .into_iter()
+                .collect(),
+                body: String::new(),
+                links: Default::default(),
+                pins: Default::default(),
+            },
+        })
+        .collect();
+    r.store_mut()
+        .commit_to_view(
+            "work",
+            Change {
+                view: "work".into(),
+                ops: legacy,
+                deps: vec![],
+                provenance: agent.provenance(),
+                justification: None,
+                message: "m1".into(),
+            },
+        )
+        .unwrap();
+    r.invalidate();
+    let p = r.propose(&agent, "work", "seed").unwrap();
+    r.land(&founder, &p.id).unwrap();
+    let canon = r.materialized(&Scope::Canon).unwrap().clone();
+    let (w, s) = (&res.created["$w"], &res.created["$s"]);
+
+    let t = tempfile::tempdir().unwrap();
+    // a doc that references a canon section, and a doc inside the canon folder
+    put(
+        t.path(),
+        "notes.yaml",
+        &format!(
+            "- id: d-NNNNN\n  type: doc\n  order: V\n  fields:\n    title: Notes\n    doc_type: glossary\n- id: s-NNNNN\n  type: section\n  parent: d-NNNNN\n  order: V\n  fields:\n    title: Terms\n- id: c-NNNNN\n  type: claim\n  parent: s-NNNNN\n  order: V\n  body: See {{{{{s}}}}}.\n"
+        ),
+    );
+    put(
+        t.path(),
+        "wallets/_folder.yaml",
+        &format!("id: {w}\ntype: folder\norder: V\n"),
+    );
+    put(
+        t.path(),
+        "wallets/limits.yaml",
+        "- id: d-MMMMM\n  type: doc\n  order: W\n  fields:\n    title: Limits\n    doc_type: glossary\n",
+    );
+    let d = check_path(&pack(), Some(&canon), t.path()).unwrap();
+    assert!(
+        !d.iter()
+            .any(|d| d.code == "E_UNKNOWN_REF" || d.code == "E_MISSING_PARENT"),
+        "{d:#?}"
+    );
+    let nameless: Vec<_> = d.iter().filter(|d| d.code == "W_NAMELESS_DOC").collect();
+    assert_eq!(nameless.len(), 1, "one summary warning: {d:#?}");
+    assert_eq!(nameless[0].file, "canon");
+    assert!(nameless[0].message.contains("2 docs"), "{:?}", nameless[0]);
+    assert_eq!(d.len(), 1, "{d:#?}");
+    // without canon the reference is unknown
+    assert!(
+        check(t.path()).iter().any(|d| d.code == "E_UNKNOWN_REF"),
+        "the canon is what resolves it"
+    );
+}
