@@ -75,13 +75,15 @@ fn load_pack(root: &Path, name: &str) -> Result<(Pack, Vec<String>), RdyError> {
             .filter(|f| f.extension().is_some_and(|x| x == "yaml" || x == "yml"))
         {
             let text = std::fs::read_to_string(&f).map_err(io)?;
-            set.add_yaml(&text).map_err(|e| {
-                RdyError::new(
-                    E_CONFIG,
-                    format!("{}: {e}", f.display()),
-                    "fix the pack file",
-                )
-            })?;
+            set.add_yaml_from(&text, &f.display().to_string())
+                .map_err(|e| match e {
+                    rdy_schema::SchemaError::Duplicate { .. } => RdyError::new(
+                        E_CONFIG,
+                        e.to_string(),
+                        "give each pack its own name; to change a pack, write a differently named pack that extends it",
+                    ),
+                    e => RdyError::new(E_CONFIG, format!("{}: {e}", f.display()), "fix the pack file"),
+                })?;
         }
     }
     let config = |e: rdy_schema::SchemaError| {

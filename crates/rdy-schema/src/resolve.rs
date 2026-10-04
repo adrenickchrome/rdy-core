@@ -15,24 +15,47 @@ pub enum SchemaError {
     Cycle(String),
     #[error("invalid pack: {0}")]
     Invalid(String),
+    #[error("pack {name:?} is defined twice: in {first} and in {second}")]
+    Duplicate {
+        name: String,
+        first: String,
+        second: String,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct PackSet {
     raw: BTreeMap<String, Pack>,
+    /// Where each pack came from (a file path, or the built-in), for error messages.
+    sources: BTreeMap<String, String>,
 }
 
 impl PackSet {
     pub fn with_builtin() -> PackSet {
         let mut s = PackSet::default();
-        s.add_yaml(STANDARD_YAML).expect("built-in pack parses");
+        s.add_yaml_from(STANDARD_YAML, "the built-in pack")
+            .expect("built-in pack parses");
         s
     }
 
     pub fn add_yaml(&mut self, yaml: &str) -> Result<String, SchemaError> {
+        self.add_yaml_from(yaml, "an inline pack")
+    }
+
+    /// Adds a pack read from `source`. A name already taken is refused (pack1): a pack is
+    /// replaced only by a differently named pack, which may extend it (spec §4.5).
+    pub fn add_yaml_from(&mut self, yaml: &str, source: &str) -> Result<String, SchemaError> {
         let pack: Pack =
             serde_yaml_ng::from_str(yaml).map_err(|e| SchemaError::Yaml(e.to_string()))?;
         let name = pack.name.clone();
+        if let Some(first) = self.sources.get(&name) {
+            return Err(SchemaError::Duplicate {
+                name,
+                first: first.clone(),
+                second: source.to_string(),
+            });
+        }
+        self.sources.insert(name.clone(), source.to_string());
         self.raw.insert(name.clone(), pack);
         Ok(name)
     }
