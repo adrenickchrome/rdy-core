@@ -244,7 +244,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
         }
         cmd => {
             let mut r = Rdy::open(&project)?;
-            match cmd {
+            let out = match cmd {
                 Cmd::Status => {
                     let landings = r.store().landings()?.len();
                     let canon = r.version_position(&Scope::Canon)?;
@@ -561,8 +561,21 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                 )),
                 Cmd::Init { .. } | Cmd::Mcp => unreachable!("handled above"),
                 Cmd::Check { .. } => unreachable!("handled in main"),
-            }
+            };
+            close_project(r);
+            out
         }
+    }
+}
+
+/// Closes the project's store cleanly. A failed close does not fail the command (its writes are
+/// durable in the log, and the next open catches the index up), but it is reported on stderr. A
+/// command that returns early with an error closes on drop, which reports the same way.
+fn close_project(r: Rdy) {
+    if let Err(e) = r.close() {
+        eprintln!(
+            "warning: the store did not close cleanly ({e}); the next rdy command catches its index up from the log"
+        );
     }
 }
 
@@ -578,6 +591,7 @@ fn run_check(project: Option<PathBuf>, path: &Path, pack: Option<&str>, as_json:
                 None => r.pack().clone(),
             };
             let canon = r.materialized(&Scope::Canon)?.clone();
+            close_project(r);
             check_path(&pk, Some(&canon), path)
         } else {
             let name = pack.ok_or_else(|| {

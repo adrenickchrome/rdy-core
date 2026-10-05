@@ -368,6 +368,77 @@ fn ckpt1_a_failed_checkpoint_never_fails_the_write() {
     assert_eq!(s.get_blob(&h).unwrap(), b"durable in the log");
 }
 
+/// Final review (Important 3): an idle checkpoint that fails is recorded like a write's, so a
+/// disk that refuses it is visible before the 1,000-frame checkpoint or the close also fails.
+#[test]
+fn ckpt1_a_failed_idle_checkpoint_is_recorded_until_one_succeeds() {
+    let base = tempfile::tempdir().unwrap();
+    let mut s = Store::open(&base.path().join("s")).unwrap();
+    s.put_blob(b"idle").unwrap();
+    s.fail_next_checkpoint();
+    let later = Instant::now() + CHECKPOINT_IDLE;
+    let e = s.checkpoint_if_idle(later).unwrap_err();
+    assert!(e.to_string().contains("injected"), "{e}");
+    assert!(
+        s.last_checkpoint_error()
+            .is_some_and(|m| m.contains("injected")),
+        "{:?}",
+        s.last_checkpoint_error()
+    );
+    assert!(
+        s.checkpoint_if_idle(later).unwrap(),
+        "the next tick retries"
+    );
+    assert!(s.last_checkpoint_error().is_none());
+}
+
+/// Final review (Important 4): `close` makes the clean close's checkpoint and returns its error,
+/// keeping the sentinel when it fails, so the next open still catches up and the failure is seen.
+#[test]
+fn ckpt1_close_returns_a_failed_checkpoint_and_keeps_the_sentinel() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::open(&dir).unwrap();
+    let h = s.put_blob(b"durable in the log").unwrap();
+    s.fail_next_checkpoint();
+    let e = s.close().unwrap_err();
+    assert!(e.to_string().contains("injected"), "{e}");
+    assert!(dir.join(rdy_store::INDEX_OPEN_SENTINEL).exists());
+    let s = Store::open(&dir).unwrap();
+    assert!(s.open_report().unclean_shutdown, "{:?}", s.open_report());
+    assert!(!s.open_report().index_rebuilt, "{:?}", s.open_report());
+    assert_eq!(s.get_blob(&h).unwrap(), b"durable in the log");
+}
+
+#[test]
+fn ckpt1_close_checkpoints_and_removes_the_sentinel() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::open(&dir).unwrap();
+    s.put_blob(b"x").unwrap();
+    s.close().unwrap();
+    assert!(!dir.join(rdy_store::INDEX_OPEN_SENTINEL).exists());
+    let r = Store::open(&dir).unwrap().open_report().clone();
+    assert!(!r.unclean_shutdown, "{r:?}");
+    assert_eq!(r.caught_up_frames, 0, "{r:?}");
+}
+
+/// Final review (Minor 12): the sentinel is never opened through a symlink, so a link planted at
+/// `<store>/index.open` cannot make every open truncate the file it points to.
+#[test]
+fn kill1_the_sentinel_never_truncates_through_a_symlink() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    drop(Store::open(&dir).unwrap());
+    let target = base.path().join("precious");
+    std::fs::write(&target, b"keep me").unwrap();
+    std::os::unix::fs::symlink(&target, dir.join(rdy_store::INDEX_OPEN_SENTINEL)).unwrap();
+    let s = Store::open(&dir).unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"keep me");
+    drop(s);
+    assert_eq!(std::fs::read(&target).unwrap(), b"keep me");
+}
+
 #[test]
 fn ckpt1_the_m1_test_writer_commits_its_index_durably() {
     let base = tempfile::tempdir().unwrap();
@@ -464,8 +535,12 @@ fn mark1_lagging_index_without_format_still_refuses_damage_in_the_first_batch() 
 }
 
 /// Carry-forward (Task 6 review): an index file that redb must repair (a pending non-durable
-/// commit left by a kill) takes `open_index`'s rollback arm: the open counts it as a kill and
-/// catches up from the log. It is neither rebuilt nor set aside.
+/// commit left by a kill) is trusted, and the open catches it up from the log: it is neither
+/// rebuilt nor set aside. With redb 4.3 this goes through the trusted `Ok(clean)` arm, not the
+/// sentinel-decided `Ok(clean == false)` arm: redb repairs the file at open and `check_integrity`
+/// then reports it clean (final review, Important 2; pinned in the rdy-store index test
+/// `kill1_redb_repairs_a_copy_of_a_live_index_at_open_and_then_reports_it_clean`). So
+/// `redb_repaired` here is redb's repair at open.
 #[test]
 fn kill1_a_pending_non_durable_commit_is_a_rollback_that_catches_up() {
     let base = tempfile::tempdir().unwrap();
@@ -479,7 +554,7 @@ fn kill1_a_pending_non_durable_commit_is_a_rollback_that_catches_up() {
     assert!(r.unclean_shutdown, "{r:?}");
     assert!(
         r.redb_repaired,
-        "redb reports the file as not cleanly closed: {r:?}"
+        "redb repaired the killed file at open (its repair callback fired): {r:?}"
     );
     assert!(!r.index_rebuilt, "{r:?}");
     assert_eq!(r.caught_up_frames, 12, "{r:?}");

@@ -90,3 +90,34 @@ fn a_malformed_producer_entry_is_a_decode_error_not_a_panic() {
         Err(rdy_store::StoreError::Decode(_))
     ));
 }
+
+/// Final review (Important 2), pinning what redb 4.3 reports, which `open_index`'s classification
+/// rests on: a copy of a live index (a non-durable commit pending, as a kill leaves it) is
+/// repaired at open (the repair callback fires) and `check_integrity` then reports it clean. So a
+/// kill reaches the trusted `Ok` arm through `clean`, not through the sentinel; the sentinel only
+/// decides the `Ok(clean == false)` arm, which redb 4.3 was not seen to produce. If a redb upgrade
+/// changes this, revisit `open_index`.
+#[test]
+fn kill1_redb_repairs_a_copy_of_a_live_index_at_open_and_then_reports_it_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.redb");
+    let idx = Index::open(&path).unwrap();
+    let upto = Location {
+        segment: 0,
+        offset: 64,
+    };
+    idx.apply(&[IndexEntry::Object(Hash::of(b"pending"), upto)], upto)
+        .unwrap();
+    let copy = dir.path().join("copy.redb");
+    std::fs::copy(&path, &copy).unwrap();
+    let c = Index::open_checked(&copy).unwrap();
+    assert!(c.repaired_at_open, "redb repairs a killed file at open");
+    assert!(c.clean, "and check_integrity reports it clean afterwards");
+    drop(c);
+    let c = Index::open_checked(&copy).unwrap();
+    assert!(c.clean && !c.repaired_at_open, "a second open is clean");
+    drop(c);
+    drop(idx);
+    let c = Index::open_checked(&path).unwrap();
+    assert!(c.clean && !c.repaired_at_open, "a cleanly closed file");
+}

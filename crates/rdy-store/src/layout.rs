@@ -31,6 +31,8 @@ enum Old {
     Dir,
     File,
     Missing,
+    /// A symbolic link (an M1 store kept elsewhere); never followed.
+    Link,
     Other,
 }
 
@@ -38,15 +40,17 @@ fn classify(old: &Path) -> Result<Old, StoreError> {
     match std::fs::symlink_metadata(old) {
         Ok(m) if m.file_type().is_dir() => Ok(Old::Dir),
         Ok(m) if m.file_type().is_file() => Ok(Old::File),
+        Ok(m) if m.file_type().is_symlink() => Ok(Old::Link),
         Ok(_) => Ok(Old::Other),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(Old::Missing),
         Err(e) => Err(e.into()),
     }
 }
 
-/// The mtime of the highest-numbered `segments/seg-*.log` of the store at `dir`; the epoch if
-/// there is none.
-fn newest_segment_mtime(dir: &Path) -> SystemTime {
+/// The log of the store at `dir`: the bytes in all its `segments/seg-*.log` files, and the mtime
+/// of the highest-numbered one (the epoch if there is none).
+fn log_summary(dir: &Path) -> (u64, SystemTime) {
+    let mut bytes = 0;
     let mut best: Option<(u32, PathBuf)> = None;
     if let Ok(entries) = std::fs::read_dir(dir.join("segments")) {
         for entry in entries.flatten() {
@@ -57,32 +61,50 @@ fn newest_segment_mtime(dir: &Path) -> SystemTime {
                 .and_then(|n| n.strip_suffix(".log"))
                 .filter(|n| n.len() >= 6 && n.bytes().all(|b| b.is_ascii_digit()))
                 .and_then(|n| n.parse::<u32>().ok());
-            if let Some(id) = id
-                && best.as_ref().is_none_or(|(b, _)| id > *b)
-            {
+            let Some(id) = id else { continue };
+            bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            if best.as_ref().is_none_or(|(b, _)| id > *b) {
                 best = Some((id, entry.path()));
             }
         }
     }
-    best.and_then(|(_, p)| std::fs::metadata(p).ok())
+    let mtime = best
+        .and_then(|(_, p)| std::fs::metadata(p).ok())
         .and_then(|m| m.modified().ok())
-        .unwrap_or(SystemTime::UNIX_EPOCH)
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    (bytes, mtime)
 }
 
+/// Both `.rdy/store` and `.rdy/store2` are store directories. The one named as holding the newer
+/// log is the non-empty one if only one holds frames (an older rdy that ran after the stub was
+/// lost recreates `.rdy/store` with an empty log), else the one whose last segment is newer,
+/// `.rdy/store2` on a tie.
 fn both_are_stores(old: &Path, new: &Path) -> StoreError {
-    let newer = if newest_segment_mtime(old) > newest_segment_mtime(new) {
-        old
-    } else {
-        new
+    let ((old_bytes, old_time), (new_bytes, new_time)) = (log_summary(old), log_summary(new));
+    let newer = match (old_bytes == 0, new_bytes == 0) {
+        (true, true) => "; both are empty".to_string(),
+        (true, false) => format!(
+            "; {} holds the newer log ({} is empty)",
+            new.display(),
+            old.display()
+        ),
+        (false, true) => format!(
+            "; {} holds the newer log ({} is empty)",
+            old.display(),
+            new.display()
+        ),
+        (false, false) => format!(
+            "; {} holds the newer log",
+            if old_time > new_time { old } else { new }.display()
+        ),
     };
     format_error(
         format!(
             "both {} and {} are store directories: an older rdy wrote to {} after this store was \
-             upgraded; {} holds the newer log",
+             upgraded{newer}",
             old.display(),
             new.display(),
             old.display(),
-            newer.display()
         ),
         "upgrade every rdy that opens this project, then keep the store with the newer log as \
          .rdy/store2 and replace .rdy/store with the upgrade stub; move the other directory \
@@ -156,6 +178,16 @@ pub fn open_project_store(rdy_dir: &Path) -> Result<Store, StoreError> {
                 fsutil::create_dir_durable(&new)?;
                 fsutil::write_durable(&old, STUB_TEXT.as_bytes())?;
                 return Store::open(&new);
+            }
+            (Old::Link, _) => {
+                return Err(format_error(
+                    format!(
+                        "{} is a symbolic link, neither the store directory nor the upgrade stub",
+                        old.display()
+                    ),
+                    "replace the link with the directory it points to (or move that directory to \
+                     .rdy/store), then reopen",
+                ));
             }
             (Old::Other, _) => {
                 return Err(format_error(

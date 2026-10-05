@@ -178,6 +178,12 @@ impl Rdy {
         Ok(self.store.checkpoint()?)
     }
 
+    /// Closes the project's store cleanly (see `Store::close`) and returns a failed checkpoint's
+    /// error. Dropping an `Rdy` closes it too, but can only report a failure on stderr.
+    pub fn close(self) -> Result<(), RdyError> {
+        Ok(self.store.close()?)
+    }
+
     /// Checkpoints if writes are waiting and the store has been idle long enough; true if it did.
     pub fn checkpoint_if_idle(&mut self) -> Result<bool, RdyError> {
         Ok(self.store.checkpoint_if_idle(std::time::Instant::now())?)

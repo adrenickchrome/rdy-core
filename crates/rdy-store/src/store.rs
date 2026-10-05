@@ -48,18 +48,26 @@ pub struct Store {
     dir: PathBuf,
     report: OpenReport,
     log: SegmentLog,
-    /// None only while `Drop` closes the database before it removes the sentinel.
+    /// None only once the clean close (`close` or `Drop`) has closed the database.
     index: Option<Index>,
     _lock: File,
     faults: Faults,
     /// Set when a failed write could not be rolled back; every later write fails until reopen.
+    ///
+    /// A known double fault (final review, Minor 10): if a write fails after its batch was
+    /// flushed with its marker (its index update failed) and the rollback's truncate then fails
+    /// too, the batch stays in the log, marked, and the next open accepts it as acknowledged
+    /// although this write returned an error. Under M1 the durable index was the boundary, so the
+    /// same double fault left the batch out. Nothing acknowledged is lost either way; the caller
+    /// of the failed write should read before retrying.
     poisoned: bool,
     /// Directories open fsynced because it created something in them (dur1).
     synced: Vec<PathBuf>,
     /// Opened by `open_legacy_for_tests`: behaves as M1 did (no format, no markers).
     legacy: bool,
-    /// Set only at the end of a successful open, after the sentinel exists: gates `Drop`, so a
-    /// store whose open failed neither removes a kill's sentinel nor does anything else on drop.
+    /// Set only at the end of a successful open, after the sentinel exists, and cleared by the
+    /// clean close: gates `close` and `Drop`, so a store whose open failed neither removes a
+    /// kill's sentinel nor does anything else on drop, and a store closes once.
     opened: bool,
     /// Frames written since the last checkpoint (none for the M1 test writer, whose index is
     /// durable on every write).
@@ -70,7 +78,8 @@ pub struct Store {
     checkpoint_frames: u64,
     /// Checkpoints this store has made.
     checkpoints: u64,
-    /// The last checkpoint a write attempted and could not make; cleared by the next success.
+    /// The last checkpoint a write or `checkpoint_if_idle` attempted and could not make; cleared
+    /// by the next success.
     checkpoint_error: Option<String>,
 }
 
@@ -92,6 +101,14 @@ struct OpenedIndex {
 /// - Anything else is a rollback: a clean file, or any file after a kill, where redb discarding
 ///   its non-durable commits is expected. Its last durable commit never covers an unacknowledged
 ///   frame, so it is trusted and the caller catches it up from its `indexed_upto`.
+///
+/// What redb 4.3 actually reports (final review; pinned by the index test
+/// `kill1_redb_repairs_a_copy_of_a_live_index_at_open_and_then_reports_it_clean`): a killed file
+/// is repaired at open (the repair callback fires) and `check_integrity` then returns clean, so a
+/// kill takes the trusted arm through `clean`. Damage shows up as an error or a panic: a sweep of
+/// 10,895 single-byte flips gave neither a kill nor damage as `Ok(clean == false)`. The
+/// `Ok(clean == false)` arm, the only one the sentinel decides, is therefore defensive and
+/// unobserved; the sentinel is reported (`unclean_shutdown`), not decisive, with redb 4.3.
 fn open_index(dir: &Path, unclean: bool) -> Result<OpenedIndex, StoreError> {
     let path = dir.join("index.redb");
     let opened = std::panic::catch_unwind(|| {
@@ -207,13 +224,14 @@ fn entries_for_frame(
 }
 
 impl Drop for Store {
+    /// Closes the store as `close` does. A failure leaves the sentinel, so the next open catches
+    /// up; it cannot be returned from here, so it is written to stderr.
     fn drop(&mut self) {
-        if self.opened && self.checkpoint().is_ok() {
-            // A clean close: the index is durable, so the next open will not see a kill. The
-            // database is closed before the sentinel goes, so a kill during the close still
-            // leaves the sentinel behind.
-            drop(self.index.take());
-            let _ = std::fs::remove_file(self.dir.join(INDEX_OPEN_SENTINEL));
+        if let Err(e) = self.close_once() {
+            eprintln!(
+                "rdy: the store at {} did not close cleanly ({e}); the next open catches its index up from the log",
+                self.dir.display()
+            );
         }
     }
 }
@@ -263,7 +281,7 @@ impl Store {
             return Err(lock_error(dir, e)); // lock1
         }
         // the sentinel of a process that died with the store open; M1 wrote none
-        let unclean = !legacy && dir.join(INDEX_OPEN_SENTINEL).exists();
+        let unclean = !legacy && std::fs::symlink_metadata(dir.join(INDEX_OPEN_SENTINEL)).is_ok();
         // a newer store is refused before the index is opened or anything is written
         let format_file = if legacy {
             None
@@ -358,7 +376,16 @@ impl Store {
         if !legacy {
             store.ensure_format(format_file.is_some())?;
             // Losing this file to a power loss only costs a needless rebuild, so it is not synced.
-            File::create(dir.join(INDEX_OPEN_SENTINEL))?;
+            // It is only ever created, never opened: an existing one (a kill's, or a link
+            // planted there) is left as it is, and nothing is followed or truncated.
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(dir.join(INDEX_OPEN_SENTINEL))
+            {
+                Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e.into()),
+                _ => {}
+            }
             store.opened = true;
         }
         Ok(store)
@@ -668,12 +695,41 @@ impl Store {
 
     /// Checkpoints, and returns true, if frames were written since the last checkpoint and the
     /// last write was `CHECKPOINT_IDLE` or more before `now`; else does nothing and returns false.
+    /// A failure is returned and also recorded (see `last_checkpoint_error`) until a checkpoint
+    /// succeeds.
     pub fn checkpoint_if_idle(&mut self, now: Instant) -> Result<bool, StoreError> {
         if self.pending == 0 || now.saturating_duration_since(self.last_write) < CHECKPOINT_IDLE {
             return Ok(false);
         }
-        self.checkpoint()?;
+        if let Err(e) = self.checkpoint() {
+            self.checkpoint_error = Some(e.to_string());
+            return Err(e);
+        }
         Ok(true)
+    }
+
+    /// Closes the store cleanly: checkpoints the index, closes it, then removes the `index.open`
+    /// sentinel, so the next open sees no kill. If the checkpoint fails, its error is returned and
+    /// the sentinel stays: nothing acknowledged is lost (it is in the log), and the next open
+    /// catches the index up. Dropping a store does the same and writes a failure to stderr.
+    pub fn close(mut self) -> Result<(), StoreError> {
+        self.close_once()
+    }
+
+    /// The clean close, once: later calls (and the drop after `close`) do nothing. A store whose
+    /// open failed was never `opened`, so it leaves a previous kill's sentinel alone.
+    fn close_once(&mut self) -> Result<(), StoreError> {
+        if !std::mem::take(&mut self.opened) {
+            return Ok(());
+        }
+        self.checkpoint()?;
+        // The database is closed before the sentinel goes, so a kill during the close still
+        // leaves the sentinel behind.
+        drop(self.index.take());
+        match std::fs::remove_file(self.dir.join(INDEX_OPEN_SENTINEL)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        }
     }
 
     /// Test hook: a write checkpoints once this many frames are pending.
@@ -700,7 +756,8 @@ impl Store {
         self.faults.checkpoint = true;
     }
 
-    /// Test hook: why the last checkpoint a write attempted failed, until a checkpoint succeeds.
+    /// Test hook: why the last checkpoint a write or `checkpoint_if_idle` attempted failed, until
+    /// a checkpoint succeeds.
     #[doc(hidden)]
     pub fn last_checkpoint_error(&self) -> Option<&str> {
         self.checkpoint_error.as_deref()

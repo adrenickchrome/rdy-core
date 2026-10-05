@@ -2,6 +2,7 @@ use crate::fsutil::sync_dir;
 use crate::kinds::{self, BatchCommit};
 use rdy_model::Hash;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::FileExt;
@@ -108,6 +109,22 @@ pub fn find_gap(dir: &Path) -> io::Result<Option<(u32, u32)>> {
     Ok(None)
 }
 
+thread_local! {
+    /// Payload bytes this thread's frame reads have hashed (see [`frame_bytes_hashed`]).
+    static HASHED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test hook: the payload bytes frame reads on this thread have hashed so far, so a test can
+/// measure what an open's tail check costs.
+#[doc(hidden)]
+pub fn frame_bytes_hashed() -> u64 {
+    HASHED.with(|h| h.get())
+}
+
+fn count_hashed(n: usize) {
+    HASHED.with(|h| h.set(h.get() + n as u64));
+}
+
 /// Reads the frame at `offset`, or returns None if it is torn or corrupt.
 fn read_frame(f: &File, offset: u64, file_len: u64) -> io::Result<Option<(u8, Hash, Vec<u8>)>> {
     let Some(payload_start) = offset.checked_add(HEADER).filter(|end| *end <= file_len) else {
@@ -126,6 +143,7 @@ fn read_frame(f: &File, offset: u64, file_len: u64) -> io::Result<Option<(u8, Ha
     let hash = Hash(header[5..37].try_into().unwrap());
     let mut payload = vec![0u8; len as usize];
     f.read_exact_at(&mut payload, payload_start)?;
+    count_hashed(payload.len());
     if Hash::of(&payload) != hash {
         return Ok(None);
     }
@@ -236,22 +254,83 @@ fn scan_marked(f: &File, seg: u32, file_len: u64) -> io::Result<Scan> {
     })
 }
 
+/// What one `acknowledged_batch_follows` call has learned about this file, so hostile bytes in a
+/// torn tail cost each frame at most one read and hash, however many marker-shaped records name
+/// it.
+#[derive(Default)]
+struct TailMemo {
+    /// Frames read and hashed so far: offset -> (kind, hash, end) of a valid frame, or None for
+    /// one whose payload does not match its hash.
+    frames: BTreeMap<u64, Option<(u8, Hash, u64)>>,
+    /// Batch starts whose chain of frames meets a frame that is invalid on its own (a hash
+    /// mismatch, or a marker inside the batch). Candidates are tried in file order, so every
+    /// later marker naming such a start meets the same frame before it reaches itself.
+    dead_starts: BTreeSet<u64>,
+}
+
+/// One step of a candidate batch's chain: the frame at `offset` if it ends at or before `bound`.
+enum Step {
+    /// A valid frame: kind, hash and end.
+    Frame(u8, Hash, u64),
+    /// The frame does not fit before `bound` (or the file): this candidate fails, but a later
+    /// one with a larger bound may not.
+    PastBound,
+    /// The frame's payload does not match its hash: every candidate that reaches it fails.
+    Invalid,
+}
+
+/// Reads the frame at `offset` for the tail check. Its header is read first, and its payload is
+/// read and hashed only if the frame ends at or before `bound`, at most once per `memo`.
+fn tail_frame(f: &File, offset: u64, bound: u64, memo: &mut TailMemo) -> io::Result<Step> {
+    if let Some(known) = memo.frames.get(&offset) {
+        return Ok(match *known {
+            Some((kind, hash, end)) if end <= bound => Step::Frame(kind, hash, end),
+            Some(_) => Step::PastBound,
+            None => Step::Invalid,
+        });
+    }
+    let Some(payload_start) = offset.checked_add(HEADER).filter(|end| *end <= bound) else {
+        return Ok(Step::PastBound);
+    };
+    let mut header = [0u8; HEADER as usize];
+    f.read_exact_at(&mut header, offset)?;
+    let len = u32::from_le_bytes(header[0..4].try_into().unwrap()) as u64;
+    let Some(end) = payload_start.checked_add(len).filter(|end| *end <= bound) else {
+        return Ok(Step::PastBound);
+    };
+    let hash = Hash(header[5..37].try_into().unwrap());
+    let mut payload = vec![0u8; len as usize];
+    f.read_exact_at(&mut payload, payload_start)?;
+    count_hashed(payload.len());
+    let found = (Hash::of(&payload) == hash).then_some((header[4], hash, end));
+    memo.frames.insert(offset, found);
+    Ok(match found {
+        Some((kind, hash, end)) => Step::Frame(kind, hash, end),
+        None => Step::Invalid,
+    })
+}
+
 /// True if the batch marker at absolute offset `marker_at` (payload `payload`) closes a real batch
 /// of this file: its `start` is before the marker, and the frames from `start` are hash-valid,
 /// contiguous, hold no other marker, and end exactly at `marker_at`, with the frame count and
 /// digest the marker names. Marker-shaped bytes inside another frame's payload (a copy of a
-/// segment, crafted asset bytes) carry offsets of a different file and fail this.
+/// segment, crafted asset bytes) carry offsets of a different file and fail this. No frame of the
+/// chain is read past `marker_at`.
 fn closes_a_real_batch(
     f: &File,
     seg: u32,
     marker_at: u64,
     payload: &[u8],
-    file_len: u64,
+    memo: &mut TailMemo,
 ) -> io::Result<bool> {
     let Ok(m) = postcard::from_bytes::<BatchCommit>(payload) else {
         return Ok(false);
     };
-    if m.start.segment != seg || m.start.offset >= marker_at || m.frames == 0 {
+    if m.start.segment != seg
+        || m.start.offset >= marker_at
+        || m.frames == 0
+        || memo.dead_starts.contains(&m.start.offset)
+    {
         return Ok(false);
     }
     let mut since: Vec<(u64, Hash)> = vec![];
@@ -260,12 +339,16 @@ fn closes_a_real_batch(
         if since.len() >= m.frames as usize {
             return Ok(false);
         }
-        match read_frame(f, offset, file_len)? {
-            Some((kind, hash, p)) if kind != kinds::BATCH_COMMIT => {
+        match tail_frame(f, offset, marker_at, memo)? {
+            Step::Frame(kind, hash, end) if kind != kinds::BATCH_COMMIT => {
                 since.push((offset, hash));
-                offset += HEADER + p.len() as u64;
+                offset = end;
             }
-            _ => return Ok(false),
+            Step::PastBound => return Ok(false),
+            Step::Frame(..) | Step::Invalid => {
+                memo.dead_starts.insert(m.start.offset);
+                return Ok(false);
+            }
         }
     }
     Ok(offset == marker_at && marker_matches(seg, &since, payload))
@@ -275,7 +358,7 @@ fn closes_a_real_batch(
 /// after `stop`, starts past `boundary`: an acknowledged batch follows the damage. Only positions
 /// whose kind byte is `BATCH_COMMIT` and whose length field fits a marker are hashed, and a
 /// candidate counts only if its batch chains from its `start` to the marker
-/// (`closes_a_real_batch`).
+/// (`closes_a_real_batch`). Candidates share one memo, so each frame is hashed at most once.
 fn acknowledged_batch_follows(
     f: &File,
     seg: u32,
@@ -286,8 +369,12 @@ fn acknowledged_batch_follows(
     let mut buf = vec![0u8; (file_len - stop) as usize];
     f.read_exact_at(&mut buf, stop)?;
     let h = HEADER as usize;
+    let mut memo = TailMemo::default();
     for pos in 0..buf.len() {
-        if pos + h > buf.len() || buf[pos + 4] != kinds::BATCH_COMMIT {
+        if pos + h > buf.len() {
+            break;
+        }
+        if buf[pos + 4] != kinds::BATCH_COMMIT {
             continue;
         }
         let len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as u64;
@@ -300,7 +387,7 @@ fn acknowledged_batch_follows(
         }
         if let Ok(m) = postcard::from_bytes::<BatchCommit>(payload)
             && m.start.offset > boundary
-            && closes_a_real_batch(f, seg, stop + pos as u64, payload, file_len)?
+            && closes_a_real_batch(f, seg, stop + pos as u64, payload, &mut memo)?
         {
             return Ok(true);
         }

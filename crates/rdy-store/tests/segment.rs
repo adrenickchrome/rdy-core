@@ -747,3 +747,101 @@ fn cat1_for_each_from_a_point_past_the_end_of_its_segment_is_invalid_data() {
         std::io::ErrorKind::InvalidData
     );
 }
+
+/// A hash-valid marker record (as crafted bytes inside a payload) naming `start` in segment 0.
+fn crafted_marker(start: u64) -> Vec<u8> {
+    let m = BatchCommit {
+        start: Location {
+            segment: 0,
+            offset: start,
+        },
+        frames: 1,
+        digest: Hash([0; 32]),
+    };
+    frame_bytes(kinds::BATCH_COMMIT, &postcard::to_allocvec(&m).unwrap())
+}
+
+/// Final review (Important 1): hostile bytes in a torn tail must not make the open's tail check
+/// hash the same frame once per marker-shaped record that names it, nor hash a frame that ends
+/// past the record. The torn write here is an agent's blob holding two crafted 1 MiB frame
+/// headers and 100 hash-valid marker records naming them. Before the fix every record hashed a
+/// whole 1 MiB frame (about 100 MiB); now the first, hash-invalid frame is hashed once and the
+/// second, which ends past every record naming it, is never hashed.
+#[test]
+fn mark1_crafted_markers_in_a_torn_tail_hash_each_frame_at_most_once() {
+    const L: usize = 1 << 20;
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 64 << 20).unwrap();
+    log.append_batch(&[(kinds::BLOB_CHUNK, b"first".to_vec())])
+        .unwrap();
+    let b = log.end();
+    log.sync().unwrap();
+    drop(log);
+    // the torn write: a frame header claiming 8 MiB, of which about 2 MiB reached the disk
+    let mut tail = (8u32 << 20).to_le_bytes().to_vec();
+    tail.push(kinds::BLOB_CHUNK);
+    tail.extend_from_slice(&[0; 32]);
+    tail.extend_from_slice(&[7; 16]);
+    // inside its payload: a hash-invalid frame of 1 MiB that fits before the records naming it
+    let s1 = b.offset + tail.len() as u64;
+    tail.extend_from_slice(&(L as u32).to_le_bytes());
+    tail.push(kinds::BLOB_CHUNK);
+    tail.extend_from_slice(&[0; 32]);
+    tail.extend_from_slice(&vec![9; L]);
+    // then a frame header of 1 MiB whose body holds the records, so it ends past each of them
+    let s2 = b.offset + tail.len() as u64;
+    tail.extend_from_slice(&(L as u32).to_le_bytes());
+    tail.push(kinds::BLOB_CHUNK);
+    tail.extend_from_slice(&[0; 32]);
+    let body_start = tail.len();
+    for i in 0..100u64 {
+        tail.extend_from_slice(&crafted_marker(if i % 2 == 0 { s1 } else { s2 }));
+        tail.extend_from_slice(&[5; 64]);
+    }
+    tail.resize(body_start + L, 5); // the second frame fits the file
+    let path = seg_file(dir.path(), 0);
+    let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+    f.write_all(&tail).unwrap();
+    drop(f);
+    let before = rdy_store::segment::frame_bytes_hashed();
+    let (log, q) = SegmentLog::open_marked(dir.path(), 64 << 20, None)
+        .expect("a torn write is quarantined, not refused");
+    let hashed = rdy_store::segment::frame_bytes_hashed() - before;
+    assert_eq!(log.end(), b);
+    assert_eq!(q.len(), 1);
+    assert!(
+        hashed <= (L + (64 << 10)) as u64,
+        "the tail check hashed {hashed} bytes"
+    );
+}
+
+/// Guard for the memo of Important 1: a marker-shaped record inside an acknowledged batch's own
+/// blob, naming that batch's start, is rejected (its frame ends past the record), and the real
+/// marker naming the same start must still count, so damage before that batch is refused.
+#[test]
+fn mark1_a_marker_record_inside_a_batch_naming_its_start_does_not_hide_that_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    log.append_batch(&[(kinds::BLOB_CHUNK, vec![1; 30])])
+        .unwrap();
+    let damaged = log.end();
+    log.append_batch(&[(kinds::BLOB_CHUNK, vec![2; 30])])
+        .unwrap();
+    let start = log.end().offset;
+    let mut blob = vec![3; 40];
+    blob.extend_from_slice(&crafted_marker(start));
+    blob.extend_from_slice(&[4; 40]);
+    log.append_batch(&[(kinds::BLOB_CHUNK, blob)]).unwrap();
+    log.sync().unwrap();
+    drop(log);
+    let path = seg_file(dir.path(), 0);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[damaged.offset as usize + 40] ^= 0xff; // the second batch; the third follows it
+    std::fs::write(&path, &bytes).unwrap();
+    let e = SegmentLog::open_marked(dir.path(), 1 << 20, None)
+        .err()
+        .expect("the third batch is acknowledged and follows the damage");
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData, "{e}");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert!(torn_files(dir.path()).is_empty());
+}

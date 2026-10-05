@@ -329,6 +329,63 @@ fn fmt1_both_store_directories_are_refused_naming_the_newer() {
     );
 }
 
+/// Final review (Important 5): an old rdy that ran after the stub was lost recreates `.rdy/store`
+/// with an empty log. However new its segment's mtime, an empty store never holds the newer log,
+/// and the message says it is empty.
+#[test]
+fn fmt1_an_empty_old_store_is_never_named_the_newer_log() {
+    let (dir, r) = project();
+    drop(r);
+    let rdy = dir.path().join(".rdy");
+    std::fs::remove_file(rdy.join("store")).unwrap();
+    drop(Store::open_legacy_for_tests(&rdy.join("store")).unwrap());
+    let now = std::time::SystemTime::now();
+    let set = |p: PathBuf, t| {
+        std::fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(t)
+            .unwrap()
+    };
+    set(
+        rdy.join("store2/segments/seg-000000.log"),
+        now - std::time::Duration::from_secs(60),
+    );
+    set(rdy.join("store/segments/seg-000000.log"), now);
+    let e = Rdy::open(dir.path()).err().expect("both are stores");
+    assert_eq!(e.code, "E_STORE_FORMAT", "{e}");
+    let old = rdy.join("store").display().to_string();
+    let new = rdy.join("store2").display().to_string();
+    assert!(
+        e.message.contains(&format!("{new} holds the newer log")),
+        "{e}"
+    );
+    assert!(e.message.contains(&format!("{old} is empty")), "{e}");
+}
+
+/// Final review (Minor 6): an M1 user who kept the store elsewhere behind a `.rdy/store` link is
+/// told to replace the link, not just to move it aside.
+#[test]
+fn fmt1_a_symlinked_old_store_is_told_to_replace_the_link() {
+    let (dir, r) = project();
+    drop(r);
+    let rdy = dir.path().join(".rdy");
+    std::fs::remove_file(rdy.join("store")).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), rdy.join("store")).unwrap();
+    let e = Rdy::open(dir.path()).err().expect("a link is not the stub");
+    assert_eq!(e.code, "E_STORE_FORMAT", "{e}");
+    assert!(e.fix.contains("replace the link"), "{e}");
+    assert!(
+        std::fs::symlink_metadata(rdy.join("store"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "nothing moved"
+    );
+}
+
 #[test]
 fn fmt1_a_stub_without_store2_is_refused() {
     let (dir, r) = project();

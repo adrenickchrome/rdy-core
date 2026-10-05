@@ -23,6 +23,12 @@ rdy show <id> --scope tag:v0.1.0   # read as of a version (also landing:<id>)
 
 In M1, `rdy mcp` holds the project's store while it runs, so run the human commands (`rdy status`, `rdy propose`, `rdy approve`, ...) after the agent session ends. A shared multi-client daemon arrives in M2.
 
+Upgrading a project made by an M1 `rdy`: the first newer `rdy` command moves the store from
+`.rdy/store/` to `.rdy/store2/` and leaves `.rdy/store` as a small file saying the store was
+upgraded. After that, an older `rdy` fails on every command with `Not a directory (os error 20)`
+on `.rdy/store` (its suggested `rdy fsck` and `rdy reindex` fail the same way) and changes
+nothing: upgrade that `rdy`.
+
 Claude Code MCP config:
 
 ```json
