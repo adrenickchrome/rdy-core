@@ -1,6 +1,7 @@
 use crate::Store;
 use crate::error::StoreError;
 use crate::kinds;
+use crate::merge::{MergeChange, Merged, merge};
 use crate::store::encode;
 use crate::view::{ViewHead, ViewOp, ViewOpKind};
 use rdy_model::{
@@ -8,7 +9,7 @@ use rdy_model::{
     StateSnapshot, Tag, decision,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// What `Store::view` returns: a view's base landing and the changes it includes, in order. It is
 /// not stored; the view's chain and its `ViewHead` are (chain1).
@@ -102,22 +103,72 @@ impl Store {
         }
     }
 
-    fn replay(
+    /// Merges `changes` onto `base` (merge1): deps first, then change id, with conflicts as data.
+    pub fn merge_onto(
         &self,
-        mut state: StateSnapshot,
-        changes: &[Hash],
-    ) -> Result<StateSnapshot, StoreError> {
-        for c in changes {
-            for op in &self.change(c)?.ops {
-                apply_op(self, &mut state, op)?;
-            }
-        }
-        Ok(state)
+        base: &StateSnapshot,
+        changes: &[Change],
+    ) -> Result<Merged, StoreError> {
+        let input: Vec<MergeChange<'_>> = changes
+            .iter()
+            .map(|c| MergeChange {
+                id: c.id(),
+                deps: &c.deps,
+                ops: &c.ops,
+            })
+            .collect();
+        Ok(merge(base, &input, &|v| self.producer(v).ok().flatten()))
+    }
+
+    /// View `name`'s included changes merged onto its base (canon's head when it has no head).
+    pub fn view_merge(&self, name: &str) -> Result<Merged, StoreError> {
+        let base = match self.view_head(name)? {
+            Some(head) => head.base,
+            None => self.canon_head()?,
+        };
+        let changes = self
+            .included(name)?
+            .iter()
+            .map(|c| self.change(c))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.merge_onto(&self.state_of(base)?, &changes)
     }
 
     pub fn view_state(&self, name: &str) -> Result<StateSnapshot, StoreError> {
-        let v = self.view(name)?;
-        self.replay(self.state_of(v.base)?, &v.changes)
+        Ok(self.view_merge(name)?.state)
+    }
+
+    /// `merge_onto(canon, changes)` with the landing checks: the first conflict (block order) is
+    /// `StaleBase` naming its base and canon's version, or `AlreadyExists` when its base is none;
+    /// an op whose base is a frozen decision is `Frozen`. The one mapping the store's `land`, the
+    /// engine's gate and atomic landings share.
+    pub fn merge_checked(
+        &self,
+        canon: &StateSnapshot,
+        changes: &[Change],
+    ) -> Result<Merged, StoreError> {
+        let merged = self.merge_onto(canon, changes)?;
+        if let Some(c) = merged.conflicts.first() {
+            return Err(match c.base {
+                Some(base) => StoreError::StaleBase {
+                    id: c.block.clone(),
+                    expected: base,
+                    actual: canon.blocks.get(&c.block).copied(),
+                },
+                None => StoreError::AlreadyExists(c.block.clone()),
+            });
+        }
+        let by_id: HashMap<Hash, &Change> = changes.iter().map(|c| (c.id(), c)).collect();
+        for id in &merged.order {
+            for op in &by_id[id].ops {
+                if let Some(base) = op.base()
+                    && decision::is_frozen(&self.get_block(&base)?)
+                {
+                    return Err(StoreError::Frozen(op.block_id().clone()));
+                }
+            }
+        }
+        Ok(merged)
     }
 
     pub fn commit_to_view(&mut self, name: &str, change: Change) -> Result<Hash, StoreError> {
@@ -153,7 +204,7 @@ impl Store {
         // The commit op names the change id, which depends on deps, so the change, its view op
         // and the view's head land in one write.
         let mut change = change;
-        let (mut items, change_pos) = self.change_frames(&mut change)?;
+        let (mut items, change_pos) = self.change_frames(&mut change, Some(name))?;
         let cid = Hash::of(&items[change_pos].1);
         let p = &change.provenance;
         let view_op = |prev: Option<Hash>, op: ViewOpKind| ViewOp {
@@ -244,7 +295,12 @@ impl Store {
     pub fn land(&mut self, proposal: &Hash, approver: Provenance) -> Result<Hash, StoreError> {
         let p = self.proposal(proposal)?;
         let head = self.canon_head()?;
-        let state = self.replay(self.canon_state()?, &p.changes)?;
+        let changes = p
+            .changes
+            .iter()
+            .map(|c| self.change(c))
+            .collect::<Result<Vec<_>, _>>()?;
+        let state = self.merge_checked(&self.canon_state()?, &changes)?.state;
         let snap = postcard::to_allocvec(&state).expect("encode snapshot");
         let rec = LandingRecord {
             proposal: *proposal,

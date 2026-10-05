@@ -1,6 +1,6 @@
 use crate::error::{StoreError, db};
 use crate::segment::Location;
-use rdy_model::Hash;
+use rdy_model::{BlockId, Hash};
 use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
 use std::path::Path;
 use std::sync::Arc;
@@ -15,6 +15,8 @@ const PRODUCERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("producers
 const VIEW_OPS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("view_ops");
 /// change hash -> the hash of the first landing that carried it into canon.
 const LANDED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("landed");
+/// a block id's string bytes, a 0x00 byte, then the hash of a change that deletes it -> empty.
+const DELETERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("deleters");
 const REFS: TableDefinition<&str, &[u8]> = TableDefinition::new("refs");
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 
@@ -41,6 +43,11 @@ pub enum IndexEntry {
         change: Hash,
         landing: Hash,
     },
+    /// `change` has an op that deletes `block`.
+    Deleted {
+        block: BlockId,
+        change: Hash,
+    },
 }
 
 pub struct Index {
@@ -64,12 +71,36 @@ fn typed_key(kind: u8, h: &Hash) -> [u8; 33] {
     key
 }
 
-/// The `view_ops` key prefix of `view`: its UTF-8 bytes, then a 0x00 byte.
-fn view_ops_prefix(view: &str) -> Vec<u8> {
-    let mut key = Vec::with_capacity(view.len() + 33);
-    key.extend_from_slice(view.as_bytes());
+/// The key prefix of `name` in a name-then-hash table (`view_ops`, `deleters`): its UTF-8 bytes,
+/// then a 0x00 byte.
+fn name_prefix(name: &str) -> Vec<u8> {
+    let mut key = Vec::with_capacity(name.len() + 33);
+    key.extend_from_slice(name.as_bytes());
     key.push(0);
     key
+}
+
+/// The hashes keyed under `name` in a name-then-hash table, in ascending hash order.
+fn hashes_under(
+    t: &redb::ReadOnlyTable<&'static [u8], &'static [u8]>,
+    name: &str,
+    what: &str,
+) -> Result<Vec<Hash>, StoreError> {
+    let prefix = name_prefix(name);
+    let mut out = vec![];
+    for item in t.range(&prefix[..]..).map_err(db)? {
+        let (k, _) = item.map_err(db)?;
+        let key = k.value();
+        if !key.starts_with(&prefix) {
+            break;
+        }
+        // a longer name that starts with `name` and a 0x00 byte sorts among these keys; only a
+        // key of exactly prefix + hash is one of `name`'s
+        if key.len() == prefix.len() + 32 {
+            out.push(hash_from(&key[prefix.len()..], what)?);
+        }
+    }
+    Ok(out)
 }
 
 fn enc(loc: &Location) -> Vec<u8> {
@@ -122,6 +153,7 @@ impl Index {
             w.open_table(PRODUCERS).map_err(db)?;
             w.open_table(VIEW_OPS).map_err(db)?;
             w.open_table(LANDED).map_err(db)?;
+            w.open_table(DELETERS).map_err(db)?;
             w.open_table(REFS).map_err(db)?;
             w.open_table(META).map_err(db)?;
         }
@@ -175,6 +207,7 @@ impl Index {
             let mut producers = w.open_table(PRODUCERS).map_err(db)?;
             let mut view_ops = w.open_table(VIEW_OPS).map_err(db)?;
             let mut landed = w.open_table(LANDED).map_err(db)?;
+            let mut deleters = w.open_table(DELETERS).map_err(db)?;
             let mut refs = w.open_table(REFS).map_err(db)?;
             let mut meta = w.open_table(META).map_err(db)?;
             for e in entries {
@@ -198,7 +231,7 @@ impl Index {
                         refs.insert(name.as_str(), &value[..]).map_err(db)?;
                     }
                     IndexEntry::ViewOp { view, op } => {
-                        let mut key = view_ops_prefix(view);
+                        let mut key = name_prefix(view);
                         key.extend_from_slice(&op.0);
                         view_ops.insert(&key[..], &[][..]).map_err(db)?;
                     }
@@ -207,6 +240,11 @@ impl Index {
                         if landed.get(&change.0[..]).map_err(db)?.is_none() {
                             landed.insert(&change.0[..], &landing.0[..]).map_err(db)?;
                         }
+                    }
+                    IndexEntry::Deleted { block, change } => {
+                        let mut key = name_prefix(block.as_str());
+                        key.extend_from_slice(&change.0);
+                        deleters.insert(&key[..], &[][..]).map_err(db)?;
                     }
                 }
             }
@@ -248,21 +286,14 @@ impl Index {
     pub fn view_ops(&self, view: &str) -> Result<Vec<Hash>, StoreError> {
         let r = self.db.begin_read().map_err(db)?;
         let t = r.open_table(VIEW_OPS).map_err(db)?;
-        let prefix = view_ops_prefix(view);
-        let mut out = vec![];
-        for item in t.range(&prefix[..]..).map_err(db)? {
-            let (k, _) = item.map_err(db)?;
-            let key = k.value();
-            if !key.starts_with(&prefix) {
-                break;
-            }
-            // a longer name that starts with `view` and a 0x00 byte sorts among these keys; only
-            // a key of exactly prefix + hash is one of `view`'s
-            if key.len() == prefix.len() + 32 {
-                out.push(hash_from(&key[prefix.len()..], "view op entry")?);
-            }
-        }
-        Ok(out)
+        hashes_under(&t, view, "view op entry")
+    }
+
+    /// The changes with an op that deletes `block`, in ascending hash order.
+    pub fn deleters(&self, block: &BlockId) -> Result<Vec<Hash>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(DELETERS).map_err(db)?;
+        hashes_under(&t, block.as_str(), "deleter entry")
     }
 
     /// The landing that carried `change` into canon, if one has.

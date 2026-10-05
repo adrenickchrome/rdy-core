@@ -3,7 +3,7 @@ use crate::{Materialized, Rdy, Scope, Session, rfc3339_now};
 use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Op, Proposal, decision};
 use rdy_schema::{Issue, Severity, validate_block};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ProposalInfo {
@@ -58,17 +58,15 @@ impl Rdy {
 
     /// Validates the canon that would result from landing `changes`.
     fn prospective_issues(&mut self, changes: &[Change]) -> Result<Vec<Issue>, RdyError> {
-        // replay onto canon to surface E_STALE_BASE / E_FROZEN early
-        let mut snap = self.store.canon_state()?;
-        for c in changes {
-            for op in &c.ops {
-                rdy_store::apply_op(&self.store, &mut snap, op)?;
-            }
-        }
+        // merge onto canon to surface E_STALE_BASE / E_ALREADY_EXISTS / E_FROZEN early
+        let merged = self
+            .store
+            .merge_checked(&self.store.canon_state()?, changes)?;
+        let by_id: HashMap<Hash, &Change> = changes.iter().map(|c| (c.id(), c)).collect();
         let mut next: Materialized = self.materialized(&Scope::Canon)?.clone();
         let mut touched = BTreeSet::new();
         let mut deleted = BTreeSet::new();
-        for c in changes {
+        for c in merged.order.iter().map(|id| by_id[id]) {
             next.apply(&c.ops);
             for op in &c.ops {
                 match op {
@@ -411,11 +409,23 @@ impl Rdy {
             return Err(e);
         }
 
-        // 3. dry run: validate the final change list before writing anything
+        // 3. dry run: validate the final change list before writing anything. The acceptance
+        // carries the deps the store gives it at commit (the producers of its bases), so the
+        // merge orders it after the changes it accepts.
+        let mut accept_deps = BTreeSet::new();
+        for op in &accept_ops {
+            if let Some(base) = op.base() {
+                accept_deps.insert(
+                    self.store
+                        .producer(&base)?
+                        .ok_or(rdy_store::StoreError::NotFound(base))?,
+                );
+            }
+        }
         let accept = (!accept_ops.is_empty()).then(|| Change {
             view: p.view.clone(),
             ops: accept_ops,
-            deps: vec![],
+            deps: accept_deps.into_iter().collect(),
             provenance: s.provenance(),
             justification: None,
             message: format!("accept decisions in {}", p.title),

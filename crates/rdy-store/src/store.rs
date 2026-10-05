@@ -7,7 +7,7 @@ use crate::segment::{CrashPoint, Location, SegmentLog, find_gap, seg_path};
 use crate::view::ViewOp;
 use rdy_model::{Block, Change, Hash, LandingRecord, Op, Proposal};
 use serde::{Serialize, de::DeserializeOwned};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -235,11 +235,17 @@ fn entries_for_frame(
         kinds::CHANGE => {
             let change: Change = decode(payload)?;
             for op in &change.ops {
-                if let Op::Create { block } | Op::Update { block, .. } = op {
-                    out.push(IndexEntry::Producer {
-                        version: block.version_hash(),
+                match op {
+                    Op::Create { block } | Op::Update { block, .. } => {
+                        out.push(IndexEntry::Producer {
+                            version: block.version_hash(),
+                            change: hash,
+                        });
+                    }
+                    Op::Delete { id, .. } => out.push(IndexEntry::Deleted {
+                        block: id.clone(),
                         change: hash,
-                    });
+                    }),
                 }
             }
         }
@@ -1017,7 +1023,7 @@ impl Store {
         mut change: Change,
         refs: Vec<(String, Vec<u8>)>,
     ) -> Result<Hash, StoreError> {
-        let (mut items, change_pos) = self.change_frames(&mut change)?;
+        let (mut items, change_pos) = self.change_frames(&mut change, None)?;
         items.extend(self.ref_items(refs));
         Ok(self.write(items)?[change_pos])
     }
@@ -1025,11 +1031,16 @@ impl Store {
 
 impl Store {
     /// How a change is laid out in a write, the one definition every change-writing path uses:
-    /// sets `change.deps`, then returns the `BLOCK` frames of its creates and updates followed by
+    /// sets `change.deps` (see `change_deps`; `view` is the view it is committed to, if any), then
+    /// returns the `BLOCK` frames of its creates and updates followed by
     /// the `CHANGE` frame, and the position of that `CHANGE` frame. The change's id is
     /// `Hash::of(&items[change_pos].1)`.
-    pub(crate) fn change_frames(&self, change: &mut Change) -> Result<(Frames, usize), StoreError> {
-        change.deps = self.change_deps(change)?;
+    pub(crate) fn change_frames(
+        &self,
+        change: &mut Change,
+        view: Option<&str>,
+    ) -> Result<(Frames, usize), StoreError> {
+        change.deps = self.change_deps(change, view)?;
         let mut items = vec![];
         for op in &change.ops {
             if let Op::Create { block } | Op::Update { block, .. } = op {
@@ -1041,15 +1052,37 @@ impl Store {
         Ok((items, change_pos))
     }
 
-    pub(crate) fn change_deps(&self, change: &Change) -> Result<Vec<Hash>, StoreError> {
+    /// A change's deps, sorted ascending and deduplicated: the producers of its ops' bases and,
+    /// when it is committed to `view`, every change `view` includes that deletes an id one of its
+    /// ops creates (so a delete and a re-create under one id merge in that order).
+    pub(crate) fn change_deps(
+        &self,
+        change: &Change,
+        view: Option<&str>,
+    ) -> Result<Vec<Hash>, StoreError> {
         let mut deps = BTreeSet::new();
+        let mut included: Option<HashSet<Hash>> = None;
         for op in &change.ops {
-            if let Some(base) = op.base() {
-                deps.insert(
-                    self.index()
-                        .producer(&base)?
-                        .ok_or(StoreError::NotFound(base))?,
-                );
+            match op {
+                Op::Create { block } => {
+                    let Some(view) = view else { continue };
+                    let deleters = self.index().deleters(&block.id)?;
+                    if deleters.is_empty() {
+                        continue;
+                    }
+                    if included.is_none() {
+                        included = Some(self.included(view)?.iter().copied().collect());
+                    }
+                    let included = included.as_ref().expect("set above");
+                    deps.extend(deleters.into_iter().filter(|d| included.contains(d)));
+                }
+                Op::Update { base, .. } | Op::Delete { base, .. } => {
+                    deps.insert(
+                        self.index()
+                            .producer(base)?
+                            .ok_or(StoreError::NotFound(*base))?,
+                    );
+                }
             }
         }
         Ok(deps.into_iter().collect())
