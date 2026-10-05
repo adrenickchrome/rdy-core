@@ -1,5 +1,82 @@
 {
   "classes": {
+    "Ubuntu 24.04.5 LTS / AMD Ryzen 7 9800X3D 8-Core Processor / ext4": {
+      "machine": "Ubuntu 24.04.5 LTS / AMD Ryzen 7 9800X3D 8-Core Processor / ext4",
+      "ops": {
+        "cold_open": {
+          "median_ms": 46.818117,
+          "op": "cold_open",
+          "p95_ms": 47.72476,
+          "runs": 5
+        },
+        "cold_open_lagging": {
+          "median_ms": 58.125619,
+          "op": "cold_open_lagging",
+          "p95_ms": 58.213146,
+          "runs": 5
+        },
+        "context": {
+          "median_ms": 31.766246,
+          "op": "context",
+          "p95_ms": 31.992969,
+          "runs": 20
+        },
+        "export_import": {
+          "median_ms": 257.592935,
+          "op": "export_import",
+          "p95_ms": 260.488469,
+          "runs": 5
+        },
+        "impact": {
+          "median_ms": 31.643532,
+          "op": "impact",
+          "p95_ms": 31.842943,
+          "runs": 20
+        },
+        "propose_land_500_flat": {
+          "median_ms": 89.49213999999999,
+          "op": "propose_land_500_flat",
+          "p95_ms": 99.026734,
+          "runs": 5
+        },
+        "render": {
+          "median_ms": 1056.201082,
+          "op": "render",
+          "p95_ms": 1063.382907,
+          "runs": 5
+        },
+        "resolve_path": {
+          "median_ms": 27.787953,
+          "op": "resolve_path",
+          "p95_ms": 27.863096,
+          "runs": 20
+        },
+        "tree_full": {
+          "median_ms": 1.329692,
+          "op": "tree_full",
+          "p95_ms": 1.375519,
+          "runs": 20
+        },
+        "version_position": {
+          "median_ms": 2.36449,
+          "op": "version_position",
+          "p95_ms": 2.7488740000000003,
+          "runs": 20
+        },
+        "write_batch_200": {
+          "median_ms": 4.690576,
+          "op": "write_batch_200",
+          "p95_ms": 8.217626000000001,
+          "runs": 9
+        },
+        "write_single": {
+          "median_ms": 2.627733,
+          "op": "write_single",
+          "p95_ms": 2.6784790000000003,
+          "runs": 30
+        }
+      }
+    },
     "macOS 26.6.2 / Apple M4 Pro / APFS": {
       "machine": "macOS 26.6.2 / Apple M4 Pro / APFS",
       "ops": {
