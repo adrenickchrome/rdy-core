@@ -16,6 +16,7 @@ rdy-graph = { path = "crates/rdy-graph" }
 rdy-engine = { path = "crates/rdy-engine" }
 rdy-render = { path = "crates/rdy-render" }
 rdy-mcp = { path = "crates/rdy-mcp" }
+rdy-daemon = { path = "crates/rdy-daemon" }
 blake3 = "1.8"
 postcard = { version = "1.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
@@ -35,3 +36,4 @@ criterion = "0.8"
 tempfile = "3"
 semver = "1"
 saphyr-parser = "0.1"
+libc = "0.2.190"

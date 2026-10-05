@@ -1198,6 +1198,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rdy-daemon"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "rdy-engine"
 version = "0.1.0"
 dependencies = [
