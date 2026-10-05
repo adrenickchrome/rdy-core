@@ -62,58 +62,88 @@ fn summarize(b: &Block, resolve: &dyn Fn(&str) -> String) -> String {
 /// `b`'s primary text (its statement, prompt, name or title field, else its body), with
 /// whitespace collapsed and each reference rendered by `resolve`; and whether it is the body.
 fn primary_text(b: &Block, resolve: &dyn Fn(&str) -> String) -> (String, bool) {
+    let (text, from_body) = resolved_text(b, resolve);
+    (collapse(&text), from_body)
+}
+
+fn collapse(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Like [`primary_text`], but with the text's own whitespace and line breaks kept.
+fn resolved_text(b: &Block, resolve: &dyn Fn(&str) -> String) -> (String, bool) {
     let keys: &[&str] = if rdy_model::tree::is_tree_type(&b.block_type) {
         &["title", "name"]
     } else {
         &["statement", "prompt", "name", "title"]
     };
-    let (text, mode, from_body) = match keys
+    match keys
         .iter()
         .find_map(|f| b.field_str(f).filter(|s| !s.is_empty()))
     {
-        Some(field) => (field, RefMode::Strict, false),
-        None => (b.body.as_str(), RefMode::for_body(&b.block_type), true),
-    };
-    let mut out = String::new();
-    if mode == RefMode::Off {
-        out.push_str(text);
-    } else {
-        let plain = |s: &str| s.replace("\\{{", "{{");
-        let mut last = 0;
-        for span in ref_spans(text, mode) {
-            out.push_str(&plain(&text[last..span.range.start]));
-            out.push_str(&resolve(&span.token));
-            last = span.range.end;
-        }
-        out.push_str(&plain(&text[last..]));
+        Some(field) => (render_refs(field, RefMode::Strict, resolve), false),
+        None => (
+            render_refs(&b.body, RefMode::for_body(&b.block_type), resolve),
+            true,
+        ),
     }
-    (
-        out.split_whitespace().collect::<Vec<_>>().join(" "),
-        from_body,
-    )
 }
 
+fn render_refs(text: &str, mode: RefMode, resolve: &dyn Fn(&str) -> String) -> String {
+    if mode == RefMode::Off {
+        return text.to_string();
+    }
+    let plain = |s: &str| s.replace("\\{{", "{{");
+    let mut out = String::new();
+    let mut last = 0;
+    for span in ref_spans(text, mode) {
+        out.push_str(&plain(&text[last..span.range.start]));
+        out.push_str(&resolve(&span.token));
+        last = span.range.end;
+    }
+    out.push_str(&plain(&text[last..]));
+    out
+}
+
+/// The longest a compact line's fallback text gets, ellipsis included.
+const COMPACT_LINE_MAX: usize = 200;
+
 /// read1: the compact read's text for `b`: its whole statement, prompt, name or title field, else
-/// the first sentence of its body. References stay as bare ids and nothing is cut at a length:
-/// the read's max_tokens does the cutting.
+/// the first sentence of its body. A body with no sentence end (and any diagram, code or table
+/// body, which hold ". " as content) shows as its `alt` or `caption` field, else its first line,
+/// capped at 200 characters with an ellipsis. References stay as bare ids; a field or sentence
+/// is not cut at a length (the read's max_tokens does the cutting).
 pub fn compact_summary(b: &Block) -> String {
-    let (text, from_body) = primary_text(b, &|tok| tok.to_string());
-    if from_body {
-        first_sentence(&text).to_string()
+    let (text, from_body) = resolved_text(b, &|tok| tok.to_string());
+    if !from_body {
+        return collapse(&text);
+    }
+    let prose = !matches!(b.block_type.as_str(), "diagram" | "code" | "table");
+    if prose && let Some(s) = first_sentence(&collapse(&text)) {
+        return s.to_string();
+    }
+    for f in ["alt", "caption"] {
+        if let Some(v) = b.field_str(f).filter(|s| !s.trim().is_empty()) {
+            return collapse(&render_refs(v, RefMode::Strict, &|tok| tok.to_string()));
+        }
+    }
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty());
+    let line = line.unwrap_or_default();
+    if line.chars().count() > COMPACT_LINE_MAX {
+        let mut cut: String = line.chars().take(COMPACT_LINE_MAX - 1).collect();
+        cut.push('…');
+        cut
     } else {
-        text
+        line.to_string()
     }
 }
 
 /// Up to and including the first `.`, `?` or `!` followed by a space or the end of `text`.
-fn first_sentence(text: &str) -> &str {
+fn first_sentence(text: &str) -> Option<&str> {
     let bytes = text.as_bytes();
-    for (i, c) in text.char_indices() {
-        if matches!(c, '.' | '?' | '!') && bytes.get(i + 1).is_none_or(|n| *n == b' ') {
-            return &text[..=i];
-        }
-    }
-    text
+    text.char_indices()
+        .find(|(i, c)| matches!(c, '.' | '?' | '!') && bytes.get(i + 1).is_none_or(|n| *n == b' '))
+        .map(|(i, _)| &text[..=i])
 }
 
 pub fn field_json(v: &FieldValue) -> serde_json::Value {
