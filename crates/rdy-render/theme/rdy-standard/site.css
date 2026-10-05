@@ -317,6 +317,10 @@ figure { margin: 1.2rem 0; }
 .pager-next { grid-column: 2; text-align: right; align-items: flex-end; }
 .pager-dir { font-size: 0.74rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-soft); }
 .pager-title { color: var(--accent-ink); font-weight: 600; overflow-wrap: anywhere; }
+@media (max-width: 900px) {
+  .pager { grid-template-columns: minmax(0, 1fr); }
+  .pager-next { grid-column: auto; text-align: left; align-items: flex-start; }
+}
 /* == /pager == */
 
 /* == version == */

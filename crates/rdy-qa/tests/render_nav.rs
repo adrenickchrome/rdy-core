@@ -267,3 +267,74 @@ fn nav1_the_scroll_spy_observes_the_heading_each_toc_link_points_at() {
     assert_eq!(v["afterSecond"], serde_json::json!([1]), "{v}");
     assert_eq!(v["afterThird"], serde_json::json!([2]), "{v}");
 }
+
+/// The value the stylesheet's cascade gives `prop` on a bare `selector` at a viewport `w` px wide,
+/// by source order (only the `min-width`/`max-width` media forms the stylesheet uses).
+fn cascaded(css: &rdy_qa::site::Css, selector: &str, prop: &str, w: u32) -> Option<String> {
+    let re = regex::Regex::new(r"\((min|max)-width:(\d+)px\)").unwrap();
+    let applies = |media: &Option<String>| match media {
+        None => true,
+        Some(m) => {
+            let m = m.replace(' ', "");
+            let conds: Vec<_> = re.captures_iter(&m).collect();
+            !conds.is_empty()
+                && conds.iter().all(|c| {
+                    let n: u32 = c[2].parse().unwrap();
+                    if &c[1] == "min" { w >= n } else { w <= n }
+                })
+        }
+    };
+    let mut out = None;
+    for b in &css.blocks {
+        if b.selector.split(',').any(|s| s.trim() == selector) && applies(&b.media) {
+            for (p, v) in &b.decls {
+                if p == prop {
+                    out = Some(v.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Phone rules use the 900px breakpoint: below it, previous/next stack in one column and the
+/// next link reads from the left, as the prototype's phone layout does; above it they sit side by
+/// side.
+#[test]
+fn nav1_previous_and_next_stack_below_900px() {
+    let (_d, mut r) = tree_site();
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    let css = rdy_qa::site::parse_css(
+        &std::fs::read_to_string(out.path().join("assets/site.css")).unwrap(),
+    );
+    for w in [320, 375, 600, 900] {
+        assert_eq!(
+            cascaded(&css, ".pager", "grid-template-columns", w).as_deref(),
+            Some("minmax(0, 1fr)"),
+            "width {w}"
+        );
+        assert_eq!(
+            cascaded(&css, ".pager-next", "grid-column", w).as_deref(),
+            Some("auto"),
+            "width {w}"
+        );
+        assert_eq!(
+            cascaded(&css, ".pager-next", "text-align", w).as_deref(),
+            Some("left"),
+            "width {w}"
+        );
+    }
+    for w in [901, 1024, 1440] {
+        assert_eq!(
+            cascaded(&css, ".pager", "grid-template-columns", w).as_deref(),
+            Some("1fr 1fr"),
+            "width {w}"
+        );
+        assert_eq!(
+            cascaded(&css, ".pager-next", "text-align", w).as_deref(),
+            Some("right"),
+            "width {w}"
+        );
+    }
+}
