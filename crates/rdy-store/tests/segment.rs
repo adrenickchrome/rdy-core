@@ -727,3 +727,23 @@ fn cat1_for_each_from_reads_every_frame_once_in_order() {
         assert_eq!(w[0].2, w[1].0, "each frame's next is the following frame");
     }
 }
+
+#[test]
+fn cat1_for_each_from_a_point_past_the_end_of_its_segment_is_invalid_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    log.append_batch(&[(kinds::BLOB_CHUNK, b"a".to_vec())])
+        .unwrap();
+    let past = Location {
+        segment: 0,
+        offset: log.end().offset + 1,
+    };
+    let e = log
+        .for_each_from(past, |_, _, _, _, _| -> std::io::Result<()> { Ok(()) })
+        .unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData, "{e}");
+    assert_eq!(
+        log.scan_from(past).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+}

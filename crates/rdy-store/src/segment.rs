@@ -749,30 +749,14 @@ impl SegmentLog {
         Ok((kind, payload))
     }
 
+    /// The location, kind and hash of every frame from `from` to the end of the log. A thin
+    /// collector over `for_each_from`, which owns the torn-frame rule.
     pub fn scan_from(&self, from: Location) -> io::Result<Vec<(Location, u8, Hash)>> {
         let mut out = vec![];
-        for seg in from.segment..=self.current() {
-            let f = &self.readers[seg as usize];
-            let file_len = f.metadata()?.len();
-            let mut offset = if seg == from.segment { from.offset } else { 0 };
-            while let Some((kind, hash, payload)) = read_frame(f, offset, file_len)? {
-                out.push((
-                    Location {
-                        segment: seg,
-                        offset,
-                    },
-                    kind,
-                    hash,
-                ));
-                offset += HEADER + payload.len() as u64;
-            }
-            if offset < file_len {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("corrupt frame in segment {seg} at offset {offset}"),
-                ));
-            }
-        }
+        self.for_each_from(from, |loc, kind, hash, _, _| -> io::Result<()> {
+            out.push((loc, kind, hash));
+            Ok(())
+        })?;
         Ok(out)
     }
 
@@ -788,7 +772,7 @@ impl SegmentLog {
     /// Calls `f(location, kind, hash, payload, next)` for every frame from `from` to the end of
     /// the log, in order, reading each frame once; `next` is the location just past the frame. A
     /// `from` at the end of its segment continues with the next segment. A torn or corrupt frame
-    /// is `InvalidData`, as in `scan_from`. An error from `f` stops the walk and is returned.
+    /// is `InvalidData`, as is a `from` past the end of its segment. An error from `f` stops the walk and is returned.
     pub fn for_each_from<E: From<io::Error>>(
         &self,
         from: Location,
@@ -798,6 +782,14 @@ impl SegmentLog {
             let file = &self.readers[seg as usize];
             let file_len = file.metadata()?.len();
             let mut offset = if seg == from.segment { from.offset } else { 0 };
+            if offset > file_len {
+                // `from` lies past the end of its segment: frames before it are missing
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("corrupt frame in segment {seg} at offset {offset}"),
+                )
+                .into());
+            }
             while let Some((kind, hash, payload)) = read_frame(file, offset, file_len)? {
                 let loc = Location {
                     segment: seg,

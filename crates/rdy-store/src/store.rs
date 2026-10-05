@@ -465,7 +465,7 @@ impl Store {
         if from >= end {
             return Ok(CatchUp::default());
         }
-        if self.index_point_unusable(from, end) {
+        if self.index_point_unusable(from, end)? {
             drop(self.index.take()); // close the file before it is renamed
             let path = self.dir.join("index.redb");
             set_aside(&path)?;
@@ -481,14 +481,25 @@ impl Store {
 
     /// True if the frame at `from` (before the end of the log and of its segment) cannot be read:
     /// `from` is then no frame start, and the index that holds it is what is wrong.
-    fn index_point_unusable(&self, from: Location, end: Location) -> bool {
+    ///
+    /// A `from` past the end of its segment is not that: the index acknowledged frames the log no
+    /// longer holds, so it is `MissingFrames` (seg1), and the index stays as it is.
+    fn index_point_unusable(&self, from: Location, end: Location) -> Result<bool, StoreError> {
         if (from.segment == 0 && from.offset == 0) || from >= end {
-            return false;
+            return Ok(false);
         }
-        match self.log.segment_len(from.segment) {
-            Ok(len) if from.offset == len => false, // the end of its segment: the next one follows
-            _ => self.log.read_hashed(from).is_err(),
+        let len = self.log.segment_len(from.segment)?;
+        if from.offset > len {
+            return Err(StoreError::MissingFrames {
+                segment: seg_path(&self.dir.join("segments"), from.segment),
+                detail: format!(
+                    "the index acknowledges writes up to segment {} offset {}, but that segment ends at offset {len}",
+                    from.segment, from.offset
+                ),
+            });
         }
+        // at the end of its segment, the next one follows
+        Ok(from.offset < len && self.log.read_hashed(from).is_err())
     }
 
     fn replay_from(&mut self, from: Location) -> Result<CatchUp, StoreError> {

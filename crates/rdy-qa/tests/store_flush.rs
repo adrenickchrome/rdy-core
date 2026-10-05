@@ -575,3 +575,47 @@ fn cat1_damage_in_a_sealed_segment_after_the_index_point_keeps_the_index() {
     assert!(Store::open(&copy).is_err());
     assert_eq!(damaged_files(&copy), 0, "the index was not set aside");
 }
+
+/// An index point past the end of a sealed segment means acknowledged frames are missing from the
+/// log (seg1): the open refuses and keeps the index, rather than rebuilding it from what is left,
+/// which would silently roll canon back.
+#[test]
+fn cat1_an_index_point_past_the_end_of_a_sealed_segment_refuses_and_keeps_the_index() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::open(&dir).unwrap();
+    s.set_segment_max(4096);
+    s.set_checkpoint_frames(u64::MAX);
+    s.set_refs(vec![("r".into(), b"v1".to_vec())]).unwrap();
+    let mut i = 0u32;
+    while s.log_end().segment < 1 {
+        s.put_blob(&vec![i as u8; 1000]).unwrap();
+        i += 1;
+    }
+    s.set_refs(vec![("r".into(), b"v2".to_vec())]).unwrap();
+    let blob = s.put_blob(b"in segment one").unwrap();
+    s.checkpoint().unwrap(); // the durable index point is inside segment 1
+    let point = s.log_end();
+    assert_eq!(point.segment, 1, "{point:?}");
+    assert!(point.offset > 0, "{point:?}");
+    while s.log_end().segment < 3 {
+        s.put_blob(&vec![i as u8; 1000]).unwrap();
+        i += 1;
+    }
+    let copy = base.path().join("copy");
+    copy_store(&dir, &copy);
+    drop(s);
+    std::fs::write(seg(&copy, 1), b"").unwrap(); // segment 1 lost what the index acknowledged
+    let e = Store::open(&copy)
+        .err()
+        .expect("open must refuse, not rebuild over the loss");
+    assert!(matches!(&e, StoreError::MissingFrames { .. }), "{e}");
+    assert!(e.to_string().contains("seg-000001.log"), "{e}");
+    assert_eq!(damaged_files(&copy), 0, "the index was not set aside");
+    // the index was kept: restoring the segment brings the writes back, with no rebuild
+    std::fs::copy(seg(&dir, 1), seg(&copy, 1)).unwrap();
+    let s = Store::open(&copy).unwrap();
+    assert!(!s.open_report().index_rebuilt, "{:?}", s.open_report());
+    assert_eq!(s.get_ref("r").unwrap().unwrap(), b"v2");
+    assert_eq!(s.get_blob(&blob).unwrap(), b"in segment one");
+}
