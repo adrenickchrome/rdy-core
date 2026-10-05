@@ -93,3 +93,22 @@ fn dtext1_a_display_text_reference_is_an_ordinary_reference_to_the_engine() {
         "a display-text reference pins its target"
     );
 }
+
+#[test]
+fn key1_a_placeholder_keeps_its_key_typed_and_escaped_forms_when_substituted() {
+    let (_d, mut r) = project();
+    let res = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Spec", "doc_type": "overview"}},
+        {"op": "create", "type": "term", "id": "$t", "parent": "$d", "fields": {"name": "Guard"}, "body": "A condition."},
+        {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "A {{$t|@key}} and B {{$t|\\@x}}."}
+    ])).unwrap();
+    let (t, p) = (
+        BlockId::parse(&res.created["$t"]).unwrap(),
+        BlockId::parse(&res.created["$p"]).unwrap(),
+    );
+    let b = r.block(&Scope::View("work".into()), &p).unwrap();
+    assert_eq!(
+        b.body,
+        format!("A {{{{{t}|@key}}}} and B {{{{{t}|\\@x}}}}.")
+    );
+}

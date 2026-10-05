@@ -73,11 +73,29 @@ impl RefMode {
 
 /// One reference in a text: `range` covers the whole `{{…}}`. `token` is the trimmed text before
 /// the first `|` (the id, a `$placeholder` or a key), and `display` is the trimmed rest, if any.
+///
+/// A display text that is exactly `@key` is the stored mark of a reference the author typed as a
+/// key: `key_typed` is then true and `display` is `None`. `\@` escapes a literal leading `@` in
+/// display text, and `display` holds it unescaped (`{{id|\@x}}` gives `Some("@x")`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RefSpan {
     pub range: std::ops::Range<usize>,
     pub token: String,
     pub display: Option<String>,
+    pub key_typed: bool,
+}
+
+impl RefSpan {
+    /// The stored `{{…}}` form of this span with `token` (for example a resolved id) in place of
+    /// its own, keeping the key-typed mark or the display text (re-escaping a leading `@`).
+    pub fn encode(&self, token: &str) -> String {
+        match (&self.display, self.key_typed) {
+            (_, true) => format!("{{{{{token}|@key}}}}"),
+            (Some(d), false) if d.starts_with('@') => format!("{{{{{token}|\\{d}}}}}"),
+            (Some(d), false) => format!("{{{{{token}|{d}}}}}"),
+            (None, false) => format!("{{{{{token}}}}}"),
+        }
+    }
 }
 
 /// The references in `text`, in order, under `mode`.
@@ -103,10 +121,21 @@ pub fn ref_spans(text: &str, mode: RefMode) -> Vec<RefSpan> {
             None => (inner.trim(), None),
         };
         if mode == RefMode::Strict || token.starts_with('$') || BlockId::parse(token).is_ok() {
+            let key_typed = display == Some("@key");
+            let display = match display {
+                _ if key_typed => None,
+                Some(d) => Some(
+                    d.strip_prefix('\\')
+                        .filter(|r| r.starts_with('@'))
+                        .unwrap_or(d),
+                ),
+                None => None,
+            };
             out.push(RefSpan {
                 range: start..end,
                 token: token.to_string(),
                 display: display.map(str::to_string),
+                key_typed,
             });
         }
         pos = end;

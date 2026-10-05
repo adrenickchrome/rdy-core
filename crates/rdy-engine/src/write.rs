@@ -293,10 +293,7 @@ impl Resolver<'_> {
         for span in ref_spans(s, mode) {
             if let Some(id) = self.placeholders.get(&span.token) {
                 out.push_str(&s[last..span.range.start]);
-                match &span.display {
-                    Some(d) => out.push_str(&format!("{{{{{id}|{d}}}}}")),
-                    None => out.push_str(&format!("{{{{{id}}}}}")),
-                }
+                out.push_str(&span.encode(&id.to_string()));
                 last = span.range.end;
             }
         }

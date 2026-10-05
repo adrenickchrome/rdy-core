@@ -70,3 +70,45 @@ fn key1_the_grammar_accepts_human_keys_and_refuses_ids_and_syntax() {
     }
     assert_eq!(key::fold("Fw-s1"), key::fold("FW-S1"));
 }
+
+#[test]
+fn key1_a_bar_at_key_marks_a_key_typed_reference_and_backslash_at_escapes_a_leading_at() {
+    let s = ref_spans(
+        "{{c-WYF81|@key}} {{ c-WYF81 | @key }} {{c-WYF81|\\@x}} {{c-WYF81|a@b}} {{c-WYF81}}",
+        RefMode::Strict,
+    );
+    assert_eq!(s.len(), 5);
+    for typed in &s[..2] {
+        assert!(typed.key_typed, "{typed:?}");
+        assert_eq!(typed.token, "c-WYF81");
+        assert_eq!(typed.display, None);
+    }
+    assert!(!s[2].key_typed);
+    assert_eq!(
+        s[2].display.as_deref(),
+        Some("@x"),
+        "the escape is removed and the @ is literal"
+    );
+    assert!(!s[3].key_typed);
+    assert_eq!(s[3].display.as_deref(), Some("a@b"));
+    assert!(!s[4].key_typed && s[4].display.is_none());
+}
+
+#[test]
+fn key1_encode_writes_the_stored_form_back_and_round_trips() {
+    let text = "{{c-WYF81|@key}} {{c-WYF81|\\@x}} {{c-WYF81|plain}} {{c-WYF81}}";
+    for s in ref_spans(text, RefMode::Strict) {
+        let back = s.encode(&s.token);
+        let again = ref_spans(&back, RefMode::Strict);
+        assert_eq!(again.len(), 1);
+        assert_eq!(
+            (again[0].key_typed, &again[0].display),
+            (s.key_typed, &s.display),
+            "{back}"
+        );
+    }
+    let s = &ref_spans("{{c-WYF81|\\@x}}", RefMode::Strict)[0];
+    assert_eq!(s.encode("p-12345"), "{{p-12345|\\@x}}");
+    let s = &ref_spans("{{c-WYF81|@key}}", RefMode::Strict)[0];
+    assert_eq!(s.encode("p-12345"), "{{p-12345|@key}}");
+}
