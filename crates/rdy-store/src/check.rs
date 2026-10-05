@@ -1,6 +1,6 @@
 //! Structural checks of the typed objects (fsck2): view chains and heads, the view-op index, and
 //! canon's landings against the change -> landing index.
-use crate::Store;
+use crate::StoreReader;
 use crate::error::StoreError;
 use crate::kinds;
 use crate::view::{ViewHead, ViewOpKind};
@@ -35,7 +35,7 @@ fn variant(k: &ViewOpKind) -> &'static str {
     }
 }
 
-impl Store {
+impl StoreReader {
     /// Checks the view chains, their heads and index entries, and canon's landings; the first
     /// failure found is a `StoreError::Decode`. Landing fields that a later rdy interprets
     /// (assurance, relay, approved version, rebased-from) are not looked at.

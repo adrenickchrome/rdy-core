@@ -7,6 +7,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 const HEADER: u64 = 4 + 1 + 32;
 /// An upper bound on the encoded `BatchCommit` payload, used to size a batch before it is written.
@@ -148,6 +149,126 @@ fn read_frame(f: &File, offset: u64, file_len: u64) -> io::Result<Option<(u8, Ha
         return Ok(None);
     }
     Ok(Some((kind, hash, payload)))
+}
+
+/// The read half of the log (rdr1): positioned reads of frames at locations the caller already
+/// knows are acknowledged (from the index, or bounded by an explicit `upto`). It opens each
+/// segment file read-only on first use and keeps it; it never scans for the end of a segment, so
+/// it never meets a batch the writer is still appending.
+pub struct SegmentReader {
+    dir: PathBuf,
+    files: RwLock<BTreeMap<u32, Arc<File>>>,
+}
+
+/// A frame that ends past the end of its file, or whose payload does not match its hash.
+fn corrupt_frame(loc: Location) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("corrupt or missing frame at {loc:?}"),
+    )
+}
+
+impl SegmentReader {
+    /// A reader of the segments in `dir`. It opens nothing yet.
+    pub fn open(dir: &Path) -> SegmentReader {
+        SegmentReader {
+            dir: dir.to_path_buf(),
+            files: RwLock::new(BTreeMap::new()),
+        }
+    }
+
+    /// Segment `seg`'s file, opened read-only on first use. A missing file is `NotFound`.
+    fn file(&self, seg: u32) -> io::Result<Arc<File>> {
+        if let Some(f) = self
+            .files
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&seg)
+        {
+            return Ok(Arc::clone(f));
+        }
+        let f = Arc::new(File::open(seg_path(&self.dir, seg))?);
+        let mut files = self.files.write().unwrap_or_else(|e| e.into_inner());
+        Ok(Arc::clone(files.entry(seg).or_insert(f)))
+    }
+
+    /// The frame at `loc` and the payload hash its header carries, hash-checked as
+    /// `SegmentLog::read_hashed` checks it: a frame that does not fit its file or does not match
+    /// its hash is `InvalidData`.
+    pub fn read_hashed(&self, loc: Location) -> io::Result<(u8, Hash, Vec<u8>)> {
+        let f = self.file(loc.segment)?;
+        let (kind, hash, payload, _) = read_frame_at(&f, loc)?;
+        Ok((kind, hash, payload))
+    }
+
+    pub fn read(&self, loc: Location) -> io::Result<(u8, Vec<u8>)> {
+        let (kind, _, payload) = self.read_hashed(loc)?;
+        Ok((kind, payload))
+    }
+
+    /// Calls `f(location, kind, hash, payload, next)` for every frame in `[from, upto)`, in order;
+    /// `next` is the location just past the frame. A segment before `upto`'s is read to the end of
+    /// its file (the writer has rolled past it, so it ends at a marker), then the walk continues
+    /// with the next segment. A frame that crosses `upto`, or a `from` past the end of its
+    /// segment, is `InvalidData`. An error from `f` stops the walk and is returned.
+    pub fn for_each_from<E: From<io::Error>>(
+        &self,
+        from: Location,
+        upto: Location,
+        mut f: impl FnMut(Location, u8, Hash, &[u8], Location) -> Result<(), E>,
+    ) -> Result<(), E> {
+        if from >= upto {
+            return Ok(());
+        }
+        for seg in from.segment..=upto.segment {
+            if seg == upto.segment && upto.offset == 0 {
+                // nothing of `upto`'s segment is in range
+                break;
+            }
+            let file = self.file(seg)?;
+            let end = if seg == upto.segment {
+                upto.offset
+            } else {
+                file.metadata()?.len()
+            };
+            let mut offset = if seg == from.segment { from.offset } else { 0 };
+            if offset > end {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("corrupt frame in segment {seg} at offset {offset}"),
+                )
+                .into());
+            }
+            while offset < end {
+                let loc = Location {
+                    segment: seg,
+                    offset,
+                };
+                let (kind, hash, payload, next) = read_frame_at(&file, loc)?;
+                if next > end {
+                    return Err(corrupt_frame(loc).into());
+                }
+                let next = Location {
+                    segment: seg,
+                    offset: next,
+                };
+                f(loc, kind, hash, &payload, next)?;
+                offset = next.offset;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The frame at `loc` in `f`, by positioned reads of its header and payload, with the offset just
+/// past it. A frame that does not fit the file or does not match its hash is `InvalidData`, as
+/// `SegmentLog::read_hashed` has it.
+fn read_frame_at(f: &File, loc: Location) -> io::Result<(u8, Hash, Vec<u8>, u64)> {
+    let file_len = f.metadata()?.len();
+    let (kind, hash, payload) =
+        read_frame(f, loc.offset, file_len)?.ok_or_else(|| corrupt_frame(loc))?;
+    let next = loc.offset + HEADER + payload.len() as u64;
+    Ok((kind, hash, payload, next))
 }
 
 /// True if any valid frame (header parses, fits within EOF, payload hash verifies)
@@ -825,12 +946,7 @@ impl SegmentLog {
             .get(loc.segment as usize)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such segment"))?;
         let file_len = f.metadata()?.len();
-        read_frame(f, loc.offset, file_len)?.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("corrupt or missing frame at {loc:?}"),
-            )
-        })
+        read_frame(f, loc.offset, file_len)?.ok_or_else(|| corrupt_frame(loc))
     }
 
     pub fn read(&self, loc: Location) -> io::Result<(u8, Vec<u8>)> {

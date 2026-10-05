@@ -1,10 +1,10 @@
-use crate::Store;
 use crate::error::StoreError;
 use crate::kinds;
 use crate::land::LandRequest;
 use crate::merge::{MergeChange, Merged, merge_indexed};
 use crate::store::encode;
 use crate::view::{ViewHead, ViewOp, ViewOpKind};
+use crate::{Store, StoreReader};
 use rdy_model::{
     Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance, StateSnapshot, Tag,
     decision,
@@ -28,7 +28,7 @@ fn tag_ref(name: &str) -> String {
     format!("tag/{name}")
 }
 
-pub fn apply_op(store: &Store, state: &mut StateSnapshot, op: &Op) -> Result<(), StoreError> {
+pub fn apply_op(store: &StoreReader, state: &mut StateSnapshot, op: &Op) -> Result<(), StoreError> {
     match op {
         Op::Create { block } => {
             if state.blocks.contains_key(&block.id) {
@@ -49,7 +49,7 @@ pub fn apply_op(store: &Store, state: &mut StateSnapshot, op: &Op) -> Result<(),
 }
 
 fn check_base(
-    store: &Store,
+    store: &StoreReader,
     state: &StateSnapshot,
     id: &BlockId,
     base: Hash,
@@ -68,7 +68,7 @@ fn check_base(
     Ok(())
 }
 
-impl Store {
+impl StoreReader {
     pub fn canon_head(&self) -> Result<Option<Hash>, StoreError> {
         self.get_ref("canon")?
             .map(|b| crate::index::hash_from(&b, "canon ref"))
@@ -79,7 +79,8 @@ impl Store {
         self.get(&self.landing(landing)?.state)
     }
 
-    fn state_of(&self, landing: Option<Hash>) -> Result<StateSnapshot, StoreError> {
+    /// The state landing `landing` recorded; the empty state for None.
+    pub fn state_of(&self, landing: Option<Hash>) -> Result<StateSnapshot, StoreError> {
         match landing {
             Some(l) => self.snapshot_at(&l),
             None => Ok(StateSnapshot::default()),
@@ -177,6 +178,43 @@ impl Store {
         Ok((merged, at))
     }
 
+    pub fn landings(&self) -> Result<Vec<(Hash, LandingRecord)>, StoreError> {
+        let mut out = vec![];
+        let mut cur = self.canon_head()?;
+        while let Some(h) = cur {
+            let rec = self.landing(&h)?;
+            cur = rec.prev;
+            out.push((h, rec));
+        }
+        Ok(out)
+    }
+
+    pub fn blocks(&self, state: &StateSnapshot) -> Result<BTreeMap<BlockId, Block>, StoreError> {
+        state
+            .blocks
+            .iter()
+            .map(|(id, v)| Ok((id.clone(), self.get_block(v)?)))
+            .collect()
+    }
+
+    pub fn read_tag(&self, h: &Hash) -> Result<Tag, StoreError> {
+        self.get_named(kinds::TAG, "tag", h)
+    }
+
+    /// Every `tag/*` ref as (name, tag hash, tag), in ref-name order.
+    pub fn tags(&self) -> Result<Vec<(String, Hash, Tag)>, StoreError> {
+        self.refs_with_prefix("tag/")?
+            .into_iter()
+            .map(|(name, value)| {
+                let h = crate::index::hash_from(&value, "tag ref")?;
+                let name = name.strip_prefix("tag/").unwrap_or(&name).to_string();
+                Ok((name, h, self.read_tag(&h)?))
+            })
+            .collect()
+    }
+}
+
+impl Store {
     pub fn commit_to_view(&mut self, name: &str, change: Change) -> Result<Hash, StoreError> {
         let state = self.view_state(name)?;
         self.commit_to_view_at(name, change, &state)
@@ -193,6 +231,18 @@ impl Store {
         change: Change,
         current: &StateSnapshot,
     ) -> Result<Hash, StoreError> {
+        self.commit_to_view_with(name, change, &|id| current.blocks.get(id).copied())
+    }
+
+    /// `commit_to_view_at` with the view's present state read through `current`: the version of
+    /// a block id in the view now, or None if the view has no such block. The same contract:
+    /// `current` MUST answer as `view_state(name)` would.
+    pub fn commit_to_view_with(
+        &mut self,
+        name: &str,
+        change: Change,
+        current: &dyn Fn(&BlockId) -> Option<Hash>,
+    ) -> Result<Hash, StoreError> {
         // apply_op only reads and writes the ids the ops name, so seed a small state with those
         let mut state = StateSnapshot::default();
         for op in &change.ops {
@@ -200,8 +250,8 @@ impl Store {
                 Op::Create { block } | Op::Update { block, .. } => &block.id,
                 Op::Delete { id, .. } => id,
             };
-            if let Some(v) = current.blocks.get(id) {
-                state.blocks.insert(id.clone(), *v);
+            if let Some(v) = current(id) {
+                state.blocks.insert(id.clone(), v);
             }
         }
         for op in &change.ops {
@@ -311,25 +361,6 @@ impl Store {
             .landing)
     }
 
-    pub fn landings(&self) -> Result<Vec<(Hash, LandingRecord)>, StoreError> {
-        let mut out = vec![];
-        let mut cur = self.canon_head()?;
-        while let Some(h) = cur {
-            let rec = self.landing(&h)?;
-            cur = rec.prev;
-            out.push((h, rec));
-        }
-        Ok(out)
-    }
-
-    pub fn blocks(&self, state: &StateSnapshot) -> Result<BTreeMap<BlockId, Block>, StoreError> {
-        state
-            .blocks
-            .iter()
-            .map(|(id, v)| Ok((id.clone(), self.get_block(v)?)))
-            .collect()
-    }
-
     /// Does not check for an existing `tag/<name>` ref (it would be overwritten): the engine's
     /// E_TAG_EXISTS check is the guard.
     ///
@@ -341,21 +372,5 @@ impl Store {
         items.extend(self.ref_items_pub(vec![(tag_ref(&tag.name), id.0.to_vec())]));
         self.write(items)?;
         Ok(id)
-    }
-
-    pub fn read_tag(&self, h: &Hash) -> Result<Tag, StoreError> {
-        self.get_named(kinds::TAG, "tag", h)
-    }
-
-    /// Every `tag/*` ref as (name, tag hash, tag), in ref-name order.
-    pub fn tags(&self) -> Result<Vec<(String, Hash, Tag)>, StoreError> {
-        self.refs_with_prefix("tag/")?
-            .into_iter()
-            .map(|(name, value)| {
-                let h = crate::index::hash_from(&value, "tag ref")?;
-                let name = name.strip_prefix("tag/").unwrap_or(&name).to_string();
-                Ok((name, h, self.read_tag(&h)?))
-            })
-            .collect()
     }
 }

@@ -152,9 +152,19 @@ pub(crate) fn hash_from(bytes: &[u8], what: &str) -> Result<Hash, StoreError> {
     })
 }
 
+/// A redb open error: `Locked(path)` when another live `Database` (in this process, e.g. a
+/// reader that outlived its store, or another one) holds the file's lock, which is not damage;
+/// anything else is `Db`.
+fn open_error(path: &Path, e: redb::DatabaseError) -> StoreError {
+    match e {
+        redb::DatabaseError::DatabaseAlreadyOpen => StoreError::Locked(path.to_path_buf()),
+        e => db(e),
+    }
+}
+
 impl Index {
     pub fn open(path: &Path) -> Result<Index, StoreError> {
-        Index::with_tables(Database::create(path).map_err(db)?)
+        Index::with_tables(Database::create(path).map_err(|e| open_error(path, e))?)
     }
 
     /// Opens the index and verifies every page checksum (about 30 ms per 300k objects). Whether
@@ -167,7 +177,7 @@ impl Index {
         let mut database = redb::Builder::new()
             .set_repair_callback(move |_| seen.store(true, Ordering::Relaxed))
             .create(path)
-            .map_err(db)?;
+            .map_err(|e| open_error(path, e))?;
         let clean = database.check_integrity().map_err(db)?;
         Ok(CheckedIndex {
             index: Index::with_tables(database)?,

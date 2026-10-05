@@ -1,7 +1,7 @@
 //! View chains (chain1): each view is a chain of `VIEW_OP` objects, newest first through `prev`,
 //! whose head the ref `view/<name>` names in a `ViewHead`. A view's included change set is read by
 //! walking back from the head to the latest checkpoint op and applying the ops after it.
-use crate::Store;
+use crate::StoreReader;
 use crate::error::StoreError;
 use crate::kinds;
 use rdy_model::Hash;
@@ -86,7 +86,7 @@ fn broken(name: &str, at: &Hash, why: impl std::fmt::Display) -> StoreError {
     StoreError::Decode(format!("view chain of {name:?} is broken at {at}: {why}"))
 }
 
-impl Store {
+impl StoreReader {
     /// The head of view `name`'s chain, or None if the view has no ref.
     pub fn view_head(&self, name: &str) -> Result<Option<ViewHead>, StoreError> {
         self.get_ref(&format!("view/{name}"))?
