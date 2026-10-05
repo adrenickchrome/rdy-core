@@ -1,5 +1,6 @@
 //! The (kind, hash) object index (plan M2a1, kind1): objects of different kinds with the same
 //! bytes are separate objects, and a planted object never hides or impersonates another kind's.
+use rdy_model::{ActorRun, AltChoice, Assurance, LandingRecord, RelayEvidence};
 use rdy_model::{Hash, StateSnapshot};
 use rdy_model::{Provenance, Role, Tag};
 use rdy_qa::fixtures::*;
@@ -159,4 +160,47 @@ fn kind1_a_chunk_planted_with_a_tags_bytes_does_not_hide_the_tag() {
     assert_eq!(id, planted);
     assert_eq!(s.read_tag(&id).unwrap(), tag);
     assert_eq!(s.tags().unwrap().len(), 1);
+}
+
+/// Gate listing for `repr1`: its other tests live in the product crates, which the gate runs
+/// but does not list. A landing with every field set reads back in its kind, with its stored
+/// hash as id, from the store and after a reindex.
+#[test]
+fn repr1_a_landing_reads_back_in_its_kind_with_its_id_after_a_reindex() {
+    let (_d, mut s) = store();
+    let by = Provenance {
+        actor: "someone".into(),
+        run: None,
+        role: Role::Approver,
+        at_ms: 1,
+    };
+    let l = LandingRecord {
+        proposal: Hash::of(b"p"),
+        prev: None,
+        state: StateSnapshot::default().id(),
+        approved_by: by,
+        changes: vec![Hash::of(b"c")],
+        chosen: Some(AltChoice {
+            set: Hash::of(b"set"),
+            member: "alt-a".into(),
+        }),
+        checks: vec![],
+        assurance: Assurance::Relayed,
+        relayed_by: Some(ActorRun {
+            actor: "agent:relay".into(),
+            run: Some("run-1".into()),
+        }),
+        relay_evidence: Some(RelayEvidence {
+            quoted: "land it".into(),
+            session_ref: "sess-1".into(),
+        }),
+        approved_version: Some(Hash::of(b"p")),
+        rebased_from: vec![Hash::of(b"an older landing")],
+    };
+    let lh = plant(&mut s, kinds::LANDING, postcard::to_allocvec(&l).unwrap());
+    assert_eq!(lh, l.id());
+    assert!(s.has_kind(kinds::LANDING, &lh).unwrap());
+    assert_eq!(s.landing(&lh).unwrap(), l);
+    s.reindex().unwrap();
+    assert_eq!(s.landing(&lh).unwrap(), l);
 }
