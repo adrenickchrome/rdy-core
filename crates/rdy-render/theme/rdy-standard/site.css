@@ -245,8 +245,6 @@ th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 figure { margin: 1.2rem 0; }
 .figure img { display: block; border-radius: var(--radius); }
 .figure-missing, .download .meta { color: var(--ink-soft); }
-.diagram-canvas pre.mermaid { text-align: center; background: var(--surface); }
-.diagram-source summary { cursor: pointer; font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
 .code-block { margin: 1.1rem 0; }
 .code-head { align-items: center; }
 .copy-code { font-size: 0.72rem; font-weight: 500; color: var(--ink-soft); }
@@ -254,6 +252,17 @@ figure { margin: 1.2rem 0; }
 /* == /content == */
 
 /* == diagram == */
+figure.diagram .diagram-canvas { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1rem; }
+.diagram-svg { text-align: center; }
+.diagram-svg svg { max-width: 100%; height: auto; }
+pre.mermaid { white-space: pre; overflow-x: auto; color: var(--ink-soft); font-size: 0.78rem; margin: 0; text-align: left; }
+figure.diagram figcaption { margin-top: 0.5rem; }
+details.diagram-source { margin-top: 0.4rem; }
+details.diagram-source summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; color: var(--ink-soft); font-weight: 500; font-size: 0.84rem; border-radius: 999px; padding: 0.15rem 0.6rem; margin-left: -0.6rem; }
+details.diagram-source summary::-webkit-details-marker { display: none; }
+details.diagram-source summary:hover { background: var(--accent-soft); color: var(--accent); }
+details.diagram-source[open] summary { color: var(--accent-ink); }
+figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 /* == /diagram == */
 
 /* == why == */

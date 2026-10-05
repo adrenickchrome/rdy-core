@@ -25,4 +25,5 @@ fn mer1_labels_in_diagram_source_are_escaped_for_mermaid() {
         "{page}"
     );
     assert!(page.contains("C[C#35; #59;x]"), "{page}");
+    assert!(page.contains("assets/js/mermaid.min.js"), "{page}");
 }
