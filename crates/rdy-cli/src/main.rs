@@ -550,16 +550,12 @@ fn tags_text(v: &Value) -> String {
 }
 
 /// `rdy edit`: the block as YAML from the `block` op, `$EDITOR` on a temp file, then the
-/// `edit_block` op, on one session.
+/// `edit_block` op. Each op runs on a session of its own: the editor may stay open for long, and
+/// the daemon may stop meanwhile (`rdy serve --stop` after a rebuild), so the write connects
+/// afresh (starting a daemon again if need be); it is sent once and never retried. When the write
+/// fails, the edited file is kept and named in the error (`fix`, and `saved_edit` in JSON).
 fn edit(env: &Env, id: &str, view: Option<&str>) -> Result<Value, ErrorReply> {
-    let mut c = Conn::open(env)?;
-    let out = edit_on(&mut c, id, view);
-    c.close();
-    out
-}
-
-fn edit_on(c: &mut Conn, id: &str, view: Option<&str>) -> Result<Value, ErrorReply> {
-    let block = c.op("block", json!({"id": id, "view": view}))?;
+    let block = call(env, "block", json!({"id": id, "view": view}))?;
     let tmp = tempfile::Builder::new()
         .prefix("rdy-edit-")
         .suffix(".yaml")
@@ -586,7 +582,18 @@ fn edit_on(c: &mut Conn, id: &str, view: Option<&str>) -> Result<Value, ErrorRep
         ));
     }
     let yaml = std::fs::read_to_string(tmp.path()).map_err(|e| io_error(e, "retry"))?;
-    c.op("edit_block", json!({"yaml": yaml, "view": view}))
+    call(env, "edit_block", json!({"yaml": yaml, "view": view})).map_err(|mut e| {
+        if let Ok(path) = tmp.into_temp_path().keep() {
+            e.fix = format!(
+                "{}; your edit is saved at {}: run rdy edit {id} again and paste it in",
+                e.fix,
+                path.display()
+            );
+            e.extra
+                .insert("saved_edit".into(), json!(path.to_string_lossy()));
+        }
+        e
+    })
 }
 
 fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {

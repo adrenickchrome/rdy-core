@@ -10,6 +10,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 /// The command that starts a detached daemon for `project`, unspawned: `<rdy_bin> serve --detach
 /// --spawned --project <project>` in `project` (`--spawned` tells `rdy serve --detach` to serve
@@ -18,8 +19,11 @@ use std::process::{Command, Stdio};
 /// variable removed from its environment, and a new session (so a new process group) of its own
 /// from before its exec. A socket path the daemon could not bind (`socket::check_socket_path`) is refused here,
 /// before anything is created, rather than spawning a daemon that would only die at its bind.
+/// A relative `project` is made absolute against the caller's working directory first: the child
+/// runs in the project, where the relative path would name `<project>/<project>`.
 pub fn serve_command(rdy_bin: &Path, project: &Path, run: &RunDir) -> io::Result<Command> {
     check_socket_path(run)?;
+    let project = std::path::absolute(project)?;
     run.ensure()?;
     let log = open_no_follow(
         OpenOptions::new().append(true).create(true).mode(0o600),
@@ -33,8 +37,8 @@ pub fn serve_command(rdy_bin: &Path, project: &Path, run: &RunDir) -> io::Result
         .arg("--detach")
         .arg("--spawned")
         .arg("--project")
-        .arg(project)
-        .current_dir(project)
+        .arg(&project)
+        .current_dir(&project)
         .stdin(Stdio::null())
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err));
@@ -65,20 +69,29 @@ pub struct Spawned {
     pub exited: Box<dyn FnMut() -> Option<i32> + Send>,
 }
 
-/// Spawns `cmd` and returns without waiting for it to finish. The `Spawned` owns the child
-/// (`exited` is its `try_wait`); dropping it detaches the child, which `serve_command`'s
-/// `setsid` already made the leader of a session of its own.
+/// Spawns `cmd` and returns without waiting for it to finish. A reaper thread waits on the child
+/// and stores its exit code, which `exited` reads; so the child is reaped when it exits whether
+/// or not the `Spawned` is still held. `setsid` does not reparent the child: without the reaper a
+/// long-lived spawner (`rdy edit`, an `rdy mcp` proxy) would keep an exited daemon as a zombie,
+/// which `process_alive` still reports.
 pub fn spawn_serve(cmd: &mut Command) -> io::Result<Spawned> {
     let mut child = cmd.spawn()?;
-    Ok(Spawned {
-        exited: Box::new(move || match child.try_wait() {
-            Ok(Some(status)) => Some(
-                status
+    let code = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&code);
+    std::thread::Builder::new()
+        .name("rdy-daemon-reaper".into())
+        .spawn(move || {
+            // an error here means the child cannot be waited on; it then never reports an exit,
+            // as with a child that runs
+            if let Ok(status) = child.wait() {
+                let c = status
                     .code()
-                    .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
-            ),
-            Ok(None) | Err(_) => None,
-        }),
+                    .unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(c);
+            }
+        })?;
+    Ok(Spawned {
+        exited: Box::new(move || *code.lock().unwrap_or_else(|e| e.into_inner())),
     })
 }
 

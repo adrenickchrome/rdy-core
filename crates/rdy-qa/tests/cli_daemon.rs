@@ -246,3 +246,135 @@ fn cli2_check_inside_a_project_reads_canon_through_the_daemon() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok");
     let _: Value = Value::Null;
 }
+
+/// The id of the doc a `new doc` reply created.
+fn created_doc(v: &Value) -> String {
+    v["created"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find_map(|x| x.as_str().filter(|s| s.starts_with("d-")))
+        .unwrap()
+        .to_string()
+}
+
+/// Writes an executable editor script into the project.
+fn editor_script(s: &Served, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = s.dir.path().join("ed.sh");
+    std::fs::write(&script, format!("#!/bin/sh\n{body}")).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+/// `rdy --project <dir> --json edit <id>` with `EDITOR=script`, as the human.
+fn edit_with(s: &Served, script: &std::path::Path, id: &str) -> std::process::Output {
+    std::process::Command::new(rdy_bin())
+        .args(["--project"])
+        .arg(s.dir.path())
+        .args(["--json", "edit", id])
+        .env("EDITOR", script)
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .env_remove("RDY_NO_DAEMON")
+        .envs(s.env_pairs())
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn cli2_a_relative_project_starts_the_daemon() {
+    let s = Served::new();
+    let parent = s.dir.path().parent().unwrap();
+    let name = s.dir.path().file_name().unwrap().to_str().unwrap();
+    for project in [name.to_string(), format!("./{name}")] {
+        let out = std::process::Command::new(rdy_bin())
+            .args(["--project", &project, "--json", "status"])
+            .current_dir(parent)
+            .env_remove("RDY_ACTOR")
+            .env_remove("RDY_RUN")
+            .env_remove("RDY_NO_DAEMON")
+            .envs(s.env_pairs())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "--project {project}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(s.daemon_pid().is_some(), "--project {project}");
+    }
+}
+
+#[test]
+fn cli2_edit_survives_the_daemon_stopping_while_the_editor_runs() {
+    let s = Served::new();
+    // made directly, so the edit below is the command that spawns the daemon (and so its parent)
+    let (ok, v) = s.json(&[
+        "--json",
+        "--no-daemon",
+        "new",
+        "doc",
+        "a",
+        "--title",
+        "Before",
+    ]);
+    assert!(ok, "{v}");
+    let id = created_doc(&v);
+    let stop_out = s.dir.path().join("stop.out");
+    let script = editor_script(
+        &s,
+        &format!(
+            "sed -i.bak 's/title: Before/title: After/' \"$1\"\n'{}' --project '{}' serve --stop > '{}' 2>&1\necho \"exit=$?\" >> '{}'\n",
+            rdy_bin().display(),
+            s.dir.path().display(),
+            stop_out.display(),
+            stop_out.display()
+        ),
+    );
+    let t = Instant::now();
+    let out = edit_with(&s, &script, &id);
+    let stopped = std::fs::read_to_string(&stop_out).unwrap();
+    assert!(
+        stopped.starts_with("stopped\n") && stopped.ends_with("exit=0\n"),
+        "the daemon the edit spawned stopped (it is reaped, not a zombie): {stopped}"
+    );
+    assert!(
+        t.elapsed() < Duration::from_secs(6),
+        "the stop did not wait out its grace: {:?}",
+        t.elapsed()
+    );
+    assert!(
+        out.status.success(),
+        "the edit is applied on a fresh session: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (ok, v) = s.json(&["--json", "show", &id, "--scope", "work"]);
+    assert!(ok, "{v}");
+    assert_eq!(v["fields"]["title"], "After");
+}
+
+#[test]
+fn cli2_a_failed_edit_keeps_the_edited_file_and_names_it() {
+    let s = Served::new();
+    let (ok, v) = s.json(&["--json", "new", "doc", "a", "--title", "Before"]);
+    assert!(ok, "{v}");
+    let id = created_doc(&v);
+    let script = editor_script(&s, "printf 'not: [valid\\n' > \"$1\"\n");
+    let out = edit_with(&s, &script, &id);
+    assert!(!out.status.success());
+    let err: Value = serde_json::from_slice(&out.stderr).unwrap();
+    let saved = std::path::PathBuf::from(err["saved_edit"].as_str().expect("saved_edit"));
+    assert!(
+        err["fix"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("your edit is saved at {}", saved.display())),
+        "{err}"
+    );
+    assert_eq!(std::fs::read_to_string(&saved).unwrap(), "not: [valid\n");
+    std::fs::remove_file(&saved).unwrap();
+    let (ok, v) = s.json(&["--json", "show", &id, "--scope", "work"]);
+    assert!(ok, "{v}");
+    assert_eq!(v["fields"]["title"], "Before");
+}
