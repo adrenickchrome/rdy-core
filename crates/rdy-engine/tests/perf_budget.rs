@@ -5,7 +5,12 @@ use rdy_model::Role;
 use serde_json::json;
 use std::io::Write;
 use std::os::unix::fs::FileExt;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// The ignored tests measure time, so they take turns: run together in one process they would
+/// disturb each other's flushes.
+static SERIAL: Mutex<()> = Mutex::new(());
 
 /// p99 of 50 durable flushes of a 4 KB write on this platform (a `write_all_at` plus `sync_data`
 /// on a temp file; `sync_data` is `F_FULLFSYNC` on macOS). The write target is stated against it.
@@ -57,6 +62,7 @@ fn dist(v: &[Duration]) -> String {
 #[test]
 #[ignore]
 fn spec_11_targets_at_100k_blocks() {
+    let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let ids = testkit::generate(dir.path(), 100_000);
 
@@ -171,5 +177,99 @@ fn spec_11_targets_at_100k_blocks() {
         misses.is_empty(),
         "spec 11 targets missed: {}",
         misses.join("; ")
+    );
+}
+
+/// chain1: the view record is a chain of ops, so the log bytes one write appends do not depend on
+/// how long the view is. M1's view record was rewritten whole on every write and grew quadratically
+/// (1.6 GB at 100k blocks). Prints the mean bytes per write over writes 900-1,000 and over writes
+/// 9,900-10,000, and the time to propose and land the 10,000-change view.
+/// Run with: cargo test -p rdy-engine --release --test perf_budget chain1 -- --ignored --nocapture
+#[test]
+#[ignore]
+fn chain1_log_bytes_per_write_stay_flat_to_10k() {
+    let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    const WRITES: usize = 10_000;
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let s = Session {
+        actor: "agent:perf".into(),
+        run: None,
+        role: Role::Writer,
+    };
+    let write = |r: &mut Rdy, ops: serde_json::Value| {
+        r.write(
+            &s,
+            WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(ops).unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .unwrap()
+    };
+
+    // One doc with 100 sections, so no parent holds more than 100 claims. This setup write is not
+    // one of the 10,000 measured writes.
+    let mut setup = vec![
+        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Doc", "doc_type": "constraints"}}),
+    ];
+    for sec in 0..100 {
+        setup.push(json!({"op": "create", "type": "section", "id": format!("$s{sec}"), "parent": "$d", "fields": {"title": format!("Part {sec}")}}));
+    }
+    let res = write(&mut r, json!(setup));
+    let parents: Vec<String> = (0..100)
+        .map(|sec| res.created[&format!("$s{sec}")].clone())
+        .collect();
+
+    // Log bytes appended by each write, taken from the end of the log. A write that rolled into a
+    // new segment has no byte count and is skipped (the segment size is far above 10,000 writes).
+    let mut bytes: Vec<Option<u64>> = vec![];
+    let mut times = vec![];
+    for i in 0..WRITES {
+        let before = r.store().log_end();
+        let t = Instant::now();
+        write(
+            &mut r,
+            json!([{"op": "create", "type": "claim", "parent": parents[i % 100], "body": format!("claim {i}")}]),
+        );
+        times.push(t.elapsed());
+        let after = r.store().log_end();
+        bytes.push((after.segment == before.segment).then(|| after.offset - before.offset));
+    }
+    let mean = |lo: usize, hi: usize| -> f64 {
+        let v: Vec<u64> = bytes[lo..hi].iter().flatten().copied().collect();
+        assert!(!v.is_empty(), "no same-segment writes in {lo}..{hi}");
+        v.iter().sum::<u64>() as f64 / v.len() as f64
+    };
+    let early = mean(900, 1_000);
+    let late = mean(9_900, 10_000);
+    println!(
+        "log bytes per write: writes 900-1,000 mean {early:.1}; writes 9,900-10,000 mean {late:.1}"
+    );
+    println!(
+        "write time: first 100 mean {:?}, last 100 mean {:?}; {}",
+        times[..100].iter().sum::<Duration>() / 100,
+        times[WRITES - 100..].iter().sum::<Duration>() / 100,
+        dist(&times)
+    );
+
+    let approver = Session {
+        actor: "human:perf".into(),
+        run: None,
+        role: Role::Approver,
+    };
+    let t = Instant::now();
+    let p = r.propose(&s, "work", "chain1").unwrap();
+    let propose = t.elapsed();
+    let t = Instant::now();
+    r.land(&approver, &p.id).unwrap();
+    let land = t.elapsed();
+    println!("propose of {WRITES}+1 changes {propose:?}; land {land:?}");
+
+    assert!(
+        late <= early * 1.1,
+        "log bytes per write grew: {early:.1} at writes 900-1,000, {late:.1} at 9,900-10,000"
     );
 }
