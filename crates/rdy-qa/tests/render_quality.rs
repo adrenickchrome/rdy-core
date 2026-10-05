@@ -398,7 +398,6 @@ fn struct1_every_image_has_alt_text() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 13"]
 fn struct1_json_twin_ids_equal_the_pages_block_ids() {
     each_page(true, |Page { rel, html, json }| {
         let twin = json

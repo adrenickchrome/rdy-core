@@ -52,6 +52,8 @@ pub struct Site<'a> {
     pub anchors: BTreeMap<BlockId, String>,
     /// Every doc in reading order: depth-first, siblings by their order.
     pub order: Vec<BlockId>,
+    /// Every folder and doc in tree order: a folder, then what it holds, siblings by their order.
+    tree: Vec<BlockId>,
     /// The first block each decision governs.
     governs: BTreeMap<BlockId, BlockId>,
     /// The questions no decision answers, in reading order of their docs.
@@ -75,6 +77,7 @@ impl<'a> Site<'a> {
             level: usize,
             out: &mut BTreeMap<BlockId, String>,
             order: &mut Vec<BlockId>,
+            tree_order: &mut Vec<BlockId>,
         ) {
             if level > tree::MAX_FOLDER_DEPTH {
                 return;
@@ -90,8 +93,9 @@ impl<'a> Site<'a> {
                     format!("{prefix}/{name}")
                 };
                 out.insert(b.id.clone(), path.clone());
+                tree_order.push(b.id.clone());
                 if b.block_type == tree::FOLDER {
-                    walk(m, Some(&b.id), &path, level + 1, out, order);
+                    walk(m, Some(&b.id), &path, level + 1, out, order, tree_order);
                 } else if b.block_type == tree::DOC {
                     order.push(b.id.clone());
                 }
@@ -99,12 +103,14 @@ impl<'a> Site<'a> {
         }
         let mut paths = BTreeMap::new();
         let mut order = vec![];
-        walk(m, None, "", 0, &mut paths, &mut order);
+        let mut tree_order = vec![];
+        walk(m, None, "", 0, &mut paths, &mut order, &mut tree_order);
         let mut site = Site {
             m,
             paths,
             anchors: BTreeMap::new(),
             order,
+            tree: tree_order,
             governs: BTreeMap::new(),
             open_questions: vec![],
             question_anchors: BTreeMap::new(),
@@ -232,9 +238,9 @@ impl<'a> Site<'a> {
         })
     }
 
-    /// Every folder and doc that has a page.
+    /// Every folder and doc that has a page, in tree order.
     pub fn tree_pages(&self) -> impl Iterator<Item = &BlockId> {
-        self.paths.keys()
+        self.tree.iter()
     }
 
     /// Where `id` lives, for any block: a tree block on its page, a block inside a doc on the
