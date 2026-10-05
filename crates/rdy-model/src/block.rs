@@ -71,11 +71,13 @@ impl RefMode {
     }
 }
 
-/// One reference in a text: `range` covers the whole `{{…}}`, `token` is its trimmed content.
+/// One reference in a text: `range` covers the whole `{{…}}`. `token` is the trimmed text before
+/// the first `|` (the id, a `$placeholder` or a key), and `display` is the trimmed rest, if any.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RefSpan {
     pub range: std::ops::Range<usize>,
     pub token: String,
+    pub display: Option<String>,
 }
 
 /// The references in `text`, in order, under `mode`.
@@ -95,11 +97,16 @@ pub fn ref_spans(text: &str, mode: RefMode) -> Vec<RefSpan> {
             break;
         };
         let end = start + 2 + len + 2;
-        let token = text[start + 2..start + 2 + len].trim();
+        let inner = &text[start + 2..start + 2 + len];
+        let (token, display) = match inner.split_once('|') {
+            Some((t, d)) => (t.trim(), Some(d.trim()).filter(|d| !d.is_empty())),
+            None => (inner.trim(), None),
+        };
         if mode == RefMode::Strict || token.starts_with('$') || BlockId::parse(token).is_ok() {
             out.push(RefSpan {
                 range: start..end,
                 token: token.to_string(),
+                display: display.map(str::to_string),
             });
         }
         pos = end;

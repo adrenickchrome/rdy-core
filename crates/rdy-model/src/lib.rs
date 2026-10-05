@@ -4,6 +4,7 @@ mod change;
 pub mod decision;
 mod hash;
 mod id;
+pub mod key;
 mod order;
 pub mod tree;
 mod value;

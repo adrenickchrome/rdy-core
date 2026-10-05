@@ -124,17 +124,15 @@ fn tree_rules() {
     doc.fields
         .insert("doc_type".into(), FieldValue::Str("memo".into()));
     assert_eq!(codes(&validate_block(&p, &doc, None)), vec!["E_DOC_TYPE"]);
-    // a claim directly under a doc is not allowed (docs hold sections)
+    // a claim directly under a doc is allowed (docs hold every content type)
     doc.fields
         .insert("doc_type".into(), FieldValue::Str("overview".into()));
-    assert_eq!(
-        codes(&validate_block(
-            &p,
-            &b("c-AAAAA", "claim", Some("d-AAAAA"), "x"),
-            Some(&doc)
-        )),
-        vec!["E_CHILD_TYPE"]
+    assert!(
+        validate_block(&p, &b("c-AAAAA", "claim", Some("d-AAAAA"), "x"), Some(&doc)).is_empty()
     );
+    // a doc under a doc is not
+    let inner = b("d-BBBBB", "doc", Some("d-AAAAA"), "");
+    assert!(codes(&validate_block(&p, &inner, Some(&doc))).contains(&"E_CHILD_TYPE"));
 }
 
 #[test]

@@ -79,6 +79,28 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
         ));
     }
     for (name, v) in &block.fields {
+        if name == "key" {
+            // `key` is an engine field on every type, never listed per type.
+            match v.as_str() {
+                None => out.push(err(
+                    block,
+                    "E_FIELD_KIND",
+                    "field \"key\" must be Str".to_string(),
+                    "write key as a str value".to_string(),
+                )),
+                Some(k) => {
+                    if let Some(reason) = rdy_model::key::problem(k) {
+                        out.push(err(
+                            block,
+                            "E_BAD_KEY",
+                            format!("{k:?} is not a valid key: {reason}"),
+                            "use letters, digits and - _ . such as FW-S1 or REQ-12; a key cannot look like a block id".to_string(),
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
         match def.fields.get(name) {
             None => out.push(err(
                 block,

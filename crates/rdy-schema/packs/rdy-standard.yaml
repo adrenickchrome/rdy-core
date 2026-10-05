@@ -4,7 +4,7 @@ link_types: [describes, implements, decided_by, affects]
 default_doc_type: overview
 
 block_types:
-  doc: { prefix: d, traits: [structural], body: forbidden, children: [section] }
+  doc: { prefix: d, traits: [structural], body: forbidden, children: [section, prose, claim, requirement, constraint, term, component, actor, interface, flow, example, note, rationale, table, diagram, figure, code, decision, question] }
   section:
     prefix: s
     traits: [structural]
@@ -64,7 +64,7 @@ block_types:
     body: required
     fields:
       lang: { kind: enum, values: [mermaid, d2], required: true }
-      alt: { kind: str, required: true }
+      alt: { kind: str }
   figure:
     prefix: fg
     traits: [asset, informative]
@@ -78,7 +78,7 @@ block_types:
     traits: [informative]
     body: required
     fields:
-      lang: { kind: str, required: true }
+      lang: { kind: str }
 
 doc_types:
   overview:

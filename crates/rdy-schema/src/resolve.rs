@@ -293,6 +293,11 @@ fn check(pack: &Pack) -> Result<(), SchemaError> {
                 )));
             }
         }
+        if t.fields.contains_key("key") {
+            return Err(SchemaError::Invalid(format!(
+                "type {name}: field key is reserved for the engine on every type"
+            )));
+        }
         for (fname, fd) in &t.fields {
             if fd.kind == FieldKind::Enum && fd.values.is_empty() {
                 return Err(SchemaError::Invalid(format!(
