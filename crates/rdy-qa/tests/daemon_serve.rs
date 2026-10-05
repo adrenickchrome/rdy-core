@@ -267,3 +267,95 @@ fn serve1_idle_exit_closes_the_store_cleanly() {
     let r = Rdy::open(dir.path()).unwrap();
     assert!(!r.open_report().unclean_shutdown);
 }
+
+/// A successor host of `version` on `project`, as a freshly spawned daemon would start it.
+fn start_successor(project: &std::path::Path, version: &str) -> rdy_daemon::ServeRun {
+    start(ServeOptions {
+        project: project.into(),
+        version: version.into(),
+        detach: false,
+        idle_timeout: Some(Duration::from_secs(60)),
+        human_actor: None,
+    })
+    .unwrap_or_else(|e| panic!("the successor did not start: {e}"))
+}
+
+/// Asserts a `version` hello on `project` reaches a ready daemon.
+fn assert_ready(rt: &tokio::runtime::Runtime, project: &std::path::Path, version: &str) {
+    rt.block_on(async {
+        let hello = Hello {
+            rdy: PROTO_VERSION,
+            version: version.into(),
+            proto: Proto::Ctl,
+            cwd: project.into(),
+        };
+        match connect(&RunDir::of_project(project), &hello).await {
+            rdy_daemon::Attempt::Ready(c) => assert_eq!(c.version(), version),
+            rdy_daemon::Attempt::Starting(p) => {
+                let c = p
+                    .wait(
+                        std::time::Instant::now() + Duration::from_secs(10),
+                        &mut |_| {},
+                    )
+                    .await
+                    .unwrap_or_else(|e| panic!("the successor did not become ready: {e}"));
+                assert_eq!(c.version(), version);
+            }
+            other => panic!("the successor did not answer the hello: {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn serve1_a_successor_started_as_a_version_replaced_daemon_exits_comes_up_ready() {
+    // the version-replace flow: the client spawns the successor as soon as it reads `exiting`,
+    // while the predecessor is still draining and closing its store
+    let mut h = Hosted::new();
+    let old = h.run.take().unwrap();
+    // the predecessor's process: it ends when its host returns
+    let old = std::thread::spawn(move || old.wait());
+    let rt = Hosted::rt();
+    rt.block_on(async {
+        let hello = Hello {
+            rdy: PROTO_VERSION,
+            version: "u".into(),
+            proto: Proto::Ctl,
+            cwd: h.dir.path().into(),
+        };
+        let a = connect(&RunDir::of_project(h.dir.path()), &hello).await;
+        assert!(matches!(a, rdy_daemon::Attempt::Exiting), "{a:?}");
+    });
+    let new = start_successor(h.dir.path(), "u");
+    assert_ready(&rt, h.dir.path(), "u");
+    assert_eq!(old.join().unwrap().unwrap(), ExitReason::VersionReplaced);
+    new.handle().stop();
+    assert_eq!(new.wait().unwrap(), ExitReason::Stopped);
+}
+
+#[test]
+fn serve1_a_successor_started_as_soon_as_a_stopped_daemons_socket_is_gone_comes_up_ready() {
+    // `rdy serve --stop && rdy status`: the next command starts a daemon as soon as the socket
+    // is gone, while the predecessor is still draining and closing its store
+    let mut h = Hosted::new();
+    let old = h.run.take().unwrap();
+    let old = std::thread::spawn(move || old.wait());
+    let rt = Hosted::rt();
+    rt.block_on(async {
+        let mut c = h.client(None, None).await;
+        c.ctl("stop", json!({})).await.unwrap();
+    });
+    let socket = RunDir::of_project(h.dir.path()).socket();
+    let t = std::time::Instant::now();
+    while socket.exists() {
+        assert!(
+            t.elapsed() < Duration::from_secs(5),
+            "the socket was not removed"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let new = start_successor(h.dir.path(), "t");
+    assert_ready(&rt, h.dir.path(), "t");
+    assert_eq!(old.join().unwrap().unwrap(), ExitReason::Stopped);
+    new.handle().stop();
+    assert_eq!(new.wait().unwrap(), ExitReason::Stopped);
+}

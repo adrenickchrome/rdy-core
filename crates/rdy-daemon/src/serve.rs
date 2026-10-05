@@ -21,10 +21,16 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The scopes built before the daemon answers `ready`.
 pub const WARM_SCOPES: &[Scope] = &[Scope::Canon];
+
+/// How long `start` retries opening a locked store before it is `AlreadyRunning` (a predecessor
+/// releases the store within about 60 ms of removing its socket).
+pub const LOCKED_RETRY: Duration = Duration::from_secs(2);
+/// The interval of those retries.
+const LOCKED_RETRY_EVERY: Duration = Duration::from_millis(25);
 
 pub struct ServeOptions {
     pub project: PathBuf,
@@ -121,7 +127,7 @@ pub fn start(opts: ServeOptions) -> Result<ServeRun, ServeError> {
     }
     // (2)
     log("opening store");
-    let rdy = match Rdy::open(&opts.project) {
+    let rdy = match open_store(&opts.project) {
         Ok(r) => r,
         Err(e) if e.code == E_LOCKED => {
             let err = ServeError::AlreadyRunning(store_dir(&opts.project));
@@ -195,6 +201,24 @@ pub fn start(opts: ServeOptions) -> Result<ServeRun, ServeError> {
     })
 }
 
+/// `Rdy::open`, retried while the store is `E_LOCKED` for up to [`LOCKED_RETRY`]: a predecessor
+/// daemon removes its socket before it drains and closes its store (and its process keeps the
+/// index open until it exits), so a successor spawned the moment the socket is gone, by a
+/// version replace or after `rdy serve --stop`, finds the store still held for a few tens of ms.
+/// A holder that keeps it (a `--no-daemon` command, a live daemon) is still `E_LOCKED` after the
+/// bound.
+fn open_store(project: &Path) -> Result<Rdy, RdyError> {
+    let deadline = Instant::now() + LOCKED_RETRY;
+    loop {
+        match Rdy::open(project) {
+            Err(e) if e.code == E_LOCKED && Instant::now() < deadline => {
+                std::thread::sleep(LOCKED_RETRY_EVERY);
+            }
+            out => return out,
+        }
+    }
+}
+
 /// `start(opts)?.wait()`.
 pub fn serve(opts: ServeOptions) -> Result<ExitReason, ServeError> {
     start(opts)?.wait()
@@ -235,10 +259,11 @@ fn serve_thread(
         log("ready");
     });
     let ran = rt.block_on(daemon.run());
+    // waits for the blocking pool (warm-up, in-flight handlers) to finish while the writer still
+    // serves them; then the store closes last, so the process exits right after releasing it
+    drop(rt);
     close(&shared);
     log("store closed");
-    // waits for the blocking pool (warm-up, in-flight handlers) to finish
-    drop(rt);
     ran.map_err(ServeError::Runtime)
 }
 
