@@ -323,6 +323,8 @@ fn a_damaged_tag_ref_does_not_break_version_reads() {
     r.store_mut()
         .set_refs(vec![("tag/v9.0.0".into(), b"garbage".to_vec())])
         .unwrap();
+    // a write outside the engine must be followed by invalidate() (snap1 precondition)
+    r.invalidate();
     let names: Vec<String> = r.versions().unwrap().into_iter().map(|v| v.name).collect();
     assert_eq!(names, ["v0.1.0"]);
     assert_eq!(label(&r, &Scope::Canon), "v0.1.0");

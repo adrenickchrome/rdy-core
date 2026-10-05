@@ -76,6 +76,8 @@ fn kind1_an_asset_with_a_future_tags_bytes_does_not_hide_the_tag() {
     };
     upload(&mut st, &postcard::to_allocvec(&tag).unwrap());
     let id = st.rdy.store_mut().put_tag(&tag).unwrap();
+    // a write outside the engine must be followed by invalidate() (snap1 precondition)
+    st.rdy.invalidate();
     assert_eq!(st.rdy.store().read_tag(&id).unwrap(), tag);
     assert_eq!(st.rdy.versions().unwrap().len(), 1);
 }
