@@ -488,3 +488,90 @@ fn kill1_a_pending_non_durable_commit_is_a_rollback_that_catches_up() {
         assert_eq!(c.get_blob(h).unwrap(), vec![i as u8; 9]);
     }
 }
+
+/// Three batches of 1,000 frames each, with no checkpoint: a copy must catch up 3,003 frames.
+fn lagging_copy(base: &Path) -> PathBuf {
+    let dir = base.join("s");
+    let mut s = Store::open(&dir).unwrap();
+    s.set_checkpoint_frames(u64::MAX);
+    for b in 0..3 {
+        let items = (0..1000)
+            .map(|i| (kinds::BLOB_CHUNK, format!("chunk {b}-{i}").into_bytes()))
+            .collect();
+        s.write(items).unwrap();
+    }
+    let copy = base.join("copy");
+    copy_store(&dir, &copy);
+    copy
+}
+
+#[test]
+fn cat1_catch_up_streams_in_chunks_of_1000_frames() {
+    let base = tempfile::tempdir().unwrap();
+    let copy = lagging_copy(base.path());
+    let s = Store::open(&copy).unwrap();
+    let r = s.open_report().clone();
+    assert_eq!(r.caught_up_frames, 3003, "{r:?}");
+    assert_eq!(r.catch_up_commits, 4, "1000 + 1000 + 1000 + 3: {r:?}");
+    assert!(s.has(&Hash::of(b"chunk 2-999")).unwrap());
+}
+
+#[test]
+fn cat1_a_catch_up_ends_with_a_checkpoint() {
+    let base = tempfile::tempdir().unwrap();
+    let copy = lagging_copy(base.path());
+    let _caught_up = Store::open(&copy).unwrap(); // still open: the index file is what a kill leaves
+    let again = base.path().join("again");
+    copy_store(&copy, &again);
+    assert_eq!(
+        Store::open(&again).unwrap().open_report().caught_up_frames,
+        0
+    );
+}
+
+#[test]
+fn cat1_an_index_point_inside_a_frame_rebuilds_from_the_whole_log() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let h = Store::open(&dir).unwrap().put_blob(b"kept").unwrap();
+    {
+        let idx = rdy_store::index::Index::open(&dir.join("index.redb")).unwrap();
+        idx.apply(
+            &[],
+            Location {
+                segment: 0,
+                offset: 5,
+            },
+        )
+        .unwrap();
+        idx.checkpoint().unwrap();
+    }
+    let s = Store::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+    assert!(s.open_report().index_rebuilt, "{:?}", s.open_report());
+    assert_eq!(s.get_blob(&h).unwrap(), b"kept");
+}
+
+/// Damage in a sealed segment after a valid index point is the log's fault, not the index's:
+/// the open refuses and keeps the index, rather than setting it aside for a rebuild that would
+/// hit the same frame.
+#[test]
+fn cat1_damage_in_a_sealed_segment_after_the_index_point_keeps_the_index() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::open(&dir).unwrap();
+    s.set_segment_max(4096);
+    s.set_checkpoint_frames(u64::MAX);
+    for i in 0..20u32 {
+        s.put_blob(&vec![i as u8; 1000]).unwrap();
+    }
+    assert!(s.log_end().segment >= 2, "{:?}", s.log_end());
+    let copy = base.path().join("copy");
+    copy_store(&dir, &copy); // its durable index point is in segment 0, after the format batch
+    drop(s);
+    let path = seg(&copy, 1);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[40] ^= 0xff; // inside segment 1's first payload
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(Store::open(&copy).is_err());
+    assert_eq!(damaged_files(&copy), 0, "the index was not set aside");
+}

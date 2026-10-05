@@ -686,3 +686,44 @@ fn mark1_marker_shaped_bytes_inside_a_torn_payload_are_not_an_acknowledged_batch
     assert_eq!(std::fs::read(&q[0]).unwrap(), torn);
     assert_eq!(std::fs::metadata(&path).unwrap().len(), b.offset);
 }
+
+#[test]
+fn cat1_for_each_from_reads_every_frame_once_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    log.append_batch(&[
+        (kinds::BLOB_CHUNK, b"a".to_vec()),
+        (kinds::BLOB_CHUNK, b"b".to_vec()),
+    ])
+    .unwrap();
+    log.append_batch(&[(kinds::BLOB_CHUNK, b"c".to_vec())])
+        .unwrap();
+    let start = Location {
+        segment: 0,
+        offset: 0,
+    };
+    let mut seen = vec![];
+    log.for_each_from(
+        start,
+        |loc, kind, hash, payload, next| -> std::io::Result<()> {
+            assert_eq!(hash, Hash::of(payload));
+            seen.push((loc, kind, next));
+            Ok(())
+        },
+    )
+    .unwrap();
+    let scanned: Vec<_> = log
+        .scan_from(start)
+        .unwrap()
+        .into_iter()
+        .map(|(l, k, _)| (l, k))
+        .collect();
+    assert_eq!(
+        seen.iter().map(|(l, k, _)| (*l, *k)).collect::<Vec<_>>(),
+        scanned
+    );
+    assert_eq!(seen.last().unwrap().2, log.end());
+    for w in seen.windows(2) {
+        assert_eq!(w[0].2, w[1].0, "each frame's next is the following frame");
+    }
+}

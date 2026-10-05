@@ -218,6 +218,16 @@ impl Drop for Store {
     }
 }
 
+/// Frames a catch-up applies to the index in one commit.
+pub const CATCH_UP_CHUNK: usize = 1000;
+
+/// What a catch-up replayed: frames read and index commits made.
+#[derive(Default)]
+struct CatchUp {
+    frames: u64,
+    commits: u32,
+}
+
 /// Frames (data frames and batch markers) since the last checkpoint that make the next write
 /// checkpoint.
 pub const CHECKPOINT_FRAMES: u64 = 1000;
@@ -342,9 +352,9 @@ impl Store {
                 ),
             });
         }
-        let frames = store.catch_up()?;
-        store.report.caught_up_frames = frames;
-        store.report.catch_up_commits = u32::from(frames > 0);
+        let caught_up = store.catch_up()?;
+        store.report.caught_up_frames = caught_up.frames;
+        store.report.catch_up_commits = caught_up.commits;
         if !legacy {
             store.ensure_format(format_file.is_some())?;
             // Losing this file to a power loss only costs a needless rebuild, so it is not synced.
@@ -442,27 +452,80 @@ impl Store {
         self.index.as_ref().expect("the index is open until drop")
     }
 
-    /// Replays the frames past the index's `indexed_upto` into it; returns how many frames it read.
-    fn catch_up(&mut self) -> Result<u64, StoreError> {
+    /// Replays the frames past the index's `indexed_upto` into it, streaming the log and applying
+    /// its entries every `CATCH_UP_CHUNK` frames, so it never holds more than one chunk. Ends with
+    /// a checkpoint.
+    ///
+    /// If `indexed_upto` is not a frame start in this log, the index is not trustworthy: it is set
+    /// aside and the whole log is replayed into an empty one. Any other failure is returned with
+    /// the index in place.
+    fn catch_up(&mut self) -> Result<CatchUp, StoreError> {
         let from = self.index().indexed_upto()?;
-        let mut entries = vec![];
-        let mut frames = 0;
-        for (loc, kind, hash) in self.log.scan_from(from)? {
-            let (_, payload) = self.log.read(loc)?;
-            entries.extend(entries_for_frame(kind, hash, loc, &payload)?);
-            frames += 1;
+        let end = self.log.end();
+        if from >= end {
+            return Ok(CatchUp::default());
         }
-        if self.legacy {
-            // M1's index was durable on every commit
-            self.index().apply_durable(&entries, self.log.end())?;
-        } else {
-            self.index().apply(&entries, self.log.end())?;
-            if frames > 0 {
-                // the replayed frames are in the log, not yet in the durable index
-                self.checkpoint()?;
+        if self.index_point_unusable(from, end) {
+            drop(self.index.take()); // close the file before it is renamed
+            let path = self.dir.join("index.redb");
+            set_aside(&path)?;
+            self.index = Some(Index::open(&path)?);
+            self.report.index_rebuilt = true;
+            return self.replay_from(Location {
+                segment: 0,
+                offset: 0,
+            });
+        }
+        self.replay_from(from)
+    }
+
+    /// True if the frame at `from` (before the end of the log and of its segment) cannot be read:
+    /// `from` is then no frame start, and the index that holds it is what is wrong.
+    fn index_point_unusable(&self, from: Location, end: Location) -> bool {
+        if (from.segment == 0 && from.offset == 0) || from >= end {
+            return false;
+        }
+        match self.log.segment_len(from.segment) {
+            Ok(len) if from.offset == len => false, // the end of its segment: the next one follows
+            _ => self.log.read_hashed(from).is_err(),
+        }
+    }
+
+    fn replay_from(&mut self, from: Location) -> Result<CatchUp, StoreError> {
+        let end = self.log.end();
+        let (log, index, legacy) = (&self.log, self.index(), self.legacy);
+        let apply = |entries: &[IndexEntry], upto: Location| {
+            if legacy {
+                // M1's index was durable on every commit
+                index.apply_durable(entries, upto)
+            } else {
+                index.apply(entries, upto)
             }
+        };
+        let mut done = CatchUp::default();
+        let mut entries = vec![];
+        let mut in_chunk = 0usize;
+        log.for_each_from(from, |loc, kind, hash, payload, next| {
+            entries.extend(entries_for_frame(kind, hash, loc, payload)?);
+            done.frames += 1;
+            in_chunk += 1;
+            if in_chunk == CATCH_UP_CHUNK {
+                apply(&entries, next)?;
+                done.commits += 1;
+                entries.clear();
+                in_chunk = 0;
+            }
+            Ok::<(), StoreError>(())
+        })?;
+        if in_chunk > 0 || done.commits == 0 {
+            apply(&entries, end)?;
+            done.commits += 1;
         }
-        Ok(frames)
+        if !legacy {
+            // the replayed frames are in the log, not yet in the durable index
+            self.checkpoint()?;
+        }
+        Ok(done)
     }
 
     /// Reads and hash-checks every frame in every segment and checks every batch marker;

@@ -776,6 +776,51 @@ impl SegmentLog {
         Ok(out)
     }
 
+    /// The length of segment `seg`'s file.
+    pub fn segment_len(&self, seg: u32) -> io::Result<u64> {
+        let f = self
+            .readers
+            .get(seg as usize)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such segment"))?;
+        Ok(f.metadata()?.len())
+    }
+
+    /// Calls `f(location, kind, hash, payload, next)` for every frame from `from` to the end of
+    /// the log, in order, reading each frame once; `next` is the location just past the frame. A
+    /// `from` at the end of its segment continues with the next segment. A torn or corrupt frame
+    /// is `InvalidData`, as in `scan_from`. An error from `f` stops the walk and is returned.
+    pub fn for_each_from<E: From<io::Error>>(
+        &self,
+        from: Location,
+        mut f: impl FnMut(Location, u8, Hash, &[u8], Location) -> Result<(), E>,
+    ) -> Result<(), E> {
+        for seg in from.segment..=self.current() {
+            let file = &self.readers[seg as usize];
+            let file_len = file.metadata()?.len();
+            let mut offset = if seg == from.segment { from.offset } else { 0 };
+            while let Some((kind, hash, payload)) = read_frame(file, offset, file_len)? {
+                let loc = Location {
+                    segment: seg,
+                    offset,
+                };
+                offset += HEADER + payload.len() as u64;
+                let next = Location {
+                    segment: seg,
+                    offset,
+                };
+                f(loc, kind, hash, &payload, next)?;
+            }
+            if offset < file_len {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("corrupt frame in segment {seg} at offset {offset}"),
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     /// Reads every frame of every segment once and verifies its hash and every batch marker.
     /// Returns the number of non-marker frames.
     pub fn verify_frames(&self) -> io::Result<usize> {
