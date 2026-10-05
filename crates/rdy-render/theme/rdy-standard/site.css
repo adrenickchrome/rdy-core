@@ -320,7 +320,8 @@ figure { margin: 1.2rem 0; }
 /* == /pager == */
 
 /* == version == */
-.version { display: inline-flex; align-items: center; gap: 0.35rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* the flex layout is scoped above the phone breakpoint: the pill is hidden at 900px and below (head section) */
+@media (min-width: 901px) { .version { display: inline-flex; align-items: center; gap: 0.35rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; } }
 .version .lock { width: 12px; height: 12px; flex: none; }
 .version .snapshot { font-size: 0.64rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
 .colophon { margin: 0; }

@@ -122,3 +122,48 @@ fn ver1_the_home_page_has_cards_for_top_level_entries_and_no_decisions() {
     }
     assert!(!h.contains("Decisions"));
 }
+
+/// Whether a block's `@media` prelude applies at a viewport `w` px wide (only the `min-width` and
+/// `max-width` forms the stylesheet uses).
+fn media_applies(media: &Option<String>, w: u32) -> bool {
+    let Some(m) = media else { return true };
+    let m = m.replace(' ', "");
+    let re = regex::Regex::new(r"\((min|max)-width:(\d+)px\)").unwrap();
+    let conds: Vec<_> = re.captures_iter(&m).collect();
+    if conds.is_empty() {
+        return false; // prefers-color-scheme, print and the like: not a width rule
+    }
+    conds.iter().all(|c| {
+        let n: u32 = c[2].parse().unwrap();
+        if &c[1] == "min" { w >= n } else { w <= n }
+    })
+}
+
+/// The pill is hidden on a phone (Task 5 keeps the head grid narrow): the version section's
+/// `display` must not win the cascade back below 900px. Resolves the cascade by source order for a
+/// bare `.version` selector at each width.
+#[test]
+fn ver1_the_pill_stays_hidden_below_900px_and_shows_above() {
+    let (_d, _r, _ids, out) = site_canon();
+    let text = std::fs::read_to_string(out.path().join("assets/site.css")).unwrap();
+    let css = rdy_qa::site::parse_css(&text);
+    let display_at = |w: u32| -> Option<String> {
+        let mut d = None;
+        for b in &css.blocks {
+            if b.selector.split(',').any(|s| s.trim() == ".version") && media_applies(&b.media, w) {
+                for (p, v) in &b.decls {
+                    if p == "display" {
+                        d = Some(v.clone());
+                    }
+                }
+            }
+        }
+        d
+    };
+    for w in [320, 375, 600, 900] {
+        assert_eq!(display_at(w).as_deref(), Some("none"), "width {w}");
+    }
+    for w in [901, 1024, 1440] {
+        assert_ne!(display_at(w).as_deref(), Some("none"), "width {w}");
+    }
+}
