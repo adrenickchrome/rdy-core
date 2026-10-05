@@ -6,6 +6,7 @@ use crate::hello::{HELLO_TIMEOUT, Hello, HelloReply, PROTO_VERSION};
 use crate::layout::RunDir;
 use crate::lock::{FileLock, open_no_follow};
 use crate::session::{Proto, SessionId};
+use crate::spawn::Spawned;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -379,8 +380,8 @@ fn attempt(run: &RunDir, stream: UnixStream, reply: HelloReply) -> Attempt {
     }
 }
 
-/// Starts a daemon for a run dir and returns at once.
-pub type SpawnFn = Box<dyn FnMut(&RunDir) -> io::Result<()> + Send>;
+/// Starts a daemon for a run dir and returns at once, with a way to tell whether it has exited.
+pub type SpawnFn = Box<dyn FnMut(&RunDir) -> io::Result<Spawned> + Send>;
 
 /// What `connect_or_start` needs.
 pub struct StartOptions {
@@ -493,13 +494,14 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
     }
 
     // 4. spawn
-    if let Err(e) = spawn(run) {
-        return Err(start_error(format!("could not start the daemon: {e}")));
-    }
+    let mut spawned = match spawn(run) {
+        Ok(s) => s,
+        Err(e) => return Err(start_error(format!("could not start the daemon: {e}"))),
+    };
 
     // 5. wait for it to answer. An old daemon removes its socket before it answers `exiting`,
     // so an `exiting` now comes from the daemon we spawned: it is not of our version, and
-    // waiting cannot help.
+    // waiting cannot help. Neither can waiting on a daemon that has exited.
     loop {
         let reached = match exchange_hello(run, &hello, crate::socket::own_uid()).await {
             Ok((_, HelloReply::Exiting { version: theirs })) => {
@@ -520,6 +522,13 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
             Attempt::Starting(p) => return finish(p, run, deadline, start_timeout, progress).await,
             Attempt::Refused(e) => return Err(e),
             Attempt::Exiting | Attempt::NoDaemon(_) => {}
+        }
+        // a daemon that died (say, finding the store locked) will never answer: say so now
+        if let Some(code) = (spawned.exited)() {
+            return Err(start_error_with_log(
+                run,
+                format!("the daemon exited with code {code} before it was ready"),
+            ));
         }
         let now = Instant::now();
         if now >= deadline {

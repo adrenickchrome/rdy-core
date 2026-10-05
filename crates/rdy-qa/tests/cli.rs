@@ -1,14 +1,23 @@
+use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::*;
-use std::process::Command;
+use std::process::{Command, Output};
 
-fn rdy(dir: &std::path::Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(rdy_bin())
-        .args(args)
-        .current_dir(dir)
-        .env("RDY_ACTOR", "human:qa")
-        .env("EDITOR", "true")
-        .output()
-        .unwrap();
+/// `rdy <args>` against the served project as the human; a command that names its own
+/// `--project` runs in the project directory with the human's environment and no other flags.
+fn rdy(s: &Served, args: &[&str]) -> (bool, String, String) {
+    let out: Output = if args.contains(&"--project") {
+        Command::new(rdy_bin())
+            .args(args)
+            .current_dir(s.dir.path())
+            .env_remove("RDY_ACTOR")
+            .env_remove("RDY_RUN")
+            .env_remove("RDY_NO_DAEMON")
+            .envs(s.env_pairs())
+            .output()
+            .unwrap()
+    } else {
+        s.rdy(args)
+    };
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into(),
@@ -18,9 +27,8 @@ fn rdy(dir: &std::path::Path, args: &[&str]) -> (bool, String, String) {
 
 #[test]
 fn cli_errors_are_clean_on_every_command() {
-    let (dir, r) = project();
-    drop(r);
-    let d = dir.path();
+    let s = Served::new();
+    let d = s.dir.path();
     let file = d.join("a-file");
     std::fs::write(&file, "x").unwrap();
     let f = file.to_str().unwrap();
@@ -58,7 +66,7 @@ fn cli_errors_are_clean_on_every_command() {
         ),
     ];
     for (code, args) in &bad {
-        let (ok, out, err) = rdy(d, args);
+        let (ok, out, err) = rdy(&s, args);
         assert!(!ok, "{args:?} should fail: {out}");
         assert!(
             !err.contains("panicked") && !out.contains("panicked"),
@@ -70,7 +78,7 @@ fn cli_errors_are_clean_on_every_command() {
         );
         let mut j = vec!["--json"];
         j.extend(args.iter());
-        let (ok, _, err) = rdy(d, &j);
+        let (ok, _, err) = rdy(&s, &j);
         assert!(!ok);
         let v: serde_json::Value = serde_json::from_str(err.trim())
             .unwrap_or_else(|e| panic!("{args:?}: stderr is not JSON ({e}): {err}"));
@@ -86,7 +94,7 @@ fn cli_errors_are_clean_on_every_command() {
     ] {
         let mut j = vec!["--json"];
         j.extend(args.iter());
-        let (ok, out, err) = rdy(d, &j);
+        let (ok, out, err) = rdy(&s, &j);
         assert!(ok, "{args:?}: {err}");
         serde_json::from_str::<serde_json::Value>(out.trim())
             .unwrap_or_else(|e| panic!("{args:?}: stdout is not JSON ({e}): {out}"));

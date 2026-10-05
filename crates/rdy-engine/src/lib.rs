@@ -204,6 +204,14 @@ pub fn resolve_pack(project: &Path, name: &str) -> Result<Pack, RdyError> {
     Ok(load_pack(project, name)?.0)
 }
 
+/// The pack the project at `project` names in `.rdy/config.yaml`, resolved without opening its
+/// store (so it works while another process holds the store). A missing or unreadable config is
+/// the same error `Rdy::open` gives.
+pub fn project_pack(project: &Path) -> Result<Pack, RdyError> {
+    let cfg = read_config(project)?;
+    resolve_pack(project, &cfg.pack)
+}
+
 /// The `.yaml` and `.yml` files of a packs directory, sorted; none if it does not exist.
 fn pack_files(dir: &Path) -> Result<Vec<PathBuf>, RdyError> {
     if !dir.exists() {

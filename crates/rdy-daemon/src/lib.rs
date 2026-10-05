@@ -32,7 +32,7 @@ pub use client::{
     Attempt, CONNECT_RETRY, Client, DEFAULT_START_TIMEOUT, LOCK_RETRY, LOG_TAIL_LINES, Pending,
     SpawnFn, StartOptions, connect, connect_or_start, log_tail,
 };
-pub use spawn::{detach, serve_command, spawn_serve};
+pub use spawn::{Spawned, detach, process_alive, serve_command, spawn_serve};
 pub mod shared;
 pub mod writer;
 

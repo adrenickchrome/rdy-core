@@ -312,8 +312,10 @@ mod in_cwd {
         cwd: &std::path::Path,
         out: &str,
     ) -> (bool, String, String) {
+        let (_cfg, env) = human_env("human:qa");
         let o = Command::new(rdy_bin())
             .args([
+                "--no-daemon",
                 "--project",
                 project.to_str().unwrap(),
                 "render",
@@ -322,6 +324,7 @@ mod in_cwd {
             ])
             .current_dir(cwd)
             .env("RDY_ACTOR", "human:qa")
+            .envs(env)
             .output()
             .unwrap();
         (

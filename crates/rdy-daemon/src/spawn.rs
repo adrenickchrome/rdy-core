@@ -7,15 +7,16 @@ use crate::socket::check_socket_path;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// The command that starts a detached daemon for `project`, unspawned: `<rdy_bin> serve --detach
-/// --project <project>` in `project`, stdin from /dev/null, stdout and stderr appended to the run
-/// dir's `daemon.log` (created 0600; refused if it is a symlink), every `RDY_*` variable removed
-/// from its environment, and a new session (so a new process group) of its own from before its
-/// exec. A socket path the daemon could not bind (`socket::check_socket_path`) is refused here,
+/// --spawned --project <project>` in `project` (`--spawned` tells `rdy serve --detach` to serve
+/// in that process rather than spawn another), stdin from /dev/null, stdout and stderr appended
+/// to the run dir's `daemon.log` (created 0600; refused if it is a symlink), every `RDY_*`
+/// variable removed from its environment, and a new session (so a new process group) of its own
+/// from before its exec. A socket path the daemon could not bind (`socket::check_socket_path`) is refused here,
 /// before anything is created, rather than spawning a daemon that would only die at its bind.
 pub fn serve_command(rdy_bin: &Path, project: &Path, run: &RunDir) -> io::Result<Command> {
     check_socket_path(run)?;
@@ -30,6 +31,7 @@ pub fn serve_command(rdy_bin: &Path, project: &Path, run: &RunDir) -> io::Result
     let mut cmd = Command::new(rdy_bin);
     cmd.arg("serve")
         .arg("--detach")
+        .arg("--spawned")
         .arg("--project")
         .arg(project)
         .current_dir(project)
@@ -56,16 +58,40 @@ pub fn serve_command(rdy_bin: &Path, project: &Path, run: &RunDir) -> io::Result
     Ok(cmd)
 }
 
-/// Spawns `cmd` and returns without waiting for it to finish. A thread reaps the child when it
-/// exits, so a long-lived spawner leaves no zombie behind.
-pub fn spawn_serve(cmd: &mut Command) -> io::Result<()> {
+/// A spawned daemon, as its spawner watches it.
+pub struct Spawned {
+    /// The child's exit code once it has exited (`128 + n` when signal `n` ended it, as a shell
+    /// reports it), `None` while it runs.
+    pub exited: Box<dyn FnMut() -> Option<i32> + Send>,
+}
+
+/// Spawns `cmd` and returns without waiting for it to finish. The `Spawned` owns the child
+/// (`exited` is its `try_wait`); dropping it detaches the child, which `serve_command`'s
+/// `setsid` already made the leader of a session of its own.
+pub fn spawn_serve(cmd: &mut Command) -> io::Result<Spawned> {
     let mut child = cmd.spawn()?;
-    std::thread::Builder::new()
-        .name("rdy-serve-reaper".into())
-        .spawn(move || {
-            let _ = child.wait();
-        })?;
-    Ok(())
+    Ok(Spawned {
+        exited: Box::new(move || match child.try_wait() {
+            Ok(Some(status)) => Some(
+                status
+                    .code()
+                    .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
+            ),
+            Ok(None) | Err(_) => None,
+        }),
+    })
+}
+
+/// Whether a process `pid` exists (`kill(pid, 0)`; a process of another user counts).
+pub fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 sends nothing; `kill` only checks that the process exists.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// Leaves the caller's session (`setsid`). `EPERM` means the caller already leads a process

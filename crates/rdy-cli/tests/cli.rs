@@ -1,13 +1,31 @@
 use serde_json::Value;
 use std::process::Command;
 
-fn rdy(dir: &std::path::Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_rdy"))
+/// A user config naming `human:tester` as the human actor, and the environment that points at it.
+fn human_config() -> (tempfile::TempDir, (&'static str, std::path::PathBuf)) {
+    let cfg = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(cfg.path().join("rdy")).unwrap();
+    std::fs::write(cfg.path().join("rdy/config.yaml"), "actor: human:tester\n").unwrap();
+    let env = ("XDG_CONFIG_HOME", cfg.path().to_path_buf());
+    (cfg, env)
+}
+
+/// `rdy --no-daemon <args>` in `dir` as the human `human:tester` (these tests drive the direct
+/// path; the daemon path is covered by rdy-qa's cli_daemon).
+fn rdy_cmd(dir: &std::path::Path, args: &[&str]) -> (tempfile::TempDir, Command) {
+    let (cfg, (k, v)) = human_config();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_rdy"));
+    cmd.arg("--no-daemon")
         .args(args)
         .current_dir(dir)
         .env("RDY_ACTOR", "human:tester")
-        .output()
-        .unwrap();
+        .env(k, v);
+    (cfg, cmd)
+}
+
+fn rdy(dir: &std::path::Path, args: &[&str]) -> (bool, String, String) {
+    let (_cfg, mut cmd) = rdy_cmd(dir, args);
+    let out = cmd.output().unwrap();
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into(),
@@ -94,13 +112,8 @@ fn import_propose_approve_render_fsck() {
 }
 
 fn rdy_env(dir: &std::path::Path, editor: &str, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_rdy"))
-        .args(args)
-        .current_dir(dir)
-        .env("RDY_ACTOR", "human:tester")
-        .env("EDITOR", editor)
-        .output()
-        .unwrap();
+    let (_cfg, mut cmd) = rdy_cmd(dir, args);
+    let out = cmd.env("EDITOR", editor).output().unwrap();
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into(),

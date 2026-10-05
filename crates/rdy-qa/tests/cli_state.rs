@@ -1,14 +1,17 @@
 //! port1 at the human boundary: status, ls, render and reindex read a ReadState; reindex
 //! republishes it.
-use rdy_qa::fixtures::{land, project, rdy_bin, write};
+use rdy_qa::fixtures::{human_env, land, project, rdy_bin, write};
 use serde_json::{Value, json};
 use std::process::Command;
 
+/// `rdy --no-daemon --json <args>` in `dir` as the human `human:qa`.
 fn rdy(dir: &std::path::Path, args: &[&str]) -> (bool, Value) {
+    let (_cfg, env) = human_env("human:qa");
     let out = Command::new(rdy_bin())
-        .arg("--json")
+        .args(["--no-daemon", "--json"])
         .args(args)
         .current_dir(dir)
+        .envs(env)
         .output()
         .unwrap();
     let text = if out.status.success() {

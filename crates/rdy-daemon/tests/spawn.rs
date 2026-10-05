@@ -34,6 +34,8 @@ fn spawn1_the_serve_command_has_the_right_shape_and_no_rdy_env() {
         vec![
             OsStr::new("serve"),
             OsStr::new("--detach"),
+            // fix forward (cli2): the spawned child serves in place rather than spawning again
+            OsStr::new("--spawned"),
             OsStr::new("--project"),
             dir.path().as_os_str()
         ]

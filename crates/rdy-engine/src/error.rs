@@ -80,10 +80,10 @@ impl From<StoreError> for RdyError {
             StoreError::Locked(p) => RdyError::new(
                 E_LOCKED,
                 format!(
-                    "the project store at {} is open in another rdy process",
+                    "the project store at {} is held by another rdy process (the daemon, or a command run with --no-daemon)",
                     p.display()
                 ),
-                "close the other rdy process (or MCP server) and retry",
+                "drop --no-daemon, or stop the daemon with rdy serve --stop",
             ),
             StoreError::HeldByReader(p) => RdyError::new(
                 E_LOCKED,

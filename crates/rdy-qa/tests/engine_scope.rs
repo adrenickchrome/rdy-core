@@ -56,9 +56,11 @@ fn scope1_mcp_and_cli_reads_refuse_an_unknown_view() {
     // CLI first: it needs the store unlocked
     let (dir, r, doc, landing) = seeded();
     drop(r);
+    let (_cfg, env) = human_env("human:qa");
     let out = Command::new(rdy_bin())
-        .args(["show", doc.as_str(), "--scope", "nope"])
+        .args(["--no-daemon", "show", doc.as_str(), "--scope", "nope"])
         .current_dir(dir.path())
+        .envs(env)
         .output()
         .unwrap();
     assert!(!out.status.success());
