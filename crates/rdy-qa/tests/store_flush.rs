@@ -619,3 +619,34 @@ fn cat1_an_index_point_past_the_end_of_a_sealed_segment_refuses_and_keeps_the_in
     assert_eq!(s.get_ref("r").unwrap().unwrap(), b"v2");
     assert_eq!(s.get_blob(&blob).unwrap(), b"in segment one");
 }
+
+/// Segments roll only between batches: with a tiny segment limit, every sealed segment ends at a
+/// batch marker and a store reopens and reads every blob back.
+#[test]
+fn roll1_every_sealed_segment_of_a_rolling_store_ends_at_a_marker() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::open(&dir).unwrap();
+    s.set_segment_max(400);
+    let blobs: Vec<_> = (0..12u8)
+        .map(|i| (s.put_blob(&[i; 60]).unwrap(), [i; 60]))
+        .collect();
+    drop(s);
+    let n = (0..).take_while(|i| seg(&dir, *i).exists()).count();
+    assert!(
+        n >= 3,
+        "the limit should have rolled the log, got {n} segments"
+    );
+    for i in 0..n as u32 {
+        let fs = frames(&std::fs::read(seg(&dir, i)).unwrap());
+        assert_eq!(
+            fs.last().unwrap().1,
+            kinds::BATCH_COMMIT,
+            "segment {i} ends at a marker"
+        );
+    }
+    let s = Store::open(&dir).unwrap();
+    for (h, bytes) in blobs {
+        assert_eq!(s.get_blob(&h).unwrap(), bytes);
+    }
+}
