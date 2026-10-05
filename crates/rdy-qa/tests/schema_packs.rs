@@ -60,3 +60,39 @@ fn pack1_a_project_with_two_packs_of_one_name_does_not_open() {
     );
     assert!(e.fix.contains("extends"), "{e}");
 }
+
+#[test]
+fn area1_a_project_pack_with_areas_loads_through_the_engine() {
+    let (dir, r) = project();
+    drop(r);
+    std::fs::write(
+        dir.path().join(".rdy/packs/team.yaml"),
+        "name: team\nversion: \"1\"\nextends: rdy-standard\nareas:\n  payments: { paths: [wallets] }\ntensions: { fork: advisory }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: team\n").unwrap();
+    let r = rdy_engine::Rdy::open(dir.path()).unwrap();
+    assert_eq!(r.pack().areas_for_path("wallets/x"), vec!["payments"]);
+    assert_eq!(
+        r.pack().tension_severity(rdy_schema::TensionKind::Fork),
+        (rdy_schema::TensionSeverity::Advisory, true)
+    );
+}
+
+#[test]
+fn area1_a_project_pack_with_a_bad_area_does_not_open_and_names_it() {
+    let (dir, r) = project();
+    drop(r);
+    std::fs::write(
+        dir.path().join(".rdy/packs/team.yaml"),
+        "name: team\nversion: \"1\"\nextends: rdy-standard\nareas:\n  Payments: { paths: [wallets] }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: team\n").unwrap();
+    let e = rdy_engine::Rdy::open(dir.path()).err().expect("refused");
+    assert_eq!(e.code, "E_CONFIG", "{e}");
+    assert!(
+        e.message.contains("area \"Payments\" has an invalid name"),
+        "{e}"
+    );
+}
