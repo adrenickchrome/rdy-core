@@ -236,7 +236,7 @@ impl Rdy {
     pub(crate) fn update_cache(&mut self, view: &str, ops: &[Op]) {
         self.graphs.remove(&Scope::View(view.to_string()));
         if let Some(m) = self.cache.get_mut(&Scope::View(view.to_string())) {
-            m.apply(ops);
+            *m = m.with(ops);
         }
     }
 }

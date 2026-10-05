@@ -1329,9 +1329,10 @@ impl Rdy {
             message: req.message,
             links,
         };
-        let id =
-            self.store
-                .commit_to_view_at(&req.view, change, self.cache[&scope].snapshot_ref())?;
+        let current = &self.cache[&scope];
+        let id = self
+            .store
+            .commit_to_view_with(&req.view, change, &|id| current.version_of(id))?;
         self.update_cache(&req.view, &ops);
 
         let m = self.cache.get(&scope).expect("cached");

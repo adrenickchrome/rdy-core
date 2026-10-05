@@ -67,7 +67,7 @@ impl Rdy {
         let mut touched = BTreeSet::new();
         let mut deleted = BTreeSet::new();
         for c in applied.iter().map(|&i| &changes[i]) {
-            next.apply(&c.ops);
+            next = next.with(&c.ops);
             for op in &c.ops {
                 match op {
                     Op::Delete { id, .. } => {
@@ -359,7 +359,7 @@ impl Rdy {
         // 1. prospective canon: canon + the proposal's own changes
         let mut prospective: Materialized = self.materialized(&Scope::Canon)?.clone();
         for c in &changes {
-            prospective.apply(&c.ops);
+            prospective = prospective.with(&c.ops);
         }
         let mut ids = BTreeSet::new();
         for c in &changes {
