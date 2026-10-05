@@ -117,9 +117,17 @@ impl StoreReader {
     /// it applied. The set of the head last read is cached, and a later read walks back only to
     /// that head or to a checkpoint, whichever it meets first. A view with no ref is empty.
     pub fn included(&self, name: &str) -> Result<Arc<Vec<Hash>>, StoreError> {
-        let Some(head) = self.view_head(name)? else {
-            return Ok(Arc::new(vec![]));
-        };
+        match self.view_head(name)? {
+            Some(head) => self.included_at(name, &head),
+            None => Ok(Arc::new(vec![])),
+        }
+    }
+
+    /// The changes view `name` includes at `head`, a head the caller has read. Ops are
+    /// content-addressed, so the answer depends on `head` alone, whatever the writer has done
+    /// since: a read that needs a view's head and its set together reads the head once and passes
+    /// it here, never `included`, which would read the head again.
+    pub fn included_at(&self, name: &str, head: &ViewHead) -> Result<Arc<Vec<Hash>>, StoreError> {
         let cached = self.cached_set(name);
         if let Some((h, set)) = &cached
             && *h == head.head

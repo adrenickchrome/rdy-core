@@ -11,6 +11,7 @@ use rdy_model::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// What `Store::view` returns: a view's base landing and the changes it includes, in order. It is
 /// not stored; the view's chain and its `ViewHead` are (chain1).
@@ -93,10 +94,11 @@ impl StoreReader {
 
     /// View `name`'s base and included changes. A view with no head floats on canon, empty.
     pub fn view(&self, name: &str) -> Result<ViewRecord, StoreError> {
+        // one head read: the base and the set must describe the same head
         match self.view_head(name)? {
             Some(head) => Ok(ViewRecord {
                 base: head.base,
-                changes: self.included(name)?.as_ref().clone(),
+                changes: self.included_at(name, &head)?.as_ref().clone(),
             }),
             None => Ok(ViewRecord {
                 base: self.canon_head()?,
@@ -129,12 +131,13 @@ impl StoreReader {
 
     /// View `name`'s included changes merged onto its base (canon's head when it has no head).
     pub fn view_merge(&self, name: &str) -> Result<Merged, StoreError> {
-        let base = match self.view_head(name)? {
-            Some(head) => head.base,
-            None => self.canon_head()?,
+        // one head read: a landing between two reads would pair the old base with the rebased
+        // (emptied) set and drop the landed changes
+        let (base, included) = match self.view_head(name)? {
+            Some(head) => (head.base, self.included_at(name, &head)?),
+            None => (self.canon_head()?, Arc::new(vec![])),
         };
-        let changes = self
-            .included(name)?
+        let changes = included
             .iter()
             .map(|c| self.change(c))
             .collect::<Result<Vec<_>, _>>()?;

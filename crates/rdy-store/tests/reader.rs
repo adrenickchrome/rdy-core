@@ -231,3 +231,98 @@ fn rdr1_a_reader_that_outlives_its_store_makes_a_reopen_refuse_not_rebuild() {
     let s = Store::open(dir.path()).unwrap();
     assert!(!s.open_report().index_rebuilt);
 }
+
+/// A block id from a counter (Crockford base32, five digits).
+fn nth_id(n: u32) -> String {
+    const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let body: String = (0..5)
+        .rev()
+        .map(|i| CROCKFORD[((n >> (5 * i)) & 31) as usize] as char)
+        .collect();
+    format!("b-{body}")
+}
+
+fn prov(role: Role) -> Provenance {
+    Provenance {
+        actor: "someone".into(),
+        run: None,
+        role,
+        at_ms: 1,
+    }
+}
+
+/// The size of the state a view record describes: its included changes merged onto its base.
+fn record_len(r: &StoreReader, rec: &rdy_store::ViewRecord) -> usize {
+    let changes = rec
+        .changes
+        .iter()
+        .map(|c| r.change(c).unwrap())
+        .collect::<Vec<_>>();
+    r.merge_onto(&r.state_of(rec.base).unwrap(), &changes)
+        .unwrap()
+        .state
+        .blocks
+        .len()
+}
+
+#[test]
+fn rdr1_compound_reads_answer_for_one_head_while_the_writer_lands() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(dir.path()).unwrap();
+    let r = s.reader();
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let start = Arc::new(Barrier::new(4));
+    const ROUNDS: u32 = 300;
+    let writer = {
+        let (done, start) = (Arc::clone(&done), Arc::clone(&start));
+        std::thread::spawn(move || {
+            start.wait();
+            for round in 0..ROUNDS {
+                for k in 0..2 {
+                    let b = block(&nth_id(round * 2 + k), "claim", "x");
+                    s.commit_to_view("v", change("v", vec![Op::Create { block: b }]))
+                        .unwrap();
+                }
+                let p = s.propose("v", "round", prov(Role::Writer)).unwrap();
+                s.land(&p, prov(Role::Approver)).unwrap();
+            }
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            s
+        })
+    };
+    let readers: Vec<_> = (0..3)
+        .map(|_| {
+            let (r, done, start) = (r.clone(), Arc::clone(&done), Arc::clone(&start));
+            std::thread::spawn(move || {
+                start.wait();
+                let (mut state_len, mut record) = (0, 0);
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    let n = r.view_state("v").unwrap().blocks.len();
+                    assert!(n >= state_len, "view_state shrank from {state_len} to {n}");
+                    state_len = n;
+                    let n = record_len(&r, &r.view("v").unwrap());
+                    assert!(
+                        n >= record,
+                        "view's base and changes shrank from {record} to {n}"
+                    );
+                    record = n;
+                    if let Err(e) = r.check_objects() {
+                        panic!("check_objects failed under a live writer: {e}");
+                    }
+                }
+            })
+        })
+        .collect();
+    let s = writer.join().unwrap();
+    for t in readers {
+        t.join().unwrap();
+    }
+    assert_eq!(
+        s.view_state("v").unwrap().blocks.len(),
+        (ROUNDS * 2) as usize
+    );
+    assert_eq!(
+        r.check_objects().unwrap().landed_changes,
+        (ROUNDS * 2) as usize
+    );
+}

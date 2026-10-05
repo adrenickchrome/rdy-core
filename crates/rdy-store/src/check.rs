@@ -106,7 +106,7 @@ impl StoreReader {
                 variant(&kind)
             )));
         }
-        let included = self.included(name)?;
+        let included = self.included_at(name, head)?;
         if included.len() as u64 != head.len {
             return Err(bad(format!(
                 "view {name:?}: the head says {} changes, the chain gives {}",
@@ -125,7 +125,12 @@ impl StoreReader {
             }
         }
         let indexed: BTreeSet<Hash> = self.view_op_ids(name)?.into_iter().collect();
-        if let Some(h) = indexed.difference(&chain).next() {
+        let newer = if indexed.is_subset(&chain) {
+            BTreeSet::new()
+        } else {
+            self.ops_after(name, &chain)?
+        };
+        if let Some(h) = indexed.difference(&chain).find(|h| !newer.contains(*h)) {
             return Err(bad(format!(
                 "view {name:?}: op {h} is indexed but not on its chain"
             )));
@@ -136,5 +141,26 @@ impl StoreReader {
             )));
         }
         Ok(chain.len())
+    }
+
+    /// The ops a writer has put on view `name`'s chain since `chain` was walked: those reached
+    /// from the view's current head before the walk meets `chain`. Called after the index was
+    /// read, so every op that read saw is on the current head's chain (an index apply moves the
+    /// ref and indexes its ops in one commit); this keeps a check that runs beside a live writer
+    /// from reporting an op the writer appended after the head it checked.
+    fn ops_after(&self, name: &str, chain: &BTreeSet<Hash>) -> Result<BTreeSet<Hash>, StoreError> {
+        let mut newer = BTreeSet::new();
+        let mut cur = self.view_head(name)?.map(|h| h.head);
+        while let Some(h) = cur {
+            if chain.contains(&h) || !newer.insert(h) {
+                break;
+            }
+            cur = match self.view_op(&h) {
+                Ok(op) if op.view == name => op.prev,
+                // a broken newer op is the next check's to report
+                _ => None,
+            };
+        }
+        Ok(newer)
     }
 }
