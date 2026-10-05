@@ -454,7 +454,7 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
         let (page_url, label, href) = page::redirect_target(&sh, id, &url);
         let html = t.fill(&label, &href);
         #[cfg(debug_assertions)]
-        if permalinks.len() % 997 == 0 {
+        if permalinks.len().is_multiple_of(997) {
             let ctx = page::build(&sh, page::Kind::Redirect(id, &url));
             let full = env
                 .get_template("redirect.html")
