@@ -4,6 +4,7 @@ use rdy_qa::fixtures::*;
 use rdy_store::{Store, StoreError};
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 fn seg(store: &Path, n: u32) -> PathBuf {
     store.join("segments").join(format!("seg-{n:06}.log"))
@@ -174,4 +175,65 @@ fn lock1_a_second_open_is_still_e_locked() {
     let _held = Store::open(&dir).unwrap();
     let e = Store::open(&dir).err().expect("the second open is refused");
     assert!(matches!(e, StoreError::Locked(_)), "{e}");
+}
+
+#[test]
+fn dur2_init_makes_the_config_and_its_directory_entry_durable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (r, synced) =
+        rdy_store::fsutil::record_syncs(|| rdy_engine::Rdy::init(dir.path(), "rdy-standard"));
+    r.unwrap();
+    let rdy = dir.path().join(".rdy");
+    let cfg = synced
+        .iter()
+        .position(|p| *p == rdy.join("config.yaml"))
+        .unwrap_or_else(|| panic!("config.yaml was not fsynced: {synced:?}"));
+    assert!(
+        synced[cfg + 1..].contains(&rdy),
+        ".rdy was not fsynced after config.yaml was written: {synced:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(rdy.join("config.yaml")).unwrap(),
+        "pack: rdy-standard\n"
+    );
+    assert!(!rdy.join(".config.yaml.tmp").exists());
+}
+
+#[test]
+fn dur2_write_durable_replaces_a_file_then_syncs_it_and_its_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("f.txt");
+    std::fs::write(&p, "old").unwrap();
+    let (r, synced) =
+        rdy_store::fsutil::record_syncs(|| rdy_store::fsutil::write_durable(&p, b"new"));
+    r.unwrap();
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+    assert_eq!(synced, vec![p.clone(), dir.path().to_path_buf()]);
+}
+
+/// Guard (passes once `record_syncs` exists): a directory fsync succeeds on this platform, through
+/// `sync_all` (F_FULLFSYNC on macOS).
+#[test]
+fn dur3_sync_dir_flushes_a_directory_on_this_platform() {
+    let dir = tempfile::tempdir().unwrap();
+    let (r, synced) = rdy_store::fsutil::record_syncs(|| rdy_store::fsutil::sync_dir(dir.path()));
+    r.unwrap();
+    assert_eq!(synced, vec![dir.path().to_path_buf()]);
+}
+
+/// Probe for the final review: on macOS a directory fsync must cost a drive flush (about 4 ms),
+/// not a plain fsync (about 0.03 ms).
+#[test]
+#[ignore = "probe: run by hand on macOS"]
+fn dur3_probe_sync_dir_costs_a_drive_flush() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = vec![];
+    for i in 0..21 {
+        std::fs::write(dir.path().join(format!("f{i}")), b"x").unwrap();
+        let s = Instant::now();
+        rdy_store::fsutil::sync_dir(dir.path()).unwrap();
+        t.push(s.elapsed());
+    }
+    t.sort();
+    println!("sync_dir median {:?}", t[10]);
 }

@@ -115,7 +115,7 @@ impl Rdy {
             pack: pack.to_string(),
         })
         .expect("config yaml");
-        std::fs::write(dot.join("config.yaml"), cfg).map_err(io)?;
+        rdy_store::fsutil::write_durable(&dot.join("config.yaml"), cfg.as_bytes()).map_err(io)?;
         Rdy::open(project)
     }
 
