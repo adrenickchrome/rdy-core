@@ -52,13 +52,6 @@ pub fn build(
         current,
         chain: &chain,
     };
-    let page = |id: &BlockId| site.page(id);
-    let top: Vec<&Block> = site
-        .m
-        .children(None)
-        .into_iter()
-        .filter(|b| tree::is_tree_type(&b.block_type) && page(&b.id).is_some())
-        .collect();
     let plain = |label: &str, to: &str| NavEntry {
         label: label.to_string(),
         href: relative(from, to),
@@ -67,24 +60,19 @@ pub fn build(
     };
     let mut groups = vec![];
     let mut first = vec![plain("Home", "index.html")];
-    let docs: Vec<NavEntry> = top
-        .iter()
-        .filter(|b| b.block_type != tree::FOLDER)
-        .map(|b| ctx.entry(b))
-        .collect();
-    first.extend(cap(docs, relative(from, "index.html")));
+    first.extend(ctx.list(None, relative(from, "index.html")));
     groups.push(NavGroup {
         entries: first,
         ..NavGroup::default()
     });
-    for folder in top.iter().filter(|b| b.block_type == tree::FOLDER) {
-        let Some(href) = page(&folder.id).map(|p| relative(from, &p)) else {
+    for folder in site.top_folders() {
+        let Some(href) = site.page(&folder.id).map(|p| relative(from, &p)) else {
             continue;
         };
         groups.push(NavGroup {
             label: Some(site.label(folder)),
             current: current == Some(&folder.id),
-            entries: cap(ctx.children_of(&folder.id), href.clone()),
+            entries: ctx.list(Some(&folder.id), href.clone()),
             href: Some(href),
         });
     }
@@ -144,7 +132,7 @@ impl Ctx<'_> {
             .unwrap_or_default();
         let open = b.block_type == tree::FOLDER && (current || on_path);
         let children = if open {
-            cap(self.children_of(&b.id), href.clone())
+            self.list(Some(&b.id), href.clone())
         } else {
             vec![]
         };
@@ -158,32 +146,61 @@ impl Ctx<'_> {
         }
     }
 
-    /// The entries of the folder `id`'s direct children that have a page.
-    fn children_of(&self, id: &BlockId) -> Vec<NavEntry> {
-        self.site
-            .m
-            .children(Some(id))
-            .into_iter()
-            .filter(|c| tree::is_tree_type(&c.block_type) && self.site.page(&c.id).is_some())
-            .map(|c| self.entry(c))
-            .collect()
+    /// The entries of the navigation list under `parent` (see [`Site::nav_list`]), cut to
+    /// [`CAP`] as [`cap`] cuts them; only the entries shown are built.
+    fn list(&self, parent: Option<&BlockId>, folder_href: String) -> Vec<NavEntry> {
+        let list = self.site.nav_list(parent);
+        // the entry on the path is the one of the chain that sits in this list
+        let at = self
+            .chain
+            .iter()
+            .find(|c| {
+                self.site
+                    .m
+                    .get(c)
+                    .is_some_and(|b| b.parent.as_ref() == parent)
+            })
+            .and_then(|c| self.site.nav_pos(c))
+            .filter(|&i| list.get(i).is_some_and(|b| self.chain.contains(&b.id)));
+        match window(list.len(), at) {
+            None => list.iter().map(|b| self.entry(b)).collect(),
+            Some(start) => {
+                let mut shown: Vec<NavEntry> = list[start..start + CAP]
+                    .iter()
+                    .map(|b| self.entry(b))
+                    .collect();
+                shown.push(more(list.len(), folder_href));
+                shown
+            }
+        }
+    }
+}
+
+/// Where the [`CAP`] entries shown of a list of `n` start, around the one at `at` (the first
+/// ones when none is); none when the whole list is shown.
+fn window(n: usize, at: Option<usize>) -> Option<usize> {
+    (n > CAP).then(|| at.map_or(0, |i| i.saturating_sub(CAP / 2).min(n - CAP)))
+}
+
+/// The closing "+N more" entry of a list of `n` cut to [`CAP`].
+fn more(n: usize, folder_href: String) -> NavEntry {
+    NavEntry {
+        more: Some((n - CAP, folder_href)),
+        ..NavEntry::default()
     }
 }
 
 /// `entries` cut to [`CAP`] around the one on the path (the first ones when none is), with a
 /// closing "+N more" entry that leads to `folder_href`.
+#[cfg(test)]
 fn cap(mut entries: Vec<NavEntry>, folder_href: String) -> Vec<NavEntry> {
     let n = entries.len();
-    if n <= CAP {
-        return entries;
-    }
     let at = entries.iter().position(|e| e.current || e.on_path);
-    let start = at.map_or(0, |i| i.saturating_sub(CAP / 2).min(n - CAP));
+    let Some(start) = window(n, at) else {
+        return entries;
+    };
     let mut shown: Vec<NavEntry> = entries.drain(start..start + CAP).collect();
-    shown.push(NavEntry {
-        more: Some((n - CAP, folder_href)),
-        ..NavEntry::default()
-    });
+    shown.push(more(n, folder_href));
     shown
 }
 

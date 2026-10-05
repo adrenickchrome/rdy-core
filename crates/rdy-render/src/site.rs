@@ -76,6 +76,17 @@ pub struct Site<'a> {
     pub terms: Vec<BlockId>,
     /// The terms' anchors on `glossary.html`.
     pub term_anchors: BTreeMap<BlockId, String>,
+    /// The navigation's lists, computed once: every folder's children that have a page, in
+    /// order, under `Some(folder)`; the top-level docs that have a page under `None`.
+    nav_lists: BTreeMap<Option<BlockId>, Vec<&'a Block>>,
+    /// The top-level folders that have a page, in order.
+    top_folders: Vec<&'a Block>,
+    /// Each folder's and doc's place in its navigation list (see `nav_lists`).
+    nav_pos: BTreeMap<BlockId, usize>,
+    /// The folder or doc whose page each page is (the first in tree order that has it).
+    page_owner: BTreeMap<String, BlockId>,
+    /// Each doc's place in `order`.
+    order_pos: BTreeMap<BlockId, usize>,
 }
 
 impl<'a> Site<'a> {
@@ -117,6 +128,21 @@ impl<'a> Site<'a> {
         let mut order = vec![];
         let mut tree_order = vec![];
         walk(m, None, "", 0, &mut paths, &mut order, &mut tree_order);
+        let (mut nav_lists, mut top_folders, mut nav_pos) =
+            (BTreeMap::<_, Vec<&Block>>::new(), vec![], BTreeMap::new());
+        for id in &tree_order {
+            let Some(b) = m.get(id) else { continue };
+            if !tree::is_tree_type(&b.block_type) {
+                continue;
+            }
+            if b.parent.is_none() && b.block_type == tree::FOLDER {
+                top_folders.push(b);
+                continue;
+            }
+            let list = nav_lists.entry(b.parent.clone()).or_default();
+            nav_pos.insert(b.id.clone(), list.len());
+            list.push(b);
+        }
         let mut site = Site {
             m,
             paths,
@@ -129,7 +155,24 @@ impl<'a> Site<'a> {
             question_anchors: BTreeMap::new(),
             terms: vec![],
             term_anchors: BTreeMap::new(),
+            nav_lists,
+            top_folders,
+            nav_pos,
+            page_owner: BTreeMap::new(),
+            order_pos: BTreeMap::new(),
         };
+        let mut page_owner = BTreeMap::new();
+        for id in &site.tree {
+            if let Some(p) = site.page(id) {
+                page_owner.entry(p).or_insert_with(|| id.clone());
+            }
+        }
+        site.page_owner = page_owner;
+        let mut order_pos = BTreeMap::new();
+        for (i, d) in site.order.iter().enumerate() {
+            order_pos.entry(d.clone()).or_insert(i);
+        }
+        site.order_pos = order_pos;
         site.compute_numbers();
         site.compute_anchors();
         site.compute_governed();
@@ -268,9 +311,12 @@ impl<'a> Site<'a> {
 
     /// Whether a doc or folder already has the page at `page`.
     fn page_taken(&self, page: &str) -> bool {
-        self.paths
-            .keys()
-            .any(|id| self.page(id).as_deref() == Some(page))
+        self.page_owner.contains_key(page)
+    }
+
+    /// The folder or doc whose page is `page` (the first in tree order, should two share it).
+    pub fn page_block(&self, page: &str) -> Option<&'a Block> {
+        self.m.get(self.page_owner.get(page)?)
     }
 
     /// The page of a folder or doc.
@@ -280,6 +326,24 @@ impl<'a> Site<'a> {
             true => format!("{p}/index.html"),
             false => format!("{p}.html"),
         })
+    }
+
+    /// The folders and docs with a page that the navigation lists under `parent` (a folder), or
+    /// the top-level docs with a page when `parent` is none.
+    pub fn nav_list(&self, parent: Option<&BlockId>) -> &[&'a Block] {
+        self.nav_lists
+            .get(&parent.cloned())
+            .map_or(&[], |l| l.as_slice())
+    }
+
+    /// The top-level folders that have a page, in order.
+    pub fn top_folders(&self) -> &[&'a Block] {
+        &self.top_folders
+    }
+
+    /// The place of a folder or doc in its navigation list.
+    pub fn nav_pos(&self, id: &BlockId) -> Option<usize> {
+        self.nav_pos.get(id).copied()
     }
 
     /// Every folder and doc that has a page, in tree order.
@@ -573,7 +637,7 @@ impl<'a> Site<'a> {
 
     /// The docs before and after `doc` in reading order.
     pub fn prev_next(&self, doc: &BlockId) -> (Option<BlockId>, Option<BlockId>) {
-        let Some(i) = self.order.iter().position(|d| d == doc) else {
+        let Some(&i) = self.order_pos.get(doc) else {
             return (None, None);
         };
         (

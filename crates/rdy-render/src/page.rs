@@ -465,6 +465,9 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
             });
         }
     }
+    // a permalink page is a bare redirect: it shows no navigation and no crumbs, so it builds
+    // none (building the site's navigation once per block made a render O(blocks x pages))
+    let redirect = kind_name == "redirect";
     PageContext {
         site_name: sh.site_name.to_string(),
         site_description: sh.description.map(String::from),
@@ -473,8 +476,16 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         root: "../".repeat(page_url.matches('/').count()),
         init_js: assets::INIT_JS,
         version: version::label(sh.position),
-        crumbs: sh.crumbs(&page_url, &chain, tail),
-        nav: nav::build(site, current, &page_url, has_terms, has_questions),
+        crumbs: if redirect {
+            vec![]
+        } else {
+            sh.crumbs(&page_url, &chain, tail)
+        },
+        nav: if redirect {
+            nav::Nav::default()
+        } else {
+            nav::build(site, current, &page_url, has_terms, has_questions)
+        },
         toc: toc::build(&items),
         pager,
         search_href: rel(&page_url, "search-index.json"),

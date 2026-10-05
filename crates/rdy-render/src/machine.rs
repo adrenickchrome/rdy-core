@@ -282,9 +282,7 @@ fn block_json(
 
 /// The folder or doc whose page is `url`.
 fn tree_block<'a>(site: &Site<'a>, url: &str) -> Option<&'a Block> {
-    site.tree_pages()
-        .find(|id| site.page(id).as_deref() == Some(url))
-        .and_then(|id| site.m.get(id))
+    site.page_block(url)
 }
 
 /// The twin of one page.
