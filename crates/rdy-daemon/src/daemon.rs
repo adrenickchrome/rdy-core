@@ -10,7 +10,7 @@ use crate::socket;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -125,16 +125,21 @@ impl ExitReason {
 pub struct DaemonHandle {
     info: DaemonInfo,
     run: RunDir,
+    files: RunFiles,
 }
 
 impl DaemonHandle {
     /// Asks `run` to stop and returns at once. The socket and the pid file are removed here, so
-    /// no new client can reach the daemon once this returns; `run` drains and returns. A second
+    /// no new client can reach the daemon once this returns, and `run` then leaves those paths
+    /// alone (a successor may already have re-created them); `run` drains and returns. A second
     /// stop is a no-op.
     pub fn stop(&self) {
-        if !self.info.stop.send_replace(true) {
-            remove_run_files(&self.run);
-        }
+        // before the signal, so `run` cannot get to the files first and this return before
+        // they are gone
+        self.files.remove(&self.run);
+        self.info
+            .stop
+            .send_if_modified(|s| !std::mem::replace(s, true));
     }
 
     pub fn sessions(&self) -> Sessions {
@@ -160,6 +165,7 @@ pub struct Daemon {
     reason: Arc<OnceLock<ExitReason>>,
     /// Mirrors `info.connections` so `run` can watch it reach 0 (the idle timer).
     count: Arc<watch::Sender<usize>>,
+    files: RunFiles,
     listener: Option<UnixListener>,
 }
 
@@ -180,6 +186,7 @@ impl Daemon {
             readiness: Readiness::new(),
             reason: Arc::new(OnceLock::new()),
             count: Arc::new(watch::channel(0).0),
+            files: RunFiles::default(),
             listener: None,
         }
     }
@@ -192,6 +199,7 @@ impl Daemon {
         DaemonHandle {
             info: self.info.clone(),
             run: self.config.run.clone(),
+            files: self.files.clone(),
         }
     }
 
@@ -204,7 +212,8 @@ impl Daemon {
 
     /// Serves connections until stopped, idle for `idle_timeout`, or replaced by another
     /// version. Then, in order: stops accepting and drops the listener, removes the socket and
-    /// the pid file, tells every connection to finish, and waits for them up to `STOP_GRACE`.
+    /// the pid file (unless `DaemonHandle::stop` already did), tells every connection to finish,
+    /// and waits for them up to `STOP_GRACE`.
     pub async fn run(mut self) -> io::Result<ExitReason> {
         let listener = self
             .listener
@@ -276,8 +285,8 @@ impl Daemon {
         let reason = self.reason.get().copied().unwrap_or(ExitReason::Stopped);
         // (1) stop accepting
         drop(listener);
-        // (2) the socket and the pid file (already gone if `DaemonHandle::stop` asked)
-        remove_run_files(&self.config.run);
+        // (2) the socket and the pid file, unless `DaemonHandle::stop` already removed them
+        self.files.remove(&self.config.run);
         // (3) every connection task sees `info.stop` and finishes
         while tasks.try_join_next().is_some() {}
         if reason != ExitReason::Idle {
@@ -314,9 +323,22 @@ async fn sleep_until_some(at: Option<tokio::time::Instant>) {
     }
 }
 
-fn remove_run_files(run: &RunDir) {
-    remove_if_present(&run.socket());
-    remove_if_present(&run.pid_file());
+/// The removal of this daemon's socket and pid file, done exactly once by whichever stop path
+/// gets there first. Once removed, the paths may belong to a successor daemon, so a second
+/// removal would delete its files. The lock is held across the removal, so every caller returns
+/// only once the files are gone.
+#[derive(Clone, Default)]
+struct RunFiles(Arc<Mutex<bool>>);
+
+impl RunFiles {
+    fn remove(&self, run: &RunDir) {
+        let mut removed = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if !*removed {
+            *removed = true;
+            remove_if_present(&run.socket());
+            remove_if_present(&run.pid_file());
+        }
+    }
 }
 
 fn remove_if_present(path: &Path) {

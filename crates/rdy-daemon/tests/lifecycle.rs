@@ -173,3 +173,38 @@ async fn life1_a_stop_closes_a_connection_still_in_its_hello() {
     ));
     assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
 }
+
+#[tokio::test]
+async fn life1_a_handle_stop_leaves_a_successors_run_files_alone() {
+    let d = daemon("1", true, |_| {}).await;
+    d.handle.stop();
+    assert!(!d.run.socket().exists() && !d.run.pid_file().exists());
+    // a successor binds the same paths before the old `run` gets to its cleanup
+    let successor = std::os::unix::net::UnixListener::bind(d.run.socket()).unwrap();
+    std::fs::write(d.run.pid_file(), "424242\n").unwrap();
+    assert!(matches!(
+        d.task.await.unwrap().unwrap(),
+        ExitReason::Stopped
+    ));
+    assert!(d.run.socket().exists(), "the successor's socket is kept");
+    assert_eq!(
+        std::fs::read_to_string(d.run.pid_file()).unwrap(),
+        "424242\n"
+    );
+    drop(successor);
+}
+
+#[tokio::test]
+async fn life1_the_stop_op_removes_the_run_files() {
+    let d = daemon("1", true, |_| {}).await;
+    let (mut r, _) = connect_with(&d.run, &hello("1", "ctl", d.dir.path())).await;
+    assert_eq!(
+        ctl(&mut r, 1, "stop", json!({})).await["ok"]["stopping"],
+        true
+    );
+    assert!(matches!(
+        d.task.await.unwrap().unwrap(),
+        ExitReason::Stopped
+    ));
+    assert!(!d.run.socket().exists() && !d.run.pid_file().exists());
+}
