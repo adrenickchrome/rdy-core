@@ -1,13 +1,16 @@
 use crate::Store;
 use crate::error::StoreError;
 use crate::kinds;
+use crate::view::{ViewHead, ViewOp, ViewOpKind};
 use rdy_model::{
     Assurance, Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance,
     StateSnapshot, Tag, decision,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
+/// What `Store::view` returns: a view's base landing and the changes it includes, in order. It is
+/// not stored; the view's chain and its `ViewHead` are (chain1).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewRecord {
     pub base: Option<Hash>,
@@ -20,6 +23,10 @@ fn view_ref(name: &str) -> String {
 
 fn tag_ref(name: &str) -> String {
     format!("tag/{name}")
+}
+
+fn encode<T: Serialize>(v: &T) -> Vec<u8> {
+    postcard::to_allocvec(v).expect("encode")
 }
 
 pub fn apply_op(store: &Store, state: &mut StateSnapshot, op: &Op) -> Result<(), StoreError> {
@@ -84,11 +91,13 @@ impl Store {
         self.state_of(self.canon_head()?)
     }
 
+    /// View `name`'s base and included changes. A view with no head floats on canon, empty.
     pub fn view(&self, name: &str) -> Result<ViewRecord, StoreError> {
-        match self.get_ref(&view_ref(name))? {
-            Some(bytes) => {
-                postcard::from_bytes(&bytes).map_err(|e| StoreError::Decode(e.to_string()))
-            }
+        match self.view_head(name)? {
+            Some(head) => Ok(ViewRecord {
+                base: head.base,
+                changes: self.included(name)?.as_ref().clone(),
+            }),
             None => Ok(ViewRecord {
                 base: self.canon_head()?,
                 changes: vec![],
@@ -130,7 +139,6 @@ impl Store {
         change: Change,
         current: &StateSnapshot,
     ) -> Result<Hash, StoreError> {
-        let mut view = self.view(name)?;
         // apply_op only reads and writes the ids the ops name, so seed a small state with those
         let mut state = StateSnapshot::default();
         for op in &change.ops {
@@ -145,30 +153,82 @@ impl Store {
         for op in &change.ops {
             apply_op(self, &mut state, op)?;
         }
-        // The view record must name the change id, which depends on deps; use the same
-        // computation as commit_change so the change and its view update land in one write.
-        let mut probe = change.clone();
-        probe.deps = self.change_deps(&probe)?;
-        let expected = probe.id();
-        view.changes.push(expected);
-        let rec = postcard::to_allocvec(&view).expect("encode view");
-        let id = self.commit_change(change, vec![(view_ref(name), rec)])?;
-        if id != expected {
+        // The commit op names the change id, which depends on deps, so the change, its view op
+        // and the view's head land in one write.
+        let mut change = change;
+        change.deps = self.change_deps(&change)?;
+        let change_bytes = encode(&change);
+        let cid = Hash::of(&change_bytes);
+        let p = &change.provenance;
+        let view_op = |prev: Option<Hash>, op: ViewOpKind| ViewOp {
+            view: name.to_string(),
+            prev,
+            op,
+            actor: p.actor.clone(),
+            run: p.run.clone(),
+            at_ms: p.at_ms,
+        };
+        let (create, prev, base, len0, owner, pinned) = match self.view_head(name)? {
+            Some(head) => (
+                None,
+                head.head,
+                head.base,
+                head.len,
+                head.owner,
+                head.pinned,
+            ),
+            None => {
+                let base = self.canon_head()?;
+                let create = encode(&view_op(
+                    None,
+                    ViewOpKind::Create {
+                        base,
+                        owner: None,
+                        pinned: false,
+                    },
+                ));
+                let id = Hash::of(&create);
+                (Some(create), id, base, 0, None, false)
+            }
+        };
+        let commit = encode(&view_op(Some(prev), ViewOpKind::Commit { change: cid }));
+        let new_head = ViewHead {
+            head: Hash::of(&commit),
+            base,
+            len: len0 + 1,
+            owner,
+            pinned,
+            closed: false,
+            last_write_ms: p.at_ms,
+        };
+        let mut items = vec![];
+        for op in &change.ops {
+            if let Op::Create { block } | Op::Update { block, .. } = op {
+                items.push((kinds::BLOCK, encode(block)));
+            }
+        }
+        items.push((kinds::CHANGE, change_bytes));
+        let change_pos = items.len() - 1;
+        items.extend(create.map(|c| (kinds::VIEW_OP, c)));
+        items.push((kinds::VIEW_OP, commit));
+        items.extend(self.ref_items_pub(vec![(view_ref(name), encode(&new_head))]));
+        let id = self.write(items)?[change_pos];
+        if id != cid {
             return Err(StoreError::Decode(format!(
-                "change id mismatch: view names {expected}, written {id}"
+                "change id mismatch: view names {cid}, written {id}"
             )));
         }
         Ok(id)
     }
 
     pub fn propose(&mut self, view: &str, title: &str, by: Provenance) -> Result<Hash, StoreError> {
-        let v = self.view(view)?;
+        let changes = self.included(view)?.as_ref().clone();
         let p = Proposal {
             stable: None,
             prev: None,
             title: title.to_string(),
             view: view.to_string(),
-            changes: v.changes,
+            changes,
             alternative: None,
             provenance: by,
         };
@@ -213,22 +273,47 @@ impl Store {
             rebased_from: vec![],
         };
         let landing_id = rec.id();
-        let mut view = self.view(&p.view)?;
-        view.changes.retain(|c| !p.changes.contains(c));
-        view.base = Some(landing_id);
+        // the proposing view checkpoints: the landed changes drop out, the rest remain
+        let head = self
+            .view_head(&p.view)?
+            .ok_or_else(|| StoreError::UnknownView(p.view.clone()))?;
+        let landed: HashSet<&Hash> = p.changes.iter().collect();
+        let (dropped, remaining): (Vec<Hash>, Vec<Hash>) = self
+            .included(&p.view)?
+            .iter()
+            .partition(|c| landed.contains(c));
+        let rebase = encode(&ViewOp {
+            view: p.view.clone(),
+            prev: Some(head.head),
+            op: ViewOpKind::Rebase {
+                landing: landing_id,
+                dropped,
+                remaining: remaining.clone(),
+            },
+            actor: rec.approved_by.actor.clone(),
+            run: rec.approved_by.run.clone(),
+            at_ms: rec.approved_by.at_ms,
+        });
+        let new_head = ViewHead {
+            head: Hash::of(&rebase),
+            base: Some(landing_id),
+            len: remaining.len() as u64,
+            owner: head.owner,
+            pinned: head.pinned,
+            closed: head.closed,
+            last_write_ms: head.last_write_ms,
+        };
         let mut items = vec![
             (kinds::SNAPSHOT, snap),
             (
                 kinds::LANDING,
                 postcard::to_allocvec(&rec).expect("encode landing"),
             ),
+            (kinds::VIEW_OP, rebase),
         ];
         let refs = vec![
             ("canon".to_string(), landing_id.0.to_vec()),
-            (
-                view_ref(&p.view),
-                postcard::to_allocvec(&view).expect("encode view"),
-            ),
+            (view_ref(&p.view), encode(&new_head)),
         ];
         items.extend(self.ref_items_pub(refs));
         self.write(items)?;

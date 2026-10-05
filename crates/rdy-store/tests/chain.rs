@@ -1,6 +1,7 @@
 //! View chains (plan M2a1, chain1).
-use rdy_model::Hash;
-use rdy_store::{Owner, Store, StoreError, ViewHead, ViewOp, ViewOpKind, kinds};
+use rdy_model::*;
+use rdy_store::{Owner, Store, StoreError, ViewHead, ViewOp, ViewOpKind, ViewRecord, kinds};
+use std::collections::BTreeMap;
 
 fn h(n: u8) -> Hash {
     Hash([n; 32])
@@ -200,6 +201,190 @@ fn chain1_a_broken_chain_names_the_view_the_op_and_why() {
     match s.view_head("f") {
         Err(StoreError::Decode(m)) => assert!(
             m.starts_with("view \"f\": its ref is not a view head: "),
+            "{m}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn block(id: &str, body: &str) -> Block {
+    Block {
+        id: BlockId::parse(id).unwrap(),
+        block_type: "claim".into(),
+        parent: None,
+        order: "V".into(),
+        fields: BTreeMap::new(),
+        body: body.into(),
+        links: BTreeMap::new(),
+        pins: BTreeMap::new(),
+    }
+}
+
+fn prov(role: Role) -> Provenance {
+    Provenance {
+        actor: "someone".into(),
+        run: None,
+        role,
+        at_ms: 1,
+    }
+}
+
+fn change(view: &str, ops: Vec<Op>) -> Change {
+    Change {
+        view: view.into(),
+        ops,
+        deps: vec![],
+        provenance: prov(Role::Writer),
+        justification: None,
+        message: String::new(),
+        links: ChangeLinks::default(),
+    }
+}
+
+fn create(view: &str, id: &str) -> Change {
+    change(
+        view,
+        vec![Op::Create {
+            block: block(id, "same length body"),
+        }],
+    )
+}
+
+#[test]
+fn chain1_the_first_write_creates_the_view_and_each_write_appends_one_op() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let c1 = s.commit_to_view("work", create("work", "b-00001")).unwrap();
+    let h1 = s.view_head("work").unwrap().unwrap();
+    let commit1 = s.view_op(&h1.head).unwrap();
+    assert_eq!(commit1.op, ViewOpKind::Commit { change: c1 });
+    assert_eq!(
+        (commit1.view.as_str(), commit1.actor.as_str()),
+        ("work", "someone")
+    );
+    let first = s.view_op(&commit1.prev.unwrap()).unwrap();
+    assert_eq!(
+        first.op,
+        ViewOpKind::Create {
+            base: None,
+            owner: None,
+            pinned: false
+        }
+    );
+    assert_eq!(first.prev, None);
+    assert_eq!(
+        (h1.len, h1.base, h1.owner.clone(), h1.pinned, h1.closed),
+        (1, None, None, false, false)
+    );
+    let c2 = s.commit_to_view("work", create("work", "b-00002")).unwrap();
+    let h2 = s.view_head("work").unwrap().unwrap();
+    assert_eq!(s.view_op(&h2.head).unwrap().prev, Some(h1.head));
+    assert_eq!(h2.len, 2);
+    assert_eq!(
+        s.view("work").unwrap(),
+        ViewRecord {
+            base: None,
+            changes: vec![c1, c2]
+        }
+    );
+    assert_eq!(s.included("work").unwrap().as_slice(), &[c1, c2]);
+    assert_eq!(s.view_op_ids("work").unwrap().len(), 3);
+}
+
+/// The 1.6 GB growth item: a write appends a constant number of bytes, however long the view.
+#[test]
+fn chain1_bytes_written_per_commit_do_not_grow_with_the_view() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut sizes = vec![];
+    for i in 0..300 {
+        let before = s.log_end();
+        s.commit_to_view("work", create("work", &format!("b-{i:05}")))
+            .unwrap();
+        let after = s.log_end();
+        if after.segment == before.segment {
+            sizes.push(after.offset - before.offset);
+        }
+    }
+    let (early, last) = (sizes[5], *sizes.last().unwrap());
+    assert!(
+        last <= early + 16,
+        "{early} bytes per write early, {last} at 300 changes"
+    );
+}
+
+#[test]
+fn chain1_landing_appends_a_rebase_checkpoint_with_the_remaining_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let c1 = s.commit_to_view("work", create("work", "b-00001")).unwrap();
+    let p = s.propose("work", "one", prov(Role::Writer)).unwrap();
+    let c2 = s.commit_to_view("work", create("work", "b-00002")).unwrap();
+    let l = s.land(&p, prov(Role::Approver)).unwrap();
+    let head = s.view_head("work").unwrap().unwrap();
+    assert_eq!(
+        s.view_op(&head.head).unwrap().op,
+        ViewOpKind::Rebase {
+            landing: l,
+            dropped: vec![c1],
+            remaining: vec![c2]
+        }
+    );
+    assert_eq!((head.base, head.len), (Some(l), 1));
+    assert_eq!(
+        s.view("work").unwrap(),
+        ViewRecord {
+            base: Some(l),
+            changes: vec![c2]
+        }
+    );
+}
+
+#[test]
+fn chain1_the_walk_stops_at_the_latest_checkpoint() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    {
+        let mut s = Store::open(&dir).unwrap();
+        for i in 0..50 {
+            s.commit_to_view("work", create("work", &format!("b-{i:05}")))
+                .unwrap();
+        }
+        let p = s.propose("work", "all", prov(Role::Writer)).unwrap();
+        s.land(&p, prov(Role::Approver)).unwrap();
+        for i in 50..52 {
+            s.commit_to_view("work", create("work", &format!("b-{i:05}")))
+                .unwrap();
+        }
+    }
+    let s = Store::open(&dir).unwrap();
+    let before = s.frames_read();
+    assert_eq!(s.included("work").unwrap().len(), 2);
+    assert!(
+        s.frames_read() - before <= 3,
+        "read {} ops",
+        s.frames_read() - before
+    );
+}
+
+#[test]
+fn chain1_a_broken_chain_is_an_error_naming_the_view() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    {
+        let mut s = Store::open(&dir).unwrap();
+        s.commit_to_view("a", create("a", "b-00001")).unwrap();
+        s.commit_to_view("b", create("b", "b-00002")).unwrap();
+        let hb = s.view_head("b").unwrap().unwrap();
+        let mut ha = s.view_head("a").unwrap().unwrap();
+        ha.head = hb.head;
+        s.set_refs(vec![("view/a".into(), postcard::to_allocvec(&ha).unwrap())])
+            .unwrap();
+    }
+    let s = Store::open(&dir).unwrap();
+    match s.view("a") {
+        Err(StoreError::Decode(m)) => assert!(
+            m.contains("view chain of \"a\" is broken at") && m.contains("belongs to view \"b\""),
             "{m}"
         ),
         other => panic!("{other:?}"),
