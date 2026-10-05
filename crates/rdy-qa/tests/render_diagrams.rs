@@ -78,3 +78,61 @@ fn dia1_a_d2_diagram_shows_its_source_and_caption_only() {
         "d2 needs no mermaid"
     );
 }
+
+/// Fix round 1. layout.html loads `app.js` (which carries `mermaid-init.js`) before
+/// `mermaid.min.js`, both `defer`. Deferred scripts run while `readyState` is already
+/// `interactive`, so the init must wait for DOMContentLoaded, not start at once.
+#[test]
+fn dia1_the_init_waits_for_a_library_loaded_after_it_by_a_later_deferred_script() {
+    if std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("node is not installed: the load-order harness is skipped");
+        return;
+    }
+    let init = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../rdy-render/theme/rdy-standard/js/mermaid-init.js");
+    let init = std::fs::read_to_string(&init).unwrap();
+    let harness = format!(
+        r#"
+const listeners = {{}};
+const calls = [];
+const pre = {{ dataset: {{}}, textContent: 'graph TD\nA-->B', closest() {{ return figure; }} }};
+const figure = {{ classList: {{ add() {{}}, remove() {{}} }}, querySelector() {{ return {{ textContent: 'The flow' }}; }} }};
+global.window = global;
+global.document = {{
+  readyState: 'interactive', // what a deferred script sees
+  documentElement: {{ hasAttribute() {{ return false; }} }},
+  addEventListener(n, f) {{ (listeners[n] = listeners[n] || []).push(f); }},
+  querySelectorAll() {{ return [pre]; }},
+  createElement() {{ return {{ className: '', querySelector() {{ return null; }}, set innerHTML(v) {{}} }}; }},
+}};
+global.getComputedStyle = () => ({{ getPropertyValue: () => '#fff' }});
+global.matchMedia = undefined;
+(function () {{ {init} }})();   // app.js runs first: no mermaid yet
+global.mermaid = {{
+  initialize() {{ calls.push('initialize'); }},
+  render() {{ calls.push('render'); return Promise.resolve({{ svg: '<svg></svg>' }}); }},
+}};                              // mermaid.min.js runs second
+(listeners.DOMContentLoaded || []).forEach(f => f());   // then DOMContentLoaded
+setTimeout(() => {{ console.log(calls.join(',')); }}, 20);
+"#
+    );
+    let out = std::process::Command::new("node")
+        .arg("-e")
+        .arg(&harness)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "initialize,render",
+        "the diagram is drawn once mermaid has loaded"
+    );
+}

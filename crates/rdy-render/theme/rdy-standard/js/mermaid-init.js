@@ -97,6 +97,9 @@
     }
   }
 
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
-  else start();
+  // Deferred scripts run in document order while readyState is already 'interactive', and
+  // mermaid.min.js is deferred after this script: wait for DOMContentLoaded, which fires after
+  // every deferred script. Only a page that has fully loaded can start at once.
+  if (document.readyState === 'complete') start();
+  else document.addEventListener('DOMContentLoaded', start);
 })();
