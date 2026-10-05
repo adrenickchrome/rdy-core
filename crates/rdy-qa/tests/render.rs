@@ -3,6 +3,9 @@ use rdy_qa::golden::{self, pages};
 use rdy_qa::site::{attrs, unescape};
 use std::path::Path;
 
+/// The inline script that sets the theme before the first paint, as the theme ships it.
+const INIT_JS: &str = include_str!("../../rdy-render/theme/rdy-standard/js/init.js");
+
 fn hostile_site() -> (tempfile::TempDir, tempfile::TempDir) {
     let (d, mut r) = golden::hostile();
     let out = tempfile::tempdir().unwrap();
@@ -24,9 +27,15 @@ fn render_hostile_text_is_escaped_on_every_page() {
             assert!(!html.contains(raw), "{}: raw {raw:?}", p.display());
         }
         for (i, _) in html.match_indices("<script") {
+            let rest = &html[i..];
+            let tag = &rest[..rest.find('>').map_or(rest.len(), |j| j + 1)];
+            let init = rest.starts_with(&format!("<script>{INIT_JS}</script>"));
+            let external = tag.starts_with("<script src=\"")
+                && (tag.ends_with("assets/app.js\" defer>")
+                    || tag.ends_with("assets/js/mermaid.min.js\" defer>"));
             assert!(
-                html[i..].starts_with("<script src=\""),
-                "{}: unexpected <script",
+                init || external,
+                "{}: unexpected <script: {tag:?}",
                 p.display()
             );
         }

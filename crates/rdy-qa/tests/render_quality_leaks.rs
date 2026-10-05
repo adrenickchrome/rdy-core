@@ -393,7 +393,6 @@ fn site20_a_flow_heading_sits_at_its_depth() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 5"]
 fn site21_theme_toggle_data_theme_and_no_cdn() {
     let (_d, _r, _ids, out) = canon();
     for p in golden::pages(out.path()) {

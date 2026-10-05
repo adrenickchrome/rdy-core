@@ -330,7 +330,8 @@ fn the_site_mirrors_the_folder_tree() {
 
     let name = r.project_name();
     let t = read("wallets/transactions.html");
-    assert!(t.contains(&format!("<nav class=\"crumbs\"><a href=\"../index.html\">{name}</a> / <a href=\"../wallets/index.html\">Wallets</a> / <span class=\"here\">Transactions</span>")), "{t}");
+    let sep = "<span class=\"crumb-sep\" aria-hidden=\"true\"></span>";
+    assert!(t.contains(&format!("<nav class=\"crumbs\" aria-label=\"Breadcrumb\"><a href=\"../index.html\">{name}</a>{sep}<a href=\"../wallets/index.html\">Wallets</a>{sep}<span aria-current=\"page\">Transactions</span>")), "{t}");
     assert!(
         t.contains("href=\"../glossary.html#ledger\">Ledger</a>"),
         "relative link across folders: {t}"
@@ -350,7 +351,7 @@ fn the_site_mirrors_the_folder_tree() {
     );
 
     let index = read("index.html");
-    assert!(index.contains(&format!("<span class=\"here\">{name}</span>")));
+    assert!(index.contains(&format!("<span aria-current=\"page\">{name}</span>")));
     assert!(
         index.contains("<a href=\"wallets/cards/limits.html\">Limits</a>"),
         "the index lists the whole tree: {index}"
@@ -520,7 +521,7 @@ fn hostile_folder_and_doc_titles_are_escaped_in_tree_pages() {
         let a = inner.find(open).unwrap();
         inner[a..a + inner[a..].find(close).unwrap()].to_string()
     };
-    let crumbs = part("<nav class=\"crumbs\">", "</nav>");
+    let crumbs = part("<nav class=\"crumbs\" aria-label=\"Breadcrumb\">", "</nav>");
     assert_eq!(
         crumbs.matches("&lt;script&gt;x").count(),
         2,

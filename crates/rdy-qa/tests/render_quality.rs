@@ -250,7 +250,6 @@ fn struct1_heading_levels_never_skip() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 5"]
 fn struct1_landmarks_are_present() {
     each_page(true, |Page { rel, html, .. }| {
         assert!(html.contains("<header"), "{rel}: header");
@@ -267,7 +266,6 @@ fn struct1_landmarks_are_present() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 5"]
 fn struct1_a_skip_link_comes_first_in_the_body() {
     each_page(true, |Page { rel, html, .. }| {
         let body = html
@@ -284,7 +282,6 @@ fn struct1_a_skip_link_comes_first_in_the_body() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 5"]
 fn struct1_every_page_has_the_version_pill_the_crumbs_and_the_theme_toggle() {
     each_page(true, |Page { rel, html, .. }| {
         assert!(html.contains("data-rdy-version"), "{rel}: version pill");
@@ -297,7 +294,6 @@ fn struct1_every_page_has_the_version_pill_the_crumbs_and_the_theme_toggle() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 5"]
 fn struct1_doc_pages_have_previous_and_next() {
     each_page(true, |Page { rel, html, .. }| {
         if doc_page(rel, html) {
@@ -310,7 +306,6 @@ fn struct1_doc_pages_have_previous_and_next() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 5"]
 fn struct1_no_link_has_an_underscore_directory() {
     each_page(false, |Page { rel, html, .. }| {
         for attr in ["href", "src", "action"] {
@@ -555,7 +550,6 @@ fn served_ok(site: &Path, page: &str) {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 5"]
 fn nojs1_every_kind_of_page_serves_its_content_without_scripts() {
     let (_d, _r, _ids, out) = golden::site_canon();
     for page in [

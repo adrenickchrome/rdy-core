@@ -31,7 +31,6 @@ fn is_token_block(b: &CssBlock) -> bool {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 5"]
 fn css1_three_token_blocks_identical_and_no_literal_elsewhere() {
     let css = canon_css();
     let t = tokens(&css).expect("the token blocks parse");
@@ -86,7 +85,6 @@ fn theme(
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 5"]
 fn css1_every_declared_pair_meets_its_floor_in_both_themes() {
     let t = tokens(&canon_css()).expect("the token blocks parse");
     assert!(!t.pairs.is_empty(), "no --pair-* is declared");
@@ -126,7 +124,6 @@ fn css1_every_declared_pair_meets_its_floor_in_both_themes() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 5"]
 fn css1_the_required_pairs_are_declared() {
     let t = tokens(&canon_css()).expect("the token blocks parse");
     let declared: Vec<&str> = t.pairs.iter().map(|p| p.name.as_str()).collect();
@@ -180,7 +177,6 @@ fn declares(css: &Css, part: &str, prop: &str, values: &[&str]) -> bool {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 5"]
 fn scroll1_no_fixed_width_wider_than_the_phone() {
     let wide: Vec<_> = fixed_widths(&canon_css())
         .into_iter()
@@ -190,7 +186,6 @@ fn scroll1_no_fixed_width_wider_than_the_phone() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 5"]
 fn scroll1_content_never_refuses_to_wrap() {
     let css = canon_css();
     let content = Regex::new(r"content|page|prose|(^|[\s>+~,])p($|[\s.:#\[>+~,])").unwrap();
@@ -208,7 +203,6 @@ fn scroll1_content_never_refuses_to_wrap() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 5"]
 fn scroll1_the_stylesheet_lets_wide_things_shrink_or_scroll() {
     let css = canon_css();
     for tag in ["img", "svg", "video"] {
