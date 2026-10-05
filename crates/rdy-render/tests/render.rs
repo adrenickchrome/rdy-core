@@ -220,8 +220,23 @@ fn escaped_braces_render_literally_and_diagram_references_become_labels() {
         ),
         "{doc}"
     );
+    // Code blocks are highlighted at build time (Docs experience Task 9), so the verbatim check
+    // compares the visible text with the markup stripped, not the raw HTML.
+    let visible = {
+        let mut out = String::new();
+        let mut in_tag = false;
+        for c in doc.chars() {
+            match c {
+                '<' => in_tag = true,
+                '>' if in_tag => in_tag = false,
+                _ if !in_tag => out.push(c),
+                _ => {}
+            }
+        }
+        out
+    };
     assert!(
-        doc.contains(r"x: \{{ .Values.image }}"),
+        visible.contains(r"x: \{{ .Values.image }}"),
         "code is shown verbatim"
     );
 }
