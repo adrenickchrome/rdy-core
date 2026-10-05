@@ -1,6 +1,7 @@
 use crate::Store;
 use crate::error::StoreError;
 use crate::kinds;
+use crate::store::encode;
 use crate::view::{ViewHead, ViewOp, ViewOpKind};
 use rdy_model::{
     Assurance, Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance,
@@ -23,10 +24,6 @@ fn view_ref(name: &str) -> String {
 
 fn tag_ref(name: &str) -> String {
     format!("tag/{name}")
-}
-
-fn encode<T: Serialize>(v: &T) -> Vec<u8> {
-    postcard::to_allocvec(v).expect("encode")
 }
 
 pub fn apply_op(store: &Store, state: &mut StateSnapshot, op: &Op) -> Result<(), StoreError> {
@@ -156,9 +153,8 @@ impl Store {
         // The commit op names the change id, which depends on deps, so the change, its view op
         // and the view's head land in one write.
         let mut change = change;
-        change.deps = self.change_deps(&change)?;
-        let change_bytes = encode(&change);
-        let cid = Hash::of(&change_bytes);
+        let (mut items, change_pos) = self.change_frames(&mut change)?;
+        let cid = Hash::of(&items[change_pos].1);
         let p = &change.provenance;
         let view_op = |prev: Option<Hash>, op: ViewOpKind| ViewOp {
             view: name.to_string(),
@@ -201,14 +197,6 @@ impl Store {
             closed: false,
             last_write_ms: p.at_ms,
         };
-        let mut items = vec![];
-        for op in &change.ops {
-            if let Op::Create { block } | Op::Update { block, .. } = op {
-                items.push((kinds::BLOCK, encode(block)));
-            }
-        }
-        items.push((kinds::CHANGE, change_bytes));
-        let change_pos = items.len() - 1;
         items.extend(create.map(|c| (kinds::VIEW_OP, c)));
         items.push((kinds::VIEW_OP, commit));
         items.extend(self.ref_items_pub(vec![(view_ref(name), encode(&new_head))]));

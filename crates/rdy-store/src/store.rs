@@ -208,7 +208,10 @@ struct Faults {
     checkpoint: bool,
 }
 
-fn encode<T: Serialize>(v: &T) -> Vec<u8> {
+/// Frames for one `write`: `(kind, payload)` pairs, in write order.
+pub(crate) type Frames = Vec<(u8, Vec<u8>)>;
+
+pub(crate) fn encode<T: Serialize>(v: &T) -> Vec<u8> {
     postcard::to_allocvec(v).expect("postcard encoding of an in-memory value cannot fail")
 }
 
@@ -1014,21 +1017,30 @@ impl Store {
         mut change: Change,
         refs: Vec<(String, Vec<u8>)>,
     ) -> Result<Hash, StoreError> {
-        change.deps = self.change_deps(&change)?;
-        let mut items = vec![];
-        for op in &change.ops {
-            if let Op::Create { block } | Op::Update { block, .. } = op {
-                items.push((kinds::BLOCK, encode(block)));
-            }
-        }
-        items.push((kinds::CHANGE, encode(&change)));
-        let change_pos = items.len() - 1;
+        let (mut items, change_pos) = self.change_frames(&mut change)?;
         items.extend(self.ref_items(refs));
         Ok(self.write(items)?[change_pos])
     }
 }
 
 impl Store {
+    /// How a change is laid out in a write, the one definition every change-writing path uses:
+    /// sets `change.deps`, then returns the `BLOCK` frames of its creates and updates followed by
+    /// the `CHANGE` frame, and the position of that `CHANGE` frame. The change's id is
+    /// `Hash::of(&items[change_pos].1)`.
+    pub(crate) fn change_frames(&self, change: &mut Change) -> Result<(Frames, usize), StoreError> {
+        change.deps = self.change_deps(change)?;
+        let mut items = vec![];
+        for op in &change.ops {
+            if let Op::Create { block } | Op::Update { block, .. } = op {
+                items.push((kinds::BLOCK, encode(block)));
+            }
+        }
+        items.push((kinds::CHANGE, encode(change)));
+        let change_pos = items.len() - 1;
+        Ok((items, change_pos))
+    }
+
     pub(crate) fn change_deps(&self, change: &Change) -> Result<Vec<Hash>, StoreError> {
         let mut deps = BTreeSet::new();
         for op in &change.ops {
