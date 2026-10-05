@@ -550,7 +550,8 @@ fn code_and_diagram_blocks_are_labelled_by_kind_and_number_never_by_their_source
         {"op": "create", "type": "code", "id": "$c2", "parent": "$s", "fields": {"lang": "python"}, "body": "def quit_game(): print('goodbye')"},
         {"op": "create", "type": "code", "id": "$c3", "parent": "$s", "fields": {"lang": ""}, "body": "raw_text here"},
         {"op": "create", "type": "diagram", "id": "$d1", "parent": "$s", "fields": {"lang": "mermaid", "alt": "Order flow"}, "body": "graph TD\n  order_in --> order_out"},
-        {"op": "create", "type": "diagram", "id": "$d2", "parent": "$s", "fields": {"lang": "mermaid", "alt": ""}, "body": "graph TD\n  left_side --> right_side"}
+        {"op": "create", "type": "diagram", "id": "$d2", "parent": "$s", "fields": {"lang": "mermaid", "alt": ""}, "body": "graph TD\n  left_side --> right_side"},
+        {"op": "create", "type": "diagram", "id": "$d3", "parent": "$s", "fields": {"lang": "mermaid", "alt": "flow of a turn"}, "body": "graph TD\n  turn_a --> turn_b"}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
     let out = tempfile::tempdir().unwrap();
     render_site(&mut r, &Scope::View("work".into()), out.path()).unwrap();
@@ -564,6 +565,7 @@ fn code_and_diagram_blocks_are_labelled_by_kind_and_number_never_by_their_source
         ("$c3", "Code 3", "grammar.html#code-3"),
         ("$d1", "Order flow", "grammar.html#order-flow"),
         ("$d2", "Diagram 2", "grammar.html#diagram-2"),
+        ("$d3", "Flow of a turn", "grammar.html#flow-of-a-turn"),
     ];
     for (k, label, url) in cases {
         let page = go(k);
@@ -576,6 +578,7 @@ fn code_and_diagram_blocks_are_labelled_by_kind_and_number_never_by_their_source
             "raw_text",
             "order_in",
             "left_side",
+            "turn_a",
         ] {
             assert!(!page.contains(leak), "{k} leaks {leak}: {page}");
         }

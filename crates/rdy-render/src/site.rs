@@ -336,7 +336,7 @@ impl<'a> Site<'a> {
             }
             None if b.block_type == "diagram" => {
                 match b.field_str("alt").filter(|a| !a.trim().is_empty()) {
-                    Some(a) => self.words_at(a, depth),
+                    Some(a) => upper_first(&self.words_at(a, depth)),
                     None => format!("Diagram {}", self.number(b)),
                 }
             }
@@ -455,6 +455,15 @@ impl<'a> Site<'a> {
             i.checked_sub(1).map(|p| self.order[p].clone()),
             self.order.get(i + 1).cloned(),
         )
+    }
+}
+
+/// `s` with its first letter upper-cased.
+fn upper_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
