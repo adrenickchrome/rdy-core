@@ -1,3 +1,4 @@
+use crate::glob::Glob;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -73,6 +74,16 @@ pub struct DocTypeDef {
     pub skeleton: Vec<SkeletonSection>,
 }
 
+/// A named part of the documentation tree, declared by path globs.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AreaDef {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pack {
@@ -92,6 +103,9 @@ pub struct Pack {
     /// Severity overrides per tension kind: only what the pack wrote.
     #[serde(default)]
     pub tensions: BTreeMap<TensionKind, TensionSeverity>,
+    /// Named areas of the tree, by area name.
+    #[serde(default)]
+    pub areas: BTreeMap<String, AreaDef>,
 }
 
 /// The kinds of tension the engine can raise.
@@ -199,6 +213,35 @@ impl Pack {
             .iter()
             .find(|(_, t)| t.prefix == prefix)
             .map(|(n, _)| n.as_str())
+    }
+
+    /// The names, ascending, of every area with a path pattern that covers `path`.
+    /// Patterns are compiled on each call; one that does not compile (impossible
+    /// after `resolve`) covers nothing.
+    pub fn areas_for_path(&self, path: &str) -> Vec<&str> {
+        self.areas
+            .iter()
+            .filter(|(_, a)| {
+                a.paths
+                    .iter()
+                    .filter_map(|p| Glob::compile(p).ok())
+                    .any(|g| g.covers(path))
+            })
+            .map(|(n, _)| n.as_str())
+            .collect()
+    }
+
+    /// The compiled patterns of one area; empty for an unknown area.
+    pub fn area_globs(&self, name: &str) -> Vec<Glob> {
+        self.areas
+            .get(name)
+            .map(|a| {
+                a.paths
+                    .iter()
+                    .filter_map(|p| Glob::compile(p).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The severity of `kind` under this pack and whether the pack set it
