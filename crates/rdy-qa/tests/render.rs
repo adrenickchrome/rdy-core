@@ -7,9 +7,9 @@ use std::path::Path;
 const INIT_JS: &str = include_str!("../../rdy-render/theme/rdy-standard/js/init.js");
 
 fn hostile_site() -> (tempfile::TempDir, tempfile::TempDir) {
-    let (d, mut r) = golden::hostile();
+    let (d, r) = golden::hostile();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     (d, out)
 }
 
@@ -149,8 +149,8 @@ fn render_every_link_resolves() {
 
 #[test]
 fn render_every_link_resolves_on_a_rich_site() {
-    let (_d, mut r) = golden::generated_tree();
-    let landing: rdy_model::Hash = r.versions().unwrap()[0].landing.parse().unwrap();
+    let (_d, r) = golden::generated_tree();
+    let landing: rdy_model::Hash = r.read().versions().unwrap()[0].landing.parse().unwrap();
     let scopes = [
         ("canon", Scope::Canon),
         ("view", Scope::View("draft".into())),
@@ -158,7 +158,7 @@ fn render_every_link_resolves_on_a_rich_site() {
     ];
     for (name, scope) in scopes {
         let out = tempfile::tempdir().unwrap();
-        rdy_render::render_site(&mut r, &scope, out.path()).unwrap();
+        rdy_render::render_site(&r.read(), &scope, out.path()).unwrap();
         let (broken, st) = check_links(out.path());
         assert!(broken.is_empty(), "{name}: {broken:#?}");
         assert!(st.pages >= 10, "{name}: {st:?}");

@@ -43,7 +43,7 @@ fn merge1_a_proposal_made_before_another_landing_is_e_stale_base_at_land() {
         r.propose(&writer(), "b", "again").unwrap_err().code,
         "E_STALE_BASE"
     );
-    check(&mut r, &Scope::Canon).unwrap();
+    check(&r, &Scope::Canon).unwrap();
 }
 
 #[test]
@@ -69,11 +69,12 @@ fn merge1_many_moves_under_old_ids_land_whatever_the_ids() {
     land(&mut r, "run").unwrap();
     for id in &ids {
         let b = r
+            .read()
             .block(&Scope::Canon, &rdy_model::BlockId::parse(id).unwrap())
             .unwrap();
         assert_eq!(b.body, "Moved.");
     }
-    check(&mut r, &Scope::Canon).unwrap();
+    check(&r, &Scope::Canon).unwrap();
 }
 
 /// Fix round 1: views a and b make the identical edit, then a edits again. a's reads, cold or
@@ -104,16 +105,24 @@ fn merge1_a_view_that_made_the_same_edit_as_another_keeps_its_own_order() {
         .unwrap();
         let id = rdy_model::BlockId::parse(&c).unwrap();
         let a = Scope::View("a".into());
-        assert_eq!(r.block(&a, &id).unwrap().body, "After.", "run {i}: warm");
+        assert_eq!(
+            r.read().block(&a, &id).unwrap().body,
+            "After.",
+            "run {i}: warm"
+        );
         r.invalidate();
-        assert_eq!(r.block(&a, &id).unwrap().body, "After.", "run {i}: cold");
+        assert_eq!(
+            r.read().block(&a, &id).unwrap().body,
+            "After.",
+            "run {i}: cold"
+        );
         land(&mut r, "a").unwrap_or_else(|e| panic!("run {i}: {e}"));
         assert_eq!(
-            r.block(&Scope::Canon, &id).unwrap().body,
+            r.read().block(&Scope::Canon, &id).unwrap().body,
             "After.",
             "run {i}"
         );
-        check(&mut r, &Scope::Canon).unwrap();
+        check(&r, &Scope::Canon).unwrap();
     }
 }
 
@@ -141,10 +150,10 @@ fn merge1_accepting_a_decision_another_view_holds_identically_lands() {
             )
             .unwrap();
         let did = rdy_model::BlockId::parse(&made.created["$decision"]).unwrap();
-        let d = r.block(&Scope::View("work".into()), &did).unwrap();
+        let d = r.read().block(&Scope::View("work".into()), &did).unwrap();
         raw_commit(&mut r, "copy", vec![d]);
         land(&mut r, "work").unwrap_or_else(|e| panic!("run {i}: {e}"));
-        let canon = r.block(&Scope::Canon, &did).unwrap();
+        let canon = r.read().block(&Scope::Canon, &did).unwrap();
         assert_eq!(canon.field_str("status"), Some("accepted"), "run {i}");
     }
 }

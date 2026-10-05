@@ -64,7 +64,8 @@ fn import_propose_approve_render_fsck() {
             {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
             {"op": "create", "type": "term", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Balances."}
         ])).unwrap(), justification: None, message: String::new() }).unwrap();
-        r.export(&Scope::View("work".into()), export.path())
+        r.read()
+            .export(&Scope::View("work".into()), export.path())
             .unwrap();
     }
     let dir = tempfile::tempdir().unwrap();
@@ -197,6 +198,7 @@ fn seed_and_land(dir: &std::path::Path, title: &str) -> String {
         role: Role::Approver,
     };
     let doc = r
+        .read()
         .materialized(&Scope::Canon)
         .unwrap()
         .children(None)

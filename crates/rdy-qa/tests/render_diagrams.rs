@@ -4,9 +4,9 @@ use rdy_qa::golden::*;
 
 #[test]
 fn dia1_a_diagram_page_bundles_mermaid_and_a_plain_page_does_not_load_it() {
-    let (_d, mut r, _ids) = every_type_site(); // has one diagram on all.html
+    let (_d, r, _ids) = every_type_site(); // has one diagram on all.html
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let js = out.path().join("assets/js/mermaid.min.js");
     assert!(js.exists() && js.metadata().unwrap().len() > 3_000_000);
     let all = std::fs::read_to_string(out.path().join("all.html")).unwrap();
@@ -25,9 +25,9 @@ fn dia1_a_diagram_page_bundles_mermaid_and_a_plain_page_does_not_load_it() {
 /// Review Focus 4.
 #[test]
 fn dia1_a_project_without_diagrams_ships_no_mermaid() {
-    let (_d, mut r) = tiny_with_doc();
+    let (_d, r) = tiny_with_doc();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     assert!(!out.path().join("assets/js").exists());
     assert!(
         !std::fs::read_to_string(out.path().join("assets/app.js"))
@@ -45,9 +45,9 @@ fn dia1_a_project_without_diagrams_ships_no_mermaid() {
 
 #[test]
 fn dia1_without_scripts_the_source_alt_and_caption_remain() {
-    let (_d, mut r, _ids) = every_type_site();
+    let (_d, r, _ids) = every_type_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let all = std::fs::read_to_string(out.path().join("all.html")).unwrap();
     let fig = &all[all.find("<figure class=\"diagram\"").unwrap()..all.find("</figure>").unwrap()];
     assert!(
@@ -65,7 +65,7 @@ fn dia1_a_d2_diagram_shows_its_source_and_caption_only() {
     write(&mut r, "work", serde_json::json!([{"op":"create","type":"doc","id":"$d","fields":{"title":"D","doc_type":"glossary"}},{"op":"create","type":"section","id":"$s","parent":"$d","fields":{"title":"Terms"}},{"op":"create","type":"diagram","parent":"$s","fields":{"lang":"d2","alt":"Boxes"},"body":"a -> b"}])).unwrap();
     land(&mut r, "work").unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("d.html")).unwrap();
     assert!(
         h.contains("data-lang=\"d2\"")

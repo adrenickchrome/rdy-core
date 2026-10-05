@@ -170,11 +170,11 @@ fn site8_no_suspect_badge() {
     .unwrap();
     let scope = rdy_engine::Scope::View("editing".into());
     assert!(
-        !r.suspects(&scope).unwrap().is_empty(),
+        !r.read().suspects(&scope).unwrap().is_empty(),
         "the view needs a suspect for this test to mean anything"
     );
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &scope, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &scope, out.path()).unwrap();
     for p in golden::pages(out.path()) {
         assert!(
             !runs_of(&p).iter().any(|r| r.text == "suspect"),
@@ -239,7 +239,7 @@ fn site12_a_titleless_doc_is_never_labelled_with_its_id() {
         .clone();
     rdy_qa::fixtures::land(&mut r, "work").unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &rdy_engine::Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &rdy_engine::Scope::Canon, out.path()).unwrap();
     assert!(!has_leak(out.path(), "F1", &doc.to_string()));
     assert!(golden::html(out.path(), "index.html").contains("Untitled one"));
 }
@@ -356,7 +356,7 @@ fn site19_a_missing_figure_reads_as_a_sentence_not_storage_words() {
     );
     rdy_qa::fixtures::land(&mut r, "work").unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &rdy_engine::Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &rdy_engine::Scope::Canon, out.path()).unwrap();
     let h = golden::html(out.path(), "gone.html");
     assert!(
         visible_runs(&h)
@@ -457,7 +457,7 @@ fn scan1_f12_names_raw_markdown_the_renderer_left_as_written() {
     ])).unwrap();
     rdy_qa::golden::land(&mut r, "work").unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &rdy_engine::Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &rdy_engine::Scope::Canon, out.path()).unwrap();
     // other pages (the home card's blurb) may quote the same prose; this test reads the doc's own page
     let f12: Vec<String> = rdy_qa::site::leaks(out.path())
         .into_iter()

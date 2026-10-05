@@ -76,8 +76,10 @@ fn kind1_an_asset_with_a_future_tags_bytes_does_not_hide_the_tag() {
     };
     upload(&mut st, &postcard::to_allocvec(&tag).unwrap());
     let id = st.rdy.store_mut().put_tag(&tag).unwrap();
+    // a write outside the engine must be followed by invalidate() (snap1 precondition)
+    st.rdy.invalidate();
     assert_eq!(st.rdy.store().read_tag(&id).unwrap(), tag);
-    assert_eq!(st.rdy.versions().unwrap().len(), 1);
+    assert_eq!(st.rdy.read().versions().unwrap().len(), 1);
 }
 
 #[test]
@@ -105,6 +107,8 @@ fn kind1_an_asset_with_a_future_proposals_bytes_does_not_hide_it() {
         .store_mut()
         .propose("work", "p", by(Role::Writer))
         .unwrap();
+    // a write outside the engine must be followed by invalidate() (snap1 precondition)
+    st.rdy.invalidate();
     assert_eq!(p, predicted.id());
     st.rdy.land(&approver(), &p.to_string()).unwrap();
 }
@@ -148,6 +152,10 @@ fn kind1_an_asset_with_a_future_landings_bytes_does_not_hide_it() {
     let l = st.rdy.store_mut().land(&p, by(Role::Approver)).unwrap();
     assert_eq!(l, predicted.id());
     st.rdy.invalidate();
-    let scope = st.rdy.resolve_scope(&format!("landing:{l}")).unwrap();
-    st.rdy.materialized(&scope).unwrap();
+    let scope = st
+        .rdy
+        .read()
+        .resolve_scope(&format!("landing:{l}"))
+        .unwrap();
+    st.rdy.read().materialized(&scope).unwrap();
 }

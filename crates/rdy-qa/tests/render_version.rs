@@ -7,7 +7,7 @@ fn ver1_every_page_carries_the_site_worded_version_pill() {
     let (_d, mut r) = tiny_with_doc();
     let render = |r: &mut Rdy, s: &Scope| {
         let o = tempfile::tempdir().unwrap();
-        rdy_render::render_site(r, s, o.path()).unwrap();
+        rdy_render::render_site(&r.read(), s, o.path()).unwrap();
         o
     };
     let out = render(&mut r, &Scope::Canon);
@@ -59,7 +59,7 @@ fn ver1_every_page_carries_the_site_worded_version_pill() {
             .unwrap()
             .contains("data-rdy-version>v0.1.0, 1 change since</span>")
     );
-    let v: rdy_model::Hash = r.versions().unwrap()[0].landing.parse().unwrap();
+    let v: rdy_model::Hash = r.read().versions().unwrap()[0].landing.parse().unwrap();
     let out = render(&mut r, &Scope::At(v));
     let h = std::fs::read_to_string(out.path().join("index.html")).unwrap();
     assert!(
@@ -69,7 +69,7 @@ fn ver1_every_page_carries_the_site_worded_version_pill() {
         "{h}"
     );
     assert_eq!(
-        r.version_position(&Scope::Canon).unwrap().label,
+        r.read().version_position(&Scope::Canon).unwrap().label,
         "v0.1.0 + 1 landing",
         "the CLI wording is unchanged"
     );
@@ -87,7 +87,7 @@ fn ver1_an_unversioned_project_reads_unversioned_everywhere() {
     )
     .unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::View("work".into()), out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::View("work".into()), out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("index.html")).unwrap();
     assert!(
         h.contains("data-rdy-version>unversioned · draft: work, 1 pending change</span>"),
@@ -101,9 +101,9 @@ fn ver1_an_unversioned_project_reads_unversioned_everywhere() {
 
 #[test]
 fn ver1_the_home_page_has_cards_for_top_level_entries_and_no_decisions() {
-    let (_d, mut r) = tree_site();
+    let (_d, r) = tree_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("index.html")).unwrap();
     assert!(h.contains("<div class=\"cards\">"));
     for (t, href) in [

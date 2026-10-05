@@ -43,7 +43,7 @@ fn link1_update_replaces_only_the_kinds_it_names() {
         json!([{"op": "update", "id": id("$dd"), "links": {"affects": [{"target": id("$u")}]}}]),
     )
     .unwrap();
-    let b = r.block(&scope, &dd).unwrap();
+    let b = r.read().block(&scope, &dd).unwrap();
     assert_eq!(
         targets(&b, "answers"),
         vec![id("$q")],
@@ -65,7 +65,7 @@ fn link1_update_replaces_only_the_kinds_it_names() {
         "fields": {"statement": "Approvers sign every refund"}, "links": {}}]),
     )
     .unwrap();
-    let b = r.block(&scope, &dd).unwrap();
+    let b = r.read().block(&scope, &dd).unwrap();
     assert_eq!(
         (targets(&b, "answers"), targets(&b, "affects")),
         (vec![id("$q")], vec![id("$u")])
@@ -76,13 +76,13 @@ fn link1_update_replaces_only_the_kinds_it_names() {
         json!([{"op": "update", "id": id("$dd"), "links": {"answers": []}}]),
     )
     .unwrap();
-    let b = r.block(&scope, &dd).unwrap();
+    let b = r.read().block(&scope, &dd).unwrap();
     assert!(
         !b.links.contains_key("answers"),
         "\"answers\": [] removes the kind"
     );
     assert_eq!(targets(&b, "affects"), vec![id("$u")]);
-    check(&mut r, &scope).unwrap();
+    check(&r, &scope).unwrap();
 }
 
 /// A guard for `rdy edit` (passes before the change; fails if write.rs merges without the
@@ -92,10 +92,10 @@ fn link1_rdy_edit_removing_a_link_kind_still_removes_it() {
     let (_d, mut r, ids) = setup();
     let scope = Scope::View("work".into());
     let dd = BlockId::parse(ids["$dd"].as_str().unwrap()).unwrap();
-    let mut edited = r.block(&scope, &dd).unwrap();
+    let mut edited = r.read().block(&scope, &dd).unwrap();
     edited.links.remove("answers");
     r.edit_block(&writer(), "work", edited).unwrap();
-    let b = r.block(&scope, &dd).unwrap();
+    let b = r.read().block(&scope, &dd).unwrap();
     assert!(!b.links.contains_key("answers"), "{:?}", b.links);
     assert_eq!(
         targets(&b, "affects"),

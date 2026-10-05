@@ -35,9 +35,9 @@ fn pres1_a_presentational_note_has_no_marker() {
         "pack: p\nname: Presentational\n",
     )
     .unwrap();
-    let mut r = rdy_engine::Rdy::open(dir.path()).unwrap();
+    let r = rdy_engine::Rdy::open(dir.path()).unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("tutorial/adventure.html")).unwrap();
     let b = block_slice(&h, ids.presentational_note.as_str());
     assert!(
@@ -50,9 +50,9 @@ fn pres1_a_presentational_note_has_no_marker() {
 
 #[test]
 fn pres1_presentational_blocks_render_plainly_and_are_flagged_in_json() {
-    let (_d, mut r, ids) = presentational_site();
+    let (_d, r, ids) = presentational_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("t.html")).unwrap();
     let b = block_slice(&h, ids.aside.as_str());
     assert!(
@@ -117,7 +117,7 @@ fn pres1_asides_and_notes_get_no_trail_agents_or_copy_ref() {
     .unwrap();
     land(&mut r, "work").unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("t.html")).unwrap();
     assert!(h.contains("Decorative.") && h.contains("Margin."), "{h}");
     assert!(

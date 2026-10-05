@@ -67,6 +67,7 @@ fn blob1_a_figure_naming_a_non_blob_object_is_not_an_asset() {
     ])).unwrap();
     let doc = rdy_model::BlockId::parse(&res.created["$d"]).unwrap();
     let not_a_blob = r
+        .read()
         .block(&Scope::View("work".into()), &doc)
         .unwrap()
         .version_hash()
@@ -88,7 +89,7 @@ fn blob1_a_figure_naming_a_non_blob_object_is_not_an_asset() {
         )],
     );
     let site = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::View("work".into()), site.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::View("work".into()), site.path()).unwrap();
     let page = std::fs::read_to_string(site.path().join("tx.html")).unwrap();
     // L19: the reader sees a sentence, not storage words ("missing asset")
     assert!(
@@ -97,6 +98,7 @@ fn blob1_a_figure_naming_a_non_blob_object_is_not_an_asset() {
     );
     let out = tempfile::tempdir().unwrap();
     let e = r
+        .read()
         .export(&Scope::View("work".into()), &out.path().join("x"))
         .unwrap_err();
     assert_eq!(e.code, "E_NOT_FOUND", "{e}");
@@ -113,6 +115,7 @@ fn blob1_a_chunk_with_the_bytes_of_another_object_still_reads() {
     ])).unwrap();
     let doc = rdy_model::BlockId::parse(&res.created["$d"]).unwrap();
     let version = r
+        .read()
         .block(&Scope::View("work".into()), &doc)
         .unwrap()
         .version_hash();
@@ -123,7 +126,8 @@ fn blob1_a_chunk_with_the_bytes_of_another_object_still_reads() {
     assert_eq!(r.store().get_blob(&blob).unwrap(), payload);
     write(&mut r, "work", json!([{"op": "create", "type": "figure", "parent": res.created["$s"], "fields": {"blob": blob.to_string(), "media_type": "image/png", "alt": "x"}}])).unwrap();
     let out = tempfile::tempdir().unwrap();
-    r.export(&Scope::View("work".into()), &out.path().join("x"))
+    r.read()
+        .export(&Scope::View("work".into()), &out.path().join("x"))
         .unwrap();
 }
 
@@ -136,7 +140,7 @@ fn blob1_a_chunk_stored_first_does_not_make_a_later_block_unreadable() {
         {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}}
     ])).unwrap();
     let doc = rdy_model::BlockId::parse(&res.created["$d"]).unwrap();
-    let block = r.block(&Scope::View("work".into()), &doc).unwrap();
+    let block = r.read().block(&Scope::View("work".into()), &doc).unwrap();
     let payload = postcard::to_allocvec(&block).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let mut s = Store::open(dir.path()).unwrap();
@@ -446,7 +450,7 @@ fn blob1_a_pre_uploaded_manifest_survives_write_export_import() {
     write(&mut r, "work", json!([{"op": "create", "type": "figure", "parent": res.created["$s"], "fields": {"blob": h.to_string(), "media_type": "image/png", "alt": "x"}}])).unwrap();
     let out = tempfile::tempdir().unwrap();
     let dir = out.path().join("x");
-    r.export(&Scope::View("work".into()), &dir).unwrap();
+    r.read().export(&Scope::View("work".into()), &dir).unwrap();
     assert_eq!(
         std::fs::read(dir.join("blobs").join(h.to_string())).unwrap(),
         bytes

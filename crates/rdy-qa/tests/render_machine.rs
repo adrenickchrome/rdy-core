@@ -4,9 +4,9 @@ use rdy_qa::golden::*;
 
 #[test]
 fn json1_every_page_has_a_twin_whose_ids_match_the_pages_block_ids() {
-    let (_d, mut r, ids) = decided_site();
+    let (_d, r, ids) = decided_site();
     let out = tempfile::tempdir().unwrap();
-    let s = rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    let s = rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let html_pages: Vec<_> = pages(out.path())
         .into_iter()
         .filter(|p| !p.to_string_lossy().contains("/go/"))
@@ -75,7 +75,7 @@ fn json1_the_version_block_carries_the_version_and_its_landing() {
     r.tag(&approver(), "v1.0.0", None, Some("first".into()))
         .unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let j: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(out.path().join("index.json")).unwrap())
             .unwrap();
@@ -116,7 +116,7 @@ fn json1_the_version_block_carries_the_hash_the_html_never_shows() {
     r.tag(&approver(), "v1.0.0", None, Some("first".into()))
         .unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let j: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(out.path().join("index.json")).unwrap())
             .unwrap();
@@ -133,9 +133,9 @@ fn json1_the_version_block_carries_the_hash_the_html_never_shows() {
 
 #[test]
 fn json1_llms_txt_lists_pages_in_tree_order_with_the_reference_pages() {
-    let (_d, mut r) = tree_site();
+    let (_d, r) = tree_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let t = std::fs::read_to_string(out.path().join("llms.txt")).unwrap();
     assert!(t.starts_with("# Tree\n\n> "));
     let i = |s: &str| t.find(s).unwrap_or_else(|| panic!("{s} in {t}"));
@@ -155,9 +155,9 @@ fn json1_llms_txt_lists_pages_in_tree_order_with_the_reference_pages() {
 /// Review Focus 5.
 #[test]
 fn json1_hostile_text_is_valid_json_on_every_page_file() {
-    let (_d, mut r) = hostile();
+    let (_d, r) = hostile();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     for p in pages(out.path()) {
         if p.to_string_lossy().contains("/go/") {
             continue;
@@ -197,9 +197,9 @@ fn keys_at(text: &str, indent: usize, from: usize) -> Vec<String> {
 /// The brief fixes the order of the twin's keys: the file reads top to bottom like the spec.
 #[test]
 fn json1_the_twins_keys_come_in_the_documented_order() {
-    let (_d, mut r, _ids) = decided_site();
+    let (_d, r, _ids) = decided_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let text = std::fs::read_to_string(out.path().join("ledgers.json")).unwrap();
     assert!(text.ends_with("}\n"));
     let top: Vec<String> = text
@@ -296,7 +296,7 @@ fn json1_a_parent_only_decision_governs_its_section_in_the_twin() {
     let (_d, mut r) = hostile();
     let twin = |r: &mut rdy_engine::Rdy| -> serde_json::Value {
         let out = tempfile::tempdir().unwrap();
-        rdy_render::render_site(r, &Scope::Canon, out.path()).unwrap();
+        rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
         serde_json::from_str(&std::fs::read_to_string(out.path().join("evil/page.json")).unwrap())
             .unwrap()
     };

@@ -4,7 +4,7 @@ use crate::keys::Keys;
 use crate::query::field_json;
 use crate::tree_io::{self, FOLDER_FILE};
 use crate::write::{LinkInput, OpInput, WriteRequest, WriteResult};
-use crate::{Rdy, Scope, Session};
+use crate::{Rdy, ReadState, Scope, Session};
 use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Link, Op, tree};
 use rdy_schema::{has_errors, skeleton_gaps, validate_block};
 use serde::{Deserialize, Serialize};
@@ -252,7 +252,7 @@ fn resolve_import_keys(blocks: &mut [Block], existing: &Materialized) -> Result<
     let incoming = Keys::of(blocks.iter());
     // the view's keys are indexed only when an incoming block has a key or a non-id reference
     let theirs: OnceCell<Keys> = OnceCell::new();
-    let view_keys = || theirs.get_or_init(|| Keys::of(existing.blocks.values()));
+    let view_keys = || theirs.get_or_init(|| Keys::of(existing.iter()));
     for b in blocks.iter() {
         let Some(k) = crate::keys::key_of(b) else {
             continue;
@@ -413,8 +413,8 @@ pub fn block_from_yaml(text: &str) -> Result<Block, RdyError> {
     from_yaml_struct(y)
 }
 
-impl Rdy {
-    pub fn export(&mut self, scope: &Scope, out: &Path) -> Result<ExportSummary, RdyError> {
+impl ReadState {
+    pub fn export(&self, scope: &Scope, out: &Path) -> Result<ExportSummary, RdyError> {
         if out.exists() && std::fs::read_dir(out).map_err(io_err)?.next().is_some() {
             return Err(RdyError::new(
                 E_BAD_INPUT,
@@ -453,8 +453,8 @@ impl Rdy {
         Ok(summary)
     }
 
-    fn write_export(&mut self, scope: &Scope, out: &Path) -> Result<ExportSummary, RdyError> {
-        let m = self.materialized(scope)?.clone();
+    fn write_export(&self, scope: &Scope, out: &Path) -> Result<ExportSummary, RdyError> {
+        let m = self.materialized(scope)?;
         std::fs::create_dir_all(out.join("docs")).map_err(io_err)?;
         std::fs::create_dir_all(out.join("blobs")).map_err(io_err)?;
         let mut summary = ExportSummary {
@@ -467,8 +467,8 @@ impl Rdy {
         // each blob, with the first figure that names it
         let mut blobs = BTreeMap::new();
         export_level(&m, None, 0, &out.join("docs"), &mut summary, &mut blobs)?;
-        if summary.blocks != m.blocks.len() {
-            let missing = m.blocks.len() - summary.blocks.min(m.blocks.len());
+        if summary.blocks != m.len() {
+            let missing = m.len() - summary.blocks.min(m.len());
             return Err(RdyError::new(
                 E_IO,
                 format!(
@@ -488,10 +488,10 @@ impl Rdy {
                     ),
                 )
             };
-            if !self.store.has_blob(h)? {
+            if !self.reader().has_blob(h)? {
                 return Err(not_found());
             }
-            let bytes = self.store.get_blob(h).map_err(|e| match e {
+            let bytes = self.reader().get_blob(h).map_err(|e| match e {
                 rdy_store::StoreError::NotFound(_) => not_found(),
                 other => other.into(),
             })?;
@@ -506,7 +506,7 @@ impl Rdy {
         };
         let manifest = Manifest {
             format: 2,
-            pack: self.pack.name.clone(),
+            pack: self.pack().name.clone(),
             scope: scope_name,
         };
         std::fs::write(
@@ -516,7 +516,9 @@ impl Rdy {
         .map_err(io_err)?;
         Ok(summary)
     }
+}
 
+impl Rdy {
     pub fn import(&mut self, s: &Session, view: &str, dir: &Path) -> Result<WriteResult, RdyError> {
         if !s.role.can_land() {
             return Err(RdyError::new(
@@ -607,7 +609,7 @@ impl Rdy {
             _ => unreachable!("format checked above"),
         };
         let scope = Scope::View(view.to_string());
-        let existing = self.materialized(&scope)?.clone();
+        let existing = self.read().materialized(&scope)?;
         // duplicates first: a duplicated doc would otherwise read as a name clash with itself
         let mut ids = BTreeSet::new();
         for b in &blocks {
@@ -773,7 +775,10 @@ impl Rdy {
             links: ChangeLinks::default(),
         };
         let id = self.store.commit_to_view(view, change)?;
-        self.update_cache(view, &ops);
+        self.publish(crate::Delta::Commit {
+            view: view.to_string(),
+            ops: ops.clone(),
+        })?;
         let created = ops
             .iter()
             .enumerate()
@@ -795,7 +800,7 @@ impl Rdy {
         edited: Block,
     ) -> Result<WriteResult, RdyError> {
         let scope = Scope::View(view.to_string());
-        let cur = self.block(&scope, &edited.id)?;
+        let cur = self.read().block(&scope, &edited.id)?;
         if cur == edited {
             return Err(RdyError::new(
                 E_BAD_INPUT,

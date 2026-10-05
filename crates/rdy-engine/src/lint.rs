@@ -101,7 +101,7 @@ pub fn check_path(
     let canon_index: OnceCell<Keys> = OnceCell::new();
     let canon_keys = || {
         canon_index.get_or_init(|| match canon {
-            Some(m) => Keys::of(m.blocks.values().filter(|b| !first.contains_key(&b.id))),
+            Some(m) => Keys::of(m.iter().filter(|b| !first.contains_key(&b.id))),
             None => Keys::default(),
         })
     };
@@ -215,8 +215,7 @@ pub fn check_path(
     }
     if let Some(m) = canon {
         let nameless: Vec<&BlockId> = m
-            .blocks
-            .values()
+            .iter()
             .filter(|b| b.block_type == rdy_model::tree::DOC && b.field_str("name").is_none())
             .map(|b| &b.id)
             .collect();

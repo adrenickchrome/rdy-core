@@ -20,7 +20,8 @@ fn setup(r: &mut Rdy) -> serde_json::Value {
 }
 
 fn suspects_of(r: &mut Rdy, scope: &Scope, block: &str) -> Vec<(String, String)> {
-    r.suspects(scope)
+    r.read()
+        .suspects(scope)
         .unwrap()
         .into_iter()
         .filter(|s| s.block.to_string() == block)
@@ -149,14 +150,15 @@ fn pres1_a_change_to_a_presentational_block_makes_nothing_suspect() {
     .unwrap();
     land(&mut r, "work").unwrap();
     assert!(
-        r.suspects(&Scope::Canon).unwrap().is_empty(),
+        r.read().suspects(&Scope::Canon).unwrap().is_empty(),
         "{:?}",
-        r.suspects(&Scope::Canon).unwrap()
+        r.read().suspects(&Scope::Canon).unwrap()
     );
 
     let claim = rdy_model::BlockId::parse(&res.created["$c"]).unwrap();
     assert!(
-        r.context(&Scope::Canon, &claim)
+        r.read()
+            .context(&Scope::Canon, &claim)
             .unwrap()
             .suspects
             .is_empty()
@@ -175,7 +177,7 @@ fn pres1_a_change_to_a_presentational_block_makes_nothing_suspect() {
     )
     .unwrap();
     land(&mut r, "work").unwrap();
-    let sus = r.suspects(&Scope::Canon).unwrap();
+    let sus = r.read().suspects(&Scope::Canon).unwrap();
     assert_eq!(sus.len(), 1, "{sus:?}");
     assert_eq!(sus[0].block.to_string(), res.created["$c2"]);
     assert_eq!(sus[0].target.to_string(), res.created["$p"]);

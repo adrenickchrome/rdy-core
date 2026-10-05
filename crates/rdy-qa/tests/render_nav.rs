@@ -4,9 +4,9 @@ use rdy_qa::golden::*;
 
 #[test]
 fn nav1_groups_follow_top_level_folders_and_mark_the_current_page() {
-    let (_d, mut r) = tree_site();
+    let (_d, r) = tree_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("b/c/three.html")).unwrap();
     let nav = &h[h.find("<nav aria-label=\"Pages\">").unwrap()..h.find("</aside>").unwrap()];
     assert!(
@@ -43,9 +43,9 @@ fn nav1_groups_follow_top_level_folders_and_mark_the_current_page() {
 
 #[test]
 fn nav1_crumbs_start_with_the_project_name_and_end_with_the_page() {
-    let (_d, mut r) = tree_site();
+    let (_d, r) = tree_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("b/c/three.html")).unwrap();
     let s = h.find("<nav class=\"crumbs\"").unwrap();
     let crumbs = &h[s..s + h[s..].find("</nav>").unwrap()];
@@ -60,9 +60,9 @@ fn nav1_crumbs_start_with_the_project_name_and_end_with_the_page() {
 
 #[test]
 fn nav1_the_toc_appears_at_three_sections_and_follows_depth() {
-    let (_d, mut r) = tree_site();
+    let (_d, r) = tree_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let three = std::fs::read_to_string(out.path().join("b/c/three.html")).unwrap();
     assert!(
         three.contains("<nav aria-label=\"On this page\">")
@@ -78,9 +78,9 @@ fn nav1_the_toc_appears_at_three_sections_and_follows_depth() {
 
 #[test]
 fn nav1_previous_and_next_follow_tree_order_on_doc_pages_only() {
-    let (_d, mut r) = tree_site();
+    let (_d, r) = tree_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let two = std::fs::read_to_string(out.path().join("a/two.html")).unwrap();
     assert!(
         two.contains("class=\"pager-prev\" href=\"one.html\"")
@@ -98,9 +98,9 @@ fn nav1_previous_and_next_follow_tree_order_on_doc_pages_only() {
 /// Review Focus 4.
 #[test]
 fn nav1_absent_collected_pages_are_not_linked() {
-    let (_d, mut r) = tiny_with_doc();
+    let (_d, r) = tiny_with_doc();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("index.html")).unwrap();
     assert!(
         !h.contains("glossary.html") && !h.contains("questions.html") && !h.contains(">Reference<")
@@ -109,9 +109,9 @@ fn nav1_absent_collected_pages_are_not_linked() {
 
 #[test]
 fn nav1_the_sidebar_caps_each_list_at_50_with_a_more_link() {
-    let (_d, mut r) = wide_folder(120); // folder "many" with 120 docs
+    let (_d, r) = wide_folder(120); // folder "many" with 120 docs
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("many/doc-60.html")).unwrap();
     let nav = &h[h.find("<nav aria-label=\"Pages\">").unwrap()..h.find("</aside>").unwrap()];
     assert_eq!(
@@ -192,9 +192,9 @@ fn nav1_the_scroll_spy_observes_the_heading_each_toc_link_points_at() {
         );
         return;
     }
-    let (_d, mut r) = tree_site();
+    let (_d, r) = tree_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("b/c/three.html")).unwrap();
     // The page as rendered: every toc link's target and the first heading that follows it.
     let toc = &h[h.find("<nav aria-label=\"On this page\">").unwrap()..];
@@ -302,9 +302,9 @@ fn cascaded(css: &rdy_qa::site::Css, selector: &str, prop: &str, w: u32) -> Opti
 /// side.
 #[test]
 fn nav1_previous_and_next_stack_below_900px() {
-    let (_d, mut r) = tree_site();
+    let (_d, r) = tree_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let css = rdy_qa::site::parse_css(
         &std::fs::read_to_string(out.path().join("assets/site.css")).unwrap(),
     );

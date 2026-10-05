@@ -145,7 +145,7 @@ ids! {
 /// The ids, after checking that every one of them is in canon.
 pub fn ids(r: &mut Rdy) -> Ids {
     let ids = Ids::new();
-    let m = r.materialized(&Scope::Canon).expect("canon").clone();
+    let m = r.read().materialized(&Scope::Canon).expect("canon");
     for (name, id) in ids.named() {
         assert!(m.get(id).is_some(), "{name} ({id}) is not in canon");
     }
@@ -318,9 +318,9 @@ fn editing_blocks(ids: &Ids) -> Vec<rdy_model::Block> {
 
 /// [`project`], then the site of `scope` rendered into the fourth value.
 pub fn site(scope: &Scope) -> (tempfile::TempDir, Rdy, Ids, tempfile::TempDir) {
-    let (dir, mut r, ids) = project();
+    let (dir, r, ids) = project();
     let out = tempfile::tempdir().expect("tempdir");
-    rdy_render::render_site(&mut r, scope, out.path()).expect("render the fixture");
+    rdy_render::render_site(&r.read(), scope, out.path()).expect("render the fixture");
     (dir, r, ids, out)
 }
 
@@ -331,13 +331,14 @@ pub fn site_canon() -> (tempfile::TempDir, Rdy, Ids, tempfile::TempDir) {
 
 /// The frozen site of `v1.0.0`'s landing.
 pub fn site_frozen() -> (tempfile::TempDir, Rdy, Ids, tempfile::TempDir) {
-    let (dir, mut r, ids) = project();
-    let landing: Hash = r.versions().expect("versions")[0]
+    let (dir, r, ids) = project();
+    let landing: Hash = r.read().versions().expect("versions")[0]
         .landing
         .parse()
         .expect("a landing hash");
     let out = tempfile::tempdir().expect("tempdir");
-    rdy_render::render_site(&mut r, &Scope::At(landing), out.path()).expect("render the fixture");
+    rdy_render::render_site(&r.read(), &Scope::At(landing), out.path())
+        .expect("render the fixture");
     (dir, r, ids, out)
 }
 
@@ -519,7 +520,7 @@ pub fn tiny() -> (tempfile::TempDir, Rdy) {
 
 /// The id of the first doc at the top level of canon, in tree order.
 pub fn first_doc_id(r: &mut Rdy) -> BlockId {
-    let m = r.materialized(&Scope::Canon).expect("canon");
+    let m = r.read().materialized(&Scope::Canon).expect("canon");
     m.children(None)
         .into_iter()
         .find(|b| b.block_type == rdy_model::tree::DOC)
@@ -910,7 +911,7 @@ pub fn decided_site() -> (tempfile::TempDir, Rdy, DecidedIds) {
         d4: BlockId::parse("D-AAAAA").expect("a placeholder"),
         q: created(&q, "$q"),
     };
-    let m = r.materialized(&Scope::Canon).expect("canon").clone();
+    let m = r.read().materialized(&Scope::Canon).expect("canon");
     for (id, at) in [
         (&ids.d0, "2020-06-23T09:00:00Z"),
         (&ids.d1, "2021-02-08T10:00:00Z"),

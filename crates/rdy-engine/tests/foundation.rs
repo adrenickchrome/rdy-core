@@ -64,7 +64,7 @@ fn materialized_children_are_ordered_and_apply_is_incremental() {
     let mut m = Materialized::build(StateSnapshot::default(), BTreeMap::new());
     let a = blk("c-AAAAA", Some("s-PPPPP"), "W");
     let b = blk("c-BBBBB", Some("s-PPPPP"), "V");
-    m.apply(&[
+    m = m.with(&[
         Op::Create { block: a.clone() },
         Op::Create { block: b.clone() },
     ]);
@@ -77,17 +77,17 @@ fn materialized_children_are_ordered_and_apply_is_incremental() {
     assert_eq!(ids, vec!["c-BBBBB", "c-AAAAA"]);
     let mut moved = a.clone();
     moved.order = "U".into();
-    m.apply(&[Op::Update {
+    m = m.with(&[Op::Update {
         base: a.version_hash(),
         block: moved,
     }]);
     assert_eq!(m.children(Some(&parent))[0].id.as_str(), "c-AAAAA");
-    m.apply(&[Op::Delete {
+    m = m.with(&[Op::Delete {
         base: b.version_hash(),
         id: b.id.clone(),
     }]);
     assert_eq!(m.children(Some(&parent)).len(), 1);
-    assert_eq!(m.snapshot.blocks.len(), 1);
+    assert_eq!(m.snapshot().blocks.len(), 1);
 }
 
 #[test]

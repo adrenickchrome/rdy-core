@@ -15,7 +15,7 @@ fn direct1_a_doc_holds_content_blocks_directly_and_still_no_tree_types() {
     ])).unwrap();
     land(&mut r, "work").unwrap();
     let doc = BlockId::parse(&res.created["$d"]).unwrap();
-    let m = r.materialized(&Scope::Canon).unwrap().clone();
+    let m = r.read().materialized(&Scope::Canon).unwrap().clone();
     let kinds: Vec<String> = m
         .children(Some(&doc))
         .iter()
@@ -86,7 +86,7 @@ fn dtext1_a_display_text_reference_is_an_ordinary_reference_to_the_engine() {
         BlockId::parse(&res.created["$t"]).unwrap(),
         BlockId::parse(&res.created["$p"]).unwrap(),
     );
-    let b = r.block(&Scope::View("work".into()), &p).unwrap();
+    let b = r.read().block(&Scope::View("work".into()), &p).unwrap();
     assert_eq!(b.body, format!("See {{{{{t}|the guard rule}}}}."));
     assert!(
         b.pins.contains_key(&t),
@@ -106,7 +106,7 @@ fn key1_a_placeholder_keeps_its_key_typed_and_escaped_forms_when_substituted() {
         BlockId::parse(&res.created["$t"]).unwrap(),
         BlockId::parse(&res.created["$p"]).unwrap(),
     );
-    let b = r.block(&Scope::View("work".into()), &p).unwrap();
+    let b = r.read().block(&Scope::View("work".into()), &p).unwrap();
     assert_eq!(
         b.body,
         format!("A {{{{{t}|@key}}}} and B {{{{{t}|\\@x}}}}.")

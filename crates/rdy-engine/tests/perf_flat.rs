@@ -99,11 +99,11 @@ fn nameless(n: usize, lookups: usize) -> (Duration, Duration) {
     r.propose(&agent(), "work", "legacy").unwrap();
     let propose = t.elapsed();
     let work = Scope::View("work".into());
-    r.materialized(&work).unwrap();
+    r.read().materialized(&work).unwrap();
     let t = Instant::now();
     for i in 0..lookups {
         let p = format!("legacy-{}", (i * 7) % n);
-        r.resolve_path(&work, &p).unwrap();
+        r.read().resolve_path(&work, &p).unwrap();
     }
     (propose, t.elapsed())
 }

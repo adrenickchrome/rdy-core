@@ -111,8 +111,7 @@ pub(crate) fn rewrite(
 pub(crate) fn resolve_text(m: &Materialized, text: &str) -> Result<BlockId, RdyError> {
     resolve_with(m, text, &|t| {
         let folded = key::fold(t);
-        m.blocks
-            .values()
+        m.iter()
             .find(|b| key_of(b).is_some_and(|k| key::fold(k) == folded))
             .map(|b| b.id.clone())
     })

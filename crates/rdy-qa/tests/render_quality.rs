@@ -32,13 +32,13 @@ fn scan1_the_golden_site_has_no_leak_in_any_scope() {
 
 #[test]
 fn scan1_the_hostile_and_generated_sites_have_no_leak() {
-    let (_d, mut r) = golden::hostile();
+    let (_d, r) = golden::hostile();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     no_leaks(out.path(), "hostile");
-    let (_d, mut r) = golden::generated_tree();
+    let (_d, r) = golden::generated_tree();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     no_leaks(out.path(), "generated");
 }
 

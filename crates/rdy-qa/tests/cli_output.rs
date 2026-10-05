@@ -17,6 +17,7 @@ fn edit1_an_edit_that_changes_pins_is_refused_and_writes_nothing() {
     .unwrap();
     let scope = Scope::View("work".into());
     let c = r
+        .read()
         .block(&scope, &BlockId::parse(&res.created["$c"]).unwrap())
         .unwrap();
     let t = BlockId::parse(&res.created["$t"]).unwrap();
@@ -130,6 +131,7 @@ fn imp1_impact_items_say_which_edge_reached_them() {
         res.created["$n"].clone(),
     );
     let items = r
+        .read()
         .impact(&Scope::Canon, &BlockId::parse(&t).unwrap(), 3)
         .unwrap();
     let got: Vec<(u32, String, String, String)> = items

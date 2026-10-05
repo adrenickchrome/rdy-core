@@ -1,7 +1,7 @@
 //! View chains (chain1): each view is a chain of `VIEW_OP` objects, newest first through `prev`,
 //! whose head the ref `view/<name>` names in a `ViewHead`. A view's included change set is read by
 //! walking back from the head to the latest checkpoint op and applying the ops after it.
-use crate::Store;
+use crate::StoreReader;
 use crate::error::StoreError;
 use crate::kinds;
 use rdy_model::Hash;
@@ -86,7 +86,7 @@ fn broken(name: &str, at: &Hash, why: impl std::fmt::Display) -> StoreError {
     StoreError::Decode(format!("view chain of {name:?} is broken at {at}: {why}"))
 }
 
-impl Store {
+impl StoreReader {
     /// The head of view `name`'s chain, or None if the view has no ref.
     pub fn view_head(&self, name: &str) -> Result<Option<ViewHead>, StoreError> {
         self.get_ref(&format!("view/{name}"))?
@@ -117,9 +117,17 @@ impl Store {
     /// it applied. The set of the head last read is cached, and a later read walks back only to
     /// that head or to a checkpoint, whichever it meets first. A view with no ref is empty.
     pub fn included(&self, name: &str) -> Result<Arc<Vec<Hash>>, StoreError> {
-        let Some(head) = self.view_head(name)? else {
-            return Ok(Arc::new(vec![]));
-        };
+        match self.view_head(name)? {
+            Some(head) => self.included_at(name, &head),
+            None => Ok(Arc::new(vec![])),
+        }
+    }
+
+    /// The changes view `name` includes at `head`, a head the caller has read. Ops are
+    /// content-addressed, so the answer depends on `head` alone, whatever the writer has done
+    /// since: a read that needs a view's head and its set together reads the head once and passes
+    /// it here, never `included`, which would read the head again.
+    pub fn included_at(&self, name: &str, head: &ViewHead) -> Result<Arc<Vec<Hash>>, StoreError> {
         let cached = self.cached_set(name);
         if let Some((h, set)) = &cached
             && *h == head.head

@@ -21,3 +21,6 @@ postcard.workspace = true
 clap.workspace = true
 tokio.workspace = true
 regex.workspace = true
+
+[dev-dependencies]
+rdy-graph.workspace = true

@@ -177,7 +177,7 @@ impl<'a> Site<'a> {
         let mut governs: BTreeMap<BlockId, BlockId> = BTreeMap::new();
         // a decision governs what it affects, else what names it as `decided_by`, else its
         // parent section
-        for b in self.m.blocks.values() {
+        for b in self.m.iter() {
             if b.block_type != decision::DECISION {
                 continue;
             }
@@ -185,7 +185,7 @@ impl<'a> Site<'a> {
                 governs.insert(b.id.clone(), l.target.clone());
             }
         }
-        for b in self.m.blocks.values() {
+        for b in self.m.iter() {
             for l in b.links.get(decision::DECIDED_BY).into_iter().flatten() {
                 if self
                     .m
@@ -196,7 +196,7 @@ impl<'a> Site<'a> {
                 }
             }
         }
-        for b in self.m.blocks.values() {
+        for b in self.m.iter() {
             if b.block_type == decision::DECISION
                 && !governs.contains_key(&b.id)
                 && let Some(p) = &b.parent
@@ -210,8 +210,7 @@ impl<'a> Site<'a> {
     fn compute_collected(&mut self) {
         let answered: BTreeSet<&BlockId> = self
             .m
-            .blocks
-            .values()
+            .iter()
             .flat_map(|b| b.links.get(decision::ANSWERS).into_iter().flatten())
             .map(|l| &l.target)
             .collect();
@@ -515,7 +514,7 @@ impl<'a> Site<'a> {
         let mut out = vec![];
         let mut cur = Some(id.clone());
         while let Some(c) = cur {
-            if out.len() > self.m.blocks.len() {
+            if out.len() > self.m.len() {
                 break;
             }
             let Some(b) = self.m.get(&c) else { break };

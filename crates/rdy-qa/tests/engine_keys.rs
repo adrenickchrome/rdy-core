@@ -27,6 +27,7 @@ fn key1_a_key_reference_is_stored_as_the_id_with_its_display_text() {
         {"op": "create", "type": "prose", "id": "$p", "parent": "SPEC-GUARDS", "body": "See {{REQ-1}} and {{ req-1 | the guard rule }}."}
     ])).unwrap();
     let p = r
+        .read()
         .block(&Scope::View("work".into()), &id(&res.created["$p"]))
         .unwrap();
     // FW-F2a: a key typed bare is stored as the id with the key-typed mark
@@ -45,6 +46,7 @@ fn key1_write_resolves_keys_in_op_targets() {
          "links": {"describes": [{"target": "req-1"}]}}
     ])).unwrap();
     let p = r
+        .read()
         .block(&Scope::View("work".into()), &id(&res.created["$p"]))
         .unwrap();
     assert_eq!(p.parent.unwrap().to_string(), s);
@@ -121,11 +123,17 @@ fn key1_two_views_each_fine_alone_clash_at_landing() {
 fn key1_read_surfaces_take_a_key_and_a_key_that_is_also_a_path_is_refused() {
     let (_d, mut r, _s, req) = keyed();
     assert_eq!(
-        r.resolve_id(&Scope::Canon, "REQ-1").unwrap().to_string(),
+        r.read()
+            .resolve_id(&Scope::Canon, "REQ-1")
+            .unwrap()
+            .to_string(),
         req
     );
     assert_eq!(
-        r.resolve_id(&Scope::Canon, "req-1").unwrap().to_string(),
+        r.read()
+            .resolve_id(&Scope::Canon, "req-1")
+            .unwrap()
+            .to_string(),
         req
     );
     let t = rdy_model::reference::parse_target("[REQ-1@v1.0.0] Spec › Guards: \"A guard runs\"")
@@ -139,7 +147,7 @@ fn key1_read_surfaces_take_a_key_and_a_key_that_is_also_a_path_is_refused() {
         {"op": "create", "type": "prose", "parent": "$i", "fields": {"key": "intro"}, "body": "Hello."}
     ])).unwrap();
     land(&mut r, "work").unwrap();
-    let e = r.resolve_id(&Scope::Canon, "intro").unwrap_err();
+    let e = r.read().resolve_id(&Scope::Canon, "intro").unwrap_err();
     assert_eq!(e.code, E_BAD_INPUT);
     assert!(e.fix.contains("id"), "{}", e.fix);
 }
@@ -153,13 +161,15 @@ fn key1_diagram_and_code_bodies_never_read_keys() {
     ])).unwrap();
     let scope = Scope::View("work".into());
     assert!(
-        r.block(&scope, &id(&res.created["$g"]))
+        r.read()
+            .block(&scope, &id(&res.created["$g"]))
             .unwrap()
             .body
             .contains("A{{REQ-1}}")
     );
     assert!(
-        r.block(&scope, &id(&res.created["$c"]))
+        r.read()
+            .block(&scope, &id(&res.created["$c"]))
             .unwrap()
             .body
             .contains("'{{REQ-1}}'")

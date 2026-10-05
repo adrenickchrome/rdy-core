@@ -323,3 +323,131 @@ was not profiled. It is inside the gate's budget and is still 18x under the < 2 
 was not investigated further and not rebaselined.
 
 Rebaselined: nothing. `qa-baseline.json` is unchanged, for both classes.
+
+## M2a2: snapshot engine (2026-10-05)
+
+Measured 2026-10-05, release build, Rust 1.99.0, on the **macOS** class: macOS 26.6.2 / Apple M4 Pro
+/ APFS. Linux was not re-measured here: its `qa-baseline.json` class still holds the M2.0 numbers, and
+the `_50k` baseline is recorded on the isolated Linux bench at plan end. **The machine was busy for
+every run below** (load average 4 to 21 while the runs were going; other work was running on it), so
+the timings are noisy. Where a number could be a regression, an A/B against the pre-plan build under
+the same load is given.
+
+What changed for the read and write paths: reads go through an `Arc<ReadState>` published by the
+writer, with `Materialized`, `Graph` and the full tree in lazily filled cells; a write seeds the
+written view's entry with `Materialized::with` (O(ops)) and a landing seeds canon, so a read of the
+written view after a write finds its materialization built.
+Reproduce: `cargo test -p rdy-engine --release --test perf_budget -- --ignored --nocapture`,
+`cargo test -p rdy-engine --release --test perf_folders -- --ignored --nocapture`,
+`cargo run -q -p rdy-qa --release --bin qa-perf` and `RDY_QA_DEEP=1 cargo run -q -p rdy-qa --release --bin qa-perf`.
+
+### `perf_budget` at 100k blocks (`spec_11_targets_at_100k_blocks`)
+
+| measurement | target | result | status |
+|---|---|---|---|
+| cold start (open + materialize + graph), median of 3 | < 2 s | 795 ms (795, 793, 821 ms) | met; re-measured after M2.0 and M2a2 as spec §15.1 asks |
+| write p50 / p95 / p99 / max (200 one-claim writes) | p99 < flush p99 + 1 ms (macOS, restated in M2.0) | 5.09 ms / 5.77 ms / 22.46 ms / 28.94 ms; flush p99 6.25 ms, so target 7.25 ms | **missed** (p99); p50 and p95 are within 1 ms of the flush p99 |
+| query p99 (`context` + `impact`, 200 probes) | < 5 ms | 3.6 us (p50 2.3 us, p95 3.0 us) | met |
+| `version_position` p99 (200 calls, cached) | < 5 ms | 3.1 us (p50 84 ns) | met |
+| view materialize, cold (`invalidate`, then `materialized`), median of 3 | < 2 s here (inside the cold-start budget); the spec's cold figure is "< 50 ms" (M2 spec 15.1), which the 10k tier measures below at 36 to 38 ms | 535 ms (525, 535, 538 ms) | met against the 2 s budget; 50 ms is not claimed at 100k |
+| view materialize after one write (the state is seeded) | - | 250 ns | informational |
+| view materialize, incremental (`with` of one `Create` on the built view, 200 runs) | p99 < 1 ms | p50 3.75 us, p95 4.0 us, p99 12.2 us, max 36 us | met |
+
+The write p99 is the second-slowest of 200 writes, as in the M2a1 section. The body did not move
+(p50 5.09 ms against 4.6 to 5.0 ms in M2a1, in the same range under this load). Whether the
+slow tail is still the first checkpoint falling inside the 200 writes was not profiled in this run.
+The assertion stays as specified; no product code was changed for the miss. Cold materialize at 100k
+is 535 ms: a view's full rebuild is the cost the snapshot engine takes off the write path
+(a write seeds the next state in microseconds), so it is paid by the first read after `invalidate`,
+`reindex` or a reopen only.
+
+`chain1_log_bytes_per_write_stay_flat_to_10k` still passes: 480.0 bytes per write at writes 900 to
+1,000 and 486.0 at writes 9,900 to 10,000; propose of 10,001 changes 85.5 ms, land 184.1 ms.
+
+### Folders and the memoised tree (`perf_folders`, 1k folders / 10k docs / about 101k blocks)
+
+| measurement | target | M2 baseline (addendum B) | result | status |
+|---|---|---|---|---|
+| full tree, first build (`tree_full`) | informational | 9.77 ms p99 (every call built it) | 9.23 ms (`tree first build`) | informational |
+| full tree, memo hits, p99 of the 49 calls after the first | < 5 ms | 9.77 ms (**missed**) | 625 ns | **met** (was the only missed read target of addendum B) |
+| `resolve_path` p99 (200 doc paths) | < 5 ms | 5.1 us | 8.0 us | met |
+
+The tree is memoised per published state (M2 spec 15.1: per canon head), so a call after the first
+returns an `Arc` clone. The first call of a state still builds it, at the cost the old per-call walk had.
+
+### `qa-perf` (typical tier, about 10k blocks) against the M2a1 baseline
+
+Medians in ms, same machine class; "pre-plan" is the build at 573c26b (before M2a2) run back to back
+with this build, twice each, under the same load, because the stored baseline was taken on a quiet
+machine. "no baseline: recorded" is expected for the new ops.
+
+| op | stored baseline | this build (first run) | this build (A/B runs 1, 2) | pre-plan (A/B runs 1, 2) | note |
+|---|---|---|---|---|---|
+| `write_single` | 4.250 | 4.239 | 4.585, 4.169 | 5.126, 4.161 | same |
+| `write_batch_200` | 7.039 | 9.001 | 9.568, 8.046 | 10.070, 9.057 | busy machine; same as pre-plan |
+| `propose_land_500_flat` | 117.674 | 53.099 | 55.000, 54.651 | 144.993, 181.199 | about 3x faster: landing seeds canon in O(ops) |
+| `version_position` | 3.582 | 0.000 | 0.000, 0.000 | 0.001, 0.001 | vpos cache hit, as M2a1 measured (p95 5.1 ms is the first, uncached call) |
+| `version_position_cached` (new) | no baseline: recorded | 0.000 (200 runs) | 0.000, 0.000 | - | microseconds; judged on the Linux bench |
+| `context` | 40.504 | 44.061 | 44.750, 45.764 | 43.435, 43.706 | cold read; same as pre-plan within 5% |
+| `impact` | 40.474 | 44.172 | 45.432, 45.942 | 43.285, 44.512 | cold read; same |
+| `resolve_path` | 34.479 | 38.511 | 40.438, 40.290 | 37.122, 40.596 | cold read; same |
+| `tree_full` | 1.379 | 0.307 | 0.308, 0.315 | 1.260, 1.258 | drops: it is a clone of the memo now (see below) |
+| `tree_full_memo` (new) | no baseline: recorded | 0.000 (20 runs) | 0.000, 0.000 | - | an `Arc` clone |
+| `view_materialize_cold` (new) | no baseline: recorded | 36.321 | 38.385, 38.534 | - | against "< 50 ms cold" (spec 15.1) |
+| `view_materialize_incremental` (new) | no baseline: recorded | 0.004 | 0.003, 0.004 | - | against "< 1 ms" |
+| `render` | 1261.995 | 1329.521 | 1365.661, 1491.988 | 5115.126, 1319.804 | noise dominates |
+| `export_import` | 562.855 | 596.576 | 585.961, 911.149 | 1134.618, 559.517 | noise dominates |
+| `cold_open` | 84.975 | 95.261 | 94.901, 94.803 | 112.563, 87.770 | within noise |
+| `cold_open_lagging` | 91.471 | 115.992 | 114.828, 111.547 | 141.666, 110.102 | see below |
+
+`tree_full` (the existing op, `tree(Canon, None, None)`) dropping and `version_position` staying a
+cache hit are not regressions, and neither was rebaselined.
+
+**`cold_open_lagging` exceeds the gate's budget against the stored baseline** (116.0 ms against 91.5
+ms is +27% and +24.5 ms, over the 25% margin and the 2 ms floor; the A/B runs read 114.8 and 111.5).
+It was investigated first: the pre-plan build, run back to back under the same load, reads 141.7 and
+110.1 ms. So the move from the stored 91.5 ms is machine drift, plus the +21% M2a1 already recorded
+(110.65 ms), and not a cost of this plan: M2a2 does not touch index catch-up. It is 17x under the
+< 2 s target. Not rebaselined. The orchestrator judges perf on the isolated Linux bench at plan end.
+
+Nothing is rebaselined by this task: `qa-baseline.json` is unchanged. The three new ops and
+`version_position_cached` are recorded in the baseline by the orchestrator's baseline commit.
+
+### Large tier (50k), first measurement
+
+`RDY_QA_DEEP=1 cargo run -q -p rdy-qa --release --bin qa-perf` builds a second project with
+`generate_tree(50, 10, 97)` (about 50k blocks), lands it, adds 20 pending writes, and measures the
+shared ops under the `_50k` names. First measurement on the busy Mac, medians in ms (not recorded in
+the baseline: that is done on the Linux bench):
+
+| op | median | p95 | runs |
+|---|---|---|---|
+| `write_single_50k` | 5.158 | 7.209 | 20 |
+| `context_50k` | 392.947 | 498.048 | 10 |
+| `impact_50k` | 402.263 | 593.252 | 10 |
+| `resolve_path_50k` | 427.513 | 578.653 | 10 |
+| `tree_full_50k` | 0.082 | 1.053 | 20 |
+| `tree_full_memo_50k` | 0.000 | 0.000 | 20 |
+| `view_materialize_cold_50k` | 430.887 | 442.671 | 5 |
+| `view_materialize_incremental_50k` | 0.003 | 0.068 | 20 |
+| `render_50k` | 455.365 | 911.582 | 3 |
+| `cold_open_50k` | 465.709 | 605.638 | 3 |
+
+The cold reads (`context`, `impact`, `resolve_path`) rebuild the graph from a cold state each run,
+which is why they are 10x the typical tier's 40 ms for 5x the blocks (and the machine's load was 21
+at the time); the write and the incremental step do not move with size.
+
+### Intake items closed
+
+- **Full tree, memoised:** `tree_full` is built once per published state and returned as an `Arc`;
+  the 1k-folder tree p99 goes from 9.77 ms (missed) to 625 ns on the memo hits, with the first build
+  at 9.23 ms.
+- **`prospective_issues`, `rdy_read` suspects and `run_check` no longer clone canon:** canon and
+  view materializations are persistent maps shared by `Arc`, so each takes the state's `Arc` and
+  `with` applies the ops in O(ops x log n); at 100k blocks `with` of one op costs 3.75 us (p99 12.2
+  us) where a clone of the old `BTreeMap` copied every block. These three paths were not timed
+  separately in this task.
+- **Cold-start first pass:** the three opens at 100k read 795, 793 and 821 ms in this run, so the
+  first pass did not stand out against the 2 s target here (it was 2.06 s in the pre-QA run, taken
+  while the OS flushed the freshly generated store). One run does not prove it is gone; the median
+  of 3 is kept as the judged number.

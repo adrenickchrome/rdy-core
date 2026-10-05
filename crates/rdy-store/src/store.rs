@@ -3,12 +3,13 @@ use crate::format::{self, Format};
 use crate::fsutil;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
-use crate::segment::{CrashPoint, Location, SegmentLog, find_gap, seg_path};
+use crate::segment::{CrashPoint, Location, SegmentLog, SegmentReader, find_gap, seg_path};
 use crate::view::ViewOp;
 use rdy_model::{Block, Change, Hash, LandingRecord, Op, Proposal};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -43,13 +44,36 @@ pub struct OpenReport {
     pub catch_up_commits: u32,
 }
 
+/// The read half of a store (rdr1): the index, the segments read by position, the set cache and
+/// the frame counter, all shared. A clone is cheap, `Send` and `Sync`, and reads only what the
+/// index holds, which the writer applies after the log's sync, so it never sees a torn frame.
+/// A reader cloned before a `reindex` keeps the index it was cloned with.
+#[derive(Clone)]
+pub struct StoreReader {
+    index: Arc<Index>,
+    shared: Arc<ReaderShared>,
+}
+
+/// What every reader of one store shares, whatever index it holds.
+struct ReaderShared {
+    dir: PathBuf,
+    segments: SegmentReader,
+    /// Per view, the head last read by `included` and the set it gave (chain1). A write never
+    /// updates it: the next read walks back to the cached head or to a checkpoint. `reindex`
+    /// clears it.
+    sets: Mutex<HashMap<String, CachedSet>>,
+    /// Object frames read by `get_raw` and `get_kind` (a test hook; reads take `&self`).
+    frames_read: AtomicU64,
+}
+
 pub struct Store {
     dir: PathBuf,
     report: OpenReport,
     log: SegmentLog,
-    /// None only once the clean close (`close` or `Drop`) has closed the database.
-    index: Option<Index>,
-    /// Declared after `index`, so the database is closed before the lock is released.
+    /// The store's own reader, which holds the only store-side `Arc` of the index. None only once
+    /// the clean close (`close` or `Drop`) has dropped it.
+    reader: Option<StoreReader>,
+    /// Declared after `reader`, so the database is closed before the lock is released.
     _lock: HeldLock,
     faults: Faults,
     /// Set when a failed write could not be rolled back; every later write fails until reopen.
@@ -78,15 +102,27 @@ pub struct Store {
     /// The last checkpoint a write or `checkpoint_if_idle` attempted and could not make; cleared
     /// by the next success.
     checkpoint_error: Option<String>,
-    /// Object frames read by `get_raw` and `get_kind` (a test hook; reads take `&self`).
-    frames_read: AtomicU64,
-    /// Per view, the head last read by `included` and the set it gave (chain1). A write never
-    /// updates it: the next read walks back to the cached head or to a checkpoint. `reindex`
-    /// clears it.
-    sets: Mutex<HashMap<String, CachedSet>>,
     /// Successful `write` calls since open (a test hook, atom1).
     writes: u64,
+    /// The kind and hash of every data frame the last successful `write` appended, in order.
+    last_batch: Vec<(u8, Hash)>,
+    /// The end of the log right after the last successful `write`.
+    last_batch_end: Location,
 }
+
+impl Deref for Store {
+    type Target = StoreReader;
+
+    fn deref(&self) -> &StoreReader {
+        self.reader.as_ref().expect("the store is open until close")
+    }
+}
+
+/// The start of the log.
+const ORIGIN: Location = Location {
+    segment: 0,
+    offset: 0,
+};
 
 /// A view's head and the included set the walk gave at it (chain1).
 pub(crate) type CachedSet = (Hash, Arc<Vec<Hash>>);
@@ -117,6 +153,9 @@ struct OpenedIndex {
 /// 10,895 single-byte flips gave neither a kill nor damage as `Ok(clean == false)`. The
 /// `Ok(clean == false)` arm, the only one the sentinel decides, is therefore defensive and
 /// unobserved; the sentinel is reported (`unclean_shutdown`), not decisive, with redb 4.3.
+///
+/// A file another live database holds (a `StoreReader` that outlived its store keeps the index
+/// open) is neither: the open is refused as `HeldByReader(dir)` and the file left alone.
 fn open_index(dir: &Path, unclean: bool) -> Result<OpenedIndex, StoreError> {
     let path = dir.join("index.redb");
     let opened = std::panic::catch_unwind(|| {
@@ -137,6 +176,7 @@ fn open_index(dir: &Path, unclean: bool) -> Result<OpenedIndex, StoreError> {
             drop(c); // close the file before it is renamed
             rebuild_index(&path, true)
         }
+        Err(StoreError::HeldByReader(_)) => Err(StoreError::HeldByReader(dir.to_path_buf())),
         Err(_) => rebuild_index(&path, false),
     }
 }
@@ -359,10 +399,19 @@ impl Store {
             index_rebuilt,
             ..OpenReport::default()
         };
+        let reader = StoreReader {
+            index: Arc::new(index),
+            shared: Arc::new(ReaderShared {
+                dir: dir.to_path_buf(),
+                segments: SegmentReader::open(&segments),
+                sets: Mutex::new(HashMap::new()),
+                frames_read: AtomicU64::new(0),
+            }),
+        };
         let mut store = Store {
             dir: dir.to_path_buf(),
             log,
-            index: Some(index),
+            reader: Some(reader),
             _lock: lock,
             faults: Faults::default(),
             poisoned: false,
@@ -374,9 +423,9 @@ impl Store {
             checkpoint_frames: CHECKPOINT_FRAMES,
             checkpoints: 0,
             checkpoint_error: None,
-            frames_read: AtomicU64::new(0),
-            sets: Mutex::new(HashMap::new()),
             writes: 0,
+            last_batch: vec![],
+            last_batch_end: ORIGIN,
         };
         let (upto, end) = (store.index().indexed_upto()?, store.log.end());
         if upto > end {
@@ -414,6 +463,9 @@ impl Store {
             Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e.into()),
             _ => {}
         }
+        // the format batch a new store writes is not a write of the caller's
+        store.last_batch.clear();
+        store.last_batch_end = ORIGIN;
         store.opened = true;
         Ok(store)
     }
@@ -481,29 +533,38 @@ impl Store {
         &self.report
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.dir
+    /// A reader of this store: a clone of its own (rdr1).
+    pub fn reader(&self) -> StoreReader {
+        StoreReader::clone(self)
     }
 
-    pub(crate) fn index(&self) -> &Index {
-        self.index.as_ref().expect("the index is open until drop")
+    /// The kind and hash of every data frame the last successful `write` appended, after dedupe
+    /// and in write order (batch markers excluded); empty right after open and after a write
+    /// that appended nothing. A failed write leaves it as it was.
+    pub fn last_batch(&self) -> &[(u8, Hash)] {
+        &self.last_batch
     }
 
-    /// The cached (head, set) of view `name`, if `included` has read one.
-    pub(crate) fn cached_set(&self, name: &str) -> Option<CachedSet> {
-        self.sets
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(name)
-            .cloned()
+    /// The end of the log right after the last successful `write`; the origin right after open.
+    pub fn last_batch_end(&self) -> Location {
+        self.last_batch_end
     }
 
-    /// Caches `set` as view `name`'s included set at `head`.
-    pub(crate) fn cache_set(&self, name: &str, head: Hash, set: Arc<Vec<Hash>>) {
-        self.sets
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(name.to_string(), (head, set));
+    /// Drops the store's own reader, and with it the store's `Arc` of the index, keeping what
+    /// readers share. The database closes now unless a cloned reader still holds it.
+    fn drop_index(&mut self) -> Option<Arc<ReaderShared>> {
+        self.reader.take().map(|StoreReader { index, shared }| {
+            drop(index);
+            shared
+        })
+    }
+
+    /// Makes `index` the store's index, in a new reader that shares everything else with the old.
+    fn set_index(&mut self, shared: Arc<ReaderShared>, index: Index) {
+        self.reader = Some(StoreReader {
+            index: Arc::new(index),
+            shared,
+        });
     }
 
     /// Replays the frames past the index's `indexed_upto` into it, streaming the log and applying
@@ -520,10 +581,11 @@ impl Store {
             return Ok(CatchUp::default());
         }
         if self.index_point_unusable(from, end)? {
-            drop(self.index.take()); // close the file before it is renamed
+            // close the file before it is renamed
+            let shared = self.drop_index().expect("the store is open until close");
             let path = self.dir.join("index.redb");
             set_aside(&path)?;
-            self.index = Some(Index::open(&path)?);
+            self.set_index(shared, Index::open(&path)?);
             self.report.index_rebuilt = true;
             return self.replay_from(Location {
                 segment: 0,
@@ -595,16 +657,26 @@ impl Store {
         self.index().dump()
     }
 
+    /// Rebuilds the index from the log in a new database at the same path. The store's reader
+    /// then holds the new index; a reader cloned before keeps the old one, which stays readable
+    /// through its unlinked file until that reader drops (Unix).
     pub fn reindex(&mut self) -> Result<(), StoreError> {
-        self.sets.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.shared
+            .sets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         let path = self.dir.join("index.redb");
         let tmp = self.dir.join("index.redb.tmp");
-        // drop the old database before deleting its file
-        self.index = Some(Index::open(&tmp)?);
+        // drop the store's old database before deleting its file
+        let scratch = Index::open(&tmp)?;
+        let shared = Arc::clone(&self.shared);
+        self.set_index(Arc::clone(&shared), scratch);
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
-        self.index = Some(Index::open(&path)?);
+        let fresh = Index::open(&path)?;
+        self.set_index(shared, fresh);
         let _ = std::fs::remove_file(&tmp);
         self.catch_up().map(|_| ())
     }
@@ -653,6 +725,8 @@ impl Store {
             batch.push((kind, payload));
         }
         if batch.is_empty() {
+            self.last_batch.clear();
+            self.last_batch_end = self.log.end();
             return Ok(hashes);
         }
         let placed = self.log.append_batch(&batch)?;
@@ -668,6 +742,12 @@ impl Store {
         }
         self.index().apply(&entries, self.log.end())?;
         self.log.crash_point(CrashPoint::AfterIndex);
+        self.last_batch = batch
+            .iter()
+            .zip(&placed)
+            .map(|((kind, _), (_, hash))| (*kind, *hash))
+            .collect();
+        self.last_batch_end = self.log.end();
         // The write is acknowledged: it is durable in the log. A checkpoint is only the index
         // catching up, so a failure of one is recorded and retried, never returned.
         self.pending += batch.len() as u64 + 1;
@@ -728,7 +808,7 @@ impl Store {
         self.checkpoint()?;
         // The database is closed before the sentinel goes, so a kill during the close still
         // leaves the sentinel behind.
-        drop(self.index.take());
+        drop(self.drop_index());
         match std::fs::remove_file(self.dir.join(INDEX_OPEN_SENTINEL)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
             _ => Ok(()),
@@ -813,6 +893,108 @@ impl Store {
         Ok(self.write(vec![(kind, encode(value))])?[0])
     }
 
+    /// Successful `write` calls since open (atom1: a landing is one).
+    #[doc(hidden)]
+    pub fn write_count(&self) -> u64 {
+        self.writes
+    }
+
+    fn ref_items(&self, refs: Vec<(String, Vec<u8>)>) -> Vec<(u8, Vec<u8>)> {
+        let at = self.log.end();
+        refs.into_iter()
+            .enumerate()
+            .map(|(i, (name, value))| {
+                let at = Location {
+                    segment: at.segment,
+                    offset: at.offset + i as u64,
+                };
+                (kinds::REF_UPDATE, encode(&RefUpdate { name, value, at }))
+            })
+            .collect()
+    }
+
+    pub fn set_refs(&mut self, refs: Vec<(String, Vec<u8>)>) -> Result<(), StoreError> {
+        let items = self.ref_items(refs);
+        self.write(items)?;
+        Ok(())
+    }
+
+    /// The hash `put_blob` would return for these bytes, without storing anything.
+    pub fn blob_hash(bytes: &[u8]) -> Hash {
+        let chunks: Vec<Hash> = bytes.chunks(CHUNK).map(Hash::of).collect();
+        Hash::of(&encode(&BlobManifest {
+            len: bytes.len() as u64,
+            chunks,
+        }))
+    }
+
+    pub fn put_blob(&mut self, bytes: &[u8]) -> Result<Hash, StoreError> {
+        let mut items: Vec<(u8, Vec<u8>)> = bytes
+            .chunks(CHUNK)
+            .map(|c| (kinds::BLOB_CHUNK, c.to_vec()))
+            .collect();
+        let chunks: Vec<Hash> = items.iter().map(|(_, c)| Hash::of(c)).collect();
+        items.push((
+            kinds::BLOB_MANIFEST,
+            encode(&BlobManifest {
+                len: bytes.len() as u64,
+                chunks,
+            }),
+        ));
+        Ok(*self.write(items)?.last().expect("manifest hash"))
+    }
+
+    pub fn commit_change(
+        &mut self,
+        mut change: Change,
+        refs: Vec<(String, Vec<u8>)>,
+    ) -> Result<Hash, StoreError> {
+        let (mut items, change_pos) = self.change_frames(&mut change, None)?;
+        items.extend(self.ref_items(refs));
+        Ok(self.write(items)?[change_pos])
+    }
+}
+
+impl StoreReader {
+    pub fn dir(&self) -> &Path {
+        &self.shared.dir
+    }
+
+    pub(crate) fn index(&self) -> &Index {
+        &self.index
+    }
+
+    /// The cached (head, set) of view `name`, if `included` has read one.
+    pub(crate) fn cached_set(&self, name: &str) -> Option<CachedSet> {
+        self.shared
+            .sets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .cloned()
+    }
+
+    /// Caches `set` as view `name`'s included set at `head`.
+    pub(crate) fn cache_set(&self, name: &str, head: Hash, set: Arc<Vec<Hash>>) {
+        self.shared
+            .sets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_string(), (head, set));
+    }
+
+    /// Calls `f(location, kind, hash, payload, next)` for every frame in `[from, upto)`, batch
+    /// markers included, continuing through segment rolls. `upto` comes from the writer
+    /// (`log_end()` or `last_batch_end()`), so the walk never meets a batch being appended.
+    pub fn for_each_frame_from(
+        &self,
+        from: Location,
+        upto: Location,
+        f: impl FnMut(Location, u8, Hash, &[u8], Location) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        self.shared.segments.for_each_from(from, upto, f)
+    }
+
     /// The first object written with hash `h`, whatever its kind, and that kind.
     pub fn get_raw(&self, h: &Hash) -> Result<(u8, Vec<u8>), StoreError> {
         let loc = self.index().object(h)?.ok_or(StoreError::NotFound(*h))?;
@@ -821,8 +1003,8 @@ impl Store {
 
     /// Reads the frame at `loc`, which the index says holds an object with hash `h`.
     fn read_object(&self, h: &Hash, loc: Location) -> Result<(u8, Vec<u8>), StoreError> {
-        self.frames_read.fetch_add(1, Ordering::Relaxed);
-        let (kind, found, payload) = self.log.read_hashed(loc)?;
+        self.shared.frames_read.fetch_add(1, Ordering::Relaxed);
+        let (kind, found, payload) = self.shared.segments.read_hashed(loc)?;
         if found != *h {
             return Err(StoreError::Decode(format!(
                 "the index places {h} at {loc:?}, which holds {found}; run rdy reindex"
@@ -890,16 +1072,10 @@ impl Store {
         Ok(self.index().typed(kind, h)?.is_some())
     }
 
-    /// Successful `write` calls since open (atom1: a landing is one).
-    #[doc(hidden)]
-    pub fn write_count(&self) -> u64 {
-        self.writes
-    }
-
     /// Object frames read so far by `get_raw` and `get_kind`.
     #[doc(hidden)]
     pub fn frames_read(&self) -> u64 {
-        self.frames_read.load(Ordering::Relaxed)
+        self.shared.frames_read.load(Ordering::Relaxed)
     }
 
     pub fn get<T: DeserializeOwned>(&self, h: &Hash) -> Result<T, StoreError> {
@@ -914,26 +1090,6 @@ impl Store {
         self.get(version)
     }
 
-    fn ref_items(&self, refs: Vec<(String, Vec<u8>)>) -> Vec<(u8, Vec<u8>)> {
-        let at = self.log.end();
-        refs.into_iter()
-            .enumerate()
-            .map(|(i, (name, value))| {
-                let at = Location {
-                    segment: at.segment,
-                    offset: at.offset + i as u64,
-                };
-                (kinds::REF_UPDATE, encode(&RefUpdate { name, value, at }))
-            })
-            .collect()
-    }
-
-    pub fn set_refs(&mut self, refs: Vec<(String, Vec<u8>)>) -> Result<(), StoreError> {
-        let items = self.ref_items(refs);
-        self.write(items)?;
-        Ok(())
-    }
-
     pub fn get_ref(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
         self.index().get_ref(name)
     }
@@ -945,31 +1101,6 @@ impl Store {
     /// How many refs start with `prefix`, without reading their values.
     pub fn count_refs(&self, prefix: &str) -> Result<usize, StoreError> {
         self.index().count_refs(prefix)
-    }
-
-    /// The hash `put_blob` would return for these bytes, without storing anything.
-    pub fn blob_hash(bytes: &[u8]) -> Hash {
-        let chunks: Vec<Hash> = bytes.chunks(CHUNK).map(Hash::of).collect();
-        Hash::of(&encode(&BlobManifest {
-            len: bytes.len() as u64,
-            chunks,
-        }))
-    }
-
-    pub fn put_blob(&mut self, bytes: &[u8]) -> Result<Hash, StoreError> {
-        let mut items: Vec<(u8, Vec<u8>)> = bytes
-            .chunks(CHUNK)
-            .map(|c| (kinds::BLOB_CHUNK, c.to_vec()))
-            .collect();
-        let chunks: Vec<Hash> = items.iter().map(|(_, c)| Hash::of(c)).collect();
-        items.push((
-            kinds::BLOB_MANIFEST,
-            encode(&BlobManifest {
-                len: bytes.len() as u64,
-                chunks,
-            }),
-        ));
-        Ok(*self.write(items)?.last().expect("manifest hash"))
     }
 
     /// Whether `h` names a blob in this store: a manifest-kind object, which only `put_blob`
@@ -1065,16 +1196,6 @@ impl Store {
         }
         Ok(first.map(|(_, c)| c))
     }
-
-    pub fn commit_change(
-        &mut self,
-        mut change: Change,
-        refs: Vec<(String, Vec<u8>)>,
-    ) -> Result<Hash, StoreError> {
-        let (mut items, change_pos) = self.change_frames(&mut change, None)?;
-        items.extend(self.ref_items(refs));
-        Ok(self.write(items)?[change_pos])
-    }
 }
 
 impl Store {
@@ -1100,6 +1221,12 @@ impl Store {
         Ok((items, change_pos))
     }
 
+    pub(crate) fn ref_items_pub(&self, refs: Vec<(String, Vec<u8>)>) -> Vec<(u8, Vec<u8>)> {
+        self.ref_items(refs)
+    }
+}
+
+impl StoreReader {
     /// The deps the store gives `change` when it commits it to `view` (or, with no view, through
     /// `commit_change`), sorted ascending and deduplicated:
     /// - for each op's base, its producers that `view` includes; when it includes none (the base
@@ -1160,9 +1287,5 @@ impl Store {
             *slot = Some(self.included(view)?.iter().copied().collect());
         }
         Ok(slot.as_ref().expect("set above"))
-    }
-
-    pub(crate) fn ref_items_pub(&self, refs: Vec<(String, Vec<u8>)>) -> Vec<(u8, Vec<u8>)> {
-        self.ref_items(refs)
     }
 }

@@ -26,10 +26,10 @@ fn without_agents(h: &str) -> String {
 
 #[test]
 fn why1_the_trail_reads_as_dated_plain_sentences_in_order() {
-    let (_d, mut r, ids) = decided_site();
+    let (_d, r, ids) = decided_site();
     let out = tempfile::tempdir().unwrap();
     // D4 is proposed, so it lives in the view `pending`, which canon cannot hold
-    rdy_render::render_site(&mut r, &Scope::View("pending".into()), out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::View("pending".into()), out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("ledgers.html")).unwrap();
     let t = trail_of(&h, "ledgers-are-atomic-when-settled");
     let items: Vec<&str> = t.split("<li").skip(1).collect();
@@ -46,9 +46,9 @@ fn why1_the_trail_reads_as_dated_plain_sentences_in_order() {
 
 #[test]
 fn why1_a_revocation_shows_its_reason_without_the_id_and_a_question_is_open() {
-    let (_d, mut r, ids) = decided_site();
+    let (_d, r, ids) = decided_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("ledgers.html")).unwrap();
     let t = trail_of(&h, "balance");
     assert!(t.contains("<span class=\"trail-when\">1 March 2021</span><span class=\"trail-what\">Ruled: Balances round down.</span>"));
@@ -65,9 +65,9 @@ fn why1_a_revocation_shows_its_reason_without_the_id_and_a_question_is_open() {
 
 #[test]
 fn why1_blocks_without_events_have_no_pill_and_nothing_shows_a_badge() {
-    let (_d, mut r, _ids) = decided_site();
+    let (_d, r, _ids) = decided_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("ledgers.html")).unwrap();
     // the lede has no wrapper, the section "Rules" has no decision: up to the next toolbar or
     // block is all either has
@@ -100,9 +100,9 @@ fn why1_blocks_without_events_have_no_pill_and_nothing_shows_a_badge() {
 
 #[test]
 fn why1_the_agents_affordance_is_collapsed_and_carries_id_type_lifecycle_and_governing() {
-    let (_d, mut r, ids) = decided_site();
+    let (_d, r, ids) = decided_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("ledgers.html")).unwrap();
     let i = h
         .find(&format!("data-rdy-block=\"{}\"", ids.requirement))
@@ -138,9 +138,9 @@ fn why1_the_agents_affordance_is_collapsed_and_carries_id_type_lifecycle_and_gov
 /// Review Focus 5.
 #[test]
 fn why1_hostile_statements_are_escaped_in_the_trail() {
-    let (_d, mut r) = hostile(); // its decision now affects the claim, so the trail renders the hostile statement
+    let (_d, r) = hostile(); // its decision now affects the claim, so the trail renders the hostile statement
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     for p in pages(out.path()) {
         let h = std::fs::read_to_string(&p).unwrap();
         assert!(!h.contains("<script>alert(1)"), "{}", p.display());
@@ -156,9 +156,9 @@ fn why1_hostile_statements_are_escaped_in_the_trail() {
 /// that has events never shows an id (Review Focus 5's neighbour: dates and statements are scanned).
 #[test]
 fn why1_the_trail_shows_no_id_and_no_second_full_stop() {
-    let (_d, mut r, ids) = decided_site();
+    let (_d, r, ids) = decided_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("ledgers.html")).unwrap();
     for anchor in ["ledgers-are-atomic-when-settled", "balance"] {
         let t = trail_of(&h, anchor);

@@ -32,20 +32,20 @@ fn sus3_repin_clears_a_changed_suspect_as_a_recorded_change() {
         json!([{"op": "update", "id": t, "body": "Balances in pence."}]),
     )
     .unwrap();
-    assert_eq!(r.context(&scope, &cid).unwrap().suspects.len(), 1);
+    assert_eq!(r.read().context(&scope, &cid).unwrap().suspects.len(), 1);
     let before = r.store().view("work").unwrap().changes.len();
     write(&mut r, "work", json!([{"op": "repin", "id": c}])).unwrap();
-    assert!(r.context(&scope, &cid).unwrap().suspects.is_empty());
+    assert!(r.read().context(&scope, &cid).unwrap().suspects.is_empty());
     assert_eq!(
         r.store().view("work").unwrap().changes.len(),
         before + 1,
         "recorded as a change"
     );
     assert_eq!(
-        r.block(&scope, &cid).unwrap().pins[&tid],
-        r.block(&scope, &tid).unwrap().version_hash()
+        r.read().block(&scope, &cid).unwrap().pins[&tid],
+        r.read().block(&scope, &tid).unwrap().version_hash()
     );
-    check(&mut r, &scope).unwrap();
+    check(&r, &scope).unwrap();
 }
 
 #[test]
@@ -124,6 +124,7 @@ fn sus3_a_superseded_decision_stays_suspect_after_repin() {
     assert_eq!(e.code, "E_BAD_INPUT", "{e}");
     assert!(e.fix.contains("only when the citation changes"), "{e}");
     let sus: Vec<_> = r
+        .read()
         .suspects(&Scope::Canon)
         .unwrap()
         .into_iter()

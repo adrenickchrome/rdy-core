@@ -210,7 +210,7 @@ impl Cx<'_> {
         let mut seen = start.clone();
         let mut todo: Vec<BlockId> = start.into_iter().collect();
         while let Some(id) = todo.pop() {
-            if seen.len() > self.m.blocks.len() {
+            if seen.len() > self.m.len() {
                 break;
             }
             let near = self
@@ -494,7 +494,7 @@ fn path_of(b: &Block, m: &Materialized, site: &Site) -> Vec<String> {
     let mut steps = 0;
     while let Some(c) = cur {
         steps += 1;
-        if steps > m.blocks.len() + 1 {
+        if steps > m.len() + 1 {
             break;
         }
         if c.block_type == "section" {

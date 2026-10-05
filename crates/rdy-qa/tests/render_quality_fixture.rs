@@ -5,11 +5,10 @@ use rdy_qa::golden;
 
 #[test]
 fn gold1_the_fixture_loads_with_every_named_block_and_about_400_blocks() {
-    let (_d, mut r, ids) = golden::project();
-    let m = r.materialized(&Scope::Canon).unwrap().clone();
+    let (_d, r, ids) = golden::project();
+    let m = r.read().materialized(&Scope::Canon).unwrap().clone();
     let committed = m
-        .blocks
-        .values()
+        .iter()
         .filter(|b| {
             m.doc_of(&b.id)
                 .is_some_and(|d| !d.field_str("title").unwrap_or("").starts_with("Appendix"))
@@ -22,8 +21,7 @@ fn gold1_the_fixture_loads_with_every_named_block_and_about_400_blocks() {
     for (name, id) in ids.named() {
         assert!(m.get(id).is_some(), "{name} ({id}) is missing");
     }
-    let types: std::collections::BTreeSet<&str> =
-        m.blocks.values().map(|b| b.block_type.as_str()).collect();
+    let types: std::collections::BTreeSet<&str> = m.iter().map(|b| b.block_type.as_str()).collect();
     for t in [
         "doc",
         "folder",
@@ -53,12 +51,11 @@ fn gold1_the_fixture_loads_with_every_named_block_and_about_400_blocks() {
 
 #[test]
 fn gold1_the_tree_has_the_folders_depths_cap_and_long_doc() {
-    let (_d, mut r, ids) = golden::project();
-    let m = r.materialized(&Scope::Canon).unwrap().clone();
+    let (_d, r, ids) = golden::project();
+    let m = r.read().materialized(&Scope::Canon).unwrap().clone();
     assert_eq!(m.children(Some(&ids.appendix_folder)).len(), 60);
     let sections = m
-        .blocks
-        .values()
+        .iter()
         .filter(|b| {
             b.block_type == "section"
                 && m.doc_of(&b.id).map(|d| d.id.clone()) == Some(ids.spec_doc.clone())
@@ -79,15 +76,13 @@ fn gold1_the_tree_has_the_folders_depths_cap_and_long_doc() {
         n
     };
     assert!(
-        m.blocks
-            .values()
+        m.iter()
             .filter(|b| b.block_type == "section")
             .any(|b| depth(b.id.clone()) == 4),
         "no section at depth 4"
     );
     let bottom = m
-        .blocks
-        .values()
+        .iter()
         .find(|b| b.field_str("title") == Some("The bottom"))
         .expect("bottom doc");
     let mut folders = 0;
@@ -106,16 +101,17 @@ fn gold1_the_tree_has_the_folders_depths_cap_and_long_doc() {
 fn gold1_versions_landings_and_the_view_have_every_case() {
     let (_d, r, _ids) = golden::project();
     assert_eq!(
-        r.version_position(&Scope::Canon).unwrap().label,
+        r.read().version_position(&Scope::Canon).unwrap().label,
         "v1.0.0 + 2 landings"
     );
     assert_eq!(
-        r.version_position(&Scope::View("editing".into()))
+        r.read()
+            .version_position(&Scope::View("editing".into()))
             .unwrap()
             .label,
         "v1.0.0 + 2 landings · view editing, 2 unlanded changes"
     );
-    let v = r.versions().unwrap();
+    let v = r.read().versions().unwrap();
     assert_eq!(v.len(), 1);
     assert_eq!(
         v[0].message.as_deref(),
@@ -125,8 +121,8 @@ fn gold1_versions_landings_and_the_view_have_every_case() {
 
 #[test]
 fn gold1_edge_content_is_present() {
-    let (_d, mut r, ids) = golden::project();
-    let m = r.materialized(&Scope::Canon).unwrap().clone();
+    let (_d, r, ids) = golden::project();
+    let m = r.read().materialized(&Scope::Canon).unwrap().clone();
     assert_eq!(
         m.get(&ids.greek_doc).unwrap().field_str("title"),
         Some("Σημασιολογία")
@@ -149,6 +145,7 @@ fn gold1_edge_content_is_present() {
             .contains("CaseBlockEvaluationOrderIsStrictlyTopToBottom")
     );
     let v = r
+        .read()
         .materialized(&Scope::View("editing".into()))
         .unwrap()
         .clone();
@@ -230,8 +227,8 @@ fn gold1_the_site_helpers_render_canon_the_frozen_version_and_the_view() {
 
 #[test]
 fn gold1_the_fixture_has_direct_content_keys_and_the_dx2_shapes() {
-    let (_d, mut r, ids) = golden::project();
-    let m = r.materialized(&Scope::Canon).unwrap().clone();
+    let (_d, r, ids) = golden::project();
+    let m = r.read().materialized(&Scope::Canon).unwrap().clone();
     let first: Vec<rdy_model::BlockId> = m
         .children(Some(&ids.spec_doc))
         .iter()
@@ -247,13 +244,10 @@ fn gold1_the_fixture_has_direct_content_keys_and_the_dx2_shapes() {
             ids.opening_note.clone()
         ]
     );
-    let keyed: std::collections::BTreeSet<&str> = m
-        .blocks
-        .values()
-        .filter_map(|b| b.field_str("key"))
-        .collect();
+    let keyed: std::collections::BTreeSet<&str> =
+        m.iter().filter_map(|b| b.field_str("key")).collect();
     assert_eq!(keyed, golden::KEYS.into_iter().collect());
-    for b in m.blocks.values() {
+    for b in m.iter() {
         for k in golden::KEYS {
             assert!(
                 !b.body.contains(&format!("{{{{{k}")),

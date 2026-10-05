@@ -4,9 +4,9 @@ use rdy_qa::golden::*;
 
 #[test]
 fn type1_each_type_renders_its_markup_and_no_type_label() {
-    let (_d, mut r, ids) = every_type_site();
+    let (_d, r, ids) = every_type_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("all.html")).unwrap();
     assert!(h.contains("<article class=\"page\" data-rdy=\"content\">"));
     assert!(h.contains("<h2 class=\"section-title\">Terms</h2>"));
@@ -53,10 +53,10 @@ fn type1_each_type_renders_its_markup_and_no_type_label() {
 
 #[test]
 fn type1_references_link_with_hover_titles_and_unresolved_ones_keep_the_authors_words() {
-    let (_d, mut r, _ids) = every_type_site();
+    let (_d, r, _ids) = every_type_site();
     let out = tempfile::tempdir().unwrap();
     // the dangling prose cannot land: it lives in the unlanded view `dangling`
-    rdy_render::render_site(&mut r, &Scope::View("dangling".into()), out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::View("dangling".into()), out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("all.html")).unwrap();
     assert!(
         h.contains("<a href=\"#ledger\" title=\"All › Terms\">Ledger</a>"),
@@ -73,9 +73,9 @@ fn type1_references_link_with_hover_titles_and_unresolved_ones_keep_the_authors_
 /// is the unresolved marker's words, so the id reaches no anchor, even lower-cased.
 #[test]
 fn type1_a_dangling_reference_reaches_no_anchor() {
-    let (_d, mut r, _ids) = every_type_site();
+    let (_d, r, _ids) = every_type_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::View("dangling".into()), out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::View("dangling".into()), out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("all.html")).unwrap();
     assert!(
         h.contains("id=\"see-ledger-and-unresolved-reference\""),
@@ -86,9 +86,9 @@ fn type1_a_dangling_reference_reaches_no_anchor() {
 
 #[test]
 fn type1_every_marker_and_eyebrow_starts_with_a_capital() {
-    let (_d, mut r, _ids) = every_type_site();
+    let (_d, r, _ids) = every_type_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("all.html")).unwrap();
     for (i, _) in h.match_indices("class=\"marker\">") {
         let t = &h[i + 15..];
@@ -118,7 +118,7 @@ fn type1_anchors_are_unique_non_empty_and_never_ids() {
     ])).unwrap();
     land(&mut r, "work").unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let page = std::fs::read_dir(out.path())
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -137,9 +137,9 @@ fn type1_anchors_are_unique_non_empty_and_never_ids() {
 /// Review Focus 5.
 #[test]
 fn type1_hostile_text_is_escaped_in_hover_titles_labels_and_captions() {
-    let (_d, mut r) = hostile();
+    let (_d, r) = hostile();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     for p in pages(out.path()) {
         let h = std::fs::read_to_string(&p).unwrap();
         for raw in [
@@ -190,7 +190,7 @@ fn type1_references_inside_fields_link_or_read_as_labels_never_as_ids() {
     .unwrap();
     land(&mut r, "work").unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("refs.html")).unwrap();
     let ledger = "<a href=\"#ledger\" title=\"Refs › Terms\">Ledger</a>";
     for want in [
@@ -248,7 +248,7 @@ fn type1_a_bodyless_type_without_its_own_rendering_keeps_its_wrapper_and_shows_i
     .unwrap();
     land(&mut r, "work").unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("people.html")).unwrap();
     assert!(
         h.contains(&format!(
@@ -287,7 +287,7 @@ fn type1_titles_that_reference_each_other_read_as_labels_a_bounded_number_of_tim
     .unwrap();
     land(&mut r, "work").unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("loop.html")).unwrap();
     assert!(h.contains("Alpha before Beta after Alpha before …"), "{h}");
     assert!(!h.contains("{{"), "{h}");

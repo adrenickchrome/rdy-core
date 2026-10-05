@@ -62,7 +62,7 @@ fn land1_an_older_proposal_whose_changes_landed_in_a_newer_one_is_refused() {
     let e = r.land(&approver(), &older.id).unwrap_err();
     assert_eq!(e.code, "E_ALREADY_LANDED", "{e}");
     assert!(e.message.contains(&landing), "{e}");
-    check(&mut r, &Scope::Canon).unwrap();
+    check(&r, &Scope::Canon).unwrap();
 }
 
 /// gate1 guard (passes before any change): a re-created block keeps its type (its id prefix), and
@@ -97,5 +97,5 @@ fn gate1_a_recreated_folder_is_checked_with_the_folders_other_views_added_under_
     let e = land(&mut r, "y").unwrap_err();
     assert_eq!(e.code, "E_VALIDATION", "{e}");
     assert!(e.issues.iter().any(|i| i.code == "E_TOO_DEEP"), "{e:?}");
-    check(&mut r, &Scope::Canon).unwrap();
+    check(&r, &Scope::Canon).unwrap();
 }

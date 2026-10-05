@@ -30,6 +30,7 @@ fn key1_import_stores_key_references_as_ids() {
     let t = tree("");
     r.import(&approver(), "work", t.path()).unwrap();
     let p = r
+        .read()
         .block(
             &Scope::View("work".into()),
             &BlockId::parse("p-AAAAA").unwrap(),

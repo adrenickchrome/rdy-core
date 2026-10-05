@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 fn render(r: &mut rdy_engine::Rdy) -> tempfile::TempDir {
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     out
 }
 fn read_json(p: &std::path::Path) -> Value {

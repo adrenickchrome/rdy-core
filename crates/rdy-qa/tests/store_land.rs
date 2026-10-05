@@ -89,6 +89,6 @@ fn atom1_a_kill_during_a_landing_leaves_all_or_nothing() {
             assert_eq!(r.store().view("work").unwrap().changes.len(), n);
             r.land(&approver(), &pid).unwrap();
         }
-        check(&mut r, &Scope::Canon).unwrap();
+        check(&r, &Scope::Canon).unwrap();
     }
 }

@@ -12,9 +12,9 @@ fn attr<'a>(h: &'a str, id: &str, name: &str) -> &'a str {
 
 #[test]
 fn ref1_every_block_carries_a_ref_in_the_grammar_and_headings_get_the_button() {
-    let (_d, mut r, ids) = decided_site();
+    let (_d, r, ids) = decided_site();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = html(out.path(), "ledgers.html");
     assert_eq!(
         unescape(attr(&h, &ids.requirement.to_string(), "data-ref")),
@@ -57,7 +57,7 @@ fn ref1_snippets_cut_at_a_word_boundary_with_an_ellipsis_and_quotes_are_straight
     ])).unwrap();
     land(&mut r, "work").unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = html(out.path(), "household-ledger.html");
     let c = res.created["$c"].to_string();
     let r#ref = unescape(attr(&h, &c, "data-ref"));
@@ -76,9 +76,9 @@ fn ref1_snippets_cut_at_a_word_boundary_with_an_ellipsis_and_quotes_are_straight
 fn ref1_frozen_pages_pin_the_version_and_between_versions_they_do_not() {
     let (_d, mut r, ids) = decided_site();
     r.tag(&approver(), "v1.0.0", None, None).unwrap();
-    let v: rdy_model::Hash = r.versions().unwrap()[0].landing.parse().unwrap();
+    let v: rdy_model::Hash = r.read().versions().unwrap()[0].landing.parse().unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::At(v), out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::At(v), out.path()).unwrap();
     let h = html(out.path(), "ledgers.html");
     assert!(
         unescape(attr(&h, &ids.requirement.to_string(), "data-ref"))
@@ -87,7 +87,7 @@ fn ref1_frozen_pages_pin_the_version_and_between_versions_they_do_not() {
     write(&mut r, "work", serde_json::json!([{"op":"update","id":ids.doc.to_string(),"fields":{"title":"Ledgers again"}}])).unwrap();
     let landing = land(&mut r, "work").unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::At(landing.parse().unwrap()), out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::At(landing.parse().unwrap()), out.path()).unwrap();
     let h = html(out.path(), "ledgers.html");
     assert!(
         unescape(attr(&h, &ids.requirement.to_string(), "data-ref"))
@@ -95,7 +95,7 @@ fn ref1_frozen_pages_pin_the_version_and_between_versions_they_do_not() {
         "between versions: no pin"
     );
     let canon = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, canon.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, canon.path()).unwrap();
     assert!(
         !unescape(attr(
             &html(canon.path(), "ledgers.html"),

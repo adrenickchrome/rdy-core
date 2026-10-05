@@ -14,7 +14,7 @@ mod version;
 
 pub use html::{Link, escape, text_html};
 
-use rdy_engine::{E_IO, Rdy, RdyError, Scope};
+use rdy_engine::{E_IO, RdyError, ReadState, Scope};
 use rdy_model::{BlockId, Hash, tree};
 use serde::Serialize;
 use site::Site;
@@ -127,7 +127,7 @@ fn io_at(what: &str, path: &Path, e: std::io::Error) -> RdyError {
 /// an empty directory, or a site rdy rendered before; anything else is refused untouched, and a
 /// symbolic link is never followed. When `out` cannot be swapped by rename (its parent is not
 /// writable, or it is a mount point), its contents are replaced in place instead.
-pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
+pub fn render_site(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
     let refuse = |what: String| {
         RdyError::new(
             rdy_engine::E_BAD_INPUT,
@@ -365,7 +365,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), RdyError> {
     }
 }
 
-fn render_into(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
+fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
     let position = rdy.version_position(scope)?;
     let versions = rdy.versions()?;
     // when each version's landing was approved (only the versions' landings are read)
@@ -373,20 +373,20 @@ fn render_into(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary
         .iter()
         .filter_map(|v| {
             let h: Hash = v.landing.parse().ok()?;
-            let rec = rdy.store().landing(&h).ok()?;
+            let rec = rdy.reader().landing(&h).ok()?;
             Some((v.landing.clone(), rec.approved_by.at_ms))
         })
         .collect();
-    let m = rdy.materialized(scope)?.clone();
+    let m = rdy.materialized(scope)?;
     let suspects: BTreeSet<BlockId> = rdy.suspects(scope)?.into_iter().map(|s| s.block).collect();
     // the figure blobs the store holds (read before `g` borrows `rdy`)
     let mut blobs: BTreeMap<Hash, Vec<u8>> = BTreeMap::new();
-    for b in m.blocks.values().filter(|b| b.block_type == "figure") {
+    for b in m.iter().filter(|b| b.block_type == "figure") {
         if let Some(h) = b.field_str("blob").and_then(|h| h.parse::<Hash>().ok())
             && !blobs.contains_key(&h)
-            && rdy.store().has_blob(&h).unwrap_or(false)
+            && rdy.reader().has_blob(&h).unwrap_or(false)
         {
-            blobs.insert(h, rdy.store().get_blob(&h)?);
+            blobs.insert(h, rdy.reader().get_blob(&h)?);
         }
     }
     let site_name = rdy.project_name();
@@ -398,7 +398,7 @@ fn render_into(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary
     let sh = page::Shared {
         site: &site,
         m: &m,
-        g,
+        g: &g,
         suspects: &suspects,
         position: &position,
         pack: &pack,
@@ -461,7 +461,7 @@ fn render_into(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary
     }
 
     // a permalink page for every folder, doc and block that has a place on the site
-    for id in m.blocks.keys() {
+    for id in m.ids() {
         let Some(url) = site.url_of(id) else { continue };
         let ctx = page::build(&sh, page::Kind::Redirect(id, &url));
         let html = env

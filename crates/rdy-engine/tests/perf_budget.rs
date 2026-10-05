@@ -1,7 +1,7 @@
 //! Run with: cargo test -p rdy-engine --release --test perf_budget -- --ignored
 //! Uses 100k blocks (spec 11). Ignored by default because generating the project takes a while.
 use rdy_engine::{Rdy, Scope, Session, WriteRequest, testkit};
-use rdy_model::Role;
+use rdy_model::{Block, BlockId, Op, Role};
 use serde_json::json;
 use std::io::Write;
 use std::os::unix::fs::FileExt;
@@ -74,8 +74,8 @@ fn spec_11_targets_at_100k_blocks() {
     for _ in 0..3 {
         drop(r.take());
         let t = Instant::now();
-        let mut open = Rdy::open(dir.path()).unwrap();
-        open.graph(&work).unwrap();
+        let open = Rdy::open(dir.path()).unwrap();
+        open.read().graph(&work).unwrap();
         colds.push(t.elapsed());
         r = Some(open);
     }
@@ -89,7 +89,13 @@ fn spec_11_targets_at_100k_blocks() {
         run: None,
         role: Role::Writer,
     };
-    let parent = r.block(&work, &ids[0]).unwrap().parent.unwrap().to_string();
+    let parent = r
+        .read()
+        .block(&work, &ids[0])
+        .unwrap()
+        .parent
+        .unwrap()
+        .to_string();
     let mut writes = vec![];
     for _ in 0..200 {
         let t = Instant::now();
@@ -118,16 +124,69 @@ fn spec_11_targets_at_100k_blocks() {
         writes[100..].iter().sum::<Duration>() / 100
     );
 
-    r.graph(&work).unwrap();
+    r.read().graph(&work).unwrap();
     let mut queries = vec![];
     for id in ids.iter().step_by(500) {
         let t = Instant::now();
-        r.context(&work, id).unwrap();
-        r.impact(&work, id, 3).unwrap();
+        r.read().context(&work, id).unwrap();
+        r.read().impact(&work, id, 3).unwrap();
         queries.push(t.elapsed() / 2);
     }
     let query_p99 = p99(queries.clone());
     println!("queries: {}", dist(&queries));
+
+    // View materialization. Cold: the state is dropped (`invalidate`) and the read rebuilds the
+    // view; three runs, judged on the median. Incremental: one write, then the work a commit's
+    // publish does to seed the next state, `with` of one Create, on the built view.
+    let mut colds_view = vec![];
+    for _ in 0..3 {
+        r.invalidate();
+        let t = Instant::now();
+        r.read().materialized(&work).unwrap();
+        colds_view.push(t.elapsed());
+    }
+    colds_view.sort();
+    let materialize_cold = colds_view[1];
+    r.write(
+        &s,
+        WriteRequest {
+            view: "work".into(),
+            ops: serde_json::from_value(
+                json!([{"op": "create", "type": "claim", "parent": parent, "body": "after invalidate"}]),
+            )
+            .unwrap(),
+            justification: None,
+            message: String::new(),
+        },
+    )
+    .unwrap();
+    let t = Instant::now();
+    let built = r.read().materialized(&work).unwrap();
+    let after_write = t.elapsed();
+    let section = BlockId::parse(&parent).unwrap();
+    let op = [Op::Create {
+        block: Block {
+            id: BlockId::new("c"),
+            block_type: "claim".into(),
+            parent: Some(section),
+            order: "V".into(),
+            fields: Default::default(),
+            body: "incremental".into(),
+            links: Default::default(),
+            pins: Default::default(),
+        },
+    }];
+    let mut incremental = vec![];
+    for _ in 0..200 {
+        let t = Instant::now();
+        let next = built.with(&op);
+        incremental.push(t.elapsed());
+        assert_eq!(next.len(), built.len() + 1);
+    }
+    let incremental_p99 = p99(incremental.clone());
+    println!("view materialize cold (median of 3) {materialize_cold:?} {colds_view:?}");
+    println!("view materialize after one write (seeded) {after_write:?}");
+    println!("view materialize incremental: {}", dist(&incremental));
 
     // The generator never lands, so land the work view once and version the head; then time the
     // version position (it walks landings back to the highest version at or before its base).
@@ -142,7 +201,7 @@ fn spec_11_targets_at_100k_blocks() {
     let mut positions = vec![];
     for _ in 0..200 {
         let t = Instant::now();
-        r.version_position(&Scope::Canon).unwrap();
+        r.read().version_position(&Scope::Canon).unwrap();
         positions.push(t.elapsed());
     }
     let position_p99 = p99(positions.clone());
@@ -155,10 +214,22 @@ fn spec_11_targets_at_100k_blocks() {
     println!("write target {write_target:?}");
     println!("write p99 {write_p99:?} (target < {write_target:?})");
     println!("query p99 {query_p99:?} (target < 5 ms)");
+    println!("view materialize cold {materialize_cold:?} (budget < 2 s)");
+    println!("view materialize incremental p99 {incremental_p99:?} (target < 1 ms)");
     println!("version_position p99 {position_p99:?} (target < 5 ms)");
     let mut misses = vec![];
     if cold >= Duration::from_secs(2) {
         misses.push(format!("cold start {cold:?} (target < 2 s)"));
+    }
+    if materialize_cold >= Duration::from_secs(2) {
+        misses.push(format!(
+            "view materialize cold {materialize_cold:?} (budget < 2 s, inside the cold-start target)"
+        ));
+    }
+    if incremental_p99 >= Duration::from_millis(1) {
+        misses.push(format!(
+            "view materialize incremental p99 {incremental_p99:?} (target < 1 ms)"
+        ));
     }
     if write_p99 >= write_target {
         misses.push(format!(
