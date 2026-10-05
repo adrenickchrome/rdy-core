@@ -305,6 +305,7 @@ fn status_warns_about_legacy_colon_views() {
                     provenance: prov,
                     justification: None,
                     message: String::new(),
+                    links: ChangeLinks::default(),
                 },
             )
             .unwrap();

@@ -72,6 +72,7 @@ fn legacy_view(r: &mut Rdy, name: &str) -> BlockId {
                 provenance: writer().provenance(),
                 justification: None,
                 message: "m1".into(),
+                links: ChangeLinks::default(),
             },
         )
         .unwrap();

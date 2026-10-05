@@ -2,8 +2,8 @@ use crate::error::*;
 use crate::{Materialized, Rdy, Scope, Session};
 use rdy_model::tree;
 use rdy_model::{
-    Block, BlockId, Change, FieldValue, Hash, Justification, Link, Op, RefMode, decision,
-    order_between, ref_spans,
+    Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Justification, Link, Op, RefMode,
+    decision, order_between, ref_spans,
 };
 use rdy_schema::{Issue, Pack, has_errors, skeleton_gaps, validate_block};
 use serde::{Deserialize, Serialize};
@@ -1316,6 +1316,7 @@ impl Rdy {
             provenance: session.provenance(),
             justification: req.justification,
             message: req.message,
+            links: ChangeLinks::default(),
         };
         let id = self
             .store

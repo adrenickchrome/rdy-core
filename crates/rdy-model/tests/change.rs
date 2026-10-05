@@ -35,6 +35,7 @@ fn change_id_covers_ops_and_provenance() {
         provenance: prov(),
         justification: None,
         message: "m".into(),
+        links: ChangeLinks::default(),
     };
     let mut c2 = c.clone();
     assert_eq!(c.id(), c2.id());

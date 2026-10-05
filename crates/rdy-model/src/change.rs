@@ -64,6 +64,23 @@ impl Op {
     }
 }
 
+/// A chosen member of an alternative set: the set's stable id (its first version's hash) and the
+/// member, which is a view name.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct AltChoice {
+    pub set: Hash,
+    pub member: String,
+}
+
+/// What a change is linked to. It is the last field of `Change`, so a change without links
+/// encodes as its other fields followed by three absent options.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeLinks {
+    pub intent: Option<Hash>,
+    pub alternative: Option<AltChoice>,
+    pub client_nonce: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Change {
     pub view: String,
@@ -72,6 +89,7 @@ pub struct Change {
     pub provenance: Provenance,
     pub justification: Option<Justification>,
     pub message: String,
+    pub links: ChangeLinks,
 }
 
 impl Change {

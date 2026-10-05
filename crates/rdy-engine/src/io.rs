@@ -4,7 +4,7 @@ use crate::query::field_json;
 use crate::tree_io::{self, FOLDER_FILE};
 use crate::write::{LinkInput, OpInput, WriteRequest, WriteResult};
 use crate::{Rdy, Scope, Session};
-use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Link, Op, tree};
+use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Link, Op, tree};
 use rdy_schema::{has_errors, validate_block};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -701,6 +701,7 @@ impl Rdy {
             provenance: s.provenance(),
             justification: None,
             message: format!("import from {}", dir.display()),
+            links: ChangeLinks::default(),
         };
         let id = self.store.commit_to_view(view, change)?;
         self.update_cache(view, &ops);

@@ -32,6 +32,7 @@ fn raw_create(r: &mut Rdy, block: Block) {
                 provenance: agent().provenance(),
                 justification: None,
                 message: "raw".into(),
+                links: ChangeLinks::default(),
             },
         )
         .unwrap();

@@ -1,6 +1,6 @@
 use crate::error::*;
 use crate::{Materialized, Rdy, Scope, Session, rfc3339_now};
-use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Op, Proposal, decision};
+use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Op, Proposal, decision};
 use rdy_schema::{Issue, Severity, validate_block};
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -422,6 +422,7 @@ impl Rdy {
             provenance: s.provenance(),
             justification: None,
             message: format!("accept decisions in {}", p.title),
+            links: ChangeLinks::default(),
         });
         let mut all = changes;
         all.extend(accept.clone());

@@ -521,6 +521,7 @@ fn export_of_a_figure_whose_blob_is_missing_fails_and_writes_nothing() {
         provenance: agent().provenance(),
         justification: None,
         message: "raw".into(),
+        links: ChangeLinks::default(),
     };
     a.store_mut().commit_to_view("work", change).unwrap();
     a.invalidate();
@@ -741,6 +742,7 @@ fn a_nameless_m1_doc_exports_with_a_warning_and_imports_named() {
                 provenance: agent().provenance(),
                 justification: None,
                 message: String::new(),
+                links: ChangeLinks::default(),
             },
         )
         .unwrap();
@@ -842,6 +844,7 @@ fn raw_doc(r: &mut Rdy, id: &str, name: &str) {
                 provenance: agent().provenance(),
                 justification: None,
                 message: "raw".into(),
+                links: ChangeLinks::default(),
             },
         )
         .unwrap();

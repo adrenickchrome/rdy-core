@@ -2,8 +2,8 @@ use crate::Store;
 use crate::error::StoreError;
 use crate::kinds;
 use rdy_model::{
-    Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance, StateSnapshot, Tag,
-    decision,
+    Assurance, Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance,
+    StateSnapshot, Tag, decision,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -166,9 +166,12 @@ impl Store {
     pub fn propose(&mut self, view: &str, title: &str, by: Provenance) -> Result<Hash, StoreError> {
         let v = self.view(view)?;
         let p = Proposal {
+            stable: None,
+            prev: None,
             title: title.to_string(),
             view: view.to_string(),
             changes: v.changes,
+            alternative: None,
             provenance: by,
         };
         self.put(kinds::PROPOSAL, &p)
@@ -184,6 +187,14 @@ impl Store {
             prev: head,
             state: state.id(),
             approved_by: approver,
+            changes: p.changes.clone(),
+            chosen: None,
+            checks: vec![],
+            assurance: Assurance::Local,
+            relayed_by: None,
+            relay_evidence: None,
+            approved_version: Some(*proposal),
+            rebased_from: vec![],
         };
         let landing_id = rec.id();
         let mut view = self.view(&p.view)?;

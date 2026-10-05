@@ -1,5 +1,5 @@
 use rdy_engine::{Rdy, RdyError, Session, WriteRequest, WriteResult};
-use rdy_model::{Block, BlockId, Change, FieldValue, Op, Role};
+use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Op, Role};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -85,6 +85,7 @@ pub fn raw_commit(r: &mut Rdy, view: &str, blocks: Vec<Block>) {
                 provenance: writer().provenance(),
                 justification: None,
                 message: "raw".into(),
+                links: ChangeLinks::default(),
             },
         )
         .expect("raw commit");

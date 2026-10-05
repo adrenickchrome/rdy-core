@@ -1,4 +1,4 @@
-use crate::{BlockId, Hash, Provenance, hash_of};
+use crate::{AltChoice, BlockId, Hash, Provenance, hash_of};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -15,9 +15,14 @@ impl StateSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Proposal {
+    /// The first version's id; `None` on the first version.
+    pub stable: Option<Hash>,
+    /// The version this one replaces; `None` on the first version.
+    pub prev: Option<Hash>,
     pub title: String,
     pub view: String,
     pub changes: Vec<Hash>,
+    pub alternative: Option<AltChoice>,
     pub provenance: Provenance,
 }
 
@@ -33,12 +38,59 @@ pub struct LandingRecord {
     pub prev: Option<Hash>,
     pub state: Hash,
     pub approved_by: Provenance,
+    pub changes: Vec<Hash>,
+    pub chosen: Option<AltChoice>,
+    /// Ids of check-result objects; always empty in M2.
+    pub checks: Vec<Hash>,
+    pub assurance: Assurance,
+    pub relayed_by: Option<ActorRun>,
+    pub relay_evidence: Option<RelayEvidence>,
+    /// The proposal version the approver approved.
+    pub approved_version: Option<Hash>,
+    /// The landings this one replaces after a rebase.
+    pub rebased_from: Vec<Hash>,
 }
 
 impl LandingRecord {
     pub fn id(&self) -> Hash {
         hash_of(self)
     }
+}
+
+/// How strongly a landing's approval is attested. The declaration order is the wire format
+/// (postcard's variant index) and the strength order: a relay is never stronger than `Local`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Assurance {
+    Policy,
+    Relayed,
+    Local,
+    Authoritative,
+}
+
+impl Assurance {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Assurance::Policy => "policy",
+            Assurance::Relayed => "relayed",
+            Assurance::Local => "local",
+            Assurance::Authoritative => "authoritative",
+        }
+    }
+}
+
+/// An actor and, optionally, the run it acted in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActorRun {
+    pub actor: String,
+    pub run: Option<String>,
+}
+
+/// What a relayed approval quotes, and where the quote came from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayEvidence {
+    pub quoted: String,
+    pub session_ref: String,
 }
 
 /// A name for a landing. In rdy core every tag is a version (addendum A): it freezes the snapshot

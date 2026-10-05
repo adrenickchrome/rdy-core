@@ -283,6 +283,7 @@ fn inside_a_project_canon_resolves_references_and_parents() {
                 provenance: agent.provenance(),
                 justification: None,
                 message: "m1".into(),
+                links: ChangeLinks::default(),
             },
         )
         .unwrap();
