@@ -3,7 +3,7 @@ use crate::format::{self, Format};
 use crate::fsutil;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
-use crate::segment::{CrashPoint, Location, SegmentLog, find_gap, log_has_marker, seg_path};
+use crate::segment::{CrashPoint, Location, SegmentLog, find_gap, seg_path};
 use rdy_model::{Block, Change, Hash, Op};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
@@ -26,12 +26,9 @@ pub const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 /// What one `Store::open` did, for tests, `rdy` diagnostics and the QA gate.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OpenReport {
-    /// This open used the marker rule (the acknowledged boundary is the last valid batch marker).
-    pub marker_rule: bool,
-    /// Torn or unacknowledged tails this open moved aside (marker rule).
+    /// Torn or unacknowledged tails this open moved aside (the acknowledged boundary is the last
+    /// valid batch marker).
     pub quarantined: Vec<PathBuf>,
-    /// This open upgraded an M1 log.
-    pub upgraded: bool,
     /// The `index.open` sentinel was present: the last process did not close the store.
     pub unclean_shutdown: bool,
     /// redb repaired the index at open or in its integrity check.
@@ -64,14 +61,11 @@ pub struct Store {
     poisoned: bool,
     /// Directories open fsynced because it created something in them (dur1).
     synced: Vec<PathBuf>,
-    /// Opened by `open_legacy_for_tests`: behaves as M1 did (no format, no markers).
-    legacy: bool,
     /// Set only at the end of a successful open, after the sentinel exists, and cleared by the
     /// clean close: gates `close` and `Drop`, so a store whose open failed neither removes a
     /// kill's sentinel nor does anything else on drop, and a store closes once.
     opened: bool,
-    /// Frames written since the last checkpoint (none for the M1 test writer, whose index is
-    /// durable on every write).
+    /// Frames written since the last checkpoint.
     pending: u64,
     /// When the last write finished, for `checkpoint_if_idle`.
     last_write: Instant,
@@ -276,18 +270,6 @@ pub const CHECKPOINT_IDLE: Duration = Duration::from_secs(2);
 
 impl Store {
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
-        Store::open_with(dir, false)
-    }
-
-    /// Test hook: opens and writes exactly as M1 did, so upgrade tests have an M1 store. No
-    /// `FORMAT` is read, checked or written, the M1 open rule is always used, no format batch is
-    /// written, and every frame is appended on its own with no batch marker.
-    #[doc(hidden)]
-    pub fn open_legacy_for_tests(dir: &Path) -> Result<Store, StoreError> {
-        Store::open_with(dir, true)
-    }
-
-    fn open_with(dir: &Path, legacy: bool) -> Result<Store, StoreError> {
         // dur1: each directory created here is fsynced into its parent before any write is acked
         let mut synced = fsutil::create_dir_durable(dir)?;
         let segments = dir.join("segments");
@@ -299,18 +281,13 @@ impl Store {
             .write(true)
             .open(dir.join("lock"))?;
         let lock = HeldLock::take(lock, dir)?; // lock1
-        // the sentinel of a process that died with the store open; M1 wrote none
-        let unclean = !legacy && std::fs::symlink_metadata(dir.join(INDEX_OPEN_SENTINEL)).is_ok();
-        // a newer store is refused before the index is opened or anything is written
-        let format_file = if legacy {
-            None
-        } else {
-            let f = format::read_format_file(dir)?;
-            if let Some(f) = f {
-                format::check_reader(f, dir)?;
-            }
-            f
-        };
+        // the sentinel of a process that died with the store open
+        let unclean = std::fs::symlink_metadata(dir.join(INDEX_OPEN_SENTINEL)).is_ok();
+        // a store of another format is refused before the index is opened or anything is written
+        let format_file = format::read_format_file(dir)?;
+        if let Some(f) = format_file {
+            format::check_format(f, dir)?;
+        }
         // seg1: a gap in the segment numbers means acknowledged frames are missing
         if let Some((missing, later)) = find_gap(&segments)? {
             return Err(StoreError::MissingFrames {
@@ -335,25 +312,16 @@ impl Store {
             fsutil::sync_dir(dir)?;
             synced.push(dir.to_path_buf());
         }
-        let mut report = OpenReport {
+        // The log opens by the marker rule: the acknowledged boundary is the last valid batch
+        // marker. The index's durable end is only the floor under which damage is refused, never
+        // the boundary, because it lags the log.
+        let (log, quarantined) = SegmentLog::open_marked(&segments, SEGMENT_MAX, acked)?;
+        let report = OpenReport {
+            quarantined,
             unclean_shutdown: unclean,
             redb_repaired,
             index_rebuilt,
             ..OpenReport::default()
-        };
-        // The FORMAT file, or a batch marker in the log's last two segments (found even behind
-        // damage, so a lagging index and a lost FORMAT cannot make an M2 log look like M1), means
-        // an M2 log: it opens by the marker rule. The index's durable end is only the floor under
-        // which damage is refused, never the boundary, because it lags the log. The index's format
-        // ref is not a signal: it can hold refs whose batch lost its marker. Without either the
-        // log is M1 (or a new store).
-        report.marker_rule = !legacy && (format_file.is_some() || log_has_marker(&segments)?);
-        let log = if report.marker_rule {
-            let (log, quarantined) = SegmentLog::open_marked(&segments, SEGMENT_MAX, acked)?;
-            report.quarantined = quarantined;
-            log
-        } else {
-            SegmentLog::open_acked(&segments, SEGMENT_MAX, acked)?
         };
         let mut store = Store {
             dir: dir.to_path_buf(),
@@ -364,7 +332,6 @@ impl Store {
             poisoned: false,
             synced,
             report,
-            legacy,
             opened: false,
             pending: 0,
             last_write: Instant::now(),
@@ -389,91 +356,76 @@ impl Store {
                 ),
             });
         }
+        // a store of another format whose FORMAT is lost is refused before the index moves
+        if let Some(n) = store.format_ref()? {
+            format::check_format(Format { store_format: n }, dir)?;
+        }
         let caught_up = store.catch_up()?;
         store.report.caught_up_frames = caught_up.frames;
         store.report.catch_up_commits = caught_up.commits;
-        if !legacy {
-            store.ensure_format(format_file.is_some())?;
-            // Losing this file to a power loss only costs a needless rebuild, so it is not synced.
-            // It is only ever created, never opened: an existing one (a kill's, or a link
-            // planted there) is left as it is, and nothing is followed or truncated.
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(dir.join(INDEX_OPEN_SENTINEL))
-            {
-                Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e.into()),
-                _ => {}
-            }
-            store.opened = true;
+        store.ensure_format(format_file.is_some())?;
+        // Losing this file to a power loss only costs a needless rebuild, so it is not synced.
+        // It is only ever created, never opened: an existing one (a kill's, or a link planted
+        // there) is left as it is, and nothing is followed or truncated.
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(INDEX_OPEN_SENTINEL))
+        {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e.into()),
+            _ => {}
         }
+        store.opened = true;
         Ok(store)
     }
 
-    /// Makes the log hold the store's format and `FORMAT` mirror it. The log's refs are the truth:
-    /// a newer `min_reader` there is refused; absent refs, or any refs in a log with no batch marker yet (an M1-rule open), are written as one
-    /// marked batch (which also upgrades an M1 log) and then `FORMAT` is written; a missing `FORMAT` is rewritten from
-    /// the refs. Both steps are idempotent, so a crash between them is finished by the next open.
-    fn ensure_format(&mut self, has_format_file: bool) -> Result<(), StoreError> {
-        let read = |this: &Store, name: &str| -> Result<Option<u32>, StoreError> {
-            this.index()
-                .get_ref(name)?
-                .map(|v| {
-                    format::decode_u32(&v).ok_or_else(|| {
-                        StoreError::Decode(format!("the log's ref {name} is not a decimal number"))
-                    })
+    /// The log's `meta/store_format` ref, as the index holds it.
+    fn format_ref(&self) -> Result<Option<u32>, StoreError> {
+        self.index()
+            .get_ref(format::REF_STORE_FORMAT)?
+            .map(|v| {
+                format::decode_u32(&v).ok_or_else(|| {
+                    StoreError::Decode(format!(
+                        "the log's ref {} is not a decimal number",
+                        format::REF_STORE_FORMAT
+                    ))
                 })
-                .transpose()
-        };
-        let (log_format, min_reader) = (
-            read(self, format::REF_LOG_FORMAT)?,
-            read(self, format::REF_MIN_READER)?,
-        );
-        if let Some(min_reader) = min_reader {
-            let f = Format {
-                log_format: log_format.unwrap_or(format::LOG_FORMAT),
-                min_reader,
+            })
+            .transpose()
+    }
+
+    /// Makes the log hold the store's format and `FORMAT` mirror it. The log's ref is the truth:
+    /// any other number there is refused, and so is a log with frames and no number. A new store
+    /// (an empty log) gets the ref as one marked batch, then a checkpoint, then `FORMAT`, so the
+    /// marker is in the log before `FORMAT` exists; a missing `FORMAT` is rewritten from the ref.
+    /// Both steps are idempotent, so a crash between them is finished by the next open.
+    fn ensure_format(&mut self, has_format_file: bool) -> Result<(), StoreError> {
+        let held_frames = self.log.end()
+            != Location {
+                segment: 0,
+                offset: 0,
             };
-            format::check_reader(f, &self.dir)?;
-        }
-        match (log_format, min_reader) {
-            // the refs are in the log and the open used the marker rule: only FORMAT is missing
-            (Some(log_format), Some(min_reader)) if self.report.marker_rule => {
+        match self.format_ref()? {
+            Some(n) => {
+                format::check_format(Format { store_format: n }, &self.dir)?;
                 if !has_format_file {
-                    format::write_format_file(
-                        &self.dir,
-                        Format {
-                            log_format,
-                            min_reader,
-                        },
-                    )?;
+                    format::write_format_file(&self.dir, Format::CURRENT)?;
                 }
             }
-            // The refs are absent, or the open used the M1 rule, so the log holds no batch marker
-            // yet (a kill or power loss can keep the ref frames and lose the marker). FORMAT
-            // selects the marker rule, so a marker must exist before it is written. The refs are
-            // idempotent: this batch's marker acknowledges everything before it.
-            _ => {
-                let held_frames = self.log.end()
-                    != Location {
-                        segment: 0,
-                        offset: 0,
-                    };
-                self.report.upgraded = held_frames && !self.report.marker_rule;
-                let cur = Format::CURRENT;
-                self.set_refs(vec![
-                    (
-                        format::REF_LOG_FORMAT.into(),
-                        format::encode_u32(cur.log_format),
-                    ),
-                    (
-                        format::REF_MIN_READER.into(),
-                        format::encode_u32(cur.min_reader),
-                    ),
-                ])?;
+            None if held_frames => {
+                return Err(format::other_build(
+                    &self.dir,
+                    "has a log with no store format",
+                ));
+            }
+            None => {
+                self.set_refs(vec![(
+                    format::REF_STORE_FORMAT.into(),
+                    format::encode_u32(Format::CURRENT.store_format),
+                )])?;
                 // a new store is durable from its first open
                 self.checkpoint()?;
-                format::write_format_file(&self.dir, cur)?;
+                format::write_format_file(&self.dir, Format::CURRENT)?;
             }
         }
         Ok(())
@@ -550,15 +502,7 @@ impl Store {
 
     fn replay_from(&mut self, from: Location) -> Result<CatchUp, StoreError> {
         let end = self.log.end();
-        let (log, index, legacy) = (&self.log, self.index(), self.legacy);
-        let apply = |entries: &[IndexEntry], upto: Location| {
-            if legacy {
-                // M1's index was durable on every commit
-                index.apply_durable(entries, upto)
-            } else {
-                index.apply(entries, upto)
-            }
-        };
+        let (log, index) = (&self.log, self.index());
         let mut done = CatchUp::default();
         let mut entries = vec![];
         let mut in_chunk = 0usize;
@@ -567,7 +511,7 @@ impl Store {
             done.frames += 1;
             in_chunk += 1;
             if in_chunk == CATCH_UP_CHUNK {
-                apply(&entries, next)?;
+                index.apply(&entries, next)?;
                 done.commits += 1;
                 entries.clear();
                 in_chunk = 0;
@@ -575,13 +519,11 @@ impl Store {
             Ok::<(), StoreError>(())
         })?;
         if in_chunk > 0 || done.commits == 0 {
-            apply(&entries, end)?;
+            index.apply(&entries, end)?;
             done.commits += 1;
         }
-        if !legacy {
-            // the replayed frames are in the log, not yet in the durable index
-            self.checkpoint()?;
-        }
+        // the replayed frames are in the log, not yet in the durable index
+        self.checkpoint()?;
         Ok(done)
     }
 
@@ -646,9 +588,6 @@ impl Store {
         if batch.is_empty() {
             return Ok(hashes);
         }
-        if self.legacy {
-            return self.append_and_index_legacy(hashes, batch);
-        }
         let placed = self.log.append_batch(&batch)?;
         let mut entries = vec![];
         for ((kind, payload), (loc, hash)) in batch.iter().zip(&placed) {
@@ -674,32 +613,10 @@ impl Store {
         Ok(hashes)
     }
 
-    /// The M1 write: each frame appended on its own with no marker, one sync, one index commit.
-    fn append_and_index_legacy(
-        &mut self,
-        hashes: Vec<Hash>,
-        batch: Vec<(u8, Vec<u8>)>,
-    ) -> Result<Vec<Hash>, StoreError> {
-        let mut entries = vec![];
-        for (kind, payload) in &batch {
-            let (loc, hash) = self.log.append(*kind, payload)?;
-            entries.extend(entries_for_frame(*kind, hash, loc, payload)?);
-        }
-        self.log.sync()?;
-        if std::mem::take(&mut self.faults.index_apply) {
-            return Err(StoreError::Db("injected index failure".into()));
-        }
-        self.index().apply_durable(&entries, self.log.end())?;
-        Ok(hashes)
-    }
-
     /// Makes the index durable up to everything written so far: one durable index commit. Until
     /// then a kill or power loss leaves the durable index behind the log, which the next open
-    /// catches up from the log. The M1 test writer's index is already durable, so it does nothing.
+    /// catches up from the log.
     pub fn checkpoint(&mut self) -> Result<(), StoreError> {
-        if self.legacy {
-            return Ok(());
-        }
         self.log.crash_point(CrashPoint::BeforeCheckpoint);
         if std::mem::take(&mut self.faults.checkpoint) {
             return Err(StoreError::Db("injected checkpoint failure".into()));

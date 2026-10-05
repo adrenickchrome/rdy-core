@@ -26,17 +26,6 @@ pub fn project() -> (tempfile::TempDir, Rdy) {
     (dir, r)
 }
 
-/// An M1-format project (for upgrade tests): `.rdy/config.yaml`, `.rdy/packs/` and the store at
-/// `.rdy/store/` with no batch markers, no FORMAT and a durable index, as an M1 binary left it.
-/// Writes through the returned handle keep that format until it is dropped.
-pub fn m1_project() -> (tempfile::TempDir, Rdy) {
-    let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir_all(dir.path().join(".rdy/packs")).expect("packs");
-    std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: rdy-standard\n").expect("config");
-    let r = Rdy::open_legacy_for_tests(dir.path()).expect("open as M1");
-    (dir, r)
-}
-
 pub fn write(r: &mut Rdy, view: &str, ops: serde_json::Value) -> Result<WriteResult, RdyError> {
     let ops = serde_json::from_value(ops)
         .map_err(|e| RdyError::new(rdy_engine::E_BAD_INPUT, e.to_string(), "fix the test's ops"))?;

@@ -1,69 +1,71 @@
-//! The store's format record: the highest log format it was written with and the oldest reader
-//! that can open it. The log is the truth (refs `meta/log_format` and `meta/min_reader`); the
-//! `FORMAT` file mirrors them so a newer store is refused before the index is opened.
+//! The store's format (plan M2a1, fmt2): one number. The log is the truth (ref
+//! `meta/store_format`); the `FORMAT` file mirrors it so a store of another format is refused
+//! before the index is opened. A store opens only if its number is this binary's: there is no
+//! compatibility between formats.
 use crate::error::StoreError;
 use crate::fsutil;
 use std::path::Path;
 
-/// The log format this binary writes.
-pub const LOG_FORMAT: u32 = 2;
-/// The highest `min_reader` this binary opens.
-pub const READER_FORMAT: u32 = 2;
+/// The store format this binary reads and writes.
+pub const STORE_FORMAT: u32 = 3;
 /// The mirror file in the store directory.
 pub const FORMAT_FILE: &str = "FORMAT";
-/// The log ref holding `log_format`, in ASCII decimal.
-pub const REF_LOG_FORMAT: &str = "meta/log_format";
-/// The log ref holding `min_reader`, in ASCII decimal.
-pub const REF_MIN_READER: &str = "meta/min_reader";
+/// The log ref holding `store_format`, in ASCII decimal.
+pub const REF_STORE_FORMAT: &str = "meta/store_format";
 
 const FIRST_LINE: &str = "rdy store format";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Format {
-    pub log_format: u32,
-    pub min_reader: u32,
+    pub store_format: u32,
 }
 
 impl Format {
     pub const CURRENT: Format = Format {
-        log_format: LOG_FORMAT,
-        min_reader: READER_FORMAT,
+        store_format: STORE_FORMAT,
     };
 
     pub fn to_text(&self) -> String {
-        format!(
-            "{FIRST_LINE}\nlog_format {}\nmin_reader {}\n",
-            self.log_format, self.min_reader
-        )
+        format!("{FIRST_LINE}\nstore_format {}\n", self.store_format)
     }
 
-    /// Parses `FORMAT` text. Unknown `<key> <number>` lines are ignored (a newer rdy may add
-    /// keys); both known keys are required.
-    pub fn parse(text: &str) -> Result<Format, String> {
+    /// Parses `FORMAT` text. Unknown `<key> <number>` lines are ignored (a later rdy may add
+    /// keys); without a `store_format` line the result is `None`.
+    pub fn parse(text: &str) -> Result<Option<Format>, String> {
         let mut lines = text.lines();
         if lines.next() != Some(FIRST_LINE) {
             return Err(format!("the first line is not {FIRST_LINE:?}"));
         }
-        let (mut log_format, mut min_reader) = (None, None);
+        let mut store_format = None;
         for line in lines {
             let number = line
                 .split_once(' ')
                 .and_then(|(key, n)| decode_u32(n.as_bytes()).map(|n| (key, n)));
             match number {
-                Some(("log_format", n)) => log_format = Some(n),
-                Some(("min_reader", n)) => min_reader = Some(n),
+                Some(("store_format", n)) => store_format = Some(n),
                 Some(_) => {}
                 None => return Err(format!("bad line {line:?}: expected `<key> <number>`")),
             }
         }
-        Ok(Format {
-            log_format: log_format.ok_or("the key log_format is missing")?,
-            min_reader: min_reader.ok_or("the key min_reader is missing")?,
-        })
+        Ok(store_format.map(|store_format| Format { store_format }))
     }
 }
 
-/// Reads `<store_dir>/FORMAT`: None if the file does not exist.
+/// The one refusal for a store this binary does not open: `what` says how the store at
+/// `store_dir` tells it was written by another build.
+pub(crate) fn other_build(store_dir: &Path, what: &str) -> StoreError {
+    StoreError::Format {
+        message: format!(
+            "this store was written by a different rdy build: {} {what}, and this rdy uses store \
+             format {STORE_FORMAT}",
+            store_dir.display()
+        ),
+        fix: "re-create it with this rdy".into(),
+    }
+}
+
+/// Reads `<store_dir>/FORMAT`: None if the file does not exist. A file with no `store_format`
+/// line is another build's store and is refused.
 pub fn read_format_file(store_dir: &Path) -> Result<Option<Format>, StoreError> {
     let path = store_dir.join(FORMAT_FILE);
     let bytes = match std::fs::read(&path) {
@@ -80,7 +82,13 @@ pub fn read_format_file(store_dir: &Path) -> Result<Option<Format>, StoreError> 
             .into(),
     };
     let text = String::from_utf8(bytes).map_err(|_| unreadable("it is not UTF-8 text".into()))?;
-    Format::parse(&text).map(Some).map_err(unreadable)
+    match Format::parse(&text).map_err(unreadable)? {
+        Some(f) => Ok(Some(f)),
+        None => Err(other_build(
+            store_dir,
+            "has a FORMAT file with no store_format line",
+        )),
+    }
 }
 
 /// Writes `<store_dir>/FORMAT` durably.
@@ -89,17 +97,13 @@ pub fn write_format_file(store_dir: &Path, f: Format) -> Result<(), StoreError> 
     Ok(())
 }
 
-/// Refuses a store that needs a newer reader than this binary.
-pub fn check_reader(f: Format, store_dir: &Path) -> Result<(), StoreError> {
-    if f.min_reader > READER_FORMAT {
-        return Err(StoreError::Format {
-            message: format!(
-                "store written by a newer rdy: {} needs reader format {}, and this rdy reads up to format {READER_FORMAT}",
-                store_dir.display(),
-                f.min_reader
-            ),
-            fix: "upgrade rdy to the version that wrote this store".into(),
-        });
+/// Refuses a store of any format but this binary's.
+pub fn check_format(f: Format, store_dir: &Path) -> Result<(), StoreError> {
+    if f.store_format != STORE_FORMAT {
+        return Err(other_build(
+            store_dir,
+            &format!("has store format {}", f.store_format),
+        ));
     }
     Ok(())
 }

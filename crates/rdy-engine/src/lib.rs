@@ -108,7 +108,7 @@ impl Rdy {
                 "open the existing project, or init a different directory",
             ));
         }
-        // dur1: .rdy and .rdy/packs are fsynced into their parents (the store adds .rdy/store2)
+        // dur1: .rdy and .rdy/packs are fsynced into their parents (the store adds .rdy/store)
         rdy_store::fsutil::create_dir_durable(&dot.join("packs")).map_err(io)?;
         load_pack(project, pack)?;
         let cfg = serde_yaml_ng::to_string(&Config {
@@ -120,22 +120,6 @@ impl Rdy {
     }
 
     pub fn open(project: &Path) -> Result<Rdy, RdyError> {
-        Rdy::open_with(project, layout::open_project_store)
-    }
-
-    /// Test hook: `Rdy::open` with the store opened as an M1 binary would, directly at
-    /// `<project>/.rdy/store` (no store2 layout, no stub, no format).
-    #[doc(hidden)]
-    pub fn open_legacy_for_tests(project: &Path) -> Result<Rdy, RdyError> {
-        Rdy::open_with(project, |rdy_dir| {
-            Store::open_legacy_for_tests(&rdy_dir.join(layout::LEGACY_DIR))
-        })
-    }
-
-    fn open_with(
-        project: &Path,
-        open_store: impl FnOnce(&Path) -> Result<Store, rdy_store::StoreError>,
-    ) -> Result<Rdy, RdyError> {
         let cfg_path = project.join(".rdy/config.yaml");
         if !cfg_path.exists() {
             return Err(RdyError::new(
@@ -148,7 +132,7 @@ impl Rdy {
         let cfg: Config = serde_yaml_ng::from_str(&text)
             .map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "fix .rdy/config.yaml"))?;
         let (pack, lineage) = load_pack(project, &cfg.pack)?;
-        let store = open_store(&project.join(".rdy"))?;
+        let store = layout::open_project_store(&project.join(".rdy"))?;
         Ok(Rdy {
             root: project.to_path_buf(),
             store,
