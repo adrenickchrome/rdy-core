@@ -176,6 +176,31 @@ fn declares(css: &Css, part: &str, prop: &str, values: &[&str]) -> bool {
     })
 }
 
+/// Task 5 handoff: the search input's border is a UI boundary, so it uses `--line-ui` (3:1 on
+/// the page), not the decorative `--line` (about 1.2:1). `var(--line)` is not a literal, so css1
+/// cannot catch it. Task 7 writes the `#search` rule inside the `search` section; this test is
+/// owned by Task 7 and its ignore is removed there.
+#[test]
+#[ignore = "SITE-BAR: Task 7"]
+fn css1_the_search_input_border_uses_the_ui_line_and_accent_on_focus() {
+    let css = canon_css();
+    assert!(
+        declares(&css, "#search", "border", &["1px solid var(--line-ui)"]),
+        "#search must declare `border: 1px solid var(--line-ui)`"
+    );
+    assert!(
+        declares(&css, "#search:focus", "border-color", &["var(--accent)"]),
+        "#search:focus must declare `border-color: var(--accent)`"
+    );
+    assert!(
+        !rules_for(&css, "#search").any(|b| b
+            .decls
+            .iter()
+            .any(|(_, v)| v.contains("var(--line)") || v.contains("var(--line-strong)"))),
+        "#search must not take its border from --line"
+    );
+}
+
 #[test]
 fn scroll1_no_fixed_width_wider_than_the_phone() {
     let wide: Vec<_> = fixed_widths(&canon_css())
