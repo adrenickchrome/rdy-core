@@ -230,7 +230,83 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
     Ok(env)
 }
 
+/// ren1: the file that marks a directory as a site rdy rendered, which a later render may replace.
+pub const SITE_MARKER: &str = ".rdy-site";
+
+/// Renders `scope` as a static site at `out`, as export does: into a staging directory beside
+/// `out`, then swapped into place, so renamed and deleted pages never linger. `out` may be new,
+/// an empty directory, or a site rdy rendered before; anything else is refused untouched, and a
+/// symbolic link is never followed.
 pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
+    let refuse = |what: String| {
+        RdyError::new(
+            rdy_engine::E_BAD_INPUT,
+            what,
+            "render into a new or empty directory, or one rdy rendered before (it holds .rdy-site)",
+        )
+    };
+    if std::fs::symlink_metadata(out).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(refuse(format!("{} is a symbolic link", out.display())));
+    }
+    if out.exists() {
+        if !out.is_dir() {
+            return Err(refuse(format!("{} is a file", out.display())));
+        }
+        let empty = std::fs::read_dir(out).map_err(io)?.next().is_none();
+        let marked = std::fs::symlink_metadata(out.join(SITE_MARKER)).is_ok_and(|m| m.is_file());
+        if !empty && !marked {
+            return Err(refuse(format!(
+                "{} is not empty and is not a site rdy rendered",
+                out.display()
+            )));
+        }
+    }
+    let name = out
+        .file_name()
+        .ok_or_else(|| refuse(format!("{} does not name a directory", out.display())))?
+        .to_string_lossy()
+        .to_string();
+    let parent = out
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent).map_err(io)?;
+    let staging = parent.join(format!(".{name}.rdy-render-partial"));
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging).map_err(io)?;
+    }
+    let stats = match render_into(rdy, scope, &staging).and_then(|s| {
+        std::fs::write(
+            staging.join(SITE_MARKER),
+            "A site rendered by rdy. rdy render replaces this directory as a whole.\n",
+        )
+        .map_err(io)?;
+        Ok(s)
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
+    if out.exists() {
+        let old = parent.join(format!(".{name}.rdy-render-old"));
+        if old.exists() {
+            std::fs::remove_dir_all(&old).map_err(io)?;
+        }
+        std::fs::rename(out, &old).map_err(io)?;
+        if let Err(e) = std::fs::rename(&staging, out) {
+            let _ = std::fs::rename(&old, out);
+            return Err(io(e));
+        }
+        std::fs::remove_dir_all(&old).map_err(io)?;
+    } else {
+        std::fs::rename(&staging, out).map_err(io)?;
+    }
+    Ok(stats)
+}
+
+fn render_into(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
     let position = rdy.version_position(scope)?;
     let versions = rdy.versions()?;
     let current = versions.last().map(|v| v.name.clone());

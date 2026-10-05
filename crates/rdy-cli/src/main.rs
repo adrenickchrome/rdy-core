@@ -87,6 +87,7 @@ enum Cmd {
         view: String,
     },
     Render {
+        /// Output directory: new, empty, or a site rdy rendered before (replaced as a whole).
         #[arg(long)]
         out: PathBuf,
         /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
