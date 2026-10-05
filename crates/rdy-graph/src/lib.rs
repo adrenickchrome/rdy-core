@@ -151,10 +151,21 @@ const IMPACT_LINKS: [&str; 6] = [
 /// block) without following them.
 const IMPACT_SHOWN: [&str; 2] = [decision::REFINES, decision::SUPERSEDES];
 
+/// Where the graph reads a block's current content when it checks a pin.
+pub trait BlockLookup {
+    fn block(&self, id: &BlockId) -> Option<&Block>;
+}
+
+impl BlockLookup for BTreeMap<BlockId, Block> {
+    fn block(&self, id: &BlockId) -> Option<&Block> {
+        self.get(id)
+    }
+}
+
 impl Graph {
-    pub fn build(blocks: &BTreeMap<BlockId, Block>) -> Graph {
+    pub fn build_from<'a>(blocks: impl IntoIterator<Item = &'a Block>) -> Graph {
         let mut g = Graph::default();
-        for b in blocks.values() {
+        for b in blocks {
             g.versions.insert(b.id.clone(), b.version_hash());
             if let Some(s) = decision::status(b) {
                 g.decision_status.insert(b.id.clone(), s);
@@ -337,7 +348,7 @@ impl Graph {
 
     pub fn suspects(
         &self,
-        blocks: &BTreeMap<BlockId, Block>,
+        blocks: &dyn BlockLookup,
         old: &dyn Fn(&Hash) -> Option<Block>,
     ) -> Vec<Suspect> {
         unique(
@@ -352,7 +363,7 @@ impl Graph {
     pub fn suspects_of(
         &self,
         id: &BlockId,
-        blocks: &BTreeMap<BlockId, Block>,
+        blocks: &dyn BlockLookup,
         old: &dyn Fn(&Hash) -> Option<Block>,
     ) -> Vec<Suspect> {
         unique(
@@ -365,7 +376,7 @@ impl Graph {
     fn edge_suspect(
         &self,
         e: &Edge,
-        blocks: &BTreeMap<BlockId, Block>,
+        blocks: &dyn BlockLookup,
         old: &dyn Fn(&Hash) -> Option<Block>,
     ) -> Option<Suspect> {
         if e.kind == EdgeKind::Contains {
@@ -397,7 +408,7 @@ impl Graph {
                 match (e.pin, self.versions.get(&e.to)) {
                     (Some(_), None) => "deleted",
                     (Some(pin), Some(cur)) if pin != *cur => {
-                        let same = match (old(&pin), blocks.get(&e.to)) {
+                        let same = match (old(&pin), blocks.block(&e.to)) {
                             (Some(a), Some(b)) => same_content(&a, b),
                             _ => false,
                         };

@@ -246,24 +246,24 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
             let mut r = Rdy::open(&project)?;
             let out = match cmd {
                 Cmd::Status => {
-                    let landings = r.store().landings()?.len();
-                    let canon = r.version_position(&Scope::Canon)?;
+                    let st = r.read();
+                    let landings = st.landings()?.len();
+                    let canon = st.version_position(&Scope::Canon)?;
                     let mut warnings = vec![];
                     let mut views = vec![];
-                    for (n, _) in r.store().refs_with_prefix("view/")? {
-                        let name = n.trim_start_matches("view/").to_string();
+                    for name in st.view_names() {
                         if name.contains(':') {
                             warnings.push(format!(
                                 "view {name:?} has ':' in its name (reserved for scopes since addendum A): read it as view:{name}, propose it with --view view:{name}; it can't receive new writes"
                             ));
                         }
-                        let changes = r.store().view_head(&name)?.map_or(0, |h| h.len);
-                        let pos = r.version_position(&Scope::View(name.clone()))?;
+                        let changes = st.included(&name).len();
+                        let pos = st.version_position(&Scope::View(name.clone()))?;
                         views.push(
                             json!({"name": name, "changes": changes, "version_position": pos}),
                         );
                     }
-                    let suspects = r.suspects(&Scope::Canon)?.len();
+                    let suspects = st.suspects(&Scope::Canon)?.len();
                     let mut text = format!(
                         "pack {}\ncanon: {} ({landings} landings, {suspects} suspects)\nviews:\n{}",
                         r.pack().name,
@@ -282,14 +282,14 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                         text.push_str(&format!("\nwarning: {w}"));
                     }
                     Ok((
-                        json!({"pack": r.pack().name, "landings": landings, "suspects": suspects, "version_position": canon, "views": views, "warnings": warnings}),
+                        json!({"pack": r.pack().name, "landings": landings, "suspects": suspects, "version_position": canon, "views": views, "warnings": warnings, "seq": st.seq()}),
                         text,
                     ))
                 }
                 Cmd::Show { id, scope } => {
-                    let scope = r.resolve_read_scope(&scope, None)?;
-                    let bid = r.resolve_id(&scope, &id)?;
-                    let ctx = r.context(&scope, &bid)?;
+                    let scope = r.read().resolve_read_scope(&scope, None)?;
+                    let bid = r.read().resolve_id(&scope, &id)?;
+                    let ctx = r.read().context(&scope, &bid)?;
                     let json = serde_json::to_value(&ctx).expect("json");
                     let status = status_words(&json["status"]);
                     let mut fields = json["fields"].clone();
@@ -351,8 +351,8 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     ))
                 }
                 Cmd::Ls { path, scope, depth } => {
-                    let scope = r.resolve_read_scope(&scope, None)?;
-                    let nodes = r.tree(&scope, path.as_deref(), depth)?;
+                    let scope = r.read().resolve_read_scope(&scope, None)?;
+                    let nodes = r.read().tree(&scope, path.as_deref(), depth)?;
                     let mut lines = vec![];
                     ls_text(&nodes, 0, &mut lines);
                     Ok((
@@ -365,11 +365,12 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     let mut text = String::new();
                     let mut tags: std::collections::HashMap<String, Vec<String>> =
                         Default::default();
-                    for v in r.versions()? {
+                    let st = r.read();
+                    for v in st.versions()? {
                         tags.entry(v.landing.clone()).or_default().push(v.name);
                     }
-                    for (id, rec) in r.store().landings()? {
-                        let p = r.store().proposal(&rec.proposal)?;
+                    for (id, rec) in st.landings()? {
+                        let p = st.reader().proposal(&rec.proposal)?;
                         let names = tags.get(&id.to_string()).cloned().unwrap_or_default();
                         text.push_str(&format!(
                             "{}  {}  by {}",
@@ -386,9 +387,9 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     Ok((Value::Array(rows), text))
                 }
                 Cmd::Impact { id, depth, scope } => {
-                    let scope = r.resolve_read_scope(&scope, None)?;
-                    let bid = r.resolve_id(&scope, &id)?;
-                    let items = r.impact(&scope, &bid, depth)?;
+                    let scope = r.read().resolve_read_scope(&scope, None)?;
+                    let bid = r.read().resolve_id(&scope, &id)?;
+                    let items = r.read().impact(&scope, &bid, depth)?;
                     let text = items
                         .iter()
                         .map(|i| {
@@ -435,7 +436,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     Ok((serde_json::to_value(&v).expect("json"), text))
                 }
                 Cmd::Tags => {
-                    let versions = r.versions()?;
+                    let versions = r.read().versions()?;
                     let current = versions.last().map(|v| v.name.clone());
                     let text = versions
                         .iter()
@@ -460,8 +461,8 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                 }
                 Cmd::Edit { id, view } => {
                     let scope = Scope::View(view.clone());
-                    let bid = r.resolve_id(&scope, &id)?;
-                    let block = r.block(&scope, &bid)?;
+                    let bid = r.read().resolve_id(&scope, &id)?;
+                    let block = r.read().block(&scope, &bid)?;
                     let tmp = tempfile::Builder::new()
                         .prefix("rdy-edit-")
                         .suffix(".yaml")
@@ -499,8 +500,8 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     ))
                 }
                 Cmd::Render { out, scope } => {
-                    let scope = r.resolve_read_scope(&scope, None)?;
-                    let s = rdy_render::render_site(&mut r, &scope, &out)?;
+                    let scope = r.read().resolve_read_scope(&scope, None)?;
+                    let s = rdy_render::render_site(&r.read(), &scope, &out)?;
                     Ok((
                         serde_json::to_value(&s).expect("json"),
                         format!(
@@ -515,8 +516,8 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     ))
                 }
                 Cmd::Export { out, scope } => {
-                    let scope = r.resolve_read_scope(&scope, None)?;
-                    let s = r.export(&scope, &out)?;
+                    let scope = r.read().resolve_read_scope(&scope, None)?;
+                    let s = r.read().export(&scope, &out)?;
                     Ok((
                         serde_json::to_value(&s).expect("json"),
                         format!(
@@ -540,7 +541,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     ))
                 }
                 Cmd::Reindex => {
-                    r.store_mut().reindex()?;
+                    r.reindex()?;
                     Ok((json!({"reindexed": true}), "index rebuilt".into()))
                 }
                 Cmd::Fsck => {
@@ -585,14 +586,16 @@ fn run_check(project: Option<PathBuf>, path: &Path, pack: Option<&str>, as_json:
             .map_err(|e| RdyError::new(E_IO, e.to_string(), "run from an existing directory"))?;
         let root = project.unwrap_or_else(|| find_project(&cwd));
         if root.join(".rdy/config.yaml").exists() {
-            let mut r = Rdy::open(&root)?;
+            let r = Rdy::open(&root)?;
             let pk = match pack {
                 Some(name) => resolve_pack(&root, name)?,
                 None => r.pack().clone(),
             };
-            let canon = r.materialized(&Scope::Canon)?.clone();
+            let st = r.read();
+            let canon = st.materialized(&Scope::Canon)?;
+            drop(st);
             close_project(r);
-            check_path(&pk, Some(&canon), path)
+            check_path(&pk, Some(&*canon), path)
         } else {
             let name = pack.ok_or_else(|| {
                 RdyError::new(

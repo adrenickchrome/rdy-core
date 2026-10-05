@@ -1,7 +1,7 @@
 mod html;
 pub use html::{escape, text_html};
 
-use rdy_engine::{E_IO, Materialized, Rdy, RdyError, Scope, summary_in};
+use rdy_engine::{E_IO, Materialized, RdyError, ReadState, Scope, summary_in};
 use rdy_graph::{DerivedStatus, EdgeKind};
 use rdy_model::{Block, BlockId, FieldValue, Hash, decision, tree};
 use serde::Serialize;
@@ -109,7 +109,7 @@ impl<'a> Site<'a> {
         let mut out = vec![];
         let mut cur = Some(id.clone());
         while let Some(c) = cur {
-            if out.len() > self.m.blocks.len() {
+            if out.len() > self.m.len() {
                 break;
             }
             let Some(b) = self.m.get(&c) else { break };
@@ -250,7 +250,7 @@ fn io_at(what: &str, path: &Path, e: std::io::Error) -> RdyError {
 /// an empty directory, or a site rdy rendered before; anything else is refused untouched, and a
 /// symbolic link is never followed. When `out` cannot be swapped by rename (its parent is not
 /// writable, or it is a mount point), its contents are replaced in place instead.
-pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
+pub fn render_site(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
     let refuse = |what: String| {
         RdyError::new(
             rdy_engine::E_BAD_INPUT,
@@ -488,7 +488,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), RdyError> {
     }
 }
 
-fn render_into(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
+fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
     let position = rdy.version_position(scope)?;
     let versions = rdy.versions()?;
     let current = versions.last().map(|v| v.name.clone());
@@ -496,15 +496,14 @@ fn render_into(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary
         .iter()
         .map(|v| json!({ "name": v.name, "landing_short": &v.landing[..12], "message": v.message, "current": Some(&v.name) == current.as_ref() }))
         .collect();
-    let m = rdy.materialized(scope)?.clone();
+    let m = rdy.materialized(scope)?;
     let suspects: BTreeSet<BlockId> = rdy.suspects(scope)?.into_iter().map(|s| s.block).collect();
     // figure blobs that exist in the store (checked before `g` borrows `rdy`)
     let present: BTreeSet<Hash> = m
-        .blocks
-        .values()
+        .iter()
         .filter(|b| b.block_type == "figure")
         .filter_map(|b| b.field_str("blob")?.parse::<Hash>().ok())
-        .filter(|h| rdy.store().has_blob(h).unwrap_or(false))
+        .filter(|h| rdy.reader().has_blob(h).unwrap_or(false))
         .collect();
     let g = rdy.graph(scope)?;
     let env = env()?;
@@ -643,11 +642,7 @@ fn render_into(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary
     }
 
     let mut decisions = vec![];
-    for b in m
-        .blocks
-        .values()
-        .filter(|b| b.block_type == decision::DECISION)
-    {
+    for b in m.iter().filter(|b| b.block_type == decision::DECISION) {
         let status = status_word(&g.status(&b.id));
         let dpage = format!("_decision/{}.html", b.id);
         let link_row = |e_kind: &EdgeKind, id: &BlockId, part: &Option<String>| {
@@ -710,7 +705,7 @@ fn render_into(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary
     for h in blobs {
         std::fs::write(
             out.join("_assets").join(h.to_string()),
-            rdy.store().get_blob(&h)?,
+            rdy.reader().get_blob(&h)?,
         )
         .map_err(io)?;
         stats.assets += 1;

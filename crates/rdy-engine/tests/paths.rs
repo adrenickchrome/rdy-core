@@ -77,43 +77,51 @@ fn id(res: &WriteResult, k: &str) -> BlockId {
 
 #[test]
 fn path_of_and_resolve_path() {
-    let (_d, mut r, res) = tree();
+    let (_d, r, res) = tree();
     let work = Scope::View("work".into());
     assert_eq!(
-        r.path_of(&work, &id(&res, "$w")).unwrap().as_deref(),
+        r.read().path_of(&work, &id(&res, "$w")).unwrap().as_deref(),
         Some("wallets")
     );
     assert_eq!(
-        r.path_of(&work, &id(&res, "$t")).unwrap().as_deref(),
+        r.read().path_of(&work, &id(&res, "$t")).unwrap().as_deref(),
         Some("wallets/transactions")
     );
     assert_eq!(
-        r.path_of(&work, &id(&res, "$s")).unwrap().as_deref(),
+        r.read().path_of(&work, &id(&res, "$s")).unwrap().as_deref(),
         Some("wallets/transactions"),
         "inner blocks have their doc's path"
     );
     assert_eq!(
-        r.path_of(&work, &id(&res, "$c")).unwrap().as_deref(),
+        r.read().path_of(&work, &id(&res, "$c")).unwrap().as_deref(),
         Some("wallets/cards")
     );
     assert_eq!(
-        r.path_of(&work, &BlockId::parse("c-ZZZZZ").unwrap())
+        r.read()
+            .path_of(&work, &BlockId::parse("c-ZZZZZ").unwrap())
             .unwrap_err()
             .code,
         "E_UNKNOWN_BLOCK"
     );
     assert_eq!(
-        r.resolve_path(&work, "wallets/transactions").unwrap(),
+        r.read()
+            .resolve_path(&work, "wallets/transactions")
+            .unwrap(),
         id(&res, "$t")
     );
     assert_eq!(
-        r.resolve_path(&work, "Wallets/TRANSACTIONS").unwrap(),
+        r.read()
+            .resolve_path(&work, "Wallets/TRANSACTIONS")
+            .unwrap(),
         id(&res, "$t"),
         "unique case-insensitive match"
     );
-    assert_eq!(r.resolve_id(&work, "glossary").unwrap(), id(&res, "$g"));
     assert_eq!(
-        r.resolve_id(&work, &res.created["$s"]).unwrap(),
+        r.read().resolve_id(&work, "glossary").unwrap(),
+        id(&res, "$g")
+    );
+    assert_eq!(
+        r.read().resolve_id(&work, &res.created["$s"]).unwrap(),
         id(&res, "$s"),
         "id-shaped text is an id"
     );
@@ -121,26 +129,30 @@ fn path_of_and_resolve_path() {
 
 #[test]
 fn paths_ignore_leading_and_trailing_slashes() {
-    let (_d, mut r, res) = tree();
+    let (_d, r, res) = tree();
     let work = Scope::View("work".into());
     for p in [
         "/wallets/",
         "wallets/transactions/",
         "/wallets/transactions",
     ] {
-        assert!(r.resolve_path(&work, p).is_ok(), "{p}");
+        assert!(r.read().resolve_path(&work, p).is_ok(), "{p}");
     }
-    assert_eq!(r.resolve_path(&work, "/wallets/").unwrap(), id(&res, "$w"));
     assert_eq!(
-        r.resolve_path(&work, "/").unwrap_err().code,
+        r.read().resolve_path(&work, "/wallets/").unwrap(),
+        id(&res, "$w")
+    );
+    assert_eq!(
+        r.read().resolve_path(&work, "/").unwrap_err().code,
         "E_UNKNOWN_BLOCK"
     );
 }
 
 #[test]
 fn an_unknown_path_lists_the_nearest_folder() {
-    let (_d, mut r, _) = tree();
+    let (_d, r, _) = tree();
     let e = r
+        .read()
         .resolve_path(&Scope::View("work".into()), "wallets/nope")
         .unwrap_err();
     assert_eq!(e.code, "E_UNKNOWN_BLOCK");
@@ -149,6 +161,7 @@ fn an_unknown_path_lists_the_nearest_folder() {
         "{e}"
     );
     let e = r
+        .read()
         .resolve_path(&Scope::View("work".into()), "nowhere/x")
         .unwrap_err();
     assert!(
@@ -171,11 +184,11 @@ fn an_ambiguous_case_insensitive_path_is_refused() {
     );
     let work = Scope::View("work".into());
     assert_eq!(
-        r.resolve_path(&work, "Specs").unwrap().as_str(),
+        r.read().resolve_path(&work, "Specs").unwrap().as_str(),
         "fd-AAAAA",
         "exact match wins"
     );
-    let e = r.resolve_path(&work, "SPECS").unwrap_err();
+    let e = r.read().resolve_path(&work, "SPECS").unwrap_err();
     assert_eq!(e.code, "E_UNKNOWN_BLOCK");
     assert!(e.message.contains("more than one"), "{e}");
 }
@@ -189,23 +202,25 @@ fn paths_follow_renames_and_moves() {
         json!([{"op": "update", "id": res.created["$w"], "fields": {"name": "purses"}}]),
     );
     assert_eq!(
-        r.path_of(&work, &id(&res, "$t")).unwrap().as_deref(),
+        r.read().path_of(&work, &id(&res, "$t")).unwrap().as_deref(),
         Some("purses/transactions")
     );
-    assert!(r.resolve_path(&work, "wallets").is_err());
+    assert!(r.read().resolve_path(&work, "wallets").is_err());
     write(
         &mut r,
         json!([{"op": "move", "id": res.created["$t"], "parent": res.created["$c"]}]),
     );
     assert_eq!(
-        r.path_of(&work, &id(&res, "$t")).unwrap().as_deref(),
+        r.read().path_of(&work, &id(&res, "$t")).unwrap().as_deref(),
         Some("purses/cards/transactions")
     );
     assert_eq!(
-        r.resolve_path(&work, "purses/cards/transactions").unwrap(),
+        r.read()
+            .resolve_path(&work, "purses/cards/transactions")
+            .unwrap(),
         id(&res, "$t")
     );
-    assert!(r.resolve_path(&work, "purses/transactions").is_err());
+    assert!(r.read().resolve_path(&work, "purses/transactions").is_err());
 }
 
 #[test]
@@ -228,26 +243,29 @@ fn nameless_docs_have_effective_names() {
     }
     let work = Scope::View("work".into());
     assert_eq!(
-        r.path_of(&work, &BlockId::parse("d-AAAAA").unwrap())
+        r.read()
+            .path_of(&work, &BlockId::parse("d-AAAAA").unwrap())
             .unwrap()
             .as_deref(),
         Some("notes")
     );
     assert_eq!(
-        r.path_of(&work, &BlockId::parse("d-BBBBB").unwrap())
+        r.read()
+            .path_of(&work, &BlockId::parse("d-BBBBB").unwrap())
             .unwrap()
             .as_deref(),
         Some("notes-2"),
         "de-duplicated in id order"
     );
     assert_eq!(
-        r.path_of(&work, &BlockId::parse("d-CCCCC").unwrap())
+        r.read()
+            .path_of(&work, &BlockId::parse("d-CCCCC").unwrap())
             .unwrap()
             .as_deref(),
         Some("untitled-ccccc")
     );
     assert_eq!(
-        r.resolve_path(&work, "notes-2").unwrap().as_str(),
+        r.read().resolve_path(&work, "notes-2").unwrap().as_str(),
         "d-BBBBB"
     );
     // the derived names are cached per parent: renaming d-AAAAA frees "notes" for d-BBBBB
@@ -256,13 +274,20 @@ fn nameless_docs_have_effective_names() {
         json!([{"op": "update", "id": "d-AAAAA", "fields": {"name": "alpha"}}]),
     );
     assert_eq!(
-        r.path_of(&work, &BlockId::parse("d-BBBBB").unwrap())
+        r.read()
+            .path_of(&work, &BlockId::parse("d-BBBBB").unwrap())
             .unwrap()
             .as_deref(),
         Some("notes")
     );
-    assert_eq!(r.resolve_path(&work, "notes").unwrap().as_str(), "d-BBBBB");
-    assert_eq!(r.resolve_path(&work, "alpha").unwrap().as_str(), "d-AAAAA");
+    assert_eq!(
+        r.read().resolve_path(&work, "notes").unwrap().as_str(),
+        "d-BBBBB"
+    );
+    assert_eq!(
+        r.read().resolve_path(&work, "alpha").unwrap().as_str(),
+        "d-AAAAA"
+    );
 }
 
 #[test]
@@ -285,13 +310,17 @@ fn new_folder_and_doc_create_missing_parents_in_one_change() {
         "one change"
     );
     let work = Scope::View("work".into());
-    let doc = r.resolve_path(&work, "wallets/cards/limits").unwrap();
-    let b = r.block(&work, &doc).unwrap();
+    let doc = r
+        .read()
+        .resolve_path(&work, "wallets/cards/limits")
+        .unwrap();
+    let b = r.read().block(&work, &doc).unwrap();
     assert_eq!(
         (b.field_str("title"), b.field_str("doc_type")),
         (Some("Card limits"), Some("overview"))
     );
     let sections: Vec<String> = r
+        .read()
         .materialized(&work)
         .unwrap()
         .children(Some(&doc))
@@ -326,7 +355,7 @@ fn new_folder_and_doc_create_missing_parents_in_one_change() {
     )
     .unwrap();
     assert_eq!(
-        r.block(&work, &gid).unwrap().field_str("title"),
+        r.read().block(&work, &gid).unwrap().field_str("title"),
         Some("glossary")
     );
 }
@@ -348,9 +377,9 @@ fn new_doc_needs_a_type_when_the_pack_has_no_default() {
 
 #[test]
 fn tree_lists_folders_and_docs_with_depth() {
-    let (_d, mut r, res) = tree();
+    let (_d, r, res) = tree();
     let work = Scope::View("work".into());
-    let all = r.tree(&work, None, None).unwrap();
+    let all = r.read().tree(&work, None, None).unwrap();
     assert_eq!(
         all.iter().map(|n| n.path.as_str()).collect::<Vec<_>>(),
         ["wallets", "glossary"]
@@ -364,10 +393,10 @@ fn tree_lists_folders_and_docs_with_depth() {
         ["wallets/transactions", "wallets/cards"]
     );
     assert_eq!(all[0].children[0].doc_type.as_deref(), Some("overview"));
-    let shallow = r.tree(&work, None, Some(0)).unwrap();
+    let shallow = r.read().tree(&work, None, Some(0)).unwrap();
     assert!(shallow[0].children.is_empty());
     assert_eq!(shallow[0].collapsed, 2);
-    let sub = r.tree(&work, Some("wallets/cards"), None).unwrap();
+    let sub = r.read().tree(&work, Some("wallets/cards"), None).unwrap();
     assert_eq!(sub.len(), 1);
     assert_eq!(sub[0].id, res.created["$c"]);
 }

@@ -290,7 +290,7 @@ fn inside_a_project_canon_resolves_references_and_parents() {
     r.invalidate();
     let p = r.propose(&agent, "work", "seed").unwrap();
     r.land(&founder, &p.id).unwrap();
-    let canon = r.materialized(&Scope::Canon).unwrap().clone();
+    let canon = r.read().materialized(&Scope::Canon).unwrap().clone();
     let (w, s) = (&res.created["$w"], &res.created["$s"]);
 
     let t = tempfile::tempdir().unwrap();

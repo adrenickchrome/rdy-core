@@ -44,12 +44,15 @@ fn placeholders_build_a_document_in_one_write() {
     let res = skeleton(&mut r);
     let ledger = BlockId::parse(&res.created["$ledger"]).unwrap();
     let c1 = BlockId::parse(&res.created["$c1"]).unwrap();
-    let claim = r.block(&Scope::View("work".into()), &c1).unwrap();
+    let claim = r.read().block(&Scope::View("work".into()), &c1).unwrap();
     assert_eq!(
         claim.body,
         format!("Balances live on the {{{{{ledger}}}}}.")
     );
-    let term = r.block(&Scope::View("work".into()), &ledger).unwrap();
+    let term = r
+        .read()
+        .block(&Scope::View("work".into()), &ledger)
+        .unwrap();
     assert_eq!(
         claim.pins[&ledger],
         term.version_hash(),
@@ -57,7 +60,7 @@ fn placeholders_build_a_document_in_one_write() {
     );
     assert!(res.warnings.is_empty());
     assert!(
-        r.materialized(&Scope::Canon).unwrap().blocks.is_empty(),
+        r.read().materialized(&Scope::Canon).unwrap().is_empty(),
         "nothing in canon yet"
     );
 }
@@ -82,9 +85,10 @@ fn references_to_existing_blocks_are_pinned() {
     let id = BlockId::parse(&res2.created["op0"]).unwrap();
     let scope = Scope::View("work".into());
     let ledger = r
+        .read()
         .block(&scope, &BlockId::parse(&ledger_id).unwrap())
         .unwrap();
-    let claim = r.block(&scope, &id).unwrap();
+    let claim = r.read().block(&scope, &id).unwrap();
     assert_eq!(claim.pins[&ledger.id], ledger.version_hash());
 }
 
@@ -129,6 +133,7 @@ fn stale_base_is_refused_with_the_current_hash() {
     let c1 = res.created["$c1"].clone();
     let scope = Scope::View("work".into());
     let v1 = r
+        .read()
         .block(&scope, &BlockId::parse(&c1).unwrap())
         .unwrap()
         .version_hash();
@@ -138,6 +143,7 @@ fn stale_base_is_refused_with_the_current_hash() {
     )
     .unwrap();
     let v2 = r
+        .read()
         .block(&scope, &BlockId::parse(&c1).unwrap())
         .unwrap()
         .version_hash();
@@ -156,7 +162,7 @@ fn after_controls_sibling_order() {
         {"op": "create", "type": "note", "parent": terms, "after": ledger, "body": "Between ledger and claim."}
     ]))).unwrap();
     let scope = Scope::View("work".into());
-    let m = r.materialized(&scope).unwrap();
+    let m = r.read().materialized(&scope).unwrap();
     let kids: Vec<String> = m
         .children(Some(&BlockId::parse(&terms).unwrap()))
         .iter()
@@ -294,10 +300,11 @@ fn successful_move_changes_parent_and_order() {
     .unwrap();
     let scope = Scope::View("work".into());
     let c1 = r
+        .read()
         .block(&scope, &BlockId::parse(&res.created["$c1"]).unwrap())
         .unwrap();
     assert_eq!(c1.parent.unwrap().to_string(), more);
-    let m = r.materialized(&scope).unwrap();
+    let m = r.read().materialized(&scope).unwrap();
     assert_eq!(m.children(Some(&BlockId::parse(&more).unwrap())).len(), 1);
 }
 
@@ -309,7 +316,7 @@ fn root_creates_keep_input_order_and_honour_after() {
         {"op": "create", "type": "doc", "id": "$b", "fields": {"title": "B", "doc_type": "glossary"}},
         {"op": "create", "type": "doc", "id": "$c", "after": "$a", "fields": {"title": "C", "doc_type": "glossary"}}
     ]))).unwrap();
-    let m = r.materialized(&Scope::View("work".into())).unwrap();
+    let m = r.read().materialized(&Scope::View("work".into())).unwrap();
     let roots: Vec<String> = m.children(None).iter().map(|b| b.id.to_string()).collect();
     assert_eq!(
         roots,
@@ -407,29 +414,36 @@ fn updates_keep_existing_pins_and_moves_keep_all_pins() {
     let pinned = w.created["op0"].clone();
     let lid = BlockId::parse(&ledger).unwrap();
     let pid = BlockId::parse(&pinned).unwrap();
-    let v1 = r.block(&scope, &lid).unwrap().version_hash();
+    let v1 = r.read().block(&scope, &lid).unwrap().version_hash();
     r.write(
         &agent(),
         req(json!([{"op": "update", "id": ledger, "body": "A newer definition."}])),
     )
     .unwrap();
-    let v2 = r.block(&scope, &lid).unwrap().version_hash();
+    let v2 = r.read().block(&scope, &lid).unwrap().version_hash();
     assert_ne!(v1, v2);
     r.write(&agent(), req(json!([{"op": "update", "id": pinned, "body": format!("Edited about {{{{{ledger}}}}}.")}]))).unwrap();
     assert_eq!(
-        r.block(&scope, &pid).unwrap().pins[&lid],
+        r.read().block(&scope, &pid).unwrap().pins[&lid],
         v1,
         "existing pin kept on edit"
     );
     // c1 was pinned when the skeleton was written in one write: an edit keeps that pin
-    let c1_pin = r.block(&scope, &BlockId::parse(&c1).unwrap()).unwrap().pins[&lid];
+    let c1_pin = r
+        .read()
+        .block(&scope, &BlockId::parse(&c1).unwrap())
+        .unwrap()
+        .pins[&lid];
     r.write(
         &agent(),
         req(json!([{"op": "update", "id": c1, "body": format!("Now {{{{{ledger}}}}}.")}])),
     )
     .unwrap();
     assert_eq!(
-        r.block(&scope, &BlockId::parse(&c1).unwrap()).unwrap().pins[&lid],
+        r.read()
+            .block(&scope, &BlockId::parse(&c1).unwrap())
+            .unwrap()
+            .pins[&lid],
         c1_pin
     );
     // a reference new in this edit gets the current version
@@ -440,7 +454,8 @@ fn updates_keep_existing_pins_and_moves_keep_all_pins() {
     )
     .unwrap();
     assert_eq!(
-        r.block(&scope, &BlockId::parse(&fresh).unwrap())
+        r.read()
+            .block(&scope, &BlockId::parse(&fresh).unwrap())
             .unwrap()
             .pins[&lid],
         v2
@@ -452,7 +467,7 @@ fn updates_keep_existing_pins_and_moves_keep_all_pins() {
         req(json!([{"op": "move", "id": pinned, "parent": sec.created["op0"]}])),
     )
     .unwrap();
-    assert_eq!(r.block(&scope, &pid).unwrap().pins[&lid], v1);
+    assert_eq!(r.read().block(&scope, &pid).unwrap().pins[&lid], v1);
 }
 
 #[test]
@@ -512,7 +527,8 @@ fn unset_removes_a_field_and_links_accept_placeholders() {
     ]))).unwrap();
     let req_id = BlockId::parse(&w0.created["op0"]).unwrap();
     assert!(
-        r.block(&scope, &req_id)
+        r.read()
+            .block(&scope, &req_id)
             .unwrap()
             .fields
             .contains_key("priority")
@@ -523,7 +539,8 @@ fn unset_removes_a_field_and_links_accept_placeholders() {
     )
     .unwrap();
     assert!(
-        !r.block(&scope, &req_id)
+        !r.read()
+            .block(&scope, &req_id)
             .unwrap()
             .fields
             .contains_key("priority")
@@ -534,11 +551,12 @@ fn unset_removes_a_field_and_links_accept_placeholders() {
          "links": {"refines": [{"target": "$p"}]}}
     ]))).unwrap();
     let q = r
+        .read()
         .block(&scope, &BlockId::parse(&w.created["$q"]).unwrap())
         .unwrap();
     let links: Vec<_> = q.links.values().flatten().collect();
     assert_eq!(links[0].target.to_string(), w.created["$p"]);
-    let p = r.block(&scope, &links[0].target).unwrap();
+    let p = r.read().block(&scope, &links[0].target).unwrap();
     assert_eq!(q.pins[&p.id], p.version_hash());
 }
 
@@ -564,9 +582,9 @@ fn a_failing_second_op_writes_nothing() {
     let res = skeleton(&mut r);
     let before = view_len(&r);
     let blocks_before = r
+        .read()
         .materialized(&Scope::View("work".into()))
         .unwrap()
-        .blocks
         .len();
     let e = r.write(&agent(), req(json!([
         {"op": "create", "type": "claim", "id": "$ok", "parent": res.created["$terms"], "body": "Fine."},
@@ -575,9 +593,9 @@ fn a_failing_second_op_writes_nothing() {
     assert_eq!(e.code, "E_UNKNOWN_BLOCK");
     assert_eq!(view_len(&r), before);
     assert_eq!(
-        r.materialized(&Scope::View("work".into()))
+        r.read()
+            .materialized(&Scope::View("work".into()))
             .unwrap()
-            .blocks
             .len(),
         blocks_before
     );
@@ -597,9 +615,9 @@ fn same_write_references_are_pinned_in_dependency_order_and_later_edits_make_sus
     ]))).unwrap();
     let id = |k: &str| BlockId::parse(&w.created[k]).unwrap();
     let (t, q, c) = (
-        r.block(&scope, &id("$t")).unwrap(),
-        r.block(&scope, &id("$q")).unwrap(),
-        r.block(&scope, &id("$c")).unwrap(),
+        r.read().block(&scope, &id("$t")).unwrap(),
+        r.read().block(&scope, &id("$q")).unwrap(),
+        r.read().block(&scope, &id("$c")).unwrap(),
     );
     assert_eq!(q.pins[&t.id], t.version_hash());
     assert_eq!(
@@ -607,14 +625,14 @@ fn same_write_references_are_pinned_in_dependency_order_and_later_edits_make_sus
         q.version_hash(),
         "pinned to the target's final version, pins included"
     );
-    assert!(r.context(&scope, &c.id).unwrap().suspects.is_empty());
+    assert!(r.read().context(&scope, &c.id).unwrap().suspects.is_empty());
 
     r.write(
         &agent(),
         req(json!([{"op": "update", "id": t.id.to_string(), "body": "Holds a balance in pence."}])),
     )
     .unwrap();
-    let sus = r.context(&scope, &q.id).unwrap().suspects;
+    let sus = r.read().context(&scope, &q.id).unwrap().suspects;
     assert_eq!(sus.len(), 1);
     assert_eq!(
         (sus[0].target.clone(), sus[0].reason.as_str()),
@@ -634,12 +652,15 @@ fn reference_cycles_in_one_write_stay_unpinned_on_the_cycle_edges_only() {
         {"op": "create", "type": "claim", "id": "c-BBBBB", "parent": terms, "body": "See {{c-AAAAA}}."}
     ]))).unwrap();
     let t = r
+        .read()
         .block(&scope, &BlockId::parse(&w.created["$t"]).unwrap())
         .unwrap();
     let a = r
+        .read()
         .block(&scope, &BlockId::parse("c-AAAAA").unwrap())
         .unwrap();
     let b = r
+        .read()
         .block(&scope, &BlockId::parse("c-BBBBB").unwrap())
         .unwrap();
     assert_eq!(a.pins.len(), 1);
@@ -664,7 +685,8 @@ fn braces_in_code_and_diagrams_are_content_and_escapes_are_literal() {
         {"op": "create", "type": "claim", "id": "$c", "parent": terms, "body": r"Write \{{literal}} to show braces."}
     ]))).unwrap();
     let get = |r: &mut Rdy, k: &str| {
-        r.block(&scope, &BlockId::parse(&w.created[k]).unwrap())
+        r.read()
+            .block(&scope, &BlockId::parse(&w.created[k]).unwrap())
             .unwrap()
     };
     let (wallet, dg, cd, c) = (

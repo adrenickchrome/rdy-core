@@ -1,11 +1,13 @@
 mod decide;
 mod error;
+pub mod events;
 mod gate;
 mod io;
 mod lint;
 mod materialize;
 mod paths;
 mod query;
+mod read_state;
 mod session;
 pub mod testkit;
 mod tree_io;
@@ -15,12 +17,14 @@ mod yaml_pos;
 
 pub use decide::DecisionInput;
 pub use error::*;
+pub use events::{Event, EventKind, Events};
 pub use gate::{LandInfo, ProposalInfo};
 pub use io::{ExportSummary, block_from_yaml, block_to_yaml};
 pub use lint::check_path;
 pub use materialize::{Materialized, PathMiss};
 pub use paths::TreeNode;
 pub use query::{Context, ImpactItem, ImpactVia, compact_summary, field_json, summary, summary_in};
+pub use read_state::{Delta, ReadState};
 pub use session::{Scope, Session, now_ms, rfc3339_now};
 pub use tree_io::Diagnostic;
 pub use version::{
@@ -28,11 +32,13 @@ pub use version::{
 };
 pub use write::{LinkInput, OpInput, WriteRequest, WriteResult, json_to_field};
 
-use rdy_model::Op;
+use arc_swap::ArcSwap;
 use rdy_schema::{Pack, PackSet};
-use rdy_store::{Store, layout};
-use std::collections::{HashMap, VecDeque};
+use rdy_store::segment::Location;
+use rdy_store::{Store, kinds, layout};
+use read_state::{AsOfCache, Entry};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Config {
@@ -41,16 +47,25 @@ struct Config {
 
 pub struct Rdy {
     root: PathBuf,
+    /// The published read state (snap1). Declared before `store`, with the shared caches, so a
+    /// dropped `Rdy` releases its state's reader before the store closes.
+    state: ArcSwap<ReadState>,
+    /// The as-of entries, shared with every published state.
+    as_of: Arc<AsOfCache>,
+    /// version_position results, keyed by scope and valid for one (canon head, tag count);
+    /// shared with every published state.
+    vpos: Arc<Mutex<version::VposCache>>,
+    /// The in-process event bus (evt1); `publish` feeds it.
+    events: Events,
+    /// The end of the last batch whose events were published to `events` (or whose events could
+    /// not be read: see `emit_error`).
+    last_emitted: Location,
+    /// The error of the latest batch whose events could not be read, so were never emitted live.
+    emit_error: Option<RdyError>,
     store: Store,
-    pack: Pack,
+    pack: Arc<Pack>,
     /// The project's pack followed by every pack it extends, nearest first.
     lineage: Vec<String>,
-    cache: HashMap<Scope, Materialized>,
-    graphs: HashMap<Scope, rdy_graph::Graph>,
-    /// As-of scopes in least-recently-used order (front = oldest); at most AS_OF_CACHE_ENTRIES.
-    as_of_lru: VecDeque<rdy_model::Hash>,
-    /// version_position results, keyed by scope and valid for one (canon head, tag count).
-    vpos: std::sync::Mutex<version::VposCache>,
 }
 
 fn io(e: std::io::Error) -> RdyError {
@@ -135,16 +150,36 @@ impl Rdy {
             .map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "fix .rdy/config.yaml"))?;
         let (pack, lineage) = load_pack(project, &cfg.pack)?;
         let store = layout::open_project_store(&project.join(".rdy"))?;
-        Ok(Rdy {
+        let pack = Arc::new(pack);
+        let as_of = Arc::new(AsOfCache::default());
+        let vpos: Arc<Mutex<version::VposCache>> = Default::default();
+        // a placeholder until the first publish below, which replaces all of it
+        let state = ArcSwap::from_pointee(ReadState {
+            seq: store.log_end(),
+            canon_head: None,
+            canon: Arc::new(Entry::new(None, None, None, Arc::new(vec![]))),
+            views: imbl::HashMap::new(),
+            tags: Arc::new(vec![]),
+            pack: Arc::clone(&pack),
+            reader: store.reader(),
+            as_of: Arc::clone(&as_of),
+            vpos: Arc::clone(&vpos),
+            error: None,
+        });
+        let mut r = Rdy {
             root: project.to_path_buf(),
+            state,
+            as_of,
+            vpos,
+            events: Events::new(),
+            last_emitted: store.log_end(),
+            emit_error: None,
             store,
             pack,
             lineage,
-            cache: HashMap::new(),
-            graphs: HashMap::new(),
-            as_of_lru: VecDeque::new(),
-            vpos: Default::default(),
-        })
+        };
+        r.invalidate();
+        Ok(r)
     }
 
     pub fn root(&self) -> &Path {
@@ -168,7 +203,9 @@ impl Rdy {
     /// Closes the project's store cleanly (see `Store::close`) and returns a failed checkpoint's
     /// error. Dropping an `Rdy` closes it too, but can only report a failure on stderr.
     pub fn close(self) -> Result<(), RdyError> {
-        Ok(self.store.close()?)
+        let Rdy { state, store, .. } = self;
+        drop(state);
+        Ok(store.close()?)
     }
 
     /// Checkpoints if writes are waiting and the store has been idle long enough; true if it did.
@@ -176,66 +213,233 @@ impl Rdy {
         Ok(self.store.checkpoint_if_idle(std::time::Instant::now())?)
     }
 
-    pub fn materialized(&mut self, scope: &Scope) -> Result<&Materialized, RdyError> {
-        if !self.cache.contains_key(scope) {
-            let snapshot = match scope {
-                Scope::Canon => self.store.canon_state()?,
-                Scope::View(v) => self.store.view_state(v)?,
-                Scope::At(h) => {
-                    let not_landing = || {
-                        RdyError::new(
-                            E_NOT_FOUND,
-                            format!("{} is not a landing", h.short()),
-                            "read as of a version (tag:<version>) or a landing in rdy log (landing:<id>)",
-                        )
-                    };
-                    if !self.store.has_kind(rdy_store::kinds::LANDING, h)? {
-                        return Err(not_landing());
+    /// The current published state: what every read reads. Cheap; a held state never changes.
+    pub fn read(&self) -> Arc<ReadState> {
+        self.state.load_full()
+    }
+
+    /// Publishes the state after a write (snap1), re-reading what `delta` names and carrying the
+    /// rest over from the current state. Every write calls it before returning `Ok`. If reading
+    /// fails, the published state holds the error, every read of it returns that error, and the
+    /// next publish re-reads everything; the error is returned too.
+    ///
+    /// Then, after the state swap, it emits the events of the store's last batch if that batch
+    /// has not been emitted yet (evt1): a `Full` publish from `invalidate` or `open` emits
+    /// nothing new, and a batch that was fully deduplicated has no frames and emits nothing.
+    /// A batch whose events cannot be read is not the write's failure (the write is durable): its
+    /// error is recorded in `last_emit_error` and the batch counts as emitted, so a later batch
+    /// never masks it; a replay over it returns the same error.
+    /// Known gap: a write made through `store_mut()` is emitted live only if it is the last batch
+    /// before the next publish; an earlier one is only in `replay_events`. M2b routes every
+    /// write through the engine.
+    pub(crate) fn publish(&mut self, delta: Delta) -> Result<(), RdyError> {
+        let prev = self.state.load_full();
+        // a state that holds an error has nothing to carry over
+        let delta = if prev.error.is_some() {
+            Delta::Full
+        } else {
+            delta
+        };
+        match self.next_state(&prev, delta) {
+            Ok(next) => {
+                self.state.store(Arc::new(next));
+                self.emit_last_batch();
+                Ok(())
+            }
+            Err(e) => {
+                self.state.store(Arc::new(ReadState {
+                    seq: self.store.log_end(),
+                    canon_head: prev.canon_head,
+                    canon: Arc::clone(&prev.canon),
+                    views: prev.views.clone(),
+                    tags: Arc::clone(&prev.tags),
+                    pack: Arc::clone(&self.pack),
+                    reader: self.store.reader(),
+                    as_of: Arc::clone(&self.as_of),
+                    vpos: Arc::clone(&self.vpos),
+                    error: Some(e.clone()),
+                }));
+                Err(e)
+            }
+        }
+    }
+
+    fn emit_last_batch(&mut self) {
+        let end = self.store.last_batch_end();
+        if end > self.last_emitted {
+            match events::events_for_batch(&self.store.reader(), end, self.store.last_batch()) {
+                Ok(events) => {
+                    for e in events {
+                        self.events.publish(Arc::new(e));
                     }
-                    self.store.snapshot_at(h)?
                 }
-            };
-            let blocks = self.store.blocks(&snapshot)?;
-            self.cache
-                .insert(scope.clone(), Materialized::build(snapshot, blocks));
-        }
-        if let Scope::At(h) = scope {
-            self.touch_as_of(*h);
-        }
-        Ok(&self.cache[scope])
-    }
-
-    /// Marks an as-of scope as used, evicting the least recently used beyond the cap (with its graph).
-    fn touch_as_of(&mut self, h: rdy_model::Hash) {
-        self.as_of_lru.retain(|x| *x != h);
-        self.as_of_lru.push_back(h);
-        while self.as_of_lru.len() > AS_OF_CACHE_ENTRIES {
-            let old = self.as_of_lru.pop_front().expect("over the cap");
-            self.cache.remove(&Scope::At(old));
-            self.graphs.remove(&Scope::At(old));
+                Err(e) => self.emit_error = Some(e),
+            }
+            self.last_emitted = end;
         }
     }
 
-    /// Drops cached canon and view state. As-of snapshots never change, so they are kept.
-    pub fn invalidate(&mut self) {
-        self.cache.retain(|s, _| matches!(s, Scope::At(_)));
-        self.graphs.retain(|s, _| matches!(s, Scope::At(_)));
+    /// A receiver of every event emitted from now on (evt1). Events committed before the
+    /// subscription are not sent; `replay_events` covers them.
+    pub fn subscribe(&self) -> std::sync::mpsc::Receiver<Arc<Event>> {
+        self.events.subscribe()
     }
 
-    /// Test hook: whether `scope`'s materialization and graph are cached.
+    /// The events of every committed batch in the log from `from` to its end, in log order: what
+    /// a subscriber would have received had it been listening since `from`. The first batch
+    /// whose events cannot be read ends the walk with its error.
+    pub fn replay_events(&self, from: Location) -> Result<Vec<Event>, RdyError> {
+        let reader = self.store.reader();
+        let mut out = Vec::new();
+        let mut group: Vec<(u8, rdy_model::Hash)> = Vec::new();
+        let mut failure: Option<RdyError> = None;
+        let walk =
+            reader.for_each_frame_from(from, self.store.log_end(), |_, kind, hash, _, next| {
+                if kind == kinds::BATCH_COMMIT {
+                    match events::events_for_batch(&reader, next, &group) {
+                        Ok(events) => out.extend(events),
+                        Err(e) => {
+                            failure = Some(e);
+                            // stops the walk; the batch's own error is returned below
+                            return Err(rdy_store::StoreError::Db("replay stopped".into()));
+                        }
+                    }
+                    group.clear();
+                } else {
+                    group.push((kind, hash));
+                }
+                Ok(())
+            });
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        walk?;
+        Ok(out)
+    }
+
+    /// The error of the latest batch since open whose events could not be read and so were never
+    /// emitted live; later batches that emit do not clear it. A replay over that batch returns
+    /// the same error.
+    pub fn last_emit_error(&self) -> Option<&RdyError> {
+        self.emit_error.as_ref()
+    }
+
+    /// Test hook: the end of the last batch whose events were emitted.
     #[doc(hidden)]
-    pub fn is_cached(&self, scope: &Scope) -> (bool, bool) {
-        (
-            self.cache.contains_key(scope),
-            self.graphs.contains_key(scope),
-        )
+    pub fn last_emitted_seq(&self) -> Location {
+        self.last_emitted
     }
 
-    pub(crate) fn update_cache(&mut self, view: &str, ops: &[Op]) {
-        self.graphs.remove(&Scope::View(view.to_string()));
-        if let Some(m) = self.cache.get_mut(&Scope::View(view.to_string())) {
-            m.apply(ops);
-        }
+    fn next_state(&self, prev: &ReadState, delta: Delta) -> Result<ReadState, RdyError> {
+        let seq = self.store.log_end();
+        let canon_head = self.store.canon_head()?;
+        let (canon, views, tags) = match delta {
+            Delta::Full => {
+                let mut views = imbl::HashMap::new();
+                for (name, _) in self.store.refs_with_prefix("view/")? {
+                    let name = name.strip_prefix("view/").unwrap_or(&name).to_string();
+                    if let Some(e) = self.view_entry(&name)? {
+                        views.insert(name, Arc::new(e));
+                    }
+                }
+                let canon = Entry::new(None, canon_head, None, Arc::new(vec![]));
+                (Arc::new(canon), views, Arc::new(self.version_tags()?))
+            }
+            Delta::Commit { view, ops } => {
+                let mut views = prev.views.clone();
+                match self.view_entry(&view)? {
+                    Some(mut next) => {
+                        // the entry the write read: the view's own, or canon's for a view with
+                        // no ref yet (it floated on canon)
+                        let pred = match prev.views.get(&view) {
+                            Some(e) => e.built_ok(),
+                            None if next.base == prev.canon_head => prev.canon.built_ok(),
+                            None => None,
+                        };
+                        if let Some(b) = pred.filter(|b| b.conflicts.is_empty()) {
+                            next.seed(read_state::Built::new(
+                                Arc::new(b.m.with(&ops)),
+                                Arc::clone(&b.conflicts),
+                            ));
+                        }
+                        views.insert(view, Arc::new(next));
+                    }
+                    None => {
+                        views.remove(&view);
+                    }
+                }
+                (Arc::clone(&prev.canon), views, Arc::clone(&prev.tags))
+            }
+            Delta::Landed { landing, view, ops } => {
+                let mut canon = Entry::new(None, Some(landing), None, Arc::new(vec![]));
+                if let Some(b) = prev.canon.built_ok() {
+                    canon.seed(read_state::Built::new(
+                        Arc::new(b.m.with(&ops)),
+                        Arc::new(vec![]),
+                    ));
+                }
+                let mut views = prev.views.clone();
+                match self.view_entry(&view)? {
+                    Some(next) => {
+                        views.insert(view, Arc::new(next));
+                    }
+                    None => {
+                        views.remove(&view);
+                    }
+                }
+                (Arc::new(canon), views, Arc::clone(&prev.tags))
+            }
+            Delta::Tags => (
+                Arc::clone(&prev.canon),
+                prev.views.clone(),
+                Arc::new(self.version_tags()?),
+            ),
+            Delta::Seq => (
+                Arc::clone(&prev.canon),
+                prev.views.clone(),
+                Arc::clone(&prev.tags),
+            ),
+        };
+        Ok(ReadState {
+            seq,
+            canon_head,
+            canon,
+            views,
+            tags,
+            pack: Arc::clone(&self.pack),
+            reader: self.store.reader(),
+            as_of: Arc::clone(&self.as_of),
+            vpos: Arc::clone(&self.vpos),
+            error: None,
+        })
+    }
+
+    /// An unbuilt entry for view `name` as the store holds it now (head and set read together);
+    /// None if the view has no ref.
+    fn view_entry(&self, name: &str) -> Result<Option<Entry>, RdyError> {
+        let Some(head) = self.store.view_head(name)? else {
+            return Ok(None);
+        };
+        let included = self.store.included_at(name, &head)?;
+        Ok(Some(Entry::new(
+            Some(name.to_string()),
+            head.base,
+            Some(head),
+            included,
+        )))
+    }
+
+    /// Republishes a state with every cell empty (`Delta::Full`). Never fails: an error in
+    /// reading the heads is kept in the state and returned by its reads. As-of builds are shared
+    /// across states and kept. Call it after writing to the store outside the engine.
+    pub fn invalidate(&mut self) {
+        let _ = self.publish(Delta::Full);
+    }
+
+    /// Rebuilds the store's index from its log and republishes the state on the new index.
+    pub fn reindex(&mut self) -> Result<(), RdyError> {
+        self.store.reindex()?;
+        self.publish(Delta::Full)
     }
 }
 

@@ -18,29 +18,36 @@ fn seeded() -> (tempfile::TempDir, Rdy, String, String) {
 #[test]
 fn scope1_an_unknown_view_is_not_found_and_a_hash_gets_the_landing_hint() {
     let (_d, r, _doc, landing) = seeded();
-    let e = r.resolve_read_scope("nope", None).unwrap_err();
+    let e = r.read().resolve_read_scope("nope", None).unwrap_err();
     assert_eq!(e.code, "E_NOT_FOUND", "{e}");
-    let e = r.resolve_read_scope(&landing, None).unwrap_err();
+    let e = r.read().resolve_read_scope(&landing, None).unwrap_err();
     assert_eq!(e.code, "E_NOT_FOUND", "{e}");
     assert!(e.fix.contains(&format!("landing:{landing}")), "{e}");
-    let e = r.resolve_read_scope(&landing[..12], None).unwrap_err();
+    let e = r
+        .read()
+        .resolve_read_scope(&landing[..12], None)
+        .unwrap_err();
     assert!(e.fix.contains("landing:"), "{e}");
     assert_eq!(
-        r.resolve_read_scope(&format!("landing:{landing}"), None)
+        r.read()
+            .resolve_read_scope(&format!("landing:{landing}"), None)
             .unwrap(),
         Scope::At(landing.parse().unwrap())
     );
     assert_eq!(
-        r.resolve_read_scope("work", None).unwrap(),
+        r.read().resolve_read_scope("work", None).unwrap(),
         Scope::View("work".into()),
         "a view with a record"
     );
     assert_eq!(
-        r.resolve_read_scope("mine", Some("mine")).unwrap(),
+        r.read().resolve_read_scope("mine", Some("mine")).unwrap(),
         Scope::View("mine".into()),
         "the session's own view, created lazily"
     );
-    assert_eq!(r.resolve_read_scope("canon", None).unwrap(), Scope::Canon);
+    assert_eq!(
+        r.read().resolve_read_scope("canon", None).unwrap(),
+        Scope::Canon
+    );
 }
 
 /// Includes Review Focus 5: a reader on canon passing a landing hash as scope.

@@ -81,13 +81,13 @@ proptest! {
         build(&mut a, &shape);
         let out = tempfile::tempdir().unwrap();
         let first = out.path().join("one");
-        a.export(&Scope::Canon, &first).unwrap();
+        a.read().export(&Scope::Canon, &first).unwrap();
         let (_b, mut b) = project();
         b.import(&approver(), "import", &first).unwrap();
         land(&mut b, "import").unwrap();
-        prop_assert_eq!(&b.materialized(&Scope::Canon).unwrap().snapshot, &a.materialized(&Scope::Canon).unwrap().snapshot);
+        prop_assert_eq!(&b.read().materialized(&Scope::Canon).unwrap().snapshot(), &a.read().materialized(&Scope::Canon).unwrap().snapshot());
         let second = out.path().join("two");
-        b.export(&Scope::Canon, &second).unwrap();
+        b.read().export(&Scope::Canon, &second).unwrap();
         prop_assert_eq!(files(&first), files(&second));
     }
 }

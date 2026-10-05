@@ -7,7 +7,8 @@ use serde_json::json;
 
 fn bodies(r: &mut Rdy, scope: &Scope, parent: &str) -> Vec<String> {
     let p = BlockId::parse(parent).unwrap();
-    r.materialized(scope)
+    r.read()
+        .materialized(scope)
         .unwrap()
         .children(Some(&p))
         .iter()
@@ -61,12 +62,12 @@ fn first1_before_puts_a_block_first() {
         .created["op0"]
         .clone();
     assert_eq!(
-        r.materialized(&scope).unwrap().children(None)[0]
+        r.read().materialized(&scope).unwrap().children(None)[0]
             .id
             .to_string(),
         top
     );
-    check(&mut r, &scope).unwrap();
+    check(&r, &scope).unwrap();
 }
 
 /// Includes Review Focus 2: moving a block before itself is refused.
@@ -110,6 +111,7 @@ fn first1_before_a_tied_sibling_goes_before_the_whole_tie() {
     land(&mut r, "vb").unwrap();
     let p = BlockId::parse(&s).unwrap();
     let kids: Vec<(String, String)> = r
+        .read()
         .materialized(&Scope::Canon)
         .unwrap()
         .children(Some(&p))
@@ -123,5 +125,5 @@ fn first1_before_a_tied_sibling_goes_before_the_whole_tie() {
     write(&mut r, "vc", json!([{"op": "create", "type": "claim", "parent": s, "before": kids[2].1, "body": "ahead"}])).unwrap();
     let got = bodies(&mut r, &Scope::View("vc".into()), &s);
     assert_eq!(got[1], "ahead", "before the whole tie: {got:?}");
-    check(&mut r, &Scope::View("vc".into())).unwrap();
+    check(&r, &Scope::View("vc".into())).unwrap();
 }

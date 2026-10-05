@@ -249,10 +249,12 @@ fn session(st: &McpState) -> Result<Session, RdyError> {
     })
 }
 
-fn scope_of(st: &McpState, s: &Option<String>) -> Result<Scope, RdyError> {
+/// The scope a tool reads, resolved on the state the tool reads (`read`), so that a view created
+/// by a later publish is never accepted here and then read on a state without it.
+fn scope_of(st: &McpState, read: &ReadState, s: &Option<String>) -> Result<Scope, RdyError> {
     match s {
         // scope1: an unknown view is not found, unless it is this session's own view
-        Some(text) => st.rdy.resolve_read_scope(text, Some(&st.view)),
+        Some(text) => read.resolve_read_scope(text, Some(&st.view)),
         // ses1: a reader session whose view is canon reads canon by default
         None if st.view == "canon" => Ok(Scope::Canon),
         None => Ok(Scope::View(st.view.clone())),
@@ -420,21 +422,20 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
 pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     let s = session(st)?;
-    let scope = scope_of(st, &p.scope)?;
-    let position = st.rdy.version_position(&scope)?;
+    let st_ = st.rdy.read();
+    let scope = scope_of(st, &st_, &p.scope)?;
+    let position = st_.version_position(&scope)?;
     let max = p.max_tokens.unwrap_or(4000);
-    let tree = fit_tree(st.rdy.tree(&scope, None, None)?, max.saturating_sub(300));
-    let store = st.rdy.store();
-    let views: Vec<Value> = store
-        .refs_with_prefix("view/")?
+    let tree = fit_tree(st_.tree(&scope, None, None)?, max.saturating_sub(300));
+    let views: Vec<Value> = st_
+        .view_names()
         .into_iter()
-        .map(|(name, _)| {
-            let name = name.trim_start_matches("view/").to_string();
-            let n = store.view_head(&name).ok().flatten().map_or(0, |h| h.len);
+        .map(|name| {
+            let n = st_.included(&name).len();
             json!({"name": name, "changes": n})
         })
         .collect();
-    let landings = store.landings()?.len();
+    let landings = st_.landings()?.len();
     Ok(budget(
         json!({
             "pack": st.rdy.pack().name, "session": {"actor": s.actor, "view": st.view},
@@ -450,7 +451,8 @@ pub struct TagsParams {}
 
 pub fn rdy_tags(st: &mut McpState, _p: TagsParams) -> Result<Value, RdyError> {
     session(st)?;
-    let versions = st.rdy.versions()?;
+    let st_ = st.rdy.read();
+    let versions = st_.versions()?;
     let current = versions.last().map(|v| v.name.clone());
     Ok(json!({"versions": versions, "current": current}))
 }
@@ -458,17 +460,13 @@ pub fn rdy_tags(st: &mut McpState, _p: TagsParams) -> Result<Value, RdyError> {
 pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
-    let scope = scope_of(st, &p.scope)?;
-    let id = st.rdy.resolve_id(&scope, &p.id)?;
-    let suspects: std::collections::BTreeSet<BlockId> = st
-        .rdy
-        .suspects(&scope)?
-        .into_iter()
-        .map(|s| s.block)
-        .collect();
-    st.rdy.graph(&scope)?;
-    let m = st.rdy.materialized(&scope)?.clone();
-    let g = st.rdy.graph(&scope)?;
+    let st_ = st.rdy.read();
+    let scope = scope_of(st, &st_, &p.scope)?;
+    let id = st_.resolve_id(&scope, &p.id)?;
+    let suspects: std::collections::BTreeSet<BlockId> =
+        st_.suspects(&scope)?.into_iter().map(|s| s.block).collect();
+    let m = st_.materialized(&scope)?;
+    let g = st_.graph(&scope)?;
     let root = m.get(&id).ok_or_else(|| {
         RdyError::new(
             E_UNKNOWN_BLOCK,
@@ -536,9 +534,10 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
 pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
-    let scope = scope_of(st, &p.scope)?;
-    let id = st.rdy.resolve_id(&scope, &p.id)?;
-    let ctx = st.rdy.context(&scope, &id)?;
+    let st_ = st.rdy.read();
+    let scope = scope_of(st, &st_, &p.scope)?;
+    let id = st_.resolve_id(&scope, &p.id)?;
+    let ctx = st_.context(&scope, &id)?;
     Ok(budget(
         serde_json::to_value(ctx).expect("context json"),
         p.max_tokens,
@@ -548,18 +547,20 @@ pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
 pub fn rdy_impact(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
-    let scope = scope_of(st, &p.scope)?;
-    let id = st.rdy.resolve_id(&scope, &p.id)?;
-    let items = st.rdy.impact(&scope, &id, p.depth.unwrap_or(3))?;
+    let st_ = st.rdy.read();
+    let scope = scope_of(st, &st_, &p.scope)?;
+    let id = st_.resolve_id(&scope, &p.id)?;
+    let items = st_.impact(&scope, &id, p.depth.unwrap_or(3))?;
     Ok(budget(json!({"items": items}), p.max_tokens))
 }
 
 pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
-    let scope = scope_of(st, &p.scope)?;
+    let st_ = st.rdy.read();
+    let scope = scope_of(st, &st_, &p.scope)?;
     Ok(budget(
-        json!({"items": st.rdy.suspects(&scope)?}),
+        json!({"items": st_.suspects(&scope)?}),
         p.max_tokens,
     ))
 }

@@ -81,6 +81,14 @@ impl From<StoreError> for RdyError {
                 ),
                 "close the other rdy process (or MCP server) and retry",
             ),
+            StoreError::HeldByReader(p) => RdyError::new(
+                E_LOCKED,
+                format!(
+                    "the project store at {} is still open in this process through a read state of an earlier open",
+                    p.display()
+                ),
+                "drop every read state (and store reader) of the earlier open, then reopen",
+            ),
             StoreError::StaleBase {
                 id,
                 expected,

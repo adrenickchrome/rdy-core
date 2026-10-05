@@ -64,17 +64,17 @@ fn rich_project(dir: &std::path::Path) -> Rdy {
 fn export_import_round_trip_preserves_every_version_hash() {
     let a_dir = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
-    let mut a = rich_project(a_dir.path());
-    let summary = a.export(&Scope::Canon, out.path()).unwrap();
+    let a = rich_project(a_dir.path());
+    let summary = a.read().export(&Scope::Canon, out.path()).unwrap();
     assert_eq!(summary.docs, 1);
     assert_eq!(summary.folders, 2);
     assert_eq!(summary.blobs, 1);
     let original: BTreeMap<BlockId, Hash> = a
+        .read()
         .materialized(&Scope::Canon)
         .unwrap()
-        .snapshot
-        .blocks
-        .clone();
+        .snapshot()
+        .blocks;
     assert_eq!(summary.blocks, original.len());
 
     let b_dir = tempfile::tempdir().unwrap();
@@ -87,19 +87,19 @@ fn export_import_round_trip_preserves_every_version_hash() {
     let p = b.propose(&founder(), "import", "migrate").unwrap();
     b.land(&founder(), &p.id).unwrap();
     let imported = b
+        .read()
         .materialized(&Scope::Canon)
         .unwrap()
-        .snapshot
-        .blocks
-        .clone();
+        .snapshot()
+        .blocks;
     assert_eq!(imported, original);
 
     // the blob came across too
     let fig = b
+        .read()
         .materialized(&Scope::Canon)
         .unwrap()
-        .blocks
-        .values()
+        .iter()
         .find(|x| x.block_type == "figure")
         .unwrap()
         .clone();
@@ -121,10 +121,10 @@ fn single_block_yaml_round_trip_and_edit() {
     let dir = tempfile::tempdir().unwrap();
     let mut r = rich_project(dir.path());
     let term = r
+        .read()
         .materialized(&Scope::Canon)
         .unwrap()
-        .blocks
-        .values()
+        .iter()
         .find(|x| x.block_type == "term")
         .unwrap()
         .clone();
@@ -135,7 +135,10 @@ fn single_block_yaml_round_trip_and_edit() {
     edited.body = "Edited definition.".into();
     r.edit_block(&founder(), "work", edited.clone()).unwrap();
     assert_eq!(
-        r.block(&Scope::View("work".into()), &term.id).unwrap().body,
+        r.read()
+            .block(&Scope::View("work".into()), &term.id)
+            .unwrap()
+            .body,
         "Edited definition."
     );
 
@@ -153,8 +156,8 @@ fn single_block_yaml_round_trip_and_edit() {
 use std::path::Path;
 
 fn exported(dir: &Path, out: &Path) -> Rdy {
-    let mut a = rich_project(dir);
-    a.export(&Scope::Canon, out).unwrap();
+    let a = rich_project(dir);
+    a.read().export(&Scope::Canon, out).unwrap();
     a
 }
 
@@ -198,9 +201,9 @@ fn assert_import_fails(out: &Path, code: &str) {
         "failed import must not change the view"
     );
     assert!(
-        b.materialized(&Scope::View("import".into()))
+        b.read()
+            .materialized(&Scope::View("import".into()))
             .unwrap()
-            .blocks
             .is_empty()
     );
 }
@@ -341,10 +344,10 @@ fn edit_block_applies_field_unset_and_links_changes() {
     let dir = tempfile::tempdir().unwrap();
     let mut r = rich_project(dir.path());
     let claim = r
+        .read()
         .materialized(&Scope::Canon)
         .unwrap()
-        .blocks
-        .values()
+        .iter()
         .find(|x| x.block_type == "claim")
         .unwrap()
         .clone();
@@ -352,17 +355,18 @@ fn edit_block_applies_field_unset_and_links_changes() {
     e.links.clear();
     r.edit_block(&founder(), "work", e).unwrap();
     assert!(
-        r.block(&Scope::View("work".into()), &claim.id)
+        r.read()
+            .block(&Scope::View("work".into()), &claim.id)
             .unwrap()
             .links
             .is_empty()
     );
 
     let sec = r
+        .read()
         .materialized(&Scope::Canon)
         .unwrap()
-        .blocks
-        .values()
+        .iter()
         .find(|x| x.block_type == "section")
         .unwrap()
         .clone();
@@ -373,13 +377,17 @@ fn edit_block_applies_field_unset_and_links_changes() {
         .insert("lifecycle".into(), FieldValue::Str("stable".into()));
     r.edit_block(&founder(), "work", e)
         .unwrap_or_else(|x| panic!("{x}"));
-    let got = r.block(&Scope::View("work".into()), &sec.id).unwrap();
+    let got = r
+        .read()
+        .block(&Scope::View("work".into()), &sec.id)
+        .unwrap();
     assert_eq!(got.field_str("title"), Some("Renamed"));
     let mut e = got.clone();
     e.fields.remove("lifecycle");
     r.edit_block(&founder(), "work", e).unwrap();
     assert!(
-        !r.block(&Scope::View("work".into()), &sec.id)
+        !r.read()
+            .block(&Scope::View("work".into()), &sec.id)
             .unwrap()
             .fields
             .contains_key("lifecycle")
@@ -391,10 +399,10 @@ fn edit_block_respects_decision_rules() {
     let dir = tempfile::tempdir().unwrap();
     let mut r = rich_project(dir.path());
     let dec = r
+        .read()
         .materialized(&Scope::Canon)
         .unwrap()
-        .blocks
-        .values()
+        .iter()
         .find(|x| x.block_type == "decision")
         .unwrap()
         .clone();
@@ -419,7 +427,7 @@ fn edit_block_respects_decision_rules() {
         )
         .unwrap();
     let id = BlockId::parse(res.created.values().next().unwrap()).unwrap();
-    let mut e = r.block(&Scope::View("work".into()), &id).unwrap();
+    let mut e = r.read().block(&Scope::View("work".into()), &id).unwrap();
     e.fields
         .insert("status".into(), FieldValue::Str("accepted".into()));
     assert_eq!(
@@ -432,10 +440,10 @@ fn edit_block_respects_decision_rules() {
 fn export_refuses_a_non_empty_directory() {
     let a_dir = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
-    let mut a = rich_project(a_dir.path());
+    let a = rich_project(a_dir.path());
     std::fs::create_dir_all(out.path().join("docs")).unwrap();
     std::fs::write(out.path().join("docs/d-STALE.yaml"), "[]").unwrap();
-    let e = a.export(&Scope::Canon, out.path()).unwrap_err();
+    let e = a.read().export(&Scope::Canon, out.path()).unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT");
     assert!(e.fix.contains("empty directory"), "{}", e.fix);
     assert_eq!(
@@ -444,26 +452,28 @@ fn export_refuses_a_non_empty_directory() {
         "nothing written"
     );
     // a directory that does not exist yet is fine
-    a.export(&Scope::Canon, &out.path().join("fresh")).unwrap();
+    a.read()
+        .export(&Scope::Canon, &out.path().join("fresh"))
+        .unwrap();
 }
 
 #[test]
 fn import_skips_dotfiles_and_non_yaml_files() {
     let a_dir = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
-    let mut a = rich_project(a_dir.path());
-    a.export(&Scope::Canon, out.path()).unwrap();
+    let a = rich_project(a_dir.path());
+    a.read().export(&Scope::Canon, out.path()).unwrap();
     std::fs::write(out.path().join("docs/.DS_Store"), [0u8, 1, 2]).unwrap();
     std::fs::write(out.path().join("docs/README.txt"), "notes").unwrap();
     std::fs::write(out.path().join("blobs/.DS_Store"), [0u8, 1, 2]).unwrap();
     let b_dir = tempfile::tempdir().unwrap();
     let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
     b.import(&founder(), "import", out.path()).unwrap();
-    let n = a.materialized(&Scope::Canon).unwrap().blocks.len();
+    let n = a.read().materialized(&Scope::Canon).unwrap().len();
     assert_eq!(
-        b.materialized(&Scope::View("import".into()))
+        b.read()
+            .materialized(&Scope::View("import".into()))
             .unwrap()
-            .blocks
             .len(),
         n
     );
@@ -474,10 +484,10 @@ fn edit_block_refuses_a_no_op_edit() {
     let dir = tempfile::tempdir().unwrap();
     let mut r = rich_project(dir.path());
     let term = r
+        .read()
         .materialized(&Scope::View("work".into()))
         .unwrap()
-        .blocks
-        .values()
+        .iter()
         .find(|x| x.block_type == "term")
         .unwrap()
         .clone();
@@ -526,7 +536,10 @@ fn export_of_a_figure_whose_blob_is_missing_fails_and_writes_nothing() {
     a.store_mut().commit_to_view("work", change).unwrap();
     a.invalidate();
     let out = parent.path().join("exp");
-    let e = a.export(&Scope::View("work".into()), &out).unwrap_err();
+    let e = a
+        .read()
+        .export(&Scope::View("work".into()), &out)
+        .unwrap_err();
     assert_eq!(e.code, "E_NOT_FOUND", "{e}");
     assert!(e.message.contains("fg-AAAAA"), "names the figure: {e}");
     assert_eq!(
@@ -540,7 +553,7 @@ fn export_of_a_figure_whose_blob_is_missing_fails_and_writes_nothing() {
 fn export_creates_missing_parents_and_clears_a_leftover_staging_dir() {
     let a_dir = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut a = rich_project(a_dir.path());
+    let a = rich_project(a_dir.path());
     let deeper = root.path().join("nested/deeper");
     // an interrupted earlier export left its staging dir behind
     std::fs::create_dir_all(deeper.join(".exp.rdy-export-partial/docs")).unwrap();
@@ -549,7 +562,7 @@ fn export_creates_missing_parents_and_clears_a_leftover_staging_dir() {
         "[]",
     )
     .unwrap();
-    a.export(&Scope::Canon, &deeper.join("exp")).unwrap();
+    a.read().export(&Scope::Canon, &deeper.join("exp")).unwrap();
     assert!(!deeper.join("exp/docs/d-STALE.yaml").exists());
     assert!(deeper.join("exp/rdy-export.yaml").exists());
     let names: Vec<_> = std::fs::read_dir(&deeper)
@@ -693,25 +706,29 @@ fn export_writes_the_folder_tree() {
 fn export_import_export_is_byte_identical() {
     let a_dir = tempfile::tempdir().unwrap();
     let out1 = tempfile::tempdir().unwrap();
-    let mut a = exported(a_dir.path(), out1.path());
+    let a = exported(a_dir.path(), out1.path());
     let original = a
+        .read()
         .materialized(&Scope::Canon)
         .unwrap()
-        .snapshot
-        .blocks
-        .clone();
+        .snapshot()
+        .blocks;
     let b_dir = tempfile::tempdir().unwrap();
     let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
     b.import(&founder(), "import", out1.path()).unwrap();
     let p = b.propose(&founder(), "import", "migrate").unwrap();
     b.land(&founder(), &p.id).unwrap();
     assert_eq!(
-        b.materialized(&Scope::Canon).unwrap().snapshot.blocks,
+        b.read()
+            .materialized(&Scope::Canon)
+            .unwrap()
+            .snapshot()
+            .blocks,
         original
     );
     let out2_dir = tempfile::tempdir().unwrap();
     let out2 = out2_dir.path().join("again");
-    b.export(&Scope::Canon, &out2).unwrap();
+    b.read().export(&Scope::Canon, &out2).unwrap();
     assert_eq!(files(&out2), files(out1.path()));
 }
 
@@ -748,7 +765,10 @@ fn a_nameless_m1_doc_exports_with_a_warning_and_imports_named() {
         .unwrap();
     a.invalidate();
     let out = tempfile::tempdir().unwrap();
-    let s = a.export(&Scope::View("work".into()), out.path()).unwrap();
+    let s = a
+        .read()
+        .export(&Scope::View("work".into()), out.path())
+        .unwrap();
     assert_eq!(s.warnings.len(), 1);
     assert!(s.warnings[0].contains("d-AAAAB"));
     assert!(out.path().join("docs/old-notes.yaml").exists());
@@ -756,6 +776,7 @@ fn a_nameless_m1_doc_exports_with_a_warning_and_imports_named() {
     let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
     b.import(&founder(), "import", out.path()).unwrap();
     let doc = b
+        .read()
         .block(
             &Scope::View("import".into()),
             &BlockId::parse("d-AAAAB").unwrap(),
@@ -778,6 +799,7 @@ fn format_1_exports_still_import_and_get_names() {
     let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
     b.import(&founder(), "import", out.path()).unwrap();
     let doc = b
+        .read()
         .block(
             &Scope::View("import".into()),
             &BlockId::parse("d-AAAAB").unwrap(),
@@ -858,7 +880,9 @@ fn import_refuses_names_that_clash_with_the_view_or_each_other() {
         let mut a = Rdy::init(d.path(), "rdy-standard").unwrap();
         raw_doc(&mut a, id, "x");
         let out = tempfile::tempdir().unwrap();
-        a.export(&Scope::View("work".into()), out.path()).unwrap();
+        a.read()
+            .export(&Scope::View("work".into()), out.path())
+            .unwrap();
         (d, out)
     };
     let (_d1, o1) = mk("d-AAAAA");
@@ -897,7 +921,10 @@ fn export_refuses_sibling_names_that_clash() {
     raw_doc(&mut a, "d-BBBBB", "X");
     let parent = tempfile::tempdir().unwrap();
     let out = parent.path().join("exp");
-    let e = a.export(&Scope::View("work".into()), &out).unwrap_err();
+    let e = a
+        .read()
+        .export(&Scope::View("work".into()), &out)
+        .unwrap_err();
     assert_eq!(e.code, "E_PATH_CLASH", "{e}");
     assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
 }

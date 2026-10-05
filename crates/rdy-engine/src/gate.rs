@@ -1,5 +1,5 @@
 use crate::error::*;
-use crate::{Materialized, Rdy, Scope, Session, rfc3339_now};
+use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, rfc3339_now};
 use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Op, Proposal, decision};
 use rdy_schema::{Issue, Severity, validate_block};
 use rdy_store::LandRequest;
@@ -39,35 +39,49 @@ fn targets(b: &Block) -> BTreeSet<BlockId> {
         .collect()
 }
 
-impl Rdy {
-    fn changes_of(&self, ids: &[Hash]) -> Result<Vec<Change>, RdyError> {
-        ids.iter()
-            .map(|h| self.store.change(h).map_err(RdyError::from))
-            .collect()
-    }
+fn changes_of(st: &ReadState, ids: &[Hash]) -> Result<Vec<Change>, RdyError> {
+    ids.iter()
+        .map(|h| st.reader().change(h).map_err(RdyError::from))
+        .collect()
+}
 
-    /// The landing that already carried any of `p`'s changes into canon: one index lookup per
-    /// change (lidx1).
-    fn landed_as(&self, p: &Proposal) -> Result<Option<Hash>, RdyError> {
-        for c in &p.changes {
-            if let Some(l) = self.store.landing_of(c)? {
-                return Ok(Some(l));
-            }
+/// The landing that already carried any of `p`'s changes into canon: one index lookup per
+/// change (lidx1).
+fn landed_as(st: &ReadState, p: &Proposal) -> Result<Option<Hash>, RdyError> {
+    for c in &p.changes {
+        if let Some(l) = st.reader().landing_of(c)? {
+            return Ok(Some(l));
         }
-        Ok(None)
     }
+    Ok(None)
+}
 
-    /// Validates the canon that would result from landing `changes`.
-    fn prospective_issues(&mut self, changes: &[Change]) -> Result<Vec<Issue>, RdyError> {
-        // merge onto canon to surface E_STALE_BASE / E_ALREADY_EXISTS / E_FROZEN early
-        let (_, applied) = self
-            .store
-            .merge_checked(&self.store.canon_state()?, changes)?;
-        let mut next: Materialized = self.materialized(&Scope::Canon)?.clone();
+/// The ops of the changes at `applied` (positions in `changes`), in applied order.
+fn applied_ops(changes: &[Change], applied: &[usize]) -> Vec<Op> {
+    applied
+        .iter()
+        .flat_map(|&i| changes[i].ops.iter().cloned())
+        .collect()
+}
+
+impl Rdy {
+    /// Validates the canon that would result from landing `changes` on `st`'s canon; returns the
+    /// issues and each applied change's position in `changes`, in applied order.
+    fn prospective_issues(
+        &self,
+        st: &ReadState,
+        changes: &[Change],
+    ) -> Result<(Vec<Issue>, Vec<usize>), RdyError> {
+        // merge onto the state's canon to surface E_STALE_BASE / E_ALREADY_EXISTS / E_FROZEN
+        // early
+        let reader = st.reader();
+        let (_, applied) = reader.merge_checked(&reader.state_of(st.canon_head())?, changes)?;
+        let next: Materialized = st
+            .materialized(&Scope::Canon)?
+            .with(&applied_ops(changes, &applied));
         let mut touched = BTreeSet::new();
         let mut deleted = BTreeSet::new();
         for c in applied.iter().map(|&i| &changes[i]) {
-            next.apply(&c.ops);
             for op in &c.ops {
                 match op {
                     Op::Delete { id, .. } => {
@@ -99,10 +113,10 @@ impl Rdy {
                     found
                 };
             let parent = b.parent.as_ref().and_then(|p| next.get(p));
-            issues.extend(validate_block(&self.pack, b, parent));
+            issues.extend(validate_block(st.pack(), b, parent));
             // two views can each be fine alone and clash or loop once both are in canon
             let mut walk = b.parent.clone();
-            for _ in 0..=next.blocks.len() {
+            for _ in 0..=next.len() {
                 let Some(p) = walk else { break };
                 if &p == id {
                     issues.push(Issue {
@@ -171,7 +185,7 @@ impl Rdy {
             }
         }
         if !deleted.is_empty() {
-            for b in next.blocks.values() {
+            for b in next.iter() {
                 if let Some(parent) = b.parent.as_ref().filter(|p| deleted.contains(*p)) {
                     issues.push(Issue {
                         severity: Severity::Error,
@@ -198,7 +212,7 @@ impl Rdy {
                 }
             }
         }
-        Ok(issues)
+        Ok((issues, applied))
     }
 
     /// Warns when the proposal places blocks (creates or moves) under a parent whose siblings, as
@@ -206,7 +220,8 @@ impl Rdy {
     /// sibling since then counts, whether a rebalance or an ordinary move of one block. The
     /// placed blocks' keys were chosen against the old keys.
     fn rekeyed_warnings(
-        &mut self,
+        &self,
+        st: &ReadState,
         view_base: Option<Hash>,
         changes: &[Change],
     ) -> Result<Vec<Issue>, RdyError> {
@@ -218,7 +233,7 @@ impl Rdy {
                         parents.insert(block.parent.clone());
                     }
                     Op::Update { base, block } => {
-                        let old = self.store.get_block(base)?;
+                        let old = st.reader().get_block(base)?;
                         if old.parent != block.parent || old.order != block.order {
                             parents.insert(block.parent.clone());
                         }
@@ -231,11 +246,11 @@ impl Rdy {
             return Ok(vec![]);
         }
         let base = match view_base {
-            Some(l) => self.store.snapshot_at(&l)?,
+            Some(l) => st.reader().snapshot_at(&l)?,
             None => rdy_model::StateSnapshot::default(),
         };
         // canon's children that the base also had, at a different version: (parent, id, base, order)
-        let canon = self.materialized(&Scope::Canon)?;
+        let canon = st.materialized(&Scope::Canon)?;
         let mut changed = vec![];
         for p in &parents {
             for sib in canon.children(p.as_ref()) {
@@ -250,7 +265,7 @@ impl Rdy {
         for p in parents {
             let mut rekeyed = None;
             for (_, id, h, order) in changed.iter().filter(|c| c.0 == p) {
-                if self.store.get_block(h)?.order != *order {
+                if st.reader().get_block(h)?.order != *order {
                     rekeyed = Some(id.clone());
                     break;
                 }
@@ -289,27 +304,31 @@ impl Rdy {
                 "start the session as a writer",
             ));
         }
-        let v = self.store.view(view)?;
-        if v.changes.is_empty() {
+        let st = self.read();
+        let included = st.included(view);
+        if included.is_empty() {
             return Err(RdyError::new(
                 E_BAD_INPUT,
                 format!("view {view:?} has no changes to propose"),
                 "write to the view first",
             ));
         }
-        let changes = self.changes_of(&v.changes)?;
-        let mut issues = self.prospective_issues(&changes)?;
+        let changes = changes_of(&st, &included)?;
+        let (mut issues, _) = self.prospective_issues(&st, &changes)?;
         if let Some(first) = issues.iter().find(|i| i.severity == Severity::Error) {
             let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
             e.issues = issues;
             return Err(e);
         }
-        issues.extend(self.rekeyed_warnings(v.base, &changes)?);
+        // a view with no head floats on canon
+        let view_base = st.view_head(view).map_or(st.canon_head(), |h| h.base);
+        issues.extend(self.rekeyed_warnings(&st, view_base, &changes)?);
         let id = self.store.propose(view, title, s.provenance())?;
+        self.publish(Delta::Seq)?;
         Ok(ProposalInfo {
             id: id.to_string(),
             title: title.into(),
-            changes: v.changes.len(),
+            changes: included.len(),
             warnings: issues,
         })
     }
@@ -339,9 +358,10 @@ impl Rdy {
             }
             return Err(rdy_store::StoreError::NotFound(pid).into());
         }
-        let p = self.store.proposal(&pid)?;
+        let st = self.read();
+        let p = st.reader().proposal(&pid)?;
         // land1: a landed change is already in canon; replaying it would only fail obscurely
-        if let Some(landing) = self.landed_as(&p)? {
+        if let Some(landing) = landed_as(&st, &p)? {
             return Err(RdyError::new(
                 E_ALREADY_LANDED,
                 format!(
@@ -354,13 +374,11 @@ impl Rdy {
                 ),
             ));
         }
-        let changes = self.changes_of(&p.changes)?;
+        let changes = changes_of(&st, &p.changes)?;
 
         // 1. prospective canon: canon + the proposal's own changes
-        let mut prospective: Materialized = self.materialized(&Scope::Canon)?.clone();
-        for c in &changes {
-            prospective.apply(&c.ops);
-        }
+        let ops: Vec<Op> = changes.iter().flat_map(|c| c.ops.iter().cloned()).collect();
+        let prospective = st.materialized(&Scope::Canon)?.with(&ops);
         let mut ids = BTreeSet::new();
         for c in &changes {
             for op in &c.ops {
@@ -383,7 +401,7 @@ impl Rdy {
                 continue;
             }
             // 2. the view must not have moved on from the proposal's version
-            let in_view = self.materialized(&view)?.get(&id).map(|v| v.version_hash());
+            let in_view = st.materialized(&view)?.get(&id).map(|v| v.version_hash());
             if in_view != Some(b.version_hash()) {
                 stale.push(RdyError::new(
                     E_STALE_BASE,
@@ -429,26 +447,36 @@ impl Rdy {
         };
         let mut all = changes;
         all.extend(accept.clone());
-        let mut issues = self.prospective_issues(&all)?;
+        let (mut issues, order) = self.prospective_issues(&st, &all)?;
         if let Some(first) = issues.iter().find(|i| i.severity == Severity::Error) {
             let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
             e.issues = issues;
             return Err(e);
         }
-        let view_base = self.store.view(&p.view)?.base;
-        issues.extend(self.rekeyed_warnings(view_base, &all)?);
+        // a view with no head floats on canon
+        let view_base = st.view_head(&p.view).map_or(st.canon_head(), |h| h.base);
+        issues.extend(self.rekeyed_warnings(&st, view_base, &all)?);
+        let landed_ops = applied_ops(&all, &order);
 
         // 4. land in one write (atom1): the acceptance change, the final proposal version, the
-        // snapshot, the landing, the view's rebase and the refs
-        let result = self.store.land_atomic(LandRequest {
+        // snapshot, the landing, the view's rebase and the refs. A failed landing writes nothing,
+        // so the published state stays as it is.
+        let out = self.store.land_atomic(LandRequest {
             proposal: pid,
             accept,
             approver: s.provenance(),
             chosen: None,
-        });
-        // never leave caches stale, whatever the write did
-        self.invalidate();
-        let out = result?;
+        })?;
+        // 5. publish canon incrementally: the previous canon with the landed ops (snap1)
+        if let Err(e) = self.publish(Delta::Landed {
+            landing: out.landing,
+            view: p.view.clone(),
+            ops: landed_ops,
+        }) {
+            // the landing is written: never leave the published state behind it
+            let _ = self.publish(Delta::Full);
+            return Err(e);
+        }
         Ok(LandInfo {
             landing: out.landing.to_string(),
             warnings: issues,

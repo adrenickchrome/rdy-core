@@ -21,9 +21,9 @@ fn v(rule: &'static str, block: Option<&BlockId>, detail: impl Into<String>) -> 
     }
 }
 
-pub fn check(r: &mut Rdy, scope: &Scope) -> Result<(), Vec<Violation>> {
+pub fn check(r: &Rdy, scope: &Scope) -> Result<(), Vec<Violation>> {
     let mut out = vec![];
-    let m = match r.materialized(scope) {
+    let m = match r.read().materialized(scope) {
         Ok(m) => m.clone(),
         Err(e) => {
             return Err(vec![v(
@@ -34,7 +34,7 @@ pub fn check(r: &mut Rdy, scope: &Scope) -> Result<(), Vec<Violation>> {
         }
     };
     let pack = r.pack().clone();
-    for b in m.blocks.values() {
+    for b in m.iter() {
         // parent exists; walk the chain for cycles and folder depth
         let parent = b.parent.as_ref().and_then(|p| m.get(p));
         if let Some(p) = &b.parent
@@ -53,7 +53,7 @@ pub fn check(r: &mut Rdy, scope: &Scope) -> Result<(), Vec<Violation>> {
                 break;
             }
             steps += 1;
-            if steps > m.blocks.len() {
+            if steps > m.len() {
                 break;
             }
             let Some(pb) = m.get(&c) else { break };
@@ -137,8 +137,7 @@ pub fn check(r: &mut Rdy, scope: &Scope) -> Result<(), Vec<Violation>> {
     }
     // sibling names, ignoring case
     let parents: BTreeSet<Option<BlockId>> = m
-        .blocks
-        .values()
+        .iter()
         .filter(|b| tree::is_tree_type(&b.block_type))
         .map(|b| b.parent.clone())
         .collect();

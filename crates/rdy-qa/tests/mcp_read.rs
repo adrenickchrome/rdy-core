@@ -97,10 +97,10 @@ fn md1_markdown_carries_every_blocks_content_and_id() {
     );
     let ids: Vec<String> = st
         .rdy
+        .read()
         .materialized(&Scope::View("work".into()))
         .unwrap()
-        .blocks
-        .keys()
+        .ids()
         .map(|k| k.to_string())
         .collect();
     for b in ids {

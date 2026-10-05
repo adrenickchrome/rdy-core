@@ -408,6 +408,7 @@ fn read_as_of_a_version() {
     land_and_tag(&mut st);
     let doc = st
         .rdy
+        .read()
         .materialized(&rdy_engine::Scope::Canon)
         .unwrap()
         .children(None)[0]
@@ -415,6 +416,7 @@ fn read_as_of_a_version() {
         .to_string();
     let section = st
         .rdy
+        .read()
         .materialized(&rdy_engine::Scope::Canon)
         .unwrap()
         .children(Some(&rdy_model::BlockId::parse(&doc).unwrap()))[0]

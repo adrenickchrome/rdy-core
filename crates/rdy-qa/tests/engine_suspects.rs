@@ -20,7 +20,8 @@ fn setup(r: &mut Rdy) -> serde_json::Value {
 }
 
 fn suspects_of(r: &mut Rdy, scope: &Scope, block: &str) -> Vec<(String, String)> {
-    r.suspects(scope)
+    r.read()
+        .suspects(scope)
         .unwrap()
         .into_iter()
         .filter(|s| s.block.to_string() == block)

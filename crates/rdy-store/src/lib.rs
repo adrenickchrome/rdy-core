@@ -17,9 +17,10 @@ pub use error::StoreError;
 pub use index::IndexDump;
 pub use land::{LandOutcome, LandRequest};
 pub use merge::{Conflict, MergeChange, Merged, Side, conflict_id, merge};
+pub use segment::SegmentReader;
 pub use store::{
     CATCH_UP_CHUNK, CHECKPOINT_FRAMES, CHECKPOINT_IDLE, INDEX_OPEN_SENTINEL, MAX_BLOB_BYTES,
-    OpenReport, Store, lock_error,
+    OpenReport, Store, StoreReader, lock_error,
 };
 mod state;
 pub use state::{ViewRecord, apply_op};

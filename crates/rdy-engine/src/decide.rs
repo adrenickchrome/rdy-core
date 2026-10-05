@@ -137,7 +137,7 @@ impl Rdy {
                 "pass a decision id like D-W2HXR",
             )
         })?;
-        let b = self.block(&Scope::View(view.into()), &bid)?;
+        let b = self.read().block(&Scope::View(view.into()), &bid)?;
         if b.block_type != decision::DECISION {
             return Err(RdyError::new(
                 E_BAD_INPUT,
@@ -157,7 +157,7 @@ impl Rdy {
         d: DecisionInput,
     ) -> Result<WriteResult, RdyError> {
         let old_id = self.require_decision(view, old)?;
-        let old_block = self.block(&Scope::View(view.into()), &old_id)?;
+        let old_block = self.read().block(&Scope::View(view.into()), &old_id)?;
         // sup1: the new decision keeps the old one's scope and premises, kind by kind, unless the
         // caller gives that kind or lists it in no_inherit
         const INHERITED: [&str; 4] = [
@@ -194,7 +194,7 @@ impl Rdy {
             let mut targets = vec![];
             for l in links {
                 // a link to a block deleted in this view can't be copied: say so before writing
-                if self.materialized(&scope)?.get(&l.target).is_none() {
+                if self.read().materialized(&scope)?.get(&l.target).is_none() {
                     return Err(RdyError::new(
                         E_UNKNOWN_REF,
                         format!(

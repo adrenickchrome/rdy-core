@@ -1,5 +1,5 @@
 use crate::error::*;
-use crate::{Materialized, Rdy, Scope, Session};
+use crate::{Delta, Materialized, Rdy, Scope, Session};
 use rdy_model::tree;
 use rdy_model::{
     Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Justification, Link, Op, RefMode,
@@ -559,7 +559,7 @@ fn components(deps: &[Vec<usize>]) -> Vec<usize> {
 fn folders_from(ov: &Overlay, parent: Option<&BlockId>) -> usize {
     let mut n = 0;
     let mut cur = parent.and_then(|p| ov.get(p));
-    for _ in 0..=ov.base.blocks.len() + ov.pending.len() {
+    for _ in 0..=ov.base.len() + ov.pending.len() {
         let Some(b) = cur else { break };
         if b.block_type == tree::FOLDER {
             n += 1;
@@ -1281,22 +1281,17 @@ fn build_ops(
 }
 
 impl Rdy {
-    pub fn block(&mut self, scope: &Scope, id: &BlockId) -> Result<Block, RdyError> {
-        self.materialized(scope)?.get(id).cloned().ok_or_else(|| {
-            RdyError::new(
-                E_UNKNOWN_BLOCK,
-                format!("no block {id}"),
-                "check the id with rdy_read",
-            )
-        })
-    }
-
     pub fn write(&mut self, session: &Session, req: WriteRequest) -> Result<WriteResult, RdyError> {
         self.write_linked(session, req, ChangeLinks::default())
     }
 
     /// `write`, with `links` (intent, alternative, client nonce) recorded on the change. MCP and
     /// the CLI don't use it yet: M2d1 adds intents, and M2f the nonce.
+    ///
+    /// The change is checked against the view as the published state holds it, which is the
+    /// view's present state only if every store write made outside the engine was followed by
+    /// `invalidate()` (as `rdy_qa::fixtures::raw_commit` does). The new state is published
+    /// before this returns.
     pub fn write_linked(
         &mut self,
         session: &Session,
@@ -1315,11 +1310,10 @@ impl Rdy {
             return Err(bad("no ops given", "pass at least one op"));
         }
         let scope = Scope::View(req.view.clone());
-        self.materialized(&scope)?;
-        let (ops, created, touched, names) = {
-            let base = self.cache.get(&scope).expect("materialized above");
-            build_ops(&self.pack, &self.store, base, session, req.ops)?
-        };
+        let st = self.read();
+        let m = st.materialized(&scope)?;
+        let (ops, created, touched, names) =
+            build_ops(&self.pack, &self.store, &m, session, req.ops)?;
         let change = Change {
             view: req.view.clone(),
             ops: ops.clone(),
@@ -1331,10 +1325,13 @@ impl Rdy {
         };
         let id = self
             .store
-            .commit_to_view_at(&req.view, change, &self.cache[&scope].snapshot)?;
-        self.update_cache(&req.view, &ops);
+            .commit_to_view_with(&req.view, change, &|id| m.version_of(id))?;
+        self.publish(Delta::Commit {
+            view: req.view.clone(),
+            ops,
+        })?;
 
-        let m = self.cache.get(&scope).expect("cached");
+        let m = self.read().materialized(&scope)?;
         let mut docs = BTreeSet::new();
         for t in &touched {
             if let Some(d) = m.doc_of(t) {

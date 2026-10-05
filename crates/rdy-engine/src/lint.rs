@@ -148,8 +148,7 @@ pub fn check_path(
     }
     if let Some(m) = canon {
         let nameless: Vec<&BlockId> = m
-            .blocks
-            .values()
+            .iter()
             .filter(|b| b.block_type == rdy_model::tree::DOC && b.field_str("name").is_none())
             .map(|b| &b.id)
             .collect();

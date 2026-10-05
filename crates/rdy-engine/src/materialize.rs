@@ -1,4 +1,6 @@
-use rdy_model::{Block, BlockId, Op, StateSnapshot, tree};
+use imbl::{OrdMap, OrdSet};
+use rdy_graph::BlockLookup;
+use rdy_model::{Block, BlockId, Hash, Op, StateSnapshot, tree};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -34,15 +36,17 @@ impl Clone for DerivedCache {
     }
 }
 
+/// One state's blocks and the maps derived from them, held in persistent maps so that a clone is
+/// cheap and `with` copies only the paths to the entries it changes.
 #[derive(Clone, Debug, Default)]
 pub struct Materialized {
-    pub snapshot: StateSnapshot,
-    pub blocks: BTreeMap<BlockId, Block>,
-    children: BTreeMap<Option<BlockId>, BTreeSet<(String, BlockId)>>,
+    blocks: OrdMap<BlockId, Arc<Block>>,
+    versions: OrdMap<BlockId, Hash>,
+    children: OrdMap<Option<BlockId>, OrdSet<(String, BlockId)>>,
     /// Docs and folders with a stored name, by (parent, lower-cased name).
-    names: BTreeMap<(Option<BlockId>, String), BTreeSet<BlockId>>,
+    names: OrdMap<(Option<BlockId>, String), OrdSet<BlockId>>,
     /// How many docs without a stored name (from M1) each parent holds.
-    nameless: BTreeMap<Option<BlockId>, usize>,
+    nameless: OrdMap<Option<BlockId>, usize>,
     derived: DerivedCache,
 }
 
@@ -60,20 +64,32 @@ pub struct PathMiss {
 impl Materialized {
     pub fn build(snapshot: StateSnapshot, blocks: BTreeMap<BlockId, Block>) -> Materialized {
         let mut m = Materialized {
-            snapshot,
-            blocks: BTreeMap::new(),
-            children: BTreeMap::new(),
-            names: BTreeMap::new(),
-            nameless: BTreeMap::new(),
-            derived: DerivedCache::default(),
+            versions: snapshot.blocks.into_iter().collect(),
+            ..Materialized::default()
         };
         for (_, b) in blocks {
-            m.insert(b);
+            m.insert(Arc::new(b));
         }
         m
     }
 
-    fn insert(&mut self, b: Block) {
+    /// This state with `ops` applied in order. `self` is unchanged; the result shares every
+    /// block the ops do not name. O(ops × log n).
+    pub fn with(&self, ops: &[Op]) -> Materialized {
+        let mut next = self.clone();
+        for op in ops {
+            match op {
+                Op::Create { block } | Op::Update { block, .. } => {
+                    next.remove(&block.id);
+                    next.insert(Arc::new(block.clone()));
+                }
+                Op::Delete { id, .. } => next.remove(id),
+            }
+        }
+        next
+    }
+
+    fn insert(&mut self, b: Arc<Block>) {
         self.children
             .entry(b.parent.clone())
             .or_default()
@@ -90,7 +106,7 @@ impl Materialized {
                 None => *self.nameless.entry(b.parent.clone()).or_default() += 1,
             }
         }
-        self.snapshot.blocks.insert(b.id.clone(), b.version_hash());
+        self.versions.insert(b.id.clone(), b.version_hash());
         self.blocks.insert(b.id.clone(), b);
     }
 
@@ -119,31 +135,72 @@ impl Materialized {
                 }
             }
         }
-        self.snapshot.blocks.remove(id);
+        self.versions.remove(id);
     }
 
     pub fn get(&self, id: &BlockId) -> Option<&Block> {
-        self.blocks.get(id)
+        self.blocks.get(id).map(|b| &**b)
+    }
+
+    /// Test hook: the shared pointer holding `id`'s block, to observe structural sharing.
+    #[doc(hidden)]
+    pub fn block_arc(&self, id: &BlockId) -> Option<Arc<Block>> {
+        self.blocks.get(id).cloned()
+    }
+
+    pub fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    /// Every block, in `BlockId` order.
+    pub fn iter(&self) -> impl Iterator<Item = &Block> + '_ {
+        self.blocks.values().map(|b| &**b)
+    }
+
+    /// Every block id, in order.
+    pub fn ids(&self) -> impl Iterator<Item = &BlockId> + '_ {
+        self.blocks.keys()
+    }
+
+    /// The version hash of a block in this state.
+    pub fn version_of(&self, id: &BlockId) -> Option<Hash> {
+        self.versions.get(id).copied()
+    }
+
+    /// Every (id, version), in id order.
+    pub fn versions(&self) -> impl Iterator<Item = (&BlockId, &Hash)> + '_ {
+        self.versions.iter()
+    }
+
+    /// A fresh snapshot holding every (id, version). O(n).
+    pub fn snapshot(&self) -> StateSnapshot {
+        StateSnapshot {
+            blocks: self.versions.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+        }
+    }
+
+    pub fn snapshot_id(&self) -> Hash {
+        self.snapshot().id()
     }
 
     pub fn children(&self, parent: Option<&BlockId>) -> Vec<&Block> {
         self.children
             .get(&parent.cloned())
-            .map(|set| {
-                set.iter()
-                    .filter_map(|(_, id)| self.blocks.get(id))
-                    .collect()
-            })
+            .map(|set| set.iter().filter_map(|(_, id)| self.get(id)).collect())
             .unwrap_or_default()
     }
 
     pub fn doc_of(&self, id: &BlockId) -> Option<&Block> {
-        let mut cur = self.blocks.get(id)?;
+        let mut cur = self.get(id)?;
         for _ in 0..=self.blocks.len() {
             if cur.block_type == "doc" {
                 return Some(cur);
             }
-            cur = self.blocks.get(cur.parent.as_ref()?)?;
+            cur = self.get(cur.parent.as_ref()?)?;
         }
         None
     }
@@ -320,16 +377,10 @@ impl Materialized {
             ambiguous: vec![],
         })
     }
+}
 
-    pub fn apply(&mut self, ops: &[Op]) {
-        for op in ops {
-            match op {
-                Op::Create { block } | Op::Update { block, .. } => {
-                    self.remove(&block.id);
-                    self.insert(block.clone());
-                }
-                Op::Delete { id, .. } => self.remove(id),
-            }
-        }
+impl BlockLookup for Materialized {
+    fn block(&self, id: &BlockId) -> Option<&Block> {
+        self.get(id)
     }
 }

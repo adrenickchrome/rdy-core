@@ -21,6 +21,9 @@ pub const REQUEST_TOO_LARGE: &str = "rdy_request_too_large";
 #[derive(Clone)]
 pub struct RdyServer {
     state: Arc<Mutex<McpState>>,
+    /// The FIFO ticket that keeps requests in arrival order across `spawn_blocking` (see
+    /// [`RdyServer::run`]).
+    order: Arc<tokio::sync::Mutex<()>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -36,130 +39,151 @@ impl RdyServer {
     pub fn new(rdy: Rdy) -> Self {
         RdyServer {
             state: Arc::new(Mutex::new(McpState::new(rdy))),
+            order: Arc::new(tokio::sync::Mutex::new(())),
             tool_router: Self::tool_router(),
         }
     }
 
-    /// Runs one tool. A panic inside it becomes an `E_INTERNAL` reply (so the request is still
-    /// answered) and drops the engine's caches, which the panic may have left half-updated.
-    fn run<P>(
+    /// Runs one tool on the blocking pool, so no tool blocks the executor. A panic inside it
+    /// becomes an `E_INTERNAL` reply (so the request is still answered) and republishes a clean
+    /// state, which the panic may have left half-updated.
+    ///
+    /// Order is kept by a FIFO ticket: tokio's mutex is fair, and the ticket is held until this
+    /// call's reply is built, so the next request's body cannot start before this one is done.
+    /// Without it, requests awaiting the blocking pool would race for the state lock and writes
+    /// could apply, and replies come back, out of request order.
+    pub(crate) async fn run<P: Send + 'static>(
         &self,
-        tool: &str,
+        tool: &'static str,
         p: P,
         f: fn(&mut McpState, P) -> Result<serde_json::Value, RdyError>,
     ) -> CallToolResult {
-        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut st, p)));
-        match out {
-            Ok(r) => result(r),
-            Err(panic) => {
-                st.rdy.invalidate();
-                let msg = panic
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic".into());
-                result(Err(RdyError::new(
-                    E_INTERNAL,
-                    format!("internal error in {tool}: {msg}"),
-                    "this is a bug in rdy; the request may or may not have been applied: re-read before retrying",
-                )))
+        let ticket = Arc::clone(&self.order).lock_owned().await;
+        let state = Arc::clone(&self.state);
+        let joined = tokio::task::spawn_blocking(move || {
+            let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
+            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut st, p)));
+            match out {
+                Ok(r) => result(r),
+                Err(panic) => {
+                    st.rdy.invalidate();
+                    let msg = panic
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic".into());
+                    result(Err(RdyError::new(
+                        E_INTERNAL,
+                        format!("internal error in {tool}: {msg}"),
+                        "this is a bug in rdy; the request may or may not have been applied: re-read before retrying",
+                    )))
+                }
             }
-        }
+        })
+        .await;
+        let reply = joined.unwrap_or_else(|_| {
+            result(Err(RdyError::new(
+                E_INTERNAL,
+                format!("internal error in {tool}: the call was cancelled"),
+                "this is a bug in rdy; the request may or may not have been applied: re-read before retrying",
+            )))
+        });
+        drop(ticket);
+        reply
     }
 
     #[tool(
         description = "Start a session: who you are (actor), your run, and role (reader, writer, reviewer). Required before other tools. Your writes go to a view named after your run; a reader may pass view \"canon\" to read canon by default."
     )]
-    fn rdy_session(&self, Parameters(p): Parameters<SessionParams>) -> CallToolResult {
-        self.run("rdy_session", p, tools::rdy_session)
+    async fn rdy_session(&self, Parameters(p): Parameters<SessionParams>) -> CallToolResult {
+        self.run("rdy_session", p, tools::rdy_session).await
     }
 
     #[tool(
         description = "Project overview: pack, the folder and doc tree, views, canon history and the version position."
     )]
-    fn rdy_overview(&self, Parameters(p): Parameters<ScopeParams>) -> CallToolResult {
-        self.run("rdy_overview", p, tools::rdy_overview)
+    async fn rdy_overview(&self, Parameters(p): Parameters<ScopeParams>) -> CallToolResult {
+        self.run("rdy_overview", p, tools::rdy_overview).await
     }
 
     #[tool(
         description = "Versions (frozen snapshots of canon, e.g. v1.2.0), oldest first, and the current version. Read one with scope \"tag:<version>\"."
     )]
-    fn rdy_tags(&self, Parameters(p): Parameters<TagsParams>) -> CallToolResult {
-        self.run("rdy_tags", p, tools::rdy_tags)
+    async fn rdy_tags(&self, Parameters(p): Parameters<TagsParams>) -> CallToolResult {
+        self.run("rdy_tags", p, tools::rdy_tags).await
     }
 
     #[tool(
         description = "Read a document, folder or subtree by id or path (e.g. wallets/transactions) as compact lines (default: each block's id, type and its whole statement, prompt, name or title, else its body's first sentence; references as bare ids), markdown or yaml. max_tokens cuts long output. scope is 'canon', an existing view's name (or your session's), 'tag:<version>' or 'landing:<id>'; an unknown view is E_NOT_FOUND."
     )]
-    fn rdy_read(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
-        self.run("rdy_read", p, tools::rdy_read)
+    async fn rdy_read(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
+        self.run("rdy_read", p, tools::rdy_read).await
     }
 
     #[tool(
         description = "By id or path: everything about one block: fields, body, version (use as base for updates), doc, links in and out, decision status, governing decisions, suspects."
     )]
-    fn rdy_context(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
-        self.run("rdy_context", p, tools::rdy_context)
+    async fn rdy_context(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
+        self.run("rdy_context", p, tools::rdy_context).await
     }
 
     #[tool(
         description = "How to write block types: fields, required values, allowed children and an example op. Omit block_type to list all types and document skeletons."
     )]
-    fn rdy_schema(&self, Parameters(p): Parameters<SchemaParams>) -> CallToolResult {
-        self.run("rdy_schema", p, tools::rdy_schema)
+    async fn rdy_schema(&self, Parameters(p): Parameters<SchemaParams>) -> CallToolResult {
+        self.run("rdy_schema", p, tools::rdy_schema).await
     }
 
     #[tool(
         description = "By id or path: blast radius: blocks that depend on the given block through references or dependency links (depends_on, conditional_on, implements, decided_by, describes, affects), by depth. Decisions that refine or supersede it are listed at depth 1 and not followed. Each item's via says which edge reached it: via.kind (references or a link name) to via.from."
     )]
-    fn rdy_impact(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
-        self.run("rdy_impact", p, tools::rdy_impact)
+    async fn rdy_impact(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
+        self.run("rdy_impact", p, tools::rdy_impact).await
     }
 
     #[tool(
         description = "References and premises (depends_on, conditional_on, implements, decided_by) whose target changed or was deleted since the block pinned it, or links of any kind to a decision that was superseded or revoked. After checking a \"changed\" suspect, clear it with a repin op in rdy_write."
     )]
-    fn rdy_suspects(&self, Parameters(p): Parameters<ScopeParams>) -> CallToolResult {
-        self.run("rdy_suspects", p, tools::rdy_suspects)
+    async fn rdy_suspects(&self, Parameters(p): Parameters<ScopeParams>) -> CallToolResult {
+        self.run("rdy_suspects", p, tools::rdy_suspects).await
     }
 
     #[tool(
         description = "Atomic batch write of ops (create, update, move, delete, rebalance, repin; rdy_schema lists them under \"ops\"). Place a block with after or before a sibling, or neither to append. Use id \"$name\" placeholders to refer to blocks created earlier in the same batch, including {{$name}} inside text. Reference blocks in text as {{id}}. links: {\"<kind>\": [{\"target\": \"<id or path>\"}]}. An update replaces only the link kinds it names; \"<kind>\": [] removes that kind."
     )]
-    fn rdy_write(&self, Parameters(p): Parameters<WriteParams>) -> CallToolResult {
-        self.run("rdy_write", p, tools::rdy_write)
+    async fn rdy_write(&self, Parameters(p): Parameters<WriteParams>) -> CallToolResult {
+        self.run("rdy_write", p, tools::rdy_write).await
     }
 
     #[tool(description = "Propose a decision (status proposed; accepted when its proposal lands).")]
-    fn rdy_decide(&self, Parameters(p): Parameters<DecideParams>) -> CallToolResult {
-        self.run("rdy_decide", p, tools::rdy_decide)
+    async fn rdy_decide(&self, Parameters(p): Parameters<DecideParams>) -> CallToolResult {
+        self.run("rdy_decide", p, tools::rdy_decide).await
     }
 
     #[tool(
         description = "Propose a decision that supersedes an existing one, wholly or a named part. It inherits the old decision's affects, depends_on, conditional_on and refines links unless you give that kind (an empty list drops it); the result's inherited lists what was copied."
     )]
-    fn rdy_supersede(&self, Parameters(p): Parameters<SupersedeParams>) -> CallToolResult {
-        self.run("rdy_supersede", p, tools::rdy_supersede)
+    async fn rdy_supersede(&self, Parameters(p): Parameters<SupersedeParams>) -> CallToolResult {
+        self.run("rdy_supersede", p, tools::rdy_supersede).await
     }
 
     #[tool(description = "Propose revoking an existing decision.")]
-    fn rdy_revoke(&self, Parameters(p): Parameters<RevokeParams>) -> CallToolResult {
-        self.run("rdy_revoke", p, tools::rdy_revoke)
+    async fn rdy_revoke(&self, Parameters(p): Parameters<RevokeParams>) -> CallToolResult {
+        self.run("rdy_revoke", p, tools::rdy_revoke).await
     }
 
     #[tool(
         description = "Propose your view's changes for canon. A human approves it with rdy approve."
     )]
-    fn rdy_propose(&self, Parameters(p): Parameters<ProposeParams>) -> CallToolResult {
-        self.run("rdy_propose", p, tools::rdy_propose)
+    async fn rdy_propose(&self, Parameters(p): Parameters<ProposeParams>) -> CallToolResult {
+        self.run("rdy_propose", p, tools::rdy_propose).await
     }
 
     #[tool(
         description = "Upload a binary asset (base64); returns the hash to put in a figure block's blob field."
     )]
-    fn rdy_asset(&self, Parameters(p): Parameters<AssetParams>) -> CallToolResult {
-        self.run("rdy_asset", p, tools::rdy_asset)
+    async fn rdy_asset(&self, Parameters(p): Parameters<AssetParams>) -> CallToolResult {
+        self.run("rdy_asset", p, tools::rdy_asset).await
     }
 }
 
@@ -473,11 +497,11 @@ impl IdleCheckpointLog {
 
 /// Serves MCP over stdin and stdout until stdin closes.
 ///
-/// The service runs on its own single-threaded runtime. rmcp runs every request in its own task
-/// and a tool body never yields, so on one thread requests run to completion in arrival order and
-/// replies leave in that order; on a worker pool they would race for the state lock and a client
-/// could see its replies shuffled. The tools are serialised by that lock anyway, so nothing is
-/// lost.
+/// The service runs on its own single-threaded runtime, and tools run on the blocking pool
+/// (`spawn_blocking`) holding the state lock for the call. rmcp runs every request in its own
+/// task; a body that awaits the pool yields, so order is kept by a FIFO ticket in
+/// [`RdyServer::run`]: a request takes the ticket in arrival order and holds it until its reply
+/// is built, so writes apply, and replies leave, in request order.
 pub async fn serve_stdio(project: PathBuf) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -793,8 +817,8 @@ mod mcp1_id_tests {
         assert_eq!(out[0]["id"], 1);
     }
 
-    #[test]
-    fn hook1_the_panic_hook_exists_only_under_cfg_test() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn hook1_the_panic_hook_exists_only_under_cfg_test() {
         let dir = tempfile::tempdir().unwrap();
         let rdy = Rdy::init(dir.path(), "rdy-standard").unwrap();
         let server = RdyServer::new(rdy);
@@ -804,7 +828,7 @@ mod mcp1_id_tests {
             role: "writer".into(),
             view: None,
         };
-        let out = serde_json::to_value(server.run("rdy_session", p, tools::rdy_session))
+        let out = serde_json::to_value(server.run("rdy_session", p, tools::rdy_session).await)
             .unwrap()
             .to_string();
         assert!(
@@ -818,8 +842,52 @@ mod mcp1_id_tests {
             role: "writer".into(),
             view: None,
         };
-        let out = serde_json::to_value(server.run("rdy_session", p, tools::rdy_session)).unwrap();
+        let out =
+            serde_json::to_value(server.run("rdy_session", p, tools::rdy_session).await).unwrap();
         assert_ne!(out["isError"], true, "{out}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn port1_a_tool_panic_on_the_blocking_pool_still_answers_and_the_server_stays_usable() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = RdyServer::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
+        let bad = SessionParams {
+            actor: "__rdy_test_panic__".into(),
+            run: Some("x".into()),
+            role: "writer".into(),
+            view: None,
+        };
+        let out = serde_json::to_value(server.run("rdy_session", bad, tools::rdy_session).await)
+            .unwrap()
+            .to_string();
+        assert!(
+            out.contains("E_INTERNAL") && out.contains("deliberate panic"),
+            "{out}"
+        );
+        let ok = SessionParams {
+            actor: "agent:a".into(),
+            run: Some("x".into()),
+            role: "writer".into(),
+            view: None,
+        };
+        let out =
+            serde_json::to_value(server.run("rdy_session", ok, tools::rdy_session).await).unwrap();
+        assert_ne!(out["isError"], true, "{out}");
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            let o = serde_json::to_value(
+                server
+                    .run("rdy_overview", ScopeParams::default(), tools::rdy_overview)
+                    .await,
+            )
+            .unwrap();
+            assert_ne!(o["isError"], true, "{o}");
+            assert!(
+                t.elapsed() < std::time::Duration::from_secs(2),
+                "{:?}",
+                t.elapsed()
+            );
+        }
     }
 
     #[test]

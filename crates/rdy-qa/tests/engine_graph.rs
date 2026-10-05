@@ -56,6 +56,7 @@ fn sus1_a_block_citing_a_target_twice_is_one_suspect() {
     .unwrap();
     land(&mut r, "work").unwrap();
     let mine: Vec<_> = r
+        .read()
         .suspects(&Scope::Canon)
         .unwrap()
         .into_iter()
@@ -64,6 +65,7 @@ fn sus1_a_block_citing_a_target_twice_is_one_suspect() {
     assert_eq!(mine.len(), 1, "{mine:?}");
     assert_eq!(mine[0].reason, "superseded");
     let ctx = r
+        .read()
         .context(&Scope::Canon, &BlockId::parse(&c).unwrap())
         .unwrap();
     assert_eq!(ctx.suspects.len(), 1, "{:?}", ctx.suspects);
@@ -82,9 +84,12 @@ fn sum1_a_questions_summary_is_its_prompt() {
     .created["op0"]
         .clone();
     let scope = Scope::View("work".into());
-    let block = r.block(&scope, &BlockId::parse(&q).unwrap()).unwrap();
+    let block = r
+        .read()
+        .block(&scope, &BlockId::parse(&q).unwrap())
+        .unwrap();
     assert_eq!(summary(&block), "Who approves refunds?");
-    let m = r.materialized(&scope).unwrap().clone();
+    let m = r.read().materialized(&scope).unwrap().clone();
     assert_eq!(summary_in(&block, &m), "Who approves refunds?");
 }
 
@@ -98,7 +103,7 @@ fn pin1_pins_print_as_hex_in_json() {
     .unwrap();
     let scope = Scope::View("work".into());
     let c = BlockId::parse(&res.created["$c"]).unwrap();
-    let ctx = serde_json::to_value(r.context(&scope, &c).unwrap()).unwrap();
+    let ctx = serde_json::to_value(r.read().context(&scope, &c).unwrap()).unwrap();
     let edge = ctx["outgoing"]
         .as_array()
         .unwrap()
@@ -116,6 +121,7 @@ fn pin1_pins_print_as_hex_in_json() {
         "{pin}"
     );
     let t = r
+        .read()
         .block(&scope, &BlockId::parse(&res.created["$t"]).unwrap())
         .unwrap();
     assert_eq!(pin, t.version_hash().to_string());
