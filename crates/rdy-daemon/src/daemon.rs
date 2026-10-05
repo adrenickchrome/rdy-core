@@ -110,17 +110,31 @@ pub enum ExitReason {
     VersionReplaced,
 }
 
+impl ExitReason {
+    fn label(self) -> &'static str {
+        match self {
+            ExitReason::Stopped => "stopped",
+            ExitReason::Idle => "idle",
+            ExitReason::VersionReplaced => "version replaced",
+        }
+    }
+}
+
 /// Controls a daemon from outside its `run`. Cheap to clone.
 #[derive(Clone)]
 pub struct DaemonHandle {
     info: DaemonInfo,
-    socket: PathBuf,
+    run: RunDir,
 }
 
 impl DaemonHandle {
-    /// Asks `run` to stop; returns at once.
+    /// Asks `run` to stop and returns at once. The socket and the pid file are removed here, so
+    /// no new client can reach the daemon once this returns; `run` drains and returns. A second
+    /// stop is a no-op.
     pub fn stop(&self) {
-        self.info.stop.send_replace(true);
+        if !self.info.stop.send_replace(true) {
+            remove_run_files(&self.run);
+        }
     }
 
     pub fn sessions(&self) -> Sessions {
@@ -133,7 +147,7 @@ impl DaemonHandle {
     }
 
     pub fn socket(&self) -> PathBuf {
-        self.socket.clone()
+        self.run.socket()
     }
 }
 
@@ -144,6 +158,8 @@ pub struct Daemon {
     readiness: Readiness,
     /// Set by the path that stops the daemon for a reason other than `Stopped`.
     reason: Arc<OnceLock<ExitReason>>,
+    /// Mirrors `info.connections` so `run` can watch it reach 0 (the idle timer).
+    count: Arc<watch::Sender<usize>>,
     listener: Option<UnixListener>,
 }
 
@@ -163,6 +179,7 @@ impl Daemon {
             info,
             readiness: Readiness::new(),
             reason: Arc::new(OnceLock::new()),
+            count: Arc::new(watch::channel(0).0),
             listener: None,
         }
     }
@@ -174,7 +191,7 @@ impl Daemon {
     pub fn handle(&self) -> DaemonHandle {
         DaemonHandle {
             info: self.info.clone(),
-            socket: self.config.run.socket(),
+            run: self.config.run.clone(),
         }
     }
 
@@ -185,14 +202,18 @@ impl Daemon {
         Ok(())
     }
 
-    /// Serves connections until stopped, then removes the socket and the pid file.
+    /// Serves connections until stopped, idle for `idle_timeout`, or replaced by another
+    /// version. Then, in order: stops accepting and drops the listener, removes the socket and
+    /// the pid file, tells every connection to finish, and waits for them up to `STOP_GRACE`.
     pub async fn run(mut self) -> io::Result<ExitReason> {
         let listener = self
             .listener
             .take()
             .ok_or_else(|| io::Error::other("run before bind"))?;
-        let socket_path = self.config.run.socket();
-        log(&format!("listening on {}", socket_path.display()));
+        log(&format!(
+            "listening on {}",
+            self.config.run.socket().display()
+        ));
         let ctx = Arc::new(Conn {
             version: self.config.version.clone(),
             expected_uid: self.config.expected_uid.unwrap_or_else(socket::own_uid),
@@ -201,7 +222,11 @@ impl Daemon {
             readiness: self.readiness.clone(),
             reason: Arc::clone(&self.reason),
         });
+        let idle = self.config.idle_timeout;
         let mut stop = self.info.stop.subscribe();
+        let mut count = self.count.subscribe();
+        // armed at the start (no connections yet) and on each drop of the count to 0
+        let mut idle_at = idle.map(|t| tokio::time::Instant::now() + t);
         let mut tasks = JoinSet::new();
         loop {
             if *stop.borrow_and_update() {
@@ -210,12 +235,31 @@ impl Daemon {
             while tasks.try_join_next().is_some() {}
             tokio::select! {
                 _ = stop.changed() => {}
+                // the sender lives in `self`, so this never errors
+                _ = count.changed() => {
+                    idle_at = if *count.borrow_and_update() == 0 {
+                        idle.map(|t| tokio::time::Instant::now() + t)
+                    } else {
+                        None
+                    };
+                }
+                _ = sleep_until_some(idle_at), if idle_at.is_some() => {
+                    let secs = idle.unwrap_or_default().as_secs_f64();
+                    log(&format!("idle for {secs} s, exiting"));
+                    let _ = self.reason.set(ExitReason::Idle);
+                    self.info.stop.send_replace(true);
+                }
                 accepted = listener.accept() => match accepted {
                     Ok((stream, _)) => {
-                        self.info.connections.fetch_add(1, Ordering::SeqCst);
+                        let connections = &self.info.connections;
+                        self.count.send_modify(|n| {
+                            *n = connections.fetch_add(1, Ordering::SeqCst) + 1;
+                        });
+                        idle_at = None;
                         let end = ConnEnd {
                             sessions: self.info.sessions.clone(),
                             connections: Arc::clone(&self.info.connections),
+                            count: Arc::clone(&self.count),
                             handler: Arc::clone(&self.handler),
                             session: None,
                         };
@@ -229,9 +273,20 @@ impl Daemon {
                 },
             }
         }
+        let reason = self.reason.get().copied().unwrap_or(ExitReason::Stopped);
+        // (1) stop accepting
         drop(listener);
-        remove_if_present(&socket_path);
-        remove_if_present(&self.config.run.pid_file());
+        // (2) the socket and the pid file (already gone if `DaemonHandle::stop` asked)
+        remove_run_files(&self.config.run);
+        // (3) every connection task sees `info.stop` and finishes
+        while tasks.try_join_next().is_some() {}
+        if reason != ExitReason::Idle {
+            log(&format!(
+                "stop requested, draining {} connections",
+                tasks.len()
+            ));
+        }
+        // (4) the bounded wait
         let drained = tokio::time::timeout(STOP_GRACE, async {
             while tasks.join_next().await.is_some() {}
         })
@@ -243,10 +298,25 @@ impl Daemon {
                 STOP_GRACE.as_secs()
             ));
         }
-        // dropping the set aborts what is left; each task's `ConnEnd` still runs
+        // dropping the set aborts what is left; each task's `ConnEnd` still runs. A handler
+        // inside `spawn_blocking` finishes on its own thread and its reply goes nowhere.
         drop(tasks);
-        Ok(self.reason.get().copied().unwrap_or(ExitReason::Stopped))
+        log(&format!("exiting ({})", reason.label()));
+        Ok(reason)
     }
+}
+
+/// Sleeps until `at`; never completes for `None` (the caller guards the branch anyway).
+async fn sleep_until_some(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+fn remove_run_files(run: &RunDir) {
+    remove_if_present(&run.socket());
+    remove_if_present(&run.pid_file());
 }
 
 fn remove_if_present(path: &Path) {
@@ -272,6 +342,7 @@ struct Conn {
 struct ConnEnd {
     sessions: Sessions,
     connections: Arc<AtomicUsize>,
+    count: Arc<watch::Sender<usize>>,
     handler: Arc<dyn Handler>,
     session: Option<SessionInfo>,
 }
@@ -288,7 +359,11 @@ impl Drop for ConnEnd {
                 log(&format!("session_ended panicked for session {}", s.id));
             }
         }
-        self.connections.fetch_sub(1, Ordering::SeqCst);
+        // under the watch's lock, so concurrent ends publish their counts in order
+        let connections = &self.connections;
+        self.count.send_modify(|n| {
+            *n = connections.fetch_sub(1, Ordering::SeqCst) - 1;
+        });
     }
 }
 
@@ -340,8 +415,17 @@ impl Conn {
             log(&format!("refused a connection from uid {peer_uid}"));
             return;
         }
-        // (b) the hello
-        let hello = match read_hello(&mut stream).await {
+        // (b) the hello; a stop closes a connection still in it
+        let mut stop = self.info.stop.subscribe();
+        if *stop.borrow_and_update() {
+            return;
+        }
+        let read = tokio::select! {
+            biased;
+            _ = stop.changed() => return,
+            read = read_hello(&mut stream) => read,
+        };
+        let hello = match read {
             Ok(h) => h,
             Err(error) => {
                 close_after_reply(stream, &HelloReply::Refused { error }).await;
@@ -405,10 +489,18 @@ impl Conn {
                 let id = session.id;
                 // spawned so a panic in the handler's future surfaces as a JoinError here
                 let mut task = AbortOnDrop(tokio::spawn(self.handler.mcp(session, stream)));
-                if let Err(e) = (&mut task.0).await
-                    && e.is_panic()
-                {
-                    log(&format!("mcp session {id} panicked"));
+                // on a stop the session's future is dropped (`task`'s drop aborts it), which
+                // closes the stream under it
+                tokio::select! {
+                    biased;
+                    _ = stop.changed() => {}
+                    joined = &mut task.0 => {
+                        if let Err(e) = joined
+                            && e.is_panic()
+                        {
+                            log(&format!("mcp session {id} panicked"));
+                        }
+                    }
                 }
             }
         }
