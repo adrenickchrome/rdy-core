@@ -3,6 +3,8 @@ use crate::segment::Location;
 use rdy_model::Hash;
 use redb::{Database, ReadableDatabase, TableDefinition};
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const OBJECTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("objects");
 const PRODUCERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("producers");
@@ -17,6 +19,15 @@ pub enum IndexEntry {
 
 pub struct Index {
     db: Database,
+}
+
+/// An index opened with its integrity checked (see `Index::open_checked`).
+pub struct CheckedIndex {
+    pub index: Index,
+    /// `check_integrity` found nothing to repair.
+    pub clean: bool,
+    /// redb fired its repair callback while opening the file (it was not closed cleanly).
+    pub repaired_at_open: bool,
 }
 
 fn enc(loc: &Location) -> Vec<u8> {
@@ -42,15 +53,23 @@ impl Index {
         Index::with_tables(Database::create(path).map_err(db)?)
     }
 
-    /// Opens the index and verifies every page checksum (about 30 ms per 300k objects). A file
-    /// that fails the check, or that redb had to repair, is an error: the caller sets it aside
-    /// and rebuilds it from the log rather than trusting it.
-    pub fn open_checked(path: &Path) -> Result<Index, StoreError> {
-        let mut database = Database::create(path).map_err(db)?;
-        if !database.check_integrity().map_err(db)? {
-            return Err(StoreError::Db("index failed its integrity check".into()));
-        }
-        Index::with_tables(database)
+    /// Opens the index and verifies every page checksum (about 30 ms per 300k objects). Whether
+    /// the file was clean is reported, not enforced: the caller decides whether a file redb had to
+    /// repair is damage (set aside and rebuilt) or a rollback after a kill (trusted, then caught
+    /// up). An error from redb is still an error.
+    pub fn open_checked(path: &Path) -> Result<CheckedIndex, StoreError> {
+        let repaired = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&repaired);
+        let mut database = redb::Builder::new()
+            .set_repair_callback(move |_| seen.store(true, Ordering::Relaxed))
+            .create(path)
+            .map_err(db)?;
+        let clean = database.check_integrity().map_err(db)?;
+        Ok(CheckedIndex {
+            index: Index::with_tables(database)?,
+            clean,
+            repaired_at_open: repaired.load(Ordering::Relaxed),
+        })
     }
 
     fn with_tables(database: Database) -> Result<Index, StoreError> {

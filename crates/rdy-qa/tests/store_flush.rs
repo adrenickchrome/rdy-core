@@ -179,3 +179,86 @@ fn mark1_a_torn_write_that_embeds_a_copy_of_a_segment_opens() {
 fn a_len(store: &Path) -> usize {
     std::fs::metadata(seg(store, 0)).unwrap().len() as usize
 }
+
+fn damaged_files(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("index.redb.damaged-")
+        })
+        .count()
+}
+
+/// Review Focus 3: the on-disk state of a store whose process was killed now.
+#[test]
+fn kill1_a_copy_of_a_live_store_opens_by_rollback_not_rebuild() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::open(&dir).unwrap();
+    let hs: Vec<_> = (0..3u8).map(|i| s.put_blob(&[i; 5]).unwrap()).collect();
+    assert!(dir.join(rdy_store::INDEX_OPEN_SENTINEL).exists());
+    let copy = base.path().join("copy");
+    copy_store(&dir, &copy);
+    let c = Store::open(&copy).unwrap();
+    let r = c.open_report().clone();
+    assert!(r.unclean_shutdown, "{r:?}");
+    assert!(!r.index_rebuilt, "a kill is not damage: {r:?}");
+    for (i, h) in hs.iter().enumerate() {
+        assert_eq!(c.get_blob(h).unwrap(), vec![i as u8; 5]);
+    }
+    assert_eq!(damaged_files(&copy), 0);
+}
+
+#[test]
+fn kill1_a_clean_close_removes_the_open_sentinel() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    Store::open(&dir).unwrap().put_blob(b"x").unwrap();
+    assert!(!dir.join(rdy_store::INDEX_OPEN_SENTINEL).exists());
+    assert!(!Store::open(&dir).unwrap().open_report().unclean_shutdown);
+}
+
+/// An open that fails after building its `Store` (here: the log names a newer reader) must not
+/// erase a previous kill's sentinel on drop.
+#[test]
+fn kill1_a_refused_open_keeps_a_kills_sentinel() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::open(&dir).unwrap();
+    s.set_refs(vec![(
+        rdy_store::format::REF_MIN_READER.into(),
+        b"3".to_vec(),
+    )])
+    .unwrap();
+    let copy = base.path().join("copy");
+    copy_store(&dir, &copy); // what a kill leaves, sentinel included
+    drop(s);
+    let e = Store::open(&copy)
+        .err()
+        .expect("the log says a newer rdy wrote it");
+    assert!(matches!(e, StoreError::Format { .. }), "{e}");
+    assert!(
+        copy.join(rdy_store::INDEX_OPEN_SENTINEL).exists(),
+        "the kill's evidence is kept"
+    );
+}
+
+/// Guard: damage to a cleanly closed index is still damage.
+#[test]
+fn kill1_a_damaged_index_after_a_clean_close_is_still_rebuilt() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let h = Store::open(&dir).unwrap().put_blob(b"kept").unwrap();
+    let idx = dir.join("index.redb");
+    let mut bytes = std::fs::read(&idx).unwrap();
+    bytes[..512].fill(0xAB);
+    std::fs::write(&idx, bytes).unwrap();
+    let s = Store::open(&dir).unwrap();
+    assert!(s.open_report().index_rebuilt);
+    assert_eq!(s.get_blob(&h).unwrap(), b"kept");
+    assert_eq!(damaged_files(&dir), 1);
+}

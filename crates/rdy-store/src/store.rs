@@ -10,6 +10,10 @@ use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
+/// The file a store creates when it opens and removes on a clean close. Finding it at open means the
+/// last process died with the store open.
+pub const INDEX_OPEN_SENTINEL: &str = "index.open";
+
 const SEGMENT_MAX: u64 = 64 * 1024 * 1024;
 const CHUNK: usize = 1024 * 1024;
 
@@ -52,29 +56,62 @@ pub struct Store {
     synced: Vec<PathBuf>,
     /// Opened by `open_legacy_for_tests`: behaves as M1 did (no format, no markers).
     legacy: bool,
+    /// Set only at the end of a successful open, after the sentinel exists: gates `Drop`, so a
+    /// store whose open failed neither removes a kill's sentinel nor does anything else on drop.
+    opened: bool,
 }
 
-/// Opens the index, verifies its integrity and reads its acknowledged boundary (None if it has
-/// none yet). An index that fails to open, fails the check, or makes redb panic is renamed to
-/// `index.redb.damaged-<n>` and replaced by an empty one, which the caller rebuilds from the
-/// log; the boundary is then unknown. The flag says whether the index was set aside.
-fn open_index(dir: &Path) -> Result<(Index, Option<Location>, bool), StoreError> {
+/// How an index open went: the index, its acknowledged boundary (None if it has none yet), whether
+/// it was set aside and replaced by an empty one, and whether redb repaired it.
+struct OpenedIndex {
+    index: Index,
+    acked: Option<Location>,
+    rebuilt: bool,
+    repaired: bool,
+}
+
+/// Opens the index, verifies its integrity and reads its acknowledged boundary. `unclean` says the
+/// `index.open` sentinel was present: the last process died with the store open.
+///
+/// - Damage is an error, a panic (redb can panic on a corrupt page), or a file redb reports as not
+///   clean when the last close was clean. It is renamed to `index.redb.damaged-<n>` and replaced
+///   by an empty one, which the caller rebuilds from the log; the boundary is then unknown.
+/// - Anything else is a rollback: a clean file, or any file after a kill, where redb discarding
+///   its non-durable commits is expected. Its last durable commit never covers an unacknowledged
+///   frame, so it is trusted and the caller catches it up from its `indexed_upto`.
+fn open_index(dir: &Path, unclean: bool) -> Result<OpenedIndex, StoreError> {
     let path = dir.join("index.redb");
-    // redb can panic on a corrupt page instead of returning an error; that is damage too
     let opened = std::panic::catch_unwind(|| {
-        Index::open_checked(&path).and_then(|i| {
-            let acked = i.acknowledged()?;
-            Ok((i, acked))
+        Index::open_checked(&path).and_then(|c| {
+            let acked = c.index.acknowledged()?;
+            Ok((c, acked))
         })
     })
     .unwrap_or_else(|_| Err(StoreError::Db("index panicked while opening".into())));
     match opened {
-        Ok((index, acked)) => Ok((index, acked, false)),
-        Err(_) => {
-            set_aside(&path)?;
-            Ok((Index::open(&path)?, None, true))
+        Ok((c, acked)) if c.clean || unclean => Ok(OpenedIndex {
+            repaired: !c.clean || c.repaired_at_open,
+            index: c.index,
+            acked,
+            rebuilt: false,
+        }),
+        Ok((c, _)) => {
+            drop(c); // close the file before it is renamed
+            rebuild_index(&path, true)
         }
+        Err(_) => rebuild_index(&path, false),
     }
+}
+
+/// Sets the damaged index aside and opens an empty one.
+fn rebuild_index(path: &Path, repaired: bool) -> Result<OpenedIndex, StoreError> {
+    set_aside(path)?;
+    Ok(OpenedIndex {
+        index: Index::open(path)?,
+        acked: None,
+        rebuilt: true,
+        repaired,
+    })
 }
 
 /// Moves `path` to the first free `<path>.damaged-<n>`, never overwriting an existing file.
@@ -155,6 +192,15 @@ fn entries_for_frame(
     Ok(out)
 }
 
+impl Drop for Store {
+    fn drop(&mut self) {
+        if self.opened {
+            // a clean close: the next open will not see a kill
+            let _ = std::fs::remove_file(self.dir.join(INDEX_OPEN_SENTINEL));
+        }
+    }
+}
+
 impl Store {
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
         Store::open_with(dir, false)
@@ -182,6 +228,8 @@ impl Store {
         if let Err(e) = lock.try_lock() {
             return Err(lock_error(dir, e)); // lock1
         }
+        // the sentinel of a process that died with the store open; M1 wrote none
+        let unclean = !legacy && dir.join(INDEX_OPEN_SENTINEL).exists();
         // a newer store is refused before the index is opened or anything is written
         let format_file = if legacy {
             None
@@ -205,13 +253,20 @@ impl Store {
         }
         // the index opens first: its indexed_upto is the acknowledged end of the log, which
         // tells the log which torn frames are an unacknowledged tail
-        let (index, acked, index_rebuilt) = open_index(dir)?;
+        let OpenedIndex {
+            index,
+            acked,
+            rebuilt: index_rebuilt,
+            repaired: redb_repaired,
+        } = open_index(dir, unclean)?;
         if fresh {
             // dur1: the new lock and index files' entries in the store directory
             fsutil::sync_dir(dir)?;
             synced.push(dir.to_path_buf());
         }
         let mut report = OpenReport {
+            unclean_shutdown: unclean,
+            redb_repaired,
             index_rebuilt,
             ..OpenReport::default()
         };
@@ -236,6 +291,7 @@ impl Store {
             synced,
             report,
             legacy,
+            opened: false,
         };
         let (upto, end) = (store.index.indexed_upto()?, store.log.end());
         if upto > end {
@@ -259,6 +315,9 @@ impl Store {
         store.report.catch_up_commits = u32::from(frames > 0);
         if !legacy {
             store.ensure_format(format_file.is_some())?;
+            // Losing this file to a power loss only costs a needless rebuild, so it is not synced.
+            File::create(dir.join(INDEX_OPEN_SENTINEL))?;
+            store.opened = true;
         }
         Ok(store)
     }
