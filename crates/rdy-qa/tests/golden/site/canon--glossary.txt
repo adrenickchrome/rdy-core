@@ -1,0 +1,137 @@
+chrome	-	Glossary · Structural pattern matching
+chrome	-	Skip to content
+chrome	-	Structural pattern matching
+chrome	L	v1.0.0, 2 changes since
+chrome	-	Search these pages
+chrome	-	Auto
+chrome	-	Light
+chrome	-	Dark
+chrome	L	Pages
+chrome	L	Overview
+chrome	L	Overview
+chrome	L	Specification
+chrome	L	The match statement and its patterns
+chrome	L	How a match runs
+chrome	L	Depth 0
+chrome	L	Rationale
+chrome	L	Why the design is what it is
+chrome	L	Σημασιολογία
+chrome	L	Tutorial
+chrome	L	Pattern matching by example
+chrome	L	Proposals
+chrome	L	Unused variable syntax
+chrome	L	Explicit pattern syntax
+chrome	L	Precise semantics for pattern matching
+chrome	L	A deliberately long title that goes on and on, so that headings, breadcrumbs, navigation entries, page titles and search results all have to cope with a name far longer than anyone would choose for a.
+chrome	L	Appendix
+chrome	L	Appendix 1
+chrome	L	Appendix 2
+chrome	L	Appendix 3
+chrome	L	Appendix 4
+chrome	L	Appendix 5
+chrome	L	Appendix 6
+chrome	L	Appendix 7
+chrome	L	Appendix 8
+chrome	L	Appendix 9
+chrome	L	Appendix 10
+chrome	L	Appendix 11
+chrome	L	Appendix 12
+chrome	L	Appendix 13
+chrome	L	Appendix 14
+chrome	L	Appendix 15
+chrome	L	Appendix 16
+chrome	L	Appendix 17
+chrome	L	Appendix 18
+chrome	L	Appendix 19
+chrome	L	Appendix 20
+chrome	L	Appendix 21
+chrome	L	Appendix 22
+chrome	L	Appendix 23
+chrome	L	Appendix 24
+chrome	L	Appendix 25
+chrome	L	Appendix 26
+chrome	L	Appendix 27
+chrome	L	Appendix 28
+chrome	L	Appendix 29
+chrome	L	Appendix 30
+chrome	L	Appendix 31
+chrome	L	Appendix 32
+chrome	L	Appendix 33
+chrome	L	Appendix 34
+chrome	L	Appendix 35
+chrome	L	Appendix 36
+chrome	L	Appendix 37
+chrome	L	Appendix 38
+chrome	L	Appendix 39
+chrome	L	Appendix 40
+chrome	L	Appendix 41
+chrome	L	Appendix 42
+chrome	L	Appendix 43
+chrome	L	Appendix 44
+chrome	L	Appendix 45
+chrome	L	Appendix 46
+chrome	L	Appendix 47
+chrome	L	Appendix 48
+chrome	L	Appendix 49
+chrome	L	Appendix 50
+chrome	-	+10 more
+chrome	L	Reference
+chrome	L	Glossary
+chrome	L	Open questions
+chrome	L	Structural pattern matching
+chrome	L	Glossary
+chrome	L	Glossary
+chrome	L	__match_args__
+chrome	-	A class attribute that lists, in order, the attributes that positional subpatterns of a class pattern refer to.
+chrome	-	defined in The match statement and its patterns › Terms
+chrome	L	As-pattern
+chrome	-	A pattern followed by `as` and a name. It matches its left side and also binds the subject to the name.
+chrome	-	defined in The match statement and its patterns › Terms
+chrome	L	Binding
+chrome	-	Giving a name a value as a result of a successful match. Bindings outlive the block.
+chrome	-	defined in Pattern matching by example › Terms
+chrome	L	Capture pattern
+chrome	-	A bare name other than `_`. It always succeeds and binds the subject to the name.
+chrome	-	defined in The match statement and its patterns › Terms
+chrome	L	Case block
+chrome	-	One `case` clause with its pattern, optional guard and indented block.
+chrome	-	defined in Pattern matching by example › Terms
+chrome	L	Class pattern
+chrome	-	A dotted name followed by parentheses that hold subpatterns. It tests the type of the subject, then its attributes.
+chrome	-	defined in The match statement and its patterns › Terms
+chrome	L	Guard
+chrome	-	An expression after `if` in a case block. It is evaluated only when the pattern has already succeeded.
+chrome	-	defined in The match statement and its patterns › Terms
+chrome	L	Irrefutable
+chrome	-	A pattern whose syntax alone proves that it always succeeds. Only the last case block may have one.
+chrome	-	defined in The match statement and its patterns › Terms
+chrome	L	Literal pattern
+chrome	-	A pattern that matches one constant: a number, a string, or one of `None`, `True` and `False`.
+chrome	-	defined in The match statement and its patterns › Terms
+chrome	L	Mapping pattern
+chrome	-	A pattern written with braces. Each item pairs a key, which must be a literal or a value, with a subpattern for the value.
+chrome	-	defined in The match statement and its patterns › Terms
+chrome	L	Or-pattern
+chrome	-	Two or more patterns joined by `|`. It succeeds at the first alternative that succeeds.
+chrome	-	defined in The match statement and its patterns › Terms
+chrome	L	Pattern
+chrome	-	The text that follows `case`. It describes a shape the subject must have and the names to bind to its parts.
+chrome	-	defined in The match statement and its patterns › Terms
+chrome	L	Sequence pattern
+chrome	-	A pattern written with square brackets or parentheses. It tests the length of the subject, then each item in turn.
+chrome	-	defined in The match statement and its patterns › Terms
+chrome	L	Soft keyword
+chrome	-	A word that is a keyword only in a specific grammatical position and an ordinary name elsewhere. `match` and `case` are soft keywords. See
+chrome	-	`match` and `case` are soft keywords.
+chrome	-	.
+chrome	-	defined in Pattern matching by example › Terms
+chrome	L	Subject
+chrome	-	The value that follows `match`. It is evaluated once; if the expression contains a comma, the subject is a tuple.
+chrome	-	defined in The match statement and its patterns › Terms
+chrome	L	Value pattern
+chrome	-	A dotted name such as `Color.RED`. The name is looked up and compared with the subject using `==`.
+chrome	-	defined in The match statement and its patterns › Terms
+chrome	L	Wildcard
+chrome	-	The single underscore, `_`. It matches any subject and binds nothing.
+chrome	-	defined in The match statement and its patterns › Terms
+chrome	L	Structural pattern matching, v1.0.0, 2 changes since.

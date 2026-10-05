@@ -21,7 +21,6 @@ fn no_leaks(site: &Path, what: &str) {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task post-G3"]
 fn scan1_the_golden_site_has_no_leak_in_any_scope() {
     let (_d, _r, _ids, out) = golden::site_canon();
     no_leaks(out.path(), "canon");
@@ -32,7 +31,6 @@ fn scan1_the_golden_site_has_no_leak_in_any_scope() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task post-G3"]
 fn scan1_the_hostile_and_generated_sites_have_no_leak() {
     let (_d, mut r) = golden::hostile();
     let out = tempfile::tempdir().unwrap();

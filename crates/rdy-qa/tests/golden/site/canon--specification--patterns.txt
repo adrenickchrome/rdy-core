@@ -1,0 +1,1707 @@
+chrome	-	The match statement and its patterns · Structural pattern matching
+chrome	-	Skip to content
+chrome	-	Structural pattern matching
+chrome	L	v1.0.0, 2 changes since
+chrome	-	Search these pages
+chrome	-	Auto
+chrome	-	Light
+chrome	-	Dark
+chrome	L	Pages
+chrome	L	Overview
+chrome	L	Overview
+chrome	L	Specification
+chrome	L	The match statement and its patterns
+chrome	L	How a match runs
+chrome	L	Depth 0
+chrome	L	Rationale
+chrome	L	Why the design is what it is
+chrome	L	Σημασιολογία
+chrome	L	Tutorial
+chrome	L	Pattern matching by example
+chrome	L	Proposals
+chrome	L	Unused variable syntax
+chrome	L	Explicit pattern syntax
+chrome	L	Precise semantics for pattern matching
+chrome	L	A deliberately long title that goes on and on, so that headings, breadcrumbs, navigation entries, page titles and search results all have to cope with a name far longer than anyone would choose for a.
+chrome	L	Appendix
+chrome	L	Appendix 1
+chrome	L	Appendix 2
+chrome	L	Appendix 3
+chrome	L	Appendix 4
+chrome	L	Appendix 5
+chrome	L	Appendix 6
+chrome	L	Appendix 7
+chrome	L	Appendix 8
+chrome	L	Appendix 9
+chrome	L	Appendix 10
+chrome	L	Appendix 11
+chrome	L	Appendix 12
+chrome	L	Appendix 13
+chrome	L	Appendix 14
+chrome	L	Appendix 15
+chrome	L	Appendix 16
+chrome	L	Appendix 17
+chrome	L	Appendix 18
+chrome	L	Appendix 19
+chrome	L	Appendix 20
+chrome	L	Appendix 21
+chrome	L	Appendix 22
+chrome	L	Appendix 23
+chrome	L	Appendix 24
+chrome	L	Appendix 25
+chrome	L	Appendix 26
+chrome	L	Appendix 27
+chrome	L	Appendix 28
+chrome	L	Appendix 29
+chrome	L	Appendix 30
+chrome	L	Appendix 31
+chrome	L	Appendix 32
+chrome	L	Appendix 33
+chrome	L	Appendix 34
+chrome	L	Appendix 35
+chrome	L	Appendix 36
+chrome	L	Appendix 37
+chrome	L	Appendix 38
+chrome	L	Appendix 39
+chrome	L	Appendix 40
+chrome	L	Appendix 41
+chrome	L	Appendix 42
+chrome	L	Appendix 43
+chrome	L	Appendix 44
+chrome	L	Appendix 45
+chrome	L	Appendix 46
+chrome	L	Appendix 47
+chrome	L	Appendix 48
+chrome	L	Appendix 49
+chrome	L	Appendix 50
+chrome	-	+10 more
+chrome	L	Reference
+chrome	L	Glossary
+chrome	L	Open questions
+chrome	L	Structural pattern matching
+chrome	L	Specification
+chrome	L	The match statement and its patterns
+content	L	Specification
+content	L	The match statement and its patterns
+content	-	This is the normative description of the match statement. It says what a match statement does and how each kind of pattern behaves, without commentary. The reasons behind the rules are in
+content	-	Why the design is what it is
+content	-	, and a guided walk through the feature is in
+content	-	Pattern matching by example
+content	-	.
+content	L	Summary
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Every term used here is defined once, in the section called Terms.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Note
+content	-	Throughout the specification, the words must, should and may are used as the requirement words: a must is a rule, a should is a strong recommendation and a may is a permission.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Terms
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Subject
+content	-	The value that follows `match`. It is evaluated once; if the expression contains a comma, the subject is a tuple.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Pattern
+content	-	The text that follows `case`. It describes a shape the subject must have and the names to bind to its parts.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Capture pattern
+content	-	A bare name other than `_`. It always succeeds and binds the subject to the name.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Wildcard
+content	-	The single underscore, `_`. It matches any subject and binds nothing.
+content	L	Why
+trail	-	8 February 2021
+trail	-	Ruled: The wildcard is `_`.
+trail	-	8 February 2021
+trail	-	Set aside: A dedicated token `?` marks values that are deliberately discarded. Options considered: `?` in patterns and in assignment, `?` in patterns only and keep `_`.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Governed by
+agents	-	live
+agents	-	,
+agents	-	rejected
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Value pattern
+content	-	A dotted name such as `Color.RED`. The name is looked up and compared with the subject using `==`.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Literal pattern
+content	-	A pattern that matches one constant: a number, a string, or one of `None`, `True` and `False`.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Class pattern
+content	-	A dotted name followed by parentheses that hold subpatterns. It tests the type of the subject, then its attributes.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Mapping pattern
+content	-	A pattern written with braces. Each item pairs a key, which must be a literal or a value, with a subpattern for the value.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Sequence pattern
+content	-	A pattern written with square brackets or parentheses. It tests the length of the subject, then each item in turn.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Guard
+content	-	An expression after `if` in a case block. It is evaluated only when the pattern has already succeeded.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Irrefutable
+content	-	A pattern whose syntax alone proves that it always succeeds. Only the last case block may have one.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Or-pattern
+content	-	Two or more patterns joined by `|`. It succeeds at the first alternative that succeeds.
+content	L	Why
+trail	-	8 February 2021
+trail	-	Ruled: Alternatives in a pattern are separated by `|`.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Governed by
+agents	-	live
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	As-pattern
+content	-	A pattern followed by `as` and a name. It matches its left side and also binds the subject to the name.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	__match_args__
+content	-	A class attribute that lists, in order, the attributes that positional subpatterns of a class pattern refer to.
+content	L	Why
+trail	-	8 February 2021
+trail	-	Ruled: Positional subpatterns map through `__match_args__`.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Governed by
+agents	-	live
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A pattern is matched with a subject, or matched against it. The primary outcome is success or failure; a secondary outcome may be the binding of names.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Patterns often contain nested subpatterns. Processing usually moves left to right until an outcome is decided. When subpatterns are tried until one succeeds, only the bindings of the successful subpattern are kept. When they are tried until one fails, the bindings merge.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · must
+content	-	Code must not rely on bindings made during a failed match.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Claim
+content	-	Names bound by a successful pattern remain available after the match statement.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	The match statement
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A match statement is a compound statement. Its grammar, in the notation used by the language reference, is given below.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Grammar
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Component
+content	L	The match statement
+content	-	The compound statement that tries each case block against one subject. It owns the order of evaluation and the scope of the names its patterns bind.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Interface
+content	L	Pattern grammar
+content	-	The grammar of a pattern: an as-pattern or an or-pattern, built from closed patterns. A closed pattern is a literal, a capture, a wildcard, a value, a group, a sequence, a mapping or a class pattern.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Semantics
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	The subject expression is evaluated. If it contains a comma, a tuple is constructed by the usual rules.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	The case blocks are tried in order. The first whose pattern succeeds against the subject and whose guard, if present, is truthy, is selected. If a case block is selected its block runs; otherwise the match statement completes and no block runs.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	The same sequence is drawn as a flow in
+content	-	How a match runs
+content	-	.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Claim
+content	-	The subject expression is evaluated exactly once, however many case blocks the statement has.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Soft keywords
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · must
+content	-	`match` and `case` are soft keywords.
+content	L	Why
+trail	-	8 February 2021
+trail	-	Ruled: `match` and `case` are soft keywords.
+trail	-	8 February 2021
+trail	-	Set aside: Every pattern element carries an explicit marker. Options considered: markers on every element, markers on captures only and the dotted-name rule.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Governed by
+agents	-	live
+agents	-	,
+agents	-	rejected
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	They are not reserved words in any other grammatical context. Code that uses either as a variable, function or attribute name keeps working.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Note
+content	-	The soft keyword `case` only ever starts a line inside a match statement, so a reader finds it easy to recognise.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Guards
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A guard is an optional expression, introduced by `if`, that is evaluated only after the pattern of its case block has succeeded. It may be any expression and may have side effects.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · should
+content	-	Guards are evaluated strictly in case-block order, and only for case blocks whose pattern succeeded.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Evaluation stops as soon as a case block is selected. If a guard raises, the exception propagates and no later case block is tried.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Python
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Note
+content	-	A guard that raises stops the whole statement. It does not fall through to the next case block.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	The long identifier CaseBlockEvaluationOrderIsStrictlyTopToBottom names this rule in one of the test suites, which shows how a single unbroken word must fit a narrow page.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Irrefutable case blocks
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A pattern is irrefutable if its syntax alone proves that it always succeeds. The irrefutable patterns are capture patterns, wildcard patterns, as-patterns whose left side is irrefutable, or-patterns containing at least one irrefutable subpattern, and parenthesised irrefutable patterns.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · must
+content	-	A match statement may have at most one irrefutable case block, and it must be last.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	This is a compile-time error, so a case block that could never be reached cannot be written.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Python
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Patterns
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	The top-level grammar of a pattern is:
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Grammar
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Literal patterns
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A literal pattern matches one constant: a signed number, a complex number written as `real + imag` or `real - imag`, a string (raw and bytes forms included, f-strings excluded) or one of the singletons `None`, `True` and `False`.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · must
+content	-	Numbers and strings compare with `==`. The singletons compare with `is`.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Example
+content	-	`case 42:` matches the integer 42 and the float 42.0, because they compare equal. `case None:` matches only the singleton.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Python
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Capture patterns
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A capture pattern is a bare name other than `_`. It always succeeds and binds the subject to the name, following the scoping rules established for the walrus operator.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · must
+content	-	Within one pattern, a given name may be bound only once.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	`case [x] | x:` is allowed, because each alternative binds `x` once. `case x, x:` is a syntax error.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Example
+content	-	In `case [first, *_]:` the name `first` is bound to the first item. In `case [x, x]:` the name is bound twice, which is refused.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Python
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Wildcard pattern
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	The single underscore, `_`, matches any subject and binds nothing. As a whole pattern it is the usual final case.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Python
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Value patterns
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A value pattern is a dotted name such as `Color.RED` or `http.HTTPStatus.OK`. The name is resolved by ordinary lookup, and the pattern succeeds if the resolved value compares equal to the subject with `==`.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · may
+content	-	An implementation may cache a value pattern that appears more than once in the same match statement.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Code must not depend on the lookup being repeated, or on how many times it happens.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Python
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Note
+content	-	A value pattern can never bind a name, which is why the dotted form is the way to compare against a constant.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Group patterns
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A pattern in parentheses, with no comma, is a group pattern. It adds nothing but emphasis.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A parenthesised pattern with a trailing comma is a one-item sequence pattern, as with tuples.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Python
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Sequence patterns
+content	-	Link
+content	-	Copy ref
+content	L	Why
+trail	-	8 February 2021
+trail	-	Ruled: Strings are sequences for matching.
+trail	-	14 June 2021
+trail	-	Withdrawn: Strings and bytes are excluded from sequence patterns.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Governed by
+agents	-	revoked
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A sequence pattern is written with square brackets or parentheses, or as a bare comma-separated list at the top level. It contains zero or more subpatterns and at most one star subpattern.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · must
+content	-	A subject is a sequence if its class inherits from `collections.abc.Sequence`, has been registered as one, or is a built-in class flagged as a sequence.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	The built-in classes so flagged are `list`, `tuple`, `range`, `memoryview`, `array.array` and `collections.deque`. Although `str`, `bytes` and `bytearray` are usually considered sequences, they are deliberately not included and never match a sequence pattern.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Example
+content	-	`case [a, b]:` matches the list `[1, 2]` and the tuple `(1, 2)`, but not the string `"ab"`.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Python
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Length rules
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Constraint
+content	-	A fixed-length pattern fails if the subject's length differs from the number of subpatterns.
+content	L	Why
+trail	-	Open
+trail	-	Question: Should the sequence test read an integer attribute from the class instead of the abstract base class? See
+trail	-	A fixed-length pattern fails if the subject's length differs from the number of
+trail	-	.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A variable-length pattern fails if the subject has fewer items than there are non-star subpatterns. Otherwise subpatterns are matched left to right.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Star subpatterns
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A star subpattern, written `*name` or `*_`, binds a list of the items left over after the subpatterns before and after it have taken theirs.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Python
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · must
+content	-	A sequence pattern contains at most one star subpattern.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Fixed length
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Without a star, the subject must have exactly as many items as the pattern has subpatterns. The empty pattern `[]` matches only an empty sequence.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Reading elements
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Elements are read by subscripting and slicing, never by iteration, so a failed match never consumes anything.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Note
+content	-	A subject that is an iterator, such as a generator, is not a sequence and never matches a sequence pattern.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Mapping patterns
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A mapping pattern is written with braces. Each item is a key pattern, which must be a literal or value pattern, a colon, and a subpattern for the value.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Python
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Example
+content	-	The pattern `{"text": message}` matches a dictionary that has a text key, whatever else it holds.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · must
+content	-	A subject is a mapping if its class inherits from `collections.abc.Mapping`, has been registered as one, or is a built-in class flagged as a mapping.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Keys
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · must
+content	-	Keys are looked up with the two-argument form of `get()`.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Matched items must already be present. A key is never created on the fly by `__missing__` or `__getitem__`. Extra keys in the subject are ignored.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · must
+content	-	A mapping pattern may not contain duplicate keys.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Double-star subpatterns
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	At most one double-star pattern is allowed, and it must come last. It binds a dictionary of the remaining items.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Class patterns
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A class pattern is a dotted name followed by parentheses containing zero or more positional subpatterns and zero or more keyword subpatterns, positional ones first.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · must
+content	-	The name must resolve to a type, and the subject must be an instance of it.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	If the name does not resolve to an instance of `type`, `TypeError` is raised. The instance test uses `isinstance()`, so an instance of a subclass matches.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Python
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Example
+content	-	`Point(x=0, y=0)` matches an instance of `Point` whose two attributes are both zero, and any subclass instance too.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Actor
+content	L	The class author
+content	-	Whoever writes a class that others will match. The class author decides, through `__match_args__`, which attributes positional subpatterns refer to.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Keyword subpatterns
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A keyword subpattern `name=pattern` reads the attribute `name` from the subject and matches the subpattern against it. A missing attribute fails the match.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Positional subpatterns
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · must
+content	-	Positional subpatterns are converted to keyword subpatterns through the class attribute `__match_args__`.
+content	L	Why
+trail	-	8 February 2021
+trail	-	Ruled: Positional subpatterns map through `__match_args__`.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Governed by
+agents	-	live
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	If there are more positional subpatterns than `len(__match_args__)`, `TypeError` is raised.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Built-in classes
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	For `bool`, `bytearray`, `bytes`, `dict`, `float`, `frozenset`, `int`, `list`, `set`, `str` and `tuple`, a single positional subpattern is matched against the whole subject instead.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Or-patterns
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	An or-pattern tries each alternative left to right and succeeds at the first that succeeds. Every alternative must bind the same set of names.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · must
+content	-	Every alternative of an or-pattern must bind the same set of names.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Otherwise the guard or the block could refer to a name that was never bound.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Python
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Note
+content	-	An or-pattern with an irrefutable alternative is itself irrefutable, and must therefore be the last case.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	As-patterns
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	An as-pattern matches its left side and, on success, also binds the subject to the capture name.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Python
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · should
+content	-	The left side of an as-pattern may be any pattern except a capture or a wildcard.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Notation
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	The tables below fix the vocabulary used in the rest of this page. The first is deliberately wide: it carries twenty attributes for each pattern kind.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Table 1
+content	L	Kind
+content	L	Written as
+content	L	Example
+content	L	Binds names
+content	L	Refutable
+content	L	Needs a type
+content	L	Reads by
+content	L	Subpatterns
+content	L	Star form
+content	L	Takes a guard
+content	L	Nests
+content	L	Repeats a name
+content	L	Looks up a name
+content	L	Compares with
+content	L	Added in
+content	L	Keyword use
+content	L	Relative cost
+content	L	Order matters
+content	L	Side effects
+content	L	Remarks
+content	-	Literal
+content	-	a constant
+content	-	`42`
+content	-	no
+content	-	yes
+content	-	no
+content	-	equality
+content	-	none
+content	-	no
+content	-	yes
+content	-	no
+content	-	no
+content	-	no
+content	-	== or is
+content	-	3.10
+content	-	none
+content	-	low
+content	-	yes
+content	-	none
+content	-	The singletons use identity.
+content	-	Capture
+content	-	a bare name
+content	-	`direction`
+content	-	yes
+content	-	no
+content	-	no
+content	-	assignment
+content	-	none
+content	-	no
+content	-	yes
+content	-	no
+content	-	never
+content	-	no
+content	-	nothing
+content	-	3.10
+content	-	none
+content	-	low
+content	-	yes
+content	-	none
+content	-	Never a dotted name.
+content	-	Sequence
+content	-	brackets
+content	-	`[a, *rest]`
+content	-	yes
+content	-	yes
+content	-	yes
+content	-	subscript
+content	-	many
+content	-	one
+content	-	yes
+content	-	yes
+content	-	never
+content	-	no
+content	-	item by item
+content	-	3.10
+content	-	none
+content	-	medium
+content	-	yes
+content	-	length and item reads
+content	-	Not a string or bytes.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	The second table holds values of every shape a cell may take: text, a list and a map.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Table 2
+content	L	Kind
+content	L	Names
+content	L	Detail
+content	-	Capture
+content	-	a, b
+content	-	a list of two names
+content	-	Mapping
+content	-	keys
+content	-	k: v
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Side effects and undefined behaviour
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	The only side effect the matching process produces on purpose is the binding of names. The process does, however, rely on attribute access, instance checks, `len()`, equality and item access on the subject and its components.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Requirement · may
+content	-	Which methods are called, and how many times, is not specified.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	An implementation may call them once, repeatedly, or not at all where it can decide the outcome another way. Likewise it is unspecified whether a name captured earlier in a case block is bound when a later subpattern fails.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Standard library support
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Named tuples and dataclasses define `__match_args__` automatically. For a dataclass the order is that of the generated initialiser; fields declared with `init=False` are omitted.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Other standard library classes gain `__match_args__` where positional matching is clearly useful.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Worked examples
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Each example gives a subject, a pattern and the outcome.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Example
+content	-	The subject `[1, 2, 3]` matches `[a, *rest]`: `a` is 1 and `rest` is `[2, 3]`.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Example
+content	-	The subject `{"k": 1, "j": 2}` matches `{"k": v, **others}`: `v` is 1 and `others` is `{"j": 2}`.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Example
+content	-	The subject `Point(1, 2)` matches `Point(x, y)` when `Point` declares `__match_args__` as `("x", "y")`.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Example
+content	-	The subject `"ab"` does not match `[x, y]`, because a string is not a sequence for matching.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Example
+content	-	The subject `3` matches `1 | 2 | 3` and binds nothing.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Example
+content	-	The subject `5` matches `n if n > 3` and binds `n` to 5; the guard runs after the capture.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Python
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Compatibility
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Because `match` and `case` are soft keywords, existing programs keep working unchanged. Tools built on a parser that looks one token ahead need to migrate to parse the new statement.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Python
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+chrome	L	Previous
+chrome	L	Overview
+chrome	L	Next
+chrome	L	How a match runs
+chrome	L	Structural pattern matching, v1.0.0, 2 changes since.
+chrome	L	On this page
+chrome	L	On this page
+chrome	L	Summary
+chrome	L	Terms
+chrome	L	The match statement
+chrome	L	Semantics
+chrome	L	Soft keywords
+chrome	L	Guards
+chrome	L	Irrefutable case blocks
+chrome	L	Patterns
+chrome	L	Literal patterns
+chrome	L	Capture patterns
+chrome	L	Wildcard pattern
+chrome	L	Value patterns
+chrome	L	Group patterns
+chrome	L	Sequence patterns
+chrome	L	Length rules
+chrome	L	Star subpatterns
+chrome	L	Fixed length
+chrome	L	Reading elements
+chrome	L	Mapping patterns
+chrome	L	Keys
+chrome	L	Double-star subpatterns
+chrome	L	Class patterns
+chrome	L	Keyword subpatterns
+chrome	L	Positional subpatterns
+chrome	L	Built-in classes
+chrome	L	Or-patterns
+chrome	L	As-patterns
+chrome	L	Notation
+chrome	L	Side effects and undefined behaviour
+chrome	L	Standard library support
+chrome	L	Worked examples
+chrome	L	Compatibility

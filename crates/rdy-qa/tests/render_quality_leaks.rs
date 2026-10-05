@@ -414,7 +414,6 @@ fn site22_tables_are_wrapped_and_content_wraps_long_tokens() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task post-G3"]
 fn site23_toc_pager_search_skip_link_and_landmarks_exist() {
     let (_d, _r, _ids, out) = canon();
     let h = golden::html(out.path(), "specification/patterns.html");

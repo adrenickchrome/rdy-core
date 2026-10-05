@@ -1,0 +1,375 @@
+chrome	-	How a match runs · Structural pattern matching
+chrome	-	Skip to content
+chrome	-	Structural pattern matching
+chrome	L	v1.0.0, 2 changes since
+chrome	-	Search these pages
+chrome	-	Auto
+chrome	-	Light
+chrome	-	Dark
+chrome	L	Pages
+chrome	L	Overview
+chrome	L	Overview
+chrome	L	Specification
+chrome	L	The match statement and its patterns
+chrome	L	How a match runs
+chrome	L	Depth 0
+chrome	L	Rationale
+chrome	L	Why the design is what it is
+chrome	L	Σημασιολογία
+chrome	L	Tutorial
+chrome	L	Pattern matching by example
+chrome	L	Proposals
+chrome	L	Unused variable syntax
+chrome	L	Explicit pattern syntax
+chrome	L	Precise semantics for pattern matching
+chrome	L	A deliberately long title that goes on and on, so that headings, breadcrumbs, navigation entries, page titles and search results all have to cope with a name far longer than anyone would choose for a.
+chrome	L	Appendix
+chrome	L	Appendix 1
+chrome	L	Appendix 2
+chrome	L	Appendix 3
+chrome	L	Appendix 4
+chrome	L	Appendix 5
+chrome	L	Appendix 6
+chrome	L	Appendix 7
+chrome	L	Appendix 8
+chrome	L	Appendix 9
+chrome	L	Appendix 10
+chrome	L	Appendix 11
+chrome	L	Appendix 12
+chrome	L	Appendix 13
+chrome	L	Appendix 14
+chrome	L	Appendix 15
+chrome	L	Appendix 16
+chrome	L	Appendix 17
+chrome	L	Appendix 18
+chrome	L	Appendix 19
+chrome	L	Appendix 20
+chrome	L	Appendix 21
+chrome	L	Appendix 22
+chrome	L	Appendix 23
+chrome	L	Appendix 24
+chrome	L	Appendix 25
+chrome	L	Appendix 26
+chrome	L	Appendix 27
+chrome	L	Appendix 28
+chrome	L	Appendix 29
+chrome	L	Appendix 30
+chrome	L	Appendix 31
+chrome	L	Appendix 32
+chrome	L	Appendix 33
+chrome	L	Appendix 34
+chrome	L	Appendix 35
+chrome	L	Appendix 36
+chrome	L	Appendix 37
+chrome	L	Appendix 38
+chrome	L	Appendix 39
+chrome	L	Appendix 40
+chrome	L	Appendix 41
+chrome	L	Appendix 42
+chrome	L	Appendix 43
+chrome	L	Appendix 44
+chrome	L	Appendix 45
+chrome	L	Appendix 46
+chrome	L	Appendix 47
+chrome	L	Appendix 48
+chrome	L	Appendix 49
+chrome	L	Appendix 50
+chrome	-	+10 more
+chrome	L	Reference
+chrome	L	Glossary
+chrome	L	Open questions
+chrome	L	Structural pattern matching
+chrome	L	Specification
+chrome	L	How a match runs
+content	L	Specification
+content	L	How a match runs
+content	-	The subject is evaluated exactly once. Case blocks are then tried top to bottom; a guard is only reached when its pattern has already succeeded, and evaluation stops at the first case block selected. The rules themselves are in
+content	-	The match statement and its patterns
+content	-	, and the reasons for the order are in
+content	-	Why the design is what it is
+content	-	.
+content	L	Evaluation order
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Evaluation of a match statement
+content	-	Evaluate the subject expression once.
+content	-	Take the next case block. When none is left, no block runs and the statement ends.
+content	-	Match its pattern against the subject, binding names as the match proceeds. When the pattern fails, go back to the previous step; a
+content	-	Guard
+content	-	is not looked at yet.
+content	-	When the case block has a guard, evaluate it. A falsy guard sends the match back to take the next case block.
+content	-	Run the selected block.
+content	-	Names bound by the pattern remain available after the block.
+content	-	The match statement completes; no further case block is tried.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	The same order, drawn as a diagram:
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	The evaluation of a match statement as a flowchart
+content	L	The evaluation of a match statement as a flowchart
+content	L	Diagram source
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Note
+content	-	Outcomes that return to the next case block are drawn as arrows back to the question at the top of the loop.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	The shape of a pattern
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Every pattern is built from the closed patterns below. The grammar in full is under the match statement in
+content	-	The match statement and its patterns
+content	-	.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	The grammar of a pattern as a tree
+content	L	The grammar of a pattern as a tree
+content	L	Diagram source
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Pattern kinds at a glance
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	One row for every kind of pattern: what it looks like, when it succeeds, and what it binds.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Normative
+content	-	Table 1
+content	L	Pattern
+content	L	Looks like
+content	L	Succeeds when
+content	L	Binds
+content	-	Literal
+content	-	`42`, `"go"`, `None`
+content	-	subject equals the literal (`is` for the three singletons)
+content	-	nothing
+content	-	Capture
+content	-	`direction`
+content	-	always
+content	-	the whole subject
+content	-	Wildcard
+content	-	`_`
+content	-	always
+content	-	nothing
+content	-	Value
+content	-	`Color.RED`
+content	-	subject equals the looked-up value
+content	-	nothing
+content	-	Group
+content	-	`(pattern)`
+content	-	the inner pattern succeeds
+content	-	whatever the inner pattern binds
+content	-	Sequence
+content	-	`[a, *rest]`
+content	-	subject is a sequence of fitting length and each item matches
+content	-	each subpattern's names; the star binds a list
+content	-	Mapping
+content	-	`{"k": v, **rest}`
+content	-	subject is a mapping with every key present and each value matching
+content	-	each value's names; the double star binds a dict
+content	-	Class
+content	-	`Point(x, y=0)`
+content	-	subject is an instance and each attribute matches
+content	-	each subpattern's names
+content	-	Or-pattern
+content	-	`a | b`
+content	-	the first alternative that succeeds
+content	-	the same names from every alternative
+content	-	As-pattern
+content	-	`pattern as name`
+content	-	the left pattern succeeds
+content	-	its names, plus the whole subject to `name`
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Sequence length rules
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Table 2
+content	L	Pattern shape
+content	L	Subject length must be
+content	L	Example that matches
+content	-	`[a, b]`
+content	-	exactly 2
+content	-	`["go", "north"]`
+content	-	`[a, *rest]`
+content	-	at least 1
+content	-	`["drop"]`, `["drop", "sword", "shield"]`
+content	-	`[*start, last]`
+content	-	at least 1
+content	-	`["pick", "up"]`
+content	-	`[a, *mid, z]`
+content	-	at least 2
+content	-	`["pick", "sword", "up"]`
+content	-	`[]`
+content	-	exactly 0
+content	-	`[]`
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	The length rules apply before any item is read; see
+content	-	A fixed-length pattern fails if the subject's length differs from the number of
+content	-	.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Note
+content	-	The length of a subject is read once, before any item is.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Illustrations and downloads
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	A case block, annotated
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A case block has a pattern, an optional guard and an indented block.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Pattern cheat sheet
+content	L	(Text, 657 bytes)
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	The cheat sheet above lists each kind of pattern on one line.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Note
+content	-	The figure and the cheat sheet are the two kinds of asset a page can carry: a picture shown in place, and a file offered for download.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+chrome	L	Previous
+chrome	L	The match statement and its patterns
+chrome	L	Next
+chrome	L	The bottom
+chrome	L	Structural pattern matching, v1.0.0, 2 changes since.
+chrome	L	On this page
+chrome	L	On this page
+chrome	L	Evaluation order
+chrome	L	The shape of a pattern
+chrome	L	Pattern kinds at a glance
+chrome	L	Sequence length rules
+chrome	L	Illustrations and downloads

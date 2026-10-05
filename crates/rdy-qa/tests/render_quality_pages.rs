@@ -67,7 +67,6 @@ fn gold1_a_golden_line_is_zone_label_flag_and_text() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task post-G3"]
 fn gold1_the_canon_pages_match_their_text_goldens() {
     let (_d, _r, _ids, out) = golden::site_canon();
     for page in [
@@ -84,14 +83,12 @@ fn gold1_the_canon_pages_match_their_text_goldens() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task post-G3"]
 fn gold1_the_frozen_page_matches_its_text_golden() {
     let (_d, _r, _ids, out) = golden::site_frozen();
     check(out.path(), "frozen", "specification/patterns.html");
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task post-G3"]
 fn gold1_the_view_page_matches_its_text_golden() {
     let (_d, _r, _ids, out) = golden::site_view();
     check(out.path(), "view", "tutorial/adventure.html");
