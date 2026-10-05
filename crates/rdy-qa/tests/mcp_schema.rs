@@ -11,7 +11,7 @@ fn p<T: serde::de::DeserializeOwned>(v: Value) -> T {
 #[test]
 fn doc1_schema_shows_the_link_shape_and_every_op() {
     let (_d, r) = project();
-    let mut st = McpState::new(r);
+    let mut st = McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
     let s = rdy_schema(&mut st, p(json!({}))).unwrap();
     assert!(
         s["link_shape"]["shape"]
@@ -52,7 +52,7 @@ fn doc1_a_malformed_links_value_gets_a_hint_with_the_shape() {
     .unwrap()
     .created["$s"]
     .clone();
-    let mut st = McpState::new(r);
+    let mut st = McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
     rdy_session(
         &mut st,
         p(json!({"actor": "agent:qa", "role": "writer", "view": "work"})),
@@ -100,7 +100,7 @@ fn ses1_a_reader_session_may_read_canon_by_default() {
     .created["$d"]
     .clone();
     land(&mut r, "work").unwrap();
-    let mut st = McpState::new(r);
+    let mut st = McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
     let ok = rdy_session(
         &mut st,
         p(json!({"actor": "agent:reader", "role": "reader", "view": "canon"})),

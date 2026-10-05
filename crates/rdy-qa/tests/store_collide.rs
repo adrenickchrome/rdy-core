@@ -31,8 +31,9 @@ fn upload(st: &mut rdy_mcp::tools::McpState, bytes: &[u8]) {
     )
     .unwrap();
     assert!(
-        st.rdy
-            .store()
+        st.engine
+            .read()
+            .reader()
             .has_kind(kinds::BLOB_CHUNK, &Hash::of(bytes))
             .unwrap()
     );
@@ -40,13 +41,24 @@ fn upload(st: &mut rdy_mcp::tools::McpState, bytes: &[u8]) {
 
 fn agent_state() -> (tempfile::TempDir, rdy_mcp::tools::McpState) {
     let (dir, r) = project();
-    let mut st = rdy_mcp::tools::McpState::new(r);
+    let mut st =
+        rdy_mcp::tools::McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
     rdy_mcp::tools::rdy_session(
         &mut st,
         serde_json::from_value(json!({"actor": "agent:qa", "role": "writer"})).unwrap(),
     )
     .unwrap();
     (dir, st)
+}
+
+/// Runs `f` on the engine's writer.
+fn on_writer(
+    st: &rdy_mcp::tools::McpState,
+    f: impl FnOnce(&mut rdy_engine::Rdy) -> Result<serde_json::Value, rdy_engine::RdyError>
+    + Send
+    + 'static,
+) -> serde_json::Value {
+    st.engine.write(Box::new(f)).unwrap()
 }
 
 fn by(role: Role) -> Provenance {
@@ -61,13 +73,19 @@ fn by(role: Role) -> Provenance {
 #[test]
 fn kind1_an_asset_with_a_future_tags_bytes_does_not_hide_the_tag() {
     let (_d, mut st) = agent_state();
-    write(
-        &mut st.rdy,
-        "work",
-        json!([{"op": "create", "type": "doc", "fields": {"title": "T", "doc_type": "glossary"}}]),
-    )
+    let landing: Hash = on_writer(&st, |r| {
+        write(
+            r,
+            "work",
+            json!([{"op": "create", "type": "doc", "fields": {"title": "T", "doc_type": "glossary"}}]),
+        )
+        .unwrap();
+        Ok(json!(land(r, "work").unwrap()))
+    })
+    .as_str()
+    .unwrap()
+    .parse()
     .unwrap();
-    let landing: Hash = land(&mut st.rdy, "work").unwrap().parse().unwrap();
     let tag = Tag {
         name: "v1.0.0".into(),
         landing,
@@ -75,23 +93,35 @@ fn kind1_an_asset_with_a_future_tags_bytes_does_not_hide_the_tag() {
         tagged_by: by(Role::Approver),
     };
     upload(&mut st, &postcard::to_allocvec(&tag).unwrap());
-    let id = st.rdy.store_mut().put_tag(&tag).unwrap();
-    // a write outside the engine must be followed by invalidate() (snap1 precondition)
-    st.rdy.invalidate();
-    assert_eq!(st.rdy.store().read_tag(&id).unwrap(), tag);
-    assert_eq!(st.rdy.read().versions().unwrap().len(), 1);
+    let t = tag.clone();
+    let id: Hash = on_writer(&st, move |r| {
+        let id = r.store_mut().put_tag(&t).unwrap();
+        // a write outside the engine must be followed by invalidate() (snap1 precondition)
+        r.invalidate();
+        Ok(json!(id.to_string()))
+    })
+    .as_str()
+    .unwrap()
+    .parse()
+    .unwrap();
+    let read = st.engine.read();
+    assert_eq!(read.reader().read_tag(&id).unwrap(), tag);
+    assert_eq!(read.versions().unwrap().len(), 1);
 }
 
 #[test]
 fn kind1_an_asset_with_a_future_proposals_bytes_does_not_hide_it() {
     let (_d, mut st) = agent_state();
-    write(
-        &mut st.rdy,
-        "work",
-        json!([{"op": "create", "type": "doc", "fields": {"title": "P", "doc_type": "glossary"}}]),
-    )
-    .unwrap();
-    let changes = st.rdy.store().view("work").unwrap().changes;
+    on_writer(&st, |r| {
+        write(
+            r,
+            "work",
+            json!([{"op": "create", "type": "doc", "fields": {"title": "P", "doc_type": "glossary"}}]),
+        )
+        .unwrap();
+        Ok(json!(null))
+    });
+    let changes = st.engine.read().reader().view("work").unwrap().changes;
     let predicted = Proposal {
         stable: None,
         prev: None,
@@ -102,32 +132,48 @@ fn kind1_an_asset_with_a_future_proposals_bytes_does_not_hide_it() {
         provenance: by(Role::Writer),
     };
     upload(&mut st, &postcard::to_allocvec(&predicted).unwrap());
-    let p = st
-        .rdy
-        .store_mut()
-        .propose("work", "p", by(Role::Writer))
-        .unwrap();
-    // a write outside the engine must be followed by invalidate() (snap1 precondition)
-    st.rdy.invalidate();
+    let p: Hash = on_writer(&st, |r| {
+        let p = r
+            .store_mut()
+            .propose("work", "p", by(Role::Writer))
+            .unwrap();
+        // a write outside the engine must be followed by invalidate() (snap1 precondition)
+        r.invalidate();
+        Ok(json!(p.to_string()))
+    })
+    .as_str()
+    .unwrap()
+    .parse()
+    .unwrap();
     assert_eq!(p, predicted.id());
-    st.rdy.land(&approver(), &p.to_string()).unwrap();
+    on_writer(&st, move |r| {
+        r.land(&approver(), &p.to_string()).unwrap();
+        Ok(json!(null))
+    });
 }
 
 #[test]
 fn kind1_an_asset_with_a_future_landings_bytes_does_not_hide_it() {
     let (_d, mut st) = agent_state();
-    write(
-        &mut st.rdy,
-        "work",
-        json!([{"op": "create", "type": "doc", "fields": {"title": "L", "doc_type": "glossary"}}]),
-    )
-    .unwrap();
-    let p = st
-        .rdy
-        .store_mut()
-        .propose("work", "p", by(Role::Writer))
+    let p: Hash = on_writer(&st, |r| {
+        write(
+            r,
+            "work",
+            json!([{"op": "create", "type": "doc", "fields": {"title": "L", "doc_type": "glossary"}}]),
+        )
         .unwrap();
-    let s = st.rdy.store();
+        let p = r
+            .store_mut()
+            .propose("work", "p", by(Role::Writer))
+            .unwrap();
+        Ok(json!(p.to_string()))
+    })
+    .as_str()
+    .unwrap()
+    .parse()
+    .unwrap();
+    let read = st.engine.read();
+    let s = read.reader();
     let pr = s.proposal(&p).unwrap();
     let changes: Vec<Change> = pr.changes.iter().map(|c| s.change(c).unwrap()).collect();
     let state = s
@@ -149,13 +195,18 @@ fn kind1_an_asset_with_a_future_landings_bytes_does_not_hide_it() {
         rebased_from: vec![],
     };
     upload(&mut st, &postcard::to_allocvec(&predicted).unwrap());
-    let l = st.rdy.store_mut().land(&p, by(Role::Approver)).unwrap();
+    drop(read);
+    let l: Hash = on_writer(&st, move |r| {
+        let l = r.store_mut().land(&p, by(Role::Approver)).unwrap();
+        r.invalidate();
+        Ok(json!(l.to_string()))
+    })
+    .as_str()
+    .unwrap()
+    .parse()
+    .unwrap();
     assert_eq!(l, predicted.id());
-    st.rdy.invalidate();
-    let scope = st
-        .rdy
-        .read()
-        .resolve_scope(&format!("landing:{l}"))
-        .unwrap();
-    st.rdy.read().materialized(&scope).unwrap();
+    let read = st.engine.read();
+    let scope = read.resolve_scope(&format!("landing:{l}")).unwrap();
+    read.materialized(&scope).unwrap();
 }

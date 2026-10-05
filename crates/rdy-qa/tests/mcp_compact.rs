@@ -17,7 +17,7 @@ fn read1_compact_shows_whole_fields_and_first_sentences_with_ids() {
     ]))
     .unwrap();
     let id = |k: &str| res.created[k].clone();
-    let mut st = McpState::new(r);
+    let mut st = McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
     rdy_session(
         &mut st,
         serde_json::from_value(json!({"actor": "agent:qa", "role": "writer", "view": "work"}))
@@ -61,7 +61,7 @@ fn compact_lines(
         ops.push(op);
     }
     let res = write(&mut r, "work", json!(ops)).unwrap();
-    let mut st = McpState::new(r);
+    let mut st = McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
     rdy_session(
         &mut st,
         serde_json::from_value(json!({"actor": "agent:qa", "role": "writer", "view": "work"}))

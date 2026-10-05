@@ -1,5 +1,6 @@
 use crate::tools::{self, *};
-use rdy_engine::{E_INTERNAL, E_LIMIT, Rdy, RdyError};
+use rdy_engine::engine::{Engine, Local};
+use rdy_engine::{E_INTERNAL, E_LIMIT, RdyError};
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -36,9 +37,11 @@ fn result(r: Result<serde_json::Value, RdyError>) -> CallToolResult {
 
 #[tool_router]
 impl RdyServer {
-    pub fn new(rdy: Rdy) -> Self {
+    pub fn new(engine: Arc<dyn Engine>, sid: Option<u64>) -> Self {
+        let mut st = McpState::new(engine);
+        st.sid = sid;
         RdyServer {
-            state: Arc::new(Mutex::new(McpState::new(rdy))),
+            state: Arc::new(Mutex::new(st)),
             order: Arc::new(tokio::sync::Mutex::new(())),
             tool_router: Self::tool_router(),
         }
@@ -66,7 +69,11 @@ impl RdyServer {
             match out {
                 Ok(r) => result(r),
                 Err(panic) => {
-                    st.rdy.invalidate();
+                    // the invalidate runs on the writer, where `Rdy` is
+                    let _ = st.engine.write(Box::new(|r| {
+                        r.invalidate();
+                        Ok(serde_json::Value::Null)
+                    }));
                     let msg = panic
                         .downcast_ref::<&str>()
                         .map(|s| s.to_string())
@@ -93,7 +100,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Start a session: who you are (actor), your run, and role (reader, writer, reviewer). Required before other tools. Your writes go to a view named after your run; a reader may pass view \"canon\" to read canon by default."
+        description = "Start a session: who you are (actor), your run, and role (reader, writer, reviewer). Required before other tools. Your writes go to a view named after your run, or work-<actor> without one; a reader may pass view \"canon\" to read canon by default."
     )]
     async fn rdy_session(&self, Parameters(p): Parameters<SessionParams>) -> CallToolResult {
         self.run("rdy_session", p, tools::rdy_session).await
@@ -510,7 +517,7 @@ pub async fn serve_stdio(project: PathBuf) -> anyhow::Result<()> {
 }
 
 async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
-    let rdy = Rdy::open(&project)?;
+    let local = Arc::new(Local::open(&project)?);
     let (to_server, from_pump) = tokio::io::duplex(1 << 16);
     tokio::spawn(async move {
         let _ = pump_lines(
@@ -521,22 +528,17 @@ async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
         )
         .await;
     });
-    let server = RdyServer::new(rdy);
-    // `serve` consumes the server: keep the state for the idle ticker and the close at exit
-    let state = Arc::clone(&server.state);
+    let server = RdyServer::new(Arc::clone(&local) as Arc<dyn Engine>, None);
     let ticker = {
-        let state = Arc::clone(&state);
+        let local = Arc::clone(&local);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(CHECKPOINT_TICK);
             let log = Arc::new(Mutex::new(IdleCheckpointLog::default()));
             loop {
                 tick.tick().await;
-                let (state, log) = (Arc::clone(&state), Arc::clone(&log));
+                let (local, log) = (Arc::clone(&local), Arc::clone(&log));
                 let _ = tokio::task::spawn_blocking(move || {
-                    let r = {
-                        let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
-                        st.rdy.checkpoint_if_idle()
-                    };
+                    let r = local.checkpoint_if_idle();
                     let mut log = log.lock().unwrap_or_else(|p| p.into_inner());
                     if let Some(line) = log.note(&r) {
                         eprintln!("{line}");
@@ -546,21 +548,23 @@ async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
             }
         })
     };
+    // `serve` consumes the server (and with it the state's handle on the engine)
     let service = server.serve((from_pump, tokio::io::stdout())).await?;
     let quit = service.waiting().await;
     ticker.abort();
     let _ = ticker.await;
     let _ = tokio::task::spawn_blocking(move || {
         // the clean close: checkpoint, close the index, remove the sentinel; a tool call still
-        // holding the state (none should, once the service has ended) leaves the close to the
+        // holding the engine (none should, once the service has ended) leaves the close to the
         // last drop, which reports a failure the same way
-        let closed = match Arc::try_unwrap(state) {
-            Ok(st) => st.into_inner().unwrap_or_else(|p| p.into_inner()).rdy.close(),
-            Err(state) => state
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .rdy
-                .checkpoint(),
+        let closed = match Arc::try_unwrap(local) {
+            Ok(local) => local.close(),
+            Err(local) => local
+                .write(Box::new(|r| {
+                    r.checkpoint()?;
+                    Ok(serde_json::Value::Null)
+                }))
+                .map(|_| ()),
         };
         if let Err(e) = closed {
             eprintln!(
@@ -570,6 +574,19 @@ async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
     })
     .await;
     quit?;
+    Ok(())
+}
+
+/// Serves one MCP session over `(r, w)` against `engine` until the peer closes. The daemon owns
+/// the checkpoint tick and the close, so neither runs here. `sid` is the daemon's session id.
+pub async fn serve_on<R, W>(engine: Arc<dyn Engine>, sid: u64, r: R, w: W) -> anyhow::Result<()>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+    W: AsyncWrite + Send + Unpin + 'static,
+{
+    let server = RdyServer::new(engine, Some(sid));
+    let service = server.serve((r, w)).await?;
+    service.waiting().await?;
     Ok(())
 }
 
@@ -820,8 +837,8 @@ mod mcp1_id_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn hook1_the_panic_hook_exists_only_under_cfg_test() {
         let dir = tempfile::tempdir().unwrap();
-        let rdy = Rdy::init(dir.path(), "rdy-standard").unwrap();
-        let server = RdyServer::new(rdy);
+        let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let server = RdyServer::new(Arc::new(Local::new(rdy)), None);
         let p = SessionParams {
             actor: "__rdy_test_panic__".into(),
             run: None,
@@ -850,7 +867,12 @@ mod mcp1_id_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn port1_a_tool_panic_on_the_blocking_pool_still_answers_and_the_server_stays_usable() {
         let dir = tempfile::tempdir().unwrap();
-        let server = RdyServer::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
+        let server = RdyServer::new(
+            Arc::new(Local::new(
+                rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap(),
+            )),
+            None,
+        );
         let bad = SessionParams {
             actor: "__rdy_test_panic__".into(),
             run: Some("x".into()),

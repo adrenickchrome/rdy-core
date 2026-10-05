@@ -161,7 +161,8 @@ fn mcp2_an_oversized_request_with_the_id_last_gets_a_reply() {
 #[test]
 fn mcp2_the_asset_limit_is_checked_before_decoding() {
     let (dir, r) = project();
-    let mut st = rdy_mcp::tools::McpState::new(r);
+    let mut st =
+        rdy_mcp::tools::McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
     rdy_mcp::tools::rdy_session(
         &mut st,
         serde_json::from_value(json!({"actor": "agent:qa", "role": "writer"})).unwrap(),
