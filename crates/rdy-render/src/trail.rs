@@ -450,7 +450,8 @@ pub fn agents(
     }
 }
 
-/// `{text}` with each reference shown as its target's label, and `\{{` as `{{`.
+/// `{text}` with each reference shown as its target's label, a dangling one as the unresolved
+/// marker's words (never its id: the copied ref sits in a `data-ref` attribute), and `\{{` as `{{`.
 fn resolved(text: &str, mode: RefMode, m: &Materialized, site: &Site) -> String {
     let plain = |s: &str| s.replace("\\{{", "{{");
     let mut out = String::new();
@@ -459,7 +460,7 @@ fn resolved(text: &str, mode: RefMode, m: &Materialized, site: &Site) -> String 
         out.push_str(&plain(&text[last..span.range.start]));
         match BlockId::parse(&span.token).ok().and_then(|id| m.get(&id)) {
             Some(t) => out.push_str(&site.label(t)),
-            None => out.push_str(&span.token),
+            None => out.push_str(crate::html::UNRESOLVED),
         }
         last = span.range.end;
     }

@@ -69,6 +69,21 @@ fn type1_references_link_with_hover_titles_and_unresolved_ones_keep_the_authors_
     );
 }
 
+/// A block's slug anchor is made from its text as a reader reads it: a dangling reference there
+/// is the unresolved marker's words, so the id reaches no anchor, even lower-cased.
+#[test]
+fn type1_a_dangling_reference_reaches_no_anchor() {
+    let (_d, mut r, _ids) = every_type_site();
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&mut r, &Scope::View("dangling".into()), out.path()).unwrap();
+    let h = std::fs::read_to_string(out.path().join("all.html")).unwrap();
+    assert!(
+        h.contains("id=\"see-ledger-and-unresolved-reference\""),
+        "{h}"
+    );
+    assert!(!h.to_lowercase().contains("p-zzzzz"), "{h}");
+}
+
 #[test]
 fn type1_every_marker_and_eyebrow_starts_with_a_capital() {
     let (_d, mut r, _ids) = every_type_site();

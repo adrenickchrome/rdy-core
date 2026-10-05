@@ -339,7 +339,8 @@ impl<'a> Site<'a> {
     }
 
     /// The text an anchor is made from: a section's title, the name of what a block defines
-    /// (their references read as labels), else the first six words of its one-line summary.
+    /// (their references read as labels), else the first six words of its one-line summary, a
+    /// dangling reference there read as the unresolved marker's words, so no id reaches the URL.
     fn anchor_text(&self, b: &Block) -> String {
         let named = match b.block_type.as_str() {
             "section" => b.field_str("title"),
@@ -348,12 +349,36 @@ impl<'a> Site<'a> {
         };
         match named.filter(|t| !t.trim().is_empty()) {
             Some(t) => self.words(t),
-            None => summary_in(b, self.m)
+            None => self
+                .without_dangling(b, &summary_in(b, self.m))
                 .split_whitespace()
                 .take(6)
                 .collect::<Vec<_>>()
                 .join(" "),
         }
+    }
+
+    /// `summary` (`b`'s one-line summary, where a reference that leads nowhere keeps its token)
+    /// with each such dangling id read as the unresolved marker's words.
+    fn without_dangling(&self, b: &Block, summary: &str) -> String {
+        let dangling: BTreeSet<String> = b
+            .ref_tokens()
+            .into_iter()
+            .filter(|t| {
+                BlockId::parse(t)
+                    .ok()
+                    .and_then(|id| self.m.get(&id))
+                    .is_none()
+            })
+            .collect();
+        ID_INSIDE
+            .replace_all(summary, |c: &regex::Captures| {
+                match dangling.contains(&c[0]) {
+                    true => crate::html::UNRESOLVED.to_string(),
+                    false => c[0].to_string(),
+                }
+            })
+            .into_owned()
     }
 
     /// The folders and doc from the top level down to `id`, top first.
