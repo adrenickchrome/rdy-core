@@ -28,6 +28,9 @@ pub struct Shared {
     /// bumps `pack_gen`, under this lock.
     pub pack_error: Mutex<Option<String>>,
     session_end: Mutex<Vec<SessionEndHook>>,
+    /// Test hook: run once by the writer right after `reload_pack` returns.
+    #[cfg(test)]
+    pub(crate) after_reload: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Shared {
@@ -46,6 +49,8 @@ impl Shared {
             pack_gen: AtomicU64::new(0),
             pack_error: Mutex::new(None),
             session_end: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            after_reload: Mutex::new(None),
         })
     }
 

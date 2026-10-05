@@ -8,7 +8,7 @@ use crate::E_DAEMON_GONE;
 use crate::daemon::log;
 use crate::shared::Shared;
 use rdy_engine::engine::WriteFn;
-use rdy_engine::{E_INTERNAL, Rdy, RdyError, ReloadOutcome, pack_fingerprint};
+use rdy_engine::{E_INTERNAL, Rdy, RdyError, ReloadOutcome};
 use serde_json::Value;
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -103,8 +103,9 @@ impl Writer {
 
     /// Reloads the config and packs if the watch saw them change. A reload bumps the pack
     /// generation and clears the pack error; files that do not load stay out (the loaded pack
-    /// stays), are recorded as seen so they are not parsed again until they change, and set the
-    /// pack error, bumping the generation when the error is new. A failed check is logged.
+    /// stays), are recorded as seen (as the reload read them, so a fix that lands meanwhile is
+    /// still a change) so they are not parsed again until they change, and set the pack error,
+    /// bumping the generation when the error is new. A failed check is logged.
     fn maybe_reload(&self, rdy: &mut Rdy) -> Result<ReloadOutcome, RdyError> {
         let Some(sh) = self.shared.upgrade() else {
             return Ok(ReloadOutcome::Unchanged);
@@ -113,6 +114,10 @@ impl Writer {
             return Ok(ReloadOutcome::Unchanged);
         }
         let out = rdy.reload_pack();
+        #[cfg(test)]
+        if let Some(f) = sh.after_reload.lock().unwrap().take() {
+            f();
+        }
         match &out {
             Ok(ReloadOutcome::Reloaded) => {
                 sh.watch.seen(rdy.pack_fingerprint());
@@ -123,11 +128,13 @@ impl Writer {
                 };
                 log(&format!("pack reloaded (generation {generation})"));
             }
-            Ok(ReloadOutcome::Invalid(e)) => {
-                match pack_fingerprint(&sh.root) {
-                    Ok(fp) => sh.watch.seen(&fp),
-                    Err(e) => log(&format!("pack check failed: {e}")),
-                }
+            Ok(ReloadOutcome::Invalid {
+                error: e,
+                fingerprint,
+            }) => {
+                // the files as the reload read them, never newer: a fix landing after the read is
+                // still a change
+                sh.watch.seen(fingerprint);
                 let text = e.to_string();
                 let mut error = sh.pack_error_lock();
                 if error.as_deref() != Some(text.as_str()) {
@@ -281,5 +288,44 @@ impl WriterHandle {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .is_some_and(|h| !h.is_finished())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::shared::Shared;
+    use rdy_engine::{Rdy, ReloadOutcome};
+
+    const PACK_A: &str = "name: proj\nversion: '1'\nextends: rdy-standard\n";
+    const PACK_BAD: &str = "name: proj\nversion: '1'\nextends: no-such-pack-at-all\n";
+    const PACK_FIXED: &str = "# fixed\nname: proj\nversion: '2'\nextends: rdy-standard\n";
+
+    #[test]
+    fn reload1_an_invalid_reload_never_records_bytes_newer_than_it_evaluated() {
+        let dir = tempfile::tempdir().unwrap();
+        let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
+        let pack = dir.path().join(".rdy/packs/proj.yaml");
+        std::fs::write(&pack, PACK_A).unwrap();
+        std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: proj\n").unwrap();
+        let out = sh.writer.reload().unwrap();
+        assert!(matches!(out, ReloadOutcome::Reloaded), "{out:?}");
+        // the reload reads the invalid file, then the file is fixed before anything is recorded
+        std::fs::write(&pack, PACK_BAD).unwrap();
+        let fixed = pack.clone();
+        *sh.after_reload.lock().unwrap() = Some(Box::new(move || {
+            std::fs::write(&fixed, PACK_FIXED).unwrap()
+        }));
+        let out = sh.writer.reload().unwrap();
+        assert!(matches!(out, ReloadOutcome::Invalid { .. }), "{out:?}");
+        assert!(sh.pack_status().1.is_some());
+        assert!(
+            sh.watch.changed(),
+            "the fixed bytes were never evaluated: the watch must still see a change"
+        );
+        let out = sh.writer.reload().unwrap();
+        assert!(matches!(out, ReloadOutcome::Reloaded), "{out:?}");
+        assert_eq!(sh.pack_status().1, None, "the fix clears the pack error");
+        assert_eq!(sh.state.load().pack().version, "2");
+        sh.shutdown().unwrap();
     }
 }

@@ -165,8 +165,13 @@ pub enum ReloadOutcome {
     Unchanged,
     /// The config and pack were re-read and the state republished with the new pack.
     Reloaded,
-    /// The files changed but do not resolve; the loaded pack stays.
-    Invalid(RdyError),
+    /// The files changed but do not resolve; the loaded pack stays. `fingerprint` is the files
+    /// as this reload read them, taken before their bytes were evaluated: recording it as seen
+    /// never marks newer, unevaluated bytes as seen.
+    Invalid {
+        error: RdyError,
+        fingerprint: PackFingerprint,
+    },
 }
 
 pub struct Rdy {
@@ -374,7 +379,12 @@ impl Rdy {
             .and_then(|cfg| load_pack(&self.root, &cfg.pack).map(|(p, l)| (cfg, p, l)));
         let (cfg, pack, lineage) = match loaded {
             Ok(v) => v,
-            Err(e) => return Ok(ReloadOutcome::Invalid(e)),
+            Err(error) => {
+                return Ok(ReloadOutcome::Invalid {
+                    error,
+                    fingerprint: fp,
+                });
+            }
         };
         self.pack = Arc::new(pack);
         self.lineage = lineage;

@@ -152,20 +152,40 @@ fn eng1_reload_pack_is_unchanged_reloaded_or_invalid_and_keeps_the_old_pack_on_i
     // an invalid edit keeps the old pack and the old fingerprint, so the fix is seen as a change
     std::fs::write(d.path().join(".rdy/packs/proj.yaml"), PACK_BAD).unwrap();
     let out = r.reload_pack().unwrap();
-    let ReloadOutcome::Invalid(e) = out else {
+    let ReloadOutcome::Invalid { error: e, .. } = out else {
         panic!("{out:?}")
     };
     assert!(e.message.contains("no-such-pack"), "{e}");
     assert_eq!(r.pack().name, "proj");
     assert_eq!(r.pack_fingerprint(), &fp1);
     assert!(
-        matches!(r.reload_pack().unwrap(), ReloadOutcome::Invalid(_)),
+        matches!(r.reload_pack().unwrap(), ReloadOutcome::Invalid { .. }),
         "still invalid, still reported"
     );
     std::fs::write(d.path().join(".rdy/packs/proj.yaml"), PACK_A).unwrap();
     // same bytes as before the bad edit: unchanged against the kept fingerprint
     assert!(matches!(r.reload_pack().unwrap(), ReloadOutcome::Unchanged));
     assert!(r.read().materialized(&Scope::Canon).is_ok());
+}
+
+#[test]
+fn eng1_an_invalid_reload_carries_the_fingerprint_of_the_bytes_it_evaluated() {
+    let (d, mut r) = project();
+    let loaded = r.pack_fingerprint().clone();
+    std::fs::write(d.path().join(".rdy/packs/proj.yaml"), PACK_BAD).unwrap();
+    std::fs::write(d.path().join(".rdy/config.yaml"), "pack: proj\n").unwrap();
+    let on_disk = rdy_engine::pack_fingerprint(d.path()).unwrap();
+    let out = r.reload_pack().unwrap();
+    let ReloadOutcome::Invalid { error, fingerprint } = out else {
+        panic!("{out:?}")
+    };
+    assert!(error.message.contains("no-such-pack"), "{error}");
+    assert_eq!(fingerprint.hash, on_disk.hash, "the bytes the reload read");
+    assert_eq!(
+        r.pack_fingerprint(),
+        &loaded,
+        "the loaded pack's fingerprint stays"
+    );
 }
 
 #[test]
