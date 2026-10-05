@@ -10,7 +10,10 @@ pub mod tree;
 mod value;
 
 pub use block::{Block, Link, RefMode, RefSpan, hash_of, ref_spans};
-pub use canon::{ActorRun, Assurance, LandingRecord, Proposal, RelayEvidence, StateSnapshot, Tag};
+pub use canon::{
+    ActorRun, ApprovalEvidence, Assurance, EvidenceKind, LandingRecord, Proposal, RelayEvidence,
+    StateSnapshot, Tag,
+};
 pub use change::{
     AltChoice, Change, ChangeLinks, EditorialClass, Justification, Op, Provenance, Role,
 };

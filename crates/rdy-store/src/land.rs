@@ -77,6 +77,7 @@ impl Store {
                     changes: final_changes.clone(),
                     alternative: p.alternative.clone(),
                     provenance: p.provenance.clone(),
+                    canon_at: p.canon_at,
                 });
                 let final_id = Hash::of(&fin);
                 items.push((kinds::PROPOSAL, fin));
@@ -109,6 +110,7 @@ impl Store {
             relay_evidence: None,
             approved_version: Some(req.proposal),
             rebased_from: vec![],
+            evidence: None,
         };
         let lbytes = encode(&landing);
         let lid = Hash::of(&lbytes);
@@ -126,6 +128,7 @@ impl Store {
                 landing: lid,
                 dropped,
                 remaining: remaining.clone(),
+                conflicts: vec![],
             },
             actor: req.approver.actor.clone(),
             run: req.approver.run.clone(),

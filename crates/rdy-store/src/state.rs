@@ -329,6 +329,7 @@ impl Store {
             changes,
             alternative: None,
             provenance: by,
+            canon_at: self.canon_head()?,
         };
         self.put(kinds::PROPOSAL, &p)
     }
@@ -347,6 +348,7 @@ impl Store {
             changes,
             alternative: p.alternative,
             provenance: p.provenance,
+            canon_at: self.canon_head()?,
         };
         self.put(kinds::PROPOSAL, &next)
     }

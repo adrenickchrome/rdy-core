@@ -143,9 +143,11 @@ fn fsck2_a_landing_with_every_new_field_set_checks_clean() {
         relay_evidence: Some(RelayEvidence {
             quoted: "land it".into(),
             session_ref: "sess-1".into(),
+            question: None,
         }),
         approved_version: Some(rec.proposal),
         rebased_from: vec![l],
+        evidence: None,
     };
     let lid = s
         .write(vec![(

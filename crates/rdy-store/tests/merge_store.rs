@@ -198,6 +198,7 @@ fn merge1_a_change_that_covers_canon_and_its_own_side_lands() {
         changes: vec![c, r_id],
         alternative: None,
         provenance: prov(Role::Writer),
+        canon_at: None,
     };
     let pid = s
         .write(vec![(

@@ -24,4 +24,4 @@ pub use store::{
 };
 mod state;
 pub use state::{ViewRecord, apply_op};
-pub use view::{Owner, ViewHead, ViewOp, ViewOpKind};
+pub use view::{Owner, ResolvedOp, ViewHead, ViewOp, ViewOpKind};

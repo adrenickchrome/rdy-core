@@ -4,10 +4,10 @@ use rdy_store::format::{Format, STORE_FORMAT};
 
 #[test]
 fn fmt2_the_format_text_is_one_number() {
-    assert_eq!(STORE_FORMAT, 3);
+    assert_eq!(STORE_FORMAT, 4);
     assert_eq!(
         Format::CURRENT.to_text(),
-        "rdy store format\nstore_format 3\n"
+        format!("rdy store format\nstore_format {STORE_FORMAT}\n")
     );
     assert_eq!(
         Format::parse(&Format::CURRENT.to_text()),
@@ -17,8 +17,12 @@ fn fmt2_the_format_text_is_one_number() {
 
 #[test]
 fn fmt2_parse_ignores_unknown_keys_and_reports_a_missing_number() {
-    let later = Format::parse("rdy store format\nstore_format 4\nview_format 2\n").unwrap();
-    assert_eq!(later, Some(Format { store_format: 4 }));
+    let next = STORE_FORMAT + 1;
+    let later = Format::parse(&format!(
+        "rdy store format\nstore_format {next}\nview_format 2\n"
+    ))
+    .unwrap();
+    assert_eq!(later, Some(Format { store_format: next }));
     assert_eq!(
         Format::parse("rdy store format\nlog_format 2\nmin_reader 2\n"),
         Ok(None),

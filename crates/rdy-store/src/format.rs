@@ -6,8 +6,10 @@ use crate::error::StoreError;
 use crate::fsutil;
 use std::path::Path;
 
-/// The store format this binary reads and writes.
-pub const STORE_FORMAT: u32 = 3;
+/// The store format this binary reads and writes. 4 (plan M2c): `ViewOpKind::Rebase.conflicts`,
+/// `ViewOpKind::Fork.owner`, `RelayEvidence.question`, `LandingRecord.evidence` and
+/// `Proposal.canon_at`.
+pub const STORE_FORMAT: u32 = 4;
 /// The mirror file in the store directory.
 pub const FORMAT_FILE: &str = "FORMAT";
 /// The log ref holding `store_format`, in ASCII decimal.

@@ -100,6 +100,7 @@ fn kind1_an_asset_with_a_future_proposals_bytes_does_not_hide_it() {
         changes,
         alternative: None,
         provenance: by(Role::Writer),
+        canon_at: st.rdy.store().canon_head().unwrap(),
     };
     upload(&mut st, &postcard::to_allocvec(&predicted).unwrap());
     let p = st
@@ -147,6 +148,7 @@ fn kind1_an_asset_with_a_future_landings_bytes_does_not_hide_it() {
         relay_evidence: None,
         approved_version: Some(p),
         rebased_from: vec![],
+        evidence: None,
     };
     upload(&mut st, &postcard::to_allocvec(&predicted).unwrap());
     let l = st.rdy.store_mut().land(&p, by(Role::Approver)).unwrap();

@@ -1,6 +1,8 @@
 //! The (kind, hash) object index (plan M2a1, kind1): objects of different kinds with the same
 //! bytes are separate objects, and a planted object never hides or impersonates another kind's.
-use rdy_model::{ActorRun, AltChoice, Assurance, LandingRecord, RelayEvidence};
+use rdy_model::{
+    ActorRun, AltChoice, ApprovalEvidence, Assurance, EvidenceKind, LandingRecord, RelayEvidence,
+};
 use rdy_model::{Hash, StateSnapshot};
 use rdy_model::{Provenance, Role, Tag};
 use rdy_qa::fixtures::*;
@@ -193,9 +195,16 @@ fn repr1_a_landing_reads_back_in_its_kind_with_its_id_after_a_reindex() {
         relay_evidence: Some(RelayEvidence {
             quoted: "land it".into(),
             session_ref: "sess-1".into(),
+            question: Some("land it?".into()),
         }),
         approved_version: Some(Hash::of(b"p")),
         rebased_from: vec![Hash::of(b"an older landing")],
+        evidence: Some(ApprovalEvidence {
+            kind: EvidenceKind::Text,
+            options: vec!["land".into(), "wait".into()],
+            choice: Some("land".into()),
+            card_hash: None,
+        }),
     };
     let lh = plant(&mut s, kinds::LANDING, postcard::to_allocvec(&l).unwrap());
     assert_eq!(lh, l.id());

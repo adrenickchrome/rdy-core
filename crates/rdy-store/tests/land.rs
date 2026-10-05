@@ -107,7 +107,8 @@ fn atom1_a_landing_with_an_acceptance_is_one_write_and_its_records_agree() {
         ViewOpKind::Rebase {
             landing: out.landing,
             dropped: vec![c1, aid],
-            remaining: vec![later]
+            remaining: vec![later],
+            conflicts: vec![],
         }
     );
     assert_eq!(
