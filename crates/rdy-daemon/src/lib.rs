@@ -47,3 +47,7 @@ pub use serve::{CtlSession, ServeError, ServeHandler, ServeOptions, ServeRun, se
 pub mod proxy;
 
 pub use proxy::run_stdio;
+
+pub mod watch;
+
+pub use watch::PackWatch;

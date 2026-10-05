@@ -1,11 +1,14 @@
 //! The writer: one thread owns the project's `Rdy` and applies writes in arrival order. Each
 //! write's state is stored into [`Shared::state`] before its reply is sent (publish before ack),
 //! so a caller that has its reply reads a state that includes its write.
+//!
+//! Before each write, and on a reload (a new connection's), the writer reloads the config and
+//! packs if they changed on disk (`maybe_reload`).
 use crate::E_DAEMON_GONE;
 use crate::daemon::log;
 use crate::shared::Shared;
 use rdy_engine::engine::WriteFn;
-use rdy_engine::{E_INTERNAL, Rdy, RdyError, ReloadOutcome};
+use rdy_engine::{E_INTERNAL, Rdy, RdyError, ReloadOutcome, pack_fingerprint};
 use serde_json::Value;
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -98,6 +101,56 @@ impl Writer {
         }
     }
 
+    /// Reloads the config and packs if the watch saw them change. A reload bumps the pack
+    /// generation and clears the pack error; files that do not load stay out (the loaded pack
+    /// stays), are recorded as seen so they are not parsed again until they change, and set the
+    /// pack error, bumping the generation when the error is new. A failed check is logged.
+    fn maybe_reload(&self, rdy: &mut Rdy) -> Result<ReloadOutcome, RdyError> {
+        let Some(sh) = self.shared.upgrade() else {
+            return Ok(ReloadOutcome::Unchanged);
+        };
+        if !sh.watch.changed() {
+            return Ok(ReloadOutcome::Unchanged);
+        }
+        let out = rdy.reload_pack();
+        match &out {
+            Ok(ReloadOutcome::Reloaded) => {
+                sh.watch.seen(rdy.pack_fingerprint());
+                let generation = {
+                    let mut error = sh.pack_error_lock();
+                    *error = None;
+                    sh.pack_gen.fetch_add(1, Ordering::SeqCst) + 1
+                };
+                log(&format!("pack reloaded (generation {generation})"));
+            }
+            Ok(ReloadOutcome::Invalid(e)) => {
+                match pack_fingerprint(&sh.root) {
+                    Ok(fp) => sh.watch.seen(&fp),
+                    Err(e) => log(&format!("pack check failed: {e}")),
+                }
+                let text = e.to_string();
+                let mut error = sh.pack_error_lock();
+                if error.as_deref() != Some(text.as_str()) {
+                    *error = Some(text);
+                    sh.pack_gen.fetch_add(1, Ordering::SeqCst);
+                    drop(error);
+                    log(&format!("pack invalid: {e}"));
+                }
+            }
+            Ok(ReloadOutcome::Unchanged) => {
+                sh.watch.seen(rdy.pack_fingerprint());
+                // the files are back to the loaded pack's bytes: nothing stands in error, and the
+                // pack did not change
+                if sh.pack_error_lock().take().is_some() {
+                    log("pack error cleared: the files are back to the loaded pack");
+                }
+            }
+            Err(e) => log(&format!("pack check failed: {e}")),
+        }
+        sh.state.store(rdy.read());
+        out
+    }
+
     fn idle_tick(&mut self, rdy: &mut Rdy) {
         match rdy.checkpoint_if_idle() {
             Err(e) if !self.checkpoint_failing => {
@@ -127,6 +180,8 @@ impl Writer {
             };
             let published = match msg {
                 Msg::Run(f, reply) => {
+                    // its outcome is logged and reported in the replies' notices
+                    let _ = self.maybe_reload(&mut rdy);
                     let out = match catch_unwind(AssertUnwindSafe(|| f(&mut rdy))) {
                         Ok(out) => out,
                         Err(p) => {
@@ -144,7 +199,7 @@ impl Writer {
                     published
                 }
                 Msg::Reload(reply) => {
-                    let out = rdy.reload_pack();
+                    let out = self.maybe_reload(&mut rdy);
                     let published = self.publish(&rdy);
                     let _ = reply.send(out);
                     published
@@ -183,7 +238,8 @@ impl WriterHandle {
         rx.recv().map_err(|_| gone())?
     }
 
-    /// Reloads the config and packs on the writer if their bytes changed.
+    /// Reloads the config and packs on the writer if the watch saw them change (`Unchanged`
+    /// otherwise). Blocks: call it from the blocking pool.
     pub fn reload(&self) -> Result<ReloadOutcome, RdyError> {
         let (tx, rx) = mpsc::sync_channel(1);
         self.send(Msg::Reload(tx))?;

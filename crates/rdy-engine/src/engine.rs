@@ -15,6 +15,36 @@ pub trait Engine: Send + Sync {
     /// What opening the store did.
     fn open_report(&self) -> OpenReport;
     fn root(&self) -> PathBuf;
+    /// How many times the loaded pack changed (a reload, or a new or fixed pack error); `0` for
+    /// an engine that never reloads.
+    fn pack_generation(&self) -> u64 {
+        0
+    }
+    /// Why the pack files on disk do not load, while they do not; the previous pack stays loaded.
+    fn pack_error(&self) -> Option<String> {
+        None
+    }
+}
+
+/// The notice for a session that last saw pack generation `*seen`: `pack_changed` once per new
+/// generation (unless the pack is now in error), then `pack_error` on every call while `error`
+/// stands. Updates `*seen`.
+pub fn notice(seen: &mut u64, generation: u64, error: Option<&str>) -> Option<String> {
+    let mut parts = vec![];
+    if *seen != generation {
+        *seen = generation;
+        if error.is_none() {
+            parts.push(format!(
+                "pack_changed: the pack was reloaded (generation {generation})"
+            ));
+        }
+    }
+    if let Some(e) = error {
+        parts.push(format!(
+            "pack_error: {e}; the previous pack stays loaded until the file is fixed"
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
 }
 
 /// `f` as a `WriteFn` whose `T` is serialized to JSON.

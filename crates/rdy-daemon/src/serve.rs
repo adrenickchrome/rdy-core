@@ -280,6 +280,8 @@ pub struct ServeHandler {
     /// Replaces `human_actor_from_env()` when set (a test hook).
     human: Option<String>,
     ctl: Mutex<HashMap<SessionId, CtlSession>>,
+    /// The pack generation each session has heard of (for its `pack_changed` notice).
+    seen: Arc<Mutex<HashMap<SessionId, u64>>>,
 }
 
 #[derive(Deserialize)]
@@ -297,6 +299,7 @@ impl ServeHandler {
             shared,
             human: human_actor,
             ctl: Mutex::new(HashMap::new()),
+            seen: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -373,7 +376,43 @@ impl Handler for ServeHandler {
         })
     }
 
+    /// Reloads the config and packs on the writer if the watch saw them change, so the
+    /// session's first reply already reads the reloaded pack (the check runs on the blocking
+    /// pool, and the writer is asked only on a change, so a new connection does not queue behind
+    /// a long write otherwise). A failed reload is the writer's to log; it never fails the
+    /// connection. The session then counts as having heard of the current generation.
+    fn session_started(&self, session: &SessionInfo) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let shared = Arc::clone(&self.shared);
+        let seen = Arc::clone(&self.seen);
+        let id = session.id;
+        Box::pin(async move {
+            let sh = Arc::clone(&shared);
+            let _ = tokio::task::spawn_blocking(move || {
+                if sh.watch.changed() {
+                    let _ = sh.writer.reload();
+                }
+            })
+            .await;
+            // after the reload: a session that connected across it has nothing to hear
+            let generation = shared.pack_status().0;
+            seen.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id, generation);
+        })
+    }
+
+    fn notice(&self, session: &SessionInfo) -> Option<String> {
+        let (generation, error) = self.shared.pack_status();
+        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        let seen = seen.entry(session.id).or_insert(generation);
+        rdy_engine::engine::notice(seen, generation, error.as_deref())
+    }
+
     fn session_ended(&self, session: &SessionInfo) {
+        self.seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&session.id);
         self.sessions().remove(&session.id);
         self.shared.end_session(session.id);
     }

@@ -233,3 +233,44 @@ async fn hello1_an_mcp_hello_hands_the_stream_to_the_handler_with_pipelined_byte
     handle.stop();
     task.await.unwrap().unwrap();
 }
+
+/// `Echo`, with a session start that takes `ms`.
+struct SlowStart(u64);
+impl Handler for SlowStart {
+    fn ctl(&self, s: &SessionInfo, r: CtlRequest) -> Result<Value, ErrorReply> {
+        Echo::default().ctl(s, r)
+    }
+
+    fn session_started(
+        &self,
+        _session: &SessionInfo,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        let ms = self.0;
+        Box::pin(async move { tokio::time::sleep(Duration::from_millis(ms)).await })
+    }
+}
+
+#[tokio::test]
+async fn reload1_a_slow_session_start_answers_one_starting_then_ready() {
+    let dir = short_tempdir();
+    let run = RunDir::of_project(dir.path());
+    let mut d = Daemon::new(
+        DaemonConfig::new(run.clone(), "1".into()),
+        std::sync::Arc::new(SlowStart(600)),
+    );
+    d.bind().await.unwrap();
+    let handle = d.handle();
+    d.readiness().ready();
+    tokio::spawn(d.run());
+    let (mut r, first) = connect_with(&run, &hello("1", "ctl", dir.path())).await;
+    let v = parsed(&first);
+    assert_eq!(
+        (v["status"].as_str(), v["progress"].as_str()),
+        (Some("starting"), Some("reloading the pack"))
+    );
+    let mut line = String::new();
+    r.read_line(&mut line).await.unwrap();
+    assert_eq!(parsed(&line)["status"], "ready", "one starting, then ready");
+    assert_eq!(ctl(&mut r, 1, "echo", json!({})).await["ok"]["session"], 1);
+    handle.stop();
+}

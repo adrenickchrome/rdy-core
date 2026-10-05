@@ -67,7 +67,19 @@ impl RdyServer {
             let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
             let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut st, p)));
             match out {
-                Ok(r) => result(r),
+                Ok(mut r) => {
+                    // the pack notice rides on an object result; otherwise it waits for one
+                    if let Ok(serde_json::Value::Object(m)) = &mut r {
+                        let generation = st.engine.pack_generation();
+                        let error = st.engine.pack_error();
+                        if let Some(n) =
+                            rdy_engine::engine::notice(&mut st.seen_gen, generation, error.as_deref())
+                        {
+                            m.insert("notice".into(), serde_json::Value::String(n));
+                        }
+                    }
+                    result(r)
+                }
                 Err(panic) => {
                     // the invalidate runs on the writer, where `Rdy` is
                     let _ = st.engine.write(Box::new(|r| {

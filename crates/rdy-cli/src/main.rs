@@ -347,7 +347,13 @@ impl Conn {
                 };
                 dispatch(&cx, op, args).map_err(ErrorReply::from)
             }
-            Conn::Daemon { rt, client } => rt.block_on(client.ctl(op, args)),
+            Conn::Daemon { rt, client } => {
+                let out = rt.block_on(client.ctl(op, args));
+                if let Some(t) = client.take_notice() {
+                    eprintln!("notice: {t}");
+                }
+                out
+            }
         }
     }
 

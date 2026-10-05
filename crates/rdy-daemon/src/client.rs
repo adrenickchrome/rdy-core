@@ -120,6 +120,8 @@ pub struct Client {
     next_id: u64,
     /// Set once the connection is closed or out of step; every later `ctl` is `E_DAEMON_GONE`.
     gone: bool,
+    /// The `notice` of the last reply.
+    notice: Option<String>,
 }
 
 impl Client {
@@ -130,6 +132,7 @@ impl Client {
             version,
             next_id: 1,
             gone: false,
+            notice: None,
         }
     }
 
@@ -143,11 +146,18 @@ impl Client {
         &self.version
     }
 
+    /// The `notice` of the last reply (a reloaded or invalid pack), taken: a second call is
+    /// `None` until another reply carries one.
+    pub fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
+    }
+
     /// Sends one `ctl` request and reads its reply. Ids count from 1. A closed connection, an
     /// unreadable reply or a reply to another id is `E_DAEMON_GONE`, and so is every later call.
     pub async fn ctl(&mut self, op: &str, args: Value) -> Result<Value, ErrorReply> {
         let gone = |message: String| ErrorReply::new(E_DAEMON_GONE, message, GONE_FIX);
         let closed = || gone(format!("the daemon closed the connection during {op}"));
+        self.notice = None;
         if self.gone {
             return Err(closed());
         }
@@ -175,6 +185,10 @@ impl Client {
                 self.gone = true;
                 return Err(gone(format!("the daemon sent an unreadable reply to {op}")));
             }
+        };
+        self.notice = match reply.remove("notice") {
+            Some(Value::String(n)) => Some(n),
+            _ => None,
         };
         let reply_id = reply.remove("id").unwrap_or(Value::Null);
         let error = match reply.remove("error") {

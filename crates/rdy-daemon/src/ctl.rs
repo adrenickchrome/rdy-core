@@ -49,6 +49,9 @@ pub struct CtlReply {
     pub ok: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ErrorReply>,
+    /// What the session should know beside this reply (`pack_changed`, `pack_error`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 impl CtlReply {
@@ -57,6 +60,7 @@ impl CtlReply {
             id,
             ok: Some(value),
             error: None,
+            notice: None,
         }
     }
 
@@ -65,6 +69,7 @@ impl CtlReply {
             id,
             ok: None,
             error: Some(error),
+            notice: None,
         }
     }
 }
@@ -161,6 +166,17 @@ async fn write_reply<W: AsyncWrite + Unpin>(w: &mut W, reply: &CtlReply) -> io::
     bytes.push(b'\n');
     w.write_all(&bytes).await?;
     w.flush().await
+}
+
+/// Writes a reply to a request of `session`, carrying the handler's notice for it.
+async fn answer<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    handler: &Arc<dyn Handler>,
+    session: &SessionInfo,
+    mut reply: CtlReply,
+) -> io::Result<()> {
+    reply.notice = handler.notice(session);
+    write_reply(w, &reply).await
 }
 
 fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
@@ -266,19 +282,20 @@ pub async fn serve_ctl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                     "connections": info.connections.load(Ordering::SeqCst),
                     "uptime_ms": info.started_at.elapsed().as_millis() as u64,
                 });
-                write_reply(&mut w, &CtlReply::ok(id, v)).await?;
+                answer(&mut w, &handler, &session, CtlReply::ok(id, v)).await?;
             }
             "sessions" => {
                 let v = serde_json::to_value(info.sessions.list()).map_err(io::Error::other)?;
-                write_reply(&mut w, &CtlReply::ok(id, v)).await?;
+                answer(&mut w, &handler, &session, CtlReply::ok(id, v)).await?;
             }
             "stop" => {
-                write_reply(&mut w, &CtlReply::ok(id, json!({"stopping": true}))).await?;
+                let reply = CtlReply::ok(id, json!({"stopping": true}));
+                answer(&mut w, &handler, &session, reply).await?;
                 info.stop.send_replace(true);
             }
             _ => {
                 let reply = call_handler(&handler, &session, request).await;
-                write_reply(&mut w, &reply).await?;
+                answer(&mut w, &handler, &session, reply).await?;
             }
         }
     }

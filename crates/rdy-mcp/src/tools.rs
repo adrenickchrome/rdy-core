@@ -45,15 +45,19 @@ pub struct McpState {
     pub view: String,
     /// The daemon's id for this connection (`SessionId.0`); `None` for stdio.
     pub sid: Option<u64>,
+    /// The pack generation this session has heard of (its `pack_changed` notice).
+    pub seen_gen: u64,
 }
 
 impl McpState {
     pub fn new(engine: Arc<dyn Engine>) -> McpState {
+        let seen_gen = engine.pack_generation();
         McpState {
             engine,
             session: None,
             view: "work".into(),
             sid: None,
+            seen_gen,
         }
     }
 
