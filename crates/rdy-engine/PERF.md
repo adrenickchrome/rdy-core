@@ -267,14 +267,26 @@ two writes in the 200, not the body. Two extra runs that printed every write ove
 exactly two: write 0 (19.0 and 19.7 ms) and write 199 (40.9 and 44.7 ms). In a 200-sample, p99 is
 the second-slowest write.
 
-- **Write 0** is the view's first write in the run: it writes the `Create` op, the view ref and the
-  commit, and it is cold. M2.0 had no `Create` frame.
+- **Write 0** is the first write after the test has queried the project. It is not the view's
+  first write (the generator has already made about 11k writes into view `work`), it writes no
+  `Create` op, and it is not a chain cost. The test builds the 100k-block graph (`graph(&work)`)
+  before the loop. `update_cache` (`crates/rdy-engine/src/lib.rs`) invalidates a view's cached graph
+  on every write, and write 0 is the write that drops it: with timing printed inside `Rdy::write`
+  (temporary, removed), write 0 spent 4.7-5.2 ms in `commit_to_view_at` (the same as writes 1-5)
+  and 13-18 ms in `update_cache`, all of it in dropping the `Graph` (18.3 ms in the run that timed
+  the drop alone; `apply` of the ops took 22-124 us). Writes 1-5 found no graph to drop and took
+  4.1-4.9 ms. The cost follows the block count, not the chain: write 0 after open then `graph`
+  took 3.9 ms at 1k blocks, 7.3 ms at 10k and 20-25 ms at 100k, while the store's part of the write
+  stayed at about 4-6 ms. The invalidation is M1 code (`fc24bbb`), unchanged by M2a1, so M2.0 paid
+  it too wherever a graph was cached before a write. This is a block-count-dependent cost that
+  stays, not an intended one (see the concern in the Task 13 report).
 - **Write 199** is a checkpoint. A write checkpoints the index once `CHECKPOINT_FRAMES` (1,000)
   frames are pending. A write now carries more frames than in M2.0 (the extra `VIEW_OP` frame), so
   the first checkpoint after the project is generated falls inside the 200 writes where M2.0's
   fell after them. In the 10,000-write run, writes over 20 ms recur every 400 writes (writes 2,778,
-  3,178, 3,578): the same checkpoint, amortised to well under 0.2 ms per write. Both costs are the
-  M2.0 design (index follows by checkpoint) plus the intended extra frame.
+  3,178, 3,578): the same checkpoint, amortised to well under 0.2 ms per write. The checkpoint is
+  the M2.0 design (index follows by checkpoint) plus the intended extra frame; the write 0 cost
+  above is not intended: it is the inline drop of the cached graph, which grows with the block count.
 
 The assertion in `perf_budget` is kept as specified, and no product code was changed for the miss.
 Other targets, same three runs: cold start (median of 3) 0.69, 0.71 and 0.69 s; query p99 3.8, 7.1
