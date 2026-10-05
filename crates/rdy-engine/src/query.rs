@@ -1,6 +1,6 @@
 use crate::error::*;
 use crate::{Materialized, Rdy, Scope};
-use rdy_graph::{DerivedStatus, Edge, Graph, Suspect};
+use rdy_graph::{DerivedStatus, Edge, Suspect};
 use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
 use serde::Serialize;
 
@@ -161,27 +161,19 @@ pub fn field_json(v: &FieldValue) -> serde_json::Value {
 }
 
 impl Rdy {
-    pub fn graph(&mut self, scope: &Scope) -> Result<&Graph, RdyError> {
-        self.materialized(scope)?;
-        if !self.graphs.contains_key(scope) {
-            let g = Graph::build_from(self.cache[scope].iter());
-            self.graphs.insert(scope.clone(), g);
-        }
-        Ok(&self.graphs[scope])
-    }
-
     pub fn suspects(&mut self, scope: &Scope) -> Result<Vec<Suspect>, RdyError> {
-        self.graph(scope)?;
-        self.materialized(scope)?;
-        let (g, m, store) = (&self.graphs[scope], &self.cache[scope], &self.store);
-        Ok(g.suspects(m, &|h| store.get_block(h).ok()))
+        let g = self.graph(scope)?;
+        let m = self.materialized(scope)?;
+        let store = &self.store;
+        Ok(g.suspects(&*m, &|h| store.get_block(h).ok()))
     }
 
     pub fn context(&mut self, scope: &Scope, id: &BlockId) -> Result<Context, RdyError> {
         let block = self.block(scope, id)?;
-        self.graph(scope)?;
-        let (m, g, store) = (&self.cache[scope], &self.graphs[scope], &self.store);
-        let suspects = g.suspects_of(id, m, &|h| store.get_block(h).ok());
+        let g = self.graph(scope)?;
+        let m = self.materialized(scope)?;
+        let store = &self.store;
+        let suspects = g.suspects_of(id, &*m, &|h| store.get_block(h).ok());
         Ok(Context {
             id: block.id.to_string(),
             block_type: block.block_type.clone(),
@@ -216,8 +208,8 @@ impl Rdy {
         depth: u32,
     ) -> Result<Vec<ImpactItem>, RdyError> {
         self.block(scope, id)?;
-        self.graph(scope)?;
-        let (g, m) = (&self.graphs[scope], &self.cache[scope]);
+        let g = self.graph(scope)?;
+        let m = self.materialized(scope)?;
         Ok(g.impact_via(id, depth)
             .into_iter()
             .filter_map(|h| {
@@ -225,7 +217,7 @@ impl Rdy {
                     depth: h.depth,
                     id: h.id.to_string(),
                     block_type: b.block_type.clone(),
-                    summary: summary_in(b, m),
+                    summary: summary_in(b, &m),
                     via: ImpactVia {
                         from: h.via.from.to_string(),
                         kind: h.via.kind,

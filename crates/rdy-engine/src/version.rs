@@ -390,6 +390,7 @@ impl Rdy {
             tagged_by: s.provenance(),
         };
         self.store.put_tag(&tag)?;
+        self.publish(crate::Delta::Tags)?;
         Ok(info(&tag))
     }
 

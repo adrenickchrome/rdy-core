@@ -74,7 +74,7 @@ fn spec_11_targets_at_100k_blocks() {
     for _ in 0..3 {
         drop(r.take());
         let t = Instant::now();
-        let mut open = Rdy::open(dir.path()).unwrap();
+        let open = Rdy::open(dir.path()).unwrap();
         open.graph(&work).unwrap();
         colds.push(t.elapsed());
         r = Some(open);

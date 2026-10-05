@@ -704,7 +704,10 @@ impl Rdy {
             links: ChangeLinks::default(),
         };
         let id = self.store.commit_to_view(view, change)?;
-        self.update_cache(view, &ops);
+        self.publish(crate::Delta::Commit {
+            view: view.to_string(),
+            ops: ops.clone(),
+        })?;
         let created = ops
             .iter()
             .enumerate()

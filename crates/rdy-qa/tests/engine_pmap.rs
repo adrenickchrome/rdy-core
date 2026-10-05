@@ -16,7 +16,7 @@ proptest! {
             {"op": "create", "type": "claim", "parent": "$s", "body": "seed"}
         ])).unwrap();
         let work = Scope::View("work".into());
-        let mut m = r.materialized(&work).unwrap().clone();
+        let mut m = (*r.materialized(&work).unwrap()).clone();
         let section = m.iter().find(|b| b.block_type == "section").unwrap().id.clone();
         for (kind, pick) in steps {
             let claims: Vec<_> = m.iter().filter(|b| b.block_type == "claim").map(|b| b.id.clone()).collect();

@@ -67,6 +67,8 @@ fn a_malformed_canon_ref_is_an_io_error_not_a_panic() {
     r.store_mut()
         .set_refs(vec![("canon".into(), b"not a hash".to_vec())])
         .unwrap();
+    // a store write outside the engine is followed by invalidate (snap1)
+    r.invalidate();
     let e = r
         .materialized(&rdy_engine::Scope::Canon)
         .map(|_| ())

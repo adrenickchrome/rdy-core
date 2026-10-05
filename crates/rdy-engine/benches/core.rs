@@ -40,7 +40,7 @@ fn bench(c: &mut Criterion) {
     drop(r);
     c.bench_function("cold_open_materialize_graph", |b| {
         b.iter(|| {
-            let mut r = Rdy::open(dir.path()).unwrap();
+            let r = Rdy::open(dir.path()).unwrap();
             r.graph(&work).unwrap();
         })
     });

@@ -127,7 +127,7 @@ fn kill1_a_killed_mcp_server_keeps_every_acknowledged_write() {
         ids.push(w["created"]["$d"].as_str().unwrap().to_string());
     }
     drop(c); // SIGKILL: the server never closes the store
-    let mut r = Rdy::open(dir.path()).unwrap();
+    let r = Rdy::open(dir.path()).unwrap();
     assert!(
         !r.store().open_report().index_rebuilt,
         "{:?}",

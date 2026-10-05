@@ -674,7 +674,7 @@ fn export_writes_the_folder_tree() {
 fn export_import_export_is_byte_identical() {
     let a_dir = tempfile::tempdir().unwrap();
     let out1 = tempfile::tempdir().unwrap();
-    let mut a = exported(a_dir.path(), out1.path());
+    let a = exported(a_dir.path(), out1.path());
     let original = a.materialized(&Scope::Canon).unwrap().snapshot().blocks;
     let b_dir = tempfile::tempdir().unwrap();
     let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();

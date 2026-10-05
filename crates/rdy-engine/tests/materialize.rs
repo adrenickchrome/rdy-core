@@ -27,7 +27,7 @@ fn pmap1_materialized_is_send_sync() {
 fn pmap1_with_leaves_the_receiver_untouched_and_shares_untouched_blocks() {
     let dir = tempfile::tempdir().unwrap();
     testkit::generate(dir.path(), 2_000);
-    let mut r = Rdy::open(dir.path()).unwrap();
+    let r = Rdy::open(dir.path()).unwrap();
     let m = r.materialized(&Scope::View("work".into())).unwrap().clone();
     let before = m.snapshot();
     let victim: BlockId = m
@@ -134,7 +134,7 @@ fn pmap1_with_equals_build_of_the_applied_snapshot() {
 fn pmap1_with_on_ten_thousand_blocks_is_under_a_millisecond() {
     let dir = tempfile::tempdir().unwrap();
     testkit::generate(dir.path(), 10_000);
-    let mut r = Rdy::open(dir.path()).unwrap();
+    let r = Rdy::open(dir.path()).unwrap();
     let m = r.materialized(&Scope::View("work".into())).unwrap().clone();
     let section = m
         .iter()

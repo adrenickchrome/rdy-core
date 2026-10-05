@@ -295,7 +295,7 @@ pub fn run_workload() -> Vec<Measure> {
     // Cold open: a fresh handle on the project, then the first read of canon.
     drop(r);
     out.push(measure("cold_open", 5, |_| {
-        let mut r = Rdy::open(&proj).expect("open");
+        let r = Rdy::open(&proj).expect("open");
         r.materialized(&Scope::Canon).expect("canon");
     }));
     // Cold open with a lagging index: the project is closed, so put the old index back over the
@@ -304,7 +304,7 @@ pub fn run_workload() -> Vec<Measure> {
     out.push(measure_timed("cold_open_lagging", 5, |_| {
         std::fs::copy(&snapshot, &index_path).expect("restore the lagging index");
         let s = Instant::now();
-        let mut r = Rdy::open(&proj).expect("open");
+        let r = Rdy::open(&proj).expect("open");
         r.materialized(&Scope::Canon).expect("canon");
         let took = s.elapsed();
         lag.get_or_insert(r.store().open_report().caught_up_frames);

@@ -157,3 +157,34 @@ pub fn generate_tree(
     }
     docs
 }
+
+/// Test hook: builds view `view`'s entry on `st`'s canon head with `merged` as its merge (its
+/// included changes are `merged.order`), through the one build function, and returns the
+/// materialization and the conflicts.
+#[doc(hidden)]
+pub fn build_view_entry_for_tests(
+    st: &crate::ReadState,
+    view: &str,
+    merged: rdy_store::merge::Merged,
+) -> Result<
+    (
+        std::sync::Arc<crate::Materialized>,
+        std::sync::Arc<Vec<rdy_store::Conflict>>,
+    ),
+    crate::RdyError,
+> {
+    let entry = crate::read_state::Entry::new(
+        Some(view.to_string()),
+        st.canon_head,
+        None,
+        std::sync::Arc::new(merged.order.clone()),
+    );
+    let built = crate::read_state::build_entry(
+        &st.reader,
+        &st.pack,
+        st.canon_for(&entry).map(|b| &**b),
+        &entry,
+        Some(merged),
+    )?;
+    Ok((built.m, built.conflicts))
+}

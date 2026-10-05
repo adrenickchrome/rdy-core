@@ -585,7 +585,7 @@ fn run_check(project: Option<PathBuf>, path: &Path, pack: Option<&str>, as_json:
             .map_err(|e| RdyError::new(E_IO, e.to_string(), "run from an existing directory"))?;
         let root = project.unwrap_or_else(|| find_project(&cwd));
         if root.join(".rdy/config.yaml").exists() {
-            let mut r = Rdy::open(&root)?;
+            let r = Rdy::open(&root)?;
             let pk = match pack {
                 Some(name) => resolve_pack(&root, name)?,
                 None => r.pack().clone(),

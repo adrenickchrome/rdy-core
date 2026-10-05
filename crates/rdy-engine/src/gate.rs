@@ -63,7 +63,7 @@ impl Rdy {
         let (_, applied) = self
             .store
             .merge_checked(&self.store.canon_state()?, changes)?;
-        let mut next: Materialized = self.materialized(&Scope::Canon)?.clone();
+        let mut next: Materialized = (*self.materialized(&Scope::Canon)?).clone();
         let mut touched = BTreeSet::new();
         let mut deleted = BTreeSet::new();
         for c in applied.iter().map(|&i| &changes[i]) {
@@ -306,6 +306,7 @@ impl Rdy {
         }
         issues.extend(self.rekeyed_warnings(v.base, &changes)?);
         let id = self.store.propose(view, title, s.provenance())?;
+        self.publish(crate::Delta::Seq)?;
         Ok(ProposalInfo {
             id: id.to_string(),
             title: title.into(),
@@ -357,7 +358,7 @@ impl Rdy {
         let changes = self.changes_of(&p.changes)?;
 
         // 1. prospective canon: canon + the proposal's own changes
-        let mut prospective: Materialized = self.materialized(&Scope::Canon)?.clone();
+        let mut prospective: Materialized = (*self.materialized(&Scope::Canon)?).clone();
         for c in &changes {
             prospective = prospective.with(&c.ops);
         }
@@ -446,9 +447,10 @@ impl Rdy {
             approver: s.provenance(),
             chosen: None,
         });
-        // never leave caches stale, whatever the write did
-        self.invalidate();
+        // never leave the published state stale, whatever the write did
+        let published = self.publish(crate::Delta::Full);
         let out = result?;
+        published?;
         Ok(LandInfo {
             landing: out.landing.to_string(),
             warnings: issues,

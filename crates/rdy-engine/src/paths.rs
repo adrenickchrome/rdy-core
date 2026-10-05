@@ -37,7 +37,8 @@ pub(crate) fn resolve_in(m: &Materialized, path: &str) -> Result<BlockId, RdyErr
 
 impl Rdy {
     pub fn resolve_path(&mut self, scope: &Scope, path: &str) -> Result<BlockId, RdyError> {
-        resolve_in(self.materialized(scope)?, path)
+        let m = self.materialized(scope)?;
+        resolve_in(&m, path)
     }
 
     /// Text matching the id grammar is an id (not checked to exist); anything else is a path.
@@ -169,14 +170,14 @@ impl Rdy {
     ) -> Result<Vec<TreeNode>, RdyError> {
         let m = self.materialized(scope)?;
         let Some(p) = path else {
-            return Ok(nodes_under(m, None, "", depth, 0));
+            return Ok(nodes_under(&m, None, "", depth, 0));
         };
-        let id = resolve_in(m, p)?;
+        let id = resolve_in(&m, p)?;
         let b = m.get(&id).expect("resolved");
         let full = m.path_of(&id).unwrap_or_default();
         let name = m.name_of(&id).unwrap_or_default();
         let level = m.folder_depth(&id) - usize::from(b.block_type == tree::FOLDER);
-        Ok(vec![node(m, b, full, name, depth, level)])
+        Ok(vec![node(&m, b, full, name, depth, level)])
     }
 
     pub fn new_folder(
