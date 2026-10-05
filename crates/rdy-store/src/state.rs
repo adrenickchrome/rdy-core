@@ -1,15 +1,16 @@
 use crate::Store;
 use crate::error::StoreError;
 use crate::kinds;
+use crate::land::LandRequest;
 use crate::merge::{MergeChange, Merged, merge};
 use crate::store::encode;
 use crate::view::{ViewHead, ViewOp, ViewOpKind};
 use rdy_model::{
-    Assurance, Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance,
-    StateSnapshot, Tag, decision,
+    Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance, StateSnapshot, Tag,
+    decision,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 /// What `Store::view` returns: a view's base landing and the changes it includes, in order. It is
 /// not stored; the view's chain and its `ViewHead` are (chain1).
@@ -19,7 +20,7 @@ pub struct ViewRecord {
     pub changes: Vec<Hash>,
 }
 
-fn view_ref(name: &str) -> String {
+pub(crate) fn view_ref(name: &str) -> String {
     format!("view/{name}")
 }
 
@@ -292,76 +293,17 @@ impl Store {
         self.put(kinds::PROPOSAL, &next)
     }
 
+    /// Lands proposal version `proposal` as is: `land_atomic` with no acceptance change and no
+    /// chosen alternative. Returns the landing id.
     pub fn land(&mut self, proposal: &Hash, approver: Provenance) -> Result<Hash, StoreError> {
-        let p = self.proposal(proposal)?;
-        let head = self.canon_head()?;
-        let changes = p
-            .changes
-            .iter()
-            .map(|c| self.change(c))
-            .collect::<Result<Vec<_>, _>>()?;
-        let state = self.merge_checked(&self.canon_state()?, &changes)?.state;
-        let snap = postcard::to_allocvec(&state).expect("encode snapshot");
-        let rec = LandingRecord {
-            proposal: *proposal,
-            prev: head,
-            state: state.id(),
-            approved_by: approver,
-            changes: p.changes.clone(),
-            chosen: None,
-            checks: vec![],
-            assurance: Assurance::Local,
-            relayed_by: None,
-            relay_evidence: None,
-            approved_version: Some(*proposal),
-            rebased_from: vec![],
-        };
-        let landing_id = rec.id();
-        // the proposing view checkpoints: the landed changes drop out, the rest remain
-        let head = self
-            .view_head(&p.view)?
-            .ok_or_else(|| StoreError::UnknownView(p.view.clone()))?;
-        let landed: HashSet<&Hash> = p.changes.iter().collect();
-        let (dropped, remaining): (Vec<Hash>, Vec<Hash>) = self
-            .included(&p.view)?
-            .iter()
-            .partition(|c| landed.contains(c));
-        let rebase = encode(&ViewOp {
-            view: p.view.clone(),
-            prev: Some(head.head),
-            op: ViewOpKind::Rebase {
-                landing: landing_id,
-                dropped,
-                remaining: remaining.clone(),
-            },
-            actor: rec.approved_by.actor.clone(),
-            run: rec.approved_by.run.clone(),
-            at_ms: rec.approved_by.at_ms,
-        });
-        let new_head = ViewHead {
-            head: Hash::of(&rebase),
-            base: Some(landing_id),
-            len: remaining.len() as u64,
-            owner: head.owner,
-            pinned: head.pinned,
-            closed: head.closed,
-            last_write_ms: head.last_write_ms,
-        };
-        let mut items = vec![
-            (kinds::SNAPSHOT, snap),
-            (
-                kinds::LANDING,
-                postcard::to_allocvec(&rec).expect("encode landing"),
-            ),
-            (kinds::VIEW_OP, rebase),
-        ];
-        let refs = vec![
-            ("canon".to_string(), landing_id.0.to_vec()),
-            (view_ref(&p.view), encode(&new_head)),
-        ];
-        items.extend(self.ref_items_pub(refs));
-        self.write(items)?;
-        Ok(landing_id)
+        Ok(self
+            .land_atomic(LandRequest {
+                proposal: *proposal,
+                accept: None,
+                approver,
+                chosen: None,
+            })?
+            .landing)
     }
 
     pub fn landings(&self) -> Result<Vec<(Hash, LandingRecord)>, StoreError> {

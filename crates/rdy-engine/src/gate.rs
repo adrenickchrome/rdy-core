@@ -2,6 +2,7 @@ use crate::error::*;
 use crate::{Materialized, Rdy, Scope, Session, rfc3339_now};
 use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Op, Proposal, decision};
 use rdy_schema::{Issue, Severity, validate_block};
+use rdy_store::LandRequest;
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap};
 
@@ -438,22 +439,19 @@ impl Rdy {
         let view_base = self.store.view(&p.view)?.base;
         issues.extend(self.rekeyed_warnings(view_base, &all)?);
 
-        // 4. write the acceptance change, then land
-        let result = (|| -> Result<_, RdyError> {
-            let target = match accept {
-                None => pid,
-                Some(change) => {
-                    let id = self.store.commit_to_view(&p.view, change)?;
-                    self.store.propose_version(&pid, &[id])?
-                }
-            };
-            Ok(self.store.land(&target, s.provenance())?)
-        })();
-        // the view may have changed even if a later step failed: never leave caches stale
+        // 4. land in one write (atom1): the acceptance change, the final proposal version, the
+        // snapshot, the landing, the view's rebase and the refs
+        let result = self.store.land_atomic(LandRequest {
+            proposal: pid,
+            accept,
+            approver: s.provenance(),
+            chosen: None,
+        });
+        // never leave caches stale, whatever the write did
         self.invalidate();
-        let landing = result?;
+        let out = result?;
         Ok(LandInfo {
-            landing: landing.to_string(),
+            landing: out.landing.to_string(),
             warnings: issues,
         })
     }

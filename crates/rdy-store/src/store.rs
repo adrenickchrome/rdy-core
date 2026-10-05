@@ -84,6 +84,8 @@ pub struct Store {
     /// updates it: the next read walks back to the cached head or to a checkpoint. `reindex`
     /// clears it.
     sets: Mutex<HashMap<String, CachedSet>>,
+    /// Successful `write` calls since open (a test hook, atom1).
+    writes: u64,
 }
 
 /// A view's head and the included set the walk gave at it (chain1).
@@ -374,6 +376,7 @@ impl Store {
             checkpoint_error: None,
             frames_read: AtomicU64::new(0),
             sets: Mutex::new(HashMap::new()),
+            writes: 0,
         };
         let (upto, end) = (store.index().indexed_upto()?, store.log.end());
         if upto > end {
@@ -608,6 +611,9 @@ impl Store {
         }
         let start = self.log.end();
         let result = self.append_and_index(items);
+        if result.is_ok() {
+            self.writes += 1;
+        }
         if result.is_err() {
             // nothing past `start` was acknowledged: discard it — including bytes a partial
             // append left past the end and a segment a failed roll left behind — so neither a
@@ -876,6 +882,12 @@ impl Store {
     /// Whether an object of `kind` with hash `h` is stored: an index lookup that reads no frame.
     pub fn has_kind(&self, kind: u8, h: &Hash) -> Result<bool, StoreError> {
         Ok(self.index().typed(kind, h)?.is_some())
+    }
+
+    /// Successful `write` calls since open (atom1: a landing is one).
+    #[doc(hidden)]
+    pub fn write_count(&self) -> u64 {
+        self.writes
     }
 
     /// Object frames read so far by `get_raw` and `get_kind`.
