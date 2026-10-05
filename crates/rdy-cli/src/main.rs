@@ -31,11 +31,11 @@ enum Cmd {
     },
     Status,
     Show {
-        /// An id or a path such as wallets/transactions.
+        /// An id or a path such as wallets/transactions; `id@version` or a ref line `[id@version] …` reads under that version.
         id: String,
-        /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
-        #[arg(long, default_value = "canon")]
-        scope: String,
+        /// canon (the default), an existing view's name, tag:<version>, landing:<id> or view:<name>.
+        #[arg(long)]
+        scope: Option<String>,
     },
     Log,
     Impact {
@@ -287,8 +287,28 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     ))
                 }
                 Cmd::Show { id, scope } => {
-                    let scope = r.resolve_read_scope(&scope, None)?;
-                    let bid = r.resolve_id(&scope, &id)?;
+                    let target = rdy_model::reference::parse_target(&id).map_err(|m| {
+                        RdyError::new(
+                            E_BAD_INPUT,
+                            m,
+                            "give an id, id@version, or a ref line such as [c-7KQ2M@v1.0.0] Doc: \"text\"",
+                        )
+                    })?;
+                    let scope = match &target.version {
+                        Some(v) => {
+                            let pin = format!("tag:{v}");
+                            if scope.as_deref().is_some_and(|s| s != pin) {
+                                return Err(RdyError::new(
+                                    E_BAD_INPUT,
+                                    format!("{id} pins version {v}; drop scope or make it tag:{v}"),
+                                    "use the pinned version, or read the bare id with a scope",
+                                ));
+                            }
+                            r.resolve_read_scope(&pin, None)?
+                        }
+                        None => r.resolve_read_scope(scope.as_deref().unwrap_or("canon"), None)?,
+                    };
+                    let bid = r.resolve_id(&scope, &target.id)?;
                     let ctx = r.context(&scope, &bid)?;
                     let json = serde_json::to_value(&ctx).expect("json");
                     let status = status_words(&json["status"]);

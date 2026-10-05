@@ -73,6 +73,7 @@ pub struct ScopeParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct IdParams {
+    /// A block id or a path. rdy_read and rdy_context also take `id@version` or a whole ref line `[id@version] …`, and read under that version.
     pub id: String,
     /// "canon", a view name (an existing view, or your session's), "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
     pub scope: Option<String>,
@@ -257,6 +258,38 @@ fn scope_of(st: &McpState, s: &Option<String>) -> Result<Scope, RdyError> {
         None if st.view == "canon" => Ok(Scope::Canon),
         None => Ok(Scope::View(st.view.clone())),
     }
+}
+
+/// refv1: the scope and the block id of a read call whose `id` may be `id@version` or a ref line.
+/// A pinned version reads under `tag:<version>`; an explicit scope that differs is refused.
+fn read_target(
+    st: &mut McpState,
+    id: &str,
+    scope: &Option<String>,
+) -> Result<(Scope, BlockId), RdyError> {
+    let t = rdy_model::reference::parse_target(id).map_err(|m| {
+        RdyError::new(
+            E_BAD_INPUT,
+            m,
+            "give an id, id@version, or a ref line such as [c-7KQ2M@v1.0.0] Doc: \"text\"",
+        )
+    })?;
+    let scope = match &t.version {
+        Some(v) => {
+            let pin = format!("tag:{v}");
+            if scope.as_deref().is_some_and(|s| s != pin) {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    format!("{id} pins version {v}; drop scope or make it tag:{v}"),
+                    "use the pinned version, or read the bare id with a scope",
+                ));
+            }
+            st.rdy.resolve_read_scope(&pin, Some(&st.view))?
+        }
+        None => scope_of(st, scope)?,
+    };
+    let bid = st.rdy.resolve_id(&scope, &t.id)?;
+    Ok((scope, bid))
 }
 
 fn id_of(s: &str) -> Result<BlockId, RdyError> {
@@ -458,8 +491,7 @@ pub fn rdy_tags(st: &mut McpState, _p: TagsParams) -> Result<Value, RdyError> {
 pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
-    let scope = scope_of(st, &p.scope)?;
-    let id = st.rdy.resolve_id(&scope, &p.id)?;
+    let (scope, id) = read_target(st, &p.id, &p.scope)?;
     let suspects: std::collections::BTreeSet<BlockId> = st
         .rdy
         .suspects(&scope)?
@@ -536,8 +568,7 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
 pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
-    let scope = scope_of(st, &p.scope)?;
-    let id = st.rdy.resolve_id(&scope, &p.id)?;
+    let (scope, id) = read_target(st, &p.id, &p.scope)?;
     let ctx = st.rdy.context(&scope, &id)?;
     Ok(budget(
         serde_json::to_value(ctx).expect("context json"),
