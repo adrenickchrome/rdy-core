@@ -185,3 +185,140 @@ fn ctl2_the_session_op_is_answered_by_the_host_not_by_dispatch() {
         "the session op is answered by the daemon connection, not by dispatch"
     );
 }
+
+#[test]
+fn ctl2_new_propose_approve_tag_land_through_the_writer_and_the_next_read_sees_them() {
+    let (d, e) = project();
+    let s = human();
+    let c = cx(&e, &s, d.path());
+    let v = dispatch(&c, "new_folder", json!({"path": "wallets"})).unwrap();
+    assert!(v["change"].is_string(), "{v}");
+    let v = dispatch(&c, "new_doc", json!({"path": "wallets/tx", "title": "Tx"})).unwrap();
+    assert!(
+        v["created"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|x| x.as_str().unwrap().starts_with("d-"))
+    );
+    let p = dispatch(&c, "propose", json!({"title": "first"})).unwrap();
+    let pid = p["id"].as_str().unwrap().to_string();
+    let l = dispatch(&c, "approve", json!({"proposal": pid})).unwrap();
+    assert!(l["landing"].is_string(), "{l}");
+    let t = dispatch(&c, "tag", json!({"version": "v0.1.0"})).unwrap();
+    assert_eq!(t["name"], "v0.1.0");
+    let st = dispatch(&c, "status", json!({})).unwrap();
+    assert_eq!(st["landings"], 1);
+    assert!(
+        st["version_position"]["label"]
+            .as_str()
+            .unwrap()
+            .contains("v0.1.0"),
+        "{st}"
+    );
+    let log = dispatch(&c, "log", json!({})).unwrap();
+    assert_eq!(log[0]["title"], "first");
+    assert_eq!(log[0]["tags"], json!(["v0.1.0"]));
+}
+
+#[test]
+fn ctl2_an_agent_may_write_but_not_approve_tag_or_import() {
+    let (d, e) = project();
+    let a = Session::agent("agent:w".into(), Some("r1".into()), Role::Writer).unwrap();
+    let c = cx(&e, &a, d.path());
+    let v = dispatch(&c, "new_doc", json!({"path": "a"})).unwrap();
+    assert!(v["change"].is_string());
+    assert_eq!(
+        dispatch(&c, "status", json!({})).unwrap()["views"][0]["name"],
+        "r1",
+        "the agent's default view is its run"
+    );
+    let p = dispatch(&c, "propose", json!({"title": "t"})).unwrap();
+    for (op, args) in [
+        ("approve", json!({"proposal": p["id"]})),
+        ("tag", json!({"version": "v0.1.0"})),
+        ("import", json!({"dir": "x", "view": "r1"})),
+    ] {
+        let err = dispatch(&c, op, args).unwrap_err();
+        assert_eq!(err.code, rdy_engine::E_PERMISSION, "{op}");
+        assert_eq!(err.message, "agent sessions cannot approve, tag or import");
+    }
+}
+
+#[test]
+fn ctl2_edit_block_round_trips_through_yaml() {
+    let (d, e) = project();
+    let s = human();
+    let c = cx(&e, &s, d.path());
+    let w = dispatch(&c, "new_doc", json!({"path": "a", "title": "Before"})).unwrap();
+    let id = w["created"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|x| x.as_str().unwrap().starts_with("d-"))
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    let b = dispatch(&c, "block", json!({"id": id})).unwrap();
+    let yaml = b["yaml"]
+        .as_str()
+        .unwrap()
+        .replace("title: Before", "title: After");
+    let v = dispatch(&c, "edit_block", json!({"yaml": yaml})).unwrap();
+    assert!(v["change"].is_string(), "{v}");
+    let shown = dispatch(&c, "show", json!({"id": id, "scope": "work"})).unwrap();
+    assert_eq!(shown["fields"]["title"], "After");
+    let err = dispatch(&c, "edit_block", json!({"yaml": "not: [valid"})).unwrap_err();
+    assert_eq!(err.code, rdy_engine::E_BAD_INPUT);
+}
+
+#[test]
+fn ctl2_import_reindex_and_fsck_run_and_fsck_reports_the_open() {
+    let (d, e) = project();
+    let s = human();
+    let c = cx(&e, &s, d.path());
+    dispatch(&c, "new_doc", json!({"path": "a"})).unwrap();
+    let p = dispatch(&c, "propose", json!({"title": "t"})).unwrap();
+    dispatch(&c, "approve", json!({"proposal": p["id"]})).unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let o = Local::new(Rdy::init(other.path(), "rdy-standard").unwrap());
+    {
+        let oc = cx(&o, &s, other.path());
+        dispatch(&oc, "new_doc", json!({"path": "b"})).unwrap();
+        dispatch(&oc, "export", json!({"out": "exp", "scope": "work"})).unwrap();
+    }
+    o.close().unwrap();
+    let dir = other.path().join("exp");
+    let v = dispatch(
+        &c,
+        "import",
+        json!({"dir": dir.to_string_lossy(), "view": "imp"}),
+    )
+    .unwrap();
+    assert!(!v["created"].as_object().unwrap().is_empty(), "{v}");
+    assert_eq!(
+        dispatch(&c, "reindex", json!({})).unwrap(),
+        json!({"reindexed": true})
+    );
+    let f = dispatch(&c, "fsck", json!({})).unwrap();
+    assert_eq!(f["landings"], 1);
+    assert!(f["frames"].as_u64().unwrap() > 0);
+    assert_eq!(f["open_report"]["index_rebuilt"], false);
+    assert_eq!(f["quarantine"], json!([]));
+    assert_eq!(
+        dispatch(&c, "status", json!({})).unwrap()["landings"],
+        1,
+        "the state was republished after reindex"
+    );
+}
+
+#[test]
+fn ctl2_a_refused_approve_is_the_gates_error_and_writes_nothing() {
+    let (d, e) = project();
+    let s = human();
+    let c = cx(&e, &s, d.path());
+    let err = dispatch(&c, "approve", json!({"proposal": "p-nothing"})).unwrap_err();
+    assert_ne!(err.code, rdy_engine::E_INTERNAL);
+    assert_eq!(dispatch(&c, "status", json!({})).unwrap()["landings"], 0);
+}

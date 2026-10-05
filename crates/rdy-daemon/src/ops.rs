@@ -1,10 +1,14 @@
 //! The ctl ops: one function per op, each against `&dyn Engine`. Every read op takes one
-//! snapshot (`engine.read()`) and reads only through it; none touches the writer. Relative
-//! paths in args resolve against the session's working directory.
-use rdy_engine::engine::{Engine, open_report_json};
+//! snapshot (`engine.read()`) and reads only through it; none touches the writer. Every write
+//! op parses and checks its role here, then runs its engine call as one `Engine::write`
+//! closure on the writer. Relative paths in args resolve against the session's working
+//! directory.
+use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::{
-    E_BAD_INPUT, RdyError, ReadState, Scope, Session, block_to_yaml, check_path, resolve_pack,
+    E_BAD_INPUT, E_PERMISSION, RdyError, ReadState, Scope, Session, block_from_yaml, block_to_yaml,
+    check_path, resolve_pack,
 };
+use rdy_model::Role;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -17,7 +21,7 @@ pub struct OpContext<'a> {
 }
 
 /// Every ctl op, in the order the docs list them. `session` is answered by the connection
-/// host; the write ops are filled in by their own arms.
+/// host.
 pub const OPS: &[&str] = &[
     "session",
     "status",
@@ -87,6 +91,87 @@ struct OutArgs {
 struct CheckArgs {
     path: String,
     pack: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewFolderArgs {
+    path: String,
+    view: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewDocArgs {
+    path: String,
+    view: Option<String>,
+    doc_type: Option<String>,
+    title: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditBlockArgs {
+    yaml: String,
+    view: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProposeArgs {
+    title: String,
+    view: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApproveArgs {
+    proposal: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TagArgs {
+    version: String,
+    landing: Option<String>,
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportArgs {
+    dir: String,
+    view: String,
+}
+
+/// Why an agent session is refused an approver op.
+pub(crate) const AGENT_NOT_APPROVER: &str = "agent sessions cannot approve, tag or import";
+/// How the refusal is fixed.
+pub(crate) const AGENT_NOT_APPROVER_FIX: &str = "approvals are made by the human actor: unset RDY_ACTOR, or set actor: in the user's rdy config";
+
+/// The session an approver op runs as: a human session as an approver; an agent session is
+/// refused with `E_PERMISSION`.
+pub(crate) fn approver(s: &Session) -> Result<Session, RdyError> {
+    if s.is_human() {
+        Ok(Session {
+            role: Role::Approver,
+            ..s.clone()
+        })
+    } else {
+        Err(RdyError::new(
+            E_PERMISSION,
+            AGENT_NOT_APPROVER,
+            AGENT_NOT_APPROVER_FIX,
+        ))
+    }
+}
+
+/// The view a write op targets: `view` without a leading `view:`, else the session's default.
+pub(crate) fn view_of(s: &Session, view: Option<String>) -> String {
+    match view {
+        Some(v) => v.strip_prefix("view:").map(String::from).unwrap_or(v),
+        None => s.default_view(),
+    }
 }
 
 /// Deserializes `args` as `T`; a failure is `E_BAD_INPUT` naming the op and its shape.
@@ -179,8 +264,7 @@ fn status_words(status: &Value) -> Option<String> {
     })
 }
 
-/// Runs the ctl op `op` with `args`. An unknown op, or a write op not yet served, is
-/// `E_BAD_INPUT` naming every op.
+/// Runs the ctl op `op` with `args`. An unknown op is `E_BAD_INPUT` naming every op.
 pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError> {
     match op {
         "session" => Err(RdyError::new(
@@ -207,6 +291,21 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "render" => render(cx, parse(op, args, "{out, scope?}")?),
         "export" => export(cx, parse(op, args, "{out, scope?}")?),
         "check" => check(cx, parse(op, args, "{path, pack?}")?),
+        "new_folder" => new_folder(cx, parse(op, args, "{path, view?}")?),
+        "new_doc" => new_doc(cx, parse(op, args, "{path, view?, doc_type?, title?}")?),
+        "edit_block" => edit_block(cx, parse(op, args, "{yaml, view?}")?),
+        "propose" => propose(cx, parse(op, args, "{title, view?}")?),
+        "approve" => approve(cx, parse(op, args, "{proposal}")?),
+        "tag" => tag(cx, parse(op, args, "{version, landing?, message?}")?),
+        "import" => import(cx, parse(op, args, "{dir, view}")?),
+        "reindex" => {
+            parse::<NoArgs>(op, args, "{}")?;
+            reindex(cx)
+        }
+        "fsck" => {
+            parse::<NoArgs>(op, args, "{}")?;
+            fsck(cx)
+        }
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),
@@ -334,4 +433,70 @@ fn check(cx: &OpContext, a: CheckArgs) -> Result<Value, RdyError> {
         Some(&*canon),
         &resolve_path(cx.cwd, &a.path),
     )?))
+}
+
+fn new_folder(cx: &OpContext, a: NewFolderArgs) -> Result<Value, RdyError> {
+    let s = cx.session.clone();
+    let view = view_of(&s, a.view);
+    write_typed(cx.engine, move |r| r.new_folder(&s, &view, &a.path))
+}
+
+fn new_doc(cx: &OpContext, a: NewDocArgs) -> Result<Value, RdyError> {
+    let s = cx.session.clone();
+    let view = view_of(&s, a.view);
+    write_typed(cx.engine, move |r| {
+        r.new_doc(
+            &s,
+            &view,
+            &a.path,
+            a.doc_type.as_deref(),
+            a.title.as_deref(),
+        )
+    })
+}
+
+fn edit_block(cx: &OpContext, a: EditBlockArgs) -> Result<Value, RdyError> {
+    let s = cx.session.clone();
+    let view = view_of(&s, a.view);
+    let block = block_from_yaml(&a.yaml)?;
+    write_typed(cx.engine, move |r| r.edit_block(&s, &view, block))
+}
+
+fn propose(cx: &OpContext, a: ProposeArgs) -> Result<Value, RdyError> {
+    let s = cx.session.clone();
+    let view = view_of(&s, a.view);
+    write_typed(cx.engine, move |r| r.propose(&s, &view, &a.title))
+}
+
+fn approve(cx: &OpContext, a: ApproveArgs) -> Result<Value, RdyError> {
+    let s = approver(cx.session)?;
+    write_typed(cx.engine, move |r| r.land_report(&s, &a.proposal))
+}
+
+fn tag(cx: &OpContext, a: TagArgs) -> Result<Value, RdyError> {
+    let s = approver(cx.session)?;
+    write_typed(cx.engine, move |r| {
+        r.tag(&s, &a.version, a.landing.as_deref(), a.message)
+    })
+}
+
+fn import(cx: &OpContext, a: ImportArgs) -> Result<Value, RdyError> {
+    let s = approver(cx.session)?;
+    let view = view_of(&s, Some(a.view));
+    let dir = resolve_path(cx.cwd, &a.dir);
+    write_typed(cx.engine, move |r| r.import(&s, &view, &dir))
+}
+
+fn reindex(cx: &OpContext) -> Result<Value, RdyError> {
+    cx.engine.write(Box::new(|r| {
+        r.reindex()?;
+        Ok(json!({"reindexed": true}))
+    }))
+}
+
+fn fsck(cx: &OpContext) -> Result<Value, RdyError> {
+    let mut v = write_typed(cx.engine, |r| r.fsck())?;
+    v["open_report"] = open_report_json(&cx.engine.open_report());
+    v["quarantine"] = json!(quarantine(&cx.engine.root()));
+    Ok(v)
 }
