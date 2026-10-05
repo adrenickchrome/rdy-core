@@ -1,7 +1,7 @@
 //! Versions (addendum A): immutable SemVer tags on canon's landings, created only by an approver.
 use crate::error::*;
-use crate::{Rdy, Scope, Session};
-use rdy_model::{Hash, Tag};
+use crate::{Rdy, ReadState, Scope, Session};
+use rdy_model::{Hash, LandingRecord, Tag};
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -20,11 +20,14 @@ pub(crate) enum VposScope {
     View(String, Option<Hash>),
 }
 
-/// The cached positions, valid for the (canon head, tag count) they were filled for.
+/// One cached position's key: the canon head and tag count of the state that asked, and the
+/// scope. Every input is in the key, so the cache is shared by all states and never stale.
+type VposKey = (Option<Hash>, usize, VposScope);
+
+/// The cached positions, shared by every published state (see `VposKey`).
 #[derive(Default)]
 pub(crate) struct VposCache {
-    filled_for: Option<(Option<Hash>, usize)>,
-    entries: HashMap<VposScope, VersionPosition>,
+    entries: HashMap<VposKey, VersionPosition>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -226,9 +229,10 @@ impl Rdy {
         ))
     }
 
-    /// Every version as (parsed version, tag), in SemVer precedence order. Tag refs whose name is
+    /// Every version as (parsed version, tag), in SemVer precedence order, read from the store's
+    /// refs: what `publish` captures into a state. Tag refs whose name is
     /// not a version, and refs that cannot be read as a tag, are skipped here so one damaged ref
-    /// does not fail every read; `rdy fsck` reports them.
+    /// does not fail every read; `rdy fsck` reports them. Reads go through `ReadState`.
     pub(crate) fn version_tags(&self) -> Result<Vec<(semver::Version, Tag)>, RdyError> {
         let mut out: Vec<(semver::Version, Tag)> = self
             .store
@@ -242,75 +246,6 @@ impl Rdy {
             .collect();
         out.sort_by(|a, b| a.0.cmp_precedence(&b.0));
         Ok(out)
-    }
-
-    /// Every version, oldest first (precedence order, which the order rules make canon order).
-    pub fn versions(&self) -> Result<Vec<VersionInfo>, RdyError> {
-        Ok(self.version_tags()?.iter().map(|(_, t)| info(t)).collect())
-    }
-
-    /// A landing in canon's chain, by full hash or unique prefix of at least 6 hex characters.
-    pub fn resolve_landing(&self, text: &str) -> Result<Hash, RdyError> {
-        let chain: Vec<Hash> = self.store.landings()?.into_iter().map(|(h, _)| h).collect();
-        match_prefix(&chain, text)
-    }
-
-    /// scope1: like `resolve_scope`, for reads. A view must have a record (it was written,
-    /// proposed or landed), unless it is `own_view`, the reading session's view, which is
-    /// created lazily. Reading a view that doesn't exist would silently read canon.
-    pub fn resolve_read_scope(
-        &self,
-        text: &str,
-        own_view: Option<&str>,
-    ) -> Result<Scope, RdyError> {
-        let scope = self.resolve_scope(text)?;
-        if let Scope::View(v) = &scope
-            && Some(v.as_str()) != own_view
-            && self.store.get_ref(&format!("view/{v}"))?.is_none()
-        {
-            let hex = (7..=64).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_hexdigit());
-            let fix = if hex {
-                format!("{v:?} looks like a landing id: read it with landing:{v}")
-            } else {
-                "list views with rdy status (MCP: rdy_overview), or read canon".to_string()
-            };
-            return Err(RdyError::new(E_NOT_FOUND, format!("no view {v:?}"), fix));
-        }
-        Ok(scope)
-    }
-
-    /// Reads scope text: `canon`, `tag:<version>`, `landing:<id>`, `view:<name>`, or a view name.
-    pub fn resolve_scope(&self, text: &str) -> Result<Scope, RdyError> {
-        if text == "canon" {
-            return Ok(Scope::Canon);
-        }
-        if let Some(name) = text.strip_prefix("tag:") {
-            let want = parse_version(name)?;
-            return self
-                .version_tags()?
-                .into_iter()
-                .find(|(v, _)| v.cmp_precedence(&want) == Ordering::Equal)
-                .map(|(_, t)| Scope::At(t.landing))
-                .ok_or_else(|| {
-                    RdyError::new(
-                        E_NOT_FOUND,
-                        format!("no version {name}"),
-                        "list versions with rdy tags",
-                    )
-                });
-        }
-        if let Some(id) = text.strip_prefix("landing:") {
-            return Ok(Scope::At(self.resolve_landing(id)?));
-        }
-        let view = text.strip_prefix("view:").unwrap_or(text);
-        if view.is_empty() {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                "a view name is empty",
-                "name a view, e.g. view:work",
-            ));
-        }
-        Ok(Scope::View(view.to_string()))
     }
 
     /// Names a landing (default: canon's head) as version `name`. Approver only; the version must
@@ -330,7 +265,8 @@ impl Rdy {
             ));
         }
         let version = parse_version(name)?;
-        let chain: Vec<Hash> = self.store.landings()?.into_iter().map(|(h, _)| h).collect();
+        let state = self.read();
+        let chain: Vec<Hash> = state.landings()?.into_iter().map(|(h, _)| h).collect();
         let head = *chain.first().ok_or_else(|| {
             RdyError::new(
                 E_NOT_FOUND,
@@ -342,7 +278,7 @@ impl Rdy {
             Some(text) => match_prefix(&chain, text)?,
             None => head,
         };
-        let existing = self.version_tags()?;
+        let existing = state.version_tags()?;
         if let Some((_, t)) = existing
             .iter()
             .find(|(v, _)| v.cmp_precedence(&version) == Ordering::Equal)
@@ -394,32 +330,161 @@ impl Rdy {
         Ok(info(&tag))
     }
 
-    /// The version position of `scope` (see `VersionPosition`). Cached: an entry's key holds
-    /// every input (canon's head, the tag count, and for a view its head op), so a write, a
-    /// landing or a tag moves the key and no entry is ever stale.
+    /// Forwarder to `ReadState::versions` (removed once every caller reads the state).
+    pub fn versions(&self) -> Result<Vec<VersionInfo>, RdyError> {
+        self.read().versions()
+    }
+
+    /// Forwarder to `ReadState::resolve_landing` (removed once every caller reads the state).
+    pub fn resolve_landing(&self, text: &str) -> Result<Hash, RdyError> {
+        self.read().resolve_landing(text)
+    }
+
+    /// Forwarder to `ReadState::resolve_read_scope` (removed once every caller reads the state).
+    pub fn resolve_read_scope(
+        &self,
+        text: &str,
+        own_view: Option<&str>,
+    ) -> Result<Scope, RdyError> {
+        self.read().resolve_read_scope(text, own_view)
+    }
+
+    /// Forwarder to `ReadState::resolve_scope` (removed once every caller reads the state).
+    pub fn resolve_scope(&self, text: &str) -> Result<Scope, RdyError> {
+        self.read().resolve_scope(text)
+    }
+
+    /// Forwarder to `ReadState::version_position` (removed once every caller reads the state).
     pub fn version_position(&self, scope: &Scope) -> Result<VersionPosition, RdyError> {
-        let canon = self.store.canon_head()?;
-        let tags = self.store.count_refs("tag/")?;
+        self.read().version_position(scope)
+    }
+
+    /// Test hook: forwards to `ReadState::version_position_cache_len`.
+    #[doc(hidden)]
+    pub fn version_position_cache_len(&self) -> usize {
+        self.read().version_position_cache_len()
+    }
+}
+
+impl ReadState {
+    /// Every version as (parsed version, tag), in SemVer precedence order: the tags this state
+    /// was published with.
+    pub(crate) fn version_tags(&self) -> Result<Vec<(semver::Version, Tag)>, RdyError> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        Ok(self.tags.as_ref().clone())
+    }
+
+    /// Canon's landings from this state's head, head first.
+    pub fn landings(&self) -> Result<Vec<(Hash, LandingRecord)>, RdyError> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        let mut out = vec![];
+        let mut cur = self.canon_head;
+        while let Some(h) = cur {
+            let rec = self.reader.landing(&h)?;
+            cur = rec.prev;
+            out.push((h, rec));
+        }
+        Ok(out)
+    }
+
+    /// Every version, oldest first (precedence order, which the order rules make canon order).
+    pub fn versions(&self) -> Result<Vec<VersionInfo>, RdyError> {
+        Ok(self.version_tags()?.iter().map(|(_, t)| info(t)).collect())
+    }
+
+    /// A landing in canon's chain, by full hash or unique prefix of at least 6 hex characters.
+    pub fn resolve_landing(&self, text: &str) -> Result<Hash, RdyError> {
+        let chain: Vec<Hash> = self.landings()?.into_iter().map(|(h, _)| h).collect();
+        match_prefix(&chain, text)
+    }
+
+    /// scope1: like `resolve_scope`, for reads. A view must have a record (it was written,
+    /// proposed or landed), unless it is `own_view`, the reading session's view, which is
+    /// created lazily. Reading a view that doesn't exist would silently read canon.
+    pub fn resolve_read_scope(
+        &self,
+        text: &str,
+        own_view: Option<&str>,
+    ) -> Result<Scope, RdyError> {
+        let scope = self.resolve_scope(text)?;
+        if let Scope::View(v) = &scope
+            && Some(v.as_str()) != own_view
+            && !self.has_view(v)
+        {
+            let hex = (7..=64).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_hexdigit());
+            let fix = if hex {
+                format!("{v:?} looks like a landing id: read it with landing:{v}")
+            } else {
+                "list views with rdy status (MCP: rdy_overview), or read canon".to_string()
+            };
+            return Err(RdyError::new(E_NOT_FOUND, format!("no view {v:?}"), fix));
+        }
+        Ok(scope)
+    }
+
+    /// Reads scope text: `canon`, `tag:<version>`, `landing:<id>`, `view:<name>`, or a view name.
+    pub fn resolve_scope(&self, text: &str) -> Result<Scope, RdyError> {
+        if text == "canon" {
+            return Ok(Scope::Canon);
+        }
+        if let Some(name) = text.strip_prefix("tag:") {
+            let want = parse_version(name)?;
+            return self
+                .version_tags()?
+                .into_iter()
+                .find(|(v, _)| v.cmp_precedence(&want) == Ordering::Equal)
+                .map(|(_, t)| Scope::At(t.landing))
+                .ok_or_else(|| {
+                    RdyError::new(
+                        E_NOT_FOUND,
+                        format!("no version {name}"),
+                        "list versions with rdy tags",
+                    )
+                });
+        }
+        if let Some(id) = text.strip_prefix("landing:") {
+            return Ok(Scope::At(self.resolve_landing(id)?));
+        }
+        let view = text.strip_prefix("view:").unwrap_or(text);
+        if view.is_empty() {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "a view name is empty",
+                "name a view, e.g. view:work",
+            ));
+        }
+        Ok(Scope::View(view.to_string()))
+    }
+
+    /// The version position of `scope` (see `VersionPosition`). Cached in the cache every state
+    /// shares, under a key that holds every input (this state's canon head and tag count, and
+    /// for a view its head op), so no entry is ever stale and a held state keeps its answer.
+    pub fn version_position(&self, scope: &Scope) -> Result<VersionPosition, RdyError> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
         let (key, head) = match scope {
             Scope::Canon => (VposScope::Canon, None),
             Scope::At(h) => (VposScope::At(*h), None),
             Scope::View(name) => {
-                let head = self.store.view_head(name)?;
+                let head = self.view_head(name).cloned();
                 (
                     VposScope::View(name.clone(), head.as_ref().map(|h| h.head)),
                     head,
                 )
             }
         };
-        let mut cache = self.vpos.lock().unwrap_or_else(|e| e.into_inner());
-        if cache.filled_for != Some((canon, tags)) {
-            cache.entries.clear();
-            cache.filled_for = Some((canon, tags));
-        }
-        if let Some(hit) = cache.entries.get(&key) {
+        let key = (self.canon_head, self.tags.len(), key);
+        let lock = || self.vpos.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(hit) = lock().entries.get(&key) {
             return Ok(hit.clone());
         }
-        let computed = self.compute_version_position(scope, canon, head)?;
+        let computed = self.compute_version_position(scope, head)?;
+        let mut cache = lock();
         if cache.entries.len() >= VPOS_CACHE_ENTRIES {
             cache.entries.clear();
         }
@@ -427,7 +492,7 @@ impl Rdy {
         Ok(computed)
     }
 
-    /// Test hook: how many positions are cached.
+    /// Test hook: how many positions are cached (the cache is shared by every state).
     #[doc(hidden)]
     pub fn version_position_cache_len(&self) -> usize {
         self.vpos
@@ -440,9 +505,9 @@ impl Rdy {
     fn compute_version_position(
         &self,
         scope: &Scope,
-        canon: Option<Hash>,
         head: Option<rdy_store::ViewHead>,
     ) -> Result<VersionPosition, RdyError> {
+        let canon = self.canon_head;
         let (base, view) = match scope {
             Scope::Canon => (canon, None),
             Scope::At(h) => (Some(*h), None),
@@ -456,8 +521,8 @@ impl Rdy {
         };
         // the highest version on each landing (version_tags is in ascending order)
         let mut on: HashMap<Hash, String> = HashMap::new();
-        for (_, t) in self.version_tags()? {
-            on.insert(t.landing, t.name);
+        for (_, t) in self.tags.iter() {
+            on.insert(t.landing, t.name.clone());
         }
         let (mut since, mut cur, mut version) = (0u32, base, None);
         while let Some(h) = cur {
@@ -469,7 +534,7 @@ impl Rdy {
                 break;
             }
             since += 1;
-            cur = self.store.landing(&h)?.prev;
+            cur = self.reader.landing(&h)?.prev;
         }
         let frozen = matches!(scope, Scope::At(_));
         Ok(VersionPosition {

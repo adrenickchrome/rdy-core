@@ -64,7 +64,7 @@ fn rich_project(dir: &std::path::Path) -> Rdy {
 fn export_import_round_trip_preserves_every_version_hash() {
     let a_dir = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
-    let mut a = rich_project(a_dir.path());
+    let a = rich_project(a_dir.path());
     let summary = a.export(&Scope::Canon, out.path()).unwrap();
     assert_eq!(summary.docs, 1);
     assert_eq!(summary.folders, 2);
@@ -142,7 +142,7 @@ fn single_block_yaml_round_trip_and_edit() {
 use std::path::Path;
 
 fn exported(dir: &Path, out: &Path) -> Rdy {
-    let mut a = rich_project(dir);
+    let a = rich_project(dir);
     a.export(&Scope::Canon, out).unwrap();
     a
 }
@@ -417,7 +417,7 @@ fn edit_block_respects_decision_rules() {
 fn export_refuses_a_non_empty_directory() {
     let a_dir = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
-    let mut a = rich_project(a_dir.path());
+    let a = rich_project(a_dir.path());
     std::fs::create_dir_all(out.path().join("docs")).unwrap();
     std::fs::write(out.path().join("docs/d-STALE.yaml"), "[]").unwrap();
     let e = a.export(&Scope::Canon, out.path()).unwrap_err();
@@ -436,7 +436,7 @@ fn export_refuses_a_non_empty_directory() {
 fn import_skips_dotfiles_and_non_yaml_files() {
     let a_dir = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
-    let mut a = rich_project(a_dir.path());
+    let a = rich_project(a_dir.path());
     a.export(&Scope::Canon, out.path()).unwrap();
     std::fs::write(out.path().join("docs/.DS_Store"), [0u8, 1, 2]).unwrap();
     std::fs::write(out.path().join("docs/README.txt"), "notes").unwrap();
@@ -521,7 +521,7 @@ fn export_of_a_figure_whose_blob_is_missing_fails_and_writes_nothing() {
 fn export_creates_missing_parents_and_clears_a_leftover_staging_dir() {
     let a_dir = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
-    let mut a = rich_project(a_dir.path());
+    let a = rich_project(a_dir.path());
     let deeper = root.path().join("nested/deeper");
     // an interrupted earlier export left its staging dir behind
     std::fs::create_dir_all(deeper.join(".exp.rdy-export-partial/docs")).unwrap();

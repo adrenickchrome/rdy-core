@@ -3,7 +3,7 @@ use crate::error::*;
 use crate::query::field_json;
 use crate::tree_io::{self, FOLDER_FILE};
 use crate::write::{LinkInput, OpInput, WriteRequest, WriteResult};
-use crate::{Rdy, Scope, Session};
+use crate::{Rdy, ReadState, Scope, Session};
 use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Link, Op, tree};
 use rdy_schema::{has_errors, validate_block};
 use serde::{Deserialize, Serialize};
@@ -346,8 +346,8 @@ pub fn block_from_yaml(text: &str) -> Result<Block, RdyError> {
     from_yaml_struct(y)
 }
 
-impl Rdy {
-    pub fn export(&mut self, scope: &Scope, out: &Path) -> Result<ExportSummary, RdyError> {
+impl ReadState {
+    pub fn export(&self, scope: &Scope, out: &Path) -> Result<ExportSummary, RdyError> {
         if out.exists() && std::fs::read_dir(out).map_err(io_err)?.next().is_some() {
             return Err(RdyError::new(
                 E_BAD_INPUT,
@@ -386,8 +386,8 @@ impl Rdy {
         Ok(summary)
     }
 
-    fn write_export(&mut self, scope: &Scope, out: &Path) -> Result<ExportSummary, RdyError> {
-        let m = self.materialized(scope)?.clone();
+    fn write_export(&self, scope: &Scope, out: &Path) -> Result<ExportSummary, RdyError> {
+        let m = self.materialized(scope)?;
         std::fs::create_dir_all(out.join("docs")).map_err(io_err)?;
         std::fs::create_dir_all(out.join("blobs")).map_err(io_err)?;
         let mut summary = ExportSummary {
@@ -421,10 +421,10 @@ impl Rdy {
                     ),
                 )
             };
-            if !self.store.has_blob(h)? {
+            if !self.reader().has_blob(h)? {
                 return Err(not_found());
             }
-            let bytes = self.store.get_blob(h).map_err(|e| match e {
+            let bytes = self.reader().get_blob(h).map_err(|e| match e {
                 rdy_store::StoreError::NotFound(_) => not_found(),
                 other => other.into(),
             })?;
@@ -439,7 +439,7 @@ impl Rdy {
         };
         let manifest = Manifest {
             format: 2,
-            pack: self.pack.name.clone(),
+            pack: self.pack().name.clone(),
             scope: scope_name,
         };
         std::fs::write(
@@ -448,6 +448,13 @@ impl Rdy {
         )
         .map_err(io_err)?;
         Ok(summary)
+    }
+}
+
+impl Rdy {
+    /// Forwarder to `ReadState::export` (removed once every caller reads the state).
+    pub fn export(&self, scope: &Scope, out: &Path) -> Result<ExportSummary, RdyError> {
+        self.read().export(scope, out)
     }
 
     pub fn import(&mut self, s: &Session, view: &str, dir: &Path) -> Result<WriteResult, RdyError> {
