@@ -41,7 +41,7 @@ fn targets(b: &Block) -> BTreeSet<BlockId> {
 impl Rdy {
     fn changes_of(&self, ids: &[Hash]) -> Result<Vec<Change>, RdyError> {
         ids.iter()
-            .map(|h| self.store.get::<Change>(h).map_err(RdyError::from))
+            .map(|h| self.store.change(h).map_err(RdyError::from))
             .collect()
     }
 
@@ -54,7 +54,7 @@ impl Rdy {
             return Ok(None);
         }
         for (landing, rec) in self.store.landings()? {
-            let landed: Proposal = self.store.get(&rec.proposal)?;
+            let landed = self.store.proposal(&rec.proposal)?;
             if p.changes.iter().any(|c| landed.changes.contains(c)) {
                 return Ok(Some(landing));
             }
@@ -337,14 +337,17 @@ impl Rdy {
             ));
         }
         let pid = parse_hash(proposal)?;
-        if self.store.get_raw(&pid)?.0 != rdy_store::kinds::PROPOSAL {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                format!("{proposal} is not a proposal"),
-                "pass the id returned by rdy_propose",
-            ));
+        if !self.store.has_kind(rdy_store::kinds::PROPOSAL, &pid)? {
+            if self.store.has(&pid)? {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    format!("{proposal} is not a proposal"),
+                    "pass the id returned by rdy_propose",
+                ));
+            }
+            return Err(rdy_store::StoreError::NotFound(pid).into());
         }
-        let p: Proposal = self.store.get(&pid)?;
+        let p = self.store.proposal(&pid)?;
         // land1: a landed change is already in canon; replaying it would only fail obscurely
         if let Some(landing) = self.landed_as(&p)? {
             return Err(RdyError::new(
@@ -440,10 +443,8 @@ impl Rdy {
             let target = match accept {
                 None => pid,
                 Some(change) => {
-                    let mut p = p;
                     let id = self.store.commit_to_view(&p.view, change)?;
-                    p.changes.push(id);
-                    self.store.put(rdy_store::kinds::PROPOSAL, &p)?
+                    self.store.propose_version(&pid, &[id])?
                 }
             };
             Ok(self.store.land(&target, s.provenance())?)

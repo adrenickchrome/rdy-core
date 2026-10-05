@@ -4,7 +4,7 @@ use crate::fsutil;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
 use crate::segment::{CrashPoint, Location, SegmentLog, find_gap, seg_path};
-use rdy_model::{Block, Change, Hash, Op};
+use rdy_model::{Block, Change, Hash, LandingRecord, Op, Proposal};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
@@ -786,6 +786,40 @@ impl Store {
     /// The object of `kind` with hash `h`, decoded.
     pub fn get_typed<T: DeserializeOwned>(&self, kind: u8, h: &Hash) -> Result<T, StoreError> {
         decode(&self.get_kind(kind, h)?)
+    }
+
+    /// The object of `kind` with hash `h`, decoded; an object of another kind with that hash is
+    /// named as what it is (`{h} is not a {what} (object kind {k})`), never decoded as `T`.
+    pub(crate) fn get_named<T: DeserializeOwned>(
+        &self,
+        kind: u8,
+        what: &str,
+        h: &Hash,
+    ) -> Result<T, StoreError> {
+        match self.get_typed(kind, h) {
+            Err(StoreError::NotFound(_)) if self.has(h)? => {
+                let (k, _) = self.get_raw(h)?;
+                Err(StoreError::Decode(format!(
+                    "{h} is not a {what} (object kind {k})"
+                )))
+            }
+            r => r,
+        }
+    }
+
+    /// The change with id `h` (repr1).
+    pub fn change(&self, h: &Hash) -> Result<Change, StoreError> {
+        self.get_named(kinds::CHANGE, "change", h)
+    }
+
+    /// The proposal version with id `h` (repr1).
+    pub fn proposal(&self, h: &Hash) -> Result<Proposal, StoreError> {
+        self.get_named(kinds::PROPOSAL, "proposal", h)
+    }
+
+    /// The landing with id `h` (repr1).
+    pub fn landing(&self, h: &Hash) -> Result<LandingRecord, StoreError> {
+        self.get_named(kinds::LANDING, "landing", h)
     }
 
     /// Whether an object of `kind` with hash `h` is stored: an index lookup that reads no frame.

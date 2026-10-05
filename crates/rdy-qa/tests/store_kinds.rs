@@ -1,6 +1,7 @@
 //! The (kind, hash) object index (plan M2a1, kind1): objects of different kinds with the same
 //! bytes are separate objects, and a planted object never hides or impersonates another kind's.
 use rdy_model::{Hash, StateSnapshot};
+use rdy_model::{Provenance, Role, Tag};
 use rdy_qa::fixtures::*;
 use rdy_store::{Store, StoreError, kinds, kinds::BlobManifest};
 use serde_json::json;
@@ -133,4 +134,29 @@ fn kind1_landing_a_hash_that_is_only_a_chunk_is_not_a_proposal() {
     let e = r.land(&approver(), &h.to_string()).unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT", "{e}");
     assert!(e.message.contains("is not a proposal"), "{e}");
+}
+
+#[test]
+fn kind1_a_chunk_planted_with_a_tags_bytes_does_not_hide_the_tag() {
+    let (_d, mut s) = store();
+    let tag = Tag {
+        name: "v1.0.0".into(),
+        landing: Hash::of(b"landing"),
+        message: None,
+        tagged_by: Provenance {
+            actor: "human:qa".into(),
+            run: None,
+            role: Role::Approver,
+            at_ms: 7,
+        },
+    };
+    let planted = plant(
+        &mut s,
+        kinds::BLOB_CHUNK,
+        postcard::to_allocvec(&tag).unwrap(),
+    );
+    let id = s.put_tag(&tag).unwrap();
+    assert_eq!(id, planted);
+    assert_eq!(s.read_tag(&id).unwrap(), tag);
+    assert_eq!(s.tags().unwrap().len(), 1);
 }

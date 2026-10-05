@@ -70,8 +70,7 @@ impl Store {
     }
 
     pub fn snapshot_at(&self, landing: &Hash) -> Result<StateSnapshot, StoreError> {
-        let rec: LandingRecord = self.get(landing)?;
-        self.get(&rec.state)
+        self.get(&self.landing(landing)?.state)
     }
 
     fn state_of(&self, landing: Option<Hash>) -> Result<StateSnapshot, StoreError> {
@@ -103,8 +102,7 @@ impl Store {
         changes: &[Hash],
     ) -> Result<StateSnapshot, StoreError> {
         for c in changes {
-            let change: Change = self.get(c)?;
-            for op in &change.ops {
+            for op in &self.change(c)?.ops {
                 apply_op(self, &mut state, op)?;
             }
         }
@@ -177,8 +175,26 @@ impl Store {
         self.put(kinds::PROPOSAL, &p)
     }
 
+    /// Writes the next version of proposal `prev`: its changes followed by `add`, with `stable`
+    /// the first version's id and `prev` the version it follows. Returns the new version's id.
+    pub fn propose_version(&mut self, prev: &Hash, add: &[Hash]) -> Result<Hash, StoreError> {
+        let p = self.proposal(prev)?;
+        let mut changes = p.changes;
+        changes.extend_from_slice(add);
+        let next = Proposal {
+            stable: Some(p.stable.unwrap_or(*prev)),
+            prev: Some(*prev),
+            title: p.title,
+            view: p.view,
+            changes,
+            alternative: p.alternative,
+            provenance: p.provenance,
+        };
+        self.put(kinds::PROPOSAL, &next)
+    }
+
     pub fn land(&mut self, proposal: &Hash, approver: Provenance) -> Result<Hash, StoreError> {
-        let p: Proposal = self.get(proposal)?;
+        let p = self.proposal(proposal)?;
         let head = self.canon_head()?;
         let state = self.replay(self.canon_state()?, &p.changes)?;
         let snap = postcard::to_allocvec(&state).expect("encode snapshot");
@@ -223,7 +239,7 @@ impl Store {
         let mut out = vec![];
         let mut cur = self.canon_head()?;
         while let Some(h) = cur {
-            let rec: LandingRecord = self.get(&h)?;
+            let rec = self.landing(&h)?;
             cur = rec.prev;
             out.push((h, rec));
         }
@@ -252,13 +268,7 @@ impl Store {
     }
 
     pub fn read_tag(&self, h: &Hash) -> Result<Tag, StoreError> {
-        let (kind, payload) = self.get_raw(h)?;
-        if kind != kinds::TAG {
-            return Err(StoreError::Decode(format!(
-                "{h} is not a tag (object kind {kind})"
-            )));
-        }
-        postcard::from_bytes(&payload).map_err(|e| StoreError::Decode(e.to_string()))
+        self.get_named(kinds::TAG, "tag", h)
     }
 
     /// Every `tag/*` ref as (name, tag hash, tag), in ref-name order.

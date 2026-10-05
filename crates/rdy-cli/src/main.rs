@@ -369,7 +369,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                         tags.entry(v.landing.clone()).or_default().push(v.name);
                     }
                     for (id, rec) in r.store().landings()? {
-                        let p: rdy_model::Proposal = r.store().get(&rec.proposal)?;
+                        let p = r.store().proposal(&rec.proposal)?;
                         let names = tags.get(&id.to_string()).cloned().unwrap_or_default();
                         text.push_str(&format!(
                             "{}  {}  by {}",
@@ -381,7 +381,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                             text.push_str(&format!("  [{}]", names.join(", ")));
                         }
                         text.push('\n');
-                        rows.push(json!({"landing": id.to_string(), "title": p.title, "approved_by": rec.approved_by.actor, "at_ms": rec.approved_by.at_ms, "changes": p.changes.len(), "tags": names}));
+                        rows.push(json!({"landing": id.to_string(), "title": p.title, "approved_by": rec.approved_by.actor, "assurance": rec.assurance.as_str(), "at_ms": rec.approved_by.at_ms, "changes": p.changes.len(), "tags": names}));
                     }
                     Ok((Value::Array(rows), text))
                 }

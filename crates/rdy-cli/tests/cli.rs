@@ -401,3 +401,19 @@ fn new_ls_and_paths_end_to_end() {
     assert_eq!(old["id"], show["id"]);
     assert!(json(dir.path(), &["impact", "wallets/transactions"]).is_array());
 }
+
+/// Review Focus 6: `rdy --json log` names each landing's assurance; the text is unchanged.
+#[test]
+fn repr1_log_json_shows_each_landings_assurance() {
+    let dir = tempfile::tempdir().unwrap();
+    json(dir.path(), &["init"]);
+    json(dir.path(), &["new", "folder", "probe"]);
+    json(dir.path(), &["new", "doc", "probe/one", "--title", "One"]);
+    let p = json(dir.path(), &["propose", "--view", "work", "--title", "p"]);
+    json(dir.path(), &["approve", p["id"].as_str().unwrap()]);
+    let log = json(dir.path(), &["log"]);
+    assert_eq!(log[0]["assurance"], "local");
+    assert_eq!(log[0]["approved_by"], "human:tester");
+    let (_, text, _) = rdy(dir.path(), &["log"]);
+    assert!(!text.contains("local"), "{text}");
+}

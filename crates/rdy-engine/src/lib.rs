@@ -186,12 +186,8 @@ impl Rdy {
                             "read as of a version (tag:<version>) or a landing in rdy log (landing:<id>)",
                         )
                     };
-                    match self.store.get_raw(h) {
-                        Ok((k, _)) if k == rdy_store::kinds::LANDING => {}
-                        Ok(_) | Err(rdy_store::StoreError::NotFound(_)) => {
-                            return Err(not_landing());
-                        }
-                        Err(e) => return Err(e.into()),
+                    if !self.store.has_kind(rdy_store::kinds::LANDING, h)? {
+                        return Err(not_landing());
                     }
                     self.store.snapshot_at(h)?
                 }

@@ -1,7 +1,7 @@
 //! Versions (addendum A): immutable SemVer tags on canon's landings, created only by an approver.
 use crate::error::*;
 use crate::{Rdy, Scope, Session};
-use rdy_model::{Hash, LandingRecord, Tag};
+use rdy_model::{Hash, Tag};
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -404,7 +404,7 @@ impl Rdy {
                 break;
             }
             since += 1;
-            cur = self.store.get::<LandingRecord>(&h)?.prev;
+            cur = self.store.landing(&h)?.prev;
         }
         let frozen = matches!(scope, Scope::At(_));
         Ok(VersionPosition {
