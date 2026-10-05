@@ -369,7 +369,7 @@ pub fn hostile() -> (tempfile::TempDir, Rdy) {
         {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "page", "title": EVIL, "doc_type": "glossary"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": EVIL}},
         {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": EVIL}, "body": EVIL},
-        {"op": "create", "type": "claim", "parent": "$s", "body": format!("{EVIL} {{{{$t}}}}")},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": format!("{EVIL} {{{{$t}}}}")},
         {"op": "create", "type": "table", "parent": "$s", "fields": {"columns": [EVIL], "rows": [[EVIL]]}},
         {"op": "create", "type": "flow", "parent": "$s", "fields": {"name": EVIL, "steps": [EVIL]}},
         {"op": "create", "type": "diagram", "parent": "$s", "fields": {"lang": "mermaid", "alt": EVIL}, "body": format!("graph TD\n A[{EVIL}]")},
@@ -384,6 +384,7 @@ pub fn hostile() -> (tempfile::TempDir, Rdy) {
             statement: EVIL.into(),
             options: vec![EVIL.into()],
             body: EVIL.into(),
+            affects: vec![res.created["$c"].clone()],
             ..Default::default()
         },
     )
@@ -881,7 +882,7 @@ pub fn decided_site() -> (tempfile::TempDir, Rdy, DecidedIds) {
         "work",
         json!([
             {"op": "create", "type": "question", "id": "$q", "parent": section,
-             "fields": {"prompt": format!("Is a ledger a sequence? See {{{{{requirement}}}}}.")}}
+             "fields": {"prompt": "Is a ledger a sequence?"}, "body": format!("See {{{{{requirement}}}}}.")}
         ]),
     )
     .expect("the question");

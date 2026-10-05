@@ -72,3 +72,65 @@ fn pres1_presentational_blocks_render_plainly_and_are_flagged_in_json() {
         .unwrap();
     assert_eq!(a["presentational"], true);
 }
+
+/// Neither a presentational aside nor a presentational note shows a trail, an agents' block or
+/// a Copy ref button, though decisions govern both (Task 11's carry-forward).
+#[test]
+fn pres1_asides_and_notes_get_no_trail_agents_or_copy_ref() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap());
+    let pack = PRESENTATIONAL_PACK.replace(
+        "  section:",
+        "  note: { prefix: n, traits: [presentational], body: required }\n  section:",
+    );
+    std::fs::write(dir.path().join(".rdy/packs/p.yaml"), pack).unwrap();
+    std::fs::write(
+        dir.path().join(".rdy/config.yaml"),
+        "pack: p\nname: Presentational\n",
+    )
+    .unwrap();
+    let mut r = rdy_engine::Rdy::open(dir.path()).unwrap();
+    let base = write(&mut r, "work", serde_json::json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "t", "title": "T", "doc_type": "glossary"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
+        {"op": "create", "type": "aside", "id": "$a", "parent": "$s", "body": "Decorative."},
+        {"op": "create", "type": "note", "id": "$n", "parent": "$s", "body": "Margin."}
+    ]))
+    .unwrap();
+    let (section, aside, note) = (
+        base.created["$s"].to_string(),
+        base.created["$a"].to_string(),
+        base.created["$n"].to_string(),
+    );
+    let decision = |id: &str, target: &str| {
+        serde_json::json!({"op": "create", "type": "decision", "id": id, "parent": section,
+            "fields": {"statement": "Stay decorative", "status": "accepted",
+                       "decided_at": "2021-02-08T10:00:00Z", "recorded_at": "2021-02-08T10:00:00Z"},
+            "links": {"affects": [{"target": target}]}})
+    };
+    write_as(
+        &approver(),
+        &mut r,
+        "work",
+        serde_json::json!([decision("$d1", &aside), decision("$d2", &note)]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    let h = std::fs::read_to_string(out.path().join("t.html")).unwrap();
+    assert!(h.contains("Decorative.") && h.contains("Margin."), "{h}");
+    assert!(
+        !h.contains("class=\"why\"") && !h.contains("<dt>Governed by</dt>"),
+        "{h}"
+    );
+    for id in [&aside, &note] {
+        assert!(
+            !h.contains(&format!("<code>{id}</code>")),
+            "{id} shows in an agents block"
+        );
+    }
+    // only the section has a reference to copy; the three blocks each have a link
+    assert_eq!(h.matches("class=\"tool copy-ref\"").count(), 1, "{h}");
+    assert_eq!(h.matches("class=\"tool copy-link\"").count(), 3, "{h}");
+}
