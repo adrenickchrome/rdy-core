@@ -1,34 +1,34 @@
 :root {
   --bg: #fbfbfc; --surface: #f2f3f6; --surface-2: #e9ebf0;
-  --ink: #1b1e26; --ink-soft: #5d6472; --ink-faint: #636b7b;
+  --ink: #1b1e26; --ink-soft: #5d6472; --ink-faint: #626977;
   --line: #e1e4ea; --line-strong: #c9cdd6; --line-ui: #7f8695;
   --accent: #2456c9; --accent-ink: #1a3f99; --accent-soft: #e6edfb;
   --note: #eef3ff; --mark: #fff1b8; --code-bg: #f2f3f6;
   --tk-k: #2456c9; --tk-s: #a0571b; --tk-c: #606876; --tk-n: #7b3fb5; --tk-f: #1b1e26; --tk-t: #0e7490; --tk-d: #7b3fb5;
-  --focus: #2456c9;
+  --focus: #2456c9; --success: #1f7134;
   --shadow: 0 12px 32px rgba(27, 30, 38, 0.12); --shadow-sm: 0 1px 2px rgba(27, 30, 38, 0.12); --scrim: rgba(27, 30, 38, 0.35);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #121419; --surface: #1a1d24; --surface-2: #22262f;
-    --ink: #e5e7ec; --ink-soft: #a1a7b4; --ink-faint: #858c9b;
+    --ink: #e5e7ec; --ink-soft: #a1a7b4; --ink-faint: #8f96a3;
     --line: #272b35; --line-strong: #3a404c; --line-ui: #737a89;
     --accent: #8fb0ff; --accent-ink: #b4caff; --accent-soft: #1d2a4a;
     --note: #182136; --mark: #5a4a12; --code-bg: #1a1d24;
     --tk-k: #8fb0ff; --tk-s: #e3a66e; --tk-c: #858c9b; --tk-n: #c9a3f0; --tk-f: #e5e7ec; --tk-t: #67c6dc; --tk-d: #c9a3f0;
-    --focus: #8fb0ff;
+    --focus: #8fb0ff; --success: #86d49a;
     --shadow: 0 12px 32px rgba(0, 0, 0, 0.5); --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4); --scrim: rgba(0, 0, 0, 0.6);
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --bg: #121419; --surface: #1a1d24; --surface-2: #22262f;
-  --ink: #e5e7ec; --ink-soft: #a1a7b4; --ink-faint: #858c9b;
+  --ink: #e5e7ec; --ink-soft: #a1a7b4; --ink-faint: #8f96a3;
   --line: #272b35; --line-strong: #3a404c; --line-ui: #737a89;
   --accent: #8fb0ff; --accent-ink: #b4caff; --accent-soft: #1d2a4a;
   --note: #182136; --mark: #5a4a12; --code-bg: #1a1d24;
   --tk-k: #8fb0ff; --tk-s: #e3a66e; --tk-c: #858c9b; --tk-n: #c9a3f0; --tk-f: #e5e7ec; --tk-t: #67c6dc; --tk-d: #c9a3f0;
-  --focus: #8fb0ff;
+  --focus: #8fb0ff; --success: #86d49a;
   --shadow: 0 12px 32px rgba(0, 0, 0, 0.5); --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4); --scrim: rgba(0, 0, 0, 0.6);
   color-scheme: dark;
 }
@@ -40,6 +40,7 @@
   --pair-soft: var(--ink-soft) var(--bg) text;
   --pair-faint: var(--ink-faint) var(--bg) text;
   --pair-faint-surface: var(--ink-faint) var(--surface) text;
+  --pair-success: var(--success) var(--bg) text;
   --pair-link: var(--accent) var(--bg) text;
   --pair-link-note: var(--accent) var(--note) text;
   --pair-ink-note: var(--ink) var(--note) text;
@@ -312,6 +313,8 @@ figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 .agents dt { font-weight: 600; }
 .agents dd { margin: 0; overflow-wrap: anywhere; }
 .agents code { font-size: 0.95em; }
+/* a governing decision that is live (approved and in force): the only state shown in success */
+.agents .state-live { color: var(--success); }
 @media (max-width: 900px) {
   .agents dl { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; }
   .agents dd { margin-bottom: 0.4rem; }

@@ -122,9 +122,12 @@ fn why1_the_agents_affordance_is_collapsed_and_carries_id_type_lifecycle_and_gov
             ids.requirement
         )) && a.contains("<dt>Type</dt><dd><code>requirement</code></dd>")
     );
+    // FW-T1: a live (approved) governing decision's status word carries the success colour
     assert!(
-        a.contains(&format!("<code>{}</code> <span>live</span>", ids.d1))
-            && a.contains(&format!("<code>{}</code> <span>rejected</span>", ids.d2))
+        a.contains(&format!(
+            "<code>{}</code> <span class=\"state-live\">live</span>",
+            ids.d1
+        )) && a.contains(&format!("<code>{}</code> <span>rejected</span>", ids.d2))
     );
     assert!(
         a.contains(&format!(
