@@ -361,7 +361,9 @@ fn ok<T: serde::Serialize>(t: T) -> Result<Value, RdyError> {
 }
 
 pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyError> {
-    if std::env::var("RDY_TEST_HOOKS").is_ok_and(|v| v == "1") && p.actor == "__rdy_test_panic__" {
+    // compiled only for this crate's own tests: a release binary has no hook and reads no env
+    #[cfg(test)]
+    if p.actor == "__rdy_test_panic__" {
         panic!("test hook: deliberate panic")
     }
     let role = match p.role.as_str() {

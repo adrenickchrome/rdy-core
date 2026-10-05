@@ -173,6 +173,28 @@ impl McpClient {
         }
     }
 
+    /// The next reply line in arrival order, whatever its id, waiting at most `budget`. Replies
+    /// already set aside by [`McpClient::recv`] come first, in the order they arrived.
+    pub fn recv_next(&mut self, budget: Duration) -> Value {
+        if !self.pending.is_empty() {
+            return self.pending.remove(0);
+        }
+        let end = Instant::now() + budget;
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            let line = match self.lines.recv_timeout(left) {
+                Ok(l) => l,
+                Err(_) => self.critical(&format!("no reply within {budget:?}")),
+            };
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if v.get("id").is_some() {
+                return v;
+            }
+        }
+    }
+
     pub fn call(&mut self, tool: &str, args: Value) -> Reply {
         self.call_within(tool, args, DEADLINE)
     }

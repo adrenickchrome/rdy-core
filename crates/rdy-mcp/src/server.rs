@@ -193,6 +193,27 @@ impl ServerHandler for RdyServer {
 /// The longest id value [`IdScanner`] will capture; a longer one counts as no id.
 const MAX_ID_BYTES: usize = 1024;
 
+/// Why [`pump_lines`] dropped an over-long line instead of answering it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Dropped {
+    /// A JSON object, but no valid top-level `"id"` (a string or a number).
+    NoTopLevelId,
+    /// A top-level `"id"` longer than [`MAX_ID_BYTES`] bytes (and no valid one besides).
+    IdOverLimit,
+    /// The line does not start a JSON object (an array, a scalar or junk).
+    NotAnObject,
+}
+
+impl std::fmt::Display for Dropped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Dropped::NoTopLevelId => f.write_str("no top-level JSON-RPC id"),
+            Dropped::IdOverLimit => write!(f, "id longer than {MAX_ID_BYTES} bytes"),
+            Dropped::NotAnObject => f.write_str("the line is not a JSON object"),
+        }
+    }
+}
+
 /// Finds the JSON-RPC `"id"` of a request line in one pass, in constant memory, without
 /// buffering the line: it tracks string and escape state and nesting depth, and captures the
 /// value of the `"id"` key of the top-level object wherever it occurs (the TypeScript SDK
@@ -214,6 +235,8 @@ struct IdScanner {
     /// The raw bytes of the id value being captured.
     capture: Option<Vec<u8>>,
     capture_is_string: bool,
+    /// A top-level id was seen but was longer than `MAX_ID_BYTES`.
+    id_over_limit: bool,
     /// The first valid top-level id, as JSON.
     id: Option<String>,
 }
@@ -258,6 +281,7 @@ impl IdScanner {
             {
                 self.capture = None;
                 self.capture_is_string = false;
+                self.id_over_limit = true;
             }
             return;
         }
@@ -266,6 +290,7 @@ impl IdScanner {
                 c.push(b);
                 if c.len() > MAX_ID_BYTES {
                     self.capture = None;
+                    self.id_over_limit = true;
                 }
                 return;
             }
@@ -322,23 +347,34 @@ impl IdScanner {
         }
     }
 
-    /// The id found, once the whole line has been fed.
-    fn finish(mut self) -> Option<String> {
+    /// The id found, once the whole line has been fed; else why there is none.
+    fn finish(mut self) -> Result<String, Dropped> {
         self.finish_capture();
-        self.id
+        match self.id {
+            Some(id) => Ok(id),
+            None if !self.top_is_object => Err(Dropped::NotAnObject),
+            None if self.id_over_limit => Err(Dropped::IdOverLimit),
+            None => Err(Dropped::NoTopLevelId),
+        }
     }
 }
 
-/// The reply-producing call for an oversized line whose id the scanner found.
+/// The reply-producing call for an oversized line of `len` bytes whose id the scanner found; a
+/// line with no usable id is reported to `on_drop` instead.
 async fn answer_oversized<W: AsyncWrite + Unpin>(
     w: &mut W,
     scan: IdScanner,
+    len: usize,
+    on_drop: &mut (dyn FnMut(usize, Dropped) + Send),
 ) -> std::io::Result<()> {
-    if let Some(id) = scan.finish() {
-        let call = format!(
-            "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"{REQUEST_TOO_LARGE}\",\"arguments\":{{}}}}}}\n"
-        );
-        w.write_all(call.as_bytes()).await?;
+    match scan.finish() {
+        Ok(id) => {
+            let call = format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"{REQUEST_TOO_LARGE}\",\"arguments\":{{}}}}}}\n"
+            );
+            w.write_all(call.as_bytes()).await?;
+        }
+        Err(why) => on_drop(len, why),
     }
     Ok(())
 }
@@ -346,21 +382,23 @@ async fn answer_oversized<W: AsyncWrite + Unpin>(
 /// Copies `r` to `w` line by line. A line longer than `max` bytes is never buffered whole: its
 /// bytes are fed to an [`IdScanner`] and drained. If the line has a top-level JSON-RPC `"id"`
 /// it is replaced by a call to the unlisted [`REQUEST_TOO_LARGE`] tool (so the client gets an
-/// error reply for its id); otherwise it is dropped.
+/// error reply for its id); otherwise it is dropped, and `on_drop` gets its length in bytes
+/// (without the newline) and the [`Dropped`] reason, once per dropped line.
 pub async fn pump_lines<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     r: R,
     mut w: W,
     max: usize,
+    on_drop: &mut (dyn FnMut(usize, Dropped) + Send),
 ) -> std::io::Result<()> {
     let mut r = BufReader::new(r);
     let mut line: Vec<u8> = Vec::new();
-    // `Some` while draining an oversized line
-    let mut over: Option<IdScanner> = None;
+    // `Some` while draining an oversized line, with its length so far
+    let mut over: Option<(IdScanner, usize)> = None;
     loop {
         let buf = r.fill_buf().await?;
         if buf.is_empty() {
             match over.take() {
-                Some(scan) => answer_oversized(&mut w, scan).await?,
+                Some((scan, len)) => answer_oversized(&mut w, scan, len, on_drop).await?,
                 None if !line.is_empty() => w.write_all(&line).await?,
                 None => {}
             }
@@ -373,14 +411,17 @@ pub async fn pump_lines<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         };
         let n = chunk.len();
         match &mut over {
-            Some(scan) => scan.feed(chunk),
+            Some((scan, len)) => {
+                scan.feed(chunk);
+                *len += n;
+            }
             None => {
                 line.extend_from_slice(chunk);
                 // `max` counts the line without its newline
                 if line.len() > max + 1 || (!done && line.len() > max) {
                     let mut scan = IdScanner::default();
                     scan.feed(&line);
-                    over = Some(scan);
+                    over = Some((scan, line.len()));
                     line = Vec::new();
                 }
             }
@@ -388,7 +429,10 @@ pub async fn pump_lines<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         r.consume(n);
         if done {
             match over.take() {
-                Some(scan) => answer_oversized(&mut w, scan).await?,
+                Some((scan, len)) => {
+                    // `len` counts the newline that ended the line
+                    answer_oversized(&mut w, scan, len - 1, on_drop).await?
+                }
                 None => w.write_all(&line).await?,
             }
             w.flush().await?;
@@ -427,11 +471,31 @@ impl IdleCheckpointLog {
     }
 }
 
+/// Serves MCP over stdin and stdout until stdin closes.
+///
+/// The service runs on its own single-threaded runtime. rmcp runs every request in its own task
+/// and a tool body never yields, so on one thread requests run to completion in arrival order and
+/// replies leave in that order; on a worker pool they would race for the state lock and a client
+/// could see its replies shuffled. The tools are serialised by that lock anyway, so nothing is
+/// lost.
 pub async fn serve_stdio(project: PathBuf) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    tokio::task::spawn_blocking(move || rt.block_on(serve_stdio_inner(project))).await?
+}
+
+async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
     let rdy = Rdy::open(&project)?;
     let (to_server, from_pump) = tokio::io::duplex(1 << 16);
     tokio::spawn(async move {
-        let _ = pump_lines(tokio::io::stdin(), to_server, tools::MAX_REQUEST_BYTES).await;
+        let _ = pump_lines(
+            tokio::io::stdin(),
+            to_server,
+            tools::MAX_REQUEST_BYTES,
+            &mut |n, why| eprintln!("rdy mcp: dropped a {n}-byte request line: {why}"),
+        )
+        .await;
     });
     let server = RdyServer::new(rdy);
     // `serve` consumes the server: keep the state for the idle ticker and the close at exit
@@ -491,7 +555,7 @@ mod tests {
 
     async fn pump(input: &str, max: usize) -> String {
         let (mut w, r) = (Vec::new(), input.as_bytes());
-        pump_lines(r, &mut w, max).await.unwrap();
+        pump_lines(r, &mut w, max, &mut |_, _| {}).await.unwrap();
         String::from_utf8(w).unwrap()
     }
 
@@ -570,7 +634,7 @@ mod mcp1_id_tests {
 
     async fn pump_with(r: impl AsyncRead + Unpin, max: usize) -> Vec<serde_json::Value> {
         let mut w = Vec::new();
-        pump_lines(r, &mut w, max).await.unwrap();
+        pump_lines(r, &mut w, max, &mut |_, _| {}).await.unwrap();
         String::from_utf8(w)
             .unwrap()
             .lines()
@@ -672,6 +736,90 @@ mod mcp1_id_tests {
             assert_eq!(out.len(), 1, "{line:.40}: {out:?}");
             assert_eq!(out[0]["c"], 3);
         }
+    }
+
+    #[tokio::test]
+    async fn mcp3_a_dropped_line_reports_its_length_and_reason() {
+        let mut seen: Vec<(usize, Dropped)> = vec![];
+        let data = format!(
+            "{{\"params\":{{\"id\":1,\"x\":\"{}\"}}}}\n[{{\"id\":1,\"x\":\"{}\"}}]\n{{\"id\":\"{}\",\"x\":\"{}\"}}\n",
+            big(),
+            big(),
+            "i".repeat(1100),
+            big()
+        );
+        let mut w = Vec::new();
+        pump_lines(data.as_bytes(), &mut w, 64, &mut |n, why| {
+            seen.push((n, why))
+        })
+        .await
+        .unwrap();
+        assert!(w.is_empty(), "{}", String::from_utf8_lossy(&w));
+        assert_eq!(
+            seen.iter().map(|(_, d)| *d).collect::<Vec<_>>(),
+            vec![
+                Dropped::NoTopLevelId,
+                Dropped::NotAnObject,
+                Dropped::IdOverLimit
+            ]
+        );
+        assert!(seen.iter().all(|(n, _)| *n > 10_000), "{seen:?}");
+        assert_eq!(
+            Dropped::NoTopLevelId.to_string(),
+            "no top-level JSON-RPC id"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp3_a_line_of_exactly_the_limit_passes_and_one_more_byte_does_not() {
+        let max = 64;
+        let exact = format!("{{\"id\":1,\"p\":\"{}\"}}", "a".repeat(max - 15)); // 15 bytes of envelope
+        assert_eq!(exact.len(), max);
+        let out = pump_with(format!("{exact}\n").as_bytes(), max).await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0]["p"].as_str().unwrap().len(),
+            max - 15,
+            "passed through verbatim"
+        );
+        let over = format!("{{\"id\":2,\"p\":\"{}\"}}", "a".repeat(max - 14));
+        assert_eq!(over.len(), max + 1);
+        let out = pump_with(format!("{over}\n").as_bytes(), max).await;
+        assert_eq!(out.len(), 1);
+        assert!(too_large(&out[0]), "{out:?}");
+        assert_eq!(out[0]["id"], 2);
+        let out = pump_with(exact.as_bytes(), max).await; // exactly the limit, no newline, at EOF
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["id"], 1);
+    }
+
+    #[test]
+    fn hook1_the_panic_hook_exists_only_under_cfg_test() {
+        let dir = tempfile::tempdir().unwrap();
+        let rdy = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let server = RdyServer::new(rdy);
+        let p = SessionParams {
+            actor: "__rdy_test_panic__".into(),
+            run: None,
+            role: "writer".into(),
+            view: None,
+        };
+        let out = serde_json::to_value(server.run("rdy_session", p, tools::rdy_session))
+            .unwrap()
+            .to_string();
+        assert!(
+            out.contains("E_INTERNAL") && out.contains("deliberate panic"),
+            "{out}"
+        );
+        // and the server lives: a normal session opens afterwards
+        let p = SessionParams {
+            actor: "agent:a".into(),
+            run: Some("r".into()),
+            role: "writer".into(),
+            view: None,
+        };
+        let out = serde_json::to_value(server.run("rdy_session", p, tools::rdy_session)).unwrap();
+        assert_ne!(out["isError"], true, "{out}");
     }
 
     #[test]
