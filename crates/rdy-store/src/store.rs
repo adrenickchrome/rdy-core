@@ -942,6 +942,11 @@ impl Store {
         self.index().refs_with_prefix(prefix)
     }
 
+    /// How many refs start with `prefix`, without reading their values.
+    pub fn count_refs(&self, prefix: &str) -> Result<usize, StoreError> {
+        self.index().count_refs(prefix)
+    }
+
     /// The hash `put_blob` would return for these bytes, without storing anything.
     pub fn blob_hash(bytes: &[u8]) -> Hash {
         let chunks: Vec<Hash> = bytes.chunks(CHUNK).map(Hash::of).collect();

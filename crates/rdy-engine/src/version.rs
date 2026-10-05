@@ -9,6 +9,24 @@ use std::collections::HashMap;
 /// How many as-of (`tag:`/`landing:`) snapshots, with their graphs, stay cached at once.
 pub const AS_OF_CACHE_ENTRIES: usize = 4;
 
+/// How many version positions stay cached at once; the cache is cleared when it is full.
+const VPOS_CACHE_ENTRIES: usize = 1024;
+
+/// What a cached version position is for. A view's key holds its head op.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum VposScope {
+    Canon,
+    At(Hash),
+    View(String, Option<Hash>),
+}
+
+/// The cached positions, valid for the (canon head, tag count) they were filled for.
+#[derive(Default)]
+pub(crate) struct VposCache {
+    filled_for: Option<(Option<Hash>, usize)>,
+    entries: HashMap<VposScope, VersionPosition>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VersionInfo {
     pub name: String,
@@ -375,18 +393,64 @@ impl Rdy {
         Ok(info(&tag))
     }
 
-    /// The version position of `scope` (see `VersionPosition`).
+    /// The version position of `scope` (see `VersionPosition`). Cached: an entry's key holds
+    /// every input (canon's head, the tag count, and for a view its head op), so a write, a
+    /// landing or a tag moves the key and no entry is ever stale.
     pub fn version_position(&self, scope: &Scope) -> Result<VersionPosition, RdyError> {
+        let canon = self.store.canon_head()?;
+        let tags = self.store.count_refs("tag/")?;
+        let (key, head) = match scope {
+            Scope::Canon => (VposScope::Canon, None),
+            Scope::At(h) => (VposScope::At(*h), None),
+            Scope::View(name) => {
+                let head = self.store.view_head(name)?;
+                (
+                    VposScope::View(name.clone(), head.as_ref().map(|h| h.head)),
+                    head,
+                )
+            }
+        };
+        let mut cache = self.vpos.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.filled_for != Some((canon, tags)) {
+            cache.entries.clear();
+            cache.filled_for = Some((canon, tags));
+        }
+        if let Some(hit) = cache.entries.get(&key) {
+            return Ok(hit.clone());
+        }
+        let computed = self.compute_version_position(scope, canon, head)?;
+        if cache.entries.len() >= VPOS_CACHE_ENTRIES {
+            cache.entries.clear();
+        }
+        cache.entries.insert(key, computed.clone());
+        Ok(computed)
+    }
+
+    /// Test hook: how many positions are cached.
+    #[doc(hidden)]
+    pub fn version_position_cache_len(&self) -> usize {
+        self.vpos
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries
+            .len()
+    }
+
+    fn compute_version_position(
+        &self,
+        scope: &Scope,
+        canon: Option<Hash>,
+        head: Option<rdy_store::ViewHead>,
+    ) -> Result<VersionPosition, RdyError> {
         let (base, view) = match scope {
-            Scope::Canon => (self.store.canon_head()?, None),
+            Scope::Canon => (canon, None),
             Scope::At(h) => (Some(*h), None),
             Scope::View(name) => {
-                let v = self.store.view(name)?;
                 let pos = ViewPosition {
                     name: name.clone(),
-                    unlanded_changes: v.changes.len() as u32,
+                    unlanded_changes: head.as_ref().map_or(0, |h| h.len as u32),
                 };
-                (v.base, Some(pos))
+                (head.map_or(canon, |h| h.base), Some(pos))
             }
         };
         // the highest version on each landing (version_tags is in ascending order)

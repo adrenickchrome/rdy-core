@@ -386,6 +386,21 @@ impl Index {
         Ok(out)
     }
 
+    /// How many refs start with `prefix`, counted without reading their values.
+    pub fn count_refs(&self, prefix: &str) -> Result<usize, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(REFS).map_err(db)?;
+        let mut n = 0;
+        for item in t.range(prefix..).map_err(db)? {
+            let (k, _) = item.map_err(db)?;
+            if !k.value().starts_with(prefix) {
+                break;
+            }
+            n += 1;
+        }
+        Ok(n)
+    }
+
     /// The acknowledged end of the log, or None if this index has never applied a write.
     pub fn acknowledged(&self) -> Result<Option<Location>, StoreError> {
         let r = self.db.begin_read().map_err(db)?;

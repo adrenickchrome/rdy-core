@@ -49,6 +49,8 @@ pub struct Rdy {
     graphs: HashMap<Scope, rdy_graph::Graph>,
     /// As-of scopes in least-recently-used order (front = oldest); at most AS_OF_CACHE_ENTRIES.
     as_of_lru: VecDeque<rdy_model::Hash>,
+    /// version_position results, keyed by scope and valid for one (canon head, tag count).
+    vpos: std::sync::Mutex<version::VposCache>,
 }
 
 fn io(e: std::io::Error) -> RdyError {
@@ -141,6 +143,7 @@ impl Rdy {
             cache: HashMap::new(),
             graphs: HashMap::new(),
             as_of_lru: VecDeque::new(),
+            vpos: Default::default(),
         })
     }
 
