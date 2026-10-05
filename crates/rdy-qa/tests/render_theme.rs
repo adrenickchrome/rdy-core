@@ -68,7 +68,6 @@ fn theme1_every_page_has_the_toggle_landmarks_and_no_external_request() {
 }
 
 #[test]
-#[ignore = "awaiting founder approval of the vendored font download (Task 5b)"]
 fn theme1_the_vendored_fonts_are_written_and_sized() {
     let (_d, out) = site();
     assert!(
