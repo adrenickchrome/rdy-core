@@ -50,7 +50,8 @@ pub struct Store {
     log: SegmentLog,
     /// None only once the clean close (`close` or `Drop`) has closed the database.
     index: Option<Index>,
-    _lock: File,
+    /// Declared after `index`, so the database is closed before the lock is released.
+    _lock: HeldLock,
     faults: Faults,
     /// Set when a failed write could not be rolled back; every later write fails until reopen.
     ///
@@ -174,6 +175,26 @@ pub fn lock_error(dir: &Path, e: std::fs::TryLockError) -> StoreError {
     }
 }
 
+/// A store's lock file, exclusively locked. Dropping it releases the lock explicitly: the lock
+/// belongs to the open file description, which a child process spawned by another thread shares
+/// until it execs, so leaving the release to the close would keep the store locked after it is
+/// closed, and a reopen in this process would fail as `Locked`.
+pub(crate) struct HeldLock(File);
+
+impl HeldLock {
+    /// Takes `file`'s exclusive lock without waiting; another holder is `Locked` (lock1).
+    pub(crate) fn take(file: File, dir: &Path) -> Result<HeldLock, StoreError> {
+        file.try_lock().map_err(|e| lock_error(dir, e))?;
+        Ok(HeldLock(file))
+    }
+}
+
+impl Drop for HeldLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 /// Test-only fault injection (see `fail_next_index_apply`).
 #[derive(Default)]
 struct Faults {
@@ -277,9 +298,7 @@ impl Store {
             .truncate(false)
             .write(true)
             .open(dir.join("lock"))?;
-        if let Err(e) = lock.try_lock() {
-            return Err(lock_error(dir, e)); // lock1
-        }
+        let lock = HeldLock::take(lock, dir)?; // lock1
         // the sentinel of a process that died with the store open; M1 wrote none
         let unclean = !legacy && std::fs::symlink_metadata(dir.join(INDEX_OPEN_SENTINEL)).is_ok();
         // a newer store is refused before the index is opened or anything is written
@@ -761,6 +780,13 @@ impl Store {
     #[doc(hidden)]
     pub fn last_checkpoint_error(&self) -> Option<&str> {
         self.checkpoint_error.as_deref()
+    }
+
+    /// Test hook: a duplicate of the lock file's descriptor, as a child process spawned while the
+    /// store is open holds one until it execs.
+    #[doc(hidden)]
+    pub fn share_lock_descriptor_for_tests(&self) -> std::io::Result<File> {
+        self._lock.0.try_clone()
     }
 
     /// Test hook: the end of the log.

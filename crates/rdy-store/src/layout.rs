@@ -6,7 +6,7 @@
 //! the stub in its place and then upgrades the log inside `store2`.
 use crate::error::StoreError;
 use crate::fsutil;
-use crate::store::{Store, lock_error};
+use crate::store::{HeldLock, Store};
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -128,7 +128,7 @@ fn move_store(rdy: &Path, old: &Path, new: &Path) -> Result<bool, StoreError> {
         Err(e) => return Err(e.into()),
     };
     // an M1 process holding the store gives E_LOCKED and nothing moves
-    lock.try_lock().map_err(|e| lock_error(old, e))?;
+    let lock = HeldLock::take(lock, old)?;
     std::fs::rename(old, new)?;
     fsutil::sync_dir(rdy)?;
     fsutil::write_durable(old, STUB_TEXT.as_bytes())?;

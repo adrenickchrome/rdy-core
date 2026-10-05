@@ -225,6 +225,24 @@ fn kill1_a_clean_close_removes_the_open_sentinel() {
     assert!(!Store::open(&dir).unwrap().open_report().unclean_shutdown);
 }
 
+/// A child process spawned by another thread while the store is open holds a duplicate of the
+/// lock file's descriptor until it execs. Closing ours must still release the lock: a lock left to
+/// the last descriptor's close made a reopen in this process fail as `Locked` (`store_flush`
+/// flaked this way next to the MCP test's spawn).
+#[test]
+fn kill1_a_clean_close_releases_the_lock_a_spawned_child_still_shares() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::open(&dir).unwrap();
+    s.put_blob(b"x").unwrap();
+    let child_copy = s.share_lock_descriptor_for_tests().unwrap();
+    drop(s);
+    let r = Store::open(&dir).map(|s| s.open_report().clone());
+    drop(child_copy);
+    let r = r.expect("a closed store reopens while a spawned child still holds its descriptor");
+    assert!(!r.unclean_shutdown, "{r:?}");
+}
+
 /// An open that fails after building its `Store` (here: the log names a newer reader) must not
 /// erase a previous kill's sentinel on drop.
 #[test]
