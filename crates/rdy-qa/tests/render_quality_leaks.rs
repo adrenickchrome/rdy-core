@@ -444,3 +444,26 @@ fn site24_blocks_carry_slug_anchors_and_id_anchors() {
     assert!(h.contains(&format!("id=\"{}\"", ids.guards_section)));
     assert!(h.contains("data-href=\"#guards\""));
 }
+
+/// F12 on a rendered site: what the renderer leaves as written is named with page and text.
+#[test]
+fn scan1_f12_names_raw_markdown_the_renderer_left_as_written() {
+    let (_d, mut r) = rdy_qa::golden::tiny();
+    rdy_qa::golden::write(&mut r, "work", serde_json::json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Raw", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
+        {"op": "create", "type": "prose", "parent": "$s", "body": "An image ![chart](c.png), a stray ` tick and a__b."},
+        {"op": "create", "type": "prose", "parent": "$s", "body": "Fine: **bold**, `code`, [link](#s) and __init__."}
+    ])).unwrap();
+    rdy_qa::golden::land(&mut r, "work").unwrap();
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&mut r, &rdy_engine::Scope::Canon, out.path()).unwrap();
+    // other pages (the home card's blurb) may quote the same prose; this test reads the doc's own page
+    let f12: Vec<String> = rdy_qa::site::leaks(out.path())
+        .into_iter()
+        .filter(|l| l.pattern == "F12" && l.page == "raw.html")
+        .map(|l| l.text)
+        .collect();
+    // Founder ruling FW-F1a: underscores are literal text, so `a__b` is not a hit.
+    assert_eq!(f12, ["`", "[chart](c.png)"]);
+}

@@ -281,6 +281,8 @@ pub fn visible_runs(html: &str) -> Vec<Run> {
 pub enum Rule {
     /// Any match, in a Chrome, Content or Trail run.
     AllText(Regex),
+    /// Any match, in a Content or Trail run that is not a label.
+    Running(Regex),
     /// Any match, in a Chrome run.
     ChromeText(Regex),
     /// Any match, in a Chrome run that sits in a nav, a version, a breadcrumb or a badge.
@@ -298,7 +300,7 @@ pub struct Leak {
     /// The page, relative to the site root, with `/` separators.
     pub page: String,
     pub zone: Zone,
-    /// The rule's id in the bar: `F1`, `F2`, ... `F11`.
+    /// The rule's id in the bar: `F1`, `F2`, ... `F12`.
     pub pattern: &'static str,
     pub text: String,
 }
@@ -423,6 +425,11 @@ pub static PATTERNS: LazyLock<Vec<(&'static str, Rule)>> = LazyLock::new(|| {
                 r"(?i)\b(landings|landing|unlanded|materialized|reindex|fsck|nonce)\b",
             )),
         ),
+        // F12, raw inline Markdown. Founder ruling FW-F1a: underscores are literal text, so
+        // only `**` is read in running text.
+        ("F12", AllText(re(r"`"))),
+        ("F12", AllText(re(r"\[[^\]\n]+\]\([^)\s]*\)"))),
+        ("F12", Running(re(r"\*\*"))),
     ]
 });
 
@@ -451,6 +458,9 @@ fn run_leaks(page: &str, run: &Run, out: &mut Vec<Leak>) {
     for (id, rule) in PATTERNS.iter() {
         match rule {
             Rule::AllText(rx) if scanned => {
+                rx.find_iter(&run.text).for_each(|m| push(id, m.as_str()));
+            }
+            Rule::Running(rx) if matches!(run.zone, Zone::Content | Zone::Trail) && !run.label => {
                 rx.find_iter(&run.text).for_each(|m| push(id, m.as_str()));
             }
             Rule::ChromeText(rx) if run.zone == Zone::Chrome => {
@@ -1292,5 +1302,33 @@ mod tests {
         assert_eq!(texts, ["Guards", "Terms & more", "a\u{a0}b"]);
         assert_eq!(runs[0].path, ["h1"]);
         assert!(runs[0].label && runs[1].label && !runs[2].label);
+    }
+
+    #[test]
+    fn scan1_f12_reads_raw_markdown_in_running_text_and_backticks_and_links_everywhere() {
+        // Founder ruling FW-F1a: underscores are literal, so `__` is never an F12 hit.
+        let page = r#"<html><body><nav class="crumbs"><a href="x.html">`rdy check`</a></nav><main data-rdy="content"><h2>__match_args__ and **x**</h2><p>a__b and **left** and ![alt](x.png)</p><p><code>`kept` **kept**</code></p><dl><dt>`stray</dt></dl></main><div data-rdy="trail"><p>**raw**</p></div><div data-rdy="agents"><p>**never**</p></div></body></html>"#;
+        let mut out = vec![];
+        for run in visible_runs(page) {
+            run_leaks("p.html", &run, &mut out);
+        }
+        let f12: Vec<(Zone, &str)> = out
+            .iter()
+            .filter(|l| l.pattern == "F12")
+            .map(|l| (l.zone, l.text.as_str()))
+            .collect();
+        assert_eq!(
+            f12,
+            vec![
+                (Zone::Chrome, "`"),
+                (Zone::Chrome, "`"),
+                (Zone::Content, "[alt](x.png)"),
+                (Zone::Content, "**"),
+                (Zone::Content, "**"),
+                (Zone::Content, "`"),
+                (Zone::Trail, "**"),
+                (Zone::Trail, "**"),
+            ]
+        );
     }
 }
