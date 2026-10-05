@@ -117,6 +117,7 @@ impl PackSet {
             out.default_doc_type = child.default_doc_type;
         }
         out.doc_types.extend(child.doc_types);
+        out.tensions.extend(child.tensions);
         Ok(out)
     }
 }
