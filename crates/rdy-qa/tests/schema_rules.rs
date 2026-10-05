@@ -112,3 +112,41 @@ fn key1_a_placeholder_keeps_its_key_typed_and_escaped_forms_when_substituted() {
         format!("A {{{{{t}|@key}}}} and B {{{{{t}|\\@x}}}}.")
     );
 }
+
+#[test]
+fn dtext1_display_text_starting_with_an_unescaped_at_is_refused_with_the_escape_as_fix() {
+    let (_d, mut r) = project();
+    let res = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Spec", "doc_type": "overview"}},
+        {"op": "create", "type": "term", "id": "$t", "parent": "$d", "fields": {"name": "Guard", "key": "GUARD"}, "body": "A condition."}
+    ])).unwrap();
+    let (d, t) = (res.created["$d"].clone(), res.created["$t"].clone());
+    for op in [
+        json!({"op": "create", "type": "prose", "parent": d, "body": format!("See {{{{{t}|@handle}}}}.")}),
+        json!({"op": "create", "type": "prose", "parent": d, "body": "See {{GUARD|@handle}}."}),
+        json!({"op": "create", "type": "section", "parent": d, "fields": {"title": format!("On {{{{{t}| @handle}}}}")}}),
+    ] {
+        let body = op.to_string();
+        let e = write(&mut r, "work", json!([op])).unwrap_err();
+        let i = e
+            .issues
+            .iter()
+            .find(|i| i.code == "E_BAD_REF")
+            .unwrap_or_else(|| panic!("{body}: {e:?}"));
+        assert!(i.message.contains("@handle"), "{i:?}");
+        assert!(i.fix.contains("\\@"), "{i:?}");
+    }
+    let ok = write(&mut r, "work", json!([
+        {"op": "create", "type": "prose", "id": "$p", "parent": d,
+         "body": format!("A {{{{{t}|\\@handle}}}}, B {{{{{t}|@key}}}}, C {{{{{t}|a@b}}}}, D {{{{GUARD|\\@x}}}}.")}
+    ]))
+    .unwrap();
+    let p = BlockId::parse(&ok.created["$p"]).unwrap();
+    let b = r.read().block(&Scope::View("work".into()), &p).unwrap();
+    assert_eq!(
+        b.body,
+        format!(
+            "A {{{{{t}|\\@handle}}}}, B {{{{{t}|@key}}}}, C {{{{{t}|a@b}}}}, D {{{{{t}|\\@x}}}}."
+        )
+    );
+}

@@ -30,14 +30,15 @@ fn issue_at(l: &Loaded, code: &str, message: &str) -> (usize, usize) {
         "E_LINK_TYPE" => key("links"),
         "E_CHILD_TYPE" | "E_ORPHAN" | "E_MISSING_PARENT" => key("parent"),
         "E_BAD_KEY" => key("fields.key"),
-        "E_FIELD_UNKNOWN" | "E_FIELD_KIND" | "E_FIELD_ENUM" | "E_DOC_TYPE" => l
+        "E_FIELD_UNKNOWN" | "E_FIELD_KIND" | "E_FIELD_ENUM" | "E_DOC_TYPE" | "E_BAD_REF" => l
             .keys
             .iter()
             .find(|(k, _)| {
                 k.strip_prefix("fields.")
                     .is_some_and(|f| message.contains(&format!("{f:?}")))
             })
-            .map(|(_, at)| *at),
+            .map(|(_, at)| *at)
+            .or_else(|| key("body").filter(|_| code == "E_BAD_REF")),
         _ => None,
     };
     found.unwrap_or(l.at)
@@ -95,9 +96,10 @@ pub fn check_path(
             .map(|l| &l.block)
             .or_else(|| canon.and_then(|m| m.get(id)))
     };
-    // key1: keys of the checked files, and of canon blocks the files don't redefine (indexed
-    // only when a token or a key needs them)
-    let file_keys = Keys::of(first.values().map(|l| &l.block));
+    // key1: keys of the checked files, and of canon blocks the files don't redefine (each indexed
+    // only when a token or a key needs it)
+    let file_index: OnceCell<Keys> = OnceCell::new();
+    let file_keys = || file_index.get_or_init(|| Keys::of(first.values().map(|l| &l.block)));
     let canon_index: OnceCell<Keys> = OnceCell::new();
     let canon_keys = || {
         canon_index.get_or_init(|| match canon {
@@ -107,17 +109,10 @@ pub fn check_path(
     };
     let is_key = |tok: &str| {
         key::problem(tok).is_none()
-            && (file_keys.get(tok).is_some() || canon_keys().get(tok).is_some())
+            && (file_keys().get(tok).is_some() || canon_keys().get(tok).is_some())
     };
     // skel1: the section titles under each checked doc, from the checked files
-    let mut section_titles: BTreeMap<&BlockId, Vec<&str>> = BTreeMap::new();
-    for l in first.values() {
-        if l.block.block_type == "section"
-            && let (Some(p), Some(t)) = (&l.block.parent, l.block.field_str("title"))
-        {
-            section_titles.entry(p).or_default().push(t);
-        }
-    }
+    let section_titles = crate::keys::section_titles(first.values().map(|l| &l.block));
     let mut keys_seen: BTreeMap<String, Vec<&BlockId>> = BTreeMap::new();
     for l in &loaded {
         let b = &l.block;
@@ -132,13 +127,8 @@ pub fn check_path(
                 .chain(canon_holders.iter().map(|(_, id)| id))
                 .filter(|o| *o != &b.id)
             {
-                diags.push(Diagnostic::error(
-                    &l.file,
-                    at,
-                    E_KEY_CLASH,
-                    format!("key {k:?} is on both {other} and {}", b.id),
-                    "give one of them another key",
-                ));
+                let e = crate::keys::clash_error(k, other, &b.id);
+                diags.push(Diagnostic::error(&l.file, at, e.code, e.message, e.fix));
             }
             earlier.push(&b.id);
         }

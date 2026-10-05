@@ -170,10 +170,18 @@ impl ReadState {
     }
 
     /// A change to a presentational block (the suspect's `target`, the block whose version
-    /// moved) makes nothing suspect. A target that is gone has no type to read, so it stays.
+    /// moved) makes nothing suspect. A target that is gone is typed by the version the suspect
+    /// pinned, read back through the store.
     fn is_presentational_source(&self, m: &Materialized, s: &Suspect) -> bool {
-        m.get(&s.target)
-            .is_some_and(|b| self.pack().is_presentational(&b.block_type))
+        let presentational = |b: &Block| self.pack().is_presentational(&b.block_type);
+        match m.get(&s.target) {
+            Some(b) => presentational(b),
+            None => m
+                .get(&s.block)
+                .and_then(|b| b.pins.get(&s.target))
+                .and_then(|h| self.reader().get_block(h).ok())
+                .is_some_and(|old| presentational(&old)),
+        }
     }
 
     pub fn context(&self, scope: &Scope, id: &BlockId) -> Result<Context, RdyError> {

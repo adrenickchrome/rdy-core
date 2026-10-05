@@ -76,22 +76,26 @@ impl RefMode {
 ///
 /// A display text that is exactly `@key` is the stored mark of a reference the author typed as a
 /// key: `key_typed` is then true and `display` is `None`. `\@` escapes a literal leading `@` in
-/// display text, and `display` holds it unescaped (`{{id|\@x}}` gives `Some("@x")`).
+/// display text, and `display` holds it unescaped (`{{id|\@x}}` gives `Some("@x")`), with
+/// `at_escaped` true. Any other display text starting with an unescaped `@` is reserved (FW-F2a);
+/// validation refuses it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RefSpan {
     pub range: std::ops::Range<usize>,
     pub token: String,
     pub display: Option<String>,
     pub key_typed: bool,
+    pub at_escaped: bool,
 }
 
 impl RefSpan {
     /// The stored `{{…}}` form of this span with `token` (for example a resolved id) in place of
-    /// its own, keeping the key-typed mark or the display text (re-escaping a leading `@`).
+    /// its own, keeping the key-typed mark or the display text as written (an escaped leading `@`
+    /// stays escaped and an unescaped one stays unescaped, so validation sees the author's text).
     pub fn encode(&self, token: &str) -> String {
         match (&self.display, self.key_typed) {
             (_, true) => format!("{{{{{token}|@key}}}}"),
-            (Some(d), false) if d.starts_with('@') => format!("{{{{{token}|\\{d}}}}}"),
+            (Some(d), false) if self.at_escaped => format!("{{{{{token}|\\{d}}}}}"),
             (Some(d), false) => format!("{{{{{token}|{d}}}}}"),
             (None, false) => format!("{{{{{token}}}}}"),
         }
@@ -122,13 +126,12 @@ pub fn ref_spans(text: &str, mode: RefMode) -> Vec<RefSpan> {
         };
         if mode == RefMode::Strict || token.starts_with('$') || BlockId::parse(token).is_ok() {
             let key_typed = display == Some("@key");
+            let escaped = display
+                .and_then(|d| d.strip_prefix('\\'))
+                .filter(|r| r.starts_with('@'));
             let display = match display {
                 _ if key_typed => None,
-                Some(d) => Some(
-                    d.strip_prefix('\\')
-                        .filter(|r| r.starts_with('@'))
-                        .unwrap_or(d),
-                ),
+                Some(d) => Some(escaped.unwrap_or(d)),
                 None => None,
             };
             out.push(RefSpan {
@@ -136,6 +139,7 @@ pub fn ref_spans(text: &str, mode: RefMode) -> Vec<RefSpan> {
                 token: token.to_string(),
                 display: display.map(str::to_string),
                 key_typed,
+                at_escaped: escaped.is_some() && !key_typed,
             });
         }
         pos = end;

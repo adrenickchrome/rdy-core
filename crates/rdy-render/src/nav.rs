@@ -66,7 +66,7 @@ pub fn build(
         ..NavEntry::default()
     };
     let mut groups = vec![];
-    let mut first = vec![plain("Overview", "index.html")];
+    let mut first = vec![plain("Home", "index.html")];
     let docs: Vec<NavEntry> = top
         .iter()
         .filter(|b| b.block_type != tree::FOLDER)

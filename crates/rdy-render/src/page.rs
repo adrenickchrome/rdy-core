@@ -62,6 +62,8 @@ pub struct Item {
     pub kind_word: &'static str,
     /// The heading text of a section, the name of what a definition defines.
     pub title: Option<String>,
+    /// Supporting text (a rationale): listed in the page JSON, not written on the page.
+    pub supporting: bool,
     pub html: String,
     /// The block's type is presentational: no marker, no "Why ?" trail, no agents' affordance.
     pub presentational: bool,
@@ -199,9 +201,6 @@ pub enum Kind<'a> {
     Redirect(&'a BlockId, &'a Url),
 }
 
-/// Supporting text: kept in the page JSON, left out of the page.
-const RATIONALE: &str = "rationale";
-
 /// A reader's word for a block's type: the one the eyebrow, the toc and the search use.
 fn kind_word(block_type: &str) -> &'static str {
     match block_type {
@@ -235,7 +234,8 @@ impl Shared<'_> {
             href: url.href_from(from),
             // the site's label never shows an id, even of a reference the target's text holds
             label: self.site.label(b),
-            title: self.hover(b, &url),
+            // the hover describes where the link leads: for a decision, the block it governs
+            title: self.hover(self.site.destination(id).unwrap_or(b), &url),
             key: b.field_str("key").map(String::from),
         })
     }
@@ -534,7 +534,14 @@ fn doc_parts(
         .or_else(|| {
             children
                 .first()
-                .filter(|s| s.block_type == "section" && children.len() > 1)
+                .filter(|s| {
+                    s.block_type == "section"
+                        && children
+                            .iter()
+                            .filter(|c| c.block_type == "section")
+                            .count()
+                            > 1
+                })
                 .and_then(|s| m.children(Some(&s.id)).into_iter().next())
                 .filter(|p| one_paragraph(p))
         });
@@ -565,12 +572,27 @@ fn doc_parts(
         for c in m.children(Some(&b.id)).into_iter().rev() {
             stack.push((c, depth + 1));
         }
-        // a decision has no place in the text, a rationale stays in the page JSON (supporting
-        // text), and the lede is shown above it
-        if b.block_type == decision::DECISION
-            || b.block_type == RATIONALE
-            || lede_block.is_some_and(|l| l.id == b.id)
-        {
+        // a decision has no place in the text, and the lede is shown above it
+        if b.block_type == decision::DECISION || lede_block.is_some_and(|l| l.id == b.id) {
+            continue;
+        }
+        // a rationale is supporting text: in the page JSON, not on the page (FW-D10)
+        if b.block_type == crate::site::RATIONALE {
+            items.push(Item {
+                id: b.id.to_string(),
+                block_type: b.block_type.clone(),
+                depth,
+                anchor: String::new(),
+                kind_word: kind_word(&b.block_type),
+                title: None,
+                supporting: true,
+                html: String::new(),
+                presentational: sh.pack.is_presentational(&b.block_type),
+                trail: Trail::default(),
+                agents: Agents::default(),
+                ref_head: String::new(),
+                ref_: String::new(),
+            });
             continue;
         }
         if b.block_type == "diagram" && b.field_str("lang") == Some("mermaid") {
@@ -619,6 +641,7 @@ fn doc_parts(
             anchor: anchor.clone(),
             kind_word: kind_word(&b.block_type),
             title,
+            supporting: false,
             html: html::block_html(b, &ctx),
             presentational,
             trail: if presentational {
@@ -629,7 +652,7 @@ fn doc_parts(
             agents: if presentational {
                 Agents::default()
             } else {
-                trail::agents(b, sh.g, m, sh.suspects, site, page, json_href)
+                trail::agents(b, sh.g, m, sh.suspects, site, json_href)
             },
             ref_head,
             ref_,

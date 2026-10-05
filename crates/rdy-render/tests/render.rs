@@ -570,7 +570,8 @@ fn code_and_diagram_blocks_are_labelled_by_kind_and_number_never_by_their_source
     ];
     for (k, label, url) in cases {
         let page = go(k);
-        assert!(page.contains(&format!("<title>{label}")), "{k}: {page}");
+        // the title names no block: a summary there would be chrome the scan reads (fix round 1)
+        assert!(page.contains("<title>Page moved · "), "{k}: {page}");
         assert!(page.contains(&format!(">{label}</a>")), "{k}: {page}");
         assert!(page.contains(url), "{k}: {page}");
         for leak in [

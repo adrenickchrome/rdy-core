@@ -27,7 +27,13 @@ pub struct Run {
     pub path: Vec<String>,
     /// The class list of the innermost element.
     pub classes: Vec<String>,
+    /// Some element on the stack is a nav entry that mirrors an authored title: a toc link, a
+    /// sidebar entry or a folder's group label.
+    pub mirrors_title: bool,
 }
+
+/// Nav entries whose text is an authored title (a heading, a doc's or a folder's title).
+const TITLE_MIRRORS: [&str; 3] = ["toc-link", "nav-item", "nav-group-label"];
 
 const LABEL_TAGS: [&str; 10] = [
     "h1",
@@ -259,6 +265,11 @@ pub fn visible_runs(html: &str) -> Vec<Run> {
                         label,
                         path: stack.iter().map(|e| e.tag.clone()).collect(),
                         classes: top.classes.clone(),
+                        mirrors_title: stack.iter().any(|e| {
+                            e.classes
+                                .iter()
+                                .any(|c| TITLE_MIRRORS.contains(&c.as_str()))
+                        }),
                     },
                     top.id,
                 ));
@@ -433,10 +444,10 @@ pub static PATTERNS: LazyLock<Vec<(&'static str, Rule)>> = LazyLock::new(|| {
     ]
 });
 
-/// Whether a Chrome run sits where F11 reads: inside a nav, or in a version, breadcrumb or
-/// badge element.
+/// Whether a Chrome run sits where F11 reads: inside a nav (except an entry that mirrors an
+/// authored title, which is the author's words), or in a version, breadcrumb or badge element.
 fn storage_position(run: &Run) -> bool {
-    run.path.iter().any(|t| t == "nav")
+    (run.path.iter().any(|t| t == "nav") && !run.mirrors_title)
         || run
             .classes
             .iter()
@@ -604,6 +615,35 @@ pub struct CssBlock {
     pub selector: String,
     pub media: Option<String>,
     pub decls: Vec<(String, String)>,
+}
+
+/// The value the stylesheet's cascade gives `prop` on a bare `selector` at a viewport `w` px wide,
+/// by source order (only the `min-width`/`max-width` media forms the stylesheet uses).
+pub fn cascaded(css: &Css, selector: &str, prop: &str, w: u32) -> Option<String> {
+    let re = Regex::new(r"\((min|max)-width:(\d+)px\)").unwrap();
+    let applies = |media: &Option<String>| match media {
+        None => true,
+        Some(m) => {
+            let m = m.replace(' ', "");
+            let conds: Vec<_> = re.captures_iter(&m).collect();
+            !conds.is_empty()
+                && conds.iter().all(|c| {
+                    let n: u32 = c[2].parse().unwrap();
+                    if &c[1] == "min" { w >= n } else { w <= n }
+                })
+        }
+    };
+    let mut out = None;
+    for b in &css.blocks {
+        if b.selector.split(',').any(|s| s.trim() == selector) && applies(&b.media) {
+            for (p, v) in &b.decls {
+                if p == prop {
+                    out = Some(v.clone());
+                }
+            }
+        }
+    }
+    out
 }
 
 fn strip_comments(css: &str) -> String {

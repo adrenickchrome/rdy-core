@@ -112,3 +112,21 @@ fn key1_encode_writes_the_stored_form_back_and_round_trips() {
     let s = &ref_spans("{{c-WYF81|@key}}", RefMode::Strict)[0];
     assert_eq!(s.encode("p-12345"), "{{p-12345|@key}}");
 }
+
+#[test]
+fn dtext1_a_span_says_whether_its_leading_at_was_escaped_and_encode_keeps_the_spelling() {
+    let s = ref_spans(
+        "{{c-WYF81|\\@x}} {{c-WYF81|@handle}} {{c-WYF81|plain}} {{c-WYF81|@key}}",
+        RefMode::Strict,
+    );
+    assert_eq!(s.len(), 4);
+    assert!(s[0].at_escaped && s[0].display.as_deref() == Some("@x"));
+    assert!(!s[1].at_escaped && s[1].display.as_deref() == Some("@handle"));
+    assert!(!s[2].at_escaped && !s[3].at_escaped);
+    assert_eq!(s[0].encode("p-12345"), "{{p-12345|\\@x}}");
+    assert_eq!(
+        s[1].encode("p-12345"),
+        "{{p-12345|@handle}}",
+        "an unescaped @ is not silently escaped, so validation sees what the author wrote"
+    );
+}

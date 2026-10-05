@@ -239,15 +239,8 @@ fn check_import_names(blocks: &[Block], existing: &Materialized) -> Result<(), R
 /// key1: refuses a key held twice (ignoring case) among the incoming blocks or between an
 /// incoming block and another block of the view, then stores every key reference as its id.
 fn resolve_import_keys(blocks: &mut [Block], existing: &Materialized) -> Result<(), RdyError> {
-    let clash = |k: &str, a: &BlockId, b: &BlockId| {
-        RdyError::new(
-            E_KEY_CLASH,
-            format!("key {k:?} is on both {a} and {b}"),
-            "give one of them another key",
-        )
-    };
     if let Some((k, a, b)) = crate::keys::clashes(blocks.iter()).first() {
-        return Err(clash(k, a, b));
+        return Err(crate::keys::clash_error(k, a, b));
     }
     let incoming = Keys::of(blocks.iter());
     // the view's keys are indexed only when an incoming block has a key or a non-id reference
@@ -258,12 +251,7 @@ fn resolve_import_keys(blocks: &mut [Block], existing: &Materialized) -> Result<
             continue;
         };
         if let Some((_, other)) = view_keys().holders(k).iter().find(|(_, o)| o != &b.id) {
-            let (a, c) = if &b.id < other {
-                (&b.id, other)
-            } else {
-                (other, &b.id)
-            };
-            return Err(clash(k, a, c));
+            return Err(crate::keys::clash_error(k, &b.id, other));
         }
     }
     let lookup = |t: &str| {
@@ -280,14 +268,7 @@ fn resolve_import_keys(blocks: &mut [Block], existing: &Materialized) -> Result<
 
 /// skel1: the required sections each imported doc lacks among the imported sections under it.
 fn import_skeleton_gaps(pack: &rdy_schema::Pack, blocks: &[Block]) -> Vec<rdy_schema::Issue> {
-    let mut titles: BTreeMap<&BlockId, Vec<&str>> = BTreeMap::new();
-    for b in blocks {
-        if b.block_type == "section"
-            && let (Some(p), Some(t)) = (&b.parent, b.field_str("title"))
-        {
-            titles.entry(p).or_default().push(t);
-        }
-    }
+    let titles = crate::keys::section_titles(blocks);
     blocks
         .iter()
         .filter(|b| b.block_type == tree::DOC)

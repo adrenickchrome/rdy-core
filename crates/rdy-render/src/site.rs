@@ -37,6 +37,10 @@ const ANCHOR_MAX: usize = 48;
 static ID_SHAPED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z]{1,3}-[0-9A-HJKMNP-TV-Z]{5}$").expect("a pattern"));
 
+/// Supporting text: in the page JSON, off the page (FW-D10). It has no anchor; a link to it
+/// leads to its doc's page.
+pub const RATIONALE: &str = "rationale";
+
 /// The block types numbered within their doc (`Table 2`, `Python code 3`, `Diagram 1`).
 const NUMBERED: [&str; 3] = ["table", "code", "diagram"];
 
@@ -61,7 +65,8 @@ pub struct Site<'a> {
     pub order: Vec<BlockId>,
     /// Every folder and doc in tree order: a folder, then what it holds, siblings by their order.
     tree: Vec<BlockId>,
-    /// The first block each decision governs.
+    /// The block each decision's permalink and references lead to: the first block it governs
+    /// in reading order (the page JSON lists every block it governs).
     governs: BTreeMap<BlockId, BlockId>,
     /// The questions no decision answers, in reading order of their docs.
     pub open_questions: Vec<BlockId>,
@@ -163,8 +168,9 @@ impl<'a> Site<'a> {
         for doc in &self.order {
             let mut taken = reserved_ids();
             for b in self.blocks_of(doc) {
-                // a decision has no place in the text: it is linked through what it governs
-                if b.block_type == decision::DECISION {
+                // a decision has no place in the text: it is linked through what it governs; a
+                // rationale is off the page
+                if b.block_type == decision::DECISION || b.block_type == RATIONALE {
                     continue;
                 }
                 anchors.insert(b.id.clone(), unique(self.anchor_text(b), &mut taken));
@@ -175,13 +181,28 @@ impl<'a> Site<'a> {
 
     fn compute_governed(&mut self) {
         let mut governs: BTreeMap<BlockId, BlockId> = BTreeMap::new();
-        // a decision governs what it affects, else what names it as `decided_by`, else its
-        // parent section
+        // where each block is read: docs in reading order, then each doc's blocks in order
+        let mut reading: BTreeMap<&BlockId, usize> = BTreeMap::new();
+        for doc in &self.order {
+            reading.insert(doc, reading.len());
+            for b in self.blocks_of(doc) {
+                reading.insert(&b.id, reading.len());
+            }
+        }
+        // a decision governs what it affects (the target read first; a target on no page comes
+        // last, in link order), else what names it as `decided_by`, else its parent section
         for b in self.m.iter() {
             if b.block_type != decision::DECISION {
                 continue;
             }
-            if let Some(l) = b.links.get(decision::AFFECTS).and_then(|l| l.first()) {
+            let first = b
+                .links
+                .get(decision::AFFECTS)
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .min_by_key(|(i, l)| (reading.get(&l.target).copied().unwrap_or(usize::MAX), *i));
+            if let Some((_, l)) = first {
                 governs.insert(b.id.clone(), l.target.clone());
             }
         }
@@ -294,10 +315,33 @@ impl<'a> Site<'a> {
             });
         }
         let doc = self.m.doc_of(id)?;
+        if b.block_type == RATIONALE {
+            return Some(Url {
+                page: self.page(&doc.id)?,
+                anchor: None,
+            });
+        }
         Some(Url {
             page: self.page(&doc.id)?,
             anchor: Some(self.anchors.get(id)?.clone()),
         })
+    }
+
+    /// The block a link to `id` lands on: `id` itself, or for a decision the block it governs
+    /// (followed through a decision that governs a decision). What a link's hover describes.
+    pub fn destination(&self, id: &BlockId) -> Option<&'a Block> {
+        let mut seen = BTreeSet::new();
+        let mut at = id;
+        loop {
+            if !seen.insert(at.clone()) {
+                return None;
+            }
+            let b = self.m.get(at)?;
+            if b.block_type != decision::DECISION {
+                return Some(b);
+            }
+            at = self.governs.get(at)?;
+        }
     }
 
     /// The permalink page of a block.

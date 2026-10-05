@@ -7,7 +7,7 @@ chrome	-	Auto
 chrome	-	Light
 chrome	-	Dark
 chrome	L	Pages
-chrome	L	Overview
+chrome	L	Home
 chrome	L	Overview
 chrome	L	Specification
 chrome	L	The match statement and its patterns

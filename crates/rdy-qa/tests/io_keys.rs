@@ -106,7 +106,9 @@ fn skel1_the_cli_prints_import_warnings() {
     );
     assert!(
         text.contains("imported 4 blocks into view work")
-            && text.contains("\nwarning W_SKELETON_MISSING: required section \"Goals\" is missing"),
+            && text.contains(
+                "\nwarning W_SKELETON_MISSING: Spec (d-AAAAA): required section \"Goals\" is missing"
+            ),
         "{text}"
     );
 }

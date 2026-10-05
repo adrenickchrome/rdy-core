@@ -143,7 +143,7 @@ ids! {
 }
 
 /// The ids, after checking that every one of them is in canon.
-pub fn ids(r: &mut Rdy) -> Ids {
+pub fn ids(r: &Rdy) -> Ids {
     let ids = Ids::new();
     let m = r.read().materialized(&Scope::Canon).expect("canon");
     for (name, id) in ids.named() {
@@ -231,7 +231,7 @@ pub fn project() -> (tempfile::TempDir, Rdy, Ids) {
         Some("Accepted by the Steering Council".into()),
     )
     .expect("tag v1.0.0");
-    let ids = ids(&mut r);
+    let ids = ids(&r);
     for (view, id, body) in [
         (
             "clarify",
@@ -519,7 +519,7 @@ pub fn tiny() -> (tempfile::TempDir, Rdy) {
 }
 
 /// The id of the first doc at the top level of canon, in tree order.
-pub fn first_doc_id(r: &mut Rdy) -> BlockId {
+pub fn first_doc_id(r: &Rdy) -> BlockId {
     let m = r.read().materialized(&Scope::Canon).expect("canon");
     m.children(None)
         .into_iter()

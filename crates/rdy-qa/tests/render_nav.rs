@@ -17,7 +17,7 @@ fn nav1_groups_follow_top_level_folders_and_mark_the_current_page() {
     );
     assert!(nav.contains("aria-current=\"page\"") && nav.contains(">Three</a>"));
     assert!(
-        nav.contains("href=\"../../index.html\">Overview</a>")
+        nav.contains("href=\"../../index.html\">Home</a>")
             && nav.contains("href=\"../../intro.html\">Intro</a>")
     );
     assert!(
@@ -74,6 +74,39 @@ fn nav1_the_toc_appears_at_three_sections_and_follows_depth() {
         !one.contains("aria-label=\"On this page\""),
         "one section: no toc"
     );
+    assert!(
+        !one.contains("<aside class=\"index\""),
+        "no toc: no empty index column above the page on a phone (FF-F)"
+    );
+    assert!(three.contains("<aside class=\"index\">"));
+}
+
+/// FF-E: the sidebar's way home is "Home", never a doc's title such as "Overview".
+#[test]
+fn nav1_the_home_entry_does_not_collide_with_a_doc_title() {
+    let (_d, _r, _ids, out) = site_canon();
+    let h = html(out.path(), "specification/patterns.html");
+    let nav = &h[h.find("<nav aria-label=\"Pages\">").unwrap()..h.find("</aside>").unwrap()];
+    assert!(nav.contains("href=\"../index.html\">Home</a>"), "{nav}");
+    assert_eq!(nav.matches(">Overview</a>").count(), 1, "{nav}");
+}
+
+/// FF-D: the glossary's list carries the class its styles select.
+#[test]
+fn nav1_the_glossary_list_is_styled() {
+    let (_d, r) = tree_site();
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
+    let h = std::fs::read_to_string(out.path().join("glossary.html")).unwrap();
+    assert!(h.contains("<dl class=\"glossary\">"), "{h}");
+    let css = rdy_qa::site::parse_css(
+        &std::fs::read_to_string(out.path().join("assets/site.css")).unwrap(),
+    );
+    assert!(
+        css.blocks
+            .iter()
+            .any(|b| b.selector.trim() == ".glossary dt")
+    );
 }
 
 #[test]
@@ -117,7 +150,7 @@ fn nav1_the_sidebar_caps_each_list_at_50_with_a_more_link() {
     assert_eq!(
         nav.matches("class=\"nav-item").count(),
         50 + 1,
-        "50 siblings plus Overview; the folder is the group label"
+        "50 siblings plus Home; the folder is the group label"
     );
     assert!(
         nav.contains("class=\"more\"")
@@ -168,10 +201,12 @@ const document = {
   getElementById: (id) => byId[id] || null,
   addEventListener: () => {},
 };
-let observed = [], callback = null;
-function IntersectionObserver(cb) { callback = cb; this.observe = (e) => observed.push(e); }
-const window = { IntersectionObserver };
-new Function('window', 'document', 'IntersectionObserver', fs.readFileSync(process.argv[process.argv.length - 1], 'utf8'))(window, document, IntersectionObserver);
+let observed = [], callback = null, options = null;
+function IntersectionObserver(cb, opts) { callback = cb; options = opts; this.observe = (e) => observed.push(e); }
+const listeners = {};
+const location = { hash: '' };
+const window = { IntersectionObserver, location, addEventListener: (t, f) => { (listeners[t] = listeners[t] || []).push(f); } };
+new Function('window', 'document', 'IntersectionObserver', 'location', fs.readFileSync(process.argv[process.argv.length - 1], 'utf8'))(window, document, IntersectionObserver, location);
 const report = { observed: observed.map((e) => e.tagName + ':' + (e.cls || e.className)), marked: () => all.map((l, i) => l.classList.contains('is-active') ? i : -1).filter((i) => i >= 0) };
 const out = { observed: observed.map((e) => e.tagName + '.' + e.className) };
 if (callback && observed.length) {
@@ -179,7 +214,17 @@ if (callback && observed.length) {
   const at = (i) => callback([{ target: observed[i], isIntersecting: true }]);
   at(1); out.afterSecond = report.marked();
   callback([{ target: observed[1], isIntersecting: false }]); at(2); out.afterThird = report.marked();
+  // a jump to the 4th heading (a toc or in-page link) while the 3rd is still in the band:
+  // the link the reader followed is marked, and stays marked while its heading is in the band
+  location.hash = '#' + spec.links[3];
+  (listeners.hashchange || []).forEach((f) => f());
+  out.afterJump = report.marked();
+  at(3); out.afterJumpBand = report.marked();
+  // reading on: the 4th leaves the band, the 5th enters it
+  callback([{ target: observed[2], isIntersecting: false }, { target: observed[3], isIntersecting: false }]); at(4);
+  out.afterReadingOn = report.marked();
 }
+out.rootMargin = options && options.rootMargin;
 console.log(JSON.stringify(out));
 "##;
 
@@ -266,35 +311,14 @@ fn nav1_the_scroll_spy_observes_the_heading_each_toc_link_points_at() {
     );
     assert_eq!(v["afterSecond"], serde_json::json!([1]), "{v}");
     assert_eq!(v["afterThird"], serde_json::json!([2]), "{v}");
-}
-
-/// The value the stylesheet's cascade gives `prop` on a bare `selector` at a viewport `w` px wide,
-/// by source order (only the `min-width`/`max-width` media forms the stylesheet uses).
-fn cascaded(css: &rdy_qa::site::Css, selector: &str, prop: &str, w: u32) -> Option<String> {
-    let re = regex::Regex::new(r"\((min|max)-width:(\d+)px\)").unwrap();
-    let applies = |media: &Option<String>| match media {
-        None => true,
-        Some(m) => {
-            let m = m.replace(' ', "");
-            let conds: Vec<_> = re.captures_iter(&m).collect();
-            !conds.is_empty()
-                && conds.iter().all(|c| {
-                    let n: u32 = c[2].parse().unwrap();
-                    if &c[1] == "min" { w >= n } else { w <= n }
-                })
-        }
-    };
-    let mut out = None;
-    for b in &css.blocks {
-        if b.selector.split(',').any(|s| s.trim() == selector) && applies(&b.media) {
-            for (p, v) in &b.decls {
-                if p == prop {
-                    out = Some(v.clone());
-                }
-            }
-        }
-    }
-    out
+    // FF-B: a followed link is marked, though an earlier heading is still in the band
+    assert_eq!(v["afterJump"], serde_json::json!([3]), "{v}");
+    assert_eq!(v["afterJumpBand"], serde_json::json!([3]), "{v}");
+    assert_eq!(v["afterReadingOn"], serde_json::json!([4]), "{v}");
+    assert!(
+        v["rootMargin"].as_str().unwrap().starts_with("0px "),
+        "the band starts at the top of the viewport, under the header: {v}"
+    );
 }
 
 /// Phone rules use the 900px breakpoint: below it, previous/next stack in one column and the
@@ -310,29 +334,29 @@ fn nav1_previous_and_next_stack_below_900px() {
     );
     for w in [320, 375, 600, 900] {
         assert_eq!(
-            cascaded(&css, ".pager", "grid-template-columns", w).as_deref(),
+            rdy_qa::site::cascaded(&css, ".pager", "grid-template-columns", w).as_deref(),
             Some("minmax(0, 1fr)"),
             "width {w}"
         );
         assert_eq!(
-            cascaded(&css, ".pager-next", "grid-column", w).as_deref(),
+            rdy_qa::site::cascaded(&css, ".pager-next", "grid-column", w).as_deref(),
             Some("auto"),
             "width {w}"
         );
         assert_eq!(
-            cascaded(&css, ".pager-next", "text-align", w).as_deref(),
+            rdy_qa::site::cascaded(&css, ".pager-next", "text-align", w).as_deref(),
             Some("left"),
             "width {w}"
         );
     }
     for w in [901, 1024, 1440] {
         assert_eq!(
-            cascaded(&css, ".pager", "grid-template-columns", w).as_deref(),
+            rdy_qa::site::cascaded(&css, ".pager", "grid-template-columns", w).as_deref(),
             Some("1fr 1fr"),
             "width {w}"
         );
         assert_eq!(
-            cascaded(&css, ".pager-next", "text-align", w).as_deref(),
+            rdy_qa::site::cascaded(&css, ".pager-next", "text-align", w).as_deref(),
             Some("right"),
             "width {w}"
         );

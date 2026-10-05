@@ -48,6 +48,33 @@ impl Keys {
     }
 }
 
+/// The `E_KEY_CLASH` error for key `k` held by both `a` and `b`, the lower id named first
+/// (import and check word it the same way).
+pub(crate) fn clash_error(k: &str, a: &BlockId, b: &BlockId) -> RdyError {
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    RdyError::new(
+        E_KEY_CLASH,
+        format!("key {k:?} is on both {lo} and {hi}"),
+        "give one of them another key",
+    )
+}
+
+/// The section titles under each parent among `blocks`, in the order given (skel1: what a doc
+/// holds for `skeleton_gaps`, read by import and check).
+pub(crate) fn section_titles<'a>(
+    blocks: impl IntoIterator<Item = &'a Block>,
+) -> BTreeMap<&'a BlockId, Vec<&'a str>> {
+    let mut titles: BTreeMap<&BlockId, Vec<&str>> = BTreeMap::new();
+    for b in blocks {
+        if b.block_type == "section"
+            && let (Some(p), Some(t)) = (&b.parent, b.field_str("title"))
+        {
+            titles.entry(p).or_default().push(t);
+        }
+    }
+    titles
+}
+
 /// Every pair of distinct ids among `blocks` sharing a key (ignoring case), each pair once and
 /// ordered by id: (the first holder's key as written, the lower id, the higher id).
 pub(crate) fn clashes<'a>(

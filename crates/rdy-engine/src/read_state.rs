@@ -165,8 +165,11 @@ pub struct ReadState {
     pub(crate) views: imbl::HashMap<String, Arc<Entry>>,
     pub(crate) tags: Arc<Vec<(semver::Version, Tag)>>,
     pub(crate) pack: Arc<Pack>,
-    /// The project directory (DX2: the site's name and description read its config).
+    /// The project directory.
     pub(crate) root: Arc<std::path::Path>,
+    /// The site's name and description, parsed from `.rdy/config.yaml` by a full publish.
+    pub(crate) name: Arc<str>,
+    pub(crate) description: Option<Arc<str>>,
     pub(crate) reader: StoreReader,
     pub(crate) as_of: Arc<AsOfCache>,
     /// The version-position cache, shared like `as_of` (read by the state's version reads).

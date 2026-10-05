@@ -549,8 +549,26 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     let res = r.import(&human(Role::Approver), &view, &dir)?;
                     let mut text =
                         format!("imported {} blocks into view {view}", res.created.len());
+                    // each warning names its doc: the title as imported, then the id
+                    let state = r.read();
+                    let scope = Scope::View(view.clone());
                     for w in &res.warnings {
-                        text.push_str(&format!("\nwarning {}: {}", w.code, w.message));
+                        let doc = w.block.as_ref().map(|id| {
+                            match state.block(&scope, id).ok().and_then(|b| {
+                                b.field_str("title")
+                                    .or(b.field_str("name"))
+                                    .map(str::to_string)
+                            }) {
+                                Some(t) if !t.trim().is_empty() => format!("{} ({id}): ", t.trim()),
+                                _ => format!("{id}: "),
+                            }
+                        });
+                        text.push_str(&format!(
+                            "\nwarning {}: {}{}",
+                            w.code,
+                            doc.unwrap_or_default(),
+                            w.message
+                        ));
                     }
                     Ok((serde_json::to_value(&res).expect("json"), text))
                 }

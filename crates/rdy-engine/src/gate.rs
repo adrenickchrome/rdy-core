@@ -108,15 +108,22 @@ impl Rdy {
             let Some(found) = next.get(id) else { continue };
             if let (Some(keys), Some(k)) = (&keys, crate::keys::key_of(found)) {
                 for (_, other) in keys.holders(k) {
-                    if other != id {
-                        issues.push(Issue {
-                            severity: Severity::Error,
-                            code: E_KEY_CLASH,
-                            block: Some(id.clone()),
-                            message: format!("{id} and {other} would both have key {k:?} in canon"),
-                            fix: format!("change the key of {id} in this view"),
-                        });
+                    // a pair whose holders are both touched is reported once, lower id first
+                    if other == id || (other < id && touched.contains(other)) {
+                        continue;
                     }
+                    let fix = if touched.contains(other) {
+                        format!("change the key of {id} or {other} in this view")
+                    } else {
+                        format!("change the key of {id} in this view")
+                    };
+                    issues.push(Issue {
+                        severity: Severity::Error,
+                        code: E_KEY_CLASH,
+                        block: Some(id.clone()),
+                        message: format!("{id} and {other} would both have key {k:?} in canon"),
+                        fix,
+                    });
                 }
             }
             // a doc from M1 has no stored name; readers give it one, so the gate doesn't require it

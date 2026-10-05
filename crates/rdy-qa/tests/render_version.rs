@@ -38,7 +38,7 @@ fn ver1_every_page_carries_the_site_worded_version_pill() {
         "{home}"
     );
     assert!(!home.to_lowercase().contains("landing"));
-    let doc = first_doc_id(&mut r);
+    let doc = first_doc_id(&r);
     write(
         &mut r,
         "work",
@@ -79,7 +79,7 @@ fn ver1_every_page_carries_the_site_worded_version_pill() {
 #[test]
 fn ver1_an_unversioned_project_reads_unversioned_everywhere() {
     let (_d, mut r) = tiny_with_doc();
-    let doc = first_doc_id(&mut r);
+    let doc = first_doc_id(&r);
     write(
         &mut r,
         "work",
@@ -123,47 +123,23 @@ fn ver1_the_home_page_has_cards_for_top_level_entries_and_no_decisions() {
     assert!(!h.contains("Decisions"));
 }
 
-/// Whether a block's `@media` prelude applies at a viewport `w` px wide (only the `min-width` and
-/// `max-width` forms the stylesheet uses).
-fn media_applies(media: &Option<String>, w: u32) -> bool {
-    let Some(m) = media else { return true };
-    let m = m.replace(' ', "");
-    let re = regex::Regex::new(r"\((min|max)-width:(\d+)px\)").unwrap();
-    let conds: Vec<_> = re.captures_iter(&m).collect();
-    if conds.is_empty() {
-        return false; // prefers-color-scheme, print and the like: not a width rule
-    }
-    conds.iter().all(|c| {
-        let n: u32 = c[2].parse().unwrap();
-        if &c[1] == "min" { w >= n } else { w <= n }
-    })
-}
-
-/// The pill is hidden on a phone (Task 5 keeps the head grid narrow): the version section's
-/// `display` must not win the cascade back below 900px. Resolves the cascade by source order for a
-/// bare `.version` selector at each width.
+/// FF-C: the pill shows at every width, so a frozen snapshot is marked at the top of a phone page
+/// too; below 900px it has the header's second row to itself (Task 5's narrow head grid keeps the
+/// brand and the tools on the first).
 #[test]
-fn ver1_the_pill_stays_hidden_below_900px_and_shows_above() {
+fn ver1_the_pill_shows_at_every_width_and_has_its_own_row_on_a_phone() {
     let (_d, _r, _ids, out) = site_canon();
     let text = std::fs::read_to_string(out.path().join("assets/site.css")).unwrap();
     let css = rdy_qa::site::parse_css(&text);
-    let display_at = |w: u32| -> Option<String> {
-        let mut d = None;
-        for b in &css.blocks {
-            if b.selector.split(',').any(|s| s.trim() == ".version") && media_applies(&b.media, w) {
-                for (p, v) in &b.decls {
-                    if p == "display" {
-                        d = Some(v.clone());
-                    }
-                }
-            }
-        }
-        d
-    };
-    for w in [320, 375, 600, 900] {
-        assert_eq!(display_at(w).as_deref(), Some("none"), "width {w}");
+    let at = |p: &str, w: u32| rdy_qa::site::cascaded(&css, ".version", p, w);
+    for w in [320, 375, 600, 900, 901, 1024, 1440] {
+        assert_eq!(
+            at("display", w).as_deref(),
+            Some("inline-flex"),
+            "width {w}"
+        );
     }
-    for w in [901, 1024, 1440] {
-        assert_ne!(display_at(w).as_deref(), Some("none"), "width {w}");
+    for w in [320, 375, 600, 900] {
+        assert_eq!(at("grid-row", w).as_deref(), Some("2"), "width {w}");
     }
 }

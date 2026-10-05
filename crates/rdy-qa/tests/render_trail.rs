@@ -144,12 +144,17 @@ fn why1_hostile_statements_are_escaped_in_the_trail() {
     for p in pages(out.path()) {
         let h = std::fs::read_to_string(&p).unwrap();
         assert!(!h.contains("<script>alert(1)"), "{}", p.display());
-        assert!(
-            h.contains("&lt;script&gt;alert(1)") || !h.contains("class=\"why\""),
-            "{}",
-            p.display()
-        );
     }
+    // the claim's page holds its trail, and the trail holds the statement as text
+    let h = std::fs::read_to_string(out.path().join("evil/page.html")).unwrap();
+    let at = h
+        .find("<details class=\"why\">")
+        .expect("the governed claim has a Why trail");
+    let trail = &h[at..at + h[at..].find("</details>").unwrap()];
+    assert!(
+        trail.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+        "{trail}"
+    );
 }
 
 /// A governed block whose statement ends in punctuation gets no second full stop, and a trail

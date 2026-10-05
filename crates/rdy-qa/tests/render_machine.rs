@@ -341,3 +341,32 @@ fn json1_a_parent_only_decision_governs_its_section_in_the_twin() {
     assert_eq!(dj["governs"], serde_json::json!([section["id"]]));
     assert_eq!(dj["affects"], serde_json::json!([]));
 }
+
+/// FW-D5: a rationale is off the page (FW-D10) but its doc's twin lists it, with no anchor and
+/// not among the page's marked `ids`.
+#[test]
+fn json1_a_rationale_is_in_its_docs_twin_though_not_on_the_page() {
+    let (_d, _r, ids, out) = site_canon();
+    let j: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(out.path().join("rationale/design.json")).unwrap(),
+    )
+    .unwrap();
+    let id = ids.rationale_block.to_string();
+    let ra = j["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == id.as_str())
+        .unwrap_or_else(|| panic!("no rationale in {j}"));
+    assert_eq!(ra["type"], "rationale");
+    assert_eq!(ra["anchor"], "");
+    assert!(!ra["summary"].as_str().unwrap().is_empty());
+    assert!(
+        !j["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == id.as_str()),
+        "ids are the page's marked blocks only"
+    );
+}

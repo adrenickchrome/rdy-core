@@ -182,3 +182,30 @@ fn pres1_a_change_to_a_presentational_block_makes_nothing_suspect() {
     assert_eq!(sus[0].block.to_string(), res.created["$c2"]);
     assert_eq!(sus[0].target.to_string(), res.created["$p"]);
 }
+
+#[test]
+fn pres1_deleting_a_presentational_block_makes_nothing_suspect_but_a_deleted_prose_does() {
+    let (_d, mut r) = presentational_project();
+    let res = write(&mut r, "work", json!([
+        {"op":"create","type":"doc","id":"$d","fields":{"name":"t","title":"T","doc_type":"glossary"}},
+        {"op":"create","type":"section","id":"$s","parent":"$d","fields":{"title":"Terms"}},
+        {"op":"create","type":"aside","id":"$a","parent":"$s","body":"Decorative."},
+        {"op":"create","type":"prose","id":"$p","parent":"$s","body":"Plain."},
+        {"op":"create","type":"claim","id":"$c","parent":"$s","body":"On the aside.","links":{"depends_on":[{"target":"$a"}]}},
+        {"op":"create","type":"claim","id":"$c2","parent":"$s","body":"On the prose.","links":{"depends_on":[{"target":"$p"}]}}
+    ])).unwrap();
+    land(&mut r, "work").unwrap();
+    write(
+        &mut r,
+        "work",
+        json!([{"op":"delete","id":res.created["$a"]},{"op":"delete","id":res.created["$p"]}]),
+    )
+    .unwrap();
+    let view = Scope::View("work".into());
+    let sus = r.read().suspects(&view).unwrap();
+    assert_eq!(sus.len(), 1, "only the prose's dependant: {sus:?}");
+    assert_eq!(sus[0].block.to_string(), res.created["$c2"]);
+    assert_eq!(sus[0].reason, "deleted");
+    let claim = rdy_model::BlockId::parse(&res.created["$c"]).unwrap();
+    assert!(r.read().context(&view, &claim).unwrap().suspects.is_empty());
+}

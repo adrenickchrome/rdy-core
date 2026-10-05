@@ -128,6 +128,27 @@ fn scan1_chrome_only_patterns_skip_content_and_f11_reads_nav_version_crumbs_and_
     );
 }
 
+/// An authored heading the toc mirrors, a doc title in the sidebar and a folder's group label are
+/// the author's words: F11 (renderer storage vocabulary) does not read them. The nav's own words
+/// and the pill still are read.
+#[test]
+fn scan1_f11_leaves_nav_entries_that_mirror_authored_titles_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("p.html"),
+        "<main><nav aria-label=\"On this page\"><ul><li><a class=\"toc-link\" href=\"#a\">3.1 On the landing record</a></li></ul></nav><nav aria-label=\"Pages\"><ul><li class=\"nav-group\"><span class=\"nav-group-label\">Landing notes</span><ul><li class=\"nav-item\"><a href=\"x.html\">Reindex runbook</a></li></ul></li></ul></nav><nav><a>3 landings</a></nav><span class=\"version\">v1 + 2 unlanded changes</span></main>",
+    )
+    .unwrap();
+    let found = leaks(dir.path());
+    assert_eq!(
+        found
+            .iter()
+            .map(|l| (l.pattern, l.text.as_str()))
+            .collect::<Vec<_>>(),
+        [("F11", "landings"), ("F11", "unlanded")]
+    );
+}
+
 // ------------------------------------------------------------------------- structure
 
 struct Page {
@@ -218,7 +239,7 @@ fn struct1_every_page_has_exactly_one_h1() {
 }
 
 /// Task 4's redirect template, verbatim in shape: a `<main>` with one sentence and no heading.
-const REDIRECT_PAGE: &str = "<!doctype html><html lang=\"en\" data-rdy-kind=\"redirect\"><head><meta charset=\"utf-8\"><title>Intro</title></head><body><main id=\"main\"><p>This page has moved to <a href=\"../intro.html\">Intro</a>.</p></main></body></html>";
+const REDIRECT_PAGE: &str = "<!doctype html><html lang=\"en\" data-rdy-kind=\"redirect\"><head><meta charset=\"utf-8\"><title>Page moved · Site</title></head><body><main id=\"main\"><p class=\"meta\">This page has moved to <a href=\"../intro.html\" data-rdy=\"content\">Intro</a>.</p></main></body></html>";
 
 #[test]
 fn struct1_a_redirect_page_is_not_held_to_the_one_h1_rule() {

@@ -75,6 +75,9 @@ pre code { background: none; border: 0; padding: 0; font-size: inherit; }
 .code-block pre { margin-top: 0; border-radius: 0 0 8px 8px; }
 .lang { font-weight: 500; letter-spacing: 0.02em; }
 mark { background: var(--mark); color: inherit; border-radius: 2px; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+/* an anchor lands below the sticky header (two more rows on a phone, below) */
+[id] { scroll-margin-top: 4.6rem; }
 [data-rdy="content"] { overflow-wrap: anywhere; }
 
 /* skip link: out of sight until it takes focus, then a pill at the top left */
@@ -82,13 +85,14 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
 .skip:focus { transform: none; }
 
 /* top bar */
-.head { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 30; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 16rem minmax(0, 1fr) auto; align-items: center; gap: 1rem; padding: 0.6rem 1.25rem; min-height: 3.5rem; }
-.brand { grid-column: 1; grid-row: 1; display: flex; align-items: center; gap: 0.6rem; text-decoration: none; color: var(--ink); font-weight: 600; font-size: 0.98rem; white-space: nowrap; min-width: 0; }
+.head { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 30; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; align-items: center; gap: 1rem; padding: 0.6rem 1.25rem; min-height: 3.5rem; }
+/* the brand and the pill size to their text; only a name longer than 24rem is cut */
+.brand { grid-column: 1; grid-row: 1; display: flex; align-items: center; gap: 0.6rem; text-decoration: none; color: var(--ink); font-weight: 600; font-size: 0.98rem; white-space: nowrap; min-width: 0; max-width: 24rem; }
 .brand svg { width: 22px; height: 22px; flex: none; }
 .brand-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.version { font-size: 0.72rem; font-weight: 500; color: var(--accent-ink); background: var(--accent-soft); border-radius: 999px; padding: 0.15rem 0.6rem; white-space: nowrap; }
-.head .search-wrap { grid-column: 2; grid-row: 1; }
-.head-tools { grid-column: 3; grid-row: 1; justify-self: end; display: flex; align-items: center; gap: 0.75rem; }
+.version { grid-column: 2; grid-row: 1; justify-self: start; font-size: 0.72rem; font-weight: 500; color: var(--accent-ink); background: var(--accent-soft); border-radius: 999px; padding: 0.15rem 0.6rem; white-space: nowrap; }
+.head .search-wrap { grid-column: 3; grid-row: 1; }
+.head-tools { grid-column: 4; grid-row: 1; justify-self: end; display: flex; align-items: center; gap: 0.75rem; }
 .theme { display: inline-flex; background: var(--surface); border: 1px solid var(--line-ui); border-radius: 8px; padding: 2px; }
 .theme button { font-size: 0.78rem; font-weight: 500; padding: 0.2rem 0.6rem; border-radius: 6px; color: var(--ink-soft); }
 .theme button[aria-checked="true"] { background: var(--bg); color: var(--ink); box-shadow: var(--shadow-sm); }
@@ -143,17 +147,18 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
   .index { order: -1; grid-column: 1 / -1; position: static; max-height: none; padding: 0.9rem 0 0; }
   .index .fold-summary { display: flex; align-items: center; }
   .index nav { margin-top: 0.5rem; }
-  .head { grid-template-columns: auto minmax(0, 1fr) auto; }
 }
 
-/* below 900px: one column, the pages follow the content, the drawer replaces the column */
+/* below 900px: one column, the pages follow the content, the drawer replaces the column; the
+   header has three rows: the brand and the tools, the version pill, the search */
 @media (max-width: 900px) {
-  .head { grid-template-columns: minmax(0, 1fr) auto; padding: 0.55rem 16px; gap: 0.5rem; }
-  .brand { grid-column: 1; font-size: 0.9rem; }
-  .head-tools { grid-column: 2; gap: 0.4rem; }
-  .head .search-wrap { grid-column: 1 / -1; grid-row: 2; max-width: none; }
+  .head { grid-template-columns: minmax(0, 1fr) auto; padding: 0.55rem 16px; gap: 0.4rem 0.5rem; }
+  .brand { grid-column: 1; grid-row: 1; font-size: 0.9rem; max-width: none; }
+  .head-tools { grid-column: 2; grid-row: 1; gap: 0.4rem; }
+  .version { grid-column: 1 / -1; grid-row: 2; white-space: normal; }
+  .head .search-wrap { grid-column: 1 / -1; grid-row: 3; max-width: none; }
   .theme button { padding: 0.15rem 0.45rem; font-size: 0.74rem; }
-  .version { display: none; }
+  [id] { scroll-margin-top: 9.4rem; }
   #menu:not([hidden]) { display: inline-flex; align-items: center; justify-content: center; }
   .app { grid-template-columns: minmax(0, 1fr); padding: 0 16px; gap: 0; }
   .sidenav { order: 2; position: static; max-height: none; overflow: visible; padding: 1rem 0 2rem; border-top: 1px solid var(--line); }
@@ -163,8 +168,8 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
   .app.nav-open .sidenav .fold-summary { display: none; }
   .nav-open #scrim { display: block; position: fixed; inset: 0; background: var(--scrim); z-index: 45; }
   /* every control a thumb has to hit is at least 40 by 40 */
-  .head a, .head button, .head summary, .sidenav a, .sidenav button, .sidenav summary, .pager a, .pager button, .tools a, .tools button { min-height: 40px; min-width: 40px; }
-  .head button, .tools button { display: inline-flex; align-items: center; justify-content: center; }
+  .head a, .head button, .head summary, .sidenav a, .sidenav button, .sidenav summary, .pager a, .pager button, .tools a, .tools button, .code-head button { min-height: 40px; min-width: 40px; }
+  .head button, .tools button, .code-head button { display: inline-flex; align-items: center; justify-content: center; }
   .sidenav a { display: flex; align-items: center; }
 }
 @keyframes drawer-in { from { transform: translateX(-100%); } to { transform: none; } }
@@ -202,7 +207,6 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
 /* == /toc == */
 
 /* == search == */
-.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .search-wrap { position: relative; max-width: 30rem; width: 100%; justify-self: center; }
 #search { width: 100%; font: inherit; font-size: 0.9rem; color: var(--ink); background: var(--surface); border: 1px solid var(--line-ui); border-radius: 8px; padding: 0.45rem 0.8rem 0.45rem 2.2rem; }
 #search::placeholder { color: var(--ink-faint); }
@@ -221,7 +225,6 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
 /* == content == */
 .block { position: relative; }
 .id-anchor { position: absolute; top: 0; left: 0; width: 0; height: 0; overflow: hidden; }
-.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); border: 0; }
 .marker { display: block; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); margin-bottom: 0.25rem; }
 .normative { margin: 1.2rem 0 1.4rem; padding: 1rem 1.2rem 0.9rem; background: var(--note); border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line)); border-radius: var(--radius); }
 .normative > p { margin-bottom: 0.5rem; font-size: 0.95rem; }
@@ -291,8 +294,10 @@ figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 .trail li.open .trail-when { color: var(--accent-ink); }
 .trail-when { font-size: 0.78rem; font-weight: 600; color: var(--ink); padding-top: 0.1rem; }
 .trail-what { font-size: 0.88rem; line-height: 1.5; }
+/* on a phone the toolbar is a row of its own above the block, always shown: it never narrows the
+   block beside it, and its height is fixed so the Cite button appearing moves nothing */
 @media (max-width: 900px) {
-  .tools { opacity: 1; }
+  .tools { float: none; display: flex; flex-wrap: nowrap; justify-content: flex-end; align-items: center; height: 40px; margin: 0 0 0.2rem; opacity: 1; }
   .trail li { grid-template-columns: 1fr; gap: 0.15rem; }
 }
 /* == /why == */
@@ -341,8 +346,8 @@ figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 /* == /pager == */
 
 /* == version == */
-/* the flex layout is scoped above the phone breakpoint: the pill is hidden at 900px and below (head section) */
-@media (min-width: 901px) { .version { display: inline-flex; align-items: center; gap: 0.35rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; } }
+/* the pill is never cut: it sizes to its text (head section), and wraps on its own row on a phone */
+.version { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
 .version .lock { width: 12px; height: 12px; flex: none; }
 .version .snapshot { font-size: 0.64rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
 .colophon { margin: 0; }

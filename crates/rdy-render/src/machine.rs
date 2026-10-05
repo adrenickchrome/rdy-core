@@ -155,7 +155,8 @@ fn link_governs(g: &Graph, d: &Block) -> Vec<BlockId> {
 }
 
 /// The blocks a decision governs: what `link_governs` says; its parent when that is nothing,
-/// as `Site::compute_governed` does, so the page its permalink leads to lists it.
+/// as `Site::compute_governed` does, so the page its permalink leads to lists it. Every target is
+/// listed here; the permalink and references lead to the one read first (`Site::destination`).
 fn governs(g: &Graph, d: &Block) -> Vec<BlockId> {
     let mut out = link_governs(g, d);
     if out.is_empty() {
@@ -289,8 +290,9 @@ fn tree_block<'a>(site: &Site<'a>, url: &str) -> Option<&'a Block> {
 /// The twin of one page.
 ///
 /// `ids` are the block ids the page's markup marks (`data-rdy-block`): a doc page's blocks.
-/// The glossary's and the questions page's entries are in `blocks` but carry no mark in the
-/// markup, so they are not in `ids`. Every path is relative to the site's root, as `page.url`.
+/// The glossary's and the questions page's entries, and a doc's rationale blocks (supporting
+/// text, off the page), are in `blocks` but carry no mark in the markup, so they are not in
+/// `ids`. Every path is relative to the site's root, as `page.url`.
 pub fn page_json(
     ctx: &PageContext,
     m: &Materialized,
@@ -318,7 +320,10 @@ pub fn page_json(
                 let Ok(id) = BlockId::parse(&i.id) else {
                     continue;
                 };
-                ids.push(i.id.clone());
+                // a supporting block (a rationale) is listed but carries no mark on the page
+                if !i.supporting {
+                    ids.push(i.id.clone());
+                }
                 blocks.extend(block_json(
                     &r,
                     &id,

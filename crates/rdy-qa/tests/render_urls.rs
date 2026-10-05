@@ -45,6 +45,80 @@ fn url1_a_go_page_exists_for_every_doc_folder_and_block_and_names_no_id() {
     }
 }
 
+/// A rationale is supporting text, off the page (FW-D10): its permalink leads to its doc's page,
+/// with no anchor that would name an element the page does not have.
+#[test]
+fn url1_a_rationale_permalink_leads_to_its_docs_page_without_an_anchor() {
+    let (_d, _r, ids, out) = site_canon();
+    let h = html(out.path(), &format!("go/{}.html", ids.rationale_block));
+    assert!(
+        h.contains("content=\"0; url=../rationale/design.html\""),
+        "{h}"
+    );
+    let page = html(out.path(), "rationale/design.html");
+    assert!(!page.contains(&format!("data-rdy-block=\"{}\"", ids.rationale_block)));
+}
+
+/// The permalink page's link text is the block's own words: a content zone, so chrome-only scan
+/// rules do not read it.
+#[test]
+fn url1_the_permalink_link_text_sits_in_a_content_zone() {
+    let (_d, r, ids) = site_with_decision();
+    let out = tempfile::tempdir().unwrap();
+    render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
+    let h = std::fs::read_to_string(out.path().join(format!("go/{}.html", ids.term))).unwrap();
+    let runs = rdy_qa::site::visible_runs(&h);
+    let link = runs
+        .iter()
+        .find(|r| r.path.last().is_some_and(|t| t == "a"))
+        .unwrap_or_else(|| panic!("{h}"));
+    assert_eq!(link.zone, rdy_qa::site::Zone::Content, "{h}");
+    // a summary in snake_case is the author's words: no chrome rule reads it on a go page
+    let (_d, mut r) = rdy_qa::fixtures::project();
+    rdy_qa::fixtures::write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "api", "title": "Api", "doc_type": "overview"}},
+        {"op": "create", "type": "prose", "parent": "$d", "body": "Call rdy_trace first. Then read."}
+    ]))
+    .unwrap();
+    rdy_qa::fixtures::land(&mut r, "work").unwrap();
+    let out = tempfile::tempdir().unwrap();
+    render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
+    let go: Vec<_> = rdy_qa::site::leaks(out.path())
+        .into_iter()
+        .filter(|l| l.page.starts_with("go/"))
+        .collect();
+    assert!(go.is_empty(), "{go:?}");
+}
+
+/// The name and description are parsed when a state is published: a held state is a snapshot
+/// and never re-reads `.rdy/config.yaml` (orchestrator ruling 2).
+#[test]
+fn url1_the_site_name_is_read_when_the_state_is_published_not_when_it_is_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("p");
+    drop(Rdy::init(&proj, "rdy-standard").unwrap());
+    let cfg = proj.join(".rdy/config.yaml");
+    std::fs::write(&cfg, "pack: rdy-standard\nname: First\ndescription: One.\n").unwrap();
+    let mut r = Rdy::open(&proj).unwrap();
+    let held = r.read();
+    std::fs::write(&cfg, "pack: rdy-standard\nname: Second\n").unwrap();
+    assert_eq!(held.project_name(), "First");
+    assert_eq!(held.project_description().as_deref(), Some("One."));
+    assert_eq!(
+        r.read().project_name(),
+        "First",
+        "no publish has re-read it"
+    );
+    r.invalidate();
+    assert_eq!(
+        r.read().project_name(),
+        "Second",
+        "a full publish re-reads the config"
+    );
+    assert_eq!(r.read().project_description(), None);
+    assert_eq!(held.project_name(), "First", "a held state never follows");
+}
+
 #[test]
 fn url1_the_site_name_comes_from_config_then_the_directory() {
     let dir = tempfile::tempdir().unwrap();
@@ -83,6 +157,25 @@ fn url1_a_reference_to_a_decision_lands_on_the_text_it_governs() {
     // the claim's body references the decision and the term: both land on #ledger
     assert!(h.matches("href=\"#ledger\"").count() >= 2, "{h}");
     assert!(!h.contains(&format!("{}.html", ids.decision)) && !h.contains("class=\"badge"));
+}
+
+/// FF-H: a reference to a decision leads to the block the decision governs, and its hover says
+/// where it leads (that block's place), not where the decision is recorded.
+#[test]
+fn url1_a_reference_to_a_decision_hovers_where_it_leads() {
+    let (_d, _r, _ids, out) = site_canon();
+    let h = html(out.path(), "specification/patterns.html");
+    let end = h
+        .find(">why the wildcard is an underscore</a>")
+        .expect("the golden spec cites the wildcard decision");
+    let open = h[..end].rfind("<a ").unwrap();
+    let tag = &h[open..end];
+    assert!(tag.contains("href=\"#wildcard\""), "{tag}");
+    assert!(
+        tag.contains("title=\"The match statement and its patterns › "),
+        "the hover names the page the link leads to: {tag}"
+    );
+    assert!(!tag.contains("Why the design is what it is"), "{tag}");
 }
 
 #[test]
@@ -173,9 +266,9 @@ fn url1_the_golden_builders_build_what_they_say() {
     let name = |r: &Rdy| r.read().project_name();
     let (_d, r) = tiny();
     assert_eq!(name(&r), "Tiny");
-    let (_d, mut r) = tiny_with_doc();
+    let (_d, r) = tiny_with_doc();
     assert_eq!(name(&r), "Tiny");
-    let doc = first_doc_id(&mut r);
+    let doc = first_doc_id(&r);
     assert_eq!(
         r.read()
             .materialized(&Scope::Canon)

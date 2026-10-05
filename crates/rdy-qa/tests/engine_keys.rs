@@ -119,6 +119,36 @@ fn key1_two_views_each_fine_alone_clash_at_landing() {
     );
 }
 
+/// Both holders of a clashing key touched by one landing: the pair is one issue, lower id first.
+#[test]
+fn key1_a_clash_between_two_touched_blocks_is_reported_once() {
+    let (_d, mut r, s, _req) = keyed();
+    raw_commit(
+        &mut r,
+        "c",
+        vec![
+            raw("p-0000B", "prose", Some(&s), "m", &[("key", "TWIN")], "one"),
+            raw("p-0000A", "prose", Some(&s), "n", &[("key", "twin")], "two"),
+        ],
+    );
+    let e = land(&mut r, "c").unwrap_err();
+    let clashes: Vec<_> = e
+        .issues
+        .iter()
+        .filter(|i| i.code == "E_KEY_CLASH")
+        .collect();
+    assert_eq!(clashes.len(), 1, "{clashes:?}");
+    assert_eq!(
+        clashes[0].block.as_ref().map(|b| b.to_string()).as_deref(),
+        Some("p-0000A")
+    );
+    assert!(
+        clashes[0].message.starts_with("p-0000A and p-0000B"),
+        "{}",
+        clashes[0].message
+    );
+}
+
 #[test]
 fn key1_read_surfaces_take_a_key_and_a_key_that_is_also_a_path_is_refused() {
     let (_d, mut r, _s, req) = keyed();

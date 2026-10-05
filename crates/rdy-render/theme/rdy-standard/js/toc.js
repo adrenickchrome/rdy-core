@@ -35,6 +35,9 @@
 
     var seen = [];
     var active = -1;
+    // the heading of the link the reader last followed (a toc or in-page link): it stays marked
+    // while it is in the band, though a short section above it may still be there too
+    var chosen = -1;
 
     function mark(i) {
       if (i === active) return;
@@ -49,6 +52,13 @@
           var at = headings.indexOf(entries[k].target);
           if (at >= 0) seen[at] = entries[k].isIntersecting;
         }
+        if (chosen >= 0) {
+          if (seen[chosen]) {
+            mark(chosen);
+            return;
+          }
+          chosen = -1;
+        }
         // the first heading in the band wins; between bands the last one stays marked
         for (var h = 0; h < headings.length; h++) {
           if (seen[h]) {
@@ -57,9 +67,26 @@
           }
         }
       },
-      { rootMargin: '-10% 0px -75% 0px' }
+      // the band starts at the top of the viewport: a heading an anchor jump puts just below
+      // the sticky header is in it
+      { rootMargin: '0px 0px -75% 0px' }
     );
     for (var n = 0; n < headings.length; n++) observer.observe(headings[n]);
+
+    // a followed link marks its own entry at once
+    function followed() {
+      var id = decodeURIComponent((window.location.hash || '').slice(1));
+      if (!id) return;
+      for (var i = 0; i < linkOf.length; i++) {
+        if (decodeURIComponent(linkOf[i].getAttribute('href').slice(1)) === id) {
+          chosen = i;
+          mark(i);
+          return;
+        }
+      }
+    }
+    window.addEventListener('hashchange', followed);
+    followed();
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);

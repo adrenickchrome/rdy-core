@@ -444,7 +444,6 @@ pub fn agents(
     m: &Materialized,
     suspects: &BTreeSet<BlockId>,
     site: &Site,
-    _from: &str,
     json_href: &str,
 ) -> Agents {
     let link = |_: &BlockId| None;
