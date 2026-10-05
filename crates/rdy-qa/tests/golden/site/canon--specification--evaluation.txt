@@ -203,45 +203,38 @@ content	L	Looks like
 content	L	Succeeds when
 content	L	Binds
 content	-	Literal
-content	-	`42`, `"go"`, `None`
-content	-	subject equals the literal (`is` for the three singletons)
+content	-	,
+content	-	,
+content	-	subject equals the literal (
+content	-	for the three singletons)
 content	-	nothing
 content	-	Capture
-content	-	`direction`
 content	-	always
 content	-	the whole subject
 content	-	Wildcard
-content	-	`_`
 content	-	always
 content	-	nothing
 content	-	Value
-content	-	`Color.RED`
 content	-	subject equals the looked-up value
 content	-	nothing
 content	-	Group
-content	-	`(pattern)`
 content	-	the inner pattern succeeds
 content	-	whatever the inner pattern binds
 content	-	Sequence
-content	-	`[a, *rest]`
 content	-	subject is a sequence of fitting length and each item matches
 content	-	each subpattern's names; the star binds a list
 content	-	Mapping
-content	-	`{"k": v, **rest}`
 content	-	subject is a mapping with every key present and each value matching
 content	-	each value's names; the double star binds a dict
 content	-	Class
-content	-	`Point(x, y=0)`
 content	-	subject is an instance and each attribute matches
 content	-	each subpattern's names
 content	-	Or-pattern
-content	-	`a | b`
 content	-	the first alternative that succeeds
 content	-	the same names from every alternative
 content	-	As-pattern
-content	-	`pattern as name`
 content	-	the left pattern succeeds
-content	-	its names, plus the whole subject to `name`
+content	-	its names, plus the whole subject to
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -263,21 +256,12 @@ content	-	Table 2
 content	L	Pattern shape
 content	L	Subject length must be
 content	L	Example that matches
-content	-	`[a, b]`
 content	-	exactly 2
-content	-	`["go", "north"]`
-content	-	`[a, *rest]`
 content	-	at least 1
-content	-	`["drop"]`, `["drop", "sword", "shield"]`
-content	-	`[*start, last]`
+content	-	,
 content	-	at least 1
-content	-	`["pick", "up"]`
-content	-	`[a, *mid, z]`
 content	-	at least 2
-content	-	`["pick", "sword", "up"]`
-content	-	`[]`
 content	-	exactly 0
-content	-	`[]`
 agents	L	For agents
 agents	L	Id
 agents	L	Type

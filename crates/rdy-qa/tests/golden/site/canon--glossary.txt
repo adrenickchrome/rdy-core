@@ -85,53 +85,68 @@ chrome	L	__match_args__
 chrome	-	A class attribute that lists, in order, the attributes that positional subpatterns of a class pattern refer to.
 chrome	-	defined in The match statement and its patterns › Terms
 chrome	L	As-pattern
-chrome	-	A pattern followed by `as` and a name. It matches its left side and also binds the subject to the name.
+chrome	-	A pattern followed by
+chrome	-	and a name. It matches its left side and also binds the subject to the name.
 chrome	-	defined in The match statement and its patterns › Terms
 chrome	L	Binding
 chrome	-	Giving a name a value as a result of a successful match. Bindings outlive the block.
 chrome	-	defined in Pattern matching by example › Terms
 chrome	L	Capture pattern
-chrome	-	A bare name other than `_`. It always succeeds and binds the subject to the name.
+chrome	-	A bare name other than
+chrome	-	. It always succeeds and binds the subject to the name.
 chrome	-	defined in The match statement and its patterns › Terms
 chrome	L	Case block
-chrome	-	One `case` clause with its pattern, optional guard and indented block.
+chrome	-	One
+chrome	-	clause with its pattern, optional guard and indented block.
 chrome	-	defined in Pattern matching by example › Terms
 chrome	L	Class pattern
 chrome	-	A dotted name followed by parentheses that hold subpatterns. It tests the type of the subject, then its attributes.
 chrome	-	defined in The match statement and its patterns › Terms
 chrome	L	Guard
-chrome	-	An expression after `if` in a case block. It is evaluated only when the pattern has already succeeded.
+chrome	-	An expression after
+chrome	-	in a case block. It is evaluated only when the pattern has already succeeded.
 chrome	-	defined in The match statement and its patterns › Terms
 chrome	L	Irrefutable
 chrome	-	A pattern whose syntax alone proves that it always succeeds. Only the last case block may have one.
 chrome	-	defined in The match statement and its patterns › Terms
 chrome	L	Literal pattern
-chrome	-	A pattern that matches one constant: a number, a string, or one of `None`, `True` and `False`.
+chrome	-	A pattern that matches one constant: a number, a string, or one of
+chrome	-	,
+chrome	-	and
+chrome	-	.
 chrome	-	defined in The match statement and its patterns › Terms
 chrome	L	Mapping pattern
 chrome	-	A pattern written with braces. Each item pairs a key, which must be a literal or a value, with a subpattern for the value.
 chrome	-	defined in The match statement and its patterns › Terms
 chrome	L	Or-pattern
-chrome	-	Two or more patterns joined by `|`. It succeeds at the first alternative that succeeds.
+chrome	-	Two or more patterns joined by
+chrome	-	. It succeeds at the first alternative that succeeds.
 chrome	-	defined in The match statement and its patterns › Terms
 chrome	L	Pattern
-chrome	-	The text that follows `case`. It describes a shape the subject must have and the names to bind to its parts.
+chrome	-	The text that follows
+chrome	-	. It describes a shape the subject must have and the names to bind to its parts.
 chrome	-	defined in The match statement and its patterns › Terms
 chrome	L	Sequence pattern
 chrome	-	A pattern written with square brackets or parentheses. It tests the length of the subject, then each item in turn.
 chrome	-	defined in The match statement and its patterns › Terms
 chrome	L	Soft keyword
-chrome	-	A word that is a keyword only in a specific grammatical position and an ordinary name elsewhere. `match` and `case` are soft keywords. See
+chrome	-	A word that is a keyword only in a specific grammatical position and an ordinary name elsewhere.
+chrome	-	and
+chrome	-	are soft keywords. See
 chrome	-	`match` and `case` are soft keywords.
 chrome	-	.
 chrome	-	defined in Pattern matching by example › Terms
 chrome	L	Subject
-chrome	-	The value that follows `match`. It is evaluated once; if the expression contains a comma, the subject is a tuple.
+chrome	-	The value that follows
+chrome	-	. It is evaluated once; if the expression contains a comma, the subject is a tuple.
 chrome	-	defined in The match statement and its patterns › Terms
 chrome	L	Value pattern
-chrome	-	A dotted name such as `Color.RED`. The name is looked up and compared with the subject using `==`.
+chrome	-	A dotted name such as
+chrome	-	. The name is looked up and compared with the subject using
+chrome	-	.
 chrome	-	defined in The match statement and its patterns › Terms
 chrome	L	Wildcard
-chrome	-	The single underscore, `_`. It matches any subject and binds nothing.
+chrome	-	The single underscore,
+chrome	-	. It matches any subject and binds nothing.
 chrome	-	defined in The match statement and its patterns › Terms
 chrome	L	Structural pattern matching, v1.0.0, 2 changes since.

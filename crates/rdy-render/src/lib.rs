@@ -2,6 +2,7 @@ mod assets;
 mod highlight;
 mod home;
 mod html;
+pub mod inline;
 mod machine;
 mod nav;
 mod page;

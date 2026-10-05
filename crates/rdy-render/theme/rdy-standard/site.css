@@ -245,6 +245,14 @@ th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
 figure { margin: 1.2rem 0; }
 .figure img { display: block; border-radius: var(--radius); }
 .figure-missing, .download .meta { color: var(--ink-soft); }
+.content code { overflow-wrap: anywhere; background: var(--surface); border-color: var(--line); color: var(--ink); }
+.content a code { color: inherit; }
+.content .lede code, .callout code { background: var(--surface-2); }
+.block > ul, .block > ol, .normative > ul, .normative > ol, .callout div > ul, .callout div > ol, .term dd > ul, .term dd > ol, .entity > ul, .entity > ol { margin: 0 0 0.95rem; padding-left: 1.4rem; }
+.block li > ul, .block li > ol { margin: 0.3rem 0 0; padding-left: 1.2rem; }
+.block li > ul > li:last-child, .block li > ol > li:last-child { margin-bottom: 0; }
+.normative > ul, .normative > ol { font-size: 0.95rem; margin-bottom: 0.5rem; }
+.normative > ul:last-child, .normative > ol:last-child, .callout div > ul:last-child, .callout div > ol:last-child, .term dd > ul:last-child, .term dd > ol:last-child { margin-bottom: 0; }
 .code-block { margin: 1.1rem 0; }
 .code-head { align-items: center; }
 .copy-code { font-size: 0.72rem; font-weight: 500; color: var(--ink-soft); }

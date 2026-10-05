@@ -1,6 +1,7 @@
 //! The "Why ?" trail of a block, the agents' affordance and the copied reference.
 use crate::html::{self, Link};
-use crate::site::Site;
+use crate::inline;
+use crate::site::{Site, rel};
 use rdy_engine::{Materialized, summary_in};
 use rdy_graph::{DerivedStatus, EdgeKind, Graph};
 use rdy_model::decision::{self, AFFECTS, ANSWERS, DECIDED_BY, IMPLEMENTS, REVOKES, SUPERSEDES};
@@ -125,6 +126,9 @@ struct Cx<'a> {
     g: &'a Graph,
     m: &'a Materialized,
     link: &'a dyn Fn(&BlockId) -> Option<Link>,
+    /// The href of the page of the doc that holds a block, from the page being written (`""` for
+    /// that page itself): a statement's relative links are read from there.
+    doc_page: &'a dyn Fn(&BlockId) -> String,
 }
 
 impl Cx<'_> {
@@ -151,8 +155,15 @@ impl Cx<'_> {
         }
     }
 
-    fn html(&self, raw: &str) -> String {
-        html::text_html(raw, self.link)
+    /// A sentence `of` holds (a statement, an option, a prompt), as spans.
+    fn html(&self, of: &Block, raw: &str) -> String {
+        inline::spans_html(
+            raw,
+            &inline::Ctx {
+                link: self.link,
+                doc_page: &(self.doc_page)(&of.id),
+            },
+        )
     }
 
     fn at<'b>(&self, d: &'b Block) -> Option<&'b str> {
@@ -164,7 +175,7 @@ impl Cx<'_> {
             Some(FieldValue::List(l)) => l
                 .iter()
                 .filter_map(|v| match v {
-                    FieldValue::Str(s) if !s.is_empty() => Some(self.html(s)),
+                    FieldValue::Str(s) if !s.is_empty() => Some(self.html(d, s)),
                     _ => None,
                 })
                 .collect(),
@@ -251,7 +262,7 @@ impl Cx<'_> {
             return;
         };
         let raw = self.statement(d);
-        let said = self.html(&raw);
+        let said = self.html(d, &raw);
         let mut put = |(k, e): (Key, Event)| {
             out.insert(k, e);
         };
@@ -302,7 +313,7 @@ impl Cx<'_> {
                                 &y.id.to_string(),
                                 format!(
                                     "Superseded: {said} gave way to {}{}",
-                                    self.html(&new),
+                                    self.html(y, &new),
                                     stop(&new)
                                 ),
                             ));
@@ -320,7 +331,7 @@ impl Cx<'_> {
                                 format!(
                                     "Partly superseded ({}): {}{}",
                                     html::escape(part),
-                                    self.html(&new),
+                                    self.html(y, &new),
                                     stop(&new)
                                 ),
                             ));
@@ -334,7 +345,7 @@ impl Cx<'_> {
                                 0,
                                 id,
                                 &y.id.to_string(),
-                                format!("Withdrawn: {}{}", self.html(&reason), stop(&reason)),
+                                format!("Withdrawn: {}{}", self.html(y, &reason), stop(&reason)),
                             ));
                         }
                     }
@@ -357,6 +368,7 @@ fn link_in<'a>(
             href: url.href_from(from),
             label: summary_in(b, m),
             title: String::new(),
+            key: b.field_str("key").map(String::from),
         })
     }
 }
@@ -365,7 +377,16 @@ fn link_in<'a>(
 /// mention it. A block with nothing to tell has no events.
 pub fn for_block(b: &Block, g: &Graph, m: &Materialized, site: &Site, from: &str) -> Trail {
     let link = link_in(m, site, from);
-    let cx = Cx { g, m, link: &link };
+    let doc_page = |id: &BlockId| match m.doc_of(id).and_then(|d| site.page(&d.id)) {
+        Some(p) if p != from => rel(from, &p),
+        _ => String::new(),
+    };
+    let cx = Cx {
+        g,
+        m,
+        link: &link,
+        doc_page: &doc_page,
+    };
     let mut events: BTreeMap<Key, Event> = BTreeMap::new();
     for id in cx.chain(cx.governing(b)) {
         cx.events_of(&id, &mut events);
@@ -392,7 +413,10 @@ pub fn for_block(b: &Block, g: &Graph, m: &Materialized, site: &Site, from: &str
             Event {
                 when: "Open".into(),
                 sort_key: None,
-                text: format!("Question: {}", cx.html(q.field_str("prompt").unwrap_or(""))),
+                text: format!(
+                    "Question: {}",
+                    cx.html(q, q.field_str("prompt").unwrap_or(""))
+                ),
                 open: true,
             },
         );
@@ -424,7 +448,13 @@ pub fn agents(
     json_href: &str,
 ) -> Agents {
     let link = |_: &BlockId| None;
-    let cx = Cx { g, m, link: &link };
+    let doc_page = |_: &BlockId| String::new();
+    let cx = Cx {
+        g,
+        m,
+        link: &link,
+        doc_page: &doc_page,
+    };
     let mut governing: Vec<(String, String, String)> = cx
         .governing(b)
         .into_iter()

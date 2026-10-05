@@ -83,7 +83,9 @@ chrome	L	Tutorial
 chrome	L	Pattern matching by example
 content	L	Tutorial
 content	L	Pattern matching by example
-content	-	We will write the command parser for a small text adventure. The player types things like `get sword` or `go north`; the game splits the line into words and has to decide what to do. Each section adds one feature of pattern matching to the parser.
+content	-	We will write the command parser for a small text adventure. The player types things like
+content	-	or
+content	-	; the game splits the line into words and has to decide what to do. Each section adds one feature of pattern matching to the parser.
 content	L	Introduction
 content	-	Link
 content	-	Copy ref
@@ -136,7 +138,9 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	A pattern does two things. It verifies that the subject has a certain structure, here a list of exactly two items, and it binds names in the pattern to parts of the subject, here `action` and `obj`.
+content	-	A pattern does two things. It verifies that the subject has a certain structure, here a list of exactly two items, and it binds names in the pattern to parts of the subject, here
+content	-	and
+content	-	.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -154,7 +158,9 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	Commands come in different lengths. `look` is one word; `get sword` is two.
+content	-	Commands come in different lengths.
+content	-	is one word;
+content	-	is two.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -210,7 +216,12 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	Literals are compared with `==`, except for `True`, `False` and `None`, which are compared with `is`. The precise rule is in
+content	-	Literals are compared with
+content	-	, except for
+content	-	,
+content	-	and
+content	-	, which are compared with
+content	-	. The precise rule is in
 content	-	Sequence patterns
 content	-	and the sections around it.
 agents	L	For agents
@@ -249,7 +260,9 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	This matches any sequence whose first element is `"drop"`. The remaining elements are gathered into a list bound to `objects`. See
+content	-	This matches any sequence whose first element is
+content	-	. The remaining elements are gathered into a list bound to
+content	-	. See
 content	-	Star subpatterns
 content	-	.
 agents	L	For agents
@@ -306,7 +319,9 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	So far we have used three simple patterns: capture patterns, which are bare names like `direction`; literal patterns; and the wildcard `_`. They compose.
+content	-	So far we have used three simple patterns: capture patterns, which are bare names like
+content	-	; literal patterns; and the wildcard
+content	-	. They compose.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -315,7 +330,9 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	Patterns nest. `["first", (left, right), _, *rest]` matches a sequence of at least three items whose first item equals `"first"` and whose second item is itself a sequence of two.
+content	-	Patterns nest.
+content	-	matches a sequence of at least three items whose first item equals
+content	-	and whose second item is itself a sequence of two.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -352,7 +369,10 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	Every alternative must bind the same names. `[1, x] | [2, y]` is not allowed, because after a successful match it would be unclear which of `x` and `y` had a value.
+content	-	Every alternative must bind the same names.
+content	-	is not allowed, because after a successful match it would be unclear which of
+content	-	and
+content	-	had a value.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -370,7 +390,8 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	The `as` keyword matches whatever is on its left and also binds the matched value to a name.
+content	-	The
+content	-	keyword matches whatever is on its left and also binds the matched value to a name.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -454,7 +475,9 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	`Click(position=(x, y))` matches only if the event's type is `Click` or a subclass, and then matches the nested pattern against its `position` attribute. See
+content	-	matches only if the event's type is
+content	-	or a subclass, and then matches the nested pattern against its
+content	-	attribute. See
 content	-	Class patterns
 content	-	.
 agents	L	For agents
@@ -542,7 +565,9 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	Be careful: a bare name with no dots is always a capture. `case Click((x, y), button=LEFT)` would bind `LEFT` to whatever the button was.
+content	-	Be careful: a bare name with no dots is always a capture.
+content	-	would bind
+content	-	to whatever the button was.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -609,7 +634,10 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	Any class is a valid match target, including `str`, `int` and `float`. Wrapping a capture in one checks the type of data that came from outside.
+content	-	Any class is a valid match target, including
+content	-	,
+content	-	and
+content	-	. Wrapping a capture in one checks the type of data that came from outside.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -649,7 +677,11 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
-content	-	A command line such as `go north` matches the case `["go", direction]`, binds `direction` to `"north"` and runs the block that moves the player. The same line also matches the later wildcard, but the first matching case wins and the wildcard is never reached.
+content	-	A command line such as
+content	-	matches the case
+content	-	, binds
+content	-	to
+content	-	and runs the block that moves the player. The same line also matches the later wildcard, but the first matching case wins and the wildcard is never reached.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -659,7 +691,11 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
-content	-	The line `drop sword shield` matches `["drop", *objects]` and binds `objects` to a list of two items. The line `drop` alone binds it to an empty list.
+content	-	The line
+content	-	matches
+content	-	and binds
+content	-	to a list of two items. The line
+content	-	alone binds it to an empty list.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -706,7 +742,9 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
-content	-	Add a command `use X on Y` that matches a three-word command with the word `on` in the middle.
+content	-	Add a command
+content	-	that matches a three-word command with the word
+content	-	in the middle.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -716,7 +754,8 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
-content	-	Make `go` accept either a direction or a room name, and keep the guard that checks the exits.
+content	-	Make
+content	-	accept either a direction or a room name, and keep the guard that checks the exits.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -726,7 +765,8 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
-content	-	Write a case that matches any command whose last word is `please`, and gives the rest of the line to the next case.
+content	-	Write a case that matches any command whose last word is
+content	-	, and gives the rest of the line to the next case.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -784,7 +824,8 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Case block
-content	-	One `case` clause with its pattern, optional guard and indented block.
+content	-	One
+content	-	clause with its pattern, optional guard and indented block.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -804,7 +845,9 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Soft keyword
-content	-	A word that is a keyword only in a specific grammatical position and an ordinary name elsewhere. `match` and `case` are soft keywords. See
+content	-	A word that is a keyword only in a specific grammatical position and an ordinary name elsewhere.
+content	-	and
+content	-	are soft keywords. See
 content	-	`match` and `case` are soft keywords.
 content	-	.
 agents	L	For agents

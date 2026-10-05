@@ -1,5 +1,6 @@
 //! The context of every page, and the one place that calls every module that fills a part of it.
 use crate::html::{self, BlockCtx, Link};
+use crate::inline::{self, Ctx};
 use crate::site::{Site, Url, rel};
 use crate::trail::{Agents, Trail};
 use crate::{assets, home, machine, nav, search, toc, trail, version};
@@ -76,8 +77,8 @@ pub struct DocBody {
     pub title: String,
     /// The parent folder's title; none at the top level.
     pub eyebrow: Option<String>,
-    /// The first paragraph of the first section, when it is that section's first block; it is
-    /// left out of `items`.
+    /// The first block of the first section as HTML (spans), when it is a prose of one paragraph
+    /// and the doc has more sections; it is left out of `items`.
     pub lede: Option<String>,
     /// The anchor the lede has on the page (it keeps the one its block would have had).
     pub lede_anchor: Option<String>,
@@ -93,7 +94,10 @@ pub struct ChildRow {
 #[derive(Clone, Debug, Serialize)]
 pub struct FolderBody {
     pub title: String,
+    /// The description as written.
     pub description: Option<String>,
+    /// The description as HTML (spans).
+    pub description_html: Option<String>,
     pub children: Vec<ChildRow>,
 }
 
@@ -232,7 +236,17 @@ impl Shared<'_> {
             // the site's label never shows an id, even of a reference the target's text holds
             label: self.site.label(b),
             title: self.hover(b, &url),
+            key: b.field_str("key").map(String::from),
         })
+    }
+
+    /// The href of the page of the doc that holds `id`, from page `from`, with no anchor; `""`
+    /// when that is `from` itself (or the block has no doc with a page).
+    fn doc_page(&self, from: &str, id: &BlockId) -> String {
+        match self.m.doc_of(id).and_then(|d| self.site.page(&d.id)) {
+            Some(p) if p != from => rel(from, &p),
+            _ => String::new(),
+        }
     }
 
     /// Where a link leads, as its hover text says it: `Doc › Section` for a block (its nearest
@@ -405,9 +419,20 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
                         })
                     })
                     .collect();
+            let link = |id: &BlockId| sh.link(&page_url, id);
+            let description = f.field_str("description");
             body.folder = Some(FolderBody {
                 title: title.clone(),
-                description: f.field_str("description").map(String::from),
+                description: description.map(String::from),
+                description_html: description.map(|d| {
+                    inline::spans_html(
+                        d,
+                        &Ctx {
+                            link: &link,
+                            doc_page: "",
+                        },
+                    )
+                }),
                 children,
             });
         }
@@ -496,14 +521,19 @@ fn doc_parts(
 ) -> (DocBody, Vec<Item>, bool) {
     let (m, site) = (sh.m, sh.site);
     let link = |id: &BlockId| sh.link(page, id);
-    // the lede: the first paragraph of the first section, when it is that section's first block
-    // and the doc has more sections; a one-section doc keeps all its text under its heading
+    // the lede: the first block of the first section, when it is a prose of one paragraph and
+    // the doc has more sections; a one-section doc keeps all its text under its heading, and a
+    // prose of several paragraphs or with a list renders in place
     let sections = m.children(Some(&doc.id));
     let lede_block = sections
         .first()
         .filter(|s| s.block_type == "section" && sections.len() > 1)
         .and_then(|s| m.children(Some(&s.id)).into_iter().next())
-        .filter(|p| p.block_type == "prose");
+        .filter(|p| p.block_type == "prose" && inline::is_one_paragraph(&p.body));
+    let own = Ctx {
+        link: &link,
+        doc_page: "",
+    };
     let eyebrow = doc
         .parent
         .as_ref()
@@ -512,7 +542,7 @@ fn doc_parts(
     let doc_body = DocBody {
         title: title.to_string(),
         eyebrow,
-        lede: lede_block.map(|p| html::text_html(&p.body, &link)),
+        lede: lede_block.map(|p| inline::spans_html(&p.body, &own)),
         lede_anchor: lede_block.and_then(|p| site.anchors.get(&p.id).cloned()),
     };
     let (mut items, mut has_mermaid) = (vec![], false);
@@ -556,6 +586,8 @@ fn doc_parts(
             depth,
             anchor: &anchor,
             link: &link,
+            // every block of the doc is on the doc's own page
+            doc_page: "",
             pack: sh.pack,
             present: &present,
             asset_href: &asset_href,
@@ -627,7 +659,13 @@ fn glossary_body(sh: &Shared, page: &str) -> GlossaryBody {
             Some(TermRow {
                 anchor: sh.site.term_anchors.get(id)?.clone(),
                 name: sh.site.words(b.field_str("name").unwrap_or("")),
-                body: html::text_html(&b.body, &link),
+                body: inline::body_inline_html(
+                    &b.body,
+                    &Ctx {
+                        link: &link,
+                        doc_page: &sh.doc_page(page, id),
+                    },
+                ),
                 href: section.href_from(page),
                 doc_title,
                 section_title,
@@ -660,7 +698,13 @@ fn questions_body(sh: &Shared, page: &str) -> QuestionsBody {
                 .get(id)
                 .cloned()
                 .unwrap_or_default(),
-            prompt: html::text_html(b.field_str("prompt").unwrap_or(""), &link),
+            prompt: inline::spans_html(
+                b.field_str("prompt").unwrap_or(""),
+                &Ctx {
+                    link: &link,
+                    doc_page: &sh.doc_page(page, id),
+                },
+            ),
             href: target.href_from(page),
             section_title,
         };

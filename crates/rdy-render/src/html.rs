@@ -1,6 +1,6 @@
 //! The designed rendering of every content type, and the references inside text.
-use crate::highlight;
-use rdy_model::{Block, BlockId, FieldValue, Hash, RefMode, ref_spans};
+use crate::{highlight, inline};
+use rdy_model::{Block, BlockId, FieldValue, Hash, RefMode, RefSpan, ref_spans};
 use rdy_schema::Pack;
 use std::fmt::Write;
 
@@ -28,34 +28,30 @@ pub struct Link {
     pub label: String,
     /// The hover text (`Doc › Section`, `Doc`, `Glossary`, `Open questions`); empty for none.
     pub title: String,
+    /// The target's key, which a reference the author typed as a key shows (FW-F2a).
+    pub key: Option<String>,
 }
 
 /// What an unresolved reference reads as. In strict mode the author wrote only an id, which a
 /// reader may not see, so the marker's own words stand in for it.
 pub(crate) const UNRESOLVED: &str = "unresolved reference";
 
-/// Escapes `text` and replaces `{{id}}` references with links; `\{{` renders as a literal `{{`.
-/// A reference that leads nowhere is a marker that names no id. A newline is a `<br>`.
+/// A label as HTML ([`inline::label_html`] on the page being written): escaped, its code spans
+/// as `<code>` and its references as links. A newline is a `<br>`.
 pub fn text_html(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
-    with_refs(
-        text,
-        RefMode::Strict,
-        &|tok| match BlockId::parse(tok).ok().and_then(|id| link(&id)) {
-            Some(l) => anchor(&l),
-            None => format!(
-                "<span class=\"ref unresolved\" title=\"This reference could not be resolved\">{UNRESOLVED}</span>"
-            ),
-        },
-    )
-    .replace('\n', "<br>")
+    inline::label_html(text, &inline::Ctx { link, doc_page: "" })
 }
 
-/// Escaped `text` with each `{{id}}` reference read as its target's label (the unresolved
-/// marker's words when it leads nowhere), for an attribute or a place a link may not go.
+/// A label as plain words ([`inline::Form::Label`]), escaped, each reference read as its display
+/// text or its target's label (see [`diagram_label`]): for an attribute, a caption or a place a
+/// link may not go.
 pub fn words_html(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
-    with_refs(text, RefMode::Strict, &|tok| {
-        escape(&diagram_label(tok, link))
-    })
+    escape(&inline::plain_refs(
+        text,
+        RefMode::Strict,
+        inline::Form::Label,
+        &|span| diagram_label(span, link),
+    ))
 }
 
 /// `<a>` for a link, with its hover title when it has one.
@@ -70,42 +66,6 @@ fn anchor(l: &Link) -> String {
             escape(&l.label)
         )
     }
-}
-
-/// The text's paragraphs (separated by blank lines), each as a `<p>`; nothing for empty text.
-fn paragraphs(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
-    split_paragraphs(text)
-        .iter()
-        .map(|p| format!("<p>{}</p>", text_html(p, link)))
-        .collect()
-}
-
-/// The text inline when it is one paragraph, as `<p>`s when it is several.
-fn inline_or_paragraphs(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
-    match split_paragraphs(text).as_slice() {
-        [] => String::new(),
-        [one] => text_html(one, link),
-        _ => paragraphs(text, link),
-    }
-}
-
-fn split_paragraphs(text: &str) -> Vec<String> {
-    let mut out = vec![];
-    let mut cur: Vec<&str> = vec![];
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            if !cur.is_empty() {
-                out.push(cur.join("\n"));
-                cur.clear();
-            }
-        } else {
-            cur.push(line);
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur.join("\n"));
-    }
-    out
 }
 
 /// mer1: escapes a label for Mermaid. Characters Mermaid reads as syntax become `#<code>;` entity
@@ -125,40 +85,46 @@ fn mermaid_label(s: &str) -> String {
     out
 }
 
-/// The label a diagram shows for the reference `tok`: the target's label, else the unresolved
-/// marker's words, never the id.
-fn diagram_label(tok: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
-    BlockId::parse(tok)
-        .ok()
-        .and_then(|id| link(&id))
-        .map_or_else(|| UNRESOLVED.to_string(), |l| l.label)
+/// The words a reference reads as where no link may go: its display text, the target's key for
+/// a key-typed reference whose target still has one, the target's label, else the unresolved
+/// marker's words; never the id.
+fn diagram_label(span: &RefSpan, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
+    if let Some(d) = &span.display {
+        return d.clone();
+    }
+    match BlockId::parse(&span.token).ok().and_then(|id| link(&id)) {
+        Some(Link { key: Some(k), .. }) if span.key_typed && !k.is_empty() => k,
+        Some(l) => l.label,
+        None => UNRESOLVED.to_string(),
+    }
 }
 
 /// Escaped diagram source with each id-shaped `{{id}}` replaced by its label (see
 /// [`diagram_label`]), escaped for Mermaid and then for HTML, so the diagram renderer sees plain
 /// text. Other `{{…}}` (e.g. Mermaid hexagons) is kept as written.
 pub fn diagram_source(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
-    with_refs(text, RefMode::IdShaped, &|tok| {
-        escape(&mermaid_label(&diagram_label(tok, link)))
+    with_refs(text, RefMode::IdShaped, &|span| {
+        escape(&mermaid_label(&diagram_label(span, link)))
     })
 }
 
 /// The diagram's source as a reader reads it under "Diagram source": escaped, its references as
 /// labels (see [`diagram_label`]), so no id is shown.
 fn readable_source(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
-    with_refs(text, RefMode::IdShaped, &|tok| {
-        escape(&diagram_label(tok, link))
+    with_refs(text, RefMode::IdShaped, &|span| {
+        escape(&diagram_label(span, link))
     })
 }
 
-/// Escapes the text between references (turning `\{{` into `{{`) and renders each reference with `r`.
-fn with_refs(text: &str, mode: RefMode, r: &dyn Fn(&str) -> String) -> String {
-    let plain = |s: &str| escape(&s.replace("\\{{", "{{"));
+/// Escapes diagram source between references (turning the rdy escape `\{{` into `{{`) and
+/// renders each reference with `r`.
+fn with_refs(text: &str, mode: RefMode, r: &dyn Fn(&RefSpan) -> String) -> String {
+    let plain = |s: &str| escape(&inline::unescape_braces(s));
     let mut out = String::new();
     let mut last = 0;
     for span in ref_spans(text, mode) {
         out.push_str(&plain(&text[last..span.range.start]));
-        out.push_str(&r(&span.token));
+        out.push_str(&r(&span));
         last = span.range.end;
     }
     out.push_str(&plain(&text[last..]));
@@ -193,9 +159,9 @@ fn human_size(n: u64) -> String {
 fn figure_html(b: &Block, ctx: &BlockCtx) -> String {
     let h = b.field_str("blob").unwrap_or("");
     let alt_text = b.field_str("alt").unwrap_or("");
-    // the alt attribute and the download link's text cannot hold a link: references read as labels
+    // the alt attribute, the caption and the download link's text are plain words
     let alt = words_html(alt_text, ctx.link);
-    let caption = text_html(alt_text, ctx.link);
+    let caption = alt.clone();
     let media = b.field_str("media_type").unwrap_or("");
     let image = media.starts_with("image/");
     match h.parse::<Hash>() {
@@ -223,18 +189,19 @@ fn figure_html(b: &Block, ctx: &BlockCtx) -> String {
     }
 }
 
-/// A table cell or column head: as [`cell`], with each reference in its text a link.
-fn cell_html(v: &FieldValue, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
+/// A table cell or column head: as [`cell`], with each string in it read as spans (a map's keys
+/// as written).
+fn cell_html(v: &FieldValue, ictx: &inline::Ctx) -> String {
     match v {
-        FieldValue::Str(s) => text_html(s, link),
+        FieldValue::Str(s) => inline::spans_html(s, ictx),
         FieldValue::List(items) => items
             .iter()
-            .map(|i| cell_html(i, link))
+            .map(|i| cell_html(i, ictx))
             .collect::<Vec<_>>()
             .join(", "),
         FieldValue::Map(m) => m
             .iter()
-            .map(|(k, v)| format!("{}: {}", escape(k), cell_html(v, link)))
+            .map(|(k, v)| format!("{}: {}", escape(k), cell_html(v, ictx)))
             .collect::<Vec<_>>()
             .join("; "),
         other => cell(other),
@@ -283,6 +250,9 @@ pub struct BlockCtx<'a> {
     pub depth: usize,
     pub anchor: &'a str,
     pub link: &'a dyn Fn(&BlockId) -> Option<Link>,
+    /// The href of the block's doc's page from the page being written, with no anchor; `""` on
+    /// the doc's own page. Relative links in the block's text are read from there.
+    pub doc_page: &'a str,
     pub pack: &'a Pack,
     /// Whether the store holds the blob.
     pub present: &'a dyn Fn(&Hash) -> bool,
@@ -321,9 +291,14 @@ const PRIMARY_FIELDS: [&str; 4] = ["statement", "prompt", "name", "title"];
 /// Inner HTML for one block. A block the site leaves out (a rationale, a decision) is empty.
 pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
     let (depth, link) = (ctx.depth, ctx.link);
+    let ictx = inline::Ctx {
+        link,
+        doc_page: ctx.doc_page,
+    };
     let t = b.block_type.as_str();
-    // a title or a name may hold references, which link like the body's
-    let f = |name: &str| text_html(b.field_str(name).unwrap_or(""), link);
+    // a title or a name is a label: its code spans and references, which link like the body's
+    let f = |name: &str| inline::label_html(b.field_str(name).unwrap_or(""), &ictx);
+    let body = || inline::body_html(&b.body, &ictx);
     // a section's heading is one level below its parent section's; a definition or a flow heads
     // a part of the section it sits in, at the level of that section's subsections
     let section_level = (depth + 1).min(6);
@@ -332,7 +307,7 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
         "section" => format!(
             "<h{section_level} class=\"section-title\">{}</h{section_level}>{}",
             f("title"),
-            paragraphs(&b.body, link)
+            body()
         ),
         "claim" | "constraint" | "requirement" => {
             let mut eyebrow = display_name(t);
@@ -344,13 +319,13 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             format!(
                 "<div class=\"normative\">{}{}</div>",
                 marker(ctx, t, &eyebrow),
-                paragraphs(&b.body, link)
+                body()
             )
         }
         "example" | "note" => format!(
             "<aside class=\"callout callout-{t}\">{}<div>{}</div></aside>",
             marker(ctx, t, &display_name(t)),
-            paragraphs(&b.body, link)
+            body()
         ),
         // supporting text: it stays in the page JSON, not on the page
         "rationale" => String::new(),
@@ -358,7 +333,7 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             "<dl class=\"term\"><dt id=\"{}\">{}</dt><dd>{}</dd></dl>",
             escape(ctx.anchor),
             f("name"),
-            inline_or_paragraphs(&b.body, link)
+            inline::body_inline_html(&b.body, &ictx)
         ),
         "component" | "actor" | "interface" => {
             let described = if ctx.described_by.is_empty() {
@@ -377,7 +352,7 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
                 "<div class=\"entity entity-{t}\">{}<h{item_level} class=\"entity-name\">{}</h{item_level}>{}{described}</div>",
                 marker(ctx, t, &display_name(t)),
                 f("name"),
-                paragraphs(&b.body, link)
+                body()
             )
         }
         "flow" => {
@@ -385,8 +360,8 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
                 Some(FieldValue::List(s)) => s
                     .iter()
                     .map(|s| match s {
-                        FieldValue::Str(t) => format!("<li>{}</li>", text_html(t, link)),
-                        o => format!("<li>{}</li>", cell_html(o, link)),
+                        FieldValue::Str(t) => format!("<li>{}</li>", inline::spans_html(t, &ictx)),
+                        o => format!("<li>{}</li>", cell_html(o, &ictx)),
                     })
                     .collect(),
                 _ => String::new(),
@@ -394,13 +369,17 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             format!(
                 "<div class=\"flow\"><h{item_level} class=\"flow-name\">{}</h{item_level}><ol class=\"steps\">{steps}</ol>{}</div>",
                 f("name"),
-                paragraphs(&b.body, link)
+                body()
             )
         }
-        "table" => table_html(b, ctx),
+        "table" => table_html(b, ctx, &ictx),
         "diagram" => {
             let lang = b.field_str("lang").unwrap_or("");
-            let alt_text = b.field_str("alt").unwrap_or("");
+            // the alt text is plain words: the hidden text and the caption
+            let alt = b
+                .field_str("alt")
+                .filter(|a| !a.trim().is_empty())
+                .map(|a| words_html(a, link));
             // only Mermaid has a renderer on the site; any other language shows its source
             let canvas = if lang == "mermaid" {
                 format!(
@@ -410,33 +389,41 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             } else {
                 String::new()
             };
+            // with no alt text the source below is the text alternative, and there is no caption
+            let (hidden, caption) = match &alt {
+                Some(a) => (a.as_str(), format!("<figcaption>{a}</figcaption>")),
+                None => ("Diagram (source below)", String::new()),
+            };
             format!(
-                "<figure class=\"diagram\" data-lang=\"{}\"><p class=\"visually-hidden\">{}</p>{canvas}<figcaption>{}</figcaption><details class=\"diagram-source\"><summary>Diagram source</summary><pre class=\"code\"><code>{}</code></pre></details></figure>",
+                "<figure class=\"diagram\" data-lang=\"{}\"><p class=\"visually-hidden\">{hidden}</p>{canvas}{caption}<details class=\"diagram-source\"><summary>Diagram source</summary><pre class=\"code\"><code>{}</code></pre></details></figure>",
                 escape(lang),
-                words_html(alt_text, link),
-                text_html(alt_text, link),
                 readable_source(&b.body, link)
             )
         }
         "figure" => figure_html(b, ctx),
         "code" => {
-            let lang = b.field_str("lang").unwrap_or("");
+            // with no language: the label `Code`, plain text, and no class on `<code>`
+            let lang = b.field_str("lang").unwrap_or("").trim();
             let human = match highlight::human_name(lang) {
-                n if n.is_empty() => "Code".to_string(),
+                n if n.is_empty() || lang.is_empty() => "Code".to_string(),
                 n => n,
             };
+            let class = if lang.is_empty() {
+                String::new()
+            } else {
+                format!(" class=\"language-{}\"", escape(lang))
+            };
             format!(
-                "<div class=\"code-block\"><div class=\"code-head\"><span class=\"lang\">{}</span><button type=\"button\" class=\"tool copy-code\" aria-label=\"Copy code\">Copy</button></div><pre class=\"code\"><code class=\"language-{}\">{}</code></pre></div>",
+                "<div class=\"code-block\"><div class=\"code-head\"><span class=\"lang\">{}</span><button type=\"button\" class=\"tool copy-code\" aria-label=\"Copy code\">Copy</button></div><pre class=\"code\"><code{class}>{}</code></pre></div>",
                 escape(&human),
-                escape(lang),
                 highlight::html(lang, &b.body)
             )
         }
         "question" => format!(
             "<aside class=\"callout callout-question\">{}<p>{}</p>{}</aside>",
             marker(ctx, t, "Open question"),
-            text_html(b.field_str("prompt").unwrap_or(""), link),
-            paragraphs(&b.body, link)
+            inline::spans_html(b.field_str("prompt").unwrap_or(""), &ictx),
+            body()
         ),
         // a decision has no place in the text: the trail and the JSON carry it
         rdy_model::decision::DECISION => String::new(),
@@ -444,18 +431,25 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
         // with no type label; its primary field (a statement, prompt, name or title) first, so
         // that a block without a body still shows what it is
         _ => {
+            // a statement or a prompt is a sentence (spans); a name or a title is a label
             let primary = PRIMARY_FIELDS
                 .iter()
-                .find_map(|k| b.field_str(k).filter(|s| !s.trim().is_empty()))
-                .map(|p| format!("<p>{}</p>", text_html(p, link)))
+                .find_map(|k| Some(*k).zip(b.field_str(k).filter(|s| !s.trim().is_empty())))
+                .map(|(k, p)| {
+                    let html = match k {
+                        "statement" | "prompt" => inline::spans_html(p, &ictx),
+                        _ => inline::label_html(p, &ictx),
+                    };
+                    format!("<p>{html}</p>")
+                })
                 .unwrap_or_default();
-            format!("{primary}{}", paragraphs(&b.body, link))
+            format!("{primary}{}", body())
         }
     }
 }
 
 /// A table: wrapped so that it scrolls on its own, captioned, numeric columns right-aligned.
-fn table_html(b: &Block, ctx: &BlockCtx) -> String {
+fn table_html(b: &Block, ctx: &BlockCtx, ictx: &inline::Ctx) -> String {
     let list = |name: &str| match b.fields.get(name) {
         Some(FieldValue::List(c)) => c.clone(),
         _ => vec![],
@@ -490,13 +484,7 @@ fn table_html(b: &Block, ctx: &BlockCtx) -> String {
     let head: String = cols
         .iter()
         .enumerate()
-        .map(|(i, c)| {
-            format!(
-                "<th scope=\"col\"{}>{}</th>",
-                class(i),
-                cell_html(c, ctx.link)
-            )
-        })
+        .map(|(i, c)| format!("<th scope=\"col\"{}>{}</th>", class(i), cell_html(c, ictx)))
         .collect();
     let body: String = rows
         .iter()
@@ -505,15 +493,15 @@ fn table_html(b: &Block, ctx: &BlockCtx) -> String {
                 FieldValue::List(cells) => cells
                     .iter()
                     .enumerate()
-                    .map(|(i, c)| format!("<td{}>{}</td>", class(i), cell_html(c, ctx.link)))
+                    .map(|(i, c)| format!("<td{}>{}</td>", class(i), cell_html(c, ictx)))
                     .collect(),
-                other => format!("<td{}>{}</td>", class(0), cell_html(other, ctx.link)),
+                other => format!("<td{}>{}</td>", class(0), cell_html(other, ictx)),
             };
             format!("<tr>{cells}</tr>")
         })
         .collect();
     let caption = match b.field_str("caption").filter(|c| !c.trim().is_empty()) {
-        Some(c) => text_html(c, ctx.link),
+        Some(c) => words_html(c, ctx.link),
         None => format!("Table {}", ctx.table_number.unwrap_or(1)),
     };
     let normative = matches!(b.fields.get("normative"), Some(FieldValue::Bool(true)));

@@ -128,7 +128,8 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Subject
-content	-	The value that follows `match`. It is evaluated once; if the expression contains a comma, the subject is a tuple.
+content	-	The value that follows
+content	-	. It is evaluated once; if the expression contains a comma, the subject is a tuple.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -138,7 +139,8 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Pattern
-content	-	The text that follows `case`. It describes a shape the subject must have and the names to bind to its parts.
+content	-	The text that follows
+content	-	. It describes a shape the subject must have and the names to bind to its parts.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -148,7 +150,8 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Capture pattern
-content	-	A bare name other than `_`. It always succeeds and binds the subject to the name.
+content	-	A bare name other than
+content	-	. It always succeeds and binds the subject to the name.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -158,12 +161,18 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Wildcard
-content	-	The single underscore, `_`. It matches any subject and binds nothing.
+content	-	The single underscore,
+content	-	. It matches any subject and binds nothing.
 content	L	Why
 trail	-	8 February 2021
-trail	-	Ruled: The wildcard is `_`.
+trail	-	Ruled: The wildcard is
+trail	-	.
 trail	-	8 February 2021
-trail	-	Set aside: A dedicated token `?` marks values that are deliberately discarded. Options considered: `?` in patterns and in assignment, `?` in patterns only and keep `_`.
+trail	-	Set aside: A dedicated token
+trail	-	marks values that are deliberately discarded. Options considered:
+trail	-	in patterns and in assignment,
+trail	-	in patterns only and keep
+trail	-	.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -177,7 +186,9 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Value pattern
-content	-	A dotted name such as `Color.RED`. The name is looked up and compared with the subject using `==`.
+content	-	A dotted name such as
+content	-	. The name is looked up and compared with the subject using
+content	-	.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -187,7 +198,10 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Literal pattern
-content	-	A pattern that matches one constant: a number, a string, or one of `None`, `True` and `False`.
+content	-	A pattern that matches one constant: a number, a string, or one of
+content	-	,
+content	-	and
+content	-	.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -227,7 +241,8 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Guard
-content	-	An expression after `if` in a case block. It is evaluated only when the pattern has already succeeded.
+content	-	An expression after
+content	-	in a case block. It is evaluated only when the pattern has already succeeded.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -247,10 +262,12 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Or-pattern
-content	-	Two or more patterns joined by `|`. It succeeds at the first alternative that succeeds.
+content	-	Two or more patterns joined by
+content	-	. It succeeds at the first alternative that succeeds.
 content	L	Why
 trail	-	8 February 2021
-trail	-	Ruled: Alternatives in a pattern are separated by `|`.
+trail	-	Ruled: Alternatives in a pattern are separated by
+trail	-	.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -262,7 +279,8 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	As-pattern
-content	-	A pattern followed by `as` and a name. It matches its left side and also binds the subject to the name.
+content	-	A pattern followed by
+content	-	and a name. It matches its left side and also binds the subject to the name.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -275,7 +293,8 @@ content	L	__match_args__
 content	-	A class attribute that lists, in order, the attributes that positional subpatterns of a class pattern refer to.
 content	L	Why
 trail	-	8 February 2021
-trail	-	Ruled: Positional subpatterns map through `__match_args__`.
+trail	-	Ruled: Positional subpatterns map through
+trail	-	.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -432,10 +451,13 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Requirement · must
-content	-	`match` and `case` are soft keywords.
+content	-	and
+content	-	are soft keywords.
 content	L	Why
 trail	-	8 February 2021
-trail	-	Ruled: `match` and `case` are soft keywords.
+trail	-	Ruled:
+trail	-	and
+trail	-	are soft keywords.
 trail	-	8 February 2021
 trail	-	Set aside: Every pattern element carries an explicit marker. Options considered: markers on every element, markers on captures only and the dotted-name rule.
 agents	L	For agents
@@ -460,7 +482,8 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Note
-content	-	The soft keyword `case` only ever starts a line inside a match statement, so a reader finds it easy to recognise.
+content	-	The soft keyword
+content	-	only ever starts a line inside a match statement, so a reader finds it easy to recognise.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -478,7 +501,8 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	A guard is an optional expression, introduced by `if`, that is evaluated only after the pattern of its case block has succeeded. It may be any expression and may have side effects.
+content	-	A guard is an optional expression, introduced by
+content	-	, that is evaluated only after the pattern of its case block has succeeded. It may be any expression and may have side effects.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -619,7 +643,12 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	A literal pattern matches one constant: a signed number, a complex number written as `real + imag` or `real - imag`, a string (raw and bytes forms included, f-strings excluded) or one of the singletons `None`, `True` and `False`.
+content	-	A literal pattern matches one constant: a signed number, a complex number written as
+content	-	or
+content	-	, a string (raw and bytes forms included, f-strings excluded) or one of the singletons
+content	-	,
+content	-	and
+content	-	.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -629,7 +658,9 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Requirement · must
-content	-	Numbers and strings compare with `==`. The singletons compare with `is`.
+content	-	Numbers and strings compare with
+content	-	. The singletons compare with
+content	-	.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -639,7 +670,8 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
-content	-	`case 42:` matches the integer 42 and the float 42.0, because they compare equal. `case None:` matches only the singleton.
+content	-	matches the integer 42 and the float 42.0, because they compare equal.
+content	-	matches only the singleton.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -667,7 +699,8 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	A capture pattern is a bare name other than `_`. It always succeeds and binds the subject to the name, following the scoping rules established for the walrus operator.
+content	-	A capture pattern is a bare name other than
+content	-	. It always succeeds and binds the subject to the name, following the scoping rules established for the walrus operator.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -686,7 +719,9 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	`case [x] | x:` is allowed, because each alternative binds `x` once. `case x, x:` is a syntax error.
+content	-	is allowed, because each alternative binds
+content	-	once.
+content	-	is a syntax error.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -696,7 +731,10 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
-content	-	In `case [first, *_]:` the name `first` is bound to the first item. In `case [x, x]:` the name is bound twice, which is refused.
+content	-	In
+content	-	the name
+content	-	is bound to the first item. In
+content	-	the name is bound twice, which is refused.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -724,7 +762,8 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	The single underscore, `_`, matches any subject and binds nothing. As a whole pattern it is the usual final case.
+content	-	The single underscore,
+content	-	, matches any subject and binds nothing. As a whole pattern it is the usual final case.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -752,7 +791,10 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	A value pattern is a dotted name such as `Color.RED` or `http.HTTPStatus.OK`. The name is resolved by ordinary lookup, and the pattern succeeds if the resolved value compares equal to the subject with `==`.
+content	-	A value pattern is a dotted name such as
+content	-	or
+content	-	. The name is resolved by ordinary lookup, and the pattern succeeds if the resolved value compares equal to the subject with
+content	-	.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -863,7 +905,8 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Requirement · must
-content	-	A subject is a sequence if its class inherits from `collections.abc.Sequence`, has been registered as one, or is a built-in class flagged as a sequence.
+content	-	A subject is a sequence if its class inherits from
+content	-	, has been registered as one, or is a built-in class flagged as a sequence.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -872,7 +915,16 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	The built-in classes so flagged are `list`, `tuple`, `range`, `memoryview`, `array.array` and `collections.deque`. Although `str`, `bytes` and `bytearray` are usually considered sequences, they are deliberately not included and never match a sequence pattern.
+content	-	The built-in classes so flagged are
+content	-	,
+content	-	,
+content	-	,
+content	-	,
+content	-	and
+content	-	. Although
+content	-	,
+content	-	and
+content	-	are usually considered sequences, they are deliberately not included and never match a sequence pattern.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -882,7 +934,10 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
-content	-	`case [a, b]:` matches the list `[1, 2]` and the tuple `(1, 2)`, but not the string `"ab"`.
+content	-	matches the list
+content	-	and the tuple
+content	-	, but not the string
+content	-	.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -943,7 +998,9 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	A star subpattern, written `*name` or `*_`, binds a list of the items left over after the subpatterns before and after it have taken theirs.
+content	-	A star subpattern, written
+content	-	or
+content	-	, binds a list of the items left over after the subpatterns before and after it have taken theirs.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -981,7 +1038,8 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	Without a star, the subject must have exactly as many items as the pattern has subpatterns. The empty pattern `[]` matches only an empty sequence.
+content	-	Without a star, the subject must have exactly as many items as the pattern has subpatterns. The empty pattern
+content	-	matches only an empty sequence.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1047,7 +1105,8 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
-content	-	The pattern `{"text": message}` matches a dictionary that has a text key, whatever else it holds.
+content	-	The pattern
+content	-	matches a dictionary that has a text key, whatever else it holds.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1057,7 +1116,8 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Requirement · must
-content	-	A subject is a mapping if its class inherits from `collections.abc.Mapping`, has been registered as one, or is a built-in class flagged as a mapping.
+content	-	A subject is a mapping if its class inherits from
+content	-	, has been registered as one, or is a built-in class flagged as a mapping.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1076,7 +1136,8 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Requirement · must
-content	-	Keys are looked up with the two-argument form of `get()`.
+content	-	Keys are looked up with the two-argument form of
+content	-	.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1085,7 +1146,9 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	Matched items must already be present. A key is never created on the fly by `__missing__` or `__getitem__`. Extra keys in the subject are ignored.
+content	-	Matched items must already be present. A key is never created on the fly by
+content	-	or
+content	-	. Extra keys in the subject are ignored.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1150,7 +1213,10 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	If the name does not resolve to an instance of `type`, `TypeError` is raised. The instance test uses `isinstance()`, so an instance of a subclass matches.
+content	-	If the name does not resolve to an instance of
+content	-	,
+content	-	is raised. The instance test uses
+content	-	, so an instance of a subclass matches.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1170,7 +1236,8 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
-content	-	`Point(x=0, y=0)` matches an instance of `Point` whose two attributes are both zero, and any subclass instance too.
+content	-	matches an instance of
+content	-	whose two attributes are both zero, and any subclass instance too.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1181,7 +1248,8 @@ content	-	Link
 content	-	Copy ref
 content	L	Actor
 content	L	The class author
-content	-	Whoever writes a class that others will match. The class author decides, through `__match_args__`, which attributes positional subpatterns refer to.
+content	-	Whoever writes a class that others will match. The class author decides, through
+content	-	, which attributes positional subpatterns refer to.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1199,7 +1267,9 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	A keyword subpattern `name=pattern` reads the attribute `name` from the subject and matches the subpattern against it. A missing attribute fails the match.
+content	-	A keyword subpattern
+content	-	reads the attribute
+content	-	from the subject and matches the subpattern against it. A missing attribute fails the match.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1218,10 +1288,12 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Requirement · must
-content	-	Positional subpatterns are converted to keyword subpatterns through the class attribute `__match_args__`.
+content	-	Positional subpatterns are converted to keyword subpatterns through the class attribute
+content	-	.
 content	L	Why
 trail	-	8 February 2021
-trail	-	Ruled: Positional subpatterns map through `__match_args__`.
+trail	-	Ruled: Positional subpatterns map through
+trail	-	.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1232,7 +1304,9 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	If there are more positional subpatterns than `len(__match_args__)`, `TypeError` is raised.
+content	-	If there are more positional subpatterns than
+content	-	,
+content	-	is raised.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1250,7 +1324,18 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	For `bool`, `bytearray`, `bytes`, `dict`, `float`, `frozenset`, `int`, `list`, `set`, `str` and `tuple`, a single positional subpattern is matched against the whole subject instead.
+content	-	For
+content	-	,
+content	-	,
+content	-	,
+content	-	,
+content	-	,
+content	-	,
+content	-	,
+content	-	,
+content	-	,
+content	-	and
+content	-	, a single positional subpattern is matched against the whole subject instead.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1395,7 +1480,6 @@ content	L	Side effects
 content	L	Remarks
 content	-	Literal
 content	-	a constant
-content	-	`42`
 content	-	no
 content	-	yes
 content	-	no
@@ -1415,7 +1499,6 @@ content	-	none
 content	-	The singletons use identity.
 content	-	Capture
 content	-	a bare name
-content	-	`direction`
 content	-	yes
 content	-	no
 content	-	no
@@ -1435,7 +1518,6 @@ content	-	none
 content	-	Never a dotted name.
 content	-	Sequence
 content	-	brackets
-content	-	`[a, *rest]`
 content	-	yes
 content	-	yes
 content	-	yes
@@ -1497,7 +1579,8 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	The only side effect the matching process produces on purpose is the binding of names. The process does, however, rely on attribute access, instance checks, `len()`, equality and item access on the subject and its components.
+content	-	The only side effect the matching process produces on purpose is the binding of names. The process does, however, rely on attribute access, instance checks,
+content	-	, equality and item access on the subject and its components.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1534,7 +1617,9 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	Named tuples and dataclasses define `__match_args__` automatically. For a dataclass the order is that of the generated initialiser; fields declared with `init=False` are omitted.
+content	-	Named tuples and dataclasses define
+content	-	automatically. For a dataclass the order is that of the generated initialiser; fields declared with
+content	-	are omitted.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1543,7 +1628,8 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	Other standard library classes gain `__match_args__` where positional matching is clearly useful.
+content	-	Other standard library classes gain
+content	-	where positional matching is clearly useful.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1571,7 +1657,12 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
-content	-	The subject `[1, 2, 3]` matches `[a, *rest]`: `a` is 1 and `rest` is `[2, 3]`.
+content	-	The subject
+content	-	matches
+content	-	:
+content	-	is 1 and
+content	-	is
+content	-	.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1581,7 +1672,12 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
-content	-	The subject `{"k": 1, "j": 2}` matches `{"k": v, **others}`: `v` is 1 and `others` is `{"j": 2}`.
+content	-	The subject
+content	-	matches
+content	-	:
+content	-	is 1 and
+content	-	is
+content	-	.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1591,7 +1687,12 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
-content	-	The subject `Point(1, 2)` matches `Point(x, y)` when `Point` declares `__match_args__` as `("x", "y")`.
+content	-	The subject
+content	-	matches
+content	-	when
+content	-	declares
+content	-	as
+content	-	.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1601,7 +1702,9 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
-content	-	The subject `"ab"` does not match `[x, y]`, because a string is not a sequence for matching.
+content	-	The subject
+content	-	does not match
+content	-	, because a string is not a sequence for matching.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1611,7 +1714,9 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
-content	-	The subject `3` matches `1 | 2 | 3` and binds nothing.
+content	-	The subject
+content	-	matches
+content	-	and binds nothing.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1621,7 +1726,10 @@ agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
-content	-	The subject `5` matches `n if n > 3` and binds `n` to 5; the guard runs after the capture.
+content	-	The subject
+content	-	matches
+content	-	and binds
+content	-	to 5; the guard runs after the capture.
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -1649,7 +1757,9 @@ agents	L	Page data
 agents	-	JSON
 content	-	Link
 content	-	Copy ref
-content	-	Because `match` and `case` are soft keywords, existing programs keep working unchanged. Tools built on a parser that looks one token ahead need to migrate to parse the new statement.
+content	-	Because
+content	-	and
+content	-	are soft keywords, existing programs keep working unchanged. Tools built on a parser that looks one token ahead need to migrate to parse the new statement.
 agents	L	For agents
 agents	L	Id
 agents	L	Type

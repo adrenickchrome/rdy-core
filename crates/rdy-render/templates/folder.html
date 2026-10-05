@@ -1,6 +1,6 @@
 {% extends "layout.html" %}
 {% block content %}
 <h1>{{ body.folder.title }}</h1>
-{% if body.folder.description %}<p>{{ body.folder.description }}</p>{% endif %}
+{% if body.folder.description_html %}<p>{{ body.folder.description_html|safe }}</p>{% endif %}
 <ul class="children">{% for c in body.folder.children %}<li class="child-{{ c.kind }}"><a href="{{ c.href }}">{{ c.label }}</a></li>{% endfor %}</ul>
 {% endblock %}

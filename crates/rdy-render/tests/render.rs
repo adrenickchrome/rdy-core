@@ -27,6 +27,7 @@ fn text_html_escapes_then_links() {
             href: "doc/d-AAAAA.html#t-MEDGR".into(),
             label: "Ledger".into(),
             title: String::new(),
+            ..Default::default()
         })
     });
     assert_eq!(

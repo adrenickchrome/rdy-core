@@ -199,9 +199,10 @@ fn type1_references_inside_fields_link_or_read_as_labels_never_as_ids() {
         format!("<th scope=\"col\">Per {ledger}</th>"),
         format!("<td>See {ledger}</td>"),
         "alt=\"Picture of Ledger\"".to_string(),
-        format!("<figcaption>Picture of {ledger}</figcaption>"),
+        // a caption is alt text: plain words, its references as labels (md1)
+        "<figcaption>Picture of Ledger</figcaption>".to_string(),
         "<p class=\"visually-hidden\">Diagram of Ledger</p>".to_string(),
-        format!("<figcaption>Diagram of {ledger}</figcaption>"),
+        "<figcaption>Diagram of Ledger</figcaption>".to_string(),
         // the section's own label, anchor and hover text read the reference as its label too
         "<a href=\"#about-ledger\" title=\"Refs › About Ledger\">About Ledger</a>".to_string(),
     ] {
