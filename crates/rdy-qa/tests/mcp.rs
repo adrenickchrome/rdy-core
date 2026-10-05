@@ -64,18 +64,25 @@ fn session(c: &mut McpClient) {
 }
 
 #[test]
-fn mcp1_a_panicking_tool_gets_an_error_reply_and_the_server_lives() {
+fn hook1_the_release_binary_has_no_test_hook() {
     let (dir, r) = project();
     drop(r);
-    // the hook is only active with RDY_TEST_HOOKS=1 in the server's own environment
     let mut c = McpClient::start_with_env(dir.path(), &[("RDY_TEST_HOOKS", "1")]);
     let reply = c.call(
         "rdy_session",
         json!({"actor": "__rdy_test_panic__", "role": "writer"}),
     );
-    assert_eq!(reply.code(), Some("E_INTERNAL"), "{reply:?}");
-    session(&mut c);
+    assert!(
+        reply.code().is_none(),
+        "the magic actor is an ordinary actor in a release build: {reply:?}"
+    );
     c.alive();
+    let bin = std::fs::read(rdy_bin()).unwrap();
+    let marker = b"__rdy_test_panic__";
+    assert!(
+        !bin.windows(marker.len()).any(|w| w == marker),
+        "the hook's marker is not in the binary"
+    );
 }
 
 #[test]
@@ -247,13 +254,13 @@ fn mcp_pipelined_requests_are_all_answered_in_time() {
         id
     }).collect();
     let start = std::time::Instant::now();
-    for id in ids {
-        c.recv(
-            id,
+    for (n, id) in ids.iter().enumerate() {
+        let v = c.recv_next(
             Duration::from_secs(5)
                 .saturating_sub(start.elapsed())
                 .max(Duration::from_millis(1)),
         );
+        assert_eq!(v["id"], *id, "reply {n} out of order: {v}");
     }
 }
 
