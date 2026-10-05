@@ -1,7 +1,9 @@
 use rdy_model::Hash;
+use rdy_store::kinds::{self, BatchCommit};
 use rdy_store::segment::{Location, SegmentLog};
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn append_read_round_trip_and_hash_is_object_id() {
@@ -317,4 +319,529 @@ fn reading_at_an_absurd_offset_is_an_error_not_a_panic() {
         })
         .is_err()
     );
+}
+
+fn batch(n: u8, size: usize) -> Vec<(u8, Vec<u8>)> {
+    (0..n).map(|i| (kinds::BLOB_CHUNK, vec![i; size])).collect()
+}
+
+#[test]
+fn mark1_append_batch_ends_with_a_marker_naming_its_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    let first = log.append_batch(&batch(2, 10)).unwrap();
+    let placed = log.append_batch(&batch(3, 20)).unwrap();
+    log.sync().unwrap();
+    assert_eq!(
+        first[0].0,
+        Location {
+            segment: 0,
+            offset: 0
+        }
+    );
+    assert_eq!(placed.len(), 3);
+    let all = log
+        .scan_from(Location {
+            segment: 0,
+            offset: 0,
+        })
+        .unwrap();
+    assert_eq!(all.len(), 2 + 1 + 3 + 1);
+    assert_eq!(all[2].1, kinds::BATCH_COMMIT);
+    let (mloc, kind, _) = all[6];
+    assert_eq!(kind, kinds::BATCH_COMMIT);
+    let m: BatchCommit = postcard::from_bytes(&log.read(mloc).unwrap().1).unwrap();
+    assert_eq!(m.start, placed[0].0);
+    assert_eq!(m.frames, 3);
+    assert_eq!(m.digest, kinds::batch_digest(placed.iter().map(|(_, h)| h)));
+    assert_eq!(log.verify_frames().unwrap(), 5, "markers are not counted");
+}
+
+#[test]
+fn roll1_a_batch_that_does_not_fit_rolls_before_its_first_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 400).unwrap();
+    log.append_batch(&batch(2, 50)).unwrap();
+    let second = log.append_batch(&batch(2, 50)).unwrap();
+    assert!(second.iter().all(|(l, _)| l.segment == 1), "{second:?}");
+    assert_eq!(second[0].0.offset, 0);
+    let seg0: Vec<_> = log
+        .scan_from(Location {
+            segment: 0,
+            offset: 0,
+        })
+        .unwrap()
+        .into_iter()
+        .filter(|(l, _, _)| l.segment == 0)
+        .collect();
+    assert_eq!(
+        seg0.last().unwrap().1,
+        kinds::BATCH_COMMIT,
+        "segment 0 ends at a marker"
+    );
+}
+
+#[test]
+fn roll1_a_batch_larger_than_a_segment_gets_a_segment_of_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 128).unwrap();
+    log.append_batch(&batch(1, 10)).unwrap();
+    let big = log.append_batch(&batch(3, 100)).unwrap();
+    assert!(big.iter().all(|(l, _)| l.segment == 1), "{big:?}");
+    let next = log.append_batch(&batch(1, 10)).unwrap();
+    assert_eq!(
+        next[0].0,
+        Location {
+            segment: 2,
+            offset: 0
+        }
+    );
+}
+
+#[test]
+fn mark1_verify_refuses_a_marker_that_does_not_match_its_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    let placed = log.append_batch(&batch(2, 10)).unwrap();
+    let bad = BatchCommit {
+        start: placed[0].0,
+        frames: 2,
+        digest: Hash::of(b"not the batch"),
+    };
+    log.append(kinds::BATCH_COMMIT, &postcard::to_allocvec(&bad).unwrap())
+        .unwrap();
+    log.sync().unwrap();
+    let e = log.verify_frames().unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+    assert!(e.to_string().contains("does not match its batch"), "{e}");
+}
+
+#[test]
+fn mark1_crash_points_round_trip_by_name() {
+    use rdy_store::segment::CrashPoint;
+    for p in CrashPoint::ALL {
+        assert_eq!(CrashPoint::parse(p.name()), Some(p));
+    }
+    assert_eq!(CrashPoint::parse("nowhere"), None);
+}
+
+fn seg_file(dir: &Path, n: u32) -> PathBuf {
+    dir.join(format!("seg-{n:06}.log"))
+}
+
+/// A well-formed frame's bytes: length, kind, payload hash, payload.
+fn frame_bytes(kind: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = (payload.len() as u32).to_le_bytes().to_vec();
+    out.push(kind);
+    out.extend_from_slice(&Hash::of(payload).0);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Three synced two-frame batches in segment 0; returns the log's end after each.
+fn three_batches(dir: &Path) -> Vec<Location> {
+    let mut log = SegmentLog::open(dir, 1 << 20).unwrap();
+    let mut ends = vec![];
+    for b in 0..3u8 {
+        log.append_batch(&[
+            (kinds::BLOB_CHUNK, vec![b; 30]),
+            (kinds::BLOB_CHUNK, vec![b + 100; 30]),
+        ])
+        .unwrap();
+        ends.push(log.end());
+    }
+    log.sync().unwrap();
+    ends
+}
+
+fn torn_files(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".torn-"))
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn mark1_the_boundary_is_the_end_of_the_last_valid_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let ends = three_batches(dir.path());
+    let tail = frame_bytes(kinds::BLOB_CHUNK, b"unmarked tail");
+    let mut f = OpenOptions::new()
+        .append(true)
+        .open(seg_file(dir.path(), 0))
+        .unwrap();
+    f.write_all(&tail).unwrap();
+    drop(f);
+    let (log, q) = SegmentLog::open_marked(dir.path(), 1 << 20, None).unwrap();
+    assert_eq!(log.end(), ends[2]);
+    assert_eq!(
+        q,
+        vec![
+            dir.path()
+                .join(format!("seg-000000.log.torn-{}", ends[2].offset))
+        ]
+    );
+    assert_eq!(std::fs::read(&q[0]).unwrap(), tail);
+    assert_eq!(
+        std::fs::metadata(seg_file(dir.path(), 0)).unwrap().len(),
+        ends[2].offset
+    );
+}
+
+#[test]
+fn mark1_a_torn_marker_leaves_its_batch_unacknowledged() {
+    let dir = tempfile::tempdir().unwrap();
+    let ends = three_batches(dir.path());
+    let f = OpenOptions::new()
+        .write(true)
+        .open(seg_file(dir.path(), 0))
+        .unwrap();
+    f.set_len(ends[2].offset - 5).unwrap();
+    drop(f);
+    let (log, q) = SegmentLog::open_marked(dir.path(), 1 << 20, None).unwrap();
+    assert_eq!(log.end(), ends[1]);
+    assert_eq!(q.len(), 1);
+}
+
+#[test]
+fn mark1_a_torn_middle_frame_under_an_intact_marker_is_the_unacknowledged_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let ends = three_batches(dir.path());
+    let path = seg_file(dir.path(), 0);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let at = ends[1].offset as usize + 40; // inside the last batch's first payload
+    bytes[at..at + 10].fill(0);
+    std::fs::write(&path, &bytes).unwrap();
+    let (log, q) = SegmentLog::open_marked(dir.path(), 1 << 20, None).unwrap();
+    assert_eq!(log.end(), ends[1]);
+    assert_eq!(q.len(), 1);
+}
+
+#[test]
+fn mark1_corruption_inside_an_earlier_batch_is_refused_and_left_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let ends = three_batches(dir.path());
+    let path = seg_file(dir.path(), 0);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[ends[0].offset as usize + 40] ^= 0xff; // the second batch; the third follows it
+    std::fs::write(&path, &bytes).unwrap();
+    let e = SegmentLog::open_marked(dir.path(), 1 << 20, None)
+        .err()
+        .expect("refuse");
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        e.to_string().contains("move the damaged segment aside"),
+        "{e}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert!(torn_files(dir.path()).is_empty());
+}
+
+#[test]
+fn mark1_a_floor_past_the_boundary_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let ends = three_batches(dir.path());
+    let path = seg_file(dir.path(), 0);
+    let f = OpenOptions::new().write(true).open(&path).unwrap();
+    f.set_len(ends[2].offset - 5).unwrap();
+    drop(f);
+    let before = std::fs::read(&path).unwrap();
+    let e = SegmentLog::open_marked(dir.path(), 1 << 20, Some(ends[2]))
+        .err()
+        .expect("refuse");
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn mark1_a_last_segment_without_a_marker_is_quarantined_and_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let ends = three_batches(dir.path());
+    let unmarked = frame_bytes(kinds::BLOB_CHUNK, b"rolled, never marked");
+    std::fs::write(seg_file(dir.path(), 1), &unmarked).unwrap();
+    let (log, q) = SegmentLog::open_marked(dir.path(), 1 << 20, None).unwrap();
+    assert_eq!(log.end(), ends[2]);
+    assert!(!seg_file(dir.path(), 1).exists());
+    assert_eq!(q, vec![dir.path().join("seg-000001.log.torn-0")]);
+    assert_eq!(std::fs::read(&q[0]).unwrap(), unmarked);
+}
+
+#[test]
+fn mark1_an_unmarked_last_segment_the_index_acknowledged_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    three_batches(dir.path());
+    std::fs::write(
+        seg_file(dir.path(), 1),
+        frame_bytes(kinds::BLOB_CHUNK, b"x"),
+    )
+    .unwrap();
+    let floor = Location {
+        segment: 1,
+        offset: 10,
+    };
+    assert!(SegmentLog::open_marked(dir.path(), 1 << 20, Some(floor)).is_err());
+    assert!(seg_file(dir.path(), 1).exists());
+}
+
+#[test]
+fn mark1_an_empty_last_segment_is_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let ends = three_batches(dir.path());
+    std::fs::File::create(seg_file(dir.path(), 1)).unwrap();
+    let (log, q) = SegmentLog::open_marked(dir.path(), 1 << 20, None).unwrap();
+    assert_eq!(log.end(), ends[2]);
+    assert!(q.is_empty());
+    assert!(!seg_file(dir.path(), 1).exists());
+}
+
+#[test]
+fn mark1_a_sealed_segment_that_does_not_end_at_a_marker_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    three_batches(dir.path());
+    let mut f = OpenOptions::new()
+        .append(true)
+        .open(seg_file(dir.path(), 0))
+        .unwrap();
+    f.write_all(&frame_bytes(kinds::BLOB_CHUNK, b"after the marker"))
+        .unwrap();
+    drop(f);
+    std::fs::write(
+        seg_file(dir.path(), 1),
+        frame_bytes(kinds::BLOB_CHUNK, b"unmarked"),
+    )
+    .unwrap();
+    let e = SegmentLog::open_marked(dir.path(), 1 << 20, None)
+        .err()
+        .expect("refuse");
+    assert!(
+        e.to_string().contains("does not end at a batch marker"),
+        "{e}"
+    );
+    assert!(
+        seg_file(dir.path(), 1).exists(),
+        "refused before touching either segment"
+    );
+    assert!(torn_files(dir.path()).is_empty());
+}
+
+#[test]
+fn mark1_log_has_marker_tells_m2_logs_from_m1_logs() {
+    let m1 = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(m1.path(), 1 << 20).unwrap();
+    log.append(kinds::BLOB_CHUNK, b"m1 frame").unwrap();
+    log.sync().unwrap();
+    drop(log);
+    assert!(!rdy_store::segment::log_has_marker(m1.path()).unwrap());
+    let m2 = tempfile::tempdir().unwrap();
+    three_batches(m2.path());
+    assert!(rdy_store::segment::log_has_marker(m2.path()).unwrap());
+    let empty = tempfile::tempdir().unwrap();
+    assert!(!rdy_store::segment::log_has_marker(empty.path()).unwrap());
+}
+
+#[test]
+fn mark1_an_empty_batch_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    assert!(log.append_batch(&[]).unwrap().is_empty());
+    assert_eq!(
+        log.end(),
+        Location {
+            segment: 0,
+            offset: 0
+        }
+    );
+}
+
+/// A write whose payload carries a copy of an rdy segment (an imported fixture, or bytes an agent
+/// crafted) and is then torn after the copy: the embedded markers are hash-valid but belong to
+/// another file's frames, so they are not an acknowledged batch following the damage.
+#[test]
+fn mark1_marker_shaped_bytes_inside_a_torn_payload_are_not_an_acknowledged_batch() {
+    let other = tempfile::tempdir().unwrap();
+    three_batches(other.path());
+    let embedded = std::fs::read(seg_file(other.path(), 0)).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    log.append_batch(&[(kinds::BLOB_CHUNK, b"first".to_vec())])
+        .unwrap();
+    let b = log.end();
+    log.sync().unwrap();
+    drop(log);
+    let mut payload = embedded.clone();
+    payload.extend_from_slice(&[7u8; 2000]);
+    let mut torn = frame_bytes(kinds::BLOB_CHUNK, &payload);
+    torn.truncate(37 + embedded.len() + 500); // cut after the embedded copy
+    let path = seg_file(dir.path(), 0);
+    let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+    f.write_all(&torn).unwrap();
+    drop(f);
+    let (log, q) = SegmentLog::open_marked(dir.path(), 1 << 20, None)
+        .expect("an ordinary torn write is quarantined, not refused");
+    assert_eq!(log.end(), b);
+    assert_eq!(q.len(), 1);
+    assert_eq!(std::fs::read(&q[0]).unwrap(), torn);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), b.offset);
+}
+
+#[test]
+fn cat1_for_each_from_reads_every_frame_once_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    log.append_batch(&[
+        (kinds::BLOB_CHUNK, b"a".to_vec()),
+        (kinds::BLOB_CHUNK, b"b".to_vec()),
+    ])
+    .unwrap();
+    log.append_batch(&[(kinds::BLOB_CHUNK, b"c".to_vec())])
+        .unwrap();
+    let start = Location {
+        segment: 0,
+        offset: 0,
+    };
+    let mut seen = vec![];
+    log.for_each_from(
+        start,
+        |loc, kind, hash, payload, next| -> std::io::Result<()> {
+            assert_eq!(hash, Hash::of(payload));
+            seen.push((loc, kind, next));
+            Ok(())
+        },
+    )
+    .unwrap();
+    let scanned: Vec<_> = log
+        .scan_from(start)
+        .unwrap()
+        .into_iter()
+        .map(|(l, k, _)| (l, k))
+        .collect();
+    assert_eq!(
+        seen.iter().map(|(l, k, _)| (*l, *k)).collect::<Vec<_>>(),
+        scanned
+    );
+    assert_eq!(seen.last().unwrap().2, log.end());
+    for w in seen.windows(2) {
+        assert_eq!(w[0].2, w[1].0, "each frame's next is the following frame");
+    }
+}
+
+#[test]
+fn cat1_for_each_from_a_point_past_the_end_of_its_segment_is_invalid_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    log.append_batch(&[(kinds::BLOB_CHUNK, b"a".to_vec())])
+        .unwrap();
+    let past = Location {
+        segment: 0,
+        offset: log.end().offset + 1,
+    };
+    let e = log
+        .for_each_from(past, |_, _, _, _, _| -> std::io::Result<()> { Ok(()) })
+        .unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData, "{e}");
+    assert_eq!(
+        log.scan_from(past).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+}
+
+/// A hash-valid marker record (as crafted bytes inside a payload) naming `start` in segment 0.
+fn crafted_marker(start: u64) -> Vec<u8> {
+    let m = BatchCommit {
+        start: Location {
+            segment: 0,
+            offset: start,
+        },
+        frames: 1,
+        digest: Hash([0; 32]),
+    };
+    frame_bytes(kinds::BATCH_COMMIT, &postcard::to_allocvec(&m).unwrap())
+}
+
+/// Final review (Important 1): hostile bytes in a torn tail must not make the open's tail check
+/// hash the same frame once per marker-shaped record that names it, nor hash a frame that ends
+/// past the record. The torn write here is an agent's blob holding two crafted 1 MiB frame
+/// headers and 100 hash-valid marker records naming them. Before the fix every record hashed a
+/// whole 1 MiB frame (about 100 MiB); now the first, hash-invalid frame is hashed once and the
+/// second, which ends past every record naming it, is never hashed.
+#[test]
+fn mark1_crafted_markers_in_a_torn_tail_hash_each_frame_at_most_once() {
+    const L: usize = 1 << 20;
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 64 << 20).unwrap();
+    log.append_batch(&[(kinds::BLOB_CHUNK, b"first".to_vec())])
+        .unwrap();
+    let b = log.end();
+    log.sync().unwrap();
+    drop(log);
+    // the torn write: a frame header claiming 8 MiB, of which about 2 MiB reached the disk
+    let mut tail = (8u32 << 20).to_le_bytes().to_vec();
+    tail.push(kinds::BLOB_CHUNK);
+    tail.extend_from_slice(&[0; 32]);
+    tail.extend_from_slice(&[7; 16]);
+    // inside its payload: a hash-invalid frame of 1 MiB that fits before the records naming it
+    let s1 = b.offset + tail.len() as u64;
+    tail.extend_from_slice(&(L as u32).to_le_bytes());
+    tail.push(kinds::BLOB_CHUNK);
+    tail.extend_from_slice(&[0; 32]);
+    tail.extend_from_slice(&vec![9; L]);
+    // then a frame header of 1 MiB whose body holds the records, so it ends past each of them
+    let s2 = b.offset + tail.len() as u64;
+    tail.extend_from_slice(&(L as u32).to_le_bytes());
+    tail.push(kinds::BLOB_CHUNK);
+    tail.extend_from_slice(&[0; 32]);
+    let body_start = tail.len();
+    for i in 0..100u64 {
+        tail.extend_from_slice(&crafted_marker(if i % 2 == 0 { s1 } else { s2 }));
+        tail.extend_from_slice(&[5; 64]);
+    }
+    tail.resize(body_start + L, 5); // the second frame fits the file
+    let path = seg_file(dir.path(), 0);
+    let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+    f.write_all(&tail).unwrap();
+    drop(f);
+    let before = rdy_store::segment::frame_bytes_hashed();
+    let (log, q) = SegmentLog::open_marked(dir.path(), 64 << 20, None)
+        .expect("a torn write is quarantined, not refused");
+    let hashed = rdy_store::segment::frame_bytes_hashed() - before;
+    assert_eq!(log.end(), b);
+    assert_eq!(q.len(), 1);
+    assert!(
+        hashed <= (L + (64 << 10)) as u64,
+        "the tail check hashed {hashed} bytes"
+    );
+}
+
+/// Guard for the memo of Important 1: a marker-shaped record inside an acknowledged batch's own
+/// blob, naming that batch's start, is rejected (its frame ends past the record), and the real
+/// marker naming the same start must still count, so damage before that batch is refused.
+#[test]
+fn mark1_a_marker_record_inside_a_batch_naming_its_start_does_not_hide_that_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    log.append_batch(&[(kinds::BLOB_CHUNK, vec![1; 30])])
+        .unwrap();
+    let damaged = log.end();
+    log.append_batch(&[(kinds::BLOB_CHUNK, vec![2; 30])])
+        .unwrap();
+    let start = log.end().offset;
+    let mut blob = vec![3; 40];
+    blob.extend_from_slice(&crafted_marker(start));
+    blob.extend_from_slice(&[4; 40]);
+    log.append_batch(&[(kinds::BLOB_CHUNK, blob)]).unwrap();
+    log.sync().unwrap();
+    drop(log);
+    let path = seg_file(dir.path(), 0);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[damaged.offset as usize + 40] ^= 0xff; // the second batch; the third follows it
+    std::fs::write(&path, &bytes).unwrap();
+    let e = SegmentLog::open_marked(dir.path(), 1 << 20, None)
+        .err()
+        .expect("the third batch is acknowledged and follows the damage");
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData, "{e}");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert!(torn_files(dir.path()).is_empty());
 }

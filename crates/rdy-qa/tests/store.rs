@@ -163,7 +163,25 @@ fn store_torn_tail_at_sampled_offsets_recovers() {
     let (last_hash, cut_from) = last;
     let end = segment_len(&dir);
     let step = if deep() { 13 } else { 97 };
-    for cut in (cut_from..end).step_by(step) {
+    // every write ends in a batch marker: a cut inside the marker leaves the batch's data frames
+    // whole but unacknowledged, so the marker rule quarantines them too
+    let marker_start = {
+        let bytes = std::fs::read(last_segment(&dir)).unwrap();
+        let mut at = cut_from as usize;
+        loop {
+            let len = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+            if at + 37 + len == bytes.len() {
+                break at as u64;
+            }
+            at += 37 + len;
+        }
+    };
+    // the sampling always includes cuts at the marker's start, inside it and one byte short of its end
+    let mut cuts: Vec<u64> = (cut_from..end).step_by(step).collect();
+    cuts.extend([marker_start, marker_start + 1, end - 1]);
+    cuts.sort_unstable();
+    cuts.dedup();
+    for cut in cuts {
         let copy = tempfile::tempdir().unwrap();
         copy_dir(&dir, copy.path());
         let seg = last_segment(copy.path());

@@ -154,7 +154,7 @@ fn fsck_detects_corruption() {
     let (dir, _) = project_with_term();
     // Seal segment 0 by starting segment 1: Store::open only repairs (truncates) the tail of the
     // CURRENT segment, so corruption must be in a sealed one for fsck to see it.
-    let segs = dir.path().join(".rdy/store/segments");
+    let segs = dir.path().join(".rdy/store2/segments");
     let seg = segs.join("seg-000000.log");
     std::fs::File::create(segs.join("seg-000001.log")).unwrap();
     let (ok, _, err) = rdy(dir.path(), &["fsck"]);

@@ -31,6 +31,10 @@ pub enum StoreError {
     Frozen(BlockId),
     #[error("acknowledged writes are missing from the log ({}): {detail}", .segment.display())]
     MissingFrames { segment: PathBuf, detail: String },
+    /// The store's format is not one this rdy can open (written by a newer rdy, or its FORMAT
+    /// file is unreadable).
+    #[error("{message}")]
+    Format { message: String, fix: String },
 }
 
 pub(crate) fn db<E: std::fmt::Display>(e: E) -> StoreError {

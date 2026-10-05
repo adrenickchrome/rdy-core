@@ -30,7 +30,7 @@ pub use write::{LinkInput, OpInput, WriteRequest, WriteResult, json_to_field};
 
 use rdy_model::Op;
 use rdy_schema::{Pack, PackSet};
-use rdy_store::Store;
+use rdy_store::{Store, layout};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
@@ -108,18 +108,34 @@ impl Rdy {
                 "open the existing project, or init a different directory",
             ));
         }
-        // dur1: .rdy and .rdy/packs are fsynced into their parents (the store adds .rdy/store)
+        // dur1: .rdy and .rdy/packs are fsynced into their parents (the store adds .rdy/store2)
         rdy_store::fsutil::create_dir_durable(&dot.join("packs")).map_err(io)?;
         load_pack(project, pack)?;
         let cfg = serde_yaml_ng::to_string(&Config {
             pack: pack.to_string(),
         })
         .expect("config yaml");
-        std::fs::write(dot.join("config.yaml"), cfg).map_err(io)?;
+        rdy_store::fsutil::write_durable(&dot.join("config.yaml"), cfg.as_bytes()).map_err(io)?;
         Rdy::open(project)
     }
 
     pub fn open(project: &Path) -> Result<Rdy, RdyError> {
+        Rdy::open_with(project, layout::open_project_store)
+    }
+
+    /// Test hook: `Rdy::open` with the store opened as an M1 binary would, directly at
+    /// `<project>/.rdy/store` (no store2 layout, no stub, no format).
+    #[doc(hidden)]
+    pub fn open_legacy_for_tests(project: &Path) -> Result<Rdy, RdyError> {
+        Rdy::open_with(project, |rdy_dir| {
+            Store::open_legacy_for_tests(&rdy_dir.join(layout::LEGACY_DIR))
+        })
+    }
+
+    fn open_with(
+        project: &Path,
+        open_store: impl FnOnce(&Path) -> Result<Store, rdy_store::StoreError>,
+    ) -> Result<Rdy, RdyError> {
         let cfg_path = project.join(".rdy/config.yaml");
         if !cfg_path.exists() {
             return Err(RdyError::new(
@@ -132,7 +148,7 @@ impl Rdy {
         let cfg: Config = serde_yaml_ng::from_str(&text)
             .map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "fix .rdy/config.yaml"))?;
         let (pack, lineage) = load_pack(project, &cfg.pack)?;
-        let store = Store::open(&project.join(".rdy/store"))?;
+        let store = open_store(&project.join(".rdy"))?;
         Ok(Rdy {
             root: project.to_path_buf(),
             store,
@@ -155,6 +171,22 @@ impl Rdy {
     }
     pub fn store_mut(&mut self) -> &mut Store {
         &mut self.store
+    }
+
+    /// Makes the store's index durable up to everything written so far (see `Store::checkpoint`).
+    pub fn checkpoint(&mut self) -> Result<(), RdyError> {
+        Ok(self.store.checkpoint()?)
+    }
+
+    /// Closes the project's store cleanly (see `Store::close`) and returns a failed checkpoint's
+    /// error. Dropping an `Rdy` closes it too, but can only report a failure on stderr.
+    pub fn close(self) -> Result<(), RdyError> {
+        Ok(self.store.close()?)
+    }
+
+    /// Checkpoints if writes are waiting and the store has been idle long enough; true if it did.
+    pub fn checkpoint_if_idle(&mut self) -> Result<bool, RdyError> {
+        Ok(self.store.checkpoint_if_idle(std::time::Instant::now())?)
     }
 
     pub fn materialized(&mut self, scope: &Scope) -> Result<&Materialized, RdyError> {

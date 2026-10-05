@@ -21,7 +21,7 @@ Source column: **perf_budget** = `tests/perf_budget.rs` (cold-start row: the pre
 | cold open + graph | - | - | 791 ms (10k blocks: 101 ms) | criterion | informational |
 | query p99 (`context` + `impact`, 200 probes) | < 5 ms | not measured (`context` scanned every edge) | 3.5 us (p50 2.2 us, p95 3.1 us, max 7.1 us) | perf_budget | met |
 | `context` / `impact` mean | - | - | 1.55 us / 373 ns (10k: 1.40 us / 324 ns) | criterion | informational |
-| write p99 (one-claim commit, 200 writes) | < 5 ms | grows with view length, 18 ms avg at 8k blocks | 23.3 ms p99 (p50 10.6 ms, p95 11.5 ms, max 24.3 ms) | perf_budget | **missed** (macOS; Linux also missed, see below) |
+| write p99 (one-claim commit, 200 writes) | < 5 ms | grows with view length, 18 ms avg at 8k blocks | 23.3 ms p99 (p50 10.6 ms, p95 11.5 ms, max 24.3 ms) | perf_budget | **missed** (macOS; Linux also missed, see below). Superseded by "M2.0: one flush per write" below |
 | write mean | - | - | 11.7 ms (10k: 11.0 ms) | criterion | informational |
 
 ## Fixes made
@@ -82,12 +82,13 @@ Reading:
 - The view-record growth is not visible at this scale on Linux (first-100 vs last-100 write means:
   5.2 vs 8.1 ms on run 1, 4.9 vs 4.8 ms and 5.5 vs 4.9 ms on runs 2 and 3).
 - With one flush per write (below), the floor on this configuration drops to about 2.5 ms, which
-  should bring p99 near or under 5 ms. Drives with power-loss protection flush in well under 0.1 ms,
+  should bring p99 near or under 5 ms. *Measured in "M2.0: one flush per write", subsection
+  "Linux": the median met it, p99 did not.* Drives with power-loss protection flush in well under 0.1 ms,
   where the target is comfortably reachable.
 
 ## What would help (M2 work, deferred, not done here)
 
-- **One fsync per write instead of two.** Commit the redb index at non-immediate durability and
+- **One fsync per write instead of two.** *Superseded: done in M2.0, see "M2.0: one flush per write" below.* Commit the redb index at non-immediate durability and
   catch the index up from the log on open (the log is the source of truth). This changes the
   store's crash story and needs a design decision. On the Linux configuration it halves the flush
   floor (about 5 ms to about 2.5 ms) and is the change most likely to meet the target there. On macOS
@@ -134,3 +135,82 @@ Reproduce: `cargo test -p rdy-engine --release --test perf_folders -- --ignored 
 - The full site render takes 4.18 s against the 2 s target, writing 11,001 pages (one per doc, one
   per folder, plus the index) and about 116 MiB. No code was changed to chase the number.
 - `resolve_path` is a map lookup and is well under target.
+
+## M2.0: one flush per write (2026-10-04)
+
+Measured 2026-10-04, release build, Rust 1.99.0, 100,000 blocks, on the **macOS** configuration of
+the table at the top (Apple M4 Pro, macOS 26.6, internal SSD, APFS). A write is now one marked batch
+in the segment log with one durable flush; the index follows by checkpoint and is caught up from the
+log on open. This section supersedes the write row of the table at the top and the "One fsync per
+write instead of two" bullet under "What would help".
+
+Restated target (spec 11, per hardware class): write p99 < 5 ms on Linux NVMe; on macOS, one
+durable flush + < 1 ms, where the flush is measured in the test (p99 of 50 runs of a 4 KB
+`write_all_at` plus `sync_data`, which is `F_FULLFSYNC` on macOS).
+Reproduce: `cargo test -p rdy-engine --release --test perf_budget -- --ignored --nocapture`.
+
+| measurement (perf_budget, 200 one-claim writes) | result |
+|---|---|
+| write p50 | 6.25 ms |
+| write p95 | 7.45 ms |
+| write p99 | 10.90 ms |
+| write max | 21.44 ms |
+| flush p99 (4 KB `write_all_at` + `sync_data`, 50 runs) | 5.34 ms |
+| write target (flush p99 + 1 ms) | 6.34 ms |
+
+Verdict: **missed** on macOS. Write p99 is 10.90 ms against the 6.34 ms target. The median is
+within the target (p50 6.25 ms, about 0.9 ms over the flush p99), and the body is tight (p50 to p95
+is 1.2 ms); the miss is in the tail, where occasional writes cost about two flushes. Writes went
+from about 10.6 ms p50 and 23.3 ms p99 (two flushes) to 6.25 ms and 10.90 ms. The assertion in
+`perf_budget` is kept as specified, and no product code was changed for the miss. The other
+targets in the same run: cold start (median of 3) 0.71 s, query p99 4.4 us, `version_position` p99
+4.4 us, all met. The remaining non-flush write cost is the O(view length) view record, which M2a1
+removes.
+
+`qa-perf` (`cargo qa --only perf`), medians in ms, before = the baseline recorded before this
+change:
+
+| op | before | after | change |
+|---|---|---|---|
+| `write_single` | 9.400 | 5.097 | -46% |
+| `write_batch_200` | 15.850 | 8.227 | -48% |
+| `propose_land_500_flat` | 129.974 | 124.220 | -4% |
+| `cold_open` | 85.969 | 87.475 | +2% |
+| `cold_open_lagging` | - (new) | 91.219 | - |
+
+`cold_open_lagging` restores an index checkpointed before the timed writes and the landings, then
+times `Rdy::open` plus the first read of canon: it caught up 4,497 frames from the log in that
+time, against the < 2 s target at 100k (M2 spec 15.1, index catch-up included). The project is the
+perf tier's ~10k-block workload, not 100k blocks.
+
+### Linux
+
+Measured 2026-10-04 on the **Linux** configuration of the table at the top (x86_64, 8 cores,
+30 GB, Ubuntu 24.04.5 LTS, kernel 6.17, consumer NVMe SSD without power-loss protection, ext4),
+release build, Rust 1.99.0, same commit and test as the macOS run above. The target on this class
+is write p99 < 5 ms. Three consecutive runs of
+`cargo test -p rdy-engine --release --test perf_budget -- --ignored --nocapture`:
+
+| run | write p50 | write p95 | write p99 | write max | flush p99 (4 KB `write_all_at` + `sync_data`, 50 runs) |
+|---|---|---|---|---|---|
+| 1 (first run after build) | 1.23 ms | 1.29 ms | 8.73 ms | 27.37 ms | 0.31 ms |
+| 2 | 3.56 ms | 3.65 ms | 29.76 ms | 403.38 ms | 1.41 ms |
+| 3 | 3.20 ms | 3.35 ms | 5.75 ms | 29.14 ms | 1.29 ms |
+
+Verdict: **missed** on Linux in all three runs (write p99 8.73, 29.76 and 5.75 ms against
+< 5 ms). The body meets it with room: p50 1.2-3.6 ms and p95 1.3-3.7 ms, with p50 to p95 under
+0.2 ms in every run. The miss is in the tail: in each run between 2 and 9 of the 200 writes took
+over 5 ms (p99 is the second-slowest write, p95 the tenth-slowest). Against the two-flush runs in
+"Linux results" (p50 4.6-5.1 ms, p99 9.5-29.8 ms), the median dropped by between a quarter and
+three quarters. The steady-run p99 dropped from about 10 ms to 5.8-8.7 ms. The
+large maxima (27-403 ms, the 403 ms once, in run 2) recur on this drive and fit the occasional slow
+flushes described there; they were not profiled in this run. The drive's own flush cost moved between runs
+(flush p99 0.31 ms in run 1, 1.3-1.4 ms in runs 2 and 3), and the write median moved with it. The
+assertion in `perf_budget` is kept, and no product code was changed for the miss. The other
+targets were met in every run: cold start (median of 3) 0.46-0.47 s, query p99 2.3-8.0 us,
+`version_position` p99 3.2-4.1 us.
+
+`qa-perf` (`cargo qa --only perf --rebaseline`) recorded this class's first baseline in
+`crates/rdy-qa/qa-baseline.json`. Medians in ms: `write_single` 2.628, `write_batch_200` 4.691,
+`propose_land_500_flat` 89.492, `cold_open` 46.818, `cold_open_lagging` 58.126 (caught up 4,497
+frames), `render` 1056.201, `export_import` 257.593.

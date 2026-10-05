@@ -397,16 +397,91 @@ pub async fn pump_lines<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     }
 }
 
+/// How often `serve_stdio` looks for an idle store to checkpoint.
+const CHECKPOINT_TICK: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// What the idle ticker tells the operator: the first failed checkpoint, once, until one succeeds.
+/// The store records the failure too (`Store::last_checkpoint_error`); every write is still
+/// durable in the log, so a failing checkpoint only lets the index lag.
+#[derive(Default)]
+struct IdleCheckpointLog {
+    failing: bool,
+}
+
+impl IdleCheckpointLog {
+    /// The line to write to stderr for this tick's result, if any.
+    fn note(&mut self, r: &Result<bool, RdyError>) -> Option<String> {
+        match r {
+            Err(e) if !self.failing => {
+                self.failing = true;
+                Some(format!(
+                    "rdy mcp: the idle index checkpoint failed ({e}); writes are still durable in the log, and it is retried every tick"
+                ))
+            }
+            Err(_) | Ok(false) => None,
+            Ok(true) => {
+                self.failing = false;
+                None
+            }
+        }
+    }
+}
+
 pub async fn serve_stdio(project: PathBuf) -> anyhow::Result<()> {
     let rdy = Rdy::open(&project)?;
     let (to_server, from_pump) = tokio::io::duplex(1 << 16);
     tokio::spawn(async move {
         let _ = pump_lines(tokio::io::stdin(), to_server, tools::MAX_REQUEST_BYTES).await;
     });
-    let service = RdyServer::new(rdy)
-        .serve((from_pump, tokio::io::stdout()))
-        .await?;
-    service.waiting().await?;
+    let server = RdyServer::new(rdy);
+    // `serve` consumes the server: keep the state for the idle ticker and the close at exit
+    let state = Arc::clone(&server.state);
+    let ticker = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(CHECKPOINT_TICK);
+            let log = Arc::new(Mutex::new(IdleCheckpointLog::default()));
+            loop {
+                tick.tick().await;
+                let (state, log) = (Arc::clone(&state), Arc::clone(&log));
+                let _ = tokio::task::spawn_blocking(move || {
+                    let r = {
+                        let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
+                        st.rdy.checkpoint_if_idle()
+                    };
+                    let mut log = log.lock().unwrap_or_else(|p| p.into_inner());
+                    if let Some(line) = log.note(&r) {
+                        eprintln!("{line}");
+                    }
+                })
+                .await;
+            }
+        })
+    };
+    let service = server.serve((from_pump, tokio::io::stdout())).await?;
+    let quit = service.waiting().await;
+    ticker.abort();
+    let _ = ticker.await;
+    let _ = tokio::task::spawn_blocking(move || {
+        // the clean close: checkpoint, close the index, remove the sentinel; a tool call still
+        // holding the state (none should, once the service has ended) leaves the close to the
+        // last drop, which reports a failure the same way
+        let closed = match Arc::try_unwrap(state) {
+            Ok(st) => st.into_inner().unwrap_or_else(|p| p.into_inner()).rdy.close(),
+            Err(state) => state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .rdy
+                .checkpoint(),
+        };
+        if let Err(e) = closed {
+            eprintln!(
+                "rdy mcp: the store did not close cleanly ({e}); the next open catches its index up from the log"
+            );
+        }
+    })
+    .await;
+    quit?;
     Ok(())
 }
 
@@ -438,6 +513,27 @@ mod tests {
         // no id to answer: dropped
         let out = pump(&format!("{}\n{{\"c\":3}}\n", "z".repeat(100)), 64).await;
         assert_eq!(out.lines().collect::<Vec<_>>(), vec!["{\"c\":3}"]);
+    }
+
+    /// Final review (Important 3): the idle ticker reports the first failed checkpoint once, stays
+    /// quiet while it keeps failing, and reports the next failure again after a success.
+    #[test]
+    fn ckpt1_the_idle_ticker_reports_a_failing_checkpoint_once_until_one_succeeds() {
+        let fail = || -> Result<bool, RdyError> {
+            Err(RdyError::new("E_IO", "disk refused", "free space"))
+        };
+        let mut log = IdleCheckpointLog::default();
+        assert_eq!(log.note(&Ok(false)), None);
+        let first = log.note(&fail()).expect("the first failure is reported");
+        assert!(first.contains("disk refused"), "{first}");
+        assert_eq!(log.note(&fail()), None, "a repeat is not");
+        assert_eq!(log.note(&Ok(false)), None, "an idle tick changes nothing");
+        assert_eq!(log.note(&fail()), None);
+        assert_eq!(log.note(&Ok(true)), None);
+        assert!(
+            log.note(&fail()).is_some(),
+            "reported again after a success"
+        );
     }
 }
 
