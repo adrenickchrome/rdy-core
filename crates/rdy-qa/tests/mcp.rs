@@ -264,22 +264,3 @@ fn mcp_pipelined_requests_are_all_answered_in_time() {
         assert_eq!(v["id"], *id, "reply {n} out of order: {v}");
     }
 }
-
-#[test]
-fn mcp_a_second_server_on_the_same_project_is_refused_quickly() {
-    let (dir, mut c) = server();
-    session(&mut c);
-    let out = std::process::Command::new(rdy_bin())
-        .args(["mcp", "--project"])
-        .arg(dir.path())
-        .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("E_LOCKED") || err.to_lowercase().contains("lock"),
-        "{err}"
-    );
-    c.alive();
-}

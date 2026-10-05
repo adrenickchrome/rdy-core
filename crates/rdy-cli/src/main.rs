@@ -606,6 +606,18 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                 format!("Initialized rdy project in {} (pack {pack})", dir.display()),
             ))
         }
+        Cmd::Mcp if !env.no_daemon => {
+            // the proxy; the runtime is not waited on at exit (a stdin read may be pending)
+            let rt = runtime()?;
+            let start_timeout = serve_config(&env.project).start_timeout;
+            let code = rt.block_on(rdy_daemon::run_stdio(
+                env.project.clone(),
+                VERSION.into(),
+                start_timeout,
+            ));
+            rt.shutdown_background();
+            std::process::exit(code);
+        }
         Cmd::Mcp => {
             let rt = tokio::runtime::Runtime::new().map_err(|e| io_error(e, "retry"))?;
             rt.block_on(rdy_mcp::server::serve_stdio(env.project.clone()))

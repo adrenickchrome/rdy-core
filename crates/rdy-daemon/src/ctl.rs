@@ -16,7 +16,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWrite
 use tokio::sync::watch;
 
 /// The longest request line served, without its newline. Equal to `rdy_mcp::tools::MAX_REQUEST_BYTES`.
-pub const MAX_CTL_LINE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_CTL_LINE_BYTES: usize = rdy_mcp::tools::MAX_REQUEST_BYTES;
 
 const E_INTERNAL: &str = "E_INTERNAL";
 

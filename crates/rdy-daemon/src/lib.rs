@@ -44,3 +44,6 @@ pub use ops::{OPS, OpContext, dispatch, quarantine};
 pub mod serve;
 
 pub use serve::{CtlSession, ServeError, ServeHandler, ServeOptions, ServeRun, serve, start};
+pub mod proxy;
+
+pub use proxy::run_stdio;

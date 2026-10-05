@@ -1,11 +1,13 @@
 //! An MCP stdio client for tests. The server is untrusted: every request has a deadline, and a
 //! missing or late reply is a Critical failure (the server is killed and the test panics).
+use crate::daemon::Served;
 use crate::fixtures::rdy_bin;
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const DEADLINE: Duration = Duration::from_secs(2);
@@ -39,6 +41,9 @@ pub struct McpClient {
     writer: Sender<String>,
     written: Receiver<bool>,
     lines: Receiver<String>,
+    /// The child's stderr, drained on a thread (a proxy child only; empty otherwise).
+    stderr: Arc<Mutex<String>>,
+    stderr_drain: Option<std::thread::JoinHandle<()>>,
     pending: Vec<Value>,
     next: u64,
     calls: usize,
@@ -57,16 +62,53 @@ impl McpClient {
         McpClient::start_with_env(project, &[])
     }
 
+    /// `rdy mcp --no-daemon --project <project>`: the in-process stdio server, no daemon.
     pub fn start_with_env(project: &Path, env: &[(&str, &str)]) -> McpClient {
-        let mut child = Command::new(rdy_bin())
-            .args(["mcp", "--project"])
+        let mut cmd = Command::new(rdy_bin());
+        cmd.args(["mcp", "--no-daemon", "--project"])
             .arg(project)
             .envs(env.iter().copied())
+            .stderr(Stdio::null());
+        McpClient::launch(cmd)
+    }
+
+    /// `rdy mcp --project <s.dir>` as `s`'s human: the proxy to the project's daemon, which it
+    /// starts if none runs (`Served` stops it at drop). Its stderr is kept for `wait_exit`.
+    pub fn start_proxy(s: &Served) -> McpClient {
+        let mut cmd = Command::new(rdy_bin());
+        cmd.args(["mcp", "--project"])
+            .arg(s.dir.path())
+            .env_remove("RDY_ACTOR")
+            .env_remove("RDY_RUN")
+            .env_remove("RDY_NO_DAEMON")
+            .envs(s.env_pairs())
+            .stderr(Stdio::piped());
+        McpClient::launch(cmd)
+    }
+
+    fn launch(mut cmd: Command) -> McpClient {
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
             .spawn()
             .expect("spawn rdy mcp");
+        let stderr = Arc::new(Mutex::new(String::new()));
+        let stderr_drain = child.stderr.take().map(|mut err| {
+            // drained so a full pipe never blocks the child
+            let sink = stderr.clone();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                loop {
+                    match err.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => sink
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push_str(&String::from_utf8_lossy(&buf[..n])),
+                    }
+                }
+            })
+        });
         let out = child.stdout.take().expect("stdout");
         let (tx, rx) = channel();
         std::thread::spawn(move || {
@@ -106,6 +148,8 @@ impl McpClient {
             writer: wtx,
             written: drx,
             lines: rx,
+            stderr,
+            stderr_drain,
             pending: vec![],
             next: 0,
             calls: 0,
@@ -117,6 +161,41 @@ impl McpClient {
         c.recv(id, Duration::from_secs(10));
         c.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
         c
+    }
+
+    /// Closes the child's stdin: the writer thread ends and drops the pipe.
+    pub fn close_stdin(&mut self) {
+        let (tx, _) = channel();
+        self.writer = tx;
+    }
+
+    /// Waits at most `budget` for the child to exit: its exit code (`None` when killed by a
+    /// signal) and the stderr captured so far. Past `budget` it is a Critical failure.
+    pub fn wait_exit(&mut self, budget: Duration) -> (Option<i32>, String) {
+        let end = Instant::now() + budget;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    // the drain thread ends at the pipe's EOF, which follows the exit; it is
+                    // waited on briefly, in case a grandchild still holds the pipe
+                    if let Some(h) = self.stderr_drain.take() {
+                        let t = Instant::now();
+                        while !h.is_finished() && t.elapsed() < Duration::from_secs(1) {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    let err = self
+                        .stderr
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    return (status.code(), err);
+                }
+                Ok(None) if Instant::now() < end => std::thread::sleep(Duration::from_millis(20)),
+                Ok(None) => self.critical(&format!("the server did not exit within {budget:?}")),
+                Err(e) => self.critical(&format!("waiting for the server failed: {e}")),
+            }
+        }
     }
 
     pub fn next_id(&mut self) -> u64 {

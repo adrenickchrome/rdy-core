@@ -579,15 +579,35 @@ async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
 
 /// Serves one MCP session over `(r, w)` against `engine` until the peer closes. The daemon owns
 /// the checkpoint tick and the close, so neither runs here. `sid` is the daemon's session id.
+///
+/// The session runs on its own single-threaded runtime, on a blocking thread, as `serve_stdio`
+/// does: the FIFO ticket in [`RdyServer::run`] keeps arrival order only when rmcp's per-request
+/// tasks reach it in the order they were spawned, which a multi-threaded runtime does not
+/// promise (its LIFO slot polls the newest task first). Dropping the returned future ends the
+/// session: the service is cancelled and the stream closed; a tool call already on the
+/// session's blocking pool finishes first.
 pub async fn serve_on<R, W>(engine: Arc<dyn Engine>, sid: u64, r: R, w: W) -> anyhow::Result<()>
 where
     R: AsyncRead + Send + Unpin + 'static,
     W: AsyncWrite + Send + Unpin + 'static,
 {
-    let server = RdyServer::new(engine, Some(sid));
-    let service = server.serve((r, w)).await?;
-    service.waiting().await?;
-    Ok(())
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    // dropped with this future, which ends the session
+    let (_cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+    tokio::task::spawn_blocking(move || {
+        rt.block_on(async move {
+            let server = RdyServer::new(engine, Some(sid));
+            let service = server.serve((r, w)).await?;
+            tokio::select! {
+                quit = service.waiting() => { quit?; }
+                _ = cancelled => {}
+            }
+            Ok(())
+        })
+    })
+    .await?
 }
 
 #[cfg(test)]
