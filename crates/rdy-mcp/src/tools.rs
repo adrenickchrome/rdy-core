@@ -66,7 +66,7 @@ pub struct SessionParams {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ScopeParams {
-    /// "canon", a view name, "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
+    /// "canon", a view name (an existing view, or your session's), "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
     pub scope: Option<String>,
     pub max_tokens: Option<usize>,
 }
@@ -74,7 +74,7 @@ pub struct ScopeParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct IdParams {
     pub id: String,
-    /// "canon", a view name, "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
+    /// "canon", a view name (an existing view, or your session's), "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
     pub scope: Option<String>,
     /// rdy_read only: compact (default), markdown or yaml.
     pub format: Option<String>,
@@ -251,7 +251,8 @@ fn session(st: &McpState) -> Result<Session, RdyError> {
 
 fn scope_of(st: &McpState, s: &Option<String>) -> Result<Scope, RdyError> {
     match s {
-        Some(text) => st.rdy.resolve_scope(text),
+        // scope1: an unknown view is not found, unless it is this session's own view
+        Some(text) => st.rdy.resolve_read_scope(text, Some(&st.view)),
         // ses1: a reader session whose view is canon reads canon by default
         None if st.view == "canon" => Ok(Scope::Canon),
         None => Ok(Scope::View(st.view.clone())),

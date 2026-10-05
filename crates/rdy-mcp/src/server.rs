@@ -90,7 +90,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Read a document, folder or subtree by id or path (e.g. wallets/transactions) as compact lines (default: each block's id, type and its whole statement, prompt, name or title, else its body's first sentence; references as bare ids), markdown or yaml. max_tokens cuts long output. scope is 'canon', a view name, 'tag:<version>' or 'landing:<id>'."
+        description = "Read a document, folder or subtree by id or path (e.g. wallets/transactions) as compact lines (default: each block's id, type and its whole statement, prompt, name or title, else its body's first sentence; references as bare ids), markdown or yaml. max_tokens cuts long output. scope is 'canon', an existing view's name (or your session's), 'tag:<version>' or 'landing:<id>'; an unknown view is E_NOT_FOUND."
     )]
     fn rdy_read(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
         self.run("rdy_read", p, tools::rdy_read)
