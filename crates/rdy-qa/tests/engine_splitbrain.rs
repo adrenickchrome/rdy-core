@@ -121,7 +121,7 @@ fn cmd() -> impl Strategy<Value = Cmd> {
 
 /// Ids in `scope` of the given types, sorted, so picks are deterministic.
 fn ids(r: &mut Rdy, scope: &Scope, types: &[&str]) -> Vec<String> {
-    let m = r.materialized(scope).unwrap();
+    let m = r.read().materialized(scope).unwrap();
     m.iter()
         .filter(|b| types.contains(&b.block_type.as_str()))
         .map(|b| b.id.to_string())
@@ -229,7 +229,7 @@ impl Sim<'_> {
                     s.effective_rebalances += 1;
                 }
                 drop(s);
-                if let Err(x) = check(&mut self.r, &Scope::View(view.clone())) {
+                if let Err(x) = check(&self.r, &Scope::View(view.clone())) {
                     return Err(TestCaseError::fail(format!(
                         "after {c:?}, view {view} broke: {x:?}"
                     )));
@@ -270,7 +270,7 @@ impl Sim<'_> {
                 s.lands_ok += 1;
                 s.siblings_rekeyed += usize::from(rekeyed);
                 drop(s);
-                if let Err(x) = check(&mut self.r, &Scope::Canon) {
+                if let Err(x) = check(&self.r, &Scope::Canon) {
                     return Err(TestCaseError::fail(format!(
                         "after {c:?} ({view}), canon broke: {x:?}"
                     )));
@@ -291,7 +291,7 @@ impl Sim<'_> {
                     .entry(refusal(&e))
                     .or_default() += 1;
                 self.generation[slot as usize] += 1;
-                if let Err(x) = check(&mut self.r, &Scope::Canon) {
+                if let Err(x) = check(&self.r, &Scope::Canon) {
                     return Err(TestCaseError::fail(format!(
                         "after refused {c:?} ({view}: {}), canon broke: {x:?}",
                         e.code
@@ -308,9 +308,10 @@ impl Sim<'_> {
         for (name, snap) in self.tags.clone() {
             let scope = self
                 .r
+                .read()
                 .resolve_scope(&format!("tag:{name}"))
                 .map_err(|e| TestCaseError::fail(format!("after {c:?}, tag {name}: {e}")))?;
-            let now = self.r.materialized(&scope).unwrap().snapshot_id();
+            let now = self.r.read().materialized(&scope).unwrap().snapshot_id();
             if now != snap {
                 return Err(TestCaseError::fail(format!(
                     "after {c:?}, version {name} changed: tagged {snap}, now {now}"
@@ -318,8 +319,8 @@ impl Sim<'_> {
             }
         }
         if let Some((name, _)) = self.tags.last().cloned() {
-            let scope = self.r.resolve_scope(&format!("tag:{name}")).unwrap();
-            if let Err(x) = check(&mut self.r, &scope) {
+            let scope = self.r.read().resolve_scope(&format!("tag:{name}")).unwrap();
+            if let Err(x) = check(&self.r, &scope) {
                 return Err(TestCaseError::fail(format!(
                     "after {c:?}, version {name} broke: {x:?}"
                 )));
@@ -339,8 +340,8 @@ impl Sim<'_> {
                 "after {c:?}, tagging {name} failed: {e:?}"
             )));
         }
-        let scope = self.r.resolve_scope(&format!("tag:{name}")).unwrap();
-        let snap = self.r.materialized(&scope).unwrap().snapshot_id();
+        let scope = self.r.read().resolve_scope(&format!("tag:{name}")).unwrap();
+        let snap = self.r.read().materialized(&scope).unwrap().snapshot_id();
         self.tags.push((name, snap));
         self.tagged_head = head;
         self.stats.borrow_mut().tags += 1;
@@ -385,6 +386,7 @@ impl Sim<'_> {
                 let pid = BlockId::parse(&p).unwrap();
                 let first = self
                     .r
+                    .read()
                     .materialized(&sc)
                     .unwrap()
                     .children(Some(&pid))
@@ -397,7 +399,7 @@ impl Sim<'_> {
                         if !self.write(*vi, op, c)? {
                             return Ok(());
                         }
-                        let m = self.r.materialized(&sc).unwrap();
+                        let m = self.r.read().materialized(&sc).unwrap();
                         m.children(Some(&pid))[0].id.to_string()
                     }
                 };
@@ -533,7 +535,7 @@ impl Sim<'_> {
                             .writes_ok
                             .entry("decide")
                             .or_default() += 1;
-                        if let Err(x) = check(&mut self.r, &sc) {
+                        if let Err(x) = check(&self.r, &sc) {
                             return Err(TestCaseError::fail(format!(
                                 "after {c:?}, view {view} broke: {x:?}"
                             )));

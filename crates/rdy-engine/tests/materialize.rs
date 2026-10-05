@@ -28,7 +28,11 @@ fn pmap1_with_leaves_the_receiver_untouched_and_shares_untouched_blocks() {
     let dir = tempfile::tempdir().unwrap();
     testkit::generate(dir.path(), 2_000);
     let r = Rdy::open(dir.path()).unwrap();
-    let m = r.materialized(&Scope::View("work".into())).unwrap().clone();
+    let m = r
+        .read()
+        .materialized(&Scope::View("work".into()))
+        .unwrap()
+        .clone();
     let before = m.snapshot();
     let victim: BlockId = m
         .iter()
@@ -76,7 +80,7 @@ fn pmap1_with_equals_build_of_the_applied_snapshot() {
     testkit::generate(dir.path(), 300);
     let mut r = Rdy::open(dir.path()).unwrap();
     let work = Scope::View("work".into());
-    let before = r.materialized(&work).unwrap().clone();
+    let before = r.read().materialized(&work).unwrap().clone();
     let section = before
         .iter()
         .find(|b| b.block_type == "section")
@@ -135,7 +139,11 @@ fn pmap1_with_on_ten_thousand_blocks_is_under_a_millisecond() {
     let dir = tempfile::tempdir().unwrap();
     testkit::generate(dir.path(), 10_000);
     let r = Rdy::open(dir.path()).unwrap();
-    let m = r.materialized(&Scope::View("work".into())).unwrap().clone();
+    let m = r
+        .read()
+        .materialized(&Scope::View("work".into()))
+        .unwrap()
+        .clone();
     let section = m
         .iter()
         .find(|b| b.block_type == "section")

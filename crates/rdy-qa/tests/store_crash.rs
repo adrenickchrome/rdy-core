@@ -84,7 +84,7 @@ fn kill1_engine_writes_killed_at_random_keep_every_acknowledged_write() {
                 acked.push(id.to_string());
             }
         }
-        let mut r = Rdy::open(dir.path()).unwrap_or_else(|e| panic!("round {round}: {e}"));
+        let r = Rdy::open(dir.path()).unwrap_or_else(|e| panic!("round {round}: {e}"));
         let report = r.store().open_report().clone();
         assert!(
             !report.index_rebuilt,
@@ -95,14 +95,14 @@ fn kill1_engine_writes_killed_at_random_keep_every_acknowledged_write() {
             "round {round}: the index lagged: {report:?}"
         );
         let work = Scope::View("work".into());
-        let m = r.materialized(&work).unwrap().clone();
+        let m = r.read().materialized(&work).unwrap().clone();
         for id in &acked {
             assert!(
                 m.get(&BlockId::parse(id).unwrap()).is_some(),
                 "round {round}: lost {id}"
             );
         }
-        invariants::check(&mut r, &work).unwrap_or_else(|v| panic!("round {round}: {v:?}"));
+        invariants::check(&r, &work).unwrap_or_else(|v| panic!("round {round}: {v:?}"));
         r.fsck().unwrap();
     }
 }
@@ -133,7 +133,7 @@ fn kill1_a_killed_mcp_server_keeps_every_acknowledged_write() {
         "{:?}",
         r.store().open_report()
     );
-    let m = r.materialized(&Scope::View(view)).unwrap().clone();
+    let m = r.read().materialized(&Scope::View(view)).unwrap().clone();
     for id in &ids {
         assert!(m.get(&BlockId::parse(id).unwrap()).is_some(), "lost {id}");
     }

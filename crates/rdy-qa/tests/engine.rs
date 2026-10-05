@@ -17,7 +17,8 @@ fn section_project() -> (tempfile::TempDir, Rdy, String) {
 
 fn children(r: &mut Rdy, scope: &Scope, parent: &str) -> Vec<(String, String)> {
     let p = rdy_model::BlockId::parse(parent).unwrap();
-    r.materialized(scope)
+    r.read()
+        .materialized(scope)
         .unwrap()
         .children(Some(&p))
         .iter()
@@ -46,21 +47,28 @@ fn ord1_append_after_a_tie_goes_after_the_whole_tie() {
     // insert after the first twin (by (order, id)) — must not panic, must land after both twins
     let first_twin = {
         let p = rdy_model::BlockId::parse(&s).unwrap();
-        r.materialized(&Scope::Canon).unwrap().children(Some(&p))[1]
+        r.read()
+            .materialized(&Scope::Canon)
+            .unwrap()
+            .children(Some(&p))[1]
             .id
             .to_string()
     };
     write(&mut r, "vc", json!([{"op": "create", "type": "claim", "parent": s, "after": first_twin, "body": "after twin"}])).unwrap();
     let kids = children(&mut r, &Scope::View("vc".into()), &s);
     assert_eq!(kids.last().unwrap().1, "after twin", "{kids:?}");
-    check(&mut r, &Scope::View("vc".into())).unwrap();
+    check(&r, &Scope::View("vc".into())).unwrap();
 }
 
 #[test]
 fn ord3_inserting_at_one_spot_hits_the_cap_then_rebalance_restores_room() {
     let (_d, mut r, s) = section_project();
     let p = rdy_model::BlockId::parse(&s).unwrap();
-    let anchor = r.materialized(&Scope::Canon).unwrap().children(Some(&p))[0]
+    let anchor = r
+        .read()
+        .materialized(&Scope::Canon)
+        .unwrap()
+        .children(Some(&p))[0]
         .id
         .to_string();
     write(
@@ -99,14 +107,18 @@ fn ord3_inserting_at_one_spot_hits_the_cap_then_rebalance_restores_room() {
     );
     assert!(after.iter().all(|(k, _)| k.len() <= 4), "{after:?}");
     write(&mut r, "work", json!([{"op": "create", "type": "claim", "parent": s, "after": anchor, "body": "fits again"}])).unwrap();
-    check(&mut r, &Scope::View("work".into())).unwrap();
+    check(&r, &Scope::View("work".into())).unwrap();
 }
 
 #[test]
 fn ord3_rebalance_keeps_frozen_decisions_as_anchors() {
     let (_d, mut r, s) = section_project();
     let p = rdy_model::BlockId::parse(&s).unwrap();
-    let first = r.materialized(&Scope::Canon).unwrap().children(Some(&p))[0]
+    let first = r
+        .read()
+        .materialized(&Scope::Canon)
+        .unwrap()
+        .children(Some(&p))[0]
         .id
         .to_string();
     // movables before the anchor, one of them squeezed in between two others
@@ -135,7 +147,7 @@ fn ord3_rebalance_keeps_frozen_decisions_as_anchors() {
         .unwrap();
     land(&mut r, "work").unwrap();
     let did = rdy_model::BlockId::parse(&d.created["$decision"]).unwrap();
-    let frozen_order = r.block(&Scope::Canon, &did).unwrap().order;
+    let frozen_order = r.read().block(&Scope::Canon, &did).unwrap().order;
     // a rebalance re-keys every movable child, so it can't share a write with an op that already touched one
     let e = write(&mut r, "work", json!([{"op": "create", "type": "claim", "parent": s, "body": "x"}, {"op": "rebalance", "parent": s}])).unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT", "{e}");
@@ -149,7 +161,8 @@ fn ord3_rebalance_keeps_frozen_decisions_as_anchors() {
     write(&mut r, "work", json!([{"op": "create", "type": "claim", "parent": s, "after": did.to_string(), "body": "x"}])).unwrap();
     let work = Scope::View("work".into());
     let ids = |r: &mut Rdy| -> Vec<(String, String, String)> {
-        r.materialized(&work)
+        r.read()
+            .materialized(&work)
             .unwrap()
             .children(Some(&p))
             .iter()
@@ -185,9 +198,9 @@ fn ord3_rebalance_keeps_frozen_decisions_as_anchors() {
         movable_keys(&after).iter().all(|k| k.len() <= 4),
         "{after:?}"
     );
-    assert_eq!(r.block(&work, &did).unwrap().order, frozen_order);
+    assert_eq!(r.read().block(&work, &did).unwrap().order, frozen_order);
     land(&mut r, "work").unwrap();
-    check(&mut r, &Scope::Canon).unwrap();
+    check(&r, &Scope::Canon).unwrap();
 }
 
 #[test]
@@ -243,7 +256,7 @@ fn ord3_legacy_long_keys_are_repaired_by_rebalance() {
         json!([{"op": "update", "id": "c-AAAAA", "body": "edited"}]),
     )
     .unwrap();
-    check(&mut r, &Scope::View("work".into())).unwrap();
+    check(&r, &Scope::View("work".into())).unwrap();
 }
 
 #[test]
@@ -330,14 +343,15 @@ fn ord3_rebalance_at_the_top_level_keeps_m1_doc_names() {
     let work = Scope::View("work".into());
     let id = rdy_model::BlockId::parse("d-AAAAA").unwrap();
     let name = r
+        .read()
         .materialized(&work)
         .unwrap()
         .name_of(&id)
         .expect("an M1 doc has a read name");
     write(&mut r, "work", json!([{"op": "rebalance"}])).unwrap();
-    let b = r.block(&work, &id).unwrap();
+    let b = r.read().block(&work, &id).unwrap();
     assert_eq!(b.field_str("name"), Some(name.as_str()), "{b:?}");
-    check(&mut r, &work).unwrap();
+    check(&r, &work).unwrap();
 }
 
 #[test]
@@ -434,7 +448,11 @@ fn ord3_a_rebalance_that_changes_nothing_is_refused() {
 fn ord3_rebalance_landed_under_an_open_proposal_warns_siblings_rekeyed() {
     let (_d, mut r, s) = section_project();
     let p = rdy_model::BlockId::parse(&s).unwrap();
-    let first = r.materialized(&Scope::Canon).unwrap().children(Some(&p))[0]
+    let first = r
+        .read()
+        .materialized(&Scope::Canon)
+        .unwrap()
+        .children(Some(&p))[0]
         .id
         .to_string();
     // make the parent untidy in canon so a rebalance has work to do
@@ -478,7 +496,7 @@ fn ord3_rebalance_landed_under_an_open_proposal_warns_siblings_rekeyed() {
         "{:?}",
         landed.warnings
     );
-    check(&mut r, &Scope::Canon).unwrap();
+    check(&r, &Scope::Canon).unwrap();
 }
 
 /// W_SIBLINGS_REKEYED is broader than rebalance: any landed re-key of a sibling (here an
@@ -487,7 +505,11 @@ fn ord3_rebalance_landed_under_an_open_proposal_warns_siblings_rekeyed() {
 fn ord3_a_landed_move_of_one_sibling_also_warns_siblings_rekeyed() {
     let (_d, mut r, s) = section_project();
     let p = rdy_model::BlockId::parse(&s).unwrap();
-    let first = r.materialized(&Scope::Canon).unwrap().children(Some(&p))[0]
+    let first = r
+        .read()
+        .materialized(&Scope::Canon)
+        .unwrap()
+        .children(Some(&p))[0]
         .id
         .to_string();
     let res = write(

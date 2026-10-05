@@ -360,7 +360,7 @@ fn every_page_carries_the_version_label() {
         pages(out.path(), &did)[2].contains("<span class=\"version\">v0.1.0 + 1 landing</span>")
     );
 
-    let at = r.resolve_scope("tag:v0.1.0").unwrap();
+    let at = r.read().resolve_scope("tag:v0.1.0").unwrap();
     let out = render(&mut r, &at);
     for page in pages(out.path(), &did) {
         assert!(

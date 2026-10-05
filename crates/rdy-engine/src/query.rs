@@ -1,5 +1,5 @@
 use crate::error::*;
-use crate::{Materialized, Rdy, ReadState, Scope};
+use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Edge, Suspect};
 use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
 use serde::Serialize;
@@ -223,27 +223,5 @@ impl ReadState {
                 })
             })
             .collect())
-    }
-}
-
-impl Rdy {
-    /// Forwarder to `ReadState::suspects` (removed once every caller reads the state).
-    pub fn suspects(&self, scope: &Scope) -> Result<Vec<Suspect>, RdyError> {
-        self.read().suspects(scope)
-    }
-
-    /// Forwarder to `ReadState::context` (removed once every caller reads the state).
-    pub fn context(&self, scope: &Scope, id: &BlockId) -> Result<Context, RdyError> {
-        self.read().context(scope, id)
-    }
-
-    /// Forwarder to `ReadState::impact` (removed once every caller reads the state).
-    pub fn impact(
-        &self,
-        scope: &Scope,
-        id: &BlockId,
-        depth: u32,
-    ) -> Result<Vec<ImpactItem>, RdyError> {
-        self.read().impact(scope, id, depth)
     }
 }

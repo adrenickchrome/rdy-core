@@ -123,27 +123,29 @@ fn a_version_cannot_name_an_earlier_landing_than_the_current_one() {
 fn landings_resolve_by_full_hash_or_a_unique_prefix() {
     let (_d, mut r, l) = project(3);
     let first: Hash = l[0].parse().unwrap();
-    assert_eq!(r.resolve_landing(&l[0]).unwrap(), first);
+    assert_eq!(r.read().resolve_landing(&l[0]).unwrap(), first);
     assert_eq!(
-        r.resolve_landing(&l[0][..12]).unwrap(),
+        r.read().resolve_landing(&l[0][..12]).unwrap(),
         first,
         "rdy log shows 12 characters"
     );
     assert_eq!(
-        r.resolve_landing(&l[0][..12].to_uppercase()).unwrap(),
+        r.read()
+            .resolve_landing(&l[0][..12].to_uppercase())
+            .unwrap(),
         first
     );
     assert_eq!(
-        r.resolve_landing(&l[0][..5]).unwrap_err().code,
+        r.read().resolve_landing(&l[0][..5]).unwrap_err().code,
         "E_NOT_FOUND",
         "fewer than 6"
     );
     assert_eq!(
-        r.resolve_landing("ffffffffffff").unwrap_err().code,
+        r.read().resolve_landing("ffffffffffff").unwrap_err().code,
         "E_NOT_FOUND"
     );
     assert_eq!(
-        r.resolve_landing("not-hex").unwrap_err().code,
+        r.read().resolve_landing("not-hex").unwrap_err().code,
         "E_NOT_FOUND"
     );
     let tagged = r
@@ -175,7 +177,7 @@ fn tagging_needs_a_landing_and_an_approver() {
 #[test]
 fn writes_proposals_and_landings_never_create_versions() {
     let (_d, r, _) = project(3);
-    assert!(r.versions().unwrap().is_empty());
+    assert!(r.read().versions().unwrap().is_empty());
     assert!(r.store().tags().unwrap().is_empty());
 }
 
@@ -185,7 +187,13 @@ fn versions_are_listed_oldest_first() {
     r.tag(&founder(), "v0.1.0", Some(&l[0]), None).unwrap();
     r.tag(&founder(), "v0.2.0", Some(&l[1]), None).unwrap();
     r.tag(&founder(), "v0.10.0", None, None).unwrap();
-    let names: Vec<String> = r.versions().unwrap().into_iter().map(|v| v.name).collect();
+    let names: Vec<String> = r
+        .read()
+        .versions()
+        .unwrap()
+        .into_iter()
+        .map(|v| v.name)
+        .collect();
     assert_eq!(
         names,
         ["v0.1.0", "v0.2.0", "v0.10.0"],
@@ -194,13 +202,13 @@ fn versions_are_listed_oldest_first() {
 }
 
 fn label(r: &Rdy, scope: &Scope) -> String {
-    r.version_position(scope).unwrap().label
+    r.read().version_position(scope).unwrap().label
 }
 
 #[test]
 fn position_without_versions() {
     let (_d, r, _) = project(2);
-    let p = r.version_position(&Scope::Canon).unwrap();
+    let p = r.read().version_position(&Scope::Canon).unwrap();
     assert_eq!(p.version, None);
     assert_eq!(p.landings_since, 2);
     assert_eq!(p.label, "no version yet");
@@ -212,7 +220,7 @@ fn position_without_versions() {
 fn position_at_and_after_a_version() {
     let (_d, mut r, l) = project(1);
     r.tag(&founder(), "v1.0.0", None, None).unwrap();
-    let p = r.version_position(&Scope::Canon).unwrap();
+    let p = r.read().version_position(&Scope::Canon).unwrap();
     assert_eq!(
         p.version,
         Some(VersionRef {
@@ -255,7 +263,10 @@ fn position_of_a_view_with_unlanded_changes() {
         )
         .unwrap();
     }
-    let p = r.version_position(&Scope::View("run-1".into())).unwrap();
+    let p = r
+        .read()
+        .version_position(&Scope::View("run-1".into()))
+        .unwrap();
     assert_eq!(
         p.view,
         Some(ViewPosition {
@@ -301,9 +312,9 @@ fn position_of_an_as_of_scope_is_frozen() {
     let l1 = land_one(&mut r, "B");
     let l2 = land_one(&mut r, "C");
     r.tag(&founder(), "v2.0.0", None, None).unwrap();
-    let at = r.resolve_scope("tag:v1.0.0").unwrap();
+    let at = r.read().resolve_scope("tag:v1.0.0").unwrap();
     assert_eq!(at, Scope::At(l[0].parse().unwrap()));
-    let p = r.version_position(&at).unwrap();
+    let p = r.read().version_position(&at).unwrap();
     assert!(p.frozen);
     assert_eq!(p.label, "v1.0.0 · frozen snapshot");
     assert_eq!(
@@ -325,11 +336,17 @@ fn a_damaged_tag_ref_does_not_break_version_reads() {
         .unwrap();
     // a write outside the engine must be followed by invalidate() (snap1 precondition)
     r.invalidate();
-    let names: Vec<String> = r.versions().unwrap().into_iter().map(|v| v.name).collect();
+    let names: Vec<String> = r
+        .read()
+        .versions()
+        .unwrap()
+        .into_iter()
+        .map(|v| v.name)
+        .collect();
     assert_eq!(names, ["v0.1.0"]);
     assert_eq!(label(&r, &Scope::Canon), "v0.1.0");
     assert!(matches!(
-        r.resolve_scope("tag:v0.1.0").unwrap(),
+        r.read().resolve_scope("tag:v0.1.0").unwrap(),
         Scope::At(_)
     ));
     let e = r.fsck().unwrap_err();

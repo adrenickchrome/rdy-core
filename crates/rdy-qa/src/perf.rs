@@ -154,7 +154,7 @@ fn measure_timed(op: &str, runs: usize, mut f: impl FnMut(usize) -> Duration) ->
 /// the materialization and graph rebuild that `f` triggers is what gets timed. This is the
 /// agent's real pattern (every write invalidates, so the next read rebuilds); warm reads are
 /// cache hits that no regression could move past the floor.
-fn cold<T>(r: &mut Rdy, f: impl FnOnce(&mut Rdy) -> T) -> (T, Duration) {
+fn cold<T>(r: &mut Rdy, f: impl FnOnce(&Rdy) -> T) -> (T, Duration) {
     r.invalidate();
     let s = Instant::now();
     let out = f(r);
@@ -199,9 +199,9 @@ pub fn run_workload() -> Vec<Measure> {
     // A fixed doc, its section and its first claim.
     let doc_path = "area-0/doc-0";
     assert_eq!(docs[0], doc_path);
-    let doc = r.resolve_path(&Scope::Canon, doc_path).expect("doc");
+    let doc = r.read().resolve_path(&Scope::Canon, doc_path).expect("doc");
     let (section, claim) = {
-        let m = r.materialized(&Scope::Canon).expect("canon");
+        let m = r.read().materialized(&Scope::Canon).expect("canon");
         let section = m.children(Some(&doc))[0].id.clone();
         let claim = m.children(Some(&section))[0].id.clone();
         (section, claim)
@@ -259,26 +259,28 @@ pub fn run_workload() -> Vec<Measure> {
     }));
     // reads timed cold: each run rebuilds what a write would have invalidated
     out.push(measure_timed("context", 20, |_| {
-        cold(&mut r, |r| r.context(&va, &claim).expect("context")).1
+        cold(&mut r, |r| r.read().context(&va, &claim).expect("context")).1
     }));
     out.push(measure_timed("impact", 20, |_| {
-        cold(&mut r, |r| r.impact(&va, &claim, 3).expect("impact")).1
+        cold(&mut r, |r| r.read().impact(&va, &claim, 3).expect("impact")).1
     }));
     // no version tag on this chain, so every run walks all of its landings
     out.push(measure_timed("version_position", 20, |_| {
         cold(&mut deep, |r| {
-            r.version_position(&Scope::Canon).expect("position")
+            r.read().version_position(&Scope::Canon).expect("position")
         })
         .1
     }));
     out.push(measure_timed("resolve_path", 20, |_| {
         cold(&mut r, |r| {
-            r.resolve_path(&Scope::Canon, doc_path).expect("resolve")
+            r.read()
+                .resolve_path(&Scope::Canon, doc_path)
+                .expect("resolve")
         })
         .1
     }));
     out.push(measure("tree_full", 20, |_| {
-        r.tree(&Scope::Canon, None, None).expect("tree");
+        r.read().tree(&Scope::Canon, None, None).expect("tree");
     }));
     out.push(measure("render", 5, |i| {
         let site = dir.path().join(format!("site{i}"));
@@ -286,7 +288,7 @@ pub fn run_workload() -> Vec<Measure> {
     }));
     out.push(measure("export_import", 5, |i| {
         let export = dir.path().join(format!("export{i}"));
-        r.export(&Scope::Canon, &export).expect("export");
+        r.read().export(&Scope::Canon, &export).expect("export");
         let fresh = dir.path().join(format!("fresh{i}"));
         std::fs::create_dir_all(&fresh).expect("mkdir");
         let mut r2 = Rdy::init(&fresh, "rdy-standard").expect("init");
@@ -296,7 +298,7 @@ pub fn run_workload() -> Vec<Measure> {
     drop(r);
     out.push(measure("cold_open", 5, |_| {
         let r = Rdy::open(&proj).expect("open");
-        r.materialized(&Scope::Canon).expect("canon");
+        r.read().materialized(&Scope::Canon).expect("canon");
     }));
     // Cold open with a lagging index: the project is closed, so put the old index back over the
     // current one (outside the timer); open then catches it up from the log.
@@ -305,7 +307,7 @@ pub fn run_workload() -> Vec<Measure> {
         std::fs::copy(&snapshot, &index_path).expect("restore the lagging index");
         let s = Instant::now();
         let r = Rdy::open(&proj).expect("open");
-        r.materialized(&Scope::Canon).expect("canon");
+        r.read().materialized(&Scope::Canon).expect("canon");
         let took = s.elapsed();
         lag.get_or_insert(r.store().open_report().caught_up_frames);
         took
@@ -376,15 +378,15 @@ mod tests {
         .unwrap();
         let doc = BlockId::parse(&res.created["$d"]).unwrap();
         let work = Scope::View("work".into());
-        r.context(&work, &doc).unwrap();
-        assert_eq!(r.is_cached(&work), (true, true), "warm before");
+        r.read().context(&work, &doc).unwrap();
+        assert_eq!(r.read().is_built(&work), (true, true), "warm before");
         let mut at_start = None;
         let (_, took) = cold(&mut r, |r| {
-            at_start = Some(r.is_cached(&work));
-            r.context(&work, &doc).unwrap()
+            at_start = Some(r.read().is_built(&work));
+            r.read().context(&work, &doc).unwrap()
         });
         assert_eq!(at_start, Some((false, false)), "the timed body starts cold");
-        assert_eq!(r.is_cached(&work), (true, true), "the body rebuilt");
+        assert_eq!(r.read().is_built(&work), (true, true), "the body rebuilt");
         assert!(took > std::time::Duration::ZERO);
     }
 

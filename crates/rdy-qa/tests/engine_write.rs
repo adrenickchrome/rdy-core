@@ -25,6 +25,7 @@ fn blob2_a_figure_must_name_a_blob_in_the_store() {
     let (_d, mut r, s) = section_project();
     let section = rdy_model::BlockId::parse(&s).unwrap();
     let block_version = r
+        .read()
         .block(&Scope::View("work".into()), &section)
         .unwrap()
         .version_hash()
@@ -124,7 +125,8 @@ fn dec1_a_writer_cannot_set_decided_at() {
     land(&mut r, "work").unwrap();
     let id = rdy_model::BlockId::parse(&did).unwrap();
     assert!(
-        r.block(&Scope::Canon, &id)
+        r.read()
+            .block(&Scope::Canon, &id)
             .unwrap()
             .field_str("decided_at")
             .is_some()

@@ -319,30 +319,3 @@ impl Rdy {
         )
     }
 }
-
-impl Rdy {
-    /// Forwarder to `ReadState::resolve_path` (removed once every caller reads the state).
-    pub fn resolve_path(&self, scope: &Scope, path: &str) -> Result<BlockId, RdyError> {
-        self.read().resolve_path(scope, path)
-    }
-
-    /// Forwarder to `ReadState::resolve_id` (removed once every caller reads the state).
-    pub fn resolve_id(&self, scope: &Scope, text: &str) -> Result<BlockId, RdyError> {
-        self.read().resolve_id(scope, text)
-    }
-
-    /// Forwarder to `ReadState::path_of` (removed once every caller reads the state).
-    pub fn path_of(&self, scope: &Scope, id: &BlockId) -> Result<Option<String>, RdyError> {
-        self.read().path_of(scope, id)
-    }
-
-    /// Forwarder to `ReadState::tree` (removed once every caller reads the state).
-    pub fn tree(
-        &self,
-        scope: &Scope,
-        path: Option<&str>,
-        depth: Option<u32>,
-    ) -> Result<Vec<TreeNode>, RdyError> {
-        self.read().tree(scope, path, depth)
-    }
-}

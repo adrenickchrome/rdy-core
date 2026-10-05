@@ -287,9 +287,9 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     ))
                 }
                 Cmd::Show { id, scope } => {
-                    let scope = r.resolve_read_scope(&scope, None)?;
-                    let bid = r.resolve_id(&scope, &id)?;
-                    let ctx = r.context(&scope, &bid)?;
+                    let scope = r.read().resolve_read_scope(&scope, None)?;
+                    let bid = r.read().resolve_id(&scope, &id)?;
+                    let ctx = r.read().context(&scope, &bid)?;
                     let json = serde_json::to_value(&ctx).expect("json");
                     let status = status_words(&json["status"]);
                     let mut fields = json["fields"].clone();
@@ -351,8 +351,8 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     ))
                 }
                 Cmd::Ls { path, scope, depth } => {
-                    let scope = r.resolve_read_scope(&scope, None)?;
-                    let nodes = r.tree(&scope, path.as_deref(), depth)?;
+                    let scope = r.read().resolve_read_scope(&scope, None)?;
+                    let nodes = r.read().tree(&scope, path.as_deref(), depth)?;
                     let mut lines = vec![];
                     ls_text(&nodes, 0, &mut lines);
                     Ok((
@@ -365,7 +365,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     let mut text = String::new();
                     let mut tags: std::collections::HashMap<String, Vec<String>> =
                         Default::default();
-                    for v in r.versions()? {
+                    for v in r.read().versions()? {
                         tags.entry(v.landing.clone()).or_default().push(v.name);
                     }
                     for (id, rec) in r.store().landings()? {
@@ -386,9 +386,9 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     Ok((Value::Array(rows), text))
                 }
                 Cmd::Impact { id, depth, scope } => {
-                    let scope = r.resolve_read_scope(&scope, None)?;
-                    let bid = r.resolve_id(&scope, &id)?;
-                    let items = r.impact(&scope, &bid, depth)?;
+                    let scope = r.read().resolve_read_scope(&scope, None)?;
+                    let bid = r.read().resolve_id(&scope, &id)?;
+                    let items = r.read().impact(&scope, &bid, depth)?;
                     let text = items
                         .iter()
                         .map(|i| {
@@ -435,7 +435,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     Ok((serde_json::to_value(&v).expect("json"), text))
                 }
                 Cmd::Tags => {
-                    let versions = r.versions()?;
+                    let versions = r.read().versions()?;
                     let current = versions.last().map(|v| v.name.clone());
                     let text = versions
                         .iter()
@@ -460,8 +460,8 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                 }
                 Cmd::Edit { id, view } => {
                     let scope = Scope::View(view.clone());
-                    let bid = r.resolve_id(&scope, &id)?;
-                    let block = r.block(&scope, &bid)?;
+                    let bid = r.read().resolve_id(&scope, &id)?;
+                    let block = r.read().block(&scope, &bid)?;
                     let tmp = tempfile::Builder::new()
                         .prefix("rdy-edit-")
                         .suffix(".yaml")
@@ -499,7 +499,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     ))
                 }
                 Cmd::Render { out, scope } => {
-                    let scope = r.resolve_read_scope(&scope, None)?;
+                    let scope = r.read().resolve_read_scope(&scope, None)?;
                     let s = rdy_render::render_site(&r.read(), &scope, &out)?;
                     Ok((
                         serde_json::to_value(&s).expect("json"),
@@ -515,8 +515,8 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     ))
                 }
                 Cmd::Export { out, scope } => {
-                    let scope = r.resolve_read_scope(&scope, None)?;
-                    let s = r.export(&scope, &out)?;
+                    let scope = r.read().resolve_read_scope(&scope, None)?;
+                    let s = r.read().export(&scope, &out)?;
                     Ok((
                         serde_json::to_value(&s).expect("json"),
                         format!(

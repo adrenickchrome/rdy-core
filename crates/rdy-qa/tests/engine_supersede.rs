@@ -65,6 +65,7 @@ fn sup1_supersede_inherits_the_old_decisions_links() {
         )
         .unwrap();
     let d2 = r
+        .read()
         .block(
             &Scope::View("work".into()),
             &BlockId::parse(&res.created["$decision"]).unwrap(),
@@ -83,6 +84,7 @@ fn sup1_supersede_inherits_the_old_decisions_links() {
     // after landing, the term's governing decision is the live one
     land(&mut r, "work").unwrap();
     let ctx = r
+        .read()
         .context(&Scope::Canon, &BlockId::parse(&id("$t")).unwrap())
         .unwrap();
     assert_eq!(ctx.governing, vec![d2.id.to_string()]);
@@ -109,6 +111,7 @@ fn sup1_the_caller_overrides_a_kind_or_drops_it() {
         )
         .unwrap();
     let d2 = r
+        .read()
         .block(
             &Scope::View("work".into()),
             &BlockId::parse(&res.created["$decision"]).unwrap(),
@@ -227,6 +230,7 @@ fn sup1_inherited_links_keep_their_part() {
         .supersede(&writer(), "work", &d1, None, supersede_input(&s))
         .unwrap();
     let d2 = r
+        .read()
         .block(
             &Scope::View("work".into()),
             &BlockId::parse(&res.created["$decision"]).unwrap(),

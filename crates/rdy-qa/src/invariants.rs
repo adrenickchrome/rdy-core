@@ -21,9 +21,9 @@ fn v(rule: &'static str, block: Option<&BlockId>, detail: impl Into<String>) -> 
     }
 }
 
-pub fn check(r: &mut Rdy, scope: &Scope) -> Result<(), Vec<Violation>> {
+pub fn check(r: &Rdy, scope: &Scope) -> Result<(), Vec<Violation>> {
     let mut out = vec![];
-    let m = match r.materialized(scope) {
+    let m = match r.read().materialized(scope) {
         Ok(m) => m.clone(),
         Err(e) => {
             return Err(vec![v(

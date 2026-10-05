@@ -329,41 +329,6 @@ impl Rdy {
         self.publish(crate::Delta::Tags)?;
         Ok(info(&tag))
     }
-
-    /// Forwarder to `ReadState::versions` (removed once every caller reads the state).
-    pub fn versions(&self) -> Result<Vec<VersionInfo>, RdyError> {
-        self.read().versions()
-    }
-
-    /// Forwarder to `ReadState::resolve_landing` (removed once every caller reads the state).
-    pub fn resolve_landing(&self, text: &str) -> Result<Hash, RdyError> {
-        self.read().resolve_landing(text)
-    }
-
-    /// Forwarder to `ReadState::resolve_read_scope` (removed once every caller reads the state).
-    pub fn resolve_read_scope(
-        &self,
-        text: &str,
-        own_view: Option<&str>,
-    ) -> Result<Scope, RdyError> {
-        self.read().resolve_read_scope(text, own_view)
-    }
-
-    /// Forwarder to `ReadState::resolve_scope` (removed once every caller reads the state).
-    pub fn resolve_scope(&self, text: &str) -> Result<Scope, RdyError> {
-        self.read().resolve_scope(text)
-    }
-
-    /// Forwarder to `ReadState::version_position` (removed once every caller reads the state).
-    pub fn version_position(&self, scope: &Scope) -> Result<VersionPosition, RdyError> {
-        self.read().version_position(scope)
-    }
-
-    /// Test hook: forwards to `ReadState::version_position_cache_len`.
-    #[doc(hidden)]
-    pub fn version_position_cache_len(&self) -> usize {
-        self.read().version_position_cache_len()
-    }
 }
 
 impl ReadState {

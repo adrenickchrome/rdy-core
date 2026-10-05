@@ -149,10 +149,10 @@ fn snap1_readers_on_threads_see_consistent_unchanging_states_while_the_writer_ru
         seqs.len(),
         writes
     );
-    let mut g = r.lock().unwrap();
+    let g = r.lock().unwrap();
     let st = g.read();
     assert_eq!(st.materialized(&Scope::Canon).unwrap().len(), 2 + writes);
     assert!(st.included("w").is_empty());
     drop(st);
-    assert!(rdy_qa::invariants::check(&mut g, &Scope::Canon).is_ok());
+    assert!(rdy_qa::invariants::check(&g, &Scope::Canon).is_ok());
 }

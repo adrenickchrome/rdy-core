@@ -75,7 +75,7 @@ fn spec_11_targets_at_100k_blocks() {
         drop(r.take());
         let t = Instant::now();
         let open = Rdy::open(dir.path()).unwrap();
-        open.graph(&work).unwrap();
+        open.read().graph(&work).unwrap();
         colds.push(t.elapsed());
         r = Some(open);
     }
@@ -89,7 +89,13 @@ fn spec_11_targets_at_100k_blocks() {
         run: None,
         role: Role::Writer,
     };
-    let parent = r.block(&work, &ids[0]).unwrap().parent.unwrap().to_string();
+    let parent = r
+        .read()
+        .block(&work, &ids[0])
+        .unwrap()
+        .parent
+        .unwrap()
+        .to_string();
     let mut writes = vec![];
     for _ in 0..200 {
         let t = Instant::now();
@@ -118,12 +124,12 @@ fn spec_11_targets_at_100k_blocks() {
         writes[100..].iter().sum::<Duration>() / 100
     );
 
-    r.graph(&work).unwrap();
+    r.read().graph(&work).unwrap();
     let mut queries = vec![];
     for id in ids.iter().step_by(500) {
         let t = Instant::now();
-        r.context(&work, id).unwrap();
-        r.impact(&work, id, 3).unwrap();
+        r.read().context(&work, id).unwrap();
+        r.read().impact(&work, id, 3).unwrap();
         queries.push(t.elapsed() / 2);
     }
     let query_p99 = p99(queries.clone());
@@ -142,7 +148,7 @@ fn spec_11_targets_at_100k_blocks() {
     let mut positions = vec![];
     for _ in 0..200 {
         let t = Instant::now();
-        r.version_position(&Scope::Canon).unwrap();
+        r.read().version_position(&Scope::Canon).unwrap();
         positions.push(t.elapsed());
     }
     let position_p99 = p99(positions.clone());

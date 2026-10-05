@@ -417,22 +417,6 @@ impl Rdy {
         self.store.reindex()?;
         self.publish(Delta::Full)
     }
-
-    /// Forwarder to `ReadState::materialized` (removed once every caller reads the state).
-    pub fn materialized(&self, scope: &Scope) -> Result<Arc<Materialized>, RdyError> {
-        self.read().materialized(scope)
-    }
-
-    /// Forwarder to `ReadState::graph` (removed once every caller reads the state).
-    pub fn graph(&self, scope: &Scope) -> Result<Arc<rdy_graph::Graph>, RdyError> {
-        self.read().graph(scope)
-    }
-
-    /// Test hook: whether `scope`'s materialization and graph are built in the current state.
-    #[doc(hidden)]
-    pub fn is_cached(&self, scope: &Scope) -> (bool, bool) {
-        self.read().is_built(scope)
-    }
 }
 
 #[derive(Clone, Debug, serde::Serialize)]

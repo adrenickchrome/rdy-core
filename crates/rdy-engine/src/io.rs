@@ -452,11 +452,6 @@ impl ReadState {
 }
 
 impl Rdy {
-    /// Forwarder to `ReadState::export` (removed once every caller reads the state).
-    pub fn export(&self, scope: &Scope, out: &Path) -> Result<ExportSummary, RdyError> {
-        self.read().export(scope, out)
-    }
-
     pub fn import(&mut self, s: &Session, view: &str, dir: &Path) -> Result<WriteResult, RdyError> {
         if !s.role.can_land() {
             return Err(RdyError::new(
@@ -547,7 +542,7 @@ impl Rdy {
             _ => unreachable!("format checked above"),
         };
         let scope = Scope::View(view.to_string());
-        let existing = self.materialized(&scope)?.clone();
+        let existing = self.read().materialized(&scope)?.clone();
         // duplicates first: a duplicated doc would otherwise read as a name clash with itself
         let mut ids = BTreeSet::new();
         for b in &blocks {
@@ -736,7 +731,7 @@ impl Rdy {
         edited: Block,
     ) -> Result<WriteResult, RdyError> {
         let scope = Scope::View(view.to_string());
-        let cur = self.block(&scope, &edited.id)?;
+        let cur = self.read().block(&scope, &edited.id)?;
         if cur == edited {
             return Err(RdyError::new(
                 E_BAD_INPUT,

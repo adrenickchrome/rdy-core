@@ -17,17 +17,17 @@ fn paths_and_tree_at_1k_folders() {
     println!("generated {} docs in {:?}", paths.len(), t.elapsed());
     let r = Rdy::open(dir.path()).unwrap();
     let work = Scope::View("work".into());
-    r.materialized(&work).unwrap();
+    r.read().materialized(&work).unwrap();
     let mut tree = vec![];
     for _ in 0..50 {
         let t = Instant::now();
-        r.tree(&work, None, None).unwrap();
+        r.read().tree(&work, None, None).unwrap();
         tree.push(t.elapsed());
     }
     let mut resolve = vec![];
     for p in paths.iter().step_by(paths.len() / 200) {
         let t = Instant::now();
-        r.resolve_path(&work, p).unwrap();
+        r.read().resolve_path(&work, p).unwrap();
         resolve.push(t.elapsed());
     }
     let (tree_p99, resolve_p99) = (p99(tree), p99(resolve));

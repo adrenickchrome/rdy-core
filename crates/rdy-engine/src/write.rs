@@ -1281,11 +1281,6 @@ fn build_ops(
 }
 
 impl Rdy {
-    /// Forwarder to `ReadState::block` (removed once every caller reads the state).
-    pub fn block(&self, scope: &Scope, id: &BlockId) -> Result<Block, RdyError> {
-        self.read().block(scope, id)
-    }
-
     pub fn write(&mut self, session: &Session, req: WriteRequest) -> Result<WriteResult, RdyError> {
         self.write_linked(session, req, ChangeLinks::default())
     }

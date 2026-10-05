@@ -51,7 +51,7 @@ fn snap1_a_landing_seeds_canon_from_the_previous_canon_and_shares_untouched_bloc
         r.store().canon_state().unwrap(),
         "the seeded canon is the store's"
     );
-    assert!(check(&mut r, &Scope::Canon).is_ok());
+    assert!(check(&r, &Scope::Canon).is_ok());
 }
 
 #[test]

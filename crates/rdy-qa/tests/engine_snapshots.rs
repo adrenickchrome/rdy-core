@@ -25,7 +25,7 @@ fn snap1_every_write_is_visible_to_the_next_read_and_the_state_is_republished_ea
     let s = r.read();
     assert_eq!(s.materialized(&Scope::Canon).unwrap().len(), 10);
     assert!(s.included("work").is_empty());
-    assert!(rdy_qa::invariants::check(&mut r, &Scope::Canon).is_ok());
+    assert!(rdy_qa::invariants::check(&r, &Scope::Canon).is_ok());
 }
 
 #[test]

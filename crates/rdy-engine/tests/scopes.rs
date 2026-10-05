@@ -36,6 +36,7 @@ fn land_one(r: &mut Rdy, title: &str) -> String {
 
 fn titles(r: &mut Rdy, scope: &Scope) -> Vec<String> {
     let mut t: Vec<String> = r
+        .read()
         .materialized(scope)
         .unwrap()
         .iter()
@@ -93,10 +94,17 @@ fn tag_and_landing_scopes_read_the_frozen_snapshot() {
         &format!("landing:{}", &l0[..8]),
         &format!("landing:{l0}"),
     ] {
-        assert_eq!(r.resolve_scope(text).unwrap(), Scope::At(at), "{text}");
+        assert_eq!(
+            r.read().resolve_scope(text).unwrap(),
+            Scope::At(at),
+            "{text}"
+        );
     }
     let snap = r.store().snapshot_at(&at).unwrap();
-    assert_eq!(r.materialized(&Scope::At(at)).unwrap().snapshot(), snap);
+    assert_eq!(
+        r.read().materialized(&Scope::At(at)).unwrap().snapshot(),
+        snap
+    );
     assert_eq!(titles(&mut r, &Scope::At(at)), ["A"]);
     assert_eq!(titles(&mut r, &Scope::Canon), ["A", "B"]);
     // a fresh process with a rebuilt index reads the same snapshot
@@ -104,7 +112,7 @@ fn tag_and_landing_scopes_read_the_frozen_snapshot() {
     // M2a1 (fmt2): the store is .rdy/store again
     std::fs::remove_file(dir.path().join(".rdy/store/index.redb")).unwrap();
     let mut r = Rdy::open(dir.path()).unwrap();
-    let scope = r.resolve_scope("tag:v1.0.0").unwrap();
+    let scope = r.read().resolve_scope("tag:v1.0.0").unwrap();
     assert_eq!(titles(&mut r, &scope), ["A"]);
 }
 
@@ -113,34 +121,35 @@ fn scope_text_resolves_by_kind() {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     land_one(&mut r, "A");
-    assert_eq!(r.resolve_scope("canon").unwrap(), Scope::Canon);
+    assert_eq!(r.read().resolve_scope("canon").unwrap(), Scope::Canon);
     assert_eq!(
-        r.resolve_scope("run-1").unwrap(),
+        r.read().resolve_scope("run-1").unwrap(),
         Scope::View("run-1".into())
     );
     assert_eq!(
-        r.resolve_scope("view:canon").unwrap(),
+        r.read().resolve_scope("view:canon").unwrap(),
         Scope::View("canon".into())
     );
     assert_eq!(
-        r.resolve_scope("view:a:b").unwrap(),
+        r.read().resolve_scope("view:a:b").unwrap(),
         Scope::View("a:b".into())
     );
     assert_eq!(
-        r.resolve_scope("tag:v9.0.0").unwrap_err().code,
+        r.read().resolve_scope("tag:v9.0.0").unwrap_err().code,
         "E_NOT_FOUND"
     );
     assert_eq!(
-        r.resolve_scope("tag:nope").unwrap_err().code,
+        r.read().resolve_scope("tag:nope").unwrap_err().code,
         "E_BAD_TAG_NAME"
     );
     assert_eq!(
-        r.resolve_scope("landing:abc").unwrap_err().code,
+        r.read().resolve_scope("landing:abc").unwrap_err().code,
         "E_NOT_FOUND"
     );
     // a hash that is not a landing never materializes
     assert_eq!(
-        r.materialized(&Scope::At(Hash([7; 32])))
+        r.read()
+            .materialized(&Scope::At(Hash([7; 32])))
             .map(|_| ())
             .unwrap_err()
             .code,
@@ -154,9 +163,12 @@ fn legacy_colon_views_stay_readable_and_proposable_but_not_writable() {
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     let id = legacy_view(&mut r, "tag:x");
     // tag:x is a version scope, never the view
-    assert_eq!(r.resolve_scope("tag:x").unwrap_err().code, "E_BAD_TAG_NAME");
-    let scope = r.resolve_scope("view:tag:x").unwrap();
-    assert!(r.materialized(&scope).unwrap().get(&id).is_some());
+    assert_eq!(
+        r.read().resolve_scope("tag:x").unwrap_err().code,
+        "E_BAD_TAG_NAME"
+    );
+    let scope = r.read().resolve_scope("view:tag:x").unwrap();
+    assert!(r.read().materialized(&scope).unwrap().get(&id).is_some());
     let write = |view: &str| WriteRequest {
         view: view.into(),
         ops: serde_json::from_value(json!([
@@ -181,7 +193,13 @@ fn legacy_colon_views_stay_readable_and_proposable_but_not_writable() {
     );
     let p = r.propose(&writer(), "tag:x", "legacy").unwrap();
     r.land(&founder(), &p.id).unwrap();
-    assert!(r.materialized(&Scope::Canon).unwrap().get(&id).is_some());
+    assert!(
+        r.read()
+            .materialized(&Scope::Canon)
+            .unwrap()
+            .get(&id)
+            .is_some()
+    );
 }
 
 #[test]
@@ -189,16 +207,16 @@ fn as_of_snapshots_survive_landings() {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     let at: Hash = land_one(&mut r, "A").parse().unwrap();
-    r.graph(&Scope::At(at)).unwrap();
-    r.materialized(&Scope::Canon).unwrap();
+    r.read().graph(&Scope::At(at)).unwrap();
+    r.read().materialized(&Scope::Canon).unwrap();
     land_one(&mut r, "B");
     assert_eq!(
-        r.is_cached(&Scope::At(at)),
+        r.read().is_built(&Scope::At(at)),
         (true, true),
         "landings don't invalidate as-of reads"
     );
     assert_eq!(
-        r.is_cached(&Scope::Canon),
+        r.read().is_built(&Scope::Canon),
         (true, false),
         "a landing seeds canon incrementally; the graph is built on demand"
     );
@@ -213,22 +231,22 @@ fn the_fifth_as_of_scope_evicts_the_least_recently_used() {
         .collect();
     assert_eq!(AS_OF_CACHE_ENTRIES, 4);
     for h in &l[..4] {
-        r.graph(&Scope::At(*h)).unwrap();
+        r.read().graph(&Scope::At(*h)).unwrap();
     }
-    r.materialized(&Scope::At(l[0])).unwrap(); // l[0] is now the most recently used
-    r.materialized(&Scope::At(l[4])).unwrap(); // evicts l[1]
+    r.read().materialized(&Scope::At(l[0])).unwrap(); // l[0] is now the most recently used
+    r.read().materialized(&Scope::At(l[4])).unwrap(); // evicts l[1]
     assert_eq!(
-        r.is_cached(&Scope::At(l[1])),
+        r.read().is_built(&Scope::At(l[1])),
         (false, false),
         "evicted with its graph"
     );
     for h in [l[0], l[2], l[3], l[4]] {
-        assert!(r.is_cached(&Scope::At(h)).0);
+        assert!(r.read().is_built(&Scope::At(h)).0);
     }
-    r.graph(&Scope::At(l[2])).unwrap(); // a graph read counts as a use
-    r.materialized(&Scope::At(l[5])).unwrap(); // evicts l[3]
-    assert!(!r.is_cached(&Scope::At(l[3])).0);
-    assert!(r.is_cached(&Scope::At(l[2])).0);
+    r.read().graph(&Scope::At(l[2])).unwrap(); // a graph read counts as a use
+    r.read().materialized(&Scope::At(l[5])).unwrap(); // evicts l[3]
+    assert!(!r.read().is_built(&Scope::At(l[3])).0);
+    assert!(r.read().is_built(&Scope::At(l[2])).0);
 }
 
 #[test]
@@ -239,12 +257,15 @@ fn a_bogus_as_of_scope_does_not_evict_cached_snapshots() {
         .map(|i| land_one(&mut r, &format!("D{i}")).parse().unwrap())
         .collect();
     for h in &l {
-        r.materialized(&Scope::At(*h)).unwrap();
+        r.read().materialized(&Scope::At(*h)).unwrap();
     }
-    let e = r.materialized(&Scope::At(Hash([7; 32]))).unwrap_err();
+    let e = r
+        .read()
+        .materialized(&Scope::At(Hash([7; 32])))
+        .unwrap_err();
     assert_eq!(e.code, "E_NOT_FOUND");
     for h in &l {
-        assert!(r.is_cached(&Scope::At(*h)).0, "{h} was evicted");
+        assert!(r.read().is_built(&Scope::At(*h)).0, "{h} was evicted");
     }
 }
 
@@ -253,9 +274,12 @@ fn an_empty_view_name_is_bad_input() {
     let dir = tempfile::tempdir().unwrap();
     let r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     for text in ["view:", ""] {
-        let e = r.resolve_scope(text).unwrap_err();
+        let e = r.read().resolve_scope(text).unwrap_err();
         assert_eq!(e.code, "E_BAD_INPUT", "{text:?}");
         assert!(e.fix.contains("view:work"), "{e}");
     }
-    assert!(matches!(r.resolve_scope("view:work"), Ok(Scope::View(_))));
+    assert!(matches!(
+        r.read().resolve_scope("view:work"),
+        Ok(Scope::View(_))
+    ));
 }

@@ -50,7 +50,7 @@ fn decide_then_land_accepts_and_freezes() {
         .unwrap();
     let did = BlockId::parse(&res.created["$decision"]).unwrap();
     let work = Scope::View("work".into());
-    let d = r.block(&work, &did).unwrap();
+    let d = r.read().block(&work, &did).unwrap();
     assert_eq!(d.field_str("status"), Some("proposed"));
     assert!(d.field_str("recorded_at").unwrap().ends_with('Z'));
 
@@ -59,7 +59,7 @@ fn decide_then_land_accepts_and_freezes() {
     assert_eq!(r.land(&agent(), &p.id).unwrap_err().code, "E_PERMISSION");
     let landing = r.land(&founder(), &p.id).unwrap();
 
-    let canon = r.block(&Scope::Canon, &did).unwrap();
+    let canon = r.read().block(&Scope::Canon, &did).unwrap();
     assert_eq!(canon.field_str("status"), Some("accepted"));
     assert!(canon.field_str("decided_at").is_some());
     let rec: LandingRecord = r.store().get(&landing.parse().unwrap()).unwrap();
@@ -100,6 +100,7 @@ fn supersede_links_to_the_old_decision() {
         )
         .unwrap();
     let new = r
+        .read()
         .block(
             &Scope::View("work".into()),
             &BlockId::parse(&res.created["$decision"]).unwrap(),
@@ -207,7 +208,8 @@ fn land_refuses_when_view_edited_a_proposed_decision_after_propose() {
     assert!(e.fix.contains("propose again"));
     assert_eq!(r.store().view("work").unwrap().changes.len(), n);
     assert_eq!(
-        r.block(&Scope::View("work".into()), &BlockId::parse(&did).unwrap())
+        r.read()
+            .block(&Scope::View("work".into()), &BlockId::parse(&did).unwrap())
             .unwrap()
             .field_str("status"),
         Some("proposed")
@@ -236,6 +238,7 @@ fn revoke_links_and_requires_a_decision() {
         .revoke(&agent(), "work", &did, "no longer true", &s)
         .unwrap();
     let b = r
+        .read()
         .block(
             &Scope::View("work".into()),
             &BlockId::parse(&rv.created["$decision"]).unwrap(),
@@ -286,10 +289,13 @@ fn land_excludes_later_view_changes_and_stamps_the_approver() {
     let later = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([{"op": "create", "type": "claim", "id": "$c", "parent": s, "body": "later"}])).unwrap(), justification: None, message: String::new() }).unwrap();
     let cid = BlockId::parse(&later.created["$c"]).unwrap();
     let landing = r.land(&founder(), &p.id).unwrap();
-    assert!(r.block(&Scope::Canon, &cid).is_err());
-    assert!(r.block(&Scope::View("work".into()), &cid).is_ok());
+    assert!(r.read().block(&Scope::Canon, &cid).is_err());
+    assert!(r.read().block(&Scope::View("work".into()), &cid).is_ok());
     assert_eq!(
-        r.block(&Scope::Canon, &did).unwrap().field_str("status"),
+        r.read()
+            .block(&Scope::Canon, &did)
+            .unwrap()
+            .field_str("status"),
         Some("accepted")
     );
     let rec: LandingRecord = r.store().get(&landing.parse().unwrap()).unwrap();
@@ -386,7 +392,7 @@ fn land_refuses_orphans_and_dangling_refs_when_canon_moved_after_propose() {
         e.issues
     );
     assert_eq!(r.store().canon_head().unwrap(), head);
-    let canon = r.materialized(&Scope::Canon).unwrap();
+    let canon = r.read().materialized(&Scope::Canon).unwrap();
     assert!(canon.iter().all(|b| b.block_type != "claim"));
 }
 
@@ -394,6 +400,7 @@ fn land_refuses_orphans_and_dangling_refs_when_canon_moved_after_propose() {
 fn land_with_a_hash_that_is_not_a_proposal_is_bad_input() {
     let (_d, mut r, s) = setup();
     let section = r
+        .read()
         .block(&Scope::View("work".into()), &BlockId::parse(&s).unwrap())
         .unwrap();
     let e = r
@@ -449,6 +456,7 @@ fn propose_refuses_deleting_a_parent_that_gained_a_child_in_canon() {
 fn deleting_a_parent_that_gained_a_moved_child_in_canon_is_refused() {
     let (_d, mut r, s) = setup();
     let doc = r
+        .read()
         .block(&Scope::View("work".into()), &BlockId::parse(&s).unwrap())
         .unwrap()
         .parent
@@ -514,7 +522,8 @@ fn recreating_a_deleted_block_under_its_old_id_is_not_a_dangling_ref() {
     let p = r.propose(&agent(), "run-1", "replace term").unwrap();
     r.land(&founder(), &p.id).unwrap();
     assert_eq!(
-        r.block(&Scope::Canon, &BlockId::parse(&t).unwrap())
+        r.read()
+            .block(&Scope::Canon, &BlockId::parse(&t).unwrap())
             .unwrap()
             .body,
         "Balances, recomputed."
@@ -525,6 +534,7 @@ fn recreating_a_deleted_block_under_its_old_id_is_not_a_dangling_ref() {
 fn recreating_a_deleted_parent_and_child_under_their_old_ids_is_not_an_orphan() {
     let (_d, mut r, s) = setup();
     let doc = r
+        .read()
         .block(&Scope::View("work".into()), &BlockId::parse(&s).unwrap())
         .unwrap()
         .parent
@@ -551,6 +561,7 @@ fn recreating_a_deleted_parent_and_child_under_their_old_ids_is_not_an_orphan() 
     let p = r.propose(&agent(), "run-1", "rebuild section").unwrap();
     r.land(&founder(), &p.id).unwrap();
     let claim = r
+        .read()
         .block(&Scope::Canon, &BlockId::parse(&c).unwrap())
         .unwrap();
     assert_eq!(claim.parent.map(|p| p.to_string()), Some(s2));

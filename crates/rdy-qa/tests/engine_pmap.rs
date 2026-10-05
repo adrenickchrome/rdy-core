@@ -16,7 +16,7 @@ proptest! {
             {"op": "create", "type": "claim", "parent": "$s", "body": "seed"}
         ])).unwrap();
         let work = Scope::View("work".into());
-        let mut m = (*r.materialized(&work).unwrap()).clone();
+        let mut m = (*r.read().materialized(&work).unwrap()).clone();
         let section = m.iter().find(|b| b.block_type == "section").unwrap().id.clone();
         for (kind, pick) in steps {
             let claims: Vec<_> = m.iter().filter(|b| b.block_type == "claim").map(|b| b.id.clone()).collect();
@@ -33,7 +33,7 @@ proptest! {
             let merged = r.store().view_merge("work").unwrap();
             prop_assert!(merged.conflicts.is_empty());
             prop_assert_eq!(m.snapshot(), merged.state);
-            let fresh = r.materialized(&work).unwrap();
+            let fresh = r.read().materialized(&work).unwrap();
             prop_assert_eq!(m.snapshot(), fresh.snapshot());
         }
     }

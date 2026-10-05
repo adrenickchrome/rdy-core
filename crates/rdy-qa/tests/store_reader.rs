@@ -31,5 +31,5 @@ fn rdr1_an_engine_readers_view_matches_the_engines_after_each_write() {
         reader.included("work").unwrap().is_empty(),
         "the landing rebased the view"
     );
-    let _ = r.materialized(&Scope::Canon).unwrap();
+    let _ = r.read().materialized(&Scope::Canon).unwrap();
 }

@@ -32,6 +32,7 @@ fn eff1_a_decision_takes_effect_when_recorded() {
         )
         .unwrap();
     let b = r
+        .read()
         .block(
             &Scope::View("work".into()),
             &BlockId::parse(&res.created["$decision"]).unwrap(),
@@ -58,6 +59,7 @@ fn eff1_a_proposer_sets_effective_from_and_it_freezes_with_the_decision() {
     )
     .unwrap();
     let b = r
+        .read()
         .block(&view, &BlockId::parse(&res.created["$b"]).unwrap())
         .unwrap();
     assert_eq!(decision::effective_from(&b), Some(early), "set on create");
@@ -79,7 +81,10 @@ fn eff1_a_proposer_sets_effective_from_and_it_freezes_with_the_decision() {
         json!([{"op": "update", "id": id, "fields": {"effective_from": early}}]),
     )
     .unwrap();
-    let a = r.block(&view, &BlockId::parse(&id).unwrap()).unwrap();
+    let a = r
+        .read()
+        .block(&view, &BlockId::parse(&id).unwrap())
+        .unwrap();
     assert_eq!(
         decision::effective_from(&a),
         Some(early),
@@ -88,6 +93,7 @@ fn eff1_a_proposer_sets_effective_from_and_it_freezes_with_the_decision() {
     assert_ne!(a.field_str("recorded_at"), Some(early));
     land(&mut r, "work").unwrap();
     let a = r
+        .read()
         .block(&Scope::Canon, &BlockId::parse(&id).unwrap())
         .unwrap();
     assert_eq!(

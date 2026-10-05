@@ -33,7 +33,8 @@ pub fn project() -> (tempfile::TempDir, Rdy) {
     (dir, r)
 }
 fn name(r: &mut Rdy, id: &str) -> String {
-    r.block(&Scope::View("work".into()), &BlockId::parse(id).unwrap())
+    r.read()
+        .block(&Scope::View("work".into()), &BlockId::parse(id).unwrap())
         .unwrap()
         .field_str("name")
         .unwrap()
@@ -96,6 +97,7 @@ fn doc_summaries_show_the_title() {
         {"op": "create", "type": "doc", "fields": {"title": "Wallet Design", "doc_type": "overview"}}
     ])).unwrap();
     let doc = r
+        .read()
         .block(
             &Scope::View("work".into()),
             &BlockId::parse(&res.created["op0"]).unwrap(),
@@ -145,7 +147,8 @@ fn a_legacy_view_with_a_nameless_doc_still_lands() {
     let p = r.propose(&agent(), "old", "legacy").unwrap();
     r.land(&founder(), &p.id).unwrap();
     assert!(
-        r.block(&Scope::Canon, &id)
+        r.read()
+            .block(&Scope::Canon, &id)
             .unwrap()
             .field_str("name")
             .is_none(),
@@ -243,6 +246,7 @@ fn ops_take_paths_for_ids_parents_and_links() {
         {"op": "update", "id": "wallets/transactions", "fields": {"lifecycle": "stable"}}
     ])).unwrap();
     let limits = r
+        .read()
         .block(
             &Scope::View("work".into()),
             &BlockId::parse(&made.created["op0"]).unwrap(),
@@ -273,12 +277,13 @@ fn moves_reach_the_top_level_and_refuse_cycles() {
     )
     .unwrap();
     assert_eq!(
-        r.path_of(
-            &Scope::View("work".into()),
-            &BlockId::parse(&res.created["$t"]).unwrap()
-        )
-        .unwrap()
-        .as_deref(),
+        r.read()
+            .path_of(
+                &Scope::View("work".into()),
+                &BlockId::parse(&res.created["$t"]).unwrap()
+            )
+            .unwrap()
+            .as_deref(),
         Some("transactions")
     );
     let e = write(
@@ -309,17 +314,17 @@ fn moves_reach_the_top_level_and_refuse_cycles() {
 fn a_nameless_doc_gets_its_effective_name_on_first_write() {
     let (_d, mut r) = project();
     let id = legacy_doc(&mut r, "work", "d-AAAAB", "Legacy Notes", None);
-    let path = r.path_of(&Scope::View("work".into()), &id).unwrap();
+    let path = r.read().path_of(&Scope::View("work".into()), &id).unwrap();
     write(
         &mut r,
         "work",
         json!([{"op": "update", "id": id.to_string(), "fields": {"lifecycle": "draft"}}]),
     )
     .unwrap();
-    let b = r.block(&Scope::View("work".into()), &id).unwrap();
+    let b = r.read().block(&Scope::View("work".into()), &id).unwrap();
     assert_eq!(b.field_str("name"), Some("legacy-notes"));
     assert_eq!(
-        r.path_of(&Scope::View("work".into()), &id).unwrap(),
+        r.read().path_of(&Scope::View("work".into()), &id).unwrap(),
         path,
         "the path didn't change"
     );
@@ -426,10 +431,10 @@ fn tree_walks_survive_a_damaged_store_with_a_very_deep_chain() {
         .unwrap();
     r.invalidate();
     let work = Scope::View("work".into());
-    let t = r.tree(&work, None, None).unwrap();
+    let t = r.read().tree(&work, None, None).unwrap();
     assert_eq!(t.len(), 1);
     let out = tempfile::tempdir().unwrap();
-    let e = r.export(&work, &out.path().join("x")).unwrap_err();
+    let e = r.read().export(&work, &out.path().join("x")).unwrap_err();
     assert_eq!(e.code, "E_IO", "{e}");
     assert!(e.message.contains("not inside"), "{e}");
 }
@@ -444,10 +449,15 @@ fn a_doc_in_the_deepest_folder_exports_and_round_trips() {
     .unwrap();
     let p = r.propose(&agent(), "work", "deep").unwrap();
     r.land(&founder(), &p.id).unwrap();
-    let original = r.materialized(&Scope::Canon).unwrap().snapshot().blocks;
+    let original = r
+        .read()
+        .materialized(&Scope::Canon)
+        .unwrap()
+        .snapshot()
+        .blocks;
 
     let out = tempfile::tempdir().unwrap();
-    let summary = r.export(&Scope::Canon, out.path()).unwrap();
+    let summary = r.read().export(&Scope::Canon, out.path()).unwrap();
     assert_eq!(summary.folders, 32);
     assert_eq!(summary.docs, 1);
 
@@ -455,6 +465,11 @@ fn a_doc_in_the_deepest_folder_exports_and_round_trips() {
     b.import(&founder(), "import", out.path()).unwrap();
     let p = b.propose(&founder(), "import", "migrate").unwrap();
     b.land(&founder(), &p.id).unwrap();
-    let imported = b.materialized(&Scope::Canon).unwrap().snapshot().blocks;
+    let imported = b
+        .read()
+        .materialized(&Scope::Canon)
+        .unwrap()
+        .snapshot()
+        .blocks;
     assert_eq!(imported, original);
 }

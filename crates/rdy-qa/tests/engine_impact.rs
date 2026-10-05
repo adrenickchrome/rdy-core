@@ -25,7 +25,8 @@ fn imp2_impact_follows_dependencies_and_shows_refiners_once() {
     let id = |k: &str| res.created[k].clone();
     let scope = Scope::View("work".into());
     let got = |r: &mut Rdy, k: &str| -> Vec<(u32, String, String)> {
-        r.impact(&scope, &BlockId::parse(&id(k)).unwrap(), 5)
+        r.read()
+            .impact(&scope, &BlockId::parse(&id(k)).unwrap(), 5)
             .unwrap()
             .into_iter()
             .map(|i| (i.depth, i.id, i.via.kind))

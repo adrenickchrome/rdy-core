@@ -12,7 +12,11 @@ fn priv1_accessors_agree_with_each_other_and_with_the_store() {
         {"op": "create", "type": "claim", "parent": "$s", "body": "One."}
     ]))
     .unwrap();
-    let m = r.materialized(&Scope::View("work".into())).unwrap().clone();
+    let m = r
+        .read()
+        .materialized(&Scope::View("work".into()))
+        .unwrap()
+        .clone();
     assert_eq!(m.len(), 3);
     assert!(!m.is_empty());
     let ids: Vec<_> = m.ids().cloned().collect();
@@ -45,7 +49,11 @@ fn priv1_the_graph_builds_from_an_iterator_and_looks_blocks_up_through_the_looku
         {"op": "create", "type": "claim", "parent": "$s", "body": "Cites {{$a}}."}
     ]))
     .unwrap();
-    let m = r.materialized(&Scope::View("work".into())).unwrap().clone();
+    let m = r
+        .read()
+        .materialized(&Scope::View("work".into()))
+        .unwrap()
+        .clone();
     let g = rdy_graph::Graph::build_from(m.iter());
     let lookup: &dyn rdy_graph::BlockLookup = &*m;
     let none = |_: &rdy_model::Hash| None;

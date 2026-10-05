@@ -46,12 +46,15 @@ fn context_and_suspects_after_landing() {
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
     let cid = BlockId::parse(&c.created["op0"]).unwrap();
     let work = Scope::View("work".into());
-    let ctx = r.context(&work, &cid).unwrap();
+    let ctx = r.read().context(&work, &cid).unwrap();
     assert_eq!(ctx.governing, vec![did.clone()]);
     assert!(ctx.suspects.is_empty());
     assert_eq!(ctx.doc.as_deref(), Some(res.created["$doc"].as_str()));
 
-    let imp = r.impact(&work, &BlockId::parse(&did).unwrap(), 2).unwrap();
+    let imp = r
+        .read()
+        .impact(&work, &BlockId::parse(&did).unwrap(), 2)
+        .unwrap();
     assert_eq!(
         imp.iter().map(|i| i.id.clone()).collect::<Vec<_>>(),
         vec![cid.to_string()]
@@ -72,12 +75,13 @@ fn context_and_suspects_after_landing() {
     .unwrap();
     let p = r.propose(&agent(), "work", "reverse").unwrap();
     r.land(&founder(), &p.id).unwrap();
-    let sus = r.suspects(&Scope::Canon).unwrap();
+    let sus = r.read().suspects(&Scope::Canon).unwrap();
     assert!(
         sus.iter()
             .any(|x| x.block == cid && x.reason == "superseded")
     );
     let st = r
+        .read()
         .context(&Scope::Canon, &BlockId::parse(&did).unwrap())
         .unwrap()
         .status;
@@ -115,7 +119,8 @@ fn graph_cache_is_refreshed_after_a_view_write() {
     let work = Scope::View("work".into());
     let id = BlockId::parse(&did).unwrap();
     assert!(
-        r.context(&work, &id)
+        r.read()
+            .context(&work, &id)
             .unwrap()
             .incoming
             .iter()
@@ -124,7 +129,7 @@ fn graph_cache_is_refreshed_after_a_view_write() {
     r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
         {"op": "create", "type": "claim", "parent": s, "body": format!("See {{{{{did}}}}}.")}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
-    let after = r.context(&work, &id).unwrap();
+    let after = r.read().context(&work, &id).unwrap();
     assert!(
         after
             .incoming
@@ -141,9 +146,9 @@ fn graph_cache_is_refreshed_after_landing() {
     let id = BlockId::parse(&did).unwrap();
     let p = r.propose(&agent(), "work", "seed").unwrap();
     // warm the canon caches before landing (decision absent from canon)
-    assert!(r.context(&Scope::Canon, &id).is_err());
+    assert!(r.read().context(&Scope::Canon, &id).is_err());
     r.land(&founder(), &p.id).unwrap();
-    let ctx = r.context(&Scope::Canon, &id).unwrap();
+    let ctx = r.read().context(&Scope::Canon, &id).unwrap();
     assert!(matches!(ctx.status, Some(rdy_graph::DerivedStatus::Live)));
 }
 
@@ -253,6 +258,7 @@ fn impact_items_render_references_in_their_summaries() {
         {"op": "create", "type": "claim", "parent": s, "body": format!("Leavers open\na new wallet per {{{{{did}}}}}.")}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
     let imp = r
+        .read()
         .impact(
             &Scope::View("work".into()),
             &BlockId::parse(&did).unwrap(),
