@@ -1,5 +1,6 @@
 use rdy_engine::*;
 use rdy_qa::golden::{self, pages};
+use rdy_qa::site::{attrs, unescape};
 use std::path::Path;
 
 fn hostile_site() -> (tempfile::TempDir, tempfile::TempDir) {
@@ -37,57 +38,6 @@ fn render_hostile_text_is_escaped_on_every_page() {
             );
         }
     }
-}
-
-/// Every attribute value of `attr` in `html`.
-fn attrs<'a>(html: &'a str, attr: &str) -> Vec<&'a str> {
-    let key = format!("{attr}=\"");
-    let mut out = vec![];
-    let mut rest = html;
-    while let Some(i) = rest.find(&key) {
-        rest = &rest[i + key.len()..];
-        if let Some(j) = rest.find('"') {
-            out.push(&rest[..j]);
-            rest = &rest[j..];
-        }
-    }
-    out
-}
-
-/// Decodes the HTML entities a browser would decode in an attribute value.
-fn unescape(s: &str) -> String {
-    let mut out = String::new();
-    let mut rest = s;
-    while let Some(i) = rest.find('&') {
-        out.push_str(&rest[..i]);
-        rest = &rest[i..];
-        let Some(j) = rest.find(';') else { break };
-        let ent = &rest[1..j];
-        let ch = match ent {
-            "amp" => Some('&'),
-            "quot" => Some('"'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "apos" => Some('\''),
-            _ => ent
-                .strip_prefix("#x")
-                .and_then(|h| u32::from_str_radix(h, 16).ok())
-                .or_else(|| ent.strip_prefix('#').and_then(|d| d.parse().ok()))
-                .and_then(char::from_u32),
-        };
-        match ch {
-            Some(c) => {
-                out.push(c);
-                rest = &rest[j + 1..];
-            }
-            None => {
-                out.push('&');
-                rest = &rest[1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 #[derive(Default, Debug)]

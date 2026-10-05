@@ -25,6 +25,8 @@ pub struct Run {
     pub label: bool,
     /// The element stack's tag names, outermost first, the innermost included.
     pub path: Vec<String>,
+    /// The class list of the innermost element.
+    pub classes: Vec<String>,
 }
 
 const LABEL_TAGS: [&str; 10] = [
@@ -186,6 +188,7 @@ struct El {
     rdy: Option<String>,
     skip: bool,
     label: bool,
+    classes: Vec<String>,
 }
 
 /// The visible text runs of a page, in document order, with zone and label flags.
@@ -218,6 +221,10 @@ pub fn visible_runs(html: &str) -> Vec<Run> {
                     rdy: attr("data-rdy").map(str::to_string),
                     skip,
                     label,
+                    classes: classes
+                        .split_ascii_whitespace()
+                        .map(str::to_string)
+                        .collect(),
                 });
             }
             Ev::Close(tag) => {
@@ -251,6 +258,7 @@ pub fn visible_runs(html: &str) -> Vec<Run> {
                         zone,
                         label,
                         path: stack.iter().map(|e| e.tag.clone()).collect(),
+                        classes: top.classes.clone(),
                     },
                     top.id,
                 ));
@@ -263,6 +271,228 @@ pub fn visible_runs(html: &str) -> Vec<Run> {
             r
         })
         .collect()
+}
+
+// -------------------------------------------------------------------------------- leaks
+
+/// How one leak pattern reads a run (the bar's section 2.1; which zones each rule reads is
+/// given with the variant).
+#[derive(Debug)]
+pub enum Rule {
+    /// Any match, in a Chrome, Content or Trail run.
+    AllText(Regex),
+    /// Any match, in a Chrome run.
+    ChromeText(Regex),
+    /// Any match, in a Chrome run that sits in a nav, a version, a breadcrumb or a badge.
+    ChromeContext(Regex),
+    /// The run is a label (Chrome or Content) whose whole text is one of the words.
+    LabelWord(&'static [&'static str]),
+    /// The run is a label (Chrome or Content) that starts with one of the words and ` ·`.
+    LabelPrefix(&'static [&'static str]),
+}
+
+/// One leak: where it is, what rule found it and the offending text (the matched substring
+/// for a regex rule, the whole run for a label rule).
+#[derive(Debug, Clone)]
+pub struct Leak {
+    /// The page, relative to the site root, with `/` separators.
+    pub page: String,
+    pub zone: Zone,
+    /// The rule's id in the bar: `F1`, `F2`, ... `F11`.
+    pub pattern: &'static str,
+    pub text: String,
+}
+
+const F5_WORDS: &[&str] = &[
+    "blob",
+    "alt",
+    "lang",
+    "parent",
+    "order",
+    "prefix",
+    "traits",
+    "body",
+    "fields",
+    "links",
+    "options",
+    "statement",
+    "prompt",
+    "columns",
+    "rows",
+    "steps",
+];
+const F8_WORDS: &[&str] = &[
+    "live",
+    "proposed",
+    "rejected",
+    "accepted",
+    "superseded",
+    "partially superseded",
+    "revoked",
+    "suspect",
+    "draft",
+    "stable",
+    "deprecated",
+    "current",
+    "frozen",
+    "pinned",
+    "open",
+    "closed",
+    "blocking",
+    "local",
+    "relayed",
+    "authoritative",
+    "policy",
+];
+const F9_WORDS: &[&str] = &[
+    "doc",
+    "folder",
+    "section",
+    "prose",
+    "claim",
+    "requirement",
+    "constraint",
+    "term",
+    "component",
+    "actor",
+    "interface",
+    "flow",
+    "example",
+    "note",
+    "rationale",
+    "table",
+    "diagram",
+    "figure",
+    "code",
+    "decision",
+    "question",
+    "review",
+    "tension",
+    "intent",
+    "landing",
+    "proposal",
+    "view",
+    "change",
+    "block",
+    "asset",
+    "blob",
+    "pack",
+    "store",
+    "canon",
+    "scope",
+];
+
+fn re(pattern: &str) -> Regex {
+    Regex::new(pattern).unwrap_or_else(|e| panic!("{pattern}: {e}"))
+}
+
+/// The leak patterns in the order a run is checked against them (so a run's leaks come out in
+/// this order). F4 (order keys) has no rule of its own: the token `order` is in F5's words.
+pub static PATTERNS: LazyLock<Vec<(&'static str, Rule)>> = LazyLock::new(|| {
+    use Rule::*;
+    vec![
+        (
+            "F1",
+            AllText(re(r"\b[A-Za-z]{1,3}-[0-9A-HJKMNP-TV-Z]{5}\b")),
+        ),
+        ("F2", AllText(re(r"\b[0-9a-fA-F]{12,64}\b"))),
+        ("F3", AllText(re(r"\bP-[0-9A-Z]+@\d+\b"))),
+        ("F3", AllText(re(r"\blanding:[0-9a-f]+"))),
+        ("F5", ChromeText(re(r"\b[a-z]+(_[a-z]+)+\b"))),
+        ("F5", LabelWord(F5_WORDS)),
+        ("F6", AllText(re(r"\b[\w./-]+\.(yaml|yml|html|json)\b"))),
+        ("F6", AllText(re(r#"(^|[\s"(/])\.rdy/"#))),
+        ("F6", AllText(re(r"\bdocs/"))),
+        ("F6", AllText(re(r"\b_blobs/"))),
+        ("F6", AllText(re(r"\b_assets/"))),
+        ("F6", AllText(re(r"\b_decision/"))),
+        ("F6", AllText(re(r"_folder\.yaml"))),
+        ("F7", AllText(re(r"(^|/)_[a-z]+/"))),
+        ("F8", LabelWord(F8_WORDS)),
+        ("F9", LabelWord(F9_WORDS)),
+        ("F9", LabelPrefix(F9_WORDS)),
+        (
+            "F10",
+            AllText(re(r"\b(Some|None|Ok|Err|Str|Int|List|Map|Bool|Null)\(")),
+        ),
+        ("F10", AllText(re(r"\{[a-z_]+: "))),
+        ("F10", AllText(re(r"rdy_[a-z]+::"))),
+        (
+            "F11",
+            ChromeContext(re(
+                r"(?i)\b(landings|landing|unlanded|materialized|reindex|fsck|nonce)\b",
+            )),
+        ),
+    ]
+});
+
+/// Whether a Chrome run sits where F11 reads: inside a nav, or in a version, breadcrumb or
+/// badge element.
+fn storage_position(run: &Run) -> bool {
+    run.path.iter().any(|t| t == "nav")
+        || run
+            .classes
+            .iter()
+            .any(|c| matches!(c.as_str(), "version" | "crumbs" | "badge"))
+}
+
+/// Every leak of one run, in [`PATTERNS`] order.
+fn run_leaks(page: &str, run: &Run, out: &mut Vec<Leak>) {
+    let scanned = matches!(run.zone, Zone::Chrome | Zone::Content | Zone::Trail);
+    let labelled = run.label && matches!(run.zone, Zone::Chrome | Zone::Content);
+    let mut push = |pattern: &'static str, text: &str| {
+        out.push(Leak {
+            page: page.to_string(),
+            zone: run.zone,
+            pattern,
+            text: text.to_string(),
+        })
+    };
+    for (id, rule) in PATTERNS.iter() {
+        match rule {
+            Rule::AllText(rx) if scanned => {
+                rx.find_iter(&run.text).for_each(|m| push(id, m.as_str()));
+            }
+            Rule::ChromeText(rx) if run.zone == Zone::Chrome => {
+                rx.find_iter(&run.text).for_each(|m| push(id, m.as_str()));
+            }
+            Rule::ChromeContext(rx) if run.zone == Zone::Chrome && storage_position(run) => {
+                rx.find_iter(&run.text).for_each(|m| push(id, m.as_str()));
+            }
+            Rule::LabelWord(words) if labelled && words.contains(&run.text.as_str()) => {
+                push(id, &run.text);
+            }
+            Rule::LabelPrefix(words)
+                if labelled
+                    && words.iter().any(|w| {
+                        run.text
+                            .strip_prefix(w)
+                            .is_some_and(|r| r.starts_with(" ·"))
+                    }) =>
+            {
+                push(id, &run.text);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Every leak on every `.html` page of the site at `site`: pages in path order, runs in
+/// document order, patterns in [`PATTERNS`] order. Agents runs are never scanned.
+pub fn leaks(site: &std::path::Path) -> Vec<Leak> {
+    let mut out = vec![];
+    for path in crate::golden::pages(site) {
+        let page = path
+            .strip_prefix(site)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let html = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{page}: {e}"));
+        for run in visible_runs(&html) {
+            run_leaks(&page, &run, &mut out);
+        }
+    }
+    out
 }
 
 /// The heading levels and texts of a page, in order (a heading's text includes any code in it).
