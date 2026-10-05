@@ -19,8 +19,12 @@ use std::time::Duration;
 const ENV_CHILD: &str = "RDY_DAEMON_CHILD";
 /// The child daemon's version (default "1").
 const ENV_VERSION: &str = "RDY_DAEMON_VERSION";
-/// The child daemon's idle timeout in ms (default: never idles out).
+/// The child daemon's idle timeout in ms (default `CHILD_IDLE_TIMEOUT`).
 const ENV_IDLE_MS: &str = "RDY_DAEMON_IDLE_MS";
+/// A child daemon's idle timeout unless `RDY_DAEMON_IDLE_MS` sets one: far past any gate test's
+/// own run, so it never fires mid-test, but a test that fails before stopping its daemon leaves
+/// no process behind for long.
+const CHILD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the child reports `starting` before `ready`, in ms (default 0).
 const ENV_PROGRESS_MS: &str = "RDY_DAEMON_PROGRESS_MS";
 
@@ -82,7 +86,9 @@ pub fn child_daemon_entry() {
     };
     let run = RunDir::of_project(Path::new(&project));
     let version = std::env::var(ENV_VERSION).unwrap_or_else(|_| "1".to_string());
-    let idle = env_ms(ENV_IDLE_MS).map(Duration::from_millis);
+    let idle = env_ms(ENV_IDLE_MS)
+        .map(Duration::from_millis)
+        .unwrap_or(CHILD_IDLE_TIMEOUT);
     let progress = Duration::from_millis(env_ms(ENV_PROGRESS_MS).unwrap_or(0));
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -90,7 +96,7 @@ pub fn child_daemon_entry() {
         .expect("child runtime");
     let code = rt.block_on(async move {
         let mut config = DaemonConfig::new(run, version);
-        config.idle_timeout = idle;
+        config.idle_timeout = Some(idle);
         let mut d = Daemon::new(config, Arc::new(EchoHandler::default()));
         if let Err(e) = d.bind().await {
             eprintln!("race1 child: bind failed: {e}");

@@ -29,6 +29,8 @@ const MAX_HELLO_REPLY_BYTES: usize = 64 * 1024;
 const MAX_LOG_TAIL_BYTES: u64 = 64 * 1024;
 
 const START_FIX: &str = "look at .rdy/run/daemon.log; run rdy serve in the foreground to see why";
+const VERSION_FIX: &str =
+    "the rdy that starts the daemon must be this client's version: check which rdy is on PATH";
 const GONE_FIX: &str = "check rdy status; a write may or may not have committed; it is not retried";
 
 fn start_error(message: String) -> ErrorReply {
@@ -204,9 +206,16 @@ impl Client {
         }
     }
 
-    /// The connection, for a `Proto::Mcp` client to hand to its MCP transport. Nothing past the
-    /// `ready` reply has been read off it.
+    /// The connection, for a `Proto::Mcp` client to hand to its MCP transport. Call it before any
+    /// `ctl` (as an MCP client does) or after `ctl` replies only (`ctl` never pipelines): then
+    /// nothing past the last reply has been read off the stream. Bytes read past it would be lost
+    /// with the buffer; debug builds assert there are none.
     pub fn into_stream(self) -> UnixStream {
+        debug_assert!(
+            self.stream.buffer().is_empty(),
+            "into_stream would drop {} bytes read past the last ctl reply",
+            self.stream.buffer().len()
+        );
         self.stream.into_inner()
     }
 
@@ -311,50 +320,51 @@ pub async fn connect(run: &RunDir, hello: &Hello) -> Attempt {
 /// Test hook: `connect`, taking the peer to be ours only when it runs as `uid`.
 #[doc(hidden)]
 pub async fn connect_expecting_uid(run: &RunDir, hello: &Hello, uid: u32) -> Attempt {
+    match exchange_hello(run, hello, uid).await {
+        Ok((stream, reply)) => attempt(run, stream, reply),
+        Err(e) => Attempt::NoDaemon(e),
+    }
+}
+
+/// The connect, the peer check, the hello and its first reply; any error is "no daemon".
+async fn exchange_hello(
+    run: &RunDir,
+    hello: &Hello,
+    uid: u32,
+) -> io::Result<(UnixStream, HelloReply)> {
     let path = run.socket();
     // a socket path that is a symlink may lead anywhere; our daemon binds a real socket there
     if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Attempt::NoDaemon(io::Error::other(format!(
+        return Err(io::Error::other(format!(
             "{} is a symbolic link, which rdy does not follow",
             path.display()
         )));
     }
-    let mut stream = match UnixStream::connect(&path).await {
-        Ok(s) => s,
-        Err(e) => return Attempt::NoDaemon(e),
-    };
+    let mut stream = UnixStream::connect(&path).await?;
     // the mirror of the daemon's peer check: only a daemon of our own user hears the hello
-    match crate::socket::peer_uid(&stream) {
-        Ok(peer) if peer == uid => {}
-        Ok(peer) => {
-            return Attempt::NoDaemon(io::Error::other(format!(
-                "the socket's peer is uid {peer}, not ours"
-            )));
-        }
-        Err(e) => return Attempt::NoDaemon(e),
+    let peer = crate::socket::peer_uid(&stream)?;
+    if peer != uid {
+        return Err(io::Error::other(format!(
+            "the socket's peer is uid {peer}, not ours"
+        )));
     }
-    let mut line = match serde_json::to_vec(hello) {
-        Ok(l) => l,
-        Err(e) => return Attempt::NoDaemon(io::Error::other(e)),
-    };
+    let mut line = serde_json::to_vec(hello).map_err(io::Error::other)?;
     line.push(b'\n');
-    if let Err(e) = stream.write_all(&line).await {
-        return Attempt::NoDaemon(e);
+    stream.write_all(&line).await?;
+    match tokio::time::timeout(HELLO_TIMEOUT, read_hello_reply(&mut stream)).await {
+        Err(_) => Err(io::Error::other(format!(
+            "no hello reply within {} s",
+            HELLO_TIMEOUT.as_secs()
+        ))),
+        Ok(Err(e)) => Err(io::Error::other(format!(
+            "no hello reply from the daemon: {e}"
+        ))),
+        Ok(Ok(reply)) => Ok((stream, reply)),
     }
-    let reply = match tokio::time::timeout(HELLO_TIMEOUT, read_hello_reply(&mut stream)).await {
-        Err(_) => {
-            return Attempt::NoDaemon(io::Error::other(format!(
-                "no hello reply within {} s",
-                HELLO_TIMEOUT.as_secs()
-            )));
-        }
-        Ok(Err(e)) => {
-            return Attempt::NoDaemon(io::Error::other(format!(
-                "no hello reply from the daemon: {e}"
-            )));
-        }
-        Ok(Ok(r)) => r,
-    };
+}
+
+/// What a first hello reply means.
+fn attempt(run: &RunDir, stream: UnixStream, reply: HelloReply) -> Attempt {
     match reply {
         HelloReply::Ready { version, session } => {
             Attempt::Ready(Client::new(stream, session, version))
@@ -440,6 +450,11 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
         Attempt::Exiting | Attempt::NoDaemon(_) => {}
     }
 
+    // a daemon spawned for a socket path over `sun_path` would only die at its bind; refuse it
+    // here rather than wait out the start timeout
+    crate::socket::check_socket_path(run)
+        .map_err(|e| start_error(format!("could not start the daemon: {e}")))?;
+
     // 2. take start.lock; the guard unlocks on every return below
     run.ensure().map_err(|e| {
         start_error(format!(
@@ -482,9 +497,25 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
         return Err(start_error(format!("could not start the daemon: {e}")));
     }
 
-    // 5. wait for it to answer
+    // 5. wait for it to answer. An old daemon removes its socket before it answers `exiting`,
+    // so an `exiting` now comes from the daemon we spawned: it is not of our version, and
+    // waiting cannot help.
     loop {
-        match connect(run, &hello).await {
+        let reached = match exchange_hello(run, &hello, crate::socket::own_uid()).await {
+            Ok((_, HelloReply::Exiting { version: theirs })) => {
+                return Err(ErrorReply::new(
+                    E_DAEMON_START,
+                    format!(
+                        "the daemon we started is rdy {theirs}, this client is rdy {}",
+                        hello.version
+                    ),
+                    VERSION_FIX,
+                ));
+            }
+            Ok((stream, reply)) => attempt(run, stream, reply),
+            Err(e) => Attempt::NoDaemon(e),
+        };
+        match reached {
             Attempt::Ready(c) => return Ok(c),
             Attempt::Starting(p) => return finish(p, run, deadline, start_timeout, progress).await,
             Attempt::Refused(e) => return Err(e),

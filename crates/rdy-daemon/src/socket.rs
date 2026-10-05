@@ -1,6 +1,7 @@
 //! The daemon's socket: binding it privately, the pid file, and the peer's uid.
 
 use crate::layout::RunDir;
+use crate::lock::open_no_follow;
 use std::fs;
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
@@ -11,11 +12,10 @@ use tokio::net::{UnixListener, UnixStream};
 /// one of which is the terminating NUL.
 pub const MAX_SOCKET_PATH: usize = 103;
 
-/// Binds the project's socket (mode 0o600) in a private run dir and writes the pid file.
-///
-/// Call only while holding the store lock (§3.1); a client never calls this.
-pub async fn bind(run: &RunDir) -> io::Result<UnixListener> {
-    run.ensure()?;
+/// Refuses a socket path `bind` could not take: over `MAX_SOCKET_PATH` bytes, `bind` fails with
+/// `ENAMETOOLONG`. The error names the path, its length and the limit. A client checks this
+/// before it spawns a daemon that would only die at its bind.
+pub fn check_socket_path(run: &RunDir) -> io::Result<()> {
     let path = run.socket();
     let len = path.as_os_str().len();
     if len > MAX_SOCKET_PATH {
@@ -29,14 +29,30 @@ pub async fn bind(run: &RunDir) -> io::Result<UnixListener> {
             ),
         ));
     }
+    Ok(())
+}
+
+/// Binds the project's socket (mode 0o600) in a private run dir and writes the pid file.
+///
+/// Call only while holding the store lock (§3.1); a client never calls this.
+pub async fn bind(run: &RunDir) -> io::Result<UnixListener> {
+    run.ensure()?;
+    check_socket_path(run)?;
+    let path = run.socket();
     match fs::remove_file(&path) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
     let listener = UnixListener::bind(&path)?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    write_pid_file(run)?;
+    if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        .and_then(|()| write_pid_file(run))
+    {
+        // the socket we just bound; no daemon will serve it
+        drop(listener);
+        let _ = fs::remove_file(&path);
+        return Err(e);
+    }
     Ok(listener)
 }
 
@@ -47,12 +63,15 @@ fn write_pid_file(run: &RunDir) -> io::Result<()> {
         "{}.tmp",
         target.file_name().unwrap_or_default().to_string_lossy()
     ));
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
+    // never through a symlink: a planted `daemon.pid.tmp` link must not get its target written
+    let mut f = open_no_follow(
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600),
+        &tmp,
+    )?;
     // a leftover tmp file keeps its old mode through open; set it exactly
     f.set_permissions(fs::Permissions::from_mode(0o600))?;
     f.write_all(format!("{}\n", std::process::id()).as_bytes())?;

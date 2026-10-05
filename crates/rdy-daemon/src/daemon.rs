@@ -7,7 +7,7 @@ use crate::hello::{HelloReply, read_hello};
 use crate::layout::RunDir;
 use crate::session::{Proto, SessionInfo, Sessions};
 use crate::socket;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -24,16 +24,26 @@ pub const STOP_GRACE: Duration = Duration::from_secs(5);
 /// The least time between two `starting` replies on one connection.
 pub const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(200);
 
-/// Read past a refusal at most this much before closing (see `close_after_reply`).
-const DRAIN_AFTER_REPLY_BYTES: usize = 64 * 1024;
+/// Read past a final reply at most this much before closing (see `close_after_reply`).
+pub(crate) const DRAIN_AFTER_REPLY_BYTES: usize = 64 * 1024;
 
-/// One daemon log line on stderr: `<unix ms> rdy serve: <text>`.
+/// One daemon log line on stderr: `<unix ms> rdy serve: <text>`. A failed write (a full disk
+/// under `daemon.log`, a closed stderr) loses the line, never the daemon.
 pub(crate) fn log(text: &str) {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    eprintln!("{ms} rdy serve: {text}");
+    let _ = writeln!(io::stderr().lock(), "{ms} rdy serve: {text}");
+}
+
+/// The peer went away mid-exchange (a client that closed or was killed before its reply): a
+/// normal end of a connection, not an error to log.
+fn is_hang_up(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+    )
 }
 
 pub struct DaemonConfig {
@@ -230,6 +240,8 @@ impl Daemon {
             info: self.info.clone(),
             readiness: self.readiness.clone(),
             reason: Arc::clone(&self.reason),
+            run: self.config.run.clone(),
+            files: self.files.clone(),
         });
         let idle = self.config.idle_timeout;
         let mut stop = self.info.stop.subscribe();
@@ -357,6 +369,8 @@ struct Conn {
     info: DaemonInfo,
     readiness: Readiness,
     reason: Arc<OnceLock<ExitReason>>,
+    run: RunDir,
+    files: RunFiles,
 }
 
 /// The end of a connection, run on every way out of its task (return, panic, abort): removes
@@ -460,6 +474,9 @@ impl Conn {
                 let reply = HelloReply::Exiting {
                     version: self.version.clone(),
                 };
+                // before the reply: the client spawns a successor as soon as it reads it, and the
+                // successor's run files must not be removed by `run`'s cleanup afterwards
+                self.files.remove(&self.run);
                 close_after_reply(stream, &reply).await;
                 log(&format!(
                     "a client of version {} arrived with no sessions; exiting to be replaced",
@@ -503,7 +520,9 @@ impl Conn {
             Proto::Ctl => {
                 let (r, w) = stream.split();
                 let handler = Arc::clone(&self.handler);
-                if let Err(e) = serve_ctl(r, w, session, handler, self.info.clone()).await {
+                if let Err(e) = serve_ctl(r, w, session, handler, self.info.clone()).await
+                    && !is_hang_up(&e)
+                {
                     log(&format!("ctl session ended with an error: {e}"));
                 }
             }

@@ -3,12 +3,23 @@ mod common;
 use common::*;
 use rdy_daemon::*;
 use std::ffi::OsStr;
+use std::sync::{Mutex, MutexGuard};
+
+/// Every test in this file holds this while it runs: one of them sets environment variables and
+/// others read the environment (`serve_command`), and the harness runs tests on parallel threads.
+static ENV: Mutex<()> = Mutex::new(());
+
+fn env_lock() -> MutexGuard<'static, ()> {
+    ENV.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[test]
 fn spawn1_the_serve_command_has_the_right_shape_and_no_rdy_env() {
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
-    // SAFETY: test-only process environment, single-threaded at this point in this test binary's test
+    let _env = env_lock();
+    // SAFETY: no other test of this binary runs while `_env` is held (each takes it first), and
+    // nothing else in this process reads the environment meanwhile
     unsafe {
         std::env::set_var("RDY_TEST_HOOKS", "1");
         std::env::set_var("RDY_QA_DEEP", "1");
@@ -63,6 +74,7 @@ fn spawn1_the_serve_command_has_the_right_shape_and_no_rdy_env() {
 
 #[test]
 fn spawn1_a_spawned_child_writes_to_the_log_in_its_own_process_group() {
+    let _env = env_lock();
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
     // a script stands in for the rdy binary: it ignores `serve --detach --project …` and reports itself
@@ -89,6 +101,7 @@ fn spawn1_a_spawned_child_writes_to_the_log_in_its_own_process_group() {
 
 #[test]
 fn spawn1_detach_makes_a_new_session_in_a_child() {
+    let _env = env_lock();
     if std::env::var("RDY_SPAWN_CHILD").is_ok() {
         detach().unwrap();
         println!("sid={}", rdy_daemon::spawn::own_sid());
@@ -123,6 +136,7 @@ fn spawn1_detach_makes_a_new_session_in_a_child() {
 /// its `detach` silently stayed in the spawner's session.
 #[test]
 fn spawn1_a_spawned_serve_child_detaches_into_a_session_of_its_own() {
+    let _env = env_lock();
     const PROBE: &str = "SPAWN1_DETACH_PROBE";
     if std::env::var(PROBE).is_ok() {
         detach().unwrap();
@@ -180,6 +194,7 @@ fn spawn1_a_spawned_serve_child_detaches_into_a_session_of_its_own() {
 
 #[test]
 fn spawn1_a_symlinked_daemon_log_is_refused_and_its_target_is_untouched() {
+    let _env = env_lock();
     use std::os::unix::fs::PermissionsExt;
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
@@ -194,5 +209,24 @@ fn spawn1_a_symlinked_daemon_log_is_refused_and_its_target_is_untouched() {
     assert_eq!(
         std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
         0o644
+    );
+}
+
+#[test]
+fn spawn1_the_serve_command_refuses_a_socket_path_over_the_limit() {
+    let _env = env_lock();
+    let dir = short_tempdir();
+    let deep = dir.path().join("a".repeat(120));
+    std::fs::create_dir_all(&deep).unwrap();
+    let run = RunDir::of_project(&deep);
+    let e = serve_command(std::path::Path::new("/bin/sh"), &deep, &run).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        e.to_string().contains("the limit is 103") && e.to_string().contains("shorter path"),
+        "{e}"
+    );
+    assert!(
+        !run.path().exists(),
+        "no run dir or log for a daemon that could not bind"
     );
 }

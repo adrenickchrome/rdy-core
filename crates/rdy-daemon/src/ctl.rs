@@ -1,15 +1,18 @@
 //! The `ctl` protocol: one JSON request per line, one JSON reply per line, in request order.
 
+use crate::daemon::DRAIN_AFTER_REPLY_BYTES;
 use crate::error::{E_BAD_INPUT, E_LIMIT, ErrorReply};
 use crate::handler::Handler;
 use crate::session::{SessionInfo, Sessions};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::Poll;
 use std::time::Instant;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::watch;
 
 /// The longest request line served, without its newline. Equal to `rdy_mcp::tools::MAX_REQUEST_BYTES`.
@@ -133,6 +136,26 @@ async fn read_line<R: AsyncRead + Unpin>(
     }
 }
 
+/// Reads off and drops, without waiting, input that has already arrived, up to about `max`
+/// bytes. Closing a Unix socket with unread input makes Linux report ECONNRESET to the peer,
+/// which could hide the reply it is about to read.
+async fn drain_ready<R: AsyncRead + Unpin>(r: &mut BufReader<R>, max: usize) {
+    let mut drained = 0;
+    while drained < max {
+        // one poll: what is buffered or ready now, never a wait for more
+        let n = std::future::poll_fn(|cx| match Pin::new(&mut *r).poll_fill_buf(cx) {
+            Poll::Ready(Ok(buf)) => Poll::Ready(buf.len()),
+            Poll::Ready(Err(_)) | Poll::Pending => Poll::Ready(0),
+        })
+        .await;
+        if n == 0 {
+            break;
+        }
+        r.consume(n);
+        drained += n;
+    }
+}
+
 async fn write_reply<W: AsyncWrite + Unpin>(w: &mut W, reply: &CtlReply) -> io::Result<()> {
     let mut bytes = serde_json::to_vec(reply).map_err(io::Error::other)?;
     bytes.push(b'\n');
@@ -210,6 +233,10 @@ pub async fn serve_ctl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                     "send a smaller request",
                 );
                 write_reply(&mut w, &CtlReply::error(Value::Null, e)).await?;
+                // the caller closes the connection: read off what the client already sent
+                // first, as `close_after_reply` does for a refused hello
+                let _ = w.shutdown().await;
+                drain_ready(&mut r, DRAIN_AFTER_REPLY_BYTES).await;
                 return Ok(());
             }
             Got::Bytes(l) => l,

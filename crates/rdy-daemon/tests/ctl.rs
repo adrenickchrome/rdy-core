@@ -240,3 +240,24 @@ fn ctl1_error_reply_serializes_in_the_m1_shape() {
     assert_eq!(e.to_string(), "E_LIMIT: too big (fix: shrink)");
     let _: &dyn std::error::Error = &e;
 }
+
+/// After the E_LIMIT reply, what the client already pipelined is read off before the close:
+/// closing a socket with unread input makes Linux reset the connection, which can hide the reply.
+#[tokio::test]
+async fn ctl1_an_oversized_line_drains_pipelined_input_before_the_close() {
+    let mut input = vec![b'a'; MAX_CTL_LINE_BYTES + 10];
+    input.push(b'\n');
+    // ~42 KiB queued behind the oversized line: more than one read buffer
+    let pipelined = (json!({"id": 2, "op": "echo"}).to_string() + "\n").repeat(2000);
+    input.extend_from_slice(pipelined.as_bytes());
+    let mut r: &[u8] = &input;
+    let mut out: Vec<u8> = Vec::new();
+    let i = info();
+    let session = i.sessions.insert(Proto::Ctl, "t".into(), "/".into(), 0);
+    serve_ctl(&mut r, &mut out, session, Arc::new(Echo), i)
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["error"]["code"], "E_LIMIT");
+    assert!(r.is_empty(), "{} pipelined bytes left unread", r.len());
+}

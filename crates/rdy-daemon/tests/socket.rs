@@ -122,3 +122,28 @@ async fn sock1_peer_uid_of_a_same_user_connection_is_our_uid() {
     assert_eq!(v["ok"][0]["peer_uid"], socket::own_uid());
     d.handle.stop();
 }
+
+/// A checkout that plants `.rdy/run/daemon.pid.tmp` as a symlink must not get its target
+/// truncated, overwritten with the pid and chmod'ed when the daemon binds.
+#[tokio::test]
+async fn sock1_a_symlinked_pid_tmp_file_is_refused_and_its_target_is_untouched() {
+    let dir = short_tempdir();
+    let run = RunDir::of_project(dir.path());
+    run.ensure().unwrap();
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, "keep\n").unwrap();
+    std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::os::unix::fs::symlink(&victim, run.path().join(format!("{PID_FILE}.tmp"))).unwrap();
+    let e = socket::bind(&run).await.unwrap_err();
+    assert!(e.to_string().contains("symbolic link"), "{e}");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
+    assert_eq!(mode(&victim), 0o644);
+    assert!(
+        !run.pid_file().exists(),
+        "no pid file for a daemon that did not bind"
+    );
+    assert!(
+        !run.socket().exists(),
+        "the socket of a failed bind is removed"
+    );
+}

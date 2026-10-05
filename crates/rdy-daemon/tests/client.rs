@@ -477,3 +477,100 @@ async fn start1_a_symlinked_daemon_log_is_never_read_into_an_error() {
     assert_eq!(e.extra["log_tail"], json!([]));
     assert_untouched(&v);
 }
+
+/// Review Focus 2 on the real spawn path: a `rdy serve --detach` spawns fine and only dies at its
+/// bind, so the client must refuse the path itself, before it spawns, not wait out the timeout.
+#[tokio::test]
+async fn start1_a_socket_path_over_the_limit_is_e_daemon_start_at_once_and_nothing_is_spawned() {
+    let dir = short_tempdir();
+    let deep = dir.path().join("a".repeat(120));
+    std::fs::create_dir_all(&deep).unwrap();
+    let run = RunDir::of_project(&deep);
+    let n = Arc::new(AtomicUsize::new(0));
+    let spawned = n.clone();
+    let t0 = std::time::Instant::now();
+    // a spawn that succeeds, as a real one does before the daemon dies at bind
+    let e = connect_or_start(
+        &run,
+        opts("1", &deep, move |_| {
+            spawned.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, E_DAEMON_START);
+    assert!(
+        e.message
+            .contains(&format!("socket path {} is ", run.socket().display()))
+            && e.message.contains("the limit is 103")
+            && e.message.contains("shorter path"),
+        "{e}"
+    );
+    assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
+    assert_eq!(n.load(Ordering::SeqCst), 0);
+}
+
+/// The daemon we spawned is of another version than this client (the rdy on PATH is not this
+/// one): it answers `exiting`, and waiting longer cannot help.
+#[tokio::test]
+async fn start1_an_exiting_reply_from_the_daemon_we_spawned_is_e_daemon_start_at_once() {
+    let dir = short_tempdir();
+    let run = RunDir::of_project(dir.path());
+    let n = Arc::new(AtomicUsize::new(0));
+    let t0 = std::time::Instant::now();
+    let e = connect_or_start(
+        &run,
+        opts(
+            "0.2.0",
+            dir.path(),
+            in_process_spawn("0.1.0", n.clone(), Duration::ZERO),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, E_DAEMON_START);
+    assert!(
+        e.message
+            .starts_with("the daemon we started is rdy 0.1.0, this client is rdy 0.2.0"),
+        "{e}"
+    );
+    assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
+    assert_eq!(n.load(Ordering::SeqCst), 1, "spawned once, not again");
+}
+
+/// `into_stream` hands on the raw stream; bytes the client had already read past its last `ctl`
+/// reply would be lost with the buffer, so calling it then is a bug (asserted in debug builds).
+#[cfg(debug_assertions)]
+#[tokio::test]
+#[should_panic(expected = "read past the last ctl reply")]
+async fn start1_into_stream_after_reading_past_a_reply_is_a_bug() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let dir = short_tempdir();
+    let run = RunDir::of_project(dir.path());
+    run.ensure().unwrap();
+    let l = tokio::net::UnixListener::bind(run.socket()).unwrap();
+    // a fake daemon that answers the first request with two lines at once
+    tokio::spawn(async move {
+        let (s, _) = l.accept().await.unwrap();
+        let mut s = tokio::io::BufReader::new(s);
+        let mut line = String::new();
+        s.read_line(&mut line).await.unwrap();
+        s.get_mut()
+            .write_all(b"{\"status\":\"ready\",\"version\":\"1\",\"session\":1}\n")
+            .await
+            .unwrap();
+        line.clear();
+        s.read_line(&mut line).await.unwrap();
+        s.get_mut()
+            .write_all(b"{\"id\":1,\"ok\":1}\n{\"id\":2,\"ok\":2}\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+    let Attempt::Ready(mut c) = connect(&run, &hello_for(dir.path())).await else {
+        panic!("no ready")
+    };
+    assert_eq!(c.ctl("echo", json!({})).await.unwrap(), json!(1));
+    let _ = c.into_stream();
+}
