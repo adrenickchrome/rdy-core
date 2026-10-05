@@ -316,3 +316,35 @@ fn md1_a_code_blocks_copy_ref_keeps_its_source_verbatim() {
         .unwrap_or_else(|| panic!("{refs:?}"));
     assert!(c.contains("- name: x 1. step `cmd` and **kwargs**"), "{c}");
 }
+
+/// A diagram's Copy ref quotes its source as written, except that each reference in it reads as
+/// on the drawn diagram: its display text, else its target's label (a dangling one: site11).
+#[test]
+fn md1_a_diagrams_copy_ref_reads_its_references_and_shows_no_id() {
+    let (_d, mut r) = tiny();
+    let res = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Flow", "name": "flow", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Steps"}},
+        {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Guard"}, "body": "An `if` clause."},
+        {"op": "create", "type": "diagram", "id": "$g", "parent": "$s", "fields": {"lang": "mermaid", "alt": "A flow"},
+         "body": "flowchart TD\n  A[{{$t}}] --> B[{{$t|the **check**}}] --> D{{hex}}"}
+    ])).unwrap();
+    land(&mut r, "work").unwrap();
+    let out = render(&mut r);
+    let h = html(out.path(), "flow.html");
+    let refs: Vec<String> = rdy_qa::site::attrs(&h, "data-ref")
+        .into_iter()
+        .map(rdy_qa::site::unescape)
+        .collect();
+    let id = &res.created["$g"];
+    let g = refs
+        .iter()
+        .find(|x| x.starts_with(&format!("[{id}]")))
+        .unwrap_or_else(|| panic!("{refs:?}"));
+    let t = res.created["$t"].as_str();
+    assert!(
+        g.contains("flowchart TD A[Guard] --> B[the **check**] --> D{{hex}}"),
+        "{g}"
+    );
+    assert!(!g.contains(t), "{g}");
+}

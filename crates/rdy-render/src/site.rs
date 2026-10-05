@@ -380,7 +380,21 @@ impl<'a> Site<'a> {
         depth: usize,
         unresolved: &dyn Fn(&str) -> String,
     ) -> String {
-        inline::plain_refs(text, mode, form, &|span| match BlockId::parse(&span.token)
+        inline::plain_refs(text, mode, form, &|span| {
+            self.ref_words(span, depth, unresolved)
+        })
+    }
+
+    /// The words a reference with no display text reads as: its target's current key when typed
+    /// as one and the target has one, else the target's label, or `unresolved(token)` when it
+    /// leads nowhere.
+    fn ref_words(
+        &self,
+        span: &rdy_model::RefSpan,
+        depth: usize,
+        unresolved: &dyn Fn(&str) -> String,
+    ) -> String {
+        match BlockId::parse(&span.token)
             .ok()
             .and_then(|id| self.m.get(&id))
         {
@@ -393,7 +407,7 @@ impl<'a> Site<'a> {
                 None => self.label_at(t, depth + 1),
             },
             None => unresolved(&span.token),
-        })
+        }
     }
 
     /// `b`'s one-line summary as a reader reads it: its statement, prompt, name or title, else
@@ -433,11 +447,15 @@ impl<'a> Site<'a> {
             return read(b.field_str(f).unwrap_or(""), RefMode::Strict, *form);
         }
         if !b.body.is_empty() {
-            // source is not Markdown: its words are its text
+            // source is not Markdown: its words are its text, each reference in it (none in
+            // code) read as on the drawn diagram, so no id is quoted
             let text = match b.block_type.as_str() {
                 "code" | "diagram" | "figure" => {
-                    let raw = inline::unescape_braces(&b.body);
-                    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+                    let mode = RefMode::for_body(&b.block_type);
+                    let words = inline::source_plain(&b.body, mode, &|span| {
+                        self.ref_words(span, depth, &unresolved_of)
+                    });
+                    words.split_whitespace().collect::<Vec<_>>().join(" ")
                 }
                 _ => read(&b.body, RefMode::for_body(&b.block_type), Form::Body),
             };

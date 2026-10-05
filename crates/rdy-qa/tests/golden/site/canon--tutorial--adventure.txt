@@ -851,7 +851,7 @@ content	L	Soft keyword
 content	-	A word that is a keyword only in a specific grammatical position and an ordinary name elsewhere.
 content	-	and
 content	-	are soft keywords. See
-content	-	`match` and `case` are soft keywords.
+content	-	match and case are soft keywords.
 content	-	.
 agents	L	For agents
 agents	L	Id

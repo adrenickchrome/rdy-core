@@ -124,6 +124,28 @@ pub(crate) fn is_one_paragraph(text: &str) -> bool {
     matches!(parse_body(text).as_slice(), [Block::Para(_)])
 }
 
+/// Source that is not Markdown (a diagram's, a figure's) as plain words: each reference in `mode`
+/// reads as its display text, else as `label` says (called only for one with none), each rdy
+/// escape `\{{` as `{{`, and nothing else changes. In [`RefMode::Off`] it is the text unescaped.
+pub(crate) fn source_plain(
+    text: &str,
+    mode: RefMode,
+    label: &dyn Fn(&RefSpan) -> String,
+) -> String {
+    let mut out = String::new();
+    let mut last = 0;
+    for span in ref_spans(text, mode) {
+        out.push_str(&unescape_braces(&text[last..span.range.start]));
+        match &span.display {
+            Some(d) => out.push_str(d),
+            None => out.push_str(&label(&span)),
+        }
+        last = span.range.end;
+    }
+    out.push_str(&unescape_braces(&text[last..]));
+    out
+}
+
 /// The text with each rdy escape `\{{` read as `{{` and nothing else changed: for diagram
 /// source, which is not Markdown.
 pub(crate) fn unescape_braces(text: &str) -> String {

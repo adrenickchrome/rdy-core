@@ -481,7 +481,8 @@ pub fn agents(
 }
 
 /// The text a reference to `b` quotes: its summary's words, uncut (a code, diagram or figure
-/// body stays as written, an unresolved reference reads as the marker's words).
+/// body stays as written but for its references, and an unresolved reference reads as the
+/// marker's words, so no id is quoted).
 fn primary_text(b: &Block, site: &Site) -> String {
     site.summary_words(b, 0, false)
 }
