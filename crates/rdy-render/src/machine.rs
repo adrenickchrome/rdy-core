@@ -460,9 +460,9 @@ fn link_text(title: &str) -> String {
 }
 
 /// What a page is about, in a line: a folder's description, a doc's first prose.
-fn blurb(p: &PageContext) -> Option<String> {
+fn blurb(p: &PageContext, site: &Site) -> Option<String> {
     let text = match p.kind {
-        "folder" => one_line(p.body.folder.as_ref()?.description.as_deref()?),
+        "folder" => site.description_words(p.body.folder.as_ref()?.description.as_deref()?),
         "doc" => {
             // the doc's first prose is its lede when it opens the doc, else the first prose block
             let html = p.body.doc.as_ref()?.lede.as_deref().or_else(|| {
@@ -486,6 +486,7 @@ fn count(n: usize, one: &str, many: &str) -> String {
 
 /// The text of `llms.txt`: `pages` are in tree order.
 fn index_text(
+    site: &Site,
     pages: &[PageContext],
     site_name: &str,
     description: Option<&str>,
@@ -505,7 +506,7 @@ fn index_text(
         let depth = p.page_url.matches('/').count() - usize::from(p.kind == "folder");
         t.push_str(&"  ".repeat(depth));
         t.push_str(&format!("- [{}]({})", link_text(&p.title), p.page_url));
-        if let Some(b) = blurb(p) {
+        if let Some(b) = blurb(p, site) {
             t.push_str(": ");
             t.push_str(&b);
         }
@@ -541,6 +542,7 @@ fn index_text(
 
 /// Writes `llms.txt` under `out`.
 pub fn write_index(
+    site: &Site,
     out: &Path,
     pages: &[PageContext],
     site_name: &str,
@@ -549,7 +551,7 @@ pub fn write_index(
 ) -> Result<(), RdyError> {
     std::fs::write(
         out.join("llms.txt"),
-        index_text(pages, site_name, description, version_text),
+        index_text(site, pages, site_name, description, version_text),
     )
     .map_err(|e| {
         RdyError::new(

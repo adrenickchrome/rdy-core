@@ -42,7 +42,8 @@ fn spec() -> (
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "The `case` clause"}},
         {"op": "create", "type": "requirement", "id": "$r", "parent": "$s", "fields": {"key": "QQKEY-77", "priority": "must"}, "body": "A **guard** runs after the pattern matches."},
         {"op": "create", "type": "term", "id": "$t", "parent": "$d", "fields": {"name": "Guard"}, "body": "An `if` clause."},
-        {"op": "create", "type": "prose", "id": "$p", "parent": "$s", "body": "See {{QQKEY-77|the guard rule}} and {{$t}}."}
+        {"op": "create", "type": "prose", "id": "$p", "parent": "$s", "body": "See {{QQKEY-77|the guard rule}} and {{$t}}."},
+        {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "rules", "description": "Rules on **guards** in `brief`, per [the docs](https://example.com), {{$t}} and {{QQKEY-77|the guard rule}}."}}
     ])).unwrap();
     r.decide(
         &writer(),
@@ -250,4 +251,68 @@ fn direct1_content_after_a_section_stays_in_stored_order() {
             && at("Middle") < at("Inside the middle.")
             && at("Inside the middle.") < at("Closing note.")
     );
+}
+
+/// A folder's description is spans: home card, search entry and `llms.txt` read it as plain words.
+#[test]
+fn md1_a_folder_description_is_plain_on_the_home_card_in_search_and_in_llms_txt() {
+    let (_d, mut r, ids) = spec();
+    let out = render(&mut r);
+    let want = "Rules on guards in brief, per the docs, Guard and the guard rule.";
+    let home = html(out.path(), "index.html");
+    assert!(home.contains(want), "home card: {want}");
+    let idx = read_json(&out.path().join("search-index.json"));
+    let f = idx["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "folder")
+        .unwrap();
+    assert_eq!(f["text"], want);
+    let llms = std::fs::read_to_string(out.path().join("llms.txt")).unwrap();
+    assert!(llms.contains(&format!(": {want}")), "{llms}");
+    let line = llms
+        .lines()
+        .find(|l| l.contains("rules/index.html"))
+        .unwrap()
+        .split_once("): ")
+        .unwrap()
+        .1
+        .to_string();
+    for (what, text) in [("search", f["text"].to_string()), ("llms.txt", line)] {
+        let id = ids["$t"].as_str().unwrap();
+        assert!(
+            !text.contains("**")
+                && !text.contains('`')
+                && !text.contains("](")
+                && !text.contains("{{")
+                && !text.contains(id)
+                && !text.contains("QQKEY"),
+            "{what}: {text}"
+        );
+    }
+}
+
+/// A code block's Copy ref quotes its source as written: no Markdown is read out of it.
+#[test]
+fn md1_a_code_blocks_copy_ref_keeps_its_source_verbatim() {
+    let (_d, mut r) = tiny();
+    let res = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Code", "name": "code", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Samples"}},
+        {"op": "create", "type": "code", "id": "$c", "parent": "$s", "fields": {"lang": "yaml"}, "body": "- name: x\n1. step `cmd` and **kwargs**"}
+    ])).unwrap();
+    land(&mut r, "work").unwrap();
+    let out = render(&mut r);
+    let h = html(out.path(), "code.html");
+    let refs: Vec<String> = rdy_qa::site::attrs(&h, "data-ref")
+        .into_iter()
+        .map(rdy_qa::site::unescape)
+        .collect();
+    let id = &res.created["$c"];
+    let c = refs
+        .iter()
+        .find(|x| x.starts_with(&format!("[{id}]")))
+        .unwrap_or_else(|| panic!("{refs:?}"));
+    assert!(c.contains("- name: x 1. step `cmd` and **kwargs**"), "{c}");
 }

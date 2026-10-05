@@ -407,7 +407,7 @@ impl<'a> Site<'a> {
 
     /// The summary's words, uncut. `keep_token` leaves an unresolved reference as its token
     /// (then every id-shaped word is `…`); otherwise it reads as the unresolved marker's words.
-    fn summary_words(&self, b: &Block, depth: usize, keep_token: bool) -> String {
+    pub(crate) fn summary_words(&self, b: &Block, depth: usize, keep_token: bool) -> String {
         let unresolved_of = |token: &str| match keep_token {
             true => token.to_string(),
             false => crate::html::UNRESOLVED.to_string(),
@@ -450,6 +450,13 @@ impl<'a> Site<'a> {
             .find_map(|f| b.field_str(f).filter(|s| !s.trim().is_empty()))
             .map(|s| read(s, RefMode::Strict, Form::Label))
             .unwrap_or_default()
+    }
+
+    /// A folder's description as plain words on one line: it is running text (spans), a reference
+    /// with no display text reads as its target's label, one that leads nowhere as nothing.
+    pub(crate) fn description_words(&self, text: &str) -> String {
+        let words = self.plain(text, RefMode::Strict, Form::Spans, 0, &|_| String::new());
+        words.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     fn summary_at(&self, b: &Block, depth: usize, keep_token: bool) -> String {

@@ -204,7 +204,10 @@ pub fn collect(index: &mut Index, page: &PageContext, m: &Materialized, site: &S
         text,
     };
     if let Some(folder) = &page.body.folder {
-        let text = clip(folder.description.as_deref().unwrap_or(""), TEXT_MAX);
+        let text = clip(
+            &site.description_words(folder.description.as_deref().unwrap_or("")),
+            TEXT_MAX,
+        );
         add(entry("folder", None, folder.title.clone(), text));
         return;
     }

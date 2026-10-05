@@ -50,7 +50,7 @@ pub fn build(
         .filter_map(|b| {
             let page = site.page(&b.id)?;
             let summary = if b.block_type == tree::FOLDER {
-                b.field_str("description").unwrap_or_default().to_string()
+                site.description_words(b.field_str("description").unwrap_or_default())
             } else {
                 first_prose(site, m, b, 0)
             };

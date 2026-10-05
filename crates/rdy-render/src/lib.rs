@@ -482,6 +482,7 @@ fn render_into(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary
     }
     search::write(&index, &site_name, out)?;
     machine::write_index(
+        &site,
         out,
         &contexts,
         &site_name,

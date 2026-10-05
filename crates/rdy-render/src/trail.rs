@@ -1,12 +1,12 @@
 //! The "Why ?" trail of a block, the agents' affordance and the copied reference.
 use crate::html::{self, Link};
-use crate::inline::{self, Form};
+use crate::inline;
 use crate::site::{Site, rel};
 use rdy_engine::Materialized;
 use rdy_graph::{DerivedStatus, EdgeKind, Graph};
 use rdy_model::decision::{self, AFFECTS, ANSWERS, DECIDED_BY, IMPLEMENTS, REVOKES, SUPERSEDES};
 use rdy_model::reference::{format_ref, head, snippet};
-use rdy_model::{Block, BlockId, FieldValue, RefMode};
+use rdy_model::{Block, BlockId, FieldValue};
 use regex::Regex;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -480,42 +480,10 @@ pub fn agents(
     }
 }
 
-/// `text` as plain words in `form`: each reference as its display text or its target's label (or
-/// current key, when typed as one), a dangling one as the unresolved marker's words (never its
-/// id: the copied ref sits in a `data-ref` attribute), `\{{` as `{{`.
-fn resolved(text: &str, mode: RefMode, form: Form, site: &Site) -> String {
-    site.plain(text, mode, form, 0, &|_| {
-        crate::html::UNRESOLVED.to_string()
-    })
-}
-
-/// The text a reference to `b` quotes: its statement, prompt, name or title, else its body,
-/// else its alt text or caption, each as plain words.
+/// The text a reference to `b` quotes: its summary's words, uncut (a code, diagram or figure
+/// body stays as written, an unresolved reference reads as the marker's words).
 fn primary_text(b: &Block, site: &Site) -> String {
-    let field = |names: &[(&str, Form)]| {
-        names.iter().find_map(|(f, form)| {
-            b.field_str(f)
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| resolved(s, RefMode::Strict, *form, site))
-        })
-    };
-    field(&[
-        ("statement", Form::Spans),
-        ("prompt", Form::Spans),
-        ("name", Form::Label),
-        ("title", Form::Label),
-    ])
-    .or_else(|| {
-        Some(resolved(
-            &b.body,
-            RefMode::for_body(&b.block_type),
-            Form::Body,
-            site,
-        ))
-        .filter(|s| !s.trim().is_empty())
-    })
-    .or_else(|| field(&[("alt", Form::Label), ("caption", Form::Label)]))
-    .unwrap_or_default()
+    site.summary_words(b, 0, false)
 }
 
 /// The doc's title, then the sections down to the block's nearest one (itself, for a section).
