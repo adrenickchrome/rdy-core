@@ -45,18 +45,12 @@ impl Rdy {
             .collect()
     }
 
-    /// The landing that already carried any of `p`'s changes into canon. Landing removes a
-    /// proposal's changes from its view, so a proposal whose changes are all still in its view
-    /// has not landed, and the common case costs one view read.
+    /// The landing that already carried any of `p`'s changes into canon: one index lookup per
+    /// change (lidx1).
     fn landed_as(&self, p: &Proposal) -> Result<Option<Hash>, RdyError> {
-        let in_view = self.store.view(&p.view)?.changes;
-        if p.changes.iter().all(|c| in_view.contains(c)) {
-            return Ok(None);
-        }
-        for (landing, rec) in self.store.landings()? {
-            let landed = self.store.proposal(&rec.proposal)?;
-            if p.changes.iter().any(|c| landed.changes.contains(c)) {
-                return Ok(Some(landing));
+        for c in &p.changes {
+            if let Some(l) = self.store.landing_of(c)? {
+                return Ok(Some(l));
             }
         }
         Ok(None)

@@ -10,6 +10,10 @@ pub const BLOB_CHUNK: u8 = 6;
 pub const BLOB_MANIFEST: u8 = 7;
 pub const REF_UPDATE: u8 = 8;
 pub const TAG: u8 = 9;
+// Codes 10-12 and 19 are unassigned. Codes 15-18 are reserved for INTENT, ALT_SET, REVIEW and
+// TENSION (later plans); nothing declares them yet.
+/// One op of a view's chain (`crate::view::ViewOp`).
+pub const VIEW_OP: u8 = 13;
 /// Ends every write batch: names the batch's first frame, its frame count and a digest of the
 /// frame hashes. Neither an object nor an index entry.
 pub const BATCH_COMMIT: u8 = 14;

@@ -4,12 +4,14 @@ use crate::fsutil;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
 use crate::segment::{CrashPoint, Location, SegmentLog, find_gap, seg_path};
+use crate::view::ViewOp;
 use rdy_model::{Block, Change, Hash, LandingRecord, Op, Proposal};
 use serde::{Serialize, de::DeserializeOwned};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The file a store creates when it opens and removes on a clean close. Finding it at open means the
@@ -78,7 +80,14 @@ pub struct Store {
     checkpoint_error: Option<String>,
     /// Object frames read by `get_raw` and `get_kind` (a test hook; reads take `&self`).
     frames_read: AtomicU64,
+    /// Per view, the head last read by `included` and the set it gave (chain1). A write never
+    /// updates it: the next read walks back to the cached head or to a checkpoint. `reindex`
+    /// clears it.
+    sets: Mutex<HashMap<String, CachedSet>>,
 }
+
+/// A view's head and the included set the walk gave at it (chain1).
+pub(crate) type CachedSet = (Hash, Arc<Vec<Hash>>);
 
 /// How an index open went: the index, its acknowledged boundary (None if it has none yet), whether
 /// it was set aside and replaced by an empty one, and whether redb repaired it.
@@ -235,6 +244,20 @@ fn entries_for_frame(
             let r: RefUpdate = decode(payload)?;
             out.push(IndexEntry::Ref(r.name, r.value));
         }
+        kinds::VIEW_OP => {
+            let op: ViewOp = decode(payload)?;
+            out.push(IndexEntry::ViewOp {
+                view: op.view,
+                op: hash,
+            });
+        }
+        kinds::LANDING => {
+            let rec: LandingRecord = decode(payload)?;
+            out.extend(rec.changes.into_iter().map(|change| IndexEntry::Landed {
+                change,
+                landing: hash,
+            }));
+        }
         _ => {}
     }
     Ok(out)
@@ -341,6 +364,7 @@ impl Store {
             checkpoints: 0,
             checkpoint_error: None,
             frames_read: AtomicU64::new(0),
+            sets: Mutex::new(HashMap::new()),
         };
         let (upto, end) = (store.index().indexed_upto()?, store.log.end());
         if upto > end {
@@ -449,8 +473,25 @@ impl Store {
         &self.dir
     }
 
-    fn index(&self) -> &Index {
+    pub(crate) fn index(&self) -> &Index {
         self.index.as_ref().expect("the index is open until drop")
+    }
+
+    /// The cached (head, set) of view `name`, if `included` has read one.
+    pub(crate) fn cached_set(&self, name: &str) -> Option<CachedSet> {
+        self.sets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .cloned()
+    }
+
+    /// Caches `set` as view `name`'s included set at `head`.
+    pub(crate) fn cache_set(&self, name: &str, head: Hash, set: Arc<Vec<Hash>>) {
+        self.sets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_string(), (head, set));
     }
 
     /// Replays the frames past the index's `indexed_upto` into it, streaming the log and applying
@@ -537,6 +578,7 @@ impl Store {
     }
 
     pub fn reindex(&mut self) -> Result<(), StoreError> {
+        self.sets.lock().unwrap_or_else(|e| e.into_inner()).clear();
         let path = self.dir.join("index.redb");
         let tmp = self.dir.join("index.redb.tmp");
         // drop the old database before deleting its file

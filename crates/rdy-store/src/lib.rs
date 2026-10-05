@@ -7,6 +7,7 @@ pub mod layout;
 pub mod merge;
 pub mod segment;
 mod store;
+pub mod view;
 
 pub use error::StoreError;
 pub use merge::{Conflict, MergeChange, Merged, Side, conflict_id, merge};
@@ -16,3 +17,4 @@ pub use store::{
 };
 mod state;
 pub use state::{ViewRecord, apply_op};
+pub use view::{Owner, ViewHead, ViewOp, ViewOpKind};

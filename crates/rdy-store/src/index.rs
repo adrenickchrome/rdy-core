@@ -11,6 +11,10 @@ const OBJECTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("objects");
 /// hash (32 bytes) followed by the kind byte -> the location of that kind's object with that hash.
 const TYPED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("typed");
 const PRODUCERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("producers");
+/// a view name's UTF-8 bytes, a 0x00 byte, then the op hash -> empty: the ops of each view.
+const VIEW_OPS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("view_ops");
+/// change hash -> the hash of the first landing that carried it into canon.
+const LANDED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("landed");
 const REFS: TableDefinition<&str, &[u8]> = TableDefinition::new("refs");
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 
@@ -27,6 +31,16 @@ pub enum IndexEntry {
         change: Hash,
     },
     Ref(String, Vec<u8>),
+    /// `op` is one of `view`'s chain ops.
+    ViewOp {
+        view: String,
+        op: Hash,
+    },
+    /// `landing` carried `change` into canon; only the first such landing is kept.
+    Landed {
+        change: Hash,
+        landing: Hash,
+    },
 }
 
 pub struct Index {
@@ -47,6 +61,14 @@ fn typed_key(kind: u8, h: &Hash) -> [u8; 33] {
     let mut key = [0u8; 33];
     key[..32].copy_from_slice(&h.0);
     key[32] = kind;
+    key
+}
+
+/// The `view_ops` key prefix of `view`: its UTF-8 bytes, then a 0x00 byte.
+fn view_ops_prefix(view: &str) -> Vec<u8> {
+    let mut key = Vec::with_capacity(view.len() + 33);
+    key.extend_from_slice(view.as_bytes());
+    key.push(0);
     key
 }
 
@@ -98,6 +120,8 @@ impl Index {
             w.open_table(OBJECTS).map_err(db)?;
             w.open_table(TYPED).map_err(db)?;
             w.open_table(PRODUCERS).map_err(db)?;
+            w.open_table(VIEW_OPS).map_err(db)?;
+            w.open_table(LANDED).map_err(db)?;
             w.open_table(REFS).map_err(db)?;
             w.open_table(META).map_err(db)?;
         }
@@ -149,6 +173,8 @@ impl Index {
             let mut objects = w.open_table(OBJECTS).map_err(db)?;
             let mut typed = w.open_table(TYPED).map_err(db)?;
             let mut producers = w.open_table(PRODUCERS).map_err(db)?;
+            let mut view_ops = w.open_table(VIEW_OPS).map_err(db)?;
+            let mut landed = w.open_table(LANDED).map_err(db)?;
             let mut refs = w.open_table(REFS).map_err(db)?;
             let mut meta = w.open_table(META).map_err(db)?;
             for e in entries {
@@ -170,6 +196,17 @@ impl Index {
                     }
                     IndexEntry::Ref(name, value) => {
                         refs.insert(name.as_str(), &value[..]).map_err(db)?;
+                    }
+                    IndexEntry::ViewOp { view, op } => {
+                        let mut key = view_ops_prefix(view);
+                        key.extend_from_slice(&op.0);
+                        view_ops.insert(&key[..], &[][..]).map_err(db)?;
+                    }
+                    IndexEntry::Landed { change, landing } => {
+                        // the first landing that carried a change keeps it
+                        if landed.get(&change.0[..]).map_err(db)?.is_none() {
+                            landed.insert(&change.0[..], &landing.0[..]).map_err(db)?;
+                        }
                     }
                 }
             }
@@ -203,6 +240,37 @@ impl Index {
         let t = r.open_table(PRODUCERS).map_err(db)?;
         match t.get(&version.0[..]).map_err(db)? {
             Some(v) => Ok(Some(hash_from(v.value(), "producer entry")?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The ops of `view`'s chain, in ascending hash order.
+    pub fn view_ops(&self, view: &str) -> Result<Vec<Hash>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(VIEW_OPS).map_err(db)?;
+        let prefix = view_ops_prefix(view);
+        let mut out = vec![];
+        for item in t.range(&prefix[..]..).map_err(db)? {
+            let (k, _) = item.map_err(db)?;
+            let key = k.value();
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            // a longer name that starts with `view` and a 0x00 byte sorts among these keys; only
+            // a key of exactly prefix + hash is one of `view`'s
+            if key.len() == prefix.len() + 32 {
+                out.push(hash_from(&key[prefix.len()..], "view op entry")?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The landing that carried `change` into canon, if one has.
+    pub fn landing_of(&self, change: &Hash) -> Result<Option<Hash>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(LANDED).map_err(db)?;
+        match t.get(&change.0[..]).map_err(db)? {
+            Some(v) => Ok(Some(hash_from(v.value(), "landed entry")?)),
             None => Ok(None),
         }
     }
