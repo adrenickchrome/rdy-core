@@ -1,5 +1,6 @@
 mod decide;
 mod error;
+pub mod events;
 mod gate;
 mod io;
 mod lint;
@@ -15,6 +16,7 @@ mod yaml_pos;
 
 pub use decide::DecisionInput;
 pub use error::*;
+pub use events::{Event, EventKind, Events};
 pub use gate::{LandInfo, ProposalInfo};
 pub use io::{ExportSummary, block_from_yaml, block_to_yaml};
 pub use lint::check_path;
