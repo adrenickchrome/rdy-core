@@ -440,6 +440,7 @@ impl Served {
     }
 
     /// SIGKILLs the daemon named by the pid file, then waits until a connect finds no daemon.
+    /// Callable from inside a tokio runtime: the wait runs its own runtime on its own thread.
     pub fn kill9(&self) {
         let pid = self.pid_file().expect("a daemon pid file");
         let status = Command::new("kill")
@@ -454,22 +455,31 @@ impl Served {
             proto: Proto::Ctl,
             cwd: self.dir.path().into(),
         };
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("kill9 runtime");
-        let deadline = std::time::Instant::now() + KILL_WAIT;
-        loop {
-            if let Attempt::NoDaemon(_) = rt.block_on(connect(&run, &hello)) {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the daemon {pid} still answers {} s after kill -9",
-                KILL_WAIT.as_secs()
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        let gone = std::thread::scope(|sc| {
+            sc.spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("kill9 runtime");
+                let deadline = std::time::Instant::now() + KILL_WAIT;
+                loop {
+                    if let Attempt::NoDaemon(_) = rt.block_on(connect(&run, &hello)) {
+                        return true;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            })
+            .join()
+            .expect("the kill9 wait thread")
+        });
+        assert!(
+            gone,
+            "the daemon {pid} still answers {} s after kill -9",
+            KILL_WAIT.as_secs()
+        );
     }
 
     /// `rdy serve --stop`; a failure is reported on stderr, never a panic.
