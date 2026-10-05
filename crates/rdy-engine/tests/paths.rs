@@ -77,7 +77,7 @@ fn id(res: &WriteResult, k: &str) -> BlockId {
 
 #[test]
 fn path_of_and_resolve_path() {
-    let (_d, mut r, res) = tree();
+    let (_d, r, res) = tree();
     let work = Scope::View("work".into());
     assert_eq!(
         r.path_of(&work, &id(&res, "$w")).unwrap().as_deref(),
@@ -121,7 +121,7 @@ fn path_of_and_resolve_path() {
 
 #[test]
 fn paths_ignore_leading_and_trailing_slashes() {
-    let (_d, mut r, res) = tree();
+    let (_d, r, res) = tree();
     let work = Scope::View("work".into());
     for p in [
         "/wallets/",
@@ -139,7 +139,7 @@ fn paths_ignore_leading_and_trailing_slashes() {
 
 #[test]
 fn an_unknown_path_lists_the_nearest_folder() {
-    let (_d, mut r, _) = tree();
+    let (_d, r, _) = tree();
     let e = r
         .resolve_path(&Scope::View("work".into()), "wallets/nope")
         .unwrap_err();
@@ -348,7 +348,7 @@ fn new_doc_needs_a_type_when_the_pack_has_no_default() {
 
 #[test]
 fn tree_lists_folders_and_docs_with_depth() {
-    let (_d, mut r, res) = tree();
+    let (_d, r, res) = tree();
     let work = Scope::View("work".into());
     let all = r.tree(&work, None, None).unwrap();
     assert_eq!(

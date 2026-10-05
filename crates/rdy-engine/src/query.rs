@@ -1,5 +1,5 @@
 use crate::error::*;
-use crate::{Materialized, Rdy, Scope};
+use crate::{Materialized, Rdy, ReadState, Scope};
 use rdy_graph::{DerivedStatus, Edge, Suspect};
 use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
 use serde::Serialize;
@@ -160,20 +160,18 @@ pub fn field_json(v: &FieldValue) -> serde_json::Value {
     }
 }
 
-impl Rdy {
-    pub fn suspects(&mut self, scope: &Scope) -> Result<Vec<Suspect>, RdyError> {
+impl ReadState {
+    pub fn suspects(&self, scope: &Scope) -> Result<Vec<Suspect>, RdyError> {
         let g = self.graph(scope)?;
         let m = self.materialized(scope)?;
-        let store = &self.store;
-        Ok(g.suspects(&*m, &|h| store.get_block(h).ok()))
+        Ok(g.suspects(&*m, &|h| self.reader().get_block(h).ok()))
     }
 
-    pub fn context(&mut self, scope: &Scope, id: &BlockId) -> Result<Context, RdyError> {
+    pub fn context(&self, scope: &Scope, id: &BlockId) -> Result<Context, RdyError> {
         let block = self.block(scope, id)?;
         let g = self.graph(scope)?;
         let m = self.materialized(scope)?;
-        let store = &self.store;
-        let suspects = g.suspects_of(id, &*m, &|h| store.get_block(h).ok());
+        let suspects = g.suspects_of(id, &*m, &|h| self.reader().get_block(h).ok());
         Ok(Context {
             id: block.id.to_string(),
             block_type: block.block_type.clone(),
@@ -202,7 +200,7 @@ impl Rdy {
     }
 
     pub fn impact(
-        &mut self,
+        &self,
         scope: &Scope,
         id: &BlockId,
         depth: u32,
@@ -225,5 +223,27 @@ impl Rdy {
                 })
             })
             .collect())
+    }
+}
+
+impl Rdy {
+    /// Forwarder to `ReadState::suspects` (removed once every caller reads the state).
+    pub fn suspects(&self, scope: &Scope) -> Result<Vec<Suspect>, RdyError> {
+        self.read().suspects(scope)
+    }
+
+    /// Forwarder to `ReadState::context` (removed once every caller reads the state).
+    pub fn context(&self, scope: &Scope, id: &BlockId) -> Result<Context, RdyError> {
+        self.read().context(scope, id)
+    }
+
+    /// Forwarder to `ReadState::impact` (removed once every caller reads the state).
+    pub fn impact(
+        &self,
+        scope: &Scope,
+        id: &BlockId,
+        depth: u32,
+    ) -> Result<Vec<ImpactItem>, RdyError> {
+        self.read().impact(scope, id, depth)
     }
 }

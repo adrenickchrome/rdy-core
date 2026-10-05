@@ -1,10 +1,11 @@
 //! Paths: readable names for folders and docs, usable wherever an id is (addendum B §2.4).
 use crate::error::*;
-use crate::{Materialized, Rdy, Scope};
+use crate::{Materialized, Rdy, ReadState, Scope};
 use crate::{Session, WriteRequest, WriteResult};
 use rdy_model::{Block, BlockId, tree};
 use serde::Serialize;
 use serde_json::json;
+use std::sync::Arc;
 
 pub(crate) fn resolve_in(m: &Materialized, path: &str) -> Result<BlockId, RdyError> {
     m.resolve_path(path).map_err(|miss| {
@@ -35,21 +36,21 @@ pub(crate) fn resolve_in(m: &Materialized, path: &str) -> Result<BlockId, RdyErr
     })
 }
 
-impl Rdy {
-    pub fn resolve_path(&mut self, scope: &Scope, path: &str) -> Result<BlockId, RdyError> {
+impl ReadState {
+    pub fn resolve_path(&self, scope: &Scope, path: &str) -> Result<BlockId, RdyError> {
         let m = self.materialized(scope)?;
         resolve_in(&m, path)
     }
 
     /// Text matching the id grammar is an id (not checked to exist); anything else is a path.
-    pub fn resolve_id(&mut self, scope: &Scope, text: &str) -> Result<BlockId, RdyError> {
+    pub fn resolve_id(&self, scope: &Scope, text: &str) -> Result<BlockId, RdyError> {
         match BlockId::parse(text) {
             Ok(id) => Ok(id),
             Err(_) => self.resolve_path(scope, text),
         }
     }
 
-    pub fn path_of(&mut self, scope: &Scope, id: &BlockId) -> Result<Option<String>, RdyError> {
+    pub fn path_of(&self, scope: &Scope, id: &BlockId) -> Result<Option<String>, RdyError> {
         let m = self.materialized(scope)?;
         if m.get(id).is_none() {
             return Err(RdyError::new(
@@ -161,13 +162,24 @@ fn nodes_under(
         .collect()
 }
 
-impl Rdy {
+impl ReadState {
+    /// The whole tree (no path, no depth cap), memoised for the life of this state.
+    pub fn tree_full(&self, scope: &Scope) -> Result<Arc<Vec<TreeNode>>, RdyError> {
+        let built = self.built(scope)?;
+        Ok(Arc::clone(built.tree.get_or_init(|| {
+            Arc::new(nodes_under(&built.m, None, "", None, 0))
+        })))
+    }
+
     pub fn tree(
-        &mut self,
+        &self,
         scope: &Scope,
         path: Option<&str>,
         depth: Option<u32>,
     ) -> Result<Vec<TreeNode>, RdyError> {
+        if path.is_none() && depth.is_none() {
+            return Ok((*self.tree_full(scope)?).clone());
+        }
         let m = self.materialized(scope)?;
         let Some(p) = path else {
             return Ok(nodes_under(&m, None, "", depth, 0));
@@ -179,7 +191,9 @@ impl Rdy {
         let level = m.folder_depth(&id) - usize::from(b.block_type == tree::FOLDER);
         Ok(vec![node(&m, b, full, name, depth, level)])
     }
+}
 
+impl Rdy {
     pub fn new_folder(
         &mut self,
         s: &Session,
@@ -233,7 +247,7 @@ impl Rdy {
                 "pass a path such as wallets/transactions",
             ));
         };
-        let m = self.materialized(&Scope::View(view.to_string()))?;
+        let m = self.read().materialized(&Scope::View(view.to_string()))?;
         let mut parent: Option<BlockId> = None;
         let mut parent_ref: Option<String> = None;
         let mut ops = vec![];
@@ -303,5 +317,32 @@ impl Rdy {
                 message: format!("new {kind} {path}"),
             },
         )
+    }
+}
+
+impl Rdy {
+    /// Forwarder to `ReadState::resolve_path` (removed once every caller reads the state).
+    pub fn resolve_path(&self, scope: &Scope, path: &str) -> Result<BlockId, RdyError> {
+        self.read().resolve_path(scope, path)
+    }
+
+    /// Forwarder to `ReadState::resolve_id` (removed once every caller reads the state).
+    pub fn resolve_id(&self, scope: &Scope, text: &str) -> Result<BlockId, RdyError> {
+        self.read().resolve_id(scope, text)
+    }
+
+    /// Forwarder to `ReadState::path_of` (removed once every caller reads the state).
+    pub fn path_of(&self, scope: &Scope, id: &BlockId) -> Result<Option<String>, RdyError> {
+        self.read().path_of(scope, id)
+    }
+
+    /// Forwarder to `ReadState::tree` (removed once every caller reads the state).
+    pub fn tree(
+        &self,
+        scope: &Scope,
+        path: Option<&str>,
+        depth: Option<u32>,
+    ) -> Result<Vec<TreeNode>, RdyError> {
+        self.read().tree(scope, path, depth)
     }
 }

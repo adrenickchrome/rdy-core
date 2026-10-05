@@ -15,7 +15,7 @@ fn paths_and_tree_at_1k_folders() {
     let t = Instant::now();
     let paths = testkit::generate_tree(dir.path(), 1000, 10, 8);
     println!("generated {} docs in {:?}", paths.len(), t.elapsed());
-    let mut r = Rdy::open(dir.path()).unwrap();
+    let r = Rdy::open(dir.path()).unwrap();
     let work = Scope::View("work".into());
     r.materialized(&work).unwrap();
     let mut tree = vec![];
