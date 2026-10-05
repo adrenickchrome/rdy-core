@@ -271,3 +271,192 @@ fn ren1_a_refused_swap_falls_back_to_replacing_in_place() {
         "no staging left"
     );
 }
+
+/// `.rdy-site` as a link to a file is not the marker: `is_file()` would follow it and mark a
+/// directory that rdy never rendered, and the render would delete what it holds.
+#[cfg(unix)]
+#[test]
+fn ren1_a_symlinked_marker_does_not_mark_a_site() {
+    let (_d, mut r, _doc) = one_doc();
+    let parent = tempfile::tempdir().unwrap();
+    let elsewhere = parent.path().join("elsewhere.txt");
+    std::fs::write(&elsewhere, "a real file").unwrap();
+    let dir = parent.path().join("notsite");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("notes.txt"), "mine").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, dir.join(rdy_render::SITE_MARKER)).unwrap();
+    let e = rdy_render::render_site(&mut r, &Scope::Canon, &dir).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("notes.txt")).unwrap(),
+        "mine"
+    );
+    assert!(
+        std::fs::symlink_metadata(dir.join(rdy_render::SITE_MARKER))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "a real file");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+}
+
+#[cfg(unix)]
+mod in_cwd {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::process::Command;
+
+    fn render(
+        project: &std::path::Path,
+        cwd: &std::path::Path,
+        out: &str,
+    ) -> (bool, String, String) {
+        let o = Command::new(rdy_bin())
+            .args([
+                "--project",
+                project.to_str().unwrap(),
+                "render",
+                "--out",
+                out,
+            ])
+            .current_dir(cwd)
+            .env("RDY_ACTOR", "human:qa")
+            .output()
+            .unwrap();
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into(),
+            String::from_utf8_lossy(&o.stderr).into(),
+        )
+    }
+
+    fn names(dir: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Rendering into the shell's own directory, spelled `.` or as its absolute path, replaces
+    /// what it holds and leaves the directory itself (inode, mode) alone, so the shell is not
+    /// left standing in a deleted directory.
+    #[test]
+    fn ren1_out_dot_and_out_equal_to_the_cwd_keep_the_directory() {
+        let (proj, r, _doc) = one_doc();
+        drop(r);
+        let parent = tempfile::tempdir().unwrap();
+        let site = parent.path().join("site");
+        std::fs::create_dir(&site).unwrap();
+        std::fs::set_permissions(&site, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let before = std::fs::metadata(&site).unwrap();
+        let abs = std::fs::canonicalize(&site).unwrap();
+        for (round, spelled) in [".", abs.to_str().unwrap(), "."].into_iter().enumerate() {
+            if round > 0 {
+                // a page and a directory that the next render must drop
+                std::fs::write(site.join("stale.html"), "x").unwrap();
+                std::fs::create_dir(site.join("stale-dir")).unwrap();
+            }
+            let (ok, out, err) = render(proj.path(), &site, spelled);
+            assert!(ok, "round {round} --out {spelled}: {out} {err}");
+            let now = std::fs::metadata(&site).unwrap();
+            assert_eq!(
+                now.ino(),
+                before.ino(),
+                "round {round}: the directory was replaced"
+            );
+            assert_eq!(now.mode(), before.mode(), "round {round}: mode");
+            assert_eq!(now.uid(), before.uid(), "round {round}: owner");
+            let n = names(&site);
+            assert!(n.contains(&"index.html".to_string()), "{n:?}");
+            assert!(n.contains(&rdy_render::SITE_MARKER.to_string()), "{n:?}");
+            assert!(
+                !n.iter()
+                    .any(|f| f.contains("rdy-render") || f.starts_with("stale")),
+                "round {round}: {n:?}"
+            );
+            assert_eq!(
+                names(parent.path()),
+                vec!["site".to_string()],
+                "round {round}: nothing left beside it"
+            );
+        }
+    }
+
+    /// `..` and `x/..` name a directory only once resolved, and are then checked like any other.
+    #[test]
+    fn ren1_out_dotdot_is_resolved_before_it_is_checked() {
+        let (proj, r, _doc) = one_doc();
+        drop(r);
+        let parent = tempfile::tempdir().unwrap();
+        // from `sub`, `..` is `site`: not empty, not a site, so refused and untouched
+        let site = parent.path().join("site");
+        let sub = site.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let (ok, _out, err) = render(proj.path(), &sub, "..");
+        assert!(!ok);
+        assert!(err.contains("not empty and is not a site"), "{err}");
+        assert_eq!(names(&site), vec!["sub".to_string()]);
+        // `fresh/x/..` is `fresh`
+        let fresh = parent.path().join("fresh");
+        std::fs::create_dir_all(fresh.join("x")).unwrap();
+        let (ok, _out, err) = render(proj.path(), parent.path(), "fresh/x/..");
+        assert!(!ok);
+        assert!(err.contains("not empty and is not a site"), "{err}");
+        assert_eq!(names(&fresh), vec!["x".to_string()]);
+        // a path that does not resolve is refused, not rendered somewhere else
+        let (ok, _out, err) = render(proj.path(), parent.path(), "gone/x/..");
+        assert!(!ok);
+        assert!(err.contains("does not name a directory"), "{err}");
+        assert!(!parent.path().join("gone").exists());
+        // once empty, it is rendered into
+        std::fs::remove_dir(fresh.join("x")).unwrap();
+        let (ok, out, err) = render(proj.path(), &fresh, ".");
+        assert!(ok, "{out} {err}");
+        assert!(fresh.join("index.html").exists());
+    }
+}
+
+/// The old copy of a swapped site that cannot be removed is a hidden full copy beside `out`: the
+/// render succeeds, and says where it is left.
+#[cfg(unix)]
+#[test]
+fn ren1_an_old_copy_that_cannot_be_removed_is_a_warning() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_d, mut r, _doc) = one_doc();
+    let parent = tempfile::tempdir().unwrap();
+    let site = parent.path().join("site");
+    let first = rdy_render::render_site(&mut r, &Scope::Canon, &site).unwrap();
+    assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+    // a read-only directory holding a file can't be emptied, so the old site can't be removed
+    let locked = site.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("f"), "x").unwrap();
+    let Some(guard) = ReadOnly::new(&locked) else {
+        return;
+    };
+    let second = rdy_render::render_site(&mut r, &Scope::Canon, &site).unwrap();
+    let old = parent.path().join(".site.rdy-render-old");
+    std::mem::forget(guard); // the directory has moved; restore its mode by its new path below
+    let left = old.join("locked");
+    let kept = left.join("f").exists();
+    std::fs::set_permissions(&left, std::fs::Permissions::from_mode(0o755)).ok();
+    assert!(kept, "the old copy is still there");
+    assert_eq!(second.warnings.len(), 1, "{:?}", second.warnings);
+    assert!(
+        second.warnings[0].contains(".site.rdy-render-old"),
+        "names the left-over copy: {:?}",
+        second.warnings
+    );
+    assert!(site.join("index.html").exists());
+    assert!(!site.join("locked").exists(), "the new site is in place");
+    let json = serde_json::to_value(&second).unwrap();
+    assert!(json["warnings"].is_array(), "{json}");
+    let json = serde_json::to_value(&first).unwrap();
+    assert!(
+        json.get("warnings").is_none(),
+        "empty warnings are skipped: {json}"
+    );
+}

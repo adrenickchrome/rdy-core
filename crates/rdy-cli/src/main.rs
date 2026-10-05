@@ -503,7 +503,15 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     let s = rdy_render::render_site(&mut r, &scope, &out)?;
                     Ok((
                         serde_json::to_value(&s).expect("json"),
-                        format!("rendered {} pages to {}", s.pages, out.display()),
+                        format!(
+                            "rendered {} pages to {}{}",
+                            s.pages,
+                            out.display(),
+                            s.warnings
+                                .iter()
+                                .map(|w| format!("\nwarning: {w}"))
+                                .collect::<String>()
+                        ),
                     ))
                 }
                 Cmd::Export { out, scope } => {

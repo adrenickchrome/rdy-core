@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 pub struct RenderSummary {
     pub pages: usize,
     pub assets: usize,
+    /// Things the render left behind that the person should know about (a hidden old copy).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 fn io(e: std::io::Error) -> RdyError {
@@ -257,10 +260,18 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
     };
     // `link/` and `link/.` resolve a link when examined, so look at the path without them.
     let out: PathBuf = out.components().collect();
-    let out = out.as_path();
-    if std::fs::symlink_metadata(out).is_ok_and(|m| m.file_type().is_symlink()) {
+    if std::fs::symlink_metadata(&out).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(refuse(format!("{} is a symbolic link", out.display())));
     }
+    // `.`, `..` and `x/..` name no directory until resolved (after the link guard above, which
+    // looks at the path as given).
+    let out = if out.file_name().is_none() {
+        std::fs::canonicalize(&out)
+            .map_err(|_| refuse(format!("{} does not name a directory", out.display())))?
+    } else {
+        out
+    };
+    let out = out.as_path();
     let exists = out.exists();
     if exists {
         if !out.is_dir() {
@@ -290,12 +301,24 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
     if !exists {
         std::fs::create_dir_all(parent).map_err(|e| io_at("cannot create", parent, e))?;
     }
+    // The directory the person is standing in is never swapped by rename: that would leave their
+    // shell in a deleted directory. Its contents are replaced in place, staged inside it.
+    let is_cwd = exists
+        && match (std::fs::canonicalize(out), std::env::current_dir()) {
+            (Ok(o), Ok(c)) => std::fs::canonicalize(c).is_ok_and(|c| c == o),
+            _ => false,
+        };
     // Staging goes beside `out`; when that is not allowed and `out` exists, inside it.
     let beside = parent.join(format!(".{name}.rdy-render-partial"));
-    if beside.exists() {
+    if !is_cwd && beside.exists() {
         std::fs::remove_dir_all(&beside).map_err(|e| io_at("cannot clear", &beside, e))?;
     }
-    let (staging, inside) = match std::fs::create_dir(&beside) {
+    let beside_made = if is_cwd {
+        Err(std::io::Error::other("it is the current directory"))
+    } else {
+        std::fs::create_dir(&beside)
+    };
+    let (staging, inside) = match beside_made {
         Ok(()) => (beside, false),
         Err(e) if exists => {
             let inside = out.join(STAGING_INSIDE);
@@ -311,7 +334,7 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
         }
         Err(e) => return Err(io_at("cannot stage in", &beside, e)),
     };
-    let stats = match render_into(rdy, scope, &staging).and_then(|s| {
+    let mut stats = match render_into(rdy, scope, &staging).and_then(|s| {
         std::fs::write(
             staging.join(SITE_MARKER),
             "A site rendered by rdy. rdy render replaces this directory as a whole.\n",
@@ -327,16 +350,26 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
     };
     let swapped = if !exists {
         std::fs::rename(&staging, out).map_err(|e| io_at("cannot move the site to", out, e))
-    } else if !inside
-        && swap_by_rename(
-            &staging,
-            out,
-            &parent.join(format!(".{name}.rdy-render-old")),
-        )
-    {
-        Ok(())
-    } else {
+    } else if inside {
         replace_in_place(&staging, out)
+    } else {
+        let old = parent.join(format!(".{name}.rdy-render-old"));
+        match swap_by_rename(&staging, out, &old) {
+            Swap::Swapped(warning) => {
+                stats.warnings.extend(warning);
+                Ok(())
+            }
+            Swap::Refused => replace_in_place(&staging, out),
+            Swap::OutMissing(e) => Err(RdyError::new(
+                E_IO,
+                format!(
+                    "cannot move the site to {}: {e}; the previous site is now at {}",
+                    out.display(),
+                    old.display()
+                ),
+                format!("move {} back to {}", old.display(), out.display()),
+            )),
+        }
     };
     if let Err(e) = swapped {
         let _ = std::fs::remove_dir_all(&staging);
@@ -348,21 +381,47 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
 /// Where staging goes inside `out` when its parent can't take it.
 const STAGING_INSIDE: &str = ".rdy-render-partial";
 
-/// Moves `out` aside, `staging` into its place, and drops the old copy. False, with `out` as it
-/// was, when a rename is refused (a mount point, a parent that is not writable).
-fn swap_by_rename(staging: &Path, out: &Path, old: &Path) -> bool {
+/// How [`swap_by_rename`] ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Swap {
+    /// `staging` is `out` now; the string is a warning when the old copy could not be removed.
+    Swapped(Option<String>),
+    /// A rename was refused (a mount point, a parent that is not writable) and `out` is as it was.
+    Refused,
+    /// `out` was moved aside and neither the new site nor the old one could be put in its place:
+    /// the previous site is at the aside path. The error is the failed rename's.
+    OutMissing(String),
+}
+
+/// Moves `out` aside, `staging` into its place, and drops the old copy.
+fn swap_by_rename(staging: &Path, out: &Path, old: &Path) -> Swap {
+    swap_with(staging, out, old, &|from, to| std::fs::rename(from, to))
+}
+
+fn swap_with(
+    staging: &Path,
+    out: &Path,
+    old: &Path,
+    rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Swap {
     if old.exists() && std::fs::remove_dir_all(old).is_err() {
-        return false;
+        return Swap::Refused;
     }
-    if std::fs::rename(out, old).is_err() {
-        return false;
+    if rename(out, old).is_err() {
+        return Swap::Refused;
     }
-    if std::fs::rename(staging, out).is_err() {
-        let _ = std::fs::rename(old, out);
-        return false;
+    if let Err(e) = rename(staging, out) {
+        return match rename(old, out) {
+            Ok(()) => Swap::Refused,
+            Err(_) => Swap::OutMissing(e.to_string()),
+        };
     }
-    let _ = std::fs::remove_dir_all(old);
-    true
+    Swap::Swapped(std::fs::remove_dir_all(old).err().map(|e| {
+        format!(
+            "the previous site could not be removed and is left at {}: {e}",
+            old.display()
+        )
+    }))
 }
 
 /// Replaces what `out` holds with what `staging` holds, without renaming `out` itself. `out`
@@ -457,6 +516,7 @@ fn render_into(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary
     let mut stats = RenderSummary {
         pages: 0,
         assets: 0,
+        warnings: vec![],
     };
 
     // where each block lives, for links from page `from`
@@ -702,5 +762,66 @@ mod swap_tests {
             std::fs::read_to_string(out.join(SITE_MARKER)).unwrap(),
             "new marker"
         );
+    }
+
+    /// Refuses the renames whose target is in `refuse`, otherwise renames.
+    fn renamer(refuse: Vec<PathBuf>) -> impl Fn(&Path, &Path) -> std::io::Result<()> {
+        move |from, to| {
+            if refuse.iter().any(|r| r == to) {
+                Err(std::io::Error::other("refused"))
+            } else {
+                std::fs::rename(from, to)
+            }
+        }
+    }
+
+    fn dirs() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let t = tempfile::tempdir().unwrap();
+        let (staging, out, old) = (
+            t.path().join("s"),
+            t.path().join("out"),
+            t.path().join("old"),
+        );
+        for (d, f) in [(&staging, "new"), (&out, "prev")] {
+            std::fs::create_dir(d).unwrap();
+            std::fs::write(d.join(f), f).unwrap();
+        }
+        (t, staging, out, old)
+    }
+
+    #[test]
+    fn a_swap_whose_restore_also_fails_reports_out_missing() {
+        let (_t, staging, out, old) = dirs();
+        let r = renamer(vec![out.clone()]);
+        let swap = swap_with(&staging, &out, &old, &r);
+        assert!(matches!(swap, Swap::OutMissing(_)), "{swap:?}");
+        assert!(!out.exists());
+        assert!(old.join("prev").exists(), "the previous site is at old");
+    }
+
+    #[test]
+    fn a_swap_whose_new_site_fails_but_restore_works_is_refused_with_out_intact() {
+        let (_t, staging, out, old) = dirs();
+        let calls = std::cell::Cell::new(0);
+        let r = |from: &Path, to: &Path| {
+            calls.set(calls.get() + 1);
+            // the second rename (staging into out) is the one refused
+            if calls.get() == 2 {
+                Err(std::io::Error::other("refused"))
+            } else {
+                std::fs::rename(from, to)
+            }
+        };
+        assert_eq!(swap_with(&staging, &out, &old, &r), Swap::Refused);
+        assert!(out.join("prev").exists());
+        assert!(!old.exists());
+    }
+
+    #[test]
+    fn a_clean_swap_has_no_warning() {
+        let (_t, staging, out, old) = dirs();
+        assert_eq!(swap_by_rename(&staging, &out, &old), Swap::Swapped(None));
+        assert!(out.join("new").exists());
+        assert!(!old.exists());
     }
 }
