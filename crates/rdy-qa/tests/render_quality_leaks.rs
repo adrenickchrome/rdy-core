@@ -25,7 +25,6 @@ fn runs_of(p: &std::path::Path) -> Vec<Run> {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 8"]
 fn site1_doc_meta_line_shows_no_doc_type_lifecycle_or_id() {
     let (_d, _r, ids, out) = canon();
     let p = golden::html(out.path(), "specification/patterns.html");
@@ -38,7 +37,6 @@ fn site1_doc_meta_line_shows_no_doc_type_lifecycle_or_id() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 8"]
 fn site2_folder_pages_show_no_type_name_or_id() {
     let (_d, _r, ids, out) = canon();
     let p = golden::html(out.path(), "specification/index.html");
@@ -112,7 +110,6 @@ fn site5_home_versions_show_no_landing_hash_or_the_word_landing() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 8"]
 fn site6_no_block_is_prefixed_with_its_type_name() {
     let (_d, _r, _ids, out) = canon();
     for p in golden::pages(out.path()) {
@@ -189,7 +186,6 @@ fn site8_no_suspect_badge() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 8"]
 fn site9_an_unresolved_reference_shows_a_marker_not_the_id() {
     let (_d, _r, _ids, out) = golden::site_view();
     let h = golden::html(out.path(), "specification/patterns.html");
@@ -203,7 +199,6 @@ fn site9_an_unresolved_reference_shows_a_marker_not_the_id() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 8"]
 fn site10_nested_table_cells_show_no_debug_output() {
     let (_d, _r, _ids, out) = canon();
     assert!(!has_leak(out.path(), "F10", ""));
@@ -215,7 +210,6 @@ fn site10_nested_table_cells_show_no_debug_output() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 8"]
 fn site11_a_dangling_reference_in_a_diagram_shows_no_id() {
     let (_d, _r, _ids, out) = golden::site_view();
     let h = golden::html(out.path(), "specification/evaluation.html");
@@ -330,7 +324,6 @@ fn site18_the_home_page_lists_no_decisions() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 8"]
 fn site19_a_missing_figure_reads_as_a_sentence_not_storage_words() {
     let (_d, mut r) = golden::hostile();
     let res = rdy_qa::fixtures::write(
@@ -377,7 +370,6 @@ fn site19_a_missing_figure_reads_as_a_sentence_not_storage_words() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 8"]
 fn site20_a_flow_heading_sits_at_its_depth() {
     let (_d, _r, _ids, out) = canon();
     let h = golden::html(out.path(), "specification/evaluation.html");
@@ -415,7 +407,6 @@ fn site21_theme_toggle_data_theme_and_no_cdn() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 8"]
 fn site22_tables_are_wrapped_and_content_wraps_long_tokens() {
     let (_d, _r, _ids, out) = canon();
     let h = golden::html(out.path(), "specification/patterns.html");
@@ -449,7 +440,6 @@ fn site23_toc_pager_search_skip_link_and_landmarks_exist() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 8"]
 fn site24_blocks_carry_slug_anchors_and_id_anchors() {
     let (_d, _r, ids, out) = canon();
     let h = golden::html(out.path(), "specification/patterns.html");

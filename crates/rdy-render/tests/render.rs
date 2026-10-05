@@ -31,7 +31,7 @@ fn text_html_escapes_then_links() {
     });
     assert_eq!(
         html,
-        "&lt;b&gt;x&lt;/b&gt; &amp; <a href=\"doc/d-AAAAA.html#t-MEDGR\">Ledger</a> <span class=\"ref missing\">t-N0PE1</span><br>next"
+        "&lt;b&gt;x&lt;/b&gt; &amp; <a href=\"doc/d-AAAAA.html#t-MEDGR\">Ledger</a> <span class=\"ref unresolved\" title=\"This reference could not be resolved\">unresolved reference</span><br>next"
     );
 }
 
@@ -71,10 +71,13 @@ fn renders_docs_decisions_diagrams_and_assets() {
     let doc = std::fs::read_to_string(out.path().join("identity.html")).unwrap();
     assert!(doc.contains("<title>Identity"));
     assert!(
-        doc.contains("href=\"#ledger\">Ledger</a>"),
+        doc.contains("href=\"#ledger\" title=\"Identity › Components\">Ledger</a>"),
         "same-doc reference links to the anchor: {doc}"
     );
-    assert!(doc.contains("id=\"ledger\"") && !doc.contains(&format!("id=\"{t_id}\"")));
+    assert!(
+        doc.contains("id=\"ledger\"")
+            && doc.contains(&format!("<span id=\"{t_id}\" class=\"id-anchor\""))
+    );
     assert!(doc.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
     assert!(!doc.contains("<script>alert(1)"));
     assert!(doc.contains("<pre class=\"mermaid\">graph TD\n  A --&gt; B</pre>"));
@@ -154,8 +157,8 @@ fn dangling_and_junk_blobs_become_placeholders() {
     let summary = render_site(&mut r, &Scope::Canon, out.path()).unwrap();
     assert_eq!(summary.assets, 0);
     let doc = std::fs::read_to_string(out.path().join("assets.html")).unwrap();
-    assert!(doc.contains("<p class=\"asset missing\">missing asset: gone</p>"));
-    assert!(doc.contains("<p class=\"asset missing\">missing asset: junk</p>"));
+    assert!(doc.contains("<p class=\"figure-missing\">gone (image not available)</p>"));
+    assert!(doc.contains("<p class=\"figure-missing\">junk (image not available)</p>"));
     assert!(!doc.contains("<img"));
 }
 
@@ -200,7 +203,7 @@ fn hostile_text_is_escaped_in_attribute_contexts() {
 fn escaped_braces_render_literally_and_diagram_references_become_labels() {
     assert_eq!(
         text_html(r"Write \{{literal}} or {{t-N0PE1}}", &|_| None),
-        "Write {{literal}} or <span class=\"ref missing\">t-N0PE1</span>"
+        "Write {{literal}} or <span class=\"ref unresolved\" title=\"This reference could not be resolved\">unresolved reference</span>"
     );
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
@@ -279,7 +282,9 @@ fn link_labels_render_references_as_text_on_one_line() {
         "a link's label is the target's text on one line, its references shown as text: {page}"
     );
     assert!(
-        page.contains("new entries per <a href=\"#s\">Ledger is append-only</a>."),
+        page.contains(
+            "new entries per <a href=\"#s\" title=\"Ledger › S\">Ledger is append-only</a>."
+        ),
         "a reference to a decision leads to the section it sits in: {page}"
     );
 }
@@ -333,7 +338,7 @@ fn the_site_mirrors_the_folder_tree() {
     let sep = "<span class=\"crumb-sep\" aria-hidden=\"true\"></span>";
     assert!(t.contains(&format!("<nav class=\"crumbs\" aria-label=\"Breadcrumb\"><a href=\"../index.html\">{name}</a>{sep}<a href=\"../wallets/index.html\">Wallets</a>{sep}<span aria-current=\"page\">Transactions</span>")), "{t}");
     assert!(
-        t.contains("href=\"../glossary.html#ledger\">Ledger</a>"),
+        t.contains("href=\"../glossary.html#ledger\" title=\"Glossary › Terms\">Ledger</a>"),
         "relative link across folders: {t}"
     );
     assert!(
@@ -345,7 +350,7 @@ fn the_site_mirrors_the_folder_tree() {
     assert!(cards.contains("Card products."), "{cards}");
     assert!(
         cards.contains(
-            "<a href=\"../../wallets/cards/limits.html\">Limits</a> <span class=\"meta\">doc</span>"
+            "<li class=\"child-doc\"><a href=\"../../wallets/cards/limits.html\">Limits</a></li>"
         ),
         "{cards}"
     );

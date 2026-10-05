@@ -219,6 +219,38 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
 /* == /search == */
 
 /* == content == */
+.block { position: relative; }
+.id-anchor { position: absolute; top: 0; left: 0; width: 0; height: 0; overflow: hidden; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); border: 0; }
+.marker { display: block; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); margin-bottom: 0.25rem; }
+.normative { margin: 1.2rem 0 1.4rem; padding: 1rem 1.2rem 0.9rem; background: var(--note); border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line)); border-radius: var(--radius); }
+.normative > p { margin-bottom: 0.5rem; font-size: 0.95rem; }
+.normative > p:last-child { margin-bottom: 0; }
+.callout { margin: 1.2rem 0 1.4rem; padding: 0.9rem 1.1rem; background: var(--surface); border-left: 3px solid var(--line-strong); border-radius: 0 var(--radius) var(--radius) 0; }
+.callout .marker { color: var(--ink-soft); }
+.callout-question { background: var(--note); border-left-color: var(--accent); }
+.callout-question .marker { color: var(--accent); }
+.callout p:last-child, .callout div > p:last-child { margin-bottom: 0; }
+.term { margin: 1rem 0; }
+.term dt { font-weight: 600; }
+.term dd { margin: 0.15rem 0 0; }
+.entity { margin: 1.4rem 0; padding-left: 1rem; border-left: 2px solid var(--line); }
+.entity-name, .flow-name { margin-top: 0; }
+.described-by { font-size: 0.88rem; color: var(--ink-soft); }
+.flow { margin: 1.4rem 0; }
+.ref.unresolved { text-decoration: underline dotted; color: var(--ink-soft); }
+.table-wrap.normative { padding: 0; background: none; }
+caption { caption-side: top; text-align: left; font-size: 0.84rem; color: var(--ink-soft); padding: 0.6rem 0.9rem 0; }
+th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+figure { margin: 1.2rem 0; }
+.figure img { display: block; border-radius: var(--radius); }
+.figure-missing, .download .meta { color: var(--ink-soft); }
+.diagram-canvas pre.mermaid { text-align: center; background: var(--surface); }
+.diagram-source summary { cursor: pointer; font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
+.code-block { margin: 1.1rem 0; }
+.code-head { align-items: center; }
+.copy-code { font-size: 0.72rem; font-weight: 500; color: var(--ink-soft); }
+.copy-code:hover { color: var(--accent); }
 /* == /content == */
 
 /* == diagram == */

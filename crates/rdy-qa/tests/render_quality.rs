@@ -236,7 +236,6 @@ fn struct1_a_redirect_page_is_not_held_to_the_one_h1_rule() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 8"]
 fn struct1_heading_levels_never_skip() {
     each_page(false, |Page { rel, html, .. }| {
         let levels = page_titles(html);

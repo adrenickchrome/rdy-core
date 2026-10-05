@@ -2,16 +2,59 @@
 use rdy_engine::Scope;
 use rdy_qa::golden::*;
 
+/// The markup of the block `id`: from its wrapper to the next block's, at most 1,200 bytes, cut
+/// at a character boundary.
+fn block_slice<'a>(h: &'a str, id: &str) -> &'a str {
+    let i = h
+        .find(&format!("data-rdy-block=\"{id}\""))
+        .unwrap_or_else(|| panic!("no block {id}"));
+    let mut end = h.len().min(i + 1200);
+    if let Some(next) = h[i + 1..end].find("data-rdy-block=") {
+        end = i + 1 + next;
+    }
+    while !h.is_char_boundary(end) {
+        end -= 1;
+    }
+    &h[i..end]
+}
+
+/// A type with a rendering of its own (`note`, a callout) shows no marker when a pack makes it
+/// presentational (the Task 14 carry-forward).
+#[test]
+fn pres1_a_presentational_note_has_no_marker() {
+    let (dir, r, ids) = project();
+    // the store is locked while a handle is open
+    drop(r);
+    let pack = PRESENTATIONAL_PACK.replace(
+        "  section:",
+        "  note: { prefix: n, traits: [presentational], body: required }\n  section:",
+    );
+    std::fs::write(dir.path().join(".rdy/packs/p.yaml"), pack).unwrap();
+    std::fs::write(
+        dir.path().join(".rdy/config.yaml"),
+        "pack: p\nname: Presentational\n",
+    )
+    .unwrap();
+    let mut r = rdy_engine::Rdy::open(dir.path()).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    let h = std::fs::read_to_string(out.path().join("tutorial/adventure.html")).unwrap();
+    let b = block_slice(&h, ids.presentational_note.as_str());
+    assert!(
+        b.contains("The sample output in this tutorial") && !b.contains("class=\"marker\""),
+        "{b}"
+    );
+    // the types the pack leaves alone keep their markers
+    assert!(h.contains("<span class=\"marker\">Example</span>"), "{h}");
+}
+
 #[test]
 fn pres1_presentational_blocks_render_plainly_and_are_flagged_in_json() {
     let (_d, mut r, ids) = presentational_site();
     let out = tempfile::tempdir().unwrap();
     rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("t.html")).unwrap();
-    let i = h
-        .find(&format!("data-rdy-block=\"{}\"", ids.aside))
-        .unwrap();
-    let b = &h[i..h.len().min(i + 1200)];
+    let b = block_slice(&h, ids.aside.as_str());
     assert!(
         b.contains("<p>Decorative.</p>")
             && !b.contains("class=\"marker\"")

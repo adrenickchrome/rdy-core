@@ -1,8 +1,6 @@
 {% extends "layout.html" %}
 {% block content %}
-{% if body.doc.eyebrow %}<p class="meta">{{ body.doc.eyebrow }}</p>
-{% endif %}<h1>{{ body.doc.title }}</h1>
-{% if body.doc.lede %}<p{% if body.doc.lede_anchor %} id="{{ body.doc.lede_anchor }}"{% endif %}>{{ body.doc.lede|safe }}</p>
-{% endif %}{% for item in items %}{% include "partials/tools.html" %}{% include "partials/block.html" %}{% include "partials/why.html" %}{% include "partials/agents.html" %}
-{% endfor %}
+<article class="page" data-rdy="content"><header class="page-head">{% if body.doc.eyebrow %}<p class="eyebrow">{{ body.doc.eyebrow }}</p>{% endif %}<h1>{{ title }}</h1>{% if body.doc.lede %}<p class="lede"{% if body.doc.lede_anchor %} id="{{ body.doc.lede_anchor }}"{% endif %}>{{ body.doc.lede|safe }}</p>{% endif %}</header>
+{% for item in items %}{% if item.html %}{% include "partials/block.html" %}
+{% endif %}{% endfor %}</article>
 {% endblock %}

@@ -3,7 +3,7 @@ use crate::html::{self, BlockCtx, Link};
 use crate::site::{Site, Url, rel};
 use crate::trail::{Agents, Trail};
 use crate::{assets, home, machine, nav, search, toc, trail, version};
-use rdy_engine::{Materialized, VersionInfo, VersionPosition, summary_in};
+use rdy_engine::{Materialized, VersionInfo, VersionPosition};
 use rdy_graph::{EdgeKind, Graph};
 use rdy_model::{Block, BlockId, Hash, decision, tree};
 use rdy_schema::Pack;
@@ -226,9 +226,39 @@ impl Shared<'_> {
         let url = self.site.url_of(id)?;
         Some(Link {
             href: url.href_from(from),
-            label: summary_in(b, self.m),
-            title: String::new(),
+            // the site's label never shows an id, even of a reference the target's text holds
+            label: self.site.label(b),
+            title: self.hover(b, &url),
         })
+    }
+
+    /// Where a link leads, as its hover text says it: `Doc › Section` for a block (its nearest
+    /// section, itself for a section), the title for a doc or folder, the collected page's name
+    /// for a block that lives there.
+    fn hover(&self, b: &Block, url: &Url) -> String {
+        if tree::is_tree_type(&b.block_type) {
+            return self.site.label(b);
+        }
+        match url.page.as_str() {
+            "questions.html" if self.site.open_questions.contains(&b.id) => {
+                return "Open questions".into();
+            }
+            "glossary.html" if self.site.terms.contains(&b.id) => return "Glossary".into(),
+            _ => {}
+        }
+        let doc = self
+            .m
+            .doc_of(&b.id)
+            .map(|d| self.site.label(d))
+            .unwrap_or_default();
+        let mut cur = Some(b);
+        while let Some(c) = cur {
+            if c.block_type == "section" {
+                return format!("{doc} › {}", self.site.label(c));
+            }
+            cur = c.parent.as_ref().and_then(|p| self.m.get(p));
+        }
+        doc
     }
 
     /// The version name when the page is rendered from a tag, so that a copied reference can
@@ -464,10 +494,11 @@ fn doc_parts(
     let (m, site) = (sh.m, sh.site);
     let link = |id: &BlockId| sh.link(page, id);
     // the lede: the first paragraph of the first section, when it is that section's first block
-    let lede_block = m
-        .children(Some(&doc.id))
+    // and the doc has more sections; a one-section doc keeps all its text under its heading
+    let sections = m.children(Some(&doc.id));
+    let lede_block = sections
         .first()
-        .filter(|s| s.block_type == "section")
+        .filter(|s| s.block_type == "section" && sections.len() > 1)
         .and_then(|s| m.children(Some(&s.id)).into_iter().next())
         .filter(|p| p.block_type == "prose");
     let eyebrow = doc

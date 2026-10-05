@@ -47,7 +47,6 @@ struct Lang {
     /// Every name the language goes by in a code block's `lang`, lower case.
     names: &'static [&'static str],
     /// What a reader calls it.
-    #[allow(dead_code)]
     human: &'static str,
     keywords: &'static [&'static str],
     rules: &'static [Rule],
@@ -221,7 +220,6 @@ const LANGS: &[Lang] = &[
 ];
 
 /// Languages a reader names that have no highlighting.
-#[allow(dead_code)]
 const PLAIN_NAMES: &[(&[&str], &str)] = &[
     (&["peg"], "Grammar"),
     (&["mermaid"], "Mermaid"),
@@ -311,8 +309,6 @@ pub fn html(lang: &str, code: &str) -> String {
 }
 
 /// The language as a reader names it, for the code label.
-// Task 8 labels code blocks with it
-#[allow(dead_code)]
 pub fn human_name(lang: &str) -> String {
     let name = lang.trim().to_lowercase();
     if let Some(i) = lookup(&name) {

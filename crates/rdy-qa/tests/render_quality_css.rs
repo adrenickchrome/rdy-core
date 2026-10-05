@@ -274,7 +274,6 @@ fn scroll1_every_page_has_the_exact_viewport_meta() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 8"]
 fn scroll1_tables_are_wrapped_and_pre_has_a_class() {
     let wrapped = Regex::new(r#"<[a-z]+ [^>]*class="[^"]*\btable-wrap\b[^"]*"[^>]*>\s*$"#).unwrap();
     let (_d, _r, _ids, out) = golden::site_canon();
