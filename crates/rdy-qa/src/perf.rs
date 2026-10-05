@@ -38,13 +38,14 @@ fn spec_target(op: &str) -> Option<String> {
     Some(
         match op {
             o if o.starts_with("write") || o.starts_with("propose") => {
-                "< 5 ms p99 per write (spec 11)"
+                "< 5 ms p99 on Linux NVMe; one durable flush + < 1 ms on macOS (spec 11, restated per hardware class)"
             }
             "context" | "impact" | "version_position" | "resolve_path" | "tree_full" => {
                 "< 5 ms p99 (spec 11)"
             }
             "render" => "< 2 s full render at 100k (spec 11)",
             "cold_open" => "< 2 s at 100k (spec 11)",
+            "cold_open_lagging" => "< 2 s at 100k, index catch-up included (M2 spec 15.1)",
             _ => return None,
         }
         .to_string(),
@@ -219,6 +220,16 @@ pub fn run_workload() -> Vec<Measure> {
         .expect("pending write");
     }
 
+    // The lagging-index snapshot: made after the pending writes and before the timed writes, so
+    // the later writes (and the landings) are what a cold open has to catch the index up over.
+    // Outside every timer.
+    r.checkpoint().expect("checkpoint");
+    let index_path = r.store().dir().join("index.redb");
+    drop(r);
+    let snapshot = dir.path().join("index.snapshot");
+    std::fs::copy(&index_path, &snapshot).expect("snapshot the index");
+    let mut r = Rdy::open(&proj).expect("reopen");
+
     let va = Scope::View("va".into());
     let mut out = vec![];
     // built once, outside every timer, and before the heavy ops so it stays small on disk
@@ -287,6 +298,22 @@ pub fn run_workload() -> Vec<Measure> {
         let mut r = Rdy::open(&proj).expect("open");
         r.materialized(&Scope::Canon).expect("canon");
     }));
+    // Cold open with a lagging index: the project is closed, so put the old index back over the
+    // current one (outside the timer); open then catches it up from the log.
+    let mut lag = None;
+    out.push(measure_timed("cold_open_lagging", 5, |_| {
+        std::fs::copy(&snapshot, &index_path).expect("restore the lagging index");
+        let s = Instant::now();
+        let mut r = Rdy::open(&proj).expect("open");
+        r.materialized(&Scope::Canon).expect("canon");
+        let took = s.elapsed();
+        lag.get_or_insert(r.store().open_report().caught_up_frames);
+        took
+    }));
+    eprintln!(
+        "cold_open_lagging: caught up {} frames",
+        lag.expect("ran at least once")
+    );
     rdy_model::unseed_ids_for_tests();
     out
 }
@@ -370,5 +397,19 @@ mod tests {
             .unwrap_or_default();
         assert!(host.is_empty() || !c.contains(&host), "{c}");
         assert_eq!(c.matches(" / ").count(), 2, "{c}");
+    }
+
+    #[test]
+    fn the_write_target_is_stated_per_hardware_class() {
+        let t = spec_target("write_single").unwrap();
+        assert!(
+            t.contains("Linux NVMe") && t.contains("one durable flush"),
+            "{t}"
+        );
+        assert!(
+            spec_target("cold_open_lagging")
+                .unwrap()
+                .contains("catch-up")
+        );
     }
 }
