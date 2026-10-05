@@ -46,7 +46,10 @@ fn vpos1_a_cached_position_moves_with_canon_tags_and_the_view() {
 }
 
 #[test]
-#[cfg_attr(debug_assertions, ignore = "timing: run with --release")]
+// Orchestrator (2026-10-05): a microsecond timing budget is not a correctness check. On a machine shared
+// by two build tracks it fails at random, so it runs only on request (`--ignored`). The perf tier measures
+// the cached position as `version_position_cached`, judged on the isolated Linux bench (M2a2 Task 14).
+#[ignore = "timing: run with --release --ignored on an idle machine; the perf tier covers it"]
 fn vpos1_a_cached_position_costs_under_10_us_p99() {
     let (_d, mut r) = project();
     for i in 0..20 {
