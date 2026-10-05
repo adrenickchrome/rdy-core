@@ -84,14 +84,76 @@ chrome	L	Specification
 chrome	L	The match statement and its patterns
 content	L	Specification
 content	L	The match statement and its patterns
+content	-	This document is the
+content	-	specification
+content	-	of the
+content	-	statement: what each pattern
+content	-	means
+content	-	and in which order the cases run. The reasons live in
+content	-	the companion rationale
+content	-	; worked examples are in
+content	-	the tutorial
+content	-	.
+content	-	Link
+content	-	Copy ref
+content	-	The specification covers:
+content	-	the syntax of patterns
+content	-	capture and wildcard patterns
+content	-	value, literal and class patterns
+content	-	the evaluation of a
+content	-	statement
+content	-	guards
+content	-	, which see the bindings of their own case
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Read it in this order:
+content	-	Patterns
+content	-	Evaluation
+content	-	Guards
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Note
+content	-	The keywords
+content	-	and
+content	-	are
+content	-	soft
+content	-	: see
+content	-	REQ-SOFT-KEYWORDS
+content	-	.
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	L	Summary
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
 content	-	This is the normative description of the match statement. It says what a match statement does and how each kind of pattern behaves, without commentary. The reasons behind the rules are in
 content	-	Why the design is what it is
 content	-	, and a guided walk through the feature is in
 content	-	Pattern matching by example
 content	-	.
-content	L	Summary
-content	-	Link
-content	-	Copy ref
 agents	L	For agents
 agents	L	Id
 agents	L	Type
@@ -494,6 +556,26 @@ agents	-	JSON
 content	L	Guards
 content	-	Link
 content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	A guard is evaluated
+content	-	only
+content	-	after its pattern matches, and
+content	-	before
+content	-	the case body runs; see
+content	-	the definition
+content	-	and
+content	-	why the wildcard is an underscore
+content	-	.
+content	-	A guard may read the names its pattern bound.
+content	-	A guard that raises ends the whole
+content	-	statement.
 agents	L	For agents
 agents	L	Id
 agents	L	Type

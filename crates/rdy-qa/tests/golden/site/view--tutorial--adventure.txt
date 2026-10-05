@@ -856,6 +856,35 @@ agents	L	Type
 agents	L	Permalink
 agents	L	Page data
 agents	-	JSON
+content	L	Quick sketches
+content	-	Link
+content	-	Copy ref
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	L	Code
+content	-	Copy
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
+content	-	Link
+content	-	Copy ref
+content	-	Diagram (source below)
+content	L	Diagram source
+agents	L	For agents
+agents	L	Id
+agents	L	Type
+agents	L	Permalink
+agents	L	Page data
+agents	-	JSON
 chrome	L	Previous
 chrome	L	Σημασιολογία
 chrome	L	Next
@@ -882,3 +911,4 @@ chrome	L	Worked examples
 chrome	L	Exercises
 chrome	L	A long listing
 chrome	L	Terms
+chrome	L	Quick sketches
