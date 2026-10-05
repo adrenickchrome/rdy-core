@@ -1,4 +1,5 @@
 use crate::fsutil::sync_dir;
+use crate::kinds::{self, BatchCommit};
 use rdy_model::Hash;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -7,6 +8,49 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 const HEADER: u64 = 4 + 1 + 32;
+/// An upper bound on the encoded `BatchCommit` payload, used to size a batch before it is written.
+const MARKER_MAX: u64 = 64;
+
+/// Where a test child process dies (`std::process::abort`) during a write or a checkpoint.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrashPoint {
+    BeforeMarker,
+    RolledBeforeMarker,
+    BeforeSync,
+    AfterSync,
+    AfterIndex,
+    BeforeCheckpoint,
+    AfterCheckpoint,
+}
+
+impl CrashPoint {
+    pub const ALL: [CrashPoint; 7] = [
+        CrashPoint::BeforeMarker,
+        CrashPoint::RolledBeforeMarker,
+        CrashPoint::BeforeSync,
+        CrashPoint::AfterSync,
+        CrashPoint::AfterIndex,
+        CrashPoint::BeforeCheckpoint,
+        CrashPoint::AfterCheckpoint,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            CrashPoint::BeforeMarker => "before_marker",
+            CrashPoint::RolledBeforeMarker => "rolled_before_marker",
+            CrashPoint::BeforeSync => "before_sync",
+            CrashPoint::AfterSync => "after_sync",
+            CrashPoint::AfterIndex => "after_index",
+            CrashPoint::BeforeCheckpoint => "before_checkpoint",
+            CrashPoint::AfterCheckpoint => "after_checkpoint",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<CrashPoint> {
+        CrashPoint::ALL.into_iter().find(|p| p.name() == s)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Location {
@@ -23,6 +67,8 @@ pub struct SegmentLog {
     /// Test fault injection (see `fail_next_roll` / `fail_next_append_after`).
     fail_roll: bool,
     fail_partial: Option<usize>,
+    /// Test hook: the armed crash point (see `crash_at`).
+    crash: Option<CrashPoint>,
 }
 
 /// The path of segment `id` in `dir`.
@@ -210,6 +256,7 @@ impl SegmentLog {
             max_len,
             fail_roll: false,
             fail_partial: None,
+            crash: None,
         };
         Ok(log)
     }
@@ -307,6 +354,8 @@ impl SegmentLog {
         File::open(path)
     }
 
+    /// Appends one frame with no batch marker (tests, and the M1 test writer). Rolls first if it
+    /// would not fit in the current segment.
     pub fn append(&mut self, kind: u8, payload: &[u8]) -> io::Result<(Location, Hash)> {
         if payload.len() > u32::MAX as usize {
             return Err(io::Error::new(
@@ -318,6 +367,12 @@ impl SegmentLog {
         if self.len > 0 && self.len + frame_len > self.max_len {
             self.roll()?;
         }
+        self.write_frame(kind, payload)
+    }
+
+    /// Writes one frame at the end of the current segment, with no size check and no roll.
+    fn write_frame(&mut self, kind: u8, payload: &[u8]) -> io::Result<(Location, Hash)> {
+        let frame_len = HEADER + payload.len() as u64;
         let hash = Hash::of(payload);
         let mut buf = Vec::with_capacity(frame_len as usize);
         buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -336,6 +391,67 @@ impl SegmentLog {
         };
         self.len += frame_len;
         Ok((loc, hash))
+    }
+
+    /// Appends `frames` as one batch ending in a `BATCH_COMMIT` marker, and does not sync. The
+    /// segment rolls only before the batch, never inside it: a batch larger than a segment gets a
+    /// segment of its own. On error the caller rolls back with `truncate_to`.
+    pub fn append_batch(&mut self, frames: &[(u8, Vec<u8>)]) -> io::Result<Vec<(Location, Hash)>> {
+        if frames.iter().any(|(_, p)| p.len() > u32::MAX as usize) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "payload too large",
+            ));
+        }
+        let size: u64 = frames
+            .iter()
+            .map(|(_, p)| HEADER + p.len() as u64)
+            .sum::<u64>()
+            + HEADER
+            + MARKER_MAX;
+        let rolled = self.len > 0 && self.len + size > self.max_len;
+        if rolled {
+            self.roll()?;
+        }
+        let start = self.end();
+        let mut placed = Vec::with_capacity(frames.len());
+        for (kind, payload) in frames {
+            placed.push(self.write_frame(*kind, payload)?);
+        }
+        self.crash_point(if rolled {
+            CrashPoint::RolledBeforeMarker
+        } else {
+            CrashPoint::BeforeMarker
+        });
+        let marker = BatchCommit {
+            start,
+            frames: frames.len() as u32,
+            digest: kinds::batch_digest(placed.iter().map(|(_, h)| h)),
+        };
+        let bytes = postcard::to_allocvec(&marker).expect("postcard encoding of a marker");
+        debug_assert!(bytes.len() as u64 <= MARKER_MAX);
+        self.write_frame(kinds::BATCH_COMMIT, &bytes)?;
+        Ok(placed)
+    }
+
+    /// Test hook: arms `p` (or disarms with None). It stays armed until it fires.
+    #[doc(hidden)]
+    pub fn crash_at(&mut self, p: Option<CrashPoint>) {
+        self.crash = p;
+    }
+
+    /// Test hook: aborts the process (no destructors) if `p` is the armed crash point.
+    #[doc(hidden)]
+    pub fn crash_point(&self, p: CrashPoint) {
+        if self.crash == Some(p) {
+            std::process::abort();
+        }
+    }
+
+    /// Test hook: changes the segment size limit.
+    #[doc(hidden)]
+    pub fn set_max_len(&mut self, max: u64) {
+        self.max_len = max;
     }
 
     pub fn sync(&mut self) -> io::Result<()> {
@@ -387,5 +503,55 @@ impl SegmentLog {
             }
         }
         Ok(out)
+    }
+
+    /// Reads every frame of every segment once and verifies its hash and every batch marker.
+    /// Returns the number of non-marker frames.
+    pub fn verify_frames(&self) -> io::Result<usize> {
+        let mut count = 0;
+        for seg in 0..=self.current() {
+            let f = &self.readers[seg as usize];
+            let file_len = f.metadata()?.len();
+            let mut offset = 0;
+            // the frames read since the previous valid marker of this segment
+            let mut since: Vec<(u64, Hash)> = vec![];
+            while let Some((kind, hash, payload)) = read_frame(f, offset, file_len)? {
+                if kind == kinds::BATCH_COMMIT {
+                    let mismatch = || {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "batch marker in segment {seg} at offset {offset} does not match its batch"
+                            ),
+                        )
+                    };
+                    let m: BatchCommit = postcard::from_bytes(&payload).map_err(|_| mismatch())?;
+                    if m.start.segment != seg {
+                        return Err(mismatch());
+                    }
+                    let i = since
+                        .iter()
+                        .position(|(o, _)| *o == m.start.offset)
+                        .ok_or_else(mismatch)?;
+                    if since.len() - i != m.frames as usize
+                        || kinds::batch_digest(since[i..].iter().map(|(_, h)| h)) != m.digest
+                    {
+                        return Err(mismatch());
+                    }
+                    since.clear();
+                } else {
+                    since.push((offset, hash));
+                    count += 1;
+                }
+                offset += HEADER + payload.len() as u64;
+            }
+            if offset < file_len {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("corrupt frame in segment {seg} at offset {offset}"),
+                ));
+            }
+        }
+        Ok(count)
     }
 }

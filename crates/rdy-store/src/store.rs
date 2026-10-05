@@ -2,7 +2,7 @@ use crate::error::StoreError;
 use crate::fsutil;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
-use crate::segment::{Location, SegmentLog, find_gap, seg_path};
+use crate::segment::{CrashPoint, Location, SegmentLog, find_gap, seg_path};
 use rdy_model::{Block, Change, Hash, Op};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
@@ -104,6 +104,10 @@ fn entries_for_frame(
     loc: Location,
     payload: &[u8],
 ) -> Result<Vec<IndexEntry>, StoreError> {
+    if kind == kinds::BATCH_COMMIT {
+        // a marker is neither an object nor a dedupe candidate
+        return Ok(vec![]);
+    }
     let mut out = vec![IndexEntry::Object(hash, loc)];
     match kind {
         kinds::CHANGE => {
@@ -211,16 +215,10 @@ impl Store {
         self.index.apply(&entries, self.log.end())
     }
 
-    /// Reads and hash-checks every frame in every segment; returns the frame count.
+    /// Reads and hash-checks every frame in every segment and checks every batch marker;
+    /// returns the number of data frames (markers are not counted).
     pub fn verify(&self) -> Result<usize, StoreError> {
-        let frames = self.log.scan_from(Location {
-            segment: 0,
-            offset: 0,
-        })?;
-        for (loc, _, _) in &frames {
-            self.log.read(*loc)?;
-        }
-        Ok(frames.len())
+        Ok(self.log.verify_frames()?)
     }
 
     pub fn reindex(&mut self) -> Result<(), StoreError> {
@@ -262,7 +260,7 @@ impl Store {
 
     fn append_and_index(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
         let mut hashes = Vec::with_capacity(items.len());
-        let mut entries = vec![];
+        let mut batch = Vec::with_capacity(items.len());
         let mut seen = BTreeSet::new();
         for (kind, payload) in items {
             let hash = Hash::of(&payload);
@@ -273,17 +271,43 @@ impl Store {
                 continue;
             }
             seen.insert(hash);
-            let (loc, _) = self.log.append(kind, &payload)?;
-            entries.extend(entries_for_frame(kind, hash, loc, &payload)?);
+            batch.push((kind, payload));
         }
-        if !entries.is_empty() {
-            self.log.sync()?;
-            if std::mem::take(&mut self.faults.index_apply) {
-                return Err(StoreError::Db("injected index failure".into()));
-            }
-            self.index.apply(&entries, self.log.end())?;
+        if batch.is_empty() {
+            return Ok(hashes);
         }
+        let placed = self.log.append_batch(&batch)?;
+        let mut entries = vec![];
+        for ((kind, payload), (loc, hash)) in batch.iter().zip(&placed) {
+            entries.extend(entries_for_frame(*kind, *hash, *loc, payload)?);
+        }
+        self.log.crash_point(CrashPoint::BeforeSync);
+        self.log.sync()?;
+        self.log.crash_point(CrashPoint::AfterSync);
+        if std::mem::take(&mut self.faults.index_apply) {
+            return Err(StoreError::Db("injected index failure".into()));
+        }
+        self.index.apply(&entries, self.log.end())?;
+        self.log.crash_point(CrashPoint::AfterIndex);
         Ok(hashes)
+    }
+
+    /// Test hook: the end of the log.
+    #[doc(hidden)]
+    pub fn log_end(&self) -> Location {
+        self.log.end()
+    }
+
+    /// Test hook: arms a crash point; the process aborts when a write or checkpoint reaches it.
+    #[doc(hidden)]
+    pub fn crash_at(&mut self, p: CrashPoint) {
+        self.log.crash_at(Some(p));
+    }
+
+    /// Test hook: changes the segment size limit.
+    #[doc(hidden)]
+    pub fn set_segment_max(&mut self, max: u64) {
+        self.log.set_max_len(max);
     }
 
     /// Test hook: the next write's index update fails after its frames are appended.

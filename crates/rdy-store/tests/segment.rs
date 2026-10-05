@@ -1,4 +1,5 @@
 use rdy_model::Hash;
+use rdy_store::kinds::{self, BatchCommit};
 use rdy_store::segment::{Location, SegmentLog};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -317,4 +318,108 @@ fn reading_at_an_absurd_offset_is_an_error_not_a_panic() {
         })
         .is_err()
     );
+}
+
+fn batch(n: u8, size: usize) -> Vec<(u8, Vec<u8>)> {
+    (0..n).map(|i| (kinds::BLOB_CHUNK, vec![i; size])).collect()
+}
+
+#[test]
+fn mark1_append_batch_ends_with_a_marker_naming_its_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    let first = log.append_batch(&batch(2, 10)).unwrap();
+    let placed = log.append_batch(&batch(3, 20)).unwrap();
+    log.sync().unwrap();
+    assert_eq!(
+        first[0].0,
+        Location {
+            segment: 0,
+            offset: 0
+        }
+    );
+    assert_eq!(placed.len(), 3);
+    let all = log
+        .scan_from(Location {
+            segment: 0,
+            offset: 0,
+        })
+        .unwrap();
+    assert_eq!(all.len(), 2 + 1 + 3 + 1);
+    assert_eq!(all[2].1, kinds::BATCH_COMMIT);
+    let (mloc, kind, _) = all[6];
+    assert_eq!(kind, kinds::BATCH_COMMIT);
+    let m: BatchCommit = postcard::from_bytes(&log.read(mloc).unwrap().1).unwrap();
+    assert_eq!(m.start, placed[0].0);
+    assert_eq!(m.frames, 3);
+    assert_eq!(m.digest, kinds::batch_digest(placed.iter().map(|(_, h)| h)));
+    assert_eq!(log.verify_frames().unwrap(), 5, "markers are not counted");
+}
+
+#[test]
+fn roll1_a_batch_that_does_not_fit_rolls_before_its_first_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 400).unwrap();
+    log.append_batch(&batch(2, 50)).unwrap();
+    let second = log.append_batch(&batch(2, 50)).unwrap();
+    assert!(second.iter().all(|(l, _)| l.segment == 1), "{second:?}");
+    assert_eq!(second[0].0.offset, 0);
+    let seg0: Vec<_> = log
+        .scan_from(Location {
+            segment: 0,
+            offset: 0,
+        })
+        .unwrap()
+        .into_iter()
+        .filter(|(l, _, _)| l.segment == 0)
+        .collect();
+    assert_eq!(
+        seg0.last().unwrap().1,
+        kinds::BATCH_COMMIT,
+        "segment 0 ends at a marker"
+    );
+}
+
+#[test]
+fn roll1_a_batch_larger_than_a_segment_gets_a_segment_of_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 128).unwrap();
+    log.append_batch(&batch(1, 10)).unwrap();
+    let big = log.append_batch(&batch(3, 100)).unwrap();
+    assert!(big.iter().all(|(l, _)| l.segment == 1), "{big:?}");
+    let next = log.append_batch(&batch(1, 10)).unwrap();
+    assert_eq!(
+        next[0].0,
+        Location {
+            segment: 2,
+            offset: 0
+        }
+    );
+}
+
+#[test]
+fn mark1_verify_refuses_a_marker_that_does_not_match_its_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    let placed = log.append_batch(&batch(2, 10)).unwrap();
+    let bad = BatchCommit {
+        start: placed[0].0,
+        frames: 2,
+        digest: Hash::of(b"not the batch"),
+    };
+    log.append(kinds::BATCH_COMMIT, &postcard::to_allocvec(&bad).unwrap())
+        .unwrap();
+    log.sync().unwrap();
+    let e = log.verify_frames().unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+    assert!(e.to_string().contains("does not match its batch"), "{e}");
+}
+
+#[test]
+fn mark1_crash_points_round_trip_by_name() {
+    use rdy_store::segment::CrashPoint;
+    for p in CrashPoint::ALL {
+        assert_eq!(CrashPoint::parse(p.name()), Some(p));
+    }
+    assert_eq!(CrashPoint::parse("nowhere"), None);
 }

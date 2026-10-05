@@ -163,7 +163,22 @@ fn store_torn_tail_at_sampled_offsets_recovers() {
     let (last_hash, cut_from) = last;
     let end = segment_len(&dir);
     let step = if deep() { 13 } else { 97 };
-    for cut in (cut_from..end).step_by(step) {
+    // Every write now ends in a batch marker. A cut inside that marker leaves the batch's data
+    // frames whole, which the M1 open rule (still in force until the marker rule lands) accepts
+    // as acknowledged-but-unindexed: so those cuts are not sampled here. The marker rule
+    // quarantines them whole; its tests are in store_open.rs.
+    let marker_start = {
+        let bytes = std::fs::read(last_segment(&dir)).unwrap();
+        let mut at = cut_from as usize;
+        loop {
+            let len = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+            if at + 37 + len == bytes.len() {
+                break at as u64;
+            }
+            at += 37 + len;
+        }
+    };
+    for cut in (cut_from..end).step_by(step).filter(|c| *c < marker_start) {
         let copy = tempfile::tempdir().unwrap();
         copy_dir(&dir, copy.path());
         let seg = last_segment(copy.path());
