@@ -122,8 +122,7 @@ fn cmd() -> impl Strategy<Value = Cmd> {
 /// Ids in `scope` of the given types, sorted, so picks are deterministic.
 fn ids(r: &mut Rdy, scope: &Scope, types: &[&str]) -> Vec<String> {
     let m = r.materialized(scope).unwrap();
-    m.blocks
-        .values()
+    m.iter()
         .filter(|b| types.contains(&b.block_type.as_str()))
         .map(|b| b.id.to_string())
         .collect()
@@ -311,7 +310,7 @@ impl Sim<'_> {
                 .r
                 .resolve_scope(&format!("tag:{name}"))
                 .map_err(|e| TestCaseError::fail(format!("after {c:?}, tag {name}: {e}")))?;
-            let now = self.r.materialized(&scope).unwrap().snapshot.id();
+            let now = self.r.materialized(&scope).unwrap().snapshot_id();
             if now != snap {
                 return Err(TestCaseError::fail(format!(
                     "after {c:?}, version {name} changed: tagged {snap}, now {now}"
@@ -341,7 +340,7 @@ impl Sim<'_> {
             )));
         }
         let scope = self.r.resolve_scope(&format!("tag:{name}")).unwrap();
-        let snap = self.r.materialized(&scope).unwrap().snapshot.id();
+        let snap = self.r.materialized(&scope).unwrap().snapshot_id();
         self.tags.push((name, snap));
         self.tagged_head = head;
         self.stats.borrow_mut().tags += 1;

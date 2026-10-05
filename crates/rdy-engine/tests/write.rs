@@ -57,7 +57,7 @@ fn placeholders_build_a_document_in_one_write() {
     );
     assert!(res.warnings.is_empty());
     assert!(
-        r.materialized(&Scope::Canon).unwrap().blocks.is_empty(),
+        r.materialized(&Scope::Canon).unwrap().is_empty(),
         "nothing in canon yet"
     );
 }
@@ -563,11 +563,7 @@ fn a_failing_second_op_writes_nothing() {
     let (_d, mut r) = project();
     let res = skeleton(&mut r);
     let before = view_len(&r);
-    let blocks_before = r
-        .materialized(&Scope::View("work".into()))
-        .unwrap()
-        .blocks
-        .len();
+    let blocks_before = r.materialized(&Scope::View("work".into())).unwrap().len();
     let e = r.write(&agent(), req(json!([
         {"op": "create", "type": "claim", "id": "$ok", "parent": res.created["$terms"], "body": "Fine."},
         {"op": "update", "id": "b-ZZZZZ", "body": "x"}
@@ -575,10 +571,7 @@ fn a_failing_second_op_writes_nothing() {
     assert_eq!(e.code, "E_UNKNOWN_BLOCK");
     assert_eq!(view_len(&r), before);
     assert_eq!(
-        r.materialized(&Scope::View("work".into()))
-            .unwrap()
-            .blocks
-            .len(),
+        r.materialized(&Scope::View("work".into())).unwrap().len(),
         blocks_before
     );
 }

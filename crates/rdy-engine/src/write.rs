@@ -559,7 +559,7 @@ fn components(deps: &[Vec<usize>]) -> Vec<usize> {
 fn folders_from(ov: &Overlay, parent: Option<&BlockId>) -> usize {
     let mut n = 0;
     let mut cur = parent.and_then(|p| ov.get(p));
-    for _ in 0..=ov.base.blocks.len() + ov.pending.len() {
+    for _ in 0..=ov.base.len() + ov.pending.len() {
         let Some(b) = cur else { break };
         if b.block_type == tree::FOLDER {
             n += 1;
@@ -1329,9 +1329,9 @@ impl Rdy {
             message: req.message,
             links,
         };
-        let id = self
-            .store
-            .commit_to_view_at(&req.view, change, &self.cache[&scope].snapshot)?;
+        let id =
+            self.store
+                .commit_to_view_at(&req.view, change, self.cache[&scope].snapshot_ref())?;
         self.update_cache(&req.view, &ops);
 
         let m = self.cache.get(&scope).expect("cached");

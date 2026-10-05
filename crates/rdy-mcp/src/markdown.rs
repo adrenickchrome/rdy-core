@@ -6,7 +6,7 @@ use rdy_model::{Block, FieldValue, decision, tree};
 /// How far below its doc `b` sits (the doc itself is 0), or None outside a doc.
 pub fn doc_depth(m: &Materialized, b: &Block) -> Option<usize> {
     let mut cur = b;
-    for depth in 0..=m.blocks.len() {
+    for depth in 0..=m.len() {
         if cur.block_type == tree::DOC {
             return Some(depth);
         }

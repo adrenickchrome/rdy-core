@@ -69,12 +69,8 @@ fn export_import_round_trip_preserves_every_version_hash() {
     assert_eq!(summary.docs, 1);
     assert_eq!(summary.folders, 2);
     assert_eq!(summary.blobs, 1);
-    let original: BTreeMap<BlockId, Hash> = a
-        .materialized(&Scope::Canon)
-        .unwrap()
-        .snapshot
-        .blocks
-        .clone();
+    let original: BTreeMap<BlockId, Hash> =
+        a.materialized(&Scope::Canon).unwrap().snapshot().blocks;
     assert_eq!(summary.blocks, original.len());
 
     let b_dir = tempfile::tempdir().unwrap();
@@ -86,20 +82,14 @@ fn export_import_round_trip_preserves_every_version_hash() {
     b.import(&founder(), "import", out.path()).unwrap();
     let p = b.propose(&founder(), "import", "migrate").unwrap();
     b.land(&founder(), &p.id).unwrap();
-    let imported = b
-        .materialized(&Scope::Canon)
-        .unwrap()
-        .snapshot
-        .blocks
-        .clone();
+    let imported = b.materialized(&Scope::Canon).unwrap().snapshot().blocks;
     assert_eq!(imported, original);
 
     // the blob came across too
     let fig = b
         .materialized(&Scope::Canon)
         .unwrap()
-        .blocks
-        .values()
+        .iter()
         .find(|x| x.block_type == "figure")
         .unwrap()
         .clone();
@@ -123,8 +113,7 @@ fn single_block_yaml_round_trip_and_edit() {
     let term = r
         .materialized(&Scope::Canon)
         .unwrap()
-        .blocks
-        .values()
+        .iter()
         .find(|x| x.block_type == "term")
         .unwrap()
         .clone();
@@ -200,7 +189,6 @@ fn assert_import_fails(out: &Path, code: &str) {
     assert!(
         b.materialized(&Scope::View("import".into()))
             .unwrap()
-            .blocks
             .is_empty()
     );
 }
@@ -343,8 +331,7 @@ fn edit_block_applies_field_unset_and_links_changes() {
     let claim = r
         .materialized(&Scope::Canon)
         .unwrap()
-        .blocks
-        .values()
+        .iter()
         .find(|x| x.block_type == "claim")
         .unwrap()
         .clone();
@@ -361,8 +348,7 @@ fn edit_block_applies_field_unset_and_links_changes() {
     let sec = r
         .materialized(&Scope::Canon)
         .unwrap()
-        .blocks
-        .values()
+        .iter()
         .find(|x| x.block_type == "section")
         .unwrap()
         .clone();
@@ -393,8 +379,7 @@ fn edit_block_respects_decision_rules() {
     let dec = r
         .materialized(&Scope::Canon)
         .unwrap()
-        .blocks
-        .values()
+        .iter()
         .find(|x| x.block_type == "decision")
         .unwrap()
         .clone();
@@ -459,12 +444,9 @@ fn import_skips_dotfiles_and_non_yaml_files() {
     let b_dir = tempfile::tempdir().unwrap();
     let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
     b.import(&founder(), "import", out.path()).unwrap();
-    let n = a.materialized(&Scope::Canon).unwrap().blocks.len();
+    let n = a.materialized(&Scope::Canon).unwrap().len();
     assert_eq!(
-        b.materialized(&Scope::View("import".into()))
-            .unwrap()
-            .blocks
-            .len(),
+        b.materialized(&Scope::View("import".into())).unwrap().len(),
         n
     );
 }
@@ -476,8 +458,7 @@ fn edit_block_refuses_a_no_op_edit() {
     let term = r
         .materialized(&Scope::View("work".into()))
         .unwrap()
-        .blocks
-        .values()
+        .iter()
         .find(|x| x.block_type == "term")
         .unwrap()
         .clone();
@@ -694,19 +675,14 @@ fn export_import_export_is_byte_identical() {
     let a_dir = tempfile::tempdir().unwrap();
     let out1 = tempfile::tempdir().unwrap();
     let mut a = exported(a_dir.path(), out1.path());
-    let original = a
-        .materialized(&Scope::Canon)
-        .unwrap()
-        .snapshot
-        .blocks
-        .clone();
+    let original = a.materialized(&Scope::Canon).unwrap().snapshot().blocks;
     let b_dir = tempfile::tempdir().unwrap();
     let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
     b.import(&founder(), "import", out1.path()).unwrap();
     let p = b.propose(&founder(), "import", "migrate").unwrap();
     b.land(&founder(), &p.id).unwrap();
     assert_eq!(
-        b.materialized(&Scope::Canon).unwrap().snapshot.blocks,
+        b.materialized(&Scope::Canon).unwrap().snapshot().blocks,
         original
     );
     let out2_dir = tempfile::tempdir().unwrap();

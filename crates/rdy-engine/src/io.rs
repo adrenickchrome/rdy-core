@@ -400,8 +400,8 @@ impl Rdy {
         // each blob, with the first figure that names it
         let mut blobs = BTreeMap::new();
         export_level(&m, None, 0, &out.join("docs"), &mut summary, &mut blobs)?;
-        if summary.blocks != m.blocks.len() {
-            let missing = m.blocks.len() - summary.blocks.min(m.blocks.len());
+        if summary.blocks != m.len() {
+            let missing = m.len() - summary.blocks.min(m.len());
             return Err(RdyError::new(
                 E_IO,
                 format!(

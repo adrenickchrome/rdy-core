@@ -387,7 +387,7 @@ fn land_refuses_orphans_and_dangling_refs_when_canon_moved_after_propose() {
     );
     assert_eq!(r.store().canon_head().unwrap(), head);
     let canon = r.materialized(&Scope::Canon).unwrap();
-    assert!(canon.blocks.values().all(|b| b.block_type != "claim"));
+    assert!(canon.iter().all(|b| b.block_type != "claim"));
 }
 
 #[test]

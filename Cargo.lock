@@ -1276,6 +1276,7 @@ dependencies = [
  "proptest",
  "rdy-daemon",
  "rdy-engine",
+ "rdy-graph",
  "rdy-mcp",
  "rdy-model",
  "rdy-render",

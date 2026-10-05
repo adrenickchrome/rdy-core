@@ -90,7 +90,7 @@ fn count_below(m: &Materialized, id: &BlockId) -> usize {
     let mut n = 0;
     let mut stack = vec![id.clone()];
     // each block is visited at most once unless the store holds a parent loop
-    for _ in 0..=m.blocks.len() {
+    for _ in 0..=m.len() {
         let Some(cur) = stack.pop() else { break };
         for c in m.children(Some(&cur)) {
             if tree::is_tree_type(&c.block_type) {

@@ -444,12 +444,7 @@ fn a_doc_in_the_deepest_folder_exports_and_round_trips() {
     .unwrap();
     let p = r.propose(&agent(), "work", "deep").unwrap();
     r.land(&founder(), &p.id).unwrap();
-    let original = r
-        .materialized(&Scope::Canon)
-        .unwrap()
-        .snapshot
-        .blocks
-        .clone();
+    let original = r.materialized(&Scope::Canon).unwrap().snapshot().blocks;
 
     let out = tempfile::tempdir().unwrap();
     let summary = r.export(&Scope::Canon, out.path()).unwrap();
@@ -460,11 +455,6 @@ fn a_doc_in_the_deepest_folder_exports_and_round_trips() {
     b.import(&founder(), "import", out.path()).unwrap();
     let p = b.propose(&founder(), "import", "migrate").unwrap();
     b.land(&founder(), &p.id).unwrap();
-    let imported = b
-        .materialized(&Scope::Canon)
-        .unwrap()
-        .snapshot
-        .blocks
-        .clone();
+    let imported = b.materialized(&Scope::Canon).unwrap().snapshot().blocks;
     assert_eq!(imported, original);
 }

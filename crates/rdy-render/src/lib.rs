@@ -109,7 +109,7 @@ impl<'a> Site<'a> {
         let mut out = vec![];
         let mut cur = Some(id.clone());
         while let Some(c) = cur {
-            if out.len() > self.m.blocks.len() {
+            if out.len() > self.m.len() {
                 break;
             }
             let Some(b) = self.m.get(&c) else { break };
@@ -500,8 +500,7 @@ fn render_into(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary
     let suspects: BTreeSet<BlockId> = rdy.suspects(scope)?.into_iter().map(|s| s.block).collect();
     // figure blobs that exist in the store (checked before `g` borrows `rdy`)
     let present: BTreeSet<Hash> = m
-        .blocks
-        .values()
+        .iter()
         .filter(|b| b.block_type == "figure")
         .filter_map(|b| b.field_str("blob")?.parse::<Hash>().ok())
         .filter(|h| rdy.store().has_blob(h).unwrap_or(false))
@@ -643,11 +642,7 @@ fn render_into(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary
     }
 
     let mut decisions = vec![];
-    for b in m
-        .blocks
-        .values()
-        .filter(|b| b.block_type == decision::DECISION)
-    {
+    for b in m.iter().filter(|b| b.block_type == decision::DECISION) {
         let status = status_word(&g.status(&b.id));
         let dpage = format!("_decision/{}.html", b.id);
         let link_row = |e_kind: &EdgeKind, id: &BlockId, part: &Option<String>| {

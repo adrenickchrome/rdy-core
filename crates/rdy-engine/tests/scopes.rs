@@ -38,8 +38,7 @@ fn titles(r: &mut Rdy, scope: &Scope) -> Vec<String> {
     let mut t: Vec<String> = r
         .materialized(scope)
         .unwrap()
-        .blocks
-        .values()
+        .iter()
         .filter_map(|b| b.field_str("title").map(String::from))
         .collect();
     t.sort();
@@ -97,7 +96,7 @@ fn tag_and_landing_scopes_read_the_frozen_snapshot() {
         assert_eq!(r.resolve_scope(text).unwrap(), Scope::At(at), "{text}");
     }
     let snap = r.store().snapshot_at(&at).unwrap();
-    assert_eq!(r.materialized(&Scope::At(at)).unwrap().snapshot, snap);
+    assert_eq!(r.materialized(&Scope::At(at)).unwrap().snapshot(), snap);
     assert_eq!(titles(&mut r, &Scope::At(at)), ["A"]);
     assert_eq!(titles(&mut r, &Scope::Canon), ["A", "B"]);
     // a fresh process with a rebuilt index reads the same snapshot

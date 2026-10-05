@@ -102,7 +102,7 @@ impl Rdy {
             issues.extend(validate_block(&self.pack, b, parent));
             // two views can each be fine alone and clash or loop once both are in canon
             let mut walk = b.parent.clone();
-            for _ in 0..=next.blocks.len() {
+            for _ in 0..=next.len() {
                 let Some(p) = walk else { break };
                 if &p == id {
                     issues.push(Issue {
@@ -171,7 +171,7 @@ impl Rdy {
             }
         }
         if !deleted.is_empty() {
-            for b in next.blocks.values() {
+            for b in next.iter() {
                 if let Some(parent) = b.parent.as_ref().filter(|p| deleted.contains(*p)) {
                     issues.push(Issue {
                         severity: Severity::Error,

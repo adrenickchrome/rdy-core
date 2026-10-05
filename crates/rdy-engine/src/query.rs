@@ -164,7 +164,7 @@ impl Rdy {
     pub fn graph(&mut self, scope: &Scope) -> Result<&Graph, RdyError> {
         self.materialized(scope)?;
         if !self.graphs.contains_key(scope) {
-            let g = Graph::build(&self.cache[scope].blocks);
+            let g = Graph::build_from(self.cache[scope].iter());
             self.graphs.insert(scope.clone(), g);
         }
         Ok(&self.graphs[scope])
@@ -174,14 +174,14 @@ impl Rdy {
         self.graph(scope)?;
         self.materialized(scope)?;
         let (g, m, store) = (&self.graphs[scope], &self.cache[scope], &self.store);
-        Ok(g.suspects(&m.blocks, &|h| store.get_block(h).ok()))
+        Ok(g.suspects(m, &|h| store.get_block(h).ok()))
     }
 
     pub fn context(&mut self, scope: &Scope, id: &BlockId) -> Result<Context, RdyError> {
         let block = self.block(scope, id)?;
         self.graph(scope)?;
         let (m, g, store) = (&self.cache[scope], &self.graphs[scope], &self.store);
-        let suspects = g.suspects_of(id, &m.blocks, &|h| store.get_block(h).ok());
+        let suspects = g.suspects_of(id, m, &|h| store.get_block(h).ok());
         Ok(Context {
             id: block.id.to_string(),
             block_type: block.block_type.clone(),

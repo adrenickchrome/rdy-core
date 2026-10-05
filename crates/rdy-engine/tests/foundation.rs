@@ -87,7 +87,7 @@ fn materialized_children_are_ordered_and_apply_is_incremental() {
         id: b.id.clone(),
     }]);
     assert_eq!(m.children(Some(&parent)).len(), 1);
-    assert_eq!(m.snapshot.blocks.len(), 1);
+    assert_eq!(m.snapshot().blocks.len(), 1);
 }
 
 #[test]

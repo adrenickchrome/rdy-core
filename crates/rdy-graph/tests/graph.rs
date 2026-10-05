@@ -46,7 +46,7 @@ fn derived_decision_status() {
     link(&mut new, "supersedes", "D-PPPPP", Some("and moves"));
     let mut proposed = dec("D-CCCCC", "proposed");
     link(&mut proposed, "revokes", "D-BBBBB", None);
-    let g = Graph::build(&map(vec![old, partial_old, new, proposed]));
+    let g = Graph::build_from(map(vec![old, partial_old, new, proposed]).values());
     assert!(matches!(
         g.status(&BlockId::parse("D-AAAAA").unwrap()),
         Some(DerivedStatus::Superseded { .. })
@@ -82,13 +82,16 @@ fn edges_impact_and_governing() {
     note.body = "See {{c-CHAMP}}.".into();
     let mut d = dec("D-AAAAA", "accepted");
     link(&mut d, "affects", "t-MEDGR", None);
-    let g = Graph::build(&map(vec![
-        term,
-        claim,
-        note,
-        d,
-        b("s-SSSSS", "section", Some("d-DDDDD")),
-    ]));
+    let g = Graph::build_from(
+        map(vec![
+            term,
+            claim,
+            note,
+            d,
+            b("s-SSSSS", "section", Some("d-DDDDD")),
+        ])
+        .values(),
+    );
     let ledger = BlockId::parse("t-MEDGR").unwrap();
     assert_eq!(
         g.incoming(&ledger)
@@ -146,21 +149,25 @@ fn suspects_ignore_status_only_changes() {
     };
 
     let blocks = map(vec![accepted.clone(), claim.clone()]);
-    assert!(Graph::build(&blocks).suspects(&blocks, &lookup).is_empty());
+    assert!(
+        Graph::build_from(blocks.values())
+            .suspects(&blocks, &lookup)
+            .is_empty()
+    );
 
     let mut edited = accepted.clone();
     edited
         .fields
         .insert("statement".into(), FieldValue::Str("different".into()));
     let blocks = map(vec![edited, claim.clone()]);
-    let s = Graph::build(&blocks).suspects(&blocks, &lookup);
+    let s = Graph::build_from(blocks.values()).suspects(&blocks, &lookup);
     assert_eq!(s.len(), 1);
     assert_eq!(s[0].reason, "changed");
 
     let mut sup = dec("D-BBBBB", "accepted");
     link(&mut sup, "supersedes", "D-AAAAA", None);
     let blocks = map(vec![accepted, claim, sup]);
-    let s = Graph::build(&blocks).suspects(&blocks, &lookup);
+    let s = Graph::build_from(blocks.values()).suspects(&blocks, &lookup);
     assert!(
         s.iter()
             .any(|x| x.reason == "superseded" && x.block.as_str() == "c-CHAMP")
@@ -185,7 +192,7 @@ fn accepted_revoker_makes_referrers_suspect_proposed_does_not() {
     let mut revoker = dec("D-BBBBB", "accepted");
     link(&mut revoker, "revokes", "D-AAAAA", None);
     let blocks = map(vec![target.clone(), claim.clone(), revoker]);
-    let g = Graph::build(&blocks);
+    let g = Graph::build_from(blocks.values());
     assert!(matches!(
         g.status(&target.id),
         Some(DerivedStatus::Revoked { .. })
@@ -199,7 +206,7 @@ fn accepted_revoker_makes_referrers_suspect_proposed_does_not() {
     let mut proposed = dec("D-BBBBB", "proposed");
     link(&mut proposed, "revokes", "D-AAAAA", None);
     let blocks = map(vec![target, claim, proposed]);
-    let g = Graph::build(&blocks);
+    let g = Graph::build_from(blocks.values());
     assert!(g.suspects(&blocks, &no_old).is_empty());
 }
 
@@ -208,7 +215,7 @@ fn pinned_target_absent_is_deleted() {
     let gone = dec("D-AAAAA", "accepted");
     let claim = claim_pinned("c-CHAMP", &gone);
     let blocks = map(vec![claim]);
-    let s = Graph::build(&blocks).suspects(&blocks, &no_old);
+    let s = Graph::build_from(blocks.values()).suspects(&blocks, &no_old);
     assert_eq!(s.len(), 1);
     assert_eq!(s[0].reason, "deleted");
 }
@@ -220,7 +227,7 @@ fn partial_supersede_is_not_suspect_and_superseder_is_not_suspect() {
     let mut sup = dec("D-BBBBB", "accepted");
     link(&mut sup, "supersedes", "D-AAAAA", Some("the moves part"));
     let blocks = map(vec![target.clone(), claim, sup.clone()]);
-    let g = Graph::build(&blocks);
+    let g = Graph::build_from(blocks.values());
     assert!(matches!(
         g.status(&target.id),
         Some(DerivedStatus::PartiallySuperseded { .. })
@@ -230,7 +237,7 @@ fn partial_supersede_is_not_suspect_and_superseder_is_not_suspect() {
     let mut whole = dec("D-BBBBB", "accepted");
     link(&mut whole, "supersedes", "D-AAAAA", None);
     let blocks = map(vec![target, whole.clone()]);
-    let s = Graph::build(&blocks).suspects(&blocks, &no_old);
+    let s = Graph::build_from(blocks.values()).suspects(&blocks, &no_old);
     assert!(s.iter().all(|x| x.block != whole.id));
 }
 
@@ -245,7 +252,7 @@ fn decision_naming_the_old_id_it_supersedes_is_not_suspect() {
     link(&mut sup, "supersedes", "D-AAAAA", None);
     sup.pins.insert(target.id.clone(), target.version_hash());
     let blocks = map(vec![target, sup.clone()]);
-    let g = Graph::build(&blocks);
+    let g = Graph::build_from(blocks.values());
     assert!(
         g.outgoing(&sup.id)
             .iter()
@@ -268,7 +275,7 @@ fn impact_depth_cutoff_and_diamond() {
     y.body = "{{t-MEDGR}}".into();
     let mut z = b("n-ZZZZZ", "note", Some("s-SSSSS"));
     z.body = "{{c-XXXXX}} {{c-YYYYY}}".into();
-    let g = Graph::build(&map(vec![t, x, y, z]));
+    let g = Graph::build_from(map(vec![t, x, y, z]).values());
     let id = BlockId::parse("t-MEDGR").unwrap();
     let d1: Vec<_> = g
         .impact(&id, 1)
@@ -299,7 +306,7 @@ fn suspects_of_matches_the_whole_scope_suspects_filtered_to_one_block() {
     let mut revoker = dec("D-BBBBB", "accepted");
     link(&mut revoker, "revokes", "D-AAAAA", None);
     let blocks = map(vec![target, claim.clone(), other.clone(), revoker.clone()]);
-    let g = Graph::build(&blocks);
+    let g = Graph::build_from(blocks.values());
     for b in blocks.values() {
         let expect: Vec<_> = g
             .suspects(&blocks, &no_old)

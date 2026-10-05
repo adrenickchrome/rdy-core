@@ -85,7 +85,7 @@ proptest! {
         let (_b, mut b) = project();
         b.import(&approver(), "import", &first).unwrap();
         land(&mut b, "import").unwrap();
-        prop_assert_eq!(&b.materialized(&Scope::Canon).unwrap().snapshot, &a.materialized(&Scope::Canon).unwrap().snapshot);
+        prop_assert_eq!(&b.materialized(&Scope::Canon).unwrap().snapshot(), &a.materialized(&Scope::Canon).unwrap().snapshot());
         let second = out.path().join("two");
         b.export(&Scope::Canon, &second).unwrap();
         prop_assert_eq!(files(&first), files(&second));

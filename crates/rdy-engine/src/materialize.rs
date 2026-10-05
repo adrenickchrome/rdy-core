@@ -1,4 +1,5 @@
-use rdy_model::{Block, BlockId, Op, StateSnapshot, tree};
+use rdy_graph::BlockLookup;
+use rdy_model::{Block, BlockId, Hash, Op, StateSnapshot, tree};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -36,8 +37,8 @@ impl Clone for DerivedCache {
 
 #[derive(Clone, Debug, Default)]
 pub struct Materialized {
-    pub snapshot: StateSnapshot,
-    pub blocks: BTreeMap<BlockId, Block>,
+    snapshot: StateSnapshot,
+    blocks: BTreeMap<BlockId, Block>,
     children: BTreeMap<Option<BlockId>, BTreeSet<(String, BlockId)>>,
     /// Docs and folders with a stored name, by (parent, lower-cased name).
     names: BTreeMap<(Option<BlockId>, String), BTreeSet<BlockId>>,
@@ -124,6 +125,48 @@ impl Materialized {
 
     pub fn get(&self, id: &BlockId) -> Option<&Block> {
         self.blocks.get(id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    /// Every block, in `BlockId` order.
+    pub fn iter(&self) -> impl Iterator<Item = &Block> + '_ {
+        self.blocks.values()
+    }
+
+    /// Every block id, in order.
+    pub fn ids(&self) -> impl Iterator<Item = &BlockId> + '_ {
+        self.blocks.keys()
+    }
+
+    /// The version hash of a block in this state.
+    pub fn version_of(&self, id: &BlockId) -> Option<Hash> {
+        self.snapshot.blocks.get(id).copied()
+    }
+
+    /// Every (id, version), in id order.
+    pub fn versions(&self) -> impl Iterator<Item = (&BlockId, &Hash)> + '_ {
+        self.snapshot.blocks.iter()
+    }
+
+    /// A fresh snapshot holding every (id, version). O(n).
+    /// Borrowed form of `snapshot` for the write path; goes with `apply` in Task 4.
+    pub(crate) fn snapshot_ref(&self) -> &StateSnapshot {
+        &self.snapshot
+    }
+
+    pub fn snapshot(&self) -> StateSnapshot {
+        self.snapshot.clone()
+    }
+
+    pub fn snapshot_id(&self) -> Hash {
+        self.snapshot().id()
     }
 
     pub fn children(&self, parent: Option<&BlockId>) -> Vec<&Block> {
@@ -331,5 +374,11 @@ impl Materialized {
                 Op::Delete { id, .. } => self.remove(id),
             }
         }
+    }
+}
+
+impl BlockLookup for Materialized {
+    fn block(&self, id: &BlockId) -> Option<&Block> {
+        self.get(id)
     }
 }
