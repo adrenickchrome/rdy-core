@@ -33,7 +33,7 @@ enum Cmd {
     Show {
         /// An id or a path such as wallets/transactions.
         id: String,
-        /// canon, a view name, tag:<version>, landing:<id> or view:<name>.
+        /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
         #[arg(long, default_value = "canon")]
         scope: String,
     },
@@ -43,7 +43,7 @@ enum Cmd {
         id: String,
         #[arg(long, default_value_t = 3)]
         depth: u32,
-        /// canon, a view name, tag:<version>, landing:<id> or view:<name>.
+        /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
         #[arg(long, default_value = "canon")]
         scope: String,
     },
@@ -74,6 +74,7 @@ enum Cmd {
     /// List the folder and doc tree.
     Ls {
         path: Option<String>,
+        /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
         #[arg(long, default_value = "canon")]
         scope: String,
         #[arg(long)]
@@ -86,16 +87,17 @@ enum Cmd {
         view: String,
     },
     Render {
+        /// Output directory: new, empty, or a site rdy rendered before (replaced as a whole).
         #[arg(long)]
         out: PathBuf,
-        /// canon, a view name, tag:<version>, landing:<id> or view:<name>.
+        /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
         #[arg(long, default_value = "canon")]
         scope: String,
     },
     Export {
         #[arg(long)]
         out: PathBuf,
-        /// canon, a view name, tag:<version>, landing:<id> or view:<name>.
+        /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
         #[arg(long, default_value = "canon")]
         scope: String,
     },
@@ -285,7 +287,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     ))
                 }
                 Cmd::Show { id, scope } => {
-                    let scope = r.resolve_scope(&scope)?;
+                    let scope = r.resolve_read_scope(&scope, None)?;
                     let bid = r.resolve_id(&scope, &id)?;
                     let ctx = r.context(&scope, &bid)?;
                     let json = serde_json::to_value(&ctx).expect("json");
@@ -349,7 +351,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     ))
                 }
                 Cmd::Ls { path, scope, depth } => {
-                    let scope = r.resolve_scope(&scope)?;
+                    let scope = r.resolve_read_scope(&scope, None)?;
                     let nodes = r.tree(&scope, path.as_deref(), depth)?;
                     let mut lines = vec![];
                     ls_text(&nodes, 0, &mut lines);
@@ -384,7 +386,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     Ok((Value::Array(rows), text))
                 }
                 Cmd::Impact { id, depth, scope } => {
-                    let scope = r.resolve_scope(&scope)?;
+                    let scope = r.resolve_read_scope(&scope, None)?;
                     let bid = r.resolve_id(&scope, &id)?;
                     let items = r.impact(&scope, &bid, depth)?;
                     let text = items
@@ -497,15 +499,23 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     ))
                 }
                 Cmd::Render { out, scope } => {
-                    let scope = r.resolve_scope(&scope)?;
+                    let scope = r.resolve_read_scope(&scope, None)?;
                     let s = rdy_render::render_site(&mut r, &scope, &out)?;
                     Ok((
                         serde_json::to_value(&s).expect("json"),
-                        format!("rendered {} pages to {}", s.pages, out.display()),
+                        format!(
+                            "rendered {} pages to {}{}",
+                            s.pages,
+                            out.display(),
+                            s.warnings
+                                .iter()
+                                .map(|w| format!("\nwarning: {w}"))
+                                .collect::<String>()
+                        ),
                     ))
                 }
                 Cmd::Export { out, scope } => {
-                    let scope = r.resolve_scope(&scope)?;
+                    let scope = r.resolve_read_scope(&scope, None)?;
                     let s = r.export(&scope, &out)?;
                     Ok((
                         serde_json::to_value(&s).expect("json"),

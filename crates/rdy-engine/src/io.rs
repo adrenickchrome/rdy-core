@@ -713,6 +713,7 @@ impl Rdy {
             change: id.to_string(),
             created,
             names: BTreeMap::new(),
+            inherited: BTreeMap::new(),
             warnings: vec![],
         })
     }
@@ -764,7 +765,7 @@ impl Rdy {
             .cloned()
             .collect();
         let links = (cur.links != edited.links).then(|| {
-            edited
+            let mut m: BTreeMap<String, Vec<LinkInput>> = edited
                 .links
                 .iter()
                 .map(|(k, v)| {
@@ -778,7 +779,12 @@ impl Rdy {
                             .collect(),
                     )
                 })
-                .collect()
+                .collect();
+            // link1: an update merges link kinds, so a kind the edit removed is sent as []
+            for k in cur.links.keys() {
+                m.entry(k.clone()).or_default();
+            }
+            m
         });
         let op = OpInput::Update {
             id: edited.id.to_string(),

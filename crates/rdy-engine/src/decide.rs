@@ -34,6 +34,9 @@ pub struct DecisionInput {
     pub refines: Vec<String>,
     #[serde(default)]
     pub answers: Vec<String>,
+    /// sup1: link kinds rdy_supersede must not copy from the old decision.
+    #[serde(default)]
+    pub no_inherit: Vec<String>,
 }
 
 fn links_of(d: &DecisionInput) -> BTreeMap<String, Vec<LinkInput>> {
@@ -100,6 +103,7 @@ impl Rdy {
             id: Some("$decision".into()),
             parent: Some(d.parent.clone()),
             after: None,
+            before: None,
             fields: fields_of(&d),
             body: d.body.clone(),
             links,
@@ -153,20 +157,87 @@ impl Rdy {
         d: DecisionInput,
     ) -> Result<WriteResult, RdyError> {
         let old_id = self.require_decision(view, old)?;
+        let old_block = self.block(&Scope::View(view.into()), &old_id)?;
+        // sup1: the new decision keeps the old one's scope and premises, kind by kind, unless the
+        // caller gives that kind or lists it in no_inherit
+        const INHERITED: [&str; 4] = [
+            decision::AFFECTS,
+            decision::DEPENDS_ON,
+            decision::CONDITIONAL_ON,
+            decision::REFINES,
+        ];
+        if let Some(k) = d
+            .no_inherit
+            .iter()
+            .find(|k| !INHERITED.contains(&k.as_str()))
+        {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("no_inherit names {k:?}, which is not a link kind rdy_supersede inherits"),
+                format!("no_inherit takes {}", INHERITED.join(", ")),
+            ));
+        }
+        let scope = Scope::View(view.into());
+        let mut inherited = BTreeMap::new();
+        let mut extra = vec![];
+        for kind in INHERITED {
+            let given = match kind {
+                decision::AFFECTS => &d.affects,
+                decision::DEPENDS_ON => &d.depends_on,
+                decision::CONDITIONAL_ON => &d.conditional_on,
+                _ => &d.refines,
+            };
+            if !given.is_empty() || d.no_inherit.iter().any(|k| k == kind) {
+                continue;
+            }
+            let links = old_block.links.get(kind).into_iter().flatten();
+            let mut targets = vec![];
+            for l in links {
+                // a link to a block deleted in this view can't be copied: say so before writing
+                if self.materialized(&scope)?.get(&l.target).is_none() {
+                    return Err(RdyError::new(
+                        E_UNKNOWN_REF,
+                        format!(
+                            "{old_id}'s {kind} link to {} no longer exists, so it can't be inherited",
+                            l.target
+                        ),
+                        format!(
+                            "pass {kind} yourself or drop it (MCP: \"{kind}\": []; engine: no_inherit)"
+                        ),
+                    ));
+                }
+                targets.push(l.target.to_string());
+                extra.push((
+                    kind.to_string(),
+                    LinkInput {
+                        target: l.target.to_string(),
+                        part: l.part.clone(),
+                    },
+                ));
+            }
+            if !targets.is_empty() {
+                inherited.insert(kind.to_string(), targets);
+            }
+        }
         let msg = format!("supersede {old_id}: {}", d.statement);
-        self.write_decision(
+        let mut res = self.write_decision(
             s,
             view,
             d,
-            vec![(
-                decision::SUPERSEDES.into(),
-                LinkInput {
-                    target: old_id.to_string(),
-                    part,
-                },
-            )],
+            {
+                extra.push((
+                    decision::SUPERSEDES.into(),
+                    LinkInput {
+                        target: old_id.to_string(),
+                        part,
+                    },
+                ));
+                extra
+            },
             msg,
-        )
+        )?;
+        res.inherited = inherited;
+        Ok(res)
     }
 
     pub fn revoke(

@@ -35,7 +35,8 @@ fn cli_errors_are_clean_on_every_command() {
         ("E_NOT_FOUND", vec!["approve", &h64]),
         ("E_BAD_TAG_NAME", vec!["tag", "not-a-version"]),
         ("E_NOT_FOUND", vec!["tag", "v1.0.0"]),
-        ("E_IO", vec!["render", "--out", f]),
+        // ren1: an existing file as --out is a bad input, not an I/O failure.
+        ("E_BAD_INPUT", vec!["render", "--out", f]),
         ("E_IO", vec!["export", "--out", f]),
         ("E_BAD_INPUT", vec!["import", "/no/such/dir", "--view", "x"]),
         ("E_NOT_FOUND", vec!["check", "/no/such/path"]),

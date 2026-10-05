@@ -66,7 +66,7 @@ pub struct SessionParams {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct ScopeParams {
-    /// "canon", a view name, "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
+    /// "canon", a view name (an existing view, or your session's), "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
     pub scope: Option<String>,
     pub max_tokens: Option<usize>,
 }
@@ -74,7 +74,7 @@ pub struct ScopeParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct IdParams {
     pub id: String,
-    /// "canon", a view name, "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
+    /// "canon", a view name (an existing view, or your session's), "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
     pub scope: Option<String>,
     /// rdy_read only: compact (default), markdown or yaml.
     pub format: Option<String>,
@@ -100,13 +100,16 @@ pub struct EditorialParams {
 pub struct WriteParams {
     pub view: Option<String>,
     /// Ops, each a JSON object (rdy_schema lists them under "ops"):
-    /// {"op":"create","type":<type>,"id":"$name"?,"parent":<id or path>?,"after":<sibling>?,"fields":{..}?,"body":".."?,"links":{..}?}
+    /// {"op":"create","type":<type>,"id":"$name"?,"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?,"fields":{..}?,"body":".."?,"links":{..}?}
     /// {"op":"update","id":<id or path>,"base":<version>?,"fields":{..}?,"unset":[<field>]?,"body":".."?,"links":{..}?}
-    /// {"op":"move","id":<id or path>,"base":<version>?,"parent":<id or path>?,"after":<sibling>?}
+    /// {"op":"move","id":<id or path>,"base":<version>?,"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?}
     /// {"op":"delete","id":<id or path>,"base":<version>?}
     /// {"op":"rebalance","parent":<id or path>?}
-    /// links: {"<kind>": [{"target": "<id or path>", "part": "<optional words>"}]}, e.g. {"decided_by": [{"target": "D-W2HXR"}]}.
-    /// Ids, parents, afters and link targets also take paths (wallets/transactions); a move without parent goes to the top level (docs and folders); rebalance re-keys a parent's children (frozen decisions stay put; in one write it must come before any other op on those children, and a child it re-keys can't be edited again in the same write).
+    /// {"op":"repin","id":<id or path>,"base":<version>?,"targets":[<id or path>]?}
+    /// links: {"<kind>": [{"target": "<id or path>", "part": "<optional words>"}]}, e.g. {"decided_by": [{"target": "D-W2HXR"}]}. An update replaces only the link kinds it names; "<kind>": [] removes that kind.
+    /// after puts a block behind a sibling and before ahead of one (before the first child makes it first); give one, or neither to append.
+    /// repin re-pins a block's references and links (all, or the targets named) to their current versions, after you've checked them: it clears "changed" suspects.
+    /// Ids, parents, afters, befores and link targets also take paths (wallets/transactions); a move without parent goes to the top level (docs and folders); rebalance re-keys a parent's children (frozen decisions stay put; in one write it must come before any other op on those children, and a child it re-keys can't be edited again in the same write).
     pub ops: Vec<Value>,
     /// The decision this change carries out.
     pub implements: Option<String>,
@@ -138,6 +141,7 @@ pub struct SupersedeParams {
     pub old: String,
     /// The words of the old decision that this one retires; omit to supersede all of it.
     pub part: Option<String>,
+    /// The new decision. It inherits the old decision's affects, depends_on, conditional_on and refines unless you give that kind; an empty list drops it.
     pub decision: DecideParams,
 }
 
@@ -247,7 +251,8 @@ fn session(st: &McpState) -> Result<Session, RdyError> {
 
 fn scope_of(st: &McpState, s: &Option<String>) -> Result<Scope, RdyError> {
     match s {
-        Some(text) => st.rdy.resolve_scope(text),
+        // scope1: an unknown view is not found, unless it is this session's own view
+        Some(text) => st.rdy.resolve_read_scope(text, Some(&st.view)),
         // ses1: a reader session whose view is canon reads canon by default
         None if st.view == "canon" => Ok(Scope::Canon),
         None => Ok(Scope::View(st.view.clone())),
@@ -266,7 +271,7 @@ const NAME_RULES: &str = "names: 1-64 characters from A-Z a-z 0-9 . _ -; not sta
 pub const WRITE_OPS: &[(&str, &str)] = &[
     (
         "create",
-        r#"{"op":"create","type":<type>,"id":"$name"?,"parent":<id or path>?,"after":<sibling>?,"fields":{..}?,"body":".."?,"links":{..}?}"#,
+        r#"{"op":"create","type":<type>,"id":"$name"?,"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?,"fields":{..}?,"body":".."?,"links":{..}?}"#,
     ),
     (
         "update",
@@ -274,19 +279,26 @@ pub const WRITE_OPS: &[(&str, &str)] = &[
     ),
     (
         "move",
-        r#"{"op":"move","id":<id or path>,"base":<version>?,"parent":<id or path>?,"after":<sibling>?}"#,
+        r#"{"op":"move","id":<id or path>,"base":<version>?,"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?}"#,
     ),
     (
         "delete",
         r#"{"op":"delete","id":<id or path>,"base":<version>?}"#,
     ),
     ("rebalance", r#"{"op":"rebalance","parent":<id or path>?}"#),
+    (
+        "repin",
+        r#"{"op":"repin","id":<id or path>,"base":<version>?,"targets":[<id or path>]?}"#,
+    ),
 ];
 
 /// doc1: the shape of a block's `links`.
 pub const LINK_SHAPE: &str = r#"links: {"<kind>": [{"target": "<id or path>", "part": "<optional: the words of the target this link is about>"}]}"#;
 pub const LINK_EXAMPLE: &str =
     r#"{"decided_by": [{"target": "D-W2HXR"}], "describes": [{"target": "wallets/transactions"}]}"#;
+
+/// link1: how an update treats links.
+pub const LINK_UPDATE: &str = r#"an update replaces only the link kinds it names; "<kind>": [] removes that kind; kinds it doesn't name are kept"#;
 
 fn link_example() -> Value {
     serde_json::from_str(LINK_EXAMPLE).expect("LINK_EXAMPLE is JSON")
@@ -493,7 +505,7 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
                     "  ".repeat(depth),
                     b.id,
                     b.block_type,
-                    summary_in(b, &m)
+                    compact_summary(b)
                 );
                 if suspects.contains(&b.id) {
                     line.push_str(" [suspect]");
@@ -583,8 +595,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
                 example["body"] = json!("…");
             }
             let mut out = json!({"type": t, "prefix": def.prefix, "traits": traits(&def.traits), "body": format!("{:?}", def.body).to_lowercase(), "fields": fields, "children": def.children, "example": example});
-            out["links"] =
-                json!({"shape": LINK_SHAPE, "example": link_example(), "kinds": pack.link_types});
+            out["links"] = json!({"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE, "kinds": pack.link_types});
             if rdy_model::tree::is_tree_type(&t) {
                 out["example"]["parent"] = json!("<folder id or path; omit for the top level>");
                 out["name_rules"] = json!(NAME_RULES);
@@ -595,7 +606,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             "pack": pack.name,
             "types": pack.block_types.iter().map(|(n, d)| json!({"type": n, "prefix": d.prefix, "traits": traits(&d.traits)})).collect::<Vec<_>>(),
             "link_types": pack.link_types,
-            "link_shape": {"shape": LINK_SHAPE, "example": link_example()},
+            "link_shape": {"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE},
             "ops": WRITE_OPS.iter().map(|(n, s)| (n.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
             "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT},
             "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
@@ -669,6 +680,17 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
 }
 
 fn decision_input(p: DecideParams) -> DecisionInput {
+    // sup1: a kind given as an empty list is not inherited by rdy_supersede
+    let no_inherit = [
+        ("affects", &p.affects),
+        ("depends_on", &p.depends_on),
+        ("conditional_on", &p.conditional_on),
+        ("refines", &p.refines),
+    ]
+    .into_iter()
+    .filter(|(_, v)| v.as_ref().is_some_and(Vec::is_empty))
+    .map(|(k, _)| k.to_string())
+    .collect();
     DecisionInput {
         parent: p.parent,
         statement: p.statement,
@@ -684,6 +706,7 @@ fn decision_input(p: DecideParams) -> DecisionInput {
         conditional_on: p.conditional_on.unwrap_or_default(),
         refines: p.refines.unwrap_or_default(),
         answers: p.answers.unwrap_or_default(),
+        no_inherit,
     }
 }
 

@@ -237,6 +237,30 @@ impl Rdy {
         match_prefix(&chain, text)
     }
 
+    /// scope1: like `resolve_scope`, for reads. A view must have a record (it was written,
+    /// proposed or landed), unless it is `own_view`, the reading session's view, which is
+    /// created lazily. Reading a view that doesn't exist would silently read canon.
+    pub fn resolve_read_scope(
+        &self,
+        text: &str,
+        own_view: Option<&str>,
+    ) -> Result<Scope, RdyError> {
+        let scope = self.resolve_scope(text)?;
+        if let Scope::View(v) = &scope
+            && Some(v.as_str()) != own_view
+            && self.store.get_ref(&format!("view/{v}"))?.is_none()
+        {
+            let hex = (7..=64).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_hexdigit());
+            let fix = if hex {
+                format!("{v:?} looks like a landing id: read it with landing:{v}")
+            } else {
+                "list views with rdy status (MCP: rdy_overview), or read canon".to_string()
+            };
+            return Err(RdyError::new(E_NOT_FOUND, format!("no view {v:?}"), fix));
+        }
+        Ok(scope)
+    }
+
     /// Reads scope text: `canon`, `tag:<version>`, `landing:<id>`, `view:<name>`, or a view name.
     pub fn resolve_scope(&self, text: &str) -> Result<Scope, RdyError> {
         if text == "canon" {

@@ -128,6 +128,29 @@ fn unique(found: impl Iterator<Item = Suspect>) -> Vec<Suspect> {
     best.into_values().collect()
 }
 
+/// sus2: link kinds through which a changed or deleted target makes a block suspect: premises,
+/// and what the block implements or is decided by (spec §6.2: "references and premises").
+/// A superseded or revoked target is suspect through any link.
+const SUSPECT_LINKS: [&str; 4] = [
+    decision::DEPENDS_ON,
+    decision::CONDITIONAL_ON,
+    decision::IMPLEMENTS,
+    decision::DECIDED_BY,
+];
+
+/// imp2: link kinds impact follows: the dependency edges (with references).
+const IMPACT_LINKS: [&str; 6] = [
+    decision::DEPENDS_ON,
+    decision::CONDITIONAL_ON,
+    decision::IMPLEMENTS,
+    decision::DECIDED_BY,
+    decision::DESCRIBES,
+    decision::AFFECTS,
+];
+/// imp2: link kinds impact lists at depth 1 (decisions that refine or supersede the queried
+/// block) without following them.
+const IMPACT_SHOWN: [&str; 2] = [decision::REFINES, decision::SUPERSEDES];
+
 impl Graph {
     pub fn build(blocks: &BTreeMap<BlockId, Block>) -> Graph {
         let mut g = Graph::default();
@@ -260,9 +283,12 @@ impl Graph {
     }
 
     /// Everything that depends on `id`, breadth first up to `max_depth`, each with the edge that
-    /// first reached it; sorted by (depth, id).
+    /// first reached it; sorted by (depth, id). Follows references and dependency links
+    /// (IMPACT_LINKS); decisions that refine or supersede `id` itself are listed at depth 1 and
+    /// not followed (IMPACT_SHOWN).
     pub fn impact_via(&self, id: &BlockId, max_depth: u32) -> Vec<ImpactHit> {
-        let mut seen = BTreeSet::from([id.clone()]);
+        // value: whether the block's own dependents are followed
+        let mut seen: BTreeMap<BlockId, bool> = BTreeMap::from([(id.clone(), true)]);
         let mut out = vec![];
         let mut queue = VecDeque::from([(0u32, id.clone())]);
         while let Some((d, cur)) = queue.pop_front() {
@@ -270,18 +296,39 @@ impl Graph {
                 continue;
             }
             for e in self.incoming(&cur) {
-                if e.kind == EdgeKind::Contains || !seen.insert(e.from.clone()) {
+                let (follow, show) = match &e.kind {
+                    EdgeKind::Contains => (false, false),
+                    EdgeKind::References => (true, true),
+                    EdgeKind::Link(n) if IMPACT_LINKS.contains(&n.as_str()) => (true, true),
+                    EdgeKind::Link(n) if IMPACT_SHOWN.contains(&n.as_str()) => (false, cur == *id),
+                    EdgeKind::Link(_) => (false, false),
+                };
+                if !show {
                     continue;
                 }
-                out.push(ImpactHit {
-                    depth: d + 1,
-                    id: e.from.clone(),
-                    via: Via {
-                        from: cur.clone(),
-                        kind: e.kind.name(),
-                    },
-                });
-                queue.push_back((d + 1, e.from.clone()));
+                match seen.get(&e.from) {
+                    Some(true) => {}
+                    Some(false) if !follow => {}
+                    Some(false) => {
+                        // listed through a refine or supersede; a dependency edge also reaches it
+                        seen.insert(e.from.clone(), true);
+                        queue.push_back((d + 1, e.from.clone()));
+                    }
+                    None => {
+                        seen.insert(e.from.clone(), follow);
+                        out.push(ImpactHit {
+                            depth: d + 1,
+                            id: e.from.clone(),
+                            via: Via {
+                                from: cur.clone(),
+                                kind: e.kind.name(),
+                            },
+                        });
+                        if follow {
+                            queue.push_back((d + 1, e.from.clone()));
+                        }
+                    }
+                }
             }
         }
         out.sort_by(|a, b| (a.depth, &a.id).cmp(&(b.depth, &b.id)));
@@ -338,20 +385,30 @@ impl Graph {
         let reason = match self.status(&e.to) {
             Some(DerivedStatus::Superseded { .. }) => "superseded",
             Some(DerivedStatus::Revoked { .. }) => "revoked",
-            _ => match (e.pin, self.versions.get(&e.to)) {
-                (Some(_), None) => "deleted",
-                (Some(pin), Some(cur)) if pin != *cur => {
-                    let same = match (old(&pin), blocks.get(&e.to)) {
-                        (Some(a), Some(b)) => same_content(&a, b),
-                        _ => false,
-                    };
-                    if same {
-                        return None;
-                    }
-                    "changed"
+            _ => {
+                let premise = match &e.kind {
+                    EdgeKind::References => true,
+                    EdgeKind::Link(n) => SUSPECT_LINKS.contains(&n.as_str()),
+                    EdgeKind::Contains => false,
+                };
+                if !premise {
+                    return None;
                 }
-                _ => return None,
-            },
+                match (e.pin, self.versions.get(&e.to)) {
+                    (Some(_), None) => "deleted",
+                    (Some(pin), Some(cur)) if pin != *cur => {
+                        let same = match (old(&pin), blocks.get(&e.to)) {
+                            (Some(a), Some(b)) => same_content(&a, b),
+                            _ => false,
+                        };
+                        if same {
+                            return None;
+                        }
+                        "changed"
+                    }
+                    _ => return None,
+                }
+            }
         };
         Some(Suspect {
             block: e.from.clone(),

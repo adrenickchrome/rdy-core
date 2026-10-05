@@ -90,7 +90,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Read a document, folder or subtree by id or path (e.g. wallets/transactions) as compact lines (default), markdown or yaml. scope is 'canon', a view name, 'tag:<version>' or 'landing:<id>'."
+        description = "Read a document, folder or subtree by id or path (e.g. wallets/transactions) as compact lines (default: each block's id, type and its whole statement, prompt, name or title, else its body's first sentence; references as bare ids), markdown or yaml. max_tokens cuts long output. scope is 'canon', an existing view's name (or your session's), 'tag:<version>' or 'landing:<id>'; an unknown view is E_NOT_FOUND."
     )]
     fn rdy_read(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
         self.run("rdy_read", p, tools::rdy_read)
@@ -111,21 +111,21 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "By id or path: blast radius: blocks that depend on, reference or describe the given block, by depth. Each item's via says which edge reached it: via.kind (references or a link name) to via.from."
+        description = "By id or path: blast radius: blocks that depend on the given block through references or dependency links (depends_on, conditional_on, implements, decided_by, describes, affects), by depth. Decisions that refine or supersede it are listed at depth 1 and not followed. Each item's via says which edge reached it: via.kind (references or a link name) to via.from."
     )]
     fn rdy_impact(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
         self.run("rdy_impact", p, tools::rdy_impact)
     }
 
     #[tool(
-        description = "References whose target changed, or whose decision was superseded or revoked."
+        description = "References and premises (depends_on, conditional_on, implements, decided_by) whose target changed or was deleted since the block pinned it, or links of any kind to a decision that was superseded or revoked. After checking a \"changed\" suspect, clear it with a repin op in rdy_write."
     )]
     fn rdy_suspects(&self, Parameters(p): Parameters<ScopeParams>) -> CallToolResult {
         self.run("rdy_suspects", p, tools::rdy_suspects)
     }
 
     #[tool(
-        description = "Atomic batch write of ops (create, update, move, delete, rebalance; rdy_schema lists them under \"ops\"). Use id \"$name\" placeholders to refer to blocks created earlier in the same batch, including {{$name}} inside text. Reference blocks in text as {{id}}. links: {\"<kind>\": [{\"target\": \"<id or path>\"}]}."
+        description = "Atomic batch write of ops (create, update, move, delete, rebalance, repin; rdy_schema lists them under \"ops\"). Place a block with after or before a sibling, or neither to append. Use id \"$name\" placeholders to refer to blocks created earlier in the same batch, including {{$name}} inside text. Reference blocks in text as {{id}}. links: {\"<kind>\": [{\"target\": \"<id or path>\"}]}. An update replaces only the link kinds it names; \"<kind>\": [] removes that kind."
     )]
     fn rdy_write(&self, Parameters(p): Parameters<WriteParams>) -> CallToolResult {
         self.run("rdy_write", p, tools::rdy_write)
@@ -137,7 +137,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Propose a decision that supersedes an existing one, wholly or a named part."
+        description = "Propose a decision that supersedes an existing one, wholly or a named part. It inherits the old decision's affects, depends_on, conditional_on and refines links unless you give that kind (an empty list drops it); the result's inherited lists what was copied."
     )]
     fn rdy_supersede(&self, Parameters(p): Parameters<SupersedeParams>) -> CallToolResult {
         self.run("rdy_supersede", p, tools::rdy_supersede)
