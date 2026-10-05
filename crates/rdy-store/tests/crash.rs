@@ -253,29 +253,81 @@ fn kill1_a_power_loss_tear_under_an_intact_marker_is_the_unacknowledged_tail() {
 }
 
 /// A marker-shaped copy inside a torn payload: the unacknowledged tail embeds a hash-valid copy of
-/// the store's own segment (every batch marker in it is genuine, for other offsets) and is cut
-/// after it. That is a torn write to quarantine, never "an acknowledged batch follows the damage".
+/// a larger store's segment, whose batch markers are genuine but start past this store's
+/// acknowledged end (so the boundary filter alone does not drop them), and is cut after the copy.
+/// That is a torn write to quarantine, never "an acknowledged batch follows the damage". This pins
+/// the `closes_a_real_batch` check of `acknowledged_batch_follows`: without it the open refuses.
 #[test]
 fn kill1_marker_shaped_bytes_in_a_torn_tail_are_quarantined_not_refused() {
+    let other = tempfile::tempdir().unwrap();
+    let mut o = Store::open(other.path()).unwrap();
+    for i in 0..12 {
+        o.put_blob(&payload(i, 0)).unwrap();
+    }
+    drop(o);
+    let embedded = std::fs::read(rdy_store::segment::seg_path(
+        &other.path().join("segments"),
+        0,
+    ))
+    .unwrap();
     let dir = tempfile::tempdir().unwrap();
     let acks = crash(dir.path(), CrashPoint::BeforeSync, 5, &[]);
     let acked_end = acks[4];
     let seg = rdy_store::segment::seg_path(&dir.path().join("segments"), acked_end.segment);
-    let mut bytes = std::fs::read(&seg).unwrap();
-    bytes.truncate(acked_end.offset as usize); // drop the kept batch: the tail is crafted below
-    let mut payload = bytes.clone();
+    let mut file = std::fs::read(&seg).unwrap();
+    file.truncate(acked_end.offset as usize); // drop the kept batch: the tail is crafted below
+    assert!(
+        (embedded.len() as u64) > acked_end.offset + 500,
+        "the embedded copy holds markers that start past the acknowledged end"
+    );
+    let mut payload = embedded.clone();
     payload.extend_from_slice(&[7u8; 2000]);
     let mut torn = (payload.len() as u32).to_le_bytes().to_vec();
     torn.push(rdy_store::kinds::BLOB_CHUNK);
     torn.extend_from_slice(&rdy_model::Hash::of(&payload).0);
     torn.extend_from_slice(&payload);
-    torn.truncate(37 + bytes.len() + 500); // cut after the embedded copy
-    let mut file = bytes.clone();
+    torn.truncate(37 + embedded.len() + 500); // cut after the embedded copy
     file.extend_from_slice(&torn);
     std::fs::write(&seg, &file).unwrap();
     let r = recovered(dir.path(), 5, false, 0);
     assert_eq!(r.quarantined.len(), 1, "{r:?}");
     assert_eq!(std::fs::read(&r.quarantined[0]).unwrap(), torn);
+}
+
+/// Ordering pin for the format batch: an open must never write `FORMAT` over a log with no marker.
+/// A directory at `<store>/.FORMAT.tmp` makes the `FORMAT` write fail, so the open errors after
+/// the refs batch (a new store) or the upgrade batch (an M1 store); the log then must already hold
+/// its marker and `FORMAT` must be absent. Once the obstacle is gone the next open finishes.
+#[test]
+fn kill1_the_open_writes_its_marker_before_it_writes_format() {
+    for m1 in [false, true] {
+        let what = if m1 { "an M1 store" } else { "a new store" };
+        let dir = tempfile::tempdir().unwrap();
+        let mut blobs = vec![];
+        if m1 {
+            let mut s = Store::open_legacy_for_tests(dir.path()).unwrap();
+            blobs.push(payload(0, 0));
+            s.put_blob(&blobs[0]).unwrap();
+        } else {
+            drop(Store::open_legacy_for_tests(dir.path()).unwrap());
+        }
+        let obstacle = dir.path().join(".FORMAT.tmp");
+        std::fs::create_dir(&obstacle).unwrap();
+        assert!(
+            Store::open(dir.path()).is_err(),
+            "{what}: the FORMAT write must fail"
+        );
+        assert!(
+            !dir.path().join("FORMAT").exists(),
+            "{what}: FORMAT was written"
+        );
+        assert!(
+            rdy_store::segment::log_has_marker(&dir.path().join("segments")).unwrap(),
+            "{what}: FORMAT was attempted before the marker"
+        );
+        std::fs::remove_dir(&obstacle).unwrap();
+        finished_format(dir.path(), &blobs, what);
+    }
 }
 
 /// Opens a store directory the way a crash left it and checks the open finished the format batch:
