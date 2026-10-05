@@ -515,7 +515,7 @@ fn doc_parts(
         lede: lede_block.map(|p| html::text_html(&p.body, &link)),
         lede_anchor: lede_block.and_then(|p| site.anchors.get(&p.id).cloned()),
     };
-    let (mut items, mut has_mermaid, mut tables) = (vec![], false, 0);
+    let (mut items, mut has_mermaid) = (vec![], false);
     let mut stack: Vec<(&Block, usize)> = m
         .children(Some(&doc.id))
         .into_iter()
@@ -537,9 +537,6 @@ fn doc_parts(
         }
         if b.block_type == "diagram" && b.field_str("lang") == Some("mermaid") {
             has_mermaid = true;
-        }
-        if b.block_type == "table" {
-            tables += 1;
         }
         let anchor = site.anchors.get(&b.id).cloned().unwrap_or_default();
         let described_by: Vec<Link> =
@@ -563,7 +560,7 @@ fn doc_parts(
             present: &present,
             asset_href: &asset_href,
             blob_len: &blob_len,
-            table_number: (b.block_type == "table").then_some(tables),
+            table_number: (b.block_type == "table").then(|| site.number(b)),
             described_by: &described_by,
         };
         let (ref_head, ref_) = trail::ref_attrs(b, site, sh.pin(), m);

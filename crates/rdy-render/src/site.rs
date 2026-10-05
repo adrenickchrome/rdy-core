@@ -36,6 +36,9 @@ const ANCHOR_MAX: usize = 48;
 static ID_SHAPED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z]{1,3}-[0-9A-HJKMNP-TV-Z]{5}$").expect("a pattern"));
 
+/// The block types numbered within their doc (`Table 2`, `Python code 3`, `Diagram 1`).
+const NUMBERED: [&str; 3] = ["table", "code", "diagram"];
+
 /// How many references deep a label reads its references' labels; past it a reference reads
 /// as `…` (a title that names a block whose title names it back stops here).
 const LABEL_DEPTH: usize = 3;
@@ -50,6 +53,9 @@ pub struct Site<'a> {
     paths: BTreeMap<BlockId, String>,
     /// Every block inside a doc that has a page, by the anchor it has on that page.
     pub anchors: BTreeMap<BlockId, String>,
+    /// Every table, code and diagram block's number among the blocks of its kind in its doc,
+    /// from 1 in reading order: what its caption and its label count by.
+    pub numbers: BTreeMap<BlockId, usize>,
     /// Every doc in reading order: depth-first, siblings by their order.
     pub order: Vec<BlockId>,
     /// Every folder and doc in tree order: a folder, then what it holds, siblings by their order.
@@ -109,6 +115,7 @@ impl<'a> Site<'a> {
             m,
             paths,
             anchors: BTreeMap::new(),
+            numbers: BTreeMap::new(),
             order,
             tree: tree_order,
             governs: BTreeMap::new(),
@@ -117,6 +124,7 @@ impl<'a> Site<'a> {
             terms: vec![],
             term_anchors: BTreeMap::new(),
         };
+        site.compute_numbers();
         site.compute_anchors();
         site.compute_governed();
         site.compute_collected();
@@ -132,6 +140,21 @@ impl<'a> Site<'a> {
             stack.extend(self.m.children(Some(&b.id)).into_iter().rev());
         }
         out
+    }
+
+    fn compute_numbers(&mut self) {
+        let mut numbers = BTreeMap::new();
+        for doc in &self.order {
+            let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+            for b in self.blocks_of(doc) {
+                if NUMBERED.contains(&b.block_type.as_str()) {
+                    let n = counts.entry(b.block_type.as_str()).or_default();
+                    *n += 1;
+                    numbers.insert(b.id.clone(), *n);
+                }
+            }
+        }
+        self.numbers = numbers;
     }
 
     fn compute_anchors(&mut self) {
@@ -283,8 +306,10 @@ impl<'a> Site<'a> {
     }
 
     /// What a reader calls `b`: its title, else its `name` field, else (for a doc or folder) its
-    /// tree name worded as a title, else the start of its text. A reference in the title or name
-    /// reads as its target's label. Never an id.
+    /// tree name worded as a title, else (for code) its language and number (`Python code 3`),
+    /// else (for a diagram) its alt text or number (`Diagram 2`), else the start of its text. A
+    /// reference in the title, name or alt reads as its target's label. Never an id, and never
+    /// code or diagram source.
     pub fn label(&self, b: &Block) -> String {
         self.label_at(b, 0)
     }
@@ -302,6 +327,19 @@ impl<'a> Site<'a> {
                 .name_of(&b.id)
                 .map(|n| name_as_title(&n))
                 .unwrap_or_default(),
+            None if b.block_type == "code" => {
+                let k = self.number(b);
+                match b.field_str("lang").filter(|l| !l.trim().is_empty()) {
+                    Some(l) => format!("{} code {k}", crate::highlight::human_name(l)),
+                    None => format!("Code {k}"),
+                }
+            }
+            None if b.block_type == "diagram" => {
+                match b.field_str("alt").filter(|a| !a.trim().is_empty()) {
+                    Some(a) => self.words_at(a, depth),
+                    None => format!("Diagram {}", self.number(b)),
+                }
+            }
             None => ID_INSIDE
                 .replace_all(&summary_in(b, self.m), "…")
                 .into_owned(),
@@ -311,6 +349,11 @@ impl<'a> Site<'a> {
         } else {
             label
         }
+    }
+
+    /// `b`'s number among the blocks of its kind in its doc (see `numbers`); 1 when it has none.
+    pub fn number(&self, b: &Block) -> usize {
+        self.numbers.get(&b.id).copied().unwrap_or(1)
     }
 
     /// A field's text as a reader reads it: each `{{id}}` reference as its target's label, an
@@ -342,6 +385,10 @@ impl<'a> Site<'a> {
     /// (their references read as labels), else the first six words of its one-line summary, a
     /// dangling reference there read as the unresolved marker's words, so no id reaches the URL.
     fn anchor_text(&self, b: &Block) -> String {
+        // code and diagram source is never a reader's word: their label is
+        if matches!(b.block_type.as_str(), "code" | "diagram") {
+            return self.label(b);
+        }
         let named = match b.block_type.as_str() {
             "section" => b.field_str("title"),
             "term" | "component" | "actor" | "interface" | "flow" => b.field_str("name"),

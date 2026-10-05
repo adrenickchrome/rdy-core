@@ -538,3 +538,59 @@ fn hostile_folder_and_doc_titles_are_escaped_in_tree_pages() {
         "the crumbs show the folder and the doc, escaped: {crumbs}"
     );
 }
+
+#[test]
+fn code_and_diagram_blocks_are_labelled_by_kind_and_number_never_by_their_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Grammar", "doc_type": "components"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Rules"}},
+        {"op": "create", "type": "code", "id": "$c1", "parent": "$s", "fields": {"lang": "python"}, "body": "match_stmt = 'match' subject_expr"},
+        {"op": "create", "type": "code", "id": "$c2", "parent": "$s", "fields": {"lang": "python"}, "body": "def quit_game(): print('goodbye')"},
+        {"op": "create", "type": "code", "id": "$c3", "parent": "$s", "fields": {"lang": ""}, "body": "raw_text here"},
+        {"op": "create", "type": "diagram", "id": "$d1", "parent": "$s", "fields": {"lang": "mermaid", "alt": "Order flow"}, "body": "graph TD\n  order_in --> order_out"},
+        {"op": "create", "type": "diagram", "id": "$d2", "parent": "$s", "fields": {"lang": "mermaid", "alt": ""}, "body": "graph TD\n  left_side --> right_side"}
+    ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    render_site(&mut r, &Scope::View("work".into()), out.path()).unwrap();
+    let go = |k: &str| {
+        let id = &res.created[k];
+        std::fs::read_to_string(out.path().join(format!("go/{id}.html"))).unwrap()
+    };
+    let cases = [
+        ("$c1", "Python code 1", "grammar.html#python-code-1"),
+        ("$c2", "Python code 2", "grammar.html#python-code-2"),
+        ("$c3", "Code 3", "grammar.html#code-3"),
+        ("$d1", "Order flow", "grammar.html#order-flow"),
+        ("$d2", "Diagram 2", "grammar.html#diagram-2"),
+    ];
+    for (k, label, url) in cases {
+        let page = go(k);
+        assert!(page.contains(&format!("<title>{label}")), "{k}: {page}");
+        assert!(page.contains(&format!(">{label}</a>")), "{k}: {page}");
+        assert!(page.contains(url), "{k}: {page}");
+        for leak in [
+            "match_stmt",
+            "quit_game",
+            "raw_text",
+            "order_in",
+            "left_side",
+        ] {
+            assert!(!page.contains(leak), "{k} leaks {leak}: {page}");
+        }
+    }
+    let doc = std::fs::read_to_string(out.path().join("grammar.html")).unwrap();
+    for leak in [
+        "match-stmt",
+        "match_stmt-",
+        "quit-game",
+        "raw_text-",
+        "graph-td",
+    ] {
+        assert!(
+            !doc.contains(&format!("id=\"{leak}")),
+            "anchor from source: {leak}"
+        );
+    }
+}
