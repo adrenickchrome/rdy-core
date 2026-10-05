@@ -9,6 +9,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 pub const DEADLINE: Duration = Duration::from_secs(2);
+/// The `protocolVersion` the client sends in its `initialize`.
+pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
 #[derive(Debug, Clone)]
 pub enum Reply {
@@ -111,7 +113,7 @@ impl McpClient {
         };
         let id = c.next_id();
         c.send(&json!({"jsonrpc": "2.0", "id": id, "method": "initialize",
-            "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "rdy-qa", "version": "0"}}}));
+            "params": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "rdy-qa", "version": "0"}}}));
         c.recv(id, Duration::from_secs(10));
         c.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
         c

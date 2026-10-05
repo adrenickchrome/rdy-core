@@ -1,9 +1,11 @@
 //! Gate helpers for the `daemon` area: an echo daemon run in a child process (the test binary
 //! re-executed with `RDY_DAEMON_CHILD`), a spawner that starts it, and client options for it.
 use rdy_daemon::{
-    CtlRequest, Daemon, DaemonConfig, E_BAD_INPUT, ErrorReply, Handler, Proto, RunDir, SessionInfo,
-    StartOptions, spawn_serve,
+    Attempt, Client, CtlRequest, Daemon, DaemonConfig, E_BAD_INPUT, ErrorReply, ExitReason,
+    Handler, Hello, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun, SessionInfo,
+    StartOptions, connect, spawn_serve, start,
 };
+use rdy_engine::Rdy;
 use serde_json::{Value, json};
 use std::fs::OpenOptions;
 use std::io;
@@ -14,6 +16,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use tokio::net::UnixStream;
 
 /// The child's project root; unset in a normal test run.
 const ENV_CHILD: &str = "RDY_DAEMON_CHILD";
@@ -223,4 +226,109 @@ pub fn client(_run: &RunDir, version: &str, cwd: &Path, spawner: ChildSpawner) -
     );
     opts.start_timeout = CLIENT_START_TIMEOUT;
     opts
+}
+
+/// A real host (`rdy_daemon::start`) in this process over a fresh `rdy-standard` project, with a
+/// 60 s idle timeout. Dropping it stops the daemon and waits for the store to close.
+pub struct Hosted {
+    pub dir: tempfile::TempDir,
+    pub run: Option<ServeRun>,
+}
+
+/// How long `Hosted`'s clients wait for `ready`.
+const HOSTED_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+impl Hosted {
+    /// `new_with_human("human:qa")`.
+    pub fn new() -> Hosted {
+        Hosted::new_with_human("human:qa")
+    }
+
+    /// A host whose configured human actor is `human`.
+    pub fn new_with_human(human: &str) -> Hosted {
+        let dir = short_tempdir();
+        drop(Rdy::init(dir.path(), "rdy-standard").expect("init the hosted project"));
+        let run = start(ServeOptions {
+            project: dir.path().to_path_buf(),
+            version: "t".into(),
+            detach: false,
+            idle_timeout: Some(Duration::from_secs(60)),
+            human_actor: Some(human.into()),
+        })
+        .unwrap_or_else(|e| panic!("start the host: {e}"));
+        Hosted {
+            dir,
+            run: Some(run),
+        }
+    }
+
+    /// A runtime for the test's client side.
+    pub fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("client runtime")
+    }
+
+    /// A connection of `proto` past `ready`.
+    async fn connect(&self, proto: Proto) -> Client {
+        let hello = Hello {
+            rdy: PROTO_VERSION,
+            version: "t".into(),
+            proto,
+            cwd: self.dir.path().into(),
+        };
+        let run = RunDir::of_project(self.dir.path());
+        match connect(&run, &hello).await {
+            Attempt::Ready(c) => c,
+            Attempt::Starting(p) => p
+                .wait(
+                    std::time::Instant::now() + HOSTED_READY_TIMEOUT,
+                    &mut |_| {},
+                )
+                .await
+                .unwrap_or_else(|e| panic!("the host did not become ready: {e}")),
+            other => panic!("the host did not answer the hello: {other:?}"),
+        }
+    }
+
+    /// A `ctl` connection past `ready` whose session op sent `actor` and `run`.
+    pub async fn client(&self, actor: Option<&str>, run: Option<&str>) -> Client {
+        let mut c = self.connect(Proto::Ctl).await;
+        c.ctl("session", json!({"actor": actor, "run": run}))
+            .await
+            .unwrap_or_else(|e| panic!("the session op failed: {e}"));
+        c
+    }
+
+    /// An `mcp` connection past `ready`.
+    pub async fn mcp_stream(&self) -> UnixStream {
+        self.connect(Proto::Mcp).await.into_stream()
+    }
+
+    /// Stops the daemon and waits for it (the store is closed when this returns).
+    pub fn stop(&mut self) -> ExitReason {
+        let run = self.run.take().expect("the host is running");
+        run.handle().stop();
+        run.wait()
+            .unwrap_or_else(|e| panic!("the host failed: {e}"))
+    }
+}
+
+impl Default for Hosted {
+    fn default() -> Self {
+        Hosted::new()
+    }
+}
+
+impl Drop for Hosted {
+    fn drop(&mut self) {
+        if let Some(run) = self.run.take() {
+            run.handle().stop();
+            // a failing host must not panic inside a drop (the test may already be unwinding)
+            if let Err(e) = run.wait() {
+                eprintln!("the hosted daemon exited with an error: {e}");
+            }
+        }
+    }
 }

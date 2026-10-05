@@ -41,3 +41,6 @@ pub use writer::{CHECKPOINT_TICK, Writer, WriterHandle};
 pub mod ops;
 
 pub use ops::{OPS, OpContext, dispatch, quarantine};
+pub mod serve;
+
+pub use serve::{CtlSession, ServeError, ServeHandler, ServeOptions, ServeRun, serve, start};
