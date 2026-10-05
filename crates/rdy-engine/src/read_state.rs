@@ -39,7 +39,6 @@ pub(crate) struct Built {
     pub(crate) conflicts: Arc<Vec<Conflict>>,
     pub(crate) graph: OnceLock<Arc<Graph>>,
     /// The full tree, memoised (filled by the tree reads).
-    #[allow(dead_code)]
     pub(crate) tree: OnceLock<Arc<Vec<TreeNode>>>,
 }
 
@@ -106,13 +105,10 @@ impl AsOfCache {
     }
 
     /// The entry for landing `h`, marked most recently used; a new one evicts the least recently
-    /// used beyond the cap. `h` must be a landing.
+    /// used beyond the cap. `h` must be a landing. The index read that checks it runs outside the
+    /// lock, so readers of other landings never wait on it.
     fn touch(&self, reader: &StoreReader, h: &Hash) -> Result<Arc<Entry>, RdyError> {
-        let mut lru = self.lock();
-        if let Some(at) = lru.iter().position(|(x, _)| x == h) {
-            let hit = lru.remove(at).expect("found above");
-            let entry = Arc::clone(&hit.1);
-            lru.push_back(hit);
+        if let Some(entry) = Self::hit(&mut self.lock(), h) {
             return Ok(entry);
         }
         if !reader.has_kind(rdy_store::kinds::LANDING, h)? {
@@ -122,12 +118,26 @@ impl AsOfCache {
                 "read as of a version (tag:<version>) or a landing in rdy log (landing:<id>)",
             ));
         }
+        let mut lru = self.lock();
+        // another reader may have added it while the lock was free
+        if let Some(entry) = Self::hit(&mut lru, h) {
+            return Ok(entry);
+        }
         let entry = Arc::new(Entry::new(None, Some(*h), None, Arc::new(vec![])));
         lru.push_back((*h, Arc::clone(&entry)));
         while lru.len() > AS_OF_CACHE_ENTRIES {
             lru.pop_front();
         }
         Ok(entry)
+    }
+
+    /// The cached entry for `h`, moved to the most recently used end.
+    fn hit(lru: &mut VecDeque<(Hash, Arc<Entry>)>, h: &Hash) -> Option<Arc<Entry>> {
+        let at = lru.iter().position(|(x, _)| x == h)?;
+        let hit = lru.remove(at).expect("found above");
+        let entry = Arc::clone(&hit.1);
+        lru.push_back(hit);
+        Some(entry)
     }
 
     /// The entry for `h` if cached, without marking it used.
@@ -158,7 +168,6 @@ pub struct ReadState {
     pub(crate) reader: StoreReader,
     pub(crate) as_of: Arc<AsOfCache>,
     /// The version-position cache, shared like `as_of` (read by the state's version reads).
-    #[allow(dead_code)]
     pub(crate) vpos: Arc<Mutex<VposCache>>,
     /// A `Full` publish that failed to read the heads: every read of this state returns it.
     pub(crate) error: Option<RdyError>,
@@ -183,21 +192,30 @@ impl ReadState {
     }
 
     /// The views with a `view/` ref, sorted.
+    ///
+    /// On a state that holds an error (every content read returns it) this answers from the
+    /// state before the failed publish, as `has_view`, `view_head` and `included` do: a caller
+    /// that reads only these four sees the earlier views and no error.
     pub fn view_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.views.keys().cloned().collect();
         names.sort();
         names
     }
 
+    /// Whether `name` has a `view/` ref; on a state that holds an error, as of the state before
+    /// the failed publish (see `view_names`).
     pub fn has_view(&self, name: &str) -> bool {
         self.views.contains_key(name)
     }
 
+    /// View `name`'s head; on a state that holds an error, as of the state before the failed
+    /// publish (see `view_names`).
     pub fn view_head(&self, name: &str) -> Option<&ViewHead> {
         self.views.get(name).and_then(|e| e.head.as_ref())
     }
 
-    /// The changes view `name` includes (empty for a view with no ref).
+    /// The changes view `name` includes (empty for a view with no ref); on a state that holds an
+    /// error, as of the state before the failed publish (see `view_names`).
     pub fn included(&self, name: &str) -> Arc<Vec<Hash>> {
         self.views
             .get(name)

@@ -217,7 +217,7 @@ fn rdr1_a_reader_that_outlives_its_store_makes_a_reopen_refuse_not_rebuild() {
     assert!(
         matches!(
             Store::open(dir.path()),
-            Err(rdy_store::StoreError::Locked(_))
+            Err(rdy_store::StoreError::HeldByReader(_))
         ),
         "a live reader still holds the index"
     );

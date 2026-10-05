@@ -249,10 +249,12 @@ fn session(st: &McpState) -> Result<Session, RdyError> {
     })
 }
 
-fn scope_of(st: &McpState, s: &Option<String>) -> Result<Scope, RdyError> {
+/// The scope a tool reads, resolved on the state the tool reads (`read`), so that a view created
+/// by a later publish is never accepted here and then read on a state without it.
+fn scope_of(st: &McpState, read: &ReadState, s: &Option<String>) -> Result<Scope, RdyError> {
     match s {
         // scope1: an unknown view is not found, unless it is this session's own view
-        Some(text) => st.rdy.read().resolve_read_scope(text, Some(&st.view)),
+        Some(text) => read.resolve_read_scope(text, Some(&st.view)),
         // ses1: a reader session whose view is canon reads canon by default
         None if st.view == "canon" => Ok(Scope::Canon),
         None => Ok(Scope::View(st.view.clone())),
@@ -421,7 +423,7 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     check_tokens(p.max_tokens)?;
     let s = session(st)?;
     let st_ = st.rdy.read();
-    let scope = scope_of(st, &p.scope)?;
+    let scope = scope_of(st, &st_, &p.scope)?;
     let position = st_.version_position(&scope)?;
     let max = p.max_tokens.unwrap_or(4000);
     let tree = fit_tree(st_.tree(&scope, None, None)?, max.saturating_sub(300));
@@ -459,7 +461,7 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.rdy.read();
-    let scope = scope_of(st, &p.scope)?;
+    let scope = scope_of(st, &st_, &p.scope)?;
     let id = st_.resolve_id(&scope, &p.id)?;
     let suspects: std::collections::BTreeSet<BlockId> =
         st_.suspects(&scope)?.into_iter().map(|s| s.block).collect();
@@ -533,7 +535,7 @@ pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.rdy.read();
-    let scope = scope_of(st, &p.scope)?;
+    let scope = scope_of(st, &st_, &p.scope)?;
     let id = st_.resolve_id(&scope, &p.id)?;
     let ctx = st_.context(&scope, &id)?;
     Ok(budget(
@@ -546,7 +548,7 @@ pub fn rdy_impact(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.rdy.read();
-    let scope = scope_of(st, &p.scope)?;
+    let scope = scope_of(st, &st_, &p.scope)?;
     let id = st_.resolve_id(&scope, &p.id)?;
     let items = st_.impact(&scope, &id, p.depth.unwrap_or(3))?;
     Ok(budget(json!({"items": items}), p.max_tokens))
@@ -556,7 +558,7 @@ pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.rdy.read();
-    let scope = scope_of(st, &p.scope)?;
+    let scope = scope_of(st, &st_, &p.scope)?;
     Ok(budget(
         json!({"items": st_.suspects(&scope)?}),
         p.max_tokens,

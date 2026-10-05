@@ -107,6 +107,8 @@ fn kind1_an_asset_with_a_future_proposals_bytes_does_not_hide_it() {
         .store_mut()
         .propose("work", "p", by(Role::Writer))
         .unwrap();
+    // a write outside the engine must be followed by invalidate() (snap1 precondition)
+    st.rdy.invalidate();
     assert_eq!(p, predicted.id());
     st.rdy.land(&approver(), &p.to_string()).unwrap();
 }

@@ -19,7 +19,7 @@ fn fsck2_a_busy_project_checks_clean_before_and_after_reindex() {
     assert_eq!(f.views, 2);
     assert!(f.landed_changes >= 1);
     let before = r.store().index_dump_for_tests().unwrap();
-    r.store_mut().reindex().unwrap();
+    r.reindex().unwrap();
     assert_eq!(r.store().index_dump_for_tests().unwrap(), before);
     let again = r.fsck().unwrap();
     assert_eq!(

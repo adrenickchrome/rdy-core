@@ -542,7 +542,7 @@ impl Rdy {
             _ => unreachable!("format checked above"),
         };
         let scope = Scope::View(view.to_string());
-        let existing = self.read().materialized(&scope)?.clone();
+        let existing = self.read().materialized(&scope)?;
         // duplicates first: a duplicated doc would otherwise read as a name clash with itself
         let mut ids = BTreeSet::new();
         for b in &blocks {

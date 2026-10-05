@@ -158,3 +158,77 @@ fn evt1_the_bus_delivers_to_every_live_subscriber_and_forgets_dropped_ones() {
     assert_eq!(bus.subscriber_count(), 1);
     assert_eq!(*a.recv().unwrap(), *ev);
 }
+
+/// A batch of one undecodable proposal: the store indexes it (it decodes no proposal to index),
+/// but its events cannot be read.
+fn junk_batch(r: &mut Rdy, bytes: &[u8]) -> rdy_model::Hash {
+    r.store_mut()
+        .write(vec![(kinds::PROPOSAL, bytes.to_vec())])
+        .unwrap()[0]
+}
+
+#[test]
+fn evt1_a_batch_whose_events_cannot_be_read_is_recorded_and_never_fails_the_publish() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let rx = r.subscribe();
+    junk_batch(&mut r, b"junk");
+    // the reindex succeeded; the events of the batch before it are not its result
+    r.reindex().unwrap();
+    let e = r
+        .last_emit_error()
+        .expect("the failure is recorded")
+        .message
+        .clone();
+    assert_eq!(r.last_emitted_seq(), r.store().last_batch_end());
+    assert!(rx.try_recv().is_err());
+    // a later batch emits its own events and never masks the earlier failure
+    one_doc(&mut r, "v", "d");
+    let live: Vec<Event> = std::iter::from_fn(|| rx.try_recv().ok())
+        .map(|e| (*e).clone())
+        .collect();
+    assert_eq!(live.len(), 2, "{live:?}");
+    assert_eq!(r.last_emit_error().map(|e| &e.message), Some(&e));
+}
+
+/// A batch of one landing whose proposal is missing: the store indexes it, but its `Landed`
+/// event cannot be read.
+fn orphan_landing(r: &mut Rdy, proposal: rdy_model::Hash) {
+    let rec = rdy_model::LandingRecord {
+        proposal,
+        prev: None,
+        state: rdy_model::Hash([0; 32]),
+        approved_by: rdy_model::Provenance {
+            actor: "a".into(),
+            run: None,
+            role: Role::Approver,
+            at_ms: 1,
+        },
+        changes: vec![],
+        chosen: None,
+        checks: vec![],
+        assurance: rdy_model::Assurance::Local,
+        relayed_by: None,
+        relay_evidence: None,
+        approved_version: None,
+        rebased_from: vec![],
+    };
+    r.store_mut().put(kinds::LANDING, &rec).unwrap();
+}
+
+#[test]
+fn evt1_replay_stops_at_the_first_batch_whose_events_cannot_be_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let from = r.read().seq();
+    let first = rdy_model::Hash([1; 32]);
+    let second = rdy_model::Hash([2; 32]);
+    orphan_landing(&mut r, first);
+    orphan_landing(&mut r, second);
+    r.invalidate();
+    let e = r.replay_events(from).unwrap_err();
+    assert!(
+        e.message.contains(&first.short()) && !e.message.contains(&second.short()),
+        "{e}"
+    );
+}

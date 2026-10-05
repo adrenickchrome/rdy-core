@@ -57,8 +57,11 @@ pub struct Rdy {
     vpos: Arc<Mutex<version::VposCache>>,
     /// The in-process event bus (evt1); `publish` feeds it.
     events: Events,
-    /// The end of the last batch whose events were published to `events`.
+    /// The end of the last batch whose events were published to `events` (or whose events could
+    /// not be read: see `emit_error`).
     last_emitted: Location,
+    /// The error of the latest batch whose events could not be read, so were never emitted live.
+    emit_error: Option<RdyError>,
     store: Store,
     pack: Arc<Pack>,
     /// The project's pack followed by every pack it extends, nearest first.
@@ -170,6 +173,7 @@ impl Rdy {
             vpos,
             events: Events::new(),
             last_emitted: store.log_end(),
+            emit_error: None,
             store,
             pack,
             lineage,
@@ -222,6 +226,9 @@ impl Rdy {
     /// Then, after the state swap, it emits the events of the store's last batch if that batch
     /// has not been emitted yet (evt1): a `Full` publish from `invalidate` or `open` emits
     /// nothing new, and a batch that was fully deduplicated has no frames and emits nothing.
+    /// A batch whose events cannot be read is not the write's failure (the write is durable): its
+    /// error is recorded in `last_emit_error` and the batch counts as emitted, so a later batch
+    /// never masks it; a replay over it returns the same error.
     /// Known gap: a write made through `store_mut()` is emitted live only if it is the last batch
     /// before the next publish; an earlier one is only in `replay_events`. M2b routes every
     /// write through the engine.
@@ -236,7 +243,8 @@ impl Rdy {
         match self.next_state(&prev, delta) {
             Ok(next) => {
                 self.state.store(Arc::new(next));
-                self.emit_last_batch()
+                self.emit_last_batch();
+                Ok(())
             }
             Err(e) => {
                 self.state.store(Arc::new(ReadState {
@@ -256,17 +264,19 @@ impl Rdy {
         }
     }
 
-    fn emit_last_batch(&mut self) -> Result<(), RdyError> {
+    fn emit_last_batch(&mut self) {
         let end = self.store.last_batch_end();
         if end > self.last_emitted {
-            let events =
-                events::events_for_batch(&self.store.reader(), end, self.store.last_batch())?;
-            for e in events {
-                self.events.publish(Arc::new(e));
+            match events::events_for_batch(&self.store.reader(), end, self.store.last_batch()) {
+                Ok(events) => {
+                    for e in events {
+                        self.events.publish(Arc::new(e));
+                    }
+                }
+                Err(e) => self.emit_error = Some(e),
             }
             self.last_emitted = end;
         }
-        Ok(())
     }
 
     /// A receiver of every event emitted from now on (evt1). Events committed before the
@@ -276,28 +286,42 @@ impl Rdy {
     }
 
     /// The events of every committed batch in the log from `from` to its end, in log order: what
-    /// a subscriber would have received had it been listening since `from`.
+    /// a subscriber would have received had it been listening since `from`. The first batch
+    /// whose events cannot be read ends the walk with its error.
     pub fn replay_events(&self, from: Location) -> Result<Vec<Event>, RdyError> {
         let reader = self.store.reader();
         let mut out = Vec::new();
         let mut group: Vec<(u8, rdy_model::Hash)> = Vec::new();
         let mut failure: Option<RdyError> = None;
-        reader.for_each_frame_from(from, self.store.log_end(), |_, kind, hash, _, next| {
-            if kind == kinds::BATCH_COMMIT {
-                match events::events_for_batch(&reader, next, &group) {
-                    Ok(events) => out.extend(events),
-                    Err(e) => failure = Some(e),
+        let walk =
+            reader.for_each_frame_from(from, self.store.log_end(), |_, kind, hash, _, next| {
+                if kind == kinds::BATCH_COMMIT {
+                    match events::events_for_batch(&reader, next, &group) {
+                        Ok(events) => out.extend(events),
+                        Err(e) => {
+                            failure = Some(e);
+                            // stops the walk; the batch's own error is returned below
+                            return Err(rdy_store::StoreError::Db("replay stopped".into()));
+                        }
+                    }
+                    group.clear();
+                } else {
+                    group.push((kind, hash));
                 }
-                group.clear();
-            } else {
-                group.push((kind, hash));
-            }
-            Ok(())
-        })?;
-        match failure {
-            Some(e) => Err(e),
-            None => Ok(out),
+                Ok(())
+            });
+        if let Some(e) = failure {
+            return Err(e);
         }
+        walk?;
+        Ok(out)
+    }
+
+    /// The error of the latest batch since open whose events could not be read and so were never
+    /// emitted live; later batches that emit do not clear it. A replay over that batch returns
+    /// the same error.
+    pub fn last_emit_error(&self) -> Option<&RdyError> {
+        self.emit_error.as_ref()
     }
 
     /// Test hook: the end of the last batch whose events were emitted.

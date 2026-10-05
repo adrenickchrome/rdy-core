@@ -365,11 +365,12 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     let mut text = String::new();
                     let mut tags: std::collections::HashMap<String, Vec<String>> =
                         Default::default();
-                    for v in r.read().versions()? {
+                    let st = r.read();
+                    for v in st.versions()? {
                         tags.entry(v.landing.clone()).or_default().push(v.name);
                     }
-                    for (id, rec) in r.store().landings()? {
-                        let p = r.store().proposal(&rec.proposal)?;
+                    for (id, rec) in st.landings()? {
+                        let p = st.reader().proposal(&rec.proposal)?;
                         let names = tags.get(&id.to_string()).cloned().unwrap_or_default();
                         text.push_str(&format!(
                             "{}  {}  by {}",

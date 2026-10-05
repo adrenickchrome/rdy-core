@@ -152,12 +152,12 @@ pub(crate) fn hash_from(bytes: &[u8], what: &str) -> Result<Hash, StoreError> {
     })
 }
 
-/// A redb open error: `Locked(path)` when another live `Database` (in this process, e.g. a
+/// A redb open error: `HeldByReader(path)` when another live `Database` (in this process, e.g. a
 /// reader that outlived its store, or another one) holds the file's lock, which is not damage;
 /// anything else is `Db`.
 fn open_error(path: &Path, e: redb::DatabaseError) -> StoreError {
     match e {
-        redb::DatabaseError::DatabaseAlreadyOpen => StoreError::Locked(path.to_path_buf()),
+        redb::DatabaseError::DatabaseAlreadyOpen => StoreError::HeldByReader(path.to_path_buf()),
         e => db(e),
     }
 }

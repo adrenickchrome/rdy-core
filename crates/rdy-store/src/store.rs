@@ -154,8 +154,8 @@ struct OpenedIndex {
 /// `Ok(clean == false)` arm, the only one the sentinel decides, is therefore defensive and
 /// unobserved; the sentinel is reported (`unclean_shutdown`), not decisive, with redb 4.3.
 ///
-/// A file another live database holds (`Locked`: a `StoreReader` that outlived its store keeps
-/// the index open) is neither: the open is refused as `Locked(dir)` and the file left alone.
+/// A file another live database holds (a `StoreReader` that outlived its store keeps the index
+/// open) is neither: the open is refused as `HeldByReader(dir)` and the file left alone.
 fn open_index(dir: &Path, unclean: bool) -> Result<OpenedIndex, StoreError> {
     let path = dir.join("index.redb");
     let opened = std::panic::catch_unwind(|| {
@@ -176,7 +176,7 @@ fn open_index(dir: &Path, unclean: bool) -> Result<OpenedIndex, StoreError> {
             drop(c); // close the file before it is renamed
             rebuild_index(&path, true)
         }
-        Err(StoreError::Locked(_)) => Err(StoreError::Locked(dir.to_path_buf())),
+        Err(StoreError::HeldByReader(_)) => Err(StoreError::HeldByReader(dir.to_path_buf())),
         Err(_) => rebuild_index(&path, false),
     }
 }

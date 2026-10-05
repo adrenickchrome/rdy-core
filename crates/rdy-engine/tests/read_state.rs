@@ -250,3 +250,22 @@ fn snap1_a_conflicted_merge_is_materialized_from_its_state_not_by_replay() {
     assert_eq!(built.0.get(&id).unwrap().field_str("title"), Some("D"));
     assert_eq!(built.1.len(), 1);
 }
+
+#[test]
+fn snap1_a_reopen_refused_by_a_held_state_names_this_process_not_another() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let held = r.read();
+    drop(r);
+    let e = Rdy::open(dir.path())
+        .err()
+        .expect("a held state keeps the index");
+    assert_eq!(e.code, rdy_engine::E_LOCKED, "{e}");
+    assert!(
+        e.message.contains("this process") && !e.message.contains("another"),
+        "{e}"
+    );
+    assert!(e.fix.contains("read state"), "{e}");
+    drop(held);
+    Rdy::open(dir.path()).unwrap();
+}

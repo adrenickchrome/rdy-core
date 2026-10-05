@@ -13,6 +13,10 @@ pub enum StoreError {
     NotFound(Hash),
     #[error("store at {0} is already open in another process")]
     Locked(PathBuf),
+    /// The store's lock was free but its index is still open: a `StoreReader` (or a state built
+    /// on one) of an earlier open in this process outlived its store.
+    #[error("store at {0} is still open through a reader of an earlier open in this process")]
+    HeldByReader(PathBuf),
     #[error("stale base for {id}: change was based on {expected}, current is {actual:?}")]
     StaleBase {
         id: BlockId,
