@@ -25,7 +25,7 @@ fn crash_child() {
     let acked: usize = var("RDY_CRASH_ACKED").unwrap().parse().unwrap();
     let pad: usize = var("RDY_CRASH_PAD").map_or(0, |v| v.parse().unwrap());
     let point = CrashPoint::parse(&var("RDY_CRASH_POINT").unwrap()).expect("a crash point");
-    let mut s = Store::open(Path::new(&dir)).unwrap();
+    let mut s = Store::create(Path::new(&dir)).unwrap();
     if let Some(m) = var("RDY_CRASH_SEGMENT_MAX") {
         s.set_segment_max(m.parse().unwrap());
     }
@@ -100,7 +100,7 @@ fn copy_store(from: &Path, to: &Path) {
 /// (`acked`) is present exactly when `kept`, the index was caught up rather than rebuilt, verify
 /// passes, and a new write survives a clean reopen.
 fn recovered(dir: &Path, acked: usize, kept: bool, pad: usize) -> OpenReport {
-    let mut s = Store::open(dir).unwrap_or_else(|e| panic!("reopen: {e}"));
+    let mut s = Store::create(dir).unwrap_or_else(|e| panic!("reopen: {e}"));
     let report = s.open_report().clone();
     assert!(!report.index_rebuilt, "a kill is not damage: {report:?}");
     for i in 0..acked {
@@ -120,7 +120,7 @@ fn recovered(dir: &Path, acked: usize, kept: bool, pad: usize) -> OpenReport {
     let after = b"after the crash".to_vec();
     s.put_blob(&after).unwrap();
     drop(s);
-    let s = Store::open(dir).unwrap();
+    let s = Store::create(dir).unwrap();
     assert_eq!(s.get_blob(&Store::blob_hash(&after)).unwrap(), after);
     s.verify().unwrap();
     report
@@ -259,7 +259,7 @@ fn kill1_a_power_loss_tear_under_an_intact_marker_is_the_unacknowledged_tail() {
 #[test]
 fn kill1_marker_shaped_bytes_in_a_torn_tail_are_quarantined_not_refused() {
     let other = tempfile::tempdir().unwrap();
-    let mut o = Store::open(other.path()).unwrap();
+    let mut o = Store::create(other.path()).unwrap();
     for i in 0..12 {
         o.put_blob(&payload(i, 0)).unwrap();
     }
@@ -293,45 +293,50 @@ fn kill1_marker_shaped_bytes_in_a_torn_tail_are_quarantined_not_refused() {
     assert_eq!(std::fs::read(&r.quarantined[0]).unwrap(), torn);
 }
 
-/// Ordering pin for the format batch: an open must never write `FORMAT` over a log with no marker.
-/// A directory at `<store>/.FORMAT.tmp` makes the `FORMAT` write fail, so the open errors after
-/// the refs batch of a new store; the log then must already hold its marker and `FORMAT` must be
-/// absent. Once the obstacle is gone the next open finishes.
+/// Ordering pin for a new store (fmt3): `create` writes `FORMAT` before anything else, so a
+/// directory without one is never a store this rdy made. A crash right after the `FORMAT` write
+/// leaves `FORMAT` alone, and the next open finishes the format batch. A crash inside the
+/// `FORMAT` write leaves no `FORMAT`: that directory is refused, untouched, by open and create.
 #[test]
-fn kill1_the_open_writes_its_marker_before_it_writes_format() {
-    let what = "a new store";
+fn kill1_create_writes_format_before_anything_else() {
+    let what = "a store holding only FORMAT";
     let dir = tempfile::tempdir().unwrap();
-    empty_store(dir.path());
-    let obstacle = dir.path().join(".FORMAT.tmp");
-    std::fs::create_dir(&obstacle).unwrap();
-    assert!(
-        Store::open(dir.path()).is_err(),
-        "{what}: the FORMAT write must fail"
-    );
-    assert!(
-        !dir.path().join("FORMAT").exists(),
-        "{what}: FORMAT was written"
-    );
-    assert!(
-        rdy_store::segment::log_has_marker(&dir.path().join("segments")).unwrap(),
-        "{what}: FORMAT was attempted before the marker"
-    );
-    std::fs::remove_dir(&obstacle).unwrap();
+    std::fs::write(
+        dir.path().join("FORMAT"),
+        "rdy store format\nstore_format 3\n",
+    )
+    .unwrap();
     finished_format(dir.path(), &[], what);
+
+    let torn = tempfile::tempdir().unwrap();
+    std::fs::write(torn.path().join(".FORMAT.tmp"), "rdy store").unwrap();
+    for e in [
+        Store::open(torn.path()).err(),
+        Store::create(torn.path()).err(),
+    ] {
+        let e = e.expect("a directory without FORMAT is refused");
+        assert!(matches!(e, rdy_store::StoreError::Format { .. }), "{e}");
+    }
+    let names: Vec<_> = std::fs::read_dir(torn.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, [".FORMAT.tmp"], "nothing was written");
 }
 
-/// A new store before its first format batch: an empty log and an empty index.
+/// A new store after `create` wrote `FORMAT`, before its first format batch: `FORMAT`, an empty
+/// log and an empty index.
 fn empty_store(dir: &Path) {
     std::fs::create_dir_all(dir.join("segments")).unwrap();
     drop(rdy_store::index::Index::open(&dir.join("index.redb")).unwrap());
+    std::fs::write(dir.join("FORMAT"), "rdy store format\nstore_format 3\n").unwrap();
 }
 
 /// Opens a store directory the way a crash left it and checks the open finished the format batch:
-/// the log holds a marker before `FORMAT` exists (never `FORMAT` over a log with no marker), the
-/// ref and `FORMAT` read back, every `blobs` entry survives, and a second open is a plain one.
+/// the log holds a marker, the ref and `FORMAT` read back, every `blobs` entry survives, and a second open is a plain one.
 fn finished_format(dir: &Path, blobs: &[Vec<u8>], what: &str) {
     let segments = dir.join("segments");
-    let s = Store::open(dir).unwrap_or_else(|e| panic!("{what}: {e}"));
+    let s = Store::create(dir).unwrap_or_else(|e| panic!("{what}: {e}"));
     assert!(
         !s.open_report().index_rebuilt,
         "{what}: {:?}",
@@ -353,7 +358,7 @@ fn finished_format(dir: &Path, blobs: &[Vec<u8>], what: &str) {
         "{what}"
     );
     drop(s);
-    let mut s = Store::open(dir).unwrap_or_else(|e| panic!("{what}, second open: {e}"));
+    let mut s = Store::create(dir).unwrap_or_else(|e| panic!("{what}, second open: {e}"));
     let r = s.open_report().clone();
     assert!(!r.index_rebuilt, "{what}: {r:?}");
     assert!(r.quarantined.is_empty(), "{what}: {r:?}");
@@ -365,16 +370,16 @@ fn finished_format(dir: &Path, blobs: &[Vec<u8>], what: &str) {
     s.verify().unwrap();
 }
 
-/// A kill between the format batch's frames and its marker (or anywhere inside the batch, or
-/// before `FORMAT` is written) on a brand-new store: the next open finishes the format batch.
+/// A kill between the format batch's frames and its marker (or anywhere inside the batch) on a
+/// brand-new store, after `create` wrote `FORMAT`: the next open finishes the format batch.
 /// The crash points are armed after open, so each kill is the log cut at an offset of the batch.
 #[test]
 fn kill1_a_kill_inside_the_first_format_batch_of_a_new_store_is_finished_by_the_next_open() {
     let base = tempfile::tempdir().unwrap();
-    empty_store(base.path()); // an empty store with its index
+    empty_store(base.path()); // an empty store with its index and FORMAT
     let done = tempfile::tempdir().unwrap();
     copy_store(base.path(), done.path());
-    drop(Store::open(done.path()).unwrap());
+    drop(Store::create(done.path()).unwrap());
     let seg = rdy_store::segment::seg_path(&done.path().join("segments"), 0);
     let full = std::fs::read(&seg).unwrap();
     assert!(!full.is_empty(), "the first open wrote the format batch");

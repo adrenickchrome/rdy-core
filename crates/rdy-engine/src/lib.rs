@@ -135,6 +135,9 @@ impl Rdy {
         // dur1: .rdy and .rdy/packs are fsynced into their parents (the store adds .rdy/store)
         rdy_store::fsutil::create_dir_durable(&dot.join("packs")).map_err(io)?;
         load_pack(project, pack)?;
+        // the store first: a directory there that is not empty and not a format-3 store is
+        // refused before the config makes this a project (fmt3)
+        layout::create_project_store(&dot)?.close()?;
         let cfg = serde_yaml_ng::to_string(&Config {
             pack: pack.to_string(),
             name: None,

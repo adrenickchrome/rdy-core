@@ -49,7 +49,7 @@ fn busy(s: &mut Store) {
 #[test]
 fn fsck2_a_healthy_store_checks_clean_and_counts() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     busy(&mut s);
     let c = s.check_objects().unwrap();
     assert_eq!((c.views, c.landed_changes), (2, 2));
@@ -62,7 +62,7 @@ fn fsck2_a_healthy_store_checks_clean_and_counts() {
 #[test]
 fn fsck2_reindex_reproduces_every_table() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     busy(&mut s);
     let before = s.index_dump_for_tests().unwrap();
     s.reindex().unwrap();
@@ -72,7 +72,7 @@ fn fsck2_reindex_reproduces_every_table() {
 #[test]
 fn fsck2_a_head_whose_count_is_wrong_is_reported() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     busy(&mut s);
     let mut h = s.view_head("b").unwrap().unwrap();
     h.len = 9;
@@ -89,7 +89,7 @@ fn fsck2_a_head_whose_count_is_wrong_is_reported() {
 #[test]
 fn fsck2_a_chain_that_starts_with_a_commit_is_reported() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     busy(&mut s);
     let h = s.view_head("b").unwrap().unwrap();
     let commit = s.view_op(&h.head).unwrap();
@@ -123,7 +123,7 @@ fn fsck2_a_chain_that_starts_with_a_commit_is_reported() {
 #[test]
 fn fsck2_a_landing_with_every_new_field_set_checks_clean() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     busy(&mut s);
     let l = s.canon_head().unwrap().unwrap();
     let rec = s.landing(&l).unwrap();

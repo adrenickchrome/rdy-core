@@ -35,9 +35,9 @@ fn change(ops: Vec<Op>) -> Change {
 #[test]
 fn second_open_is_locked() {
     let dir = tempfile::tempdir().unwrap();
-    let _s = Store::open(dir.path()).unwrap();
+    let _s = Store::create(dir.path()).unwrap();
     assert!(matches!(
-        Store::open(dir.path()),
+        Store::create(dir.path()),
         Err(StoreError::Locked(_))
     ));
 }
@@ -47,14 +47,14 @@ fn objects_persist_and_dedupe() {
     let dir = tempfile::tempdir().unwrap();
     let b = block("b-AAAAA", "x");
     let h = {
-        let mut s = Store::open(dir.path()).unwrap();
+        let mut s = Store::create(dir.path()).unwrap();
         let h1 = s.put(kinds::BLOCK, &b).unwrap();
         let h2 = s.put(kinds::BLOCK, &b).unwrap();
         assert_eq!(h1, h2);
         assert_eq!(h1, b.version_hash());
         h1
     };
-    let s = Store::open(dir.path()).unwrap();
+    let s = Store::create(dir.path()).unwrap();
     assert_eq!(s.get_block(&h).unwrap(), b);
     assert!(matches!(
         s.get::<Block>(&Hash::of(b"missing")),
@@ -65,7 +65,7 @@ fn objects_persist_and_dedupe() {
 #[test]
 fn blobs_chunk_and_round_trip() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let data: Vec<u8> = (0..(5 * 1024 * 1024 / 2))
         .map(|i| (i % 251) as u8)
         .collect();
@@ -77,7 +77,7 @@ fn blobs_chunk_and_round_trip() {
 #[test]
 fn commit_change_computes_deps_from_producers() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let v1 = block("b-AAAAA", "one");
     let c1 = s
         .commit_change(change(vec![Op::Create { block: v1.clone() }]), vec![])
@@ -110,7 +110,7 @@ fn reindex_rebuilds_everything_including_refs() {
     let dir = tempfile::tempdir().unwrap();
     let v1 = block("b-AAAAA", "one");
     {
-        let mut s = Store::open(dir.path()).unwrap();
+        let mut s = Store::create(dir.path()).unwrap();
         s.commit_change(
             change(vec![Op::Create { block: v1.clone() }]),
             vec![("view/work".into(), vec![1])],
@@ -121,7 +121,7 @@ fn reindex_rebuilds_everything_including_refs() {
         s.set_refs(vec![("canon".into(), b"A".to_vec())]).unwrap(); // same value again
     }
     std::fs::remove_file(dir.path().join("index.redb")).unwrap();
-    let s = Store::open(dir.path()).unwrap();
+    let s = Store::create(dir.path()).unwrap();
     assert_eq!(s.get_ref("canon").unwrap(), Some(b"A".to_vec()));
     assert_eq!(s.get_ref("view/work").unwrap(), Some(vec![1]));
     assert_eq!(s.get_block(&v1.version_hash()).unwrap(), v1);
@@ -150,7 +150,7 @@ fn frame(kind: u8, payload: &[u8]) -> Vec<u8> {
 #[test]
 fn failed_index_apply_rolls_back_frames_so_reindex_cannot_resurrect_them() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     s.set_refs(vec![("canon".into(), b"A".to_vec())]).unwrap();
     let len_before = file_len(&seg0(dir.path()));
     let frames_before = s.verify().unwrap();
@@ -170,7 +170,7 @@ fn failed_index_apply_rolls_back_frames_so_reindex_cannot_resurrect_them() {
     // the store keeps working, and the next write lands where the failed one started
     s.set_refs(vec![("other".into(), b"x".to_vec())]).unwrap();
     drop(s);
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     s.reindex().unwrap();
     assert_eq!(s.get_ref("canon").unwrap(), Some(b"A".to_vec()));
     assert!(!s.has(&v1.version_hash()).unwrap());
@@ -180,7 +180,7 @@ fn failed_index_apply_rolls_back_frames_so_reindex_cannot_resurrect_them() {
 #[test]
 fn failed_rollback_poisons_the_store_until_reopen() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     s.set_refs(vec![("canon".into(), b"A".to_vec())]).unwrap();
     s.fail_next_index_apply();
     s.fail_next_rollback();
@@ -190,7 +190,7 @@ fn failed_rollback_poisons_the_store_until_reopen() {
         .unwrap_err();
     assert!(e.to_string().contains("reopen"), "{e}");
     drop(s);
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     s.set_refs(vec![("other".into(), b"x".to_vec())]).unwrap();
 }
 
@@ -199,7 +199,7 @@ fn damaged_index_is_set_aside_and_rebuilt_on_open() {
     let dir = tempfile::tempdir().unwrap();
     let v1 = block("b-AAAAA", "one");
     {
-        let mut s = Store::open(dir.path()).unwrap();
+        let mut s = Store::create(dir.path()).unwrap();
         s.put(kinds::BLOCK, &v1).unwrap();
         s.set_refs(vec![("canon".into(), b"A".to_vec())]).unwrap();
     }
@@ -208,7 +208,7 @@ fn damaged_index_is_set_aside_and_rebuilt_on_open() {
         let mut bytes = std::fs::read(&idx).unwrap();
         bytes[..512].fill(0xAB);
         std::fs::write(&idx, bytes).unwrap();
-        let s = Store::open(dir.path()).unwrap();
+        let s = Store::create(dir.path()).unwrap();
         assert_eq!(s.get_block(&v1.version_hash()).unwrap(), v1);
         assert_eq!(s.get_ref("canon").unwrap(), Some(b"A".to_vec()));
         let damaged = std::fs::read_dir(dir.path())
@@ -229,7 +229,7 @@ fn torn_unacknowledged_batch_with_a_valid_later_frame_is_quarantined() {
     let dir = tempfile::tempdir().unwrap();
     let v1 = block("b-AAAAA", "acknowledged");
     {
-        let mut s = Store::open(dir.path()).unwrap();
+        let mut s = Store::create(dir.path()).unwrap();
         s.put(kinds::BLOCK, &v1).unwrap();
     }
     let seg = seg0(dir.path());
@@ -240,7 +240,7 @@ fn torn_unacknowledged_batch_with_a_valid_later_frame_is_quarantined() {
     bytes.extend(frame(kinds::BLOCK, b"later-frame-of-the-same-batch"));
     std::fs::write(&seg, &bytes).unwrap();
 
-    let s = Store::open(dir.path()).unwrap();
+    let s = Store::create(dir.path()).unwrap();
     assert_eq!(s.get_block(&v1.version_hash()).unwrap(), v1);
     assert_eq!(file_len(&seg), acked);
     assert!(!s.has(&Hash::of(b"later-frame-of-the-same-batch")).unwrap());
@@ -254,7 +254,7 @@ fn torn_unacknowledged_batch_with_a_valid_later_frame_is_quarantined() {
 fn corruption_below_the_acknowledged_boundary_refuses_to_open() {
     let dir = tempfile::tempdir().unwrap();
     {
-        let mut s = Store::open(dir.path()).unwrap();
+        let mut s = Store::create(dir.path()).unwrap();
         s.put(kinds::BLOCK, &block("b-AAAAA", "one")).unwrap();
         s.put(kinds::BLOCK, &block("b-BBBBB", "two")).unwrap();
     }
@@ -264,7 +264,7 @@ fn corruption_below_the_acknowledged_boundary_refuses_to_open() {
     bytes[last] ^= 0xff; // inside the last acknowledged frame
     std::fs::write(&seg, &bytes).unwrap();
 
-    let e = Store::open(dir.path()).err().expect("open must refuse");
+    let e = Store::create(dir.path()).err().expect("open must refuse");
     let StoreError::Io(io) = &e else {
         panic!("{e}")
     };
@@ -280,7 +280,7 @@ fn corruption_below_the_acknowledged_boundary_refuses_to_open() {
 #[test]
 fn a_malformed_canon_ref_is_a_decode_error_not_a_panic() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     s.set_refs(vec![("canon".into(), b"A".to_vec())]).unwrap();
     assert!(matches!(s.canon_head(), Err(StoreError::Decode(_))));
     // every reader of canon goes through canon_head
@@ -295,11 +295,11 @@ fn an_index_that_points_a_hash_at_another_object_is_an_error_not_wrong_data() {
     // same id and body length: both frames sit at the same location in their logs
     let va = block("b-AAAAA", "one");
     let vb = block("b-AAAAA", "two");
-    Store::open(a_dir.path())
+    Store::create(a_dir.path())
         .unwrap()
         .put(kinds::BLOCK, &va)
         .unwrap();
-    Store::open(b_dir.path())
+    Store::create(b_dir.path())
         .unwrap()
         .put(kinds::BLOCK, &vb)
         .unwrap();
@@ -308,7 +308,7 @@ fn an_index_that_points_a_hash_at_another_object_is_an_error_not_wrong_data() {
         a_dir.path().join("index.redb"),
     )
     .unwrap();
-    let s = Store::open(a_dir.path()).unwrap();
+    let s = Store::create(a_dir.path()).unwrap();
     assert!(
         matches!(s.get_block(&vb.version_hash()), Err(StoreError::Decode(_))),
         "must not return {:?}",
@@ -326,7 +326,7 @@ fn a_byte_flip_anywhere_in_the_index_is_recovered_on_open() {
         .map(|i| block(&format!("b-{i:05}"), &format!("body {i}")))
         .collect();
     {
-        let mut s = Store::open(dir.path()).unwrap();
+        let mut s = Store::create(dir.path()).unwrap();
         for b in &blocks {
             s.put(kinds::BLOCK, b).unwrap();
         }
@@ -343,7 +343,7 @@ fn a_byte_flip_anywhere_in_the_index_is_recovered_on_open() {
         std::fs::write(&idx, &bytes).unwrap();
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
-                let s = Store::open(dir.path()).map_err(|e| e.to_string())?;
+                let s = Store::create(dir.path()).map_err(|e| e.to_string())?;
                 for b in &blocks {
                     if s.get_block(&b.version_hash()).map_err(|e| e.to_string())? != *b {
                         return Err(format!("{} read back different", b.id));
@@ -373,7 +373,7 @@ fn a_byte_flip_anywhere_in_the_index_is_recovered_on_open() {
 #[test]
 fn a_partial_append_leaves_no_bytes_past_the_end() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     s.set_refs(vec![("canon".into(), b"A".to_vec())]).unwrap();
     let len_before = file_len(&seg0(dir.path()));
     let frames_before = s.verify().unwrap();
@@ -392,7 +392,7 @@ fn a_partial_append_leaves_no_bytes_past_the_end() {
     );
     s.put(kinds::BLOCK, &block("b-BBBBB", "after")).unwrap();
     drop(s);
-    let s = Store::open(dir.path()).unwrap();
+    let s = Store::create(dir.path()).unwrap();
     assert_eq!(s.verify().unwrap(), frames_before + 1);
     assert!(!s.has(&torn.version_hash()).unwrap());
 }

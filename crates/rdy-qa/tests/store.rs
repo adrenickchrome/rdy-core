@@ -6,7 +6,7 @@ use serde_json::json;
 #[test]
 fn blob1_get_blob_refuses_objects_that_are_not_blobs() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let chunk = s.put(kinds::BLOB_CHUNK, &vec![1u8, 2, 3]).unwrap();
     let snap = s
         .put(kinds::SNAPSHOT, &rdy_model::StateSnapshot::default())
@@ -26,7 +26,7 @@ fn blob1_get_blob_refuses_objects_that_are_not_blobs() {
 #[test]
 fn blob1_a_manifest_that_lies_about_its_length_is_an_error_not_an_allocation() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let chunk_bytes = postcard::to_allocvec(&vec![7u8; 10]).unwrap();
     let chunk = s.write(vec![(kinds::BLOB_CHUNK, chunk_bytes)]).unwrap()[0];
     for len in [u64::MAX, 0, 1] {
@@ -143,7 +143,7 @@ fn blob1_a_chunk_stored_first_does_not_make_a_later_block_unreadable() {
     let block = r.read().block(&Scope::View("work".into()), &doc).unwrap();
     let payload = postcard::to_allocvec(&block).unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let blob = s.put_blob(&payload).unwrap();
     let h = s.put(kinds::BLOCK, &block).unwrap();
     assert_eq!(h, block.version_hash());
@@ -161,7 +161,7 @@ fn store_torn_tail_at_sampled_offsets_recovers() {
     // A torn write is one the index never acknowledged: keep the index as it was before the
     // last write, as after a crash between the segment append and the index commit.
     let (first, last, pre_index) = {
-        let mut s = Store::open(&dir).unwrap();
+        let mut s = Store::create(&dir).unwrap();
         let first = s.put_blob(b"acknowledged").unwrap();
         let before = segment_len(&dir);
         let pre_index = std::fs::read(dir.join("index.redb")).unwrap();
@@ -202,12 +202,12 @@ fn store_torn_tail_at_sampled_offsets_recovers() {
         if cut > cut_from {
             // with the index that acknowledged the write, a cut is damage, and must be refused
             assert!(
-                Store::open(copy.path()).is_err(),
+                Store::create(copy.path()).is_err(),
                 "cut at {cut}: acknowledged data was cut silently"
             );
         }
         std::fs::write(copy.path().join("index.redb"), &pre_index).unwrap();
-        let s = Store::open(copy.path()).unwrap_or_else(|e| panic!("cut at {cut}: {e}"));
+        let s = Store::create(copy.path()).unwrap_or_else(|e| panic!("cut at {cut}: {e}"));
         assert_eq!(s.get_blob(&first).unwrap(), b"acknowledged", "cut at {cut}");
         assert!(
             s.get_blob(&last_hash).is_err(),
@@ -231,7 +231,7 @@ fn store_index_damage_sweep_never_returns_wrong_data() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
     let hashes: Vec<_> = {
-        let mut s = Store::open(&dir).unwrap();
+        let mut s = Store::create(&dir).unwrap();
         (0..200u32)
             .map(|i| s.put_blob(&i.to_le_bytes()).unwrap())
             .collect()
@@ -245,7 +245,7 @@ fn store_index_damage_sweep_never_returns_wrong_data() {
         let mut bytes = index.clone();
         bytes[at] ^= 0xff;
         std::fs::write(copy.path().join("index.redb"), bytes).unwrap();
-        let s = Store::open(copy.path()).unwrap_or_else(|e| panic!("flip at {at}: {e}"));
+        let s = Store::create(copy.path()).unwrap_or_else(|e| panic!("flip at {at}: {e}"));
         for (i, h) in hashes.iter().enumerate() {
             assert_eq!(
                 s.get_blob(h).unwrap(),
@@ -295,7 +295,7 @@ fn manifest_payload_of(bytes: &[u8]) -> Vec<u8> {
 #[test]
 fn blob1_a_manifest_preuploaded_as_a_chunk_still_reads() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let bytes = b"an asset whose bytes an agent knew ahead of time".to_vec();
     // the exact postcard bytes of the manifest `put_blob(bytes)` will write, stored as a chunk
     let payload = manifest_payload_of(&bytes);
@@ -312,7 +312,7 @@ fn blob1_a_manifest_preuploaded_as_a_chunk_still_reads() {
 #[test]
 fn kind1_manifest_bytes_under_another_kind_do_not_block_the_blob() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let bytes = b"manifest-shaped bytes under a non-blob kind".to_vec();
     let payload = manifest_payload_of(&bytes);
     let other = s.write(vec![(kinds::SNAPSHOT, payload.clone())]).unwrap()[0];
@@ -335,7 +335,7 @@ fn upload_as_chunk(s: &mut Store, payload: Vec<u8>) -> rdy_model::Hash {
 #[test]
 fn blob1_a_forged_chunk_kind_manifest_is_not_a_blob() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let big = vec![9u8; MIB];
     let hc = upload_as_chunk(&mut s, big.clone());
     let small = upload_as_chunk(&mut s, vec![1u8; 10]);
@@ -389,7 +389,7 @@ fn blob1_a_forged_chunk_kind_manifest_is_not_a_blob() {
 #[test]
 fn blob1_a_chunk_kind_manifest_that_is_canonical_still_reads() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let bytes = vec![5u8; 3 * MIB + 7];
     let payload = postcard::to_allocvec(&BlobManifest {
         len: bytes.len() as u64,

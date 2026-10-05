@@ -9,7 +9,7 @@ fn h(n: u8) -> Hash {
 
 fn store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
-    let s = Store::open(&dir.path().join("s")).unwrap();
+    let s = Store::create(&dir.path().join("s")).unwrap();
     (dir, s)
 }
 
@@ -253,7 +253,7 @@ fn create(view: &str, id: &str) -> Change {
 #[test]
 fn chain1_the_first_write_creates_the_view_and_each_write_appends_one_op() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     let c1 = s.commit_to_view("work", create("work", "b-00001")).unwrap();
     let h1 = s.view_head("work").unwrap().unwrap();
     let commit1 = s.view_op(&h1.head).unwrap();
@@ -295,7 +295,7 @@ fn chain1_the_first_write_creates_the_view_and_each_write_appends_one_op() {
 #[test]
 fn chain1_bytes_written_per_commit_do_not_grow_with_the_view() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     let mut sizes = vec![];
     for i in 0..300 {
         let before = s.log_end();
@@ -316,7 +316,7 @@ fn chain1_bytes_written_per_commit_do_not_grow_with_the_view() {
 #[test]
 fn chain1_landing_appends_a_rebase_checkpoint_with_the_remaining_changes() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     let c1 = s.commit_to_view("work", create("work", "b-00001")).unwrap();
     let p = s.propose("work", "one", prov(Role::Writer)).unwrap();
     let c2 = s.commit_to_view("work", create("work", "b-00002")).unwrap();
@@ -345,7 +345,7 @@ fn chain1_the_walk_stops_at_the_latest_checkpoint() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
     {
-        let mut s = Store::open(&dir).unwrap();
+        let mut s = Store::create(&dir).unwrap();
         for i in 0..50 {
             s.commit_to_view("work", create("work", &format!("b-{i:05}")))
                 .unwrap();
@@ -357,7 +357,7 @@ fn chain1_the_walk_stops_at_the_latest_checkpoint() {
                 .unwrap();
         }
     }
-    let s = Store::open(&dir).unwrap();
+    let s = Store::create(&dir).unwrap();
     let before = s.frames_read();
     assert_eq!(s.included("work").unwrap().len(), 2);
     assert!(
@@ -372,7 +372,7 @@ fn chain1_a_broken_chain_is_an_error_naming_the_view() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
     {
-        let mut s = Store::open(&dir).unwrap();
+        let mut s = Store::create(&dir).unwrap();
         s.commit_to_view("a", create("a", "b-00001")).unwrap();
         s.commit_to_view("b", create("b", "b-00002")).unwrap();
         let hb = s.view_head("b").unwrap().unwrap();
@@ -381,7 +381,7 @@ fn chain1_a_broken_chain_is_an_error_naming_the_view() {
         s.set_refs(vec![("view/a".into(), postcard::to_allocvec(&ha).unwrap())])
             .unwrap();
     }
-    let s = Store::open(&dir).unwrap();
+    let s = Store::create(&dir).unwrap();
     match s.view("a") {
         Err(StoreError::Decode(m)) => assert!(
             m.contains("view chain of \"a\" is broken at") && m.contains("belongs to view \"b\""),

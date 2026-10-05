@@ -29,7 +29,7 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
 fn fmt1_a_new_store_records_its_format_in_the_log_and_in_format() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let s = Store::open(&dir).unwrap();
+    let s = Store::create(&dir).unwrap();
     assert_eq!(
         std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
         CURRENT_TEXT
@@ -37,7 +37,7 @@ fn fmt1_a_new_store_records_its_format_in_the_log_and_in_format() {
     assert_eq!(s.get_ref(REF_STORE_FORMAT).unwrap(), Some(b"3".to_vec()));
     assert_eq!(s.verify().unwrap(), 1, "one format batch of one ref");
     drop(s);
-    let s = Store::open(&dir).unwrap();
+    let s = Store::create(&dir).unwrap();
     assert_eq!(s.verify().unwrap(), 1, "no second format batch");
     assert!(s.open_report().quarantined.is_empty());
 }
@@ -46,7 +46,7 @@ fn fmt1_a_new_store_records_its_format_in_the_log_and_in_format() {
 fn fmt1_format_refs_survive_reindex() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let mut s = Store::open(&dir).unwrap();
+    let mut s = Store::create(&dir).unwrap();
     s.put_blob(b"x").unwrap();
     s.reindex().unwrap();
     assert_eq!(s.get_ref(REF_STORE_FORMAT).unwrap(), Some(b"3".to_vec()));
@@ -56,36 +56,35 @@ fn fmt1_format_refs_survive_reindex() {
     );
 }
 
+/// fmt3 replaces fmt1's rewrite: a store whose FORMAT is lost is refused, and FORMAT is not
+/// rewritten from the log (that would mean opening the index before the format is known).
 #[test]
-fn fmt1_a_lost_format_file_is_rewritten_from_the_log() {
+fn fmt3_a_lost_format_file_is_refused_and_not_rewritten() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let frames = {
-        let mut s = Store::open(&dir).unwrap();
+    {
+        let mut s = Store::create(&dir).unwrap();
         s.put_blob(b"one").unwrap();
-        s.put_blob(b"two").unwrap();
-        s.verify().unwrap()
-    };
+    }
     std::fs::remove_file(dir.join("FORMAT")).unwrap();
-    let s = Store::open(&dir).unwrap();
-    assert_eq!(
-        std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
-        CURRENT_TEXT
-    );
-    assert_eq!(s.verify().unwrap(), frames, "no second format batch");
-    assert_eq!(s.get_blob(&Store::blob_hash(b"one")).unwrap(), b"one");
+    let before = tree(&dir);
+    refused(&dir, "has no FORMAT file");
+    assert_eq!(tree(&dir), before);
 }
 
 #[test]
 fn fmt1_an_unreadable_format_file_names_its_fix() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    drop(Store::open(&dir).unwrap());
+    drop(Store::create(&dir).unwrap());
     std::fs::write(dir.join("FORMAT"), "not a format file\n").unwrap();
     let e = RdyError::from(Store::open(&dir).err().expect("unreadable"));
     assert_eq!(e.code, "E_STORE_FORMAT", "{e}");
     assert!(e.message.contains("is unreadable"), "{e}");
-    assert!(e.fix.contains("delete it and reopen"), "{e}");
+    assert_eq!(
+        e.fix, "restore FORMAT from backup, or re-create it with this rdy",
+        "{e}"
+    );
 }
 
 /// Review Focus 3: the one refusal, whatever told us the store is another build's.
@@ -111,7 +110,7 @@ fn refused(dir: &Path, what: &str) -> RdyError {
 fn fmt2_a_store_of_a_newer_format_is_refused_before_anything_is_opened() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    Store::open(&dir).unwrap().put_blob(b"x").unwrap();
+    Store::create(&dir).unwrap().put_blob(b"x").unwrap();
     std::fs::write(dir.join("FORMAT"), "rdy store format\nstore_format 4\n").unwrap();
     let before = tree(&dir);
     refused(&dir, "has store format 4");
@@ -122,7 +121,7 @@ fn fmt2_a_store_of_a_newer_format_is_refused_before_anything_is_opened() {
 fn fmt2_an_m2_0_store_is_refused() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    Store::open(&dir).unwrap().put_blob(b"x").unwrap();
+    Store::create(&dir).unwrap().put_blob(b"x").unwrap();
     std::fs::write(
         dir.join("FORMAT"),
         "rdy store format\nlog_format 2\nmin_reader 2\n",
@@ -134,25 +133,27 @@ fn fmt2_an_m2_0_store_is_refused() {
 }
 
 #[test]
-fn fmt2_a_log_that_says_another_format_is_refused_without_format() {
+fn fmt2_a_log_that_says_another_format_is_refused() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    Store::open(&dir)
+    Store::create(&dir)
         .unwrap()
         .set_refs(vec![(REF_STORE_FORMAT.into(), b"2".to_vec())])
         .unwrap();
-    std::fs::remove_file(dir.join("FORMAT")).unwrap();
     let seg = std::fs::read(dir.join("segments/seg-000000.log")).unwrap();
     refused(&dir, "has store format 2");
     assert_eq!(
         std::fs::read(dir.join("segments/seg-000000.log")).unwrap(),
         seg
     );
-    assert!(!dir.join("FORMAT").exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
+        CURRENT_TEXT
+    );
 }
 
-/// A marked log with no format ref: frames, no format ref, no FORMAT. The index is built to find
-/// that out; the log is untouched.
+/// A marked log with no format ref under a FORMAT that says 3: the index is built to find that
+/// out; the log is untouched.
 #[test]
 fn fmt2_a_log_with_frames_and_no_store_format_is_refused() {
     let base = tempfile::tempdir().unwrap();
@@ -167,13 +168,13 @@ fn fmt2_a_log_with_frames_and_no_store_format_is_refused() {
         .unwrap();
         log.sync().unwrap();
     }
+    std::fs::write(dir.join("FORMAT"), CURRENT_TEXT).unwrap();
     let seg = std::fs::read(dir.join("segments/seg-000000.log")).unwrap();
     refused(&dir, "has a log with no store format");
     assert_eq!(
         std::fs::read(dir.join("segments/seg-000000.log")).unwrap(),
         seg
     );
-    assert!(!dir.join("FORMAT").exists());
 }
 
 #[test]
@@ -217,15 +218,206 @@ fn fmt1_a_new_project_keeps_its_store_in_dot_rdy_store() {
     assert_eq!(e.code, "E_LOCKED", "{e}");
 }
 
-/// A missing store directory under an intact .rdy is created, durably (dur1).
+/// A missing store directory under an intact .rdy is refused, not created: only init creates a
+/// store (fmt3). Init creates it durably (dur1).
 #[test]
-fn fmt1_a_missing_store_directory_is_created_durably() {
+fn fmt3_a_missing_store_directory_is_refused_not_created() {
     let (dir, r) = project();
     drop(r);
     let rdy = dir.path().join(".rdy");
     std::fs::remove_dir_all(rdy.join("store")).unwrap();
-    let (r, synced) = rdy_store::fsutil::record_syncs(|| Rdy::open(dir.path()));
+    let before = tree(&rdy);
+    let e = Rdy::open(dir.path()).err().expect("no store");
+    assert_eq!(e.code, "E_STORE_FORMAT", "{e}");
+    assert!(
+        e.message.starts_with(&format!(
+            "there is no store at {}",
+            rdy.join("store").display()
+        )),
+        "{e}"
+    );
+    assert_eq!(e.fix, "re-create it with this rdy");
+    assert_eq!(tree(&rdy), before);
+    let fresh = tempfile::tempdir().unwrap();
+    let (r, synced) = rdy_store::fsutil::record_syncs(|| Rdy::init(fresh.path(), "rdy-standard"));
     r.unwrap();
+    let rdy = fresh.path().join(".rdy");
     assert!(synced.contains(&rdy), "{synced:?}");
-    assert!(rdy.join("store/FORMAT").exists());
+    assert!(synced.contains(&rdy.join("store")), "{synced:?}");
+}
+
+/// The M1 store layout (M1 at a22b24b): `lock`, a redb `index.redb` and `segments/`, and no
+/// `FORMAT`. `frames` are written to `seg-000000.log` in M1's frame layout (u32 length, kind,
+/// 32-byte hash, payload); none is the M1 `init` store, which holds an empty segment.
+fn m1_store(dir: &Path, frames: &[(u8, &[u8])]) {
+    std::fs::create_dir_all(dir.join("segments")).unwrap();
+    drop(rdy_store::index::Index::open(&dir.join("index.redb")).unwrap());
+    std::fs::write(dir.join("lock"), b"").unwrap();
+    let mut seg = Vec::new();
+    for (kind, payload) in frames {
+        seg.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        seg.push(*kind);
+        seg.extend_from_slice(&Store::blob_hash(payload).0);
+        seg.extend_from_slice(payload);
+    }
+    std::fs::write(dir.join("segments/seg-000000.log"), seg).unwrap();
+}
+
+/// An M1 project: `.rdy/config.yaml`, `.rdy/packs/` and an M1 store at `.rdy/store`.
+fn m1_project(frames: &[(u8, &[u8])]) -> tempfile::TempDir {
+    let p = tempfile::tempdir().unwrap();
+    let rdy = p.path().join(".rdy");
+    std::fs::create_dir_all(rdy.join("packs")).unwrap();
+    std::fs::write(rdy.join("config.yaml"), "pack: rdy-standard\n").unwrap();
+    m1_store(&rdy.join("store"), frames);
+    p
+}
+
+const M1_FRAME: (u8, &[u8]) = (kinds::BLOB_CHUNK, b"an M1 doc: wallet, components");
+
+fn assert_refused_as_another_build(e: RdyError, store: &Path) {
+    assert_eq!(e.code, "E_STORE_FORMAT", "{e}");
+    assert_eq!(
+        e.message,
+        format!(
+            "this store was written by a different rdy build: {} has no FORMAT file, and this rdy uses store format {STORE_FORMAT}",
+            store.display()
+        )
+    );
+    assert_eq!(e.fix, "re-create it with this rdy");
+}
+
+#[test]
+fn fmt3_an_m1_store_with_data_is_refused_and_nothing_is_written() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    m1_store(&dir, &[M1_FRAME]);
+    let before = tree(&dir);
+    let e = Store::open(&dir).err().expect("an M1 store is refused");
+    assert_refused_as_another_build(RdyError::from(e), &dir);
+    assert_eq!(tree(&dir), before, "every file is byte-identical");
+}
+
+#[test]
+fn fmt3_an_m1_project_with_data_is_refused_and_nothing_is_written() {
+    let p = m1_project(&[M1_FRAME]);
+    let rdy = p.path().join(".rdy");
+    let before = tree(&rdy);
+    let e = Rdy::open(p.path()).err().expect("an M1 project is refused");
+    assert_refused_as_another_build(e, &rdy.join("store"));
+    assert_eq!(
+        tree(&rdy),
+        before,
+        "every file under .rdy is byte-identical"
+    );
+}
+
+#[test]
+fn fmt3_an_empty_m1_store_is_refused_and_gains_no_format_file() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    m1_store(&dir, &[]);
+    let before = tree(&dir);
+    let e = Store::open(&dir)
+        .err()
+        .expect("an empty M1 store is refused");
+    assert_refused_as_another_build(RdyError::from(e), &dir);
+    assert!(!dir.join("FORMAT").exists());
+    assert_eq!(tree(&dir), before);
+    // init does not claim it either: it is not empty
+    let e = Store::create(&dir).err().expect("create does not claim it");
+    assert_refused_as_another_build(RdyError::from(e), &dir);
+    assert_eq!(tree(&dir), before);
+}
+
+#[test]
+fn fmt3_an_empty_m1_project_is_refused_and_gains_no_format_file() {
+    let p = m1_project(&[]);
+    let rdy = p.path().join(".rdy");
+    let before = tree(&rdy);
+    let e = Rdy::open(p.path())
+        .err()
+        .expect("an empty M1 project is refused");
+    assert_refused_as_another_build(e, &rdy.join("store"));
+    assert!(!rdy.join("store/FORMAT").exists());
+    assert_eq!(tree(&rdy), before);
+}
+
+/// A directory that is not a store at all (it holds anything) is refused by open and by create.
+#[test]
+fn fmt3_a_directory_that_is_not_a_store_is_never_claimed() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("notes.txt"), b"mine").unwrap();
+    let before = tree(&dir);
+    for e in [Store::open(&dir).err(), Store::create(&dir).err()] {
+        assert_refused_as_another_build(RdyError::from(e.expect("refused")), &dir);
+        assert_eq!(tree(&dir), before);
+    }
+    // an empty directory is a store only once init creates one: open does not
+    let empty = base.path().join("e");
+    std::fs::create_dir_all(&empty).unwrap();
+    assert_refused_as_another_build(
+        RdyError::from(Store::open(&empty).err().expect("open never creates")),
+        &empty,
+    );
+    assert!(tree(&empty).is_empty());
+    drop(Store::create(&empty).unwrap());
+    assert_eq!(
+        std::fs::read_to_string(empty.join("FORMAT")).unwrap(),
+        CURRENT_TEXT
+    );
+    drop(Store::open(&empty).unwrap());
+}
+
+#[test]
+fn fmt3_init_on_a_fresh_path_makes_a_format_3_store_that_reopens() {
+    let p = tempfile::tempdir().unwrap();
+    let proj = p.path().join("new/project");
+    drop(Rdy::init(&proj, "rdy-standard").unwrap());
+    let store = proj.join(".rdy/store");
+    assert_eq!(
+        std::fs::read_to_string(store.join("FORMAT")).unwrap(),
+        CURRENT_TEXT
+    );
+    let r = Rdy::open(&proj).unwrap();
+    assert_eq!(
+        r.store().get_ref(REF_STORE_FORMAT).unwrap(),
+        Some(b"3".to_vec())
+    );
+}
+
+/// `rdy init` in a directory whose `.rdy/store` holds something that is not a store is refused,
+/// and nothing is written: no config, no FORMAT.
+#[test]
+fn fmt3_init_over_a_non_store_directory_is_refused() {
+    let p = tempfile::tempdir().unwrap();
+    let store = p.path().join(".rdy/store");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("index.redb"), b"not ours").unwrap();
+    let e = Rdy::init(p.path(), "rdy-standard").err().expect("refused");
+    assert_refused_as_another_build(e, &store);
+    assert!(!p.path().join(".rdy/config.yaml").exists());
+    assert!(!store.join("FORMAT").exists());
+}
+
+/// The CLI shows the human the refusal and its "re-create it" fix.
+#[test]
+fn fmt3_the_cli_shows_re_create_it_for_an_m1_project() {
+    let p = m1_project(&[M1_FRAME]);
+    let rdy = p.path().join(".rdy");
+    let before = tree(&rdy);
+    let out = std::process::Command::new(rdy_bin())
+        .arg("status")
+        .current_dir(p.path())
+        .env("RDY_ACTOR", "human:qa")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("error E_STORE_FORMAT"), "{err}");
+    assert!(err.contains("has no FORMAT file"), "{err}");
+    assert!(err.contains("fix: re-create it with this rdy"), "{err}");
+    assert_eq!(tree(&rdy), before);
 }

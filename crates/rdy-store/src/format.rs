@@ -1,7 +1,8 @@
-//! The store's format (plan M2a1, fmt2): one number. The log is the truth (ref
-//! `meta/store_format`); the `FORMAT` file mirrors it so a store of another format is refused
-//! before the index is opened. A store opens only if its number is this binary's: there is no
-//! compatibility between formats.
+//! The store's format (plan M2a1, fmt2): one number, in the log (ref `meta/store_format`) and in
+//! the `FORMAT` file. A store opens only if its `FORMAT` says this binary's number (fmt3): a
+//! missing `FORMAT` (an M1 store, or any directory rdy did not create) is refused before the
+//! index or the log is opened, and so is a log that disagrees. There is no compatibility between
+//! formats, and opening never writes a `FORMAT`: only `Store::create` (rdy init) does.
 use crate::error::StoreError;
 use crate::fsutil;
 use std::path::Path;
@@ -64,6 +65,19 @@ pub(crate) fn other_build(store_dir: &Path, what: &str) -> StoreError {
     }
 }
 
+/// The refusal for a store path where there is nothing: `rdy init` creates a store, and opening
+/// never does.
+pub(crate) fn no_store(store_dir: &Path) -> StoreError {
+    StoreError::Format {
+        message: format!(
+            "there is no store at {}: rdy init creates one and opening never does, and this rdy \
+             uses store format {STORE_FORMAT}",
+            store_dir.display()
+        ),
+        fix: "re-create it with this rdy".into(),
+    }
+}
+
 /// Reads `<store_dir>/FORMAT`: None if the file does not exist. A file with no `store_format`
 /// line is another build's store and is refused.
 pub fn read_format_file(store_dir: &Path) -> Result<Option<Format>, StoreError> {
@@ -78,8 +92,7 @@ pub fn read_format_file(store_dir: &Path) -> Result<Option<Format>, StoreError> 
             "the store's FORMAT file at {} is unreadable: {reason}",
             path.display()
         ),
-        fix: "restore FORMAT from backup, or delete it and reopen: rdy rewrites it from the log"
-            .into(),
+        fix: "restore FORMAT from backup, or re-create it with this rdy".into(),
     };
     let text = String::from_utf8(bytes).map_err(|_| unreadable("it is not UTF-8 text".into()))?;
     match Format::parse(&text).map_err(unreadable)? {

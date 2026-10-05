@@ -40,7 +40,7 @@ fn change(view: &str, ops: Vec<Op>, by: Provenance) -> Change {
 #[test]
 fn atom1_a_landing_with_an_acceptance_is_one_write_and_its_records_agree() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     let w = prov("agent:w", Role::Writer);
     let a = prov("human:a", Role::Approver);
     let d = block("b-00001", "claim", "proposed");
@@ -125,7 +125,7 @@ fn atom1_a_landing_with_an_acceptance_is_one_write_and_its_records_agree() {
 fn atom1_an_index_failure_leaves_nothing_of_the_landing() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let mut s = Store::open(&dir).unwrap();
+    let mut s = Store::create(&dir).unwrap();
     let w = prov("agent:w", Role::Writer);
     s.commit_to_view(
         "work",
@@ -147,7 +147,7 @@ fn atom1_an_index_failure_leaves_nothing_of_the_landing() {
         (canon, view.clone())
     );
     drop(s);
-    let mut s = Store::open(&dir).unwrap();
+    let mut s = Store::create(&dir).unwrap();
     s.reindex().unwrap();
     assert_eq!(
         (s.canon_head().unwrap(), s.view_head("work").unwrap()),
