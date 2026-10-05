@@ -126,7 +126,6 @@ fn ref1_the_payload_is_never_visible_text() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task post-G3 (the scan still reports the kind markers, folder kinds, table cells and hashes that Tasks 6, 8 and 12 fix)"]
 fn ref1_the_payload_is_never_visible_text_and_the_scan_stays_clean() {
     let (_d, _r, ids, out) = site_frozen();
     let h = html(out.path(), "specification/patterns.html");
