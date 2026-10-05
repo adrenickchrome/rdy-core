@@ -9,6 +9,13 @@ pub struct Target {
     pub version: Option<String>,
 }
 
+/// The fix hint every read surface gives with a malformed ref.
+pub const BAD_REF_FIX: &str =
+    "give an id, id@version, or a ref line such as [c-7KQ2M@v1.0.0] Doc: \"text\"";
+
+/// The fix hint every read surface gives when a pinned version meets a different scope.
+pub const PIN_CLASH_FIX: &str = "use the pinned version, or read the bare id with a scope";
+
 fn bad(text: &str) -> String {
     format!("a ref is [id] or [id@version]: {text}")
 }
@@ -42,6 +49,28 @@ pub fn parse_target(text: &str) -> Result<Target, String> {
         id: id.to_string(),
         version: version.map(str::to_string),
     })
+}
+
+impl Target {
+    /// The scope text a read under this target uses: `Some("tag:<version>")` for a pin,
+    /// `given` unchanged otherwise (the caller applies its own default). A `given` scope that
+    /// differs from the pin is an error message, to be mapped to `E_BAD_INPUT` with
+    /// [`PIN_CLASH_FIX`].
+    pub fn scope_text(&self, given: Option<&str>) -> Result<Option<String>, String> {
+        match &self.version {
+            Some(v) => {
+                let pin = format!("tag:{v}");
+                if given.is_some_and(|s| s != pin) {
+                    return Err(format!(
+                        "{} pins version {v}; drop scope or make it tag:{v}",
+                        self.id
+                    ));
+                }
+                Ok(Some(pin))
+            }
+            None => Ok(given.map(str::to_string)),
+        }
+    }
 }
 
 /// The snippet of a ref: whitespace collapsed, a straight `"` turned into `'`, cut at the last
@@ -179,5 +208,22 @@ mod tests {
             format_ref(&head("c-WYF81", None, &["Doc"]), &snippet("Body.", 80)),
             "[c-WYF81] Doc: \"Body.\""
         );
+    }
+    #[test]
+    fn refv1_scope_text_pins_clashes_and_passes_the_given_scope_through() {
+        let bare = parse_target("c-WYF81").unwrap();
+        assert_eq!(bare.scope_text(None), Ok(None));
+        assert_eq!(bare.scope_text(Some("view:x")), Ok(Some("view:x".into())));
+        let pinned = parse_target("[c-WYF81@v1.2.0] Doc: \"Body.\"").unwrap();
+        assert_eq!(pinned.scope_text(None), Ok(Some("tag:v1.2.0".into())));
+        assert_eq!(
+            pinned.scope_text(Some("tag:v1.2.0")),
+            Ok(Some("tag:v1.2.0".into()))
+        );
+        assert_eq!(
+            pinned.scope_text(Some("canon")),
+            Err("c-WYF81 pins version v1.2.0; drop scope or make it tag:v1.2.0".to_string())
+        );
+        assert!(BAD_REF_FIX.contains("id@version") && PIN_CLASH_FIX.contains("pinned version"));
     }
 }

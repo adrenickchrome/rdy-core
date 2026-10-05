@@ -267,25 +267,13 @@ fn read_target(
     id: &str,
     scope: &Option<String>,
 ) -> Result<(Scope, BlockId), RdyError> {
-    let t = rdy_model::reference::parse_target(id).map_err(|m| {
-        RdyError::new(
-            E_BAD_INPUT,
-            m,
-            "give an id, id@version, or a ref line such as [c-7KQ2M@v1.0.0] Doc: \"text\"",
-        )
-    })?;
-    let scope = match &t.version {
-        Some(v) => {
-            let pin = format!("tag:{v}");
-            if scope.as_deref().is_some_and(|s| s != pin) {
-                return Err(RdyError::new(
-                    E_BAD_INPUT,
-                    format!("{id} pins version {v}; drop scope or make it tag:{v}"),
-                    "use the pinned version, or read the bare id with a scope",
-                ));
-            }
-            st.rdy.resolve_read_scope(&pin, Some(&st.view))?
-        }
+    let t = rdy_model::reference::parse_target(id)
+        .map_err(|m| RdyError::new(E_BAD_INPUT, m, rdy_model::reference::BAD_REF_FIX))?;
+    let pinned = t
+        .scope_text(scope.as_deref())
+        .map_err(|m| RdyError::new(E_BAD_INPUT, m, rdy_model::reference::PIN_CLASH_FIX))?;
+    let scope = match pinned {
+        Some(text) => st.rdy.resolve_read_scope(&text, Some(&st.view))?,
         None => scope_of(st, scope)?,
     };
     let bid = st.rdy.resolve_id(&scope, &t.id)?;

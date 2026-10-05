@@ -288,26 +288,15 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                 }
                 Cmd::Show { id, scope } => {
                     let target = rdy_model::reference::parse_target(&id).map_err(|m| {
-                        RdyError::new(
-                            E_BAD_INPUT,
-                            m,
-                            "give an id, id@version, or a ref line such as [c-7KQ2M@v1.0.0] Doc: \"text\"",
-                        )
+                        RdyError::new(E_BAD_INPUT, m, rdy_model::reference::BAD_REF_FIX)
                     })?;
-                    let scope = match &target.version {
-                        Some(v) => {
-                            let pin = format!("tag:{v}");
-                            if scope.as_deref().is_some_and(|s| s != pin) {
-                                return Err(RdyError::new(
-                                    E_BAD_INPUT,
-                                    format!("{id} pins version {v}; drop scope or make it tag:{v}"),
-                                    "use the pinned version, or read the bare id with a scope",
-                                ));
-                            }
-                            r.resolve_read_scope(&pin, None)?
-                        }
-                        None => r.resolve_read_scope(scope.as_deref().unwrap_or("canon"), None)?,
-                    };
+                    let text = target
+                        .scope_text(scope.as_deref())
+                        .map_err(|m| {
+                            RdyError::new(E_BAD_INPUT, m, rdy_model::reference::PIN_CLASH_FIX)
+                        })?
+                        .unwrap_or_else(|| "canon".to_string());
+                    let scope = r.resolve_read_scope(&text, None)?;
                     let bid = r.resolve_id(&scope, &target.id)?;
                     let ctx = r.context(&scope, &bid)?;
                     let json = serde_json::to_value(&ctx).expect("json");
