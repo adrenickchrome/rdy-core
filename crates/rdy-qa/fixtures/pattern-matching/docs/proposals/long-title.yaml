@@ -1,0 +1,37 @@
+- id: d-7Z6JV
+  type: doc
+  order: a4
+  fields:
+    title: A deliberately long title that goes on and on, so that headings, breadcrumbs, navigation entries,
+      page titles and search results all have to cope with a name far longer than anyone would choose
+      for a.
+    doc_type: overview
+- id: s-3X9G9
+  type: section
+  parent: d-7Z6JV
+  order: a1
+  fields:
+    title: Summary
+- id: p-G5EAV
+  type: prose
+  parent: s-3X9G9
+  order: a1
+  body: This document exists to test a very long title. Its content is short on purpose. See {{d-8PBD5}}
+    for the real specification and {{d-JBCJC}} for the overview.
+- id: s-A6547
+  type: section
+  parent: d-7Z6JV
+  order: a2
+  fields:
+    title: Goals
+- id: p-Z97W4
+  type: prose
+  parent: s-A6547
+  order: a1
+  body: A page with a long title should wrap its heading, shorten its breadcrumb and keep its navigation
+    entry on one line.
+- id: n-KSHNP
+  type: note
+  parent: s-A6547
+  order: a2
+  body: Nothing else on this page is long.

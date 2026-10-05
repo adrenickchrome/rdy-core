@@ -1,0 +1,244 @@
+- id: d-6TCS9
+  type: doc
+  order: a2
+  fields:
+    title: How a match runs
+    doc_type: flows
+- id: s-Y6THC
+  type: section
+  parent: d-6TCS9
+  order: a1
+  fields:
+    title: Evaluation order
+- id: p-QEDC5
+  type: prose
+  parent: s-Y6THC
+  order: a1
+  body: The subject is evaluated exactly once. Case blocks are then tried top to bottom; a guard is only
+    reached when its pattern has already succeeded, and evaluation stops at the first case block selected.
+    The rules themselves are in {{d-8PBD5}}, and the reasons for the order are in {{d-3T4TW}}.
+- id: f-KEF71
+  type: flow
+  parent: s-Y6THC
+  order: a2
+  fields:
+    name: Evaluation of a match statement
+    steps:
+    - Evaluate the subject expression once.
+    - Take the next case block. When none is left, no block runs and the statement ends.
+    - Match its pattern against the subject, binding names as the match proceeds. When the pattern fails,
+      go back to the previous step; a {{t-XTQDJ}} is not looked at yet.
+    - When the case block has a guard, evaluate it. A falsy guard sends the match back to take the next
+      case block.
+    - Run the selected block.
+    - Names bound by the pattern remain available after the block.
+    - The match statement completes; no further case block is tried.
+- id: p-C236B
+  type: prose
+  parent: s-Y6THC
+  order: a3
+  body: 'The same order, drawn as a diagram:'
+- id: dg-2MF0M
+  type: diagram
+  parent: s-Y6THC
+  order: a4
+  fields:
+    lang: mermaid
+    alt: The evaluation of a match statement as a flowchart
+  body: |-
+    flowchart TD
+      S([{{f-KEF71}}]) --> Q{Case blocks left?}
+      Q -- no --> X([No block runs])
+      Q -- yes --> C[Take the next case block]
+      C --> P[Match its pattern against the subject]
+      P -- fails --> Q
+      P -- succeeds --> G{Has a guard?}
+      G -- no --> R[Run the block]
+      G -- yes --> E[Evaluate the guard]
+      E -- falsy --> Q
+      E -- truthy --> R
+      R --> B([Bound names remain available])
+- id: n-E524M
+  type: note
+  parent: s-Y6THC
+  order: a5
+  body: Outcomes that return to the next case block are drawn as arrows back to the question at the top
+    of the loop.
+- id: s-PR9DG
+  type: section
+  parent: d-6TCS9
+  order: a2
+  fields:
+    title: The shape of a pattern
+- id: p-RGPPK
+  type: prose
+  parent: s-PR9DG
+  order: a1
+  body: Every pattern is built from the closed patterns below. The grammar in full is under the match
+    statement in {{d-8PBD5}}.
+- id: dg-J21FA
+  type: diagram
+  parent: s-PR9DG
+  order: a2
+  fields:
+    lang: mermaid
+    alt: The grammar of a pattern as a tree
+  body: |-
+    flowchart TD
+      CB[Case block] --> P[Pattern]
+      CB --> GD[{{t-XTQDJ}}]
+      CB --> BL[Block]
+      P --> AS[As-pattern]
+      P --> OR[Or-pattern]
+      AS --> OR
+      OR --> CL[Closed pattern]
+      CL --> LI[Literal]
+      CL --> CA[Capture]
+      CL --> WI[Wildcard]
+      CL --> VA[Value]
+      CL --> GR[Group]
+      CL --> SE[Sequence]
+      CL --> MA[Mapping]
+      CL --> CP[Class]
+- id: s-SM8WZ
+  type: section
+  parent: d-6TCS9
+  order: a3
+  fields:
+    title: Pattern kinds at a glance
+- id: p-WPA2D
+  type: prose
+  parent: s-SM8WZ
+  order: a1
+  body: 'One row for every kind of pattern: what it looks like, when it succeeds, and what it binds.'
+- id: tb-T4K0D
+  type: table
+  parent: s-SM8WZ
+  order: a2
+  fields:
+    columns:
+    - Pattern
+    - Looks like
+    - Succeeds when
+    - Binds
+    rows:
+    - - Literal
+      - '`42`, `"go"`, `None`'
+      - subject equals the literal (`is` for the three singletons)
+      - nothing
+    - - Capture
+      - '`direction`'
+      - always
+      - the whole subject
+    - - Wildcard
+      - '`_`'
+      - always
+      - nothing
+    - - Value
+      - '`Color.RED`'
+      - subject equals the looked-up value
+      - nothing
+    - - Group
+      - '`(pattern)`'
+      - the inner pattern succeeds
+      - whatever the inner pattern binds
+    - - Sequence
+      - '`[a, *rest]`'
+      - subject is a sequence of fitting length and each item matches
+      - each subpattern's names; the star binds a list
+    - - Mapping
+      - '`{"k": v, **rest}`'
+      - subject is a mapping with every key present and each value matching
+      - each value's names; the double star binds a dict
+    - - Class
+      - '`Point(x, y=0)`'
+      - subject is an instance and each attribute matches
+      - each subpattern's names
+    - - Or-pattern
+      - '`a | b`'
+      - the first alternative that succeeds
+      - the same names from every alternative
+    - - As-pattern
+      - '`pattern as name`'
+      - the left pattern succeeds
+      - its names, plus the whole subject to `name`
+    normative: true
+- id: s-1HD9V
+  type: section
+  parent: d-6TCS9
+  order: a4
+  fields:
+    title: Sequence length rules
+- id: tb-1NGZE
+  type: table
+  parent: s-1HD9V
+  order: a1
+  fields:
+    columns:
+    - Pattern shape
+    - Subject length must be
+    - Example that matches
+    rows:
+    - - '`[a, b]`'
+      - exactly 2
+      - '`["go", "north"]`'
+    - - '`[a, *rest]`'
+      - at least 1
+      - '`["drop"]`, `["drop", "sword", "shield"]`'
+    - - '`[*start, last]`'
+      - at least 1
+      - '`["pick", "up"]`'
+    - - '`[a, *mid, z]`'
+      - at least 2
+      - '`["pick", "sword", "up"]`'
+    - - '`[]`'
+      - exactly 0
+      - '`[]`'
+- id: p-ZH3FX
+  type: prose
+  parent: s-1HD9V
+  order: a2
+  body: The length rules apply before any item is read; see {{k-9CR0X}}.
+- id: n-1GSMH
+  type: note
+  parent: s-1HD9V
+  order: a3
+  body: The length of a subject is read once, before any item is.
+- id: s-PJ6X1
+  type: section
+  parent: d-6TCS9
+  order: a5
+  fields:
+    title: Illustrations and downloads
+- id: fg-TFCW2
+  type: figure
+  parent: s-PJ6X1
+  order: a1
+  fields:
+    blob: 667893735fd6ddea275b7aa47f9bf71622da7924b3304e8764ab068f69e6dd7c
+    media_type: image/png
+    alt: A case block, annotated
+- id: p-GY462
+  type: prose
+  parent: s-PJ6X1
+  order: a2
+  body: A case block has a pattern, an optional guard and an indented block.
+- id: fg-Z4AYY
+  type: figure
+  parent: s-PJ6X1
+  order: a3
+  fields:
+    blob: 0630056c54ce9b97cd46579e6e84307ffdfc4133c0a8a1c3d53703fb49cb1b4e
+    media_type: text/plain
+    alt: Pattern cheat sheet
+- id: p-S1XJK
+  type: prose
+  parent: s-PJ6X1
+  order: a4
+  body: The cheat sheet above lists each kind of pattern on one line.
+- id: n-Q851Q
+  type: note
+  parent: s-PJ6X1
+  order: a5
+  body: 'The figure and the cheat sheet are the two kinds of asset a page can carry: a picture shown in
+    place, and a file offered for download.'

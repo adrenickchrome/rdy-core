@@ -1,0 +1,24 @@
+- id: d-FCG1T
+  type: doc
+  order: a2
+  fields:
+    title: Σημασιολογία
+    doc_type: glossary
+- id: s-2Q6JV
+  type: section
+  parent: d-FCG1T
+  order: a1
+  fields:
+    title: Εισαγωγή
+- id: p-C1863
+  type: prose
+  parent: s-2Q6JV
+  order: a1
+  body: Αυτή η σελίδα συνοψίζει τη σημασιολογία της εντολής match. Οι κανόνες βρίσκονται στο {{d-8PBD5}}
+    και οι λόγοι τους στο {{d-3T4TW}}.
+- id: s-X696E
+  type: section
+  parent: d-FCG1T
+  order: a2
+  fields:
+    title: Σημειώσεις

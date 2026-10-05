@@ -1,0 +1,84 @@
+- id: d-16X0K
+  type: doc
+  order: a2
+  fields:
+    title: Explicit pattern syntax
+    doc_type: decisions-log
+- id: s-H0H2C
+  type: section
+  parent: d-16X0K
+  order: a1
+  fields:
+    title: Summary
+- id: p-7JFD2
+  type: prose
+  parent: s-H0H2C
+  order: a1
+  body: 'This proposal asked for explicit markers on every pattern element: `as name` to bind, `== expr`
+    for equality, `is expr` for identity, and a double underscore as the wildcard. It was rejected together
+    with the other alternative, as recorded in {{D-FD7AD}}.'
+- id: cd-DWAPX
+  type: code
+  parent: s-H0H2C
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        case ["go", as direction]:
+            ...
+        case ["look", == target]:
+            ...
+- id: s-4W2GP
+  type: section
+  parent: d-16X0K
+  order: a2
+  fields:
+    title: The proposal
+- id: p-3059W
+  type: prose
+  parent: s-4W2GP
+  order: a1
+  body: Marking every element removes the one rule that readers found hardest, the difference between
+    a bare name and a dotted one. In exchange the common case gains clutter on every line.
+- id: p-XAENC
+  type: prose
+  parent: s-4W2GP
+  order: a2
+  body: The council's view was that explicit markers would clutter the common case to simplify a rarer
+    one. The adopted rule is stated in {{s-PZFV5}}.
+- id: ra-QH8DH
+  type: rationale
+  parent: s-4W2GP
+  order: a3
+  body: A marker on every element makes the rare case clear and the common case noisy.
+- id: e-80KQ2
+  type: example
+  parent: s-4W2GP
+  order: a4
+  body: '`case Point(x, y):` becomes a line with two markers where the adopted rule needs none.'
+- id: s-15CMA
+  type: section
+  parent: d-16X0K
+  order: a3
+  fields:
+    title: Decisions
+- id: D-KN01Z
+  type: decision
+  parent: s-15CMA
+  order: a1
+  fields:
+    statement: Every pattern element carries an explicit marker
+    status: rejected
+    decided_at: '2021-02-08T10:00:00Z'
+    recorded_at: '2021-02-08T10:00:00Z'
+    options:
+    - markers on every element
+    - markers on captures only
+    - the dotted-name rule
+    authority_basis: recorded_ruling
+    attested_by: Steering Council
+  body: The adopted rule keeps the common case free of markers.
+  links:
+    affects:
+    - target: r-CMSDK

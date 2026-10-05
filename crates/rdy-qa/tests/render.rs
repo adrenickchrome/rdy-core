@@ -1,59 +1,12 @@
 use rdy_engine::*;
-use rdy_qa::fixtures::*;
-use serde_json::json;
-use std::path::{Path, PathBuf};
-
-const EVIL: &str = "<script>alert(1)</script>\"'><img src=x onerror=alert(2)>&amp;";
+use rdy_qa::golden::{self, pages};
+use std::path::Path;
 
 fn hostile_site() -> (tempfile::TempDir, tempfile::TempDir) {
-    let (d, mut r) = project();
-    let blob = r.store_mut().put_blob(b"png").unwrap().to_string();
-    let res = write(&mut r, "work", json!([
-        {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "evil", "title": EVIL, "description": EVIL}},
-        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "page", "title": EVIL, "doc_type": "glossary"}},
-        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": EVIL}},
-        {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": EVIL}, "body": EVIL},
-        {"op": "create", "type": "claim", "parent": "$s", "body": format!("{EVIL} {{{{$t}}}}")},
-        {"op": "create", "type": "table", "parent": "$s", "fields": {"columns": [EVIL], "rows": [[EVIL]]}},
-        {"op": "create", "type": "flow", "parent": "$s", "fields": {"name": EVIL, "steps": [EVIL]}},
-        {"op": "create", "type": "diagram", "parent": "$s", "fields": {"lang": "mermaid", "alt": EVIL}, "body": format!("graph TD\n A[{EVIL}]")},
-        {"op": "create", "type": "code", "parent": "$s", "fields": {"lang": EVIL}, "body": EVIL},
-        {"op": "create", "type": "figure", "parent": "$s", "fields": {"blob": blob, "media_type": "image/png", "alt": EVIL}}
-    ])).unwrap();
-    r.decide(
-        &writer(),
-        "work",
-        DecisionInput {
-            parent: res.created["$s"].clone(),
-            statement: EVIL.into(),
-            options: vec![EVIL.into()],
-            body: EVIL.into(),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    land(&mut r, "work").unwrap();
-    r.tag(&approver(), "v0.1.0", None, Some(EVIL.into()))
-        .unwrap();
+    let (d, mut r) = golden::hostile();
     let out = tempfile::tempdir().unwrap();
     rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
     (d, out)
-}
-
-fn pages(root: &Path) -> Vec<PathBuf> {
-    let mut out = vec![];
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).unwrap() {
-            let p = e.unwrap().path();
-            if p.is_dir() {
-                stack.push(p)
-            } else if p.extension().is_some_and(|x| x == "html") {
-                out.push(p)
-            }
-        }
-    }
-    out
 }
 
 #[test]
@@ -213,82 +166,14 @@ fn render_every_link_resolves() {
 
 #[test]
 fn render_every_link_resolves_on_a_rich_site() {
-    let (_d, mut r) = project();
-    let blob = r.store_mut().put_blob(b"png").unwrap().to_string();
-    let mut ops = vec![
-        json!({"op": "create", "type": "folder", "id": "$fa", "fields": {"name": "a", "title": "A"}}),
-        json!({"op": "create", "type": "folder", "id": "$fb", "parent": "$fa", "fields": {"name": "b", "title": "B"}}),
-        json!({"op": "create", "type": "folder", "id": "$fc", "parent": "$fb", "fields": {"name": "c", "title": "C"}}),
-    ];
-    let folders = ["$fa", "$fb", "$fc"];
-    for (fi, f) in folders.iter().enumerate() {
-        for d in 0..3 {
-            let (doc, sec, term) = (
-                format!("$d{fi}{d}"),
-                format!("$s{fi}{d}"),
-                format!("$t{fi}{d}"),
-            );
-            ops.push(json!({"op": "create", "type": "doc", "id": doc, "parent": f, "fields": {"title": format!("Doc {fi}{d}"), "doc_type": "glossary"}}));
-            ops.push(json!({"op": "create", "type": "section", "id": sec, "parent": doc, "fields": {"title": "Terms"}}));
-            ops.push(json!({"op": "create", "type": "term", "id": term, "parent": sec, "fields": {"name": format!("Term{fi}{d}")}, "body": "A term."}));
-        }
-    }
-    for fi in 0..3 {
-        for d in 0..3 {
-            let (sec, term) = (format!("$s{fi}{d}"), format!("$t{fi}{d}"));
-            // cross-doc refs to other folders and depths
-            let other = format!("$t{}{}", (fi + 1) % 3, d);
-            let far = format!("$t{}{}", (fi + 2) % 3, (d + 1) % 3);
-            ops.push(json!({"op": "create", "type": "claim", "parent": sec, "body": format!("Uses {{{{{other}}}}} and {{{{{far}}}}} and {{{{{term}}}}}.")}));
-        }
-    }
-    ops.push(json!({"op": "create", "type": "figure", "parent": "$s22", "fields": {"blob": blob, "media_type": "image/png", "alt": "pic"}}));
-    ops.push(json!({"op": "create", "type": "diagram", "parent": "$s22", "fields": {"lang": "mermaid", "alt": "d"}, "body": "graph TD\n A[{{$t00}}] --> B"}));
-    let res = write(&mut r, "work", json!(ops)).unwrap();
-    let sec = |k: &str| res.created[k].clone();
-    let dec = |statement: &str, parent: String, affects: Vec<String>| DecisionInput {
-        parent,
-        statement: statement.into(),
-        options: vec!["yes".into(), "no".into()],
-        affects,
-        body: "Because.".into(),
-        ..Default::default()
-    };
-    let d1 = r
-        .decide(
-            &writer(),
-            "work",
-            dec("First", sec("$s00"), vec![sec("$t22")]),
-        )
-        .unwrap();
-    let d1_id = d1.created.values().next().expect("decision id").clone();
-    r.decide(
-        &writer(),
-        "work",
-        dec("Second", sec("$s11"), vec![sec("$t00")]),
-    )
-    .unwrap();
-    r.supersede(
-        &writer(),
-        "work",
-        &d1_id,
-        None,
-        dec("Third supersedes first", sec("$s22"), vec![sec("$t11")]),
-    )
-    .unwrap();
-    let landing = land(&mut r, "work").unwrap();
-    let v = r.tag(&approver(), "v1.0.0", None, None).unwrap();
-    // unlanded changes in a view
-    write(&mut r, "draft", json!([
-        {"op": "create", "type": "doc", "parent": sec("$fc"), "fields": {"title": "Draft doc", "doc_type": "glossary"}},
-    ])).unwrap();
-    let _ = landing;
-    let mut scopes = vec![
+    let (_d, mut r) = golden::generated_tree();
+    let landing: rdy_model::Hash = r.versions().unwrap()[0].landing.parse().unwrap();
+    let scopes = [
         ("canon", Scope::Canon),
         ("view", Scope::View("draft".into())),
-        ("tag", Scope::At(v.landing.parse().unwrap())),
+        ("tag", Scope::At(landing)),
     ];
-    for (name, scope) in scopes.drain(..) {
+    for (name, scope) in scopes {
         let out = tempfile::tempdir().unwrap();
         rdy_render::render_site(&mut r, &scope, out.path()).unwrap();
         let (broken, st) = check_links(out.path());

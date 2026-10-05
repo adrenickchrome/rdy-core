@@ -1,0 +1,80 @@
+- id: d-1BGP0
+  type: doc
+  order: a3
+  fields:
+    title: Precise semantics for pattern matching
+    doc_type: open-questions
+- id: s-DM0SE
+  type: section
+  parent: d-1BGP0
+  order: a1
+  fields:
+    title: Summary
+- id: p-FTPS3
+  type: prose
+  parent: s-DM0SE
+  order: a1
+  body: 'This draft proposes to say exactly which methods a match statement calls, in what order and how
+    often, and to read an integer attribute from the class instead of testing against an abstract base
+    class. It is deferred: it is not part of Python 3.10 and the rules in {{d-8PBD5}} stand until it is
+    decided.'
+- id: s-3VDVS
+  type: section
+  parent: d-1BGP0
+  order: a2
+  fields:
+    title: Background
+- id: p-Z2CVH
+  type: prose
+  parent: s-3VDVS
+  order: a1
+  body: The specification leaves the number of calls unspecified so that an implementation may stop early.
+    Library authors who write classes for matching asked for more control, and tool authors asked for
+    rules they could rely on.
+- id: c-QVCVW
+  type: claim
+  parent: s-3VDVS
+  order: a2
+  body: Today an implementation may call the methods it needs once, repeatedly or not at all.
+- id: n-C8E1H
+  type: note
+  parent: s-3VDVS
+  order: a3
+  body: 'The draft remains open: nothing in it has been decided.'
+- id: cd-KPGSV
+  type: code
+  parent: s-3VDVS
+  order: a4
+  fields:
+    lang: python
+  body: |-
+    class Vector:
+        __match_container__ = 1  # draft: read an integer, skip the abstract base class
+- id: s-9HC86
+  type: section
+  parent: d-1BGP0
+  order: a3
+  fields:
+    title: Questions
+- id: Q-ADQZS
+  type: question
+  parent: s-9HC86
+  order: a1
+  fields:
+    prompt: Should the sequence test read an integer attribute from the class instead of the abstract
+      base class? See {{k-9CR0X}}.
+  body: The change would make the test cheaper and let a class opt in without registering.
+- id: Q-EXNX0
+  type: question
+  parent: s-9HC86
+  order: a2
+  fields:
+    prompt: Which single character should stand for the wildcard in a pattern?
+  body: 'Settled: see the wildcard decision in {{d-3T4TW}}.'
+- id: Q-4CTM3
+  type: question
+  parent: s-9HC86
+  order: a3
+  fields:
+    prompt: Should a class be able to opt into matching itself rather than being taken apart?
+  body: That would generalise the special treatment of the built-in types.
