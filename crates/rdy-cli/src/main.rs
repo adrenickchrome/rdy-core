@@ -545,10 +545,12 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                 }
                 Cmd::Import { dir, view } => {
                     let res = r.import(&human(Role::Approver), &view, &dir)?;
-                    Ok((
-                        serde_json::to_value(&res).expect("json"),
-                        format!("imported {} blocks into view {view}", res.created.len()),
-                    ))
+                    let mut text =
+                        format!("imported {} blocks into view {view}", res.created.len());
+                    for w in &res.warnings {
+                        text.push_str(&format!("\nwarning {}: {}", w.code, w.message));
+                    }
+                    Ok((serde_json::to_value(&res).expect("json"), text))
                 }
                 Cmd::Reindex => {
                     r.store_mut().reindex()?;

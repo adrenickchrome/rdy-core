@@ -1,4 +1,5 @@
 use crate::error::*;
+use crate::keys::{self, Keys};
 use crate::{Materialized, Rdy, Scope, Session};
 use rdy_model::tree;
 use rdy_model::{
@@ -7,7 +8,7 @@ use rdy_model::{
 };
 use rdy_schema::{Issue, Pack, has_errors, skeleton_gaps, validate_block};
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 
@@ -267,9 +268,29 @@ impl<'a> Overlay<'a> {
 struct Resolver<'a> {
     placeholders: BTreeMap<String, BlockId>,
     base: &'a Materialized,
+    /// The keys of `base`, indexed on first use: a write that neither sets a key nor names a
+    /// non-id token builds no index.
+    base_keys: OnceCell<Keys>,
+    /// Keys held after earlier ops of this write: folded key → (key as written, holder).
+    set_keys: BTreeMap<String, (String, BlockId)>,
+    /// The folded key each block changed by this write holds in `set_keys`.
+    set_by: BTreeMap<BlockId, String>,
+    /// Blocks this write changed or deleted: their key in `base` no longer counts.
+    rekeyed: BTreeSet<BlockId>,
 }
 
 impl Resolver<'_> {
+    fn new(base: &Materialized) -> Resolver<'_> {
+        Resolver {
+            placeholders: BTreeMap::new(),
+            base,
+            base_keys: OnceCell::new(),
+            set_keys: BTreeMap::new(),
+            set_by: BTreeMap::new(),
+            rekeyed: BTreeSet::new(),
+        }
+    }
+
     fn id(&self, s: &str) -> Result<BlockId, RdyError> {
         if let Some(name) = s.strip_prefix('$') {
             return self.placeholders.get(s).cloned().ok_or_else(|| {
@@ -279,14 +300,55 @@ impl Resolver<'_> {
                 )
             });
         }
-        match BlockId::parse(s) {
-            Ok(id) => Ok(id),
-            // not an id: a folder or doc path, read in the view as it was before this write
-            Err(_) => crate::paths::resolve_in(self.base, s),
+        // not an id: a key (as this write has left them), else a folder or doc path, read in the
+        // view as it was before this write
+        keys::resolve_with(self.base, s, &|t| self.key_holder(t).map(|(_, id)| id))
+    }
+
+    /// The block holding key `text` (ignoring case) after the earlier ops of this write.
+    fn key_holder(&self, text: &str) -> Option<(String, BlockId)> {
+        let folded = rdy_model::key::fold(text);
+        if let Some(h) = self.set_keys.get(&folded) {
+            return Some(h.clone());
+        }
+        self.base_keys
+            .get_or_init(|| Keys::of(self.base.blocks.values()))
+            .holders(text)
+            .iter()
+            .find(|(_, id)| !self.rekeyed.contains(id))
+            .cloned()
+    }
+
+    /// Records the key `id` holds once this op applies (`None`: deleted, or no key).
+    fn note_key(&mut self, id: &BlockId, now: Option<&Block>) {
+        if let Some(old) = self.set_by.remove(id) {
+            self.set_keys.remove(&old);
+        }
+        self.rekeyed.insert(id.clone());
+        if let Some(k) = now.and_then(keys::key_of) {
+            let folded = rdy_model::key::fold(k);
+            self.set_by.insert(id.clone(), folded.clone());
+            self.set_keys.insert(folded, (k.to_string(), id.clone()));
         }
     }
 
-    /// Replaces `{{$name}}` references (as `mode` reads them) with the created ids.
+    /// Refuses `block`'s key when another block already holds it (ignoring case).
+    fn check_key(&self, block: &Block) -> Result<(), RdyError> {
+        let Some(new) = keys::key_of(block) else {
+            return Ok(());
+        };
+        match self.key_holder(new) {
+            Some((theirs, other)) if other != block.id => Err(RdyError::new(
+                E_KEY_CLASH,
+                format!("key {new:?} is already on {other} (as {theirs:?})"),
+                format!("give this block another key, or change {other}'s key first"),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// Replaces `{{$name}}` references (as `mode` reads them) with the created ids, then
+    /// `{{KEY}}` references with the ids holding those keys.
     fn text(&self, s: &str, mode: RefMode) -> String {
         let mut out = String::with_capacity(s.len());
         let mut last = 0;
@@ -298,7 +360,7 @@ impl Resolver<'_> {
             }
         }
         out.push_str(&s[last..]);
-        out
+        keys::rewrite(&out, mode, &|t| self.key_holder(t).map(|(_, id)| id))
     }
 
     fn value(&self, v: FieldValue) -> FieldValue {
@@ -723,10 +785,7 @@ fn build_ops(
     inputs: Vec<OpInput>,
 ) -> Result<Built, RdyError> {
     let mut ov = Overlay::new(base);
-    let mut res = Resolver {
-        placeholders: BTreeMap::new(),
-        base,
-    };
+    let mut res = Resolver::new(base);
     let mut ops = vec![];
     let mut created = BTreeMap::new();
     let mut names = BTreeMap::new();
@@ -818,6 +877,7 @@ fn build_ops(
                 let before = before.as_deref().map(|b| res.id(b)).transpose()?;
                 let order = place(&ov, parent.as_ref(), after.as_ref(), before.as_ref())?;
                 let body = res.text(&body, RefMode::for_body(&block_type));
+                let sets_key = fields.contains_key("key");
                 let mut block = Block {
                     id: new_id.clone(),
                     block_type,
@@ -842,6 +902,10 @@ fn build_ops(
                 }
                 check_decided_at(session, &block, None)?;
                 check_depth(&ov, &block, 0)?;
+                if sets_key {
+                    res.check_key(&block)?;
+                    res.note_key(&new_id, Some(&block));
+                }
                 touched.insert(new_id.clone());
                 ov.set(new_id, Some(block.clone()));
                 ops.push(Op::Create { block });
@@ -865,6 +929,7 @@ fn build_ops(
                 {
                     block.fields.insert("name".into(), FieldValue::Str(n));
                 }
+                let sets_key = fields.contains_key("key");
                 block.fields.extend(res.fields(fields)?);
                 for k in unset {
                     block.fields.remove(&k);
@@ -887,6 +952,12 @@ fn build_ops(
                 let renamed = block.field_str("name") != cur.field_str("name");
                 if renamed {
                     check_name(&ov, &block, i, false)?;
+                }
+                if sets_key {
+                    res.check_key(&block)?;
+                }
+                if keys::key_of(&block) != keys::key_of(cur) {
+                    res.note_key(&id, Some(&block));
                 }
                 touched.insert(id.clone());
                 ov.set(id, Some(block.clone()));
@@ -972,6 +1043,9 @@ fn build_ops(
                         format!("{id} still has children"),
                         "delete or move its children first",
                     ));
+                }
+                if keys::key_of(cur).is_some() {
+                    res.note_key(&id, None);
                 }
                 touched.insert(id.clone());
                 ov.set(id.clone(), None);
@@ -1185,8 +1259,11 @@ fn build_ops(
             let target = BlockId::parse(&tok).map_err(|_| {
                 RdyError::new(
                     E_UNKNOWN_REF,
-                    format!("{{{{{tok}}}}} in {} is not a block id", block.id),
-                    "reference blocks as {{id}}, e.g. {{t-MEDGR}}; find ids with rdy_read or rdy_overview (rdy ls on the command line)",
+                    format!(
+                        "{{{{{tok}}}}} in {} is neither a block id nor a key in this view",
+                        block.id
+                    ),
+                    "reference blocks as {{id}} or {{KEY}}, e.g. {{t-MEDGR}}; find ids and keys with rdy_read",
                 )
             })?;
             let t = ov.get(&target).ok_or_else(|| {

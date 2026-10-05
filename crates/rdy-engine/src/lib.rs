@@ -2,6 +2,7 @@ mod decide;
 mod error;
 mod gate;
 mod io;
+mod keys;
 mod lint;
 mod materialize;
 mod paths;

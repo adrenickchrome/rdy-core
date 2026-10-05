@@ -1,5 +1,5 @@
 use rdy_engine::*;
-use rdy_schema::PackSet;
+use rdy_schema::{PackSet, Severity};
 use std::path::Path;
 
 fn pack() -> rdy_schema::Pack {
@@ -21,6 +21,16 @@ fn check(root: &Path) -> Vec<Diagnostic> {
 
 fn one(root: &Path) -> Diagnostic {
     let d = check(root);
+    assert_eq!(d.len(), 1, "{d:#?}");
+    d[0].clone()
+}
+
+/// The one error (skeleton warnings aside).
+fn one_error(root: &Path) -> Diagnostic {
+    let d: Vec<Diagnostic> = check(root)
+        .into_iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
     assert_eq!(d.len(), 1, "{d:#?}");
     d[0].clone()
 }
@@ -208,7 +218,8 @@ fn inner_blocks_stay_inside_their_files_doc() {
         "b.yaml",
         "- id: d-BBBBB\n  type: doc\n  order: W\n  fields:\n    title: Other\n    doc_type: glossary\n- id: s-BBBBB\n  type: section\n  parent: d-AAAAA\n  order: V\n  fields:\n    title: Terms\n",
     );
-    let d = one(t.path());
+    // d-BBBBB also lacks its Terms section (W_SKELETON_MISSING); this test is about the error
+    let d = one_error(t.path());
     assert_eq!(
         (d.code.as_str(), d.line, d.column),
         ("E_FILE_FORMAT", 9, 3),
@@ -322,7 +333,12 @@ fn inside_a_project_canon_resolves_references_and_parents() {
     assert_eq!(nameless.len(), 1, "one summary warning: {d:#?}");
     assert_eq!(nameless[0].file, "canon");
     assert!(nameless[0].message.contains("2 docs"), "{:?}", nameless[0]);
-    assert_eq!(d.len(), 1, "{d:#?}");
+    // limits.yaml's doc has no Terms section (W_SKELETON_MISSING); this test is about the rest
+    assert_eq!(
+        d.iter().filter(|d| d.code != "W_SKELETON_MISSING").count(),
+        1,
+        "{d:#?}"
+    );
     // without canon the reference is unknown
     assert!(
         check(t.path()).iter().any(|d| d.code == "E_UNKNOWN_REF"),

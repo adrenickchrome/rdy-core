@@ -84,8 +84,27 @@ impl Rdy {
         // it is not deleted
         deleted.retain(|id| next.get(id).is_none());
         let mut issues = vec![];
+        // two views can each give a different block the same key: index next's keys once, and
+        // only when a touched block has a key
+        let keys = touched
+            .iter()
+            .any(|id| next.get(id).and_then(crate::keys::key_of).is_some())
+            .then(|| crate::keys::Keys::of(next.blocks.values()));
         for id in &touched {
             let Some(found) = next.get(id) else { continue };
+            if let (Some(keys), Some(k)) = (&keys, crate::keys::key_of(found)) {
+                for (_, other) in keys.holders(k) {
+                    if other != id {
+                        issues.push(Issue {
+                            severity: Severity::Error,
+                            code: E_KEY_CLASH,
+                            block: Some(id.clone()),
+                            message: format!("{id} and {other} would both have key {k:?} in canon"),
+                            fix: format!("change the key of {id} in this view"),
+                        });
+                    }
+                }
+            }
             // a doc from M1 has no stored name; readers give it one, so the gate doesn't require it
             let named;
             let b =

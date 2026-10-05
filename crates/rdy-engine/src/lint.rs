@@ -1,9 +1,11 @@
 //! `rdy check`: lints format-2 files without touching the store (addendum B §4.1).
 use crate::Materialized;
 use crate::error::*;
+use crate::keys::{Keys, key_of};
 use crate::tree_io::{Diagnostic, Loaded, read_file, read_tree};
-use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
-use rdy_schema::{Pack, Severity, validate_block};
+use rdy_model::{Block, BlockId, FieldValue, RefMode, key, ref_spans};
+use rdy_schema::{Pack, Severity, skeleton_gaps, validate_block};
+use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -27,6 +29,7 @@ fn issue_at(l: &Loaded, code: &str, message: &str) -> (usize, usize) {
         "E_BODY_REQUIRED" | "E_BODY_FORBIDDEN" => key("body"),
         "E_LINK_TYPE" => key("links"),
         "E_CHILD_TYPE" | "E_ORPHAN" | "E_MISSING_PARENT" => key("parent"),
+        "E_BAD_KEY" => key("fields.key"),
         "E_FIELD_UNKNOWN" | "E_FIELD_KIND" | "E_FIELD_ENUM" | "E_DOC_TYPE" => l
             .keys
             .iter()
@@ -92,8 +95,71 @@ pub fn check_path(
             .map(|l| &l.block)
             .or_else(|| canon.and_then(|m| m.get(id)))
     };
+    // key1: keys of the checked files, and of canon blocks the files don't redefine (indexed
+    // only when a token or a key needs them)
+    let file_keys = Keys::of(first.values().map(|l| &l.block));
+    let canon_index: OnceCell<Keys> = OnceCell::new();
+    let canon_keys = || {
+        canon_index.get_or_init(|| match canon {
+            Some(m) => Keys::of(m.blocks.values().filter(|b| !first.contains_key(&b.id))),
+            None => Keys::default(),
+        })
+    };
+    let is_key = |tok: &str| {
+        key::problem(tok).is_none()
+            && (file_keys.get(tok).is_some() || canon_keys().get(tok).is_some())
+    };
+    // skel1: the section titles under each checked doc, from the checked files
+    let mut section_titles: BTreeMap<&BlockId, Vec<&str>> = BTreeMap::new();
+    for l in first.values() {
+        if l.block.block_type == "section"
+            && let (Some(p), Some(t)) = (&l.block.parent, l.block.field_str("title"))
+        {
+            section_titles.entry(p).or_default().push(t);
+        }
+    }
+    let mut keys_seen: BTreeMap<String, Vec<&BlockId>> = BTreeMap::new();
     for l in &loaded {
         let b = &l.block;
+        let is_first = first.get(&b.id).is_some_and(|f| std::ptr::eq(*f, l));
+        if is_first && let Some(k) = key_of(b) {
+            let at = l.keys.get("fields.key").copied().unwrap_or(l.at);
+            let earlier = keys_seen.entry(key::fold(k)).or_default();
+            let canon_holders = canon_keys().holders(k);
+            for other in earlier
+                .iter()
+                .copied()
+                .chain(canon_holders.iter().map(|(_, id)| id))
+                .filter(|o| *o != &b.id)
+            {
+                diags.push(Diagnostic::error(
+                    &l.file,
+                    at,
+                    E_KEY_CLASH,
+                    format!("key {k:?} is on both {other} and {}", b.id),
+                    "give one of them another key",
+                ));
+            }
+            earlier.push(&b.id);
+        }
+        if is_first && b.block_type == rdy_model::tree::DOC {
+            let titles = section_titles
+                .get(&b.id)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let at = l.keys.get("fields.doc_type").copied().unwrap_or(l.at);
+            for i in skeleton_gaps(pack, b, titles) {
+                diags.push(Diagnostic {
+                    file: l.file.clone(),
+                    line: at.0,
+                    column: at.1,
+                    code: i.code.into(),
+                    message: i.message,
+                    fix: i.fix,
+                    severity: i.severity,
+                });
+            }
+        }
         let parent = b.parent.as_ref().and_then(lookup);
         for i in validate_block(pack, b, parent) {
             let at = issue_at(l, i.code, &i.message);
@@ -112,6 +178,7 @@ pub fn check_path(
                 .ok()
                 .and_then(|id| lookup(&id))
                 .is_none()
+                && !is_key(tok)
         };
         let mut refs: Vec<(String, String)> = vec![];
         for (k, v) in &b.fields {

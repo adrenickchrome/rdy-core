@@ -583,6 +583,9 @@ pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     ))
 }
 
+/// What bodies and text fields accept (md1, dtext1, key1).
+const TEXT_RULES: &str = "Bodies and text fields: **bold**, *italic*, `code`, [link](https://… or a relative path), and in bodies - bullets and 1. numbered lists (indent two spaces to nest). No raw HTML. {{id}} or {{id|words}} references a block; \\{{ is a literal {{. fields.key: optional short human id, unique per project ignoring case, letters/digits/-_. , not shaped like a block id.";
+
 pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError> {
     let pack = st.rdy.pack();
     let traits = |ts: &std::collections::BTreeSet<Trait>| {
@@ -631,6 +634,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             "ops": WRITE_OPS.iter().map(|(n, s)| (n.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
             "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT},
             "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
+            "text": TEXT_RULES,
         })),
     }
 }

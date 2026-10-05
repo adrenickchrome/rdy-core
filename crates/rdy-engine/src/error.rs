@@ -33,6 +33,8 @@ pub const E_STORE_FORMAT: &str = "E_STORE_FORMAT";
 pub const E_INTERNAL: &str = "E_INTERNAL";
 /// Input over a hard limit.
 pub const E_LIMIT: &str = "E_LIMIT";
+/// Two blocks would hold the same key (compared ignoring case).
+pub const E_KEY_CLASH: &str = "E_KEY_CLASH";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RdyError {

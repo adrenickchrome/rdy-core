@@ -40,11 +40,12 @@ impl Rdy {
         resolve_in(self.materialized(scope)?, path)
     }
 
-    /// Text matching the id grammar is an id (not checked to exist); anything else is a path.
+    /// Text matching the id grammar is an id (not checked to exist); anything else is a key,
+    /// else a path (a text that is both, naming different blocks, is refused).
     pub fn resolve_id(&mut self, scope: &Scope, text: &str) -> Result<BlockId, RdyError> {
         match BlockId::parse(text) {
             Ok(id) => Ok(id),
-            Err(_) => self.resolve_path(scope, text),
+            Err(_) => crate::keys::resolve_text(self.materialized(scope)?, text),
         }
     }
 
