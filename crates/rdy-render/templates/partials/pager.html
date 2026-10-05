@@ -1,1 +1,2 @@
-<!-- partials/pager.html: Task 6 -->
+{% if pager.prev %}<a class="pager-prev" href="{{ pager.prev.href }}"><span class="pager-dir">Previous</span><span class="pager-title">{{ pager.prev.title }}</span></a>{% else %}<span></span>{% endif %}
+{% if pager.next %}<a class="pager-next" href="{{ pager.next.href }}"><span class="pager-dir">Next</span><span class="pager-title">{{ pager.next.title }}</span></a>{% else %}<span></span>{% endif %}

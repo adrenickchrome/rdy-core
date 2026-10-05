@@ -389,7 +389,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
                 let b = sh.m.get(&id?)?;
                 Some(PagerLink {
                     title: site.label(b),
-                    href: rel(&page_url, &site.page(&b.id)?),
+                    href: nav::relative(&page_url, &site.page(&b.id)?),
                 })
             };
             pager = Pager {

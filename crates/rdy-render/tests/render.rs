@@ -495,7 +495,8 @@ fn the_home_page_lists_every_doc_of_a_wide_folder() {
     render_site(&mut r, &Scope::View("work".into()), out.path()).unwrap();
     // the home page lists everything (the sidebar's 50-entry cap is the nav's, and tested there)
     let index = std::fs::read_to_string(out.path().join("index.html")).unwrap();
-    assert!(index.contains("Doc 000") && index.contains("Doc 119") && !index.contains("more</a>"));
+    let main = &index[index.find("<main").unwrap()..index.find("</main>").unwrap()];
+    assert!(main.contains("Doc 000") && main.contains("Doc 119") && !main.contains("more</a>"));
 }
 
 #[test]
