@@ -155,3 +155,80 @@ fn upg1_an_m1_torn_tail_is_repaired_by_the_m1_rule_before_the_upgrade() {
             .contains(".torn-"))
     );
 }
+
+/// An M1 log that holds both format refs as plain frames and no batch marker: what a kill (or a
+/// power loss) during the upgrade's format batch leaves when the ref frames land and the marker
+/// does not. Returns the blobs, and the index as it was before the refs were written.
+fn m1_log_with_format_refs_and_no_marker(dir: &Path) -> (Vec<rdy_model::Hash>, Vec<u8>) {
+    let blobs: Vec<_> = {
+        let mut s = Store::open_legacy_for_tests(dir).unwrap();
+        (0..3u8).map(|i| s.put_blob(&[i; 9]).unwrap()).collect()
+    };
+    let pre_index = std::fs::read(dir.join("index.redb")).unwrap();
+    {
+        let mut s = Store::open_legacy_for_tests(dir).unwrap();
+        s.set_refs(vec![
+            (REF_LOG_FORMAT.into(), b"2".to_vec()),
+            (REF_MIN_READER.into(), b"2".to_vec()),
+        ])
+        .unwrap();
+    }
+    assert!(!dir.join("FORMAT").exists());
+    assert!(!rdy_store::segment::log_has_marker(&dir.join("segments")).unwrap());
+    (blobs, pre_index)
+}
+
+fn assert_finished_upgrade(dir: &Path, blobs: &[rdy_model::Hash]) {
+    // an open that does not write must leave a store the next open accepts
+    let s = Store::open(dir).unwrap();
+    let r = s.open_report().clone();
+    assert!(!r.marker_rule && r.upgraded, "{r:?}");
+    assert!(
+        rdy_store::segment::log_has_marker(&dir.join("segments")).unwrap(),
+        "the open must leave a marker that acknowledges the log"
+    );
+    drop(s);
+    let s = Store::open(dir).unwrap();
+    let r = s.open_report().clone();
+    assert!(r.marker_rule && !r.upgraded, "{r:?}");
+    for (i, h) in blobs.iter().enumerate() {
+        assert_eq!(s.get_blob(h).unwrap(), vec![i as u8; 9]);
+    }
+    assert_eq!(s.get_ref(REF_LOG_FORMAT).unwrap(), Some(b"2".to_vec()));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
+        CURRENT_TEXT
+    );
+    s.verify().unwrap();
+}
+
+/// Round 1, finding 1: both refs are in an M1-rule log with no marker; the open must not write
+/// FORMAT alone, or the next open uses the marker rule on a log with no marker.
+#[test]
+fn upg1_format_refs_without_a_marker_get_a_marker_before_format_is_written() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let (blobs, _) = m1_log_with_format_refs_and_no_marker(&dir);
+    assert_finished_upgrade(&dir, &blobs);
+}
+
+/// Round 1, finding 2: a kill before the upgrade's marker leaves the ref frames and no marker,
+/// with the index from before the upgrade; the next open finishes the upgrade.
+#[test]
+fn upg1_a_kill_before_the_upgrade_marker_is_finished_by_the_next_open() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let (blobs, pre_index) = m1_log_with_format_refs_and_no_marker(&dir);
+    std::fs::write(dir.join("index.redb"), pre_index).unwrap();
+    assert_finished_upgrade(&dir, &blobs);
+}
+
+/// The same, with the index gone: it is rebuilt from the log, and nothing acknowledged is lost.
+#[test]
+fn upg1_a_kill_before_the_upgrade_marker_with_the_index_gone_loses_nothing() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let (blobs, _) = m1_log_with_format_refs_and_no_marker(&dir);
+    std::fs::remove_file(dir.join("index.redb")).unwrap();
+    assert_finished_upgrade(&dir, &blobs);
+}

@@ -264,8 +264,8 @@ impl Store {
     }
 
     /// Makes the log hold the store's format and `FORMAT` mirror it. The log's refs are the truth:
-    /// a newer `min_reader` there is refused; absent refs are written as one marked batch (which
-    /// also upgrades an M1 log) and then `FORMAT` is written; a missing `FORMAT` is rewritten from
+    /// a newer `min_reader` there is refused; absent refs, or any refs in a log with no batch marker yet (an M1-rule open), are written as one
+    /// marked batch (which also upgrades an M1 log) and then `FORMAT` is written; a missing `FORMAT` is rewritten from
     /// the refs. Both steps are idempotent, so a crash between them is finished by the next open.
     fn ensure_format(&mut self, has_format_file: bool) -> Result<(), StoreError> {
         let read = |this: &Store, name: &str| -> Result<Option<u32>, StoreError> {
@@ -290,7 +290,8 @@ impl Store {
             format::check_reader(f, &self.dir)?;
         }
         match (log_format, min_reader) {
-            (Some(log_format), Some(min_reader)) => {
+            // the refs are in the log and the open used the marker rule: only FORMAT is missing
+            (Some(log_format), Some(min_reader)) if self.report.marker_rule => {
                 if !has_format_file {
                     format::write_format_file(
                         &self.dir,
@@ -301,6 +302,10 @@ impl Store {
                     )?;
                 }
             }
+            // The refs are absent, or the open used the M1 rule, so the log holds no batch marker
+            // yet (a kill or power loss can keep the ref frames and lose the marker). FORMAT
+            // selects the marker rule, so a marker must exist before it is written. The refs are
+            // idempotent: this batch's marker acknowledges everything before it.
             _ => {
                 let held_frames = self.log.end()
                     != Location {
