@@ -118,8 +118,11 @@ fn sus3_a_superseded_decision_stays_suspect_after_repin() {
     )
     .unwrap();
     land(&mut r, "work").unwrap();
-    write(&mut r, "work", json!([{"op": "repin", "id": c2}])).unwrap();
-    land(&mut r, "work").unwrap();
+    // the citation did not change, so a repin has nothing to do: it is refused, and the
+    // suspect stays (a superseded or revoked suspect clears only when the citation changes)
+    let e = write(&mut r, "work", json!([{"op": "repin", "id": c2}])).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+    assert!(e.fix.contains("only when the citation changes"), "{e}");
     let sus: Vec<_> = r
         .suspects(&Scope::Canon)
         .unwrap()
@@ -137,4 +140,46 @@ fn sus3_the_repin_op_is_documented() {
             .iter()
             .any(|(n, s)| *n == "repin" && s.contains("\"targets\""))
     );
+}
+
+/// A repin that would change no pin is refused per op, like a no-op rebalance, not committed as
+/// an empty change.
+#[test]
+fn sus3_a_repin_that_changes_no_pin_is_refused() {
+    let (_d, mut r) = project();
+    let (_s, t, c) = claim_on_term(&mut r);
+    let before = r.store().view("work").unwrap().changes.len();
+    // already pins the current version of what it cites
+    let e = write(&mut r, "work", json!([{"op": "repin", "id": c}])).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+    assert!(
+        e.message.contains("already pins the current version"),
+        "{e}"
+    );
+    assert!(e.message.contains(&c), "{e}");
+    assert!(e.fix.contains("only when the citation changes"), "{e}");
+    // cites nothing
+    let e = write(&mut r, "work", json!([{"op": "repin", "id": t}])).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+    assert_eq!(r.store().view("work").unwrap().changes.len(), before);
+    // one op that would change a pin does not excuse a sibling that would not
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": t, "body": "Balances in pence."}]),
+    )
+    .unwrap();
+    let before = r.store().view("work").unwrap().changes.len();
+    let e = write(
+        &mut r,
+        "work",
+        json!([{"op": "repin", "id": c}, {"op": "repin", "id": t}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+    assert!(e.message.contains(&t), "names the no-op block: {e}");
+    assert_eq!(r.store().view("work").unwrap().changes.len(), before);
+    // the repin that does change a pin still lands
+    write(&mut r, "work", json!([{"op": "repin", "id": c}])).unwrap();
+    assert_eq!(r.store().view("work").unwrap().changes.len(), before + 1);
 }

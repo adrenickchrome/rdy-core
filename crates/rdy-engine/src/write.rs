@@ -1083,6 +1083,7 @@ fn build_ops(
                     .filter_map(|t| BlockId::parse(t).ok())
                     .chain(cur.links.values().flatten().map(|l| l.target.clone()))
                     .collect();
+                let targets_given = !targets.is_empty();
                 let wanted: Vec<BlockId> = if targets.is_empty() {
                     cited.iter().cloned().collect()
                 } else {
@@ -1109,6 +1110,24 @@ fn build_ops(
                         )
                     })?;
                     block.pins.insert(t.clone(), target.version_hash());
+                }
+                // like a no-op rebalance, a repin that changes no pin is refused, per op
+                if block.pins == cur.pins {
+                    let what = if targets_given {
+                        wanted
+                            .iter()
+                            .map(|t| t.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    } else {
+                        "everything it cites".to_string()
+                    };
+                    return Err(bad(
+                        format!(
+                            "{id} already pins the current version of {what}; nothing to repin"
+                        ),
+                        "a superseded or revoked suspect clears only when the citation changes, not by repinning; rdy_context lists the block's suspects",
+                    ));
                 }
                 repinned.extend(wanted);
                 prior.push((true, block.pins.clone())); // pins set here; the second pass keeps them

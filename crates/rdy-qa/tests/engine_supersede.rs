@@ -149,3 +149,95 @@ fn sup1_mcp_supersede_drops_a_kind_given_as_an_empty_list() {
     assert!(out["inherited"].get("affects").is_none(), "{out}");
     assert!(out["inherited"]["depends_on"].is_array(), "{out}");
 }
+
+fn supersede_input(s: &str) -> DecisionInput {
+    DecisionInput {
+        parent: s.to_string(),
+        statement: "Newer".into(),
+        ..Default::default()
+    }
+}
+
+/// A kind name rdy_supersede does not know is refused, not ignored: a typo would still inherit.
+#[test]
+fn sup1_an_unknown_no_inherit_kind_is_refused() {
+    let (_d, mut r) = project();
+    let (s, _ids, d1) = setup(&mut r);
+    let before = r.store().view("work").unwrap().changes.len();
+    let mut d = supersede_input(&s);
+    d.no_inherit = vec!["affect".into()];
+    let e = r.supersede(&writer(), "work", &d1, None, d).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+    assert!(e.message.contains("affect"), "{e}");
+    for kind in ["affects", "depends_on", "conditional_on", "refines"] {
+        assert!(e.fix.contains(kind), "the fix lists {kind}: {e}");
+    }
+    assert_eq!(r.store().view("work").unwrap().changes.len(), before);
+}
+
+/// An inherited link whose target was deleted in the view is refused up front, naming the old
+/// decision, the kind and the target, instead of a generic failure about a decision never made.
+#[test]
+fn sup1_an_inherited_link_to_a_deleted_target_is_refused_before_writing() {
+    let (_d, mut r) = project();
+    let (s, ids, d1) = setup(&mut r);
+    let t = ids["$t"].as_str().unwrap().to_string();
+    write(&mut r, "work", json!([{"op": "delete", "id": t}])).unwrap();
+    let before = r.store().view("work").unwrap().changes.len();
+    let e = r
+        .supersede(&writer(), "work", &d1, None, supersede_input(&s))
+        .unwrap_err();
+    assert_eq!(e.code, "E_UNKNOWN_REF", "{e}");
+    assert!(
+        e.message
+            .contains(&format!("{d1}'s affects link to {t} no longer exists")),
+        "{e}"
+    );
+    assert!(e.message.contains("can't be inherited"), "{e}");
+    assert!(e.fix.contains("no_inherit"), "{e}");
+    assert!(e.fix.contains("\"affects\": []"), "{e}");
+    assert_eq!(r.store().view("work").unwrap().changes.len(), before);
+    // giving the kind, or dropping it, gets past it
+    let mut d = supersede_input(&s);
+    d.no_inherit = vec!["affects".into()];
+    r.supersede(&writer(), "work", &d1, None, d).unwrap();
+}
+
+/// An inherited link keeps its `part`: dropping it would widen the new decision's scope to the
+/// whole target.
+#[test]
+fn sup1_inherited_links_keep_their_part() {
+    let (_d, mut r) = project();
+    let (s, ids, _d1) = setup(&mut r);
+    let t = ids["$t"].as_str().unwrap().to_string();
+    let d1 = write(
+        &mut r,
+        "work",
+        json!([{
+            "op": "create", "type": "decision", "parent": s,
+            "fields": {"statement": "Money back is a refund", "status": "proposed"},
+            "links": {"affects": [{"target": t, "part": "Money back"}]}
+        }]),
+    )
+    .unwrap()
+    .created["op0"]
+        .clone();
+    land(&mut r, "work").unwrap();
+    let res = r
+        .supersede(&writer(), "work", &d1, None, supersede_input(&s))
+        .unwrap();
+    let d2 = r
+        .block(
+            &Scope::View("work".into()),
+            &BlockId::parse(&res.created["$decision"]).unwrap(),
+        )
+        .unwrap();
+    let l = &d2.links["affects"];
+    assert_eq!(l.len(), 1);
+    assert_eq!(l[0].target.to_string(), t);
+    assert_eq!(l[0].part.as_deref(), Some("Money back"));
+    assert_eq!(
+        serde_json::to_value(&res.inherited).unwrap(),
+        json!({"affects": [t]})
+    );
+}
