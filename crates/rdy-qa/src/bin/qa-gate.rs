@@ -103,14 +103,17 @@ fn write_baselines(classes: &Classes) -> std::io::Result<()> {
 /// Runs the perf workload and compares it; returns (verdicts, note, ok).
 fn perf_tier(
     rebaseline: bool,
+    deep: bool,
     machine: &str,
     notes: &mut Vec<String>,
 ) -> (Vec<perf::Verdict>, String, bool) {
     eprintln!("==> perf (qa-perf)");
-    let out = cargo(&["run", "-q", "-p", "rdy-qa", "--release", "--bin", "qa-perf"])
-        .current_dir(root())
-        .stderr(Stdio::inherit())
-        .output();
+    let mut c = cargo(&["run", "-q", "-p", "rdy-qa", "--release", "--bin", "qa-perf"]);
+    if deep {
+        // the large tier (about 50k blocks, the `_50k` ops)
+        c.env("RDY_QA_DEEP", "1");
+    }
+    let out = c.current_dir(root()).stderr(Stdio::inherit()).output();
     let out = match out {
         Ok(o) if o.status.success() => o,
         Ok(o) => {
@@ -147,13 +150,10 @@ fn perf_tier(
     let note;
     if missing || rebaseline {
         verdicts = perf::compare(None, &measures);
-        classes.insert(
-            machine.to_string(),
-            Baseline {
-                machine: machine.to_string(),
-                ops: measures.iter().map(|m| (m.op.clone(), m.clone())).collect(),
-            },
-        );
+        // the measured ops replace their entries and every other op is kept, so a typical-tier
+        // rebaseline never deletes the `_50k` baseline
+        let merged = perf::merge_baseline(classes.get(machine), machine, &measures);
+        classes.insert(machine.to_string(), merged);
         if let Err(e) = write_baselines(&classes) {
             return (
                 verdicts,
@@ -169,11 +169,18 @@ fn perf_tier(
             format!("Rebaselined `{machine}` in crates/rdy-qa/qa-baseline.json (commit the diff).")
         };
     } else {
-        let base = classes.get(machine);
-        if let Some(b) = base {
+        // a typical run does not measure the `_50k` ops: their absence is not drift
+        let base = classes.get(machine).map(|b| {
+            if deep {
+                b.clone()
+            } else {
+                perf::typical_only(b)
+            }
+        });
+        if let Some(b) = &base {
             notes.extend(report::baseline_drift(b, &measures));
         }
-        verdicts = perf::compare(base, &measures);
+        verdicts = perf::compare(base.as_ref(), &measures);
         note = format!("Compared against the baseline for `{machine}`.");
     }
     let ok = verdicts.iter().all(|v| v.pass);
@@ -329,7 +336,7 @@ fn main() {
     }
 
     let (perf_verdicts, perf_note, perf_ok) = if plan.perf {
-        perf_tier(args.rebaseline, &machine, &mut notes)
+        perf_tier(args.rebaseline, args.deep, &machine, &mut notes)
     } else {
         (vec![], "Skipped (`--skip-perf`).".to_string(), true)
     };
