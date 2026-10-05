@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 const OBJECTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("objects");
 /// hash (32 bytes) followed by the kind byte -> the location of that kind's object with that hash.
 const TYPED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("typed");
+/// a version hash, then the hash of a change that produced it -> empty: every producer of every
+/// version, since two changes (in two views, or a view and a landing) can write identical bytes.
 const PRODUCERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("producers");
 /// a view name's UTF-8 bytes, a 0x00 byte, then the op hash -> empty: the ops of each view.
 const VIEW_OPS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("view_ops");
@@ -28,6 +30,7 @@ pub enum IndexEntry {
         hash: Hash,
         loc: Location,
     },
+    /// `change` has an op that produces `version`; a version keeps every producer.
     Producer {
         version: Hash,
         change: Hash,
@@ -223,9 +226,10 @@ impl Index {
                         }
                     }
                     IndexEntry::Producer { version, change } => {
-                        producers
-                            .insert(&version.0[..], &change.0[..])
-                            .map_err(db)?;
+                        let mut key = [0u8; 64];
+                        key[..32].copy_from_slice(&version.0);
+                        key[32..].copy_from_slice(&change.0);
+                        producers.insert(&key[..], &[][..]).map_err(db)?;
                     }
                     IndexEntry::Ref(name, value) => {
                         refs.insert(name.as_str(), &value[..]).map_err(db)?;
@@ -273,13 +277,21 @@ impl Index {
         }
     }
 
-    pub fn producer(&self, version: &Hash) -> Result<Option<Hash>, StoreError> {
+    /// The changes with an op that produces `version`, in ascending hash order.
+    pub fn producers(&self, version: &Hash) -> Result<Vec<Hash>, StoreError> {
         let r = self.db.begin_read().map_err(db)?;
         let t = r.open_table(PRODUCERS).map_err(db)?;
-        match t.get(&version.0[..]).map_err(db)? {
-            Some(v) => Ok(Some(hash_from(v.value(), "producer entry")?)),
-            None => Ok(None),
+        let mut out = vec![];
+        for item in t.range(&version.0[..]..).map_err(db)? {
+            let (k, _) = item.map_err(db)?;
+            let key = k.value();
+            if !key.starts_with(&version.0) {
+                break;
+            }
+            // every key is a version and a change, 64 bytes; anything else is damage
+            out.push(hash_from(&key[32..], "producer entry")?);
         }
+        Ok(out)
     }
 
     /// The ops of `view`'s chain, in ascending hash order.

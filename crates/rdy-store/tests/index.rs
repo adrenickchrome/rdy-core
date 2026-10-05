@@ -53,7 +53,8 @@ fn apply_persists_across_reopen() {
     }
     let idx = Index::open(&path).unwrap();
     assert_eq!(idx.object(&h).unwrap(), Some(loc));
-    assert_eq!(idx.producer(&v).unwrap(), Some(c));
+    // merge1 fix round 1: a version keeps every producer, so the index lists them
+    assert_eq!(idx.producers(&v).unwrap(), vec![c]);
     assert_eq!(idx.get_ref("canon").unwrap(), Some(vec![9]));
     let views = idx.refs_with_prefix("view/").unwrap();
     assert_eq!(
@@ -84,13 +85,17 @@ fn a_malformed_producer_entry_is_a_decode_error_not_a_panic() {
             let mut t = w
                 .open_table(redb::TableDefinition::<&[u8], &[u8]>::new("producers"))
                 .unwrap();
-            t.insert(&[7u8; 32][..], &b"short"[..]).unwrap();
+            // merge1 fix round 1: an entry is the version then the change, so a key with a short
+            // change hash is the malformed entry
+            let mut key = vec![7u8; 32];
+            key.extend_from_slice(b"short");
+            t.insert(&key[..], &[][..]).unwrap();
         }
         w.commit().unwrap();
     }
     let idx = Index::open(&path).unwrap();
     assert!(matches!(
-        idx.producer(&Hash([7u8; 32])),
+        idx.producers(&Hash([7u8; 32])),
         Err(rdy_store::StoreError::Decode(_))
     ));
 }

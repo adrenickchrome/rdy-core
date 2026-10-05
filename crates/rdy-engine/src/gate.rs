@@ -410,27 +410,23 @@ impl Rdy {
         }
 
         // 3. dry run: validate the final change list before writing anything. The acceptance
-        // carries the deps the store gives it at commit (the producers of its bases), so the
-        // merge orders it after the changes it accepts.
-        let mut accept_deps = BTreeSet::new();
-        for op in &accept_ops {
-            if let Some(base) = op.base() {
-                accept_deps.insert(
-                    self.store
-                        .producer(&base)?
-                        .ok_or(rdy_store::StoreError::NotFound(base))?,
-                );
-            }
-        }
-        let accept = (!accept_ops.is_empty()).then(|| Change {
-            view: p.view.clone(),
-            ops: accept_ops,
-            deps: accept_deps.into_iter().collect(),
-            provenance: s.provenance(),
-            justification: None,
-            message: format!("accept decisions in {}", p.title),
-            links: ChangeLinks::default(),
-        });
+        // carries the deps the store gives it when it commits it to the view (the view's own
+        // producers of its bases), so the merge orders it after the changes it accepts.
+        let accept = if accept_ops.is_empty() {
+            None
+        } else {
+            let mut change = Change {
+                view: p.view.clone(),
+                ops: accept_ops,
+                deps: vec![],
+                provenance: s.provenance(),
+                justification: None,
+                message: format!("accept decisions in {}", p.title),
+                links: ChangeLinks::default(),
+            };
+            change.deps = self.store.change_deps(&change, Some(&p.view))?;
+            Some(change)
+        };
         let mut all = changes;
         all.extend(accept.clone());
         let mut issues = self.prospective_issues(&all)?;

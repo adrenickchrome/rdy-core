@@ -1014,8 +1014,33 @@ impl Store {
         Ok(())
     }
 
+    /// The change that carried `version` into canon: of its producers, the one whose landing was
+    /// written first, or, when none has landed, the one written first. A version two changes
+    /// wrote identically has two producers; a side from canon names the one canon got it from.
     pub fn producer(&self, version: &Hash) -> Result<Option<Hash>, StoreError> {
-        self.index().producer(version)
+        let all = self.index().producers(version)?;
+        if all.len() <= 1 {
+            return Ok(all.first().copied());
+        }
+        let at = |kind: u8, h: &Hash| -> Result<Location, StoreError> {
+            self.index().typed(kind, h)?.ok_or(StoreError::NotFound(*h))
+        };
+        let mut landed: Option<(Location, Hash)> = None;
+        for c in &all {
+            if let Some(l) = self.index().landing_of(c)? {
+                let key = (at(kinds::LANDING, &l)?, *c);
+                landed = Some(landed.map_or(key, |k| k.min(key)));
+            }
+        }
+        if let Some((_, c)) = landed {
+            return Ok(Some(c));
+        }
+        let mut first: Option<(Location, Hash)> = None;
+        for c in &all {
+            let key = (at(kinds::CHANGE, c)?, *c);
+            first = Some(first.map_or(key, |k| k.min(key)));
+        }
+        Ok(first.map(|(_, c)| c))
     }
 
     pub fn commit_change(
@@ -1052,15 +1077,20 @@ impl Store {
         Ok((items, change_pos))
     }
 
-    /// A change's deps, sorted ascending and deduplicated: the producers of its ops' bases and,
-    /// when it is committed to `view`, every change `view` includes that deletes an id one of its
-    /// ops creates (so a delete and a re-create under one id merge in that order).
-    pub(crate) fn change_deps(
+    /// The deps the store gives `change` when it commits it to `view` (or, with no view, through
+    /// `commit_change`), sorted ascending and deduplicated:
+    /// - for each op's base, its producers that `view` includes; when it includes none (the base
+    ///   came from canon), or there is no view, `producer(base)`. A version two views wrote
+    ///   identically has a producer in each, and a dep must name the writer's own;
+    /// - when committed to `view`, every change `view` includes that deletes an id one of its
+    ///   ops creates (so a delete and a re-create under one id merge in that order).
+    pub fn change_deps(
         &self,
         change: &Change,
         view: Option<&str>,
     ) -> Result<Vec<Hash>, StoreError> {
         let mut deps = BTreeSet::new();
+        // `view`'s included set, read once and only when a dep needs it
         let mut included: Option<HashSet<Hash>> = None;
         for op in &change.ops {
             match op {
@@ -1070,22 +1100,43 @@ impl Store {
                     if deleters.is_empty() {
                         continue;
                     }
-                    if included.is_none() {
-                        included = Some(self.included(view)?.iter().copied().collect());
-                    }
-                    let included = included.as_ref().expect("set above");
+                    let included = self.included_set(&mut included, view)?;
                     deps.extend(deleters.into_iter().filter(|d| included.contains(d)));
                 }
                 Op::Update { base, .. } | Op::Delete { base, .. } => {
-                    deps.insert(
-                        self.index()
-                            .producer(base)?
-                            .ok_or(StoreError::NotFound(*base))?,
-                    );
+                    let producers = self.index().producers(base)?;
+                    if producers.is_empty() {
+                        return Err(StoreError::NotFound(*base));
+                    }
+                    if producers.len() > 1
+                        && let Some(view) = view
+                    {
+                        let included = self.included_set(&mut included, view)?;
+                        let own: Vec<Hash> = producers
+                            .into_iter()
+                            .filter(|p| included.contains(p))
+                            .collect();
+                        if !own.is_empty() {
+                            deps.extend(own);
+                            continue;
+                        }
+                    }
+                    deps.insert(self.producer(base)?.ok_or(StoreError::NotFound(*base))?);
                 }
             }
         }
         Ok(deps.into_iter().collect())
+    }
+
+    fn included_set<'a>(
+        &self,
+        slot: &'a mut Option<HashSet<Hash>>,
+        view: &str,
+    ) -> Result<&'a HashSet<Hash>, StoreError> {
+        if slot.is_none() {
+            *slot = Some(self.included(view)?.iter().copied().collect());
+        }
+        Ok(slot.as_ref().expect("set above"))
     }
 
     pub(crate) fn ref_items_pub(&self, refs: Vec<(String, Vec<u8>)>) -> Vec<(u8, Vec<u8>)> {

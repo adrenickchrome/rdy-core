@@ -75,3 +75,76 @@ fn merge1_many_moves_under_old_ids_land_whatever_the_ids() {
     }
     check(&mut r, &Scope::Canon).unwrap();
 }
+
+/// Fix round 1: views a and b make the identical edit, then a edits again. a's reads, cold or
+/// warm, and its proposal and landing see a's own order, whatever the changes' ids.
+#[test]
+fn merge1_a_view_that_made_the_same_edit_as_another_keeps_its_own_order() {
+    for i in 0..16 {
+        let (_d, mut r) = project();
+        let (_s, c) = seed(&mut r);
+        let same = format!("Same {i}.");
+        write(
+            &mut r,
+            "a",
+            json!([{"op": "update", "id": c, "body": same}]),
+        )
+        .unwrap();
+        write(
+            &mut r,
+            "b",
+            json!([{"op": "update", "id": c, "body": same}]),
+        )
+        .unwrap();
+        write(
+            &mut r,
+            "a",
+            json!([{"op": "update", "id": c, "body": "After."}]),
+        )
+        .unwrap();
+        let id = rdy_model::BlockId::parse(&c).unwrap();
+        let a = Scope::View("a".into());
+        assert_eq!(r.block(&a, &id).unwrap().body, "After.", "run {i}: warm");
+        r.invalidate();
+        assert_eq!(r.block(&a, &id).unwrap().body, "After.", "run {i}: cold");
+        land(&mut r, "a").unwrap_or_else(|e| panic!("run {i}: {e}"));
+        assert_eq!(
+            r.block(&Scope::Canon, &id).unwrap().body,
+            "After.",
+            "run {i}"
+        );
+        check(&mut r, &Scope::Canon).unwrap();
+    }
+}
+
+/// Fix round 1: the dry run's acceptance change depends on the change in the proposing view
+/// that wrote the decision, not on another view's identical copy of it, so the merge never
+/// replays the acceptance before the decision exists.
+#[test]
+fn merge1_accepting_a_decision_another_view_holds_identically_lands() {
+    for i in 0..12 {
+        let (_d, mut r) = project();
+        let res = write(&mut r, "work", json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Log", "doc_type": "decisions-log"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Decisions"}}
+        ]))
+        .unwrap();
+        let made = r
+            .decide(
+                &writer(),
+                "work",
+                DecisionInput {
+                    parent: res.created["$s"].clone(),
+                    statement: format!("Ship {i}"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let did = rdy_model::BlockId::parse(&made.created["$decision"]).unwrap();
+        let d = r.block(&Scope::View("work".into()), &did).unwrap();
+        raw_commit(&mut r, "copy", vec![d]);
+        land(&mut r, "work").unwrap_or_else(|e| panic!("run {i}: {e}"));
+        let canon = r.block(&Scope::Canon, &did).unwrap();
+        assert_eq!(canon.field_str("status"), Some("accepted"), "run {i}");
+    }
+}
