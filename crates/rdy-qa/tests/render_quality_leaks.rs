@@ -96,7 +96,6 @@ fn site4_no_raw_edge_kind_is_visible_anywhere() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 12"]
 fn site5_home_versions_show_no_landing_hash_or_the_word_landing() {
     let (_d, _r, _ids, out) = canon();
     assert!(!has_leak(out.path(), "F2", ""));
@@ -296,7 +295,6 @@ fn site16_no_underscore_directory_and_no_id_or_hash_page_in_any_url() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 12"]
 fn site17_the_version_label_uses_site_wording() {
     let (_d, _r, _ids, out) = golden::site_view();
     let h = golden::html(out.path(), "tutorial/adventure.html");

@@ -358,8 +358,12 @@ fn the_site_mirrors_the_folder_tree() {
     let index = read("index.html");
     assert!(index.contains(&format!("<span aria-current=\"page\">{name}</span>")));
     assert!(
-        index.contains("<a href=\"wallets/cards/limits.html\">Limits</a>"),
-        "the index lists the whole tree: {index}"
+        index.contains("<a class=\"card\" href=\"wallets/index.html\"><strong>Wallets</strong>"),
+        "the home page has a card for each top-level entry: {index}"
+    );
+    assert!(
+        !index.contains("limits.html"),
+        "the home page does not list the whole tree: {index}"
     );
 }
 
