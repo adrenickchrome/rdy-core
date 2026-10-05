@@ -417,3 +417,60 @@ fn repr1_log_json_shows_each_landings_assurance() {
     let (_, text, _) = rdy(dir.path(), &["log"]);
     assert!(!text.contains("local"), "{text}");
 }
+
+/// Guard (final review fix round 1): `rdy status` counts each view's changes from its head
+/// (`ViewHead.len`), which must equal the view's included set.
+#[test]
+fn chain1_status_counts_each_views_changes() {
+    use rdy_engine::*;
+    use rdy_model::Role;
+    let dir = tempfile::tempdir().unwrap();
+    json(dir.path(), &["init"]);
+    {
+        let mut r = Rdy::open(dir.path()).unwrap();
+        let w = Session {
+            actor: "agent:a".into(),
+            run: None,
+            role: Role::Writer,
+        };
+        for (view, title) in [("work", "One"), ("work", "Two"), ("side", "Three")] {
+            r.write(
+                &w,
+                WriteRequest {
+                    view: view.into(),
+                    ops: serde_json::from_value(serde_json::json!([{"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "glossary"}}])).unwrap(),
+                    justification: None,
+                    message: String::new(),
+                },
+            )
+            .unwrap();
+        }
+    }
+    let counts = |st: &Value| -> Vec<(String, u64)> {
+        let mut v: Vec<(String, u64)> = st["views"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| {
+                (
+                    v["name"].as_str().unwrap().to_string(),
+                    v["changes"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    let st = json(dir.path(), &["status"]);
+    assert_eq!(
+        counts(&st),
+        vec![("side".to_string(), 1), ("work".to_string(), 2)]
+    );
+    let p = json(dir.path(), &["propose", "--view", "work", "--title", "two"]);
+    json(dir.path(), &["approve", p["id"].as_str().unwrap()]);
+    let st = json(dir.path(), &["status"]);
+    assert_eq!(
+        counts(&st),
+        vec![("side".to_string(), 1), ("work".to_string(), 0)]
+    );
+}

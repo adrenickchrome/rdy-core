@@ -207,7 +207,9 @@ fn quarantine(f: &File, dir: &Path, seg: &Path, offset: u64, file_len: u64) -> i
 /// True if the batch marker `payload`, met after the data frames `since` (offset and hash of each
 /// frame since the previous valid marker) in segment `seg`, matches its batch: it names this
 /// segment, its `start` is one of those frames, and the frame count and digest from there agree.
-/// Frames before the marker's `start` are allowed (the first marker of an upgraded log).
+/// Frames before the marker's `start` are allowed: a marker vouches only for its own batch. A
+/// store write never leaves such frames (a failed write is truncated away or poisons the store);
+/// `append` does.
 fn marker_matches(seg: u32, since: &[(u64, Hash)], payload: &[u8]) -> bool {
     let Ok(m) = postcard::from_bytes::<BatchCommit>(payload) else {
         return false;
@@ -709,8 +711,8 @@ impl SegmentLog {
         File::open(path)
     }
 
-    /// Appends one frame with no batch marker (tests, and the M1 test writer). Rolls first if it
-    /// would not fit in the current segment.
+    /// Appends one frame with no batch marker, for tests. Rolls first if it would not fit in the
+    /// current segment.
     pub fn append(&mut self, kind: u8, payload: &[u8]) -> io::Result<(Location, Hash)> {
         if payload.len() > u32::MAX as usize {
             return Err(io::Error::new(

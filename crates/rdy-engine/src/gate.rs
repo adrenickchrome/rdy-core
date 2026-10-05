@@ -4,7 +4,7 @@ use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Op, Propo
 use rdy_schema::{Issue, Severity, validate_block};
 use rdy_store::LandRequest;
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ProposalInfo {
@@ -60,14 +60,13 @@ impl Rdy {
     /// Validates the canon that would result from landing `changes`.
     fn prospective_issues(&mut self, changes: &[Change]) -> Result<Vec<Issue>, RdyError> {
         // merge onto canon to surface E_STALE_BASE / E_ALREADY_EXISTS / E_FROZEN early
-        let merged = self
+        let (_, applied) = self
             .store
             .merge_checked(&self.store.canon_state()?, changes)?;
-        let by_id: HashMap<Hash, &Change> = changes.iter().map(|c| (c.id(), c)).collect();
         let mut next: Materialized = self.materialized(&Scope::Canon)?.clone();
         let mut touched = BTreeSet::new();
         let mut deleted = BTreeSet::new();
-        for c in merged.order.iter().map(|id| by_id[id]) {
+        for c in applied.iter().map(|&i| &changes[i]) {
             next.apply(&c.ops);
             for op in &c.ops {
                 match op {

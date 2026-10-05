@@ -65,19 +65,22 @@ enum Slot {
 
 /// Deps first, then change id: Kahn's algorithm over the distinct input changes, its ready set
 /// ordered by id ascending; any nodes a cycle leaves unplaced follow in ascending id order.
-fn order<'c, 'a>(changes: &'c [MergeChange<'a>]) -> Vec<&'c MergeChange<'a>> {
+/// Returns each applied change's position in `changes` (its first, when listed twice).
+fn order(changes: &[MergeChange<'_>]) -> Vec<usize> {
     let mut index: HashMap<Hash, usize> = HashMap::with_capacity(changes.len());
-    let mut nodes: Vec<&MergeChange<'a>> = Vec::with_capacity(changes.len());
-    for c in changes {
+    // node -> its position in `changes`
+    let mut nodes: Vec<usize> = Vec::with_capacity(changes.len());
+    for (at, c) in changes.iter().enumerate() {
         if let Entry::Vacant(e) = index.entry(c.id) {
             e.insert(nodes.len());
-            nodes.push(c);
+            nodes.push(at);
         }
     }
+    let id = |i: usize| changes[nodes[i]].id;
     let mut indegree = vec![0usize; nodes.len()];
     let mut succ: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
-    for (i, c) in nodes.iter().enumerate() {
-        for d in c.deps {
+    for (i, &at) in nodes.iter().enumerate() {
+        for d in changes[at].deps {
             if let Some(&j) = index.get(d)
                 && j != i
             {
@@ -90,7 +93,7 @@ fn order<'c, 'a>(changes: &'c [MergeChange<'a>]) -> Vec<&'c MergeChange<'a>> {
         .iter()
         .enumerate()
         .filter(|(_, n)| **n == 0)
-        .map(|(i, _)| Reverse((nodes[i].id, i)))
+        .map(|(i, _)| Reverse((id(i), i)))
         .collect();
     let mut placed = vec![false; nodes.len()];
     let mut out = Vec::with_capacity(nodes.len());
@@ -100,19 +103,14 @@ fn order<'c, 'a>(changes: &'c [MergeChange<'a>]) -> Vec<&'c MergeChange<'a>> {
         for &s in &succ[i] {
             indegree[s] -= 1;
             if indegree[s] == 0 {
-                ready.push(Reverse((nodes[s].id, s)));
+                ready.push(Reverse((id(s), s)));
             }
         }
     }
     if out.len() < nodes.len() {
-        let mut rest: Vec<&MergeChange<'a>> = nodes
-            .iter()
-            .zip(&placed)
-            .filter(|(_, p)| !**p)
-            .map(|(c, _)| *c)
-            .collect();
-        rest.sort_by_key(|c| c.id);
-        out.extend(rest);
+        let mut rest: Vec<usize> = (0..nodes.len()).filter(|&i| !placed[i]).collect();
+        rest.sort_by_key(|&i| id(i));
+        out.extend(rest.into_iter().map(|i| nodes[i]));
     }
     out
 }
@@ -124,9 +122,20 @@ pub fn merge(
     changes: &[MergeChange<'_>],
     producer: &dyn Fn(&Hash) -> Option<Hash>,
 ) -> Merged {
+    merge_indexed(base, changes, producer).0
+}
+
+/// `merge`, with each entry of `Merged::order` also given as its position in `changes` (its
+/// first, when a change is listed twice), so a caller can find the applied changes without
+/// hashing them again.
+pub fn merge_indexed(
+    base: &StateSnapshot,
+    changes: &[MergeChange<'_>],
+    producer: &dyn Fn(&Hash) -> Option<Hash>,
+) -> (Merged, Vec<usize>) {
     let ordered = order(changes);
     let mut slots: BTreeMap<BlockId, Slot> = BTreeMap::new();
-    for c in &ordered {
+    for c in ordered.iter().map(|&at| &changes[at]) {
         let mut deps = c.deps.to_vec();
         deps.sort_unstable();
         let covered = |s: &Side| s.change.is_some_and(|x| deps.binary_search(&x).is_ok());
@@ -205,9 +214,13 @@ pub fn merge(
             }
         }
     }
-    Merged {
-        state,
-        conflicts,
-        order: ordered.iter().map(|c| c.id).collect(),
-    }
+    let order = ordered.iter().map(|&at| changes[at].id).collect();
+    (
+        Merged {
+            state,
+            conflicts,
+            order,
+        },
+        ordered,
+    )
 }

@@ -428,7 +428,7 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
         .into_iter()
         .map(|(name, _)| {
             let name = name.trim_start_matches("view/").to_string();
-            let n = store.view(&name).map(|v| v.changes.len()).unwrap_or(0);
+            let n = store.view_head(&name).ok().flatten().map_or(0, |h| h.len);
             json!({"name": name, "changes": n})
         })
         .collect();

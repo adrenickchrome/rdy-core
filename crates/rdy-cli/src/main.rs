@@ -257,7 +257,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                                 "view {name:?} has ':' in its name (reserved for scopes since addendum A): read it as view:{name}, propose it with --view view:{name}; it can't receive new writes"
                             ));
                         }
-                        let changes = r.store().view(&name)?.changes.len();
+                        let changes = r.store().view_head(&name)?.map_or(0, |h| h.len);
                         let pos = r.version_position(&Scope::View(name.clone()))?;
                         views.push(
                             json!({"name": name, "changes": changes, "version_position": pos}),

@@ -199,7 +199,8 @@ impl Index {
         self.apply_with(entries, upto, Durability::None)
     }
 
-    /// `apply`, durable when it returns. The M1 test writer's index commit.
+    /// `apply`, durable when it returns. No store path calls it: it is the test hook that builds a
+    /// durable index lagging the log.
     pub fn apply_durable(&self, entries: &[IndexEntry], upto: Location) -> Result<(), StoreError> {
         self.apply_with(entries, upto, Durability::Immediate)
     }

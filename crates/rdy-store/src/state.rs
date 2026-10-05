@@ -2,7 +2,7 @@ use crate::Store;
 use crate::error::StoreError;
 use crate::kinds;
 use crate::land::LandRequest;
-use crate::merge::{MergeChange, Merged, merge};
+use crate::merge::{MergeChange, Merged, merge_indexed};
 use crate::store::encode;
 use crate::view::{ViewHead, ViewOp, ViewOpKind};
 use rdy_model::{
@@ -10,7 +10,7 @@ use rdy_model::{
     decision,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 /// What `Store::view` returns: a view's base landing and the changes it includes, in order. It is
 /// not stored; the view's chain and its `ViewHead` are (chain1).
@@ -110,6 +110,11 @@ impl Store {
         base: &StateSnapshot,
         changes: &[Change],
     ) -> Result<Merged, StoreError> {
+        Ok(self.merge_onto_indexed(base, changes).0)
+    }
+
+    /// `merge_onto`, with each applied change's position in `changes` (see `merge_indexed`).
+    fn merge_onto_indexed(&self, base: &StateSnapshot, changes: &[Change]) -> (Merged, Vec<usize>) {
         let input: Vec<MergeChange<'_>> = changes
             .iter()
             .map(|c| MergeChange {
@@ -118,7 +123,7 @@ impl Store {
                 ops: &c.ops,
             })
             .collect();
-        Ok(merge(base, &input, &|v| self.producer(v).ok().flatten()))
+        merge_indexed(base, &input, &|v| self.producer(v).ok().flatten())
     }
 
     /// View `name`'s included changes merged onto its base (canon's head when it has no head).
@@ -142,13 +147,14 @@ impl Store {
     /// `merge_onto(canon, changes)` with the landing checks: the first conflict (block order) is
     /// `StaleBase` naming its base and canon's version, or `AlreadyExists` when its base is none;
     /// an op whose base is a frozen decision is `Frozen`. The one mapping the store's `land`, the
-    /// engine's gate and atomic landings share.
+    /// engine's gate and atomic landings share. With the merge, it returns each applied change's
+    /// position in `changes`, in the order applied (see `merge_indexed`).
     pub fn merge_checked(
         &self,
         canon: &StateSnapshot,
         changes: &[Change],
-    ) -> Result<Merged, StoreError> {
-        let merged = self.merge_onto(canon, changes)?;
+    ) -> Result<(Merged, Vec<usize>), StoreError> {
+        let (merged, at) = self.merge_onto_indexed(canon, changes);
         if let Some(c) = merged.conflicts.first() {
             return Err(match c.base {
                 Some(base) => StoreError::StaleBase {
@@ -159,9 +165,8 @@ impl Store {
                 None => StoreError::AlreadyExists(c.block.clone()),
             });
         }
-        let by_id: HashMap<Hash, &Change> = changes.iter().map(|c| (c.id(), c)).collect();
-        for id in &merged.order {
-            for op in &by_id[id].ops {
+        for &i in &at {
+            for op in &changes[i].ops {
                 if let Some(base) = op.base()
                     && decision::is_frozen(&self.get_block(&base)?)
                 {
@@ -169,7 +174,7 @@ impl Store {
                 }
             }
         }
-        Ok(merged)
+        Ok((merged, at))
     }
 
     pub fn commit_to_view(&mut self, name: &str, change: Change) -> Result<Hash, StoreError> {

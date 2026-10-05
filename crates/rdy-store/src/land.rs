@@ -92,7 +92,7 @@ impl Store {
             .map(|c| self.change(c))
             .collect::<Result<Vec<_>, _>>()?;
         changes.extend(accept_change.iter().cloned());
-        let state = self.merge_checked(&self.canon_state()?, &changes)?.state;
+        let state = self.merge_checked(&self.canon_state()?, &changes)?.0.state;
         let sid = state.id();
         items.push((kinds::SNAPSHOT, encode(&state)));
         // 5. the landing

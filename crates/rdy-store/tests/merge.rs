@@ -2,7 +2,7 @@
 //! sequential replay for any valid history, and equal to a slow reference.
 use proptest::prelude::*;
 use rdy_model::{Block, BlockId, Hash, Op, StateSnapshot};
-use rdy_store::merge::{Conflict, MergeChange, Merged, Side, conflict_id, merge};
+use rdy_store::merge::{Conflict, MergeChange, Merged, Side, conflict_id, merge, merge_indexed};
 use std::collections::{BTreeMap, HashMap};
 
 fn blk(n: u8, body: &str) -> Block {
@@ -579,5 +579,79 @@ proptest! {
     ) {
         let p = canon_producer(&base);
         prop_assert_eq!(merge(&base, &view(&a), &p), merge(&base, &view(&b), &p));
+    }
+}
+
+/// Proptest seed cc 7ec97673… from Task 4's worktree (`merge1_prop_the_merge_matches_the_reference`):
+/// change 0 updates block 2, which the base lacks, from block 0's version (a conflict with the
+/// absent side); change 1 depends on it and creates block 2 with the same bytes. Guard: it
+/// passes since Task 4; pinned by name so the case is replayed without the saved regressions
+/// file.
+#[test]
+fn merge1_seed_7ec9767_a_create_after_a_failed_update_of_an_absent_block_matches_the_reference() {
+    let specs = [
+        Spec {
+            ops: vec![(2, 1, 0, 0)],
+            deps_mask: 0,
+        },
+        Spec {
+            ops: vec![(2, 0, 0, 0)],
+            deps_mask: 67,
+        },
+    ];
+    let (base, input) = build(&specs);
+    let p = canon_producer(&base);
+    assert_eq!(
+        merge(&base, &view(&input), &p),
+        reference(&base, &input, &p)
+    );
+}
+
+#[test]
+fn merge1_merge_indexed_names_each_applied_change_by_its_first_input_position() {
+    let x0 = blk(1, "zero");
+    let base = base_with(std::slice::from_ref(&x0));
+    let a = owned(
+        "a",
+        vec![Hash::of(CANON)],
+        vec![Op::Update {
+            base: x0.version_hash(),
+            block: blk(1, "a"),
+        }],
+    );
+    let b = owned(
+        "b",
+        vec![a.id],
+        vec![Op::Update {
+            base: blk(1, "a").version_hash(),
+            block: blk(1, "b"),
+        }],
+    );
+    let c = owned("c", vec![], vec![Op::Create { block: blk(2, "c") }]);
+    // b first, a listed twice, c last: a change listed twice counts at its first position
+    let input = [b.clone(), a.clone(), c.clone(), a.clone()];
+    let p = canon_producer(&base);
+    let (m, at) = merge_indexed(&base, &view(&input), &p);
+    assert_eq!(m, merge(&base, &view(&input), &p));
+    assert_eq!(at.len(), m.order.len());
+    for (k, id) in m.order.iter().enumerate() {
+        assert_eq!(input[at[k]].id, *id, "position {k}");
+    }
+    assert_eq!(at[m.order.iter().position(|x| *x == a.id).unwrap()], 1);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn merge1_prop_merge_indexed_is_merge_with_input_positions(specs in arb_specs()) {
+        let (base, input) = build(&specs);
+        let p = canon_producer(&base);
+        let (m, at) = merge_indexed(&base, &view(&input), &p);
+        prop_assert_eq!(&m, &merge(&base, &view(&input), &p));
+        prop_assert_eq!(at.len(), m.order.len());
+        for (k, id) in m.order.iter().enumerate() {
+            prop_assert_eq!(input[at[k]].id, *id);
+        }
     }
 }
