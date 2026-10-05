@@ -674,10 +674,9 @@ pub fn colour_literals(value: &str) -> Vec<String> {
     while i < b.len() {
         let c = b[i];
         if c == b'"' || c == b'\'' {
-            i += value[i + 1..]
+            i = value[i + 1..]
                 .find(c as char)
                 .map_or(b.len(), |j| i + j + 2);
-            i = i.min(b.len());
         } else if c == b'#' {
             let n = b[i + 1..]
                 .iter()
@@ -1003,6 +1002,9 @@ mod tests {
             ["#FFF", "#0008", "#12345678"]
         );
         assert!(lits("#12345 #ggg").is_empty());
+        assert_eq!(lits("12px 'a' #fff red"), ["#fff", "red"]);
+        assert_eq!(lits("'x' 'y' red"), ["red"]);
+        assert_eq!(lits("12px \"a\" #fff blue"), ["#fff", "blue"]);
         assert_eq!(
             lits("linear-gradient(to right, hsl(0 0% 0%), WhiteSmoke 50%, var(--a, red))"),
             ["hsl(0 0% 0%)", "WhiteSmoke"]
