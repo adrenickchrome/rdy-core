@@ -433,11 +433,7 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
         ));
     }
     st.view = view;
-    st.session = Some(Session {
-        actor: p.actor,
-        run: p.run,
-        role,
-    });
+    st.session = Some(Session::agent(p.actor, p.run, role)?);
     Ok(json!({ "view": st.view, "role": p.role }))
 }
 

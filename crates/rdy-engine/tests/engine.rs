@@ -1,6 +1,8 @@
 //! eng1: one door for reads and writes, the serve config, pack reload and the open report.
 use rdy_engine::engine::{Engine, Local, write_typed};
-use rdy_engine::{Rdy, ReloadOutcome, Scope, ServeConfig, Session, WriteRequest, serve_config};
+use rdy_engine::{
+    Rdy, ReloadOutcome, Scope, ServeConfig, Session, SessionKind, WriteRequest, serve_config,
+};
 use rdy_model::Role;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +14,7 @@ fn writer() -> Session {
         actor: "human:t".into(),
         run: Some("cli".into()),
         role: Role::Writer,
+        kind: SessionKind::Human,
     }
 }
 

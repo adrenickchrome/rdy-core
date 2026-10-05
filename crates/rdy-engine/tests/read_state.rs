@@ -10,6 +10,7 @@ fn writer() -> Session {
         actor: "a".into(),
         run: None,
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     }
 }
 
@@ -39,6 +40,7 @@ fn land(r: &mut Rdy, view: &str) -> rdy_model::Hash {
             actor: "h".into(),
             run: None,
             role: Role::Approver,
+            kind: rdy_engine::SessionKind::Human,
         },
         &p.id,
     )

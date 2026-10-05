@@ -27,7 +27,9 @@ pub use materialize::{Materialized, PathMiss};
 pub use paths::TreeNode;
 pub use query::{Context, ImpactItem, ImpactVia, compact_summary, field_json, summary, summary_in};
 pub use read_state::{Delta, ReadState};
-pub use session::{Scope, Session, now_ms, rfc3339_now};
+pub use session::{
+    Scope, Session, SessionKind, classify, human_actor, human_actor_from_env, now_ms, rfc3339_now,
+};
 pub use tree_io::Diagnostic;
 pub use version::{
     AS_OF_CACHE_ENTRIES, VersionInfo, VersionPosition, VersionRef, ViewPosition, parse_version,

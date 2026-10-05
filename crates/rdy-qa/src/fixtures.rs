@@ -3,21 +3,35 @@ use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Op, Role};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-fn session(actor: &str, role: Role) -> Session {
-    Session {
-        actor: actor.into(),
-        run: None,
-        role,
-    }
-}
 pub fn writer() -> Session {
-    session("agent:qa", Role::Writer)
+    Session::human("human:qa".into(), Role::Writer)
 }
 pub fn approver() -> Session {
-    session("human:qa", Role::Approver)
+    Session::human("human:qa".into(), Role::Approver)
 }
 pub fn reader() -> Session {
-    session("agent:reader", Role::Reader)
+    Session::human("human:qa".into(), Role::Reader)
+}
+/// An agent session (writer) for ownership tests.
+pub fn agent(actor: &str, run: Option<&str>) -> Session {
+    Session::agent(actor.into(), run.map(str::to_string), Role::Writer).unwrap()
+}
+
+/// A user config naming `actor` as the human: `<tmp>/rdy/config.yaml`, and the environment
+/// (`XDG_CONFIG_HOME`) that points a client at it. Keep the `TempDir` alive.
+pub fn human_env(actor: &str) -> (tempfile::TempDir, Vec<(String, String)>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("rdy")).expect("config dir");
+    std::fs::write(
+        dir.path().join("rdy/config.yaml"),
+        format!("actor: {actor}\n"),
+    )
+    .expect("config");
+    let env = vec![(
+        "XDG_CONFIG_HOME".to_string(),
+        dir.path().to_string_lossy().into_owned(),
+    )];
+    (dir, env)
 }
 
 pub fn project() -> (tempfile::TempDir, Rdy) {

@@ -96,6 +96,7 @@ fn pmap1_with_equals_build_of_the_applied_snapshot() {
         actor: "a".into(),
         run: None,
         role: rdy_model::Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     };
     r.write(
         &s,

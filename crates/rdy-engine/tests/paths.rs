@@ -7,6 +7,7 @@ fn agent() -> Session {
         actor: "agent:a".into(),
         run: None,
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     }
 }
 fn write(r: &mut Rdy, ops: serde_json::Value) -> WriteResult {

@@ -7,6 +7,7 @@ pub fn agent() -> Session {
         actor: "agent:a".into(),
         run: None,
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     }
 }
 pub fn founder() -> Session {
@@ -14,6 +15,7 @@ pub fn founder() -> Session {
         actor: "human:founder".into(),
         run: None,
         role: Role::Approver,
+        kind: rdy_engine::SessionKind::Human,
     }
 }
 pub fn write(r: &mut Rdy, view: &str, ops: serde_json::Value) -> Result<WriteResult, RdyError> {

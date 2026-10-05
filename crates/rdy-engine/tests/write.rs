@@ -7,6 +7,7 @@ fn agent() -> Session {
         actor: "agent:designer".into(),
         run: Some("run-1".into()),
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     }
 }
 

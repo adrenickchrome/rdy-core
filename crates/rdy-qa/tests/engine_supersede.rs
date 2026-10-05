@@ -137,8 +137,10 @@ fn sup1_mcp_supersede_drops_a_kind_given_as_an_empty_list() {
     let mut st = rdy_mcp::tools::McpState::new(r);
     rdy_mcp::tools::rdy_session(
         &mut st,
-        serde_json::from_value(json!({"actor": "agent:qa", "role": "writer", "view": "work"}))
-            .unwrap(),
+        serde_json::from_value(
+            json!({"actor": "human:qa", "run": "cli", "role": "writer", "view": "work"}),
+        )
+        .unwrap(),
     )
     .unwrap();
     let out = rdy_mcp::tools::rdy_supersede(

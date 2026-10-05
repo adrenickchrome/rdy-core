@@ -189,11 +189,7 @@ fn human(role: Role) -> Session {
             std::env::var("USER").unwrap_or_else(|_| "unknown".into())
         )
     });
-    Session {
-        actor,
-        run: None,
-        role,
-    }
+    Session::human(actor, role)
 }
 
 fn hash_short(s: &str) -> &str {

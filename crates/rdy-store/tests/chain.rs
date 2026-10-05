@@ -267,14 +267,26 @@ fn chain1_the_first_write_creates_the_view_and_each_write_appends_one_op() {
         first.op,
         ViewOpKind::Create {
             base: None,
-            owner: None,
+            owner: Some(Owner {
+                actor: "someone".into(),
+                run: None
+            }),
             pinned: false
         }
     );
     assert_eq!(first.prev, None);
     assert_eq!(
         (h1.len, h1.base, h1.owner.clone(), h1.pinned, h1.closed),
-        (1, None, None, false, false)
+        (
+            1,
+            None,
+            Some(Owner {
+                actor: "someone".into(),
+                run: None
+            }),
+            false,
+            false
+        )
     );
     let c2 = s.commit_to_view("work", create("work", "b-00002")).unwrap();
     let h2 = s.view_head("work").unwrap().unwrap();
@@ -389,4 +401,33 @@ fn chain1_a_broken_chain_is_an_error_naming_the_view() {
         ),
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn sess2_an_implicit_create_records_the_changes_actor_and_run_as_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
+    let mut c = create("v", "b-00001");
+    c.provenance.actor = "agent:w".into();
+    c.provenance.run = Some("r1".into());
+    s.commit_to_view("v", c).unwrap();
+    let owner = Owner {
+        actor: "agent:w".into(),
+        run: Some("r1".into()),
+    };
+    let h = s.view_head("v").unwrap().unwrap();
+    assert_eq!(h.owner, Some(owner.clone()));
+    let commit = s.view_op(&h.head).unwrap();
+    let first = s.view_op(&commit.prev.unwrap()).unwrap();
+    assert_eq!(
+        first.op,
+        ViewOpKind::Create {
+            base: None,
+            owner: Some(owner.clone()),
+            pinned: false
+        }
+    );
+    // a later write by someone else does not take the view
+    s.commit_to_view("v", create("v", "b-00002")).unwrap();
+    assert_eq!(s.view_head("v").unwrap().unwrap().owner, Some(owner));
 }

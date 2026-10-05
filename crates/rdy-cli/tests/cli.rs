@@ -58,6 +58,7 @@ fn import_propose_approve_render_fsck() {
             actor: "agent:a".into(),
             run: None,
             role: Role::Writer,
+            kind: rdy_engine::SessionKind::Human,
         };
         r.write(&w, WriteRequest { view: "work".into(), ops: serde_json::from_value(serde_json::json!([
             {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Hello", "doc_type": "glossary"}},
@@ -116,6 +117,7 @@ fn project_with_term() -> (tempfile::TempDir, String) {
         actor: "agent:a".into(),
         run: None,
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     };
     let res = r.write(&w, WriteRequest { view: "work".into(), ops: serde_json::from_value(serde_json::json!([
         {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Hello", "doc_type": "glossary"}},
@@ -191,11 +193,13 @@ fn seed_and_land(dir: &std::path::Path, title: &str) -> String {
         actor: "agent:a".into(),
         run: None,
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     };
     let a = Session {
         actor: "human:tester".into(),
         run: None,
         role: Role::Approver,
+        kind: rdy_engine::SessionKind::Human,
     };
     let doc = r
         .read()
@@ -435,6 +439,7 @@ fn chain1_status_counts_each_views_changes() {
             actor: "agent:a".into(),
             run: None,
             role: Role::Writer,
+            kind: rdy_engine::SessionKind::Human,
         };
         for (view, title) in [("work", "One"), ("work", "Two"), ("side", "Three")] {
             r.write(

@@ -323,6 +323,7 @@ fn approver() -> rdy_engine::Session {
         actor: "human:founder".into(),
         run: None,
         role: rdy_model::Role::Approver,
+        kind: rdy_engine::SessionKind::Human,
     }
 }
 
