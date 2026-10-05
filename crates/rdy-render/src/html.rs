@@ -32,7 +32,7 @@ pub struct Link {
 
 /// What an unresolved reference reads as. In strict mode the author wrote only an id, which a
 /// reader may not see, so the marker's own words stand in for it.
-const UNRESOLVED: &str = "unresolved reference";
+pub(crate) const UNRESOLVED: &str = "unresolved reference";
 
 /// Escapes `text` and replaces `{{id}}` references with links; `\{{` renders as a literal `{{`.
 /// A reference that leads nowhere is a marker that names no id. A newline is a `<br>`.
@@ -48,6 +48,14 @@ pub fn text_html(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String 
         },
     )
     .replace('\n', "<br>")
+}
+
+/// Escaped `text` with each `{{id}}` reference read as its target's label (the unresolved
+/// marker's words when it leads nowhere), for an attribute or a place a link may not go.
+pub fn words_html(text: &str, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
+    with_refs(text, RefMode::Strict, &|tok| {
+        escape(&diagram_label(tok, link))
+    })
 }
 
 /// `<a>` for a link, with its hover title when it has one.
@@ -184,7 +192,10 @@ fn human_size(n: u64) -> String {
 /// A figure: its image or a download link, or a sentence when the store lacks the blob.
 fn figure_html(b: &Block, ctx: &BlockCtx) -> String {
     let h = b.field_str("blob").unwrap_or("");
-    let alt = escape(b.field_str("alt").unwrap_or(""));
+    let alt_text = b.field_str("alt").unwrap_or("");
+    // the alt attribute and the download link's text cannot hold a link: references read as labels
+    let alt = words_html(alt_text, ctx.link);
+    let caption = text_html(alt_text, ctx.link);
     let media = b.field_str("media_type").unwrap_or("");
     let image = media.starts_with("image/");
     match h.parse::<Hash>() {
@@ -192,7 +203,7 @@ fn figure_html(b: &Block, ctx: &BlockCtx) -> String {
             let src = escape(&(ctx.asset_href)(&hash, media));
             if image {
                 format!(
-                    "<figure class=\"figure\"><img src=\"{src}\" alt=\"{alt}\" loading=\"lazy\"><figcaption>{alt}</figcaption></figure>"
+                    "<figure class=\"figure\"><img src=\"{src}\" alt=\"{alt}\" loading=\"lazy\"><figcaption>{caption}</figcaption></figure>"
                 )
             } else {
                 let mut meta = human_media(media);
@@ -206,9 +217,27 @@ fn figure_html(b: &Block, ctx: &BlockCtx) -> String {
             }
         }
         _ => format!(
-            "<p class=\"figure-missing\">{alt} ({} not available)</p>",
+            "<p class=\"figure-missing\">{caption} ({} not available)</p>",
             if image { "image" } else { "file" }
         ),
+    }
+}
+
+/// A table cell or column head: as [`cell`], with each reference in its text a link.
+fn cell_html(v: &FieldValue, link: &dyn Fn(&BlockId) -> Option<Link>) -> String {
+    match v {
+        FieldValue::Str(s) => text_html(s, link),
+        FieldValue::List(items) => items
+            .iter()
+            .map(|i| cell_html(i, link))
+            .collect::<Vec<_>>()
+            .join(", "),
+        FieldValue::Map(m) => m
+            .iter()
+            .map(|(k, v)| format!("{}: {}", escape(k), cell_html(v, link)))
+            .collect::<Vec<_>>()
+            .join("; "),
+        other => cell(other),
     }
 }
 
@@ -286,11 +315,15 @@ fn marker(ctx: &BlockCtx, block_type: &str, words: &str) -> String {
     }
 }
 
+/// The fields that hold a block's primary text, in the order the engine reads them.
+const PRIMARY_FIELDS: [&str; 4] = ["statement", "prompt", "name", "title"];
+
 /// Inner HTML for one block. A block the site leaves out (a rationale, a decision) is empty.
 pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
     let (depth, link) = (ctx.depth, ctx.link);
     let t = b.block_type.as_str();
-    let f = |name: &str| escape(b.field_str(name).unwrap_or(""));
+    // a title or a name may hold references, which link like the body's
+    let f = |name: &str| text_html(b.field_str(name).unwrap_or(""), link);
     // a section's heading is one level below its parent section's; a definition or a flow heads
     // a part of the section it sits in, at the level of that section's subsections
     let section_level = (depth + 1).min(6);
@@ -353,7 +386,7 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
                     .iter()
                     .map(|s| match s {
                         FieldValue::Str(t) => format!("<li>{}</li>", text_html(t, link)),
-                        o => format!("<li>{}</li>", cell(o)),
+                        o => format!("<li>{}</li>", cell_html(o, link)),
                     })
                     .collect(),
                 _ => String::new(),
@@ -367,7 +400,7 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
         "table" => table_html(b, ctx),
         "diagram" => {
             let lang = b.field_str("lang").unwrap_or("");
-            let alt = f("alt");
+            let alt_text = b.field_str("alt").unwrap_or("");
             // only Mermaid has a renderer on the site; any other language shows its source
             let canvas = if lang == "mermaid" {
                 format!(
@@ -378,8 +411,10 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
                 String::new()
             };
             format!(
-                "<figure class=\"diagram\" data-lang=\"{}\"><p class=\"visually-hidden\">{alt}</p>{canvas}<figcaption>{alt}</figcaption><details class=\"diagram-source\"><summary>Diagram source</summary><pre class=\"code\"><code>{}</code></pre></details></figure>",
+                "<figure class=\"diagram\" data-lang=\"{}\"><p class=\"visually-hidden\">{}</p>{canvas}<figcaption>{}</figcaption><details class=\"diagram-source\"><summary>Diagram source</summary><pre class=\"code\"><code>{}</code></pre></details></figure>",
                 escape(lang),
+                words_html(alt_text, link),
+                text_html(alt_text, link),
                 readable_source(&b.body, link)
             )
         }
@@ -406,8 +441,16 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
         // a decision has no place in the text: the trail and the JSON carry it
         rdy_model::decision::DECISION => String::new(),
         // prose, and a type with no rendering of its own (presentational or not): plain text,
-        // with no type label
-        _ => paragraphs(&b.body, link),
+        // with no type label; its primary field (a statement, prompt, name or title) first, so
+        // that a block without a body still shows what it is
+        _ => {
+            let primary = PRIMARY_FIELDS
+                .iter()
+                .find_map(|k| b.field_str(k).filter(|s| !s.trim().is_empty()))
+                .map(|p| format!("<p>{}</p>", text_html(p, link)))
+                .unwrap_or_default();
+            format!("{primary}{}", paragraphs(&b.body, link))
+        }
     }
 }
 
@@ -447,7 +490,13 @@ fn table_html(b: &Block, ctx: &BlockCtx) -> String {
     let head: String = cols
         .iter()
         .enumerate()
-        .map(|(i, c)| format!("<th scope=\"col\"{}>{}</th>", class(i), cell(c)))
+        .map(|(i, c)| {
+            format!(
+                "<th scope=\"col\"{}>{}</th>",
+                class(i),
+                cell_html(c, ctx.link)
+            )
+        })
         .collect();
     let body: String = rows
         .iter()
@@ -456,9 +505,9 @@ fn table_html(b: &Block, ctx: &BlockCtx) -> String {
                 FieldValue::List(cells) => cells
                     .iter()
                     .enumerate()
-                    .map(|(i, c)| format!("<td{}>{}</td>", class(i), cell(c)))
+                    .map(|(i, c)| format!("<td{}>{}</td>", class(i), cell_html(c, ctx.link)))
                     .collect(),
-                other => format!("<td{}>{}</td>", class(0), cell(other)),
+                other => format!("<td{}>{}</td>", class(0), cell_html(other, ctx.link)),
             };
             format!("<tr>{cells}</tr>")
         })

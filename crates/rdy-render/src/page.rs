@@ -195,6 +195,9 @@ pub enum Kind<'a> {
     Redirect(&'a BlockId, &'a Url),
 }
 
+/// Supporting text: kept in the page JSON, left out of the page.
+const RATIONALE: &str = "rationale";
+
 /// A reader's word for a block's type: the one the eyebrow, the toc and the search use.
 fn kind_word(block_type: &str) -> &'static str {
     match block_type {
@@ -524,8 +527,12 @@ fn doc_parts(
         for c in m.children(Some(&b.id)).into_iter().rev() {
             stack.push((c, depth + 1));
         }
-        // a decision has no place in the text, and the lede is shown above it
-        if b.block_type == decision::DECISION || lede_block.is_some_and(|l| l.id == b.id) {
+        // a decision has no place in the text, a rationale stays in the page JSON (supporting
+        // text), and the lede is shown above it
+        if b.block_type == decision::DECISION
+            || b.block_type == RATIONALE
+            || lede_block.is_some_and(|l| l.id == b.id)
+        {
             continue;
         }
         if b.block_type == "diagram" && b.field_str("lang") == Some("mermaid") {
@@ -561,18 +568,20 @@ fn doc_parts(
         };
         let (ref_head, ref_) = trail::ref_attrs(b, site, sh.pin(), m);
         let presentational = sh.pack.is_presentational(&b.block_type);
+        // the heading or name as a reader reads it: its references as their labels
         let title = match b.block_type.as_str() {
             "section" => b.field_str("title"),
             "term" | "component" | "actor" | "interface" | "flow" => b.field_str("name"),
             _ => None,
-        };
+        }
+        .map(|t| site.words(t));
         items.push(Item {
             id: b.id.to_string(),
             block_type: b.block_type.clone(),
             depth,
             anchor: anchor.clone(),
             kind_word: kind_word(&b.block_type),
-            title: title.map(String::from),
+            title,
             html: html::block_html(b, &ctx),
             presentational,
             trail: if presentational {
@@ -620,7 +629,7 @@ fn glossary_body(sh: &Shared, page: &str) -> GlossaryBody {
             let section = b.parent.as_ref().and_then(|p| sh.site.url_of(p))?;
             Some(TermRow {
                 anchor: sh.site.term_anchors.get(id)?.clone(),
-                name: b.field_str("name").unwrap_or("").to_string(),
+                name: sh.site.words(b.field_str("name").unwrap_or("")),
                 body: html::text_html(&b.body, &link),
                 href: section.href_from(page),
                 doc_title,

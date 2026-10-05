@@ -1,7 +1,7 @@
 //! The site's shape: which page every folder, doc and block lives on, where on the page, and
 //! the order a reader walks the docs in.
 use rdy_engine::{Materialized, summary_in};
-use rdy_model::{Block, BlockId, decision, tree};
+use rdy_model::{Block, BlockId, RefMode, decision, ref_spans, tree};
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
@@ -35,6 +35,10 @@ const ANCHOR_MAX: usize = 48;
 /// The shape of a block id (`d-7KQ2M`): an anchor never takes it, because a visible id is a leak.
 static ID_SHAPED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z]{1,3}-[0-9A-HJKMNP-TV-Z]{5}$").expect("a pattern"));
+
+/// How many references deep a label reads its references' labels; past it a reference reads
+/// as `…` (a title that names a block whose title names it back stops here).
+const LABEL_DEPTH: usize = 3;
 
 /// The id inside a longer text, as the leak scan reads it.
 static ID_INSIDE: LazyLock<Regex> =
@@ -133,7 +137,7 @@ impl<'a> Site<'a> {
                 if b.block_type == decision::DECISION {
                     continue;
                 }
-                anchors.insert(b.id.clone(), unique(anchor_text(b, self.m), &mut taken));
+                anchors.insert(b.id.clone(), unique(self.anchor_text(b), &mut taken));
             }
         }
         self.anchors = anchors;
@@ -188,23 +192,17 @@ impl<'a> Site<'a> {
             for b in self.blocks_of(doc) {
                 if b.block_type == decision::QUESTION && !answered.contains(&b.id) {
                     open.push(b.id.clone());
-                    question_anchors
-                        .insert(b.id.clone(), unique(anchor_text(b, self.m), &mut taken));
+                    question_anchors.insert(b.id.clone(), unique(self.anchor_text(b), &mut taken));
                 }
                 if b.block_type == "term" {
                     terms.push(b);
                 }
             }
         }
-        terms.sort_by_key(|b| {
-            (
-                b.field_str("name").unwrap_or("").to_lowercase(),
-                b.id.clone(),
-            )
-        });
+        terms.sort_by_cached_key(|b| (self.label(b).to_lowercase(), b.id.clone()));
         let (mut term_anchors, mut taken) = (BTreeMap::new(), reserved_ids());
         for b in &terms {
-            term_anchors.insert(b.id.clone(), unique(anchor_text(b, self.m), &mut taken));
+            term_anchors.insert(b.id.clone(), unique(self.anchor_text(b), &mut taken));
         }
         // a top-level doc named `glossary` or `questions` already has that page: it keeps it,
         // and the collected page is not written (nor linked)
@@ -279,15 +277,20 @@ impl<'a> Site<'a> {
     }
 
     /// What a reader calls `b`: its title, else its `name` field, else (for a doc or folder) its
-    /// tree name worded as a title, else the start of its text. Never an id.
+    /// tree name worded as a title, else the start of its text. A reference in the title or name
+    /// reads as its target's label. Never an id.
     pub fn label(&self, b: &Block) -> String {
+        self.label_at(b, 0)
+    }
+
+    fn label_at(&self, b: &Block, depth: usize) -> String {
         let tree = tree::is_tree_type(&b.block_type);
         let said = b
             .field_str("title")
             .filter(|t| !t.is_empty())
             .or_else(|| b.field_str("name").filter(|t| !t.is_empty() && !tree));
         let label = match said {
-            Some(t) => t.to_string(),
+            Some(t) => self.words_at(t, depth),
             None if tree => self
                 .m
                 .name_of(&b.id)
@@ -301,6 +304,49 @@ impl<'a> Site<'a> {
             "Untitled".to_string()
         } else {
             label
+        }
+    }
+
+    /// A field's text as a reader reads it: each `{{id}}` reference as its target's label, an
+    /// unresolved one as the unresolved marker's words, `\{{` as `{{`. Not escaped.
+    pub fn words(&self, text: &str) -> String {
+        self.words_at(text, 0)
+    }
+
+    fn words_at(&self, text: &str, depth: usize) -> String {
+        let mut out = String::new();
+        let mut last = 0;
+        for span in ref_spans(text, RefMode::Strict) {
+            out.push_str(&text[last..span.range.start].replace("\\{{", "{{"));
+            let target = BlockId::parse(&span.token)
+                .ok()
+                .and_then(|id| self.m.get(&id));
+            match target {
+                Some(_) if depth >= LABEL_DEPTH => out.push('…'),
+                Some(t) => out.push_str(&self.label_at(t, depth + 1)),
+                None => out.push_str(crate::html::UNRESOLVED),
+            }
+            last = span.range.end;
+        }
+        out.push_str(&text[last..].replace("\\{{", "{{"));
+        out
+    }
+
+    /// The text an anchor is made from: a section's title, the name of what a block defines
+    /// (their references read as labels), else the first six words of its one-line summary.
+    fn anchor_text(&self, b: &Block) -> String {
+        let named = match b.block_type.as_str() {
+            "section" => b.field_str("title"),
+            "term" | "component" | "actor" | "interface" | "flow" => b.field_str("name"),
+            _ => None,
+        };
+        match named.filter(|t| !t.trim().is_empty()) {
+            Some(t) => self.words(t),
+            None => summary_in(b, self.m)
+                .split_whitespace()
+                .take(6)
+                .collect::<Vec<_>>()
+                .join(" "),
         }
     }
 
@@ -349,24 +395,6 @@ fn name_as_title(name: &str) -> String {
     match chars.next() {
         Some(c) => c.to_uppercase().chain(chars).collect(),
         None => String::new(),
-    }
-}
-
-/// The text an anchor is made from: a section's title, the name of what a block defines, else
-/// the first six words of its one-line summary.
-fn anchor_text(b: &Block, m: &Materialized) -> String {
-    let named = match b.block_type.as_str() {
-        "section" => b.field_str("title"),
-        "term" | "component" | "actor" | "interface" | "flow" => b.field_str("name"),
-        _ => None,
-    };
-    match named.filter(|t| !t.trim().is_empty()) {
-        Some(t) => t.to_string(),
-        None => summary_in(b, m)
-            .split_whitespace()
-            .take(6)
-            .collect::<Vec<_>>()
-            .join(" "),
     }
 }
 
