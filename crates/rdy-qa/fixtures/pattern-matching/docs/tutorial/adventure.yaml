@@ -2589,3 +2589,28 @@
     name: Soft keyword
   body: A word that is a keyword only in a specific grammatical position and an ordinary name elsewhere.
     `match` and `case` are soft keywords. See {{r-CMSDK}}.
+- id: s-2N76F
+  type: section
+  parent: d-XM01W
+  order: aK
+  fields:
+    title: Quick sketches
+- id: cd-ZNYMB
+  type: code
+  parent: s-2N76F
+  order: a1
+  body: |-
+    >>> match command.split():
+    ...     case [action]:
+    ...         print(action)
+- id: dg-HBT4Q
+  type: diagram
+  parent: s-2N76F
+  order: a2
+  fields:
+    lang: mermaid
+  body: |-
+    flowchart LR
+      S[subject] --> C{case?}
+      C -->|matches| B[body]
+      C -->|no| N[next case]

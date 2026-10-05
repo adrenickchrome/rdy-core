@@ -208,6 +208,7 @@
   order: a2
   fields:
     statement: The wildcard is `_`
+    key: DEC-WILDCARD
     status: accepted
     decided_at: '2021-02-08T10:00:00Z'
     recorded_at: '2021-02-08T10:00:00Z'

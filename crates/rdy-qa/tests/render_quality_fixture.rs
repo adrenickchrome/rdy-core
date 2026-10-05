@@ -227,3 +227,57 @@ fn gold1_the_site_helpers_render_canon_the_frozen_version_and_the_view() {
         );
     }
 }
+
+#[test]
+fn gold1_the_fixture_has_direct_content_keys_and_the_dx2_shapes() {
+    let (_d, mut r, ids) = golden::project();
+    let m = r.materialized(&Scope::Canon).unwrap().clone();
+    let first: Vec<rdy_model::BlockId> = m
+        .children(Some(&ids.spec_doc))
+        .iter()
+        .take(4)
+        .map(|b| b.id.clone())
+        .collect();
+    assert_eq!(
+        first,
+        [
+            ids.opening_prose.clone(),
+            ids.opening_list.clone(),
+            ids.opening_steps.clone(),
+            ids.opening_note.clone()
+        ]
+    );
+    let keyed: std::collections::BTreeSet<&str> = m
+        .blocks
+        .values()
+        .filter_map(|b| b.field_str("key"))
+        .collect();
+    assert_eq!(keyed, golden::KEYS.into_iter().collect());
+    for b in m.blocks.values() {
+        for k in golden::KEYS {
+            assert!(
+                !b.body.contains(&format!("{{{{{k}")),
+                "{} still holds {{{{{k}…",
+                b.id
+            );
+        }
+    }
+    assert!(
+        m.get(&ids.opening_list)
+            .unwrap()
+            .body
+            .contains(&format!("{{{{{}|guards}}}}", ids.guards_section))
+    );
+    assert!(
+        m.get(&ids.langless_code)
+            .unwrap()
+            .field_str("lang")
+            .is_none()
+    );
+    assert!(
+        m.get(&ids.altless_diagram)
+            .unwrap()
+            .field_str("alt")
+            .is_none()
+    );
+}

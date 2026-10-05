@@ -4,6 +4,37 @@
   fields:
     title: The match statement and its patterns
     doc_type: overview
+- id: p-EF50Z
+  type: prose
+  parent: d-8PBD5
+  order: M1
+  body: |-
+    This document is the **specification** of the `match` statement: what each pattern *means* and in which order the cases run. The reasons live in {{d-3T4TW|the companion rationale}}; worked examples are in [the tutorial](../tutorial/adventure.html).
+- id: p-Q6S0X
+  type: prose
+  parent: d-8PBD5
+  order: M2
+  body: |-
+    The specification covers:
+    - the syntax of patterns
+      - capture and wildcard patterns
+      - value, literal and class patterns
+    - the evaluation of a `match` statement
+    - {{SPEC-GUARDS|guards}}, which see the bindings of their own case
+- id: p-38BJB
+  type: prose
+  parent: d-8PBD5
+  order: M3
+  body: |-
+    Read it in this order:
+    1. Patterns
+    2. Evaluation
+    3. Guards
+- id: n-ZHA5J
+  type: note
+  parent: d-8PBD5
+  order: M4
+  body: 'The keywords `match` and `case` are *soft*: see {{REQ-SOFT-KEYWORDS}}.'
 - id: s-FSHEC
   type: section
   parent: d-8PBD5
@@ -251,6 +282,7 @@
   order: a1
   fields:
     priority: must
+    key: REQ-SOFT-KEYWORDS
   body: '`match` and `case` are soft keywords.'
   links:
     decided_by:
@@ -273,6 +305,15 @@
   order: a4
   fields:
     title: Guards
+    key: SPEC-GUARDS
+- id: p-W97Y4
+  type: prose
+  parent: s-EF1NX
+  order: Z1
+  body: |-
+    A guard is evaluated **only** after its pattern matches, and *before* the case body runs; see {{t-XTQDJ|the definition}} and {{DEC-WILDCARD|why the wildcard is an underscore}}.
+    - A guard may read the names its pattern bound.
+    - A guard that raises ends the whole `match` statement.
 - id: p-9PXMN
   type: prose
   parent: s-EF1NX

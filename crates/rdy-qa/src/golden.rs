@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 /// The committed export: `rdy-export.yaml`, `docs/` and `blobs/`.
 pub const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/pattern-matching");
 
+/// The keys the fixture gives blocks (the DX2 content): a requirement, a section and a decision.
+pub const KEYS: [&str; 3] = ["REQ-SOFT-KEYWORDS", "SPEC-GUARDS", "DEC-WILDCARD"];
+
 /// Text that is hostile in every context a renderer writes it into (the `render` area).
 pub const EVIL: &str = "<script>alert(1)</script>\"'><img src=x onerror=alert(2)>&amp;";
 
@@ -122,6 +125,14 @@ ids! {
         evaluation_order_section: "s-Y6THC",
         capture_section: "s-PZFV5",
         sequence_section: "s-PZK7F",
+        opening_prose: "p-EF50Z",
+        opening_list: "p-Q6S0X",
+        opening_steps: "p-38BJB",
+        opening_note: "n-ZHA5J",
+        guards_markdown_prose: "p-W97Y4",
+        quick_section: "s-2N76F",
+        langless_code: "cd-ZNYMB",
+        altless_diagram: "dg-HBT4Q",
     }
     view {
         dangling_ref_prose: "p-Y3BEZ",
