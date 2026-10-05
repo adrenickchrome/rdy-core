@@ -1,3 +1,4 @@
+use crate::glob::Glob;
 use crate::pack::*;
 use rdy_model::decision as d;
 use rdy_model::tree;
@@ -117,6 +118,8 @@ impl PackSet {
             out.default_doc_type = child.default_doc_type;
         }
         out.doc_types.extend(child.doc_types);
+        out.tensions.extend(child.tensions);
+        out.areas.extend(child.areas);
         Ok(out)
     }
 }
@@ -303,6 +306,31 @@ fn check(pack: &Pack) -> Result<(), SchemaError> {
         return Err(SchemaError::Invalid(format!(
             "default_doc_type {d:?} is not one of the pack's doc_types"
         )));
+    }
+    check_areas(pack)?;
+    Ok(())
+}
+
+/// Area names are `^[a-z0-9][a-z0-9_-]{0,63}$` and every path pattern compiles.
+fn check_areas(pack: &Pack) -> Result<(), SchemaError> {
+    for (name, area) in &pack.areas {
+        let b = name.as_bytes();
+        let valid = (1..=64).contains(&b.len())
+            && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+            && b.iter()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_' || *c == b'-');
+        if !valid {
+            return Err(SchemaError::Invalid(format!(
+                "area {name:?} has an invalid name: use a-z, 0-9, '_' and '-', 1 to 64 characters, starting with a letter or digit"
+            )));
+        }
+        for pattern in &area.paths {
+            if let Err(e) = Glob::compile(pattern) {
+                return Err(SchemaError::Invalid(format!(
+                    "area {name:?} path {pattern:?}: {e}"
+                )));
+            }
+        }
     }
     Ok(())
 }

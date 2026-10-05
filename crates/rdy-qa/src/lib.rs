@@ -4,5 +4,6 @@ pub mod daemon;
 pub mod fixtures;
 pub mod invariants;
 pub mod mcp;
+pub mod packs;
 pub mod perf;
 pub mod report;

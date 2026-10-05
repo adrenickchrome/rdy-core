@@ -1305,8 +1305,10 @@ dependencies = [
 name = "rdy-schema"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "rdy-model",
  "serde",
+ "serde_json",
  "serde_yaml_ng",
  "thiserror",
 ]
