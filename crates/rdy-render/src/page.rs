@@ -470,7 +470,7 @@ pub fn finish(
     sh: &Shared,
     ctx: &PageContext,
     index: &mut search::Index,
-) -> Option<serde_json::Value> {
+) -> Option<machine::PageTwin> {
     if ctx.kind == "redirect" {
         return None;
     }

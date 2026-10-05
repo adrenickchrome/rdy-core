@@ -174,3 +174,146 @@ fn json1_hostile_text_is_valid_json_on_every_page_file() {
         "a hostile title cannot become a link scheme: {t}"
     );
 }
+
+/// The keys of the JSON object that sits at `indent` spaces in the pretty-printed `text`,
+/// in file order (a `Value` would have sorted them).
+fn keys_at(text: &str, indent: usize, from: usize) -> Vec<String> {
+    let pad = " ".repeat(indent);
+    let mut keys = vec![];
+    for line in text[from..].lines() {
+        if let Some(rest) = line.strip_prefix(&pad)
+            && let Some(rest) = rest.strip_prefix('"')
+            && let Some((key, _)) = rest.split_once("\": ")
+        {
+            keys.push(key.to_string());
+        }
+        // the object's closing brace at one level up ends it
+        if line.starts_with(&format!("{}}}", " ".repeat(indent - 2))) && !keys.is_empty() {
+            break;
+        }
+    }
+    keys
+}
+
+/// The brief fixes the order of the twin's keys: the file reads top to bottom like the spec.
+#[test]
+fn json1_the_twins_keys_come_in_the_documented_order() {
+    let (_d, mut r, _ids) = decided_site();
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    let text = std::fs::read_to_string(out.path().join("ledgers.json")).unwrap();
+    assert!(text.ends_with("}\n"));
+    let top: Vec<String> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("  \""))
+        .filter_map(|l| l.split_once("\": ").map(|(k, _)| k.to_string()))
+        .collect();
+    assert_eq!(
+        top,
+        [
+            "schema",
+            "site",
+            "version",
+            "page",
+            "ids",
+            "blocks",
+            "decisions",
+            "links"
+        ]
+    );
+    let at = |needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle} in {text}"))
+    };
+    assert_eq!(
+        keys_at(&text, 4, at("  \"site\": {")),
+        ["name", "description"]
+    );
+    assert_eq!(
+        keys_at(&text, 4, at("  \"version\": {")),
+        [
+            "label",
+            "name",
+            "landing",
+            "landings_since",
+            "view",
+            "frozen"
+        ]
+    );
+    assert_eq!(
+        keys_at(&text, 4, at("  \"page\": {")),
+        [
+            "kind",
+            "id",
+            "url",
+            "title",
+            "doc_type",
+            "lifecycle",
+            "permalink"
+        ]
+    );
+    assert_eq!(
+        keys_at(&text, 6, at("  \"blocks\": [")),
+        [
+            "id",
+            "type",
+            "anchor",
+            "parent",
+            "title",
+            "summary",
+            "lifecycle",
+            "governing",
+            "suspect",
+            "presentational"
+        ]
+    );
+    assert_eq!(
+        keys_at(&text, 6, at("  \"decisions\": [")),
+        [
+            "id",
+            "statement",
+            "status",
+            "decided_at",
+            "authority_basis",
+            "options",
+            "supersedes",
+            "revokes",
+            "affects",
+            "governs"
+        ]
+    );
+    assert_eq!(
+        keys_at(&text, 4, at("  \"links\": {")),
+        ["prev", "next", "parent", "search", "index"]
+    );
+}
+
+/// A decision that affects nothing and that nothing names (what `rdy decide` writes by
+/// default) governs its parent section: the section's twin lists it, so an agent reading the
+/// page sees every decision the `go/<D>.html` permalink leads to.
+#[test]
+fn json1_a_parent_only_decision_governs_its_section_in_the_twin() {
+    let (_d, mut r) = hostile();
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    let j: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.path().join("evil/page.json")).unwrap())
+            .unwrap();
+    let section = j["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["type"] == "section")
+        .unwrap();
+    let governing = section["governing"].as_array().unwrap();
+    assert_eq!(governing.len(), 1, "{section}");
+    let d = governing[0]["id"].as_str().unwrap();
+    assert_eq!(governing[0]["status"], "live");
+    let decisions = j["decisions"].as_array().unwrap();
+    let dj = decisions
+        .iter()
+        .find(|x| x["id"] == d)
+        .unwrap_or_else(|| panic!("{d} in {decisions:?}"));
+    assert_eq!(dj["governs"], serde_json::json!([section["id"]]));
+    assert_eq!(dj["affects"], serde_json::json!([]));
+}

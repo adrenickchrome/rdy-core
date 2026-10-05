@@ -6,7 +6,7 @@ use rdy_engine::{E_IO, Materialized, RdyError, VersionPosition, summary_in};
 use rdy_graph::{DerivedStatus, EdgeKind, Graph};
 use rdy_model::{Block, BlockId, FieldValue, decision};
 use rdy_schema::Pack;
-use serde_json::{Value, json};
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -19,12 +19,103 @@ const DEFAULT_DESCRIPTION: &str = "Design documentation rendered by rdy.";
 /// The most characters of a page's first prose that `llms.txt` shows beside its link.
 const BLURB_MAX: usize = 160;
 
-fn opt(s: Option<&str>) -> Value {
-    s.map_or(Value::Null, |s| json!(s))
+/// The twin of one page. The fields are in the order the file shows them: serde writes a
+/// struct's fields in declaration order, which a `serde_json::Value` would not.
+#[derive(Serialize)]
+pub struct PageTwin {
+    schema: &'static str,
+    site: SiteJson,
+    version: VersionJson,
+    page: PageJson,
+    ids: Vec<String>,
+    blocks: Vec<BlockJson>,
+    decisions: Vec<DecisionJson>,
+    links: LinksJson,
 }
 
-fn id_list<'a>(ids: impl IntoIterator<Item = &'a BlockId>) -> Value {
-    Value::Array(ids.into_iter().map(|i| json!(i.to_string())).collect())
+#[derive(Serialize)]
+struct SiteJson {
+    name: String,
+    description: Option<String>,
+}
+
+#[derive(Serialize)]
+struct VersionJson {
+    label: String,
+    name: Option<String>,
+    landing: Option<String>,
+    landings_since: u32,
+    view: Option<ViewJson>,
+    frozen: bool,
+}
+
+#[derive(Serialize)]
+struct ViewJson {
+    name: String,
+    pending: u32,
+}
+
+#[derive(Serialize)]
+struct PageJson {
+    kind: &'static str,
+    id: Option<String>,
+    url: String,
+    title: String,
+    doc_type: Option<String>,
+    lifecycle: Option<String>,
+    permalink: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BlockJson {
+    id: String,
+    #[serde(rename = "type")]
+    block_type: String,
+    anchor: String,
+    parent: Option<String>,
+    title: Option<String>,
+    summary: String,
+    lifecycle: Option<String>,
+    governing: Vec<GoverningJson>,
+    suspect: bool,
+    presentational: bool,
+}
+
+#[derive(Serialize)]
+struct GoverningJson {
+    id: String,
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+struct DecisionJson {
+    id: String,
+    statement: String,
+    status: &'static str,
+    decided_at: Option<String>,
+    authority_basis: Option<String>,
+    options: Vec<String>,
+    supersedes: Vec<String>,
+    revokes: Vec<String>,
+    affects: Vec<String>,
+    governs: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct LinksJson {
+    prev: Option<String>,
+    next: Option<String>,
+    parent: Option<String>,
+    search: &'static str,
+    index: &'static str,
+}
+
+fn owned(s: Option<&str>) -> Option<String> {
+    s.map(String::from)
+}
+
+fn id_list(ids: &[BlockId]) -> Vec<String> {
+    ids.iter().map(|i| i.to_string()).collect()
 }
 
 /// The engine's word for a decision's derived status.
@@ -48,9 +139,35 @@ fn link_targets(b: &Block, kind: &str) -> Vec<BlockId> {
         .collect()
 }
 
+/// The blocks a decision governs through links: what it affects and what names it as
+/// `decided_by` or `implements`.
+fn link_governs(g: &Graph, d: &Block) -> Vec<BlockId> {
+    let mut out: Vec<BlockId> = link_targets(d, decision::AFFECTS);
+    for e in g.incoming(&d.id) {
+        if matches!(&e.kind, EdgeKind::Link(n) if n == decision::DECIDED_BY || n == decision::IMPLEMENTS)
+            && !out.contains(&e.from)
+        {
+            out.push(e.from.clone());
+        }
+    }
+    out
+}
+
+/// The blocks a decision governs: what `link_governs` says; its parent when that is nothing,
+/// as `Site::compute_governed` does, so the page its permalink leads to lists it.
+fn governs(g: &Graph, d: &Block) -> Vec<BlockId> {
+    let mut out = link_governs(g, d);
+    if out.is_empty() {
+        out.extend(d.parent.clone());
+    }
+    out
+}
+
 /// Every decision, whatever its status, that governs `id`: one the block names as `decided_by`
-/// or `implements`, one that `affects` it. In id order, as the engine's `governing` is.
-fn governing(g: &Graph, id: &BlockId) -> BTreeSet<BlockId> {
+/// or `implements`, one that `affects` it, and a decision under it that governs nothing else
+/// through links. In id order, as the engine's `governing` is.
+fn governing(r: &Read, id: &BlockId) -> BTreeSet<BlockId> {
+    let g = r.g;
     let named = g
         .outgoing(id)
         .iter()
@@ -63,56 +180,42 @@ fn governing(g: &Graph, id: &BlockId) -> BTreeSet<BlockId> {
         .iter()
         .filter(|e| matches!(&e.kind, EdgeKind::Link(n) if n == decision::AFFECTS))
         .map(|e| e.from.clone());
+    let under =
+        r.m.children(Some(id))
+            .into_iter()
+            .filter(|c| c.block_type == decision::DECISION && link_governs(g, c).is_empty())
+            .map(|c| c.id.clone());
     named
         .chain(affecting)
+        .chain(under)
         .filter(|d| g.status(d).is_some())
         .collect()
 }
 
-/// The blocks a decision governs: what it affects and what names it as `decided_by` or
-/// `implements`; its parent when it governs nothing else.
-fn governs(g: &Graph, d: &Block) -> Vec<BlockId> {
-    let mut out: Vec<BlockId> = link_targets(d, decision::AFFECTS);
-    for e in g.incoming(&d.id) {
-        if matches!(&e.kind, EdgeKind::Link(n) if n == decision::DECIDED_BY || n == decision::IMPLEMENTS)
-            && !out.contains(&e.from)
-        {
-            out.push(e.from.clone());
-        }
-    }
-    if out.is_empty() {
-        out.extend(d.parent.clone());
-    }
-    out
-}
-
-fn options_of(d: &Block) -> Value {
+fn options_of(d: &Block) -> Vec<String> {
     match d.fields.get("options") {
-        Some(FieldValue::List(items)) => Value::Array(
-            items
-                .iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| json!(s))
-                .collect(),
-        ),
-        _ => json!([]),
+        Some(FieldValue::List(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(String::from)
+            .collect(),
+        _ => vec![],
     }
 }
 
-fn decision_json(d: &Block, g: &Graph) -> Value {
-    let status = g.status(&d.id).map_or("proposed", |s| status_word(&s));
-    json!({
-        "id": d.id.to_string(),
-        "statement": d.field_str("statement").unwrap_or(""),
-        "status": status,
-        "decided_at": opt(d.field_str("decided_at")),
-        "authority_basis": opt(d.field_str("authority_basis")),
-        "options": options_of(d),
-        "supersedes": id_list(&link_targets(d, decision::SUPERSEDES)),
-        "revokes": id_list(&link_targets(d, decision::REVOKES)),
-        "affects": id_list(&link_targets(d, decision::AFFECTS)),
-        "governs": id_list(&governs(g, d)),
-    })
+fn decision_json(d: &Block, g: &Graph) -> DecisionJson {
+    DecisionJson {
+        id: d.id.to_string(),
+        statement: d.field_str("statement").unwrap_or("").to_string(),
+        status: g.status(&d.id).map_or("proposed", |s| status_word(&s)),
+        decided_at: owned(d.field_str("decided_at")),
+        authority_basis: owned(d.field_str("authority_basis")),
+        options: options_of(d),
+        supersedes: id_list(&link_targets(d, decision::SUPERSEDES)),
+        revokes: id_list(&link_targets(d, decision::REVOKES)),
+        affects: id_list(&link_targets(d, decision::AFFECTS)),
+        governs: id_list(&governs(g, d)),
+    }
 }
 
 /// What the twin reads about the whole project, whichever page it is for.
@@ -131,19 +234,19 @@ fn block_json(
     title: Option<&str>,
     presentational: bool,
     seen: &mut Vec<BlockId>,
-) -> Value {
-    let Some(b) = r.m.get(id) else {
-        return Value::Null;
-    };
+) -> Option<BlockJson> {
+    let b = r.m.get(id)?;
     // a presentational block has no trail, so no decision governs it for a reader
-    let governing: Vec<Value> = if presentational {
+    let governing: Vec<GoverningJson> = if presentational {
         vec![]
     } else {
-        governing(r.g, id)
+        governing(r, id)
             .into_iter()
             .map(|d| {
-                let status = r.g.status(&d).map_or("proposed", |s| status_word(&s));
-                let entry = json!({"id": d.to_string(), "status": status});
+                let entry = GoverningJson {
+                    id: d.to_string(),
+                    status: r.g.status(&d).map_or("proposed", |s| status_word(&s)),
+                };
                 if !seen.contains(&d) {
                     seen.push(d);
                 }
@@ -151,17 +254,17 @@ fn block_json(
             })
             .collect()
     };
-    json!({
-        "id": id.to_string(),
-        "type": b.block_type,
-        "anchor": anchor,
-        "parent": b.parent.as_ref().map(|p| p.to_string()),
-        "title": opt(title),
-        "summary": summary_in(b, r.m),
-        "lifecycle": opt(b.field_str("lifecycle")),
-        "governing": governing,
-        "suspect": r.suspects.contains(id),
-        "presentational": presentational,
+    Some(BlockJson {
+        id: id.to_string(),
+        block_type: b.block_type.clone(),
+        anchor: anchor.to_string(),
+        parent: b.parent.as_ref().map(|p| p.to_string()),
+        title: owned(title),
+        summary: summary_in(b, r.m),
+        lifecycle: owned(b.field_str("lifecycle")),
+        governing,
+        suspect: r.suspects.contains(id),
+        presentational,
     })
 }
 
@@ -185,22 +288,22 @@ pub fn page_json(
     pos: &VersionPosition,
     site: &Site,
     pack: &Pack,
-) -> Value {
+) -> PageTwin {
     let r = Read { m, g, suspects };
     let own = matches!(ctx.kind, "doc" | "folder")
         .then(|| tree_block(site, &ctx.page_url))
         .flatten();
     let mut seen: Vec<BlockId> = vec![];
-    let mut ids: Vec<&str> = vec![];
-    let mut blocks: Vec<Value> = vec![];
+    let mut ids: Vec<String> = vec![];
+    let mut blocks: Vec<BlockJson> = vec![];
     match ctx.kind {
         "doc" => {
             for i in &ctx.items {
                 let Ok(id) = BlockId::parse(&i.id) else {
                     continue;
                 };
-                ids.push(&i.id);
-                blocks.push(block_json(
+                ids.push(i.id.clone());
+                blocks.extend(block_json(
                     &r,
                     &id,
                     &i.anchor,
@@ -218,7 +321,7 @@ pub fn page_json(
             };
             for id in list {
                 let Some(b) = m.get(id) else { continue };
-                blocks.push(block_json(
+                blocks.extend(block_json(
                     &r,
                     id,
                     anchors.get(id).map_or("", String::as_str),
@@ -230,7 +333,7 @@ pub fn page_json(
         }
         _ => {}
     }
-    let decisions: Vec<Value> = seen
+    let decisions: Vec<DecisionJson> = seen
         .iter()
         .filter_map(|d| m.get(d))
         .map(|d| decision_json(d, g))
@@ -258,37 +361,43 @@ pub fn page_json(
         Some(v) => (Some(v.landing.as_str()), Some(v.name.as_str())),
         None => (None, None),
     };
-    json!({
-        "schema": SCHEMA,
-        "site": {"name": ctx.site_name, "description": opt(ctx.site_description.as_deref())},
-        "version": {
-            "label": ctx.version.text,
-            "name": opt(name),
-            "landing": opt(landing),
-            "landings_since": pos.landings_since,
-            "view": pos.view.as_ref().map(|v| json!({"name": v.name, "pending": v.unlanded_changes})),
-            "frozen": pos.frozen,
+    PageTwin {
+        schema: SCHEMA,
+        site: SiteJson {
+            name: ctx.site_name.clone(),
+            description: ctx.site_description.clone(),
         },
-        "page": {
-            "kind": ctx.kind,
-            "id": own.map(|b| b.id.to_string()),
-            "url": ctx.page_url,
-            "title": ctx.title,
-            "doc_type": opt(own.and_then(|b| b.field_str("doc_type"))),
-            "lifecycle": opt(own.and_then(|b| b.field_str("lifecycle"))),
-            "permalink": own.map(|b| site.go_page(&b.id)),
+        version: VersionJson {
+            label: ctx.version.text.clone(),
+            name: name.map(String::from),
+            landing: landing.map(String::from),
+            landings_since: pos.landings_since,
+            view: pos.view.as_ref().map(|v| ViewJson {
+                name: v.name.clone(),
+                pending: v.unlanded_changes,
+            }),
+            frozen: pos.frozen,
         },
-        "ids": ids,
-        "blocks": blocks,
-        "decisions": decisions,
-        "links": {
-            "prev": prev,
-            "next": next,
-            "parent": parent,
-            "search": "search-index.json",
-            "index": "llms.txt",
+        page: PageJson {
+            kind: ctx.kind,
+            id: own.map(|b| b.id.to_string()),
+            url: ctx.page_url.clone(),
+            title: ctx.title.clone(),
+            doc_type: own.and_then(|b| b.field_str("doc_type")).map(String::from),
+            lifecycle: own.and_then(|b| b.field_str("lifecycle")).map(String::from),
+            permalink: own.map(|b| site.go_page(&b.id)),
         },
-    })
+        ids,
+        blocks,
+        decisions,
+        links: LinksJson {
+            prev,
+            next,
+            parent,
+            search: "search-index.json",
+            index: "llms.txt",
+        },
+    }
 }
 
 /// A text as one line: runs of whitespace become one space.
