@@ -27,6 +27,8 @@ pub const E_FILE_FORMAT: &str = "E_FILE_FORMAT";
 pub const E_ALREADY_LANDED: &str = "E_ALREADY_LANDED";
 /// No order key fits between two siblings within `MAX_ORDER_KEY_LEN`.
 pub const E_ORDER_DEPTH: &str = "E_ORDER_DEPTH";
+/// The store was written by a newer rdy, or its FORMAT file is unreadable.
+pub const E_STORE_FORMAT: &str = "E_STORE_FORMAT";
 /// A tool panicked.
 pub const E_INTERNAL: &str = "E_INTERNAL";
 /// Input over a hard limit.
@@ -144,6 +146,7 @@ impl From<StoreError> for RdyError {
                     segment.display()
                 ),
             ),
+            StoreError::Format { message, fix } => RdyError::new(E_STORE_FORMAT, message, fix),
             StoreError::Io(e) if e.kind() == std::io::ErrorKind::InvalidData => RdyError::new(
                 E_IO,
                 format!("i/o error: {e}"),

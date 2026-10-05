@@ -375,6 +375,7 @@ fn a_partial_append_leaves_no_bytes_past_the_end() {
     let mut s = Store::open(dir.path()).unwrap();
     s.set_refs(vec![("canon".into(), b"A".to_vec())]).unwrap();
     let len_before = file_len(&seg0(dir.path()));
+    let frames_before = s.verify().unwrap();
     let torn = block("b-AAAAA", "torn");
     s.fail_next_append_after(10);
     assert!(s.put(kinds::BLOCK, &torn).is_err());
@@ -385,12 +386,12 @@ fn a_partial_append_leaves_no_bytes_past_the_end() {
     );
     assert_eq!(
         s.verify().unwrap(),
-        1,
-        "fsck in the same session sees only the acknowledged frame"
+        frames_before,
+        "fsck in the same session sees only the acknowledged frames"
     );
     s.put(kinds::BLOCK, &block("b-BBBBB", "after")).unwrap();
     drop(s);
     let s = Store::open(dir.path()).unwrap();
-    assert_eq!(s.verify().unwrap(), 2);
+    assert_eq!(s.verify().unwrap(), frames_before + 1);
     assert!(!s.has(&torn.version_hash()).unwrap());
 }

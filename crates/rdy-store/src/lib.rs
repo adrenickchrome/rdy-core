@@ -1,4 +1,5 @@
 pub mod error;
+pub mod format;
 pub mod fsutil;
 pub mod index;
 pub mod kinds;

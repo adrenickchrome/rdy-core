@@ -1,4 +1,5 @@
 use crate::error::StoreError;
+use crate::format::{self, Format};
 use crate::fsutil;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
@@ -49,6 +50,8 @@ pub struct Store {
     poisoned: bool,
     /// Directories open fsynced because it created something in them (dur1).
     synced: Vec<PathBuf>,
+    /// Opened by `open_legacy_for_tests`: behaves as M1 did (no format, no markers).
+    legacy: bool,
 }
 
 /// Opens the index, verifies its integrity and reads its acknowledged boundary (None if it has
@@ -154,6 +157,18 @@ fn entries_for_frame(
 
 impl Store {
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
+        Store::open_with(dir, false)
+    }
+
+    /// Test hook: opens and writes exactly as M1 did, so upgrade tests have an M1 store. No
+    /// `FORMAT` is read, checked or written, the M1 open rule is always used, no format batch is
+    /// written, and every frame is appended on its own with no batch marker.
+    #[doc(hidden)]
+    pub fn open_legacy_for_tests(dir: &Path) -> Result<Store, StoreError> {
+        Store::open_with(dir, true)
+    }
+
+    fn open_with(dir: &Path, legacy: bool) -> Result<Store, StoreError> {
         // dur1: each directory created here is fsynced into its parent before any write is acked
         let mut synced = fsutil::create_dir_durable(dir)?;
         let segments = dir.join("segments");
@@ -167,6 +182,16 @@ impl Store {
         if let Err(e) = lock.try_lock() {
             return Err(lock_error(dir, e)); // lock1
         }
+        // a newer store is refused before the index is opened or anything is written
+        let format_file = if legacy {
+            None
+        } else {
+            let f = format::read_format_file(dir)?;
+            if let Some(f) = f {
+                format::check_reader(f, dir)?;
+            }
+            f
+        };
         // seg1: a gap in the segment numbers means acknowledged frames are missing
         if let Some((missing, later)) = find_gap(&segments)? {
             return Err(StoreError::MissingFrames {
@@ -190,9 +215,10 @@ impl Store {
             index_rebuilt,
             ..OpenReport::default()
         };
-        // an M2 log (any batch marker in its last two segments) opens by the marker rule; the
-        // index's durable end is only the floor under which damage is refused, never the boundary
-        report.marker_rule = log_has_marker(&segments)?;
+        // FORMAT, or a batch marker in the log's last two segments, means an M2 log: it opens by
+        // the marker rule. The index's durable end is only the floor under which damage is
+        // refused, never the boundary. Without either the log is M1 (or a new store).
+        report.marker_rule = !legacy && (format_file.is_some() || log_has_marker(&segments)?);
         let log = if report.marker_rule {
             let (log, quarantined) = SegmentLog::open_marked(&segments, SEGMENT_MAX, acked)?;
             report.quarantined = quarantined;
@@ -209,6 +235,7 @@ impl Store {
             poisoned: false,
             synced,
             report,
+            legacy,
         };
         let (upto, end) = (store.index.indexed_upto()?, store.log.end());
         if upto > end {
@@ -230,7 +257,72 @@ impl Store {
         let frames = store.catch_up()?;
         store.report.caught_up_frames = frames;
         store.report.catch_up_commits = u32::from(frames > 0);
+        if !legacy {
+            store.ensure_format(format_file.is_some())?;
+        }
         Ok(store)
+    }
+
+    /// Makes the log hold the store's format and `FORMAT` mirror it. The log's refs are the truth:
+    /// a newer `min_reader` there is refused; absent refs are written as one marked batch (which
+    /// also upgrades an M1 log) and then `FORMAT` is written; a missing `FORMAT` is rewritten from
+    /// the refs. Both steps are idempotent, so a crash between them is finished by the next open.
+    fn ensure_format(&mut self, has_format_file: bool) -> Result<(), StoreError> {
+        let read = |this: &Store, name: &str| -> Result<Option<u32>, StoreError> {
+            this.index
+                .get_ref(name)?
+                .map(|v| {
+                    format::decode_u32(&v).ok_or_else(|| {
+                        StoreError::Decode(format!("the log's ref {name} is not a decimal number"))
+                    })
+                })
+                .transpose()
+        };
+        let (log_format, min_reader) = (
+            read(self, format::REF_LOG_FORMAT)?,
+            read(self, format::REF_MIN_READER)?,
+        );
+        if let Some(min_reader) = min_reader {
+            let f = Format {
+                log_format: log_format.unwrap_or(format::LOG_FORMAT),
+                min_reader,
+            };
+            format::check_reader(f, &self.dir)?;
+        }
+        match (log_format, min_reader) {
+            (Some(log_format), Some(min_reader)) => {
+                if !has_format_file {
+                    format::write_format_file(
+                        &self.dir,
+                        Format {
+                            log_format,
+                            min_reader,
+                        },
+                    )?;
+                }
+            }
+            _ => {
+                let held_frames = self.log.end()
+                    != Location {
+                        segment: 0,
+                        offset: 0,
+                    };
+                self.report.upgraded = held_frames && !self.report.marker_rule;
+                let cur = Format::CURRENT;
+                self.set_refs(vec![
+                    (
+                        format::REF_LOG_FORMAT.into(),
+                        format::encode_u32(cur.log_format),
+                    ),
+                    (
+                        format::REF_MIN_READER.into(),
+                        format::encode_u32(cur.min_reader),
+                    ),
+                ])?;
+                format::write_format_file(&self.dir, cur)?;
+            }
+        }
+        Ok(())
     }
 
     /// Test hook: the directories `open` fsynced because it created something in them.
@@ -323,6 +415,9 @@ impl Store {
         if batch.is_empty() {
             return Ok(hashes);
         }
+        if self.legacy {
+            return self.append_and_index_legacy(hashes, batch);
+        }
         let placed = self.log.append_batch(&batch)?;
         let mut entries = vec![];
         for ((kind, payload), (loc, hash)) in batch.iter().zip(&placed) {
@@ -336,6 +431,25 @@ impl Store {
         }
         self.index.apply(&entries, self.log.end())?;
         self.log.crash_point(CrashPoint::AfterIndex);
+        Ok(hashes)
+    }
+
+    /// The M1 write: each frame appended on its own with no marker, one sync, one index commit.
+    fn append_and_index_legacy(
+        &mut self,
+        hashes: Vec<Hash>,
+        batch: Vec<(u8, Vec<u8>)>,
+    ) -> Result<Vec<Hash>, StoreError> {
+        let mut entries = vec![];
+        for (kind, payload) in &batch {
+            let (loc, hash) = self.log.append(*kind, payload)?;
+            entries.extend(entries_for_frame(*kind, hash, loc, payload)?);
+        }
+        self.log.sync()?;
+        if std::mem::take(&mut self.faults.index_apply) {
+            return Err(StoreError::Db("injected index failure".into()));
+        }
+        self.index.apply(&entries, self.log.end())?;
         Ok(hashes)
     }
 
