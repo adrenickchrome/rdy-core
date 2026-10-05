@@ -246,24 +246,24 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
             let mut r = Rdy::open(&project)?;
             let out = match cmd {
                 Cmd::Status => {
-                    let landings = r.store().landings()?.len();
-                    let canon = r.version_position(&Scope::Canon)?;
+                    let st = r.read();
+                    let landings = st.landings()?.len();
+                    let canon = st.version_position(&Scope::Canon)?;
                     let mut warnings = vec![];
                     let mut views = vec![];
-                    for (n, _) in r.store().refs_with_prefix("view/")? {
-                        let name = n.trim_start_matches("view/").to_string();
+                    for name in st.view_names() {
                         if name.contains(':') {
                             warnings.push(format!(
                                 "view {name:?} has ':' in its name (reserved for scopes since addendum A): read it as view:{name}, propose it with --view view:{name}; it can't receive new writes"
                             ));
                         }
-                        let changes = r.store().view_head(&name)?.map_or(0, |h| h.len);
-                        let pos = r.version_position(&Scope::View(name.clone()))?;
+                        let changes = st.included(&name).len();
+                        let pos = st.version_position(&Scope::View(name.clone()))?;
                         views.push(
                             json!({"name": name, "changes": changes, "version_position": pos}),
                         );
                     }
-                    let suspects = r.suspects(&Scope::Canon)?.len();
+                    let suspects = st.suspects(&Scope::Canon)?.len();
                     let mut text = format!(
                         "pack {}\ncanon: {} ({landings} landings, {suspects} suspects)\nviews:\n{}",
                         r.pack().name,
@@ -282,7 +282,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                         text.push_str(&format!("\nwarning: {w}"));
                     }
                     Ok((
-                        json!({"pack": r.pack().name, "landings": landings, "suspects": suspects, "version_position": canon, "views": views, "warnings": warnings}),
+                        json!({"pack": r.pack().name, "landings": landings, "suspects": suspects, "version_position": canon, "views": views, "warnings": warnings, "seq": st.seq()}),
                         text,
                     ))
                 }
@@ -500,7 +500,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                 }
                 Cmd::Render { out, scope } => {
                     let scope = r.resolve_read_scope(&scope, None)?;
-                    let s = rdy_render::render_site(&mut r, &scope, &out)?;
+                    let s = rdy_render::render_site(&r.read(), &scope, &out)?;
                     Ok((
                         serde_json::to_value(&s).expect("json"),
                         format!(
@@ -540,7 +540,7 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     ))
                 }
                 Cmd::Reindex => {
-                    r.store_mut().reindex()?;
+                    r.reindex()?;
                     Ok((json!({"reindexed": true}), "index rebuilt".into()))
                 }
                 Cmd::Fsck => {
@@ -590,9 +590,11 @@ fn run_check(project: Option<PathBuf>, path: &Path, pack: Option<&str>, as_json:
                 Some(name) => resolve_pack(&root, name)?,
                 None => r.pack().clone(),
             };
-            let canon = r.materialized(&Scope::Canon)?.clone();
+            let st = r.read();
+            let canon = st.materialized(&Scope::Canon)?;
+            drop(st);
             close_project(r);
-            check_path(&pk, Some(&canon), path)
+            check_path(&pk, Some(&*canon), path)
         } else {
             let name = pack.ok_or_else(|| {
                 RdyError::new(

@@ -21,7 +21,7 @@ fn ren1_rerendering_replaces_the_site_and_drops_stale_pages() {
     let (_d, mut r, doc) = one_doc();
     let parent = tempfile::tempdir().unwrap();
     let site = parent.path().join("site");
-    rdy_render::render_site(&mut r, &Scope::Canon, &site).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, &site).unwrap();
     assert!(site.join("tx.html").exists());
     assert!(site.join(rdy_render::SITE_MARKER).exists());
     write(
@@ -31,7 +31,7 @@ fn ren1_rerendering_replaces_the_site_and_drops_stale_pages() {
     )
     .unwrap();
     land(&mut r, "work").unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, &site).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, &site).unwrap();
     assert!(site.join("renamed.html").exists());
     assert!(!site.join("tx.html").exists(), "the stale page is gone");
     let left: Vec<_> = std::fs::read_dir(parent.path())
@@ -48,10 +48,10 @@ fn ren1_rerendering_replaces_the_site_and_drops_stale_pages() {
 /// Includes Review Focus 4: an existing file as --out is refused and untouched.
 #[test]
 fn ren1_a_non_empty_directory_that_is_not_a_site_is_refused_untouched() {
-    let (_d, mut r, _doc) = one_doc();
+    let (_d, r, _doc) = one_doc();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("notes.txt"), "mine").unwrap();
-    let e = rdy_render::render_site(&mut r, &Scope::Canon, dir.path()).unwrap_err();
+    let e = rdy_render::render_site(&r.read(), &Scope::Canon, dir.path()).unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT", "{e}");
     assert_eq!(
         std::fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
@@ -59,16 +59,16 @@ fn ren1_a_non_empty_directory_that_is_not_a_site_is_refused_untouched() {
     );
     assert!(!dir.path().join(rdy_render::SITE_MARKER).exists());
     let file = dir.path().join("notes.txt");
-    let e = rdy_render::render_site(&mut r, &Scope::Canon, &file).unwrap_err();
+    let e = rdy_render::render_site(&r.read(), &Scope::Canon, &file).unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT", "{e}");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "mine");
 }
 
 #[test]
 fn ren1_an_empty_directory_is_rendered_into() {
-    let (_d, mut r, _doc) = one_doc();
+    let (_d, r, _doc) = one_doc();
     let dir = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, dir.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, dir.path()).unwrap();
     assert!(dir.path().join("index.html").exists());
     assert!(dir.path().join(rdy_render::SITE_MARKER).exists());
 }
@@ -78,7 +78,7 @@ fn ren1_an_empty_directory_is_rendered_into() {
 #[test]
 fn ren1_a_symlinked_out_is_refused_untouched() {
     use std::os::unix::fs::MetadataExt;
-    let (_d, mut r, _doc) = one_doc();
+    let (_d, r, _doc) = one_doc();
     let parent = tempfile::tempdir().unwrap();
     let target = parent.path().join("target");
     std::fs::create_dir(&target).unwrap();
@@ -91,7 +91,7 @@ fn ren1_a_symlinked_out_is_refused_untouched() {
     // Tab-completion appends a slash to a link to a directory, and `/.` names the same thing.
     for spelled in ["link", "link/", "link/."] {
         let out = parent.path().join(spelled);
-        let e = rdy_render::render_site(&mut r, &Scope::Canon, &out).unwrap_err();
+        let e = rdy_render::render_site(&r.read(), &Scope::Canon, &out).unwrap_err();
         assert_eq!(e.code, "E_BAD_INPUT", "{spelled}: {e}");
         assert!(
             std::fs::symlink_metadata(&link)
@@ -159,7 +159,7 @@ impl Drop for ReadOnly {
 #[cfg(unix)]
 #[test]
 fn ren1_an_empty_out_under_an_unwritable_parent_is_rendered_into() {
-    let (_d, mut r, _doc) = one_doc();
+    let (_d, r, _doc) = one_doc();
     let parent = tempfile::tempdir().unwrap();
     let ro = parent.path().join("ro");
     let site = ro.join("site");
@@ -167,7 +167,7 @@ fn ren1_an_empty_out_under_an_unwritable_parent_is_rendered_into() {
     let Some(_guard) = ReadOnly::new(&ro) else {
         return;
     };
-    rdy_render::render_site(&mut r, &Scope::Canon, &site).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, &site).unwrap();
     assert!(site.join("index.html").exists());
     assert!(site.join(rdy_render::SITE_MARKER).exists());
     let left: Vec<_> = std::fs::read_dir(&site)
@@ -187,7 +187,7 @@ fn ren1_a_rerender_under_an_unwritable_parent_replaces_the_site() {
     let parent = tempfile::tempdir().unwrap();
     let ro = parent.path().join("ro");
     let site = ro.join("site");
-    rdy_render::render_site(&mut r, &Scope::Canon, &site).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, &site).unwrap();
     assert!(site.join("tx.html").exists());
     std::fs::create_dir(site.join("stale-dir")).unwrap();
     std::fs::write(site.join("stale-dir").join("x"), "x").unwrap();
@@ -201,7 +201,7 @@ fn ren1_a_rerender_under_an_unwritable_parent_replaces_the_site() {
     let Some(_guard) = ReadOnly::new(&ro) else {
         return;
     };
-    rdy_render::render_site(&mut r, &Scope::Canon, &site).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, &site).unwrap();
     assert!(site.join("renamed.html").exists());
     assert!(!site.join("tx.html").exists(), "the stale page is gone");
     assert!(
@@ -223,7 +223,7 @@ fn ren1_a_rerender_under_an_unwritable_parent_replaces_the_site() {
 #[cfg(unix)]
 #[test]
 fn ren1_an_unwritable_new_out_names_the_path() {
-    let (_d, mut r, _doc) = one_doc();
+    let (_d, r, _doc) = one_doc();
     let parent = tempfile::tempdir().unwrap();
     let ro = parent.path().join("readonly-parent");
     std::fs::create_dir(&ro).unwrap();
@@ -231,7 +231,7 @@ fn ren1_an_unwritable_new_out_names_the_path() {
         return;
     };
     let site = ro.join("site");
-    let e = rdy_render::render_site(&mut r, &Scope::Canon, &site).unwrap_err();
+    let e = rdy_render::render_site(&r.read(), &Scope::Canon, &site).unwrap_err();
     assert_eq!(e.code, "E_IO", "{e}");
     assert!(
         e.to_string().contains("readonly-parent"),
@@ -248,7 +248,7 @@ fn ren1_a_refused_swap_falls_back_to_replacing_in_place() {
     let (_d, mut r, doc) = one_doc();
     let parent = tempfile::tempdir().unwrap();
     let site = parent.path().join("site");
-    rdy_render::render_site(&mut r, &Scope::Canon, &site).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, &site).unwrap();
     write(
         &mut r,
         "work",
@@ -262,7 +262,7 @@ fn ren1_a_refused_swap_falls_back_to_replacing_in_place() {
     let Some(_guard) = ReadOnly::new(&old) else {
         return;
     };
-    rdy_render::render_site(&mut r, &Scope::Canon, &site).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, &site).unwrap();
     assert!(site.join("renamed.html").exists());
     assert!(!site.join("tx.html").exists());
     assert!(site.join(rdy_render::SITE_MARKER).exists());
@@ -277,7 +277,7 @@ fn ren1_a_refused_swap_falls_back_to_replacing_in_place() {
 #[cfg(unix)]
 #[test]
 fn ren1_a_symlinked_marker_does_not_mark_a_site() {
-    let (_d, mut r, _doc) = one_doc();
+    let (_d, r, _doc) = one_doc();
     let parent = tempfile::tempdir().unwrap();
     let elsewhere = parent.path().join("elsewhere.txt");
     std::fs::write(&elsewhere, "a real file").unwrap();
@@ -285,7 +285,7 @@ fn ren1_a_symlinked_marker_does_not_mark_a_site() {
     std::fs::create_dir(&dir).unwrap();
     std::fs::write(dir.join("notes.txt"), "mine").unwrap();
     std::os::unix::fs::symlink(&elsewhere, dir.join(rdy_render::SITE_MARKER)).unwrap();
-    let e = rdy_render::render_site(&mut r, &Scope::Canon, &dir).unwrap_err();
+    let e = rdy_render::render_site(&r.read(), &Scope::Canon, &dir).unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT", "{e}");
     assert_eq!(
         std::fs::read_to_string(dir.join("notes.txt")).unwrap(),
@@ -425,10 +425,10 @@ mod in_cwd {
 #[test]
 fn ren1_an_old_copy_that_cannot_be_removed_is_a_warning() {
     use std::os::unix::fs::PermissionsExt;
-    let (_d, mut r, _doc) = one_doc();
+    let (_d, r, _doc) = one_doc();
     let parent = tempfile::tempdir().unwrap();
     let site = parent.path().join("site");
-    let first = rdy_render::render_site(&mut r, &Scope::Canon, &site).unwrap();
+    let first = rdy_render::render_site(&r.read(), &Scope::Canon, &site).unwrap();
     assert!(first.warnings.is_empty(), "{:?}", first.warnings);
     // a read-only directory holding a file can't be emptied, so the old site can't be removed
     let locked = site.join("locked");
@@ -437,7 +437,7 @@ fn ren1_an_old_copy_that_cannot_be_removed_is_a_warning() {
     let Some(guard) = ReadOnly::new(&locked) else {
         return;
     };
-    let second = rdy_render::render_site(&mut r, &Scope::Canon, &site).unwrap();
+    let second = rdy_render::render_site(&r.read(), &Scope::Canon, &site).unwrap();
     let old = parent.path().join(".site.rdy-render-old");
     std::mem::forget(guard); // the directory has moved; restore its mode by its new path below
     let left = old.join("locked");

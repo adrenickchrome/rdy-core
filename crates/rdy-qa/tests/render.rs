@@ -36,7 +36,7 @@ fn hostile_site() -> (tempfile::TempDir, tempfile::TempDir) {
     r.tag(&approver(), "v0.1.0", None, Some(EVIL.into()))
         .unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     (d, out)
 }
 
@@ -290,7 +290,7 @@ fn render_every_link_resolves_on_a_rich_site() {
     ];
     for (name, scope) in scopes.drain(..) {
         let out = tempfile::tempdir().unwrap();
-        rdy_render::render_site(&mut r, &scope, out.path()).unwrap();
+        rdy_render::render_site(&r.read(), &scope, out.path()).unwrap();
         let (broken, st) = check_links(out.path());
         assert!(broken.is_empty(), "{name}: {broken:#?}");
         assert!(st.pages >= 10, "{name}: {st:?}");

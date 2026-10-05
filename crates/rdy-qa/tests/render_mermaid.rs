@@ -18,7 +18,7 @@ fn mer1_labels_in_diagram_source_are_escaped_for_mermaid() {
     .unwrap();
     land(&mut r, "work").unwrap();
     let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let page = std::fs::read_to_string(out.path().join("tx.html")).unwrap();
     assert!(
         page.contains("A[Ledger #93; #34;q#34; #40;x#41; #124; y] --&gt; B[Done]"),

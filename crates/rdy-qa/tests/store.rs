@@ -88,7 +88,7 @@ fn blob1_a_figure_naming_a_non_blob_object_is_not_an_asset() {
         )],
     );
     let site = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::View("work".into()), site.path()).unwrap();
+    rdy_render::render_site(&r.read(), &Scope::View("work".into()), site.path()).unwrap();
     let page = std::fs::read_to_string(site.path().join("tx.html")).unwrap();
     assert!(page.contains("missing asset"), "{page}");
     let out = tempfile::tempdir().unwrap();

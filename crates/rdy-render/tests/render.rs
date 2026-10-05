@@ -60,7 +60,7 @@ fn renders_docs_decisions_diagrams_and_assets() {
     r.land(&founder(), &p.id).unwrap();
 
     let out = tempfile::tempdir().unwrap();
-    let summary = render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    let summary = render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     assert_eq!(summary.pages, 3); // index, one doc, one decision
     assert_eq!(summary.assets, 1);
 
@@ -149,7 +149,7 @@ fn dangling_and_junk_blobs_become_placeholders() {
     let p = r.propose(&agent(), "work", "seed").unwrap();
     r.land(&founder(), &p.id).unwrap();
     let out = tempfile::tempdir().unwrap();
-    let summary = render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    let summary = render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     assert_eq!(summary.assets, 0);
     let doc = std::fs::read_to_string(out.path().join("assets.html")).unwrap();
     assert!(doc.contains("<p class=\"asset missing\">missing asset: gone</p>"));
@@ -184,7 +184,7 @@ fn hostile_text_is_escaped_in_attribute_contexts() {
     let p = r.propose(&agent(), "work", "seed").unwrap();
     r.land(&founder(), &p.id).unwrap();
     let out = tempfile::tempdir().unwrap();
-    render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let doc = std::fs::read_to_string(out.path().join("t.html")).unwrap();
     let dec = std::fs::read_to_string(
         out.path()
@@ -216,7 +216,7 @@ fn escaped_braces_render_literally_and_diagram_references_become_labels() {
         {"op": "create", "type": "code", "parent": "$s", "fields": {"lang": "yaml"}, "body": r"x: \{{ .Values.image }}"}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
     let out = tempfile::tempdir().unwrap();
-    render_site(&mut r, &Scope::View("work".into()), out.path()).unwrap();
+    render_site(&r.read(), &Scope::View("work".into()), out.path()).unwrap();
     let doc = std::fs::read_to_string(out.path().join("flows.html")).unwrap();
     assert!(
         doc.contains(
@@ -257,7 +257,7 @@ fn link_labels_render_references_as_text_on_one_line() {
     let p = r.propose(&agent(), "work", "seed").unwrap();
     r.land(&founder(), &p.id).unwrap();
     let out = tempfile::tempdir().unwrap();
-    render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let dec = std::fs::read_to_string(out.path().join(format!("_decision/{did}.html"))).unwrap();
     assert!(
         dec.contains(">Corrections are new entries per Ledger is append-only.</a>"),
@@ -304,7 +304,7 @@ fn every_page_carries_the_version_label() {
     let (doc, did) = small_site(&mut r);
     let render = |r: &mut Rdy, scope: &Scope| {
         let out = tempfile::tempdir().unwrap();
-        render_site(r, scope, out.path()).unwrap();
+        render_site(&r.read(), scope, out.path()).unwrap();
         out
     };
     let out = render(&mut r, &Scope::Canon);
@@ -404,7 +404,7 @@ fn the_site_mirrors_the_folder_tree() {
     let ids = site_tree(&mut r);
     let id = |k: &str| ids[k].as_str().unwrap().to_string();
     let out = tempfile::tempdir().unwrap();
-    let s = render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    let s = render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     for p in [
         "index.html",
         "glossary.html",
@@ -480,7 +480,7 @@ fn decisions_and_assets_live_under_underscore_directories() {
     let p = r.propose(&agent(), "work", "seed").unwrap();
     r.land(&founder(), &p.id).unwrap();
     let out = tempfile::tempdir().unwrap();
-    render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let doc = std::fs::read_to_string(out.path().join("wallets/design.html")).unwrap();
     assert!(doc.contains(&format!("src=\"../_assets/{blob}\"")), "{doc}");
     assert!(
@@ -498,10 +498,10 @@ fn site_size_at_1k_folders() {
     // cargo test -p rdy-render --release --test render site_size_at_1k_folders -- --ignored --nocapture
     let dir = tempfile::tempdir().unwrap();
     rdy_engine::testkit::generate_tree(dir.path(), 1000, 10, 8);
-    let mut r = Rdy::open(dir.path()).unwrap();
+    let r = Rdy::open(dir.path()).unwrap();
     let out = tempfile::tempdir().unwrap();
     let t = std::time::Instant::now();
-    let s = render_site(&mut r, &Scope::View("work".into()), out.path()).unwrap();
+    let s = render_site(&r.read(), &Scope::View("work".into()), out.path()).unwrap();
     let took = t.elapsed();
     fn size(p: &std::path::Path) -> u64 {
         std::fs::read_dir(p)
@@ -563,7 +563,7 @@ fn a_damaged_store_with_a_very_deep_chain_renders_without_overflowing() {
         .unwrap();
     r.invalidate();
     let out = tempfile::tempdir().unwrap();
-    let s = render_site(&mut r, &Scope::View("work".into()), out.path()).unwrap();
+    let s = render_site(&r.read(), &Scope::View("work".into()), out.path()).unwrap();
     // index + one page per folder down to one past the limit
     assert_eq!(s.pages, 1 + tree::MAX_FOLDER_DEPTH + 1, "{s:?}");
 }
@@ -586,7 +586,7 @@ fn the_sidebar_shows_at_most_50_siblings_per_list() {
     )
     .unwrap();
     let out = tempfile::tempdir().unwrap();
-    render_site(&mut r, &Scope::View("work".into()), out.path()).unwrap();
+    render_site(&r.read(), &Scope::View("work".into()), out.path()).unwrap();
     let page = std::fs::read_to_string(out.path().join("doc-100.html")).unwrap();
     let start = page.find("<aside class=\"tree\">").unwrap();
     let end = page[start..].find("</aside>").unwrap() + start;
@@ -620,7 +620,7 @@ fn hostile_folder_and_doc_titles_are_escaped_in_tree_pages() {
         {"op": "create", "type": "section", "parent": "$d", "fields": {"title": evil}}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
     let out = tempfile::tempdir().unwrap();
-    render_site(&mut r, &Scope::View("work".into()), out.path()).unwrap();
+    render_site(&r.read(), &Scope::View("work".into()), out.path()).unwrap();
     for page in ["evil/index.html", "evil/inner.html", "index.html"] {
         let html = std::fs::read_to_string(out.path().join(page)).unwrap();
         assert!(!html.contains("<script>x"), "{page}: {html}");

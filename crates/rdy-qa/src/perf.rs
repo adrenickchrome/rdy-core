@@ -282,7 +282,7 @@ pub fn run_workload() -> Vec<Measure> {
     }));
     out.push(measure("render", 5, |i| {
         let site = dir.path().join(format!("site{i}"));
-        rdy_render::render_site(&mut r, &Scope::Canon, &site).expect("render");
+        rdy_render::render_site(&r.read(), &Scope::Canon, &site).expect("render");
     }));
     out.push(measure("export_import", 5, |i| {
         let export = dir.path().join(format!("export{i}"));
