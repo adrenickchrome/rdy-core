@@ -111,7 +111,6 @@ fn json1_the_version_block_carries_the_version_and_its_landing() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 12 (until the home page stops showing the landing hash)"]
 fn json1_the_version_block_carries_the_hash_the_html_never_shows() {
     let (_d, mut r) = tiny_with_doc();
     r.tag(&approver(), "v1.0.0", None, Some("first".into()))
@@ -290,15 +289,40 @@ fn json1_the_twins_keys_come_in_the_documented_order() {
 
 /// A decision that affects nothing and that nothing names (what `rdy decide` writes by
 /// default) governs its parent section: the section's twin lists it, so an agent reading the
-/// page sees every decision the `go/<D>.html` permalink leads to.
+/// page sees every decision the `go/<D>.html` permalink leads to. `hostile()`'s own decision
+/// affects the claim (why1), so this test decides a parent-only one under the section.
 #[test]
 fn json1_a_parent_only_decision_governs_its_section_in_the_twin() {
     let (_d, mut r) = hostile();
-    let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&mut r, &Scope::Canon, out.path()).unwrap();
-    let j: serde_json::Value =
+    let twin = |r: &mut rdy_engine::Rdy| -> serde_json::Value {
+        let out = tempfile::tempdir().unwrap();
+        rdy_render::render_site(r, &Scope::Canon, out.path()).unwrap();
         serde_json::from_str(&std::fs::read_to_string(out.path().join("evil/page.json")).unwrap())
-            .unwrap();
+            .unwrap()
+    };
+    let before = twin(&mut r);
+    let section_id = before["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["type"] == "section")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    r.decide(
+        &writer(),
+        "work",
+        rdy_engine::DecisionInput {
+            parent: section_id,
+            statement: "Parent only.".into(),
+            options: vec!["Parent only.".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let j = twin(&mut r);
     let section = j["blocks"]
         .as_array()
         .unwrap()
