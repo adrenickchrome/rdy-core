@@ -11,16 +11,19 @@ use std::path::Path;
 pub struct FileLock(File);
 
 impl FileLock {
-    /// Opens `path` (create, read+write, mode 0600; std opens with O_CLOEXEC) and tries the
-    /// lock once. `Ok(None)` when another holder has it. The file is never deleted.
+    /// Opens `path` (create, read+write, mode 0600, never through a symlink; std opens with
+    /// O_CLOEXEC) and tries the lock once. `Ok(None)` when another holder has it. The file is
+    /// never deleted.
     pub fn try_take(path: &Path) -> io::Result<Option<FileLock>> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(path)?;
+        let file = open_no_follow(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600),
+            path,
+        )?;
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => return Ok(None),
@@ -43,5 +46,24 @@ impl FileLock {
 impl Drop for FileLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
+    }
+}
+
+/// Opens `path` with `opts` and `O_NOFOLLOW`: a run-dir file that is a symlink is refused, never
+/// followed, so a checkout cannot point `.rdy/run/<file>` at a file elsewhere for rdy to write,
+/// chmod or read.
+pub(crate) fn open_no_follow(opts: &mut OpenOptions, path: &Path) -> io::Result<File> {
+    match opts.custom_flags(libc::O_NOFOLLOW).open(path) {
+        Ok(f) => Ok(f),
+        Err(e)
+            if e.raw_os_error() == Some(libc::ELOOP)
+                && fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) =>
+        {
+            Err(io::Error::other(format!(
+                "{} is a symbolic link, which rdy does not follow",
+                path.display()
+            )))
+        }
+        Err(e) => Err(e),
     }
 }

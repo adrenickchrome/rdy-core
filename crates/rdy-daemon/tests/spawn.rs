@@ -177,3 +177,22 @@ fn spawn1_a_spawned_serve_child_detaches_into_a_session_of_its_own() {
     );
     assert_eq!(sid, pid, "the child leads its own session: {line}");
 }
+
+#[test]
+fn spawn1_a_symlinked_daemon_log_is_refused_and_its_target_is_untouched() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = short_tempdir();
+    let run = RunDir::of_project(dir.path());
+    run.ensure().unwrap();
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, "keep\n").unwrap();
+    std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::os::unix::fs::symlink(&victim, run.log_file()).unwrap();
+    let e = serve_command(std::path::Path::new("/bin/sh"), dir.path(), &run).unwrap_err();
+    assert!(e.to_string().contains("symbolic link"), "{e}");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
+    assert_eq!(
+        std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+}

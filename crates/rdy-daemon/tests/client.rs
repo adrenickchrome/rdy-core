@@ -318,3 +318,162 @@ fn start1_a_released_start_lock_is_free_while_a_spawned_child_still_shares_it() 
         "a released start.lock is free while a spawned child still holds its descriptor"
     );
 }
+
+fn hello_for(cwd: &std::path::Path) -> Hello {
+    Hello {
+        rdy: PROTO_VERSION,
+        version: "1".into(),
+        proto: Proto::Ctl,
+        cwd: cwd.to_path_buf(),
+    }
+}
+
+/// What a plain listener heard: the bytes of the first connection it had queued, or `None` when
+/// no client ever connected.
+fn heard(l: &std::os::unix::net::UnixListener) -> Option<Vec<u8>> {
+    use std::io::Read;
+    l.set_nonblocking(true).unwrap();
+    match l.accept() {
+        Ok((mut s, _)) => {
+            s.set_nonblocking(false).unwrap();
+            // best effort: macOS refuses a timeout on a socket whose peer has gone (EINVAL)
+            let _ = s.set_read_timeout(Some(Duration::from_secs(1)));
+            let mut b = vec![];
+            s.read_to_end(&mut b).unwrap();
+            Some(b)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
+        Err(e) => panic!("accept: {e}"),
+    }
+}
+
+fn victim(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let v = dir.join("victim");
+    std::fs::write(&v, "keep\n").unwrap();
+    std::fs::set_permissions(&v, std::fs::Permissions::from_mode(0o644)).unwrap();
+    v
+}
+
+fn assert_untouched(v: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::read_to_string(v).unwrap(), "keep\n");
+    assert_eq!(
+        std::fs::metadata(v).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+}
+
+#[tokio::test]
+async fn start1_a_socket_whose_peer_is_another_uid_is_no_daemon_and_hears_no_hello() {
+    let dir = short_tempdir();
+    let run = RunDir::of_project(dir.path());
+    run.ensure().unwrap();
+    let l = std::os::unix::net::UnixListener::bind(run.socket()).unwrap();
+    let me = socket::own_uid();
+    let t0 = std::time::Instant::now();
+    match client::connect_expecting_uid(&run, &hello_for(dir.path()), me + 1).await {
+        Attempt::NoDaemon(e) => {
+            assert_eq!(
+                e.to_string(),
+                format!("the socket's peer is uid {me}, not ours")
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        t0.elapsed() < Duration::from_secs(1),
+        "refused at once, not after the hello timeout"
+    );
+    assert_eq!(heard(&l), Some(vec![]), "the foreign peer heard nothing");
+}
+
+#[tokio::test]
+async fn start1_a_symlinked_socket_is_not_followed() {
+    let dir = short_tempdir();
+    let other = short_tempdir();
+    let run = RunDir::of_project(dir.path());
+    run.ensure().unwrap();
+    let evil = other.path().join("evil.sock");
+    let l = std::os::unix::net::UnixListener::bind(&evil).unwrap();
+    std::os::unix::fs::symlink(&evil, run.socket()).unwrap();
+    match connect(&run, &hello_for(dir.path())).await {
+        Attempt::NoDaemon(e) => assert!(e.to_string().contains("symbolic link"), "{e}"),
+        other => panic!("{other:?}"),
+    }
+    let n = Arc::new(AtomicUsize::new(0));
+    let mut c = connect_or_start(
+        &run,
+        opts(
+            "1",
+            dir.path(),
+            in_process_spawn("1", n.clone(), Duration::ZERO),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(n.load(Ordering::SeqCst), 1);
+    use std::os::unix::fs::FileTypeExt;
+    assert!(
+        std::fs::symlink_metadata(run.socket())
+            .unwrap()
+            .file_type()
+            .is_socket(),
+        "the daemon's bind replaced the link"
+    );
+    assert_eq!(heard(&l), None, "the linked-to socket was never connected");
+    c.ctl("stop", json!({})).await.unwrap();
+}
+
+#[tokio::test]
+async fn start1_a_symlinked_start_lock_is_refused_and_its_target_is_untouched() {
+    let dir = short_tempdir();
+    let run = RunDir::of_project(dir.path());
+    run.ensure().unwrap();
+    let v = victim(dir.path());
+    std::os::unix::fs::symlink(&v, run.start_lock()).unwrap();
+    match lock::FileLock::try_take(&run.start_lock()) {
+        Err(e) => assert!(e.to_string().contains("symbolic link"), "{e}"),
+        Ok(got) => panic!("took a symlinked lock: {}", got.is_some()),
+    }
+    let n = Arc::new(AtomicUsize::new(0));
+    let e = connect_or_start(
+        &run,
+        opts(
+            "1",
+            dir.path(),
+            in_process_spawn("1", n.clone(), Duration::ZERO),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, E_DAEMON_START);
+    assert!(
+        e.message
+            .starts_with(&format!("could not lock {}: ", run.start_lock().display()))
+            && e.message.contains("symbolic link"),
+        "{e}"
+    );
+    assert_eq!(n.load(Ordering::SeqCst), 0);
+    assert_untouched(&v);
+}
+
+#[tokio::test]
+async fn start1_a_symlinked_daemon_log_is_never_read_into_an_error() {
+    let dir = short_tempdir();
+    let run = RunDir::of_project(dir.path());
+    run.ensure().unwrap();
+    let v = victim(dir.path());
+    std::os::unix::fs::symlink(&v, run.log_file()).unwrap();
+    assert!(log_tail(&run, LOG_TAIL_LINES).is_empty());
+    let mut o = opts("1", dir.path(), |_| Ok(()));
+    o.start_timeout = Duration::from_millis(300);
+    let e = connect_or_start(&run, o).await.unwrap_err();
+    assert_eq!(e.code, E_DAEMON_START);
+    assert!(
+        !e.message.contains("keep") && e.message.ends_with("\n(no daemon.log)"),
+        "{e}"
+    );
+    assert_eq!(e.extra["log_tail"], json!([]));
+    assert_untouched(&v);
+}

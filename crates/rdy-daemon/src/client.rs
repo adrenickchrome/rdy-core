@@ -4,9 +4,10 @@
 use crate::error::{E_DAEMON_GONE, E_DAEMON_START, ErrorReply};
 use crate::hello::{HELLO_TIMEOUT, Hello, HelloReply, PROTO_VERSION};
 use crate::layout::RunDir;
-use crate::lock::FileLock;
+use crate::lock::{FileLock, open_no_follow};
 use crate::session::{Proto, SessionId};
 use serde_json::{Value, json};
+use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -38,7 +39,8 @@ fn start_error(message: String) -> ErrorReply {
 /// `extra["log_tail"]`.
 fn start_error_with_log(run: &RunDir, mut message: String) -> ErrorReply {
     let tail = log_tail(run, LOG_TAIL_LINES);
-    if run.log_file().exists() {
+    // a symlinked log is never read, so it counts as missing
+    if fs::symlink_metadata(run.log_file()).is_ok_and(|m| m.is_file()) {
         message.push_str("\nlast lines of .rdy/run/daemon.log:\n");
         message.push_str(&tail.join("\n"));
     } else {
@@ -60,9 +62,9 @@ fn not_ready(run: &RunDir, start_timeout: Duration) -> ErrorReply {
 }
 
 /// The last `n` lines of the run dir's `daemon.log` (from at most its last 64 KiB); empty when
-/// the file is missing or unreadable.
+/// the file is missing, unreadable or a symlink.
 pub fn log_tail(run: &RunDir, n: usize) -> Vec<String> {
-    let Ok(mut f) = std::fs::File::open(run.log_file()) else {
+    let Ok(mut f) = open_no_follow(fs::OpenOptions::new().read(true), &run.log_file()) else {
         return vec![];
     };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
@@ -300,12 +302,37 @@ pub enum Attempt {
 }
 
 /// Connects to the run dir's socket, sends `hello` and reads the first reply (within
-/// `HELLO_TIMEOUT`). A daemon that dies between accept and reply is no daemon.
+/// `HELLO_TIMEOUT`). A daemon that dies between accept and reply is no daemon; so is a socket
+/// path that is a symlink, and a peer that is not of our own uid (neither hears the hello).
 pub async fn connect(run: &RunDir, hello: &Hello) -> Attempt {
-    let mut stream = match UnixStream::connect(run.socket()).await {
+    connect_expecting_uid(run, hello, crate::socket::own_uid()).await
+}
+
+/// Test hook: `connect`, taking the peer to be ours only when it runs as `uid`.
+#[doc(hidden)]
+pub async fn connect_expecting_uid(run: &RunDir, hello: &Hello, uid: u32) -> Attempt {
+    let path = run.socket();
+    // a socket path that is a symlink may lead anywhere; our daemon binds a real socket there
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Attempt::NoDaemon(io::Error::other(format!(
+            "{} is a symbolic link, which rdy does not follow",
+            path.display()
+        )));
+    }
+    let mut stream = match UnixStream::connect(&path).await {
         Ok(s) => s,
         Err(e) => return Attempt::NoDaemon(e),
     };
+    // the mirror of the daemon's peer check: only a daemon of our own user hears the hello
+    match crate::socket::peer_uid(&stream) {
+        Ok(peer) if peer == uid => {}
+        Ok(peer) => {
+            return Attempt::NoDaemon(io::Error::other(format!(
+                "the socket's peer is uid {peer}, not ours"
+            )));
+        }
+        Err(e) => return Attempt::NoDaemon(e),
+    }
     let mut line = match serde_json::to_vec(hello) {
         Ok(l) => l,
         Err(e) => return Attempt::NoDaemon(io::Error::other(e)),

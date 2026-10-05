@@ -2,6 +2,7 @@
 //! child's own `detach`.
 
 use crate::layout::RunDir;
+use crate::lock::open_no_follow;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -11,15 +12,15 @@ use std::process::{Command, Stdio};
 
 /// The command that starts a detached daemon for `project`, unspawned: `<rdy_bin> serve --detach
 /// --project <project>` in `project`, stdin from /dev/null, stdout and stderr appended to the run
-/// dir's `daemon.log` (created 0600), every `RDY_*` variable removed from its environment, and
-/// a new session (so a new process group) of its own from before its exec.
+/// dir's `daemon.log` (created 0600; refused if it is a symlink), every `RDY_*` variable removed
+/// from its environment, and a new session (so a new process group) of its own from before its
+/// exec.
 pub fn serve_command(rdy_bin: &Path, project: &Path, run: &RunDir) -> io::Result<Command> {
     run.ensure()?;
-    let log = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(0o600)
-        .open(run.log_file())?;
+    let log = open_no_follow(
+        OpenOptions::new().append(true).create(true).mode(0o600),
+        &run.log_file(),
+    )?;
     // a file left by an older run keeps its mode through open; set it exactly
     log.set_permissions(fs::Permissions::from_mode(0o600))?;
     let (out, err) = (log.try_clone()?, log.try_clone()?);
