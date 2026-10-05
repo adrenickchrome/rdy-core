@@ -1,7 +1,7 @@
 use crate::error::{StoreError, db};
 use crate::segment::Location;
 use rdy_model::Hash;
-use redb::{Database, ReadableDatabase, TableDefinition};
+use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -84,8 +84,46 @@ impl Index {
         Ok(Index { db: database })
     }
 
+    /// Applies `entries` and moves `indexed_upto` to `upto` in one commit that is not durable: a
+    /// kill or power loss can lose it, so it must be reproducible from the log. The next durable
+    /// commit (`checkpoint`, `apply_durable`) makes it and every earlier one durable.
     pub fn apply(&self, entries: &[IndexEntry], upto: Location) -> Result<(), StoreError> {
+        self.apply_with(entries, upto, Durability::None)
+    }
+
+    /// `apply`, durable when it returns. The M1 test writer's index commit.
+    pub fn apply_durable(&self, entries: &[IndexEntry], upto: Location) -> Result<(), StoreError> {
+        self.apply_with(entries, upto, Durability::Immediate)
+    }
+
+    /// A durable commit that records the current `indexed_upto` as `checkpointed_upto`, which
+    /// makes every earlier non-durable commit durable. It always writes, so redb never skips it
+    /// as an empty commit.
+    pub fn checkpoint(&self) -> Result<(), StoreError> {
         let w = self.db.begin_write().map_err(db)?;
+        {
+            let mut meta = w.open_table(META).map_err(db)?;
+            let upto = match meta.get("indexed_upto").map_err(db)? {
+                Some(v) => v.value().to_vec(),
+                None => enc(&Location {
+                    segment: 0,
+                    offset: 0,
+                }),
+            };
+            meta.insert("checkpointed_upto", &upto[..]).map_err(db)?;
+        }
+        w.commit().map_err(db)?;
+        Ok(())
+    }
+
+    fn apply_with(
+        &self,
+        entries: &[IndexEntry],
+        upto: Location,
+        durability: Durability,
+    ) -> Result<(), StoreError> {
+        let mut w = self.db.begin_write().map_err(db)?;
+        w.set_durability(durability).map_err(db)?;
         {
             let mut objects = w.open_table(OBJECTS).map_err(db)?;
             let mut producers = w.open_table(PRODUCERS).map_err(db)?;

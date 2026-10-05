@@ -375,8 +375,10 @@ fn open_readers(dir: &Path) -> io::Result<Vec<File>> {
     Ok(readers)
 }
 
-/// True if any frame of the last two segments (read in order until the first bad frame) is a
-/// `BATCH_COMMIT`: the log was written by M2 and opens under the marker rule.
+/// True if the last two segments hold a `BATCH_COMMIT`: the log was written by M2 and opens under
+/// the marker rule. Each segment is read in order until its first bad frame. Behind that damage a
+/// marker still counts if it closes a real batch of the file (see `acknowledged_batch_follows`),
+/// so damage in the first batch does not make an M2 log look like an M1 log.
 pub fn log_has_marker(dir: &Path) -> io::Result<bool> {
     let mut count = 0u32;
     while seg_path(dir, count).exists() {
@@ -391,6 +393,9 @@ pub fn log_has_marker(dir: &Path) -> io::Result<bool> {
                 return Ok(true);
             }
             offset += HEADER + payload.len() as u64;
+        }
+        if offset < file_len && acknowledged_batch_follows(&f, seg, 0, offset, file_len)? {
+            return Ok(true);
         }
     }
     Ok(false)

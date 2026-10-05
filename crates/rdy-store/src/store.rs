@@ -9,6 +9,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// The file a store creates when it opens and removes on a clean close. Finding it at open means the
 /// last process died with the store open.
@@ -47,7 +48,8 @@ pub struct Store {
     dir: PathBuf,
     report: OpenReport,
     log: SegmentLog,
-    index: Index,
+    /// None only while `Drop` closes the database before it removes the sentinel.
+    index: Option<Index>,
     _lock: File,
     faults: Faults,
     /// Set when a failed write could not be rolled back; every later write fails until reopen.
@@ -59,6 +61,17 @@ pub struct Store {
     /// Set only at the end of a successful open, after the sentinel exists: gates `Drop`, so a
     /// store whose open failed neither removes a kill's sentinel nor does anything else on drop.
     opened: bool,
+    /// Frames written since the last checkpoint (none for the M1 test writer, whose index is
+    /// durable on every write).
+    pending: u64,
+    /// When the last write finished, for `checkpoint_if_idle`.
+    last_write: Instant,
+    /// A write checkpoints once `pending` reaches this.
+    checkpoint_frames: u64,
+    /// Checkpoints this store has made.
+    checkpoints: u64,
+    /// The last checkpoint a write attempted and could not make; cleared by the next success.
+    checkpoint_error: Option<String>,
 }
 
 /// How an index open went: the index, its acknowledged boundary (None if it has none yet), whether
@@ -149,6 +162,7 @@ pub fn lock_error(dir: &Path, e: std::fs::TryLockError) -> StoreError {
 struct Faults {
     index_apply: bool,
     rollback: bool,
+    checkpoint: bool,
 }
 
 fn encode<T: Serialize>(v: &T) -> Vec<u8> {
@@ -194,12 +208,22 @@ fn entries_for_frame(
 
 impl Drop for Store {
     fn drop(&mut self) {
-        if self.opened {
-            // a clean close: the next open will not see a kill
+        if self.opened && self.checkpoint().is_ok() {
+            // A clean close: the index is durable, so the next open will not see a kill. The
+            // database is closed before the sentinel goes, so a kill during the close still
+            // leaves the sentinel behind.
+            drop(self.index.take());
             let _ = std::fs::remove_file(self.dir.join(INDEX_OPEN_SENTINEL));
         }
     }
 }
+
+/// Frames (data frames and batch markers) since the last checkpoint that make the next write
+/// checkpoint.
+pub const CHECKPOINT_FRAMES: u64 = 1000;
+/// How long a store with index state not yet checkpointed sits without a write before
+/// `checkpoint_if_idle` flushes it.
+pub const CHECKPOINT_IDLE: Duration = Duration::from_secs(2);
 
 impl Store {
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
@@ -270,9 +294,12 @@ impl Store {
             index_rebuilt,
             ..OpenReport::default()
         };
-        // FORMAT, or a batch marker in the log's last two segments, means an M2 log: it opens by
-        // the marker rule. The index's durable end is only the floor under which damage is
-        // refused, never the boundary. Without either the log is M1 (or a new store).
+        // The FORMAT file, or a batch marker in the log's last two segments (found even behind
+        // damage, so a lagging index and a lost FORMAT cannot make an M2 log look like M1), means
+        // an M2 log: it opens by the marker rule. The index's durable end is only the floor under
+        // which damage is refused, never the boundary, because it lags the log. The index's format
+        // ref is not a signal: it can hold refs whose batch lost its marker. Without either the
+        // log is M1 (or a new store).
         report.marker_rule = !legacy && (format_file.is_some() || log_has_marker(&segments)?);
         let log = if report.marker_rule {
             let (log, quarantined) = SegmentLog::open_marked(&segments, SEGMENT_MAX, acked)?;
@@ -284,7 +311,7 @@ impl Store {
         let mut store = Store {
             dir: dir.to_path_buf(),
             log,
-            index,
+            index: Some(index),
             _lock: lock,
             faults: Faults::default(),
             poisoned: false,
@@ -292,8 +319,13 @@ impl Store {
             report,
             legacy,
             opened: false,
+            pending: 0,
+            last_write: Instant::now(),
+            checkpoint_frames: CHECKPOINT_FRAMES,
+            checkpoints: 0,
+            checkpoint_error: None,
         };
-        let (upto, end) = (store.index.indexed_upto()?, store.log.end());
+        let (upto, end) = (store.index().indexed_upto()?, store.log.end());
         if upto > end {
             // seg1: the index acknowledged frames the log no longer holds. Rebuilding the index
             // from this log would silently roll canon back (spec §5.10: nothing is deleted).
@@ -328,7 +360,7 @@ impl Store {
     /// the refs. Both steps are idempotent, so a crash between them is finished by the next open.
     fn ensure_format(&mut self, has_format_file: bool) -> Result<(), StoreError> {
         let read = |this: &Store, name: &str| -> Result<Option<u32>, StoreError> {
-            this.index
+            this.index()
                 .get_ref(name)?
                 .map(|v| {
                     format::decode_u32(&v).ok_or_else(|| {
@@ -383,6 +415,8 @@ impl Store {
                         format::encode_u32(cur.min_reader),
                     ),
                 ])?;
+                // a new store is durable from its first open
+                self.checkpoint()?;
                 format::write_format_file(&self.dir, cur)?;
             }
         }
@@ -404,9 +438,13 @@ impl Store {
         &self.dir
     }
 
+    fn index(&self) -> &Index {
+        self.index.as_ref().expect("the index is open until drop")
+    }
+
     /// Replays the frames past the index's `indexed_upto` into it; returns how many frames it read.
     fn catch_up(&mut self) -> Result<u64, StoreError> {
-        let from = self.index.indexed_upto()?;
+        let from = self.index().indexed_upto()?;
         let mut entries = vec![];
         let mut frames = 0;
         for (loc, kind, hash) in self.log.scan_from(from)? {
@@ -414,7 +452,16 @@ impl Store {
             entries.extend(entries_for_frame(kind, hash, loc, &payload)?);
             frames += 1;
         }
-        self.index.apply(&entries, self.log.end())?;
+        if self.legacy {
+            // M1's index was durable on every commit
+            self.index().apply_durable(&entries, self.log.end())?;
+        } else {
+            self.index().apply(&entries, self.log.end())?;
+            if frames > 0 {
+                // the replayed frames are in the log, not yet in the durable index
+                self.checkpoint()?;
+            }
+        }
         Ok(frames)
     }
 
@@ -428,11 +475,11 @@ impl Store {
         let path = self.dir.join("index.redb");
         let tmp = self.dir.join("index.redb.tmp");
         // drop the old database before deleting its file
-        self.index = Index::open(&tmp)?;
+        self.index = Some(Index::open(&tmp)?);
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
-        self.index = Index::open(&path)?;
+        self.index = Some(Index::open(&path)?);
         let _ = std::fs::remove_file(&tmp);
         self.catch_up().map(|_| ())
     }
@@ -469,7 +516,7 @@ impl Store {
             let hash = Hash::of(&payload);
             hashes.push(hash);
             if kind != kinds::REF_UPDATE
-                && (seen.contains(&hash) || self.index.object(&hash)?.is_some())
+                && (seen.contains(&hash) || self.index().object(&hash)?.is_some())
             {
                 continue;
             }
@@ -493,8 +540,17 @@ impl Store {
         if std::mem::take(&mut self.faults.index_apply) {
             return Err(StoreError::Db("injected index failure".into()));
         }
-        self.index.apply(&entries, self.log.end())?;
+        self.index().apply(&entries, self.log.end())?;
         self.log.crash_point(CrashPoint::AfterIndex);
+        // The write is acknowledged: it is durable in the log. A checkpoint is only the index
+        // catching up, so a failure of one is recorded and retried, never returned.
+        self.pending += batch.len() as u64 + 1;
+        self.last_write = Instant::now();
+        if self.pending >= self.checkpoint_frames
+            && let Err(e) = self.checkpoint()
+        {
+            self.checkpoint_error = Some(e.to_string());
+        }
         Ok(hashes)
     }
 
@@ -513,8 +569,67 @@ impl Store {
         if std::mem::take(&mut self.faults.index_apply) {
             return Err(StoreError::Db("injected index failure".into()));
         }
-        self.index.apply(&entries, self.log.end())?;
+        self.index().apply_durable(&entries, self.log.end())?;
         Ok(hashes)
+    }
+
+    /// Makes the index durable up to everything written so far: one durable index commit. Until
+    /// then a kill or power loss leaves the durable index behind the log, which the next open
+    /// catches up from the log. The M1 test writer's index is already durable, so it does nothing.
+    pub fn checkpoint(&mut self) -> Result<(), StoreError> {
+        if self.legacy {
+            return Ok(());
+        }
+        self.log.crash_point(CrashPoint::BeforeCheckpoint);
+        if std::mem::take(&mut self.faults.checkpoint) {
+            return Err(StoreError::Db("injected checkpoint failure".into()));
+        }
+        self.index().checkpoint()?;
+        self.log.crash_point(CrashPoint::AfterCheckpoint);
+        self.pending = 0;
+        self.checkpoints += 1;
+        self.checkpoint_error = None;
+        Ok(())
+    }
+
+    /// Checkpoints, and returns true, if frames were written since the last checkpoint and the
+    /// last write was `CHECKPOINT_IDLE` or more before `now`; else does nothing and returns false.
+    pub fn checkpoint_if_idle(&mut self, now: Instant) -> Result<bool, StoreError> {
+        if self.pending == 0 || now.saturating_duration_since(self.last_write) < CHECKPOINT_IDLE {
+            return Ok(false);
+        }
+        self.checkpoint()?;
+        Ok(true)
+    }
+
+    /// Test hook: a write checkpoints once this many frames are pending.
+    #[doc(hidden)]
+    pub fn set_checkpoint_frames(&mut self, n: u64) {
+        self.checkpoint_frames = n;
+    }
+
+    /// Test hook: the checkpoints this store has made.
+    #[doc(hidden)]
+    pub fn checkpoint_count(&self) -> u64 {
+        self.checkpoints
+    }
+
+    /// Test hook: the frames written since the last checkpoint.
+    #[doc(hidden)]
+    pub fn pending_checkpoint_frames(&self) -> u64 {
+        self.pending
+    }
+
+    /// Test hook: the next checkpoint fails.
+    #[doc(hidden)]
+    pub fn fail_next_checkpoint(&mut self) {
+        self.faults.checkpoint = true;
+    }
+
+    /// Test hook: why the last checkpoint a write attempted failed, until a checkpoint succeeds.
+    #[doc(hidden)]
+    pub fn last_checkpoint_error(&self) -> Option<&str> {
+        self.checkpoint_error.as_deref()
     }
 
     /// Test hook: the end of the log.
@@ -558,7 +673,7 @@ impl Store {
     }
 
     pub fn get_raw(&self, h: &Hash) -> Result<(u8, Vec<u8>), StoreError> {
-        let loc = self.index.object(h)?.ok_or(StoreError::NotFound(*h))?;
+        let loc = self.index().object(h)?.ok_or(StoreError::NotFound(*h))?;
         let (kind, found, payload) = self.log.read_hashed(loc)?;
         if found != *h {
             return Err(StoreError::Decode(format!(
@@ -573,7 +688,7 @@ impl Store {
     }
 
     pub fn has(&self, h: &Hash) -> Result<bool, StoreError> {
-        Ok(self.index.object(h)?.is_some())
+        Ok(self.index().object(h)?.is_some())
     }
 
     pub fn get_block(&self, version: &Hash) -> Result<Block, StoreError> {
@@ -601,11 +716,11 @@ impl Store {
     }
 
     pub fn get_ref(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
-        self.index.get_ref(name)
+        self.index().get_ref(name)
     }
 
     pub fn refs_with_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
-        self.index.refs_with_prefix(prefix)
+        self.index().refs_with_prefix(prefix)
     }
 
     /// The hash `put_blob` would return for these bytes, without storing anything.
@@ -714,7 +829,7 @@ impl Store {
     }
 
     pub fn producer(&self, version: &Hash) -> Result<Option<Hash>, StoreError> {
-        self.index.producer(version)
+        self.index().producer(version)
     }
 
     pub fn commit_change(
@@ -742,7 +857,7 @@ impl Store {
         for op in &change.ops {
             if let Some(base) = op.base() {
                 deps.insert(
-                    self.index
+                    self.index()
                         .producer(&base)?
                         .ok_or(StoreError::NotFound(base))?,
                 );

@@ -173,6 +173,16 @@ impl Rdy {
         &mut self.store
     }
 
+    /// Makes the store's index durable up to everything written so far (see `Store::checkpoint`).
+    pub fn checkpoint(&mut self) -> Result<(), RdyError> {
+        Ok(self.store.checkpoint()?)
+    }
+
+    /// Checkpoints if writes are waiting and the store has been idle long enough; true if it did.
+    pub fn checkpoint_if_idle(&mut self) -> Result<bool, RdyError> {
+        Ok(self.store.checkpoint_if_idle(std::time::Instant::now())?)
+    }
+
     pub fn materialized(&mut self, scope: &Scope) -> Result<&Materialized, RdyError> {
         if !self.cache.contains_key(scope) {
             let snapshot = match scope {

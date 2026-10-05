@@ -4,9 +4,12 @@
 #![allow(unused_imports, dead_code)]
 use rdy_model::Hash;
 use rdy_qa::fixtures::*;
+use rdy_qa::mcp::{McpClient, Reply};
+use rdy_store::CHECKPOINT_IDLE;
 use rdy_store::{Store, StoreError, kinds, segment::Location};
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 fn seg(store: &Path, n: u32) -> PathBuf {
     store.join("segments").join(format!("seg-{n:06}.log"))
@@ -261,4 +264,227 @@ fn kill1_a_damaged_index_after_a_clean_close_is_still_rebuilt() {
     assert!(s.open_report().index_rebuilt);
     assert_eq!(s.get_blob(&h).unwrap(), b"kept");
     assert_eq!(damaged_files(&dir), 1);
+}
+
+#[test]
+fn ckpt1_a_write_leaves_the_durable_index_behind_the_log() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::open(&dir).unwrap(); // a new store: format batch, then a checkpoint
+    for i in 0..5u8 {
+        s.put_blob(&[i; 7]).unwrap();
+    }
+    let copy = base.path().join("copy");
+    copy_store(&dir, &copy);
+    let c = Store::open(&copy).unwrap();
+    // 5 writes x (chunk, manifest, marker): acknowledged by the log flush alone
+    assert_eq!(
+        c.open_report().caught_up_frames,
+        15,
+        "{:?}",
+        c.open_report()
+    );
+}
+
+#[test]
+fn ckpt1_a_checkpoint_makes_the_index_durable() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::open(&dir).unwrap();
+    for i in 0..5u8 {
+        s.put_blob(&[i; 7]).unwrap();
+    }
+    s.checkpoint().unwrap();
+    let copy = base.path().join("copy");
+    copy_store(&dir, &copy);
+    assert_eq!(
+        Store::open(&copy).unwrap().open_report().caught_up_frames,
+        0
+    );
+}
+
+#[test]
+fn ckpt1_the_index_checkpoints_every_1000_frames() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    drop(Store::open(&dir).unwrap());
+    let mut s = Store::open(&dir).unwrap();
+    assert_eq!(s.checkpoint_count(), 0);
+    for i in 0..400u32 {
+        s.put_blob(&i.to_le_bytes()).unwrap(); // 3 frames each
+    }
+    // the checkpoint fires after write 334 (1,002 frames); 66 writes (198 frames) follow it
+    assert_eq!(s.checkpoint_count(), 1);
+    assert_eq!(s.pending_checkpoint_frames(), 198);
+}
+
+#[test]
+fn ckpt1_an_idle_store_checkpoints_after_two_seconds() {
+    let base = tempfile::tempdir().unwrap();
+    let mut s = Store::open(&base.path().join("s")).unwrap();
+    s.put_blob(b"idle").unwrap();
+    assert!(!s.checkpoint_if_idle(Instant::now()).unwrap());
+    assert!(
+        s.checkpoint_if_idle(Instant::now() + CHECKPOINT_IDLE)
+            .unwrap()
+    );
+    assert_eq!(s.pending_checkpoint_frames(), 0);
+    assert!(
+        !s.checkpoint_if_idle(Instant::now() + CHECKPOINT_IDLE * 2)
+            .unwrap(),
+        "nothing new"
+    );
+}
+
+#[test]
+fn ckpt1_a_clean_close_leaves_a_durable_index() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    {
+        let mut s = Store::open(&dir).unwrap();
+        for i in 0..3u8 {
+            s.put_blob(&[i; 3]).unwrap();
+        }
+    }
+    let r = Store::open(&dir).unwrap().open_report().clone();
+    assert_eq!(r.caught_up_frames, 0, "{r:?}");
+    assert!(!r.unclean_shutdown);
+}
+
+/// Review Focus 5.
+#[test]
+fn ckpt1_a_failed_checkpoint_never_fails_the_write() {
+    let base = tempfile::tempdir().unwrap();
+    let mut s = Store::open(&base.path().join("s")).unwrap();
+    s.set_checkpoint_frames(1);
+    s.fail_next_checkpoint();
+    let h = s.put_blob(b"durable in the log").unwrap();
+    assert!(s.last_checkpoint_error().unwrap().contains("injected"));
+    s.put_blob(b"next").unwrap();
+    assert!(
+        s.last_checkpoint_error().is_none(),
+        "the next checkpoint retried"
+    );
+    assert_eq!(s.get_blob(&h).unwrap(), b"durable in the log");
+}
+
+#[test]
+fn ckpt1_the_m1_test_writer_commits_its_index_durably() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::open_legacy_for_tests(&dir).unwrap();
+    s.put_blob(b"m1").unwrap();
+    let end = s.log_end();
+    let copy = base.path().join("copy");
+    copy_store(&dir, &copy);
+    // read the copy's durable index directly: what a kill of an M1 process leaves
+    let idx = rdy_store::index::Index::open(&copy.join("index.redb")).unwrap();
+    assert_eq!(
+        idx.indexed_upto().unwrap(),
+        end,
+        "the durable index covers the M1 write"
+    );
+}
+
+#[test]
+fn ckpt1_the_mcp_server_checkpoints_when_idle() {
+    let (dir, r) = project();
+    drop(r);
+    let mut c = McpClient::start(dir.path());
+    assert!(matches!(
+        c.call(
+            "rdy_session",
+            json!({"actor": "agent:qa", "role": "writer"})
+        ),
+        Reply::Ok(_)
+    ));
+    c.call("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "fields": {"title": "Idle", "doc_type": "glossary"}}]})).ok();
+    std::thread::sleep(Duration::from_secs(3));
+    let copy = tempfile::tempdir().unwrap();
+    copy_store(&dir.path().join(".rdy/store2"), copy.path());
+    assert_eq!(
+        Store::open(copy.path())
+            .unwrap()
+            .open_report()
+            .caught_up_frames,
+        0
+    );
+}
+
+/// Carry-forward (Task 3 review): the marker rule must not depend on seeing a marker before the
+/// first bad frame once the index lags. With FORMAT gone and the index at the start, the M1 rule
+/// would take the lagging `indexed_upto` as the acknowledged boundary and truncate acknowledged
+/// batches after damage in the first batch.
+#[test]
+fn mark1_lagging_index_without_format_still_refuses_damage_in_the_first_batch() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    {
+        let mut s = Store::open(&dir).unwrap();
+        s.put_blob(b"second").unwrap();
+        s.put_blob(b"third").unwrap();
+    }
+    // an index that never got past the start of the log, and no FORMAT file
+    std::fs::remove_file(dir.join("index.redb")).unwrap();
+    {
+        let idx = rdy_store::index::Index::open(&dir.join("index.redb")).unwrap();
+        idx.apply_durable(
+            &[],
+            Location {
+                segment: 0,
+                offset: 0,
+            },
+        )
+        .unwrap();
+    }
+    std::fs::remove_file(dir.join("FORMAT")).unwrap();
+    let path = seg(&dir, 0);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[40] ^= 0xff; // inside the first batch's first frame
+    std::fs::write(&path, &bytes).unwrap();
+    let e = Store::open(&dir)
+        .err()
+        .expect("acknowledged batches follow the damage");
+    assert!(
+        matches!(&e, StoreError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData),
+        "{e}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes, "nothing truncated");
+    let torn = std::fs::read_dir(dir.join("segments"))
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".torn-")
+        })
+        .count();
+    assert_eq!(torn, 0, "nothing quarantined");
+}
+
+/// Carry-forward (Task 6 review): an index file that redb must repair (a pending non-durable
+/// commit left by a kill) takes `open_index`'s rollback arm: the open counts it as a kill and
+/// catches up from the log. It is neither rebuilt nor set aside.
+#[test]
+fn kill1_a_pending_non_durable_commit_is_a_rollback_that_catches_up() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::open(&dir).unwrap();
+    let hs: Vec<_> = (0..4u8).map(|i| s.put_blob(&[i; 9]).unwrap()).collect();
+    let copy = base.path().join("copy");
+    copy_store(&dir, &copy);
+    let c = Store::open(&copy).unwrap();
+    let r = c.open_report().clone();
+    assert!(r.unclean_shutdown, "{r:?}");
+    assert!(
+        r.redb_repaired,
+        "redb reports the file as not cleanly closed: {r:?}"
+    );
+    assert!(!r.index_rebuilt, "{r:?}");
+    assert_eq!(r.caught_up_frames, 12, "{r:?}");
+    assert_eq!(damaged_files(&copy), 0);
+    for (i, h) in hs.iter().enumerate() {
+        assert_eq!(c.get_blob(h).unwrap(), vec![i as u8; 9]);
+    }
 }

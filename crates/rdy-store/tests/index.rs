@@ -45,6 +45,7 @@ fn apply_persists_across_reopen() {
             },
         )
         .unwrap();
+        idx.checkpoint().unwrap(); // `apply` alone is not durable
     }
     let idx = Index::open(&path).unwrap();
     assert_eq!(idx.object(&h).unwrap(), Some(loc));

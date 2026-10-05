@@ -397,16 +397,42 @@ pub async fn pump_lines<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     }
 }
 
+/// How often `serve_stdio` looks for an idle store to checkpoint.
+const CHECKPOINT_TICK: std::time::Duration = std::time::Duration::from_millis(500);
+
 pub async fn serve_stdio(project: PathBuf) -> anyhow::Result<()> {
     let rdy = Rdy::open(&project)?;
     let (to_server, from_pump) = tokio::io::duplex(1 << 16);
     tokio::spawn(async move {
         let _ = pump_lines(tokio::io::stdin(), to_server, tools::MAX_REQUEST_BYTES).await;
     });
-    let service = RdyServer::new(rdy)
-        .serve((from_pump, tokio::io::stdout()))
-        .await?;
-    service.waiting().await?;
+    let server = RdyServer::new(rdy);
+    // `serve` consumes the server: keep the state for the idle ticker and the checkpoint at exit
+    let state = Arc::clone(&server.state);
+    let ticker = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(CHECKPOINT_TICK);
+            loop {
+                tick.tick().await;
+                let state = Arc::clone(&state);
+                let _ = tokio::task::spawn_blocking(move || {
+                    let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
+                    let _ = st.rdy.checkpoint_if_idle();
+                })
+                .await;
+            }
+        })
+    };
+    let service = server.serve((from_pump, tokio::io::stdout())).await?;
+    let quit = service.waiting().await;
+    ticker.abort();
+    let _ = tokio::task::spawn_blocking(move || {
+        let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = st.rdy.checkpoint();
+    })
+    .await;
+    quit?;
     Ok(())
 }
 
