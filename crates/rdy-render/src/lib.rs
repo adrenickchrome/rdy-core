@@ -7,7 +7,7 @@ use rdy_model::{Block, BlockId, FieldValue, Hash, decision, tree};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RenderSummary {
@@ -233,10 +233,20 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
 /// ren1: the file that marks a directory as a site rdy rendered, which a later render may replace.
 pub const SITE_MARKER: &str = ".rdy-site";
 
+/// An io error that names the path it happened at.
+fn io_at(what: &str, path: &Path, e: std::io::Error) -> RdyError {
+    RdyError::new(
+        E_IO,
+        format!("{what} {}: {e}", path.display()),
+        "check that the output directory and its parent are writable",
+    )
+}
+
 /// Renders `scope` as a static site at `out`, as export does: into a staging directory beside
 /// `out`, then swapped into place, so renamed and deleted pages never linger. `out` may be new,
 /// an empty directory, or a site rdy rendered before; anything else is refused untouched, and a
-/// symbolic link is never followed.
+/// symbolic link is never followed. When `out` cannot be swapped by rename (its parent is not
+/// writable, or it is a mount point), its contents are replaced in place instead.
 pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
     let refuse = |what: String| {
         RdyError::new(
@@ -245,14 +255,21 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
             "render into a new or empty directory, or one rdy rendered before (it holds .rdy-site)",
         )
     };
+    // `link/` and `link/.` resolve a link when examined, so look at the path without them.
+    let out: PathBuf = out.components().collect();
+    let out = out.as_path();
     if std::fs::symlink_metadata(out).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(refuse(format!("{} is a symbolic link", out.display())));
     }
-    if out.exists() {
+    let exists = out.exists();
+    if exists {
         if !out.is_dir() {
             return Err(refuse(format!("{} is a file", out.display())));
         }
-        let empty = std::fs::read_dir(out).map_err(io)?.next().is_none();
+        let empty = std::fs::read_dir(out)
+            .map_err(|e| io_at("cannot read", out, e))?
+            .next()
+            .is_none();
         let marked = std::fs::symlink_metadata(out.join(SITE_MARKER)).is_ok_and(|m| m.is_file());
         if !empty && !marked {
             return Err(refuse(format!(
@@ -270,17 +287,36 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent).map_err(io)?;
-    let staging = parent.join(format!(".{name}.rdy-render-partial"));
-    if staging.exists() {
-        std::fs::remove_dir_all(&staging).map_err(io)?;
+    if !exists {
+        std::fs::create_dir_all(parent).map_err(|e| io_at("cannot create", parent, e))?;
     }
+    // Staging goes beside `out`; when that is not allowed and `out` exists, inside it.
+    let beside = parent.join(format!(".{name}.rdy-render-partial"));
+    if beside.exists() {
+        std::fs::remove_dir_all(&beside).map_err(|e| io_at("cannot clear", &beside, e))?;
+    }
+    let (staging, inside) = match std::fs::create_dir(&beside) {
+        Ok(()) => (beside, false),
+        Err(e) if exists => {
+            let inside = out.join(STAGING_INSIDE);
+            if inside.exists() {
+                std::fs::remove_dir_all(&inside).map_err(|e| io_at("cannot clear", &inside, e))?;
+            }
+            std::fs::create_dir(&inside).map_err(|e2| {
+                let mut err = io_at("cannot stage in", &inside, e2);
+                err.message += &format!(" (and beside {}: {e})", out.display());
+                err
+            })?;
+            (inside, true)
+        }
+        Err(e) => return Err(io_at("cannot stage in", &beside, e)),
+    };
     let stats = match render_into(rdy, scope, &staging).and_then(|s| {
         std::fs::write(
             staging.join(SITE_MARKER),
             "A site rendered by rdy. rdy render replaces this directory as a whole.\n",
         )
-        .map_err(io)?;
+        .map_err(|e| io_at("cannot write the marker in", &staging, e))?;
         Ok(s)
     }) {
         Ok(s) => s,
@@ -289,21 +325,108 @@ pub fn render_site(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSum
             return Err(e);
         }
     };
-    if out.exists() {
-        let old = parent.join(format!(".{name}.rdy-render-old"));
-        if old.exists() {
-            std::fs::remove_dir_all(&old).map_err(io)?;
-        }
-        std::fs::rename(out, &old).map_err(io)?;
-        if let Err(e) = std::fs::rename(&staging, out) {
-            let _ = std::fs::rename(&old, out);
-            return Err(io(e));
-        }
-        std::fs::remove_dir_all(&old).map_err(io)?;
+    let swapped = if !exists {
+        std::fs::rename(&staging, out).map_err(|e| io_at("cannot move the site to", out, e))
+    } else if !inside
+        && swap_by_rename(
+            &staging,
+            out,
+            &parent.join(format!(".{name}.rdy-render-old")),
+        )
+    {
+        Ok(())
     } else {
-        std::fs::rename(&staging, out).map_err(io)?;
+        replace_in_place(&staging, out)
+    };
+    if let Err(e) = swapped {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e);
     }
     Ok(stats)
+}
+
+/// Where staging goes inside `out` when its parent can't take it.
+const STAGING_INSIDE: &str = ".rdy-render-partial";
+
+/// Moves `out` aside, `staging` into its place, and drops the old copy. False, with `out` as it
+/// was, when a rename is refused (a mount point, a parent that is not writable).
+fn swap_by_rename(staging: &Path, out: &Path, old: &Path) -> bool {
+    if old.exists() && std::fs::remove_dir_all(old).is_err() {
+        return false;
+    }
+    if std::fs::rename(out, old).is_err() {
+        return false;
+    }
+    if std::fs::rename(staging, out).is_err() {
+        let _ = std::fs::rename(old, out);
+        return false;
+    }
+    let _ = std::fs::remove_dir_all(old);
+    true
+}
+
+/// Replaces what `out` holds with what `staging` holds, without renaming `out` itself. `out`
+/// is empty or an earlier site, so its children go; the marker is moved in first so that a
+/// failure partway leaves a directory a later render accepts.
+fn replace_in_place(staging: &Path, out: &Path) -> Result<(), RdyError> {
+    let staging_name = staging.file_name();
+    let remove = |path: &Path| -> Result<(), RdyError> {
+        let is_dir = std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
+        let r = if is_dir {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        r.map_err(|e| io_at("cannot remove", path, e))
+    };
+    for entry in std::fs::read_dir(out).map_err(|e| io_at("cannot read", out, e))? {
+        let path = entry.map_err(|e| io_at("cannot read", out, e))?.path();
+        if path.file_name() == staging_name || path.file_name() == Some(SITE_MARKER.as_ref()) {
+            continue;
+        }
+        remove(&path)?;
+    }
+    let marker = out.join(SITE_MARKER);
+    if std::fs::symlink_metadata(&marker).is_ok() {
+        remove(&marker)?;
+    }
+    move_entry(&staging.join(SITE_MARKER), &marker)?;
+    for entry in std::fs::read_dir(staging).map_err(|e| io_at("cannot read", staging, e))? {
+        let from = entry.map_err(|e| io_at("cannot read", staging, e))?.path();
+        let to = out.join(from.file_name().unwrap_or_default());
+        move_entry(&from, &to)?;
+    }
+    std::fs::remove_dir(staging).map_err(|e| io_at("cannot remove", staging, e))
+}
+
+/// Renames `from` to `to`, or copies it when a rename can't cross filesystems.
+fn move_entry(from: &Path, to: &Path) -> Result<(), RdyError> {
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    copy_tree(from, to)?;
+    let is_dir = std::fs::symlink_metadata(from).is_ok_and(|m| m.is_dir());
+    let r = if is_dir {
+        std::fs::remove_dir_all(from)
+    } else {
+        std::fs::remove_file(from)
+    };
+    r.map_err(|e| io_at("cannot remove", from, e))
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<(), RdyError> {
+    if std::fs::symlink_metadata(from).is_ok_and(|m| m.is_dir()) {
+        std::fs::create_dir_all(to).map_err(|e| io_at("cannot create", to, e))?;
+        for entry in std::fs::read_dir(from).map_err(|e| io_at("cannot read", from, e))? {
+            let child = entry.map_err(|e| io_at("cannot read", from, e))?.path();
+            copy_tree(&child, &to.join(child.file_name().unwrap_or_default()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to)
+            .map(|_| ())
+            .map_err(|e| io_at("cannot copy to", to, e))
+    }
 }
 
 fn render_into(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
@@ -533,4 +656,51 @@ fn render_into(rdy: &mut Rdy, scope: &Scope, out: &Path) -> Result<RenderSummary
         stats.assets += 1;
     }
     Ok(stats)
+}
+
+#[cfg(test)]
+mod swap_tests {
+    use super::*;
+
+    #[test]
+    fn copy_tree_copies_nested_files() {
+        let d = tempfile::tempdir().unwrap();
+        let from = d.path().join("from");
+        std::fs::create_dir_all(from.join("a/b")).unwrap();
+        std::fs::write(from.join("a/b/f.txt"), "x").unwrap();
+        std::fs::write(from.join("top.txt"), "y").unwrap();
+        let to = d.path().join("to");
+        copy_tree(&from, &to).unwrap();
+        assert_eq!(std::fs::read_to_string(to.join("a/b/f.txt")).unwrap(), "x");
+        assert_eq!(std::fs::read_to_string(to.join("top.txt")).unwrap(), "y");
+    }
+
+    #[test]
+    fn replace_in_place_clears_the_old_site_and_keeps_a_marker_throughout() {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("out");
+        std::fs::create_dir_all(out.join("old-dir")).unwrap();
+        std::fs::write(out.join("old.html"), "old").unwrap();
+        std::fs::write(out.join(SITE_MARKER), "old marker").unwrap();
+        let staging = d.path().join("stage");
+        std::fs::create_dir_all(staging.join("new-dir")).unwrap();
+        std::fs::write(staging.join("new.html"), "new").unwrap();
+        std::fs::write(staging.join("new-dir/p.html"), "p").unwrap();
+        std::fs::write(staging.join(SITE_MARKER), "new marker").unwrap();
+        replace_in_place(&staging, &out).unwrap();
+        assert!(!staging.exists());
+        assert!(!out.join("old.html").exists() && !out.join("old-dir").exists());
+        assert_eq!(
+            std::fs::read_to_string(out.join("new.html")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join("new-dir/p.html")).unwrap(),
+            "p"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join(SITE_MARKER)).unwrap(),
+            "new marker"
+        );
+    }
 }
