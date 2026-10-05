@@ -1,7 +1,9 @@
+mod glob;
 mod pack;
 mod resolve;
 mod validate;
 
+pub use glob::{Glob, GlobError, MAX_GLOB_LEN, MAX_PATH_SEGMENTS};
 pub use pack::*;
 pub use resolve::{PackSet, STANDARD_YAML, SchemaError};
 pub use validate::{Issue, Severity, has_errors, skeleton_gaps, validate_block};
