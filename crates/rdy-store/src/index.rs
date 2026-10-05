@@ -2,6 +2,7 @@ use crate::error::{StoreError, db};
 use crate::segment::Location;
 use rdy_model::{BlockId, Hash};
 use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,6 +65,33 @@ pub struct CheckedIndex {
     pub clean: bool,
     /// redb fired its repair callback while opening the file (it was not closed cleanly).
     pub repaired_at_open: bool,
+}
+
+/// Every table of an index as raw keys and values, for comparing two indexes (fsck2). `meta` is
+/// left out: it records how far the index has read, which a rebuild need not match.
+#[doc(hidden)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct IndexDump {
+    pub objects: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub typed: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub producers: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub refs: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub view_ops: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub landed: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub deleters: BTreeMap<Vec<u8>, Vec<u8>>,
+}
+
+fn dump_table(
+    r: &redb::ReadTransaction,
+    def: TableDefinition<&'static [u8], &'static [u8]>,
+) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, StoreError> {
+    let t = r.open_table(def).map_err(db)?;
+    let mut out = BTreeMap::new();
+    for item in t.iter().map_err(db)? {
+        let (k, v) = item.map_err(db)?;
+        out.insert(k.value().to_vec(), v.value().to_vec());
+    }
+    Ok(out)
 }
 
 /// The `typed` table's key: the hash's 32 bytes, then the kind byte.
@@ -316,6 +344,26 @@ impl Index {
             Some(v) => Ok(Some(hash_from(v.value(), "landed entry")?)),
             None => Ok(None),
         }
+    }
+
+    /// Every table's rows, from one read transaction.
+    #[doc(hidden)]
+    pub fn dump(&self) -> Result<IndexDump, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let mut refs = BTreeMap::new();
+        for item in r.open_table(REFS).map_err(db)?.iter().map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            refs.insert(k.value().as_bytes().to_vec(), v.value().to_vec());
+        }
+        Ok(IndexDump {
+            objects: dump_table(&r, OBJECTS)?,
+            typed: dump_table(&r, TYPED)?,
+            producers: dump_table(&r, PRODUCERS)?,
+            refs,
+            view_ops: dump_table(&r, VIEW_OPS)?,
+            landed: dump_table(&r, LANDED)?,
+            deleters: dump_table(&r, DELETERS)?,
+        })
     }
 
     pub fn get_ref(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {

@@ -241,6 +241,8 @@ pub struct FsckReport {
     pub frames: usize,
     pub landings: usize,
     pub versions: usize,
+    pub views: usize,
+    pub landed_changes: usize,
 }
 
 impl Rdy {
@@ -252,10 +254,13 @@ impl Rdy {
         }
         let chain: Vec<rdy_model::Hash> = landings.iter().map(|(h, _)| *h).collect();
         let versions = self.check_tags(&chain)?;
+        let objects = self.store.check_objects()?;
         Ok(FsckReport {
             frames,
             landings: landings.len(),
             versions,
+            views: objects.views,
+            landed_changes: objects.landed_changes,
         })
     }
 }

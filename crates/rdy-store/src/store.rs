@@ -589,6 +589,12 @@ impl Store {
         Ok(self.log.verify_frames()?)
     }
 
+    /// Every table of the index as raw rows (fsck2: a reindex must reproduce them).
+    #[doc(hidden)]
+    pub fn index_dump_for_tests(&self) -> Result<crate::index::IndexDump, StoreError> {
+        self.index().dump()
+    }
+
     pub fn reindex(&mut self) -> Result<(), StoreError> {
         self.sets.lock().unwrap_or_else(|e| e.into_inner()).clear();
         let path = self.dir.join("index.redb");

@@ -1,3 +1,4 @@
+mod check;
 pub mod error;
 pub mod format;
 pub mod fsutil;
@@ -10,7 +11,10 @@ pub mod segment;
 mod store;
 pub mod view;
 
+pub use check::StoreCheck;
 pub use error::StoreError;
+#[doc(hidden)]
+pub use index::IndexDump;
 pub use land::{LandOutcome, LandRequest};
 pub use merge::{Conflict, MergeChange, Merged, Side, conflict_id, merge};
 pub use store::{
