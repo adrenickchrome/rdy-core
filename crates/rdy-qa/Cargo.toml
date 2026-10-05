@@ -20,3 +20,4 @@ proptest.workspace = true
 postcard.workspace = true
 clap.workspace = true
 tokio.workspace = true
+regex.workspace = true
