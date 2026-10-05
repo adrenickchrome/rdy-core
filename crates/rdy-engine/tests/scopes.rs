@@ -197,7 +197,11 @@ fn as_of_snapshots_survive_landings() {
         (true, true),
         "landings don't invalidate as-of reads"
     );
-    assert_eq!(r.is_cached(&Scope::Canon), (false, false));
+    assert_eq!(
+        r.is_cached(&Scope::Canon),
+        (true, false),
+        "a landing seeds canon incrementally; the graph is built on demand"
+    );
 }
 
 #[test]
