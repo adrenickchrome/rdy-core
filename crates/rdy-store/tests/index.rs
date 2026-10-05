@@ -30,7 +30,11 @@ fn apply_persists_across_reopen() {
         let idx = Index::open(&path).unwrap();
         idx.apply(
             &[
-                IndexEntry::Object(h, loc),
+                IndexEntry::Object {
+                    kind: rdy_store::kinds::BLOB_CHUNK,
+                    hash: h,
+                    loc,
+                },
                 IndexEntry::Producer {
                     version: v,
                     change: c,
@@ -106,8 +110,15 @@ fn kill1_redb_repairs_a_copy_of_a_live_index_at_open_and_then_reports_it_clean()
         segment: 0,
         offset: 64,
     };
-    idx.apply(&[IndexEntry::Object(Hash::of(b"pending"), upto)], upto)
-        .unwrap();
+    idx.apply(
+        &[IndexEntry::Object {
+            kind: rdy_store::kinds::BLOB_CHUNK,
+            hash: Hash::of(b"pending"),
+            loc: upto,
+        }],
+        upto,
+    )
+    .unwrap();
     let copy = dir.path().join("copy.redb");
     std::fs::copy(&path, &copy).unwrap();
     let c = Index::open_checked(&copy).unwrap();
@@ -120,4 +131,51 @@ fn kill1_redb_repairs_a_copy_of_a_live_index_at_open_and_then_reports_it_clean()
     drop(idx);
     let c = Index::open_checked(&path).unwrap();
     assert!(c.clean && !c.repaired_at_open, "a cleanly closed file");
+}
+
+#[test]
+fn kind1_typed_entries_coexist_and_the_untyped_entry_is_the_first_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let idx = Index::open(&dir.path().join("index.redb")).unwrap();
+    let h = Hash::of(b"same bytes");
+    let (a, b) = (
+        Location {
+            segment: 0,
+            offset: 10,
+        },
+        Location {
+            segment: 0,
+            offset: 90,
+        },
+    );
+    idx.apply(
+        &[
+            IndexEntry::Object {
+                kind: rdy_store::kinds::BLOB_CHUNK,
+                hash: h,
+                loc: a,
+            },
+            IndexEntry::Object {
+                kind: rdy_store::kinds::SNAPSHOT,
+                hash: h,
+                loc: b,
+            },
+        ],
+        Location {
+            segment: 0,
+            offset: 200,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        idx.typed(rdy_store::kinds::BLOB_CHUNK, &h).unwrap(),
+        Some(a)
+    );
+    assert_eq!(idx.typed(rdy_store::kinds::SNAPSHOT, &h).unwrap(), Some(b));
+    assert_eq!(idx.typed(rdy_store::kinds::TAG, &h).unwrap(), None);
+    assert_eq!(
+        idx.object(&h).unwrap(),
+        Some(a),
+        "untyped: the first written"
+    );
 }

@@ -6,14 +6,26 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// hash -> the location of the first frame written with that hash, of whatever kind (untyped reads).
 const OBJECTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("objects");
+/// hash (32 bytes) followed by the kind byte -> the location of that kind's object with that hash.
+const TYPED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("typed");
 const PRODUCERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("producers");
 const REFS: TableDefinition<&str, &[u8]> = TableDefinition::new("refs");
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 
 pub enum IndexEntry {
-    Object(Hash, Location),
-    Producer { version: Hash, change: Hash },
+    /// An object frame: indexed by (kind, hash), and by hash alone if it is the first frame
+    /// written with that hash.
+    Object {
+        kind: u8,
+        hash: Hash,
+        loc: Location,
+    },
+    Producer {
+        version: Hash,
+        change: Hash,
+    },
     Ref(String, Vec<u8>),
 }
 
@@ -28,6 +40,14 @@ pub struct CheckedIndex {
     pub clean: bool,
     /// redb fired its repair callback while opening the file (it was not closed cleanly).
     pub repaired_at_open: bool,
+}
+
+/// The `typed` table's key: the hash's 32 bytes, then the kind byte.
+fn typed_key(kind: u8, h: &Hash) -> [u8; 33] {
+    let mut key = [0u8; 33];
+    key[..32].copy_from_slice(&h.0);
+    key[32] = kind;
+    key
 }
 
 fn enc(loc: &Location) -> Vec<u8> {
@@ -76,6 +96,7 @@ impl Index {
         let w = database.begin_write().map_err(db)?;
         {
             w.open_table(OBJECTS).map_err(db)?;
+            w.open_table(TYPED).map_err(db)?;
             w.open_table(PRODUCERS).map_err(db)?;
             w.open_table(REFS).map_err(db)?;
             w.open_table(META).map_err(db)?;
@@ -126,13 +147,21 @@ impl Index {
         w.set_durability(durability).map_err(db)?;
         {
             let mut objects = w.open_table(OBJECTS).map_err(db)?;
+            let mut typed = w.open_table(TYPED).map_err(db)?;
             let mut producers = w.open_table(PRODUCERS).map_err(db)?;
             let mut refs = w.open_table(REFS).map_err(db)?;
             let mut meta = w.open_table(META).map_err(db)?;
             for e in entries {
                 match e {
-                    IndexEntry::Object(h, loc) => {
-                        objects.insert(&h.0[..], &enc(loc)[..]).map_err(db)?;
+                    IndexEntry::Object { kind, hash, loc } => {
+                        let at = enc(loc);
+                        typed
+                            .insert(&typed_key(*kind, hash)[..], &at[..])
+                            .map_err(db)?;
+                        // the untyped entry keeps the first frame written with this hash
+                        if objects.get(&hash.0[..]).map_err(db)?.is_none() {
+                            objects.insert(&hash.0[..], &at[..]).map_err(db)?;
+                        }
                     }
                     IndexEntry::Producer { version, change } => {
                         producers
@@ -154,6 +183,16 @@ impl Index {
         let r = self.db.begin_read().map_err(db)?;
         let t = r.open_table(OBJECTS).map_err(db)?;
         match t.get(&h.0[..]).map_err(db)? {
+            Some(v) => Ok(Some(dec(v.value())?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The location of the object of `kind` with hash `h`.
+    pub fn typed(&self, kind: u8, h: &Hash) -> Result<Option<Location>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(TYPED).map_err(db)?;
+        match t.get(&typed_key(kind, h)[..]).map_err(db)? {
             Some(v) => Ok(Some(dec(v.value())?)),
             None => Ok(None),
         }

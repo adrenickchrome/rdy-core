@@ -9,6 +9,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// The file a store creates when it opens and removes on a clean close. Finding it at open means the
@@ -18,9 +19,8 @@ pub const INDEX_OPEN_SENTINEL: &str = "index.open";
 const SEGMENT_MAX: u64 = 64 * 1024 * 1024;
 const CHUNK: usize = 1024 * 1024;
 
-/// The largest blob a chunk-kind object may stand for as a manifest: an agent chose that object's
-/// bytes, so its `len` is not trusted to size the work of reading it. Matches the largest asset
-/// `rdy_asset` accepts.
+/// The largest asset `rdy_asset` accepts. The store does not enforce it: only `put_blob` writes a
+/// manifest-kind object, so no manifest whose bytes an agent chose is ever read as a blob.
 pub const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 
 /// What one `Store::open` did, for tests, `rdy` diagnostics and the QA gate.
@@ -76,6 +76,8 @@ pub struct Store {
     /// The last checkpoint a write or `checkpoint_if_idle` attempted and could not make; cleared
     /// by the next success.
     checkpoint_error: Option<String>,
+    /// Object frames read by `get_raw` and `get_kind` (a test hook; reads take `&self`).
+    frames_read: AtomicU64,
 }
 
 /// How an index open went: the index, its acknowledged boundary (None if it has none yet), whether
@@ -216,7 +218,7 @@ fn entries_for_frame(
         // a marker is neither an object nor a dedupe candidate
         return Ok(vec![]);
     }
-    let mut out = vec![IndexEntry::Object(hash, loc)];
+    let mut out = vec![IndexEntry::Object { kind, hash, loc }];
     match kind {
         kinds::CHANGE => {
             let change: Change = decode(payload)?;
@@ -338,6 +340,7 @@ impl Store {
             checkpoint_frames: CHECKPOINT_FRAMES,
             checkpoints: 0,
             checkpoint_error: None,
+            frames_read: AtomicU64::new(0),
         };
         let (upto, end) = (store.index().indexed_upto()?, store.log.end());
         if upto > end {
@@ -577,12 +580,13 @@ impl Store {
         for (kind, payload) in items {
             let hash = Hash::of(&payload);
             hashes.push(hash);
+            // kind1: dedupe by (kind, hash); the same bytes under another kind are another object
             if kind != kinds::REF_UPDATE
-                && (seen.contains(&hash) || self.index().object(&hash)?.is_some())
+                && (seen.contains(&(kind, hash)) || self.index().typed(kind, &hash)?.is_some())
             {
                 continue;
             }
-            seen.insert(hash);
+            seen.insert((kind, hash));
             batch.push((kind, payload));
         }
         if batch.is_empty() {
@@ -746,8 +750,15 @@ impl Store {
         Ok(self.write(vec![(kind, encode(value))])?[0])
     }
 
+    /// The first object written with hash `h`, whatever its kind, and that kind.
     pub fn get_raw(&self, h: &Hash) -> Result<(u8, Vec<u8>), StoreError> {
         let loc = self.index().object(h)?.ok_or(StoreError::NotFound(*h))?;
+        self.read_object(h, loc)
+    }
+
+    /// Reads the frame at `loc`, which the index says holds an object with hash `h`.
+    fn read_object(&self, h: &Hash, loc: Location) -> Result<(u8, Vec<u8>), StoreError> {
+        self.frames_read.fetch_add(1, Ordering::Relaxed);
         let (kind, found, payload) = self.log.read_hashed(loc)?;
         if found != *h {
             return Err(StoreError::Decode(format!(
@@ -755,6 +766,37 @@ impl Store {
             )));
         }
         Ok((kind, payload))
+    }
+
+    /// The payload of the object of `kind` with hash `h` (kind1).
+    pub fn get_kind(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
+        let loc = self
+            .index()
+            .typed(kind, h)?
+            .ok_or(StoreError::NotFound(*h))?;
+        let (found_kind, payload) = self.read_object(h, loc)?;
+        if found_kind != kind {
+            return Err(StoreError::Decode(format!(
+                "the index places a kind {kind} object {h} at {loc:?}, which holds kind {found_kind}; run rdy reindex"
+            )));
+        }
+        Ok(payload)
+    }
+
+    /// The object of `kind` with hash `h`, decoded.
+    pub fn get_typed<T: DeserializeOwned>(&self, kind: u8, h: &Hash) -> Result<T, StoreError> {
+        decode(&self.get_kind(kind, h)?)
+    }
+
+    /// Whether an object of `kind` with hash `h` is stored: an index lookup that reads no frame.
+    pub fn has_kind(&self, kind: u8, h: &Hash) -> Result<bool, StoreError> {
+        Ok(self.index().typed(kind, h)?.is_some())
+    }
+
+    /// Object frames read so far by `get_raw` and `get_kind`.
+    #[doc(hidden)]
+    pub fn frames_read(&self) -> u64 {
+        self.frames_read.load(Ordering::Relaxed)
     }
 
     pub fn get<T: DeserializeOwned>(&self, h: &Hash) -> Result<T, StoreError> {
@@ -822,23 +864,10 @@ impl Store {
         Ok(*self.write(items)?.last().expect("manifest hash"))
     }
 
-    /// Whether `h` names a blob (a manifest object) in this store. An object of chunk kind
-    /// counts when it is exactly the manifest `put_blob` would have written for a blob that is
-    /// all here: the index dedupes by hash alone, so a manifest whose bytes were first stored as
-    /// a chunk is that chunk-kind object. That check reads at most `MAX_BLOB_BYTES`, one chunk at
-    /// a time, and keeps none of it.
+    /// Whether `h` names a blob in this store: a manifest-kind object, which only `put_blob`
+    /// writes. One index lookup; it reads no frame.
     pub fn has_blob(&self, h: &Hash) -> Result<bool, StoreError> {
-        match self.get_raw(h) {
-            Ok((kinds::BLOB_MANIFEST, _)) => Ok(true),
-            Ok((kinds::BLOB_CHUNK, _)) => match self.read_blob(h, &mut |_| {}) {
-                Ok(()) => Ok(true),
-                Err(StoreError::Decode(_) | StoreError::NotFound(_)) => Ok(false),
-                Err(e) => Err(e),
-            },
-            Ok(_) => Ok(false),
-            Err(StoreError::NotFound(_)) => Ok(false),
-            Err(e) => Err(e),
-        }
+        self.has_kind(kinds::BLOB_MANIFEST, h)
     }
 
     pub fn get_blob(&self, h: &Hash) -> Result<Vec<u8>, StoreError> {
@@ -847,31 +876,26 @@ impl Store {
         Ok(out)
     }
 
-    /// Validates the manifest at `h` against what `put_blob` writes, then hands each chunk to
-    /// `sink` in order. Nothing is read before the manifest is known to be canonical and, for a
-    /// chunk-kind object (whose bytes an agent chose), within `MAX_BLOB_BYTES`.
+    /// Validates the manifest-kind object at `h` against what `put_blob` writes, then hands each
+    /// chunk to `sink` in order. Nothing is read before the manifest is known to be canonical.
     fn read_blob(&self, h: &Hash, sink: &mut dyn FnMut(&[u8])) -> Result<(), StoreError> {
-        let (kind, payload) = self.get_raw(h)?;
-        // The kind check is defence in depth; the structural checks below are the guard. A
-        // manifest's bytes may have been stored first as a chunk, and writes dedupe by hash
-        // alone, so a chunk-kind object that decodes as a manifest is accepted too.
-        if kind != kinds::BLOB_MANIFEST && kind != kinds::BLOB_CHUNK {
-            return Err(StoreError::Decode(format!(
-                "{h} is not a blob (object kind {kind})"
-            )));
-        }
+        let payload = match self.get_kind(kinds::BLOB_MANIFEST, h) {
+            Ok(p) => p,
+            // kind1: an object of another kind with this hash is never the blob
+            Err(StoreError::NotFound(_)) if self.has(h)? => {
+                let (kind, _) = self.get_raw(h)?;
+                return Err(StoreError::Decode(format!(
+                    "{h} is not a blob (object kind {kind})"
+                )));
+            }
+            Err(e) => return Err(e),
+        };
         let m: BlobManifest = decode(&payload)?;
         // postcard ignores trailing bytes; a manifest that is not its own canonical encoding
         // is not what `put_blob` wrote, and would not re-import under its own name
         if encode(&m) != payload {
             return Err(StoreError::Decode(format!(
                 "{h} is not a canonical blob manifest"
-            )));
-        }
-        if kind == kinds::BLOB_CHUNK && m.len > MAX_BLOB_BYTES {
-            return Err(StoreError::Decode(format!(
-                "{h} claims a blob of {} bytes, over the limit of {MAX_BLOB_BYTES}",
-                m.len
             )));
         }
         // the chunk count `put_blob` would produce, checked before anything is allocated or read
@@ -884,10 +908,13 @@ impl Store {
         }
         let mut left = m.len;
         for c in &m.chunks {
-            // a chunk's stored kind is not checked: writes dedupe by hash alone, so a chunk may
-            // share its object with a block or snapshot of the same bytes, and the hash already
-            // proves the bytes
-            let (_, bytes) = self.get_raw(c)?;
+            // the chunk-kind object, or failing that any object with the chunk's hash: a chunk
+            // written before kind1 may have deduped into a block or snapshot of the same bytes,
+            // and the hash proves the bytes
+            let bytes = match self.get_kind(kinds::BLOB_CHUNK, c) {
+                Err(StoreError::NotFound(_)) => self.get_raw(c)?.1,
+                r => r?,
+            };
             // every chunk but the last is a full chunk, as `put_blob` cuts them
             let want = left.min(CHUNK as u64);
             if bytes.len() as u64 != want {
