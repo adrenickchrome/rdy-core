@@ -438,63 +438,233 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
     if !site.open_questions.is_empty() {
         kinds.push(page::Kind::Questions);
     }
-    let mut index = search::Index::default();
-    let mut contexts = vec![];
-    let mut has_mermaid = false;
-    for kind in kinds {
-        let ctx = page::build(&sh, kind);
-        has_mermaid |= ctx.has_mermaid;
-        let html = env
-            .get_template(template_of(ctx.kind))
-            .map_err(tpl)?
-            .render(&ctx)
-            .map_err(tpl)?;
-        ensure_dir(&ctx.page_url)?;
-        std::fs::write(out.join(&ctx.page_url), html).map_err(io)?;
-        stats.pages += 1;
-        if let Some(twin) = page::finish(&sh, &ctx, &mut index) {
-            let text = serde_json::to_string_pretty(&twin).expect("json") + "\n";
-            std::fs::write(out.join(page::json_path(&ctx.page_url)), text).map_err(io)?;
-            stats.json += 1;
-        }
-        contexts.push(ctx);
-    }
-
-    // a permalink page for every folder, doc and block that has a place on the site
+    // a permalink page for every folder, doc and block that has a place on the site: the
+    // template is rendered once, and every page fills in its target's href and label
+    let mut redirect: Option<RedirectTemplate> = None;
+    let mut permalinks: Vec<(String, String)> = vec![];
     for id in m.ids() {
         let Some(url) = site.url_of(id) else { continue };
-        let ctx = page::build(&sh, page::Kind::Redirect(id, &url));
-        let html = env
-            .get_template("redirect.html")
-            .map_err(tpl)?
-            .render(&ctx)
-            .map_err(tpl)?;
-        ensure_dir(&ctx.page_url)?;
-        std::fs::write(out.join(&ctx.page_url), html).map_err(io)?;
-        stats.redirects += 1;
+        let t = match &mut redirect {
+            Some(t) => t,
+            None => {
+                let ctx = page::build(&sh, page::Kind::Redirect(id, &url));
+                redirect.insert(RedirectTemplate::new(&env, ctx)?)
+            }
+        };
+        let (page_url, label, href) = page::redirect_target(&sh, id, &url);
+        let html = t.fill(&label, &href);
+        #[cfg(debug_assertions)]
+        if permalinks.len() % 997 == 0 {
+            let ctx = page::build(&sh, page::Kind::Redirect(id, &url));
+            let full = env
+                .get_template("redirect.html")
+                .map_err(tpl)?
+                .render(&ctx)
+                .map_err(tpl)?;
+            debug_assert_eq!(
+                html, full,
+                "the prebuilt permalink page differs from the template"
+            );
+        }
+        permalinks.push((page_url, html));
     }
-
+    // they are written while the pages are built; a doc page at a permalink's path (a doc
+    // named like an id in a folder named `go`) is written over by the permalink, as it always was
+    let taken: BTreeSet<String> = permalinks.iter().map(|(p, _)| p.clone()).collect();
+    stats.redirects = permalinks.len();
+    make_dirs(out, &permalinks)?;
+    let writer = {
+        let out = out.to_path_buf();
+        std::thread::spawn(move || write_all(&out, &permalinks))
+    };
+    let pages = (|| -> Result<bool, RdyError> {
+        let mut index = search::Index::default();
+        let mut contexts = vec![];
+        let mut twins = vec![];
+        let mut has_mermaid = false;
+        for kind in kinds {
+            let ctx = page::build(&sh, kind);
+            has_mermaid |= ctx.has_mermaid;
+            if let Some(twin) = page::finish(&sh, &ctx, &mut index) {
+                twins.push((page::json_path(&ctx.page_url), twin));
+            }
+            contexts.push(ctx);
+        }
+        // the pages are rendered, and their twins serialized, on a few threads
+        let mut files = par_map(&contexts, |ctx| {
+            let html = env
+                .get_template(template_of(ctx.kind))
+                .map_err(tpl)?
+                .render(ctx)
+                .map_err(tpl)?;
+            Ok((ctx.page_url.clone(), html))
+        })?;
+        stats.pages = files.len();
+        files.extend(par_map(&twins, |(path, twin)| {
+            let text = serde_json::to_string_pretty(twin).expect("json") + "\n";
+            Ok((path.clone(), text))
+        })?);
+        stats.json = twins.len();
+        files.retain(|(p, _)| !taken.contains(p));
+        make_dirs(out, &files)?;
+        write_all(out, &files)?;
+        search::write(&index, &site_name, out)?;
+        machine::write_index(
+            &site,
+            out,
+            &contexts,
+            &site_name,
+            description.as_deref(),
+            &version::label(&position).text,
+        )?;
+        Ok(has_mermaid)
+    })();
+    let written = writer.join().expect("the permalink writer does not panic");
+    let has_mermaid = pages?;
+    written?;
     assets::write(out, has_mermaid)?;
     for (path, h) in sh.used_blobs.borrow().iter() {
         ensure_dir(path)?;
         std::fs::write(out.join(path), &blobs[h]).map_err(io)?;
         stats.assets += 1;
     }
-    search::write(&index, &site_name, out)?;
-    machine::write_index(
-        &site,
-        out,
-        &contexts,
-        &site_name,
-        description.as_deref(),
-        &version::label(&position).text,
-    )?;
     Ok(stats)
+}
+
+/// The permalink template rendered once, with a marker where a page's href and label go: the
+/// template reads nothing else that differs from one permalink page to the next.
+struct RedirectTemplate {
+    /// The text between the markers, `slots.len() + 1` pieces.
+    pieces: Vec<String>,
+    /// Which value each marker stands for: true for the href, false for the label.
+    slots: Vec<bool>,
+}
+
+impl RedirectTemplate {
+    const HREF: char = '\u{E000}';
+    const LABEL: char = '\u{E001}';
+
+    fn new(
+        env: &minijinja::Environment<'static>,
+        mut ctx: page::PageContext,
+    ) -> Result<RedirectTemplate, RdyError> {
+        ctx.body.redirect = Some(page::RedirectBody {
+            label: Self::LABEL.to_string(),
+            href: Self::HREF.to_string(),
+        });
+        let html = env
+            .get_template("redirect.html")
+            .map_err(tpl)?
+            .render(&ctx)
+            .map_err(tpl)?;
+        let (mut pieces, mut slots, mut cur) = (vec![], vec![], String::new());
+        for c in html.chars() {
+            if c == Self::HREF || c == Self::LABEL {
+                pieces.push(std::mem::take(&mut cur));
+                slots.push(c == Self::HREF);
+            } else {
+                cur.push(c);
+            }
+        }
+        pieces.push(cur);
+        Ok(RedirectTemplate { pieces, slots })
+    }
+
+    /// The page for a target, its values escaped as the template escapes them.
+    fn fill(&self, label: &str, href: &str) -> String {
+        let (label, href) = (escape(label), escape(href));
+        let mut out = String::with_capacity(
+            self.pieces.iter().map(String::len).sum::<usize>() + 2 * href.len() + label.len(),
+        );
+        for (piece, slot) in self.pieces.iter().zip(&self.slots) {
+            out.push_str(piece);
+            out.push_str(if *slot { &href } else { &label });
+        }
+        out.push_str(self.pieces.last().map_or("", String::as_str));
+        out
+    }
+}
+
+/// `f` of every item, in order, worked out on a few threads.
+fn par_map<T: Sync, R: Send>(
+    items: &[T],
+    f: impl Fn(&T) -> Result<R, RdyError> + Sync,
+) -> Result<Vec<R>, RdyError> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 8);
+    let chunk = items.len().div_ceil(threads).max(1);
+    let f = &f;
+    std::thread::scope(|s| {
+        let workers: Vec<_> = items
+            .chunks(chunk)
+            .map(|part| s.spawn(move || part.iter().map(f).collect::<Result<Vec<R>, _>>()))
+            .collect();
+        let mut out = Vec::with_capacity(items.len());
+        for w in workers {
+            out.extend(w.join().expect("a render thread does not panic")?);
+        }
+        Ok(out)
+    })
+}
+
+/// Makes the directories of every (site-relative path, text) under `out`.
+fn make_dirs(out: &Path, files: &[(String, String)]) -> Result<(), RdyError> {
+    let dirs: BTreeSet<&Path> = files
+        .iter()
+        .filter_map(|(p, _)| Path::new(p).parent())
+        .collect();
+    for dir in dirs {
+        std::fs::create_dir_all(out.join(dir)).map_err(io)?;
+    }
+    Ok(())
+}
+
+/// Writes every (site-relative path, text) under `out`, on a few threads; their directories
+/// exist.
+fn write_all(out: &Path, files: &[(String, String)]) -> Result<(), RdyError> {
+    par_map(files, |(path, text)| {
+        std::fs::write(out.join(path), text).map_err(io)
+    })
+    .map(drop)
 }
 
 #[cfg(test)]
 mod swap_tests {
     use super::*;
+
+    #[test]
+    fn par_map_keeps_the_order_and_reports_a_failure() {
+        let items: Vec<usize> = (0..1000).collect();
+        let doubled = par_map(&items, |i| Ok(i * 2)).unwrap();
+        assert_eq!(doubled, items.iter().map(|i| i * 2).collect::<Vec<_>>());
+        let failed = par_map(&items, |i| match i {
+            700 => Err(RdyError::new(E_IO, "boom", "")),
+            _ => Ok(*i),
+        });
+        assert!(failed.is_err());
+        assert!(
+            par_map(&Vec::<usize>::new(), |i| Ok(*i))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_prebuilt_permalink_page_escapes_what_it_fills_in() {
+        let t = RedirectTemplate {
+            pieces: vec!["<a href=\"".into(), "\">".into(), "</a>".into()],
+            slots: vec![true, false],
+        };
+        assert_eq!(
+            t.fill("A & <B>", "../x.html#a\"b"),
+            format!(
+                "<a href=\"{}\">{}</a>",
+                escape("../x.html#a\"b"),
+                escape("A & <B>")
+            )
+        );
+    }
 
     #[test]
     fn copy_tree_copies_nested_files() {

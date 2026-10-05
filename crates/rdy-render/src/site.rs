@@ -4,7 +4,8 @@ use crate::inline::{self, Form};
 use rdy_engine::Materialized;
 use rdy_model::{Block, BlockId, RefMode, decision, tree};
 use regex::Regex;
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::LazyLock;
 
 /// Where a block lives: a page of the site and, for a block inside a page, its anchor.
@@ -87,6 +88,13 @@ pub struct Site<'a> {
     page_owner: BTreeMap<String, BlockId>,
     /// Each doc's place in `order`.
     order_pos: BTreeMap<BlockId, usize>,
+    /// Every label worked out so far, by block and reference depth: a label is read many times
+    /// per render (links, hovers, crumbs, the navigation, the search, the twins).
+    labels: RefCell<HashMap<(BlockId, usize), String>>,
+    /// Every doc's blocks in reading order (see `blocks_of`), walked once.
+    doc_blocks: BTreeMap<BlockId, Vec<&'a Block>>,
+    /// Every summary's words worked out so far (see `summary_words`).
+    summaries: RefCell<HashMap<(BlockId, usize, bool), String>>,
 }
 
 impl<'a> Site<'a> {
@@ -160,7 +168,15 @@ impl<'a> Site<'a> {
             nav_pos,
             page_owner: BTreeMap::new(),
             order_pos: BTreeMap::new(),
+            labels: RefCell::default(),
+            doc_blocks: BTreeMap::new(),
+            summaries: RefCell::default(),
         };
+        site.doc_blocks = site
+            .order
+            .iter()
+            .map(|d| (d.clone(), Self::walk_blocks(m, d)))
+            .collect();
         let mut page_owner = BTreeMap::new();
         for id in &site.tree {
             if let Some(p) = site.page(id) {
@@ -181,12 +197,17 @@ impl<'a> Site<'a> {
     }
 
     /// Every block under `doc`, in reading order.
-    fn blocks_of(&self, doc: &BlockId) -> Vec<&'a Block> {
+    fn blocks_of(&self, doc: &BlockId) -> &[&'a Block] {
+        self.doc_blocks.get(doc).map_or(&[], Vec::as_slice)
+    }
+
+    /// Every block under `doc`, in reading order, walked from the store.
+    fn walk_blocks(m: &'a Materialized, doc: &BlockId) -> Vec<&'a Block> {
         let mut out = vec![];
-        let mut stack: Vec<&Block> = self.m.children(Some(doc)).into_iter().rev().collect();
+        let mut stack: Vec<&Block> = m.children(Some(doc)).into_iter().rev().collect();
         while let Some(b) = stack.pop() {
             out.push(b);
-            stack.extend(self.m.children(Some(&b.id)).into_iter().rev());
+            stack.extend(m.children(Some(&b.id)).into_iter().rev());
         }
         out
     }
@@ -288,7 +309,7 @@ impl<'a> Site<'a> {
                     question_anchors.insert(b.id.clone(), unique(self.anchor_text(b), &mut taken));
                 }
                 if b.block_type == "term" {
-                    terms.push(b);
+                    terms.push(*b);
                 }
             }
         }
@@ -423,6 +444,16 @@ impl<'a> Site<'a> {
     }
 
     fn label_at(&self, b: &Block, depth: usize) -> String {
+        let key = (b.id.clone(), depth);
+        if let Some(l) = self.labels.borrow().get(&key) {
+            return l.clone();
+        }
+        let label = self.label_uncached(b, depth);
+        self.labels.borrow_mut().insert(key, label.clone());
+        label
+    }
+
+    fn label_uncached(&self, b: &Block, depth: usize) -> String {
         let tree = tree::is_tree_type(&b.block_type);
         let said = b
             .field_str("title")
@@ -529,6 +560,16 @@ impl<'a> Site<'a> {
     /// The summary's words, uncut. `keep_token` leaves an unresolved reference as its token
     /// (then every id-shaped word is `…`); otherwise it reads as the unresolved marker's words.
     pub(crate) fn summary_words(&self, b: &Block, depth: usize, keep_token: bool) -> String {
+        let key = (b.id.clone(), depth, keep_token);
+        if let Some(w) = self.summaries.borrow().get(&key) {
+            return w.clone();
+        }
+        let words = self.summary_words_uncached(b, depth, keep_token);
+        self.summaries.borrow_mut().insert(key, words.clone());
+        words
+    }
+
+    fn summary_words_uncached(&self, b: &Block, depth: usize, keep_token: bool) -> String {
         let unresolved_of = |token: &str| match keep_token {
             true => token.to_string(),
             false => crate::html::UNRESOLVED.to_string(),

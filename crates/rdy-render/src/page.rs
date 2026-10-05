@@ -458,11 +458,8 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         Kind::Glossary => body.glossary = Some(glossary_body(sh, &page_url)),
         Kind::Questions => body.questions = Some(questions_body(sh, &page_url)),
         Kind::Redirect(id, url) => {
-            let b = sh.m.get(id).expect("a permalink's block exists");
-            body.redirect = Some(RedirectBody {
-                label: site.label(b),
-                href: url.href_from(&page_url),
-            });
+            let (_, label, href) = redirect_target(sh, id, url);
+            body.redirect = Some(RedirectBody { label, href });
         }
     }
     // a permalink page is a bare redirect: it shows no navigation and no crumbs, so it builds
@@ -498,6 +495,14 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         kind: kind_name,
         page_url,
     }
+}
+
+/// A permalink page's path, and the label and href of the block it leads to.
+pub fn redirect_target(sh: &Shared, id: &BlockId, url: &Url) -> (String, String, String) {
+    let b = sh.m.get(id).expect("a permalink's block exists");
+    let page = sh.site.go_page(id);
+    let href = url.href_from(&page);
+    (page, sh.site.label(b), href)
 }
 
 /// The search entries and the JSON twin of a finished page, through the two modules that read
