@@ -73,6 +73,7 @@ pub struct ScopeParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct IdParams {
+    /// A block id or a path. rdy_read and rdy_context also take `id@version` or a whole ref line `[id@version] …`, and read under that version.
     pub id: String,
     /// "canon", a view name (an existing view, or your session's), "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
     pub scope: Option<String>,
@@ -259,6 +260,27 @@ fn scope_of(st: &McpState, read: &ReadState, s: &Option<String>) -> Result<Scope
         None if st.view == "canon" => Ok(Scope::Canon),
         None => Ok(Scope::View(st.view.clone())),
     }
+}
+
+/// refv1: the scope and the block id of a read call whose `id` may be `id@version` or a ref line.
+/// A pinned version reads under `tag:<version>`; an explicit scope that differs is refused.
+fn read_target(
+    st: &McpState,
+    read: &ReadState,
+    id: &str,
+    scope: &Option<String>,
+) -> Result<(Scope, BlockId), RdyError> {
+    let t = rdy_model::reference::parse_target(id)
+        .map_err(|m| RdyError::new(E_BAD_INPUT, m, rdy_model::reference::BAD_REF_FIX))?;
+    let pinned = t
+        .scope_text(scope.as_deref())
+        .map_err(|m| RdyError::new(E_BAD_INPUT, m, rdy_model::reference::PIN_CLASH_FIX))?;
+    let scope = match pinned {
+        Some(text) => read.resolve_read_scope(&text, Some(&st.view))?,
+        None => scope_of(st, read, scope)?,
+    };
+    let bid = read.resolve_id(&scope, &t.id)?;
+    Ok((scope, bid))
 }
 
 fn id_of(s: &str) -> Result<BlockId, RdyError> {
@@ -461,8 +483,7 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.rdy.read();
-    let scope = scope_of(st, &st_, &p.scope)?;
-    let id = st_.resolve_id(&scope, &p.id)?;
+    let (scope, id) = read_target(st, &st_, &p.id, &p.scope)?;
     let suspects: std::collections::BTreeSet<BlockId> =
         st_.suspects(&scope)?.into_iter().map(|s| s.block).collect();
     let m = st_.materialized(&scope)?;
@@ -535,8 +556,7 @@ pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.rdy.read();
-    let scope = scope_of(st, &st_, &p.scope)?;
-    let id = st_.resolve_id(&scope, &p.id)?;
+    let (scope, id) = read_target(st, &st_, &p.id, &p.scope)?;
     let ctx = st_.context(&scope, &id)?;
     Ok(budget(
         serde_json::to_value(ctx).expect("context json"),
@@ -564,6 +584,9 @@ pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
         p.max_tokens,
     ))
 }
+
+/// What bodies and text fields accept (md1, dtext1, key1).
+const TEXT_RULES: &str = "Bodies and text fields: **bold**, *italic*, `code`, [link](https://… or a relative path), and in bodies - bullets and 1. numbered lists (indent two spaces to nest). No raw HTML. {{id}} or {{id|words}} references a block; \\{{ is a literal {{ and a leading @ in words is written \\@. fields.key: optional short human id, unique per project ignoring case, letters/digits/-_. , not shaped like a block id.";
 
 pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError> {
     let pack = st.rdy.pack();
@@ -613,6 +636,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             "ops": WRITE_OPS.iter().map(|(n, s)| (n.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
             "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT},
             "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
+            "text": TEXT_RULES,
         })),
     }
 }

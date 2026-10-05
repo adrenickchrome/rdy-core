@@ -1,0 +1,477 @@
+- id: d-3T4TW
+  type: doc
+  order: a1
+  fields:
+    title: Why the design is what it is
+    doc_type: principles
+- id: s-H34R9
+  type: section
+  parent: d-3T4TW
+  order: a1
+  fields:
+    title: Motivation
+- id: p-J81ES
+  type: prose
+  parent: s-H34R9
+  order: a1
+  body: Pattern matching exists in Haskell, Erlang, Scala, Elixir and Ruby, and Python already had sequence
+    unpacking. This page explains why the feature was worth adding and why each visible decision went
+    the way it did. The rules themselves are in {{d-8PBD5}}.
+- id: p-97F12
+  type: prose
+  parent: s-H34R9
+  order: a2
+  body: Three idioms recur in Python code and each is clumsier than it needs to be. The first is the chain
+    of `if` and `elif` tests used to find out the type or shape of an object, with checks such as `isinstance(x,
+    cls)`, `hasattr(x, "attr")` or `len(x) == n`. The checks and the code that picks the object apart
+    say the same thing twice.
+- id: p-3JEGJ
+  type: prose
+  parent: s-H34R9
+  order: a3
+  body: The second is code that walks an abstract syntax tree. Recognising a node of the form A + B *
+    C takes several nested conditions on the node's type and on the types of its children. A pattern states
+    the shape directly.
+- id: p-BMX7F
+  type: prose
+  parent: s-H34R9
+  order: a4
+  body: The third is picking apart loosely structured data, especially JSON, which arrives as nested dictionaries
+    and lists. Mapping and sequence patterns suit this well.
+- id: ra-ECFQR
+  type: rationale
+  parent: s-H34R9
+  order: a5
+  body: The point of the feature is to say a shape once, where today the shape is checked in one place
+    and used in another.
+- id: n-755CJ
+  type: note
+  parent: s-H34R9
+  order: a6
+  body: 'The examples in this section are drawn from real code: a command interpreter, a syntax tree walker
+    and a loader for JSON documents.'
+- id: s-EF319
+  type: section
+  parent: d-3T4TW
+  order: a2
+  fields:
+    title: Alongside objects, not instead of them
+- id: p-XK8FK
+  type: prose
+  parent: s-EF319
+  order: a1
+  body: Object-oriented dispatch chooses a method from one object's class. Pattern matching covers the
+    cases where the action depends on the types of several objects to equal parts, or on an object's class
+    and its attribute values.
+- id: p-D57H2
+  type: prose
+  parent: s-EF319
+  order: a2
+  body: The Visitor pattern cannot express the second of these without changes to the class hierarchy,
+    which is impossible for built-in or third-party types.
+- id: ra-W0AVD
+  type: rationale
+  parent: s-EF319
+  order: a3
+  body: A pattern can test the class of an object and its attributes in one expression, which a visitor
+    cannot do for a type the author does not own.
+- id: c-KX12E
+  type: claim
+  parent: s-EF319
+  order: a4
+  body: Pattern matching complements object-oriented dispatch and does not replace it.
+- id: s-B815D
+  type: section
+  parent: d-3T4TW
+  order: a3
+  fields:
+    title: Why match is a soft keyword
+- id: p-VX86F
+  type: prose
+  parent: s-B815D
+  order: a1
+  body: Three reasons. The parser can tell a match statement from a use of the name `match` by context,
+    so a hard keyword is not needed. A hard keyword would break almost every existing program, because
+    `match` is so widely used as a name. And every candidate for an alternative keyword turned out to
+    be just as widely used.
+- id: D-G83ZN
+  type: decision
+  parent: s-B815D
+  order: a2
+  fields:
+    statement: '`match` and `case` are soft keywords'
+    status: accepted
+    decided_at: '2021-02-08T10:00:00Z'
+    recorded_at: '2021-02-08T10:00:00Z'
+    options:
+    - soft keywords
+    - hard keywords
+    - a different keyword
+    authority_basis: recorded_ruling
+    attested_by: Steering Council
+  body: The word `match` is so common in existing code that reserving it would break almost every program.
+  links:
+    affects:
+    - target: r-CMSDK
+- id: s-WWEW7
+  type: section
+  parent: d-3T4TW
+  order: a4
+  fields:
+    title: A statement, not an expression
+- id: p-WJN5N
+  type: prose
+  parent: s-WWEW7
+  order: a1
+  body: Some proposals wanted `match` to be an expression. That would fit poorly with Python's statement-oriented
+    nature and lead to unusually long and complex expressions. It would also restrict each case to a single
+    expression rather than an arbitrary block.
+- id: s-22WP4
+  type: section
+  parent: s-WWEW7
+  order: a2
+  fields:
+    title: Indentation
+- id: p-WZMME
+  type: prose
+  parent: s-22WP4
+  order: a1
+  body: 'A case block sits two levels in: one for the case, one for its body. Several flat schemes were
+    suggested, and every one of them broke the rule that a colon at the end of a line introduces an indented
+    block.'
+- id: ra-7ZA7B
+  type: rationale
+  parent: s-22WP4
+  order: a2
+  body: Sample programs showed that the brevity of patterns more than makes up for the extra level of
+    indentation.
+- id: s-095ED
+  type: section
+  parent: s-WWEW7
+  order: a3
+  fields:
+    title: Why case
+- id: p-VA891
+  type: prose
+  parent: s-095ED
+  order: a1
+  body: The statement combines multi-branch control flow, in the tradition of `switch`, with deconstruction,
+    in the tradition of functional languages. `case` stresses the first, and only ever occurs as the leading
+    keyword inside a match statement.
+- id: ra-BY58A
+  type: rationale
+  parent: s-095ED
+  order: a2
+  body: A word that stresses the first half of the statement and is easy to recognise beats one that stresses
+    the second.
+- id: s-TF8Z2
+  type: section
+  parent: d-3T4TW
+  order: a5
+  fields:
+    title: 'Capture or value: the dotted-name rule'
+- id: p-GNJNB
+  type: prose
+  parent: s-TF8Z2
+  order: a1
+  body: The hardest problem in the syntax is telling a name that binds from a name that stands for a value.
+    Proposals to mark captures explicitly, with `?x` or `$x` for example, would simplify a secondary use
+    case at the expense of extra clutter in the primary one.
+- id: ra-PSFZ2
+  type: rationale
+  parent: s-TF8Z2
+  order: a2
+  body: A capture can never silently shadow a module-level constant and change meaning when that constant
+    changes.
+- id: p-Z5DDN
+  type: prose
+  parent: s-TF8Z2
+  order: a3
+  body: 'The adopted rule is simple: any dotted name is a value pattern; any bare name is a capture. `HttpStatus.OK`
+    is looked up; `status` binds. The normative statement is in {{s-PZFV5}}, and the rejected alternatives
+    are kept in {{d-ZJWAW}} and {{d-16X0K}}.'
+- id: s-66NFJ
+  type: section
+  parent: d-3T4TW
+  order: a6
+  fields:
+    title: The wildcard
+- id: p-P4YN5
+  type: prose
+  parent: s-66NFJ
+  order: a1
+  body: The wildcard needed a spelling that could not be mistaken for a name. A single underscore already
+    means "a value I do not care about" in unpacking and in loops, so reusing it costs readers nothing.
+- id: D-1RRV2
+  type: decision
+  parent: s-66NFJ
+  order: a2
+  fields:
+    statement: The wildcard is `_`
+    key: DEC-WILDCARD
+    status: accepted
+    decided_at: '2021-02-08T10:00:00Z'
+    recorded_at: '2021-02-08T10:00:00Z'
+    options:
+    - '`_`'
+    - '`?`'
+    - '`...`'
+    authority_basis: recorded_ruling
+    attested_by: Steering Council
+  body: The underscore already carries this meaning elsewhere in the language.
+  links:
+    affects:
+    - target: t-V8Q67
+    answers:
+    - target: Q-EXNX0
+- id: s-G0D55
+  type: section
+  parent: d-3T4TW
+  order: a7
+  fields:
+    title: Singletons compare by identity
+- id: p-5Y5BR
+  type: prose
+  parent: s-G0D55
+  order: a1
+  body: Literal patterns normally use `==`. `None`, `True` and `False` use `is` instead, because `True
+    == 1.0` and a `case True:` that matched `1.0` would lead to subtle bugs and convoluted workarounds.
+- id: ra-2EA9E
+  type: rationale
+  parent: s-G0D55
+  order: a2
+  body: Identity for the three singletons is the only rule that never surprises a reader.
+- id: e-2Z7VM
+  type: example
+  parent: s-G0D55
+  order: a3
+  body: '`case True:` does not match the integer 1, even though `True == 1`.'
+- id: s-H3REX
+  type: section
+  parent: d-3T4TW
+  order: a8
+  fields:
+    title: Strings are not sequences here
+- id: p-79BF0
+  type: prose
+  parent: s-H3REX
+  order: a1
+  body: Strings and bytes are atomic objects in their own right as well as sequences, and their elements
+    are themselves strings. It is often unintuitive and unintended that strings pass for sequences, so
+    sequence patterns exclude them. The rule is stated in {{s-PZK7F}}.
+- id: D-E4V9K
+  type: decision
+  parent: s-H3REX
+  order: a2
+  fields:
+    statement: Strings are sequences for matching
+    status: accepted
+    decided_at: '2021-02-08T10:00:00Z'
+    recorded_at: '2021-02-08T10:00:00Z'
+    options:
+    - strings match sequence patterns
+    - strings do not
+    authority_basis: recorded_ruling
+    attested_by: Steering Council
+  body: The first draft treated a string like any other sequence.
+  links:
+    affects:
+    - target: s-PZK7F
+- id: D-J3BYE
+  type: decision
+  parent: s-H3REX
+  order: a3
+  fields:
+    statement: 'Revoke D-E4V9K: strings and bytes are excluded from sequence patterns'
+    status: accepted
+    decided_at: '2021-06-14T09:30:00Z'
+    recorded_at: '2021-06-14T09:30:00Z'
+    options: []
+    authority_basis: recorded_ruling
+    attested_by: Steering Council
+  body: A pattern such as `[x, y]` matching the string "ab" would almost never be intended.
+  links:
+    revokes:
+    - target: D-E4V9K
+- id: s-R1M40
+  type: section
+  parent: d-3T4TW
+  order: a9
+  fields:
+    title: Class patterns and __match_args__
+- id: p-6KX5W
+  type: prose
+  parent: s-R1M40
+  order: a1
+  body: Unlike algebraic data types, Python objects carry no fixed order of fields. Keyword subpatterns,
+    `Node(left=x, right=y)`, name attributes directly. The class attribute `__match_args__` declares an
+    order, so that `Node(x, y)` can be written where the order is obvious.
+- id: p-D1NWD
+  type: prose
+  parent: s-R1M40
+  order: a2
+  body: In both forms deconstruction mirrors the syntax of construction, as it already does for assignment,
+    function definitions and unpacking. The class author owns the order; see {{s-9RT3Q}}.
+- id: D-QK28X
+  type: decision
+  parent: s-R1M40
+  order: a3
+  fields:
+    statement: Positional subpatterns map through `__match_args__`
+    status: accepted
+    decided_at: '2021-02-08T10:00:00Z'
+    recorded_at: '2021-02-08T10:00:00Z'
+    options:
+    - a class attribute
+    - a method
+    - the constructor's signature
+    authority_basis: recorded_ruling
+    attested_by: Steering Council
+  body: A class attribute is cheap to read and easy to generate for dataclasses.
+  links:
+    affects:
+    - target: t-8SX2E
+- id: s-YT1GA
+  type: section
+  parent: d-3T4TW
+  order: aA
+  fields:
+    title: Guards
+- id: p-Q4N8W
+  type: prose
+  parent: s-YT1GA
+  order: a1
+  body: Patterns say what the subject must look like; they are declarative and ideally free of side effects.
+    Some conditions, such as a value being less than another, cannot be expressed that way.
+- id: p-4SR5Z
+  type: prose
+  parent: s-YT1GA
+  order: a2
+  body: Rather than widen the pattern language, a guard attaches an arbitrary expression to a case block
+    in a highly controlled way. The compiler can still optimise the patterns, and the reader can still
+    see where the arbitrary code is.
+- id: ra-2DXZ7
+  type: rationale
+  parent: s-YT1GA
+  order: a3
+  body: Keeping arbitrary code in one visible place keeps patterns optimisable and case blocks readable.
+- id: s-0ZW1M
+  type: section
+  parent: d-3T4TW
+  order: aB
+  fields:
+    title: Or-patterns bind the same names
+- id: p-PPNMS
+  type: prose
+  parent: s-0ZW1M
+  order: a1
+  body: Statically typed languages forbid bindings inside or-patterns because the alternatives may have
+    different types. Python can be more flexible, but each alternative must still bind the same set of
+    names.
+- id: D-EDT1K
+  type: decision
+  parent: s-0ZW1M
+  order: a2
+  fields:
+    statement: Alternatives in a pattern are separated by `|`
+    status: accepted
+    decided_at: '2021-02-08T10:00:00Z'
+    recorded_at: '2021-02-08T10:00:00Z'
+    options:
+    - '`|`'
+    - '`or`'
+    - a comma
+    authority_basis: recorded_ruling
+    attested_by: Steering Council
+  body: The vertical bar is the traditional separator in pattern languages and does not clash with the
+    comma.
+  links:
+    affects:
+    - target: t-WNTNS
+- id: s-QYKDA
+  type: section
+  parent: s-0ZW1M
+  order: a3
+  fields:
+    title: Why there are no AND or NOT patterns
+- id: p-YQEGA
+  type: prose
+  parent: s-QYKDA
+  order: a1
+  body: Sequence, mapping and class patterns already require every part to match, which covers most needs
+    for conjunction; a guard covers the rest and reads better. Negation is rarely useful outside double
+    negation and can always be added later.
+- id: s-6F5HY
+  type: section
+  parent: d-3T4TW
+  order: aC
+  fields:
+    title: How the decision was reached
+- id: p-CTCTX
+  type: prose
+  parent: s-6F5HY
+  order: a1
+  body: 'The feature was first proposed in one document, accepted as three: the specification, this rationale
+    and the tutorial.'
+- id: D-8XSBD
+  type: decision
+  parent: s-6F5HY
+  order: a2
+  fields:
+    statement: The original proposal defines the feature
+    status: accepted
+    decided_at: '2020-06-23T12:00:00Z'
+    recorded_at: '2020-06-23T12:00:00Z'
+    options:
+    - one document
+    - split documents
+    authority_basis: recorded_ruling
+    attested_by: Steering Council
+  body: The first proposal bundled the specification, the rationale and the tutorial.
+- id: D-7Y52G
+  type: decision
+  parent: s-6F5HY
+  order: a3
+  fields:
+    statement: The specification, rationale and tutorial together define the feature
+    status: accepted
+    decided_at: '2021-02-08T10:00:00Z'
+    recorded_at: '2021-02-08T10:00:00Z'
+    options:
+    - one document
+    - split documents
+    authority_basis: recorded_ruling
+    attested_by: Steering Council
+  body: Three documents let each reader find what they came for.
+  links:
+    supersedes:
+    - target: D-8XSBD
+    affects:
+    - target: d-8PBD5
+- id: s-45X42
+  type: section
+  parent: d-3T4TW
+  order: aD
+  fields:
+    title: Backwards compatibility
+- id: p-J7B17
+  type: prose
+  parent: s-45X42
+  order: a1
+  body: Because the keywords are soft and the parser resolves them from context, existing programs keep
+    working unchanged. Third-party tools built on a parser that looks one token ahead need to migrate.
+- id: c-QT2ND
+  type: claim
+  parent: s-45X42
+  order: a2
+  body: No program that ran before the feature changes its meaning because of it.
+- id: ra-PHARV
+  type: rationale
+  parent: s-45X42
+  order: a3
+  body: Soft keywords were the only way to add the statement without reserving two common names.
+- id: n-35B0F
+  type: note
+  parent: s-45X42
+  order: a4
+  body: Tools that read Python source with their own parser are the only code that must change.

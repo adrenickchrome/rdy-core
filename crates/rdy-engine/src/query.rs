@@ -164,14 +164,32 @@ impl ReadState {
     pub fn suspects(&self, scope: &Scope) -> Result<Vec<Suspect>, RdyError> {
         let g = self.graph(scope)?;
         let m = self.materialized(scope)?;
-        Ok(g.suspects(&*m, &|h| self.reader().get_block(h).ok()))
+        let mut out = g.suspects(&*m, &|h| self.reader().get_block(h).ok());
+        out.retain(|s| !self.is_presentational_source(&m, s));
+        Ok(out)
+    }
+
+    /// A change to a presentational block (the suspect's `target`, the block whose version
+    /// moved) makes nothing suspect. A target that is gone is typed by the version the suspect
+    /// pinned, read back through the store.
+    fn is_presentational_source(&self, m: &Materialized, s: &Suspect) -> bool {
+        let presentational = |b: &Block| self.pack().is_presentational(&b.block_type);
+        match m.get(&s.target) {
+            Some(b) => presentational(b),
+            None => m
+                .get(&s.block)
+                .and_then(|b| b.pins.get(&s.target))
+                .and_then(|h| self.reader().get_block(h).ok())
+                .is_some_and(|old| presentational(&old)),
+        }
     }
 
     pub fn context(&self, scope: &Scope, id: &BlockId) -> Result<Context, RdyError> {
         let block = self.block(scope, id)?;
         let g = self.graph(scope)?;
         let m = self.materialized(scope)?;
-        let suspects = g.suspects_of(id, &*m, &|h| self.reader().get_block(h).ok());
+        let mut suspects = g.suspects_of(id, &*m, &|h| self.reader().get_block(h).ok());
+        suspects.retain(|s| !self.is_presentational_source(&m, s));
         Ok(Context {
             id: block.id.to_string(),
             block_type: block.block_type.clone(),

@@ -1,0 +1,4 @@
+{%- macro list(entries) -%}
+<ul>{% for e in entries %}<li><a class="toc-link" href="#{{ e.anchor }}">{{ e.label }}</a>{% if e.children %}{{ list(e.children) }}{% endif %}</li>{% endfor %}</ul>
+{%- endmacro -%}
+<p class="toc-label">On this page</p>{{ list(toc.entries) }}

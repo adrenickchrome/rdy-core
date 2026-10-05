@@ -1,0 +1,1216 @@
+- id: d-8PBD5
+  type: doc
+  order: a1
+  fields:
+    title: The match statement and its patterns
+    doc_type: overview
+- id: p-EF50Z
+  type: prose
+  parent: d-8PBD5
+  order: M1
+  body: |-
+    This document is the **specification** of the `match` statement: what each pattern *means* and in which order the cases run. The reasons live in {{d-3T4TW|the companion rationale}}; worked examples are in [the tutorial](../tutorial/adventure.html).
+- id: p-Q6S0X
+  type: prose
+  parent: d-8PBD5
+  order: M2
+  body: |-
+    The specification covers:
+    - the syntax of patterns
+      - capture and wildcard patterns
+      - value, literal and class patterns
+    - the evaluation of a `match` statement
+    - {{SPEC-GUARDS|guards}}, which see the bindings of their own case
+- id: p-38BJB
+  type: prose
+  parent: d-8PBD5
+  order: M3
+  body: |-
+    Read it in this order:
+    1. Patterns
+    2. Evaluation
+    3. Guards
+- id: n-ZHA5J
+  type: note
+  parent: d-8PBD5
+  order: M4
+  body: 'The keywords `match` and `case` are *soft*: see {{REQ-SOFT-KEYWORDS}}.'
+- id: s-FSHEC
+  type: section
+  parent: d-8PBD5
+  order: a1
+  fields:
+    title: Summary
+- id: p-7QZWC
+  type: prose
+  parent: s-FSHEC
+  order: a1
+  body: This is the normative description of the match statement. It says what a match statement does
+    and how each kind of pattern behaves, without commentary. The reasons behind the rules are in {{d-3T4TW}},
+    and a guided walk through the feature is in {{d-XM01W}}.
+- id: p-BQTGJ
+  type: prose
+  parent: s-FSHEC
+  order: a2
+  body: Every term used here is defined once, in the section called Terms.
+- id: n-G2QKT
+  type: note
+  parent: s-FSHEC
+  order: a3
+  body: 'Throughout the specification, the words must, should and may are used as the requirement words:
+    a must is a rule, a should is a strong recommendation and a may is a permission.'
+- id: s-C7X9Z
+  type: section
+  parent: d-8PBD5
+  order: a2
+  fields:
+    title: Terms
+- id: t-D3BFG
+  type: term
+  parent: s-C7X9Z
+  order: a1
+  fields:
+    name: Subject
+  body: The value that follows `match`. It is evaluated once; if the expression contains a comma, the
+    subject is a tuple.
+- id: t-8SH2G
+  type: term
+  parent: s-C7X9Z
+  order: a2
+  fields:
+    name: Pattern
+  body: The text that follows `case`. It describes a shape the subject must have and the names to bind
+    to its parts.
+- id: t-SM177
+  type: term
+  parent: s-C7X9Z
+  order: a3
+  fields:
+    name: Capture pattern
+  body: A bare name other than `_`. It always succeeds and binds the subject to the name.
+- id: t-V8Q67
+  type: term
+  parent: s-C7X9Z
+  order: a4
+  fields:
+    name: Wildcard
+  body: The single underscore, `_`. It matches any subject and binds nothing.
+- id: t-N6SPT
+  type: term
+  parent: s-C7X9Z
+  order: a5
+  fields:
+    name: Value pattern
+  body: A dotted name such as `Color.RED`. The name is looked up and compared with the subject using `==`.
+- id: t-9AM6P
+  type: term
+  parent: s-C7X9Z
+  order: a6
+  fields:
+    name: Literal pattern
+  body: 'A pattern that matches one constant: a number, a string, or one of `None`, `True` and `False`.'
+- id: t-SAEVJ
+  type: term
+  parent: s-C7X9Z
+  order: a7
+  fields:
+    name: Class pattern
+  body: A dotted name followed by parentheses that hold subpatterns. It tests the type of the subject,
+    then its attributes.
+- id: t-E2TVQ
+  type: term
+  parent: s-C7X9Z
+  order: a8
+  fields:
+    name: Mapping pattern
+  body: A pattern written with braces. Each item pairs a key, which must be a literal or a value, with
+    a subpattern for the value.
+- id: t-BBMBY
+  type: term
+  parent: s-C7X9Z
+  order: a9
+  fields:
+    name: Sequence pattern
+  body: A pattern written with square brackets or parentheses. It tests the length of the subject, then
+    each item in turn.
+- id: t-XTQDJ
+  type: term
+  parent: s-C7X9Z
+  order: aA
+  fields:
+    name: Guard
+  body: An expression after `if` in a case block. It is evaluated only when the pattern has already succeeded.
+- id: t-5RHE0
+  type: term
+  parent: s-C7X9Z
+  order: aB
+  fields:
+    name: Irrefutable
+  body: A pattern whose syntax alone proves that it always succeeds. Only the last case block may have
+    one.
+- id: t-WNTNS
+  type: term
+  parent: s-C7X9Z
+  order: aC
+  fields:
+    name: Or-pattern
+  body: Two or more patterns joined by `|`. It succeeds at the first alternative that succeeds.
+- id: t-TYDHM
+  type: term
+  parent: s-C7X9Z
+  order: aD
+  fields:
+    name: As-pattern
+  body: A pattern followed by `as` and a name. It matches its left side and also binds the subject to
+    the name.
+- id: t-8SX2E
+  type: term
+  parent: s-C7X9Z
+  order: aE
+  fields:
+    name: __match_args__
+  body: A class attribute that lists, in order, the attributes that positional subpatterns of a class
+    pattern refer to.
+- id: p-C7GRY
+  type: prose
+  parent: s-C7X9Z
+  order: aF
+  body: A pattern is matched with a subject, or matched against it. The primary outcome is success or
+    failure; a secondary outcome may be the binding of names.
+- id: p-1VZJ0
+  type: prose
+  parent: s-C7X9Z
+  order: aG
+  body: Patterns often contain nested subpatterns. Processing usually moves left to right until an outcome
+    is decided. When subpatterns are tried until one succeeds, only the bindings of the successful subpattern
+    are kept. When they are tried until one fails, the bindings merge.
+- id: r-C6ZE9
+  type: requirement
+  parent: s-C7X9Z
+  order: aH
+  fields:
+    priority: must
+  body: Code must not rely on bindings made during a failed match.
+- id: c-JYHQT
+  type: claim
+  parent: s-C7X9Z
+  order: aI
+  body: Names bound by a successful pattern remain available after the match statement.
+- id: s-ZPKS7
+  type: section
+  parent: d-8PBD5
+  order: a3
+  fields:
+    title: The match statement
+- id: p-4T05X
+  type: prose
+  parent: s-ZPKS7
+  order: a1
+  body: A match statement is a compound statement. Its grammar, in the notation used by the language reference,
+    is given below.
+- id: cd-DQJG2
+  type: code
+  parent: s-ZPKS7
+  order: a2
+  fields:
+    lang: peg
+  body: |-
+    match_stmt: "match" subject_expr ':' NEWLINE INDENT case_block+ DEDENT
+    subject_expr:
+        | star_named_expression ',' star_named_expressions?
+        | named_expression
+    case_block: "case" patterns [guard] ':' block
+    guard: 'if' named_expression
+- id: m-3ZB5J
+  type: component
+  parent: s-ZPKS7
+  order: a3
+  fields:
+    name: The match statement
+  body: The compound statement that tries each case block against one subject. It owns the order of evaluation
+    and the scope of the names its patterns bind.
+  links:
+    implements:
+    - target: r-CMSDK
+    - target: r-C6ZE9
+- id: i-WJ5ZR
+  type: interface
+  parent: s-ZPKS7
+  order: a4
+  fields:
+    name: Pattern grammar
+  body: 'The grammar of a pattern: an as-pattern or an or-pattern, built from closed patterns. A closed
+    pattern is a literal, a capture, a wildcard, a value, a group, a sequence, a mapping or a class pattern.'
+- id: s-EENV5
+  type: section
+  parent: s-ZPKS7
+  order: a5
+  fields:
+    title: Semantics
+- id: p-W57XM
+  type: prose
+  parent: s-EENV5
+  order: a1
+  body: The subject expression is evaluated. If it contains a comma, a tuple is constructed by the usual
+    rules.
+- id: p-QH77H
+  type: prose
+  parent: s-EENV5
+  order: a2
+  body: The case blocks are tried in order. The first whose pattern succeeds against the subject and whose
+    guard, if present, is truthy, is selected. If a case block is selected its block runs; otherwise the
+    match statement completes and no block runs.
+- id: p-26RXD
+  type: prose
+  parent: s-EENV5
+  order: a3
+  body: The same sequence is drawn as a flow in {{d-6TCS9}}.
+- id: c-M8YT5
+  type: claim
+  parent: s-EENV5
+  order: a4
+  body: The subject expression is evaluated exactly once, however many case blocks the statement has.
+- id: s-H6AHT
+  type: section
+  parent: s-ZPKS7
+  order: a6
+  fields:
+    title: Soft keywords
+- id: r-CMSDK
+  type: requirement
+  parent: s-H6AHT
+  order: a1
+  fields:
+    priority: must
+    key: REQ-SOFT-KEYWORDS
+  body: '`match` and `case` are soft keywords.'
+  links:
+    decided_by:
+    - target: D-G83ZN
+- id: p-JNW4K
+  type: prose
+  parent: s-H6AHT
+  order: a2
+  body: They are not reserved words in any other grammatical context. Code that uses either as a variable,
+    function or attribute name keeps working.
+- id: n-KEZX1
+  type: note
+  parent: s-H6AHT
+  order: a3
+  body: The soft keyword `case` only ever starts a line inside a match statement, so a reader finds it
+    easy to recognise.
+- id: s-EF1NX
+  type: section
+  parent: d-8PBD5
+  order: a4
+  fields:
+    title: Guards
+    key: SPEC-GUARDS
+- id: p-W97Y4
+  type: prose
+  parent: s-EF1NX
+  order: Z1
+  body: |-
+    A guard is evaluated **only** after its pattern matches, and *before* the case body runs; see {{t-XTQDJ|the definition}} and {{DEC-WILDCARD|why the wildcard is an underscore}}.
+    - A guard may read the names its pattern bound.
+    - A guard that raises ends the whole `match` statement.
+- id: p-9PXMN
+  type: prose
+  parent: s-EF1NX
+  order: a1
+  body: A guard is an optional expression, introduced by `if`, that is evaluated only after the pattern
+    of its case block has succeeded. It may be any expression and may have side effects.
+- id: r-2KZGG
+  type: requirement
+  parent: s-EF1NX
+  order: a2
+  fields:
+    priority: should
+  body: Guards are evaluated strictly in case-block order, and only for case blocks whose pattern succeeded.
+- id: p-WJRF1
+  type: prose
+  parent: s-EF1NX
+  order: a3
+  body: Evaluation stops as soon as a case block is selected. If a guard raises, the exception propagates
+    and no later case block is tried.
+- id: cd-99RM7
+  type: code
+  parent: s-EF1NX
+  order: a4
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        case ["go", direction] if direction in current_room.exits:
+            move(direction)
+        case ["go", _]:
+            print("Sorry, you can't go that way")
+- id: n-HQEVE
+  type: note
+  parent: s-EF1NX
+  order: a5
+  body: A guard that raises stops the whole statement. It does not fall through to the next case block.
+- id: p-CMY61
+  type: prose
+  parent: s-EF1NX
+  order: a6
+  body: The long identifier CaseBlockEvaluationOrderIsStrictlyTopToBottom names this rule in one of the
+    test suites, which shows how a single unbroken word must fit a narrow page.
+- id: s-48GQN
+  type: section
+  parent: d-8PBD5
+  order: a5
+  fields:
+    title: Irrefutable case blocks
+- id: p-HPVJE
+  type: prose
+  parent: s-48GQN
+  order: a1
+  body: A pattern is irrefutable if its syntax alone proves that it always succeeds. The irrefutable patterns
+    are capture patterns, wildcard patterns, as-patterns whose left side is irrefutable, or-patterns containing
+    at least one irrefutable subpattern, and parenthesised irrefutable patterns.
+- id: r-ZY80Y
+  type: requirement
+  parent: s-48GQN
+  order: a2
+  fields:
+    priority: must
+  body: A match statement may have at most one irrefutable case block, and it must be last.
+- id: p-MQB70
+  type: prose
+  parent: s-48GQN
+  order: a3
+  body: This is a compile-time error, so a case block that could never be reached cannot be written.
+- id: cd-AQ3MT
+  type: code
+  parent: s-48GQN
+  order: a4
+  fields:
+    lang: python
+  body: |-
+    match value:
+        case x:
+            print("always")
+        case 0:  # error: unreachable
+            print("never")
+- id: s-TGT6J
+  type: section
+  parent: d-8PBD5
+  order: a6
+  fields:
+    title: Patterns
+- id: p-WXMMX
+  type: prose
+  parent: s-TGT6J
+  order: a1
+  body: 'The top-level grammar of a pattern is:'
+- id: cd-H3733
+  type: code
+  parent: s-TGT6J
+  order: a2
+  fields:
+    lang: peg
+  body: |-
+    patterns: open_sequence_pattern | pattern
+    pattern: as_pattern | or_pattern
+    as_pattern: or_pattern 'as' capture_pattern
+    or_pattern: '|'.closed_pattern+
+    closed_pattern:
+        | literal_pattern | capture_pattern | wildcard_pattern
+        | value_pattern | group_pattern | sequence_pattern
+        | mapping_pattern | class_pattern
+- id: s-XKZ53
+  type: section
+  parent: s-TGT6J
+  order: a3
+  fields:
+    title: Literal patterns
+- id: p-71SH5
+  type: prose
+  parent: s-XKZ53
+  order: a1
+  body: 'A literal pattern matches one constant: a signed number, a complex number written as `real +
+    imag` or `real - imag`, a string (raw and bytes forms included, f-strings excluded) or one of the
+    singletons `None`, `True` and `False`.'
+- id: r-P90ME
+  type: requirement
+  parent: s-XKZ53
+  order: a2
+  fields:
+    priority: must
+  body: Numbers and strings compare with `==`. The singletons compare with `is`.
+- id: ra-RAPPN
+  type: rationale
+  parent: s-XKZ53
+  order: a3
+  body: With equality alone, `case True:` would match the float `1.0`, because `True == 1.0`. Most readers
+    would find that surprising, so the singletons use identity.
+- id: e-FDRAM
+  type: example
+  parent: s-XKZ53
+  order: a4
+  body: '`case 42:` matches the integer 42 and the float 42.0, because they compare equal. `case None:`
+    matches only the singleton.'
+- id: cd-JMVED
+  type: code
+  parent: s-XKZ53
+  order: a5
+  fields:
+    lang: python
+  body: |-
+    match status:
+        case 200:
+            return "ok"
+        case None:
+            return "no status"
+        case "pending" | "queued":
+            return "wait"
+- id: s-PZFV5
+  type: section
+  parent: s-TGT6J
+  order: a4
+  fields:
+    title: Capture patterns
+- id: p-BC1PB
+  type: prose
+  parent: s-PZFV5
+  order: a1
+  body: A capture pattern is a bare name other than `_`. It always succeeds and binds the subject to the
+    name, following the scoping rules established for the walrus operator.
+- id: r-6SWAH
+  type: requirement
+  parent: s-PZFV5
+  order: a2
+  fields:
+    priority: must
+  body: Within one pattern, a given name may be bound only once.
+- id: p-H15GY
+  type: prose
+  parent: s-PZFV5
+  order: a3
+  body: '`case [x] | x:` is allowed, because each alternative binds `x` once. `case x, x:` is a syntax
+    error.'
+- id: e-7K46K
+  type: example
+  parent: s-PZFV5
+  order: a4
+  body: In `case [first, *_]:` the name `first` is bound to the first item. In `case [x, x]:` the name
+    is bound twice, which is refused.
+- id: cd-HR35S
+  type: code
+  parent: s-PZFV5
+  order: a5
+  fields:
+    lang: python
+  body: |-
+    match point:
+        case (x, y):
+            print(x, y)
+        case other:
+            print(other)
+- id: s-YJQMB
+  type: section
+  parent: s-TGT6J
+  order: a5
+  fields:
+    title: Wildcard pattern
+- id: p-C99N2
+  type: prose
+  parent: s-YJQMB
+  order: a1
+  body: The single underscore, `_`, matches any subject and binds nothing. As a whole pattern it is the
+    usual final case.
+- id: cd-ZQBMD
+  type: code
+  parent: s-YJQMB
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        case ["quit"]:
+            quit_game()
+        case _:
+            print("Sorry, I couldn't understand that")
+- id: s-1MXM1
+  type: section
+  parent: s-TGT6J
+  order: a6
+  fields:
+    title: Value patterns
+- id: p-PXGXZ
+  type: prose
+  parent: s-1MXM1
+  order: a1
+  body: A value pattern is a dotted name such as `Color.RED` or `http.HTTPStatus.OK`. The name is resolved
+    by ordinary lookup, and the pattern succeeds if the resolved value compares equal to the subject with
+    `==`.
+- id: r-8GYSR
+  type: requirement
+  parent: s-1MXM1
+  order: a2
+  fields:
+    priority: may
+  body: An implementation may cache a value pattern that appears more than once in the same match statement.
+- id: p-BY68N
+  type: prose
+  parent: s-1MXM1
+  order: a3
+  body: Code must not depend on the lookup being repeated, or on how many times it happens.
+- id: cd-9353S
+  type: code
+  parent: s-1MXM1
+  order: a4
+  fields:
+    lang: python
+  body: |-
+    match response.status:
+        case http.HTTPStatus.OK:
+            handle(response)
+        case http.HTTPStatus.NOT_FOUND:
+            retry()
+- id: n-9PR62
+  type: note
+  parent: s-1MXM1
+  order: a5
+  body: A value pattern can never bind a name, which is why the dotted form is the way to compare against
+    a constant.
+- id: s-W9JPK
+  type: section
+  parent: s-TGT6J
+  order: a7
+  fields:
+    title: Group patterns
+- id: p-VXEEE
+  type: prose
+  parent: s-W9JPK
+  order: a1
+  body: A pattern in parentheses, with no comma, is a group pattern. It adds nothing but emphasis.
+- id: p-BW104
+  type: prose
+  parent: s-W9JPK
+  order: a2
+  body: A parenthesised pattern with a trailing comma is a one-item sequence pattern, as with tuples.
+- id: cd-D2GH6
+  type: code
+  parent: s-W9JPK
+  order: a3
+  fields:
+    lang: python
+  body: |-
+    match item:
+        case (1 | 2):
+            print("a group")
+        case (1,):
+            print("a one-item sequence")
+- id: s-PZK7F
+  type: section
+  parent: s-TGT6J
+  order: a8
+  fields:
+    title: Sequence patterns
+- id: p-FBNMK
+  type: prose
+  parent: s-PZK7F
+  order: a1
+  body: A sequence pattern is written with square brackets or parentheses, or as a bare comma-separated
+    list at the top level. It contains zero or more subpatterns and at most one star subpattern.
+- id: r-M1M23
+  type: requirement
+  parent: s-PZK7F
+  order: a2
+  fields:
+    priority: must
+  body: A subject is a sequence if its class inherits from `collections.abc.Sequence`, has been registered
+    as one, or is a built-in class flagged as a sequence.
+- id: p-MT148
+  type: prose
+  parent: s-PZK7F
+  order: a3
+  body: The built-in classes so flagged are `list`, `tuple`, `range`, `memoryview`, `array.array` and
+    `collections.deque`. Although `str`, `bytes` and `bytearray` are usually considered sequences, they
+    are deliberately not included and never match a sequence pattern.
+- id: e-GG6SC
+  type: example
+  parent: s-PZK7F
+  order: a4
+  body: '`case [a, b]:` matches the list `[1, 2]` and the tuple `(1, 2)`, but not the string `"ab"`.'
+- id: cd-YEESG
+  type: code
+  parent: s-PZK7F
+  order: a5
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        case [action, obj]:
+            run(action, obj)
+        case [action, *objs]:
+            run_many(action, objs)
+- id: s-J7DH0
+  type: section
+  parent: s-PZK7F
+  order: a6
+  fields:
+    title: Length rules
+- id: k-9CR0X
+  type: constraint
+  parent: s-J7DH0
+  order: a1
+  body: A fixed-length pattern fails if the subject's length differs from the number of subpatterns.
+- id: p-2Y48X
+  type: prose
+  parent: s-J7DH0
+  order: a2
+  body: A variable-length pattern fails if the subject has fewer items than there are non-star subpatterns.
+    Otherwise subpatterns are matched left to right.
+- id: s-H142N
+  type: section
+  parent: s-J7DH0
+  order: a3
+  fields:
+    title: Star subpatterns
+- id: p-RBWEF
+  type: prose
+  parent: s-H142N
+  order: a1
+  body: A star subpattern, written `*name` or `*_`, binds a list of the items left over after the subpatterns
+    before and after it have taken theirs.
+- id: cd-63MS8
+  type: code
+  parent: s-H142N
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        case ["drop", *objects]:
+            for obj in objects:
+                character.drop(obj, current_room)
+- id: r-ADATP
+  type: requirement
+  parent: s-H142N
+  order: a3
+  fields:
+    priority: must
+  body: A sequence pattern contains at most one star subpattern.
+- id: s-SBJZA
+  type: section
+  parent: s-J7DH0
+  order: a4
+  fields:
+    title: Fixed length
+- id: p-ZAHTX
+  type: prose
+  parent: s-SBJZA
+  order: a1
+  body: Without a star, the subject must have exactly as many items as the pattern has subpatterns. The
+    empty pattern `[]` matches only an empty sequence.
+- id: s-ZW3MY
+  type: section
+  parent: s-PZK7F
+  order: a7
+  fields:
+    title: Reading elements
+- id: p-BFW6Y
+  type: prose
+  parent: s-ZW3MY
+  order: a1
+  body: Elements are read by subscripting and slicing, never by iteration, so a failed match never consumes
+    anything.
+- id: n-8FGFX
+  type: note
+  parent: s-ZW3MY
+  order: a2
+  body: A subject that is an iterator, such as a generator, is not a sequence and never matches a sequence
+    pattern.
+- id: s-V4ABJ
+  type: section
+  parent: s-TGT6J
+  order: a9
+  fields:
+    title: Mapping patterns
+- id: p-DCJTN
+  type: prose
+  parent: s-V4ABJ
+  order: a1
+  body: A mapping pattern is written with braces. Each item is a key pattern, which must be a literal
+    or value pattern, a colon, and a subpattern for the value.
+- id: cd-3NRED
+  type: code
+  parent: s-V4ABJ
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    match action:
+        case {"sleep": duration}:
+            wait(duration)
+        case {"sound": url, **rest}:
+            play(url, rest)
+- id: e-Z9MM8
+  type: example
+  parent: s-V4ABJ
+  order: a3
+  body: 'The pattern `{"text": message}` matches a dictionary that has a text key, whatever else it holds.'
+- id: r-R48YH
+  type: requirement
+  parent: s-V4ABJ
+  order: a4
+  fields:
+    priority: must
+  body: A subject is a mapping if its class inherits from `collections.abc.Mapping`, has been registered
+    as one, or is a built-in class flagged as a mapping.
+- id: s-SBH97
+  type: section
+  parent: s-V4ABJ
+  order: a5
+  fields:
+    title: Keys
+- id: r-CW5PF
+  type: requirement
+  parent: s-SBH97
+  order: a1
+  fields:
+    priority: must
+  body: Keys are looked up with the two-argument form of `get()`.
+- id: p-RR6S1
+  type: prose
+  parent: s-SBH97
+  order: a2
+  body: Matched items must already be present. A key is never created on the fly by `__missing__` or `__getitem__`.
+    Extra keys in the subject are ignored.
+- id: r-9CP1G
+  type: requirement
+  parent: s-SBH97
+  order: a3
+  fields:
+    priority: must
+  body: A mapping pattern may not contain duplicate keys.
+- id: s-BM25K
+  type: section
+  parent: s-V4ABJ
+  order: a6
+  fields:
+    title: Double-star subpatterns
+- id: p-88WPG
+  type: prose
+  parent: s-BM25K
+  order: a1
+  body: At most one double-star pattern is allowed, and it must come last. It binds a dictionary of the
+    remaining items.
+- id: s-9RT3Q
+  type: section
+  parent: s-TGT6J
+  order: aA
+  fields:
+    title: Class patterns
+- id: p-52EK9
+  type: prose
+  parent: s-9RT3Q
+  order: a1
+  body: A class pattern is a dotted name followed by parentheses containing zero or more positional subpatterns
+    and zero or more keyword subpatterns, positional ones first.
+- id: r-CX79Q
+  type: requirement
+  parent: s-9RT3Q
+  order: a2
+  fields:
+    priority: must
+  body: The name must resolve to a type, and the subject must be an instance of it.
+- id: p-QKHPK
+  type: prose
+  parent: s-9RT3Q
+  order: a3
+  body: If the name does not resolve to an instance of `type`, `TypeError` is raised. The instance test
+    uses `isinstance()`, so an instance of a subclass matches.
+- id: cd-PHQAP
+  type: code
+  parent: s-9RT3Q
+  order: a4
+  fields:
+    lang: python
+  body: |-
+    match event:
+        case Click(position=(x, y)):
+            handle_click_at(x, y)
+        case KeyPress(key_name="Q") | Quit():
+            game.quit()
+- id: e-D74JV
+  type: example
+  parent: s-9RT3Q
+  order: a5
+  body: '`Point(x=0, y=0)` matches an instance of `Point` whose two attributes are both zero, and any
+    subclass instance too.'
+- id: a-MPEDJ
+  type: actor
+  parent: s-9RT3Q
+  order: a6
+  fields:
+    name: The class author
+  body: Whoever writes a class that others will match. The class author decides, through `__match_args__`,
+    which attributes positional subpatterns refer to.
+- id: s-GAR5K
+  type: section
+  parent: s-9RT3Q
+  order: a7
+  fields:
+    title: Keyword subpatterns
+- id: p-HFADX
+  type: prose
+  parent: s-GAR5K
+  order: a1
+  body: A keyword subpattern `name=pattern` reads the attribute `name` from the subject and matches the
+    subpattern against it. A missing attribute fails the match.
+- id: s-2EDR4
+  type: section
+  parent: s-9RT3Q
+  order: a8
+  fields:
+    title: Positional subpatterns
+- id: r-QSN1E
+  type: requirement
+  parent: s-2EDR4
+  order: a1
+  fields:
+    priority: must
+  body: Positional subpatterns are converted to keyword subpatterns through the class attribute `__match_args__`.
+  links:
+    decided_by:
+    - target: D-QK28X
+- id: p-JXXHQ
+  type: prose
+  parent: s-2EDR4
+  order: a2
+  body: If there are more positional subpatterns than `len(__match_args__)`, `TypeError` is raised.
+- id: s-7GWAV
+  type: section
+  parent: s-9RT3Q
+  order: a9
+  fields:
+    title: Built-in classes
+- id: p-GEPHG
+  type: prose
+  parent: s-7GWAV
+  order: a1
+  body: For `bool`, `bytearray`, `bytes`, `dict`, `float`, `frozenset`, `int`, `list`, `set`, `str` and
+    `tuple`, a single positional subpattern is matched against the whole subject instead.
+- id: s-05T69
+  type: section
+  parent: s-TGT6J
+  order: aB
+  fields:
+    title: Or-patterns
+- id: p-SAP2Y
+  type: prose
+  parent: s-05T69
+  order: a1
+  body: An or-pattern tries each alternative left to right and succeeds at the first that succeeds. Every
+    alternative must bind the same set of names.
+- id: r-H0Y89
+  type: requirement
+  parent: s-05T69
+  order: a2
+  fields:
+    priority: must
+  body: Every alternative of an or-pattern must bind the same set of names.
+- id: p-T5KPB
+  type: prose
+  parent: s-05T69
+  order: a3
+  body: Otherwise the guard or the block could refer to a name that was never bound.
+- id: cd-V92R0
+  type: code
+  parent: s-05T69
+  order: a4
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        case ["go", "north"] | ["north"]:
+            move("north")
+        case ["get", obj] | ["pick", "up", obj]:
+            take(obj)
+- id: n-65Q86
+  type: note
+  parent: s-05T69
+  order: a5
+  body: An or-pattern with an irrefutable alternative is itself irrefutable, and must therefore be the
+    last case.
+- id: s-EDJ3F
+  type: section
+  parent: s-TGT6J
+  order: aC
+  fields:
+    title: As-patterns
+- id: p-042CP
+  type: prose
+  parent: s-EDJ3F
+  order: a1
+  body: An as-pattern matches its left side and, on success, also binds the subject to the capture name.
+- id: cd-AQZQE
+  type: code
+  parent: s-EDJ3F
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        case ["go", ("north" | "south") as direction]:
+            move(direction)
+- id: r-7DK6F
+  type: requirement
+  parent: s-EDJ3F
+  order: a3
+  fields:
+    priority: should
+  body: The left side of an as-pattern may be any pattern except a capture or a wildcard.
+- id: s-G92P1
+  type: section
+  parent: d-8PBD5
+  order: a7
+  fields:
+    title: Notation
+- id: p-VQPEN
+  type: prose
+  parent: s-G92P1
+  order: a1
+  body: 'The tables below fix the vocabulary used in the rest of this page. The first is deliberately
+    wide: it carries twenty attributes for each pattern kind.'
+- id: tb-S8DXP
+  type: table
+  parent: s-G92P1
+  order: a2
+  fields:
+    columns:
+    - Kind
+    - Written as
+    - Example
+    - Binds names
+    - Refutable
+    - Needs a type
+    - Reads by
+    - Subpatterns
+    - Star form
+    - Takes a guard
+    - Nests
+    - Repeats a name
+    - Looks up a name
+    - Compares with
+    - Added in
+    - Keyword use
+    - Relative cost
+    - Order matters
+    - Side effects
+    - Remarks
+    rows:
+    - - Literal
+      - a constant
+      - '`42`'
+      - 'no'
+      - 'yes'
+      - 'no'
+      - equality
+      - none
+      - 'no'
+      - 'yes'
+      - 'no'
+      - 'no'
+      - 'no'
+      - == or is
+      - '3.10'
+      - none
+      - low
+      - 'yes'
+      - none
+      - The singletons use identity.
+    - - Capture
+      - a bare name
+      - '`direction`'
+      - 'yes'
+      - 'no'
+      - 'no'
+      - assignment
+      - none
+      - 'no'
+      - 'yes'
+      - 'no'
+      - never
+      - 'no'
+      - nothing
+      - '3.10'
+      - none
+      - low
+      - 'yes'
+      - none
+      - Never a dotted name.
+    - - Sequence
+      - brackets
+      - '`[a, *rest]`'
+      - 'yes'
+      - 'yes'
+      - 'yes'
+      - subscript
+      - many
+      - one
+      - 'yes'
+      - 'yes'
+      - never
+      - 'no'
+      - item by item
+      - '3.10'
+      - none
+      - medium
+      - 'yes'
+      - length and item reads
+      - Not a string or bytes.
+- id: p-WFX88
+  type: prose
+  parent: s-G92P1
+  order: a3
+  body: 'The second table holds values of every shape a cell may take: text, a list and a map.'
+- id: tb-500MS
+  type: table
+  parent: s-G92P1
+  order: a4
+  fields:
+    columns:
+    - Kind
+    - Names
+    - Detail
+    rows:
+    - - Capture
+      - - a
+        - b
+      - a list of two names
+    - - Mapping
+      - keys
+      - k: v
+- id: s-M8QXS
+  type: section
+  parent: d-8PBD5
+  order: a8
+  fields:
+    title: Side effects and undefined behaviour
+- id: p-G3NAB
+  type: prose
+  parent: s-M8QXS
+  order: a1
+  body: The only side effect the matching process produces on purpose is the binding of names. The process
+    does, however, rely on attribute access, instance checks, `len()`, equality and item access on the
+    subject and its components.
+- id: r-2C9EX
+  type: requirement
+  parent: s-M8QXS
+  order: a2
+  fields:
+    priority: may
+  body: Which methods are called, and how many times, is not specified.
+- id: p-G9AG4
+  type: prose
+  parent: s-M8QXS
+  order: a3
+  body: An implementation may call them once, repeatedly, or not at all where it can decide the outcome
+    another way. Likewise it is unspecified whether a name captured earlier in a case block is bound when
+    a later subpattern fails.
+- id: s-XQQBB
+  type: section
+  parent: d-8PBD5
+  order: a9
+  fields:
+    title: Standard library support
+- id: p-P5F9K
+  type: prose
+  parent: s-XQQBB
+  order: a1
+  body: Named tuples and dataclasses define `__match_args__` automatically. For a dataclass the order
+    is that of the generated initialiser; fields declared with `init=False` are omitted.
+- id: p-KMZN7
+  type: prose
+  parent: s-XQQBB
+  order: a2
+  body: Other standard library classes gain `__match_args__` where positional matching is clearly useful.
+- id: s-N9350
+  type: section
+  parent: d-8PBD5
+  order: aA
+  fields:
+    title: Worked examples
+- id: p-QBTX1
+  type: prose
+  parent: s-N9350
+  order: a1
+  body: Each example gives a subject, a pattern and the outcome.
+- id: e-MAX73
+  type: example
+  parent: s-N9350
+  order: a2
+  body: 'The subject `[1, 2, 3]` matches `[a, *rest]`: `a` is 1 and `rest` is `[2, 3]`.'
+- id: e-X061K
+  type: example
+  parent: s-N9350
+  order: a3
+  body: 'The subject `{"k": 1, "j": 2}` matches `{"k": v, **others}`: `v` is 1 and `others` is `{"j":
+    2}`.'
+- id: e-VV895
+  type: example
+  parent: s-N9350
+  order: a4
+  body: The subject `Point(1, 2)` matches `Point(x, y)` when `Point` declares `__match_args__` as `("x",
+    "y")`.
+- id: e-HB0TQ
+  type: example
+  parent: s-N9350
+  order: a5
+  body: The subject `"ab"` does not match `[x, y]`, because a string is not a sequence for matching.
+- id: e-SKNCC
+  type: example
+  parent: s-N9350
+  order: a6
+  body: The subject `3` matches `1 | 2 | 3` and binds nothing.
+- id: e-FN016
+  type: example
+  parent: s-N9350
+  order: a7
+  body: The subject `5` matches `n if n > 3` and binds `n` to 5; the guard runs after the capture.
+- id: cd-PY7AW
+  type: code
+  parent: s-N9350
+  order: a8
+  fields:
+    lang: python
+  body: |-
+    def describe(subject):
+        match subject:
+            case []:
+                return "empty"
+            case [one]:
+                return "one item"
+            case [first, *_]:
+                return f"starts with {first!r}"
+            case {"k": v}:
+                return f"has a k key holding {v!r}"
+            case _:
+                return "something else"
+- id: s-YYDCE
+  type: section
+  parent: d-8PBD5
+  order: aB
+  fields:
+    title: Compatibility
+- id: p-GK09Z
+  type: prose
+  parent: s-YYDCE
+  order: a1
+  body: Because `match` and `case` are soft keywords, existing programs keep working unchanged. Tools
+    built on a parser that looks one token ahead need to migrate to parse the new statement.
+- id: cd-1R2V4
+  type: code
+  parent: s-YYDCE
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    # f-strings double a brace to print one; a template engine reads the next line as a placeholder
+    print(f"{{subject}} is {subject}")
+    template = "Hello \{{ name }}"

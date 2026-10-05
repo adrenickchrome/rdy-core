@@ -58,15 +58,15 @@
           "runs": 5
         },
         "render": {
-          "median_ms": 1056.201082,
+          "median_ms": 343.180235,
           "op": "render",
-          "p95_ms": 1063.382907,
+          "p95_ms": 373.896763,
           "runs": 5
         },
         "render_50k": {
-          "median_ms": 98.41507,
+          "median_ms": 576.1370059999999,
           "op": "render_50k",
-          "p95_ms": 258.91661300000004,
+          "p95_ms": 742.200553,
           "runs": 3
         },
         "resolve_path": {
@@ -154,9 +154,9 @@
           "runs": 30
         },
         "write_single_50k": {
-          "median_ms": 0.542588,
+          "median_ms": 2.636371,
           "op": "write_single_50k",
-          "p95_ms": 0.560562,
+          "p95_ms": 2.724178,
           "runs": 20
         }
       }

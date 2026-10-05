@@ -1,6 +1,6 @@
 use crate::pack::{BodyRule, FieldKind, Pack};
 use rdy_model::tree;
-use rdy_model::{Block, BlockId, FieldValue};
+use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -79,6 +79,28 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
         ));
     }
     for (name, v) in &block.fields {
+        if name == "key" {
+            // `key` is an engine field on every type, never listed per type.
+            match v.as_str() {
+                None => out.push(err(
+                    block,
+                    "E_FIELD_KIND",
+                    "field \"key\" must be Str".to_string(),
+                    "write key as a str value".to_string(),
+                )),
+                Some(k) => {
+                    if let Some(reason) = rdy_model::key::problem(k) {
+                        out.push(err(
+                            block,
+                            "E_BAD_KEY",
+                            format!("{k:?} is not a valid key: {reason}"),
+                            "use letters, digits and - _ . such as FW-S1 or REQ-12; a key cannot look like a block id".to_string(),
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
         match def.fields.get(name) {
             None => out.push(err(
                 block,
@@ -225,6 +247,7 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
             ),
         ));
     }
+    reserved_at(block, &mut out);
     if !rdy_model::valid_order_key(&block.order) {
         out.push(err(
             block,
@@ -243,6 +266,46 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
         ));
     }
     out
+}
+
+/// Refuses display text that starts with an unescaped `@` other than the `@key` mark: a leading
+/// `@` is reserved for engine marks (FW-F2a), so a literal one is written `\@`. Checked in bodies
+/// read in `Strict` mode and in every string field.
+fn reserved_at(block: &Block, out: &mut Vec<Issue>) {
+    fn scan(block: &Block, place: &str, text: &str, mode: RefMode, out: &mut Vec<Issue>) {
+        for span in ref_spans(text, mode) {
+            let Some(d) = span.display.as_deref() else {
+                continue;
+            };
+            if d.starts_with('@') && !span.at_escaped {
+                out.push(err(
+                    block,
+                    "E_BAD_REF",
+                    format!(
+                        "{place} has a reference whose display text {d:?} starts with @, which is reserved"
+                    ),
+                    format!(
+                        "write \\@ for a literal @ ({{{{{}|\\{d}}}}}), or @key alone to mark a key-typed reference",
+                        span.token
+                    ),
+                ));
+            }
+        }
+    }
+    fn field(block: &Block, name: &str, v: &FieldValue, out: &mut Vec<Issue>) {
+        match v {
+            FieldValue::Str(s) => scan(block, &format!("field {name:?}"), s, RefMode::Strict, out),
+            FieldValue::List(items) => items.iter().for_each(|i| field(block, name, i, out)),
+            FieldValue::Map(m) => m.values().for_each(|i| field(block, name, i, out)),
+            _ => {}
+        }
+    }
+    if RefMode::for_body(&block.block_type) == RefMode::Strict {
+        scan(block, "the body", &block.body, RefMode::Strict, out);
+    }
+    for (name, v) in &block.fields {
+        field(block, name, v, out);
+    }
 }
 
 pub fn skeleton_gaps(pack: &Pack, doc: &Block, section_titles: &[&str]) -> Vec<Issue> {

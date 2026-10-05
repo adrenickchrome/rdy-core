@@ -3,6 +3,7 @@ mod error;
 pub mod events;
 mod gate;
 mod io;
+mod keys;
 mod lint;
 mod materialize;
 mod paths;
@@ -43,6 +44,12 @@ use std::sync::{Arc, Mutex};
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Config {
     pack: String,
+    /// The project's name as a reader of its site sees it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// One sentence about the project, shown on the site's home page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 pub struct Rdy {
@@ -130,6 +137,8 @@ impl Rdy {
         load_pack(project, pack)?;
         let cfg = serde_yaml_ng::to_string(&Config {
             pack: pack.to_string(),
+            name: None,
+            description: None,
         })
         .expect("config yaml");
         rdy_store::fsutil::write_durable(&dot.join("config.yaml"), cfg.as_bytes()).map_err(io)?;
@@ -153,6 +162,7 @@ impl Rdy {
         let pack = Arc::new(pack);
         let as_of = Arc::new(AsOfCache::default());
         let vpos: Arc<Mutex<version::VposCache>> = Default::default();
+        let (name, description) = site_identity(project, Some(&cfg));
         // a placeholder until the first publish below, which replaces all of it
         let state = ArcSwap::from_pointee(ReadState {
             seq: store.log_end(),
@@ -161,6 +171,9 @@ impl Rdy {
             views: imbl::HashMap::new(),
             tags: Arc::new(vec![]),
             pack: Arc::clone(&pack),
+            root: Arc::from(project),
+            name,
+            description,
             reader: store.reader(),
             as_of: Arc::clone(&as_of),
             vpos: Arc::clone(&vpos),
@@ -254,6 +267,9 @@ impl Rdy {
                     views: prev.views.clone(),
                     tags: Arc::clone(&prev.tags),
                     pack: Arc::clone(&self.pack),
+                    root: Arc::clone(&prev.root),
+                    name: Arc::clone(&prev.name),
+                    description: prev.description.clone(),
                     reader: self.store.reader(),
                     as_of: Arc::clone(&self.as_of),
                     vpos: Arc::clone(&self.vpos),
@@ -333,6 +349,12 @@ impl Rdy {
     fn next_state(&self, prev: &ReadState, delta: Delta) -> Result<ReadState, RdyError> {
         let seq = self.store.log_end();
         let canon_head = self.store.canon_head()?;
+        // the config is re-read only by a full publish (open, invalidate, reindex); every other
+        // publish carries the previous state's name and description
+        let (name, description) = match delta {
+            Delta::Full => site_identity(&prev.root, read_config(&prev.root).as_ref()),
+            _ => (Arc::clone(&prev.name), prev.description.clone()),
+        };
         let (canon, views, tags) = match delta {
             Delta::Full => {
                 let mut views = imbl::HashMap::new();
@@ -407,6 +429,9 @@ impl Rdy {
             views,
             tags,
             pack: Arc::clone(&self.pack),
+            root: Arc::clone(&prev.root),
+            name,
+            description,
             reader: self.store.reader(),
             as_of: Arc::clone(&self.as_of),
             vpos: Arc::clone(&self.vpos),
@@ -469,5 +494,58 @@ impl Rdy {
             views: objects.views,
             landed_changes: objects.landed_changes,
         })
+    }
+}
+
+/// The config at `root` as it is on disk; any read or parse error reads as no config.
+fn read_config(root: &Path) -> Option<Config> {
+    let text = std::fs::read_to_string(root.join(".rdy/config.yaml")).ok()?;
+    serde_yaml_ng::from_str(&text).ok()
+}
+
+/// The project's name and description as a site shows them, parsed once when a state is
+/// published (a state is a snapshot). The name is the config's `name`, else the project
+/// directory's name (`-` and `_` turned into spaces, the first letter upper-cased), else
+/// `Design docs`; the description is the config's non-empty `description`.
+fn site_identity(root: &Path, cfg: Option<&Config>) -> (Arc<str>, Option<Arc<str>>) {
+    let named = cfg
+        .and_then(|c| c.name.as_deref())
+        .map(str::trim)
+        .filter(|n| !n.is_empty());
+    let name = match named {
+        Some(n) => n.to_string(),
+        None => {
+            let dir = root
+                .file_name()
+                .map(|n| n.to_string_lossy().replace(['-', '_'], " "))
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty());
+            match dir {
+                Some(d) => {
+                    let mut chars = d.chars();
+                    let first = chars.next().expect("non-empty").to_uppercase();
+                    first.chain(chars).collect()
+                }
+                None => "Design docs".to_string(),
+            }
+        }
+    };
+    let description = cfg
+        .and_then(|c| c.description.as_deref())
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(Arc::from);
+    (Arc::from(name), description)
+}
+
+impl ReadState {
+    /// The name of the project as a site shows it, as parsed when this state was published.
+    pub fn project_name(&self) -> String {
+        self.name.to_string()
+    }
+
+    /// The config's `description`, when it had a non-empty one when this state was published.
+    pub fn project_description(&self) -> Option<String> {
+        self.description.as_deref().map(str::to_string)
     }
 }

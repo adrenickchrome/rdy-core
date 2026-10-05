@@ -1,0 +1,20 @@
+match-cheatsheet
+================
+
+match SUBJECT:
+    case PATTERN [if GUARD]:
+        BLOCK
+
+literal      42  "go"  None  True
+capture      name            (binds; never a dotted name)
+wildcard     _               (matches anything; binds nothing)
+value        Color.RED       (dotted name; compared with ==)
+group        (pattern)
+sequence     [a, b, *rest]   (not str, bytes or bytearray)
+mapping      {"k": v, **rest}
+class        Point(x, y=0)   (positional via __match_args__)
+or           p1 | p2         (same names in every branch)
+as           p as name
+
+cases run top to bottom; the first match wins
+a guard runs only after its pattern succeeded

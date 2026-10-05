@@ -125,9 +125,14 @@ pub fn plan(only: Option<&str>, files: &[String], skip_perf: bool) -> Result<Pla
     }
 }
 
-/// `engine_splitbrain` -> `engine`.
+/// `engine_splitbrain` -> `engine`; the `render_quality*` files are their own area, apart from
+/// `render`.
 pub fn area_of(stem: &str) -> &str {
-    stem.split('_').next().unwrap_or(stem)
+    if stem.starts_with("render_quality") {
+        "render_quality"
+    } else {
+        stem.split('_').next().unwrap_or(stem)
+    }
 }
 
 /// `ord1_append_after_a_tie` -> `ord1` (`^[a-z]+\d+_`).
@@ -352,6 +357,13 @@ pub fn json(r: &Report) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn area_of_keeps_render_quality_whole() {
+        assert_eq!(area_of("render_quality_css"), "render_quality");
+        assert_eq!(area_of("render_quality"), "render_quality");
+        assert_eq!(area_of("render_site"), "render");
+    }
 
     #[test]
     fn only_narrows_the_run_and_perf_is_an_area() {

@@ -114,14 +114,14 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Read a document, folder or subtree by id or path (e.g. wallets/transactions) as compact lines (default: each block's id, type and its whole statement, prompt, name or title, else its body's first sentence; references as bare ids), markdown or yaml. max_tokens cuts long output. scope is 'canon', an existing view's name (or your session's), 'tag:<version>' or 'landing:<id>'; an unknown view is E_NOT_FOUND."
+        description = "Read a document, folder or subtree by id or path (e.g. wallets/transactions) as compact lines (default: each block's id, type and its whole statement, prompt, name or title, else its body's first sentence; references as bare ids), markdown or yaml. max_tokens cuts long output. scope is 'canon', an existing view's name (or your session's), 'tag:<version>' or 'landing:<id>'; an unknown view is E_NOT_FOUND. `id` may be `id@version` or a ref line `[id@version] …`, read under that version."
     )]
     async fn rdy_read(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
         self.run("rdy_read", p, tools::rdy_read).await
     }
 
     #[tool(
-        description = "By id or path: everything about one block: fields, body, version (use as base for updates), doc, links in and out, decision status, governing decisions, suspects."
+        description = "By id or path: everything about one block: fields, body, version (use as base for updates), doc, links in and out, decision status, governing decisions, suspects. `id` may be `id@version` or a ref line `[id@version] …`, read under that version."
     )]
     async fn rdy_context(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
         self.run("rdy_context", p, tools::rdy_context).await
@@ -149,7 +149,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Atomic batch write of ops (create, update, move, delete, rebalance, repin; rdy_schema lists them under \"ops\"). Place a block with after or before a sibling, or neither to append. Use id \"$name\" placeholders to refer to blocks created earlier in the same batch, including {{$name}} inside text. Reference blocks in text as {{id}}. links: {\"<kind>\": [{\"target\": \"<id or path>\"}]}. An update replaces only the link kinds it names; \"<kind>\": [] removes that kind."
+        description = "Atomic batch write of ops (create, update, move, delete, rebalance, repin; rdy_schema lists them under \"ops\"). Place a block with after or before a sibling, or neither to append. Use id \"$name\" placeholders to refer to blocks created earlier in the same batch, including {{$name}} inside text. Reference blocks in text as {{id}}, or {{id|your words}} to choose the link text; a block's key (fields.key, e.g. REQ-12) works wherever an id does and is stored as the id. Bodies take a small Markdown subset (rdy_schema \"text\"). links: {\"<kind>\": [{\"target\": \"<id or path>\"}]}. An update replaces only the link kinds it names; \"<kind>\": [] removes that kind."
     )]
     async fn rdy_write(&self, Parameters(p): Parameters<WriteParams>) -> CallToolResult {
         self.run("rdy_write", p, tools::rdy_write).await

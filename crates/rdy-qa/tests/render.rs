@@ -1,59 +1,16 @@
 use rdy_engine::*;
-use rdy_qa::fixtures::*;
-use serde_json::json;
-use std::path::{Path, PathBuf};
+use rdy_qa::golden::{self, pages};
+use rdy_qa::site::{attrs, unescape};
+use std::path::Path;
 
-const EVIL: &str = "<script>alert(1)</script>\"'><img src=x onerror=alert(2)>&amp;";
+/// The inline script that sets the theme before the first paint, as the theme ships it.
+const INIT_JS: &str = include_str!("../../rdy-render/theme/rdy-standard/js/init.js");
 
 fn hostile_site() -> (tempfile::TempDir, tempfile::TempDir) {
-    let (d, mut r) = project();
-    let blob = r.store_mut().put_blob(b"png").unwrap().to_string();
-    let res = write(&mut r, "work", json!([
-        {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "evil", "title": EVIL, "description": EVIL}},
-        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "page", "title": EVIL, "doc_type": "glossary"}},
-        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": EVIL}},
-        {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": EVIL}, "body": EVIL},
-        {"op": "create", "type": "claim", "parent": "$s", "body": format!("{EVIL} {{{{$t}}}}")},
-        {"op": "create", "type": "table", "parent": "$s", "fields": {"columns": [EVIL], "rows": [[EVIL]]}},
-        {"op": "create", "type": "flow", "parent": "$s", "fields": {"name": EVIL, "steps": [EVIL]}},
-        {"op": "create", "type": "diagram", "parent": "$s", "fields": {"lang": "mermaid", "alt": EVIL}, "body": format!("graph TD\n A[{EVIL}]")},
-        {"op": "create", "type": "code", "parent": "$s", "fields": {"lang": EVIL}, "body": EVIL},
-        {"op": "create", "type": "figure", "parent": "$s", "fields": {"blob": blob, "media_type": "image/png", "alt": EVIL}}
-    ])).unwrap();
-    r.decide(
-        &writer(),
-        "work",
-        DecisionInput {
-            parent: res.created["$s"].clone(),
-            statement: EVIL.into(),
-            options: vec![EVIL.into()],
-            body: EVIL.into(),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    land(&mut r, "work").unwrap();
-    r.tag(&approver(), "v0.1.0", None, Some(EVIL.into()))
-        .unwrap();
+    let (d, r) = golden::hostile();
     let out = tempfile::tempdir().unwrap();
     rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     (d, out)
-}
-
-fn pages(root: &Path) -> Vec<PathBuf> {
-    let mut out = vec![];
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).unwrap() {
-            let p = e.unwrap().path();
-            if p.is_dir() {
-                stack.push(p)
-            } else if p.extension().is_some_and(|x| x == "html") {
-                out.push(p)
-            }
-        }
-    }
-    out
 }
 
 #[test]
@@ -70,9 +27,15 @@ fn render_hostile_text_is_escaped_on_every_page() {
             assert!(!html.contains(raw), "{}: raw {raw:?}", p.display());
         }
         for (i, _) in html.match_indices("<script") {
+            let rest = &html[i..];
+            let tag = &rest[..rest.find('>').map_or(rest.len(), |j| j + 1)];
+            let init = rest.starts_with(&format!("<script>{INIT_JS}</script>"));
+            let external = tag.starts_with("<script src=\"")
+                && (tag.ends_with("assets/app.js\" defer>")
+                    || tag.ends_with("assets/js/mermaid.min.js\" defer>"));
             assert!(
-                html[i..].starts_with("<script type=\"module\">import mermaid from \"https://"),
-                "{}: unexpected <script",
+                init || external,
+                "{}: unexpected <script: {tag:?}",
                 p.display()
             );
         }
@@ -86,64 +49,14 @@ fn render_hostile_text_is_escaped_on_every_page() {
     }
 }
 
-/// Every attribute value of `attr` in `html`.
-fn attrs<'a>(html: &'a str, attr: &str) -> Vec<&'a str> {
-    let key = format!("{attr}=\"");
-    let mut out = vec![];
-    let mut rest = html;
-    while let Some(i) = rest.find(&key) {
-        rest = &rest[i + key.len()..];
-        if let Some(j) = rest.find('"') {
-            out.push(&rest[..j]);
-            rest = &rest[j..];
-        }
-    }
-    out
-}
-
-/// Decodes the HTML entities a browser would decode in an attribute value.
-fn unescape(s: &str) -> String {
-    let mut out = String::new();
-    let mut rest = s;
-    while let Some(i) = rest.find('&') {
-        out.push_str(&rest[..i]);
-        rest = &rest[i..];
-        let Some(j) = rest.find(';') else { break };
-        let ent = &rest[1..j];
-        let ch = match ent {
-            "amp" => Some('&'),
-            "quot" => Some('"'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "apos" => Some('\''),
-            _ => ent
-                .strip_prefix("#x")
-                .and_then(|h| u32::from_str_radix(h, 16).ok())
-                .or_else(|| ent.strip_prefix('#').and_then(|d| d.parse().ok()))
-                .and_then(char::from_u32),
-        };
-        match ch {
-            Some(c) => {
-                out.push(c);
-                rest = &rest[j + 1..];
-            }
-            None => {
-                out.push('&');
-                rest = &rest[1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
 #[derive(Default, Debug)]
 struct LinkStats {
     pages: usize,
     max_depth: usize,
     anchors: usize,
     assets: usize,
-    decisions: usize,
+    /// The `go/` pages whose refresh target resolved.
+    go_targets: usize,
 }
 
 /// Checks every link in the site; returns the broken ones and what was covered.
@@ -168,11 +81,9 @@ fn check_links(site: &Path) -> (Vec<String>, LinkStats) {
             if anchor.is_some() {
                 st.anchors += 1;
             }
-            if file.contains("_assets/") {
+            // a figure's file, not the theme's
+            if file.contains("assets/") && !file.ends_with(".css") && !file.ends_with(".js") {
                 st.assets += 1;
-            }
-            if file.contains("_decision/") {
-                st.decisions += 1;
             }
             let mut target = if file.is_empty() {
                 p.clone()
@@ -200,6 +111,31 @@ fn check_links(site: &Path) -> (Vec<String>, LinkStats) {
                 }
             }
         }
+        // a permalink page's refresh target resolves, with its anchor
+        if p.strip_prefix(site).is_ok_and(|r| r.starts_with("go")) {
+            let refresh = attrs(&html, "content")
+                .into_iter()
+                .find_map(|c| c.strip_prefix("0; url="))
+                .map(unescape);
+            let Some(refresh) = refresh else {
+                broken.push(format!("{}: no refresh", p.display()));
+                continue;
+            };
+            let (file, anchor) = match refresh.split_once('#') {
+                Some((f, a)) => (f.to_string(), Some(a.to_string())),
+                None => (refresh.clone(), None),
+            };
+            let mut target = p.parent().unwrap().join(&file);
+            if target.is_dir() {
+                target = target.join("index.html");
+            }
+            let t = std::fs::read_to_string(&target).unwrap_or_default();
+            if t.is_empty() || anchor.is_some_and(|a| !t.contains(&format!("id=\"{a}\""))) {
+                broken.push(format!("{} → {refresh} (refresh target)", p.display()));
+            } else {
+                st.go_targets += 1;
+            }
+        }
     }
     (broken, st)
 }
@@ -213,82 +149,14 @@ fn render_every_link_resolves() {
 
 #[test]
 fn render_every_link_resolves_on_a_rich_site() {
-    let (_d, mut r) = project();
-    let blob = r.store_mut().put_blob(b"png").unwrap().to_string();
-    let mut ops = vec![
-        json!({"op": "create", "type": "folder", "id": "$fa", "fields": {"name": "a", "title": "A"}}),
-        json!({"op": "create", "type": "folder", "id": "$fb", "parent": "$fa", "fields": {"name": "b", "title": "B"}}),
-        json!({"op": "create", "type": "folder", "id": "$fc", "parent": "$fb", "fields": {"name": "c", "title": "C"}}),
-    ];
-    let folders = ["$fa", "$fb", "$fc"];
-    for (fi, f) in folders.iter().enumerate() {
-        for d in 0..3 {
-            let (doc, sec, term) = (
-                format!("$d{fi}{d}"),
-                format!("$s{fi}{d}"),
-                format!("$t{fi}{d}"),
-            );
-            ops.push(json!({"op": "create", "type": "doc", "id": doc, "parent": f, "fields": {"title": format!("Doc {fi}{d}"), "doc_type": "glossary"}}));
-            ops.push(json!({"op": "create", "type": "section", "id": sec, "parent": doc, "fields": {"title": "Terms"}}));
-            ops.push(json!({"op": "create", "type": "term", "id": term, "parent": sec, "fields": {"name": format!("Term{fi}{d}")}, "body": "A term."}));
-        }
-    }
-    for fi in 0..3 {
-        for d in 0..3 {
-            let (sec, term) = (format!("$s{fi}{d}"), format!("$t{fi}{d}"));
-            // cross-doc refs to other folders and depths
-            let other = format!("$t{}{}", (fi + 1) % 3, d);
-            let far = format!("$t{}{}", (fi + 2) % 3, (d + 1) % 3);
-            ops.push(json!({"op": "create", "type": "claim", "parent": sec, "body": format!("Uses {{{{{other}}}}} and {{{{{far}}}}} and {{{{{term}}}}}.")}));
-        }
-    }
-    ops.push(json!({"op": "create", "type": "figure", "parent": "$s22", "fields": {"blob": blob, "media_type": "image/png", "alt": "pic"}}));
-    ops.push(json!({"op": "create", "type": "diagram", "parent": "$s22", "fields": {"lang": "mermaid", "alt": "d"}, "body": "graph TD\n A[{{$t00}}] --> B"}));
-    let res = write(&mut r, "work", json!(ops)).unwrap();
-    let sec = |k: &str| res.created[k].clone();
-    let dec = |statement: &str, parent: String, affects: Vec<String>| DecisionInput {
-        parent,
-        statement: statement.into(),
-        options: vec!["yes".into(), "no".into()],
-        affects,
-        body: "Because.".into(),
-        ..Default::default()
-    };
-    let d1 = r
-        .decide(
-            &writer(),
-            "work",
-            dec("First", sec("$s00"), vec![sec("$t22")]),
-        )
-        .unwrap();
-    let d1_id = d1.created.values().next().expect("decision id").clone();
-    r.decide(
-        &writer(),
-        "work",
-        dec("Second", sec("$s11"), vec![sec("$t00")]),
-    )
-    .unwrap();
-    r.supersede(
-        &writer(),
-        "work",
-        &d1_id,
-        None,
-        dec("Third supersedes first", sec("$s22"), vec![sec("$t11")]),
-    )
-    .unwrap();
-    let landing = land(&mut r, "work").unwrap();
-    let v = r.tag(&approver(), "v1.0.0", None, None).unwrap();
-    // unlanded changes in a view
-    write(&mut r, "draft", json!([
-        {"op": "create", "type": "doc", "parent": sec("$fc"), "fields": {"title": "Draft doc", "doc_type": "glossary"}},
-    ])).unwrap();
-    let _ = landing;
-    let mut scopes = vec![
+    let (_d, r) = golden::generated_tree();
+    let landing: rdy_model::Hash = r.read().versions().unwrap()[0].landing.parse().unwrap();
+    let scopes = [
         ("canon", Scope::Canon),
         ("view", Scope::View("draft".into())),
-        ("tag", Scope::At(v.landing.parse().unwrap())),
+        ("tag", Scope::At(landing)),
     ];
-    for (name, scope) in scopes.drain(..) {
+    for (name, scope) in scopes {
         let out = tempfile::tempdir().unwrap();
         rdy_render::render_site(&r.read(), &scope, out.path()).unwrap();
         let (broken, st) = check_links(out.path());
@@ -297,6 +165,6 @@ fn render_every_link_resolves_on_a_rich_site() {
         assert!(st.max_depth >= 3, "{name}: {st:?}");
         assert!(st.anchors >= 5, "{name}: {st:?}");
         assert!(st.assets >= 1, "{name}: {st:?}");
-        assert!(st.decisions >= 1, "{name}: {st:?}");
+        assert!(st.go_targets >= 1, "{name}: {st:?}");
     }
 }

@@ -1,9 +1,7 @@
 {% extends "layout.html" %}
 {% block content %}
-<h1>{{ site }}</h1>
-<h2>Contents</h2>{{ tree|safe }}
-<h2>Decisions</h2>
-<ul>{% for x in decisions %}<li><a href="_decision/{{ x.id }}.html">{{ x.statement }}</a> <span class="badge {{ x.status_class }}">{{ x.status }}</span></li>{% endfor %}</ul>
-<h2>Versions</h2>
-{% if versions %}<ul>{% for v in versions %}<li><span class="version-name">{{ v.name }}</span> <span class="meta">landing {{ v.landing_short }}{% if v.message %} · {{ v.message }}{% endif %}</span>{% if v.current %} <span class="badge">current</span>{% endif %}</li>{% endfor %}</ul>{% else %}<p class="meta">No versions yet.</p>{% endif %}
+{% set home = body.home %}
+<header class="page-head"><h1>{{ site_name }}</h1>{% if home.description %}<p class="lede">{{ home.description }}</p>{% endif %}</header>
+<section><h2 id="contents">Contents</h2><div class="cards">{% for c in home.cards %}<a class="card" href="{{ c.href }}"><strong>{{ c.title }}</strong>{% if c.summary %}<span>{{ c.summary }}</span>{% endif %}</a>{% endfor %}</div></section>
+<section><h2 id="versions">Versions</h2>{% if home.versions %}<dl class="versions">{% for v in home.versions %}<dt>{{ v.name }}{% if v.current %} <span class="meta">(current)</span>{% endif %}</dt><dd>{{ v.when }}{% if v.message %} · {{ v.message }}{% endif %}</dd>{% endfor %}</dl>{% else %}<p>No versions yet.</p>{% endif %}</section>
 {% endblock %}

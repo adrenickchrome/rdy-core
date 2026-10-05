@@ -1,0 +1,2616 @@
+- id: d-XM01W
+  type: doc
+  order: a1
+  fields:
+    title: Pattern matching by example
+    doc_type: overview
+- id: s-BCHSC
+  type: section
+  parent: d-XM01W
+  order: a1
+  fields:
+    title: Introduction
+- id: p-71MQ4
+  type: prose
+  parent: s-BCHSC
+  order: a1
+  body: We will write the command parser for a small text adventure. The player types things like `get
+    sword` or `go north`; the game splits the line into words and has to decide what to do. Each section
+    adds one feature of pattern matching to the parser.
+- id: p-D56RX
+  type: prose
+  parent: s-BCHSC
+  order: a2
+  body: The tutorial teaches by example. The exact rules are in {{d-8PBD5}} and the reasons for them in
+    {{d-3T4TW}}.
+- id: s-DEBV4
+  type: section
+  parent: d-XM01W
+  order: a2
+  fields:
+    title: Matching sequences
+- id: p-VWXDC
+  type: prose
+  parent: s-DEBV4
+  order: a1
+  body: Splitting the input gives a list of words. Instead of checking its length by hand, describe the
+    shape you expect.
+- id: cd-CVKKA
+  type: code
+  parent: s-DEBV4
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        case [action, obj]:
+            ...  # interpret action, obj
+- id: p-7A4R5
+  type: prose
+  parent: s-DEBV4
+  order: a3
+  body: A pattern does two things. It verifies that the subject has a certain structure, here a list of
+    exactly two items, and it binds names in the pattern to parts of the subject, here `action` and `obj`.
+- id: s-76SVR
+  type: section
+  parent: d-XM01W
+  order: a3
+  fields:
+    title: Matching several patterns
+- id: p-QQFVP
+  type: prose
+  parent: s-76SVR
+  order: a1
+  body: Commands come in different lengths. `look` is one word; `get sword` is two.
+- id: cd-Z5DG3
+  type: code
+  parent: s-76SVR
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        case [action]:
+            ...  # interpret single-verb action
+        case [action, obj]:
+            ...  # interpret action, obj
+- id: p-KA0M5
+  type: prose
+  parent: s-76SVR
+  order: a3
+  body: The match statement checks patterns from top to bottom. If a pattern does not match the subject,
+    the next one is tried.
+- id: s-J4RQD
+  type: section
+  parent: d-XM01W
+  order: a4
+  fields:
+    title: Matching specific values
+- id: p-SGTGY
+  type: prose
+  parent: s-J4RQD
+  order: a1
+  body: Literal values in a pattern filter for particular commands.
+- id: cd-55F89
+  type: code
+  parent: s-J4RQD
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        case ["quit"]:
+            print("Goodbye!")
+            quit_game()
+        case ["look"]:
+            current_room.describe()
+        case ["get", obj]:
+            character.get(obj, current_room)
+        case ["go", direction]:
+            current_room = current_room.neighbor(direction)
+        # The rest of your commands go here
+- id: p-70BHH
+  type: prose
+  parent: s-J4RQD
+  order: a3
+  body: Literals are compared with `==`, except for `True`, `False` and `None`, which are compared with
+    `is`. The precise rule is in {{s-PZK7F}} and the sections around it.
+- id: s-SMQ23
+  type: section
+  parent: d-XM01W
+  order: a5
+  fields:
+    title: Matching the rest
+- id: p-BMR5J
+  type: prose
+  parent: s-SMQ23
+  order: a1
+  body: A star inside a sequence pattern works like extended unpacking.
+- id: cd-BFVAC
+  type: code
+  parent: s-SMQ23
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        case ["drop", *objects]:
+            for obj in objects:
+                character.drop(obj, current_room)
+        # The rest of your commands go here
+- id: p-89AFY
+  type: prose
+  parent: s-SMQ23
+  order: a3
+  body: This matches any sequence whose first element is `"drop"`. The remaining elements are gathered
+    into a list bound to `objects`. See {{s-H142N}}.
+- id: s-F20PN
+  type: section
+  parent: d-XM01W
+  order: a6
+  fields:
+    title: Adding a wildcard
+- id: p-JKB2F
+  type: prose
+  parent: s-F20PN
+  order: a1
+  body: To handle anything not yet covered, end with the wildcard.
+- id: cd-6N3BZ
+  type: code
+  parent: s-F20PN
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        case ["quit"]: ...  # Code omitted for brevity
+        case ["go", direction]: ...
+        case ["drop", *objects]: ...
+        ...  # Other cases
+        case _:
+            print(f"Sorry, I couldn't understand {command!r}")
+- id: p-39NCY
+  type: prose
+  parent: s-F20PN
+  order: a3
+  body: The wildcard always matches and binds nothing, so it only makes sense on its own as the last case.
+    The language enforces that.
+- id: s-QJ383
+  type: section
+  parent: d-XM01W
+  order: a7
+  fields:
+    title: Composing patterns
+- id: p-48JMX
+  type: prose
+  parent: s-QJ383
+  order: a1
+  body: 'So far we have used three simple patterns: capture patterns, which are bare names like `direction`;
+    literal patterns, which are strings, numbers, `True`, `False` and `None`; and the wildcard `_`.'
+- id: p-DPRDG
+  type: prose
+  parent: s-QJ383
+  order: a2
+  body: Patterns nest. `["first", (left, right), _, *rest]` matches a sequence of at least three items
+    whose first item equals `"first"` and whose second item is itself a sequence of two.
+- id: s-WPBJP
+  type: section
+  parent: d-XM01W
+  order: a8
+  fields:
+    title: Or patterns
+- id: p-BMBJ1
+  type: prose
+  parent: s-WPBJP
+  order: a1
+  body: A vertical bar joins alternatives. The first alternative that matches wins.
+- id: cd-07KJV
+  type: code
+  parent: s-WPBJP
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        ...  # Other cases
+        case ["north"] | ["go", "north"]:
+            current_room = current_room.neighbor("north")
+        case ["get", obj] | ["pick", "up", obj] | ["pick", obj, "up"]:
+            ...  # Code for picking up the given object
+- id: p-RCB6A
+  type: prose
+  parent: s-WPBJP
+  order: a3
+  body: Every alternative must bind the same names. `[1, x] | [2, y]` is not allowed, because after a
+    successful match it would be unclear which of `x` and `y` had a value.
+- id: s-KTM2G
+  type: section
+  parent: d-XM01W
+  order: a9
+  fields:
+    title: Capturing a sub-pattern
+- id: p-BF3RM
+  type: prose
+  parent: s-KTM2G
+  order: a1
+  body: The `as` keyword matches whatever is on its left and also binds the matched value to a name.
+- id: cd-1CZW0
+  type: code
+  parent: s-KTM2G
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        case ["go", ("north" | "south" | "east" | "west") as direction]:
+            current_room = current_room.neighbor(direction)
+- id: s-HWQ1E
+  type: section
+  parent: d-XM01W
+  order: aA
+  fields:
+    title: Adding conditions
+- id: p-GHMF1
+  type: prose
+  parent: s-HWQ1E
+  order: a1
+  body: A guard adds a boolean test after the pattern. It is checked only if the pattern matched, and
+    after all its names have been bound.
+- id: cd-YCPWJ
+  type: code
+  parent: s-HWQ1E
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        case ["go", direction] if direction in current_room.exits:
+            current_room = current_room.neighbor(direction)
+        case ["go", _]:
+            print("Sorry, you can't go that way")
+- id: p-556X5
+  type: prose
+  parent: s-HWQ1E
+  order: a3
+  body: The guard stays out of the pattern, which keeps the pattern declarative.
+- id: s-9YJMR
+  type: section
+  parent: d-XM01W
+  order: aB
+  fields:
+    title: Matching objects
+- id: p-V99ZD
+  type: prose
+  parent: s-9YJMR
+  order: a1
+  body: Suppose the game is now driven by events from a window. A class pattern checks the type of the
+    event and matches its attributes.
+- id: cd-AR85A
+  type: code
+  parent: s-9YJMR
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    match event.get():
+        case Click(position=(x, y)):
+            handle_click_at(x, y)
+        case KeyPress(key_name="Q") | Quit():
+            game.quit()
+        case KeyPress(key_name="up arrow"):
+            game.go_north()
+        ...
+        case KeyPress():
+            pass  # Ignore other keystrokes
+        case other_event:
+            raise ValueError(f"Unrecognized event: {other_event}")
+- id: p-0P5A7
+  type: prose
+  parent: s-9YJMR
+  order: a3
+  body: '`Click(position=(x, y))` matches only if the event''s type is `Click` or a subclass, and then
+    matches the nested pattern against its `position` attribute. See {{s-9RT3Q}}.'
+- id: s-0VRRF
+  type: section
+  parent: d-XM01W
+  order: aC
+  fields:
+    title: Matching positional attributes
+- id: p-WT87X
+  type: prose
+  parent: s-0VRRF
+  order: a1
+  body: A dataclass can be matched positionally, because the dataclass decorator declares the attribute
+    order.
+- id: cd-MV0HE
+  type: code
+  parent: s-0VRRF
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    from dataclasses import dataclass
+
+    @dataclass
+    class Click:
+        position: tuple
+        button: Button
+
+    match event.get():
+        case Click((x, y)):
+            handle_click_at(x, y)
+- id: p-DCT6J
+  type: prose
+  parent: s-0VRRF
+  order: a3
+  body: Any class can do the same by declaring {{t-8SX2E}}.
+- id: cd-N4SHF
+  type: code
+  parent: s-0VRRF
+  order: a4
+  fields:
+    lang: python
+  body: |-
+    class Click:
+        __match_args__ = ("position", "button")
+        def __init__(self, pos, btn):
+            self.position = pos
+            self.button = btn
+            ...
+- id: s-34PBY
+  type: section
+  parent: d-XM01W
+  order: aD
+  fields:
+    title: Matching against constants
+- id: p-F3YRW
+  type: prose
+  parent: s-34PBY
+  order: a1
+  body: A dotted name in a pattern is looked up rather than bound, which is how to match an enumeration
+    value.
+- id: cd-8A6SW
+  type: code
+  parent: s-34PBY
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    match event.get():
+        case Click((x, y), button=Button.LEFT):  # This is a left click
+            handle_click_at(x, y)
+        case Click():
+            pass  # ignore other clicks
+- id: p-EPTMP
+  type: prose
+  parent: s-34PBY
+  order: a3
+  body: 'Be careful: a bare name with no dots is always a capture. `case Click((x, y), button=LEFT)` would
+    bind `LEFT` to whatever the button was.'
+- id: n-MMVXD
+  type: note
+  parent: s-34PBY
+  order: a4
+  body: The most common slip in this feature is a bare name where a dotted one was meant. A reader should
+    look twice at any capture that shares its spelling with a constant.
+- id: s-KTWA5
+  type: section
+  parent: d-XM01W
+  order: aE
+  fields:
+    title: Matching mappings
+- id: p-H0MTC
+  type: prose
+  parent: s-KTWA5
+  order: a1
+  body: If actions arrive from the network as dictionaries, mapping patterns pick them apart by key.
+- id: cd-GAVNQ
+  type: code
+  parent: s-KTWA5
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    for action in actions:
+        match action:
+            case {"text": message, "color": c}:
+                ui.set_text_color(c)
+                ui.display(message)
+            case {"sleep": duration}:
+                ui.wait(duration)
+            case {"sound": url, "format": "ogg"}:
+                ui.play(url)
+            case {"sound": _, "format": _}:
+                warning("Unsupported audio format")
+- id: p-SKWZD
+  type: prose
+  parent: s-KTWA5
+  order: a3
+  body: Keys must be literals; values can be any pattern. Extra keys in the subject are ignored, so a
+    pattern with a text key and a color key also matches a dictionary that carries a font key. See {{s-V4ABJ}}.
+- id: s-19ZM8
+  type: section
+  parent: d-XM01W
+  order: aF
+  fields:
+    title: Matching built-in types
+- id: p-AHWVS
+  type: prose
+  parent: s-19ZM8
+  order: a1
+  body: Any class is a valid match target, including `str`, `int` and `float`. Wrapping a capture in one
+    checks the type of data that came from outside.
+- id: cd-9R2YK
+  type: code
+  parent: s-19ZM8
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    for action in actions:
+        match action:
+            case {"text": str(message), "color": str(c)}:
+                ui.set_text_color(c)
+                ui.display(message)
+            case {"sleep": float(duration)}:
+                ui.wait(duration)
+            case {"sound": str(url), "format": "ogg"}:
+                ui.play(url)
+            case {"sound": _, "format": _}:
+                warning("Unsupported audio format")
+- id: p-8J92W
+  type: prose
+  parent: s-19ZM8
+  order: a3
+  body: Why a single positional argument means "the whole value" for these classes is explained under
+    class patterns in {{s-9RT3Q}}.
+- id: s-ZEJQA
+  type: section
+  parent: d-XM01W
+  order: aG
+  fields:
+    title: Worked examples
+- id: e-KN4GK
+  type: example
+  parent: s-ZEJQA
+  order: a1
+  body: A command line such as `go north` matches the case `["go", direction]`, binds `direction` to `"north"`
+    and runs the block that moves the player. The same line also matches the later wildcard, but the first
+    matching case wins and the wildcard is never reached.
+- id: e-NFFB9
+  type: example
+  parent: s-ZEJQA
+  order: a2
+  body: The line `drop sword shield` matches `["drop", *objects]` and binds `objects` to a list of two
+    items. The line `drop` alone binds it to an empty list.
+- id: n-83VA8
+  type: note
+  parent: s-ZEJQA
+  order: a3
+  body: The sample output in this tutorial is formatted for reading and carries no meaning of its own.
+- id: p-V1JR0
+  type: prose
+  parent: s-ZEJQA
+  order: a4
+  body: The next section holds one very long listing, the parser written out many times over, to show
+    how the page copes with it.
+- id: s-0TR88
+  type: section
+  parent: d-XM01W
+  order: aH
+  fields:
+    title: Exercises
+- id: p-Q50ZZ
+  type: prose
+  parent: s-0TR88
+  order: a1
+  body: Try each of these on the adventure parser.
+- id: e-22W8N
+  type: example
+  parent: s-0TR88
+  order: a2
+  body: Add a command `use X on Y` that matches a three-word command with the word `on` in the middle.
+- id: e-8WXVX
+  type: example
+  parent: s-0TR88
+  order: a3
+  body: Make `go` accept either a direction or a room name, and keep the guard that checks the exits.
+- id: e-GD12H
+  type: example
+  parent: s-0TR88
+  order: a4
+  body: Write a case that matches any command whose last word is `please`, and gives the rest of the line
+    to the next case.
+- id: e-Q1DVT
+  type: example
+  parent: s-0TR88
+  order: a5
+  body: Handle a command that arrives as a dictionary with a verb key and a list of objects.
+- id: n-BTMZY
+  type: note
+  parent: s-0TR88
+  order: a6
+  body: There is no single right answer to any exercise; each has several readable patterns.
+- id: s-VDYYV
+  type: section
+  parent: d-XM01W
+  order: aI
+  fields:
+    title: A long listing
+- id: cd-EKTRM
+  type: code
+  parent: s-VDYYV
+  order: a1
+  fields:
+    lang: python
+  body: |
+    # The adventure parser, repeated with numbered comments.
+
+    # --- parser 001 ---
+    def parse_command_001(command, current_room, character):
+        # 001.1 split the line into words
+        match command.split():
+            # 001.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 001.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 001.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 001.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (001)"
+
+    # --- parser 002 ---
+    def parse_command_002(command, current_room, character):
+        # 002.1 split the line into words
+        match command.split():
+            # 002.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 002.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 002.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 002.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (002)"
+
+    # --- parser 003 ---
+    def parse_command_003(command, current_room, character):
+        # 003.1 split the line into words
+        match command.split():
+            # 003.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 003.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 003.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 003.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (003)"
+
+    # --- parser 004 ---
+    def parse_command_004(command, current_room, character):
+        # 004.1 split the line into words
+        match command.split():
+            # 004.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 004.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 004.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 004.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (004)"
+
+    # --- parser 005 ---
+    def parse_command_005(command, current_room, character):
+        # 005.1 split the line into words
+        match command.split():
+            # 005.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 005.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 005.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 005.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (005)"
+
+    # --- parser 006 ---
+    def parse_command_006(command, current_room, character):
+        # 006.1 split the line into words
+        match command.split():
+            # 006.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 006.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 006.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 006.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (006)"
+
+    # --- parser 007 ---
+    def parse_command_007(command, current_room, character):
+        # 007.1 split the line into words
+        match command.split():
+            # 007.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 007.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 007.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 007.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (007)"
+
+    # --- parser 008 ---
+    def parse_command_008(command, current_room, character):
+        # 008.1 split the line into words
+        match command.split():
+            # 008.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 008.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 008.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 008.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (008)"
+
+    # --- parser 009 ---
+    def parse_command_009(command, current_room, character):
+        # 009.1 split the line into words
+        match command.split():
+            # 009.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 009.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 009.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 009.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (009)"
+
+    # --- parser 010 ---
+    def parse_command_010(command, current_room, character):
+        # 010.1 split the line into words
+        match command.split():
+            # 010.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 010.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 010.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 010.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (010)"
+
+    # --- parser 011 ---
+    def parse_command_011(command, current_room, character):
+        # 011.1 split the line into words
+        match command.split():
+            # 011.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 011.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 011.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 011.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (011)"
+
+    # --- parser 012 ---
+    def parse_command_012(command, current_room, character):
+        # 012.1 split the line into words
+        match command.split():
+            # 012.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 012.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 012.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 012.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (012)"
+
+    # --- parser 013 ---
+    def parse_command_013(command, current_room, character):
+        # 013.1 split the line into words
+        match command.split():
+            # 013.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 013.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 013.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 013.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (013)"
+
+    # --- parser 014 ---
+    def parse_command_014(command, current_room, character):
+        # 014.1 split the line into words
+        match command.split():
+            # 014.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 014.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 014.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 014.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (014)"
+
+    # --- parser 015 ---
+    def parse_command_015(command, current_room, character):
+        # 015.1 split the line into words
+        match command.split():
+            # 015.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 015.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 015.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 015.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (015)"
+
+    # --- parser 016 ---
+    def parse_command_016(command, current_room, character):
+        # 016.1 split the line into words
+        match command.split():
+            # 016.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 016.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 016.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 016.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (016)"
+
+    # --- parser 017 ---
+    def parse_command_017(command, current_room, character):
+        # 017.1 split the line into words
+        match command.split():
+            # 017.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 017.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 017.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 017.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (017)"
+
+    # --- parser 018 ---
+    def parse_command_018(command, current_room, character):
+        # 018.1 split the line into words
+        match command.split():
+            # 018.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 018.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 018.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 018.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (018)"
+
+    # --- parser 019 ---
+    def parse_command_019(command, current_room, character):
+        # 019.1 split the line into words
+        match command.split():
+            # 019.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 019.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 019.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 019.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (019)"
+
+    # --- parser 020 ---
+    def parse_command_020(command, current_room, character):
+        # 020.1 split the line into words
+        match command.split():
+            # 020.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 020.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 020.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 020.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (020)"
+
+    # --- parser 021 ---
+    def parse_command_021(command, current_room, character):
+        # 021.1 split the line into words
+        match command.split():
+            # 021.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 021.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 021.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 021.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (021)"
+
+    # --- parser 022 ---
+    def parse_command_022(command, current_room, character):
+        # 022.1 split the line into words
+        match command.split():
+            # 022.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 022.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 022.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 022.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (022)"
+
+    # --- parser 023 ---
+    def parse_command_023(command, current_room, character):
+        # 023.1 split the line into words
+        match command.split():
+            # 023.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 023.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 023.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 023.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (023)"
+
+    # --- parser 024 ---
+    def parse_command_024(command, current_room, character):
+        # 024.1 split the line into words
+        match command.split():
+            # 024.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 024.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 024.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 024.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (024)"
+
+    # --- parser 025 ---
+    def parse_command_025(command, current_room, character):
+        # 025.1 split the line into words
+        match command.split():
+            # 025.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 025.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 025.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 025.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (025)"
+
+    # --- parser 026 ---
+    def parse_command_026(command, current_room, character):
+        # 026.1 split the line into words
+        match command.split():
+            # 026.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 026.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 026.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 026.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (026)"
+
+    # --- parser 027 ---
+    def parse_command_027(command, current_room, character):
+        # 027.1 split the line into words
+        match command.split():
+            # 027.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 027.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 027.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 027.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (027)"
+
+    # --- parser 028 ---
+    def parse_command_028(command, current_room, character):
+        # 028.1 split the line into words
+        match command.split():
+            # 028.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 028.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 028.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 028.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (028)"
+
+    # --- parser 029 ---
+    def parse_command_029(command, current_room, character):
+        # 029.1 split the line into words
+        match command.split():
+            # 029.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 029.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 029.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 029.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (029)"
+
+    # --- parser 030 ---
+    def parse_command_030(command, current_room, character):
+        # 030.1 split the line into words
+        match command.split():
+            # 030.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 030.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 030.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 030.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (030)"
+
+    # --- parser 031 ---
+    def parse_command_031(command, current_room, character):
+        # 031.1 split the line into words
+        match command.split():
+            # 031.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 031.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 031.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 031.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (031)"
+
+    # --- parser 032 ---
+    def parse_command_032(command, current_room, character):
+        # 032.1 split the line into words
+        match command.split():
+            # 032.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 032.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 032.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 032.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (032)"
+
+    # --- parser 033 ---
+    def parse_command_033(command, current_room, character):
+        # 033.1 split the line into words
+        match command.split():
+            # 033.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 033.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 033.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 033.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (033)"
+
+    # --- parser 034 ---
+    def parse_command_034(command, current_room, character):
+        # 034.1 split the line into words
+        match command.split():
+            # 034.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 034.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 034.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 034.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (034)"
+
+    # --- parser 035 ---
+    def parse_command_035(command, current_room, character):
+        # 035.1 split the line into words
+        match command.split():
+            # 035.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 035.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 035.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 035.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (035)"
+
+    # --- parser 036 ---
+    def parse_command_036(command, current_room, character):
+        # 036.1 split the line into words
+        match command.split():
+            # 036.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 036.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 036.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 036.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (036)"
+
+    # --- parser 037 ---
+    def parse_command_037(command, current_room, character):
+        # 037.1 split the line into words
+        match command.split():
+            # 037.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 037.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 037.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 037.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (037)"
+
+    # --- parser 038 ---
+    def parse_command_038(command, current_room, character):
+        # 038.1 split the line into words
+        match command.split():
+            # 038.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 038.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 038.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 038.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (038)"
+
+    # --- parser 039 ---
+    def parse_command_039(command, current_room, character):
+        # 039.1 split the line into words
+        match command.split():
+            # 039.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 039.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 039.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 039.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (039)"
+
+    # --- parser 040 ---
+    def parse_command_040(command, current_room, character):
+        # 040.1 split the line into words
+        match command.split():
+            # 040.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 040.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 040.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 040.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (040)"
+
+    # --- parser 041 ---
+    def parse_command_041(command, current_room, character):
+        # 041.1 split the line into words
+        match command.split():
+            # 041.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 041.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 041.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 041.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (041)"
+
+    # --- parser 042 ---
+    def parse_command_042(command, current_room, character):
+        # 042.1 split the line into words
+        match command.split():
+            # 042.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 042.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 042.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 042.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (042)"
+
+    # --- parser 043 ---
+    def parse_command_043(command, current_room, character):
+        # 043.1 split the line into words
+        match command.split():
+            # 043.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 043.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 043.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 043.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (043)"
+
+    # --- parser 044 ---
+    def parse_command_044(command, current_room, character):
+        # 044.1 split the line into words
+        match command.split():
+            # 044.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 044.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 044.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 044.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (044)"
+
+    # --- parser 045 ---
+    def parse_command_045(command, current_room, character):
+        # 045.1 split the line into words
+        match command.split():
+            # 045.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 045.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 045.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 045.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (045)"
+
+    # --- parser 046 ---
+    def parse_command_046(command, current_room, character):
+        # 046.1 split the line into words
+        match command.split():
+            # 046.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 046.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 046.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 046.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (046)"
+
+    # --- parser 047 ---
+    def parse_command_047(command, current_room, character):
+        # 047.1 split the line into words
+        match command.split():
+            # 047.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 047.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 047.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 047.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (047)"
+
+    # --- parser 048 ---
+    def parse_command_048(command, current_room, character):
+        # 048.1 split the line into words
+        match command.split():
+            # 048.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 048.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 048.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 048.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (048)"
+
+    # --- parser 049 ---
+    def parse_command_049(command, current_room, character):
+        # 049.1 split the line into words
+        match command.split():
+            # 049.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 049.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 049.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 049.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (049)"
+
+    # --- parser 050 ---
+    def parse_command_050(command, current_room, character):
+        # 050.1 split the line into words
+        match command.split():
+            # 050.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 050.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 050.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 050.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (050)"
+
+    # --- parser 051 ---
+    def parse_command_051(command, current_room, character):
+        # 051.1 split the line into words
+        match command.split():
+            # 051.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 051.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 051.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 051.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (051)"
+
+    # --- parser 052 ---
+    def parse_command_052(command, current_room, character):
+        # 052.1 split the line into words
+        match command.split():
+            # 052.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 052.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 052.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 052.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (052)"
+
+    # --- parser 053 ---
+    def parse_command_053(command, current_room, character):
+        # 053.1 split the line into words
+        match command.split():
+            # 053.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 053.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 053.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 053.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (053)"
+
+    # --- parser 054 ---
+    def parse_command_054(command, current_room, character):
+        # 054.1 split the line into words
+        match command.split():
+            # 054.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 054.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 054.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 054.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (054)"
+
+    # --- parser 055 ---
+    def parse_command_055(command, current_room, character):
+        # 055.1 split the line into words
+        match command.split():
+            # 055.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 055.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 055.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 055.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (055)"
+
+    # --- parser 056 ---
+    def parse_command_056(command, current_room, character):
+        # 056.1 split the line into words
+        match command.split():
+            # 056.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 056.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 056.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 056.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (056)"
+
+    # --- parser 057 ---
+    def parse_command_057(command, current_room, character):
+        # 057.1 split the line into words
+        match command.split():
+            # 057.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 057.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 057.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 057.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (057)"
+
+    # --- parser 058 ---
+    def parse_command_058(command, current_room, character):
+        # 058.1 split the line into words
+        match command.split():
+            # 058.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 058.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 058.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 058.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (058)"
+
+    # --- parser 059 ---
+    def parse_command_059(command, current_room, character):
+        # 059.1 split the line into words
+        match command.split():
+            # 059.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 059.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 059.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 059.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (059)"
+
+    # --- parser 060 ---
+    def parse_command_060(command, current_room, character):
+        # 060.1 split the line into words
+        match command.split():
+            # 060.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 060.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 060.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 060.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (060)"
+
+    # --- parser 061 ---
+    def parse_command_061(command, current_room, character):
+        # 061.1 split the line into words
+        match command.split():
+            # 061.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 061.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 061.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 061.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (061)"
+
+    # --- parser 062 ---
+    def parse_command_062(command, current_room, character):
+        # 062.1 split the line into words
+        match command.split():
+            # 062.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 062.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 062.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 062.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (062)"
+
+    # --- parser 063 ---
+    def parse_command_063(command, current_room, character):
+        # 063.1 split the line into words
+        match command.split():
+            # 063.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 063.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 063.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 063.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (063)"
+
+    # --- parser 064 ---
+    def parse_command_064(command, current_room, character):
+        # 064.1 split the line into words
+        match command.split():
+            # 064.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 064.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 064.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 064.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (064)"
+
+    # --- parser 065 ---
+    def parse_command_065(command, current_room, character):
+        # 065.1 split the line into words
+        match command.split():
+            # 065.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 065.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 065.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 065.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (065)"
+
+    # --- parser 066 ---
+    def parse_command_066(command, current_room, character):
+        # 066.1 split the line into words
+        match command.split():
+            # 066.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 066.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 066.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 066.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (066)"
+
+    # --- parser 067 ---
+    def parse_command_067(command, current_room, character):
+        # 067.1 split the line into words
+        match command.split():
+            # 067.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 067.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 067.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 067.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (067)"
+
+    # --- parser 068 ---
+    def parse_command_068(command, current_room, character):
+        # 068.1 split the line into words
+        match command.split():
+            # 068.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 068.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 068.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 068.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (068)"
+
+    # --- parser 069 ---
+    def parse_command_069(command, current_room, character):
+        # 069.1 split the line into words
+        match command.split():
+            # 069.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 069.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 069.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 069.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (069)"
+
+    # --- parser 070 ---
+    def parse_command_070(command, current_room, character):
+        # 070.1 split the line into words
+        match command.split():
+            # 070.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 070.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 070.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 070.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (070)"
+
+    # --- parser 071 ---
+    def parse_command_071(command, current_room, character):
+        # 071.1 split the line into words
+        match command.split():
+            # 071.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 071.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 071.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 071.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (071)"
+
+    # --- parser 072 ---
+    def parse_command_072(command, current_room, character):
+        # 072.1 split the line into words
+        match command.split():
+            # 072.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 072.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 072.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 072.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (072)"
+
+    # --- parser 073 ---
+    def parse_command_073(command, current_room, character):
+        # 073.1 split the line into words
+        match command.split():
+            # 073.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 073.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 073.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 073.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (073)"
+
+    # --- parser 074 ---
+    def parse_command_074(command, current_room, character):
+        # 074.1 split the line into words
+        match command.split():
+            # 074.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 074.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 074.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 074.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (074)"
+
+    # --- parser 075 ---
+    def parse_command_075(command, current_room, character):
+        # 075.1 split the line into words
+        match command.split():
+            # 075.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 075.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 075.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 075.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (075)"
+
+    # --- parser 076 ---
+    def parse_command_076(command, current_room, character):
+        # 076.1 split the line into words
+        match command.split():
+            # 076.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 076.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 076.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 076.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (076)"
+
+    # --- parser 077 ---
+    def parse_command_077(command, current_room, character):
+        # 077.1 split the line into words
+        match command.split():
+            # 077.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 077.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 077.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 077.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (077)"
+
+    # --- parser 078 ---
+    def parse_command_078(command, current_room, character):
+        # 078.1 split the line into words
+        match command.split():
+            # 078.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 078.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 078.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 078.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (078)"
+
+    # --- parser 079 ---
+    def parse_command_079(command, current_room, character):
+        # 079.1 split the line into words
+        match command.split():
+            # 079.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 079.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 079.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 079.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (079)"
+
+    # --- parser 080 ---
+    def parse_command_080(command, current_room, character):
+        # 080.1 split the line into words
+        match command.split():
+            # 080.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 080.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 080.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 080.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (080)"
+
+    # --- parser 081 ---
+    def parse_command_081(command, current_room, character):
+        # 081.1 split the line into words
+        match command.split():
+            # 081.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 081.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 081.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 081.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (081)"
+
+    # --- parser 082 ---
+    def parse_command_082(command, current_room, character):
+        # 082.1 split the line into words
+        match command.split():
+            # 082.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 082.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 082.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 082.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (082)"
+
+    # --- parser 083 ---
+    def parse_command_083(command, current_room, character):
+        # 083.1 split the line into words
+        match command.split():
+            # 083.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 083.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 083.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 083.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (083)"
+
+    # --- parser 084 ---
+    def parse_command_084(command, current_room, character):
+        # 084.1 split the line into words
+        match command.split():
+            # 084.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 084.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 084.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 084.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (084)"
+
+    # --- parser 085 ---
+    def parse_command_085(command, current_room, character):
+        # 085.1 split the line into words
+        match command.split():
+            # 085.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 085.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 085.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 085.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (085)"
+
+    # --- parser 086 ---
+    def parse_command_086(command, current_room, character):
+        # 086.1 split the line into words
+        match command.split():
+            # 086.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 086.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 086.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 086.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (086)"
+
+    # --- parser 087 ---
+    def parse_command_087(command, current_room, character):
+        # 087.1 split the line into words
+        match command.split():
+            # 087.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 087.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 087.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 087.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (087)"
+
+    # --- parser 088 ---
+    def parse_command_088(command, current_room, character):
+        # 088.1 split the line into words
+        match command.split():
+            # 088.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 088.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 088.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 088.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (088)"
+
+    # --- parser 089 ---
+    def parse_command_089(command, current_room, character):
+        # 089.1 split the line into words
+        match command.split():
+            # 089.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 089.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 089.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 089.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (089)"
+
+    # --- parser 090 ---
+    def parse_command_090(command, current_room, character):
+        # 090.1 split the line into words
+        match command.split():
+            # 090.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 090.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 090.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 090.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (090)"
+
+    # --- parser 091 ---
+    def parse_command_091(command, current_room, character):
+        # 091.1 split the line into words
+        match command.split():
+            # 091.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 091.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 091.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 091.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (091)"
+
+    # --- parser 092 ---
+    def parse_command_092(command, current_room, character):
+        # 092.1 split the line into words
+        match command.split():
+            # 092.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 092.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 092.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 092.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (092)"
+
+    # --- parser 093 ---
+    def parse_command_093(command, current_room, character):
+        # 093.1 split the line into words
+        match command.split():
+            # 093.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 093.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 093.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 093.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (093)"
+
+    # --- parser 094 ---
+    def parse_command_094(command, current_room, character):
+        # 094.1 split the line into words
+        match command.split():
+            # 094.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 094.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 094.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 094.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (094)"
+
+    # --- parser 095 ---
+    def parse_command_095(command, current_room, character):
+        # 095.1 split the line into words
+        match command.split():
+            # 095.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 095.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 095.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 095.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (095)"
+
+    # --- parser 096 ---
+    def parse_command_096(command, current_room, character):
+        # 096.1 split the line into words
+        match command.split():
+            # 096.2 one-word commands
+            case ["quit"]:
+                return "quit"
+            case ["look"]:
+                return current_room.describe()
+            # 096.3 commands with an object
+            case ["get", obj]:
+                return character.get(obj, current_room)
+            case ["drop", *objects]:
+                return [character.drop(obj, current_room) for obj in objects]
+            # 096.4 movement, with a guard
+            case ["go", direction] if direction in current_room.exits:
+                return current_room.neighbor(direction)
+            # 096.5 anything else
+            case _:
+                return "Sorry, I couldn't understand that (096)"
+- id: s-Z1QH6
+  type: section
+  parent: d-XM01W
+  order: aJ
+  fields:
+    title: Terms
+- id: t-HCXDK
+  type: term
+  parent: s-Z1QH6
+  order: a1
+  fields:
+    name: Case block
+  body: One `case` clause with its pattern, optional guard and indented block.
+- id: t-CTTFB
+  type: term
+  parent: s-Z1QH6
+  order: a2
+  fields:
+    name: Binding
+  body: Giving a name a value as a result of a successful match. Bindings outlive the block.
+- id: t-CNTP6
+  type: term
+  parent: s-Z1QH6
+  order: a3
+  fields:
+    name: Soft keyword
+  body: A word that is a keyword only in a specific grammatical position and an ordinary name elsewhere.
+    `match` and `case` are soft keywords. See {{r-CMSDK}}.
+- id: s-2N76F
+  type: section
+  parent: d-XM01W
+  order: aK
+  fields:
+    title: Quick sketches
+- id: cd-ZNYMB
+  type: code
+  parent: s-2N76F
+  order: a1
+  body: |-
+    >>> match command.split():
+    ...     case [action]:
+    ...         print(action)
+- id: dg-HBT4Q
+  type: diagram
+  parent: s-2N76F
+  order: a2
+  fields:
+    lang: mermaid
+  body: |-
+    flowchart LR
+      S[subject] --> C{case?}
+      C -->|matches| B[body]
+      C -->|no| N[next case]

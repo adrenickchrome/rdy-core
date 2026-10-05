@@ -1,9 +1,11 @@
 //! `rdy check`: lints format-2 files without touching the store (addendum B §4.1).
 use crate::Materialized;
 use crate::error::*;
+use crate::keys::{Keys, key_of};
 use crate::tree_io::{Diagnostic, Loaded, read_file, read_tree};
-use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
-use rdy_schema::{Pack, Severity, validate_block};
+use rdy_model::{Block, BlockId, FieldValue, RefMode, key, ref_spans};
+use rdy_schema::{Pack, Severity, skeleton_gaps, validate_block};
+use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -27,14 +29,16 @@ fn issue_at(l: &Loaded, code: &str, message: &str) -> (usize, usize) {
         "E_BODY_REQUIRED" | "E_BODY_FORBIDDEN" => key("body"),
         "E_LINK_TYPE" => key("links"),
         "E_CHILD_TYPE" | "E_ORPHAN" | "E_MISSING_PARENT" => key("parent"),
-        "E_FIELD_UNKNOWN" | "E_FIELD_KIND" | "E_FIELD_ENUM" | "E_DOC_TYPE" => l
+        "E_BAD_KEY" => key("fields.key"),
+        "E_FIELD_UNKNOWN" | "E_FIELD_KIND" | "E_FIELD_ENUM" | "E_DOC_TYPE" | "E_BAD_REF" => l
             .keys
             .iter()
             .find(|(k, _)| {
                 k.strip_prefix("fields.")
                     .is_some_and(|f| message.contains(&format!("{f:?}")))
             })
-            .map(|(_, at)| *at),
+            .map(|(_, at)| *at)
+            .or_else(|| key("body").filter(|_| code == "E_BAD_REF")),
         _ => None,
     };
     found.unwrap_or(l.at)
@@ -92,8 +96,60 @@ pub fn check_path(
             .map(|l| &l.block)
             .or_else(|| canon.and_then(|m| m.get(id)))
     };
+    // key1: keys of the checked files, and of canon blocks the files don't redefine (each indexed
+    // only when a token or a key needs it)
+    let file_index: OnceCell<Keys> = OnceCell::new();
+    let file_keys = || file_index.get_or_init(|| Keys::of(first.values().map(|l| &l.block)));
+    let canon_index: OnceCell<Keys> = OnceCell::new();
+    let canon_keys = || {
+        canon_index.get_or_init(|| match canon {
+            Some(m) => Keys::of(m.iter().filter(|b| !first.contains_key(&b.id))),
+            None => Keys::default(),
+        })
+    };
+    let is_key = |tok: &str| {
+        key::problem(tok).is_none()
+            && (file_keys().get(tok).is_some() || canon_keys().get(tok).is_some())
+    };
+    // skel1: the section titles under each checked doc, from the checked files
+    let section_titles = crate::keys::section_titles(first.values().map(|l| &l.block));
+    let mut keys_seen: BTreeMap<String, Vec<&BlockId>> = BTreeMap::new();
     for l in &loaded {
         let b = &l.block;
+        let is_first = first.get(&b.id).is_some_and(|f| std::ptr::eq(*f, l));
+        if is_first && let Some(k) = key_of(b) {
+            let at = l.keys.get("fields.key").copied().unwrap_or(l.at);
+            let earlier = keys_seen.entry(key::fold(k)).or_default();
+            let canon_holders = canon_keys().holders(k);
+            for other in earlier
+                .iter()
+                .copied()
+                .chain(canon_holders.iter().map(|(_, id)| id))
+                .filter(|o| *o != &b.id)
+            {
+                let e = crate::keys::clash_error(k, other, &b.id);
+                diags.push(Diagnostic::error(&l.file, at, e.code, e.message, e.fix));
+            }
+            earlier.push(&b.id);
+        }
+        if is_first && b.block_type == rdy_model::tree::DOC {
+            let titles = section_titles
+                .get(&b.id)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let at = l.keys.get("fields.doc_type").copied().unwrap_or(l.at);
+            for i in skeleton_gaps(pack, b, titles) {
+                diags.push(Diagnostic {
+                    file: l.file.clone(),
+                    line: at.0,
+                    column: at.1,
+                    code: i.code.into(),
+                    message: i.message,
+                    fix: i.fix,
+                    severity: i.severity,
+                });
+            }
+        }
         let parent = b.parent.as_ref().and_then(lookup);
         for i in validate_block(pack, b, parent) {
             let at = issue_at(l, i.code, &i.message);
@@ -112,6 +168,7 @@ pub fn check_path(
                 .ok()
                 .and_then(|id| lookup(&id))
                 .is_none()
+                && !is_key(tok)
         };
         let mut refs: Vec<(String, String)> = vec![];
         for (k, v) in &b.fields {

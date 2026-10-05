@@ -42,12 +42,10 @@ impl ReadState {
         resolve_in(&m, path)
     }
 
-    /// Text matching the id grammar is an id (not checked to exist); anything else is a path.
+    /// Text matching the id grammar is an id (not checked to exist); anything else is a key,
+    /// else a path (a text that is both, naming different blocks, is refused).
     pub fn resolve_id(&self, scope: &Scope, text: &str) -> Result<BlockId, RdyError> {
-        match BlockId::parse(text) {
-            Ok(id) => Ok(id),
-            Err(_) => self.resolve_path(scope, text),
-        }
+        crate::keys::resolve_text(&*self.materialized(scope)?, text)
     }
 
     pub fn path_of(&self, scope: &Scope, id: &BlockId) -> Result<Option<String>, RdyError> {

@@ -1,12 +1,14 @@
 use crate::Materialized;
 use crate::error::*;
+use crate::keys::Keys;
 use crate::query::field_json;
 use crate::tree_io::{self, FOLDER_FILE};
 use crate::write::{LinkInput, OpInput, WriteRequest, WriteResult};
 use crate::{Rdy, ReadState, Scope, Session};
 use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Link, Op, tree};
-use rdy_schema::{has_errors, validate_block};
+use rdy_schema::{has_errors, skeleton_gaps, validate_block};
 use serde::{Deserialize, Serialize};
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -232,6 +234,52 @@ fn check_import_names(blocks: &[Block], existing: &Materialized) -> Result<(), R
         }
     }
     Ok(())
+}
+
+/// key1: refuses a key held twice (ignoring case) among the incoming blocks or between an
+/// incoming block and another block of the view, then stores every key reference as its id.
+fn resolve_import_keys(blocks: &mut [Block], existing: &Materialized) -> Result<(), RdyError> {
+    if let Some((k, a, b)) = crate::keys::clashes(blocks.iter()).first() {
+        return Err(crate::keys::clash_error(k, a, b));
+    }
+    let incoming = Keys::of(blocks.iter());
+    // the view's keys are indexed only when an incoming block has a key or a non-id reference
+    let theirs: OnceCell<Keys> = OnceCell::new();
+    let view_keys = || theirs.get_or_init(|| Keys::of(existing.iter()));
+    for b in blocks.iter() {
+        let Some(k) = crate::keys::key_of(b) else {
+            continue;
+        };
+        if let Some((_, other)) = view_keys().holders(k).iter().find(|(_, o)| o != &b.id) {
+            return Err(crate::keys::clash_error(k, &b.id, other));
+        }
+    }
+    let lookup = |t: &str| {
+        incoming
+            .get(t)
+            .or_else(|| view_keys().get(t))
+            .map(|(_, id)| id.clone())
+    };
+    for b in blocks.iter_mut() {
+        crate::keys::rewrite_block(b, &lookup);
+    }
+    Ok(())
+}
+
+/// skel1: the required sections each imported doc lacks among the imported sections under it.
+fn import_skeleton_gaps(pack: &rdy_schema::Pack, blocks: &[Block]) -> Vec<rdy_schema::Issue> {
+    let titles = crate::keys::section_titles(blocks);
+    blocks
+        .iter()
+        .filter(|b| b.block_type == tree::DOC)
+        .flat_map(|d| {
+            skeleton_gaps(
+                pack,
+                d,
+                titles.get(&d.id).map(Vec::as_slice).unwrap_or_default(),
+            )
+        })
+        .collect()
 }
 
 fn io_err(e: std::io::Error) -> RdyError {
@@ -557,6 +605,7 @@ impl Rdy {
         drop(ids);
         assign_missing_names(&mut blocks, &existing);
         check_import_names(&blocks, &existing)?;
+        resolve_import_keys(&mut blocks, &existing)?;
         let incoming: BTreeMap<BlockId, &Block> =
             blocks.iter().map(|b| (b.id.clone(), b)).collect();
         let parent_of = |id: &BlockId| -> Option<Option<BlockId>> {
@@ -692,6 +741,7 @@ impl Rdy {
         for bytes in &blob_bytes {
             self.store.put_blob(bytes)?;
         }
+        let warnings = import_skeleton_gaps(&self.pack, &blocks);
         let ops: Vec<Op> = blocks
             .into_iter()
             .map(|block| Op::Create { block })
@@ -720,7 +770,7 @@ impl Rdy {
             created,
             names: BTreeMap::new(),
             inherited: BTreeMap::new(),
-            warnings: vec![],
+            warnings,
         })
     }
 

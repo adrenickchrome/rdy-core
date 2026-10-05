@@ -1,0 +1,143 @@
+- id: d-JBCJC
+  type: doc
+  order: a1
+  fields:
+    title: Overview
+    doc_type: overview
+- id: s-AH6A7
+  type: section
+  parent: d-JBCJC
+  order: a1
+  fields:
+    title: Summary
+- id: p-ZHK1P
+  type: prose
+  parent: s-AH6A7
+  order: a1
+  body: 'A match statement takes a subject value and tries each case in turn. Each case names a pattern:
+    a description of the shape the subject must have, and the names to bind to its parts. The first case
+    whose pattern fits, and whose guard holds, runs.'
+- id: p-26VCC
+  type: prose
+  parent: s-AH6A7
+  order: a2
+  body: The original proposal introduced the statement for Python. These pages describe the feature as
+    it shipped in Python 3.10, with the specification split from its rationale and its tutorial.
+- id: cd-4X0F1
+  type: code
+  parent: s-AH6A7
+  order: a3
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        case ["go", ("north" | "south" | "east" | "west") as direction]:
+            current_room = current_room.neighbor(direction)
+        case ["drop", *objects]:
+            for obj in objects:
+                character.drop(obj, current_room)
+        case ["quit"]:
+            print("Goodbye!")
+        case _:
+            print(f"Sorry, I couldn't understand {command!r}")
+- id: p-54BAE
+  type: prose
+  parent: s-AH6A7
+  order: a4
+  body: Four cases, four shapes. The first matches a two-item list whose second item is one of four strings
+    and binds it to `direction`. The second matches any list that starts with `"drop"` and gathers the
+    rest. The third matches one exact value. The last, the wildcard, matches anything and so must come
+    last.
+- id: s-5A4YQ
+  type: section
+  parent: d-JBCJC
+  order: a2
+  fields:
+    title: Goals
+- id: p-G2PHS
+  type: prose
+  parent: s-5A4YQ
+  order: a1
+  body: 'The goal is a statement that makes the three most common structural checks in Python code short
+    and readable: testing the shape of a sequence, picking apart a mapping, and testing the type and attributes
+    of an object.'
+- id: p-HZSTR
+  type: prose
+  parent: s-5A4YQ
+  order: a2
+  body: 'Success is measured by the code that disappears: the chains of tests, and the lines that pick
+    a value apart after the test has passed.'
+- id: c-23BCG
+  type: claim
+  parent: s-5A4YQ
+  order: a3
+  body: A pattern states the shape of the data directly, so the code that follows no longer repeats the
+    checks that found it.
+- id: r-0RJFT
+  type: requirement
+  parent: s-5A4YQ
+  order: a4
+  fields:
+    priority: must
+  body: The feature must not change the meaning of any program that runs without it.
+- id: r-VYBCJ
+  type: requirement
+  parent: s-5A4YQ
+  order: a5
+  fields:
+    priority: should
+  body: The syntax should read like the construction of the value it takes apart.
+- id: s-S36HZ
+  type: section
+  parent: d-JBCJC
+  order: a3
+  fields:
+    title: Non-goals
+- id: p-Y5R4N
+  type: prose
+  parent: s-S36HZ
+  order: a1
+  body: The proposal does not make the statement an expression, and it does not add patterns for conjunction
+    or negation. Both could be added later without breaking what is here.
+- id: k-1CV17
+  type: constraint
+  parent: s-S36HZ
+  order: a2
+  body: A pattern never has a side effect that a reader would not expect from the equivalent chain of
+    tests.
+- id: s-ZSB5R
+  type: section
+  parent: d-JBCJC
+  order: a4
+  fields:
+    title: Context
+- id: p-KPZMK
+  type: prose
+  parent: s-ZSB5R
+  order: a1
+  body: Pattern matching exists in Haskell, Erlang, Scala, Elixir and Ruby, and Python already had sequence
+    unpacking. The {{d-8PBD5}} is the normative text, {{d-3T4TW}} explains the choices behind it and {{d-XM01W}}
+    teaches the feature by example.
+- id: p-CTEJF
+  type: prose
+  parent: s-ZSB5R
+  order: a2
+  body: Two alternative designs were considered and set aside; they are kept with the other proposals,
+    and a third, still open, asks for more precise semantics. See {{d-ZJWAW}}, {{d-16X0K}} and {{d-1BGP0}}.
+- id: n-SBVFQ
+  type: note
+  parent: s-ZSB5R
+  order: a3
+  body: 'The pages are grouped by purpose: the specification, the rationale, the tutorial and the proposals
+    that were set aside.'
+- id: c-7W0Z3
+  type: claim
+  parent: s-ZSB5R
+  order: a4
+  body: The specification, the rationale and the tutorial describe one feature and agree with each other.
+- id: k-W1JGK
+  type: constraint
+  parent: s-ZSB5R
+  order: a5
+  body: A change to the specification is a change to the feature, and so needs the same approval as the
+    feature did.

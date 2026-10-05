@@ -1,0 +1,91 @@
+- id: d-ZJWAW
+  type: doc
+  order: a1
+  fields:
+    title: Unused variable syntax
+    doc_type: decisions-log
+- id: s-0NT8R
+  type: section
+  parent: d-ZJWAW
+  order: a1
+  fields:
+    title: Summary
+- id: p-K34HK
+  type: prose
+  parent: s-0NT8R
+  order: a1
+  body: This proposal asked for a dedicated token, `?`, to stand for a value that is deliberately discarded,
+    both in patterns and in ordinary assignment. It was written while the main design was still open and
+    was rejected when that design was accepted.
+- id: cd-ZYK95
+  type: code
+  parent: s-0NT8R
+  order: a2
+  fields:
+    lang: python
+  body: |-
+    match command.split():
+        case ["go", ?]:
+            ...  # the direction does not matter
+        case [?, ?, ?]:
+            ...
+- id: n-0VNYX
+  type: note
+  parent: s-0NT8R
+  order: a3
+  body: The proposal never entered the language, and no released version accepts the syntax shown here.
+- id: s-XR20P
+  type: section
+  parent: d-ZJWAW
+  order: a2
+  fields:
+    title: The proposal
+- id: p-G0T0Q
+  type: prose
+  parent: s-XR20P
+  order: a1
+  body: The wildcard `_` is an ordinary name everywhere else in Python, so a reader cannot tell a discarded
+    value from a variable that was meant to be used. A new token would make the intent visible and could
+    be checked by tools.
+- id: p-FB7D2
+  type: prose
+  parent: s-XR20P
+  order: a2
+  body: The cost is a new piece of syntax for a small gain. The chosen design, described in {{d-3T4TW}},
+    reuses a spelling that already means this to every reader.
+- id: ra-Q0PB6
+  type: rationale
+  parent: s-XR20P
+  order: a3
+  body: A spelling that already means this to every reader costs nothing to learn.
+- id: e-NVV6G
+  type: example
+  parent: s-XR20P
+  order: a4
+  body: '`case [x, _]:` already reads as a pair whose second item does not matter.'
+- id: s-GFRHK
+  type: section
+  parent: d-ZJWAW
+  order: a3
+  fields:
+    title: Decisions
+- id: D-FD7AD
+  type: decision
+  parent: s-GFRHK
+  order: a1
+  fields:
+    statement: A dedicated token `?` marks values that are deliberately discarded
+    status: rejected
+    decided_at: '2021-02-08T10:00:00Z'
+    recorded_at: '2021-02-08T10:00:00Z'
+    options:
+    - '`?` in patterns and in assignment'
+    - '`?` in patterns only'
+    - keep `_`
+    authority_basis: recorded_ruling
+    attested_by: Steering Council
+  body: The Steering Council judged the new token too costly for the gain. The wildcard stays as described
+    in {{d-8PBD5}}.
+  links:
+    affects:
+    - target: t-V8Q67

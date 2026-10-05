@@ -1,0 +1,1 @@
+{% set trail = item.trail %}{% if trail.events %}<details class="why"><summary>Why</summary><div class="why-body" data-rdy="trail"><ol class="trail">{% for e in trail.events %}<li{% if e.open %} class="open"{% endif %}><span class="trail-when">{{ e.when }}</span><span class="trail-what">{{ e.text|safe }}</span></li>{% endfor %}</ol></div></details>{% endif %}

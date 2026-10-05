@@ -31,11 +31,11 @@ enum Cmd {
     },
     Status,
     Show {
-        /// An id or a path such as wallets/transactions.
+        /// An id or a path such as wallets/transactions; `id@version` or a ref line `[id@version] …` reads under that version.
         id: String,
-        /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
-        #[arg(long, default_value = "canon")]
-        scope: String,
+        /// canon (the default), an existing view's name, tag:<version>, landing:<id> or view:<name>.
+        #[arg(long)]
+        scope: Option<String>,
     },
     Log,
     Impact {
@@ -287,9 +287,19 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     ))
                 }
                 Cmd::Show { id, scope } => {
-                    let scope = r.read().resolve_read_scope(&scope, None)?;
-                    let bid = r.read().resolve_id(&scope, &id)?;
-                    let ctx = r.read().context(&scope, &bid)?;
+                    let target = rdy_model::reference::parse_target(&id).map_err(|m| {
+                        RdyError::new(E_BAD_INPUT, m, rdy_model::reference::BAD_REF_FIX)
+                    })?;
+                    let text = target
+                        .scope_text(scope.as_deref())
+                        .map_err(|m| {
+                            RdyError::new(E_BAD_INPUT, m, rdy_model::reference::PIN_CLASH_FIX)
+                        })?
+                        .unwrap_or_else(|| "canon".to_string());
+                    let st = r.read();
+                    let scope = st.resolve_read_scope(&text, None)?;
+                    let bid = st.resolve_id(&scope, &target.id)?;
+                    let ctx = st.context(&scope, &bid)?;
                     let json = serde_json::to_value(&ctx).expect("json");
                     let status = status_words(&json["status"]);
                     let mut fields = json["fields"].clone();
@@ -505,8 +515,10 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     Ok((
                         serde_json::to_value(&s).expect("json"),
                         format!(
-                            "rendered {} pages to {}{}",
+                            "rendered {} pages, {} permalinks and {} assets to {}{}",
                             s.pages,
+                            s.redirects,
+                            s.assets,
                             out.display(),
                             s.warnings
                                 .iter()
@@ -535,10 +547,30 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                 }
                 Cmd::Import { dir, view } => {
                     let res = r.import(&human(Role::Approver), &view, &dir)?;
-                    Ok((
-                        serde_json::to_value(&res).expect("json"),
-                        format!("imported {} blocks into view {view}", res.created.len()),
-                    ))
+                    let mut text =
+                        format!("imported {} blocks into view {view}", res.created.len());
+                    // each warning names its doc: the title as imported, then the id
+                    let state = r.read();
+                    let scope = Scope::View(view.clone());
+                    for w in &res.warnings {
+                        let doc = w.block.as_ref().map(|id| {
+                            match state.block(&scope, id).ok().and_then(|b| {
+                                b.field_str("title")
+                                    .or(b.field_str("name"))
+                                    .map(str::to_string)
+                            }) {
+                                Some(t) if !t.trim().is_empty() => format!("{} ({id}): ", t.trim()),
+                                _ => format!("{id}: "),
+                            }
+                        });
+                        text.push_str(&format!(
+                            "\nwarning {}: {}{}",
+                            w.code,
+                            doc.unwrap_or_default(),
+                            w.message
+                        ));
+                    }
+                    Ok((serde_json::to_value(&res).expect("json"), text))
                 }
                 Cmd::Reindex => {
                     r.reindex()?;

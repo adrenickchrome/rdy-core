@@ -293,12 +293,24 @@ fn check(pack: &Pack) -> Result<(), SchemaError> {
                 )));
             }
         }
+        if t.fields.contains_key("key") {
+            return Err(SchemaError::Invalid(format!(
+                "type {name}: field key is reserved for the engine on every type"
+            )));
+        }
         for (fname, fd) in &t.fields {
             if fd.kind == FieldKind::Enum && fd.values.is_empty() {
                 return Err(SchemaError::Invalid(format!(
                     "enum field {name}.{fname} has no values"
                 )));
             }
+        }
+        if t.traits.contains(&Trait::Presentational)
+            && (t.traits.contains(&Trait::Normative) || t.traits.contains(&Trait::Defines))
+        {
+            return Err(SchemaError::Invalid(format!(
+                "type {name}: presentational excludes normative and defines"
+            )));
         }
     }
     if let Some(d) = &pack.default_doc_type

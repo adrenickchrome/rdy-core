@@ -1,0 +1,6 @@
+id: fd-MJN6T
+type: folder
+order: a2
+fields:
+  title: Specification
+  description: What each pattern kind matches, what it binds, and what is left undefined.

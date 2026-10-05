@@ -190,7 +190,12 @@ fn doc_and_folder_are_injected_into_every_pack() {
     assert_eq!(folder.body, BodyRule::Forbidden);
     assert!(folder.fields["name"].required && !folder.fields["title"].required);
     let std = PackSet::with_builtin().resolve("rdy-standard").unwrap();
-    assert_eq!(std.block_types["doc"].children, vec!["section".to_string()]);
+    // a doc holds every content type directly, section first (the same list a section holds)
+    assert_eq!(
+        std.block_types["doc"].children,
+        std.block_types["section"].children
+    );
+    assert_eq!(std.block_types["doc"].children[0], "section");
     assert_eq!(std.default_doc_type.as_deref(), Some("overview"));
 }
 
