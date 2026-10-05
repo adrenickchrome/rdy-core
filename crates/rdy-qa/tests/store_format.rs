@@ -3,9 +3,12 @@
 #![allow(unused_imports)]
 use rdy_engine::{Rdy, RdyError, Scope};
 use rdy_qa::fixtures::*;
+use rdy_qa::invariants;
 use rdy_store::format::{Format, REF_LOG_FORMAT, REF_MIN_READER};
+use rdy_store::layout::STUB_TEXT;
 use rdy_store::{Store, StoreError};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 const CURRENT_TEXT: &str = "rdy store format\nlog_format 2\nmin_reader 2\n";
@@ -231,4 +234,235 @@ fn upg1_a_kill_before_the_upgrade_marker_with_the_index_gone_loses_nothing() {
     let (blobs, _) = m1_log_with_format_refs_and_no_marker(&dir);
     std::fs::remove_file(dir.join("index.redb")).unwrap();
     assert_finished_upgrade(&dir, &blobs);
+}
+
+/// Every path under `dir` with its contents (None for directories).
+fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    let mut out = BTreeMap::new();
+    for e in std::fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.is_dir() {
+            out.insert(p.clone(), None);
+            out.extend(tree(&p));
+        } else {
+            out.insert(p.clone(), Some(std::fs::read(&p).unwrap()));
+        }
+    }
+    out
+}
+
+#[test]
+fn fmt1_a_new_project_keeps_its_store_in_store2_behind_a_stub() {
+    let (dir, r) = project();
+    let rdy = dir.path().join(".rdy");
+    assert_eq!(
+        STUB_TEXT,
+        "this store was upgraded by a newer rdy (M2 or later); upgrade rdy\n"
+    );
+    assert!(rdy.join("store").is_file());
+    assert_eq!(
+        std::fs::read_to_string(rdy.join("store")).unwrap(),
+        STUB_TEXT
+    );
+    for f in ["lock", "FORMAT", "index.redb", "segments"] {
+        assert!(rdy.join("store2").join(f).exists(), "{f}");
+    }
+    assert_eq!(r.store().dir(), rdy.join("store2").as_path());
+    let e = Rdy::open(dir.path())
+        .err()
+        .expect("the lock moved with the store");
+    assert_eq!(e.code, "E_LOCKED", "{e}");
+}
+
+/// Review Focus 4.
+#[test]
+fn fmt1_an_m1_open_fails_on_the_stub_before_it_locks_or_writes() {
+    let (dir, r) = project();
+    drop(r);
+    let rdy = dir.path().join(".rdy");
+    let before = tree(&rdy);
+    // M1's Store::open began with exactly these two calls, before its lock or any write
+    let store = rdy.join("store");
+    rdy_store::fsutil::create_dir_durable(&store).ok();
+    rdy_store::fsutil::create_dir_durable(&store.join("segments"))
+        .expect_err("no directory can be made inside the stub file");
+    assert_eq!(tree(&rdy), before, "nothing under .rdy changed");
+}
+
+#[test]
+fn fmt1_both_store_directories_are_refused_naming_the_newer() {
+    let (dir, r) = project();
+    drop(r);
+    let rdy = dir.path().join(".rdy");
+    // an old rdy ran after the upgrade: no stub, so it made .rdy/store again and wrote to it
+    std::fs::remove_file(rdy.join("store")).unwrap();
+    Store::open_legacy_for_tests(&rdy.join("store"))
+        .unwrap()
+        .put_blob(b"written by an old rdy")
+        .unwrap();
+    let now = std::time::SystemTime::now();
+    let set = |p: PathBuf, t| {
+        std::fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(t)
+            .unwrap()
+    };
+    set(
+        rdy.join("store2/segments/seg-000000.log"),
+        now - std::time::Duration::from_secs(60),
+    );
+    set(rdy.join("store/segments/seg-000000.log"), now);
+    let e = Rdy::open(dir.path()).err().expect("both are stores");
+    assert_eq!(e.code, "E_STORE_FORMAT", "{e}");
+    let old = rdy.join("store").display().to_string();
+    let new = rdy.join("store2").display().to_string();
+    assert!(e.message.contains(&new), "{e}");
+    assert!(
+        e.message.contains(&format!("{old} holds the newer log")),
+        "{e}"
+    );
+    assert!(
+        rdy.join("store").is_dir() && rdy.join("store2").is_dir(),
+        "nothing moved"
+    );
+}
+
+#[test]
+fn fmt1_a_stub_without_store2_is_refused() {
+    let (dir, r) = project();
+    drop(r);
+    let rdy = dir.path().join(".rdy");
+    std::fs::rename(rdy.join("store2"), rdy.join("store2.elsewhere")).unwrap();
+    let e = Rdy::open(dir.path()).err().expect("the store is missing");
+    assert_eq!(e.code, "E_STORE_FORMAT", "{e}");
+    assert!(e.message.contains("is missing"), "{e}");
+}
+
+#[test]
+fn fmt1_a_missing_stub_is_rewritten() {
+    let (dir, r) = project();
+    drop(r);
+    let rdy = dir.path().join(".rdy");
+    std::fs::remove_file(rdy.join("store")).unwrap();
+    Rdy::open(dir.path()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(rdy.join("store")).unwrap(),
+        STUB_TEXT
+    );
+}
+
+#[test]
+fn fmt1_the_stub_is_written_durably() {
+    let dir = tempfile::tempdir().unwrap();
+    let (r, synced) = rdy_store::fsutil::record_syncs(|| Rdy::init(dir.path(), "rdy-standard"));
+    r.unwrap();
+    let rdy = dir.path().join(".rdy");
+    let stub = synced
+        .iter()
+        .position(|p| *p == rdy.join("store"))
+        .expect("stub synced");
+    assert!(synced[stub + 1..].contains(&rdy), "{synced:?}");
+}
+
+#[test]
+fn upg1_an_m1_project_upgrades_on_its_first_open() {
+    let (dir, mut r) = m1_project();
+    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"title": "Kept", "doc_type": "glossary"}}])).unwrap();
+    land(&mut r, "work").unwrap();
+    r.tag(&approver(), "v0.1.0", None, None).unwrap();
+    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"title": "Pending", "doc_type": "glossary"}}])).unwrap();
+    let canon = r.store().canon_head().unwrap();
+    let landings = r.store().landings().unwrap().len();
+    let work = r.store().view_state("work").unwrap();
+    drop(r);
+    let rdy = dir.path().join(".rdy");
+    assert!(
+        rdy.join("store").is_dir() && !rdy.join("store2").exists(),
+        "an M1 layout"
+    );
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let rep = r.store().open_report().clone();
+    assert!(rep.upgraded && !rep.marker_rule, "{rep:?}");
+    assert_eq!(
+        std::fs::read_to_string(rdy.join("store")).unwrap(),
+        STUB_TEXT
+    );
+    assert_eq!(
+        Format::parse(&std::fs::read_to_string(rdy.join("store2/FORMAT")).unwrap()).unwrap(),
+        Format::CURRENT
+    );
+    assert_eq!(r.store().canon_head().unwrap(), canon);
+    assert_eq!(r.store().landings().unwrap().len(), landings);
+    assert_eq!(r.store().view_state("work").unwrap(), work);
+    assert!(matches!(
+        r.resolve_scope("tag:v0.1.0").unwrap(),
+        Scope::At(_)
+    ));
+    r.fsck().unwrap();
+    invariants::check(&mut r, &Scope::Canon).unwrap();
+    drop(r);
+    let r = Rdy::open(dir.path()).unwrap();
+    let rep = r.store().open_report();
+    assert!(rep.marker_rule && !rep.upgraded, "{rep:?}");
+}
+
+#[test]
+fn upg1_a_crash_between_the_rename_and_the_stub_finishes_on_the_next_open() {
+    let (dir, mut r) = m1_project();
+    write(&mut r, "work", json!([{"op": "create", "type": "doc", "fields": {"title": "Moved", "doc_type": "glossary"}}])).unwrap();
+    drop(r);
+    let rdy = dir.path().join(".rdy");
+    std::fs::rename(rdy.join("store"), rdy.join("store2")).unwrap();
+    let r = Rdy::open(dir.path()).unwrap();
+    assert!(r.store().open_report().upgraded);
+    assert_eq!(
+        std::fs::read_to_string(rdy.join("store")).unwrap(),
+        STUB_TEXT
+    );
+}
+
+/// Review Focus 4.
+#[test]
+fn upg1_an_m1_process_holding_the_store_blocks_the_upgrade() {
+    let (dir, r) = m1_project();
+    drop(r);
+    let rdy = dir.path().join(".rdy");
+    let held = std::fs::File::options()
+        .write(true)
+        .open(rdy.join("store/lock"))
+        .unwrap();
+    held.try_lock().unwrap();
+    let e = Rdy::open(dir.path())
+        .err()
+        .expect("an M1 process holds the store");
+    assert_eq!(e.code, "E_LOCKED", "{e}");
+    assert!(
+        rdy.join("store").is_dir() && !rdy.join("store2").exists(),
+        "nothing moved"
+    );
+    drop(held);
+    Rdy::open(dir.path()).unwrap();
+}
+
+#[test]
+fn upg1_the_move_is_durable() {
+    let (dir, r) = m1_project();
+    drop(r);
+    let rdy = dir.path().join(".rdy");
+    let (r, synced) = rdy_store::fsutil::record_syncs(|| Rdy::open(dir.path()));
+    r.unwrap();
+    let stub = synced
+        .iter()
+        .position(|p| *p == rdy.join("store"))
+        .expect("stub synced");
+    assert!(
+        synced[..stub].contains(&rdy),
+        "the rename was synced before the stub: {synced:?}"
+    );
+    assert!(
+        synced[stub + 1..].contains(&rdy),
+        "the stub's entry was synced: {synced:?}"
+    );
 }

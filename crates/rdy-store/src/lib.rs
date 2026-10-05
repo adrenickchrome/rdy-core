@@ -3,6 +3,7 @@ pub mod format;
 pub mod fsutil;
 pub mod index;
 pub mod kinds;
+pub mod layout;
 pub mod segment;
 mod store;
 
