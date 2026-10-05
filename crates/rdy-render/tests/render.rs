@@ -106,6 +106,7 @@ fn raw_create(r: &mut Rdy, view: &str, blocks: Vec<Block>) {
         provenance: agent().provenance(),
         justification: None,
         message: "raw".into(),
+        links: ChangeLinks::default(),
     };
     r.store_mut().commit_to_view(view, change).unwrap();
     r.invalidate();
@@ -556,6 +557,7 @@ fn a_damaged_store_with_a_very_deep_chain_renders_without_overflowing() {
                 provenance: agent().provenance(),
                 justification: None,
                 message: "damaged".into(),
+                links: ChangeLinks::default(),
             },
         )
         .unwrap();

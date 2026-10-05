@@ -90,6 +90,7 @@ fn nameless(n: usize, lookups: usize) -> (Duration, Duration) {
                 provenance: agent().provenance(),
                 justification: None,
                 message: "raw".into(),
+                links: ChangeLinks::default(),
             },
         )
         .unwrap();

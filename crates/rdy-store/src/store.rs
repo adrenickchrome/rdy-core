@@ -3,12 +3,15 @@ use crate::format::{self, Format};
 use crate::fsutil;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
-use crate::segment::{CrashPoint, Location, SegmentLog, find_gap, log_has_marker, seg_path};
-use rdy_model::{Block, Change, Hash, Op};
+use crate::segment::{CrashPoint, Location, SegmentLog, find_gap, seg_path};
+use crate::view::ViewOp;
+use rdy_model::{Block, Change, Hash, LandingRecord, Op, Proposal};
 use serde::{Serialize, de::DeserializeOwned};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The file a store creates when it opens and removes on a clean close. Finding it at open means the
@@ -18,20 +21,16 @@ pub const INDEX_OPEN_SENTINEL: &str = "index.open";
 const SEGMENT_MAX: u64 = 64 * 1024 * 1024;
 const CHUNK: usize = 1024 * 1024;
 
-/// The largest blob a chunk-kind object may stand for as a manifest: an agent chose that object's
-/// bytes, so its `len` is not trusted to size the work of reading it. Matches the largest asset
-/// `rdy_asset` accepts.
+/// The largest asset `rdy_asset` accepts. The store does not enforce it: only `put_blob` writes a
+/// manifest-kind object, so no manifest whose bytes an agent chose is ever read as a blob.
 pub const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 
 /// What one `Store::open` did, for tests, `rdy` diagnostics and the QA gate.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OpenReport {
-    /// This open used the marker rule (the acknowledged boundary is the last valid batch marker).
-    pub marker_rule: bool,
-    /// Torn or unacknowledged tails this open moved aside (marker rule).
+    /// Torn or unacknowledged tails this open moved aside (the acknowledged boundary is the last
+    /// valid batch marker).
     pub quarantined: Vec<PathBuf>,
-    /// This open upgraded an M1 log.
-    pub upgraded: bool,
     /// The `index.open` sentinel was present: the last process did not close the store.
     pub unclean_shutdown: bool,
     /// redb repaired the index at open or in its integrity check.
@@ -64,14 +63,11 @@ pub struct Store {
     poisoned: bool,
     /// Directories open fsynced because it created something in them (dur1).
     synced: Vec<PathBuf>,
-    /// Opened by `open_legacy_for_tests`: behaves as M1 did (no format, no markers).
-    legacy: bool,
     /// Set only at the end of a successful open, after the sentinel exists, and cleared by the
     /// clean close: gates `close` and `Drop`, so a store whose open failed neither removes a
     /// kill's sentinel nor does anything else on drop, and a store closes once.
     opened: bool,
-    /// Frames written since the last checkpoint (none for the M1 test writer, whose index is
-    /// durable on every write).
+    /// Frames written since the last checkpoint.
     pending: u64,
     /// When the last write finished, for `checkpoint_if_idle`.
     last_write: Instant,
@@ -82,7 +78,18 @@ pub struct Store {
     /// The last checkpoint a write or `checkpoint_if_idle` attempted and could not make; cleared
     /// by the next success.
     checkpoint_error: Option<String>,
+    /// Object frames read by `get_raw` and `get_kind` (a test hook; reads take `&self`).
+    frames_read: AtomicU64,
+    /// Per view, the head last read by `included` and the set it gave (chain1). A write never
+    /// updates it: the next read walks back to the cached head or to a checkpoint. `reindex`
+    /// clears it.
+    sets: Mutex<HashMap<String, CachedSet>>,
+    /// Successful `write` calls since open (a test hook, atom1).
+    writes: u64,
 }
+
+/// A view's head and the included set the walk gave at it (chain1).
+pub(crate) type CachedSet = (Hash, Arc<Vec<Hash>>);
 
 /// How an index open went: the index, its acknowledged boundary (None if it has none yet), whether
 /// it was set aside and replaced by an empty one, and whether redb repaired it.
@@ -203,7 +210,10 @@ struct Faults {
     checkpoint: bool,
 }
 
-fn encode<T: Serialize>(v: &T) -> Vec<u8> {
+/// Frames for one `write`: `(kind, payload)` pairs, in write order.
+pub(crate) type Frames = Vec<(u8, Vec<u8>)>;
+
+pub(crate) fn encode<T: Serialize>(v: &T) -> Vec<u8> {
     postcard::to_allocvec(v).expect("postcard encoding of an in-memory value cannot fail")
 }
 
@@ -222,22 +232,42 @@ fn entries_for_frame(
         // a marker is neither an object nor a dedupe candidate
         return Ok(vec![]);
     }
-    let mut out = vec![IndexEntry::Object(hash, loc)];
+    let mut out = vec![IndexEntry::Object { kind, hash, loc }];
     match kind {
         kinds::CHANGE => {
             let change: Change = decode(payload)?;
             for op in &change.ops {
-                if let Op::Create { block } | Op::Update { block, .. } = op {
-                    out.push(IndexEntry::Producer {
-                        version: block.version_hash(),
+                match op {
+                    Op::Create { block } | Op::Update { block, .. } => {
+                        out.push(IndexEntry::Producer {
+                            version: block.version_hash(),
+                            change: hash,
+                        });
+                    }
+                    Op::Delete { id, .. } => out.push(IndexEntry::Deleted {
+                        block: id.clone(),
                         change: hash,
-                    });
+                    }),
                 }
             }
         }
         kinds::REF_UPDATE => {
             let r: RefUpdate = decode(payload)?;
             out.push(IndexEntry::Ref(r.name, r.value));
+        }
+        kinds::VIEW_OP => {
+            let op: ViewOp = decode(payload)?;
+            out.push(IndexEntry::ViewOp {
+                view: op.view,
+                op: hash,
+            });
+        }
+        kinds::LANDING => {
+            let rec: LandingRecord = decode(payload)?;
+            out.extend(rec.changes.into_iter().map(|change| IndexEntry::Landed {
+                change,
+                landing: hash,
+            }));
         }
         _ => {}
     }
@@ -276,18 +306,6 @@ pub const CHECKPOINT_IDLE: Duration = Duration::from_secs(2);
 
 impl Store {
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
-        Store::open_with(dir, false)
-    }
-
-    /// Test hook: opens and writes exactly as M1 did, so upgrade tests have an M1 store. No
-    /// `FORMAT` is read, checked or written, the M1 open rule is always used, no format batch is
-    /// written, and every frame is appended on its own with no batch marker.
-    #[doc(hidden)]
-    pub fn open_legacy_for_tests(dir: &Path) -> Result<Store, StoreError> {
-        Store::open_with(dir, true)
-    }
-
-    fn open_with(dir: &Path, legacy: bool) -> Result<Store, StoreError> {
         // dur1: each directory created here is fsynced into its parent before any write is acked
         let mut synced = fsutil::create_dir_durable(dir)?;
         let segments = dir.join("segments");
@@ -299,18 +317,13 @@ impl Store {
             .write(true)
             .open(dir.join("lock"))?;
         let lock = HeldLock::take(lock, dir)?; // lock1
-        // the sentinel of a process that died with the store open; M1 wrote none
-        let unclean = !legacy && std::fs::symlink_metadata(dir.join(INDEX_OPEN_SENTINEL)).is_ok();
-        // a newer store is refused before the index is opened or anything is written
-        let format_file = if legacy {
-            None
-        } else {
-            let f = format::read_format_file(dir)?;
-            if let Some(f) = f {
-                format::check_reader(f, dir)?;
-            }
-            f
-        };
+        // the sentinel of a process that died with the store open
+        let unclean = std::fs::symlink_metadata(dir.join(INDEX_OPEN_SENTINEL)).is_ok();
+        // a store of another format is refused before the index is opened or anything is written
+        let format_file = format::read_format_file(dir)?;
+        if let Some(f) = format_file {
+            format::check_format(f, dir)?;
+        }
         // seg1: a gap in the segment numbers means acknowledged frames are missing
         if let Some((missing, later)) = find_gap(&segments)? {
             return Err(StoreError::MissingFrames {
@@ -335,25 +348,16 @@ impl Store {
             fsutil::sync_dir(dir)?;
             synced.push(dir.to_path_buf());
         }
-        let mut report = OpenReport {
+        // The log opens by the marker rule: the acknowledged boundary is the last valid batch
+        // marker. The index's durable end is only the floor under which damage is refused, never
+        // the boundary, because it lags the log.
+        let (log, quarantined) = SegmentLog::open_marked(&segments, SEGMENT_MAX, acked)?;
+        let report = OpenReport {
+            quarantined,
             unclean_shutdown: unclean,
             redb_repaired,
             index_rebuilt,
             ..OpenReport::default()
-        };
-        // The FORMAT file, or a batch marker in the log's last two segments (found even behind
-        // damage, so a lagging index and a lost FORMAT cannot make an M2 log look like M1), means
-        // an M2 log: it opens by the marker rule. The index's durable end is only the floor under
-        // which damage is refused, never the boundary, because it lags the log. The index's format
-        // ref is not a signal: it can hold refs whose batch lost its marker. Without either the
-        // log is M1 (or a new store).
-        report.marker_rule = !legacy && (format_file.is_some() || log_has_marker(&segments)?);
-        let log = if report.marker_rule {
-            let (log, quarantined) = SegmentLog::open_marked(&segments, SEGMENT_MAX, acked)?;
-            report.quarantined = quarantined;
-            log
-        } else {
-            SegmentLog::open_acked(&segments, SEGMENT_MAX, acked)?
         };
         let mut store = Store {
             dir: dir.to_path_buf(),
@@ -364,13 +368,15 @@ impl Store {
             poisoned: false,
             synced,
             report,
-            legacy,
             opened: false,
             pending: 0,
             last_write: Instant::now(),
             checkpoint_frames: CHECKPOINT_FRAMES,
             checkpoints: 0,
             checkpoint_error: None,
+            frames_read: AtomicU64::new(0),
+            sets: Mutex::new(HashMap::new()),
+            writes: 0,
         };
         let (upto, end) = (store.index().indexed_upto()?, store.log.end());
         if upto > end {
@@ -389,91 +395,76 @@ impl Store {
                 ),
             });
         }
+        // a store of another format whose FORMAT is lost is refused before the index moves
+        if let Some(n) = store.format_ref()? {
+            format::check_format(Format { store_format: n }, dir)?;
+        }
         let caught_up = store.catch_up()?;
         store.report.caught_up_frames = caught_up.frames;
         store.report.catch_up_commits = caught_up.commits;
-        if !legacy {
-            store.ensure_format(format_file.is_some())?;
-            // Losing this file to a power loss only costs a needless rebuild, so it is not synced.
-            // It is only ever created, never opened: an existing one (a kill's, or a link
-            // planted there) is left as it is, and nothing is followed or truncated.
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(dir.join(INDEX_OPEN_SENTINEL))
-            {
-                Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e.into()),
-                _ => {}
-            }
-            store.opened = true;
+        store.ensure_format(format_file.is_some())?;
+        // Losing this file to a power loss only costs a needless rebuild, so it is not synced.
+        // It is only ever created, never opened: an existing one (a kill's, or a link planted
+        // there) is left as it is, and nothing is followed or truncated.
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(INDEX_OPEN_SENTINEL))
+        {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e.into()),
+            _ => {}
         }
+        store.opened = true;
         Ok(store)
     }
 
-    /// Makes the log hold the store's format and `FORMAT` mirror it. The log's refs are the truth:
-    /// a newer `min_reader` there is refused; absent refs, or any refs in a log with no batch marker yet (an M1-rule open), are written as one
-    /// marked batch (which also upgrades an M1 log) and then `FORMAT` is written; a missing `FORMAT` is rewritten from
-    /// the refs. Both steps are idempotent, so a crash between them is finished by the next open.
-    fn ensure_format(&mut self, has_format_file: bool) -> Result<(), StoreError> {
-        let read = |this: &Store, name: &str| -> Result<Option<u32>, StoreError> {
-            this.index()
-                .get_ref(name)?
-                .map(|v| {
-                    format::decode_u32(&v).ok_or_else(|| {
-                        StoreError::Decode(format!("the log's ref {name} is not a decimal number"))
-                    })
+    /// The log's `meta/store_format` ref, as the index holds it.
+    fn format_ref(&self) -> Result<Option<u32>, StoreError> {
+        self.index()
+            .get_ref(format::REF_STORE_FORMAT)?
+            .map(|v| {
+                format::decode_u32(&v).ok_or_else(|| {
+                    StoreError::Decode(format!(
+                        "the log's ref {} is not a decimal number",
+                        format::REF_STORE_FORMAT
+                    ))
                 })
-                .transpose()
-        };
-        let (log_format, min_reader) = (
-            read(self, format::REF_LOG_FORMAT)?,
-            read(self, format::REF_MIN_READER)?,
-        );
-        if let Some(min_reader) = min_reader {
-            let f = Format {
-                log_format: log_format.unwrap_or(format::LOG_FORMAT),
-                min_reader,
+            })
+            .transpose()
+    }
+
+    /// Makes the log hold the store's format and `FORMAT` mirror it. The log's ref is the truth:
+    /// any other number there is refused, and so is a log with frames and no number. A new store
+    /// (an empty log) gets the ref as one marked batch, then a checkpoint, then `FORMAT`, so the
+    /// marker is in the log before `FORMAT` exists; a missing `FORMAT` is rewritten from the ref.
+    /// Both steps are idempotent, so a crash between them is finished by the next open.
+    fn ensure_format(&mut self, has_format_file: bool) -> Result<(), StoreError> {
+        let held_frames = self.log.end()
+            != Location {
+                segment: 0,
+                offset: 0,
             };
-            format::check_reader(f, &self.dir)?;
-        }
-        match (log_format, min_reader) {
-            // the refs are in the log and the open used the marker rule: only FORMAT is missing
-            (Some(log_format), Some(min_reader)) if self.report.marker_rule => {
+        match self.format_ref()? {
+            Some(n) => {
+                format::check_format(Format { store_format: n }, &self.dir)?;
                 if !has_format_file {
-                    format::write_format_file(
-                        &self.dir,
-                        Format {
-                            log_format,
-                            min_reader,
-                        },
-                    )?;
+                    format::write_format_file(&self.dir, Format::CURRENT)?;
                 }
             }
-            // The refs are absent, or the open used the M1 rule, so the log holds no batch marker
-            // yet (a kill or power loss can keep the ref frames and lose the marker). FORMAT
-            // selects the marker rule, so a marker must exist before it is written. The refs are
-            // idempotent: this batch's marker acknowledges everything before it.
-            _ => {
-                let held_frames = self.log.end()
-                    != Location {
-                        segment: 0,
-                        offset: 0,
-                    };
-                self.report.upgraded = held_frames && !self.report.marker_rule;
-                let cur = Format::CURRENT;
-                self.set_refs(vec![
-                    (
-                        format::REF_LOG_FORMAT.into(),
-                        format::encode_u32(cur.log_format),
-                    ),
-                    (
-                        format::REF_MIN_READER.into(),
-                        format::encode_u32(cur.min_reader),
-                    ),
-                ])?;
+            None if held_frames => {
+                return Err(format::other_build(
+                    &self.dir,
+                    "has a log with no store format",
+                ));
+            }
+            None => {
+                self.set_refs(vec![(
+                    format::REF_STORE_FORMAT.into(),
+                    format::encode_u32(Format::CURRENT.store_format),
+                )])?;
                 // a new store is durable from its first open
                 self.checkpoint()?;
-                format::write_format_file(&self.dir, cur)?;
+                format::write_format_file(&self.dir, Format::CURRENT)?;
             }
         }
         Ok(())
@@ -494,8 +485,25 @@ impl Store {
         &self.dir
     }
 
-    fn index(&self) -> &Index {
+    pub(crate) fn index(&self) -> &Index {
         self.index.as_ref().expect("the index is open until drop")
+    }
+
+    /// The cached (head, set) of view `name`, if `included` has read one.
+    pub(crate) fn cached_set(&self, name: &str) -> Option<CachedSet> {
+        self.sets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .cloned()
+    }
+
+    /// Caches `set` as view `name`'s included set at `head`.
+    pub(crate) fn cache_set(&self, name: &str, head: Hash, set: Arc<Vec<Hash>>) {
+        self.sets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_string(), (head, set));
     }
 
     /// Replays the frames past the index's `indexed_upto` into it, streaming the log and applying
@@ -550,15 +558,7 @@ impl Store {
 
     fn replay_from(&mut self, from: Location) -> Result<CatchUp, StoreError> {
         let end = self.log.end();
-        let (log, index, legacy) = (&self.log, self.index(), self.legacy);
-        let apply = |entries: &[IndexEntry], upto: Location| {
-            if legacy {
-                // M1's index was durable on every commit
-                index.apply_durable(entries, upto)
-            } else {
-                index.apply(entries, upto)
-            }
-        };
+        let (log, index) = (&self.log, self.index());
         let mut done = CatchUp::default();
         let mut entries = vec![];
         let mut in_chunk = 0usize;
@@ -567,7 +567,7 @@ impl Store {
             done.frames += 1;
             in_chunk += 1;
             if in_chunk == CATCH_UP_CHUNK {
-                apply(&entries, next)?;
+                index.apply(&entries, next)?;
                 done.commits += 1;
                 entries.clear();
                 in_chunk = 0;
@@ -575,13 +575,11 @@ impl Store {
             Ok::<(), StoreError>(())
         })?;
         if in_chunk > 0 || done.commits == 0 {
-            apply(&entries, end)?;
+            index.apply(&entries, end)?;
             done.commits += 1;
         }
-        if !legacy {
-            // the replayed frames are in the log, not yet in the durable index
-            self.checkpoint()?;
-        }
+        // the replayed frames are in the log, not yet in the durable index
+        self.checkpoint()?;
         Ok(done)
     }
 
@@ -591,7 +589,14 @@ impl Store {
         Ok(self.log.verify_frames()?)
     }
 
+    /// Every table of the index as raw rows (fsck2: a reindex must reproduce them).
+    #[doc(hidden)]
+    pub fn index_dump_for_tests(&self) -> Result<crate::index::IndexDump, StoreError> {
+        self.index().dump()
+    }
+
     pub fn reindex(&mut self) -> Result<(), StoreError> {
+        self.sets.lock().unwrap_or_else(|e| e.into_inner()).clear();
         let path = self.dir.join("index.redb");
         let tmp = self.dir.join("index.redb.tmp");
         // drop the old database before deleting its file
@@ -612,6 +617,9 @@ impl Store {
         }
         let start = self.log.end();
         let result = self.append_and_index(items);
+        if result.is_ok() {
+            self.writes += 1;
+        }
         if result.is_err() {
             // nothing past `start` was acknowledged: discard it — including bytes a partial
             // append left past the end and a segment a failed roll left behind — so neither a
@@ -635,19 +643,17 @@ impl Store {
         for (kind, payload) in items {
             let hash = Hash::of(&payload);
             hashes.push(hash);
+            // kind1: dedupe by (kind, hash); the same bytes under another kind are another object
             if kind != kinds::REF_UPDATE
-                && (seen.contains(&hash) || self.index().object(&hash)?.is_some())
+                && (seen.contains(&(kind, hash)) || self.index().typed(kind, &hash)?.is_some())
             {
                 continue;
             }
-            seen.insert(hash);
+            seen.insert((kind, hash));
             batch.push((kind, payload));
         }
         if batch.is_empty() {
             return Ok(hashes);
-        }
-        if self.legacy {
-            return self.append_and_index_legacy(hashes, batch);
         }
         let placed = self.log.append_batch(&batch)?;
         let mut entries = vec![];
@@ -674,32 +680,10 @@ impl Store {
         Ok(hashes)
     }
 
-    /// The M1 write: each frame appended on its own with no marker, one sync, one index commit.
-    fn append_and_index_legacy(
-        &mut self,
-        hashes: Vec<Hash>,
-        batch: Vec<(u8, Vec<u8>)>,
-    ) -> Result<Vec<Hash>, StoreError> {
-        let mut entries = vec![];
-        for (kind, payload) in &batch {
-            let (loc, hash) = self.log.append(*kind, payload)?;
-            entries.extend(entries_for_frame(*kind, hash, loc, payload)?);
-        }
-        self.log.sync()?;
-        if std::mem::take(&mut self.faults.index_apply) {
-            return Err(StoreError::Db("injected index failure".into()));
-        }
-        self.index().apply_durable(&entries, self.log.end())?;
-        Ok(hashes)
-    }
-
     /// Makes the index durable up to everything written so far: one durable index commit. Until
     /// then a kill or power loss leaves the durable index behind the log, which the next open
-    /// catches up from the log. The M1 test writer's index is already durable, so it does nothing.
+    /// catches up from the log.
     pub fn checkpoint(&mut self) -> Result<(), StoreError> {
-        if self.legacy {
-            return Ok(());
-        }
         self.log.crash_point(CrashPoint::BeforeCheckpoint);
         if std::mem::take(&mut self.faults.checkpoint) {
             return Err(StoreError::Db("injected checkpoint failure".into()));
@@ -829,8 +813,15 @@ impl Store {
         Ok(self.write(vec![(kind, encode(value))])?[0])
     }
 
+    /// The first object written with hash `h`, whatever its kind, and that kind.
     pub fn get_raw(&self, h: &Hash) -> Result<(u8, Vec<u8>), StoreError> {
         let loc = self.index().object(h)?.ok_or(StoreError::NotFound(*h))?;
+        self.read_object(h, loc)
+    }
+
+    /// Reads the frame at `loc`, which the index says holds an object with hash `h`.
+    fn read_object(&self, h: &Hash, loc: Location) -> Result<(u8, Vec<u8>), StoreError> {
+        self.frames_read.fetch_add(1, Ordering::Relaxed);
         let (kind, found, payload) = self.log.read_hashed(loc)?;
         if found != *h {
             return Err(StoreError::Decode(format!(
@@ -838,6 +829,77 @@ impl Store {
             )));
         }
         Ok((kind, payload))
+    }
+
+    /// The payload of the object of `kind` with hash `h` (kind1).
+    pub fn get_kind(&self, kind: u8, h: &Hash) -> Result<Vec<u8>, StoreError> {
+        let loc = self
+            .index()
+            .typed(kind, h)?
+            .ok_or(StoreError::NotFound(*h))?;
+        let (found_kind, payload) = self.read_object(h, loc)?;
+        if found_kind != kind {
+            return Err(StoreError::Decode(format!(
+                "the index places a kind {kind} object {h} at {loc:?}, which holds kind {found_kind}; run rdy reindex"
+            )));
+        }
+        Ok(payload)
+    }
+
+    /// The object of `kind` with hash `h`, decoded.
+    pub fn get_typed<T: DeserializeOwned>(&self, kind: u8, h: &Hash) -> Result<T, StoreError> {
+        decode(&self.get_kind(kind, h)?)
+    }
+
+    /// The object of `kind` with hash `h`, decoded; an object of another kind with that hash is
+    /// named as what it is (`{h} is not a {what} (object kind {k})`), never decoded as `T`.
+    pub(crate) fn get_named<T: DeserializeOwned>(
+        &self,
+        kind: u8,
+        what: &str,
+        h: &Hash,
+    ) -> Result<T, StoreError> {
+        match self.get_typed(kind, h) {
+            Err(StoreError::NotFound(_)) if self.has(h)? => {
+                let (k, _) = self.get_raw(h)?;
+                Err(StoreError::Decode(format!(
+                    "{h} is not a {what} (object kind {k})"
+                )))
+            }
+            r => r,
+        }
+    }
+
+    /// The change with id `h` (repr1).
+    pub fn change(&self, h: &Hash) -> Result<Change, StoreError> {
+        self.get_named(kinds::CHANGE, "change", h)
+    }
+
+    /// The proposal version with id `h` (repr1).
+    pub fn proposal(&self, h: &Hash) -> Result<Proposal, StoreError> {
+        self.get_named(kinds::PROPOSAL, "proposal", h)
+    }
+
+    /// The landing with id `h` (repr1).
+    pub fn landing(&self, h: &Hash) -> Result<LandingRecord, StoreError> {
+        self.get_named(kinds::LANDING, "landing", h)
+    }
+
+    /// Whether an object of `kind` with hash `h` is stored: an index lookup that reads no frame.
+    pub fn has_kind(&self, kind: u8, h: &Hash) -> Result<bool, StoreError> {
+        Ok(self.index().typed(kind, h)?.is_some())
+    }
+
+    /// Successful `write` calls since open (atom1: a landing is one).
+    #[doc(hidden)]
+    pub fn write_count(&self) -> u64 {
+        self.writes
+    }
+
+    /// Object frames read so far by `get_raw` and `get_kind`.
+    #[doc(hidden)]
+    pub fn frames_read(&self) -> u64 {
+        self.frames_read.load(Ordering::Relaxed)
     }
 
     pub fn get<T: DeserializeOwned>(&self, h: &Hash) -> Result<T, StoreError> {
@@ -880,6 +942,11 @@ impl Store {
         self.index().refs_with_prefix(prefix)
     }
 
+    /// How many refs start with `prefix`, without reading their values.
+    pub fn count_refs(&self, prefix: &str) -> Result<usize, StoreError> {
+        self.index().count_refs(prefix)
+    }
+
     /// The hash `put_blob` would return for these bytes, without storing anything.
     pub fn blob_hash(bytes: &[u8]) -> Hash {
         let chunks: Vec<Hash> = bytes.chunks(CHUNK).map(Hash::of).collect();
@@ -905,23 +972,10 @@ impl Store {
         Ok(*self.write(items)?.last().expect("manifest hash"))
     }
 
-    /// Whether `h` names a blob (a manifest object) in this store. An object of chunk kind
-    /// counts when it is exactly the manifest `put_blob` would have written for a blob that is
-    /// all here: the index dedupes by hash alone, so a manifest whose bytes were first stored as
-    /// a chunk is that chunk-kind object. That check reads at most `MAX_BLOB_BYTES`, one chunk at
-    /// a time, and keeps none of it.
+    /// Whether `h` names a blob in this store: a manifest-kind object, which only `put_blob`
+    /// writes. One index lookup; it reads no frame.
     pub fn has_blob(&self, h: &Hash) -> Result<bool, StoreError> {
-        match self.get_raw(h) {
-            Ok((kinds::BLOB_MANIFEST, _)) => Ok(true),
-            Ok((kinds::BLOB_CHUNK, _)) => match self.read_blob(h, &mut |_| {}) {
-                Ok(()) => Ok(true),
-                Err(StoreError::Decode(_) | StoreError::NotFound(_)) => Ok(false),
-                Err(e) => Err(e),
-            },
-            Ok(_) => Ok(false),
-            Err(StoreError::NotFound(_)) => Ok(false),
-            Err(e) => Err(e),
-        }
+        self.has_kind(kinds::BLOB_MANIFEST, h)
     }
 
     pub fn get_blob(&self, h: &Hash) -> Result<Vec<u8>, StoreError> {
@@ -930,31 +984,26 @@ impl Store {
         Ok(out)
     }
 
-    /// Validates the manifest at `h` against what `put_blob` writes, then hands each chunk to
-    /// `sink` in order. Nothing is read before the manifest is known to be canonical and, for a
-    /// chunk-kind object (whose bytes an agent chose), within `MAX_BLOB_BYTES`.
+    /// Validates the manifest-kind object at `h` against what `put_blob` writes, then hands each
+    /// chunk to `sink` in order. Nothing is read before the manifest is known to be canonical.
     fn read_blob(&self, h: &Hash, sink: &mut dyn FnMut(&[u8])) -> Result<(), StoreError> {
-        let (kind, payload) = self.get_raw(h)?;
-        // The kind check is defence in depth; the structural checks below are the guard. A
-        // manifest's bytes may have been stored first as a chunk, and writes dedupe by hash
-        // alone, so a chunk-kind object that decodes as a manifest is accepted too.
-        if kind != kinds::BLOB_MANIFEST && kind != kinds::BLOB_CHUNK {
-            return Err(StoreError::Decode(format!(
-                "{h} is not a blob (object kind {kind})"
-            )));
-        }
+        let payload = match self.get_kind(kinds::BLOB_MANIFEST, h) {
+            Ok(p) => p,
+            // kind1: an object of another kind with this hash is never the blob
+            Err(StoreError::NotFound(_)) if self.has(h)? => {
+                let (kind, _) = self.get_raw(h)?;
+                return Err(StoreError::Decode(format!(
+                    "{h} is not a blob (object kind {kind})"
+                )));
+            }
+            Err(e) => return Err(e),
+        };
         let m: BlobManifest = decode(&payload)?;
         // postcard ignores trailing bytes; a manifest that is not its own canonical encoding
         // is not what `put_blob` wrote, and would not re-import under its own name
         if encode(&m) != payload {
             return Err(StoreError::Decode(format!(
                 "{h} is not a canonical blob manifest"
-            )));
-        }
-        if kind == kinds::BLOB_CHUNK && m.len > MAX_BLOB_BYTES {
-            return Err(StoreError::Decode(format!(
-                "{h} claims a blob of {} bytes, over the limit of {MAX_BLOB_BYTES}",
-                m.len
             )));
         }
         // the chunk count `put_blob` would produce, checked before anything is allocated or read
@@ -967,10 +1016,13 @@ impl Store {
         }
         let mut left = m.len;
         for c in &m.chunks {
-            // a chunk's stored kind is not checked: writes dedupe by hash alone, so a chunk may
-            // share its object with a block or snapshot of the same bytes, and the hash already
-            // proves the bytes
-            let (_, bytes) = self.get_raw(c)?;
+            // the chunk-kind object, or failing that any object with the chunk's hash: a chunk
+            // written before kind1 may have deduped into a block or snapshot of the same bytes,
+            // and the hash proves the bytes
+            let bytes = match self.get_kind(kinds::BLOB_CHUNK, c) {
+                Err(StoreError::NotFound(_)) => self.get_raw(c)?.1,
+                r => r?,
+            };
             // every chunk but the last is a full chunk, as `put_blob` cuts them
             let want = left.min(CHUNK as u64);
             if bytes.len() as u64 != want {
@@ -985,8 +1037,33 @@ impl Store {
         Ok(())
     }
 
+    /// The change that carried `version` into canon: of its producers, the one whose landing was
+    /// written first, or, when none has landed, the one written first. A version two changes
+    /// wrote identically has two producers; a side from canon names the one canon got it from.
     pub fn producer(&self, version: &Hash) -> Result<Option<Hash>, StoreError> {
-        self.index().producer(version)
+        let all = self.index().producers(version)?;
+        if all.len() <= 1 {
+            return Ok(all.first().copied());
+        }
+        let at = |kind: u8, h: &Hash| -> Result<Location, StoreError> {
+            self.index().typed(kind, h)?.ok_or(StoreError::NotFound(*h))
+        };
+        let mut landed: Option<(Location, Hash)> = None;
+        for c in &all {
+            if let Some(l) = self.index().landing_of(c)? {
+                let key = (at(kinds::LANDING, &l)?, *c);
+                landed = Some(landed.map_or(key, |k| k.min(key)));
+            }
+        }
+        if let Some((_, c)) = landed {
+            return Ok(Some(c));
+        }
+        let mut first: Option<(Location, Hash)> = None;
+        for c in &all {
+            let key = (at(kinds::CHANGE, c)?, *c);
+            first = Some(first.map_or(key, |k| k.min(key)));
+        }
+        Ok(first.map(|(_, c)| c))
     }
 
     pub fn commit_change(
@@ -994,33 +1071,95 @@ impl Store {
         mut change: Change,
         refs: Vec<(String, Vec<u8>)>,
     ) -> Result<Hash, StoreError> {
-        change.deps = self.change_deps(&change)?;
-        let mut items = vec![];
-        for op in &change.ops {
-            if let Op::Create { block } | Op::Update { block, .. } = op {
-                items.push((kinds::BLOCK, encode(block)));
-            }
-        }
-        items.push((kinds::CHANGE, encode(&change)));
-        let change_pos = items.len() - 1;
+        let (mut items, change_pos) = self.change_frames(&mut change, None)?;
         items.extend(self.ref_items(refs));
         Ok(self.write(items)?[change_pos])
     }
 }
 
 impl Store {
-    pub(crate) fn change_deps(&self, change: &Change) -> Result<Vec<Hash>, StoreError> {
-        let mut deps = BTreeSet::new();
+    /// How a change is laid out in a write, the one definition every change-writing path uses:
+    /// sets `change.deps` (see `change_deps`; `view` is the view it is committed to, if any), then
+    /// returns the `BLOCK` frames of its creates and updates followed by
+    /// the `CHANGE` frame, and the position of that `CHANGE` frame. The change's id is
+    /// `Hash::of(&items[change_pos].1)`.
+    pub(crate) fn change_frames(
+        &self,
+        change: &mut Change,
+        view: Option<&str>,
+    ) -> Result<(Frames, usize), StoreError> {
+        change.deps = self.change_deps(change, view)?;
+        let mut items = vec![];
         for op in &change.ops {
-            if let Some(base) = op.base() {
-                deps.insert(
-                    self.index()
-                        .producer(&base)?
-                        .ok_or(StoreError::NotFound(base))?,
-                );
+            if let Op::Create { block } | Op::Update { block, .. } = op {
+                items.push((kinds::BLOCK, encode(block)));
+            }
+        }
+        items.push((kinds::CHANGE, encode(change)));
+        let change_pos = items.len() - 1;
+        Ok((items, change_pos))
+    }
+
+    /// The deps the store gives `change` when it commits it to `view` (or, with no view, through
+    /// `commit_change`), sorted ascending and deduplicated:
+    /// - for each op's base, its producers that `view` includes; when it includes none (the base
+    ///   came from canon), or there is no view, `producer(base)`. A version two views wrote
+    ///   identically has a producer in each, and a dep must name the writer's own;
+    /// - when committed to `view`, every change `view` includes that deletes an id one of its
+    ///   ops creates (so a delete and a re-create under one id merge in that order).
+    pub fn change_deps(
+        &self,
+        change: &Change,
+        view: Option<&str>,
+    ) -> Result<Vec<Hash>, StoreError> {
+        let mut deps = BTreeSet::new();
+        // `view`'s included set, read once and only when a dep needs it
+        let mut included: Option<HashSet<Hash>> = None;
+        for op in &change.ops {
+            match op {
+                Op::Create { block } => {
+                    let Some(view) = view else { continue };
+                    let deleters = self.index().deleters(&block.id)?;
+                    if deleters.is_empty() {
+                        continue;
+                    }
+                    let included = self.included_set(&mut included, view)?;
+                    deps.extend(deleters.into_iter().filter(|d| included.contains(d)));
+                }
+                Op::Update { base, .. } | Op::Delete { base, .. } => {
+                    let producers = self.index().producers(base)?;
+                    if producers.is_empty() {
+                        return Err(StoreError::NotFound(*base));
+                    }
+                    if producers.len() > 1
+                        && let Some(view) = view
+                    {
+                        let included = self.included_set(&mut included, view)?;
+                        let own: Vec<Hash> = producers
+                            .into_iter()
+                            .filter(|p| included.contains(p))
+                            .collect();
+                        if !own.is_empty() {
+                            deps.extend(own);
+                            continue;
+                        }
+                    }
+                    deps.insert(self.producer(base)?.ok_or(StoreError::NotFound(*base))?);
+                }
             }
         }
         Ok(deps.into_iter().collect())
+    }
+
+    fn included_set<'a>(
+        &self,
+        slot: &'a mut Option<HashSet<Hash>>,
+        view: &str,
+    ) -> Result<&'a HashSet<Hash>, StoreError> {
+        if slot.is_none() {
+            *slot = Some(self.included(view)?.iter().copied().collect());
+        }
+        Ok(slot.as_ref().expect("set above"))
     }
 
     pub(crate) fn ref_items_pub(&self, refs: Vec<(String, Vec<u8>)>) -> Vec<(u8, Vec<u8>)> {

@@ -28,6 +28,7 @@ fn change(ops: Vec<Op>) -> Change {
         },
         justification: None,
         message: String::new(),
+        links: ChangeLinks::default(),
     }
 }
 

@@ -192,7 +192,6 @@ fn roll1_a_kill_after_a_roll_before_the_marker_loses_only_that_batch() {
     let rolled = rdy_store::segment::seg_path(&dir.path().join("segments"), last.segment + 1);
     assert!(rolled.exists(), "the crash came after the roll");
     let r = recovered(dir.path(), acks.len(), false, 1000);
-    assert!(r.marker_rule, "{r:?}");
     assert_eq!(
         r.quarantined,
         vec![PathBuf::from(format!("{}.torn-0", rolled.display()))]
@@ -296,43 +295,40 @@ fn kill1_marker_shaped_bytes_in_a_torn_tail_are_quarantined_not_refused() {
 
 /// Ordering pin for the format batch: an open must never write `FORMAT` over a log with no marker.
 /// A directory at `<store>/.FORMAT.tmp` makes the `FORMAT` write fail, so the open errors after
-/// the refs batch (a new store) or the upgrade batch (an M1 store); the log then must already hold
-/// its marker and `FORMAT` must be absent. Once the obstacle is gone the next open finishes.
+/// the refs batch of a new store; the log then must already hold its marker and `FORMAT` must be
+/// absent. Once the obstacle is gone the next open finishes.
 #[test]
 fn kill1_the_open_writes_its_marker_before_it_writes_format() {
-    for m1 in [false, true] {
-        let what = if m1 { "an M1 store" } else { "a new store" };
-        let dir = tempfile::tempdir().unwrap();
-        let mut blobs = vec![];
-        if m1 {
-            let mut s = Store::open_legacy_for_tests(dir.path()).unwrap();
-            blobs.push(payload(0, 0));
-            s.put_blob(&blobs[0]).unwrap();
-        } else {
-            drop(Store::open_legacy_for_tests(dir.path()).unwrap());
-        }
-        let obstacle = dir.path().join(".FORMAT.tmp");
-        std::fs::create_dir(&obstacle).unwrap();
-        assert!(
-            Store::open(dir.path()).is_err(),
-            "{what}: the FORMAT write must fail"
-        );
-        assert!(
-            !dir.path().join("FORMAT").exists(),
-            "{what}: FORMAT was written"
-        );
-        assert!(
-            rdy_store::segment::log_has_marker(&dir.path().join("segments")).unwrap(),
-            "{what}: FORMAT was attempted before the marker"
-        );
-        std::fs::remove_dir(&obstacle).unwrap();
-        finished_format(dir.path(), &blobs, what);
-    }
+    let what = "a new store";
+    let dir = tempfile::tempdir().unwrap();
+    empty_store(dir.path());
+    let obstacle = dir.path().join(".FORMAT.tmp");
+    std::fs::create_dir(&obstacle).unwrap();
+    assert!(
+        Store::open(dir.path()).is_err(),
+        "{what}: the FORMAT write must fail"
+    );
+    assert!(
+        !dir.path().join("FORMAT").exists(),
+        "{what}: FORMAT was written"
+    );
+    assert!(
+        rdy_store::segment::log_has_marker(&dir.path().join("segments")).unwrap(),
+        "{what}: FORMAT was attempted before the marker"
+    );
+    std::fs::remove_dir(&obstacle).unwrap();
+    finished_format(dir.path(), &[], what);
+}
+
+/// A new store before its first format batch: an empty log and an empty index.
+fn empty_store(dir: &Path) {
+    std::fs::create_dir_all(dir.join("segments")).unwrap();
+    drop(rdy_store::index::Index::open(&dir.join("index.redb")).unwrap());
 }
 
 /// Opens a store directory the way a crash left it and checks the open finished the format batch:
 /// the log holds a marker before `FORMAT` exists (never `FORMAT` over a log with no marker), the
-/// refs and `FORMAT` read back, every `blobs` entry survives, and a second open is a plain one.
+/// ref and `FORMAT` read back, every `blobs` entry survives, and a second open is a plain one.
 fn finished_format(dir: &Path, blobs: &[Vec<u8>], what: &str) {
     let segments = dir.join("segments");
     let s = Store::open(dir).unwrap_or_else(|e| panic!("{what}: {e}"));
@@ -345,28 +341,21 @@ fn finished_format(dir: &Path, blobs: &[Vec<u8>], what: &str) {
         rdy_store::segment::log_has_marker(&segments).unwrap(),
         "{what}: no marker"
     );
+    // M2a1 (fmt2): one format number, `store_format 3`, in place of log_format/min_reader
     assert_eq!(
         std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
-        "rdy store format\nlog_format 2\nmin_reader 2\n",
+        "rdy store format\nstore_format 3\n",
         "{what}"
     );
     assert_eq!(
-        s.get_ref("meta/log_format").unwrap(),
-        Some(b"2".to_vec()),
-        "{what}"
-    );
-    assert_eq!(
-        s.get_ref("meta/min_reader").unwrap(),
-        Some(b"2".to_vec()),
+        s.get_ref("meta/store_format").unwrap(),
+        Some(b"3".to_vec()),
         "{what}"
     );
     drop(s);
     let mut s = Store::open(dir).unwrap_or_else(|e| panic!("{what}, second open: {e}"));
     let r = s.open_report().clone();
-    assert!(
-        r.marker_rule && !r.upgraded && !r.index_rebuilt,
-        "{what}: {r:?}"
-    );
+    assert!(!r.index_rebuilt, "{what}: {r:?}");
     assert!(r.quarantined.is_empty(), "{what}: {r:?}");
     for b in blobs {
         assert_eq!(s.get_blob(&Store::blob_hash(b)).unwrap(), *b, "{what}");
@@ -382,7 +371,7 @@ fn finished_format(dir: &Path, blobs: &[Vec<u8>], what: &str) {
 #[test]
 fn kill1_a_kill_inside_the_first_format_batch_of_a_new_store_is_finished_by_the_next_open() {
     let base = tempfile::tempdir().unwrap();
-    drop(Store::open_legacy_for_tests(base.path()).unwrap()); // an empty store with its index
+    empty_store(base.path()); // an empty store with its index
     let done = tempfile::tempdir().unwrap();
     copy_store(base.path(), done.path());
     drop(Store::open(done.path()).unwrap());
@@ -398,40 +387,6 @@ fn kill1_a_kill_inside_the_first_format_batch_of_a_new_store_is_finished_by_the_
             copy.path(),
             &[],
             &format!("new store, log cut at {cut} of {}", full.len()),
-        );
-    }
-}
-
-/// The same for an M1 store being upgraded: a kill anywhere in the upgrade's format batch leaves
-/// the M1 frames acknowledged and the next open finishes the upgrade with a marker.
-#[test]
-fn kill1_a_kill_inside_the_upgrade_batch_of_an_m1_store_is_finished_by_the_next_open() {
-    let blobs: Vec<Vec<u8>> = (0..4).map(|i| payload(i, 0)).collect();
-    let m1 = tempfile::tempdir().unwrap();
-    let mut s = Store::open_legacy_for_tests(m1.path()).unwrap();
-    for b in &blobs {
-        s.put_blob(b).unwrap();
-    }
-    let m1_end = s.log_end();
-    drop(s);
-    let done = tempfile::tempdir().unwrap();
-    copy_store(m1.path(), done.path());
-    assert!(Store::open(done.path()).unwrap().open_report().upgraded);
-    let seg = rdy_store::segment::seg_path(&done.path().join("segments"), 0);
-    let full = std::fs::read(&seg).unwrap();
-    assert!(
-        full.len() as u64 > m1_end.offset,
-        "the upgrade appended its batch"
-    );
-    for cut in m1_end.offset as usize..=full.len() {
-        let copy = tempfile::tempdir().unwrap();
-        copy_store(m1.path(), copy.path());
-        let seg = rdy_store::segment::seg_path(&copy.path().join("segments"), 0);
-        std::fs::write(&seg, &full[..cut]).unwrap();
-        finished_format(
-            copy.path(),
-            &blobs,
-            &format!("upgrade, log cut at {cut} of {}", full.len()),
         );
     }
 }

@@ -130,6 +130,7 @@ pub fn legacy_doc(r: &mut Rdy, view: &str, id: &str, title: &str, parent: Option
                 provenance: agent().provenance(),
                 justification: None,
                 message: "m1".into(),
+                links: ChangeLinks::default(),
             },
         )
         .unwrap();
@@ -419,6 +420,7 @@ fn tree_walks_survive_a_damaged_store_with_a_very_deep_chain() {
                 provenance: agent().provenance(),
                 justification: None,
                 message: "damaged".into(),
+                links: ChangeLinks::default(),
             },
         )
         .unwrap();

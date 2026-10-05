@@ -70,7 +70,8 @@ fn seg1_rdy_open_names_the_missing_segment_in_its_fix() {
     .unwrap();
     land(&mut r, "work").unwrap();
     drop(r);
-    let store = dir.path().join(".rdy/store2");
+    // M2a1 (fmt2): the store is .rdy/store again
+    let store = dir.path().join(".rdy/store");
     std::fs::copy(seg(&store, 0), seg(&store, 2)).unwrap();
     let e = rdy_engine::Rdy::open(dir.path())
         .err()

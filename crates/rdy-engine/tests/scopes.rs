@@ -72,6 +72,7 @@ fn legacy_view(r: &mut Rdy, name: &str) -> BlockId {
                 provenance: writer().provenance(),
                 justification: None,
                 message: "m1".into(),
+                links: ChangeLinks::default(),
             },
         )
         .unwrap();
@@ -101,7 +102,8 @@ fn tag_and_landing_scopes_read_the_frozen_snapshot() {
     assert_eq!(titles(&mut r, &Scope::Canon), ["A", "B"]);
     // a fresh process with a rebuilt index reads the same snapshot
     drop(r);
-    std::fs::remove_file(dir.path().join(".rdy/store2/index.redb")).unwrap();
+    // M2a1 (fmt2): the store is .rdy/store again
+    std::fs::remove_file(dir.path().join(".rdy/store/index.redb")).unwrap();
     let mut r = Rdy::open(dir.path()).unwrap();
     let scope = r.resolve_scope("tag:v1.0.0").unwrap();
     assert_eq!(titles(&mut r, &scope), ["A"]);

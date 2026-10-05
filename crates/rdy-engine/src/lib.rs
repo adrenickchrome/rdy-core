@@ -49,6 +49,8 @@ pub struct Rdy {
     graphs: HashMap<Scope, rdy_graph::Graph>,
     /// As-of scopes in least-recently-used order (front = oldest); at most AS_OF_CACHE_ENTRIES.
     as_of_lru: VecDeque<rdy_model::Hash>,
+    /// version_position results, keyed by scope and valid for one (canon head, tag count).
+    vpos: std::sync::Mutex<version::VposCache>,
 }
 
 fn io(e: std::io::Error) -> RdyError {
@@ -108,7 +110,7 @@ impl Rdy {
                 "open the existing project, or init a different directory",
             ));
         }
-        // dur1: .rdy and .rdy/packs are fsynced into their parents (the store adds .rdy/store2)
+        // dur1: .rdy and .rdy/packs are fsynced into their parents (the store adds .rdy/store)
         rdy_store::fsutil::create_dir_durable(&dot.join("packs")).map_err(io)?;
         load_pack(project, pack)?;
         let cfg = serde_yaml_ng::to_string(&Config {
@@ -120,22 +122,6 @@ impl Rdy {
     }
 
     pub fn open(project: &Path) -> Result<Rdy, RdyError> {
-        Rdy::open_with(project, layout::open_project_store)
-    }
-
-    /// Test hook: `Rdy::open` with the store opened as an M1 binary would, directly at
-    /// `<project>/.rdy/store` (no store2 layout, no stub, no format).
-    #[doc(hidden)]
-    pub fn open_legacy_for_tests(project: &Path) -> Result<Rdy, RdyError> {
-        Rdy::open_with(project, |rdy_dir| {
-            Store::open_legacy_for_tests(&rdy_dir.join(layout::LEGACY_DIR))
-        })
-    }
-
-    fn open_with(
-        project: &Path,
-        open_store: impl FnOnce(&Path) -> Result<Store, rdy_store::StoreError>,
-    ) -> Result<Rdy, RdyError> {
         let cfg_path = project.join(".rdy/config.yaml");
         if !cfg_path.exists() {
             return Err(RdyError::new(
@@ -148,7 +134,7 @@ impl Rdy {
         let cfg: Config = serde_yaml_ng::from_str(&text)
             .map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "fix .rdy/config.yaml"))?;
         let (pack, lineage) = load_pack(project, &cfg.pack)?;
-        let store = open_store(&project.join(".rdy"))?;
+        let store = layout::open_project_store(&project.join(".rdy"))?;
         Ok(Rdy {
             root: project.to_path_buf(),
             store,
@@ -157,6 +143,7 @@ impl Rdy {
             cache: HashMap::new(),
             graphs: HashMap::new(),
             as_of_lru: VecDeque::new(),
+            vpos: Default::default(),
         })
     }
 
@@ -202,12 +189,8 @@ impl Rdy {
                             "read as of a version (tag:<version>) or a landing in rdy log (landing:<id>)",
                         )
                     };
-                    match self.store.get_raw(h) {
-                        Ok((k, _)) if k == rdy_store::kinds::LANDING => {}
-                        Ok(_) | Err(rdy_store::StoreError::NotFound(_)) => {
-                            return Err(not_landing());
-                        }
-                        Err(e) => return Err(e.into()),
+                    if !self.store.has_kind(rdy_store::kinds::LANDING, h)? {
+                        return Err(not_landing());
                     }
                     self.store.snapshot_at(h)?
                 }
@@ -261,6 +244,8 @@ pub struct FsckReport {
     pub frames: usize,
     pub landings: usize,
     pub versions: usize,
+    pub views: usize,
+    pub landed_changes: usize,
 }
 
 impl Rdy {
@@ -272,10 +257,13 @@ impl Rdy {
         }
         let chain: Vec<rdy_model::Hash> = landings.iter().map(|(h, _)| *h).collect();
         let versions = self.check_tags(&chain)?;
+        let objects = self.store.check_objects()?;
         Ok(FsckReport {
             frames,
             landings: landings.len(),
             versions,
+            views: objects.views,
+            landed_changes: objects.landed_changes,
         })
     }
 }

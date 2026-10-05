@@ -93,15 +93,6 @@ fn mark1_every_store_write_ends_with_a_marker_that_matches_its_batch() {
     );
 }
 
-#[test]
-fn mark1_a_reopened_store_uses_the_marker_rule() {
-    let base = tempfile::tempdir().unwrap();
-    let dir = base.path().join("s");
-    Store::open(&dir).unwrap().put_blob(b"marked").unwrap();
-    let s = Store::open(&dir).unwrap();
-    assert!(s.open_report().marker_rule, "{:?}", s.open_report());
-}
-
 /// Review Focus 1: the M1 rule would treat a lagging index's end as the acknowledged boundary and
 /// silently truncate the acknowledged batches after the damage.
 #[test]
@@ -243,16 +234,17 @@ fn kill1_a_clean_close_releases_the_lock_a_spawned_child_still_shares() {
     assert!(!r.unclean_shutdown, "{r:?}");
 }
 
-/// An open that fails after building its `Store` (here: the log names a newer reader) must not
-/// erase a previous kill's sentinel on drop.
+/// An open that fails after building its `Store` (here: the log names another store format) must
+/// not erase a previous kill's sentinel on drop.
 #[test]
 fn kill1_a_refused_open_keeps_a_kills_sentinel() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
     let mut s = Store::open(&dir).unwrap();
+    // M2a1 (fmt2): the one format ref, set to another format, in place of min_reader
     s.set_refs(vec![(
-        rdy_store::format::REF_MIN_READER.into(),
-        b"3".to_vec(),
+        rdy_store::format::REF_STORE_FORMAT.into(),
+        b"4".to_vec(),
     )])
     .unwrap();
     let copy = base.path().join("copy");
@@ -260,7 +252,7 @@ fn kill1_a_refused_open_keeps_a_kills_sentinel() {
     drop(s);
     let e = Store::open(&copy)
         .err()
-        .expect("the log says a newer rdy wrote it");
+        .expect("the log says another rdy build wrote it");
     assert!(matches!(e, StoreError::Format { .. }), "{e}");
     assert!(
         copy.join(rdy_store::INDEX_OPEN_SENTINEL).exists(),
@@ -458,24 +450,6 @@ fn kill1_the_sentinel_never_truncates_through_a_symlink() {
 }
 
 #[test]
-fn ckpt1_the_m1_test_writer_commits_its_index_durably() {
-    let base = tempfile::tempdir().unwrap();
-    let dir = base.path().join("s");
-    let mut s = Store::open_legacy_for_tests(&dir).unwrap();
-    s.put_blob(b"m1").unwrap();
-    let end = s.log_end();
-    let copy = base.path().join("copy");
-    copy_store(&dir, &copy);
-    // read the copy's durable index directly: what a kill of an M1 process leaves
-    let idx = rdy_store::index::Index::open(&copy.join("index.redb")).unwrap();
-    assert_eq!(
-        idx.indexed_upto().unwrap(),
-        end,
-        "the durable index covers the M1 write"
-    );
-}
-
-#[test]
 fn ckpt1_the_mcp_server_checkpoints_when_idle() {
     let (dir, r) = project();
     drop(r);
@@ -490,7 +464,8 @@ fn ckpt1_the_mcp_server_checkpoints_when_idle() {
     c.call("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "fields": {"title": "Idle", "doc_type": "glossary"}}]})).ok();
     std::thread::sleep(Duration::from_secs(3));
     let copy = tempfile::tempdir().unwrap();
-    copy_store(&dir.path().join(".rdy/store2"), copy.path());
+    // M2a1 (fmt2): the store is .rdy/store again
+    copy_store(&dir.path().join(".rdy/store"), copy.path());
     assert_eq!(
         Store::open(copy.path())
             .unwrap()

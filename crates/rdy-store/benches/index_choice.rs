@@ -41,14 +41,13 @@ fn redb(c: &mut Criterion) {
             for (n, chunk) in ks.chunks(10).enumerate() {
                 let entries: Vec<IndexEntry> = chunk
                     .iter()
-                    .map(|h| {
-                        IndexEntry::Object(
-                            *h,
-                            Location {
-                                segment: 0,
-                                offset: n as u64,
-                            },
-                        )
+                    .map(|h| IndexEntry::Object {
+                        kind: rdy_store::kinds::BLOB_CHUNK,
+                        hash: *h,
+                        loc: Location {
+                            segment: 0,
+                            offset: n as u64,
+                        },
                     })
                     .collect();
                 idx.apply(
@@ -67,14 +66,13 @@ fn redb(c: &mut Criterion) {
     for (n, chunk) in ks.chunks(1000).enumerate() {
         let entries: Vec<IndexEntry> = chunk
             .iter()
-            .map(|h| {
-                IndexEntry::Object(
-                    *h,
-                    Location {
-                        segment: 0,
-                        offset: n as u64,
-                    },
-                )
+            .map(|h| IndexEntry::Object {
+                kind: rdy_store::kinds::BLOB_CHUNK,
+                hash: *h,
+                loc: Location {
+                    segment: 0,
+                    offset: n as u64,
+                },
             })
             .collect();
         idx.apply(

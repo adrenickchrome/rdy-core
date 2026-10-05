@@ -587,3 +587,33 @@ fn name_errors_carry_a_corrected_payload_and_schema_explains_names() {
             .any(|t| t["type"] == "folder")
     );
 }
+
+/// Guard (final review fix round 1): `rdy_overview` counts each view's changes from its head
+/// (`ViewHead.len`), which must equal the view's included set, before and after a landing.
+#[test]
+fn chain1_overview_counts_each_views_changes() {
+    let (_d, mut st) = state();
+    start(&mut st);
+    seed(&mut st);
+    rdy_write(
+        &mut st,
+        serde_json::from_value(json!({"ops": [
+            {"op": "create", "type": "doc", "fields": {"title": "Second", "doc_type": "glossary"}}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+    let count = |st: &mut McpState| {
+        let ov = rdy_overview(st, serde_json::from_value(json!({})).unwrap()).unwrap();
+        assert_eq!(ov["views"][0]["name"], "run-7");
+        ov["views"][0]["changes"].clone()
+    };
+    assert_eq!(count(&mut st), 2);
+    let p = rdy_propose(
+        &mut st,
+        serde_json::from_value(json!({"title": "two"})).unwrap(),
+    )
+    .unwrap();
+    st.rdy.land(&approver(), p["id"].as_str().unwrap()).unwrap();
+    assert_eq!(count(&mut st), 0);
+}

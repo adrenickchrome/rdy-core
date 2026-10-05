@@ -32,6 +32,7 @@ fn change(view: &str, ops: Vec<Op>) -> Change {
         provenance: prov(Role::Writer),
         justification: None,
         message: String::new(),
+        links: ChangeLinks::default(),
     }
 }
 

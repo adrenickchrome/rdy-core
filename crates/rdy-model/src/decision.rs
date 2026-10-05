@@ -14,6 +14,9 @@ pub const IMPLEMENTS: &str = "implements";
 pub const DESCRIBES: &str = "describes";
 pub const AFFECTS: &str = "affects";
 
+/// The decision field naming when a decision takes effect (RFC 3339 UTC, like `recorded_at`).
+pub const EFFECTIVE_FROM: &str = "effective_from";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecisionStatus {
     Proposed,
@@ -38,4 +41,13 @@ pub fn is_frozen(b: &Block) -> bool {
         status(b),
         Some(DecisionStatus::Accepted | DecisionStatus::Rejected)
     )
+}
+
+/// When a decision takes effect: its `effective_from`, otherwise when it was recorded. `None` for
+/// a block that is not a decision.
+pub fn effective_from(b: &Block) -> Option<&str> {
+    if b.block_type != DECISION {
+        return None;
+    }
+    b.field_str(EFFECTIVE_FROM).or(b.field_str("recorded_at"))
 }

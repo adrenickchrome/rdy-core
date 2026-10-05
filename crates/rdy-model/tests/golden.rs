@@ -60,6 +60,7 @@ fn change(justification: Option<Justification>) -> Change {
         },
         justification,
         message: "golden".into(),
+        links: ChangeLinks::default(),
     }
 }
 
@@ -69,9 +70,10 @@ fn canonical_encoding_is_frozen() {
         block().version_hash().to_string(),
         "3900f27b4ae5bff77eb9b5e6313e5f30b77df8fb3274ce3d56e1b8074356d71e"
     );
+    // M2a1: Change gained links (three absent options, 00 00 00); the hash was recomputed
     assert_eq!(
         change(None).id().to_string(),
-        "2d24ead4674748aa8b8d0788ec49ee427f3adba8e33eabf49078271aadd8215b"
+        "28f9ecd6025c8aa5263814e2e20f299b72d7cdc73955de2df3ad8d8e3517e604"
     );
     assert_eq!(
         change(Some(Justification::Implements(
@@ -79,7 +81,7 @@ fn canonical_encoding_is_frozen() {
         )))
         .id()
         .to_string(),
-        "b6e750bf9649c363e3be5e6c022b6bea296ef80e2d7188d09fdb76df49a818ff"
+        "abf5f9e885d140c62af8f9b47a862804e9e5ac8c4adf1b7a5b0c357256197289"
     );
     assert_eq!(
         change(Some(Justification::Editorial {
@@ -88,6 +90,6 @@ fn canonical_encoding_is_frozen() {
         }))
         .id()
         .to_string(),
-        "be552e118939bf6bdce4cc62db8ead08cb5c8ce833b25bd6c274d71e3f434282"
+        "d12135aab465ce3f0c596a04b4129b55b4f7507c951ed35bd64666b1aa51217a"
     );
 }

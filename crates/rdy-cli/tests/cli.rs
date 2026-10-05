@@ -154,7 +154,8 @@ fn fsck_detects_corruption() {
     let (dir, _) = project_with_term();
     // Seal segment 0 by starting segment 1: Store::open only repairs (truncates) the tail of the
     // CURRENT segment, so corruption must be in a sealed one for fsck to see it.
-    let segs = dir.path().join(".rdy/store2/segments");
+    // M2a1 (fmt2): the store is .rdy/store again
+    let segs = dir.path().join(".rdy/store/segments");
     let seg = segs.join("seg-000000.log");
     std::fs::File::create(segs.join("seg-000001.log")).unwrap();
     let (ok, _, err) = rdy(dir.path(), &["fsck"]);
@@ -304,6 +305,7 @@ fn status_warns_about_legacy_colon_views() {
                     provenance: prov,
                     justification: None,
                     message: String::new(),
+                    links: ChangeLinks::default(),
                 },
             )
             .unwrap();
@@ -398,4 +400,77 @@ fn new_ls_and_paths_end_to_end() {
     );
     assert_eq!(old["id"], show["id"]);
     assert!(json(dir.path(), &["impact", "wallets/transactions"]).is_array());
+}
+
+/// Review Focus 6: `rdy --json log` names each landing's assurance; the text is unchanged.
+#[test]
+fn repr1_log_json_shows_each_landings_assurance() {
+    let dir = tempfile::tempdir().unwrap();
+    json(dir.path(), &["init"]);
+    json(dir.path(), &["new", "folder", "probe"]);
+    json(dir.path(), &["new", "doc", "probe/one", "--title", "One"]);
+    let p = json(dir.path(), &["propose", "--view", "work", "--title", "p"]);
+    json(dir.path(), &["approve", p["id"].as_str().unwrap()]);
+    let log = json(dir.path(), &["log"]);
+    assert_eq!(log[0]["assurance"], "local");
+    assert_eq!(log[0]["approved_by"], "human:tester");
+    let (_, text, _) = rdy(dir.path(), &["log"]);
+    assert!(!text.contains("local"), "{text}");
+}
+
+/// Guard (final review fix round 1): `rdy status` counts each view's changes from its head
+/// (`ViewHead.len`), which must equal the view's included set.
+#[test]
+fn chain1_status_counts_each_views_changes() {
+    use rdy_engine::*;
+    use rdy_model::Role;
+    let dir = tempfile::tempdir().unwrap();
+    json(dir.path(), &["init"]);
+    {
+        let mut r = Rdy::open(dir.path()).unwrap();
+        let w = Session {
+            actor: "agent:a".into(),
+            run: None,
+            role: Role::Writer,
+        };
+        for (view, title) in [("work", "One"), ("work", "Two"), ("side", "Three")] {
+            r.write(
+                &w,
+                WriteRequest {
+                    view: view.into(),
+                    ops: serde_json::from_value(serde_json::json!([{"op": "create", "type": "doc", "fields": {"title": title, "doc_type": "glossary"}}])).unwrap(),
+                    justification: None,
+                    message: String::new(),
+                },
+            )
+            .unwrap();
+        }
+    }
+    let counts = |st: &Value| -> Vec<(String, u64)> {
+        let mut v: Vec<(String, u64)> = st["views"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| {
+                (
+                    v["name"].as_str().unwrap().to_string(),
+                    v["changes"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    let st = json(dir.path(), &["status"]);
+    assert_eq!(
+        counts(&st),
+        vec![("side".to_string(), 1), ("work".to_string(), 2)]
+    );
+    let p = json(dir.path(), &["propose", "--view", "work", "--title", "two"]);
+    json(dir.path(), &["approve", p["id"].as_str().unwrap()]);
+    let st = json(dir.path(), &["status"]);
+    assert_eq!(
+        counts(&st),
+        vec![("side".to_string(), 1), ("work".to_string(), 0)]
+    );
 }

@@ -30,7 +30,11 @@ fn apply_persists_across_reopen() {
         let idx = Index::open(&path).unwrap();
         idx.apply(
             &[
-                IndexEntry::Object(h, loc),
+                IndexEntry::Object {
+                    kind: rdy_store::kinds::BLOB_CHUNK,
+                    hash: h,
+                    loc,
+                },
                 IndexEntry::Producer {
                     version: v,
                     change: c,
@@ -49,7 +53,8 @@ fn apply_persists_across_reopen() {
     }
     let idx = Index::open(&path).unwrap();
     assert_eq!(idx.object(&h).unwrap(), Some(loc));
-    assert_eq!(idx.producer(&v).unwrap(), Some(c));
+    // merge1 fix round 1: a version keeps every producer, so the index lists them
+    assert_eq!(idx.producers(&v).unwrap(), vec![c]);
     assert_eq!(idx.get_ref("canon").unwrap(), Some(vec![9]));
     let views = idx.refs_with_prefix("view/").unwrap();
     assert_eq!(
@@ -80,13 +85,17 @@ fn a_malformed_producer_entry_is_a_decode_error_not_a_panic() {
             let mut t = w
                 .open_table(redb::TableDefinition::<&[u8], &[u8]>::new("producers"))
                 .unwrap();
-            t.insert(&[7u8; 32][..], &b"short"[..]).unwrap();
+            // merge1 fix round 1: an entry is the version then the change, so a key with a short
+            // change hash is the malformed entry
+            let mut key = vec![7u8; 32];
+            key.extend_from_slice(b"short");
+            t.insert(&key[..], &[][..]).unwrap();
         }
         w.commit().unwrap();
     }
     let idx = Index::open(&path).unwrap();
     assert!(matches!(
-        idx.producer(&Hash([7u8; 32])),
+        idx.producers(&Hash([7u8; 32])),
         Err(rdy_store::StoreError::Decode(_))
     ));
 }
@@ -106,8 +115,15 @@ fn kill1_redb_repairs_a_copy_of_a_live_index_at_open_and_then_reports_it_clean()
         segment: 0,
         offset: 64,
     };
-    idx.apply(&[IndexEntry::Object(Hash::of(b"pending"), upto)], upto)
-        .unwrap();
+    idx.apply(
+        &[IndexEntry::Object {
+            kind: rdy_store::kinds::BLOB_CHUNK,
+            hash: Hash::of(b"pending"),
+            loc: upto,
+        }],
+        upto,
+    )
+    .unwrap();
     let copy = dir.path().join("copy.redb");
     std::fs::copy(&path, &copy).unwrap();
     let c = Index::open_checked(&copy).unwrap();
@@ -120,4 +136,51 @@ fn kill1_redb_repairs_a_copy_of_a_live_index_at_open_and_then_reports_it_clean()
     drop(idx);
     let c = Index::open_checked(&path).unwrap();
     assert!(c.clean && !c.repaired_at_open, "a cleanly closed file");
+}
+
+#[test]
+fn kind1_typed_entries_coexist_and_the_untyped_entry_is_the_first_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let idx = Index::open(&dir.path().join("index.redb")).unwrap();
+    let h = Hash::of(b"same bytes");
+    let (a, b) = (
+        Location {
+            segment: 0,
+            offset: 10,
+        },
+        Location {
+            segment: 0,
+            offset: 90,
+        },
+    );
+    idx.apply(
+        &[
+            IndexEntry::Object {
+                kind: rdy_store::kinds::BLOB_CHUNK,
+                hash: h,
+                loc: a,
+            },
+            IndexEntry::Object {
+                kind: rdy_store::kinds::SNAPSHOT,
+                hash: h,
+                loc: b,
+            },
+        ],
+        Location {
+            segment: 0,
+            offset: 200,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        idx.typed(rdy_store::kinds::BLOB_CHUNK, &h).unwrap(),
+        Some(a)
+    );
+    assert_eq!(idx.typed(rdy_store::kinds::SNAPSHOT, &h).unwrap(), Some(b));
+    assert_eq!(idx.typed(rdy_store::kinds::TAG, &h).unwrap(), None);
+    assert_eq!(
+        idx.object(&h).unwrap(),
+        Some(a),
+        "untyped: the first written"
+    );
 }

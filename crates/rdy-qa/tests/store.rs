@@ -299,17 +299,20 @@ fn blob1_a_manifest_preuploaded_as_a_chunk_still_reads() {
     assert_eq!(s.get_blob(&h).unwrap(), bytes);
 }
 
+/// kind1: manifest-shaped bytes stored first under another kind no longer stand in for the
+/// manifest: `put_blob` writes its own manifest-kind object, and both objects read.
 #[test]
-fn blob1_a_manifest_of_another_kind_is_still_refused() {
+fn kind1_manifest_bytes_under_another_kind_do_not_block_the_blob() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = Store::open(dir.path()).unwrap();
     let bytes = b"manifest-shaped bytes under a non-blob kind".to_vec();
     let payload = manifest_payload_of(&bytes);
-    let other = s.write(vec![(kinds::SNAPSHOT, payload)]).unwrap()[0];
-    s.put_blob(&bytes).unwrap();
-    assert_eq!(Store::blob_hash(&bytes), other);
-    assert!(matches!(s.get_blob(&other), Err(StoreError::Decode(_))));
-    assert!(!s.has_blob(&other).unwrap());
+    let other = s.write(vec![(kinds::SNAPSHOT, payload.clone())]).unwrap()[0];
+    let h = s.put_blob(&bytes).unwrap();
+    assert_eq!(h, other);
+    assert!(s.has_blob(&h).unwrap());
+    assert_eq!(s.get_blob(&h).unwrap(), bytes);
+    assert_eq!(s.get_kind(kinds::SNAPSHOT, &h).unwrap(), payload);
 }
 
 const MIB: usize = 1024 * 1024;

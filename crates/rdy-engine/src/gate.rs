@@ -1,7 +1,8 @@
 use crate::error::*;
 use crate::{Materialized, Rdy, Scope, Session, rfc3339_now};
-use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Op, Proposal, decision};
+use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Op, Proposal, decision};
 use rdy_schema::{Issue, Severity, validate_block};
+use rdy_store::LandRequest;
 use serde::Serialize;
 use std::collections::BTreeSet;
 
@@ -41,22 +42,16 @@ fn targets(b: &Block) -> BTreeSet<BlockId> {
 impl Rdy {
     fn changes_of(&self, ids: &[Hash]) -> Result<Vec<Change>, RdyError> {
         ids.iter()
-            .map(|h| self.store.get::<Change>(h).map_err(RdyError::from))
+            .map(|h| self.store.change(h).map_err(RdyError::from))
             .collect()
     }
 
-    /// The landing that already carried any of `p`'s changes into canon. Landing removes a
-    /// proposal's changes from its view, so a proposal whose changes are all still in its view
-    /// has not landed, and the common case costs one view read.
+    /// The landing that already carried any of `p`'s changes into canon: one index lookup per
+    /// change (lidx1).
     fn landed_as(&self, p: &Proposal) -> Result<Option<Hash>, RdyError> {
-        let in_view = self.store.view(&p.view)?.changes;
-        if p.changes.iter().all(|c| in_view.contains(c)) {
-            return Ok(None);
-        }
-        for (landing, rec) in self.store.landings()? {
-            let landed: Proposal = self.store.get(&rec.proposal)?;
-            if p.changes.iter().any(|c| landed.changes.contains(c)) {
-                return Ok(Some(landing));
+        for c in &p.changes {
+            if let Some(l) = self.store.landing_of(c)? {
+                return Ok(Some(l));
             }
         }
         Ok(None)
@@ -64,17 +59,14 @@ impl Rdy {
 
     /// Validates the canon that would result from landing `changes`.
     fn prospective_issues(&mut self, changes: &[Change]) -> Result<Vec<Issue>, RdyError> {
-        // replay onto canon to surface E_STALE_BASE / E_FROZEN early
-        let mut snap = self.store.canon_state()?;
-        for c in changes {
-            for op in &c.ops {
-                rdy_store::apply_op(&self.store, &mut snap, op)?;
-            }
-        }
+        // merge onto canon to surface E_STALE_BASE / E_ALREADY_EXISTS / E_FROZEN early
+        let (_, applied) = self
+            .store
+            .merge_checked(&self.store.canon_state()?, changes)?;
         let mut next: Materialized = self.materialized(&Scope::Canon)?.clone();
         let mut touched = BTreeSet::new();
         let mut deleted = BTreeSet::new();
-        for c in changes {
+        for c in applied.iter().map(|&i| &changes[i]) {
             next.apply(&c.ops);
             for op in &c.ops {
                 match op {
@@ -337,14 +329,17 @@ impl Rdy {
             ));
         }
         let pid = parse_hash(proposal)?;
-        if self.store.get_raw(&pid)?.0 != rdy_store::kinds::PROPOSAL {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                format!("{proposal} is not a proposal"),
-                "pass the id returned by rdy_propose",
-            ));
+        if !self.store.has_kind(rdy_store::kinds::PROPOSAL, &pid)? {
+            if self.store.has(&pid)? {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    format!("{proposal} is not a proposal"),
+                    "pass the id returned by rdy_propose",
+                ));
+            }
+            return Err(rdy_store::StoreError::NotFound(pid).into());
         }
-        let p: Proposal = self.store.get(&pid)?;
+        let p = self.store.proposal(&pid)?;
         // land1: a landed change is already in canon; replaying it would only fail obscurely
         if let Some(landing) = self.landed_as(&p)? {
             return Err(RdyError::new(
@@ -414,15 +409,24 @@ impl Rdy {
             return Err(e);
         }
 
-        // 3. dry run: validate the final change list before writing anything
-        let accept = (!accept_ops.is_empty()).then(|| Change {
-            view: p.view.clone(),
-            ops: accept_ops,
-            deps: vec![],
-            provenance: s.provenance(),
-            justification: None,
-            message: format!("accept decisions in {}", p.title),
-        });
+        // 3. dry run: validate the final change list before writing anything. The acceptance
+        // carries the deps the store gives it when it commits it to the view (the view's own
+        // producers of its bases), so the merge orders it after the changes it accepts.
+        let accept = if accept_ops.is_empty() {
+            None
+        } else {
+            let mut change = Change {
+                view: p.view.clone(),
+                ops: accept_ops,
+                deps: vec![],
+                provenance: s.provenance(),
+                justification: None,
+                message: format!("accept decisions in {}", p.title),
+                links: ChangeLinks::default(),
+            };
+            change.deps = self.store.change_deps(&change, Some(&p.view))?;
+            Some(change)
+        };
         let mut all = changes;
         all.extend(accept.clone());
         let mut issues = self.prospective_issues(&all)?;
@@ -434,24 +438,19 @@ impl Rdy {
         let view_base = self.store.view(&p.view)?.base;
         issues.extend(self.rekeyed_warnings(view_base, &all)?);
 
-        // 4. write the acceptance change, then land
-        let result = (|| -> Result<_, RdyError> {
-            let target = match accept {
-                None => pid,
-                Some(change) => {
-                    let mut p = p;
-                    let id = self.store.commit_to_view(&p.view, change)?;
-                    p.changes.push(id);
-                    self.store.put(rdy_store::kinds::PROPOSAL, &p)?
-                }
-            };
-            Ok(self.store.land(&target, s.provenance())?)
-        })();
-        // the view may have changed even if a later step failed: never leave caches stale
+        // 4. land in one write (atom1): the acceptance change, the final proposal version, the
+        // snapshot, the landing, the view's rebase and the refs
+        let result = self.store.land_atomic(LandRequest {
+            proposal: pid,
+            accept,
+            approver: s.provenance(),
+            chosen: None,
+        });
+        // never leave caches stale, whatever the write did
         self.invalidate();
-        let landing = result?;
+        let out = result?;
         Ok(LandInfo {
-            landing: landing.to_string(),
+            landing: out.landing.to_string(),
             warnings: issues,
         })
     }

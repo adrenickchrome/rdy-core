@@ -192,6 +192,7 @@ fn inject_engine_types(pack: &mut Pack) {
         ),
         ("decided_at", f(FieldKind::Str, false, &[])),
         ("recorded_at", f(FieldKind::Str, false, &[])),
+        ("effective_from", f(FieldKind::Str, false, &[])),
         ("review_by", f(FieldKind::Str, false, &[])),
         ("kind", f(FieldKind::Str, false, &[])),
         ("placeholders", f(FieldKind::List, false, &[])),

@@ -214,3 +214,112 @@ targets were met in every run: cold start (median of 3) 0.46-0.47 s, query p99 2
 `crates/rdy-qa/qa-baseline.json`. Medians in ms: `write_single` 2.628, `write_batch_200` 4.691,
 `propose_land_500_flat` 89.492, `cold_open` 46.818, `cold_open_lagging` 58.126 (caught up 4,497
 frames), `render` 1056.201, `export_import` 257.593.
+
+## M2a1: store format
+
+Measured 2026-10-05, release build, Rust 1.99.0, on the **macOS** class: macOS 26.6.2 / Apple M4 Pro /
+APFS. Linux was not re-measured: its rows above and its `qa-baseline.json` class still hold the
+M2.0 numbers. What changed for the write path: a view's record is now a chain of `VIEW_OP` frames
+(one `Create` op on a view's first write, one `Commit` op per write) in place of one view record
+rewritten whole on every write; a landing is one atomic batch; propose and land merge.
+Reproduce: `cargo test -p rdy-engine --release --test perf_budget -- --ignored --nocapture`
+(the two ignored tests take turns, so they do not disturb each other's flushes) and
+`cargo run -q -p rdy-qa --release --bin qa-perf` (or `cargo qa --only perf`).
+
+### Log bytes per write (`chain1_log_bytes_per_write_stay_flat_to_10k`)
+
+10,000 single-claim writes into one view through `Rdy::write` (a setup write that creates one doc
+and 100 sections comes first; claims go round-robin into the sections). Bytes are the growth of the
+log end per write.
+
+| measurement | result |
+|---|---|
+| mean bytes per write, writes 900-1,000 | 480.0 |
+| mean bytes per write, writes 9,900-10,000 | 486.0 |
+| ratio (asserted <= 1.1) | 1.0125 |
+| write time, first 100 / last 100 (mean) | 4.4 ms / 5.4 ms (second run: 4.9 ms / 8.8 ms) |
+| `propose` of the 10,001-change view | 85.0 ms (second run: 161.9 ms) |
+| `land` of that proposal | 121.3 ms (second run: 132.0 ms) |
+
+M1's view record re-encoded the whole included set on every write: about 350 KB per write at 11k
+changes, 1.6 GB for the 100k project. A write now appends about 480 bytes at any length (6 bytes more
+at 10k, which was not investigated). The chained record removes the one size-dependent write cost
+that "What would help" named. The runs differ in their timings (a third run, which printed slow
+writes, saw eight consecutive writes over 20 ms around write 2,700); the byte counts were the same
+in every run.
+
+### `perf_budget` at 100k blocks (`spec_11_targets_at_100k_blocks`, 200 one-claim writes)
+
+Three consecutive runs, each alone in its process. Target (M2.0's restated one, macOS): write p99 <
+one durable flush p99 + 1 ms.
+
+| run | write p50 | write p95 | write p99 | write max | flush p99 | write target |
+|---|---|---|---|---|---|---|
+| 1 | 5.01 ms | 6.19 ms | 17.08 ms | 46.45 ms | 5.27 ms | 6.27 ms |
+| 2 | 4.59 ms | 5.92 ms | 17.38 ms | 45.70 ms | 4.49 ms | 5.49 ms |
+| 3 | 4.87 ms | 6.28 ms | 17.23 ms | 41.50 ms | 81.49 ms (one slow flush in 50) | 82.49 ms |
+
+Verdict: **missed** on macOS: write p99 17.1-17.4 ms against 5.5-6.3 ms (run 3's target is not
+meaningful: one 4 KB flush in its 50 took tens of ms; against the other runs' 5.3 ms it also
+misses). The body improved on M2.0 (p50 6.25 ms, p95 7.45 ms): p50 is 4.6-5.0 ms and p95 6.2 ms,
+close to the flush p99 (4.5-5.3 ms here). The p99 got worse than M2.0's 10.90 ms, and the cause is
+two writes in the 200, not the body. Two extra runs that printed every write over 9 ms found
+exactly two: write 0 (19.0 and 19.7 ms) and write 199 (40.9 and 44.7 ms). In a 200-sample, p99 is
+the second-slowest write.
+
+- **Write 0** is the first write after the test has queried the project. It is not the view's
+  first write (the generator has already made about 11k writes into view `work`), it writes no
+  `Create` op, and it is not a chain cost. The test builds the 100k-block graph (`graph(&work)`)
+  before the loop. `update_cache` (`crates/rdy-engine/src/lib.rs`) invalidates a view's cached graph
+  on every write, and write 0 is the write that drops it: with timing printed inside `Rdy::write`
+  (temporary, removed), write 0 spent 4.7-5.2 ms in `commit_to_view_at` (the same as writes 1-5)
+  and 13-18 ms in `update_cache`, all of it in dropping the `Graph` (18.3 ms in the run that timed
+  the drop alone; `apply` of the ops took 22-124 us). Writes 1-5 found no graph to drop and took
+  4.1-4.9 ms. The cost follows the block count, not the chain: write 0 after open then `graph`
+  took 3.9 ms at 1k blocks, 7.3 ms at 10k and 20-25 ms at 100k, while the store's part of the write
+  stayed at about 4-6 ms. The invalidation is M1 code (`fc24bbb`), unchanged by M2a1, so M2.0 paid
+  it too wherever a graph was cached before a write. This is a block-count-dependent cost that
+  stays, not an intended one (see the concern in the Task 13 report).
+- **Write 199** is a checkpoint. A write checkpoints the index once `CHECKPOINT_FRAMES` (1,000)
+  frames are pending. A write now carries more frames than in M2.0 (the extra `VIEW_OP` frame), so
+  the first checkpoint after the project is generated falls inside the 200 writes where M2.0's
+  fell after them. In the 10,000-write run, writes over 20 ms recur every 400 writes (writes 2,778,
+  3,178, 3,578): the same checkpoint, amortised to well under 0.2 ms per write. The checkpoint is
+  the M2.0 design (index follows by checkpoint) plus the intended extra frame; the write 0 cost
+  above is not intended: it is the inline drop of the cached graph, which grows with the block count.
+
+The assertion in `perf_budget` is kept as specified, and no product code was changed for the miss.
+Other targets, same three runs: cold start (median of 3) 0.69, 0.71 and 0.69 s; query p99 3.8, 7.1
+and 5.2 us; `version_position` p99 1.96, 1.38 and 1.29 us (M2.0: 4.4 us; the cache of Task 11, one
+walk only when canon's head, the view's head or the tag count changes); all met.
+
+### `qa-perf` against the baseline
+
+`cargo qa --only perf` passed: every operation is within the gate's budget against the baseline for
+`macOS 26.6.2 / Apple M4 Pro / APFS` (the M2.0 baseline), so the gate was not rebaselined. Medians
+in ms:
+
+| op | baseline | M2a1 | change |
+|---|---|---|---|
+| `write_single` | 4.250 | 4.321 | +2% |
+| `write_batch_200` | 7.039 | 8.064 | +15% |
+| `propose_land_500_flat` | 117.674 | 122.313 | +4% |
+| `context` | 40.504 | 40.477 | 0% |
+| `impact` | 40.474 | 40.485 | 0% |
+| `version_position` | 3.582 | 0.001 | cache hit (p95 4.9 ms is the first, uncached call) |
+| `resolve_path` | 34.479 | 34.026 | -1% |
+| `tree_full` | 1.379 | 1.238 | -10% |
+| `render` | 1261.995 | 1220.097 | -3% |
+| `export_import` | 562.855 | 547.997 | -3% |
+| `cold_open` | 84.975 | 86.811 | +2% |
+| `cold_open_lagging` | 91.471 | 110.650 | +21% |
+
+`write_batch_200` (+15%) and `propose_land_500_flat` (+4%) carry the intended costs: one more frame
+per write, and a merge in propose and land. `cold_open_lagging` is the largest move (+21%; a
+standalone `qa-perf` run gave 105.96 ms, so it is not noise): it catches up 4,551 frames from the
+log in place of 4,497, 1% more, yet takes about 15-19 ms longer. The likely cause is the index
+entries a caught-up frame now makes (the typed (kind, hash) entry and the `view_ops` entry); that
+was not profiled. It is inside the gate's budget and is still 18x under the < 2 s target, so it
+was not investigated further and not rebaselined.
+
+Rebaselined: nothing. `qa-baseline.json` is unchanged, for both classes.

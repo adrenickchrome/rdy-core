@@ -2,8 +2,8 @@ use crate::error::*;
 use crate::{Materialized, Rdy, Scope, Session};
 use rdy_model::tree;
 use rdy_model::{
-    Block, BlockId, Change, FieldValue, Hash, Justification, Link, Op, RefMode, decision,
-    order_between, ref_spans,
+    Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Justification, Link, Op, RefMode,
+    decision, order_between, ref_spans,
 };
 use rdy_schema::{Issue, Pack, has_errors, skeleton_gaps, validate_block};
 use serde::{Deserialize, Serialize};
@@ -1292,6 +1292,17 @@ impl Rdy {
     }
 
     pub fn write(&mut self, session: &Session, req: WriteRequest) -> Result<WriteResult, RdyError> {
+        self.write_linked(session, req, ChangeLinks::default())
+    }
+
+    /// `write`, with `links` (intent, alternative, client nonce) recorded on the change. MCP and
+    /// the CLI don't use it yet: M2d1 adds intents, and M2f the nonce.
+    pub fn write_linked(
+        &mut self,
+        session: &Session,
+        req: WriteRequest,
+        links: ChangeLinks,
+    ) -> Result<WriteResult, RdyError> {
         if !session.role.can_write() {
             return Err(RdyError::new(
                 E_PERMISSION,
@@ -1316,6 +1327,7 @@ impl Rdy {
             provenance: session.provenance(),
             justification: req.justification,
             message: req.message,
+            links,
         };
         let id = self
             .store
