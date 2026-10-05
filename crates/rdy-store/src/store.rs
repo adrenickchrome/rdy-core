@@ -2,7 +2,7 @@ use crate::error::StoreError;
 use crate::fsutil;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
-use crate::segment::{CrashPoint, Location, SegmentLog, find_gap, seg_path};
+use crate::segment::{CrashPoint, Location, SegmentLog, find_gap, log_has_marker, seg_path};
 use rdy_model::{Block, Change, Hash, Op};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
@@ -17,8 +17,30 @@ const CHUNK: usize = 1024 * 1024;
 /// `rdy_asset` accepts.
 pub const MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 
+/// What one `Store::open` did, for tests, `rdy` diagnostics and the QA gate.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OpenReport {
+    /// This open used the marker rule (the acknowledged boundary is the last valid batch marker).
+    pub marker_rule: bool,
+    /// Torn or unacknowledged tails this open moved aside (marker rule).
+    pub quarantined: Vec<PathBuf>,
+    /// This open upgraded an M1 log.
+    pub upgraded: bool,
+    /// The `index.open` sentinel was present: the last process did not close the store.
+    pub unclean_shutdown: bool,
+    /// redb repaired the index at open or in its integrity check.
+    pub redb_repaired: bool,
+    /// The index was set aside and rebuilt from the whole log.
+    pub index_rebuilt: bool,
+    /// Frames replayed into the index by this open.
+    pub caught_up_frames: u64,
+    /// Index commits the catch-up made.
+    pub catch_up_commits: u32,
+}
+
 pub struct Store {
     dir: PathBuf,
+    report: OpenReport,
     log: SegmentLog,
     index: Index,
     _lock: File,
@@ -32,8 +54,8 @@ pub struct Store {
 /// Opens the index, verifies its integrity and reads its acknowledged boundary (None if it has
 /// none yet). An index that fails to open, fails the check, or makes redb panic is renamed to
 /// `index.redb.damaged-<n>` and replaced by an empty one, which the caller rebuilds from the
-/// log; the boundary is then unknown.
-fn open_index(dir: &Path) -> Result<(Index, Option<Location>), StoreError> {
+/// log; the boundary is then unknown. The flag says whether the index was set aside.
+fn open_index(dir: &Path) -> Result<(Index, Option<Location>, bool), StoreError> {
     let path = dir.join("index.redb");
     // redb can panic on a corrupt page instead of returning an error; that is damage too
     let opened = std::panic::catch_unwind(|| {
@@ -44,10 +66,10 @@ fn open_index(dir: &Path) -> Result<(Index, Option<Location>), StoreError> {
     })
     .unwrap_or_else(|_| Err(StoreError::Db("index panicked while opening".into())));
     match opened {
-        Ok(ok) => Ok(ok),
+        Ok((index, acked)) => Ok((index, acked, false)),
         Err(_) => {
             set_aside(&path)?;
-            Ok((Index::open(&path)?, None))
+            Ok((Index::open(&path)?, None, true))
         }
     }
 }
@@ -158,13 +180,26 @@ impl Store {
         }
         // the index opens first: its indexed_upto is the acknowledged end of the log, which
         // tells the log which torn frames are an unacknowledged tail
-        let (index, acked) = open_index(dir)?;
+        let (index, acked, index_rebuilt) = open_index(dir)?;
         if fresh {
             // dur1: the new lock and index files' entries in the store directory
             fsutil::sync_dir(dir)?;
             synced.push(dir.to_path_buf());
         }
-        let log = SegmentLog::open_acked(&segments, SEGMENT_MAX, acked)?;
+        let mut report = OpenReport {
+            index_rebuilt,
+            ..OpenReport::default()
+        };
+        // an M2 log (any batch marker in its last two segments) opens by the marker rule; the
+        // index's durable end is only the floor under which damage is refused, never the boundary
+        report.marker_rule = log_has_marker(&segments)?;
+        let log = if report.marker_rule {
+            let (log, quarantined) = SegmentLog::open_marked(&segments, SEGMENT_MAX, acked)?;
+            report.quarantined = quarantined;
+            log
+        } else {
+            SegmentLog::open_acked(&segments, SEGMENT_MAX, acked)?
+        };
         let mut store = Store {
             dir: dir.to_path_buf(),
             log,
@@ -173,6 +208,7 @@ impl Store {
             faults: Faults::default(),
             poisoned: false,
             synced,
+            report,
         };
         let (upto, end) = (store.index.indexed_upto()?, store.log.end());
         if upto > end {
@@ -191,7 +227,9 @@ impl Store {
                 ),
             });
         }
-        store.catch_up()?;
+        let frames = store.catch_up()?;
+        store.report.caught_up_frames = frames;
+        store.report.catch_up_commits = u32::from(frames > 0);
         Ok(store)
     }
 
@@ -201,18 +239,27 @@ impl Store {
         &self.synced
     }
 
+    /// What the open that produced this store did.
+    pub fn open_report(&self) -> &OpenReport {
+        &self.report
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
-    fn catch_up(&mut self) -> Result<(), StoreError> {
+    /// Replays the frames past the index's `indexed_upto` into it; returns how many frames it read.
+    fn catch_up(&mut self) -> Result<u64, StoreError> {
         let from = self.index.indexed_upto()?;
         let mut entries = vec![];
+        let mut frames = 0;
         for (loc, kind, hash) in self.log.scan_from(from)? {
             let (_, payload) = self.log.read(loc)?;
             entries.extend(entries_for_frame(kind, hash, loc, &payload)?);
+            frames += 1;
         }
-        self.index.apply(&entries, self.log.end())
+        self.index.apply(&entries, self.log.end())?;
+        Ok(frames)
     }
 
     /// Reads and hash-checks every frame in every segment and checks every batch marker;
@@ -231,7 +278,7 @@ impl Store {
         }
         self.index = Index::open(&path)?;
         let _ = std::fs::remove_file(&tmp);
-        self.catch_up()
+        self.catch_up().map(|_| ())
     }
 
     pub fn write(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {

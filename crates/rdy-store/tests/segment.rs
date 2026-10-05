@@ -3,6 +3,7 @@ use rdy_store::kinds::{self, BatchCommit};
 use rdy_store::segment::{Location, SegmentLog};
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn append_read_round_trip_and_hash_is_object_id() {
@@ -422,4 +423,235 @@ fn mark1_crash_points_round_trip_by_name() {
         assert_eq!(CrashPoint::parse(p.name()), Some(p));
     }
     assert_eq!(CrashPoint::parse("nowhere"), None);
+}
+
+fn seg_file(dir: &Path, n: u32) -> PathBuf {
+    dir.join(format!("seg-{n:06}.log"))
+}
+
+/// A well-formed frame's bytes: length, kind, payload hash, payload.
+fn frame_bytes(kind: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = (payload.len() as u32).to_le_bytes().to_vec();
+    out.push(kind);
+    out.extend_from_slice(&Hash::of(payload).0);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Three synced two-frame batches in segment 0; returns the log's end after each.
+fn three_batches(dir: &Path) -> Vec<Location> {
+    let mut log = SegmentLog::open(dir, 1 << 20).unwrap();
+    let mut ends = vec![];
+    for b in 0..3u8 {
+        log.append_batch(&[
+            (kinds::BLOB_CHUNK, vec![b; 30]),
+            (kinds::BLOB_CHUNK, vec![b + 100; 30]),
+        ])
+        .unwrap();
+        ends.push(log.end());
+    }
+    log.sync().unwrap();
+    ends
+}
+
+fn torn_files(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".torn-"))
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn mark1_the_boundary_is_the_end_of_the_last_valid_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let ends = three_batches(dir.path());
+    let tail = frame_bytes(kinds::BLOB_CHUNK, b"unmarked tail");
+    let mut f = OpenOptions::new()
+        .append(true)
+        .open(seg_file(dir.path(), 0))
+        .unwrap();
+    f.write_all(&tail).unwrap();
+    drop(f);
+    let (log, q) = SegmentLog::open_marked(dir.path(), 1 << 20, None).unwrap();
+    assert_eq!(log.end(), ends[2]);
+    assert_eq!(
+        q,
+        vec![
+            dir.path()
+                .join(format!("seg-000000.log.torn-{}", ends[2].offset))
+        ]
+    );
+    assert_eq!(std::fs::read(&q[0]).unwrap(), tail);
+    assert_eq!(
+        std::fs::metadata(seg_file(dir.path(), 0)).unwrap().len(),
+        ends[2].offset
+    );
+}
+
+#[test]
+fn mark1_a_torn_marker_leaves_its_batch_unacknowledged() {
+    let dir = tempfile::tempdir().unwrap();
+    let ends = three_batches(dir.path());
+    let f = OpenOptions::new()
+        .write(true)
+        .open(seg_file(dir.path(), 0))
+        .unwrap();
+    f.set_len(ends[2].offset - 5).unwrap();
+    drop(f);
+    let (log, q) = SegmentLog::open_marked(dir.path(), 1 << 20, None).unwrap();
+    assert_eq!(log.end(), ends[1]);
+    assert_eq!(q.len(), 1);
+}
+
+#[test]
+fn mark1_a_torn_middle_frame_under_an_intact_marker_is_the_unacknowledged_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let ends = three_batches(dir.path());
+    let path = seg_file(dir.path(), 0);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let at = ends[1].offset as usize + 40; // inside the last batch's first payload
+    bytes[at..at + 10].fill(0);
+    std::fs::write(&path, &bytes).unwrap();
+    let (log, q) = SegmentLog::open_marked(dir.path(), 1 << 20, None).unwrap();
+    assert_eq!(log.end(), ends[1]);
+    assert_eq!(q.len(), 1);
+}
+
+#[test]
+fn mark1_corruption_inside_an_earlier_batch_is_refused_and_left_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let ends = three_batches(dir.path());
+    let path = seg_file(dir.path(), 0);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[ends[0].offset as usize + 40] ^= 0xff; // the second batch; the third follows it
+    std::fs::write(&path, &bytes).unwrap();
+    let e = SegmentLog::open_marked(dir.path(), 1 << 20, None)
+        .err()
+        .expect("refuse");
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        e.to_string().contains("move the damaged segment aside"),
+        "{e}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert!(torn_files(dir.path()).is_empty());
+}
+
+#[test]
+fn mark1_a_floor_past_the_boundary_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let ends = three_batches(dir.path());
+    let path = seg_file(dir.path(), 0);
+    let f = OpenOptions::new().write(true).open(&path).unwrap();
+    f.set_len(ends[2].offset - 5).unwrap();
+    drop(f);
+    let before = std::fs::read(&path).unwrap();
+    let e = SegmentLog::open_marked(dir.path(), 1 << 20, Some(ends[2]))
+        .err()
+        .expect("refuse");
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn mark1_a_last_segment_without_a_marker_is_quarantined_and_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let ends = three_batches(dir.path());
+    let unmarked = frame_bytes(kinds::BLOB_CHUNK, b"rolled, never marked");
+    std::fs::write(seg_file(dir.path(), 1), &unmarked).unwrap();
+    let (log, q) = SegmentLog::open_marked(dir.path(), 1 << 20, None).unwrap();
+    assert_eq!(log.end(), ends[2]);
+    assert!(!seg_file(dir.path(), 1).exists());
+    assert_eq!(q, vec![dir.path().join("seg-000001.log.torn-0")]);
+    assert_eq!(std::fs::read(&q[0]).unwrap(), unmarked);
+}
+
+#[test]
+fn mark1_an_unmarked_last_segment_the_index_acknowledged_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    three_batches(dir.path());
+    std::fs::write(
+        seg_file(dir.path(), 1),
+        frame_bytes(kinds::BLOB_CHUNK, b"x"),
+    )
+    .unwrap();
+    let floor = Location {
+        segment: 1,
+        offset: 10,
+    };
+    assert!(SegmentLog::open_marked(dir.path(), 1 << 20, Some(floor)).is_err());
+    assert!(seg_file(dir.path(), 1).exists());
+}
+
+#[test]
+fn mark1_an_empty_last_segment_is_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let ends = three_batches(dir.path());
+    std::fs::File::create(seg_file(dir.path(), 1)).unwrap();
+    let (log, q) = SegmentLog::open_marked(dir.path(), 1 << 20, None).unwrap();
+    assert_eq!(log.end(), ends[2]);
+    assert!(q.is_empty());
+    assert!(!seg_file(dir.path(), 1).exists());
+}
+
+#[test]
+fn mark1_a_sealed_segment_that_does_not_end_at_a_marker_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    three_batches(dir.path());
+    let mut f = OpenOptions::new()
+        .append(true)
+        .open(seg_file(dir.path(), 0))
+        .unwrap();
+    f.write_all(&frame_bytes(kinds::BLOB_CHUNK, b"after the marker"))
+        .unwrap();
+    drop(f);
+    std::fs::write(
+        seg_file(dir.path(), 1),
+        frame_bytes(kinds::BLOB_CHUNK, b"unmarked"),
+    )
+    .unwrap();
+    let e = SegmentLog::open_marked(dir.path(), 1 << 20, None)
+        .err()
+        .expect("refuse");
+    assert!(
+        e.to_string().contains("does not end at a batch marker"),
+        "{e}"
+    );
+    assert!(
+        seg_file(dir.path(), 1).exists(),
+        "refused before touching either segment"
+    );
+    assert!(torn_files(dir.path()).is_empty());
+}
+
+#[test]
+fn mark1_log_has_marker_tells_m2_logs_from_m1_logs() {
+    let m1 = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(m1.path(), 1 << 20).unwrap();
+    log.append(kinds::BLOB_CHUNK, b"m1 frame").unwrap();
+    log.sync().unwrap();
+    drop(log);
+    assert!(!rdy_store::segment::log_has_marker(m1.path()).unwrap());
+    let m2 = tempfile::tempdir().unwrap();
+    three_batches(m2.path());
+    assert!(rdy_store::segment::log_has_marker(m2.path()).unwrap());
+    let empty = tempfile::tempdir().unwrap();
+    assert!(!rdy_store::segment::log_has_marker(empty.path()).unwrap());
+}
+
+#[test]
+fn mark1_an_empty_batch_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    assert!(log.append_batch(&[]).unwrap().is_empty());
+    assert_eq!(
+        log.end(),
+        Location {
+            segment: 0,
+            offset: 0
+        }
+    );
 }

@@ -89,3 +89,54 @@ fn mark1_every_store_write_ends_with_a_marker_that_matches_its_batch() {
         "fsck counts data frames"
     );
 }
+
+#[test]
+fn mark1_a_reopened_store_uses_the_marker_rule() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    Store::open(&dir).unwrap().put_blob(b"marked").unwrap();
+    let s = Store::open(&dir).unwrap();
+    assert!(s.open_report().marker_rule, "{:?}", s.open_report());
+}
+
+/// Review Focus 1: the M1 rule would treat a lagging index's end as the acknowledged boundary and
+/// silently truncate the acknowledged batches after the damage.
+#[test]
+fn mark1_damage_inside_an_acknowledged_batch_is_refused_even_when_the_index_lags() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    Store::open(&dir).unwrap().put_blob(b"first").unwrap();
+    let early_index = std::fs::read(dir.join("index.redb")).unwrap();
+    let end1 = {
+        let mut s = Store::open(&dir).unwrap();
+        let end1 = s.log_end();
+        s.put_blob(b"second").unwrap();
+        s.put_blob(b"third").unwrap();
+        end1
+    };
+    let path = seg(&dir, 0);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[end1.offset as usize + 40] ^= 0xff; // inside the second write's first frame
+    std::fs::write(&path, &bytes).unwrap();
+    std::fs::write(dir.join("index.redb"), &early_index).unwrap(); // the index lags the log
+    let e = Store::open(&dir)
+        .err()
+        .expect("an acknowledged batch follows the damage");
+    assert!(
+        matches!(&e, StoreError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData),
+        "{e}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes, "nothing truncated");
+}
+
+/// A kill can leave a complete, marked batch that was never fsynced. The open accepts it, so it
+/// must fsync the segment before the catch-up (and a checkpoint) can make the index durable past it.
+#[test]
+fn mark1_open_fsyncs_the_last_segment_it_accepts() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    Store::open(&dir).unwrap().put_blob(b"accepted").unwrap();
+    let (s, synced) = rdy_store::fsutil::record_syncs(|| Store::open(&dir));
+    s.unwrap();
+    assert!(synced.contains(&seg(&dir, 0)), "{synced:?}");
+}

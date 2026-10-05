@@ -158,7 +158,8 @@ fn valid_frame_after(f: &File, offset: u64, file_len: u64) -> io::Result<bool> {
 
 /// Copies `[offset, file_len)` to `<seg>.torn-<offset>` (or `.torn-<offset>.<n>` if that name is
 /// taken; an existing quarantine file is never overwritten) and fsyncs it and the directory.
-fn quarantine(f: &File, dir: &Path, seg: &Path, offset: u64, file_len: u64) -> io::Result<()> {
+/// Returns the path it wrote.
+fn quarantine(f: &File, dir: &Path, seg: &Path, offset: u64, file_len: u64) -> io::Result<PathBuf> {
     let mut buf = vec![0u8; (file_len - offset) as usize];
     f.read_exact_at(&mut buf, offset)?;
     let base = format!(
@@ -166,25 +167,197 @@ fn quarantine(f: &File, dir: &Path, seg: &Path, offset: u64, file_len: u64) -> i
         seg.file_name().unwrap().to_string_lossy()
     );
     let mut n = 0u32;
-    let q = loop {
+    let (q, path) = loop {
         let name = if n == 0 {
             base.clone()
         } else {
             format!("{base}.{n}")
         };
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(dir.join(name))
-        {
-            Ok(q) => break q,
+        let path = dir.join(name);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(q) => break (q, path),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
             Err(e) => return Err(e),
         }
     };
     q.write_all_at(&buf, 0)?;
     q.sync_all()?;
-    sync_dir(dir)
+    sync_dir(dir)?;
+    Ok(path)
+}
+
+/// True if the batch marker `payload`, met after the data frames `since` (offset and hash of each
+/// frame since the previous valid marker) in segment `seg`, matches its batch: it names this
+/// segment, its `start` is one of those frames, and the frame count and digest from there agree.
+/// Frames before the marker's `start` are allowed (the first marker of an upgraded log).
+fn marker_matches(seg: u32, since: &[(u64, Hash)], payload: &[u8]) -> bool {
+    let Ok(m) = postcard::from_bytes::<BatchCommit>(payload) else {
+        return false;
+    };
+    if m.start.segment != seg {
+        return false;
+    }
+    let Some(i) = since.iter().position(|(o, _)| *o == m.start.offset) else {
+        return false;
+    };
+    since.len() - i == m.frames as usize
+        && kinds::batch_digest(since[i..].iter().map(|(_, h)| h)) == m.digest
+}
+
+/// The result of scanning one segment forward from offset 0 under the marker rule.
+struct Scan {
+    /// The end of the last marker that matches its batch; None if there is none.
+    boundary: Option<u64>,
+    /// Where the scan stopped: a torn or corrupt frame, a marker that does not match its batch,
+    /// or the end of the file.
+    stop: u64,
+}
+
+fn scan_marked(f: &File, seg: u32, file_len: u64) -> io::Result<Scan> {
+    let mut offset = 0;
+    let mut boundary = None;
+    let mut since: Vec<(u64, Hash)> = vec![];
+    while let Some((kind, hash, payload)) = read_frame(f, offset, file_len)? {
+        if kind == kinds::BATCH_COMMIT {
+            if !marker_matches(seg, &since, &payload) {
+                break;
+            }
+            since.clear();
+            offset += HEADER + payload.len() as u64;
+            boundary = Some(offset);
+        } else {
+            since.push((offset, hash));
+            offset += HEADER + payload.len() as u64;
+        }
+    }
+    Ok(Scan {
+        boundary,
+        stop: offset,
+    })
+}
+
+/// True if a hash-valid `BATCH_COMMIT` frame at any byte position at or after `stop` decodes,
+/// belongs to segment `seg` and starts a batch past `boundary`: an acknowledged batch follows the
+/// damage. Only positions whose kind byte is `BATCH_COMMIT` and whose length field fits a marker
+/// are hashed.
+fn acknowledged_batch_follows(
+    f: &File,
+    seg: u32,
+    boundary: u64,
+    stop: u64,
+    file_len: u64,
+) -> io::Result<bool> {
+    let mut buf = vec![0u8; (file_len - stop) as usize];
+    f.read_exact_at(&mut buf, stop)?;
+    let h = HEADER as usize;
+    for pos in 0..buf.len() {
+        if pos + h > buf.len() || buf[pos + 4] != kinds::BATCH_COMMIT {
+            continue;
+        }
+        let len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as u64;
+        if len > MARKER_MAX || pos + h + len as usize > buf.len() {
+            continue;
+        }
+        let payload = &buf[pos + h..pos + h + len as usize];
+        if Hash::of(payload).0 != buf[pos + 5..pos + 37] {
+            continue;
+        }
+        if let Ok(m) = postcard::from_bytes::<BatchCommit>(payload)
+            && m.start.segment == seg
+            && m.start.offset > boundary
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn damaged_error(stop: u64, seg: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "corruption at offset {stop} in {} damages acknowledged data; refusing to truncate. Frames before offset {stop} are intact: move the damaged segment aside or restore it from backup, then reopen",
+            seg.display()
+        ),
+    )
+}
+
+/// The marker rule's tail check on segment `seg` (file `f`, `file_len` bytes) once its scan has
+/// found `boundary` `b` and stopped at `stop`. With no tail (`b` is the end of the file) it does
+/// nothing. Otherwise it refuses, leaving the file untouched, if an acknowledged batch follows
+/// the damage or the index's `floor` is past `(seg, b)`; else it quarantines `[b, file_len)` and
+/// returns the path. It never truncates: the caller does.
+fn check_tail(
+    f: &File,
+    dir: &Path,
+    seg: u32,
+    scan: &Scan,
+    file_len: u64,
+    floor: Option<Location>,
+) -> io::Result<Option<PathBuf>> {
+    let b = scan.boundary.unwrap_or(0);
+    if b >= file_len {
+        return Ok(None);
+    }
+    let path = seg_path(dir, seg);
+    let end_of_good = Location {
+        segment: seg,
+        offset: b,
+    };
+    if floor.is_some_and(|fl| fl > end_of_good)
+        || acknowledged_batch_follows(f, seg, b, scan.stop, file_len)?
+    {
+        return Err(damaged_error(scan.stop, &path));
+    }
+    quarantine(f, dir, &path, b, file_len).map(Some)
+}
+
+/// Opens every segment file in `dir` for reading, creating `dir` and an empty segment 0 if there
+/// are none. Refuses a gap in the segment numbers.
+fn open_readers(dir: &Path) -> io::Result<Vec<File>> {
+    crate::fsutil::create_dir_durable(dir)?;
+    // seg1: a segment past a gap holds acknowledged frames the log would otherwise skip
+    if let Some((missing, later)) = find_gap(dir)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{} is missing but {} exists: acknowledged frames are missing; restore the missing segment from backup, then reopen",
+                seg_path(dir, missing).display(),
+                seg_path(dir, later).display()
+            ),
+        ));
+    }
+    let mut readers = vec![];
+    while seg_path(dir, readers.len() as u32).exists() {
+        readers.push(File::open(seg_path(dir, readers.len() as u32))?);
+    }
+    if readers.is_empty() {
+        File::create(seg_path(dir, 0))?.sync_all()?;
+        sync_dir(dir)?;
+        readers.push(File::open(seg_path(dir, 0))?);
+    }
+    Ok(readers)
+}
+
+/// True if any frame of the last two segments (read in order until the first bad frame) is a
+/// `BATCH_COMMIT`: the log was written by M2 and opens under the marker rule.
+pub fn log_has_marker(dir: &Path) -> io::Result<bool> {
+    let mut count = 0u32;
+    while seg_path(dir, count).exists() {
+        count += 1;
+    }
+    for seg in count.saturating_sub(2)..count {
+        let f = File::open(seg_path(dir, seg))?;
+        let file_len = f.metadata()?.len();
+        let mut offset = 0;
+        while let Some((kind, _, payload)) = read_frame(&f, offset, file_len)? {
+            if kind == kinds::BATCH_COMMIT {
+                return Ok(true);
+            }
+            offset += HEADER + payload.len() as u64;
+        }
+    }
+    Ok(false)
 }
 
 impl SegmentLog {
@@ -199,27 +372,7 @@ impl SegmentLog {
     /// Corruption below `acked` damages acknowledged data and is refused. With `acked` unknown,
     /// the tail is truncated only if no valid frame follows the corruption.
     pub fn open_acked(dir: &Path, max_len: u64, acked: Option<Location>) -> io::Result<SegmentLog> {
-        crate::fsutil::create_dir_durable(dir)?;
-        // seg1: a segment past a gap holds acknowledged frames the log would otherwise skip
-        if let Some((missing, later)) = find_gap(dir)? {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{} is missing but {} exists: acknowledged frames are missing; restore the missing segment from backup, then reopen",
-                    seg_path(dir, missing).display(),
-                    seg_path(dir, later).display()
-                ),
-            ));
-        }
-        let mut readers = vec![];
-        while seg_path(dir, readers.len() as u32).exists() {
-            readers.push(File::open(seg_path(dir, readers.len() as u32))?);
-        }
-        if readers.is_empty() {
-            File::create(seg_path(dir, 0))?.sync_all()?;
-            sync_dir(dir)?;
-            readers.push(File::open(seg_path(dir, 0))?);
-        }
+        let readers = open_readers(dir)?;
         let last = (readers.len() - 1) as u32;
         let writer = OpenOptions::new()
             .read(true)
@@ -246,8 +399,11 @@ impl SegmentLog {
             }
             quarantine(&writer, dir, &seg_path(dir, last), offset, file_len)?;
             writer.set_len(offset)?;
-            writer.sync_all()?;
         }
+        // a kill can leave complete frames that were written but never fsynced: this open accepts
+        // them, so make them durable before an index checkpoint can get ahead of them
+        writer.sync_all()?;
+        crate::fsutil::record(&seg_path(dir, last));
         let log = SegmentLog {
             dir: dir.to_path_buf(),
             readers,
@@ -259,6 +415,77 @@ impl SegmentLog {
             crash: None,
         };
         Ok(log)
+    }
+
+    /// Opens the log under the marker rule: the acknowledged boundary is the end of the last batch
+    /// marker of the last segment that matches its batch. A tail after it (a torn or unmarked
+    /// batch) is quarantined and cut; damage before it is refused, leaving the files untouched.
+    /// `floor` is the index's durable `indexed_upto` (None if unknown): a tail that starts before
+    /// it would cut acknowledged frames, so it is refused too. A last segment holding no marker
+    /// is one unacknowledged batch: it is quarantined if non-empty and removed (segment 0 is
+    /// truncated instead), provided the segment before it ends exactly at a marker. Returns the
+    /// log and the quarantine files this open wrote. It ends by fsyncing the last segment, so
+    /// frames a kill left unsynced are durable before the index can be checkpointed past them.
+    pub fn open_marked(
+        dir: &Path,
+        max_len: u64,
+        floor: Option<Location>,
+    ) -> io::Result<(SegmentLog, Vec<PathBuf>)> {
+        let mut readers = open_readers(dir)?;
+        let mut last = (readers.len() - 1) as u32;
+        let mut writer = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(seg_path(dir, last))?;
+        let file_len = writer.metadata()?.len();
+        let scan = scan_marked(&writer, last, file_len)?;
+        let mut quarantined = vec![];
+        let len;
+        if scan.boundary.is_none() && last > 0 {
+            // the last segment is one unacknowledged batch, if the one before it is sealed at a marker
+            let prev_path = seg_path(dir, last - 1);
+            let prev = File::open(&prev_path)?;
+            let prev_len = prev.metadata()?.len();
+            if scan_marked(&prev, last - 1, prev_len)?.boundary != Some(prev_len) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} does not end at a batch marker, but a later segment was started: the log is damaged; restore it from backup, then reopen",
+                        prev_path.display()
+                    ),
+                ));
+            }
+            quarantined.extend(check_tail(&writer, dir, last, &scan, file_len, floor)?);
+            drop(writer);
+            std::fs::remove_file(seg_path(dir, last))?;
+            sync_dir(dir)?;
+            readers.pop();
+            last -= 1;
+            writer = OpenOptions::new().read(true).write(true).open(&prev_path)?;
+            len = prev_len;
+        } else {
+            let b = scan.boundary.unwrap_or(0);
+            if let Some(q) = check_tail(&writer, dir, last, &scan, file_len, floor)? {
+                quarantined.push(q);
+                writer.set_len(b)?;
+            }
+            len = b;
+        }
+        // a kill can leave a complete, marked batch that was written but never fsynced: this
+        // open accepts it, so make it durable before an index checkpoint can get ahead of it
+        writer.sync_all()?;
+        crate::fsutil::record(&seg_path(dir, last));
+        let log = SegmentLog {
+            dir: dir.to_path_buf(),
+            readers,
+            writer,
+            len,
+            max_len,
+            fail_roll: false,
+            fail_partial: None,
+            crash: None,
+        };
+        Ok((log, quarantined))
     }
 
     /// Discards everything appended at or after `to`, which must not be before the start of the
@@ -397,6 +624,9 @@ impl SegmentLog {
     /// segment rolls only before the batch, never inside it: a batch larger than a segment gets a
     /// segment of its own. On error the caller rolls back with `truncate_to`.
     pub fn append_batch(&mut self, frames: &[(u8, Vec<u8>)]) -> io::Result<Vec<(Location, Hash)>> {
+        if frames.is_empty() {
+            return Ok(vec![]);
+        }
         if frames.iter().any(|(_, p)| p.len() > u32::MAX as usize) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -525,17 +755,7 @@ impl SegmentLog {
                             ),
                         )
                     };
-                    let m: BatchCommit = postcard::from_bytes(&payload).map_err(|_| mismatch())?;
-                    if m.start.segment != seg {
-                        return Err(mismatch());
-                    }
-                    let i = since
-                        .iter()
-                        .position(|(o, _)| *o == m.start.offset)
-                        .ok_or_else(mismatch)?;
-                    if since.len() - i != m.frames as usize
-                        || kinds::batch_digest(since[i..].iter().map(|(_, h)| h)) != m.digest
-                    {
+                    if !marker_matches(seg, &since, &payload) {
                         return Err(mismatch());
                     }
                     since.clear();
