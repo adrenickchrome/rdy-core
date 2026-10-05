@@ -930,3 +930,59 @@ pub fn decided_site() -> (tempfile::TempDir, Rdy, DecidedIds) {
     };
     (d, r, ids)
 }
+
+/// A pack of its own whose `aside` type is presentational; a section may hold one (pres1).
+pub const PRESENTATIONAL_PACK: &str = "name: p\nversion: '1'\nextends: rdy-standard\nblock_types:\n  aside: { prefix: as, traits: [presentational], body: required }\n  section:\n    prefix: s\n    traits: [structural]\n    children: [section, prose, claim, requirement, constraint, term, component, actor, interface, flow, example, note, rationale, table, diagram, figure, code, decision, question, aside]\n";
+
+/// The ids [`presentational_site`] returns.
+#[derive(Clone, Debug)]
+pub struct PresentationalIds {
+    pub doc: BlockId,
+    /// A presentational block, governed by `decision`.
+    pub aside: BlockId,
+    /// A claim that depends on the aside.
+    pub claim: BlockId,
+    pub decision: BlockId,
+}
+
+/// A project named `Presentational` whose own pack makes `aside` presentational: doc `t`
+/// ("T") with a section, an aside ("Decorative."), a claim that depends on it and an accepted
+/// decision (written by the approver) that affects the aside; landed.
+pub fn presentational_site() -> (tempfile::TempDir, Rdy, PresentationalIds) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    drop(Rdy::init(dir.path(), "rdy-standard").expect("init"));
+    std::fs::write(dir.path().join(".rdy/packs/p.yaml"), PRESENTATIONAL_PACK).expect("pack");
+    std::fs::write(
+        dir.path().join(".rdy/config.yaml"),
+        "pack: p\nname: Presentational\n",
+    )
+    .expect("config");
+    let mut r = Rdy::open(dir.path()).expect("open");
+    let base = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "t", "title": "T", "doc_type": "glossary"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
+        {"op": "create", "type": "aside", "id": "$a", "parent": "$s", "body": "Decorative."},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Depends on {{$a}}.",
+         "links": {"depends_on": [{"target": "$a"}]}}
+    ]))
+    .expect("the base");
+    let (section, aside) = (s(&created(&base, "$s")), s(&created(&base, "$a")));
+    let decided = crate::golden::write_as(
+        &approver(),
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "decision", "id": "$dec", "parent": section,
+            "fields": {"statement": "Asides stay decorative", "status": "accepted",
+                       "decided_at": "2021-02-08T10:00:00Z", "recorded_at": "2021-02-08T10:00:00Z"},
+            "links": {"affects": [{"target": aside}]}}]),
+    )
+    .expect("the decision");
+    land(&mut r, "work").expect("land the presentational site");
+    let ids = PresentationalIds {
+        doc: created(&base, "$d"),
+        aside: created(&base, "$a"),
+        claim: created(&base, "$c"),
+        decision: created(&decided, "$dec"),
+    };
+    (dir, r, ids)
+}

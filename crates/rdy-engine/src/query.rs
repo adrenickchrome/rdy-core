@@ -174,14 +174,24 @@ impl Rdy {
         self.graph(scope)?;
         self.materialized(scope)?;
         let (g, m, store) = (&self.graphs[scope], &self.cache[scope], &self.store);
-        Ok(g.suspects(&m.blocks, &|h| store.get_block(h).ok()))
+        let mut out = g.suspects(&m.blocks, &|h| store.get_block(h).ok());
+        out.retain(|s| !self.is_presentational_source(m, s));
+        Ok(out)
+    }
+
+    /// A change to a presentational block (the suspect's `target`, the block whose version
+    /// moved) makes nothing suspect. A target that is gone has no type to read, so it stays.
+    fn is_presentational_source(&self, m: &Materialized, s: &Suspect) -> bool {
+        m.get(&s.target)
+            .is_some_and(|b| self.pack().is_presentational(&b.block_type))
     }
 
     pub fn context(&mut self, scope: &Scope, id: &BlockId) -> Result<Context, RdyError> {
         let block = self.block(scope, id)?;
         self.graph(scope)?;
         let (m, g, store) = (&self.cache[scope], &self.graphs[scope], &self.store);
-        let suspects = g.suspects_of(id, &m.blocks, &|h| store.get_block(h).ok());
+        let mut suspects = g.suspects_of(id, &m.blocks, &|h| store.get_block(h).ok());
+        suspects.retain(|s| !self.is_presentational_source(m, s));
         Ok(Context {
             id: block.id.to_string(),
             block_type: block.block_type.clone(),

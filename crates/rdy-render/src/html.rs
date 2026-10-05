@@ -236,6 +236,8 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
                 }
             )
         }
+        // a presentational type has no label: it is plain text with no marker
+        other if ctx.pack.is_presentational(other) => format!("<p>{body}</p>"),
         other => format!(
             "<p><span class=\"meta\">{}</span> {body}</p>",
             escape(other)

@@ -13,6 +13,9 @@ pub enum Trait {
     Describes,
     Asset,
     Structural,
+    /// Decoration: exempt from the briefing and justification rules, never a suspect source,
+    /// rendered without a marker or a "Why ?" pill. Excludes `normative` and `defines`.
+    Presentational,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -265,5 +268,12 @@ impl Pack {
                 (k, s, o)
             })
             .collect()
+    }
+
+    /// Whether `block_type` is declared with the `presentational` trait (an unknown type is not).
+    pub fn is_presentational(&self, block_type: &str) -> bool {
+        self.block_types
+            .get(block_type)
+            .is_some_and(|t| t.traits.contains(&Trait::Presentational))
     }
 }

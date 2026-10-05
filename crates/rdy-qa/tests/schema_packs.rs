@@ -96,3 +96,32 @@ fn area1_a_project_pack_with_a_bad_area_does_not_open_and_names_it() {
         "{e}"
     );
 }
+
+#[test]
+fn pres1_presentational_is_a_trait_and_excludes_normative_and_defines() {
+    let ok = "name: p\nversion: '1'\nextends: rdy-standard\nblock_types:\n  aside: { prefix: as, traits: [presentational], body: required }\n";
+    let mut set = PackSet::with_builtin();
+    set.add_yaml(ok).unwrap();
+    let pack = set.resolve("p").unwrap();
+    assert!(pack.is_presentational("aside") && !pack.is_presentational("prose"));
+    assert!(
+        !pack.is_presentational("nope"),
+        "an unknown type is not presentational"
+    );
+    for (traits, name) in [
+        ("presentational, normative", "q"),
+        ("presentational, defines", "r"),
+    ] {
+        let bad = format!(
+            "name: {name}\nversion: '1'\nextends: rdy-standard\nblock_types:\n  aside: {{ prefix: as, traits: [{traits}], body: required }}\n"
+        );
+        let mut set = PackSet::with_builtin();
+        set.add_yaml(&bad).unwrap();
+        let e = set.resolve(name).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("type aside: presentational excludes normative and defines"),
+            "{e}"
+        );
+    }
+}

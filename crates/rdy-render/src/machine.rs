@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 pub fn page_json(
-    _ctx: &PageContext,
+    ctx: &PageContext,
     _m: &Materialized,
     _g: &Graph,
     _suspects: &BTreeSet<BlockId>,
@@ -18,7 +18,12 @@ pub fn page_json(
     _site: &Site,
     _pack: &Pack,
 ) -> Value {
-    json!({"schema": "rdy-page/1"})
+    let blocks: Vec<Value> = ctx
+        .items
+        .iter()
+        .map(|i| json!({"id": i.id, "type": i.block_type, "presentational": i.presentational}))
+        .collect();
+    json!({"schema": "rdy-page/1", "blocks": blocks})
 }
 
 /// Writes `llms.txt` under `out`.

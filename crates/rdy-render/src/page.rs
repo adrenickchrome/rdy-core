@@ -62,6 +62,8 @@ pub struct Item {
     /// The heading text of a section, the name of what a definition defines.
     pub title: Option<String>,
     pub html: String,
+    /// The block's type is presentational: no marker, no "Why ?" trail, no agents' affordance.
+    pub presentational: bool,
     pub trail: Trail,
     pub agents: Agents,
     pub ref_head: String,
@@ -527,6 +529,7 @@ fn doc_parts(
             described_by: &described_by,
         };
         let (ref_head, ref_) = trail::ref_attrs(b, site, sh.pin(), m);
+        let presentational = sh.pack.is_presentational(&b.block_type);
         let title = match b.block_type.as_str() {
             "section" => b.field_str("title"),
             "term" | "component" | "actor" | "interface" | "flow" => b.field_str("name"),
@@ -540,8 +543,17 @@ fn doc_parts(
             kind_word: kind_word(&b.block_type),
             title: title.map(String::from),
             html: html::block_html(b, &ctx),
-            trail: trail::for_block(b, sh.g, m, site, page),
-            agents: trail::agents(b, sh.g, m, sh.suspects, site, page, json_href),
+            presentational,
+            trail: if presentational {
+                Trail::default()
+            } else {
+                trail::for_block(b, sh.g, m, site, page)
+            },
+            agents: if presentational {
+                Agents::default()
+            } else {
+                trail::agents(b, sh.g, m, sh.suspects, site, page, json_href)
+            },
             ref_head,
             ref_,
         });

@@ -300,6 +300,13 @@ fn check(pack: &Pack) -> Result<(), SchemaError> {
                 )));
             }
         }
+        if t.traits.contains(&Trait::Presentational)
+            && (t.traits.contains(&Trait::Normative) || t.traits.contains(&Trait::Defines))
+        {
+            return Err(SchemaError::Invalid(format!(
+                "type {name}: presentational excludes normative and defines"
+            )));
+        }
     }
     if let Some(d) = &pack.default_doc_type
         && !pack.doc_types.contains_key(d)
