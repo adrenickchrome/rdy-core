@@ -1,7 +1,8 @@
 {% extends "layout.html" %}
 {% block content %}
-<h1>{{ doc.title }}</h1>
-<p class="meta">{% if doc.doc_type %}{{ doc.doc_type }}{% endif %}{% if doc.lifecycle %} · {{ doc.lifecycle }}{% endif %} · {{ doc.id }}</p>
-{% for item in items %}<div class="block {{ item.block_type }}" id="{{ item.id }}">{{ item.html|safe }}{% if item.suspect %} <span class="badge suspect">suspect</span>{% endif %}</div>
+{% if body.doc.eyebrow %}<p class="meta">{{ body.doc.eyebrow }}</p>
+{% endif %}<h1>{{ body.doc.title }}</h1>
+{% if body.doc.lede %}<p{% if body.doc.lede_anchor %} id="{{ body.doc.lede_anchor }}"{% endif %}>{{ body.doc.lede|safe }}</p>
+{% endif %}{% for item in items %}{% include "partials/tools.html" %}{% include "partials/block.html" %}{% include "partials/why.html" %}{% include "partials/agents.html" %}
 {% endfor %}
 {% endblock %}

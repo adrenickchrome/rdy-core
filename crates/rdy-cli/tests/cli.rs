@@ -83,7 +83,8 @@ fn import_propose_approve_render_fsck() {
     assert_eq!(log[0]["approved_by"], "human:tester");
     let site = dir.path().join("site");
     let r = json(dir.path(), &["render", "--out", site.to_str().unwrap()]);
-    assert_eq!(r["pages"], 2);
+    // the home page, the doc and the glossary its term earns
+    assert_eq!(r["pages"], 3);
     assert!(site.join("index.html").exists());
     let f = json(dir.path(), &["fsck"]);
     assert_eq!(f["landings"], 1);

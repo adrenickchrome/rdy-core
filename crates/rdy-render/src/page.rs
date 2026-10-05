@@ -1,0 +1,630 @@
+//! The context of every page, and the one place that calls every module that fills a part of it.
+use crate::html::{self, BlockCtx, Link};
+use crate::site::{Site, Url, rel};
+use crate::trail::{Agents, Trail};
+use crate::{assets, home, machine, nav, search, toc, trail, version};
+use rdy_engine::{Materialized, VersionInfo, VersionPosition, summary_in};
+use rdy_graph::{EdgeKind, Graph};
+use rdy_model::{Block, BlockId, Hash, decision, tree};
+use rdy_schema::Pack;
+use serde::Serialize;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// What a render reads, whichever page it builds.
+pub struct Shared<'a> {
+    pub site: &'a Site<'a>,
+    pub m: &'a Materialized,
+    pub g: &'a Graph,
+    pub suspects: &'a BTreeSet<BlockId>,
+    pub position: &'a VersionPosition,
+    pub pack: &'a Pack,
+    pub site_name: &'a str,
+    pub description: Option<&'a str>,
+    pub versions: &'a [VersionInfo],
+    /// Landing hash (hex) to the time it was approved, in milliseconds.
+    pub landed_ms: &'a BTreeMap<String, i64>,
+    /// The figure blobs the store holds, by hash, with their bytes.
+    pub blobs: &'a BTreeMap<Hash, Vec<u8>>,
+    /// The blobs some page links to, by the site-relative path of their file, filled as pages
+    /// are built.
+    pub used_blobs: RefCell<BTreeMap<String, Hash>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Crumb {
+    pub label: String,
+    /// Where the crumb leads; none for the page the reader is on.
+    pub href: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PagerLink {
+    pub title: String,
+    pub href: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Pager {
+    pub prev: Option<PagerLink>,
+    pub next: Option<PagerLink>,
+}
+
+/// One block of a doc, as the doc template and the toc see it.
+#[derive(Clone, Debug, Serialize)]
+pub struct Item {
+    pub id: String,
+    pub block_type: String,
+    pub depth: usize,
+    pub anchor: String,
+    /// A reader's word for what the block is.
+    pub kind_word: &'static str,
+    /// The heading text of a section, the name of what a definition defines.
+    pub title: Option<String>,
+    pub html: String,
+    pub trail: Trail,
+    pub agents: Agents,
+    pub ref_head: String,
+    #[serde(rename = "ref")]
+    pub ref_: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DocBody {
+    pub title: String,
+    /// The parent folder's title; none at the top level.
+    pub eyebrow: Option<String>,
+    /// The first paragraph of the first section, when it is that section's first block; it is
+    /// left out of `items`.
+    pub lede: Option<String>,
+    /// The anchor the lede has on the page (it keeps the one its block would have had).
+    pub lede_anchor: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ChildRow {
+    pub href: String,
+    pub label: String,
+    pub kind: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FolderBody {
+    pub title: String,
+    pub description: Option<String>,
+    pub children: Vec<ChildRow>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TermRow {
+    pub anchor: String,
+    pub name: String,
+    pub body: String,
+    pub href: String,
+    pub doc_title: String,
+    pub section_title: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct GlossaryBody {
+    pub terms: Vec<TermRow>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct QuestionRow {
+    pub anchor: String,
+    pub prompt: String,
+    pub href: String,
+    pub section_title: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct QuestionGroup {
+    pub doc_title: String,
+    pub questions: Vec<QuestionRow>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct QuestionsBody {
+    pub groups: Vec<QuestionGroup>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RedirectBody {
+    pub label: String,
+    pub href: String,
+}
+
+/// The part of the context that belongs to one kind of page.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Body {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc: Option<DocBody>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder: Option<FolderBody>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub home: Option<home::Home>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub glossary: Option<GlossaryBody>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub questions: Option<QuestionsBody>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect: Option<RedirectBody>,
+}
+
+/// Everything a template reads.
+#[derive(Clone, Debug, Serialize)]
+pub struct PageContext {
+    pub site_name: String,
+    pub site_description: Option<String>,
+    pub lang: &'static str,
+    pub title: String,
+    /// Site-relative, with `/` separators.
+    pub page_url: String,
+    /// `home`, `folder`, `doc`, `glossary`, `questions` or `redirect`.
+    pub kind: &'static str,
+    /// The prefix that leads from this page to the site's root (`../` per level).
+    pub root: String,
+    /// The text of the inline script that sets the theme before the page paints.
+    pub init_js: &'static str,
+    pub version: version::Label,
+    pub crumbs: Vec<Crumb>,
+    pub nav: nav::Nav,
+    pub toc: toc::Toc,
+    pub pager: Pager,
+    pub search_href: String,
+    pub has_mermaid: bool,
+    pub has_terms: bool,
+    pub has_questions: bool,
+    /// The page's JSON twin, relative to the page.
+    pub json_href: String,
+    pub items: Vec<Item>,
+    pub body: Body,
+}
+
+/// Which page to build.
+pub enum Kind<'a> {
+    Home,
+    Folder(&'a BlockId),
+    Doc(&'a BlockId),
+    Glossary,
+    Questions,
+    /// The permalink page of a block and where it leads.
+    Redirect(&'a BlockId, &'a Url),
+}
+
+/// A reader's word for a block's type: the one the eyebrow, the toc and the search use.
+fn kind_word(block_type: &str) -> &'static str {
+    match block_type {
+        "section" => "section",
+        "term" => "term",
+        "figure" => "figure",
+        "table" => "table",
+        "code" => "code",
+        "diagram" => "diagram",
+        _ => "block",
+    }
+}
+
+/// `wallets/transactions.html` is `transactions.json` beside it.
+fn json_name(page: &str) -> String {
+    let file = page.rsplit('/').next().unwrap_or(page);
+    format!("{}.json", file.strip_suffix(".html").unwrap_or(file))
+}
+
+/// The path of a page's JSON twin, relative to the site root.
+pub fn json_path(page: &str) -> String {
+    format!("{}.json", page.strip_suffix(".html").unwrap_or(page))
+}
+
+impl Shared<'_> {
+    /// A link from `from` to the block `id`, if it has a place on the site.
+    fn link(&self, from: &str, id: &BlockId) -> Option<Link> {
+        let b = self.m.get(id)?;
+        let url = self.site.url_of(id)?;
+        Some(Link {
+            href: url.href_from(from),
+            label: summary_in(b, self.m),
+            title: String::new(),
+        })
+    }
+
+    /// The version name when the page is rendered from a tag, so that a copied reference can
+    /// name it.
+    fn pin(&self) -> Option<&str> {
+        let p = self.position;
+        match (&p.version, p.frozen, p.landings_since) {
+            (Some(v), true, 0) => Some(&v.name),
+            _ => None,
+        }
+    }
+
+    fn crumbs(&self, from: &str, chain: &[BlockId], tail: Option<&str>) -> Vec<Crumb> {
+        let mut out = vec![Crumb {
+            label: self.site_name.to_string(),
+            href: (!chain.is_empty() || tail.is_some()).then(|| rel(from, "index.html")),
+        }];
+        for (i, id) in chain.iter().enumerate() {
+            let Some(b) = self.m.get(id) else { continue };
+            let here = tail.is_none() && i + 1 == chain.len();
+            let href = if here {
+                None
+            } else {
+                self.site.page(id).map(|p| rel(from, &p))
+            };
+            out.push(Crumb {
+                label: self.site.label(b),
+                href,
+            });
+        }
+        if let Some(t) = tail {
+            out.push(Crumb {
+                label: t.to_string(),
+                href: None,
+            });
+        }
+        out
+    }
+}
+
+/// The page context for `kind`, with every module that fills a part of it called.
+pub fn build(sh: &Shared, kind: Kind) -> PageContext {
+    let site = sh.site;
+    let has_terms = !site.terms.is_empty();
+    let has_questions = !site.open_questions.is_empty();
+    let (page_url, kind_name, title, current, chain, tail): (
+        String,
+        &'static str,
+        String,
+        Option<&BlockId>,
+        Vec<BlockId>,
+        Option<&str>,
+    ) = match &kind {
+        Kind::Home => (
+            "index.html".into(),
+            "home",
+            sh.site_name.to_string(),
+            None,
+            vec![],
+            None,
+        ),
+        Kind::Folder(id) | Kind::Doc(id) => {
+            let b = sh.m.get(id).expect("a page's block exists");
+            (
+                site.page(id).expect("a page's block has a page"),
+                if matches!(kind, Kind::Doc(_)) {
+                    "doc"
+                } else {
+                    "folder"
+                },
+                site.label(b),
+                Some(*id),
+                site.chain(id),
+                None,
+            )
+        }
+        Kind::Glossary => (
+            "glossary.html".into(),
+            "glossary",
+            "Glossary".into(),
+            None,
+            vec![],
+            Some("Glossary"),
+        ),
+        Kind::Questions => (
+            "questions.html".into(),
+            "questions",
+            "Open questions".into(),
+            None,
+            vec![],
+            Some("Open questions"),
+        ),
+        Kind::Redirect(id, _) => {
+            let b = sh.m.get(id).expect("a permalink's block exists");
+            (
+                site.go_page(id),
+                "redirect",
+                site.label(b),
+                None,
+                vec![],
+                None,
+            )
+        }
+    };
+    let json_href = if kind_name == "redirect" {
+        String::new()
+    } else {
+        json_name(&page_url)
+    };
+    let mut body = Body::default();
+    let mut items = vec![];
+    let mut has_mermaid = false;
+    let mut pager = Pager::default();
+    match &kind {
+        Kind::Home => {
+            body.home = Some(home::build(
+                site,
+                sh.m,
+                sh.versions,
+                sh.landed_ms,
+                sh.description,
+                has_terms,
+                has_questions,
+            ));
+        }
+        Kind::Folder(id) => {
+            let f = sh.m.get(id).expect("a folder exists");
+            let children =
+                sh.m.children(Some(id))
+                    .into_iter()
+                    .filter(|c| tree::is_tree_type(&c.block_type))
+                    .filter_map(|c| {
+                        Some(ChildRow {
+                            href: rel(&page_url, &site.page(&c.id)?),
+                            label: site.label(c),
+                            kind: if c.block_type == tree::FOLDER {
+                                "folder"
+                            } else {
+                                "doc"
+                            },
+                        })
+                    })
+                    .collect();
+            body.folder = Some(FolderBody {
+                title: title.clone(),
+                description: f.field_str("description").map(String::from),
+                children,
+            });
+        }
+        Kind::Doc(id) => {
+            let doc = sh.m.get(id).expect("a doc exists");
+            let (doc_body, built, mermaid) = doc_parts(sh, doc, &page_url, &json_href, &title);
+            body.doc = Some(doc_body);
+            items = built;
+            has_mermaid = mermaid;
+            let (prev, next) = site.prev_next(id);
+            let link = |id: Option<BlockId>| {
+                let b = sh.m.get(&id?)?;
+                Some(PagerLink {
+                    title: site.label(b),
+                    href: rel(&page_url, &site.page(&b.id)?),
+                })
+            };
+            pager = Pager {
+                prev: link(prev),
+                next: link(next),
+            };
+        }
+        Kind::Glossary => body.glossary = Some(glossary_body(sh, &page_url)),
+        Kind::Questions => body.questions = Some(questions_body(sh, &page_url)),
+        Kind::Redirect(id, url) => {
+            let b = sh.m.get(id).expect("a permalink's block exists");
+            body.redirect = Some(RedirectBody {
+                label: site.label(b),
+                href: url.href_from(&page_url),
+            });
+        }
+    }
+    PageContext {
+        site_name: sh.site_name.to_string(),
+        site_description: sh.description.map(String::from),
+        lang: "en",
+        title,
+        root: "../".repeat(page_url.matches('/').count()),
+        init_js: assets::INIT_JS,
+        version: version::label(sh.position),
+        crumbs: sh.crumbs(&page_url, &chain, tail),
+        nav: nav::build(site, current, &page_url, has_terms, has_questions),
+        toc: toc::build(&items),
+        pager,
+        search_href: rel(&page_url, "search-index.json"),
+        has_mermaid,
+        has_terms,
+        has_questions,
+        json_href,
+        items,
+        body,
+        kind: kind_name,
+        page_url,
+    }
+}
+
+/// The search entries and the JSON twin of a finished page, through the two modules that read
+/// one. A permalink page has neither.
+pub fn finish(
+    sh: &Shared,
+    ctx: &PageContext,
+    index: &mut search::Index,
+) -> Option<serde_json::Value> {
+    if ctx.kind == "redirect" {
+        return None;
+    }
+    search::collect(index, ctx, sh.m, sh.site);
+    Some(machine::page_json(
+        ctx,
+        sh.m,
+        sh.g,
+        sh.suspects,
+        sh.position,
+        sh.site,
+        sh.pack,
+    ))
+}
+
+/// The doc's own part of the context, its blocks as items and whether one is a Mermaid diagram.
+fn doc_parts(
+    sh: &Shared,
+    doc: &Block,
+    page: &str,
+    json_href: &str,
+    title: &str,
+) -> (DocBody, Vec<Item>, bool) {
+    let (m, site) = (sh.m, sh.site);
+    let link = |id: &BlockId| sh.link(page, id);
+    // the lede: the first paragraph of the first section, when it is that section's first block
+    let lede_block = m
+        .children(Some(&doc.id))
+        .first()
+        .filter(|s| s.block_type == "section")
+        .and_then(|s| m.children(Some(&s.id)).into_iter().next())
+        .filter(|p| p.block_type == "prose");
+    let eyebrow = doc
+        .parent
+        .as_ref()
+        .and_then(|p| m.get(p))
+        .map(|f| site.label(f));
+    let doc_body = DocBody {
+        title: title.to_string(),
+        eyebrow,
+        lede: lede_block.map(|p| html::text_html(&p.body, &link)),
+        lede_anchor: lede_block.and_then(|p| site.anchors.get(&p.id).cloned()),
+    };
+    let (mut items, mut has_mermaid, mut tables) = (vec![], false, 0);
+    let mut stack: Vec<(&Block, usize)> = m
+        .children(Some(&doc.id))
+        .into_iter()
+        .rev()
+        .map(|b| (b, 1))
+        .collect();
+    let used = &sh.used_blobs;
+    while let Some((b, depth)) = stack.pop() {
+        for c in m.children(Some(&b.id)).into_iter().rev() {
+            stack.push((c, depth + 1));
+        }
+        // a decision has no place in the text, and the lede is shown above it
+        if b.block_type == decision::DECISION || lede_block.is_some_and(|l| l.id == b.id) {
+            continue;
+        }
+        if b.block_type == "diagram" && b.field_str("lang") == Some("mermaid") {
+            has_mermaid = true;
+        }
+        if b.block_type == "table" {
+            tables += 1;
+        }
+        let anchor = site.anchors.get(&b.id).cloned().unwrap_or_default();
+        let described_by: Vec<Link> =
+            sh.g.incoming(&b.id)
+                .iter()
+                .filter(|e| matches!(&e.kind, EdgeKind::Link(n) if n == decision::DESCRIBES))
+                .filter_map(|e| sh.link(page, &e.from))
+                .collect();
+        let present = |h: &Hash| sh.blobs.contains_key(h);
+        let asset_href = |h: &Hash, media: &str| {
+            let path = assets::blob_path(&h.to_string(), media);
+            used.borrow_mut().insert(path.clone(), *h);
+            rel(page, &path)
+        };
+        let blob_len = |h: &Hash| sh.blobs.get(h).map(|b| b.len() as u64);
+        let ctx = BlockCtx {
+            depth,
+            anchor: &anchor,
+            link: &link,
+            pack: sh.pack,
+            present: &present,
+            asset_href: &asset_href,
+            blob_len: &blob_len,
+            table_number: (b.block_type == "table").then_some(tables),
+            described_by: &described_by,
+        };
+        let (ref_head, ref_) = trail::ref_attrs(b, site, sh.pin(), m);
+        let title = match b.block_type.as_str() {
+            "section" => b.field_str("title"),
+            "term" | "component" | "actor" | "interface" | "flow" => b.field_str("name"),
+            _ => None,
+        };
+        items.push(Item {
+            id: b.id.to_string(),
+            block_type: b.block_type.clone(),
+            depth,
+            anchor: anchor.clone(),
+            kind_word: kind_word(&b.block_type),
+            title: title.map(String::from),
+            html: html::block_html(b, &ctx),
+            trail: trail::for_block(b, sh.g, m, site, page),
+            agents: trail::agents(b, sh.g, m, sh.suspects, site, page, json_href),
+            ref_head,
+            ref_,
+        });
+    }
+    (doc_body, items, has_mermaid)
+}
+
+/// The nearest section above a block and the title of its doc, as a reader says where it is.
+fn whereabouts(sh: &Shared, b: &Block) -> (String, String) {
+    let doc =
+        sh.m.doc_of(&b.id)
+            .map(|d| sh.site.label(d))
+            .unwrap_or_default();
+    let mut cur = b.parent.as_ref().and_then(|p| sh.m.get(p));
+    while let Some(p) = cur {
+        if p.block_type == "section" {
+            return (doc, sh.site.label(p));
+        }
+        cur = p.parent.as_ref().and_then(|p| sh.m.get(p));
+    }
+    (doc, String::new())
+}
+
+fn glossary_body(sh: &Shared, page: &str) -> GlossaryBody {
+    let link = |id: &BlockId| sh.link(page, id);
+    let terms = sh
+        .site
+        .terms
+        .iter()
+        .filter_map(|id| {
+            let b = sh.m.get(id)?;
+            let (doc_title, section_title) = whereabouts(sh, b);
+            let section = b.parent.as_ref().and_then(|p| sh.site.url_of(p))?;
+            Some(TermRow {
+                anchor: sh.site.term_anchors.get(id)?.clone(),
+                name: b.field_str("name").unwrap_or("").to_string(),
+                body: html::text_html(&b.body, &link),
+                href: section.href_from(page),
+                doc_title,
+                section_title,
+            })
+        })
+        .collect();
+    GlossaryBody { terms }
+}
+
+fn questions_body(sh: &Shared, page: &str) -> QuestionsBody {
+    let link = |id: &BlockId| sh.link(page, id);
+    let mut groups: Vec<QuestionGroup> = vec![];
+    // `open_questions` is in reading order, so one doc's questions are together
+    let mut last: Option<BlockId> = None;
+    for id in &sh.site.open_questions {
+        let Some(b) = sh.m.get(id) else { continue };
+        let Some(doc) = sh.m.doc_of(id) else { continue };
+        let (doc_title, section_title) = whereabouts(sh, b);
+        let Some(from) = sh.site.url_of(&doc.id) else {
+            continue;
+        };
+        let target = Url {
+            page: from.page,
+            anchor: sh.site.anchors.get(id).cloned(),
+        };
+        let row = QuestionRow {
+            anchor: sh
+                .site
+                .question_anchors
+                .get(id)
+                .cloned()
+                .unwrap_or_default(),
+            prompt: html::text_html(b.field_str("prompt").unwrap_or(""), &link),
+            href: target.href_from(page),
+            section_title,
+        };
+        if last.as_ref() != Some(&doc.id) {
+            groups.push(QuestionGroup {
+                doc_title,
+                questions: vec![],
+            });
+            last = Some(doc.id.clone());
+        }
+        if let Some(g) = groups.last_mut() {
+            g.questions.push(row);
+        }
+    }
+    QuestionsBody { groups }
+}

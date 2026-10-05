@@ -1,0 +1,6 @@
+{% extends "layout.html" %}
+{% block content %}
+<h1>Glossary</h1>
+<dl>{% for t in body.glossary.terms %}<dt id="{{ t.anchor }}">{{ t.name }}</dt><dd>{{ t.body|safe }} <a class="defined-in" href="{{ t.href }}">defined in {{ t.doc_title }} › {{ t.section_title }}</a></dd>
+{% endfor %}</dl>
+{% endblock %}

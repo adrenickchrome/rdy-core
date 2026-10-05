@@ -163,10 +163,12 @@ fn agent_over_mcp_then_human_approves() {
     assert_eq!(show["fields"]["status"], "accepted");
     let site = dir.path().join("site");
     rdy(dir.path(), &["render", "--out", site.to_str().unwrap()]);
+    // a decision has no page of its own: its permalink leads to the text it sits in
+    assert!(!site.join("_decision").exists());
     assert!(
-        std::fs::read_to_string(site.join(format!("_decision/{did}.html")))
+        std::fs::read_to_string(site.join(format!("go/{did}.html")))
             .unwrap()
-            .contains("Wallets don")
+            .contains("url=../wallets.html#decisions")
     );
     let ex = dir.path().join("export");
     assert_eq!(

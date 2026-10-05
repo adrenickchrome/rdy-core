@@ -54,7 +54,6 @@ fn site2_folder_pages_show_no_type_name_or_id() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 4"]
 fn site3_no_decision_page_exists_and_no_raw_status_label() {
     let (_d, _r, _ids, out) = canon();
     assert!(!out.path().join("decisions").exists() && !out.path().join("_decision").exists());
@@ -78,7 +77,6 @@ fn site3_no_decision_page_exists_and_no_raw_status_label() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 4"]
 fn site4_no_raw_edge_kind_is_visible_anywhere() {
     let (_d, _r, _ids, out) = canon();
     for k in [
@@ -148,7 +146,6 @@ fn site6_no_block_is_prefixed_with_its_type_name() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 4"]
 fn site7_inline_decisions_show_no_status_badge_and_link_to_no_decision_dir() {
     let (_d, _r, _ids, out) = canon();
     for p in golden::pages(out.path()) {
@@ -165,7 +162,6 @@ fn site7_inline_decisions_show_no_status_badge_and_link_to_no_decision_dir() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 4"]
 fn site8_no_suspect_badge() {
     // the fixture's views hold no suspect: a prose that cites a superseded decision makes one
     let (_d, mut r, ids) = golden::project();
@@ -237,7 +233,6 @@ fn site11_a_dangling_reference_in_a_diagram_shows_no_id() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 4"]
 fn site12_a_titleless_doc_is_never_labelled_with_its_id() {
     let (_d, mut r) = golden::generated_tree();
     // a doc requires a title: the empty string is "no title"
@@ -257,14 +252,12 @@ fn site12_a_titleless_doc_is_never_labelled_with_its_id() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 4"]
 fn site13_a_missing_link_target_is_never_labelled_with_its_id() {
     let (_d, _r, _ids, out) = canon();
     assert!(!has_leak(out.path(), "F1", ""));
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 4"]
 fn site14_no_breadcrumb_tail_reads_decision_id() {
     let (_d, _r, _ids, out) = canon();
     for p in golden::pages(out.path()) {
@@ -277,7 +270,6 @@ fn site14_no_breadcrumb_tail_reads_decision_id() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 4"]
 fn site15_the_site_name_is_the_projects_name_not_rdy() {
     let (_d, _r, _ids, out) = canon();
     for p in golden::pages(out.path()) {
@@ -297,7 +289,6 @@ fn site15_the_site_name_is_the_projects_name_not_rdy() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 4"]
 fn site16_no_underscore_directory_and_no_id_or_hash_page_in_any_url() {
     let (_d, _r, _ids, out) = canon();
     for p in golden::pages(out.path()) {
@@ -327,7 +318,6 @@ fn site17_the_version_label_uses_site_wording() {
 }
 
 #[test]
-#[ignore = "SITE-BAR: Task 4"]
 fn site18_the_home_page_lists_no_decisions() {
     let (_d, _r, _ids, out) = canon();
     let h = golden::html(out.path(), "index.html");

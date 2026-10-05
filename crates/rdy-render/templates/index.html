@@ -1,9 +1,8 @@
 {% extends "layout.html" %}
 {% block content %}
-<h1>{{ site }}</h1>
-<h2>Contents</h2>{{ tree|safe }}
-<h2>Decisions</h2>
-<ul>{% for x in decisions %}<li><a href="_decision/{{ x.id }}.html">{{ x.statement }}</a> <span class="badge {{ x.status_class }}">{{ x.status }}</span></li>{% endfor %}</ul>
+<h1>{{ site_name }}</h1>
+{% if site_description %}<p>{{ site_description }}</p>{% endif %}
+<h2>Contents</h2>{{ body.home.tree|safe }}
 <h2>Versions</h2>
-{% if versions %}<ul>{% for v in versions %}<li><span class="version-name">{{ v.name }}</span> <span class="meta">landing {{ v.landing_short }}{% if v.message %} · {{ v.message }}{% endif %}</span>{% if v.current %} <span class="badge">current</span>{% endif %}</li>{% endfor %}</ul>{% else %}<p class="meta">No versions yet.</p>{% endif %}
+{% if body.home.versions %}<ul>{% for v in body.home.versions %}<li><span class="version-name">{{ v.name }}</span> <span class="meta">landing {{ v.landing_short }}{% if v.message %} · {{ v.message }}{% endif %}</span>{% if v.current %} <span class="meta">(current)</span>{% endif %}</li>{% endfor %}</ul>{% else %}<p class="meta">No versions yet.</p>{% endif %}
 {% endblock %}

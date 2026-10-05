@@ -37,6 +37,12 @@ use std::path::{Path, PathBuf};
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Config {
     pack: String,
+    /// The project's name as a reader of its site sees it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// One sentence about the project, shown on the site's home page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 pub struct Rdy {
@@ -115,6 +121,8 @@ impl Rdy {
         load_pack(project, pack)?;
         let cfg = serde_yaml_ng::to_string(&Config {
             pack: pack.to_string(),
+            name: None,
+            description: None,
         })
         .expect("config yaml");
         rdy_store::fsutil::write_durable(&dot.join("config.yaml"), cfg.as_bytes()).map_err(io)?;
@@ -265,5 +273,49 @@ impl Rdy {
             views: objects.views,
             landed_changes: objects.landed_changes,
         })
+    }
+}
+
+impl Rdy {
+    /// The config as it is on disk now; any read or parse error reads as no config.
+    fn config_now(&self) -> Option<Config> {
+        let text = std::fs::read_to_string(self.root().join(".rdy/config.yaml")).ok()?;
+        serde_yaml_ng::from_str(&text).ok()
+    }
+
+    /// The name of the project as a site shows it: the config's `name`, else the project
+    /// directory's name (`-` and `_` turned into spaces, the first letter upper-cased), else
+    /// `Design docs`.
+    pub fn project_name(&self) -> String {
+        let named = self
+            .config_now()
+            .and_then(|c| c.name)
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty());
+        if let Some(n) = named {
+            return n;
+        }
+        let dir = self
+            .root()
+            .file_name()
+            .map(|n| n.to_string_lossy().replace(['-', '_'], " "))
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty());
+        match dir {
+            Some(d) => {
+                let mut chars = d.chars();
+                let first = chars.next().expect("non-empty").to_uppercase();
+                first.chain(chars).collect()
+            }
+            None => "Design docs".to_string(),
+        }
+    }
+
+    /// The config's `description`, when it has a non-empty one.
+    pub fn project_description(&self) -> Option<String> {
+        self.config_now()
+            .and_then(|c| c.description)
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty())
     }
 }

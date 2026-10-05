@@ -1,9 +1,11 @@
 <!doctype html>
-<html lang="en">
+<html lang="{{ lang }}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{ title }} · {{ site }}</title>
+<title>{% if kind == "home" %}{{ site_name }}{% else %}{{ title }} · {{ site_name }}{% endif %}</title>
+{% if init_js %}<script>{{ init_js|safe }}</script>
+{% endif %}<link rel="stylesheet" href="{{ root }}assets/site.css">
 <style>
 :root { --bg:#fff; --fg:#1b1b1f; --muted:#5f6068; --line:#e3e3e8; --accent:#3a5bd9; --warn:#b54708; --ok:#067647; }
 @media (prefers-color-scheme: dark) { :root { --bg:#141417; --fg:#ececf1; --muted:#a0a0ab; --line:#2b2b31; --accent:#8ea2ff; --warn:#f79009; --ok:#47cd89; } }
@@ -11,20 +13,25 @@ body { background:var(--bg); color:var(--fg); font:16px/1.55 system-ui, sans-ser
 a { color:var(--accent); } nav { margin-bottom:24px; color:var(--muted); }
 .block { margin:12px 0; } .meta { color:var(--muted); font-size:13px; }
 .badge { display:inline-block; font-size:12px; padding:1px 8px; border:1px solid var(--line); border-radius:999px; }
-.badge.live, .badge.accepted { color:var(--ok); } .badge.suspect, .badge.superseded, .badge.revoked { color:var(--warn); }
 .ref.missing { color:var(--warn); text-decoration:line-through; }
-.decision { border-left:3px solid var(--accent); padding-left:12px; }
 dl.term dt { font-weight:600; } table { border-collapse:collapse; } td, th { border:1px solid var(--line); padding:4px 8px; }
 pre { background:color-mix(in srgb, var(--fg) 6%, transparent); padding:12px; overflow-x:auto; }
 img { max-width:100%; }
 .version { margin-left:8px; color:var(--muted); font-size:13px; } .version.frozen { color:var(--accent); }
-aside.tree { font-size:14px; border-left:2px solid var(--line); padding-left:12px; margin-bottom:24px; } aside.tree ul { list-style:none; padding-left:14px; margin:2px 0; } li.current > a { font-weight:600; color:var(--fg); } .here { color:var(--fg); }
+.here { color:var(--fg); }
 </style>
 </head>
 <body>
-<nav class="crumbs">{% for c in crumbs %}{% if not loop.first %} / {% endif %}{% if c.href %}<a href="{{ c.href|safe }}">{{ c.label }}</a>{% else %}<span class="here">{{ c.label }}</span>{% endif %}{% endfor %} <span class="version{% if frozen %} frozen{% endif %}">{{ version }}</span></nav>
-{% if sidebar %}<aside class="tree">{{ sidebar|safe }}</aside>{% endif %}
+<header>{% include "partials/search.html" %}</header>
+<nav class="crumbs">{% for c in crumbs %}{% if not loop.first %} / {% endif %}{% if c.href %}<a href="{{ c.href }}">{{ c.label }}</a>{% else %}<span class="here">{{ c.label }}</span>{% endif %}{% endfor %} {% include "partials/version.html" %}</nav>
+{% include "partials/nav.html" %}
+<main id="main">
 {% block content %}{% endblock %}
-{% if mermaid %}<script type="module">import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs"; mermaid.initialize({ startOnLoad: true });</script>{% endif %}
-</body>
+{% include "partials/pager.html" %}
+</main>
+{% include "partials/toc.html" %}
+{% include "partials/colophon.html" %}
+<script src="{{ root }}assets/app.js" defer></script>
+{% if has_mermaid %}<script src="{{ root }}assets/js/mermaid.min.js" defer></script>
+{% endif %}</body>
 </html>

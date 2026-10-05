@@ -504,8 +504,10 @@ fn run(cli: Cli) -> Result<(Value, String), RdyError> {
                     Ok((
                         serde_json::to_value(&s).expect("json"),
                         format!(
-                            "rendered {} pages to {}{}",
+                            "rendered {} pages, {} permalinks and {} assets to {}{}",
                             s.pages,
+                            s.redirects,
+                            s.assets,
                             out.display(),
                             s.warnings
                                 .iter()

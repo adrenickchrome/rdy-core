@@ -1296,6 +1296,7 @@ dependencies = [
  "rdy-engine",
  "rdy-graph",
  "rdy-model",
+ "rdy-schema",
  "rdy-store",
  "regex",
  "serde",

@@ -6,7 +6,7 @@
 //! Every block of the committed tree has an explicit id, so [`Ids`] is a table of constants.
 use crate::fixtures;
 pub use crate::fixtures::{approver, land, raw, raw_commit, write, writer};
-use rdy_engine::{DecisionInput, Rdy, Scope};
+use rdy_engine::{DecisionInput, Rdy, RdyError, Scope, Session, WriteRequest, WriteResult};
 use rdy_model::{BlockId, FieldValue, Hash, Link};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -468,4 +468,465 @@ pub fn generated_tree() -> (tempfile::TempDir, Rdy) {
         {"op": "create", "type": "doc", "parent": sec("$fc"), "fields": {"title": "Draft doc", "doc_type": "glossary"}},
     ])).unwrap();
     (d, r)
+}
+
+/// [`fixtures::write`] as `s` rather than as the writer (an approver sets `status` and
+/// `decided_at` on a decision).
+pub fn write_as(s: &Session, r: &mut Rdy, view: &str, ops: Value) -> Result<WriteResult, RdyError> {
+    let ops = serde_json::from_value(ops)
+        .map_err(|e| RdyError::new(rdy_engine::E_BAD_INPUT, e.to_string(), "fix the test's ops"))?;
+    r.write(
+        s,
+        WriteRequest {
+            view: view.into(),
+            ops,
+            justification: None,
+            message: String::new(),
+        },
+    )
+}
+
+/// An empty project named `name`: init, then `name:` into the config, then open (the store is
+/// locked while a handle is open, so the first handle is dropped).
+fn named_project(name: &str) -> (tempfile::TempDir, Rdy) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    drop(Rdy::init(dir.path(), "rdy-standard").expect("init"));
+    std::fs::write(
+        dir.path().join(".rdy/config.yaml"),
+        format!("pack: rdy-standard\nname: {name:?}\n"),
+    )
+    .expect("config");
+    let r = Rdy::open(dir.path()).expect("open");
+    (dir, r)
+}
+
+/// An empty project named `Tiny`.
+pub fn tiny() -> (tempfile::TempDir, Rdy) {
+    named_project("Tiny")
+}
+
+/// The id of the first doc at the top level of canon, in tree order.
+pub fn first_doc_id(r: &mut Rdy) -> BlockId {
+    let m = r.materialized(&Scope::Canon).expect("canon");
+    m.children(None)
+        .into_iter()
+        .find(|b| b.block_type == rdy_model::tree::DOC)
+        .map(|b| b.id.clone())
+        .expect("canon holds a doc")
+}
+
+/// Writes and lands one doc, "Identity" (a glossary), with sections "Terms" and "Notes", the
+/// first holding one prose block.
+pub fn small_site(r: &mut Rdy) {
+    write(r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Identity", "doc_type": "glossary"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
+        {"op": "create", "type": "prose", "parent": "$s", "body": "Who the ledger belongs to."}
+    ]))
+    .expect("small site");
+    land(r, "work").expect("land the small site");
+}
+
+/// `Tiny`, with one doc, "Identity", with two sections, landed.
+pub fn tiny_with_doc() -> (tempfile::TempDir, Rdy) {
+    let (d, mut r) = tiny();
+    write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Identity", "doc_type": "glossary"}},
+        {"op": "create", "type": "section", "parent": "$d", "fields": {"title": "Terms"}},
+        {"op": "create", "type": "section", "parent": "$d", "fields": {"title": "Notes"}}
+    ]))
+    .expect("the doc");
+    land(&mut r, "work").expect("land the doc");
+    (d, r)
+}
+
+/// The blocks of [`site_with_decision`].
+#[derive(Clone, Debug)]
+pub struct WalletIds {
+    pub doc: BlockId,
+    pub folder: BlockId,
+    pub section: BlockId,
+    pub term: BlockId,
+    pub claim: BlockId,
+    pub question: BlockId,
+    pub decision: BlockId,
+}
+
+fn created(res: &WriteResult, key: &str) -> BlockId {
+    BlockId::parse(&res.created[key]).expect("a created id")
+}
+
+/// Project `Wallets`: folder `wallets`, doc `transactions` ("Transactions"), section "Guards",
+/// term "Ledger", a claim referencing the decision and the term, a question and a decision that
+/// affects the term; landed.
+pub fn site_with_decision() -> (tempfile::TempDir, Rdy, WalletIds) {
+    let (d, mut r) = named_project("Wallets");
+    let res = write(&mut r, "work", json!([
+        {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "wallets", "title": "Wallets"}},
+        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "transactions", "title": "Transactions", "doc_type": "glossary"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Guards"}},
+        {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Balances."},
+        {"op": "create", "type": "question", "id": "$q", "parent": "$s", "fields": {"prompt": "Is a ledger a sequence?"}}
+    ]))
+    .expect("the wallets");
+    let (section, term) = (created(&res, "$s"), created(&res, "$t"));
+    let dec = r
+        .decide(
+            &writer(),
+            "work",
+            DecisionInput {
+                parent: s(&section),
+                statement: "Ledgers are atomic".into(),
+                affects: vec![s(&term)],
+                ..Default::default()
+            },
+        )
+        .expect("the decision");
+    let decision = created(&dec, "$decision");
+    let claim = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "claim", "id": "$c", "parent": s(&section),
+             "body": format!("See {{{{{decision}}}}} and {{{{{term}}}}}.")}
+        ]),
+    )
+    .expect("the claim");
+    land(&mut r, "work").expect("land the wallets");
+    let ids = WalletIds {
+        doc: created(&res, "$d"),
+        folder: created(&res, "$f"),
+        section,
+        term,
+        claim: created(&claim, "$c"),
+        question: created(&res, "$q"),
+        decision,
+    };
+    (d, r, ids)
+}
+
+/// Project `Tree`; top level in order: doc `intro` ("Intro", one section "Summary" with one prose
+/// block), folder `a` ("Alpha": doc `one` with a section "Terms" holding the term "Ledger", doc
+/// `two` with one section), folder `b` ("Beta": folder `c` ("Gamma") holding doc `three` with
+/// five sections, the third holding a question); landed.
+pub fn tree_site() -> (tempfile::TempDir, Rdy) {
+    let (d, mut r) = named_project("Tree");
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$intro", "fields": {"name": "intro", "title": "Intro", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$is", "parent": "$intro", "fields": {"title": "Summary"}}),
+        json!({"op": "create", "type": "prose", "parent": "$is", "body": "Where to start."}),
+        json!({"op": "create", "type": "folder", "id": "$a", "fields": {"name": "a", "title": "Alpha"}}),
+        json!({"op": "create", "type": "folder", "id": "$b", "fields": {"name": "b", "title": "Beta"}}),
+        json!({"op": "create", "type": "doc", "id": "$one", "parent": "$a", "fields": {"name": "one", "title": "One", "doc_type": "glossary"}}),
+        json!({"op": "create", "type": "section", "id": "$os", "parent": "$one", "fields": {"title": "Terms"}}),
+        json!({"op": "create", "type": "term", "parent": "$os", "fields": {"name": "Ledger"}, "body": "Balances are derived."}),
+        json!({"op": "create", "type": "doc", "id": "$two", "parent": "$a", "fields": {"name": "two", "title": "Two", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "parent": "$two", "fields": {"title": "Summary"}}),
+        json!({"op": "create", "type": "folder", "id": "$c", "parent": "$b", "fields": {"name": "c", "title": "Gamma"}}),
+        json!({"op": "create", "type": "doc", "id": "$three", "parent": "$c", "fields": {"name": "three", "title": "Three", "doc_type": "overview"}}),
+    ];
+    for n in 1..=5 {
+        ops.push(json!({"op": "create", "type": "section", "id": format!("$ts{n}"), "parent": "$three", "fields": {"title": format!("Part {n}")}}));
+    }
+    ops.push(json!({"op": "create", "type": "question", "parent": "$ts3", "fields": {"prompt": "Is a ledger a sequence?"}}));
+    write(&mut r, "work", json!(ops)).expect("the tree");
+    land(&mut r, "work").expect("land the tree");
+    (d, r)
+}
+
+/// Project `Many`: folder `many` holding `n` docs, `Doc 1` to `Doc n` (names `doc-1`...); landed.
+pub fn wide_folder(n: usize) -> (tempfile::TempDir, Rdy) {
+    let (d, mut r) = named_project("Many");
+    let mut ops = vec![
+        json!({"op": "create", "type": "folder", "id": "$f", "fields": {"name": "many", "title": "Many"}}),
+    ];
+    for i in 1..=n {
+        ops.push(json!({"op": "create", "type": "doc", "parent": "$f",
+            "fields": {"name": format!("doc-{i}"), "title": format!("Doc {i}"), "doc_type": "overview"}}));
+    }
+    write(&mut r, "work", json!(ops)).expect("the wide folder");
+    land(&mut r, "work").expect("land the wide folder");
+    (d, r)
+}
+
+/// The blocks of [`every_type_site`].
+#[derive(Clone, Debug)]
+pub struct TypeIds {
+    pub doc: BlockId,
+    pub section: BlockId,
+    pub subsection: BlockId,
+    pub prose: BlockId,
+    pub requirement: BlockId,
+    pub claim: BlockId,
+    pub constraint: BlockId,
+    pub example: BlockId,
+    pub note: BlockId,
+    pub rationale: BlockId,
+    pub term: BlockId,
+    pub component: BlockId,
+    pub actor: BlockId,
+    pub interface: BlockId,
+    pub flow: BlockId,
+    pub table: BlockId,
+    pub diagram: BlockId,
+    pub figure: BlockId,
+    pub code: BlockId,
+    pub question: BlockId,
+    pub decision: BlockId,
+    /// Exists only in the view `dangling`: it references an id that does not exist.
+    pub dangling_prose: BlockId,
+}
+
+/// Project `All`: doc "All" (`all`), a section "Terms" and a sub-section holding the component
+/// and the flow, then one block of every type in the order prose, requirement, claim,
+/// constraint, example, note, rationale, term, component, actor, interface, flow, table,
+/// diagram, figure, code, question; a decision that affects the requirement; landed. A prose
+/// block with a dangling reference is in the view `dangling`, never landed.
+pub fn every_type_site() -> (tempfile::TempDir, Rdy, TypeIds) {
+    let (d, mut r) = named_project("All");
+    let blob = r
+        .store_mut()
+        .put_blob(b"\x89PNG fake")
+        .expect("blob")
+        .to_string();
+    let res = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"name": "all", "title": "All", "doc_type": "glossary"}},
+        {"op": "create", "type": "section", "id": "$sec", "parent": "$doc", "fields": {"title": "Terms"}},
+        {"op": "create", "type": "prose", "id": "$prose", "parent": "$sec", "body": "Plain words."},
+        {"op": "create", "type": "requirement", "id": "$req", "parent": "$sec", "fields": {"priority": "must"}, "body": "It must."},
+        {"op": "create", "type": "claim", "id": "$claim", "parent": "$sec", "body": "Balances are derived."},
+        {"op": "create", "type": "constraint", "id": "$constraint", "parent": "$sec", "body": "No balance column."},
+        {"op": "create", "type": "example", "id": "$example", "parent": "$sec", "body": "A deposit of five."},
+        {"op": "create", "type": "note", "id": "$note", "parent": "$sec", "body": "Mind the rounding."},
+        {"op": "create", "type": "rationale", "id": "$rationale", "parent": "$sec", "body": "Because reasons."},
+        {"op": "create", "type": "term", "id": "$term", "parent": "$sec", "fields": {"name": "Ledger"}, "body": "Balances."},
+        {"op": "create", "type": "section", "id": "$sub", "parent": "$sec", "fields": {"title": "Parts"}},
+        {"op": "create", "type": "component", "id": "$component", "parent": "$sub", "fields": {"name": "Core"}, "body": "The core."},
+        {"op": "create", "type": "actor", "id": "$actor", "parent": "$sec", "fields": {"name": "Teller"}, "body": "A person at the counter."},
+        {"op": "create", "type": "interface", "id": "$interface", "parent": "$sec", "fields": {"name": "Post"}, "body": "Posts an entry."},
+        {"op": "create", "type": "flow", "id": "$flow", "parent": "$sub", "fields": {"name": "Settle", "steps": ["One", "Two"]}},
+        {"op": "create", "type": "table", "id": "$table", "parent": "$sec", "fields": {"columns": ["Name", "Count"], "rows": [["a", 1], [["a", "b"], 2], [{"k": "v"}, 3]]}},
+        {"op": "create", "type": "diagram", "id": "$diagram", "parent": "$sec", "fields": {"lang": "mermaid", "alt": "The flow"}, "body": "graph TD\n A --> B"},
+        {"op": "create", "type": "figure", "id": "$figure", "parent": "$sec", "fields": {"blob": blob, "media_type": "image/png", "alt": "A picture"}},
+        {"op": "create", "type": "code", "id": "$code", "parent": "$sec", "fields": {"lang": "python"}, "body": "print(1)"},
+        {"op": "create", "type": "question", "id": "$question", "parent": "$sec", "fields": {"prompt": "Is a ledger a sequence?"}}
+    ]))
+    .expect("every type");
+    let dec = r
+        .decide(
+            &writer(),
+            "work",
+            DecisionInput {
+                parent: res.created["$sec"].clone(),
+                statement: "Ledgers are atomic".into(),
+                affects: vec![res.created["$req"].clone()],
+                ..Default::default()
+            },
+        )
+        .expect("the decision");
+    land(&mut r, "work").expect("land every type");
+    let dangling_prose = BlockId::parse("p-DNG01").expect("an id");
+    raw_commit(
+        &mut r,
+        "dangling",
+        vec![raw(
+            dangling_prose.as_str(),
+            "prose",
+            Some(&res.created["$sec"]),
+            "zz",
+            &[],
+            &format!("See {{{{{}}}}} and {{{{p-ZZZZZ}}}}.", res.created["$term"]),
+        )],
+    );
+    let ids = TypeIds {
+        doc: created(&res, "$doc"),
+        section: created(&res, "$sec"),
+        subsection: created(&res, "$sub"),
+        prose: created(&res, "$prose"),
+        requirement: created(&res, "$req"),
+        claim: created(&res, "$claim"),
+        constraint: created(&res, "$constraint"),
+        example: created(&res, "$example"),
+        note: created(&res, "$note"),
+        rationale: created(&res, "$rationale"),
+        term: created(&res, "$term"),
+        component: created(&res, "$component"),
+        actor: created(&res, "$actor"),
+        interface: created(&res, "$interface"),
+        flow: created(&res, "$flow"),
+        table: created(&res, "$table"),
+        diagram: created(&res, "$diagram"),
+        figure: created(&res, "$figure"),
+        code: created(&res, "$code"),
+        question: created(&res, "$question"),
+        decision: created(&dec, "$decision"),
+        dangling_prose,
+    };
+    (d, r, ids)
+}
+
+/// The blocks of [`decided_site`].
+#[derive(Clone, Debug)]
+pub struct DecidedIds {
+    pub doc: BlockId,
+    pub requirement: BlockId,
+    pub term: BlockId,
+    /// Accepted 2020-06-23, superseded by `d1`.
+    pub d0: BlockId,
+    /// Accepted 2021-02-08, supersedes `d0`.
+    pub d1: BlockId,
+    /// Rejected 2021-01-10.
+    pub d2: BlockId,
+    /// Accepted 2021-03-01, revoked by `d3_revoker`.
+    pub d3: BlockId,
+    /// Accepted 2021-04-02.
+    pub d3_revoker: BlockId,
+    /// Proposed; exists only in the view `pending`.
+    pub d4: BlockId,
+    pub q: BlockId,
+}
+
+/// Project `Ledgers`: doc "Ledgers" with a section "Rules" holding the prose `Plain words.`, the
+/// requirement `Ledgers are atomic when settled.`, the term "Balance", five decisions the
+/// approver wrote with their `status` and `decided_at` (D0 to D3 and D3's revoker, see
+/// [`DecidedIds`]) and a question that references the requirement; landed. D4, proposed, is in
+/// the view `pending`, which is never landed (canon cannot hold a proposed decision).
+pub fn decided_site() -> (tempfile::TempDir, Rdy, DecidedIds) {
+    let (d, mut r) = named_project("Ledgers");
+    let base = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"name": "ledgers", "title": "Ledgers", "doc_type": "glossary"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Rules"}},
+        {"op": "create", "type": "prose", "parent": "$s", "body": "Plain words."},
+        {"op": "create", "type": "requirement", "id": "$r", "parent": "$s", "fields": {"priority": "must"}, "body": "Ledgers are atomic when settled."},
+        {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Balance"}, "body": "What an account holds."}
+    ]))
+    .expect("the base");
+    let (section, requirement, term) = (
+        s(&created(&base, "$s")),
+        s(&created(&base, "$r")),
+        s(&created(&base, "$t")),
+    );
+    let decision = |id: &str,
+                    statement: &str,
+                    status: &str,
+                    at: &str,
+                    options: &[&str],
+                    links: Value| {
+        json!({"op": "create", "type": "decision", "id": id, "parent": section,
+            "fields": {"statement": statement, "status": status, "decided_at": at, "recorded_at": at, "options": options},
+            "links": links})
+    };
+    let dated = write_as(
+        &approver(),
+        &mut r,
+        "work",
+        json!([
+            decision(
+                "$d0",
+                "Ledgers are eventually consistent",
+                "accepted",
+                "2020-06-23T09:00:00Z",
+                &[],
+                json!({"affects": [{"target": requirement}]})
+            ),
+            decision(
+                "$d1",
+                "Ledgers are atomic",
+                "accepted",
+                "2021-02-08T10:00:00Z",
+                &["atomic", "eventual"],
+                json!({"affects": [{"target": requirement}], "supersedes": [{"target": "$d0"}]})
+            ),
+            decision(
+                "$d2",
+                "Ledgers are optional",
+                "rejected",
+                "2021-01-10T09:00:00Z",
+                &["optional", "required"],
+                json!({"affects": [{"target": requirement}]})
+            ),
+            decision(
+                "$d3",
+                "Balances round down",
+                "accepted",
+                "2021-03-01T09:00:00Z",
+                &[],
+                json!({"affects": [{"target": term}]})
+            )
+        ]),
+    )
+    .expect("the dated decisions");
+    let (d0, d1, d2, d3) = (
+        created(&dated, "$d0"),
+        created(&dated, "$d1"),
+        created(&dated, "$d2"),
+        created(&dated, "$d3"),
+    );
+    let revoker = write_as(
+        &approver(),
+        &mut r,
+        "work",
+        json!([decision(
+            "$rv",
+            &format!("Revoke {d3}: balances round half to even"),
+            "accepted",
+            "2021-04-02T09:00:00Z",
+            &[],
+            json!({"revokes": [{"target": s(&d3)}]})
+        )]),
+    )
+    .expect("the revoking decision");
+    let q = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "question", "id": "$q", "parent": section,
+             "fields": {"prompt": format!("Is a ledger a sequence? See {{{{{requirement}}}}}.")}}
+        ]),
+    )
+    .expect("the question");
+    land(&mut r, "work").expect("land the decided site");
+    let ids = DecidedIds {
+        doc: created(&base, "$doc"),
+        requirement: created(&base, "$r"),
+        term: created(&base, "$t"),
+        d0,
+        d1,
+        d2,
+        d3,
+        d3_revoker: created(&revoker, "$rv"),
+        d4: BlockId::parse("D-AAAAA").expect("a placeholder"),
+        q: created(&q, "$q"),
+    };
+    let m = r.materialized(&Scope::Canon).expect("canon").clone();
+    for (id, at) in [
+        (&ids.d0, "2020-06-23T09:00:00Z"),
+        (&ids.d1, "2021-02-08T10:00:00Z"),
+        (&ids.d2, "2021-01-10T09:00:00Z"),
+        (&ids.d3, "2021-03-01T09:00:00Z"),
+        (&ids.d3_revoker, "2021-04-02T09:00:00Z"),
+    ] {
+        assert_eq!(
+            m.get(id).and_then(|b| b.field_str("decided_at")),
+            Some(at),
+            "the gate rewrote decided_at of {id}"
+        );
+    }
+    let pending = r
+        .decide(
+            &writer(),
+            "pending",
+            DecisionInput {
+                parent: section,
+                statement: "Ledgers may be sharded".into(),
+                affects: vec![requirement],
+                ..Default::default()
+            },
+        )
+        .expect("the proposed decision");
+    let ids = DecidedIds {
+        d4: created(&pending, "$decision"),
+        ..ids
+    };
+    (d, r, ids)
 }

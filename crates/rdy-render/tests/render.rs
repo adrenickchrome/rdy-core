@@ -23,7 +23,11 @@ fn founder() -> Session {
 fn text_html_escapes_then_links() {
     let t = BlockId::parse("t-MEDGR").unwrap();
     let html = text_html("<b>x</b> & {{t-MEDGR}} {{t-N0PE1}}\nnext", &|id| {
-        (id == &t).then(|| ("doc/d-AAAAA.html#t-MEDGR".into(), "Ledger".into()))
+        (id == &t).then(|| rdy_render::Link {
+            href: "doc/d-AAAAA.html#t-MEDGR".into(),
+            label: "Ledger".into(),
+            title: String::new(),
+        })
     });
     assert_eq!(
         html,
@@ -44,53 +48,51 @@ fn renders_docs_decisions_diagrams_and_assets() {
         {"op": "create", "type": "diagram", "parent": "$s", "fields": {"lang": "mermaid", "alt": "flow"}, "body": "graph TD\n  A --> B"},
         {"op": "create", "type": "figure", "parent": "$s", "fields": {"blob": blob, "media_type": "image/png", "alt": "logo"}}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
-    let d = r
-        .decide(
-            &agent(),
-            "work",
-            DecisionInput {
-                parent: res.created["$s"].clone(),
-                statement: "Ledger is append-only".into(),
-                options: vec!["append-only".into(), "mutable".into()],
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    r.decide(
+        &agent(),
+        "work",
+        DecisionInput {
+            parent: res.created["$s"].clone(),
+            statement: "Ledger is append-only".into(),
+            options: vec!["append-only".into(), "mutable".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let p = r.propose(&agent(), "work", "seed").unwrap();
     r.land(&founder(), &p.id).unwrap();
 
     let out = tempfile::tempdir().unwrap();
     let summary = render_site(&mut r, &Scope::Canon, out.path()).unwrap();
-    assert_eq!(summary.pages, 3); // index, one doc, one decision
+    assert_eq!(summary.pages, 3); // index, one doc and the glossary: a decision has no page
     assert_eq!(summary.assets, 1);
 
     let t_id = &res.created["$t"];
-    let did = &d.created["$decision"];
     let doc = std::fs::read_to_string(out.path().join("identity.html")).unwrap();
     assert!(doc.contains("<title>Identity"));
     assert!(
-        doc.contains(&format!("href=\"#{t_id}\">Ledger</a>")),
-        "same-doc reference links to the anchor"
+        doc.contains("href=\"#ledger\">Ledger</a>"),
+        "same-doc reference links to the anchor: {doc}"
     );
+    assert!(doc.contains("id=\"ledger\"") && !doc.contains(&format!("id=\"{t_id}\"")));
     assert!(doc.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
     assert!(!doc.contains("<script>alert(1)"));
     assert!(doc.contains("<pre class=\"mermaid\">graph TD\n  A --&gt; B</pre>"));
-    assert!(doc.contains("mermaid"));
-    assert!(doc.contains(&format!("src=\"_assets/{blob}\"")) && doc.contains("alt=\"logo\""));
-    assert!(doc.contains(&format!("href=\"_decision/{did}.html\"")));
-
-    let dec = std::fs::read_to_string(out.path().join(format!("_decision/{did}.html"))).unwrap();
-    assert!(dec.contains("Ledger is append-only"));
-    assert!(dec.contains("live"));
-    assert!(dec.contains("mutable"), "considered options are listed");
+    assert!(
+        doc.contains("assets/js/mermaid.min.js") && !doc.contains("cdn"),
+        "the page with a diagram loads the vendored library"
+    );
+    assert!(doc.contains(&format!("src=\"assets/{blob}.png\"")) && doc.contains("alt=\"logo\""));
+    assert!(!out.path().join("_decision").exists() && !doc.contains("_decision"));
 
     let index = std::fs::read_to_string(out.path().join("index.html")).unwrap();
     assert!(index.contains(&"identity.html".to_string()));
     assert!(
-        !index.contains("cdn.jsdelivr.net/npm/mermaid"),
+        !index.contains("mermaid"),
         "no diagram script on pages without diagrams"
     );
-    assert!(out.path().join(format!("_assets/{blob}")).exists());
+    assert!(out.path().join(format!("assets/{blob}.png")).exists());
+    assert!(out.path().join("assets/js/mermaid.min.js").exists());
 }
 
 /// Commits `blocks` to `view` straight through the store, past the write path's checks: an older
@@ -169,30 +171,24 @@ fn hostile_text_is_escaped_in_attribute_contexts() {
         {"op": "create", "type": "figure", "parent": "$s", "fields": {"blob": blob, "media_type": "image/png", "alt": evil}},
         {"op": "create", "type": "code", "parent": "$s", "fields": {"lang": evil}, "body": "x"}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
-    let d = r
-        .decide(
-            &agent(),
-            "work",
-            DecisionInput {
-                parent: res.created["$s"].clone(),
-                statement: evil.into(),
-                options: vec![evil.into()],
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    r.decide(
+        &agent(),
+        "work",
+        DecisionInput {
+            parent: res.created["$s"].clone(),
+            statement: evil.into(),
+            options: vec![evil.into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let p = r.propose(&agent(), "work", "seed").unwrap();
     r.land(&founder(), &p.id).unwrap();
     let out = tempfile::tempdir().unwrap();
     render_site(&mut r, &Scope::Canon, out.path()).unwrap();
     let doc = std::fs::read_to_string(out.path().join("t.html")).unwrap();
-    let dec = std::fs::read_to_string(
-        out.path()
-            .join(format!("_decision/{}.html", d.created["$decision"])),
-    )
-    .unwrap();
     let index = std::fs::read_to_string(out.path().join("index.html")).unwrap();
-    for page in [&doc, &dec, &index] {
+    for page in [&doc, &index] {
         assert!(!page.contains("onerror=\"alert"), "attribute breakout");
         assert!(!page.contains("<b>"), "raw tag");
     }
@@ -251,126 +247,25 @@ fn link_labels_render_references_as_text_on_one_line() {
         )
         .unwrap();
     let did = d.created["$decision"].clone();
+    let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
+        {"op": "create", "type": "claim", "id": "$c", "parent": s, "body": format!("Corrections are\nnew entries per {{{{{did}}}}}.")}
+    ])).unwrap(), justification: None, message: String::new() }).unwrap();
+    let claim = res.created["$c"].clone();
     r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
-        {"op": "create", "type": "claim", "parent": s, "body": format!("Corrections are\nnew entries per {{{{{did}}}}}.")}
+        {"op": "create", "type": "claim", "parent": s, "body": format!("Compare {{{{{claim}}}}}.")}
     ])).unwrap(), justification: None, message: String::new() }).unwrap();
     let p = r.propose(&agent(), "work", "seed").unwrap();
     r.land(&founder(), &p.id).unwrap();
     let out = tempfile::tempdir().unwrap();
     render_site(&mut r, &Scope::Canon, out.path()).unwrap();
-    let dec = std::fs::read_to_string(out.path().join(format!("_decision/{did}.html"))).unwrap();
+    let page = std::fs::read_to_string(out.path().join("ledger.html")).unwrap();
     assert!(
-        dec.contains(">Corrections are new entries per Ledger is append-only.</a>"),
-        "Referenced by label: {dec}"
-    );
-}
-
-fn small_site(r: &mut Rdy) -> (String, String) {
-    let res = r.write(&agent(), WriteRequest { view: "work".into(), ops: serde_json::from_value(json!([
-        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Identity", "doc_type": "decisions-log"}},
-        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Decisions"}}
-    ])).unwrap(), justification: None, message: String::new() }).unwrap();
-    let d = r
-        .decide(
-            &agent(),
-            "work",
-            DecisionInput {
-                parent: res.created["$s"].clone(),
-                statement: "Ledger is append-only".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    let p = r.propose(&agent(), "work", "seed").unwrap();
-    r.land(&founder(), &p.id).unwrap();
-    (res.created["$doc"].clone(), d.created["$decision"].clone())
-}
-
-fn pages(out: &std::path::Path, did: &str) -> Vec<String> {
-    [
-        "index.html".to_string(),
-        "identity.html".to_string(),
-        format!("_decision/{did}.html"),
-    ]
-    .iter()
-    .map(|p| std::fs::read_to_string(out.join(p)).unwrap())
-    .collect()
-}
-
-#[test]
-fn every_page_carries_the_version_label() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
-    let (doc, did) = small_site(&mut r);
-    let render = |r: &mut Rdy, scope: &Scope| {
-        let out = tempfile::tempdir().unwrap();
-        render_site(r, scope, out.path()).unwrap();
-        out
-    };
-    let out = render(&mut r, &Scope::Canon);
-    for page in pages(out.path(), &did) {
-        assert!(
-            page.contains("<span class=\"version\">no version yet</span>"),
-            "{page}"
-        );
-    }
-    assert!(pages(out.path(), &did)[0].contains("No versions yet."));
-
-    r.tag(&founder(), "v0.1.0", None, Some("first cut".into()))
-        .unwrap();
-    let out = render(&mut r, &Scope::Canon);
-    for page in pages(out.path(), &did) {
-        assert!(
-            page.contains("<span class=\"version\">v0.1.0</span>"),
-            "{page}"
-        );
-    }
-    let index = &pages(out.path(), &did)[0];
-    assert!(
-        index.contains("<span class=\"version-name\">v0.1.0</span>"),
-        "{index}"
+        page.contains(">Corrections are new entries per Ledger is append-only.</a>"),
+        "a link's label is the target's text on one line, its references shown as text: {page}"
     );
     assert!(
-        index.contains("first cut") && index.contains("<span class=\"badge\">current</span>"),
-        "{index}"
-    );
-
-    r.write(
-        &agent(),
-        WriteRequest {
-            view: "work".into(),
-            ops: serde_json::from_value(json!([
-                {"op": "update", "id": doc, "fields": {"title": "Identity v2"}}
-            ]))
-            .unwrap(),
-            justification: None,
-            message: String::new(),
-        },
-    )
-    .unwrap();
-    let out = render(&mut r, &Scope::View("work".into()));
-    assert!(
-        pages(out.path(), &did)[1]
-            .contains("<span class=\"version\">v0.1.0 · view work, 1 unlanded change</span>")
-    );
-    let p = r.propose(&agent(), "work", "rename").unwrap();
-    r.land(&founder(), &p.id).unwrap();
-    let out = render(&mut r, &Scope::Canon);
-    assert!(
-        pages(out.path(), &did)[2].contains("<span class=\"version\">v0.1.0 + 1 landing</span>")
-    );
-
-    let at = r.resolve_scope("tag:v0.1.0").unwrap();
-    let out = render(&mut r, &at);
-    for page in pages(out.path(), &did) {
-        assert!(
-            page.contains("<span class=\"version frozen\">v0.1.0 · frozen snapshot</span>"),
-            "{page}"
-        );
-    }
-    assert!(
-        pages(out.path(), &did)[1].contains("<title>Identity ·"),
-        "the snapshot shows the old title"
+        page.contains("new entries per <a href=\"#s\">Ledger is append-only</a>."),
+        "a reference to a decision leads to the section it sits in: {page}"
     );
 }
 
@@ -401,8 +296,7 @@ fn site_tree(r: &mut Rdy) -> serde_json::Map<String, serde_json::Value> {
 fn the_site_mirrors_the_folder_tree() {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
-    let ids = site_tree(&mut r);
-    let id = |k: &str| ids[k].as_str().unwrap().to_string();
+    let _ids = site_tree(&mut r);
     let out = tempfile::tempdir().unwrap();
     let s = render_site(&mut r, &Scope::Canon, out.path()).unwrap();
     for p in [
@@ -419,17 +313,13 @@ fn the_site_mirrors_the_folder_tree() {
     assert_eq!(s.pages, 7);
     let read = |p: &str| std::fs::read_to_string(out.path().join(p)).unwrap();
 
+    let name = r.project_name();
     let t = read("wallets/transactions.html");
-    assert!(t.contains("<nav class=\"crumbs\"><a href=\"../index.html\">rdy</a> / <a href=\"../wallets/index.html\">wallets</a> / <span class=\"here\">Transactions</span>"), "{t}");
+    assert!(t.contains(&format!("<nav class=\"crumbs\"><a href=\"../index.html\">{name}</a> / <a href=\"../wallets/index.html\">Wallets</a> / <span class=\"here\">Transactions</span>")), "{t}");
     assert!(
-        t.contains(&format!(
-            "href=\"../glossary.html#{}\">Ledger</a>",
-            id("$term")
-        )),
+        t.contains("href=\"../glossary.html#ledger\">Ledger</a>"),
         "relative link across folders: {t}"
     );
-    let sidebar = "<aside class=\"tree\"><ul><li><a href=\"../glossary.html\">Glossary</a></li><li><a href=\"../wallets/index.html\">wallets</a><ul><li class=\"current\"><a href=\"../wallets/transactions.html\">Transactions</a></li><li><a href=\"../wallets/balance.html\">Balance</a></li><li><a href=\"../wallets/cards/index.html\">cards</a></li></ul></li></ul></aside>";
-    assert!(t.contains(sidebar), "neighbourhood sidebar: {t}");
     assert!(
         !t.contains("limits.html"),
         "a cousin folder's contents are not shown"
@@ -443,19 +333,17 @@ fn the_site_mirrors_the_folder_tree() {
         ),
         "{cards}"
     );
-    assert!(cards.contains("<li class=\"current\"><a href=\"../../wallets/cards/index.html\">cards</a><ul><li><a href=\"../../wallets/cards/limits.html\">Limits</a></li></ul></li>"), "the current folder's children: {cards}");
 
     let index = read("index.html");
-    assert!(index.contains("<span class=\"here\">rdy</span>"));
+    assert!(index.contains(&format!("<span class=\"here\">{name}</span>")));
     assert!(
         index.contains("<a href=\"wallets/cards/limits.html\">Limits</a>"),
         "the index lists the whole tree: {index}"
     );
-    assert!(!index.contains("<aside"));
 }
 
 #[test]
-fn decisions_and_assets_live_under_underscore_directories() {
+fn url1_assets_live_under_assets_and_decisions_have_no_page() {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     let blob = r.store_mut().put_blob(b"\x89PNG fake").unwrap().to_string();
@@ -482,14 +370,16 @@ fn decisions_and_assets_live_under_underscore_directories() {
     let out = tempfile::tempdir().unwrap();
     render_site(&mut r, &Scope::Canon, out.path()).unwrap();
     let doc = std::fs::read_to_string(out.path().join("wallets/design.html")).unwrap();
-    assert!(doc.contains(&format!("src=\"../_assets/{blob}\"")), "{doc}");
     assert!(
-        doc.contains(&format!("href=\"../_decision/{did}.html\"")),
+        doc.contains(&format!("src=\"../assets/{blob}.png\"")),
         "{doc}"
     );
-    assert!(out.path().join(format!("_assets/{blob}")).exists());
-    let dec = std::fs::read_to_string(out.path().join(format!("_decision/{did}.html"))).unwrap();
-    assert!(dec.contains(&format!("<a href=\"../wallets/design.html\">Design</a> / <span class=\"here\">decision {did}</span>")), "{dec}");
+    assert!(out.path().join(format!("assets/{blob}.png")).exists());
+    assert!(!out.path().join("_assets").exists() && !out.path().join("_decision").exists());
+    assert!(!doc.contains("_decision") && !doc.contains(&format!("{did}.html")));
+    // the decision is reached through its permalink, which lands on the text it sits in
+    let go = std::fs::read_to_string(out.path().join(format!("go/{did}.html"))).unwrap();
+    assert!(go.contains("url=../wallets/design.html#decisions"), "{go}");
 }
 
 #[test]
@@ -569,7 +459,7 @@ fn a_damaged_store_with_a_very_deep_chain_renders_without_overflowing() {
 }
 
 #[test]
-fn the_sidebar_shows_at_most_50_siblings_per_list() {
+fn the_home_page_lists_every_doc_of_a_wide_folder() {
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
     let ops: Vec<_> = (0..120)
@@ -587,24 +477,7 @@ fn the_sidebar_shows_at_most_50_siblings_per_list() {
     .unwrap();
     let out = tempfile::tempdir().unwrap();
     render_site(&mut r, &Scope::View("work".into()), out.path()).unwrap();
-    let page = std::fs::read_to_string(out.path().join("doc-100.html")).unwrap();
-    let start = page.find("<aside class=\"tree\">").unwrap();
-    let end = page[start..].find("</aside>").unwrap() + start;
-    let sidebar = &page[start..end];
-    assert!(sidebar.matches("<li").count() <= 51, "{sidebar}");
-    assert!(
-        sidebar.contains("<li class=\"current\"><a href=\"doc-100.html\">Doc 100</a>"),
-        "{sidebar}"
-    );
-    assert!(
-        sidebar.contains("<li class=\"more\"><a href=\"index.html\">+70 more</a></li>"),
-        "{sidebar}"
-    );
-    assert!(
-        sidebar.contains("Doc 099") && sidebar.contains("Doc 101"),
-        "neighbours: {sidebar}"
-    );
-    // the index still lists everything
+    // the home page lists everything (the sidebar's 50-entry cap is the nav's, and tested there)
     let index = std::fs::read_to_string(out.path().join("index.html")).unwrap();
     assert!(index.contains("Doc 000") && index.contains("Doc 119") && !index.contains("more</a>"));
 }
@@ -632,14 +505,10 @@ fn hostile_folder_and_doc_titles_are_escaped_in_tree_pages() {
         let a = inner.find(open).unwrap();
         inner[a..a + inner[a..].find(close).unwrap()].to_string()
     };
-    for (what, region) in [
-        ("crumbs", part("<nav class=\"crumbs\">", "</nav>")),
-        ("sidebar", part("<aside class=\"tree\">", "</aside>")),
-    ] {
-        assert_eq!(
-            region.matches("&lt;script&gt;x").count(),
-            2,
-            "{what} shows the folder and the doc, escaped: {region}"
-        );
-    }
+    let crumbs = part("<nav class=\"crumbs\">", "</nav>");
+    assert_eq!(
+        crumbs.matches("&lt;script&gt;x").count(),
+        2,
+        "the crumbs show the folder and the doc, escaped: {crumbs}"
+    );
 }

@@ -1,0 +1,431 @@
+//! The site's shape: which page every folder, doc and block lives on, where on the page, and
+//! the order a reader walks the docs in.
+use rdy_engine::{Materialized, summary_in};
+use rdy_model::{Block, BlockId, decision, tree};
+use regex::Regex;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::LazyLock;
+
+/// Where a block lives: a page of the site and, for a block inside a page, its anchor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Url {
+    pub page: String,
+    pub anchor: Option<String>,
+}
+
+impl Url {
+    /// The href of this url as seen from page `from`: just `#anchor` on the same page.
+    pub fn href_from(&self, from: &str) -> String {
+        match (&self.anchor, self.page == from) {
+            (Some(a), true) => format!("#{a}"),
+            (Some(a), false) => format!("{}#{a}", rel(from, &self.page)),
+            (None, _) => rel(from, &self.page),
+        }
+    }
+}
+
+/// A link from page `from` to page `to`, both site-relative.
+pub fn rel(from: &str, to: &str) -> String {
+    format!("{}{to}", "../".repeat(from.matches('/').count()))
+}
+
+/// The most characters an anchor keeps of the text it is made from.
+const ANCHOR_MAX: usize = 48;
+
+/// The shape of a block id (`d-7KQ2M`): an anchor never takes it, because a visible id is a leak.
+static ID_SHAPED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z]{1,3}-[0-9A-HJKMNP-TV-Z]{5}$").expect("a pattern"));
+
+/// The id inside a longer text, as the leak scan reads it.
+static ID_INSIDE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b[A-Za-z]{1,3}-[0-9A-HJKMNP-TV-Z]{5}\b").expect("a pattern"));
+
+pub struct Site<'a> {
+    pub m: &'a Materialized,
+    /// Every folder's and doc's tree path.
+    paths: BTreeMap<BlockId, String>,
+    /// Every block inside a doc that has a page, by the anchor it has on that page.
+    pub anchors: BTreeMap<BlockId, String>,
+    /// Every doc in reading order: depth-first, siblings by their order.
+    pub order: Vec<BlockId>,
+    /// The first block each decision governs.
+    governs: BTreeMap<BlockId, BlockId>,
+    /// The questions no decision answers, in reading order of their docs.
+    pub open_questions: Vec<BlockId>,
+    /// Those questions' anchors on `questions.html`.
+    pub question_anchors: BTreeMap<BlockId, String>,
+    /// Every term, by name, case-insensitively.
+    pub terms: Vec<BlockId>,
+    /// The terms' anchors on `glossary.html`.
+    pub term_anchors: BTreeMap<BlockId, String>,
+}
+
+impl<'a> Site<'a> {
+    pub fn new(m: &'a Materialized) -> Site<'a> {
+        // `level` folders are above `parent`'s children; only a damaged store nests deeper than
+        // MAX_FOLDER_DEPTH, and what lies below it gets no page
+        fn walk(
+            m: &Materialized,
+            parent: Option<&BlockId>,
+            prefix: &str,
+            level: usize,
+            out: &mut BTreeMap<BlockId, String>,
+            order: &mut Vec<BlockId>,
+        ) {
+            if level > tree::MAX_FOLDER_DEPTH {
+                return;
+            }
+            let names = m.names_under(parent);
+            for b in m.children(parent) {
+                let Some(name) = names.get(&b.id) else {
+                    continue;
+                };
+                let path = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                out.insert(b.id.clone(), path.clone());
+                if b.block_type == tree::FOLDER {
+                    walk(m, Some(&b.id), &path, level + 1, out, order);
+                } else if b.block_type == tree::DOC {
+                    order.push(b.id.clone());
+                }
+            }
+        }
+        let mut paths = BTreeMap::new();
+        let mut order = vec![];
+        walk(m, None, "", 0, &mut paths, &mut order);
+        let mut site = Site {
+            m,
+            paths,
+            anchors: BTreeMap::new(),
+            order,
+            governs: BTreeMap::new(),
+            open_questions: vec![],
+            question_anchors: BTreeMap::new(),
+            terms: vec![],
+            term_anchors: BTreeMap::new(),
+        };
+        site.compute_anchors();
+        site.compute_governed();
+        site.compute_collected();
+        site
+    }
+
+    /// Every block under `doc`, in reading order.
+    fn blocks_of(&self, doc: &BlockId) -> Vec<&'a Block> {
+        let mut out = vec![];
+        let mut stack: Vec<&Block> = self.m.children(Some(doc)).into_iter().rev().collect();
+        while let Some(b) = stack.pop() {
+            out.push(b);
+            stack.extend(self.m.children(Some(&b.id)).into_iter().rev());
+        }
+        out
+    }
+
+    fn compute_anchors(&mut self) {
+        let mut anchors = BTreeMap::new();
+        for doc in &self.order {
+            let mut taken = BTreeSet::new();
+            for b in self.blocks_of(doc) {
+                // a decision has no place in the text: it is linked through what it governs
+                if b.block_type == decision::DECISION {
+                    continue;
+                }
+                anchors.insert(b.id.clone(), unique(anchor_text(b, self.m), &mut taken));
+            }
+        }
+        self.anchors = anchors;
+    }
+
+    fn compute_governed(&mut self) {
+        let mut governs: BTreeMap<BlockId, BlockId> = BTreeMap::new();
+        // a decision governs what it affects, else what names it as `decided_by`, else its
+        // parent section
+        for b in self.m.blocks.values() {
+            if b.block_type != decision::DECISION {
+                continue;
+            }
+            if let Some(l) = b.links.get(decision::AFFECTS).and_then(|l| l.first()) {
+                governs.insert(b.id.clone(), l.target.clone());
+            }
+        }
+        for b in self.m.blocks.values() {
+            for l in b.links.get(decision::DECIDED_BY).into_iter().flatten() {
+                if self
+                    .m
+                    .get(&l.target)
+                    .is_some_and(|t| t.block_type == decision::DECISION)
+                {
+                    governs.entry(l.target.clone()).or_insert(b.id.clone());
+                }
+            }
+        }
+        for b in self.m.blocks.values() {
+            if b.block_type == decision::DECISION
+                && !governs.contains_key(&b.id)
+                && let Some(p) = &b.parent
+            {
+                governs.insert(b.id.clone(), p.clone());
+            }
+        }
+        self.governs = governs;
+    }
+
+    fn compute_collected(&mut self) {
+        let answered: BTreeSet<&BlockId> = self
+            .m
+            .blocks
+            .values()
+            .flat_map(|b| b.links.get(decision::ANSWERS).into_iter().flatten())
+            .map(|l| &l.target)
+            .collect();
+        let (mut open, mut question_anchors) = (vec![], BTreeMap::new());
+        let mut taken = BTreeSet::new();
+        let mut terms: Vec<&Block> = vec![];
+        for doc in &self.order {
+            for b in self.blocks_of(doc) {
+                if b.block_type == decision::QUESTION && !answered.contains(&b.id) {
+                    open.push(b.id.clone());
+                    question_anchors
+                        .insert(b.id.clone(), unique(anchor_text(b, self.m), &mut taken));
+                }
+                if b.block_type == "term" {
+                    terms.push(b);
+                }
+            }
+        }
+        terms.sort_by_key(|b| {
+            (
+                b.field_str("name").unwrap_or("").to_lowercase(),
+                b.id.clone(),
+            )
+        });
+        let (mut term_anchors, mut taken) = (BTreeMap::new(), BTreeSet::new());
+        for b in &terms {
+            term_anchors.insert(b.id.clone(), unique(anchor_text(b, self.m), &mut taken));
+        }
+        // a top-level doc named `glossary` or `questions` already has that page: it keeps it,
+        // and the collected page is not written (nor linked)
+        if !self.page_taken("questions.html") {
+            self.open_questions = open;
+            self.question_anchors = question_anchors;
+        }
+        if !self.page_taken("glossary.html") {
+            self.terms = terms.iter().map(|b| b.id.clone()).collect();
+            self.term_anchors = term_anchors;
+        }
+    }
+
+    /// Whether a doc or folder already has the page at `page`.
+    fn page_taken(&self, page: &str) -> bool {
+        self.paths
+            .keys()
+            .any(|id| self.page(id).as_deref() == Some(page))
+    }
+
+    /// The page of a folder or doc.
+    pub fn page(&self, id: &BlockId) -> Option<String> {
+        let p = self.paths.get(id)?;
+        Some(match self.m.get(id)?.block_type == tree::FOLDER {
+            true => format!("{p}/index.html"),
+            false => format!("{p}.html"),
+        })
+    }
+
+    /// Every folder and doc that has a page.
+    pub fn tree_pages(&self) -> impl Iterator<Item = &BlockId> {
+        self.paths.keys()
+    }
+
+    /// Where `id` lives, for any block: a tree block on its page, a block inside a doc on the
+    /// doc's page at its anchor, a decision where the first block it governs lives, a term at its
+    /// place in its doc, an open question on the questions page.
+    pub fn url_of(&self, id: &BlockId) -> Option<Url> {
+        self.url_of_bounded(id, &mut BTreeSet::new())
+    }
+
+    fn url_of_bounded(&self, id: &BlockId, seen: &mut BTreeSet<BlockId>) -> Option<Url> {
+        if !seen.insert(id.clone()) {
+            return None;
+        }
+        let b = self.m.get(id)?;
+        if tree::is_tree_type(&b.block_type) {
+            return Some(Url {
+                page: self.page(id)?,
+                anchor: None,
+            });
+        }
+        if b.block_type == decision::DECISION {
+            return self.url_of_bounded(self.governs.get(id)?, seen);
+        }
+        if let Some(a) = self.question_anchors.get(id) {
+            return Some(Url {
+                page: "questions.html".into(),
+                anchor: Some(a.clone()),
+            });
+        }
+        let doc = self.m.doc_of(id)?;
+        Some(Url {
+            page: self.page(&doc.id)?,
+            anchor: Some(self.anchors.get(id)?.clone()),
+        })
+    }
+
+    /// The permalink page of a block.
+    pub fn go_page(&self, id: &BlockId) -> String {
+        format!("go/{id}.html")
+    }
+
+    /// What a reader calls `b`: its title, else its `name` field, else (for a doc or folder) its
+    /// tree name worded as a title, else the start of its text. Never an id.
+    pub fn label(&self, b: &Block) -> String {
+        let tree = tree::is_tree_type(&b.block_type);
+        let said = b
+            .field_str("title")
+            .filter(|t| !t.is_empty())
+            .or_else(|| b.field_str("name").filter(|t| !t.is_empty() && !tree));
+        let label = match said {
+            Some(t) => t.to_string(),
+            None if tree => self
+                .m
+                .name_of(&b.id)
+                .map(|n| name_as_title(&n))
+                .unwrap_or_default(),
+            None => ID_INSIDE
+                .replace_all(&summary_in(b, self.m), "…")
+                .into_owned(),
+        };
+        if label.trim().is_empty() {
+            "Untitled".to_string()
+        } else {
+            label
+        }
+    }
+
+    /// The folders and doc from the top level down to `id`, top first.
+    pub fn chain(&self, id: &BlockId) -> Vec<BlockId> {
+        let mut out = vec![];
+        let mut cur = Some(id.clone());
+        while let Some(c) = cur {
+            if out.len() > self.m.blocks.len() {
+                break;
+            }
+            let Some(b) = self.m.get(&c) else { break };
+            if tree::is_tree_type(&b.block_type) {
+                out.push(c.clone());
+            }
+            cur = b.parent.clone();
+        }
+        out.reverse();
+        out
+    }
+
+    /// The docs before and after `doc` in reading order.
+    pub fn prev_next(&self, doc: &BlockId) -> (Option<BlockId>, Option<BlockId>) {
+        let Some(i) = self.order.iter().position(|d| d == doc) else {
+            return (None, None);
+        };
+        (
+            i.checked_sub(1).map(|p| self.order[p].clone()),
+            self.order.get(i + 1).cloned(),
+        )
+    }
+}
+
+/// A tree name worded as a title: `-` becomes a space, the first letter is upper-cased, and the
+/// name `untitled-<id>` that a doc without a title gets reads as `Untitled`.
+fn name_as_title(name: &str) -> String {
+    let id_chars = "0123456789abcdefghjkmnpqrstvwxyz";
+    let derived = name
+        .strip_prefix("untitled-")
+        .is_some_and(|b| b.chars().count() == 5 && b.chars().all(|c| id_chars.contains(c)));
+    if derived {
+        return "Untitled".to_string();
+    }
+    let words = name.replace('-', " ");
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// The text an anchor is made from: a section's title, the name of what a block defines, else
+/// the first six words of its one-line summary.
+fn anchor_text(b: &Block, m: &Materialized) -> String {
+    let named = match b.block_type.as_str() {
+        "section" => b.field_str("title"),
+        "term" | "component" | "actor" | "interface" | "flow" => b.field_str("name"),
+        _ => None,
+    };
+    match named.filter(|t| !t.trim().is_empty()) {
+        Some(t) => t.to_string(),
+        None => summary_in(b, m)
+            .split_whitespace()
+            .take(6)
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+/// `text` as an anchor not in `taken`, which then holds it: slugged, cut to [`ANCHOR_MAX`],
+/// `part` when nothing is left, `-x` after anything shaped like an id, `-2`, `-3`... on a clash.
+fn unique(text: String, taken: &mut BTreeSet<String>) -> String {
+    let slug = tree::slug(&text);
+    let cut: String = slug.chars().take(ANCHOR_MAX).collect();
+    let mut base = cut.trim_end_matches(['-', '.']).to_string();
+    if base.is_empty() {
+        base = "part".to_string();
+    }
+    if ID_SHAPED.is_match(&base) {
+        base.push_str("-x");
+    }
+    let mut candidate = base.clone();
+    let mut n = 2;
+    while !taken.insert(candidate.clone()) {
+        candidate = format!("{base}-{n}");
+        n += 1;
+    }
+    candidate
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_anchor_is_a_slug_cut_to_48_that_is_never_empty_or_id_shaped() {
+        let mut taken = BTreeSet::new();
+        assert_eq!(unique("Guards".into(), &mut taken), "guards");
+        assert_eq!(unique("Guards".into(), &mut taken), "guards-2");
+        assert_eq!(unique("Guards".into(), &mut taken), "guards-3");
+        assert_eq!(unique("Ελληνικά".into(), &mut taken), "part");
+        assert_eq!(unique("Ελληνικά".into(), &mut taken), "part-2");
+        let long = "word ".repeat(60);
+        let a = unique(long, &mut taken);
+        assert!(a.chars().count() <= ANCHOR_MAX && !a.ends_with('-'), "{a}");
+        // `D-1RRV2` slugs to `d-1rrv2`, which is not an id; digits only are
+        assert_eq!(unique("d-12345".into(), &mut taken), "d-12345-x");
+    }
+
+    #[test]
+    fn a_name_is_worded_as_a_title() {
+        assert_eq!(name_as_title("untitled-one"), "Untitled one");
+        assert_eq!(name_as_title("untitled-7kq2m"), "Untitled");
+        assert_eq!(name_as_title("doc-1"), "Doc 1");
+        assert_eq!(name_as_title("wallets"), "Wallets");
+    }
+
+    #[test]
+    fn an_href_to_the_same_page_is_just_the_anchor() {
+        let u = Url {
+            page: "a/b.html".into(),
+            anchor: Some("x".into()),
+        };
+        assert_eq!(u.href_from("a/b.html"), "#x");
+        assert_eq!(u.href_from("c.html"), "a/b.html#x");
+        assert_eq!(u.href_from("a/c.html"), "../a/b.html#x");
+    }
+}

@@ -1,7 +1,6 @@
 {% extends "layout.html" %}
 {% block content %}
-<h1>{{ folder.title }}</h1>
-{% if folder.description %}<p>{{ folder.description }}</p>{% endif %}
-<p class="meta">folder · {{ folder.id }}</p>
-<ul>{% for c in children %}<li><a href="{{ c.href|safe }}">{{ c.label }}</a> <span class="meta">{{ c.kind }}</span></li>{% endfor %}</ul>
+<h1>{{ body.folder.title }}</h1>
+{% if body.folder.description %}<p>{{ body.folder.description }}</p>{% endif %}
+<ul>{% for c in body.folder.children %}<li><a href="{{ c.href }}">{{ c.label }}</a> <span class="meta">{{ c.kind }}</span></li>{% endfor %}</ul>
 {% endblock %}

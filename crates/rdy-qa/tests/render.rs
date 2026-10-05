@@ -25,7 +25,7 @@ fn render_hostile_text_is_escaped_on_every_page() {
         }
         for (i, _) in html.match_indices("<script") {
             assert!(
-                html[i..].starts_with("<script type=\"module\">import mermaid from \"https://"),
+                html[i..].starts_with("<script src=\""),
                 "{}: unexpected <script",
                 p.display()
             );
@@ -46,7 +46,8 @@ struct LinkStats {
     max_depth: usize,
     anchors: usize,
     assets: usize,
-    decisions: usize,
+    /// The `go/` pages whose refresh target resolved.
+    go_targets: usize,
 }
 
 /// Checks every link in the site; returns the broken ones and what was covered.
@@ -71,11 +72,9 @@ fn check_links(site: &Path) -> (Vec<String>, LinkStats) {
             if anchor.is_some() {
                 st.anchors += 1;
             }
-            if file.contains("_assets/") {
+            // a figure's file, not the theme's
+            if file.contains("assets/") && !file.ends_with(".css") && !file.ends_with(".js") {
                 st.assets += 1;
-            }
-            if file.contains("_decision/") {
-                st.decisions += 1;
             }
             let mut target = if file.is_empty() {
                 p.clone()
@@ -101,6 +100,31 @@ fn check_links(site: &Path) -> (Vec<String>, LinkStats) {
                 if !t.contains(&format!("id=\"{a}\"")) {
                     broken.push(format!("{} → {link} (no anchor)", p.display()));
                 }
+            }
+        }
+        // a permalink page's refresh target resolves, with its anchor
+        if p.strip_prefix(site).is_ok_and(|r| r.starts_with("go")) {
+            let refresh = attrs(&html, "content")
+                .into_iter()
+                .find_map(|c| c.strip_prefix("0; url="))
+                .map(unescape);
+            let Some(refresh) = refresh else {
+                broken.push(format!("{}: no refresh", p.display()));
+                continue;
+            };
+            let (file, anchor) = match refresh.split_once('#') {
+                Some((f, a)) => (f.to_string(), Some(a.to_string())),
+                None => (refresh.clone(), None),
+            };
+            let mut target = p.parent().unwrap().join(&file);
+            if target.is_dir() {
+                target = target.join("index.html");
+            }
+            let t = std::fs::read_to_string(&target).unwrap_or_default();
+            if t.is_empty() || anchor.is_some_and(|a| !t.contains(&format!("id=\"{a}\""))) {
+                broken.push(format!("{} → {refresh} (refresh target)", p.display()));
+            } else {
+                st.go_targets += 1;
             }
         }
     }
@@ -132,6 +156,6 @@ fn render_every_link_resolves_on_a_rich_site() {
         assert!(st.max_depth >= 3, "{name}: {st:?}");
         assert!(st.anchors >= 5, "{name}: {st:?}");
         assert!(st.assets >= 1, "{name}: {st:?}");
-        assert!(st.decisions >= 1, "{name}: {st:?}");
+        assert!(st.go_targets >= 1, "{name}: {st:?}");
     }
 }
