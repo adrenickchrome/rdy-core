@@ -1,7 +1,8 @@
 //! The site's shape: which page every folder, doc and block lives on, where on the page, and
 //! the order a reader walks the docs in.
-use rdy_engine::{Materialized, summary_in};
-use rdy_model::{Block, BlockId, RefMode, decision, ref_spans, tree};
+use crate::inline::{self, Form};
+use rdy_engine::Materialized;
+use rdy_model::{Block, BlockId, RefMode, decision, tree};
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
@@ -340,9 +341,7 @@ impl<'a> Site<'a> {
                     None => format!("Diagram {}", self.number(b)),
                 }
             }
-            None => ID_INSIDE
-                .replace_all(&summary_in(b, self.m), "…")
-                .into_owned(),
+            None => self.summary_at(b, depth, true),
         };
         if label.trim().is_empty() {
             "Untitled".to_string()
@@ -356,29 +355,107 @@ impl<'a> Site<'a> {
         self.numbers.get(&b.id).copied().unwrap_or(1)
     }
 
-    /// A field's text as a reader reads it: each `{{id}}` reference as its target's label, an
-    /// unresolved one as the unresolved marker's words, `\{{` as `{{`. Not escaped.
+    /// A field's text as a reader reads it, as a label ([`Form::Label`]): a code span's text, a
+    /// reference as its display text, else its target's current key when the author typed a key,
+    /// else the target's label; an unresolved one as the unresolved marker's words, `\{{` as
+    /// `{{`. Not escaped.
     pub fn words(&self, text: &str) -> String {
         self.words_at(text, 0)
     }
 
     fn words_at(&self, text: &str, depth: usize) -> String {
-        let mut out = String::new();
-        let mut last = 0;
-        for span in ref_spans(text, RefMode::Strict) {
-            out.push_str(&text[last..span.range.start].replace("\\{{", "{{"));
-            let target = BlockId::parse(&span.token)
-                .ok()
-                .and_then(|id| self.m.get(&id));
-            match target {
-                Some(_) if depth >= LABEL_DEPTH => out.push('…'),
-                Some(t) => out.push_str(&self.label_at(t, depth + 1)),
-                None => out.push_str(crate::html::UNRESOLVED),
-            }
-            last = span.range.end;
+        self.plain(text, RefMode::Strict, Form::Label, depth, &|_| {
+            crate::html::UNRESOLVED.to_string()
+        })
+    }
+
+    /// `text` as plain words in `form` ([`inline::plain_refs`]): a reference with no display text reads as `ref_words`
+    /// says (the target's key when typed as one and the target has one, else its label), or as
+    /// `unresolved(token)` when it leads nowhere.
+    pub fn plain(
+        &self,
+        text: &str,
+        mode: RefMode,
+        form: Form,
+        depth: usize,
+        unresolved: &dyn Fn(&str) -> String,
+    ) -> String {
+        inline::plain_refs(text, mode, form, &|span| match BlockId::parse(&span.token)
+            .ok()
+            .and_then(|id| self.m.get(&id))
+        {
+            Some(_) if depth >= LABEL_DEPTH => "…".to_string(),
+            Some(t) => match t
+                .field_str("key")
+                .filter(|k| span.key_typed && !k.is_empty())
+            {
+                Some(k) => k.to_string(),
+                None => self.label_at(t, depth + 1),
+            },
+            None => unresolved(&span.token),
+        })
+    }
+
+    /// `b`'s one-line summary as a reader reads it: its statement, prompt, name or title, else
+    /// its body, else its alt text or caption, as plain words (the form that fits the field),
+    /// whitespace collapsed and cut to 80 characters. A reference reads as its display text or
+    /// its target's label, one that leads nowhere keeps its id as written, and any id left in the
+    /// words is read as `…`.
+    pub fn summary(&self, b: &Block) -> String {
+        self.summary_at(b, 0, true)
+    }
+
+    /// The summary's words, uncut. `keep_token` leaves an unresolved reference as its token
+    /// (then every id-shaped word is `…`); otherwise it reads as the unresolved marker's words.
+    fn summary_words(&self, b: &Block, depth: usize, keep_token: bool) -> String {
+        let unresolved_of = |token: &str| match keep_token {
+            true => token.to_string(),
+            false => crate::html::UNRESOLVED.to_string(),
+        };
+        let read = |text: &str, mode: RefMode, form: Form| {
+            let words = self.plain(text, mode, form, depth, &unresolved_of);
+            words.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let said: &[(&str, Form)] = if tree::is_tree_type(&b.block_type) {
+            &[("title", Form::Label), ("name", Form::Label)]
+        } else {
+            &[
+                ("statement", Form::Spans),
+                ("prompt", Form::Spans),
+                ("name", Form::Label),
+                ("title", Form::Label),
+            ]
+        };
+        if let Some((f, form)) = said
+            .iter()
+            .find(|(f, _)| b.field_str(f).is_some_and(|s| !s.is_empty()))
+        {
+            return read(b.field_str(f).unwrap_or(""), RefMode::Strict, *form);
         }
-        out.push_str(&text[last..].replace("\\{{", "{{"));
-        out
+        if !b.body.is_empty() {
+            // source is not Markdown: its words are its text
+            let text = match b.block_type.as_str() {
+                "code" | "diagram" | "figure" => {
+                    let raw = inline::unescape_braces(&b.body);
+                    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+                }
+                _ => read(&b.body, RefMode::for_body(&b.block_type), Form::Body),
+            };
+            if !text.is_empty() {
+                return text;
+            }
+        }
+        ["alt", "caption"]
+            .iter()
+            .find_map(|f| b.field_str(f).filter(|s| !s.trim().is_empty()))
+            .map(|s| read(s, RefMode::Strict, Form::Label))
+            .unwrap_or_default()
+    }
+
+    fn summary_at(&self, b: &Block, depth: usize, keep_token: bool) -> String {
+        let words = self.summary_words(b, depth, keep_token);
+        let words = ID_INSIDE.replace_all(&words, "…");
+        words.chars().take(80).collect()
     }
 
     /// The text an anchor is made from: a section's title, the name of what a block defines
@@ -397,35 +474,15 @@ impl<'a> Site<'a> {
         match named.filter(|t| !t.trim().is_empty()) {
             Some(t) => self.words(t),
             None => self
-                .without_dangling(b, &summary_in(b, self.m))
+                .summary_words(b, 0, false)
+                .chars()
+                .take(80)
+                .collect::<String>()
                 .split_whitespace()
                 .take(6)
                 .collect::<Vec<_>>()
                 .join(" "),
         }
-    }
-
-    /// `summary` (`b`'s one-line summary, where a reference that leads nowhere keeps its token)
-    /// with each such dangling id read as the unresolved marker's words.
-    fn without_dangling(&self, b: &Block, summary: &str) -> String {
-        let dangling: BTreeSet<String> = b
-            .ref_tokens()
-            .into_iter()
-            .filter(|t| {
-                BlockId::parse(t)
-                    .ok()
-                    .and_then(|id| self.m.get(&id))
-                    .is_none()
-            })
-            .collect();
-        ID_INSIDE
-            .replace_all(summary, |c: &regex::Captures| {
-                match dangling.contains(&c[0]) {
-                    true => crate::html::UNRESOLVED.to_string(),
-                    false => c[0].to_string(),
-                }
-            })
-            .into_owned()
     }
 
     /// The folders and doc from the top level down to `id`, top first.

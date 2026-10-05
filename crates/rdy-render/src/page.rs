@@ -521,15 +521,23 @@ fn doc_parts(
 ) -> (DocBody, Vec<Item>, bool) {
     let (m, site) = (sh.m, sh.site);
     let link = |id: &BlockId| sh.link(page, id);
-    // the lede: the first block of the first section, when it is a prose of one paragraph and
-    // the doc has more sections; a one-section doc keeps all its text under its heading, and a
-    // prose of several paragraphs or with a list renders in place
-    let sections = m.children(Some(&doc.id));
-    let lede_block = sections
+    // the lede: the doc's first child when it is a prose of one paragraph (content directly in
+    // the doc), else the first block of the first section when it is such a prose and the doc
+    // has more sections (a one-section doc keeps all its text under its heading); a prose of
+    // several paragraphs or with a list renders in place
+    let children = m.children(Some(&doc.id));
+    let one_paragraph = |p: &Block| p.block_type == "prose" && inline::is_one_paragraph(&p.body);
+    let lede_block = children
         .first()
-        .filter(|s| s.block_type == "section" && sections.len() > 1)
-        .and_then(|s| m.children(Some(&s.id)).into_iter().next())
-        .filter(|p| p.block_type == "prose" && inline::is_one_paragraph(&p.body));
+        .copied()
+        .filter(|p| one_paragraph(p))
+        .or_else(|| {
+            children
+                .first()
+                .filter(|s| s.block_type == "section" && children.len() > 1)
+                .and_then(|s| m.children(Some(&s.id)).into_iter().next())
+                .filter(|p| one_paragraph(p))
+        });
     let own = Ctx {
         link: &link,
         doc_page: "",
@@ -630,7 +638,8 @@ fn doc_parts(
     (doc_body, items, has_mermaid)
 }
 
-/// The nearest section above a block and the title of its doc, as a reader says where it is.
+/// The title of a block's doc and of the nearest section above it, as a reader says where it is;
+/// the section's title is empty when the block sits directly in the doc.
 fn whereabouts(sh: &Shared, b: &Block) -> (String, String) {
     let doc =
         sh.m.doc_of(&b.id)

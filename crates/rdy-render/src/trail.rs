@@ -1,12 +1,12 @@
 //! The "Why ?" trail of a block, the agents' affordance and the copied reference.
 use crate::html::{self, Link};
-use crate::inline;
+use crate::inline::{self, Form};
 use crate::site::{Site, rel};
-use rdy_engine::{Materialized, summary_in};
+use rdy_engine::Materialized;
 use rdy_graph::{DerivedStatus, EdgeKind, Graph};
 use rdy_model::decision::{self, AFFECTS, ANSWERS, DECIDED_BY, IMPLEMENTS, REVOKES, SUPERSEDES};
 use rdy_model::reference::{format_ref, head, snippet};
-use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
+use rdy_model::{Block, BlockId, FieldValue, RefMode};
 use regex::Regex;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -366,7 +366,7 @@ fn link_in<'a>(
         let url = site.url_of(id)?;
         Some(Link {
             href: url.href_from(from),
-            label: summary_in(b, m),
+            label: site.summary(b),
             title: String::new(),
             key: b.field_str("key").map(String::from),
         })
@@ -480,40 +480,42 @@ pub fn agents(
     }
 }
 
-/// `{text}` with each reference shown as its target's label, a dangling one as the unresolved
-/// marker's words (never its id: the copied ref sits in a `data-ref` attribute), and `\{{` as `{{`.
-fn resolved(text: &str, mode: RefMode, m: &Materialized, site: &Site) -> String {
-    let plain = |s: &str| s.replace("\\{{", "{{");
-    let mut out = String::new();
-    let mut last = 0;
-    for span in ref_spans(text, mode) {
-        out.push_str(&plain(&text[last..span.range.start]));
-        match BlockId::parse(&span.token).ok().and_then(|id| m.get(&id)) {
-            Some(t) => out.push_str(&site.label(t)),
-            None => out.push_str(crate::html::UNRESOLVED),
-        }
-        last = span.range.end;
-    }
-    out.push_str(&plain(&text[last..]));
-    out
+/// `text` as plain words in `form`: each reference as its display text or its target's label (or
+/// current key, when typed as one), a dangling one as the unresolved marker's words (never its
+/// id: the copied ref sits in a `data-ref` attribute), `\{{` as `{{`.
+fn resolved(text: &str, mode: RefMode, form: Form, site: &Site) -> String {
+    site.plain(text, mode, form, 0, &|_| {
+        crate::html::UNRESOLVED.to_string()
+    })
 }
 
 /// The text a reference to `b` quotes: its statement, prompt, name or title, else its body,
-/// else its alt text or caption.
-fn primary_text(b: &Block, m: &Materialized, site: &Site) -> String {
-    let field = |names: &[&str]| {
-        names
-            .iter()
-            .find_map(|f| b.field_str(f).filter(|s| !s.trim().is_empty()))
-            .map(|s| resolved(s, RefMode::Strict, m, site))
-    };
-    field(&["statement", "prompt", "name", "title"])
-        .or_else(|| {
-            Some(resolved(&b.body, RefMode::for_body(&b.block_type), m, site))
+/// else its alt text or caption, each as plain words.
+fn primary_text(b: &Block, site: &Site) -> String {
+    let field = |names: &[(&str, Form)]| {
+        names.iter().find_map(|(f, form)| {
+            b.field_str(f)
                 .filter(|s| !s.trim().is_empty())
+                .map(|s| resolved(s, RefMode::Strict, *form, site))
         })
-        .or_else(|| field(&["alt", "caption"]))
-        .unwrap_or_default()
+    };
+    field(&[
+        ("statement", Form::Spans),
+        ("prompt", Form::Spans),
+        ("name", Form::Label),
+        ("title", Form::Label),
+    ])
+    .or_else(|| {
+        Some(resolved(
+            &b.body,
+            RefMode::for_body(&b.block_type),
+            Form::Body,
+            site,
+        ))
+        .filter(|s| !s.trim().is_empty())
+    })
+    .or_else(|| field(&[("alt", Form::Label), ("caption", Form::Label)]))
+    .unwrap_or_default()
 }
 
 /// The doc's title, then the sections down to the block's nearest one (itself, for a section).
@@ -543,6 +545,6 @@ pub fn ref_attrs(b: &Block, site: &Site, pin: Option<&str>, m: &Materialized) ->
     let path = path_of(b, m, site);
     let path: Vec<&str> = path.iter().map(String::as_str).collect();
     let head = head(&b.id.to_string(), pin, &path);
-    let line = format_ref(&head, &snippet(&primary_text(b, m, site), 80));
+    let line = format_ref(&head, &snippet(&primary_text(b, site), 80));
     (head, line)
 }

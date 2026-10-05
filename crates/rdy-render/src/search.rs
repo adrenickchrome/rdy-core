@@ -1,9 +1,10 @@
 //! The search index: `search-index.json`, one entry per doc, section, term, question and folder,
 //! read by the client in `theme/rdy-standard/js/search.js`.
+use crate::inline::Form;
 use crate::page::PageContext;
 use crate::site::Site;
 use rdy_engine::{E_IO, Materialized, RdyError};
-use rdy_model::{Block, BlockId, FieldValue, RefMode, decision, ref_spans, tree};
+use rdy_model::{Block, BlockId, FieldValue, RefMode, decision, tree};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -81,30 +82,24 @@ fn clip(s: &str, max: usize) -> String {
         .to_string()
 }
 
-/// `text` as a reader sees it: each `{{id}}` reference is the label of its target (nothing when
-/// it has none), `\{{` is a literal `{{`.
-fn plain(text: &str, mode: RefMode, m: &Materialized, site: &Site) -> String {
-    let mut out = String::new();
-    let mut last = 0;
-    let literal = |s: &str| s.replace("\\{{", "{{");
-    for span in ref_spans(text, mode) {
-        out.push_str(&literal(&text[last..span.range.start]));
-        if let Some(t) = BlockId::parse(&span.token).ok().and_then(|id| m.get(&id)) {
-            out.push_str(&site.label(t));
-        }
-        last = span.range.end;
-    }
-    out.push_str(&literal(&text[last..]));
-    out
+/// `text` as a reader sees it ([`Site::plain`]): Markdown flattened, a reference as its display
+/// text or its target's label (nothing when it leads nowhere), `\{{` a literal `{{`.
+fn plain(text: &str, mode: RefMode, form: Form, site: &Site) -> String {
+    site.plain(text, mode, form, 0, &|_| String::new())
 }
 
-fn field(b: &Block, name: &str, m: &Materialized, site: &Site) -> String {
-    plain(b.field_str(name).unwrap_or(""), RefMode::Strict, m, site)
+/// A field's words: a statement or prompt reads as running text, any other as a label.
+fn field(b: &Block, name: &str, site: &Site) -> String {
+    let form = match name {
+        "statement" | "prompt" => Form::Spans,
+        _ => Form::Label,
+    };
+    plain(b.field_str(name).unwrap_or(""), RefMode::Strict, form, site)
 }
 
-fn cell(v: &FieldValue) -> String {
+fn cell(v: &FieldValue, site: &Site) -> String {
     match v {
-        FieldValue::Str(s) => s.clone(),
+        FieldValue::Str(s) => plain(s, RefMode::Strict, Form::Spans, site),
         FieldValue::Bool(b) => b.to_string(),
         FieldValue::Int(i) => i.to_string(),
         _ => String::new(),
@@ -112,8 +107,8 @@ fn cell(v: &FieldValue) -> String {
 }
 
 /// The text a reader can find in `b` itself (not in its children), with its own whitespace.
-fn own_text(b: &Block, m: &Materialized, site: &Site) -> String {
-    let body = || plain(&b.body, RefMode::for_body(&b.block_type), m, site);
+fn own_text(b: &Block, site: &Site) -> String {
+    let body = || plain(&b.body, RefMode::for_body(&b.block_type), Form::Body, site);
     let list = |name: &str| match b.fields.get(name) {
         Some(FieldValue::List(l)) => l.clone(),
         _ => vec![],
@@ -122,29 +117,33 @@ fn own_text(b: &Block, m: &Materialized, site: &Site) -> String {
         // a decision has no place in the text
         decision::DECISION => String::new(),
         "term" | "component" | "actor" | "interface" => {
-            format!("{}: {}", field(b, "name", m, site), body())
+            format!("{}: {}", field(b, "name", site), body())
         }
-        "question" => field(b, "prompt", m, site),
-        "diagram" | "figure" => field(b, "alt", m, site),
+        "question" => field(b, "prompt", site),
+        "diagram" | "figure" => field(b, "alt", site),
         "code" => b.body.clone(),
         "table" => {
             let rows = list("rows").into_iter().map(|r| match r {
-                FieldValue::List(cells) => cells.iter().map(cell).collect::<Vec<_>>().join(" "),
-                other => cell(&other),
+                FieldValue::List(cells) => cells
+                    .iter()
+                    .map(|c| cell(c, site))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                other => cell(&other, site),
             });
             list("columns")
                 .iter()
-                .map(cell)
+                .map(|c| cell(c, site))
                 .chain(rows)
                 .collect::<Vec<_>>()
                 .join(" ")
         }
         "flow" => {
             let steps = list("steps").into_iter().map(|s| match s {
-                FieldValue::Str(t) => plain(&t, RefMode::Strict, m, site),
-                other => cell(&other),
+                FieldValue::Str(t) => plain(&t, RefMode::Strict, Form::Spans, site),
+                other => cell(&other, site),
             });
-            std::iter::once(field(b, "name", m, site))
+            std::iter::once(field(b, "name", site))
                 .chain(steps)
                 .chain(std::iter::once(body()))
                 .collect::<Vec<_>>()
@@ -156,13 +155,13 @@ fn own_text(b: &Block, m: &Materialized, site: &Site) -> String {
 
 /// A section's own words: what its direct children that are not sections say.
 fn section_text(sec: &Block, m: &Materialized, site: &Site) -> String {
-    let mut out = plain(&sec.body, RefMode::Strict, m, site);
+    let mut out = plain(&sec.body, RefMode::Strict, Form::Body, site);
     for c in m.children(Some(&sec.id)) {
         if c.block_type == "section" {
             continue;
         }
         out.push(' ');
-        out.push_str(&own_text(c, m, site));
+        out.push_str(&own_text(c, site));
         if out.chars().count() > TEXT_MAX * 2 {
             break;
         }
@@ -175,7 +174,7 @@ fn first_prose(doc: &BlockId, m: &Materialized, site: &Site) -> String {
     let mut stack: Vec<&Block> = m.children(Some(doc)).into_iter().rev().collect();
     while let Some(b) = stack.pop() {
         if b.block_type == "prose" {
-            return clip(&plain(&b.body, RefMode::Strict, m, site), TEXT_MAX);
+            return clip(&plain(&b.body, RefMode::Strict, Form::Body, site), TEXT_MAX);
         }
         stack.extend(m.children(Some(&b.id)).into_iter().rev());
     }
@@ -210,8 +209,13 @@ pub fn collect(index: &mut Index, page: &PageContext, m: &Materialized, site: &S
         return;
     }
     let Some(doc) = &page.body.doc else { return };
-    let prose = first_prose(&id, m, site);
-    add(entry("doc", None, doc.title.clone(), prose));
+    // what the doc says directly (outside any section), else the first prose under it
+    let direct = m
+        .get(&id)
+        .map(|d| section_text(d, m, site))
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| first_prose(&id, m, site));
+    add(entry("doc", None, doc.title.clone(), direct));
     for item in &page.items {
         let Some(b) = BlockId::parse(&item.id).ok().and_then(|id| m.get(&id)) else {
             continue;
@@ -228,11 +232,11 @@ pub fn collect(index: &mut Index, page: &PageContext, m: &Materialized, site: &S
             }
             "term" => {
                 let title = item.title.clone().unwrap_or_else(|| site.label(b));
-                let text = clip(&plain(&b.body, RefMode::Strict, m, site), TEXT_MAX);
+                let text = clip(&plain(&b.body, RefMode::Strict, Form::Body, site), TEXT_MAX);
                 add(entry("term", Some(item.anchor.clone()), title, text));
             }
             "question" => {
-                let prompt = clip(&field(b, "prompt", m, site), TEXT_MAX);
+                let prompt = clip(&field(b, "prompt", site), TEXT_MAX);
                 let url = site.url_of(&b.id);
                 let mut e = entry(
                     "question",

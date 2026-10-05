@@ -1,10 +1,11 @@
 //! The machine-readable twins of the pages and `llms.txt` (FW-D5): the file an agent reads in
 //! place of a page. Raw ids, hashes and type names are allowed here; the pages never show them.
+use crate::inline::Form;
 use crate::page::PageContext;
 use crate::site::Site;
-use rdy_engine::{E_IO, Materialized, RdyError, VersionPosition, summary_in};
+use rdy_engine::{E_IO, Materialized, RdyError, VersionPosition};
 use rdy_graph::{DerivedStatus, EdgeKind, Graph};
-use rdy_model::{Block, BlockId, FieldValue, decision};
+use rdy_model::{Block, BlockId, FieldValue, RefMode, decision};
 use rdy_schema::Pack;
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -192,25 +193,34 @@ fn governing(r: &Read, id: &BlockId) -> BTreeSet<BlockId> {
         .collect()
 }
 
-fn options_of(d: &Block) -> Vec<String> {
+/// A running text as plain words on one line (a reference with no display text reads as its
+/// target's label, one that leads nowhere as the unresolved marker's words).
+fn spans_words(site: &Site, text: &str) -> String {
+    let words = site.plain(text, RefMode::Strict, Form::Spans, 0, &|_| {
+        crate::html::UNRESOLVED.to_string()
+    });
+    one_line(&words)
+}
+
+fn options_of(d: &Block, site: &Site) -> Vec<String> {
     match d.fields.get("options") {
         Some(FieldValue::List(items)) => items
             .iter()
             .filter_map(|v| v.as_str())
-            .map(String::from)
+            .map(|o| spans_words(site, o))
             .collect(),
         _ => vec![],
     }
 }
 
-fn decision_json(d: &Block, g: &Graph) -> DecisionJson {
+fn decision_json(d: &Block, g: &Graph, site: &Site) -> DecisionJson {
     DecisionJson {
         id: d.id.to_string(),
-        statement: d.field_str("statement").unwrap_or("").to_string(),
+        statement: spans_words(site, d.field_str("statement").unwrap_or("")),
         status: g.status(&d.id).map_or("proposed", |s| status_word(&s)),
         decided_at: owned(d.field_str("decided_at")),
         authority_basis: owned(d.field_str("authority_basis")),
-        options: options_of(d),
+        options: options_of(d, site),
         supersedes: id_list(&link_targets(d, decision::SUPERSEDES)),
         revokes: id_list(&link_targets(d, decision::REVOKES)),
         affects: id_list(&link_targets(d, decision::AFFECTS)),
@@ -223,6 +233,7 @@ struct Read<'a> {
     m: &'a Materialized,
     g: &'a Graph,
     suspects: &'a BTreeSet<BlockId>,
+    site: &'a Site<'a>,
 }
 
 /// A block as the twin lists it. `anchor` is where it sits on the page; `title` what it is
@@ -260,7 +271,7 @@ fn block_json(
         anchor: anchor.to_string(),
         parent: b.parent.as_ref().map(|p| p.to_string()),
         title: owned(title),
-        summary: summary_in(b, r.m),
+        summary: r.site.summary(b),
         lifecycle: owned(b.field_str("lifecycle")),
         governing,
         suspect: r.suspects.contains(id),
@@ -289,7 +300,12 @@ pub fn page_json(
     site: &Site,
     pack: &Pack,
 ) -> PageTwin {
-    let r = Read { m, g, suspects };
+    let r = Read {
+        m,
+        g,
+        suspects,
+        site,
+    };
     let own = matches!(ctx.kind, "doc" | "folder")
         .then(|| tree_block(site, &ctx.page_url))
         .flatten();
@@ -336,7 +352,7 @@ pub fn page_json(
     let decisions: Vec<DecisionJson> = seen
         .iter()
         .filter_map(|d| m.get(d))
-        .map(|d| decision_json(d, g))
+        .map(|d| decision_json(d, g, site))
         .collect();
 
     let (prev, next) = match (ctx.kind, own) {

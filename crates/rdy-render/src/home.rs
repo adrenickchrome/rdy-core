@@ -1,8 +1,9 @@
 //! The home page's context: a card for every top-level folder and doc, and the versions, newest
 //! first, in a reader's words (a date and the message, never a hash).
+use crate::inline::Form;
 use crate::site::{Site, rel};
 use rdy_engine::{Materialized, VersionInfo};
-use rdy_model::{Block, RefMode, ref_spans, tree};
+use rdy_model::{Block, RefMode, tree};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -103,7 +104,7 @@ fn first_prose(site: &Site, m: &Materialized, b: &Block, depth: usize) -> String
     }
     for c in m.children(Some(&b.id)) {
         if c.block_type == "prose" && !c.body.trim().is_empty() {
-            return plain(site, m, c);
+            return plain(site, c);
         }
         let inner = first_prose(site, m, c, depth + 1);
         if !inner.is_empty() {
@@ -113,22 +114,14 @@ fn first_prose(site: &Site, m: &Materialized, b: &Block, depth: usize) -> String
     String::new()
 }
 
-fn plain(site: &Site, m: &Materialized, b: &Block) -> String {
-    let text = &b.body;
-    let mut out = String::new();
-    let mut last = 0;
-    for span in ref_spans(text, RefMode::for_body(&b.block_type)) {
-        out.push_str(&text[last..span.range.start].replace("\\{{", "{{"));
-        if let Some(t) = rdy_model::BlockId::parse(&span.token)
-            .ok()
-            .and_then(|id| m.get(&id))
-        {
-            out.push_str(&site.label(t));
-        }
-        last = span.range.end;
-    }
-    out.push_str(&text[last..].replace("\\{{", "{{"));
-    out
+fn plain(site: &Site, b: &Block) -> String {
+    site.plain(
+        &b.body,
+        RefMode::for_body(&b.block_type),
+        Form::Body,
+        0,
+        &|_| String::new(),
+    )
 }
 
 /// `text` with its whitespace collapsed, cut at a word boundary to at most `max` characters, with
