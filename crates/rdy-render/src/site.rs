@@ -127,7 +127,7 @@ impl<'a> Site<'a> {
     fn compute_anchors(&mut self) {
         let mut anchors = BTreeMap::new();
         for doc in &self.order {
-            let mut taken = BTreeSet::new();
+            let mut taken = reserved_ids();
             for b in self.blocks_of(doc) {
                 // a decision has no place in the text: it is linked through what it governs
                 if b.block_type == decision::DECISION {
@@ -182,7 +182,7 @@ impl<'a> Site<'a> {
             .map(|l| &l.target)
             .collect();
         let (mut open, mut question_anchors) = (vec![], BTreeMap::new());
-        let mut taken = BTreeSet::new();
+        let mut taken = reserved_ids();
         let mut terms: Vec<&Block> = vec![];
         for doc in &self.order {
             for b in self.blocks_of(doc) {
@@ -202,7 +202,7 @@ impl<'a> Site<'a> {
                 b.id.clone(),
             )
         });
-        let (mut term_anchors, mut taken) = (BTreeMap::new(), BTreeSet::new());
+        let (mut term_anchors, mut taken) = (BTreeMap::new(), reserved_ids());
         for b in &terms {
             term_anchors.insert(b.id.clone(), unique(anchor_text(b, self.m), &mut taken));
         }
@@ -370,6 +370,18 @@ fn anchor_text(b: &Block, m: &Materialized) -> String {
     }
 }
 
+/// Element ids the page chrome owns (the `<main>` skip-link target, the search box and its
+/// results, the sidebar and its menu button and scrim, the contents list, the version
+/// switcher). A block anchor never equals one, so each per-page `taken` set starts with them.
+const RESERVED_IDS: &[&str] = &[
+    "main", "search", "results", "sidebar", "menu", "scrim", "contents", "versions",
+];
+
+/// A fresh per-page `taken` set, holding [`RESERVED_IDS`].
+fn reserved_ids() -> BTreeSet<String> {
+    RESERVED_IDS.iter().map(|s| s.to_string()).collect()
+}
+
 /// `text` as an anchor not in `taken`, which then holds it: slugged, cut to [`ANCHOR_MAX`],
 /// `part` when nothing is left, `-x` after anything shaped like an id, `-2`, `-3`... on a clash.
 fn unique(text: String, taken: &mut BTreeSet<String>) -> String {
@@ -408,6 +420,22 @@ mod tests {
         assert!(a.chars().count() <= ANCHOR_MAX && !a.ends_with('-'), "{a}");
         // `D-1RRV2` slugs to `d-1rrv2`, which is not an id; digits only are
         assert_eq!(unique("d-12345".into(), &mut taken), "d-12345-x");
+    }
+
+    #[test]
+    fn a_page_anchor_never_equals_an_id_the_chrome_owns() {
+        let mut taken = reserved_ids();
+        assert_eq!(unique("Main".into(), &mut taken), "main-2");
+        assert_eq!(unique("Main".into(), &mut taken), "main-3");
+        for (t, want) in [
+            ("Search", "search-2"),
+            ("Contents", "contents-2"),
+            ("Versions", "versions-2"),
+            ("Sidebar", "sidebar-2"),
+        ] {
+            assert_eq!(unique(t.into(), &mut taken), want);
+        }
+        assert_eq!(unique("Guards".into(), &mut taken), "guards");
     }
 
     #[test]

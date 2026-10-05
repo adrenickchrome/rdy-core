@@ -217,3 +217,46 @@ fn url1_the_golden_builders_build_what_they_say() {
     let view = r.materialized(&Scope::View("pending".into())).unwrap();
     assert!(view.get(&ids.d4).is_some());
 }
+
+/// Fix round 1: a block anchor never equals an id the page itself uses (`<main id="main">`,
+/// the skip link, the search and nav chrome), so it is suffixed like any other clash.
+#[test]
+fn url1_anchors_never_collide_with_the_pages_own_element_ids() {
+    let (_d, mut r) = tiny();
+    write(&mut r, "work", json!([
+        {"op":"create","type":"doc","id":"$d","fields":{"title":"Chrome","doc_type":"overview"}},
+        {"op":"create","type":"section","id":"$m","parent":"$d","fields":{"title":"Main"}},
+        {"op":"create","type":"section","parent":"$d","fields":{"title":"Search"}},
+        {"op":"create","type":"section","parent":"$d","fields":{"title":"Contents"}},
+        {"op":"create","type":"section","parent":"$d","fields":{"title":"Versions"}},
+        {"op":"create","type":"term","parent":"$m","fields":{"name":"Main"},"body":"The main thing."},
+        {"op":"create","type":"question","parent":"$m","fields":{"prompt":"Main?"}}
+    ])).unwrap();
+    land(&mut r, "work").unwrap();
+    let out = tempfile::tempdir().unwrap();
+    render_site(&mut r, &Scope::Canon, out.path()).unwrap();
+    let doc = std::fs::read_to_string(out.path().join("chrome.html")).unwrap();
+    for (title, anchor) in [
+        ("Main", "main-2"),
+        ("Search", "search-2"),
+        ("Contents", "contents-2"),
+        ("Versions", "versions-2"),
+    ] {
+        assert!(
+            doc.contains(&format!("id=\"{anchor}\"")),
+            "{title} -> {anchor}: {doc}"
+        );
+    }
+    assert_eq!(
+        doc.matches("id=\"main\"").count(),
+        1,
+        "only the page's own <main>: {doc}"
+    );
+    let g = std::fs::read_to_string(out.path().join("glossary.html")).unwrap();
+    assert!(g.contains("<dt id=\"main-2\">Main</dt>"), "{g}");
+    let q = std::fs::read_to_string(out.path().join("questions.html")).unwrap();
+    assert!(
+        q.contains("id=\"main-2\"") && q.matches("id=\"main\"").count() == 1,
+        "{q}"
+    );
+}
