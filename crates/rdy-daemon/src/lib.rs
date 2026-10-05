@@ -23,3 +23,13 @@ pub use hello::{HELLO_TIMEOUT, Hello, HelloReply, MAX_HELLO_BYTES, PROTO_VERSION
 pub use layout::{LOG_FILE, PID_FILE, RUN_DIR, RunDir, SOCKET_FILE, START_LOCK_FILE};
 pub use session::{Proto, SessionId, SessionInfo, Sessions};
 pub use socket::MAX_SOCKET_PATH;
+pub mod client;
+#[doc(hidden)]
+pub mod lock;
+pub mod spawn;
+
+pub use client::{
+    Attempt, CONNECT_RETRY, Client, DEFAULT_START_TIMEOUT, LOCK_RETRY, LOG_TAIL_LINES, Pending,
+    SpawnFn, StartOptions, connect, connect_or_start, log_tail,
+};
+pub use spawn::{detach, serve_command, spawn_serve};
