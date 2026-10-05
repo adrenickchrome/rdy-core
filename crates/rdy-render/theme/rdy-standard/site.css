@@ -96,8 +96,8 @@ mark { background: var(--mark); color: inherit; border-radius: 2px; }
 
 /* frame */
 .app { display: grid; grid-template-columns: 16rem minmax(0, 1fr) 14rem; gap: 2.5rem; max-width: 90rem; margin: 0 auto; padding: 0 1.25rem; min-height: 100vh; }
-.sidenav { order: -1; position: sticky; top: 3.6rem; align-self: start; max-height: calc(100vh - 3.6rem); overflow-y: auto; padding: 1.5rem 0 2rem; }
-.index { order: 1; position: sticky; top: 3.6rem; align-self: start; max-height: calc(100vh - 3.6rem); overflow-y: auto; padding: 5.3rem 0 2rem; }
+.sidenav { position: sticky; top: 3.6rem; align-self: start; max-height: calc(100vh - 3.6rem); overflow-y: auto; padding: 1.5rem 0 2rem; }
+.index { position: sticky; top: 3.6rem; align-self: start; max-height: calc(100vh - 3.6rem); overflow-y: auto; padding: 5.3rem 0 2rem; }
 .fold-summary { display: none; list-style: none; cursor: pointer; font-size: 0.78rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); }
 .fold-summary::-webkit-details-marker { display: none; }
 .fold-summary::after { content: ''; display: inline-block; width: 0.45rem; height: 0.45rem; margin-left: 0.5rem; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: translateY(-0.12rem) rotate(45deg); }
@@ -140,7 +140,7 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
 /* below 1200px the index leaves its column and precedes the page */
 @media (max-width: 1200px) {
   .app { grid-template-columns: 15rem minmax(0, 1fr); }
-  .index { order: -2; grid-column: 1 / -1; position: static; max-height: none; padding: 0.9rem 0 0; }
+  .index { order: -1; grid-column: 1 / -1; position: static; max-height: none; padding: 0.9rem 0 0; }
   .index .fold-summary { display: flex; align-items: center; }
   .index nav { margin-top: 0.5rem; }
   .head { grid-template-columns: auto minmax(0, 1fr) auto; }

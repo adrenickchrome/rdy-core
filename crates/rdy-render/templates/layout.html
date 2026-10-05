@@ -24,14 +24,14 @@
   </div>
 </header>
 <div class="app">
+  <aside class="sidenav" id="sidebar"><details class="sidenav-fold" open><summary class="fold-summary">Pages</summary><nav aria-label="Pages">{% include "partials/nav.html" %}</nav></details></aside>
+  <div id="scrim"></div>
   <main class="content" id="main" tabindex="-1">
     <nav class="crumbs" aria-label="Breadcrumb">{% for c in crumbs %}{% if not loop.first %}<span class="crumb-sep" aria-hidden="true"></span>{% endif %}{% if c.href %}<a href="{{ c.href }}">{{ c.label }}</a>{% else %}<span aria-current="page">{{ c.label }}</span>{% endif %}{% endfor %}</nav>
     {% block content %}{% endblock %}
     {% if kind == "doc" %}<nav class="pager" aria-label="Previous and next">{% include "partials/pager.html" %}</nav>{% endif %}
     <footer class="foot">{% include "partials/colophon.html" %}</footer>
   </main>
-  <aside class="sidenav" id="sidebar"><details class="sidenav-fold" open><summary class="fold-summary">Pages</summary><nav aria-label="Pages">{% include "partials/nav.html" %}</nav></details></aside>
-  <div id="scrim"></div>
   <aside class="index">{% if toc.entries %}<details class="toc-fold" open><summary class="fold-summary">On this page</summary><nav aria-label="On this page">{% include "partials/toc.html" %}</nav></details>{% endif %}</aside>
 </div>
 <noscript><p class="noscript">Search needs JavaScript. Everything else on this page works without it.</p></noscript>
