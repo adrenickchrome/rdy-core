@@ -236,10 +236,46 @@ fn scan_marked(f: &File, seg: u32, file_len: u64) -> io::Result<Scan> {
     })
 }
 
-/// True if a hash-valid `BATCH_COMMIT` frame at any byte position at or after `stop` decodes,
-/// belongs to segment `seg` and starts a batch past `boundary`: an acknowledged batch follows the
-/// damage. Only positions whose kind byte is `BATCH_COMMIT` and whose length field fits a marker
-/// are hashed.
+/// True if the batch marker at absolute offset `marker_at` (payload `payload`) closes a real batch
+/// of this file: its `start` is before the marker, and the frames from `start` are hash-valid,
+/// contiguous, hold no other marker, and end exactly at `marker_at`, with the frame count and
+/// digest the marker names. Marker-shaped bytes inside another frame's payload (a copy of a
+/// segment, crafted asset bytes) carry offsets of a different file and fail this.
+fn closes_a_real_batch(
+    f: &File,
+    seg: u32,
+    marker_at: u64,
+    payload: &[u8],
+    file_len: u64,
+) -> io::Result<bool> {
+    let Ok(m) = postcard::from_bytes::<BatchCommit>(payload) else {
+        return Ok(false);
+    };
+    if m.start.segment != seg || m.start.offset >= marker_at || m.frames == 0 {
+        return Ok(false);
+    }
+    let mut since: Vec<(u64, Hash)> = vec![];
+    let mut offset = m.start.offset;
+    while offset < marker_at {
+        if since.len() >= m.frames as usize {
+            return Ok(false);
+        }
+        match read_frame(f, offset, file_len)? {
+            Some((kind, hash, p)) if kind != kinds::BATCH_COMMIT => {
+                since.push((offset, hash));
+                offset += HEADER + p.len() as u64;
+            }
+            _ => return Ok(false),
+        }
+    }
+    Ok(offset == marker_at && marker_matches(seg, &since, payload))
+}
+
+/// True if a real batch, closed by a hash-valid `BATCH_COMMIT` frame at any byte position at or
+/// after `stop`, starts past `boundary`: an acknowledged batch follows the damage. Only positions
+/// whose kind byte is `BATCH_COMMIT` and whose length field fits a marker are hashed, and a
+/// candidate counts only if its batch chains from its `start` to the marker
+/// (`closes_a_real_batch`).
 fn acknowledged_batch_follows(
     f: &File,
     seg: u32,
@@ -263,8 +299,8 @@ fn acknowledged_batch_follows(
             continue;
         }
         if let Ok(m) = postcard::from_bytes::<BatchCommit>(payload)
-            && m.start.segment == seg
             && m.start.offset > boundary
+            && closes_a_real_batch(f, seg, stop + pos as u64, payload, file_len)?
         {
             return Ok(true);
         }

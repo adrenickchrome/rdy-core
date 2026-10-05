@@ -655,3 +655,34 @@ fn mark1_an_empty_batch_writes_nothing() {
         }
     );
 }
+
+/// A write whose payload carries a copy of an rdy segment (an imported fixture, or bytes an agent
+/// crafted) and is then torn after the copy: the embedded markers are hash-valid but belong to
+/// another file's frames, so they are not an acknowledged batch following the damage.
+#[test]
+fn mark1_marker_shaped_bytes_inside_a_torn_payload_are_not_an_acknowledged_batch() {
+    let other = tempfile::tempdir().unwrap();
+    three_batches(other.path());
+    let embedded = std::fs::read(seg_file(other.path(), 0)).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = SegmentLog::open(dir.path(), 1 << 20).unwrap();
+    log.append_batch(&[(kinds::BLOB_CHUNK, b"first".to_vec())])
+        .unwrap();
+    let b = log.end();
+    log.sync().unwrap();
+    drop(log);
+    let mut payload = embedded.clone();
+    payload.extend_from_slice(&[7u8; 2000]);
+    let mut torn = frame_bytes(kinds::BLOB_CHUNK, &payload);
+    torn.truncate(37 + embedded.len() + 500); // cut after the embedded copy
+    let path = seg_file(dir.path(), 0);
+    let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+    f.write_all(&torn).unwrap();
+    drop(f);
+    let (log, q) = SegmentLog::open_marked(dir.path(), 1 << 20, None)
+        .expect("an ordinary torn write is quarantined, not refused");
+    assert_eq!(log.end(), b);
+    assert_eq!(q.len(), 1);
+    assert_eq!(std::fs::read(&q[0]).unwrap(), torn);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), b.offset);
+}

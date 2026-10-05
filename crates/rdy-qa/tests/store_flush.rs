@@ -140,3 +140,42 @@ fn mark1_open_fsyncs_the_last_segment_it_accepts() {
     s.unwrap();
     assert!(synced.contains(&seg(&dir, 0)), "{synced:?}");
 }
+
+/// A write whose bytes embed a copy of an rdy segment, torn after the copy: the embedded markers
+/// are hash-valid but belong to another file, so the tail is an ordinary unacknowledged one and
+/// the store opens (it used to refuse, stuck behind a "damaged acknowledged data" error).
+#[test]
+fn mark1_a_torn_write_that_embeds_a_copy_of_a_segment_opens() {
+    let base = tempfile::tempdir().unwrap();
+    let a = base.path().join("a");
+    {
+        let mut s = Store::open(&a).unwrap();
+        for i in 0..5u8 {
+            s.put_blob(&[i; 40]).unwrap();
+        }
+    }
+    let mut chunk = std::fs::read(seg(&a, 0)).unwrap();
+    chunk.extend_from_slice(&[9u8; 2000]);
+    let b = base.path().join("b");
+    Store::open(&b).unwrap().put_blob(b"first").unwrap();
+    let early_index = std::fs::read(b.join("index.redb")).unwrap();
+    let before = std::fs::read(seg(&b, 0)).unwrap();
+    Store::open(&b).unwrap().put_blob(&chunk).unwrap();
+    let path = seg(&b, 0);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let embedded_end = before.len() + 37 + 37 + a_len(&a);
+    bytes.truncate(embedded_end + 500); // a short write, after the embedded copy
+    std::fs::write(&path, &bytes).unwrap();
+    std::fs::write(b.join("index.redb"), &early_index).unwrap();
+    let s = Store::open(&b).expect("a torn unacknowledged write is quarantined, not refused");
+    assert_eq!(
+        s.open_report().quarantined.len(),
+        1,
+        "{:?}",
+        s.open_report()
+    );
+}
+
+fn a_len(store: &Path) -> usize {
+    std::fs::metadata(seg(store, 0)).unwrap().len() as usize
+}
