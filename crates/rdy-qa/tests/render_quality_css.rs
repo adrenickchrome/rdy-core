@@ -181,7 +181,6 @@ fn declares(css: &Css, part: &str, prop: &str, values: &[&str]) -> bool {
 /// cannot catch it. Task 7 writes the `#search` rule inside the `search` section; this test is
 /// owned by Task 7 and its ignore is removed there.
 #[test]
-#[ignore = "SITE-BAR: Task 7"]
 fn css1_the_search_input_border_uses_the_ui_line_and_accent_on_focus() {
     let css = canon_css();
     assert!(
