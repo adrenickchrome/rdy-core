@@ -16,7 +16,7 @@ pub use daemon::{
     Readiness, STOP_GRACE,
 };
 pub use error::{
-    E_BAD_INPUT, E_DAEMON_GONE, E_DAEMON_START, E_DAEMON_VERSION, E_LIMIT, ErrorReply,
+    E_BAD_INPUT, E_DAEMON_GONE, E_DAEMON_START, E_DAEMON_VERSION, E_LIMIT, E_NO_SESSION, ErrorReply,
 };
 pub use handler::Handler;
 pub use hello::{HELLO_TIMEOUT, Hello, HelloReply, MAX_HELLO_BYTES, PROTO_VERSION, read_hello};
@@ -38,3 +38,6 @@ pub mod writer;
 
 pub use shared::{DaemonEngine, Shared};
 pub use writer::{CHECKPOINT_TICK, Writer, WriterHandle};
+pub mod ops;
+
+pub use ops::{OPS, OpContext, dispatch, quarantine};
