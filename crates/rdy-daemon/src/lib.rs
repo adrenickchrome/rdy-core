@@ -33,3 +33,8 @@ pub use client::{
     SpawnFn, StartOptions, connect, connect_or_start, log_tail,
 };
 pub use spawn::{detach, serve_command, spawn_serve};
+pub mod shared;
+pub mod writer;
+
+pub use shared::{DaemonEngine, Shared};
+pub use writer::{CHECKPOINT_TICK, Writer, WriterHandle};
