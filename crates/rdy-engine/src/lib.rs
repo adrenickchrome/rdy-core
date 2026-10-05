@@ -34,7 +34,8 @@ pub use write::{LinkInput, OpInput, WriteRequest, WriteResult, json_to_field};
 
 use arc_swap::ArcSwap;
 use rdy_schema::{Pack, PackSet};
-use rdy_store::{Store, layout};
+use rdy_store::segment::Location;
+use rdy_store::{Store, kinds, layout};
 use read_state::{AsOfCache, Entry};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -54,6 +55,10 @@ pub struct Rdy {
     /// version_position results, keyed by scope and valid for one (canon head, tag count);
     /// shared with every published state.
     vpos: Arc<Mutex<version::VposCache>>,
+    /// The in-process event bus (evt1); `publish` feeds it.
+    events: Events,
+    /// The end of the last batch whose events were published to `events`.
+    last_emitted: Location,
     store: Store,
     pack: Arc<Pack>,
     /// The project's pack followed by every pack it extends, nearest first.
@@ -163,6 +168,8 @@ impl Rdy {
             state,
             as_of,
             vpos,
+            events: Events::new(),
+            last_emitted: store.log_end(),
             store,
             pack,
             lineage,
@@ -211,6 +218,13 @@ impl Rdy {
     /// rest over from the current state. Every write calls it before returning `Ok`. If reading
     /// fails, the published state holds the error, every read of it returns that error, and the
     /// next publish re-reads everything; the error is returned too.
+    ///
+    /// Then, after the state swap, it emits the events of the store's last batch if that batch
+    /// has not been emitted yet (evt1): a `Full` publish from `invalidate` or `open` emits
+    /// nothing new, and a batch that was fully deduplicated has no frames and emits nothing.
+    /// Known gap: a write made through `store_mut()` is emitted live only if it is the last batch
+    /// before the next publish; an earlier one is only in `replay_events`. M2b routes every
+    /// write through the engine.
     pub(crate) fn publish(&mut self, delta: Delta) -> Result<(), RdyError> {
         let prev = self.state.load_full();
         // a state that holds an error has nothing to carry over
@@ -222,7 +236,7 @@ impl Rdy {
         match self.next_state(&prev, delta) {
             Ok(next) => {
                 self.state.store(Arc::new(next));
-                Ok(())
+                self.emit_last_batch()
             }
             Err(e) => {
                 self.state.store(Arc::new(ReadState {
@@ -240,6 +254,56 @@ impl Rdy {
                 Err(e)
             }
         }
+    }
+
+    fn emit_last_batch(&mut self) -> Result<(), RdyError> {
+        let end = self.store.last_batch_end();
+        if end > self.last_emitted {
+            let events =
+                events::events_for_batch(&self.store.reader(), end, self.store.last_batch())?;
+            for e in events {
+                self.events.publish(Arc::new(e));
+            }
+            self.last_emitted = end;
+        }
+        Ok(())
+    }
+
+    /// A receiver of every event emitted from now on (evt1). Events committed before the
+    /// subscription are not sent; `replay_events` covers them.
+    pub fn subscribe(&self) -> std::sync::mpsc::Receiver<Arc<Event>> {
+        self.events.subscribe()
+    }
+
+    /// The events of every committed batch in the log from `from` to its end, in log order: what
+    /// a subscriber would have received had it been listening since `from`.
+    pub fn replay_events(&self, from: Location) -> Result<Vec<Event>, RdyError> {
+        let reader = self.store.reader();
+        let mut out = Vec::new();
+        let mut group: Vec<(u8, rdy_model::Hash)> = Vec::new();
+        let mut failure: Option<RdyError> = None;
+        reader.for_each_frame_from(from, self.store.log_end(), |_, kind, hash, _, next| {
+            if kind == kinds::BATCH_COMMIT {
+                match events::events_for_batch(&reader, next, &group) {
+                    Ok(events) => out.extend(events),
+                    Err(e) => failure = Some(e),
+                }
+                group.clear();
+            } else {
+                group.push((kind, hash));
+            }
+            Ok(())
+        })?;
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(out),
+        }
+    }
+
+    /// Test hook: the end of the last batch whose events were emitted.
+    #[doc(hidden)]
+    pub fn last_emitted_seq(&self) -> Location {
+        self.last_emitted
     }
 
     fn next_state(&self, prev: &ReadState, delta: Delta) -> Result<ReadState, RdyError> {
