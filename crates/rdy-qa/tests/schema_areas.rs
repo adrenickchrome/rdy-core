@@ -62,6 +62,7 @@ fn qapack1_a_thousand_areas_with_a_hundred_globs_each_resolve_and_answer_fast() 
 fn qapack1_pathological_globs_in_a_pack_are_bounded() {
     let mut set = PackSet::with_builtin();
     let pat = format!("{}/a", vec!["**"; 60].join("/"));
+    // 100 bare stars would be `BadDoubleStar`; interleave `?` to keep 50 stars in one segment.
     set.add_yaml(&format!("name: p\nversion: \"1\"\nextends: rdy-standard\nareas:\n  a: {{ paths: ['{pat}', '{}a'] }}\n", "*?".repeat(50))).unwrap();
     let p = set.resolve("p").unwrap();
     let path = vec!["b"; MAX_PATH_SEGMENTS].join("/");

@@ -15,7 +15,7 @@ pub const MAX_PATH_SEGMENTS: usize = 64;
 pub enum GlobError {
     #[error("a path glob cannot be empty")]
     Empty,
-    #[error("a path glob is at most 256 bytes; this one is {len}")]
+    #[error("a path glob is at most {} bytes; this one is {len}", MAX_GLOB_LEN)]
     TooLong { len: usize },
     #[error(
         "character {ch:?} at byte {at} is not allowed in a path glob: use A-Z, a-z, 0-9, '.', '_', '-', '/', '*', '?'"
@@ -145,8 +145,17 @@ impl Glob {
 }
 
 /// `*`/`?` matching of one segment: the standard single-backtrack-point scan, O(pattern x name).
+/// `?` is one character. Tree names are ASCII, so the common case scans bytes without allocating.
 fn segment_matches(toks: &[Tok], name: &str) -> bool {
-    let name: Vec<char> = name.chars().collect();
+    if name.is_ascii() {
+        scan(toks, name.as_bytes(), |lit, b| lit == *b)
+    } else {
+        let chars: Vec<char> = name.chars().collect();
+        scan(toks, &chars, |lit, c| char::from(lit) == *c)
+    }
+}
+
+fn scan<T>(toks: &[Tok], name: &[T], lit_eq: impl Fn(u8, &T) -> bool) -> bool {
     let (mut t, mut s) = (0usize, 0usize);
     let mut backtrack: Option<(usize, usize)> = None;
     while s < name.len() {
@@ -159,7 +168,7 @@ fn segment_matches(toks: &[Tok], name: &str) -> bool {
                 t += 1;
                 s += 1;
             }
-            Some(Tok::Lit(b)) if char::from(*b) == name[s] => {
+            Some(Tok::Lit(b)) if lit_eq(*b, &name[s]) => {
                 t += 1;
                 s += 1;
             }

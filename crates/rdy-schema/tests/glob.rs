@@ -187,3 +187,27 @@ proptest! {
         prop_assert_eq!(g(&pattern).covers(&joined), any_prefix);
     }
 }
+
+// Guard (fix round 1): the TooLong text follows MAX_GLOB_LEN rather than repeating the number.
+#[test]
+fn glob1_the_too_long_text_names_the_limit_constant() {
+    let e = Glob::compile(&"a".repeat(MAX_GLOB_LEN + 1)).unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        format!(
+            "a path glob is at most {MAX_GLOB_LEN} bytes; this one is {}",
+            MAX_GLOB_LEN + 1
+        )
+    );
+}
+
+// Guard (fix round 1): `?` is one character, not one byte, so the allocation-free ASCII scan
+// must not change what a non-ASCII segment matches.
+#[test]
+fn glob1_question_mark_is_one_character_in_a_non_ascii_name() {
+    assert!(g("caf?").matches("café"));
+    assert!(!g("caf??").matches("café"));
+    assert!(!g("caf*e").matches("café"));
+    assert!(g("c*?").matches("café"));
+    assert!(!g("cafe").matches("café"));
+}
