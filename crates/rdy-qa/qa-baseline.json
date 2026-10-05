@@ -4,69 +4,75 @@
       "machine": "macOS 26.6.2 / Apple M4 Pro / APFS",
       "ops": {
         "cold_open": {
-          "median_ms": 85.96875,
+          "median_ms": 84.974959,
           "op": "cold_open",
-          "p95_ms": 89.023375,
+          "p95_ms": 91.135959,
+          "runs": 5
+        },
+        "cold_open_lagging": {
+          "median_ms": 91.471208,
+          "op": "cold_open_lagging",
+          "p95_ms": 94.9065,
           "runs": 5
         },
         "context": {
-          "median_ms": 40.722542,
+          "median_ms": 40.504042,
           "op": "context",
-          "p95_ms": 43.364875,
+          "p95_ms": 42.686375,
           "runs": 20
         },
         "export_import": {
-          "median_ms": 535.282708,
+          "median_ms": 562.8552500000001,
           "op": "export_import",
-          "p95_ms": 556.412167,
+          "p95_ms": 592.2867080000001,
           "runs": 5
         },
         "impact": {
-          "median_ms": 40.560542,
+          "median_ms": 40.474333,
           "op": "impact",
-          "p95_ms": 42.865416,
+          "p95_ms": 43.039750000000005,
           "runs": 20
         },
         "propose_land_500_flat": {
-          "median_ms": 129.974292,
+          "median_ms": 117.674375,
           "op": "propose_land_500_flat",
-          "p95_ms": 138.5615,
+          "p95_ms": 133.137167,
           "runs": 5
         },
         "render": {
-          "median_ms": 1270.0543340000002,
+          "median_ms": 1261.995167,
           "op": "render",
-          "p95_ms": 1278.019209,
+          "p95_ms": 1284.046791,
           "runs": 5
         },
         "resolve_path": {
-          "median_ms": 35.080167,
+          "median_ms": 34.479167,
           "op": "resolve_path",
-          "p95_ms": 37.337625,
+          "p95_ms": 37.472333,
           "runs": 20
         },
         "tree_full": {
-          "median_ms": 1.279208,
+          "median_ms": 1.378875,
           "op": "tree_full",
-          "p95_ms": 1.455584,
+          "p95_ms": 1.670542,
           "runs": 20
         },
         "version_position": {
-          "median_ms": 3.471833,
+          "median_ms": 3.582084,
           "op": "version_position",
-          "p95_ms": 4.204791999999999,
+          "p95_ms": 4.339917000000001,
           "runs": 20
         },
         "write_batch_200": {
-          "median_ms": 15.850291999999998,
+          "median_ms": 7.038625,
           "op": "write_batch_200",
-          "p95_ms": 20.18725,
+          "p95_ms": 19.487833,
           "runs": 9
         },
         "write_single": {
-          "median_ms": 9.400416,
+          "median_ms": 4.2504170000000006,
           "op": "write_single",
-          "p95_ms": 9.621125,
+          "p95_ms": 5.696291,
           "runs": 30
         }
       }
