@@ -10,7 +10,7 @@ use rdy_schema::{Issue, Severity};
 use rdy_store::view::{ResolvedOp, ViewOp, ViewOpKind};
 use rdy_store::{Conflict, Owner, StoreError};
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 /// A view's owner as reads show it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -584,35 +584,15 @@ impl Rdy {
         let gone: BTreeSet<Hash> = requested.iter().copied().collect();
         let deps = dependents(&st, &included, &gone)?;
         if !deps.is_empty() && !cascade {
-            let excluded: BTreeSet<Hash> = gone.iter().chain(&deps).copied().collect();
-            let reader = st.reader();
-            let mut issues = vec![];
-            for d in &deps {
-                let on: Vec<Hash> = reader
-                    .change(d)?
-                    .deps
-                    .into_iter()
-                    .filter(|x| excluded.contains(x))
-                    .collect();
-                issues.push(Issue {
-                    severity: Severity::Error,
-                    code: E_HAS_DEPENDENTS,
-                    block: None,
-                    message: format!("{} depends on {}", d.short(), shorts(&on)),
-                    fix: format!("exclude {} too", d.short()),
-                });
-            }
-            let mut e = RdyError::new(
+            return Err(dependents_refusal(
+                &st,
+                &gone,
+                &deps,
                 E_HAS_DEPENDENTS,
-                format!(
-                    "{} included change(s) depend on what you are excluding: {}",
-                    deps.len(),
-                    shorts(&deps)
-                ),
+                "what you are excluding",
                 "exclude them too with --cascade (MCP: cascade: true)",
-            );
-            e.issues = issues;
-            return Err(e);
+                |d| format!("exclude {} too", d.short()),
+            )?);
         }
         // 4. the write
         drop(st);
@@ -759,10 +739,17 @@ impl Rdy {
             cur = op.prev;
             chain.push((h, op));
         }
+        // The net undone set: an op is undone when its newest undo is live, that is not itself
+        // undone. Newest first, every undo of an undo is decided before the undo it targets, so
+        // after a redo the redone op is live again and an op maps to the live undo of it.
         let mut undone: HashMap<Hash, Hash> = HashMap::new();
+        let mut decided: HashSet<Hash> = HashSet::new();
         for (h, op) in &chain {
-            if let ViewOpKind::Undo { target } = op.op {
-                undone.entry(target).or_insert(*h);
+            if let ViewOpKind::Undo { target } = op.op
+                && decided.insert(target)
+                && !undone.contains_key(h)
+            {
+                undone.insert(target, *h);
             }
         }
         let included_list = st.included(view);
@@ -875,7 +862,15 @@ impl Rdy {
                 let gone: BTreeSet<Hash> = taken_out.iter().copied().collect();
                 let deps = dependents(&st, &included_list, &gone)?;
                 if !deps.is_empty() && !cascade {
-                    return Err(undo_blocked(&st, &gone, &deps)?);
+                    return Err(dependents_refusal(
+                        &st,
+                        &gone,
+                        &deps,
+                        E_UNDO_BLOCKED,
+                        "what this undo would exclude",
+                        "undo with --cascade (MCP: cascade: true) to exclude them too",
+                        |d| format!("undo with --cascade to exclude {} too", d.short()),
+                    )?);
                 }
                 if !deps.is_empty() {
                     ops.push(ViewOpKind::Exclude {
@@ -1044,12 +1039,17 @@ impl Rdy {
     }
 }
 
-/// `E_UNDO_BLOCKED`: the included changes in `deps` depend on `gone`, which the undo would
-/// exclude; one issue per dependent.
-fn undo_blocked(
+/// The refusal (`code`) of a write that would exclude `gone` while the included changes in
+/// `deps` depend on it: `E_HAS_DEPENDENTS` for an exclude, `E_UNDO_BLOCKED` for an undo. The
+/// message names `what` the write would exclude; one issue per dependent, with `item_fix`.
+fn dependents_refusal(
     st: &ReadState,
     gone: &BTreeSet<Hash>,
     deps: &[Hash],
+    code: &'static str,
+    what: &str,
+    fix: &str,
+    item_fix: impl Fn(&Hash) -> String,
 ) -> Result<RdyError, RdyError> {
     let excluded: BTreeSet<Hash> = gone.iter().chain(deps).copied().collect();
     let reader = st.reader();
@@ -1063,20 +1063,20 @@ fn undo_blocked(
             .collect();
         issues.push(Issue {
             severity: Severity::Error,
-            code: E_UNDO_BLOCKED,
+            code,
             block: None,
             message: format!("{} depends on {}", d.short(), shorts(&on)),
-            fix: format!("undo with --cascade to exclude {} too", d.short()),
+            fix: item_fix(d),
         });
     }
     let mut e = RdyError::new(
-        E_UNDO_BLOCKED,
+        code,
         format!(
-            "{} included change(s) depend on what this undo would exclude: {}",
+            "{} included change(s) depend on {what}: {}",
             deps.len(),
             shorts(deps)
         ),
-        "undo with --cascade (MCP: cascade: true) to exclude them too",
+        fix,
     );
     e.issues = issues;
     Ok(e)

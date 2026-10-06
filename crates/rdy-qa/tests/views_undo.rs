@@ -315,3 +315,100 @@ fn undo1_close_marks_views_closed_emits_view_closed_and_checks_every_name_first(
     );
     assert!(!r.read().view_head("a").unwrap().closed);
 }
+
+#[test]
+fn undo1_an_undo_after_a_redo_takes_the_redone_change_out_again() {
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = as_agent("agent:a", "r1");
+    let c1 = write_as(&mut r, &a, "a", claim(&section, "1"))
+        .unwrap()
+        .change;
+    let c2 = write_as(&mut r, &a, "a", claim(&section, "2"))
+        .unwrap()
+        .change;
+    let commit2 = head(&r, "a");
+    let u1 = r.undo(&a, "a", None, false).unwrap();
+    let redo = r.undo(&a, "a", Some(&u1.op), false).unwrap();
+    assert_eq!(r.read().included("a").len(), 2, "c2 is back");
+    // an undone undo does not undo its target: u1 is undone by the live redo
+    let e = r.undo(&a, "a", Some(&u1.op), false).unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT, "{e}");
+    assert!(
+        e.message.contains(&redo.op[..12]),
+        "names the live redo: {e}"
+    );
+    // the target-less undo after a redo takes the redone change out, not c1
+    let u3 = r.undo(&a, "a", None, false).unwrap();
+    assert_eq!(
+        (u3.undone.as_str(), u3.kind.as_str(), &u3.excluded),
+        (commit2.as_str(), "commit", &vec![c2.clone()]),
+        "{u3:?}"
+    );
+    assert_eq!(r.read().included("a").as_ref(), &vec![c1.parse().unwrap()]);
+    let e = r.undo(&a, "a", Some(&commit2), false).unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT, "{e}");
+    assert!(
+        e.message.contains(&u3.op[..12]) && e.fix.contains(&u3.op[..12]),
+        "the refusal names the live undo of c2's commit, not u1: {e}"
+    );
+    let u4 = r.undo(&a, "a", None, false).unwrap();
+    assert_eq!(&u4.excluded, &vec![c1.clone()], "then it walks back to c1");
+    check(&r, &view("a")).unwrap();
+    r.fsck().unwrap();
+}
+
+#[test]
+fn undo1_after_a_redo_the_redone_op_can_be_undone_by_name() {
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = as_agent("agent:a", "r1");
+    let c1 = write_as(&mut r, &a, "a", claim(&section, "1"))
+        .unwrap()
+        .change;
+    let c2 = write_as(&mut r, &a, "a", claim(&section, "2"))
+        .unwrap()
+        .change;
+    let commit2 = head(&r, "a");
+    let u1 = r.undo(&a, "a", None, false).unwrap();
+    r.undo(&a, "a", Some(&u1.op), false).unwrap();
+    let u = r.undo(&a, "a", Some(&commit2), false).unwrap();
+    assert_eq!(
+        (u.kind.as_str(), &u.excluded),
+        ("commit", &vec![c2.clone()])
+    );
+    assert_eq!(r.read().included("a").as_ref(), &vec![c1.parse().unwrap()]);
+    check(&r, &view("a")).unwrap();
+    r.fsck().unwrap();
+}
+
+#[test]
+fn undo1_an_op_is_undone_only_while_its_newest_undo_is_live() {
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = as_agent("agent:a", "r1");
+    let c1 = write_as(&mut r, &a, "a", claim(&section, "1"))
+        .unwrap()
+        .change;
+    let c2 = write_as(&mut r, &a, "a", claim(&section, "2"))
+        .unwrap()
+        .change;
+    let u1 = r.undo(&a, "a", None, false).unwrap();
+    let u2 = r.undo(&a, "a", Some(&u1.op), false).unwrap();
+    let u3 = r.undo(&a, "a", None, false).unwrap();
+    assert_eq!(&u3.excluded, &vec![c2.clone()], "{u3:?}");
+    // undoing the redo now changes nothing (c2 is already out), and it makes u1 live again
+    let u4 = r.undo(&a, "a", Some(&u2.op), false).unwrap();
+    assert!(u4.excluded.is_empty() && u4.included.is_empty(), "{u4:?}");
+    r.undo(&a, "a", Some(&u3.op), false).unwrap();
+    assert_eq!(r.read().included("a").len(), 2, "c2 is back");
+    // c2's newest undo (u3) is undone, so c2's commit is live although u1 is live too
+    let u = r.undo(&a, "a", None, false).unwrap();
+    assert_eq!(&u.excluded, &vec![c2.clone()], "{u:?}");
+    assert_eq!(r.read().included("a").as_ref(), &vec![c1.parse().unwrap()]);
+    check(&r, &view("a")).unwrap();
+    r.fsck().unwrap();
+}
