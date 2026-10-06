@@ -90,8 +90,21 @@ fn spawn1_a_spawned_child_writes_to_the_log_in_its_own_process_group() {
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut cmd = serve_command(&fake, dir.path(), &run).unwrap();
     spawn_serve(&mut cmd).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(700));
-    let text = std::fs::read_to_string(run.log_file()).unwrap();
+    // poll until the child has written both lines (its name, then its pgid); a fixed sleep flaked
+    // under load (two tracks building on one machine)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let text = loop {
+        let text = std::fs::read_to_string(run.log_file()).unwrap_or_default();
+        let done = text.contains("child-")
+            && text
+                .lines()
+                .last()
+                .is_some_and(|l| l.trim().parse::<i32>().is_ok());
+        if done || std::time::Instant::now() > deadline {
+            break text;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
     assert!(text.contains("child-"), "{text}");
     let pgid: i32 = text.lines().last().unwrap().trim().parse().unwrap();
     assert_ne!(
