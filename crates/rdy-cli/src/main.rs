@@ -432,8 +432,8 @@ fn ls_text(nodes: &Value, depth: usize, out: &mut Vec<String>) {
     }
 }
 
-/// The `warning:` lines for what the store's open left behind: quarantine files and an unclean
-/// shutdown (`status` and `fsck` replies).
+/// The `warning:` lines for what the store's open left behind: quarantine files (`status` and
+/// `fsck` replies). An unclean shutdown is no warning: the open recovered from it.
 fn open_warnings(v: &Value) -> String {
     let mut out = String::new();
     let names: Vec<&str> = v["quarantine"]
@@ -444,9 +444,6 @@ fn open_warnings(v: &Value) -> String {
         .collect();
     if !names.is_empty() {
         out.push_str(&format!("\nwarning: quarantine: {}", names.join(", ")));
-    }
-    if v["open_report"]["unclean_shutdown"] == json!(true) {
-        out.push_str("\nwarning: the last run did not close the store cleanly");
     }
     out
 }
@@ -831,13 +828,19 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         }
         Cmd::Fsck => {
             let v = call(env, "fsck", json!({}))?;
-            let t = format!(
+            let mut t = format!(
                 "ok: {} frames, {} landings, {} versions{}",
                 num(&v["frames"]),
                 num(&v["landings"]),
                 num(&v["versions"]),
                 open_warnings(&v)
             );
+            if v["open_report"]["unclean_shutdown"] == json!(true) {
+                t.push_str(&format!(
+                    "\nnote: this daemon started after an unclean shutdown and recovered (caught up {} frames)",
+                    num(&v["open_report"]["caught_up_frames"])
+                ));
+            }
             Ok((v, t))
         }
         Cmd::Check { .. } | Cmd::Serve { .. } => unreachable!("handled in main"),

@@ -415,12 +415,14 @@ async fn answer_oversized<W: AsyncWrite + Unpin>(
     scan: IdScanner,
     len: usize,
     on_drop: &mut (dyn FnMut(usize, Dropped) + Send),
+    on_line: &mut (dyn FnMut(&[u8]) + Send),
 ) -> std::io::Result<()> {
     match scan.finish() {
         Ok(id) => {
             let call = format!(
                 "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"{REQUEST_TOO_LARGE}\",\"arguments\":{{}}}}}}\n"
             );
+            on_line(call.as_bytes());
             w.write_all(call.as_bytes()).await?;
         }
         Err(why) => on_drop(len, why),
@@ -435,9 +437,21 @@ async fn answer_oversized<W: AsyncWrite + Unpin>(
 /// (without the newline) and the [`Dropped`] reason, once per dropped line.
 pub async fn pump_lines<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     r: R,
+    w: W,
+    max: usize,
+    on_drop: &mut (dyn FnMut(usize, Dropped) + Send),
+) -> std::io::Result<()> {
+    pump_lines_with(r, w, max, on_drop, &mut |_| {}).await
+}
+
+/// [`pump_lines`] with `on_line(line)` called for each line it forwards (a replacement call for
+/// an over-long line included), before writing it. The line is as written, newline and all.
+pub async fn pump_lines_with<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    r: R,
     mut w: W,
     max: usize,
     on_drop: &mut (dyn FnMut(usize, Dropped) + Send),
+    on_line: &mut (dyn FnMut(&[u8]) + Send),
 ) -> std::io::Result<()> {
     let mut r = BufReader::new(r);
     let mut line: Vec<u8> = Vec::new();
@@ -447,8 +461,11 @@ pub async fn pump_lines<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         let buf = r.fill_buf().await?;
         if buf.is_empty() {
             match over.take() {
-                Some((scan, len)) => answer_oversized(&mut w, scan, len, on_drop).await?,
-                None if !line.is_empty() => w.write_all(&line).await?,
+                Some((scan, len)) => answer_oversized(&mut w, scan, len, on_drop, on_line).await?,
+                None if !line.is_empty() => {
+                    on_line(&line);
+                    w.write_all(&line).await?
+                }
                 None => {}
             }
             w.flush().await?;
@@ -480,9 +497,12 @@ pub async fn pump_lines<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             match over.take() {
                 Some((scan, len)) => {
                     // `len` counts the newline that ended the line
-                    answer_oversized(&mut w, scan, len - 1, on_drop).await?
+                    answer_oversized(&mut w, scan, len - 1, on_drop, on_line).await?
                 }
-                None => w.write_all(&line).await?,
+                None => {
+                    on_line(&line);
+                    w.write_all(&line).await?
+                }
             }
             w.flush().await?;
             line.clear();

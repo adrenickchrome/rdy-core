@@ -170,7 +170,7 @@ fn proxy1_a_proxy_against_a_store_held_by_no_daemon_fails_fast() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("E_DAEMON_START") && err.contains("locked"),
+        err.contains("E_DAEMON_START") && err.contains("held by another rdy process"),
         "{err}"
     );
     assert!(t.elapsed() < Duration::from_secs(29), "{:?}", t.elapsed());

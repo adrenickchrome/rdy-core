@@ -17,8 +17,19 @@ use tokio::net::UnixStream;
 
 /// How long `connect_or_start` waits for a daemon to become ready, by default.
 pub const DEFAULT_START_TIMEOUT: Duration = Duration::from_secs(30);
-/// The pause between two connects while a spawned daemon comes up.
-pub const CONNECT_RETRY: Duration = Duration::from_millis(100);
+/// How long `connect_or_start` waits for a store lock held by no daemon to be released before it
+/// refuses to spawn one.
+pub const HELD_GRACE: Duration = Duration::from_millis(250);
+/// The pause between two looks at a store lock held by no daemon.
+const HELD_POLL: Duration = Duration::from_millis(10);
+/// The longest pause between two connects while a spawned daemon comes up.
+const CONNECT_BACKOFF_MAX: Duration = Duration::from_millis(50);
+
+/// The pause before connect try `attempt` (counting from 0) while a spawned daemon comes up:
+/// 1 ms, doubling, at most 50 ms (1, 2, 4, 8, 16, 32, 50, 50, ...).
+pub fn connect_backoff(attempt: u32) -> Duration {
+    Duration::from_millis(1u64 << attempt.min(6)).min(CONNECT_BACKOFF_MAX)
+}
 /// The pause between two tries of `start.lock`.
 pub const LOCK_RETRY: Duration = Duration::from_millis(50);
 /// How many lines of `daemon.log` an `E_DAEMON_START` cites.
@@ -40,7 +51,25 @@ fn start_error(message: String) -> ErrorReply {
 
 /// An `E_DAEMON_START` that cites the last lines of `daemon.log` in its message and in
 /// `extra["log_tail"]`.
-fn start_error_with_log(run: &RunDir, mut message: String) -> ErrorReply {
+fn start_error_with_log(run: &RunDir, message: String) -> ErrorReply {
+    start_error_citing(run, message, None)
+}
+
+/// `start_error_with_log`; with `since` (the log's length right before our own spawn) it cites
+/// only the lines written after it.
+fn start_error_citing(run: &RunDir, mut message: String, since: Option<u64>) -> ErrorReply {
+    if let Some(from) = since {
+        let tail = log_tail_since(run, from, LOG_TAIL_LINES);
+        if tail.is_empty() {
+            message.push_str("\n(the daemon wrote nothing to daemon.log)");
+        } else {
+            message.push_str("\nlast lines of .rdy/run/daemon.log:\n");
+            message.push_str(&tail.join("\n"));
+        }
+        let mut e = start_error(message);
+        e.extra.insert("log_tail".into(), json!(tail));
+        return e;
+    }
     let tail = log_tail(run, LOG_TAIL_LINES);
     // a symlinked log is never read, so it counts as missing
     if fs::symlink_metadata(run.log_file()).is_ok_and(|m| m.is_file()) {
@@ -54,13 +83,14 @@ fn start_error_with_log(run: &RunDir, mut message: String) -> ErrorReply {
     e
 }
 
-fn not_ready(run: &RunDir, start_timeout: Duration) -> ErrorReply {
-    start_error_with_log(
+fn not_ready(run: &RunDir, start_timeout: Duration, since: Option<u64>) -> ErrorReply {
+    start_error_citing(
         run,
         format!(
             "the daemon did not become ready within {} s",
             start_timeout.as_secs()
         ),
+        since,
     )
 }
 
@@ -84,6 +114,54 @@ pub fn log_tail(run: &RunDir, n: usize) -> Vec<String> {
     }
     let from = lines.len().saturating_sub(n);
     lines[from..].iter().map(|l| l.to_string()).collect()
+}
+
+/// The lines of the run dir's `daemon.log` written since byte `from` (all of it when the file is
+/// now shorter: it was replaced), at most the last `n`, from at most its last 64 KiB; empty when
+/// the file is missing, unreadable or a symlink.
+pub fn log_tail_since(run: &RunDir, from: u64, n: usize) -> Vec<String> {
+    let Ok(mut f) = open_no_follow(fs::OpenOptions::new().read(true), &run.log_file()) else {
+        return vec![];
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let from = if len < from { 0 } else { from };
+    let start = from.max(len.saturating_sub(MAX_LOG_TAIL_BYTES));
+    let mut buf = Vec::new();
+    if f.seek(SeekFrom::Start(start)).is_err() || f.read_to_end(&mut buf).is_err() {
+        return vec![];
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if start > from && !lines.is_empty() {
+        // cut mid-line
+        lines.remove(0);
+    }
+    let first = lines.len().saturating_sub(n);
+    lines[first..].iter().map(|l| l.to_string()).collect()
+}
+
+/// The length of the run dir's `daemon.log` now (0 when missing or not a regular file).
+fn log_len(run: &RunDir) -> u64 {
+    fs::symlink_metadata(run.log_file())
+        .ok()
+        .filter(|m| m.is_file())
+        .map_or(0, |m| m.len())
+}
+
+/// Whether the store's lock file is held by a process right now. A missing lock file or any other
+/// probe error counts as not held.
+fn store_lock_held(lock: &std::path::Path) -> bool {
+    let Ok(f) = fs::File::open(lock) else {
+        return false;
+    };
+    match f.try_lock() {
+        Ok(()) => {
+            let _ = f.unlock();
+            false
+        }
+        Err(fs::TryLockError::WouldBlock) => true,
+        Err(fs::TryLockError::Error(_)) => false,
+    }
 }
 
 /// Reads one hello reply, one byte at a time up to and including its newline, so nothing past
@@ -431,9 +509,10 @@ async fn finish(
     deadline: Instant,
     start_timeout: Duration,
     progress: &mut (dyn FnMut(&str) + Send),
+    since: Option<u64>,
 ) -> Result<Client, ErrorReply> {
     p.wait_until(deadline, progress).await.map_err(|w| match w {
-        Waited::Deadline => not_ready(run, start_timeout),
+        Waited::Deadline => not_ready(run, start_timeout, since),
         Waited::Failed(e) => e,
     })
 }
@@ -460,7 +539,9 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
     // 1. a daemon may be running
     match connect(run, &hello).await {
         Attempt::Ready(c) => return Ok(c),
-        Attempt::Starting(p) => return finish(p, run, deadline, start_timeout, progress).await,
+        Attempt::Starting(p) => {
+            return finish(p, run, deadline, start_timeout, progress, None).await;
+        }
         Attempt::Refused(e) => return Err(e),
         Attempt::Exiting | Attempt::NoDaemon(_) => {}
     }
@@ -502,12 +583,44 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
     // 3. another client may have started one while we waited for the lock
     match connect(run, &hello).await {
         Attempt::Ready(c) => return Ok(c),
-        Attempt::Starting(p) => return finish(p, run, deadline, start_timeout, progress).await,
+        Attempt::Starting(p) => {
+            return finish(p, run, deadline, start_timeout, progress, None).await;
+        }
         Attempt::Refused(e) => return Err(e),
         Attempt::Exiting | Attempt::NoDaemon(_) => {}
     }
 
+    // a store held by a process that is not a daemon (a --no-daemon rdy) would only make the
+    // daemon we spawn die at its open: refuse that here, without a spawn, once it has had a
+    // moment to let go
+    if let Some(store) = run.path().parent().map(|p| p.join("store")) {
+        let lock = store.join("lock");
+        let give_up = (Instant::now() + HELD_GRACE).min(deadline);
+        while store_lock_held(&lock) {
+            match connect(run, &hello).await {
+                Attempt::Ready(c) => return Ok(c),
+                Attempt::Starting(p) => {
+                    return finish(p, run, deadline, start_timeout, progress, None).await;
+                }
+                Attempt::Refused(e) => return Err(e),
+                Attempt::Exiting | Attempt::NoDaemon(_) => {}
+            }
+            if Instant::now() >= give_up {
+                return Err(ErrorReply::new(
+                    E_DAEMON_START,
+                    format!(
+                        "the store at {} is held by another rdy process that is not a daemon (a command run with --no-daemon, or rdy mcp --no-daemon)",
+                        store.display()
+                    ),
+                    "a --no-daemon rdy holds the store: close it, or drop --no-daemon",
+                ));
+            }
+            tokio::time::sleep(HELD_POLL).await;
+        }
+    }
+
     // 4. spawn
+    let log_from = log_len(run);
     let mut spawned = match spawn(run) {
         Ok(s) => s,
         Err(e) => return Err(start_error(format!("could not start the daemon: {e}"))),
@@ -516,6 +629,7 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
     // 5. wait for it to answer. An old daemon removes its socket before it answers `exiting`,
     // so an `exiting` now comes from the daemon we spawned: it is not of our version, and
     // waiting cannot help. Neither can waiting on a daemon that has exited.
+    let mut attempt_no = 0u32;
     loop {
         let reached = match exchange_hello(run, &hello, crate::socket::own_uid()).await {
             Ok((_, HelloReply::Exiting { version: theirs })) => {
@@ -533,21 +647,25 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
         };
         match reached {
             Attempt::Ready(c) => return Ok(c),
-            Attempt::Starting(p) => return finish(p, run, deadline, start_timeout, progress).await,
+            Attempt::Starting(p) => {
+                return finish(p, run, deadline, start_timeout, progress, Some(log_from)).await;
+            }
             Attempt::Refused(e) => return Err(e),
             Attempt::Exiting | Attempt::NoDaemon(_) => {}
         }
         // a daemon that died (say, finding the store locked) will never answer: say so now
         if let Some(code) = (spawned.exited)() {
-            return Err(start_error_with_log(
+            return Err(start_error_citing(
                 run,
                 format!("the daemon exited with code {code} before it was ready"),
+                Some(log_from),
             ));
         }
         let now = Instant::now();
         if now >= deadline {
-            return Err(not_ready(run, start_timeout));
+            return Err(not_ready(run, start_timeout, Some(log_from)));
         }
-        tokio::time::sleep(CONNECT_RETRY.min(deadline - now)).await;
+        tokio::time::sleep(connect_backoff(attempt_no).min(deadline - now)).await;
+        attempt_no += 1;
     }
 }
