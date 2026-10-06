@@ -89,6 +89,8 @@ struct BriefArgs {
     ids: Option<Vec<String>>,
     path: Option<String>,
     scope: Option<String>,
+    /// A write target, resolved as `edit_block` writes it: this view when it has a head, else canon.
+    view: Option<String>,
     max_tokens: Option<usize>,
 }
 
@@ -303,7 +305,10 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             tags(cx)
         }
         "block" => block(cx, parse(op, args, "{id, view?}")?),
-        "brief" => brief(cx, parse(op, args, "{ids?, path?, scope?, max_tokens?}")?),
+        "brief" => brief(
+            cx,
+            parse(op, args, "{ids?, path?, scope?, view?, max_tokens?}")?,
+        ),
         "render" => render(cx, parse(op, args, "{out, scope?}")?),
         "export" => export(cx, parse(op, args, "{out, scope?}")?),
         "check" => check(cx, parse(op, args, "{path, pack?}")?),
@@ -427,7 +432,9 @@ fn block(cx: &OpContext, a: BlockArgs) -> Result<Value, RdyError> {
 }
 
 /// A briefing over blocks and/or a doc or folder path, registered so its token can be cited.
-/// The scope is the one given; else the session's default view when it has a head, else canon.
+/// The scope is the one given (a read: an unknown view is `E_NOT_FOUND`); else `view` as a write
+/// target (that view when it has a head, else canon, as a write there would read it); else the
+/// session's default view when it has a head, else canon.
 fn brief(cx: &OpContext, a: BriefArgs) -> Result<Value, RdyError> {
     if let Some(n) = a.max_tokens.filter(|n| *n > MAX_TOKENS_LIMIT) {
         return Err(RdyError::new(
@@ -438,10 +445,23 @@ fn brief(cx: &OpContext, a: BriefArgs) -> Result<Value, RdyError> {
     }
     let st = cx.engine.read();
     let own = cx.session.default_view();
-    let scope = match a.scope.as_deref() {
-        Some(t) => st.resolve_read_scope(t, Some(&own))?,
-        None if st.view_head(&own).is_some() => Scope::View(own),
-        None => Scope::Canon,
+    if a.scope.is_some() && a.view.is_some() {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "brief takes scope or view, not both",
+            "pass scope to read a scope, or view to brief a write target",
+        ));
+    }
+    let scope = match (a.scope.as_deref(), a.view) {
+        (Some(t), _) => st.resolve_read_scope(t, Some(&own))?,
+        (None, view) => {
+            let target = view.unwrap_or(own);
+            if st.view_head(&target).is_some() {
+                Scope::View(target)
+            } else {
+                Scope::Canon
+            }
+        }
     };
     let b = st.brief(
         &scope,

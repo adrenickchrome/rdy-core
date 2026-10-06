@@ -590,7 +590,7 @@ fn edit(env: &Env, id: &str, view: Option<&str>) -> Result<Value, ErrorReply> {
     let briefing = call(
         env,
         "brief",
-        json!({"ids": [text(&block["id"])], "scope": view}),
+        json!({"ids": [text(&block["id"])], "view": view}),
     )?;
     let tmp = tempfile::Builder::new()
         .prefix("rdy-edit-")

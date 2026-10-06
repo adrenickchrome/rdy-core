@@ -169,6 +169,45 @@ fn cbrf1_rdy_edit_prints_consequences_after_saving() {
 }
 
 #[test]
+fn cbrf1_rdy_edit_in_a_fresh_view_briefs_it_as_a_write_target() {
+    let s = Served::new();
+    let spec = {
+        let mut r = Rdy::open(s.dir.path()).unwrap();
+        let spec = stable_spec(&mut r);
+        r.close().unwrap();
+        spec
+    };
+    let ed = script(
+        &s,
+        "fresh.sh",
+        "sed -i.bak 's/A holds./A holds in fresh./' \"$1\"\n",
+    );
+    let id = spec.a.to_string();
+    let out = std::process::Command::new(rdy_bin())
+        .arg("--project")
+        .arg(s.dir.path())
+        .args(["--json", "edit", &id, "--view", "fresh"])
+        .env("EDITOR", &ed)
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .env_remove("RDY_NO_DAEMON")
+        .envs(s.env_pairs())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (ok, shown) = s.json(&["--json", "show", &id, "--scope", "fresh"]);
+    assert!(ok, "{shown}");
+    assert!(
+        shown["body"].to_string().contains("A holds in fresh."),
+        "{shown}"
+    );
+}
+
+#[test]
 fn cbrf1_the_brief_op_answers_for_a_path_and_edit_block_cites_its_token() {
     let s = Served::new();
     let spec = {
