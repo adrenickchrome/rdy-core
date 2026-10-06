@@ -722,21 +722,25 @@ fn engine_split_brain_histories_keep_every_invariant() {
     // sb2: the generator gained `Include`, which reseeds every case; the brackets show the new
     // seeded run and the floors are unchanged, so three of them (refused landings,
     // E_CONFLICT_UNRESOLVED and E_PATH_CLASH landings) now sit at or just under their counts.
+    // Final review fix round 1: an include brings the change that created a parent it needs, so
+    // the seeded run's one E_MISSING_PARENT landing is gone and the history after it moved; the
+    // brackets show that run, and the E_CONFLICT_UNRESOLVED floor (10, its old count) is now 6,
+    // about 70% of the new count like the others.
     let s = stats.into_inner();
     eprintln!("split-brain coverage: {s:#?}");
     let land = |code: &str| s.land_refused.get(code).copied().unwrap_or(0);
     let floors = [
-        ("effective rebalances [33]", s.effective_rebalances, 16),
+        ("effective rebalances [32]", s.effective_rebalances, 16),
         // gconf1: a collision a landing recorded as a view conflict is refused as
         // E_CONFLICT_UNRESOLVED, no longer E_STALE_BASE; the seeded run's 15 E_STALE_BASE
         // refusals (the bracket said 19) are now 15 E_CONFLICT_UNRESOLVED, and the refused
         // landings were 28 before and after (the bracket said 36)
-        ("refused landings [20]", s.land_refused.values().sum(), 19),
+        ("refused landings [21]", s.land_refused.values().sum(), 19),
         ("refused-landing codes [4]", s.land_refused.len(), 3),
         (
-            "E_CONFLICT_UNRESOLVED landings [10]",
+            "E_CONFLICT_UNRESOLVED landings [9]",
             land("E_CONFLICT_UNRESOLVED"),
-            10,
+            6,
         ),
         (
             "E_PARENT_CYCLE landings [6]",
@@ -746,7 +750,7 @@ fn engine_split_brain_histories_keep_every_invariant() {
         // vcreate1: an empty unpinned view reads canon (the floating rule), so writes into it no
         // longer read a stale base; the seeded run's path clashes at landing fell from 5 to 4
         (
-            "E_PATH_CLASH landings [3]",
+            "E_PATH_CLASH landings [5]",
             land("E_VALIDATION/E_PATH_CLASH"),
             3,
         ),
@@ -764,9 +768,9 @@ fn engine_split_brain_histories_keep_every_invariant() {
     // refused as unresolved; each at least once per run
     let sb2 = [
         ("included [65]", s.included),
-        ("conflict_recorded [37]", s.conflict_recorded),
+        ("conflict_recorded [33]", s.conflict_recorded),
         (
-            "conflict_unresolved_at_land [10]",
+            "conflict_unresolved_at_land [9]",
             s.conflict_unresolved_at_land,
         ),
     ];
@@ -780,4 +784,40 @@ fn engine_split_brain_histories_keep_every_invariant() {
     // reb1: the four views are unpinned, so every landing rebases them onto the re-keyed
     // siblings and W_SIBLINGS_REKEYED (a pinned view's warning) is never raised here
     assert_eq!(s.siblings_rekeyed, 0, "{s:#?}");
+}
+
+/// sb2 (final review fix round 1): the helper's include across views, as one named case, so the
+/// gate lists the id. View v1 includes only v0's claim under a section v0 created; the include
+/// brings the section's creation along, v1 passes the checker and lands, and canon does too (the
+/// helper's run once saw this landing refused as `E_MISSING_PARENT`).
+#[test]
+fn sb2_an_include_across_views_brings_the_parents_creation_and_lands() {
+    let (_d, mut r) = project();
+    base(&mut r);
+    let doc = ids(&mut r, &Scope::Canon, &["doc"])[0].clone();
+    let c1 = write(
+        &mut r,
+        "v0",
+        json!([{"op": "create", "type": "section", "parent": doc, "fields": {"title": "Fresh"}}]),
+    )
+    .unwrap();
+    let s = c1.created.values().next().unwrap().clone();
+    let c2 = write(
+        &mut r,
+        "v0",
+        json!([{"op": "create", "type": "claim", "parent": s, "body": "under fresh"}]),
+    )
+    .unwrap();
+    let res = r
+        .view_include(&writer(), "v1", std::slice::from_ref(&c2.change))
+        .unwrap();
+    assert_eq!(
+        (res.added, res.added_deps),
+        (vec![c2.change.clone()], vec![c1.change.clone()])
+    );
+    check(&r, &Scope::View("v1".into())).unwrap();
+    land(&mut r, "v1").unwrap();
+    check(&r, &Scope::Canon).unwrap();
+    let claim = c2.created.values().next().unwrap().clone();
+    assert_eq!(body_of(&r, &Scope::Canon, &claim), "under fresh");
 }

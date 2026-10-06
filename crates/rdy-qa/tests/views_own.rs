@@ -190,11 +190,13 @@ fn own1_close_stale_is_human_only_and_closes_idle_views() {
     assert!(
         r.view_close_stale(&human_writer(), 14, now_ms())
             .unwrap()
+            .closed
             .is_empty()
     );
     let closed = r
         .view_close_stale(&human_writer(), 0, now_ms() + 86_400_000 * 2)
-        .unwrap();
+        .unwrap()
+        .closed;
     assert_eq!(
         closed.iter().map(|c| c.view.as_str()).collect::<Vec<_>>(),
         vec!["a", "b", "seed"]
@@ -332,4 +334,70 @@ fn own1_work_is_the_humans_view() {
 
 fn req(v: serde_json::Value) -> ViewRequest {
     serde_json::from_value(v).unwrap()
+}
+
+/// Final review fix round 1 (Minor 6): an import is a commit, so like every engine commit it
+/// claims the existing unowned view it writes into.
+#[test]
+fn own1_an_import_into_an_unowned_view_claims_it() {
+    let (_a, mut src) = project();
+    seed_doc(&mut src, "seed");
+    land(&mut src, "seed").unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let dir = out.path().join("export");
+    src.read().export(&Scope::Canon, &dir).unwrap();
+    let (_d, mut r) = project();
+    r.view_create(&human_writer(), "imp", None, false).unwrap();
+    assert_eq!(r.view_own(&writer(), "imp", None).unwrap().owner, None);
+    r.import(&approver(), "imp", &dir).unwrap();
+    let st = r.read();
+    let h = st.view_head("imp").unwrap();
+    assert_eq!(
+        h.owner.as_ref().map(|o| o.actor.as_str()),
+        Some("human:qa"),
+        "the import claimed the view"
+    );
+    let commit = st.reader().view_op(&h.head).unwrap();
+    assert!(matches!(commit.op, ViewOpKind::Commit { .. }), "{commit:?}");
+    let own = st.reader().view_op(&commit.prev.unwrap()).unwrap();
+    assert!(
+        matches!(own.op, ViewOpKind::Own { owner: Some(_) }),
+        "an Own op before the Commit: {own:?}"
+    );
+}
+
+/// Final review fix round 1 (Minor 8): `close --stale` never closes the session's own default
+/// view (the human's `work`); it says it kept it.
+#[test]
+fn own1_close_stale_keeps_the_sessions_default_view_and_says_so() {
+    let (_d, mut r, _section, _a, _b, _ca, _cb) = two_agents();
+    write(&mut r, "work", new_doc("mine")).unwrap();
+    let res = r
+        .view_close_stale(&human_writer(), 0, now_ms() + 86_400_000 * 2)
+        .unwrap();
+    assert_eq!(
+        res.closed
+            .iter()
+            .map(|c| c.view.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "b", "seed"]
+    );
+    assert_eq!(res.kept.as_deref(), Some("work"));
+    let st = r.read();
+    assert!(!st.view_head("work").unwrap().closed, "work stays open");
+    drop(st);
+    write(&mut r, "work", new_doc("more")).unwrap();
+    let none = r.view_close_stale(&human_writer(), 14, now_ms()).unwrap();
+    assert!(none.closed.is_empty() && none.kept.is_none(), "{none:?}");
+}
+
+/// Final review fix round 1 (Minor 9): `own` takes the writer role, as creating a view does; a
+/// human session with the reader role cannot reassign a view.
+#[test]
+fn own1_own_needs_the_writer_role() {
+    let (_d, mut r, _section, _a, _b, _ca, _cb) = two_agents();
+    let before = head(&r, "a");
+    let e = r.view_own(&reader(), "a", None).unwrap_err();
+    assert_eq!(e.code, E_PERMISSION, "{e}");
+    assert_eq!(head(&r, "a"), before, "nothing was written");
 }

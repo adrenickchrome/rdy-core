@@ -326,17 +326,21 @@ fn show_text(v: &Value) -> String {
 
 fn close_text(v: &Value) -> String {
     let closed = v["closed"].as_array().map_or(&[][..], Vec::as_slice);
-    if closed.is_empty() {
-        return "closed 0 views".into();
-    }
-    closed
+    let mut lines: Vec<String> = closed
         .iter()
         .map(|c| match text(&c["reason"]) {
             "" => format!("closed {}", text(&c["view"])),
             reason => format!("closed {} ({reason})", text(&c["view"])),
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    if lines.is_empty() {
+        lines.push("closed 0 views".into());
+    }
+    // `close --stale` keeps the session's own default view open
+    if let Some(kept) = v["kept"].as_str() {
+        lines.push(format!("kept {kept} open (your default view)"));
+    }
+    lines.join("\n")
 }
 
 /// The text of the `view` op's reply to a request of kind `op` (`create`, `fork`, `include`,

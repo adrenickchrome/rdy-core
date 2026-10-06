@@ -113,3 +113,17 @@ fn seeded_ids_replay_the_same_sequence_and_unseeded_ids_stay_valid() {
         a
     );
 }
+
+/// Final review fix round 1 (ledger minor): `BlockId` parses with `str::parse`, as `Hash` does,
+/// with `BlockId::parse`'s rules and errors.
+#[test]
+fn block_id_from_str_matches_parse() {
+    let id = rdy_model::BlockId::new("c");
+    let text = id.to_string();
+    assert_eq!(text.parse::<rdy_model::BlockId>(), Ok(id));
+    assert_eq!(
+        "c-?????".parse::<rdy_model::BlockId>(),
+        rdy_model::BlockId::parse("c-?????")
+    );
+    assert!("nope".parse::<rdy_model::BlockId>().is_err());
+}

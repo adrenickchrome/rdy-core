@@ -1,6 +1,9 @@
 use crate::error::*;
 use crate::session::rfc3339_of_ms;
-use crate::views::{Action, ConflictInfo, conflict_infos, parse_change};
+use crate::views::{
+    Action, BaseBlocks, ConflictInfo, conflict_infos, creators, landings_through, missing_parents,
+    parse_change,
+};
 use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, rfc3339_now};
 use rdy_model::{
     ApprovalEvidence, Block, BlockId, Change, ChangeLinks, EvidenceKind, FieldValue, Hash,
@@ -298,7 +301,7 @@ fn resolve_in(st: &ReadState, text: &str) -> Result<ProposalRef, RdyError> {
     let Some((prefix, want)) = parsed else {
         return Err(RdyError::new(
             E_BAD_INPUT,
-            format!("{text:?} is not a proposal id"),
+            format!("{:?} is not a proposal id", crate::views::clip(text)),
             "pass P-<id> or P-<id>@<n> from rdy_propose, or a version hash",
         ));
     };
@@ -391,17 +394,6 @@ fn landed_as(st: &ReadState, p: &Proposal) -> Result<Option<Hash>, RdyError> {
         }
     }
     Ok(None)
-}
-
-/// The landings at or before `base` on canon's chain (none for `None`).
-fn landings_through(st: &ReadState, base: Option<Hash>) -> Result<BTreeSet<Hash>, RdyError> {
-    let mut out = BTreeSet::new();
-    let mut cur = base;
-    while let Some(h) = cur {
-        out.insert(h);
-        cur = st.reader().landing(&h)?.prev;
-    }
-    Ok(out)
 }
 
 /// `E_CONFLICT_UNRESOLVED` for the conflicts a version carries on the blocks it writes: one
@@ -781,6 +773,7 @@ impl Rdy {
                 "write to the view first",
             ));
         }
+        let subset = changes.is_some();
         let ids: Vec<Hash> = match changes {
             None => included.as_ref().clone(),
             Some(list) => {
@@ -818,7 +811,8 @@ impl Rdy {
         let base = st.effective_base(view);
         let set: BTreeSet<&Hash> = ids.iter().collect();
         let mut based: Option<BTreeSet<Hash>> = None;
-        let mut missing = vec![];
+        // (the change, what it needs, why)
+        let mut missing: Vec<(Hash, Hash, String)> = vec![];
         for (c, id) in changes.iter().zip(&ids) {
             for dep in &c.deps {
                 if set.contains(dep) {
@@ -834,13 +828,49 @@ impl Rdy {
                     None => false,
                 };
                 if !in_base {
-                    missing.push((*id, *dep));
+                    missing.push((
+                        *id,
+                        *dep,
+                        format!("{} depends on {}", id.short(), dep.short()),
+                    ));
+                }
+            }
+        }
+        // the parent rule (final review fix round 1): a subset also carries the change that
+        // creates each parent its blocks are created or moved under, unless the parent is in the
+        // view's base (the whole view carries every such change it has)
+        if subset {
+            let sub: Vec<(Hash, Change)> =
+                ids.iter().copied().zip(changes.iter().cloned()).collect();
+            let mut in_base = BaseBlocks::new(&st, base);
+            let parents = missing_parents(&sub, &mut |p| in_base.has(p))?;
+            if !parents.is_empty() {
+                let rest: Vec<(Hash, Change)> = included
+                    .iter()
+                    .filter(|h| !set.contains(h))
+                    .map(|h| Ok((*h, st.reader().change(h)?)))
+                    .collect::<Result<_, RdyError>>()?;
+                let by = creators(rest.iter().map(|(h, c)| (*h, c)));
+                for (c, block, p) in parents {
+                    if let Some(k) = by.get(&p)
+                        && !missing.iter().any(|(x, d, _)| *x == c && d == k)
+                    {
+                        missing.push((
+                            c,
+                            *k,
+                            format!(
+                                "{} puts {block} under {p}, which {} creates",
+                                c.short(),
+                                k.short()
+                            ),
+                        ));
+                    }
                 }
             }
         }
         if !missing.is_empty() {
             let mut deps: Vec<Hash> = vec![];
-            for (_, d) in &missing {
+            for (_, d, _) in &missing {
                 if !deps.contains(d) {
                     deps.push(*d);
                 }
@@ -858,12 +888,12 @@ impl Rdy {
                 ),
             );
             e.issues = missing
-                .iter()
-                .map(|(c, d)| Issue {
+                .into_iter()
+                .map(|(_, d, message)| Issue {
                     severity: Severity::Error,
                     code: E_DEPS_MISSING,
                     block: None,
-                    message: format!("{} depends on {}", c.short(), d.short()),
+                    message,
                     fix: format!("include {}", d.short()),
                 })
                 .collect();

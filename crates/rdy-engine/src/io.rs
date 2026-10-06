@@ -590,7 +590,13 @@ impl Rdy {
             _ => unreachable!("format checked above"),
         };
         let scope = Scope::View(view.to_string());
-        let existing = self.read().materialized(&scope)?;
+        // an import is a commit: it claims an unowned view and checks against the view's
+        // recorded conflicts, as `write_linked` does
+        let st = self.read();
+        let claim = crate::views::commit_claim(&st, s, view)?;
+        let conflicts = st.conflicts(&scope)?;
+        let existing = st.materialized(&scope)?;
+        drop(st);
         // duplicates first: a duplicated doc would otherwise read as a name clash with itself
         let mut ids = BTreeSet::new();
         for b in &blocks {
@@ -755,7 +761,13 @@ impl Rdy {
             message: format!("import from {}", dir.display()),
             links: ChangeLinks::default(),
         };
-        let id = self.store.commit_to_view(view, change)?;
+        let id = self.store.commit_to_view_resolving(
+            view,
+            change,
+            &|id| existing.version_of(id),
+            &conflicts,
+            claim,
+        )?;
         self.publish(crate::Delta::Commit {
             view: view.to_string(),
             ops: ops.clone(),

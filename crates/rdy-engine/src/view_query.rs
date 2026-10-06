@@ -7,10 +7,11 @@ use crate::views::{
     ConflictInfo, OwnerInfo, ViewHeadInfo, conflict_infos, head_info, kind_name, net_undone,
 };
 use crate::{Materialized, Scope};
-use rdy_model::{Block, BlockId, Hash, tree};
+use rdy_model::{Block, BlockId, Change, Hash, StateSnapshot, tree};
 use rdy_store::view::{ViewOp, ViewOpKind};
+use rdy_store::{MergeChange, merge_on_blocks};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// One row of `rdy view ls`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -77,7 +78,8 @@ pub struct CompareEntry {
     pub block_type: String,
     /// The block's path, for a folder or a doc.
     pub path: Option<String>,
-    /// The field names whose values differ, then `body`, `links` and `order` when they differ.
+    /// The field names whose values differ, then `body`, `links` and `order` when they differ
+    /// (`order` only under the same parent: a moved block's new key is part of the move).
     pub fields: Vec<String>,
     /// For a moved block: its parent in `b`.
     pub from_parent: Option<String>,
@@ -124,7 +126,9 @@ fn touched(ops: &[rdy_model::Op]) -> Vec<BlockId> {
         .collect()
 }
 
-/// The names whose values differ between `a` and `b`, then `body`, `links` and `order`.
+/// The names whose values differ between `a` and `b`, then `body`, `links` and `order`. A block
+/// under a new parent gets a new order key as part of the move, so `order` is listed only when
+/// the parent is the same: a pure move is listed under `moved` only.
 fn differing(a: &Block, b: &Block) -> Vec<String> {
     let names: BTreeSet<&String> = a.fields.keys().chain(b.fields.keys()).collect();
     let mut out: Vec<String> = names
@@ -138,7 +142,7 @@ fn differing(a: &Block, b: &Block) -> Vec<String> {
     if a.links != b.links {
         out.push("links".into());
     }
-    if a.order != b.order {
+    if a.order != b.order && a.parent == b.parent {
         out.push("order".into());
     }
     out
@@ -170,6 +174,8 @@ impl ReadState {
         now_ms: i64,
     ) -> Result<Vec<ViewSummary>, RdyError> {
         let window = i64::from(idle_days).saturating_mul(86_400_000);
+        // the base states the counts merge onto, each read once
+        let mut bases: HashMap<Option<Hash>, StateSnapshot> = HashMap::new();
         let mut out = vec![];
         for name in self.view_names() {
             let Some(head) = self.view_head(&name) else {
@@ -179,16 +185,18 @@ impl ReadState {
                 continue;
             }
             let included = self.included(&name);
-            let mut blocks = HashSet::new();
-            for ch in included.iter() {
-                for op in &self.reader().change(ch)?.ops {
-                    blocks.insert(op.block_id().clone());
-                }
-            }
+            let changes = included
+                .iter()
+                .map(|ch| self.reader().change(ch))
+                .collect::<Result<Vec<Change>, _>>()?;
+            let blocks: BTreeSet<BlockId> = changes
+                .iter()
+                .flat_map(|c| c.ops.iter().map(|op| op.block_id().clone()))
+                .collect();
             let conflicts = if head.closed {
                 0
             } else {
-                self.conflicts(&Scope::View(name.clone()))?.len()
+                self.conflict_count(&name, &changes, &blocks, &mut bases)?
             };
             out.push(ViewSummary {
                 owner: head.owner.as_ref().map(OwnerInfo::from),
@@ -205,6 +213,58 @@ impl ReadState {
             });
         }
         Ok(out)
+    }
+
+    /// How many blocks view `name`'s merge records a conflict on, without building the view:
+    /// the build's count when it is built, else a merge of its `changes` (touching `blocks`)
+    /// onto its base restricted to those blocks, whose conflicts are the full merge's
+    /// (`merge_on_blocks`), counted once per entry. A cold `rdy view ls` thus costs a merge on
+    /// each view's own blocks, not a build of every view.
+    fn conflict_count(
+        &self,
+        name: &str,
+        changes: &[Change],
+        blocks: &BTreeSet<BlockId>,
+        bases: &mut HashMap<Option<Hash>, StateSnapshot>,
+    ) -> Result<usize, RdyError> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        let Some(entry) = self.views.get(name) else {
+            return Ok(0);
+        };
+        if entry.floats() || entry.included.is_empty() {
+            return Ok(0);
+        }
+        if let Some(b) = entry.built_ok() {
+            return Ok(b.conflicts.len());
+        }
+        if let Some(n) = entry.conflict_count.get() {
+            return Ok(*n);
+        }
+        if let std::collections::hash_map::Entry::Vacant(slot) = bases.entry(entry.base) {
+            slot.insert(self.reader().state_of(entry.base)?);
+        }
+        let input: Vec<MergeChange<'_>> = entry
+            .included
+            .iter()
+            .zip(changes)
+            .map(|(id, c)| MergeChange {
+                id: *id,
+                deps: &c.deps,
+                ops: &c.ops,
+            })
+            .collect();
+        let n = merge_on_blocks(
+            &bases[&entry.base],
+            &input,
+            &|v| self.reader().producer(v).ok().flatten(),
+            blocks,
+        )
+        .conflicts
+        .len();
+        let _ = entry.conflict_count.set(n);
+        Ok(n)
     }
 
     /// View `name` in detail (FND-7): its head, each change it includes with the blocks it

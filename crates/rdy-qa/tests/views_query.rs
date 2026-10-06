@@ -282,3 +282,111 @@ fn vls1_idle_days_is_read_from_the_config_on_open_and_survives_every_publish() {
     r.invalidate();
     assert_eq!(r.read().idle_days(), 3);
 }
+
+/// Final review fix round 1 (Minor 7): a move gives the block a new order key under its new
+/// parent; that is part of the move, so a pure move is listed under `moved` only, and `moved` and
+/// `changed` do not double-count it.
+#[test]
+fn cmp1_a_pure_move_is_listed_under_moved_only() {
+    let (_d, mut r) = project();
+    let (doc, section, _c) = seed_doc(&mut r, "seed");
+    let s2 = write(
+        &mut r,
+        "seed",
+        json!([{"op": "create", "type": "section", "parent": doc, "fields": {"title": "T"}}]),
+    )
+    .unwrap()
+    .created
+    .values()
+    .next()
+    .unwrap()
+    .clone();
+    // two children under the target, so the moved section's key there differs from its key
+    // under the doc
+    write(&mut r, "seed", claim(&section, "two")).unwrap();
+    land(&mut r, "seed").unwrap();
+    let a = as_agent("agent:a", "r1");
+    let before = r.read().block(&Scope::Canon, &s2.parse().unwrap()).unwrap();
+    write_as(
+        &mut r,
+        &a,
+        "a",
+        json!([{"op": "move", "id": s2, "parent": section}]),
+    )
+    .unwrap();
+    let after = r.read().block(&view("a"), &s2.parse().unwrap()).unwrap();
+    assert_ne!(before.order, after.order, "the move re-keyed the section");
+    let cmp = r.read().compare(&view("a"), &Scope::Canon).unwrap();
+    assert_eq!(
+        cmp.moved.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        vec![s2.as_str()]
+    );
+    assert!(cmp.changed.is_empty(), "{:?}", cmp.changed);
+}
+
+/// Final review fix round 1 (Minor 10): a cold `view_list` counts each open view's conflicts
+/// without building the view (a merge on the blocks its changes touch), and the counts are the
+/// views' own.
+#[test]
+fn vls1_a_cold_list_counts_conflicts_without_building_the_views() {
+    let (_d, mut r) = project();
+    let (_doc, section, c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let v = version_of(&r, &Scope::Canon, &c);
+    let a = as_agent("agent:a", "r1");
+    write_as(&mut r, &a, "a", update(&c, &v, "a's")).unwrap();
+    let cb = write_as(
+        &mut r,
+        &as_agent("agent:b", "r1"),
+        "b",
+        update(&c, &v, "b's"),
+    )
+    .unwrap()
+    .change;
+    r.view_include(&a, "a", &[cb]).unwrap();
+    let d = as_agent("agent:d", "r1");
+    write_as(&mut r, &d, "d", update(&c, &v, "d's")).unwrap();
+    write_as(&mut r, &d, "d", claim(&section, "d2")).unwrap();
+    write_as(
+        &mut r,
+        &as_agent("agent:e", "r1"),
+        "e",
+        claim(&section, "e"),
+    )
+    .unwrap();
+    let mut want = vec![];
+    for name in ["a", "b", "d", "e"] {
+        want.push((
+            name.to_string(),
+            r.read().conflicts(&view(name)).unwrap().len(),
+        ));
+    }
+    assert_eq!(
+        want.iter().map(|w| w.1).collect::<Vec<_>>(),
+        vec![1, 0, 0, 0]
+    );
+    // a landing records a conflict in d (rebased onto canon's edit of c)
+    write(&mut r, "h", update(&c, &v, "canon's")).unwrap();
+    land(&mut r, "h").unwrap();
+    let mut want = vec![];
+    for name in ["a", "b", "d", "e"] {
+        want.push((
+            name.to_string(),
+            r.read().conflicts(&view(name)).unwrap().len(),
+        ));
+    }
+    r.invalidate();
+    let st = r.read();
+    let got: Vec<(String, usize)> = st
+        .view_list(false, 14, 0)
+        .unwrap()
+        .into_iter()
+        .filter(|s| ["a", "b", "d", "e"].contains(&s.name.as_str()))
+        .map(|s| (s.name, s.conflicts))
+        .collect();
+    for name in ["a", "b", "d", "e"] {
+        assert_eq!(st.is_built(&view(name)), (false, false), "{name} was built");
+    }
+    assert_eq!(got, want);
+    assert!(want.iter().any(|(n, k)| n == "d" && *k == 1), "{want:?}");
+}

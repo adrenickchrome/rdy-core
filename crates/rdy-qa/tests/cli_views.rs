@@ -201,3 +201,29 @@ fn eff2_rdy_show_prints_when_a_decision_takes_effect() {
         "{text}"
     );
 }
+
+/// Final review fix round 1 (Minor 8): `rdy view close --stale` keeps the human's own `work`
+/// view open and says so; the next edit there still works.
+#[test]
+fn cview1_close_stale_keeps_the_humans_work_view_and_says_so() {
+    let s = Served::new();
+    with_rdy(&s, |r| {
+        seed_doc(r, "work");
+        seed_doc(r, "other");
+    });
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let (ok, v) = s.json(&["--json", "view", "close", "--stale", "0"]);
+    assert!(ok && v["kept"] == "work", "{v}");
+    assert_eq!(v["closed"][0]["view"], "other", "{v}");
+    with_rdy(&s, |r| {
+        r.view_close(&writer(), &["other".into()], "x").unwrap_err();
+        assert!(!r.read().view_head("work").unwrap().closed);
+        write(r, "work", json!([{"op": "create", "type": "doc", "fields": {"name": "w2", "title": "W2", "doc_type": "glossary"}}])).unwrap();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let (ok, out) = text(&s, &["view", "close", "--stale", "0"]);
+    assert!(
+        ok && out.starts_with("closed 0 views") && out.contains("kept work open"),
+        "{out}"
+    );
+}

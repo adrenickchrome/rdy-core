@@ -294,3 +294,41 @@ fn gconf1_a_version_listing_a_delete_before_its_decisions_creation_lands() {
     );
     check(&r, &Scope::Canon).unwrap();
 }
+
+/// Final review fix round 1 (Important 1): a subset must also carry the change that created the
+/// parent of each block it creates, unless that parent is in the view's base; leaving it out is
+/// `E_DEPS_MISSING` naming that change, not a late `E_VALIDATION`/`E_MISSING_PARENT`.
+#[test]
+fn gconf1_a_subset_without_the_creation_of_a_childs_parent_is_e_deps_missing() {
+    let (_d, mut r) = project();
+    let (doc, _section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let sa = as_agent("agent:a", "r1");
+    let c1 = write_as(
+        &mut r,
+        &sa,
+        "a",
+        json!([{"op": "create", "type": "section", "parent": doc, "fields": {"title": "New"}}]),
+    )
+    .unwrap();
+    let new = c1.created.values().next().unwrap().clone();
+    let c2 = write_as(&mut r, &sa, "a", claim(&new, "child")).unwrap();
+    let e = r
+        .propose_subset(&sa, "a", "t", Some(std::slice::from_ref(&c2.change)))
+        .unwrap_err();
+    assert_eq!(e.code, E_DEPS_MISSING, "{e}");
+    assert_eq!(e.issues.len(), 1, "{e:?}");
+    assert!(
+        e.issues[0].message.contains(&c1.change[..12]) && e.issues[0].message.contains(&new),
+        "{:?}",
+        e.issues[0]
+    );
+    assert!(e.fix.contains(&c1.change[..12]), "{e}");
+    assert_eq!(r.read().reader().get_ref("open/a").unwrap(), None);
+    let ok = r
+        .propose_subset(&sa, "a", "t", Some(&[c2.change.clone(), c1.change.clone()]))
+        .unwrap();
+    r.land_report(&approver(), &ok.r#ref).unwrap();
+    let child = c2.created.values().next().unwrap().clone();
+    assert_eq!(body_of(&r, &Scope::Canon, &child), "child");
+}

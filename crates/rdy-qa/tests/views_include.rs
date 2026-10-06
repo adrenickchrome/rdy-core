@@ -276,3 +276,86 @@ fn excl1_excluding_a_side_removes_the_conflict_and_the_view_floats_when_emptied(
         "an emptied unpinned view floats on canon"
     );
 }
+
+fn section(parent: &str, title: &str) -> serde_json::Value {
+    json!([{"op": "create", "type": "section", "parent": parent, "fields": {"title": title}}])
+}
+
+/// Final review fix round 1 (Important 1): a change's store deps cover its op bases, deletes and
+/// conflict sides, not the parent it creates a block under. An include brings the change that
+/// created each created block's parent (and that change's own closure), so the target view holds
+/// no orphan and the landing is not refused late with `E_MISSING_PARENT`.
+#[test]
+fn incl1_including_a_child_brings_the_changes_that_created_its_parents_and_the_view_lands() {
+    let (_d, mut r) = project();
+    let (doc, _section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = as_agent("agent:a", "r1");
+    let c0 = write_as(&mut r, &a, "a", section(&doc, "Outer")).unwrap();
+    let outer = c0.created.values().next().unwrap().clone();
+    let c1 = write_as(&mut r, &a, "a", section(&outer, "Inner")).unwrap();
+    let inner = c1.created.values().next().unwrap().clone();
+    let c2 = write_as(&mut r, &a, "a", claim(&inner, "child")).unwrap();
+    let child = c2.created.values().next().unwrap().clone();
+    let b = as_agent("agent:b", "r1");
+    let res = r
+        .view_include(&b, "b", std::slice::from_ref(&c2.change))
+        .unwrap();
+    assert_eq!(res.added, vec![c2.change.clone()]);
+    let mut deps = res.added_deps.clone();
+    deps.sort();
+    let mut want = vec![c0.change.clone(), c1.change.clone()];
+    want.sort();
+    assert_eq!(
+        deps, want,
+        "the parents' creations come with the child: {res:?}"
+    );
+    assert_eq!(body_of(&r, &view("b"), &child), "child");
+    check(&r, &view("b")).unwrap();
+    land(&mut r, "b").unwrap();
+    assert_eq!(body_of(&r, &Scope::Canon, &child), "child");
+    check(&r, &Scope::Canon).unwrap();
+    r.fsck().unwrap();
+}
+
+/// A parent no unlanded change creates (here: it landed after a pinned view's base) cannot be
+/// brought along; the include is refused naming the parent, and writes nothing.
+#[test]
+fn incl1_a_child_whose_parent_cannot_be_brought_along_is_refused_naming_the_parent() {
+    let (_d, mut r) = project();
+    let (doc, _section, _c) = seed_doc(&mut r, "seed");
+    let l1 = land(&mut r, "seed").unwrap();
+    let a = as_agent("agent:a", "r1");
+    let c1 = write_as(&mut r, &a, "a", section(&doc, "New")).unwrap();
+    let new = c1.created.values().next().unwrap().clone();
+    let c2 = write_as(&mut r, &a, "a", claim(&new, "child")).unwrap();
+    let p = r
+        .propose_subset(
+            &a,
+            "a",
+            "the section",
+            Some(std::slice::from_ref(&c1.change)),
+        )
+        .unwrap();
+    r.land_report(&approver(), &p.r#ref).unwrap();
+    let b = as_agent("agent:b", "r1");
+    r.view_create(&b, "pinned", Some(&format!("landing:{l1}")), true)
+        .unwrap();
+    let head = r.read().view_head("pinned").unwrap().head;
+    let e = r
+        .view_include(&b, "pinned", std::slice::from_ref(&c2.change))
+        .unwrap_err();
+    assert_eq!(e.code, E_DEPS_MISSING, "{e}");
+    assert_eq!(e.issues.len(), 1, "{e:?}");
+    assert!(
+        e.issues[0].message.contains(&new) && e.issues[0].message.contains(&c2.change[..12]),
+        "{:?}",
+        e.issues[0]
+    );
+    assert_eq!(e.issues[0].code, E_DEPS_MISSING);
+    assert_eq!(
+        r.read().view_head("pinned").unwrap().head,
+        head,
+        "nothing was written"
+    );
+}

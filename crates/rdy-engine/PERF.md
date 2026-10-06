@@ -564,6 +564,13 @@ builds (11 ms each at 10k). It is cold by construction (`invalidate` first); aft
 It has no target, and a per-view cached conflict count would be the fix if `rdy view ls` on a
 cold daemon turns out to matter.
 
+Final review fix round 1 made that fix: `view_list` no longer builds a view to count its
+conflicts. A built view gives its build's count; otherwise the count is a merge of the view's
+changes onto its base restricted to the blocks they touch (`merge_on_blocks`, whose conflicts are
+the full merge's), cached in the view's state entry, with each base state read once per list.
+`vls1_a_cold_list_counts_conflicts_without_building_the_views` pins that the list builds no view.
+The figures above predate it; the bench run at plan end measures the new cost.
+
 ### Landing with 50 views at 100k (`m2c_landing_with_50_views_at_100k`, ignored)
 
 100,000 blocks (`testkit::generate`, landed), 50 views of 20 changes each (1,000 writes, 5.1 s),

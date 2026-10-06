@@ -173,7 +173,7 @@ fn reb1_a_conflict_on_an_untouched_block_survives_a_rebase_unchanged() {
 }
 
 #[test]
-fn reb1_a_cascade_across_five_views_re_keys_the_conflict_at_each_landing() {
+fn reb1_a_cascade_across_five_views_re_keys_the_conflict_at_each_landing_at_the_engine() {
     let (_d, mut r) = project();
     let (_doc, _section, c) = seed_doc(&mut r, "seed");
     land(&mut r, "seed").unwrap();

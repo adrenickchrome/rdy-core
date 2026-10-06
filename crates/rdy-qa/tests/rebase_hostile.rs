@@ -487,3 +487,37 @@ fn vhost1_view_list_with_500_views() {
     assert_eq!(r.read().view_list(true, 14, now()).unwrap().len(), 500);
     check(&r, &Scope::Canon).unwrap();
 }
+
+/// Final review fix round 1 (ledger minor): a bad change, op or proposal id comes back clipped
+/// to its first 80 characters and an ellipsis, never verbatim (a 16 MB MCP request's id would
+/// otherwise fill the error), and clipping a multi-byte id never splits a character.
+#[test]
+fn vhost1_a_huge_bad_id_comes_back_clipped_in_the_error() {
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = as_agent("agent:a", "r1");
+    write_as(&mut r, &a, "a", claim(&section, "x")).unwrap();
+    let huge = format!("{}{}", "\u{e9}".repeat(79), "z".repeat(1 << 20));
+    let one = std::slice::from_ref(&huge);
+    let errs = vec![
+        ("include", r.view_include(&a, "a", one).unwrap_err()),
+        ("exclude", r.view_exclude(&a, "a", one, false).unwrap_err()),
+        (
+            "propose",
+            r.propose_subset(&a, "a", "t", Some(one)).unwrap_err(),
+        ),
+        ("undo", r.undo(&a, "a", Some(&huge), false).unwrap_err()),
+        ("approve", r.resolve_proposal(&huge).unwrap_err()),
+    ];
+    let clipped = format!("{}z\u{2026}", "\u{e9}".repeat(79));
+    for (what, e) in errs {
+        assert_eq!(e.code, E_BAD_INPUT, "{what}: {}", e.code);
+        assert!(
+            e.message.len() < 400 && e.message.contains(&clipped),
+            "{what}: {} bytes: {}",
+            e.message.len(),
+            e.message.chars().take(200).collect::<String>()
+        );
+    }
+}

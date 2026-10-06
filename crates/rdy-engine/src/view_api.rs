@@ -122,22 +122,21 @@ pub fn run_view(
                 (None, Some(v)) => Some(vec![v]),
                 (None, None) => None,
             };
-            let closed = match (names, req.stale) {
+            match (names, req.stale) {
                 (None, Some(days)) => {
-                    write_typed(engine, move |r| r.view_close_stale(&s, days, now_ms()))?
+                    // `kept`: the session's own default view, idle but never closed this way
+                    write_typed(engine, move |r| r.view_close_stale(&s, days, now_ms()))
                 }
                 (Some(names), _) => {
                     let reason = req.reason.clone().unwrap_or_default();
-                    write_typed(engine, move |r| r.view_close(&s, &names, &reason))?
+                    let closed = write_typed(engine, move |r| r.view_close(&s, &names, &reason))?;
+                    Ok(json!({ "closed": closed }))
                 }
-                (None, None) => {
-                    return Err(needs(
-                        "close needs a view, views or stale",
-                        "pass view, views, or stale: <days> to close the idle views",
-                    ));
-                }
-            };
-            Ok(json!({ "closed": closed }))
+                (None, None) => Err(needs(
+                    "close needs a view, views or stale",
+                    "pass view, views, or stale: <days> to close the idle views",
+                )),
+            }
         }
         "own" => {
             let view = named()

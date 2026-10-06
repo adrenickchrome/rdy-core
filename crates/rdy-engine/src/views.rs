@@ -1,16 +1,26 @@
 //! Views as the engine shows and changes them: create and fork (vcreate1), include with its
 //! dependency closure and exclude with its dependents (incl1, excl1), the claim a commit makes
-//! on an unowned view, the closed-view rules, the conflict reads, and undo and close (undo1).
+//! on an unowned view, the closed-view rules and the conflict reads. Undo and close (undo1) are
+//! in `undo`, ownership and the bulk close (own1) in `own`.
+use crate::Materialized;
 use crate::error::*;
 use crate::read_state::ReadState;
 use crate::write::{not_humans_view, writable_view};
 use crate::{Delta, Rdy, Scope, Session};
-use rdy_model::{BlockId, Hash, Op};
+use rdy_model::{BlockId, Change, Hash, Op, StateSnapshot};
 use rdy_schema::{Issue, Severity};
-use rdy_store::view::{ResolvedOp, ViewOp, ViewOpKind};
+use rdy_store::view::ViewOpKind;
 use rdy_store::{Conflict, Owner, StoreError};
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+
+mod own;
+mod undo;
+
+pub use own::StaleClose;
+pub use undo::{CloseResult, UndoResult};
+pub(crate) use undo::{kind_name, net_undone};
 
 /// A view's owner as reads show it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -108,7 +118,7 @@ pub(crate) fn owner_of(s: &Session) -> Owner {
     }
 }
 
-fn no_view(view: &str) -> RdyError {
+pub(crate) fn no_view(view: &str) -> RdyError {
     RdyError::new(
         E_NOT_FOUND,
         format!("no view {view:?}"),
@@ -182,6 +192,17 @@ fn first_chars(text: &str, n: usize) -> &str {
     match text.char_indices().nth(n) {
         Some((at, _)) => &text[..at],
         None => text,
+    }
+}
+
+/// `text` as an error message echoes a bad id: its first 80 characters, with an ellipsis when
+/// there are more (a request's id can be megabytes long).
+pub(crate) fn clip(text: &str) -> String {
+    let head = first_chars(text, 80);
+    if head.len() < text.len() {
+        format!("{head}\u{2026}")
+    } else {
+        head.to_string()
     }
 }
 
@@ -353,26 +374,130 @@ pub(crate) fn parse_change(s: &str) -> Result<Hash, RdyError> {
     s.parse().map_err(|_| {
         RdyError::new(
             E_BAD_INPUT,
-            format!("{s:?} is not a change id"),
+            format!("{:?} is not a change id", clip(s)),
             "pass the id returned by rdy_write, or one listed by rdy view show",
         )
     })
 }
 
+/// The landings at or before `base` on canon's chain (none for `None`).
+pub(crate) fn landings_through(
+    st: &ReadState,
+    base: Option<Hash>,
+) -> Result<BTreeSet<Hash>, RdyError> {
+    let mut out = BTreeSet::new();
+    let mut cur = base;
+    while let Some(h) = cur {
+        out.insert(h);
+        cur = st.reader().landing(&h)?.prev;
+    }
+    Ok(out)
+}
+
 /// Whether `change` landed on canon's chain at or before landing `base` (None: nothing is).
-pub(crate) fn in_base(st: &ReadState, base: Option<Hash>, change: &Hash) -> Result<bool, RdyError> {
-    let Some(base) = base else { return Ok(false) };
+/// `based` holds `landings_through(base)`, read once, when a change first needs it.
+fn landed_through(
+    st: &ReadState,
+    base: Option<Hash>,
+    based: &mut Option<BTreeSet<Hash>>,
+    change: &Hash,
+) -> Result<bool, RdyError> {
     let Some(l) = st.reader().landing_of(change)? else {
         return Ok(false);
     };
-    let mut reached = false;
-    for (h, _) in st.landings()? {
-        reached |= h == base;
-        if reached && h == l {
-            return Ok(true);
+    if based.is_none() {
+        *based = Some(landings_through(st, base)?);
+    }
+    Ok(based.as_ref().is_some_and(|b| b.contains(&l)))
+}
+
+/// The blocks of landing `base`'s state, read once when first asked: canon's materialization
+/// when `base` is canon's head (built already in practice), else the landing's snapshot.
+pub(crate) struct BaseBlocks<'a> {
+    st: &'a ReadState,
+    base: Option<Hash>,
+    canon: Option<Arc<Materialized>>,
+    snap: Option<StateSnapshot>,
+}
+
+impl<'a> BaseBlocks<'a> {
+    pub(crate) fn new(st: &'a ReadState, base: Option<Hash>) -> BaseBlocks<'a> {
+        BaseBlocks {
+            st,
+            base,
+            canon: None,
+            snap: None,
         }
     }
-    Ok(false)
+
+    pub(crate) fn has(&mut self, id: &BlockId) -> Result<bool, RdyError> {
+        if self.base.is_none() {
+            return Ok(false);
+        }
+        if self.base == self.st.canon_head() {
+            if self.canon.is_none() {
+                self.canon = Some(self.st.materialized(&Scope::Canon)?);
+            }
+            return Ok(self.canon.as_ref().is_some_and(|m| m.get(id).is_some()));
+        }
+        if self.snap.is_none() {
+            self.snap = Some(self.st.reader().state_of(self.base)?);
+        }
+        Ok(self
+            .snap
+            .as_ref()
+            .is_some_and(|s| s.blocks.contains_key(id)))
+    }
+}
+
+/// The parent rule (final review fix round 1). A change's deps cover its op bases, its deletes
+/// and conflict sides, not the parent a block is created or moved under; a set of changes that
+/// leaves out the change creating such a parent would put an orphan in the view, refused only
+/// when it lands. For each block `changes` create or move under a parent that none of them
+/// creates and that `present` does not hold: (the change, the block, the parent), each parent
+/// once, in change order.
+pub(crate) fn missing_parents(
+    changes: &[(Hash, Change)],
+    present: &mut dyn FnMut(&BlockId) -> Result<bool, RdyError>,
+) -> Result<Vec<(Hash, BlockId, BlockId)>, RdyError> {
+    let created: HashSet<&BlockId> = changes
+        .iter()
+        .flat_map(|(_, c)| &c.ops)
+        .filter_map(|op| match op {
+            Op::Create { block } => Some(&block.id),
+            _ => None,
+        })
+        .collect();
+    let mut asked: HashSet<&BlockId> = HashSet::new();
+    let mut out = vec![];
+    for (h, c) in changes {
+        for op in &c.ops {
+            let (Op::Create { block } | Op::Update { block, .. }) = op else {
+                continue;
+            };
+            let Some(p) = &block.parent else { continue };
+            if created.contains(p) || !asked.insert(p) || present(p)? {
+                continue;
+            }
+            out.push((*h, block.id.clone(), p.clone()));
+        }
+    }
+    Ok(out)
+}
+
+/// The change that creates each block id `changes` create (the first one, in order).
+pub(crate) fn creators<'a>(
+    changes: impl IntoIterator<Item = (Hash, &'a Change)>,
+) -> HashMap<BlockId, Hash> {
+    let mut out = HashMap::new();
+    for (h, c) in changes {
+        for op in &c.ops {
+            if let Op::Create { block } = op {
+                out.entry(block.id.clone()).or_insert(h);
+            }
+        }
+    }
+    out
 }
 
 /// The changes of `included`, in included order and not in `gone`, whose deps meet `gone`
@@ -409,7 +534,7 @@ pub(crate) fn dependents(
 
 /// The deps `added` needs that are neither in `included`, in `added`, nor in base `base`, found
 /// breadth first from `added` (the closure an include completes), in discovery order.
-fn missing_deps(
+pub(crate) fn missing_deps(
     st: &ReadState,
     base: Option<Hash>,
     included: &BTreeSet<Hash>,
@@ -420,12 +545,14 @@ fn missing_deps(
     let mut found: Vec<Hash> = vec![];
     let mut found_set: BTreeSet<Hash> = BTreeSet::new();
     let mut queue: VecDeque<Hash> = added.iter().copied().collect();
+    // the landings through the base, walked once for the whole closure
+    let mut based = None;
     while let Some(c) = queue.pop_front() {
         for d in reader.change(&c)?.deps {
             if included.contains(&d)
                 || added_set.contains(&d)
                 || found_set.contains(&d)
-                || in_base(st, base, &d)?
+                || landed_through(st, base, &mut based, &d)?
             {
                 continue;
             }
@@ -435,6 +562,120 @@ fn missing_deps(
         }
     }
     Ok(found)
+}
+
+/// incl1: what an include of `added` into `view` (reading on `base`, including `included`)
+/// brings along, in discovery order: the deps they need that the view lacks, then, for each
+/// parent a block of theirs is created or moved under that neither the view nor the include
+/// has, the unlanded change that creates it, with that change's own closure, until nothing is
+/// missing. A parent no unlanded change creates (one that landed after a pinned base, say)
+/// refuses the include with `E_DEPS_MISSING`, one issue per parent.
+fn include_closure(
+    st: &ReadState,
+    view: &str,
+    base: Option<Hash>,
+    included: &BTreeSet<Hash>,
+    added: &[Hash],
+) -> Result<Vec<Hash>, RdyError> {
+    let reader = st.reader();
+    let mut deps = missing_deps(st, base, included, added)?;
+    let mut changes: Vec<(Hash, Change)> = added
+        .iter()
+        .chain(&deps)
+        .map(|h| Ok((*h, reader.change(h)?)))
+        .collect::<Result<_, RdyError>>()?;
+    let mut in_base = BaseBlocks::new(st, base);
+    // the ids the view's own changes create, and the creators among every view's changes: each
+    // read once, when a parent first needs it
+    let mut in_view: Option<HashSet<BlockId>> = None;
+    let mut open: Option<HashMap<BlockId, Hash>> = None;
+    loop {
+        let missing = missing_parents(&changes, &mut |p| {
+            if in_base.has(p)? {
+                return Ok(true);
+            }
+            if in_view.is_none() {
+                let mut ids = HashSet::new();
+                for h in included {
+                    for op in reader.change(h)?.ops {
+                        if let Op::Create { block } = op {
+                            ids.insert(block.id);
+                        }
+                    }
+                }
+                in_view = Some(ids);
+            }
+            Ok(in_view.as_ref().is_some_and(|ids| ids.contains(p)))
+        })?;
+        if missing.is_empty() {
+            return Ok(deps);
+        }
+        if open.is_none() {
+            let mut seen = HashSet::new();
+            let mut all = vec![];
+            for name in st.view_names() {
+                for h in st.included(&name).iter() {
+                    if seen.insert(*h) {
+                        all.push((*h, reader.change(h)?));
+                    }
+                }
+            }
+            open = Some(creators(all.iter().map(|(h, c)| (*h, c))));
+        }
+        let open = open.as_ref().expect("read above");
+        let have: BTreeSet<Hash> = included
+            .iter()
+            .copied()
+            .chain(changes.iter().map(|(h, _)| *h))
+            .collect();
+        let mut new: Vec<Hash> = vec![];
+        let mut issues = vec![];
+        let mut lacking: Vec<String> = vec![];
+        for (c, block, p) in &missing {
+            match open.get(p) {
+                Some(k) if !have.contains(k) && reader.landing_of(k)?.is_none() => {
+                    if !new.contains(k) {
+                        new.push(*k);
+                    }
+                }
+                _ => {
+                    lacking.push(p.to_string());
+                    issues.push(Issue {
+                    severity: Severity::Error,
+                    code: E_DEPS_MISSING,
+                    block: Some(block.clone()),
+                    message: format!(
+                        "{} puts {block} under {p}, which view {view:?} does not have and no unlanded change creates",
+                        c.short()
+                    ),
+                    fix: format!(
+                        "create {p} in view {view} first, or include {} into a view that has {p}",
+                        c.short()
+                    ),
+                    });
+                }
+            }
+        }
+        if !issues.is_empty() {
+            let mut e = RdyError::new(
+                E_DEPS_MISSING,
+                format!(
+                    "view {view:?} lacks {} parent(s) the included changes need: {}",
+                    lacking.len(),
+                    lacking.join(", ")
+                ),
+                "include into a view that has those parents (a fork of the view the changes were written in)",
+            );
+            e.issues = issues;
+            return Err(e);
+        }
+        let more = missing_deps(st, base, &have, &new)?;
+        for h in new.iter().chain(&more) {
+            changes.push((*h, reader.change(h)?));
+        }
+        deps.extend(new);
+        deps.extend(more);
+    }
 }
 
 /// The requested ids, parsed, duplicates collapsed, in request order.
@@ -450,7 +691,7 @@ fn parse_changes(changes: &[String]) -> Result<Vec<Hash>, RdyError> {
     Ok(out)
 }
 
-fn strings(hs: &[Hash]) -> Vec<String> {
+pub(crate) fn strings(hs: &[Hash]) -> Vec<String> {
     hs.iter().map(|h| h.to_string()).collect()
 }
 
@@ -481,9 +722,11 @@ fn op_result(
 }
 
 impl Rdy {
-    /// incl1: includes `changes` (from any view) in `view`, with the deps they need that the view
-    /// neither includes nor has in its base. Changes already included are skipped; a landed
-    /// change is refused. An include into a view with no ref creates it, owned by the session.
+    /// incl1: includes `changes` (from any view) in `view`, with what they need that the view
+    /// neither includes nor has in its base: their deps, and the changes that create the parents
+    /// their blocks are created or moved under (`include_closure`). Changes already included are
+    /// skipped; a landed change is refused. An include into a view with no ref creates it, owned
+    /// by the session.
     pub fn view_include(
         &mut self,
         s: &Session,
@@ -526,11 +769,11 @@ impl Rdy {
             .into_iter()
             .filter(|c| !included.contains(c))
             .collect();
-        let added_deps = missing_deps(&st, base, &included, &added)?;
         // 4. nothing new: no write
         if added.is_empty() {
             return op_result(&st, view, &[], &[], &[], &[]);
         }
+        let added_deps = include_closure(&st, view, base, &included, &added)?;
         // 5. the writes: a new view is created first (its own batch and publish)
         let exists = st.has_view(view);
         drop(st);
@@ -614,447 +857,10 @@ impl Rdy {
     }
 }
 
-/// What `rdy undo` did: the `Undo` op it wrote, the op it undid, and that op's inverse on the
-/// view.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct UndoResult {
-    pub view: String,
-    /// The new `Undo` op.
-    pub op: String,
-    /// The op it undid.
-    pub undone: String,
-    /// The undone op's kind (`commit`, `include`, `exclude`, `close`, `own`, `create`, `fork`,
-    /// `undo`).
-    pub kind: String,
-    pub effect: String,
-    /// The changes the undo put back in the view, with the deps they need.
-    pub included: Vec<String>,
-    /// The changes the undo took out of the view.
-    pub excluded: Vec<String>,
-    /// The included changes that depended on them, excluded too (`cascade`).
-    pub cascaded: Vec<String>,
-    pub closed: bool,
-    pub reopened: bool,
-    /// Whether the reopened view was rebased onto canon's head.
-    pub rebased: bool,
-    pub conflicts: Vec<ConflictInfo>,
-}
-
-/// A view `rdy view close` closed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct CloseResult {
-    pub view: String,
-    pub reason: String,
-}
-
-/// An op kind in snake case, as undo and `view show` report it.
-pub(crate) fn kind_name(k: &ViewOpKind) -> &'static str {
-    match k {
-        ViewOpKind::Create { .. } => "create",
-        ViewOpKind::Fork { .. } => "fork",
-        ViewOpKind::Commit { .. } => "commit",
-        ViewOpKind::Include { .. } => "include",
-        ViewOpKind::Exclude { .. } => "exclude",
-        ViewOpKind::Rebase { .. } => "rebase",
-        ViewOpKind::Undo { .. } => "undo",
-        ViewOpKind::Close { .. } => "close",
-        ViewOpKind::Own { .. } => "own",
-    }
-}
-
-/// The net undone set of a view's op chain (newest first): each undone op mapped to the live
-/// undo of it. An op is undone when its newest undo is live, that is, not itself undone. Newest
-/// first, every undo of an undo is decided before the undo it targets, so after a redo the
-/// redone op is live again. One rule for `undo` and `view show`.
-pub(crate) fn net_undone(chain: &[(Hash, ViewOp)]) -> HashMap<Hash, Hash> {
-    let mut undone: HashMap<Hash, Hash> = HashMap::new();
-    let mut decided: HashSet<Hash> = HashSet::new();
-    for (h, op) in chain {
-        if let ViewOpKind::Undo { target } = op.op
-            && decided.insert(target)
-            && !undone.contains_key(h)
-        {
-            undone.insert(target, *h);
-        }
-    }
-    undone
-}
-
-fn undo_landing(message: String) -> RdyError {
-    RdyError::new(
-        E_UNDO_LANDING,
-        message,
-        "a landing is undone by a revoking decision (rdy_revoke)",
-    )
-}
-
-/// The landed rule: an undo never brings back or removes landed work. `Some` refusal when
-/// `effect` would re-include a landed change, or would exclude changes that all landed and none
-/// of which the view still includes.
-fn landed_refusal(
-    st: &ReadState,
-    short: &str,
-    effect: &ResolvedOp,
-    included: &BTreeSet<Hash>,
-) -> Result<Option<RdyError>, RdyError> {
-    let reader = st.reader();
-    match effect {
-        ResolvedOp::Include(cs) => {
-            for c in cs {
-                if let Some(l) = reader.landing_of(c)? {
-                    return Ok(Some(undo_landing(format!(
-                        "op {short} would re-include {}, which landed in {}",
-                        c.short(),
-                        l.short()
-                    ))));
-                }
-            }
-            Ok(None)
-        }
-        ResolvedOp::Exclude(cs) if !cs.is_empty() => {
-            if cs.iter().any(|c| included.contains(c)) {
-                return Ok(None);
-            }
-            let mut first = None;
-            for c in cs {
-                match reader.landing_of(c)? {
-                    Some(l) => {
-                        first.get_or_insert(l);
-                    }
-                    None => return Ok(None),
-                }
-            }
-            Ok(first
-                .map(|l| undo_landing(format!("op {short}'s change(s) landed in {}", l.short()))))
-        }
-        _ => Ok(None),
-    }
-}
-
-/// Whether `text` could name an op: 7 to 64 hex characters.
-fn is_op_prefix(text: &str) -> bool {
-    (7..=64).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-impl Rdy {
-    /// undo1: undoes op `target` of `view`'s chain (by id or unique prefix), or without a target
-    /// the session's newest undoable op not yet undone, by appending an `Undo` with the ops its
-    /// inverse needs: the excluded changes' dependents (`cascade`, else `E_UNDO_BLOCKED`), a
-    /// re-include's missing deps, or a rebase onto canon when it reopens a view. A rebase, and
-    /// an undo that would bring back or remove landed work, is `E_UNDO_LANDING`.
-    pub fn undo(
-        &mut self,
-        s: &Session,
-        view: &str,
-        target: Option<&str>,
-        cascade: bool,
-    ) -> Result<UndoResult, RdyError> {
-        // 1. the rules
-        let st = self.read();
-        check_view_op(&st, s, view, Action::Undo)?;
-        let head = st.view_head(view).ok_or_else(|| no_view(view))?.clone();
-        let reader = st.reader();
-        // 2. the chain, newest first; each undone op with the (newest) undo of it
-        let mut chain: Vec<(Hash, ViewOp)> = vec![];
-        let mut cur = Some(head.head);
-        while let Some(h) = cur {
-            let op = reader.view_op(&h)?;
-            cur = op.prev;
-            chain.push((h, op));
-        }
-        // The net undone set: see `net_undone`.
-        let undone = net_undone(&chain);
-        let included_list = st.included(view);
-        let included: BTreeSet<Hash> = included_list.iter().copied().collect();
-        // 3 and 4. the target, its effect, and the rules on it
-        let (target, target_op, effect) = match target {
-            Some(text) => {
-                if !is_op_prefix(text) {
-                    return Err(RdyError::new(
-                        E_BAD_INPUT,
-                        format!("{text:?} is not an op id"),
-                        format!("rdy view show {view} lists its ops"),
-                    ));
-                }
-                let prefix = text.to_ascii_lowercase();
-                let mut found = chain
-                    .iter()
-                    .filter(|(h, _)| h.to_string().starts_with(&prefix));
-                let (h, op) = match (found.next(), found.next()) {
-                    (None, _) => {
-                        return Err(RdyError::new(
-                            E_NOT_FOUND,
-                            format!("no op {text} on view {view:?}'s chain"),
-                            format!("rdy view show {view} lists its ops"),
-                        ));
-                    }
-                    (Some(_), Some(_)) => {
-                        return Err(RdyError::new(
-                            E_BAD_INPUT,
-                            format!("{text} is ambiguous on view {view:?}'s chain"),
-                            "use more characters",
-                        ));
-                    }
-                    (Some((h, op)), None) => (*h, op.clone()),
-                };
-                if let ViewOpKind::Rebase { landing, .. } = &op.op {
-                    return Err(undo_landing(format!(
-                        "op {} is a rebase from landing {}",
-                        h.short(),
-                        landing.short()
-                    )));
-                }
-                if let Some(u) = undone.get(&h) {
-                    return Err(RdyError::new(
-                        E_BAD_INPUT,
-                        format!("op {} is already undone by {}", h.short(), u.short()),
-                        format!(
-                            "to redo it, undo that undo: rdy undo --view {view} {}",
-                            u.short()
-                        ),
-                    ));
-                }
-                let effect = reader.undo_effect(view, &h)?;
-                if let Some(e) = landed_refusal(&st, &h.short(), &effect, &included)? {
-                    return Err(e);
-                }
-                (h, op, effect)
-            }
-            None => {
-                let mut pick = None;
-                for (h, op) in &chain {
-                    if op.actor != s.actor
-                        || op.run != s.run
-                        || !matches!(
-                            op.op,
-                            ViewOpKind::Commit { .. }
-                                | ViewOpKind::Include { .. }
-                                | ViewOpKind::Exclude { .. }
-                                | ViewOpKind::Close { .. }
-                                | ViewOpKind::Own { .. }
-                        )
-                        || undone.contains_key(h)
-                    {
-                        continue;
-                    }
-                    let effect = reader.undo_effect(view, h)?;
-                    if landed_refusal(&st, &h.short(), &effect, &included)?.is_none() {
-                        pick = Some((*h, op.clone(), effect));
-                        break;
-                    }
-                }
-                pick.ok_or_else(|| {
-                    let by = match &s.run {
-                        Some(run) => format!("{}/{run}", s.actor),
-                        None => s.actor.clone(),
-                    };
-                    RdyError::new(
-                        E_NOTHING_TO_UNDO,
-                        format!("no undoable op by {by} on view {view:?}"),
-                        format!(
-                            "name an op: rdy undo --view {view} <op> (rdy view show lists them)"
-                        ),
-                    )
-                })?
-            }
-        };
-        // 5. the ops: the undo, then what its inverse needs
-        let mut ops = vec![ViewOpKind::Undo { target }];
-        let mut put_back: Vec<Hash> = vec![];
-        let mut taken_out: Vec<Hash> = vec![];
-        let mut cascaded: Vec<Hash> = vec![];
-        let mut rebased = false;
-        match &effect {
-            ResolvedOp::Exclude(cs) => {
-                taken_out = cs
-                    .iter()
-                    .filter(|c| included.contains(c))
-                    .copied()
-                    .collect();
-                let gone: BTreeSet<Hash> = taken_out.iter().copied().collect();
-                let deps = dependents(&st, &included_list, &gone)?;
-                if !deps.is_empty() && !cascade {
-                    return Err(dependents_refusal(
-                        &st,
-                        &gone,
-                        &deps,
-                        E_UNDO_BLOCKED,
-                        "what this undo would exclude",
-                        "undo with --cascade (MCP: cascade: true) to exclude them too",
-                        |d| format!("undo with --cascade to exclude {} too", d.short()),
-                    )?);
-                }
-                if !deps.is_empty() {
-                    ops.push(ViewOpKind::Exclude {
-                        changes: deps.clone(),
-                    });
-                    cascaded = deps;
-                }
-            }
-            ResolvedOp::Include(cs) => {
-                let mut seen = BTreeSet::new();
-                put_back = cs
-                    .iter()
-                    .filter(|c| !included.contains(c) && seen.insert(**c))
-                    .copied()
-                    .collect();
-                let deps = missing_deps(&st, st.effective_base(view), &included, &put_back)?;
-                if !deps.is_empty() {
-                    ops.push(ViewOpKind::Include {
-                        changes: deps.clone(),
-                    });
-                    put_back.extend(deps);
-                }
-            }
-            ResolvedOp::Reopen => {
-                if !head.pinned
-                    && !included_list.is_empty()
-                    && let Some(ch) = st.canon_head()
-                    && Some(ch) != head.base
-                {
-                    let mut dropped = vec![];
-                    let mut remaining = vec![];
-                    for c in included_list.iter() {
-                        if reader.landing_of(c)?.is_some() {
-                            dropped.push(*c);
-                        } else {
-                            remaining.push(*c);
-                        }
-                    }
-                    let rest = remaining
-                        .iter()
-                        .map(|c| reader.change(c))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let merged = reader.merge_onto(&reader.state_of(Some(ch))?, &rest)?;
-                    ops.push(ViewOpKind::Rebase {
-                        landing: ch,
-                        dropped,
-                        remaining,
-                        conflicts: merged.conflicts,
-                    });
-                    rebased = true;
-                }
-            }
-            ResolvedOp::Close | ResolvedOp::SetOwner(_) | ResolvedOp::Nothing => {}
-        }
-        let kind = kind_name(&target_op.op);
-        let effect_text = match (&target_op.op, &effect) {
-            (ViewOpKind::Undo { target: t }, _) => {
-                format!("redid {}", kind_name(&reader.view_op(t)?.op))
-            }
-            (_, ResolvedOp::Exclude(_)) if !taken_out.is_empty() => {
-                format!("excluded {} change(s)", taken_out.len() + cascaded.len())
-            }
-            (_, ResolvedOp::Include(_)) if !put_back.is_empty() => {
-                format!("included {} change(s)", put_back.len())
-            }
-            (_, ResolvedOp::Close) => "closed".to_string(),
-            (_, ResolvedOp::Reopen) => "reopened".to_string(),
-            (_, ResolvedOp::SetOwner(_)) => "owner restored".to_string(),
-            _ => "no change".to_string(),
-        };
-        // 6. the write, the publish, the result
-        let after_undo = ops.len() - 1;
-        drop(st);
-        let new_head = self.store.view_append(view, ops, &s.provenance())?;
-        self.publish(Delta::View {
-            view: view.to_string(),
-        })?;
-        let st2 = self.read();
-        let mut op = new_head.head;
-        for _ in 0..after_undo {
-            op = st2.reader().view_op(&op)?.prev.ok_or_else(|| {
-                RdyError::new(
-                    E_INTERNAL,
-                    format!("view {view:?}: the undo's ops end without a prev"),
-                    "run rdy fsck",
-                )
-            })?;
-        }
-        let conflicts = conflict_infos(&st2, &st2.conflicts(&Scope::View(view.to_string()))?)?;
-        Ok(UndoResult {
-            view: view.to_string(),
-            op: op.to_string(),
-            undone: target.to_string(),
-            kind: kind.to_string(),
-            effect: effect_text,
-            included: strings(&put_back),
-            excluded: strings(&taken_out),
-            cascaded: strings(&cascaded),
-            closed: matches!(effect, ResolvedOp::Close),
-            reopened: matches!(effect, ResolvedOp::Reopen),
-            rebased,
-            conflicts,
-        })
-    }
-
-    /// Closes `views`, each with `reason` ("closed by hand" when empty). Every name is checked
-    /// before any write; each view is then closed in its own write, so a store failure on one
-    /// leaves the views before it closed, and the error names the view it failed on.
-    pub fn view_close(
-        &mut self,
-        s: &Session,
-        views: &[String],
-        reason: &str,
-    ) -> Result<Vec<CloseResult>, RdyError> {
-        if views.is_empty() {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                "name at least one view to close",
-                "rdy view close <view>...",
-            ));
-        }
-        let reason = if reason.trim().is_empty() {
-            "closed by hand"
-        } else {
-            reason
-        };
-        // 1. the rules, for every name, before any write (a name given twice is closed once
-        //    the first is, so it is already closed)
-        let st = self.read();
-        let mut seen = BTreeSet::new();
-        for v in views {
-            check_view_op(&st, s, v, Action::Close)?;
-            let h = st.view_head(v).ok_or_else(|| no_view(v))?;
-            if h.closed || !seen.insert(v.as_str()) {
-                return Err(RdyError::new(
-                    E_BAD_INPUT,
-                    format!("view {v:?} is already closed"),
-                    "nothing to do; reopen it with rdy undo if that was the intent",
-                ));
-            }
-        }
-        drop(st);
-        // 2. one write and one publish per view
-        let mut out = vec![];
-        for v in views {
-            self.store
-                .view_append(
-                    v,
-                    vec![ViewOpKind::Close {
-                        reason: reason.to_string(),
-                    }],
-                    &s.provenance(),
-                )
-                .map_err(|e| {
-                    let mut e = RdyError::from(e);
-                    e.message = format!("closing view {v:?}: {}", e.message);
-                    e
-                })?;
-            self.publish(Delta::View { view: v.clone() })?;
-            out.push(CloseResult {
-                view: v.clone(),
-                reason: reason.to_string(),
-            });
-        }
-        Ok(out)
-    }
-}
-
 /// The refusal (`code`) of a write that would exclude `gone` while the included changes in
 /// `deps` depend on it: `E_HAS_DEPENDENTS` for an exclude, `E_UNDO_BLOCKED` for an undo. The
 /// message names `what` the write would exclude; one issue per dependent, with `item_fix`.
-fn dependents_refusal(
+pub(crate) fn dependents_refusal(
     st: &ReadState,
     gone: &BTreeSet<Hash>,
     deps: &[Hash],
@@ -1092,80 +898,4 @@ fn dependents_refusal(
     );
     e.issues = issues;
     Ok(e)
-}
-
-/// An owner as `rdy view own` takes it: `<actor>` or `<actor>/<run>`, split at the first `/`.
-fn parse_owner(text: &str) -> Result<Owner, RdyError> {
-    let (actor, run) = match text.split_once('/') {
-        Some((actor, run)) => (actor, Some(run)),
-        None => (text, None),
-    };
-    if actor.is_empty() || run.is_some_and(str::is_empty) {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            "owner must be <actor>[/<run>]",
-            "for example agent:claude/r1, or agent:claude for a session with no run",
-        ));
-    }
-    Ok(Owner {
-        actor: actor.to_string(),
-        run: run.map(str::to_string),
-    })
-}
-
-impl Rdy {
-    /// own1: the human reassigns `view` to `owner` (`<actor>[/<run>]`), or leaves it unowned
-    /// (`None`), so that the next commit claims it. Works on a closed view and leaves it closed.
-    pub fn view_own(
-        &mut self,
-        s: &Session,
-        view: &str,
-        owner: Option<&str>,
-    ) -> Result<ViewHeadInfo, RdyError> {
-        if !s.is_human() {
-            return Err(RdyError::new(
-                E_PERMISSION,
-                "only a human reassigns a view",
-                "ask the human, or fork the view",
-            ));
-        }
-        if self.read().view_head(view).is_none() {
-            return Err(no_view(view));
-        }
-        let owner = owner.map(parse_owner).transpose()?;
-        self.store
-            .view_append(view, vec![ViewOpKind::Own { owner }], &s.provenance())?;
-        self.publish(Delta::View {
-            view: view.to_string(),
-        })?;
-        head_info(&self.read(), view)
-    }
-
-    /// own1: the human closes every open view idle for more than `days` days at `now_ms`, each
-    /// as `view_close` does, with the reason "idle for more than {days} days".
-    pub fn view_close_stale(
-        &mut self,
-        s: &Session,
-        days: u32,
-        now_ms: i64,
-    ) -> Result<Vec<CloseResult>, RdyError> {
-        if !s.is_human() {
-            return Err(RdyError::new(
-                E_PERMISSION,
-                "only a human closes views in bulk",
-                "run rdy view close --stale as the human",
-            ));
-        }
-        let idle: Vec<String> = self
-            .read()
-            .view_list(false, days, now_ms)?
-            .into_iter()
-            .filter(|v| v.idle)
-            .map(|v| v.name)
-            .collect();
-        if idle.is_empty() {
-            return Ok(vec![]);
-        }
-        self.view_close(s, &idle, &format!("idle for more than {days} days"))
-    }
 }
