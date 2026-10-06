@@ -482,10 +482,14 @@ fn rec1_a_doc_type_with_nav_false_is_rendered_but_left_out_of_nav_folder_index_h
         beta_prev[..beta_prev.find("</a>").unwrap()].contains("Alpha Page"),
         "{beta}"
     );
-    // a record's own page is out of the reading order
+    // a record's own page is out of the reading order, and carries no empty pager landmark
     let recp = read("area/rec-in.html");
     assert!(
         !recp.contains("class=\"pager-prev\"") && !recp.contains("class=\"pager-next\""),
+        "{recp}"
+    );
+    assert!(
+        !recp.contains("class=\"pager\"") && !recp.contains("Previous and next"),
         "{recp}"
     );
     // the search index

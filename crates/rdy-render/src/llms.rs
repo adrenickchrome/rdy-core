@@ -26,21 +26,65 @@ fn decode(s: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// The elements that part words: every other tag (a link, `<code>`, `<strong>`) sits inside a
+/// line of text, so `<code>go north</code>;` reads `go north;`.
+const BLOCK: [&str; 30] = [
+    "p",
+    "div",
+    "br",
+    "hr",
+    "li",
+    "ul",
+    "ol",
+    "dl",
+    "dt",
+    "dd",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "td",
+    "th",
+    "caption",
+    "figure",
+    "figcaption",
+    "pre",
+    "blockquote",
+    "aside",
+    "details",
+    "summary",
+];
+
 /// The text of a piece of the renderer's own HTML (the escaped text `text_html` writes): tags
-/// dropped, the five entities `escape` writes decoded.
+/// dropped (a block-level one parts the words around it), the five entities `escape` writes
+/// decoded.
 fn plain(html: &str) -> String {
     let mut text = String::with_capacity(html.len());
-    let mut in_tag = false;
+    let mut tag: Option<String> = None;
     for c in html.chars() {
-        match c {
+        match (&mut tag, c) {
             // `escape` turns every `<` of the author's text into `&lt;`, so a bare one opens a tag
-            '<' => {
-                in_tag = true;
-                text.push(' ');
+            (None, '<') => tag = Some(String::new()),
+            (Some(t), '>') => {
+                let name = t
+                    .trim_start_matches('/')
+                    .split(|c: char| c.is_whitespace() || c == '/')
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if BLOCK.contains(&name.as_str()) {
+                    text.push(' ');
+                }
+                tag = None;
             }
-            '>' if in_tag => in_tag = false,
-            c if !in_tag => text.push(c),
-            _ => {}
+            (Some(t), c) => t.push(c),
+            (None, c) => text.push(c),
         }
     }
     one_line(&decode(&text))
@@ -247,11 +291,11 @@ fn attr<'a>(tag: &'a str, key: &str) -> Option<&'a str> {
 }
 
 /// An element whose words a reader never sees on the page: a button's label, what only a screen
-/// reader hears (`class="visually-hidden"`), and the diagram canvas (`aria-hidden="true"`; its
-/// words are under "Diagram source"). Only the attributes count, never an href or title that
-/// mentions them.
+/// reader hears (`class="visually-hidden"`), the diagram canvas (`aria-hidden="true"`; its
+/// words are under "Diagram source"), and a script, a stylesheet (an SVG's own included) or a
+/// template. Only the attributes count, never an href or title that mentions them.
 fn unseen(name: &str, tag: &str) -> bool {
-    name == "button"
+    matches!(name, "button" | "script" | "style" | "template")
         || attr(tag, "aria-hidden") == Some("true")
         || attr(tag, "class").is_some_and(|c| c.split_whitespace().any(|c| c == "visually-hidden"))
 }
@@ -261,7 +305,7 @@ const VOID: [&str; 6] = ["br", "img", "hr", "input", "meta", "link"];
 
 /// The words a reader reads in a piece of the renderer's own HTML, as Markdown: a heading's level
 /// as `#`s, list items as `- ` or `1. `, a table's rows as `|` cells and preformatted text
-/// fenced. Attributes, buttons and what only a screen reader hears are left out.
+/// fenced. Attributes, buttons, scripts, styles and what only a screen reader hears are left out.
 fn reader_text(html: &str) -> String {
     let mut out = Lines::default();
     // the element being skipped, and how many of its kind are open inside the walk
@@ -463,6 +507,17 @@ mod tests {
     }
 
     #[test]
+    fn llms1_an_inline_tag_is_not_a_word_break() {
+        assert_eq!(
+            plain(
+                "Type <code>get sword</code> or <code>go north</code>; a <a href=\"x\">token</a>, \
+                <code>?</code>, <em>stands</em>.<p>Next</p>"
+            ),
+            "Type get sword or go north; a token, ?, stands. Next"
+        );
+    }
+
+    #[test]
     fn a_link_text_cannot_close_the_link_or_open_a_destination() {
         assert_eq!(link_text("a](javascript:x)\nb"), "a  javascript:x  b");
     }
@@ -486,6 +541,14 @@ mod tests {
              Table 1\n\n| A | B |\n| --- | --- |\n| a \\| b | 2 |\n\nPython\n\n\
              ```\nif x < 1:\n    pass\n```\n\nAlt"
         );
+    }
+
+    #[test]
+    fn llms1_reader_text_drops_scripts_styles_and_templates() {
+        let html = "<p>Before</p><script>var x = \"<p>no</p>\";</script><style>.a{color:red}</style>\
+            <template><p>Later</p></template><figure><svg viewBox=\"0 0 1 1\"><style>text{fill:red}\
+            </style><text>Label</text></svg><figcaption>After</figcaption></figure>";
+        assert_eq!(reader_text(html), "Before\n\nLabel\n\nAfter");
     }
 
     #[test]

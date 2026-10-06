@@ -133,6 +133,42 @@ fn tbar1_the_toolbar_takes_no_layout_space_at_any_width() {
     }
 }
 
+/// Final review, fix round 1: the shown toolbar sits above its block, so a permalink that lands
+/// a block just below the sticky header must leave room for the bar too, or its top is under the
+/// header. At a desktop width the room is the header (its min-height and 1px rule) plus the bar
+/// (a `.tool`'s line box, its vertical padding and the bar's 1px borders). On a phone the
+/// header's three rows dwarf the bar, and `theme1_anchors_land_below_the_sticky_header` holds.
+#[test]
+fn tbar1_a_permalink_lands_with_the_shown_toolbar_below_the_sticky_header() {
+    let (_d, r) = tree_site();
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
+    let css = parse_css(&std::fs::read_to_string(out.path().join("assets/site.css")).unwrap());
+    let at = |sel: &str, prop: &str, w: u32| cascaded(&css, sel, prop, w).unwrap_or_default();
+    let rem = |v: &str| -> f64 {
+        v.split_whitespace()
+            .next()
+            .and_then(|n| n.strip_suffix("rem"))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("{v:?} is not in rem"))
+    };
+    let px = 1.0 / 16.0;
+    for w in [901, 1280, 1920] {
+        let header = rem(&at(".head", "min-height", w)) + px;
+        let line: f64 = at(".tool", "line-height", w).parse().unwrap();
+        let bar = rem(&at(".tool", "font-size", w)) * line
+            + 2.0 * rem(&at(".tool", "padding", w))
+            + 2.0 * px;
+        let lands = rem(&at("[id]", "scroll-margin-top", w));
+        assert!(
+            lands >= header + bar,
+            "width {w}: a permalink lands {lands}rem down, but the header and the shown bar take \
+             {:.3}rem",
+            header + bar
+        );
+    }
+}
+
 #[test]
 fn tbar1_the_toolbar_holds_only_link_and_copy_ref_and_tab_reaches_it() {
     let (_d, r, _ids) = decided_site();

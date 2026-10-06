@@ -61,6 +61,13 @@ fn llms1_every_line_of_llms_txt_is_text_a_reader_sees() {
     let id = regex::Regex::new(r"\b[A-Za-z]{1,3}-[0-9A-HJKMNP-TV-Z]{5}\b").unwrap();
     let hash = regex::Regex::new(r"\b[0-9a-fA-F]{12,64}\b").unwrap();
     assert!(!id.is_match(&t) && !hash.is_match(&t), "{t}");
+    // an inline tag is not a word break: `<code>go north</code>;` reads `go north;`, and the
+    // squashed comparison below cannot see a space a reader never sees
+    for line in t.lines() {
+        for gap in [" ,", " .", " ;"] {
+            assert!(!line.contains(gap), "{gap:?} in {line}");
+        }
+    }
     assert!(
         t.contains("\n> "),
         "the golden project has a description: {t}"
