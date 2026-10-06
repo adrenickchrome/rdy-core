@@ -65,7 +65,14 @@ enum Cmd {
         #[arg(long)]
         blame: bool,
     },
-    Log,
+    Log {
+        /// At most this many landings, newest first.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Only landings after this one: a landing id (at least 6 hex characters), landing:<id> or tag:<version>.
+        #[arg(long)]
+        since: Option<String>,
+    },
     Impact {
         /// An id or a path such as wallets/transactions.
         id: String,
@@ -584,38 +591,14 @@ fn show_text(v: &Value) -> String {
     out
 }
 
-/// `actor` or `actor/run`, from a `{actor, run}` object.
-fn actor_run(v: &Value) -> String {
-    match v["run"].as_str() {
-        Some(run) => format!("{}/{run}", text(&v["actor"])),
-        None => text(&v["actor"]).to_string(),
-    }
-}
-
 fn log_text(v: &Value) -> String {
+    let rows = v.as_array().map(Vec::as_slice).unwrap_or_default();
+    if rows.is_empty() {
+        return "no landings".to_string();
+    }
     let mut out = String::new();
-    for row in v.as_array().into_iter().flatten() {
-        out.push_str(&format!(
-            "{}  {}  by {}",
-            hash_short(text(&row["landing"])),
-            text(&row["title"]),
-            text(&row["approved_by"])
-        ));
-        if let Some(a) = row["approved"].as_str() {
-            out.push_str(&format!("  approved {a}"));
-        }
-        if row["relayed_by"].is_object() {
-            out.push_str(&format!(", relayed by {}", actor_run(&row["relayed_by"])));
-        }
-        let tags: Vec<&str> = row["tags"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect();
-        if !tags.is_empty() {
-            out.push_str(&format!("  [{}]", tags.join(", ")));
-        }
+    for row in rows {
+        out.push_str(&history_text::log_head_line(row));
         out.push('\n');
         let (ev, relay) = (&row["evidence"], &row["relay_evidence"]);
         if ev.is_object() || relay.is_object() {
@@ -873,8 +856,8 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             ls_text(&v, 0, &mut lines);
             Ok((v, lines.join("\n")))
         }
-        Cmd::Log => {
-            let v = call(env, "log", json!({}))?;
+        Cmd::Log { limit, since } => {
+            let v = call(env, "log", json!({"limit": limit, "since": since}))?;
             let t = log_text(&v);
             Ok((v, t))
         }

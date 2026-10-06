@@ -58,6 +58,13 @@ struct NoArgs {}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct LogArgs {
+    limit: Option<usize>,
+    since: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FsckArgs {
     #[serde(default)]
     clean_quarantine: bool,
@@ -352,10 +359,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         }
         "show" => show(cx, parse(op, args, "{id, scope?, blame?}")?),
         "ls" => ls(cx, parse(op, args, "{path?, scope?, depth?}")?),
-        "log" => {
-            parse::<NoArgs>(op, args, "{}")?;
-            log(cx)
-        }
+        "log" => log(cx, parse(op, args, "{limit?, since?}")?),
         "impact" => impact(cx, parse(op, args, "{id, depth?, scope?}")?),
         "suspects" => suspects(cx, parse(op, args, "{scope?}")?),
         "tags" => {
@@ -478,8 +482,9 @@ fn ls(cx: &OpContext, a: LsArgs) -> Result<Value, RdyError> {
     Ok(to_json(&st.tree(&scope, a.path.as_deref(), a.depth)?))
 }
 
-fn log(cx: &OpContext) -> Result<Value, RdyError> {
-    Ok(to_json(&cx.engine.read().log_rows()?))
+fn log(cx: &OpContext, a: LogArgs) -> Result<Value, RdyError> {
+    let st = cx.engine.read();
+    Ok(to_json(&st.log_page(a.since.as_deref(), a.limit)?))
 }
 
 fn impact(cx: &OpContext, a: ImpactArgs) -> Result<Value, RdyError> {

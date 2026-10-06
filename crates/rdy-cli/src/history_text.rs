@@ -24,6 +24,35 @@ pub(crate) fn time(ms: &Value) -> String {
     rdy_engine::rfc3339(ms.as_i64().unwrap_or(0))
 }
 
+/// logt1: the first line of a `rdy log` entry: the landing, when, the title, who proposed it and
+/// who approved it (and relayed the approval), and its tags.
+pub(crate) fn log_head_line(row: &Value) -> String {
+    let mut line = format!(
+        "{}  {}  {}  proposed by {}  ",
+        short(s(row, "landing")),
+        s(row, "at"),
+        s(row, "title"),
+        who(&row["proposed_by"])
+    );
+    match row["approved"].as_str() {
+        Some(a) => line.push_str(&format!("approved {a} by {}", s(row, "approved_by"))),
+        None => line.push_str(&format!("approved by {}", s(row, "approved_by"))),
+    }
+    if row["relayed_by"].is_object() {
+        line.push_str(&format!(", relayed by {}", who(&row["relayed_by"])));
+    }
+    let tags: Vec<&str> = row["tags"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if !tags.is_empty() {
+        line.push_str(&format!("  [{}]", tags.join(", ")));
+    }
+    line
+}
+
 /// `implements <id>` or `editorial <class>: <reason>`; `None` for no justification.
 pub(crate) fn justification_text(j: &Value) -> Option<String> {
     if let Some(id) = j["implements"].as_str() {

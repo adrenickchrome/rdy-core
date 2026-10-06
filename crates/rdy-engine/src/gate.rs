@@ -126,6 +126,8 @@ pub struct LandingRow {
     pub title: String,
     /// The approving actor.
     pub approved_by: String,
+    /// The provenance of the proposal version that landed.
+    pub proposed_by: RelayedByRow,
     pub assurance: String,
     pub relayed_by: Option<RelayedByRow>,
     pub relay_evidence: Option<RelayEvidenceRow>,
@@ -1276,12 +1278,49 @@ impl Rdy {
 impl ReadState {
     /// Canon's landings as `rdy log` shows them, head first (H3-C5).
     pub fn log_rows(&self) -> Result<Vec<LandingRow>, RdyError> {
+        self.log_page(None, None)
+    }
+
+    /// logt1: a page of the log, newest first. `since` is a landing id (at least 6 hex
+    /// characters), `landing:<id>` or `tag:<version>`: only landings after it are listed. `limit`
+    /// is at least 1. `since` is resolved first, so a bad one is an error even on an empty page.
+    pub fn log_page(
+        &self,
+        since: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<LandingRow>, RdyError> {
+        if limit == Some(0) {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "limit must be at least 1",
+                "omit limit to list every landing",
+            ));
+        }
+        let stop = match since {
+            None => None,
+            Some(text) if text.starts_with("tag:") => match self.resolve_scope(text)? {
+                Scope::At(h) => Some(h),
+                _ => {
+                    return Err(RdyError::new(
+                        E_INTERNAL,
+                        format!("{text:?} did not resolve to a landing"),
+                        "report this as a bug in rdy",
+                    ));
+                }
+            },
+            Some(text) => {
+                Some(self.resolve_landing(text.strip_prefix("landing:").unwrap_or(text))?)
+            }
+        };
         let mut tags: std::collections::HashMap<String, Vec<String>> = Default::default();
         for v in self.versions()? {
             tags.entry(v.landing).or_default().push(v.name);
         }
         let mut rows = vec![];
         for (id, rec) in self.landings()? {
+            if Some(id) == stop || limit.is_some_and(|n| rows.len() >= n) {
+                break;
+            }
             let tags = tags.remove(&id.to_string()).unwrap_or_default();
             rows.push(self.landing_row(id, &rec, tags)?);
         }
@@ -1307,6 +1346,10 @@ impl ReadState {
             approved,
             title: p.title.clone(),
             approved_by: rec.approved_by.actor.clone(),
+            proposed_by: RelayedByRow {
+                actor: p.provenance.actor.clone(),
+                run: p.provenance.run.clone(),
+            },
             assurance: rec.assurance.as_str().into(),
             relayed_by: rec.relayed_by.as_ref().map(|r| RelayedByRow {
                 actor: r.actor.clone(),

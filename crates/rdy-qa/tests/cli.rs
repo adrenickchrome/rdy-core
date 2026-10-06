@@ -60,6 +60,8 @@ fn cli_errors_are_clean_on_every_command() {
             "E_NOT_FOUND",
             vec!["show", "--scope", "landing:zz", "c-ZZZZZ"],
         ),
+        ("E_BAD_INPUT", vec!["log", "--limit", "0"]),
+        ("E_NOT_FOUND", vec!["log", "--since", "tag:v9.9.9"]),
         ("E_UNKNOWN_BLOCK", vec!["edit", "c-ZZZZZ"]),
         ("E_NOT_FOUND", vec!["view", "show", "nope"]),
         ("E_NOT_FOUND", vec!["view", "fork", "nope", "x"]),
