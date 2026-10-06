@@ -1,0 +1,152 @@
+//! prov1: code citing a still-proposed decision is provisional; a rejected decision flags its
+//! files for rework; how many commits depend on a decision (FW-L2).
+use rdy_engine::*;
+use rdy_model::BlockId;
+use rdy_qa::edit_loop::*;
+use rdy_qa::fixtures::*;
+use rdy_qa::git_repo::*;
+use serde_json::json;
+
+fn w() -> Scope {
+    Scope::View("w".into())
+}
+
+fn linked(r: &Rdy) -> GitRepo {
+    let g = GitRepo::new();
+    g.link(r.root());
+    g
+}
+
+#[test]
+fn prov1_code_citing_a_proposed_decision_is_provisional_until_it_lands() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let d = r
+        .decide(
+            &writer(),
+            "w",
+            DecisionInput {
+                parent: s.section.to_string(),
+                statement: "Sync identifies a device by email".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let p = BlockId::parse(&d.created["$decision"]).unwrap();
+    let g = linked(&r);
+    g.write("src/p.rs", "p\n");
+    g.write("src/q.rs", "q\n");
+    g.commit(&format!("feat: p\n\nImplements: {p}"));
+    g.write("src/q.rs", "q2\n");
+    g.commit(&format!("feat: q\n\nImplements: {p}, {}", s.a));
+
+    let cb = r.read().brief_code(&w(), "src/p.rs", None, None).unwrap();
+    let x = &cb.code.implements[0];
+    assert_eq!(x.block, p.to_string());
+    assert_eq!(x.status.as_deref(), Some("proposed"));
+    assert!(x.provisional && !x.rework);
+    assert_eq!(x.commits, 1);
+    assert_eq!(
+        x.dependent_commits,
+        Some(2),
+        "both commits depend on the decision"
+    );
+    assert!(cb.code.provisional && !cb.code.rework);
+
+    let canon = r
+        .read()
+        .brief_code(&Scope::Canon, "src/p.rs", None, None)
+        .unwrap();
+    assert!(canon.code.implements.is_empty());
+    assert_eq!(
+        canon.code.unresolved,
+        vec![p.to_string()],
+        "not in canon yet"
+    );
+
+    land(&mut r, "w").unwrap();
+    let after = r
+        .read()
+        .brief_code(&Scope::Canon, "src/p.rs", None, None)
+        .unwrap();
+    let x = &after.code.implements[0];
+    assert_eq!(x.status.as_deref(), Some("live"));
+    assert!(!x.provisional && !after.code.provisional);
+    assert_eq!(x.dependent_commits, Some(2));
+}
+
+#[test]
+fn prov1_a_rejected_decision_flags_the_files_that_cite_it_for_rework() {
+    use rdy_qa::golden::write_as;
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let res = write_as(
+        &approver(),
+        &mut r,
+        "w",
+        json!([{"op": "create", "type": "decision", "id": "$x", "parent": s.section.to_string(),
+            "fields": {"statement": "Accounts for sync", "status": "rejected",
+                       "decided_at": "2021-01-10T09:00:00Z", "recorded_at": "2021-01-10T09:00:00Z",
+                       "options": ["yes", "no"]}}]),
+    )
+    .unwrap();
+    let x = BlockId::parse(&res.created["$x"]).unwrap();
+    land(&mut r, "w").unwrap();
+    let g = linked(&r);
+    g.write("src/r.rs", "r\n");
+    g.commit(&format!("feat: accounts\n\nImplements: {x}"));
+    let cb = r
+        .read()
+        .brief_code(&Scope::Canon, "src/r.rs", None, None)
+        .unwrap();
+    let e = &cb.code.implements[0];
+    assert_eq!(e.status.as_deref(), Some("rejected"));
+    assert!(e.rework && !e.provisional);
+    assert!(cb.code.rework);
+    let dep = r.read().code_dependents(&Scope::Canon, &x).unwrap();
+    assert_eq!(dep.commits, 1);
+    assert_eq!(
+        dep.files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["src/r.rs"]
+    );
+}
+
+#[test]
+fn prov1_code_dependents_counts_distinct_commits_and_lists_files_at_head() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let g = linked(&r);
+    let d = s.decision.to_string();
+    g.write("src/x.rs", "x\n");
+    g.write("src/y.rs", "y\n");
+    g.commit(&format!("feat: x y\n\nImplements: {d}"));
+    g.write("src/y.rs", "y2\n");
+    g.commit(&format!("feat: y\n\nImplements: {d}, {d}"));
+    g.write("src/z.rs", "z\n");
+    g.commit(&format!("feat: z\n\nImplements: {d}"));
+    g.rm("src/z.rs");
+    g.commit("chore: drop z");
+    let dep = r
+        .read()
+        .code_dependents(&Scope::Canon, &s.decision)
+        .unwrap();
+    assert_eq!(
+        dep.commits, 3,
+        "every commit that cites D, the deleted file's included"
+    );
+    let files: Vec<&str> = dep.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(files, vec!["src/x.rs", "src/y.rs"]);
+    assert!(dep.files.iter().all(|f| f.repo == g.configured()));
+    let cb = r
+        .read()
+        .brief_code(&Scope::Canon, "src/y.rs", None, None)
+        .unwrap();
+    let e = cb.code.implements.iter().find(|e| e.block == d).unwrap();
+    assert_eq!(e.commits, 2);
+    assert_eq!(e.dependent_commits, Some(3));
+    let a = r.read().code_dependents(&Scope::Canon, &s.a).unwrap();
+    assert_eq!((a.commits, a.files.len()), (0, 0));
+}
