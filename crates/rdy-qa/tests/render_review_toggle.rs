@@ -77,6 +77,11 @@ fn rv1_the_stylesheet_hides_markers_only_when_show_changes_is_off() {
             "shown without script, width {w}"
         );
         assert_ne!(at(".chg-label", "display", w), "none", "width {w}");
+        assert_eq!(
+            at("#show-changes[hidden]", "display", w),
+            "none",
+            "the hidden button stays hidden until script, width {w}"
+        );
         assert!(
             !at(".has-chg", "border-inline-start", w).is_empty(),
             "width {w}"
