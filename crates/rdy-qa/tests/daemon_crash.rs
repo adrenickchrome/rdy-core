@@ -240,13 +240,18 @@ fn kill2_clients_reconnect_and_exactly_one_successor_replaces_the_dead_daemon() 
     let s = Served::new();
     s.json(&["--json", "status"]);
     let first = s.daemon_pid().unwrap();
+    // kill while writes are in flight: wait until the clients have acked some writes (polled
+    // with a deadline), not a fixed sleep, which on a fast machine let every write finish first
+    const PER_THREAD: usize = 60;
+    let acked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let results: Vec<_> = (0..4)
         .map(|t| {
             let s_dir = s.dir.path().to_path_buf();
             let env = s.env_pairs();
+            let acked = acked.clone();
             std::thread::spawn(move || {
                 let mut failures = 0;
-                for i in 0..30 {
+                for i in 0..PER_THREAD {
                     let out = std::process::Command::new(rdy_qa::fixtures::rdy_bin())
                         .args(["--project"])
                         .arg(&s_dir)
@@ -255,7 +260,9 @@ fn kill2_clients_reconnect_and_exactly_one_successor_replaces_the_dead_daemon() 
                         .env_remove("RDY_ACTOR")
                         .output()
                         .unwrap();
-                    if !out.status.success() {
+                    if out.status.success() {
+                        acked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    } else {
                         failures += 1;
                     }
                 }
@@ -263,7 +270,16 @@ fn kill2_clients_reconnect_and_exactly_one_successor_replaces_the_dead_daemon() 
             })
         })
         .collect();
-    std::thread::sleep(Duration::from_millis(250));
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while acked.load(std::sync::atomic::Ordering::SeqCst) < 20
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        acked.load(std::sync::atomic::Ordering::SeqCst) < 4 * PER_THREAD,
+        "every write finished before the kill; the test needs writes in flight"
+    );
     s.kill9();
     let failures: Vec<usize> = results.into_iter().map(|h| h.join().unwrap()).collect();
     assert!(failures.iter().all(|f| *f <= 2), "{failures:?}");
@@ -275,7 +291,7 @@ fn kill2_clients_reconnect_and_exactly_one_successor_replaces_the_dead_daemon() 
     let failed = failures.iter().sum::<usize>() as u64;
     // a failed command may still have committed (its ack was lost), never the reverse
     assert!(
-        changes + failed >= 120 && changes <= 120,
+        changes + failed >= (4 * PER_THREAD) as u64 && changes <= (4 * PER_THREAD) as u64,
         "{changes} changes, {failed} failures: {v}"
     );
     assert_eq!(s.daemon_pid(), Some(second), "exactly one successor");
