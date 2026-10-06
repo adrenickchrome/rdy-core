@@ -212,7 +212,12 @@ impl ReadState {
         };
 
         let budget = max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS).saturating_mul(4);
-        while !out.items.is_empty() && serde_json::to_string(&out).map_or(0, |s| s.len()) > budget {
+        let size = |c: &Consequences| {
+            serde_json::to_string(c)
+                .expect("consequences serialize: strings and string-keyed maps only")
+                .len()
+        };
+        while !out.items.is_empty() && size(&out) > budget {
             let drop = out.items.len().div_ceil(2);
             for dropped in out.items.split_off(out.items.len() - drop) {
                 *out.omitted
@@ -256,10 +261,11 @@ pub fn write_and_report<T: Serialize + 'static>(
             .consequences(&Scope::View(view.into()), &h, max_tokens)
         {
             Ok(c) => {
-                v["consequences"] = serde_json::to_value(&c.items).unwrap_or_default();
+                v["consequences"] = serde_json::to_value(&c.items)
+                    .expect("consequences serialize: strings and string-keyed maps only");
                 if !c.omitted.is_empty() {
                     v["consequences_omitted"] =
-                        serde_json::to_value(&c.omitted).unwrap_or_default();
+                        serde_json::to_value(&c.omitted).expect("a map of counts serializes");
                 }
             }
             Err(e) => {

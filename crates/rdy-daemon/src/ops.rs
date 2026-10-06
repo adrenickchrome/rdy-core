@@ -89,7 +89,8 @@ struct BriefArgs {
     ids: Option<Vec<String>>,
     path: Option<String>,
     scope: Option<String>,
-    /// A write target, resolved as `edit_block` writes it: this view when it has a head, else canon.
+    /// A write target, resolved as `edit_block` writes it: this view when it has a head, else
+    /// canon.
     view: Option<String>,
     max_tokens: Option<usize>,
 }
@@ -431,18 +432,24 @@ fn block(cx: &OpContext, a: BlockArgs) -> Result<Value, RdyError> {
     )
 }
 
+/// `E_LIMIT` for a `max_tokens` over `MAX_TOKENS_LIMIT`, as the MCP tools refuse it.
+fn check_max_tokens(max_tokens: Option<usize>) -> Result<(), RdyError> {
+    match max_tokens {
+        Some(n) if n > MAX_TOKENS_LIMIT => Err(RdyError::new(
+            E_LIMIT,
+            format!("max_tokens {n} is over the limit of {MAX_TOKENS_LIMIT}"),
+            format!("ask for at most {MAX_TOKENS_LIMIT} tokens"),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// A briefing over blocks and/or a doc or folder path, registered so its token can be cited.
 /// The scope is the one given (a read: an unknown view is `E_NOT_FOUND`); else `view` as a write
 /// target (that view when it has a head, else canon, as a write there would read it); else the
 /// session's default view when it has a head, else canon.
 fn brief(cx: &OpContext, a: BriefArgs) -> Result<Value, RdyError> {
-    if let Some(n) = a.max_tokens.filter(|n| *n > MAX_TOKENS_LIMIT) {
-        return Err(RdyError::new(
-            E_LIMIT,
-            format!("max_tokens {n} is over the limit of {MAX_TOKENS_LIMIT}"),
-            format!("ask for at most {MAX_TOKENS_LIMIT} tokens"),
-        ));
-    }
+    check_max_tokens(a.max_tokens)?;
     let st = cx.engine.read();
     let own = cx.session.default_view();
     if a.scope.is_some() && a.view.is_some() {
@@ -531,6 +538,7 @@ fn new_doc(cx: &OpContext, a: NewDocArgs) -> Result<Value, RdyError> {
 }
 
 fn edit_block(cx: &OpContext, a: EditBlockArgs) -> Result<Value, RdyError> {
+    check_max_tokens(a.max_tokens)?;
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
     let block = block_from_yaml(&a.yaml)?;

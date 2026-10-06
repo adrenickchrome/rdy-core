@@ -578,15 +578,17 @@ fn tags_text(v: &Value) -> String {
         .join("\n")
 }
 
-/// `rdy edit`: the block as YAML from the `block` op, its briefing from the `brief` op shown as `#`
-/// lines above the YAML, `$EDITOR` on a temp file, then the `edit_block` op citing the briefing's
-/// token (a briefing that moved while the editor was open is `E_BRIEF_STALE`, and the edit is kept). Each op runs on a session of its own: the editor may stay open for long, and
+/// `rdy edit`: the block as YAML from the `block` op, its briefing from the `brief` op shown as
+/// `#` lines above the YAML, `$EDITOR` on a temp file, then the `edit_block` op citing the
+/// briefing's token (a briefing that moved while the editor was open is `E_BRIEF_STALE`, and the
+/// edit is kept). Each op runs on a session of its own: the editor may stay open for long, and
 /// the daemon may stop meanwhile (`rdy serve --stop` after a rebuild), so the write connects
 /// afresh (starting a daemon again if need be); it is sent once and never retried. When the write
 /// fails, the edited file is kept and named in the error (`fix`, and `saved_edit` in JSON).
 fn edit(env: &Env, id: &str, view: Option<&str>) -> Result<Value, ErrorReply> {
     let block = call(env, "block", json!({"id": id, "view": view}))?;
-    // cbrf1 (Q6c): brief the block, show the briefing as `#` lines above the YAML and cite its token
+    // cbrf1 (Q6c): brief the block, show the briefing as `#` lines above the YAML and cite its
+    // token
     let briefing = call(
         env,
         "brief",

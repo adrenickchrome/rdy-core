@@ -329,3 +329,43 @@ fn ctl2_a_refused_approve_is_the_gates_error_and_writes_nothing() {
     assert_ne!(err.code, rdy_engine::E_INTERNAL);
     assert_eq!(dispatch(&c, "status", json!({})).unwrap()["landings"], 0);
 }
+
+#[test]
+fn cbrf1_edit_block_bounds_max_tokens_like_the_brief_op() {
+    let (d, e) = project();
+    let s = human();
+    let c = cx(&e, &s, d.path());
+    let w = dispatch(&c, "new_doc", json!({"path": "a", "title": "Before"})).unwrap();
+    let id = w["created"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|x| x.as_str().unwrap().starts_with("d-"))
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+    let over = dispatch(&c, "brief", json!({"ids": [id], "max_tokens": 100_001})).unwrap_err();
+    assert_eq!(over.code, "E_LIMIT");
+    let yaml = dispatch(&c, "block", json!({"id": id})).unwrap()["yaml"]
+        .as_str()
+        .unwrap()
+        .replace("title: Before", "title: After");
+    let err = dispatch(
+        &c,
+        "edit_block",
+        json!({"yaml": yaml, "max_tokens": 100_001}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, "E_LIMIT", "{err:?}");
+    assert_eq!(err.message, over.message);
+    let shown = dispatch(&c, "show", json!({"id": id, "scope": "work"})).unwrap();
+    assert_eq!(shown["fields"]["title"], "Before", "nothing was written");
+    let ok = dispatch(
+        &c,
+        "edit_block",
+        json!({"yaml": yaml, "max_tokens": 100_000}),
+    )
+    .unwrap();
+    assert!(ok["change"].is_string(), "{ok}");
+}

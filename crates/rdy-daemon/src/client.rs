@@ -148,8 +148,6 @@ fn log_len(run: &RunDir) -> u64 {
         .map_or(0, |m| m.len())
 }
 
-/// Whether the store's lock file is held by a process right now. A missing lock file or any other
-/// probe error counts as not held.
 /// Whether `daemon.pid` names a live process: a daemon (starting, or draining its store) that a
 /// held store lock may belong to.
 fn daemon_pid_alive(run: &RunDir) -> bool {
@@ -159,6 +157,8 @@ fn daemon_pid_alive(run: &RunDir) -> bool {
         .is_some_and(crate::spawn::process_alive)
 }
 
+/// Whether the store's lock file is held by a process right now. A missing lock file or any other
+/// probe error counts as not held.
 fn store_lock_held(lock: &std::path::Path) -> bool {
     let Ok(f) = fs::File::open(lock) else {
         return false;

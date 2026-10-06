@@ -334,3 +334,128 @@ fn brf1_unknown_ids_and_empty_coverage_are_refused() {
         .unwrap_err();
     assert_eq!(e.code, "E_UNKNOWN_BLOCK", "{e}");
 }
+
+/// Doc `big` in view `work`: the doc, a section and `claims` claims; plus doc `other`. Returns
+/// `other`'s id.
+fn big_doc(r: &mut Rdy, claims: usize) -> BlockId {
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "big", "title": "Big", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "All"}}),
+        json!({"op": "create", "type": "doc", "id": "$o", "fields": {"name": "other", "title": "Other", "doc_type": "overview"}}),
+    ];
+    ops.extend((0..claims).map(|i| {
+        json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": "$s", "body": format!("Claim {i}.")})
+    }));
+    let w = write(r, "work", json!(ops)).expect("the big doc");
+    BlockId::parse(&w.created["$o"]).expect("created id")
+}
+
+#[test]
+fn brf1_coverage_over_the_limit_is_refused_without_walking_the_rest() {
+    assert_eq!(MAX_BRIEF_BLOCKS, 5_000);
+    let (_d, mut r) = project();
+    let work = Scope::View("work".into());
+    // the doc, its section and 4,998 claims: exactly the limit
+    let other = big_doc(&mut r, MAX_BRIEF_BLOCKS - 2);
+    let cov = |ids: Vec<String>| Coverage {
+        ids,
+        path: Some("big".into()),
+    };
+    let at_limit = r.read().brief(&work, &cov(vec![]), None).unwrap();
+    assert_eq!(at_limit.covers, MAX_BRIEF_BLOCKS);
+    let doc = r.read().resolve_id(&work, "big").unwrap();
+    let overlap = r
+        .read()
+        .brief(&work, &cov(vec![doc.to_string()]), None)
+        .unwrap();
+    assert_eq!(
+        overlap.covers, MAX_BRIEF_BLOCKS,
+        "an id inside the path is counted once"
+    );
+    let e = r
+        .read()
+        .brief(&work, &cov(vec![other.to_string()]), None)
+        .unwrap_err();
+    assert_eq!(e.code, "E_LIMIT", "{e}");
+    assert_eq!(
+        e.message,
+        format!("more than {MAX_BRIEF_BLOCKS} blocks to brief; the limit is {MAX_BRIEF_BLOCKS}"),
+        "the walk stops at the first block over the limit, so the total is not known"
+    );
+    let section = {
+        let m = r.read().materialized(&work).unwrap();
+        m.children(Some(&doc))[0].id.clone()
+    };
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "claim", "parent": section.to_string(), "body": "One more."}]),
+    )
+    .unwrap();
+    let e = r.read().brief(&work, &cov(vec![]), None).unwrap_err();
+    assert_eq!(e.code, "E_LIMIT", "{e}");
+    assert!(e.message.starts_with("more than 5000 blocks"), "{e}");
+}
+
+#[test]
+fn brf1_the_registry_is_bounded_by_recorded_entries_as_well_as_by_count() {
+    assert_eq!(BRIEF_REGISTRY_ENTRIES, 1_000_000);
+    // a record of `n` with `size` covered blocks, each also recorded: 2 × size entries
+    let rec = |n: u8, size: usize| {
+        let covers: BTreeSet<BlockId> = (0..size).map(|_| BlockId::new("c")).collect();
+        let recorded = covers.iter().map(|id| (id.clone(), None)).collect();
+        Arc::new(BriefRecord {
+            token: Hash::of(&[n]),
+            covers,
+            recorded,
+        })
+    };
+    let hex = |n: u8| Hash::of(&[n]).to_string();
+    let reg = BriefRegistry::with_entry_budget(100, 10);
+    reg.insert(rec(0, 2));
+    reg.insert(rec(1, 2));
+    assert_eq!((reg.len(), reg.entries()), (2, 8));
+    reg.insert(rec(1, 2));
+    assert_eq!(
+        (reg.len(), reg.entries()),
+        (2, 8),
+        "a refreshed token is counted once"
+    );
+    reg.insert(rec(2, 2));
+    assert!(
+        reg.get(&hex(0)).is_none(),
+        "12 entries are over the budget of 10: the least recently used goes"
+    );
+    assert!(reg.get(&hex(1)).is_some() && reg.get(&hex(2)).is_some());
+    assert_eq!((reg.len(), reg.entries()), (2, 8));
+    reg.insert(rec(3, 20));
+    assert_eq!(
+        (reg.len(), reg.entries()),
+        (1, 40),
+        "a record over the budget on its own is kept, and only it"
+    );
+    assert!(reg.get(&hex(3)).is_some());
+}
+
+#[test]
+fn brf1_a_derived_status_tag_is_its_serde_tag() {
+    use rdy_graph::DerivedStatus;
+    let by = vec![BlockId::new("d")];
+    for s in [
+        DerivedStatus::Proposed,
+        DerivedStatus::Rejected,
+        DerivedStatus::Live,
+        DerivedStatus::PartiallySuperseded {
+            by: by.clone(),
+            parts: vec!["x".into()],
+        },
+        DerivedStatus::Superseded { by: by.clone() },
+        DerivedStatus::Revoked { by },
+    ] {
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["status"],
+            s.tag(),
+            "{s:?}"
+        );
+    }
+}

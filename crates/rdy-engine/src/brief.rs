@@ -23,6 +23,10 @@ pub const E_BRIEF_STALE: &str = "E_BRIEF_STALE";
 pub const W_BRIEF_STALE: &str = "W_BRIEF_STALE";
 /// The most briefings one registry holds; the least recently used goes first.
 pub const BRIEF_REGISTRY_CAP: usize = 10_000;
+/// The most entries (covered plus recorded blocks, summed over its briefings) one registry
+/// holds; the least recently used briefing goes first. An entry costs on the order of 100 bytes,
+/// so this bounds a registry near 100 MB however large its briefings are.
+pub const BRIEF_REGISTRY_ENTRIES: usize = 1_000_000;
 /// The most blocks one briefing covers.
 pub const MAX_BRIEF_BLOCKS: usize = 5_000;
 /// A briefing's size budget when none is given, in tokens (4 bytes of JSON each).
@@ -64,6 +68,11 @@ impl BriefRecord {
     pub fn token_hex(&self) -> String {
         self.token.to_string()
     }
+
+    /// What this record weighs against a registry's entry budget.
+    fn entries(&self) -> usize {
+        self.covers.len() + self.recorded.len()
+    }
 }
 
 /// The briefing token (exact): BLAKE3 of `rdy-brief-1\n` and, for each recorded block in id
@@ -78,10 +87,12 @@ pub fn token_of(covers: &BTreeSet<BlockId>, recorded: &BTreeMap<BlockId, Option<
     Hash::of(&bytes)
 }
 
-/// The registered briefings, by token: at most `cap`, the least recently inserted or read
-/// dropped first. In memory only: gone when the project closes.
+/// The registered briefings, by token: at most `cap` of them and at most `entry_budget` entries
+/// (`covers` plus `recorded`, summed), the least recently inserted or read dropped first. The
+/// briefing inserted last is always kept. In memory only: gone when the project closes.
 pub struct BriefRegistry {
     cap: usize,
+    entry_budget: usize,
     inner: Mutex<Lru>,
 }
 
@@ -92,6 +103,8 @@ struct Lru {
     by_token: HashMap<Hash, (u64, Arc<BriefRecord>)>,
     /// Stamp → token, oldest first.
     order: BTreeMap<u64, Hash>,
+    /// The entries of every record held.
+    entries: usize,
 }
 
 impl Lru {
@@ -99,10 +112,23 @@ impl Lru {
     fn put(&mut self, r: Arc<BriefRecord>) {
         let (stamp, token) = (self.clock, r.token);
         self.clock += 1;
-        if let Some((old, _)) = self.by_token.insert(token, (stamp, r)) {
+        self.entries += r.entries();
+        if let Some((old, prev)) = self.by_token.insert(token, (stamp, r)) {
             self.order.remove(&old);
+            self.entries -= prev.entries();
         }
         self.order.insert(stamp, token);
+    }
+
+    /// Drops the least recently used record; false when none is left.
+    fn evict(&mut self) -> bool {
+        let Some((_, oldest)) = self.order.pop_first() else {
+            return false;
+        };
+        if let Some((_, r)) = self.by_token.remove(&oldest) {
+            self.entries -= r.entries();
+        }
+        true
     }
 
     /// `token`'s record, marked most recently used.
@@ -119,9 +145,16 @@ impl Lru {
 }
 
 impl BriefRegistry {
+    /// A registry of at most `cap` briefings and `BRIEF_REGISTRY_ENTRIES` entries.
     pub fn new(cap: usize) -> BriefRegistry {
+        BriefRegistry::with_entry_budget(cap, BRIEF_REGISTRY_ENTRIES)
+    }
+
+    /// A registry of at most `cap` briefings and `entry_budget` entries.
+    pub fn with_entry_budget(cap: usize, entry_budget: usize) -> BriefRegistry {
         BriefRegistry {
             cap,
+            entry_budget,
             inner: Mutex::new(Lru::default()),
         }
     }
@@ -134,11 +167,12 @@ impl BriefRegistry {
     pub fn insert(&self, r: Arc<BriefRecord>) {
         let mut lru = self.lock();
         lru.put(r);
-        while lru.by_token.len() > self.cap {
-            let Some((_, oldest)) = lru.order.pop_first() else {
+        while lru.by_token.len() > 1
+            && (lru.by_token.len() > self.cap || lru.entries > self.entry_budget)
+        {
+            if !lru.evict() {
                 break;
-            };
-            lru.by_token.remove(&oldest);
+            }
         }
     }
 
@@ -150,6 +184,11 @@ impl BriefRegistry {
 
     pub fn len(&self) -> usize {
         self.lock().by_token.len()
+    }
+
+    /// The entries (`covers` plus `recorded`) of every briefing held.
+    pub fn entries(&self) -> usize {
+        self.lock().entries
     }
 
     pub fn is_empty(&self) -> bool {
@@ -285,7 +324,10 @@ impl Briefing {
 
     /// The JSON size in tokens (4 bytes each).
     fn tokens(&self) -> usize {
-        serde_json::to_string(self).map_or(0, |s| s.len()) / 4
+        serde_json::to_string(self)
+            .expect("a briefing serializes: strings, numbers and string-keyed maps only")
+            .len()
+            / 4
     }
 
     /// Halves the longest detail list (ties: governs, dependents, will_go_stale, suspects,
@@ -346,18 +388,6 @@ fn scope_label(scope: &Scope) -> String {
     }
 }
 
-/// A derived status's tag, as `DerivedStatus` serializes it.
-fn status_tag(s: &DerivedStatus) -> &'static str {
-    match s {
-        DerivedStatus::Proposed => "proposed",
-        DerivedStatus::Rejected => "rejected",
-        DerivedStatus::Live => "live",
-        DerivedStatus::PartiallySuperseded { .. } => "partially_superseded",
-        DerivedStatus::Superseded { .. } => "superseded",
-        DerivedStatus::Revoked { .. } => "revoked",
-    }
-}
-
 /// A references edge, or a link named in `names`.
 fn edge_in(kind: &EdgeKind, names: &[&str]) -> bool {
     match kind {
@@ -388,22 +418,44 @@ impl ReadState {
             }
             Ok(id)
         };
+        // refused as soon as the coverage passes the limit: the walk stops there
+        let too_many = || {
+            RdyError::new(
+                E_LIMIT,
+                format!(
+                    "more than {MAX_BRIEF_BLOCKS} blocks to brief; the limit is {MAX_BRIEF_BLOCKS}"
+                ),
+                "brief a smaller part: a doc, or the blocks you will change",
+            )
+        };
         let mut ids = BTreeSet::new();
         for text in &cov.ids {
             ids.insert(known(text)?);
+            if ids.len() > MAX_BRIEF_BLOCKS {
+                return Err(too_many());
+            }
         }
         if let Some(path) = &cov.path {
             let root = known(path)?;
-            // the walk keeps its own visited set: a block also named in `ids` is still walked
+            // the walk keeps its own visited set: a block also named in `ids` is still walked,
+            // and counts once (`extra` counts the walked blocks not in `ids`)
+            let mut extra = usize::from(!ids.contains(&root));
             let mut seen = BTreeSet::from([root.clone()]);
             let mut todo = vec![root];
             while let Some(cur) = todo.pop() {
+                if ids.len() + extra > MAX_BRIEF_BLOCKS {
+                    return Err(too_many());
+                }
                 for c in m.children(Some(&cur)) {
                     // a block already seen is not walked again (a damaged store may loop)
                     if seen.insert(c.id.clone()) {
+                        extra += usize::from(!ids.contains(&c.id));
                         todo.push(c.id.clone());
                     }
                 }
+            }
+            if ids.len() + extra > MAX_BRIEF_BLOCKS {
+                return Err(too_many());
             }
             ids.extend(seen);
         }
@@ -412,16 +464,6 @@ impl ReadState {
                 E_BAD_INPUT,
                 "give ids or path",
                 "rdy_brief takes ids (blocks) or path (a doc or folder)",
-            ));
-        }
-        if ids.len() > MAX_BRIEF_BLOCKS {
-            return Err(RdyError::new(
-                E_LIMIT,
-                format!(
-                    "{} blocks to brief; the limit is {MAX_BRIEF_BLOCKS}",
-                    ids.len()
-                ),
-                "brief a smaller part: a doc, or the blocks you will change",
             ));
         }
         self.brief_ids(scope, &ids, max_tokens)
@@ -474,7 +516,7 @@ impl ReadState {
                     status: g
                         .status(&d)
                         .as_ref()
-                        .map(status_tag)
+                        .map(DerivedStatus::tag)
                         .unwrap_or_default()
                         .into(),
                     statement,

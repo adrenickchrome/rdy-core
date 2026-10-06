@@ -509,15 +509,15 @@ registry. `brief_doc` is `ReadState::brief` over the fixture's doc by path plus 
 the read pool with the view's graph carried (an untimed briefed write creates the new state first).
 `write_briefed` is one claim create that cites a current briefing: the check runs and hits.
 `write_consequences` is a briefed `update` of a claim that another claim references, then
-`ReadState::consequences` over the change, asserting the referrer comes back as one `suspect`
-entry (the assert is outside the timer); the briefing of the claim is made untimed. `write_single` is
+`ReadState::consequences` over the change, asserting the referrer comes back as one `suspect` entry
+(the assert is outside the timer); the briefing of the claim is made untimed. `write_single` is
 shown from the same runs as the like-for-like write without a briefing.
 
 Medians and p95 in ms. Linux: Ubuntu 24.04.5 LTS / AMD Ryzen 7 9800X3D 8-Core Processor / ext4,
 isolated bench, release build, two `cargo qa --only perf --deep` runs back to back (the bench idle
-at the start of each, `PERF.lock` held by the helper); every new op's median differs by at most 4.3% between the
-runs (`brief_doc` 4.3%, the rest under 1%), so both are recorded. The Mac was not measured (the
-perf rows come from the bench only).
+at the start of each, `PERF.lock` held by the helper); every new op's median differs by at most 4.3%
+between the runs (`brief_doc` 4.3%, the rest under 1%), so both are recorded. The Mac was not
+measured (the perf rows come from the bench only).
 
 | op | 10k run 1 median / p95 | 10k run 2 median / p95 | 50k run 1 median / p95 | 50k run 2 median / p95 |
 |---|---|---|---|---|
@@ -527,13 +527,14 @@ perf rows come from the bench only).
 | `brief_doc` | 0.201 / 0.228 | 0.209 / 0.229 | 0.227 / 0.284 | 0.226 / 0.299 |
 
 Every row is far under "< 5 ms p99 on Linux NVMe" (writes) and "< 5 ms p99" (`brief_doc`) at both
-sizes, so none is a miss. The briefing check adds about 0.04 ms at 10k and 0.09 ms at 50k to a
-write (`write_briefed` against `write_single`): the check is one registry read and one version
-lookup per recorded block on the writer, the registry read being a mutex-guarded hash-map lookup. A write plus its consequences costs no more than the
-briefed write (the tier records p95, not p99, over 20 to 30 runs), because the consequences run on the read pool over the carried graph (Tasks 2 and
-4), a graph walk over the changed block's incoming edges and not a rebuild; a cold graph build is
-about 30 ms at 10k, and the carry is what keeps it off this path. `brief_doc` over a 97-claim doc
-is about 0.2 ms at both sizes: its cost follows the doc, not the project.
+sizes, so none is a miss. The briefing check adds about 0.04 ms at 10k and 0.09 ms at 50k to a write
+(`write_briefed` against `write_single`): the check is one registry read and one version lookup per
+recorded block on the writer, the registry read being a mutex-guarded hash-map lookup. A write plus
+its consequences costs no more than the briefed write (the tier records p95, not p99, over 20 to 30
+runs), because the consequences run on the read pool over the carried graph (Tasks 2 and 4), a graph
+walk over the changed block's incoming edges and not a rebuild; a cold graph build is about 30 ms at
+10k, and the carry is what keeps it off this path. `brief_doc` over a 97-claim doc is about 0.2 ms
+at both sizes: its cost follows the doc, not the project.
 
 The daemon rows, before (`main`'s baseline in `qa-baseline.json`, the M2b run) and after (this
 branch, both runs):
@@ -553,32 +554,32 @@ moves between about 0.4 and 2.6 ms per flush on the same machine class.
 
 - **`main` shows the same floor.** The pre-plan base (`f558724`) on the same bench, same command
   (`cargo qa --only perf --deep`), two runs: `write_single` 0.528 and 0.531 ms, `new_doc_single`
-  1.684 and 1.681 ms, `daemon_write_single` 0.647 and 0.652 ms, `write_single_50k` 0.550 and 0.547 ms,
-  `daemon_write_single_50k` 0.664 and 0.657 ms, `daemon_cold_start` 49.5 and 49.7 ms (50k: 190.7 and
-  190.2 ms). So the 4x drop of `daemon_write_single` against its old baseline is not the daemon work
-  of this plan.
+  1.684 and 1.681 ms, `daemon_write_single` 0.647 and 0.652 ms, `write_single_50k` 0.550 and 0.547
+  ms, `daemon_write_single_50k` 0.664 and 0.657 ms, `daemon_cold_start` 49.5 and 49.7 ms (50k: 190.7
+  and 190.2 ms). So the 4x drop of `daemon_write_single` against its old baseline is not the daemon
+  work of this plan.
 - **The temp dir is the same mount.** The perf tier's `tempfile::tempdir()` is `/tmp`, on the root
   ext4 filesystem on the NVMe (`/dev/nvme0n1p5`), the same one the machine-class string names; the
   kernel reports the device write cache as `write back` with FUA, so `fsync` issues a real flush.
   The block layer's own flush counter (`/sys/block/nvme0n1/stat`) went up by exactly 600 for 600
   `fsync`/`fdatasync` calls of a 4 KB-write micro-benchmark, at about 0.29 ms of device time each:
   every flush reaches the device, and the device answers fast in that state.
-- **The device is bimodal over minutes.** The micro-benchmark (4 KB `pwrite` + `fdatasync`, 300 runs)
-  read p50 0.43 ms with the bench idle, then 2.4 to 2.6 ms (what "Linux" at the top of this file
-  and the M2b baseline record) minutes after the perf runs, and 1.4 to 1.6 ms in between; it flipped
-  within a single `qa-perf` run (a 10k tier at 2.6 ms, the 50k tier at 0.55 ms). It is reproducible on
-  demand: 20 GB of sequential writes (`dd`, `conv=fsync`) took the idle 0.43 ms to 2.6 ms, held for
-  minutes. So the floor tracks recent write volume on the drive (a consumer NVMe without power-loss
-  protection; the cause inside the drive is not established here). The M2.0 notes of this file saw
-  the same swing (flush p99 0.31 ms in one run, 1.3 to 1.4 ms in the next).
+- **The device is bimodal over minutes.** The micro-benchmark (4 KB `pwrite` + `fdatasync`, 300
+  runs) read p50 0.43 ms with the bench idle, then 2.4 to 2.6 ms (what "Linux" at the top of this
+  file and the M2b baseline record) minutes after the perf runs, and 1.4 to 1.6 ms in between; it
+  flipped within a single `qa-perf` run (a 10k tier at 2.6 ms, the 50k tier at 0.55 ms). It is
+  reproducible on demand: 20 GB of sequential writes (`dd`, `conv=fsync`) took the idle 0.43 ms to
+  2.6 ms, held for minutes. So the floor tracks recent write volume on the drive (a consumer NVMe
+  without power-loss protection; the cause inside the drive is not established here). The M2.0 notes
+  of this file saw the same swing (flush p99 0.31 ms in one run, 1.3 to 1.4 ms in the next).
 
-Which gives the baseline rule (`perf.rs`: a row fails only when worse than its baseline by the margin
-and by more than `FLOOR_MS`): every floor-bound Linux row is baselined on the **slow floor** (about
-2.6 ms per durable flush), where `write_single`, `write_single_50k`, `new_doc_single` and
-`write_batch_200` already were. A row baselined on the fast floor fails when the drive is in the slow
-state: the first baseline of this branch did, and the bench said so (`write_briefed` 2.62 ms against
-0.575 ms, `daemon_write_single` 2.68 ms against 0.668 ms: FAIL). On the slow floor a fast-state run
-reads as an improvement and passes. The `write_briefed`, `write_consequences` and
+Which gives the baseline rule (`perf.rs`: a row fails only when worse than its baseline by the
+margin and by more than `FLOOR_MS`): every floor-bound Linux row is baselined on the **slow floor**
+(about 2.6 ms per durable flush), where `write_single`, `write_single_50k`, `new_doc_single` and
+`write_batch_200` already were. A row baselined on the fast floor fails when the drive is in the
+slow state: the first baseline of this branch did, and the bench said so (`write_briefed` 2.62 ms
+against 0.575 ms, `daemon_write_single` 2.68 ms against 0.668 ms: FAIL). On the slow floor a
+fast-state run reads as an improvement and passes. The `write_briefed`, `write_consequences` and
 `daemon_write_single` rows (and `_50k`) are the mean of two runs taken in the slow state:
 
 | op | 10k run A / run B | 50k run A / run B |

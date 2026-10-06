@@ -74,6 +74,20 @@ pub enum DerivedStatus {
     },
 }
 
+impl DerivedStatus {
+    /// The status's name, as its serialized `status` tag spells it.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            DerivedStatus::Proposed => "proposed",
+            DerivedStatus::Rejected => "rejected",
+            DerivedStatus::Live => "live",
+            DerivedStatus::PartiallySuperseded { .. } => "partially_superseded",
+            DerivedStatus::Superseded { .. } => "superseded",
+            DerivedStatus::Revoked { .. } => "revoked",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Suspect {
     pub block: BlockId,

@@ -9,6 +9,7 @@ use rdy_qa::daemon::{child_daemon_entry, client as client_opts, spawn_child_daem
 use rdy_qa::mcp::McpClient;
 use serde_json::{Value, json};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// The re-exec child of `dfu1_a_store_held_by_a_predecessor_that_is_exiting_is_waited_for`.
 #[test]
@@ -183,8 +184,16 @@ fn dfu1_a_store_held_by_a_predecessor_that_is_exiting_is_waited_for() {
         let old = connect_or_start(&run, client_opts(&run, "0.1.0", dir.path(), spawn_old))
             .await
             .unwrap();
-        old.close();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // the old daemon is idle once it has dropped `old`'s connection: it ends the session
+        // (`ConnEnd`) before it closes the stream, so EOF here means it has no session left
+        let mut stream = old.into_stream();
+        stream.shutdown().await.unwrap();
+        let mut buf = [0u8; 64];
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while stream.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+        })
+        .await
+        .expect("the old daemon closes the connection");
         // the old daemon is replaced (it answers `exiting` and drops its socket) but its store
         // lock is still held for longer than HELD_GRACE
         let holder = hold_store_lock(dir.path(), HELD_GRACE * 3);
