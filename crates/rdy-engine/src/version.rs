@@ -33,6 +33,8 @@ pub(crate) struct VposCache {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VersionInfo {
     pub name: String,
+    /// The full hash of the tag object.
+    pub tag: String,
     /// The full hash of the landing the version names.
     pub landing: String,
     pub message: Option<String>,
@@ -43,6 +45,7 @@ pub struct VersionInfo {
 fn info(t: &Tag) -> VersionInfo {
     VersionInfo {
         name: t.name.clone(),
+        tag: t.id().to_string(),
         landing: t.landing.to_string(),
         message: t.message.clone(),
         tagged_by: t.tagged_by.actor.clone(),
@@ -481,7 +484,8 @@ impl ReadState {
                     name: name.clone(),
                     unlanded_changes: head.as_ref().map_or(0, |h| h.len as u32),
                 };
-                (head.map_or(canon, |h| h.base), Some(pos))
+                // a floating view stands where canon stands
+                (self.effective_base(name), Some(pos))
             }
         };
         // the highest version on each landing (version_tags is in ascending order)

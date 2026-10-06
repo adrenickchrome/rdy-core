@@ -29,6 +29,16 @@ pub enum StoreError {
     AlreadyExists(BlockId),
     #[error("unknown view {0:?}")]
     UnknownView(String),
+    #[error("view {0:?} exists")]
+    ViewExists(String),
+    #[error("view {0:?} is closed")]
+    ViewClosed(String),
+    /// The proposal version named is not its stable's latest (`proposal/<stable>`).
+    #[error("proposal {stable} moved to version {latest}")]
+    ProposalMoved { stable: Hash, latest: Hash },
+    /// A proposal version with no changes: it would land as an empty landing, again and again.
+    #[error("a proposal of view {0:?} needs at least one change")]
+    EmptyProposal(String),
     #[error("conflict on block {id}")]
     Conflict { id: BlockId },
     #[error("block {0} is a frozen decision and cannot change")]

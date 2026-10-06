@@ -470,6 +470,13 @@ fn ord3_rebalance_landed_under_an_open_proposal_warns_siblings_rekeyed() {
     .unwrap();
     land(&mut r, "work").unwrap();
     // B places a block relative to the current keys
+    // vb is pinned: a landing rebases open unpinned views onto the new keys (reb1), so only a
+    // pinned view still sees siblings re-keyed under it (Task 8 pins the unpinned counterpart)
+    let ch = r.read().canon_head();
+    r.store_mut()
+        .view_create("vb", ch, None, true, &writer().provenance())
+        .unwrap();
+    r.invalidate();
     write(
         &mut r,
         "vb",
@@ -520,6 +527,13 @@ fn ord3_a_landed_move_of_one_sibling_also_warns_siblings_rekeyed() {
     .unwrap();
     let second = res.created["$c"].clone();
     land(&mut r, "work").unwrap();
+    // vb is pinned: a landing rebases open unpinned views onto the new keys (reb1), so only a
+    // pinned view still sees siblings re-keyed under it (Task 8 pins the unpinned counterpart)
+    let ch = r.read().canon_head();
+    r.store_mut()
+        .view_create("vb", ch, None, true, &writer().provenance())
+        .unwrap();
+    r.invalidate();
     write(
         &mut r,
         "vb",

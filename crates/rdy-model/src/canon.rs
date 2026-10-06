@@ -24,6 +24,8 @@ pub struct Proposal {
     pub changes: Vec<Hash>,
     pub alternative: Option<AltChoice>,
     pub provenance: Provenance,
+    /// Canon's head when this version was written; `None` before the first landing.
+    pub canon_at: Option<Hash>,
 }
 
 impl Proposal {
@@ -49,6 +51,8 @@ pub struct LandingRecord {
     pub approved_version: Option<Hash>,
     /// The landings this one replaces after a rebase.
     pub rebased_from: Vec<Hash>,
+    /// How the approval was obtained, when that is recorded.
+    pub evidence: Option<ApprovalEvidence>,
 }
 
 impl LandingRecord {
@@ -91,6 +95,41 @@ pub struct ActorRun {
 pub struct RelayEvidence {
     pub quoted: String,
     pub session_ref: String,
+    /// The question the human was asked, when the relay recorded it.
+    pub question: Option<String>,
+}
+
+/// How an approval was obtained. The declaration order is the wire format (postcard's variant
+/// index).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EvidenceKind {
+    /// Asked through the client's own elicitation.
+    Elicited,
+    /// Answered on a rendered approval card.
+    Card,
+    /// Quoted from free text.
+    Text,
+}
+
+impl EvidenceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EvidenceKind::Elicited => "elicited",
+            EvidenceKind::Card => "card",
+            EvidenceKind::Text => "text",
+        }
+    }
+}
+
+/// The record of how a landing's approval was obtained: its kind, the options offered, the one
+/// chosen, and the card shown (if any).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalEvidence {
+    pub kind: EvidenceKind,
+    pub options: Vec<String>,
+    pub choice: Option<String>,
+    pub card_hash: Option<Hash>,
 }
 
 /// A name for a landing. In rdy core every tag is a version (addendum A): it freezes the snapshot

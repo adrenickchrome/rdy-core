@@ -138,3 +138,64 @@ fn eff1_the_schema_declares_effective_from() {
         "{codes:?}"
     );
 }
+
+#[test]
+fn eff2_rdy_decide_takes_effective_from_and_the_context_shows_when_a_decision_takes_effect() {
+    let (_d, mut r) = project();
+    let parent = log_section(&mut r);
+    let view = Scope::View("work".into());
+    let early = "2026-09-01T00:00:00Z";
+    let a = r
+        .decide(
+            &writer(),
+            "work",
+            DecisionInput {
+                parent: parent.clone(),
+                statement: "A".into(),
+                effective_from: Some(early.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let b = r
+        .decide(
+            &writer(),
+            "work",
+            DecisionInput {
+                parent: parent.clone(),
+                statement: "B".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let st = r.read();
+    let ida = BlockId::parse(&a.created["$decision"]).unwrap();
+    let idb = BlockId::parse(&b.created["$decision"]).unwrap();
+    assert_eq!(
+        st.block(&view, &ida)
+            .unwrap()
+            .field_str(decision::EFFECTIVE_FROM),
+        Some(early),
+        "stored as the field"
+    );
+    assert_eq!(
+        st.context(&view, &ida).unwrap().effective_from.as_deref(),
+        Some(early)
+    );
+    let bb = st.block(&view, &idb).unwrap();
+    assert_eq!(
+        st.context(&view, &idb).unwrap().effective_from.as_deref(),
+        bb.field_str("recorded_at"),
+        "falls back to recorded_at"
+    );
+    let sec = BlockId::parse(&parent).unwrap();
+    let ctx = st.context(&view, &sec).unwrap();
+    assert_eq!(ctx.effective_from, None, "only decisions have one");
+    assert!(
+        serde_json::to_value(&ctx)
+            .unwrap()
+            .get("effective_from")
+            .is_none(),
+        "absent, not null, for other blocks"
+    );
+}

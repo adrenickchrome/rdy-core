@@ -15,8 +15,8 @@ pub use check::StoreCheck;
 pub use error::StoreError;
 #[doc(hidden)]
 pub use index::IndexDump;
-pub use land::{LandOutcome, LandRequest};
-pub use merge::{Conflict, MergeChange, Merged, Side, conflict_id, merge};
+pub use land::{LandOutcome, LandRequest, RebasedView, Relay};
+pub use merge::{Conflict, MergeChange, Merged, Side, conflict_id, merge, merge_on_blocks};
 pub use segment::SegmentReader;
 pub use store::{
     CATCH_UP_CHUNK, CHECKPOINT_FRAMES, CHECKPOINT_IDLE, INDEX_OPEN_SENTINEL, MAX_BLOB_BYTES,
@@ -24,4 +24,4 @@ pub use store::{
 };
 mod state;
 pub use state::{ViewRecord, apply_op};
-pub use view::{Owner, ViewHead, ViewOp, ViewOpKind};
+pub use view::{Owner, ResolvedOp, ViewHead, ViewOp, ViewOpKind};

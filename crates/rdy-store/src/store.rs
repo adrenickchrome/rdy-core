@@ -3,6 +3,7 @@ use crate::format::{self, Format};
 use crate::fsutil;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
+use crate::merge::Conflict;
 use crate::segment::{CrashPoint, Location, SegmentLog, SegmentReader, find_gap, seg_path};
 use crate::view::ViewOp;
 use rdy_model::{Block, Change, Hash, LandingRecord, Op, Proposal};
@@ -347,7 +348,7 @@ pub const CHECKPOINT_IDLE: Duration = Duration::from_secs(2);
 impl Store {
     /// Creates a store, as `rdy init` does: in a directory that does not exist or is wholly
     /// empty, `FORMAT` is written first (the claim), then the log gets its format ref. A
-    /// directory holding anything is never claimed: it is opened as `open` does, so a format-3
+    /// directory holding anything is never claimed: it is opened as `open` does, so a current-format
     /// store opens (an init retried after a crash) and anything else is refused.
     pub fn create(dir: &Path) -> Result<Store, StoreError> {
         let mut synced = match std::fs::symlink_metadata(dir) {
@@ -366,11 +367,11 @@ impl Store {
         };
         format::write_format_file(dir, Format::CURRENT)?;
         synced.push(dir.to_path_buf());
-        Store::open_format_3(dir, synced)
+        Store::open_current_format(dir, synced)
     }
 
     /// Opens an existing store. Opening never creates, upgrades or claims a store (fmt3): a path
-    /// that is not a directory with a `FORMAT` file saying store format 3 is refused before
+    /// that is not a directory with a `FORMAT` file naming the current store format is refused before
     /// anything in it is created, locked, opened or written.
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
         match std::fs::symlink_metadata(dir) {
@@ -385,11 +386,11 @@ impl Store {
             Some(f) => format::check_format(f, dir)?,
             None => return Err(format::other_build(dir, "has no FORMAT file")),
         }
-        Store::open_format_3(dir, vec![])
+        Store::open_current_format(dir, vec![])
     }
 
-    /// Opens a store whose `FORMAT` says store format 3.
-    fn open_format_3(dir: &Path, mut synced: Vec<PathBuf>) -> Result<Store, StoreError> {
+    /// Opens a store whose `FORMAT` names the current store format (`STORE_FORMAT`).
+    fn open_current_format(dir: &Path, mut synced: Vec<PathBuf>) -> Result<Store, StoreError> {
         let segments = dir.join("segments");
         // dur1: each directory created here is fsynced into its parent before any write is acked
         synced.extend(fsutil::create_dir_durable(&segments)?);
@@ -981,7 +982,7 @@ impl Store {
         mut change: Change,
         refs: Vec<(String, Vec<u8>)>,
     ) -> Result<Hash, StoreError> {
-        let (mut items, change_pos) = self.change_frames(&mut change, None)?;
+        let (mut items, change_pos) = self.change_frames(&mut change, None, &[])?;
         items.extend(self.ref_items(refs));
         Ok(self.write(items)?[change_pos])
     }
@@ -1240,8 +1241,9 @@ impl Store {
         &self,
         change: &mut Change,
         view: Option<&str>,
+        conflicts: &[Conflict],
     ) -> Result<(Frames, usize), StoreError> {
-        change.deps = self.change_deps(change, view)?;
+        change.deps = self.change_deps_resolving(change, view, conflicts)?;
         let mut items = vec![];
         for op in &change.ops {
             if let Op::Create { block } | Op::Update { block, .. } = op {
@@ -1270,6 +1272,18 @@ impl StoreReader {
         &self,
         change: &Change,
         view: Option<&str>,
+    ) -> Result<Vec<Hash>, StoreError> {
+        self.change_deps_resolving(change, view, &[])
+    }
+
+    /// `change_deps`, plus, for each op whose block has a conflict in `conflicts`, the change of
+    /// every side that has one: a write under a recorded conflict depends on every side, so the
+    /// merge reads it as the conflict's resolution (res1).
+    pub fn change_deps_resolving(
+        &self,
+        change: &Change,
+        view: Option<&str>,
+        conflicts: &[Conflict],
     ) -> Result<Vec<Hash>, StoreError> {
         let mut deps = BTreeSet::new();
         // `view`'s included set, read once and only when a dep needs it
@@ -1305,6 +1319,11 @@ impl StoreReader {
                     }
                     deps.insert(self.producer(base)?.ok_or(StoreError::NotFound(*base))?);
                 }
+            }
+        }
+        for op in &change.ops {
+            if let Some(c) = conflicts.iter().find(|c| c.block == *op.block_id()) {
+                deps.extend(c.sides.iter().filter_map(|s| s.change));
             }
         }
         Ok(deps.into_iter().collect())

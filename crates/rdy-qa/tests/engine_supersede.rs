@@ -136,10 +136,12 @@ fn sup1_mcp_supersede_drops_a_kind_given_as_an_empty_list() {
     let (s, _ids, d1) = setup(&mut r);
     let mut st =
         rdy_mcp::tools::McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
+    // class 5 (M2c own1): an MCP session is an agent's, and `work` is the human's default view,
+    // so the agent supersedes the landed D1 in its own run-named view.
     rdy_mcp::tools::rdy_session(
         &mut st,
         serde_json::from_value(
-            json!({"actor": "human:qa", "run": "cli", "role": "writer", "view": "work"}),
+            json!({"actor": "agent:qa", "run": "r1", "role": "writer", "view": "r1"}),
         )
         .unwrap(),
     )

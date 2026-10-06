@@ -65,9 +65,16 @@ fn full_landing() -> LandingRecord {
         relay_evidence: Some(RelayEvidence {
             quoted: "yes, land it".into(),
             session_ref: "sess-1".into(),
+            question: Some("land it?".into()),
         }),
         approved_version: Some(Hash::of(b"p@1")),
         rebased_from: vec![Hash::of(b"l1"), Hash::of(b"l2")],
+        evidence: Some(ApprovalEvidence {
+            kind: EvidenceKind::Card,
+            options: vec!["land".into(), "wait".into()],
+            choice: Some("land".into()),
+            card_hash: Some(Hash::of(b"card")),
+        }),
     }
 }
 
@@ -79,6 +86,7 @@ fn local_landing(approved_version: Option<Hash>) -> LandingRecord {
         relay_evidence: None,
         approved_version,
         rebased_from: vec![],
+        evidence: None,
         ..full_landing()
     }
 }
@@ -129,6 +137,7 @@ fn repr1_proposal_and_landing_field_order_is_frozen() {
         changes: vec![Hash::of(b"c1"), Hash::of(b"c2")],
         alternative: Some(alt()),
         provenance: prov(),
+        canon_at: Some(Hash::of(b"canon")),
     };
     assert_eq!(
         enc(&p),
@@ -139,7 +148,8 @@ fn repr1_proposal_and_landing_field_order_is_frozen() {
             &p.view,
             &p.changes,
             &p.alternative,
-            &p.provenance
+            &p.provenance,
+            p.canon_at,
         ))
     );
     assert_eq!(p.id(), Hash::of(&enc(&p)));
@@ -159,6 +169,7 @@ fn repr1_proposal_and_landing_field_order_is_frozen() {
             &l.relay_evidence,
             l.approved_version,
             &l.rebased_from,
+            &l.evidence,
         ))
     );
     assert_eq!(l.id(), Hash::of(&enc(&l)));
@@ -194,8 +205,9 @@ fn repr1_landing_assurance_and_relay_fields_have_fixed_encodings() {
     let ev = RelayEvidence {
         quoted: "yes, land it".into(),
         session_ref: "sess-1".into(),
+        question: Some("land it?".into()),
     };
-    assert_eq!(enc(&ev), enc(&("yes, land it", "sess-1")));
+    assert_eq!(enc(&ev), enc(&("yes, land it", "sess-1", Some("land it?"))));
 }
 
 /// Review Focus 6: what M2 writes after `checks` is a fixed tail of bytes.
@@ -214,15 +226,41 @@ fn repr1_an_m2_landings_new_fields_encode_as_a_fixed_tail() {
     let mut want = head.clone();
     want.extend([0x02, 0x00, 0x00, 0x01]);
     want.extend(Hash::of(b"p").0);
-    want.push(0x00);
+    want.extend([0x00, 0x00]);
     assert_eq!(
         enc(&l),
         want,
-        "local, no relay, no evidence, the version, no rebase"
+        "local, no relay, no evidence, the version, no rebase, no approval evidence"
     );
     let mut want = head;
-    want.extend([0x02, 0x00, 0x00, 0x00, 0x00]);
+    want.extend([0x02, 0x00, 0x00, 0x00, 0x00, 0x00]);
     assert_eq!(enc(&local_landing(None)), want);
+}
+
+#[test]
+fn evk1_evidence_kinds_and_approval_evidence_have_fixed_encodings() {
+    let all = [
+        EvidenceKind::Elicited,
+        EvidenceKind::Card,
+        EvidenceKind::Text,
+    ];
+    assert_eq!(all.map(|k| enc(&k)), [vec![0x00], vec![0x01], vec![0x02]]);
+    assert_eq!(all.map(EvidenceKind::as_str), ["elicited", "card", "text"]);
+    let e = ApprovalEvidence {
+        kind: EvidenceKind::Text,
+        options: vec![],
+        choice: None,
+        card_hash: None,
+    };
+    assert_eq!(
+        enc(&e),
+        enc(&(
+            EvidenceKind::Text,
+            Vec::<String>::new(),
+            None::<String>,
+            None::<Hash>
+        ))
+    );
 }
 
 fn decision_block(fields: &[(&str, &str)]) -> Block {

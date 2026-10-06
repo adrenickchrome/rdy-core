@@ -1,13 +1,15 @@
 use crate::error::*;
 use crate::keys::{self, Keys};
-use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, SessionKind};
+use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, SessionKind, views};
 use rdy_model::tree;
 use rdy_model::{
     Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Justification, Link, Op, RefMode,
     decision, order_between, ref_spans,
 };
 use rdy_schema::{Issue, Pack, has_errors, skeleton_gaps, validate_block};
+use rdy_store::Conflict;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
@@ -332,6 +334,26 @@ impl Resolver<'_> {
         }
     }
 
+    /// An edit's key against the view: `was` is what the view held before the op. An edit that
+    /// sets a key or ends with another key than `was` is checked, and a changed key is noted.
+    /// (For a conflicted block `was` is the conflict's base, while an edit from a side starts
+    /// from the side's block, whose key the view may not hold.)
+    fn check_rekey(
+        &mut self,
+        block: &Block,
+        was: Option<&Block>,
+        sets_key: bool,
+    ) -> Result<(), RdyError> {
+        let changed = keys::key_of(block) != was.and_then(keys::key_of);
+        if sets_key || changed {
+            self.check_key(block)?;
+        }
+        if changed {
+            self.note_key(&block.id, Some(block));
+        }
+        Ok(())
+    }
+
     /// Refuses `block`'s key when another block already holds it (ignoring case).
     fn check_key(&self, block: &Block) -> Result<(), RdyError> {
         let Some(new) = keys::key_of(block) else {
@@ -512,17 +534,30 @@ fn place(
     }
 }
 
+/// The block an update, move, delete or repin of `id` starts from, and the base its op records.
+///
+/// cres1: a block with a recorded conflict reads as the conflict's base, and an edit of it must
+/// name the version it was made from: the conflict's base or one of its sides' versions. The
+/// edit then starts from that version and, through the store, depends on every side, so it
+/// resolves the conflict. A clean block keeps M1's strict check against its current version.
 fn current_for_edit<'b>(
     ov: &'b Overlay,
     id: &BlockId,
     base: &Option<String>,
     touched: &BTreeSet<BlockId>,
-) -> Result<(Hash, &'b Block), RdyError> {
+    conflicts: &[Conflict],
+    store: &rdy_store::Store,
+) -> Result<(Hash, Cow<'b, Block>), RdyError> {
     if touched.contains(id) {
         return Err(bad(
             format!("{id} is changed more than once in this write"),
             "combine the edits into one op",
         ));
+    }
+    if let Some(c) = conflicts.iter().find(|c| c.block == *id) {
+        let (b, cur) = conflicted_for_edit(ov, id, base, c, store)?;
+        check_not_frozen(id, &cur)?;
+        return Ok((b, cur));
     }
     let cur = ov.get(id).ok_or_else(|| {
         RdyError::new(
@@ -545,6 +580,118 @@ fn current_for_edit<'b>(
             format!("re-read {id} (rdy_context) and retry with base={cur_hash}"),
         ));
     }
+    check_not_frozen(id, cur)?;
+    Ok((cur_hash, Cow::Borrowed(cur)))
+}
+
+/// cres1: the base and starting block of an edit of `id`, which has the recorded conflict `c`.
+fn conflicted_for_edit<'b>(
+    ov: &'b Overlay,
+    id: &BlockId,
+    base: &Option<String>,
+    c: &Conflict,
+    store: &rdy_store::Store,
+) -> Result<(Hash, Cow<'b, Block>), RdyError> {
+    let cid = c.id.short();
+    let sides: Vec<Hash> = c.sides.iter().filter_map(|s| s.version).collect();
+    frozen_in_conflict(id, c, store)?;
+    let Some(b) = parse_base(base)? else {
+        let side_list = sides
+            .iter()
+            .map(|h| h.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let fix = match c.base {
+            Some(cb) => format!(
+                "pass base={cb} (its base) or one of its sides' versions ({side_list}); rdy_context shows them"
+            ),
+            None => format!(
+                "pass base=<one of its sides' versions> ({side_list}); rdy_context shows them"
+            ),
+        };
+        return Err(bad(
+            format!("{id} is conflicted ({cid}): name the version you edited"),
+            fix,
+        ));
+    };
+    if c.base != Some(b) && !sides.contains(&b) {
+        let (its_base, retry) = match c.base {
+            Some(cb) => (cb.short(), format!("base={cb} or a side's version")),
+            None => ("none".to_string(), "base=<a side's version>".to_string()),
+        };
+        return Err(RdyError::new(
+            E_STALE_BASE,
+            format!(
+                "{id} is conflicted ({cid}): your base {} is neither its base {its_base} nor a side",
+                b.short()
+            ),
+            format!("re-read {id} (rdy_context lists the sides) and retry with {retry}"),
+        ));
+    }
+    // the view reads the conflict's base, so the overlay holds it; a side's block is in the store
+    match ov.get(id).filter(|cur| cur.version_hash() == b) {
+        Some(cur) => Ok((b, Cow::Borrowed(cur))),
+        None => Ok((b, Cow::Owned(store.get_block(&b)?))),
+    }
+}
+
+/// cres1: a conflict whose base or any side is a frozen decision cannot be resolved by an edit,
+/// from any version: the edit would change or drop an accepted or rejected decision. The way out
+/// is to drop the stale change(s) or to supersede the decision.
+fn frozen_in_conflict(
+    id: &BlockId,
+    c: &Conflict,
+    store: &rdy_store::Store,
+) -> Result<(), RdyError> {
+    let mut frozen = None;
+    if let Some(cb) = c.base
+        && decision::is_frozen(&store.get_block(&cb)?)
+    {
+        frozen = Some(format!("its base {}", cb.short()));
+    }
+    let mut stale = vec![];
+    for s in &c.sides {
+        let side_frozen = match s.version {
+            Some(v) => decision::is_frozen(&store.get_block(&v)?),
+            None => false,
+        };
+        match (side_frozen, s.change) {
+            (true, change) if frozen.is_none() => {
+                let landing = match change {
+                    Some(ch) => store.landing_of(&ch)?,
+                    None => None,
+                };
+                frozen = Some(match (change, landing) {
+                    (Some(ch), Some(l)) => format!("side {} landed in {}", ch.short(), l.short()),
+                    (Some(ch), None) => format!("side {}", ch.short()),
+                    (None, _) => "a side in canon".to_string(),
+                });
+            }
+            (false, Some(ch)) => stale.push(ch.to_string()),
+            _ => {}
+        }
+    }
+    let Some(which) = frozen else {
+        return Ok(());
+    };
+    let exclude = match stale.as_slice() {
+        [] => "exclude the stale change from the view (rdy view exclude)".to_string(),
+        [one] => format!("exclude the stale change {one} from the view (rdy view exclude)"),
+        many => format!(
+            "exclude the stale changes {} from the view (rdy view exclude)",
+            many.join(", ")
+        ),
+    };
+    Err(RdyError::new(
+        E_FROZEN,
+        format!(
+            "{id} is an accepted or rejected decision ({which}) and cannot change; this conflict cannot be resolved by an edit"
+        ),
+        format!("{exclude}, or write a new decision that supersedes or revokes {id}"),
+    ))
+}
+
+fn check_not_frozen(id: &BlockId, cur: &Block) -> Result<(), RdyError> {
     if decision::is_frozen(cur) {
         return Err(RdyError::new(
             E_FROZEN,
@@ -552,7 +699,7 @@ fn current_for_edit<'b>(
             format!("write a new decision that supersedes or revokes {id}"),
         ));
     }
-    Ok((cur_hash, cur))
+    Ok(())
 }
 
 type Built = (
@@ -679,7 +826,14 @@ fn check_depth(ov: &Overlay, block: &Block, below: usize) -> Result<(), RdyError
 }
 
 /// Checks a doc's or folder's name: valid, and unique among its siblings ignoring case.
-fn check_name(ov: &Overlay, block: &Block, op: usize, is_move: bool) -> Result<(), RdyError> {
+/// `no_fields` names the op when it takes no fields (a move, or a repin resolving a conflict from
+/// a side that carries another name), so the fix says to rename first.
+fn check_name(
+    ov: &Overlay,
+    block: &Block,
+    op: usize,
+    no_fields: Option<&str>,
+) -> Result<(), RdyError> {
     if !tree::is_tree_type(&block.block_type) {
         return Ok(());
     }
@@ -706,13 +860,12 @@ fn check_name(ov: &Overlay, block: &Block, op: usize, is_move: bool) -> Result<(
                     "{} would be named {name:?}, which {other} already uses here (names are unique ignoring case)",
                     block.id
                 ),
-                if is_move {
-                    format!("a move takes no fields: rename {} first with an update (e.g. to {fixed:?}), then move it", block.id)
-                } else {
-                    format!("choose another name, e.g. {fixed:?}")
+                match no_fields {
+                    Some(kind) => format!("a {kind} takes no fields: rename {} first with an update (e.g. to {fixed:?}), then {kind} it", block.id),
+                    None => format!("choose another name, e.g. {fixed:?}"),
                 },
             );
-            return Err(if is_move {
+            return Err(if no_fields.is_some() {
                 err
             } else {
                 err.with_corrected(serde_json::json!({"op": op, "fields": {"name": fixed}}))
@@ -783,6 +936,7 @@ fn build_ops(
     base: &Materialized,
     session: &Session,
     inputs: Vec<OpInput>,
+    conflicts: &[Conflict],
 ) -> Result<Built, RdyError> {
     let mut ov = Overlay::new(base);
     let mut res = Resolver::new(base);
@@ -898,7 +1052,7 @@ fn build_ops(
                         .insert("name".into(), FieldValue::Str(name.clone()));
                     names.insert(block.id.to_string(), name);
                 } else {
-                    check_name(&ov, &block, i, false)?;
+                    check_name(&ov, &block, i, None)?;
                 }
                 check_decided_at(session, &block, None)?;
                 check_depth(&ov, &block, 0)?;
@@ -920,7 +1074,8 @@ fn build_ops(
                 links,
             } => {
                 let id = res.id(&id)?;
-                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched)?;
+                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched, conflicts, store)?;
+                let cur: &Block = &cur;
                 let mut block = cur.clone();
                 // a doc from M1 stores the name readers already use for it on its first write
                 if block.block_type == tree::DOC
@@ -949,16 +1104,12 @@ fn build_ops(
                 }
                 check_decided_at(session, &block, Some(cur))?;
                 prior.push((false, cur.pins.clone()));
-                let renamed = block.field_str("name") != cur.field_str("name");
-                if renamed {
-                    check_name(&ov, &block, i, false)?;
+                // names and keys against what the view held, not the side an edit starts from
+                let was = ov.get(&id);
+                if block.field_str("name") != was.and_then(|w| w.field_str("name")) {
+                    check_name(&ov, &block, i, None)?;
                 }
-                if sets_key {
-                    res.check_key(&block)?;
-                }
-                if keys::key_of(&block) != keys::key_of(cur) {
-                    res.note_key(&id, Some(&block));
-                }
+                res.check_rekey(&block, was, sets_key)?;
                 touched.insert(id.clone());
                 ov.set(id, Some(block.clone()));
                 ops.push(Op::Update {
@@ -983,7 +1134,8 @@ fn build_ops(
                         "name another sibling as before, or omit it",
                     ));
                 }
-                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched)?;
+                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched, conflicts, store)?;
+                let cur: &Block = &cur;
                 let mut block = cur.clone();
                 if block.block_type == tree::DOC
                     && !block.fields.contains_key("name")
@@ -1012,7 +1164,8 @@ fn build_ops(
                 }
                 block.parent = parent.clone();
                 block.order = place(&ov, parent.as_ref(), after.as_ref(), before.as_ref())?;
-                check_name(&ov, &block, i, true)?;
+                check_name(&ov, &block, i, Some("move"))?;
+                res.check_rekey(&block, ov.get(&id), false)?;
                 if block.block_type == tree::FOLDER {
                     check_depth(&ov, &block, folders_below(&ov, &id))?;
                 } else {
@@ -1028,7 +1181,8 @@ fn build_ops(
             }
             OpInput::Delete { id, base: b } => {
                 let id = res.id(&id)?;
-                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched)?;
+                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched, conflicts, store)?;
+                let cur: &Block = &cur;
                 if cur.block_type == decision::QUESTION {
                     return Err(bad(
                         format!(
@@ -1044,7 +1198,8 @@ fn build_ops(
                         "delete or move its children first",
                     ));
                 }
-                if keys::key_of(cur).is_some() {
+                // the key the view held (a conflicted block's base), not the side's
+                if ov.get(&id).and_then(keys::key_of).is_some() {
                     res.note_key(&id, None);
                 }
                 touched.insert(id.clone());
@@ -1122,7 +1277,9 @@ fn build_ops(
                     if decision::is_frozen(b) || b.order == k {
                         continue;
                     }
-                    let (base_hash, cur) = current_for_edit(&ov, &b.id, &None, &touched)?;
+                    let (base_hash, cur) =
+                        current_for_edit(&ov, &b.id, &None, &touched, conflicts, store)?;
+                    let cur: &Block = &cur;
                     let mut block = cur.clone();
                     // like a move, a doc from M1 stores the name readers already use for it
                     if block.block_type == tree::DOC
@@ -1150,7 +1307,8 @@ fn build_ops(
                 targets,
             } => {
                 let id = res.id(&id)?;
-                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched)?;
+                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched, conflicts, store)?;
+                let cur: &Block = &cur;
                 let cited: BTreeSet<BlockId> = cur
                     .ref_tokens()
                     .iter()
@@ -1203,6 +1361,12 @@ fn build_ops(
                         "a superseded or revoked suspect clears only when the citation changes, not by repinning; rdy_context lists the block's suspects",
                     ));
                 }
+                // a repin from a conflict's side carries the side's name and key
+                let was = ov.get(&id);
+                if block.field_str("name") != was.and_then(|w| w.field_str("name")) {
+                    check_name(&ov, &block, i, Some("repin"))?;
+                }
+                res.check_rekey(&block, was, false)?;
                 repinned.extend(wanted);
                 prior.push((true, block.pins.clone())); // pins set here; the second pass keeps them
                 touched.insert(id.clone());
@@ -1400,11 +1564,13 @@ impl Rdy {
         }
         let scope = Scope::View(req.view.clone());
         let st = self.read();
-        check_view_access(&st, &req.view, session)?;
+        check_view_access(&st, &req.view, session, views::Action::Commit)?;
+        let claim = views::commit_claim(&st, session, &req.view)?;
+        let conflicts = st.conflicts(&scope)?;
         let m = st.materialized(&scope)?;
         let brief_warnings = crate::brief::check(&self.pack, &self.briefs, &m, &req.ops, brief)?;
         let (ops, created, touched, names) =
-            build_ops(&self.pack, &self.store, &m, session, req.ops)?;
+            build_ops(&self.pack, &self.store, &m, session, req.ops, &conflicts)?;
         let change = Change {
             view: req.view.clone(),
             ops: ops.clone(),
@@ -1414,9 +1580,13 @@ impl Rdy {
             message: req.message,
             links,
         };
-        let id = self
-            .store
-            .commit_to_view_with(&req.view, change, &|id| m.version_of(id))?;
+        let id = self.store.commit_to_view_resolving(
+            &req.view,
+            change,
+            &|id| m.version_of(id),
+            &conflicts,
+            claim,
+        )?;
         self.publish(Delta::Commit {
             view: req.view.clone(),
             ops,
@@ -1451,29 +1621,72 @@ impl Rdy {
     }
 }
 
-/// May `s` write into `view`? The view must be writable at all (`writable_view`); then an agent
-/// session may only commit into a view with no head yet, an unowned head, or a head it owns
-/// (same actor and run). A human session may write into any view.
-pub(crate) fn check_view_access(st: &ReadState, view: &str, s: &Session) -> Result<(), RdyError> {
-    writable_view(view)?;
+/// May `s` do `action` on `view`? The view must be writable at all (`writable_view`; a proposal
+/// skips this, so legacy `:` views stay proposable by the human). A human session may do
+/// anything anywhere. An agent session never acts on the human's `work` view; otherwise it may
+/// act on a view with no head yet (commit and include create it), on an unowned head only by
+/// committing (the commit claims it), and on a head it owns (same actor and run).
+pub(crate) fn check_view_access(
+    st: &ReadState,
+    view: &str,
+    s: &Session,
+    action: views::Action,
+) -> Result<(), RdyError> {
+    let propose = action == views::Action::Propose;
+    if !propose {
+        writable_view(view)?;
+    }
     if s.kind != SessionKind::Agent {
         return Ok(());
     }
-    match st.view_head(view) {
-        Some(h) => match &h.owner {
-            Some(o) if (&o.actor, &o.run) != (&s.actor, &s.run) => Err(RdyError::new(
-                E_VIEW_OWNER,
+    not_humans_view(view, s)?;
+    let Some(h) = st.view_head(view) else {
+        return Ok(());
+    };
+    match &h.owner {
+        None if action == views::Action::Commit => Ok(()),
+        None => Err(RdyError::new(
+            E_VIEW_OWNER,
+            format!("view {view:?} is unowned"),
+            if propose {
+                "commit to it to claim it, or include its changes into your own view and propose \
+                 that"
+                    .to_string()
+            } else {
+                format!("commit to it to claim it, or fork it (rdy view fork {view} <name>)")
+            },
+        )),
+        Some(o) if (&o.actor, &o.run) == (&s.actor, &s.run) => Ok(()),
+        Some(o) => Err(RdyError::new(
+            E_VIEW_OWNER,
+            format!(
+                "view {view:?} is owned by {}{}",
+                o.actor,
+                o.run.as_ref().map(|r| format!("/{r}")).unwrap_or_default()
+            ),
+            if propose && view != s.default_view() {
                 format!(
-                    "view {view:?} is owned by {}{}",
-                    o.actor,
-                    o.run.as_ref().map(|r| format!("/{r}")).unwrap_or_default()
-                ),
-                own_view_fix(view, s),
-            )),
-            _ => Ok(()),
-        },
-        None => Ok(()),
+                    "propose your own view ({}), or include its changes into your own view and \
+                     propose that",
+                    s.default_view()
+                )
+            } else {
+                own_view_fix(view, s)
+            },
+        )),
     }
+}
+
+/// An agent session never acts on, creates or forks into the human's `work` view.
+pub(crate) fn not_humans_view(view: &str, s: &Session) -> Result<(), RdyError> {
+    if s.kind == SessionKind::Agent && view == "work" {
+        return Err(RdyError::new(
+            E_VIEW_OWNER,
+            "view \"work\" is the human's default view",
+            own_view_fix(view, s),
+        ));
+    }
+    Ok(())
 }
 
 /// The `E_VIEW_OWNER` fix. When the refused view is the session's own default view, sending the

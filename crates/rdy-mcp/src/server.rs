@@ -1,5 +1,6 @@
 use crate::order::{Order, Ordered, Stamped};
 use crate::tools::{self, *};
+use crate::view_tools;
 use rdy_engine::engine::{Engine, Local};
 use rdy_engine::{E_INTERNAL, E_LIMIT, RdyError};
 use rmcp::{
@@ -207,6 +208,20 @@ impl RdyServer {
     async fn rdy_asset(&self, Parameters(p): Parameters<AssetParams>) -> CallToolResult {
         self.run("rdy_asset", p, tools::rdy_asset).await
     }
+
+    #[tool(
+        description = "Create, fork, include, exclude, compare, list, show, close or undo views. Include, exclude, close and undo need ownership of the target view."
+    )]
+    async fn rdy_view(&self, Parameters(p): Parameters<view_tools::ViewParams>) -> CallToolResult {
+        self.run("rdy_view", p, view_tools::rdy_view).await
+    }
+
+    #[tool(
+        description = "Canon's landings, newest first: who approved which proposal version, how (assurance, relay, evidence), and the tags on each."
+    )]
+    async fn rdy_log(&self, Parameters(p): Parameters<view_tools::LogParams>) -> CallToolResult {
+        self.run("rdy_log", p, view_tools::rdy_log).await
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -237,7 +252,7 @@ impl ServerHandler for RdyServer {
 }
 
 /// What the server tells a host about rdy.
-pub const INSTRUCTIONS: &str = "rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Read and write through rdy's tools, not the working-copy files. Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>). Write with rdy_write; propose with rdy_propose.";
+pub const INSTRUCTIONS: &str = "rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Read and write through rdy's tools, not the working-copy files. Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>). Write with rdy_write; propose with rdy_propose. Work in your own view; include others' changes, never write into their views. Conflicts are recorded, not errors: resolve one by writing the block.";
 
 /// The longest id value [`IdScanner`] will capture; a longer one counts as no id.
 const MAX_ID_BYTES: usize = 1024;

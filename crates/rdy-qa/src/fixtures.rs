@@ -34,6 +34,16 @@ pub fn human_env(actor: &str) -> (tempfile::TempDir, Vec<(String, String)>) {
     (dir, env)
 }
 
+/// An agent session (writer) with run `run`.
+pub fn as_agent(actor: &str, run: &str) -> Session {
+    Session::agent(actor.into(), Some(run.into()), Role::Writer).unwrap()
+}
+
+/// The human, as a writer (`writer()`).
+pub fn human_writer() -> Session {
+    writer()
+}
+
 pub fn project() -> (tempfile::TempDir, Rdy) {
     let dir = tempfile::tempdir().expect("tempdir");
     let r = Rdy::init(dir.path(), "rdy-standard").expect("init");
@@ -51,6 +61,60 @@ pub fn write(r: &mut Rdy, view: &str, ops: serde_json::Value) -> Result<WriteRes
             justification: None,
             message: String::new(),
         },
+    )
+}
+
+pub fn write_as(
+    r: &mut Rdy,
+    s: &Session,
+    view: &str,
+    ops: serde_json::Value,
+) -> Result<WriteResult, RdyError> {
+    let ops = serde_json::from_value(ops)
+        .map_err(|e| RdyError::new(rdy_engine::E_BAD_INPUT, e.to_string(), "fix the test's ops"))?;
+    r.write(
+        s,
+        WriteRequest {
+            view: view.into(),
+            ops,
+            justification: None,
+            message: String::new(),
+        },
+    )
+}
+
+pub fn version_of(r: &Rdy, scope: &rdy_engine::Scope, id: &str) -> String {
+    let id = BlockId::parse(id).expect("block id");
+    r.read()
+        .materialized(scope)
+        .expect("scope")
+        .version_of(&id)
+        .expect("block in scope")
+        .to_string()
+}
+
+pub fn body_of(r: &Rdy, scope: &rdy_engine::Scope, id: &str) -> String {
+    let id = BlockId::parse(id).expect("block id");
+    r.read()
+        .materialized(scope)
+        .expect("scope")
+        .get(&id)
+        .expect("block in scope")
+        .body
+        .clone()
+}
+
+/// One glossary doc "Seed" with one section and one claim, written into `view` by `writer()`.
+pub fn seed_doc(r: &mut Rdy, view: &str) -> (String, String, String) {
+    let res = write(r, view, serde_json::json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "seed", "title": "Seed", "doc_type": "glossary"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "one"}
+    ])).expect("seed");
+    (
+        res.created["$d"].clone(),
+        res.created["$s"].clone(),
+        res.created["$c"].clone(),
     )
 }
 

@@ -17,6 +17,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 mod brief_text;
+mod view_cmd;
 
 /// This binary's version: the hello's `version`, so a client only talks to a daemon of its own.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -77,8 +78,40 @@ enum Cmd {
         #[arg(long)]
         view: Option<String>,
     },
+    /// Approve a proposal version: P-<id>@<n>, P-<id> (its latest version) or a version hash.
     Approve {
         proposal: String,
+        /// The agent that relays the human's approval, as actor[/run]. Records a relayed approval.
+        #[arg(long, requires = "evidence")]
+        relayed_by: Option<String>,
+        /// The human's words, quoted. Requires --relayed-by and the exact version.
+        #[arg(long, requires = "relayed_by")]
+        evidence: Option<String>,
+        /// The question the human was asked.
+        #[arg(long, requires = "relayed_by")]
+        question: Option<String>,
+        /// Where the human said it (default: cli).
+        #[arg(long = "session", requires = "relayed_by")]
+        session_ref: Option<String>,
+        /// Refuse the approval when canon has moved since the version was proposed.
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Create, fork, include, exclude, compare, list, show, close and hand over views.
+    View {
+        #[command(subcommand)]
+        cmd: view_cmd::ViewCmd,
+    },
+    /// Undo the newest op of this session on a view, or the named op.
+    Undo {
+        /// The view (default: the session's own).
+        #[arg(long)]
+        view: Option<String>,
+        /// The view op to undo (default: this session's newest undoable op).
+        op: Option<String>,
+        /// Also exclude the included changes that depend on the ones the undo excludes.
+        #[arg(long)]
+        cascade: bool,
     },
     /// Name a landing (default: canon's head) as a version, e.g. v1.2.0. Approver only.
     Tag {
@@ -506,12 +539,27 @@ fn show_text(v: &Value) -> String {
     if let Some(s) = status {
         out.push_str(&format!("status: {s}\n"));
     }
+    if let Some(from) = v["effective_from"].as_str() {
+        out.push_str(&format!("effective from: {from}\n"));
+    }
     out.push_str(&format!(
         "{}\n{}",
         serde_json::to_string_pretty(&fields).unwrap_or_default(),
         text(&v["body"])
     ));
+    if v["conflict"].is_object() {
+        out.push('\n');
+        out.push_str(&view_cmd::conflict_text(v));
+    }
     out
+}
+
+/// `actor` or `actor/run`, from a `{actor, run}` object.
+fn actor_run(v: &Value) -> String {
+    match v["run"].as_str() {
+        Some(run) => format!("{}/{run}", text(&v["actor"])),
+        None => text(&v["actor"]).to_string(),
+    }
 }
 
 fn log_text(v: &Value) -> String {
@@ -523,6 +571,12 @@ fn log_text(v: &Value) -> String {
             text(&row["title"]),
             text(&row["approved_by"])
         ));
+        if let Some(a) = row["approved"].as_str() {
+            out.push_str(&format!("  approved {a}"));
+        }
+        if row["relayed_by"].is_object() {
+            out.push_str(&format!(", relayed by {}", actor_run(&row["relayed_by"])));
+        }
         let tags: Vec<&str> = row["tags"]
             .as_array()
             .into_iter()
@@ -533,6 +587,34 @@ fn log_text(v: &Value) -> String {
             out.push_str(&format!("  [{}]", tags.join(", ")));
         }
         out.push('\n');
+        let (ev, relay) = (&row["evidence"], &row["relay_evidence"]);
+        if ev.is_object() || relay.is_object() {
+            let mut line = format!("    evidence ({})", text(&ev["kind"]));
+            if relay.is_object() {
+                line.push_str(&format!(": \"{}\"", text(&relay["quoted"])));
+                match relay["question"].as_str() {
+                    Some(q) => line.push_str(&format!(
+                        " (asked: \"{q}\"; session {})",
+                        text(&relay["session_ref"])
+                    )),
+                    None => line.push_str(&format!(" (session {})", text(&relay["session_ref"]))),
+                }
+            } else if let Some(c) = ev["choice"].as_str() {
+                line.push_str(&format!(": chose \"{c}\""));
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+        let from: Vec<&str> = row["rebased_from"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(hash_short)
+            .collect();
+        if !from.is_empty() {
+            out.push_str(&format!("    rebased from {}\n", from.join(", ")));
+        }
     }
     out
 }
@@ -751,17 +833,56 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         }
         Cmd::Propose { title, view } => {
             let v = call(env, "propose", json!({"title": title, "view": view}))?;
-            let id = text(&v["id"]);
-            let t = format!(
-                "proposal {} ({} changes)\napprove with: rdy approve {id}",
-                hash_short(id),
-                num(&v["changes"]),
-            );
+            let pref = text(&v["ref"]);
+            let mut t = format!("proposal {pref} ({} changes)", num(&v["changes"]));
+            let blocking = v["blocking"].as_array().map_or(0, Vec::len);
+            if blocking > 0 {
+                t.push_str(&format!(
+                    "\nblocking: {blocking} conflict(s) on blocks this proposal writes"
+                ));
+            }
+            t.push_str(&format!("\napprove with: rdy approve {pref}"));
             Ok((v, t))
         }
-        Cmd::Approve { proposal } => {
-            let v = call(env, "approve", json!({"proposal": proposal}))?;
-            let mut t = format!("landed {}", hash_short(text(&v["landing"])));
+        Cmd::Approve {
+            proposal,
+            relayed_by,
+            evidence,
+            question,
+            session_ref,
+            strict,
+        } => {
+            let v = call(
+                env,
+                "approve",
+                json!({
+                    "proposal": proposal,
+                    "relayed_by": relayed_by,
+                    "evidence": evidence,
+                    "question": question,
+                    "session_ref": session_ref,
+                    "strict": strict.then_some(true),
+                }),
+            )?;
+            let approved = text(&v["approved"]);
+            let mut t = format!(
+                "approving {approved}: {} ({} change(s))\nlanded {} ({approved})",
+                text(&v["title"]),
+                num(&v["changes"]),
+                hash_short(text(&v["landing"]))
+            );
+            if let Some(by) = relayed_by {
+                t.push_str(&format!(", relayed by {by}"));
+            }
+            for r in v["rebased"].as_array().into_iter().flatten() {
+                if num(&r["conflicts"]) > 0 {
+                    t.push_str(&format!(
+                        "\nrebased {}: {} conflict(s)",
+                        text(&r["view"]),
+                        num(&r["conflicts"])
+                    ));
+                }
+            }
             for w in v["warnings"].as_array().into_iter().flatten() {
                 t.push_str(&format!(
                     "\nwarning {}: {}",
@@ -769,6 +890,18 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                     text(&w["message"])
                 ));
             }
+            Ok((v, t))
+        }
+        Cmd::View { cmd } => {
+            let args = view_cmd::args_of(&cmd);
+            let op = text(&args["op"]).to_string();
+            let v = call(env, "view", args)?;
+            let t = view_cmd::render(&op, &v);
+            Ok((v, t))
+        }
+        Cmd::Undo { view, op, cascade } => {
+            let v = call(env, "view", view_cmd::undo_args(view, op, cascade))?;
+            let t = view_cmd::render("undo", &v);
             Ok((v, t))
         }
         Cmd::Tag {

@@ -4,7 +4,8 @@ use rdy_model::{
     Block, BlockId, FieldValue, LandingRecord, StateSnapshot, decision, tree, valid_order_key,
 };
 use rdy_schema::{Severity, validate_block};
-use std::collections::{BTreeMap, BTreeSet};
+use rdy_store::{Conflict, ViewOpKind, kinds};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Violation {
@@ -155,6 +156,9 @@ pub fn check(r: &Rdy, scope: &Scope) -> Result<(), Vec<Violation>> {
     }
     if *scope == Scope::Canon {
         out.extend(frozen(r));
+        if let Err(vs) = check_views(r) {
+            out.extend(vs);
+        }
     }
     if let Err(e) = r.fsck() {
         out.push(v("fsck", None, e.to_string()));
@@ -195,4 +199,148 @@ fn frozen(r: &Rdy) -> Vec<Violation> {
         }
     }
     out
+}
+
+/// Spec §15.3 invariants 1-4 for views: every view's set is closed under deps (`closed`), every
+/// live unpinned view reads on canon's head (`rebased`), every recorded or derived conflict side
+/// names a stored change and block (`conflict_sides`), and the store's typed objects, view chains
+/// and dependency DAG hold (`chains`). The frame walk of `Rdy::fsck` is left to the caller.
+pub fn check_views(r: &Rdy) -> Result<(), Vec<Violation>> {
+    let mut out = vec![];
+    let st = r.read();
+    let store = st.reader();
+    let canon = st.canon_head();
+    // landings, newest first: a landing's position is its distance from canon's head
+    let landings = match store.landings() {
+        Ok(l) => l,
+        Err(e) => {
+            return Err(vec![v(
+                "chains",
+                None,
+                format!("cannot read landings: {e}"),
+            )]);
+        }
+    };
+    let position: HashMap<_, usize> = landings
+        .iter()
+        .enumerate()
+        .map(|(i, (h, _))| (*h, i))
+        .collect();
+    for name in st.view_names() {
+        let Some(head) = st.view_head(&name) else {
+            continue;
+        };
+        let included = st.included(&name);
+        // 1. closed under deps, relative to the view's base
+        let set: HashSet<_> = included.iter().collect();
+        let base_pos = head.base.and_then(|b| position.get(&b).copied());
+        for c in included.iter() {
+            let Ok(ch) = store.change(c) else {
+                out.push(v(
+                    "closed",
+                    None,
+                    format!("view {name:?}: change {c} is not stored"),
+                ));
+                continue;
+            };
+            for dep in &ch.deps {
+                let landed_in_base = match (store.landing_of(dep), base_pos) {
+                    (Ok(Some(l)), Some(b)) => position.get(&l).is_some_and(|at| *at >= b),
+                    _ => false,
+                };
+                if !set.contains(dep) && !landed_in_base {
+                    out.push(v(
+                        "closed",
+                        None,
+                        format!(
+                            "view {name:?}: change {c} depends on {dep}, which is neither included nor in the view's base"
+                        ),
+                    ));
+                }
+            }
+        }
+        // 2. a live unpinned view reads on canon's head
+        if !head.closed && !head.pinned {
+            if !included.is_empty() {
+                if head.base != canon {
+                    out.push(v(
+                        "rebased",
+                        None,
+                        format!(
+                            "view {name:?} has work on base {:?}, but canon's head is {canon:?}",
+                            head.base
+                        ),
+                    ));
+                }
+            } else if st.effective_base(&name) != canon {
+                out.push(v(
+                    "rebased",
+                    None,
+                    format!("empty view {name:?} does not read on canon's head"),
+                ));
+            }
+        }
+        // 3. conflict sides: those a landing recorded, and those the view's merge derives
+        let mut conflicts: Vec<Conflict> = vec![];
+        match store.view_op_ids(&name) {
+            Ok(ids) => {
+                for h in ids {
+                    match store.view_op(&h) {
+                        Ok(op) => {
+                            if let ViewOpKind::Rebase { conflicts: cs, .. } = op.op {
+                                conflicts.extend(cs);
+                            }
+                        }
+                        Err(e) => out.push(v(
+                            "conflict_sides",
+                            None,
+                            format!("view {name:?}: cannot read op {h}: {e}"),
+                        )),
+                    }
+                }
+            }
+            Err(e) => out.push(v(
+                "conflict_sides",
+                None,
+                format!("view {name:?}: cannot list its ops: {e}"),
+            )),
+        }
+        if !head.closed {
+            match st.conflicts(&Scope::View(name.clone())) {
+                Ok(cs) => conflicts.extend(cs.iter().cloned()),
+                Err(e) => out.push(v(
+                    "conflict_sides",
+                    None,
+                    format!("view {name:?}: cannot materialize it to derive its conflicts: {e}"),
+                )),
+            }
+        }
+        for c in &conflicts {
+            for side in &c.sides {
+                if let Some(ch) = &side.change
+                    && !store.has_kind(kinds::CHANGE, ch).unwrap_or(false)
+                {
+                    out.push(v(
+                        "conflict_sides",
+                        Some(&c.block),
+                        format!("view {name:?}: a conflict side names {ch}, which is not a change"),
+                    ));
+                }
+                if let Some(ver) = &side.version
+                    && !store.has_kind(kinds::BLOCK, ver).unwrap_or(false)
+                {
+                    out.push(v(
+                        "conflict_sides",
+                        Some(&c.block),
+                        format!("view {name:?}: a conflict side holds {ver}, which is not a block"),
+                    ));
+                }
+            }
+        }
+    }
+    // 4. chains, heads, index entries, the dependency DAG
+    if let Err(e) = store.check_objects() {
+        out.push(v("chains", None, e.to_string()));
+    }
+    if out.is_empty() { Ok(()) } else { Err(out) }
 }

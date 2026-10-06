@@ -2,6 +2,7 @@
 //! child (`crash_child`) that makes acknowledged writes and is aborted at a chosen point of a later
 //! one; the parent reopens the store and checks it recovered every acknowledged write, with the
 //! index caught up from the log rather than rebuilt.
+use rdy_store::format::STORE_FORMAT;
 use rdy_store::segment::{CrashPoint, Location};
 use rdy_store::{OpenReport, Store};
 use std::io::Write;
@@ -303,7 +304,7 @@ fn kill1_create_writes_format_before_anything_else() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("FORMAT"),
-        "rdy store format\nstore_format 3\n",
+        format!("rdy store format\nstore_format {STORE_FORMAT}\n"),
     )
     .unwrap();
     finished_format(dir.path(), &[], what);
@@ -329,7 +330,11 @@ fn kill1_create_writes_format_before_anything_else() {
 fn empty_store(dir: &Path) {
     std::fs::create_dir_all(dir.join("segments")).unwrap();
     drop(rdy_store::index::Index::open(&dir.join("index.redb")).unwrap());
-    std::fs::write(dir.join("FORMAT"), "rdy store format\nstore_format 3\n").unwrap();
+    std::fs::write(
+        dir.join("FORMAT"),
+        format!("rdy store format\nstore_format {STORE_FORMAT}\n"),
+    )
+    .unwrap();
 }
 
 /// Opens a store directory the way a crash left it and checks the open finished the format batch:
@@ -346,15 +351,15 @@ fn finished_format(dir: &Path, blobs: &[Vec<u8>], what: &str) {
         rdy_store::segment::log_has_marker(&segments).unwrap(),
         "{what}: no marker"
     );
-    // M2a1 (fmt2): one format number, `store_format 3`, in place of log_format/min_reader
+    // M2a1 (fmt2): one format number, `store_format N`, in place of log_format/min_reader
     assert_eq!(
         std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
-        "rdy store format\nstore_format 3\n",
+        format!("rdy store format\nstore_format {STORE_FORMAT}\n"),
         "{what}"
     );
     assert_eq!(
         s.get_ref("meta/store_format").unwrap(),
-        Some(b"3".to_vec()),
+        Some(STORE_FORMAT.to_string().into_bytes()),
         "{what}"
     );
     drop(s);

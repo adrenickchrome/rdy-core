@@ -172,3 +172,31 @@ fn imp1_impact_items_say_which_edge_reached_them() {
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v[1]["via"], json!({"from": c, "kind": "references"}));
 }
+
+#[test]
+fn relay1_propose_text_names_the_ref_the_approver_approves() {
+    let (s, mut r) = served();
+    let section = seed_doc(&mut r, "seed").1;
+    land(&mut r, "seed").unwrap();
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "x"}]),
+    )
+    .unwrap();
+    r.close().unwrap();
+    let (ok, text, err) = rdy(&s, &["propose", "--title", "t"]);
+    assert!(ok, "{err}");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "no blocking line without a conflict: {text}"
+    );
+    let pref = lines[0]
+        .strip_prefix("proposal ")
+        .and_then(|l| l.strip_suffix(" (1 changes)"))
+        .unwrap();
+    assert!(pref.starts_with("P-") && pref.ends_with("@1"), "{text}");
+    assert_eq!(lines[1], format!("approve with: rdy approve {pref}"));
+}

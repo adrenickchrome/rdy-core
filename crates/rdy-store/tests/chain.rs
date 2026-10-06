@@ -65,6 +65,7 @@ fn chain1_the_walk_applies_the_ops_after_the_latest_checkpoint() {
         from_head: h(9),
         base: None,
         changes: vec![h(2), h(3)],
+        owner: None,
     };
     let ids = chain(
         &mut s,
@@ -120,6 +121,7 @@ fn chain1_the_walk_reads_back_only_to_the_checkpoint_then_only_to_the_cached_hea
         landing: h(99),
         dropped: (10..30).map(h).collect(),
         remaining: vec![h(50)],
+        conflicts: vec![],
     });
     ops.extend([
         ViewOpKind::Commit { change: h(51) },
@@ -186,7 +188,6 @@ fn chain1_a_broken_chain_names_the_view_the_op_and_why() {
         ("a", b[0], "the op belongs to view \"b\""),
         ("c", h(7), "the op is missing"),
         ("d", d[0], "it ends without a checkpoint"),
-        ("e", e[1], "an undo op needs a newer rdy"),
     ] {
         match s.included(view) {
             Err(StoreError::Decode(m)) => assert_eq!(
@@ -205,6 +206,13 @@ fn chain1_a_broken_chain_names_the_view_the_op_and_why() {
         ),
         other => panic!("{other:?}"),
     }
+    // vop1: the walk resolves an undo through its target, so an undo of a missing op fails there
+    assert!(
+        matches!(s.included("e"), Err(StoreError::NotFound(t)) if t == h(1)),
+        "{:?} at {}",
+        s.included("e"),
+        e[1]
+    );
 }
 
 fn block(id: &str, body: &str) -> Block {
@@ -339,7 +347,8 @@ fn chain1_landing_appends_a_rebase_checkpoint_with_the_remaining_changes() {
         ViewOpKind::Rebase {
             landing: l,
             dropped: vec![c1],
-            remaining: vec![c2]
+            remaining: vec![c2],
+            conflicts: vec![],
         }
     );
     assert_eq!((head.base, head.len), (Some(l), 1));

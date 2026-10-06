@@ -3,7 +3,8 @@
 //! every successful landing canon does. The generator is biased toward conflicts (a small shared
 //! pool of targets, clashing names, folder and section moves that can form cycles, deep sibling
 //! keys that give `rebalance` real work), and the run counts outcomes and asserts coverage
-//! minimums so the test cannot silently decay into one that never conflicts.
+//! minimums so the test cannot silently decay into one that never conflicts. Views also include
+//! each other's changes (sb2), so conflicts are recorded in views and refuse their landings.
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed, TestCaseError, TestRunner};
 use rdy_engine::*;
@@ -82,6 +83,13 @@ enum Cmd {
     Land {
         view: u8,
     },
+    /// sb2: the newest change of `from` touching `pick`'s block (one of the blocks `from`'s
+    /// changes touch), included into `to` by `to`'s writer.
+    Include {
+        from: u8,
+        to: u8,
+        pick: u16,
+    },
     /// An approver tags canon's head as the next version, if canon moved since the last tag.
     Tag,
 }
@@ -114,7 +122,8 @@ fn cmd() -> impl Strategy<Value = Cmd> {
         4 => (v.clone(), p.clone(), name()).prop_map(|(view, pick, name)| Cmd::Rename { view, pick, name }),
         3 => (v.clone(), p.clone()).prop_map(|(view, parent)| Cmd::Rebalance { view, parent }),
         2 => (v.clone(), p.clone()).prop_map(|(view, parent)| Cmd::Decide { view, parent }),
-        3 => v.prop_map(|view| Cmd::Land { view }),
+        3 => v.clone().prop_map(|view| Cmd::Land { view }),
+        3 => (v, 1u8..4, any::<u16>()).prop_map(|(from, d, pick)| Cmd::Include { from, to: (from + d) % 4, pick }),
         1 => Just(Cmd::Tag),
     ]
 }
@@ -160,6 +169,12 @@ struct Stats {
     write_refused: BTreeMap<String, usize>,
     siblings_rekeyed: usize,
     tags: usize,
+    /// sb2: includes that added a change, refused includes by code, conflicts recorded in a view
+    /// (by an include, or by a landing's rebase), and landings refused for an unresolved conflict
+    included: usize,
+    include_refused: BTreeMap<String, usize>,
+    conflict_recorded: usize,
+    conflict_unresolved_at_land: usize,
 }
 
 struct Sim<'a> {
@@ -193,8 +208,29 @@ fn kind(c: &Cmd) -> &'static str {
         Cmd::Rebalance { .. } => "rebalance",
         Cmd::Decide { .. } => "decide",
         Cmd::Land { .. } => "land",
+        Cmd::Include { .. } => "include",
         Cmd::Tag => "tag",
     }
+}
+
+/// `scope`'s violations now (none when it passes the checker).
+fn violations(r: &Rdy, scope: &Scope) -> Vec<rdy_qa::invariants::Violation> {
+    check(r, scope).err().unwrap_or_default()
+}
+
+/// The violations `scope` has now that it did not have `before`. A landing rebases every open
+/// unpinned view with work (reb1), so a view can carry a clash that canon's landing brought in
+/// (two blocks given one name, say); a write must not add one, and such a view is refused when
+/// it lands, as before.
+fn new_violations(
+    before: &[rdy_qa::invariants::Violation],
+    r: &Rdy,
+    scope: &Scope,
+) -> Vec<rdy_qa::invariants::Violation> {
+    violations(r, scope)
+        .into_iter()
+        .filter(|x| !before.contains(x))
+        .collect()
 }
 
 fn refusal(e: &RdyError) -> String {
@@ -217,10 +253,11 @@ impl Sim<'_> {
         Scope::View(self.view(slot))
     }
 
-    /// One write; on success the view must pass the checker.
+    /// One write; on success the view must gain no violation from it.
     fn write(&mut self, slot: u8, ops: serde_json::Value, c: &Cmd) -> Result<bool, TestCaseError> {
         let view = self.view(slot);
         let rebalance = ops[0]["op"] == "rebalance";
+        let before = violations(&self.r, &Scope::View(view.clone()));
         match write(&mut self.r, &view, ops) {
             Ok(_) => {
                 let mut s = self.stats.borrow_mut();
@@ -229,7 +266,8 @@ impl Sim<'_> {
                     s.effective_rebalances += 1;
                 }
                 drop(s);
-                if let Err(x) = check(&self.r, &Scope::View(view.clone())) {
+                let x = new_violations(&before, &self.r, &Scope::View(view.clone()));
+                if !x.is_empty() {
                     return Err(TestCaseError::fail(format!(
                         "after {c:?}, view {view} broke: {x:?}"
                     )));
@@ -259,16 +297,20 @@ impl Sim<'_> {
             Err(e) => Err(e),
             Ok(p) => {
                 let warned = p.warnings.iter().any(|i| i.code == "W_SIBLINGS_REKEYED");
-                self.r
-                    .land_report(&approver(), &p.id)
-                    .map(|l| warned || l.warnings.iter().any(|i| i.code == "W_SIBLINGS_REKEYED"))
+                self.r.land_report(&approver(), &p.id).map(|l| {
+                    (
+                        warned || l.warnings.iter().any(|i| i.code == "W_SIBLINGS_REKEYED"),
+                        l.rebased.iter().filter(|v| v.conflicts > 0).count(),
+                    )
+                })
             }
         };
         match res {
-            Ok(rekeyed) => {
+            Ok((rekeyed, conflicted)) => {
                 let mut s = self.stats.borrow_mut();
                 s.lands_ok += 1;
                 s.siblings_rekeyed += usize::from(rekeyed);
+                s.conflict_recorded += conflicted;
                 drop(s);
                 if let Err(x) = check(&self.r, &Scope::Canon) {
                     return Err(TestCaseError::fail(format!(
@@ -284,12 +326,12 @@ impl Sim<'_> {
                 )));
             }
             Err(e) => {
-                *self
-                    .stats
-                    .borrow_mut()
-                    .land_refused
-                    .entry(refusal(&e))
-                    .or_default() += 1;
+                let mut s = self.stats.borrow_mut();
+                *s.land_refused.entry(refusal(&e)).or_default() += 1;
+                if e.code == E_CONFLICT_UNRESOLVED {
+                    s.conflict_unresolved_at_land += 1;
+                }
+                drop(s);
                 self.generation[slot as usize] += 1;
                 if let Err(x) = check(&self.r, &Scope::Canon) {
                     return Err(TestCaseError::fail(format!(
@@ -324,6 +366,59 @@ impl Sim<'_> {
                 return Err(TestCaseError::fail(format!(
                     "after {c:?}, version {name} broke: {x:?}"
                 )));
+            }
+        }
+        Ok(())
+    }
+
+    /// sb2: includes into `to` the newest change of `from` that touches the picked block and that
+    /// `to` does not include yet. The included view may now hold a conflict, or a clash two
+    /// clean changes make together (it is refused when it lands); later writes to it must not
+    /// add a violation of their own.
+    fn include(&mut self, from: u8, to: u8, pick: u16, c: &Cmd) -> Result<(), TestCaseError> {
+        let (fv, tv) = (self.view(from), self.view(to));
+        let st = self.r.read();
+        let into = st.included(&tv);
+        let mut changes = vec![];
+        for id in st.included(&fv).iter() {
+            let ops = st.reader().change(id).unwrap().ops;
+            let blocks: Vec<BlockId> = ops.iter().map(|op| op.block_id().clone()).collect();
+            changes.push((*id, blocks));
+        }
+        let mut blocks: Vec<BlockId> = changes.iter().flat_map(|(_, b)| b.clone()).collect();
+        blocks.sort();
+        blocks.dedup();
+        if blocks.is_empty() {
+            return Ok(());
+        }
+        let block = &blocks[pick as usize % blocks.len()];
+        let Some(change) = changes
+            .iter()
+            .rev()
+            .find(|(id, b)| b.contains(block) && !into.contains(id))
+            .map(|(id, _)| id.to_string())
+        else {
+            return Ok(());
+        };
+        drop(st);
+        match self.r.view_include(&writer(), &tv, &[change]) {
+            Ok(res) => {
+                let mut s = self.stats.borrow_mut();
+                s.included += 1;
+                s.conflict_recorded += usize::from(!res.conflicts.is_empty());
+            }
+            Err(e) if unexpected(&e) => {
+                return Err(TestCaseError::fail(format!(
+                    "after {c:?}, including into {tv} failed unexpectedly: {e:?}"
+                )));
+            }
+            Err(e) => {
+                *self
+                    .stats
+                    .borrow_mut()
+                    .include_refused
+                    .entry(refusal(&e))
+                    .or_default() += 1;
             }
         }
         Ok(())
@@ -527,6 +622,7 @@ impl Sim<'_> {
                     statement: format!("decided in {view}"),
                     ..Default::default()
                 };
+                let before = violations(&self.r, &sc);
                 match self.r.decide(&writer(), &view, d) {
                     Ok(_) => {
                         *self
@@ -535,7 +631,8 @@ impl Sim<'_> {
                             .writes_ok
                             .entry("decide")
                             .or_default() += 1;
-                        if let Err(x) = check(&self.r, &sc) {
+                        let x = new_violations(&before, &self.r, &sc);
+                        if !x.is_empty() {
                             return Err(TestCaseError::fail(format!(
                                 "after {c:?}, view {view} broke: {x:?}"
                             )));
@@ -558,6 +655,7 @@ impl Sim<'_> {
                 return Ok(());
             }
             Cmd::Land { view: vi } => return self.land(*vi, c),
+            Cmd::Include { from, to, pick } => return self.include(*from, *to, *pick, c),
             Cmd::Tag => return self.tag(c),
         };
         if let Some(op) = op {
@@ -621,33 +719,105 @@ fn engine_split_brain_histories_keep_every_invariant() {
     // Coverage floors. Block ids are seeded per case, so the fast run's counters are exact and
     // repeatable; the floors sit at about 70% of the seeded fast run (shown in brackets), so a
     // generator change that loses coverage fails here. Deep mode sees about ten times as much.
+    // sb2: the generator gained `Include`, which reseeds every case; the brackets show the new
+    // seeded run and the floors are unchanged, so three of them (refused landings,
+    // E_CONFLICT_UNRESOLVED and E_PATH_CLASH landings) now sit at or just under their counts.
+    // Final review fix round 1: an include brings the change that created a parent it needs, so
+    // the seeded run's one E_MISSING_PARENT landing is gone and the history after it moved; the
+    // brackets show that run, and the E_CONFLICT_UNRESOLVED floor (10, its old count) is now 6,
+    // about 70% of the new count like the others.
     let s = stats.into_inner();
     eprintln!("split-brain coverage: {s:#?}");
     let land = |code: &str| s.land_refused.get(code).copied().unwrap_or(0);
     let floors = [
-        ("effective rebalances [23]", s.effective_rebalances, 16),
-        ("refused landings [36]", s.land_refused.values().sum(), 25),
+        ("effective rebalances [32]", s.effective_rebalances, 16),
+        // gconf1: a collision a landing recorded as a view conflict is refused as
+        // E_CONFLICT_UNRESOLVED, no longer E_STALE_BASE; the seeded run's 15 E_STALE_BASE
+        // refusals (the bracket said 19) are now 15 E_CONFLICT_UNRESOLVED, and the refused
+        // landings were 28 before and after (the bracket said 36)
+        ("refused landings [21]", s.land_refused.values().sum(), 19),
         ("refused-landing codes [4]", s.land_refused.len(), 3),
-        ("E_STALE_BASE landings [19]", land("E_STALE_BASE"), 13),
         (
-            "E_PARENT_CYCLE landings [7]",
+            "E_CONFLICT_UNRESOLVED landings [9]",
+            land("E_CONFLICT_UNRESOLVED"),
+            6,
+        ),
+        (
+            "E_PARENT_CYCLE landings [6]",
             land("E_VALIDATION/E_PARENT_CYCLE"),
             4,
         ),
+        // vcreate1: an empty unpinned view reads canon (the floating rule), so writes into it no
+        // longer read a stale base; the seeded run's path clashes at landing fell from 5 to 4
         (
-            "E_PATH_CLASH landings [8]",
+            "E_PATH_CLASH landings [5]",
             land("E_VALIDATION/E_PATH_CLASH"),
-            5,
+            3,
         ),
-        ("W_SIBLINGS_REKEYED [7]", s.siblings_rekeyed, 4),
         (
-            "E_FROZEN writes [5]",
+            "E_FROZEN writes [7]",
             s.write_refused.get(E_FROZEN).copied().unwrap_or(0),
             3,
         ),
-        ("versions tagged [28]", s.tags, 19),
+        ("versions tagged [26]", s.tags, 19),
     ];
     for (what, got, min) in floors {
         assert!(got >= min, "{what}: {got} < floor {min}: {s:#?}");
     }
+    // sb2: views include each other's changes, record conflicts, and a landing with one is
+    // refused as unresolved; each at least once per run
+    let sb2 = [
+        ("included [65]", s.included),
+        ("conflict_recorded [33]", s.conflict_recorded),
+        (
+            "conflict_unresolved_at_land [9]",
+            s.conflict_unresolved_at_land,
+        ),
+    ];
+    for (what, got) in sb2 {
+        assert!(got >= 1, "{what}: none seen: {s:#?}");
+    }
+    // class 5: a landing's collision with canon is recorded as a view conflict
+    // (E_CONFLICT_UNRESOLVED); E_STALE_BASE at landing comes only from pinned or closed views,
+    // and this helper makes none
+    assert_eq!(land("E_STALE_BASE"), 0, "{s:#?}");
+    // reb1: the four views are unpinned, so every landing rebases them onto the re-keyed
+    // siblings and W_SIBLINGS_REKEYED (a pinned view's warning) is never raised here
+    assert_eq!(s.siblings_rekeyed, 0, "{s:#?}");
+}
+
+/// sb2 (final review fix round 1): the helper's include across views, as one named case, so the
+/// gate lists the id. View v1 includes only v0's claim under a section v0 created; the include
+/// brings the section's creation along, v1 passes the checker and lands, and canon does too (the
+/// helper's run once saw this landing refused as `E_MISSING_PARENT`).
+#[test]
+fn sb2_an_include_across_views_brings_the_parents_creation_and_lands() {
+    let (_d, mut r) = project();
+    base(&mut r);
+    let doc = ids(&mut r, &Scope::Canon, &["doc"])[0].clone();
+    let c1 = write(
+        &mut r,
+        "v0",
+        json!([{"op": "create", "type": "section", "parent": doc, "fields": {"title": "Fresh"}}]),
+    )
+    .unwrap();
+    let s = c1.created.values().next().unwrap().clone();
+    let c2 = write(
+        &mut r,
+        "v0",
+        json!([{"op": "create", "type": "claim", "parent": s, "body": "under fresh"}]),
+    )
+    .unwrap();
+    let res = r
+        .view_include(&writer(), "v1", std::slice::from_ref(&c2.change))
+        .unwrap();
+    assert_eq!(
+        (res.added, res.added_deps),
+        (vec![c2.change.clone()], vec![c1.change.clone()])
+    );
+    check(&r, &Scope::View("v1".into())).unwrap();
+    land(&mut r, "v1").unwrap();
+    check(&r, &Scope::Canon).unwrap();
+    let claim = c2.created.values().next().unwrap().clone();
+    assert_eq!(body_of(&r, &Scope::Canon, &claim), "under fresh");
 }

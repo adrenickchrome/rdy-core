@@ -145,9 +145,16 @@ fn repr1_a_landing_with_every_field_set_survives_the_store_and_a_reindex() {
         relay_evidence: Some(RelayEvidence {
             quoted: "land it".into(),
             session_ref: "sess-1".into(),
+            question: Some("land it?".into()),
         }),
         approved_version: Some(Hash::of(b"p")),
         rebased_from: vec![Hash::of(b"an older landing")],
+        evidence: Some(ApprovalEvidence {
+            kind: EvidenceKind::Text,
+            options: vec!["land".into(), "wait".into()],
+            choice: Some("land".into()),
+            card_hash: None,
+        }),
     };
     let lh = s
         .write(vec![(kinds::LANDING, postcard::to_allocvec(&l).unwrap())])

@@ -1,7 +1,7 @@
 use crate::error::StoreError;
 use crate::kinds;
 use crate::land::LandRequest;
-use crate::merge::{MergeChange, Merged, merge_indexed};
+use crate::merge::{Conflict, MergeChange, Merged, merge_indexed};
 use crate::store::encode;
 use crate::view::{Owner, ViewHead, ViewOp, ViewOpKind};
 use crate::{Store, StoreReader};
@@ -10,7 +10,7 @@ use rdy_model::{
     decision,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// What `Store::view` returns: a view's base landing and the changes it includes, in order. It is
@@ -23,6 +23,16 @@ pub struct ViewRecord {
 
 pub(crate) fn view_ref(name: &str) -> String {
     format!("view/{name}")
+}
+
+/// The ref naming the latest version of the proposal whose first version is `stable`.
+pub(crate) fn proposal_ref(stable: &Hash) -> String {
+    format!("proposal/{stable}")
+}
+
+/// The ref naming the stable id of view `view`'s open proposal (empty when it has none).
+pub(crate) fn open_ref(view: &str) -> String {
+    format!("open/{view}")
 }
 
 fn tag_ref(name: &str) -> String {
@@ -218,8 +228,14 @@ impl StoreReader {
 }
 
 impl Store {
+    /// Commits `change` into view `name`, checked against what the view reads: its state, or
+    /// canon's for an empty unpinned view (the floating read rule), so the check agrees with the
+    /// float catch-up that moves such a view onto canon in the same batch.
     pub fn commit_to_view(&mut self, name: &str, change: Change) -> Result<Hash, StoreError> {
-        let state = self.view_state(name)?;
+        let state = match self.view_head(name)? {
+            Some(h) if !h.pinned && h.len == 0 => self.canon_state()?,
+            _ => self.view_state(name)?,
+        };
         self.commit_to_view_at(name, change, &state)
     }
 
@@ -239,31 +255,125 @@ impl Store {
 
     /// `commit_to_view_at` with the view's present state read through `current`: the version of
     /// a block id in the view now, or None if the view has no such block. The same contract:
-    /// `current` MUST answer as `view_state(name)` would.
+    /// `current` MUST answer as the view reads, which is `view_state(name)` except for an empty
+    /// unpinned view, which reads as canon (the floating read rule): there `current` MUST answer
+    /// as `canon_state()`. When the float catch-up fires, the store enforces this on the blocks
+    /// the change writes (see `commit_to_view_resolving`).
     pub fn commit_to_view_with(
         &mut self,
         name: &str,
         change: Change,
         current: &dyn Fn(&BlockId) -> Option<Hash>,
     ) -> Result<Hash, StoreError> {
-        // apply_op only reads and writes the ids the ops name, so seed a small state with those
+        self.commit_to_view_resolving(name, change, current, &[], None)
+    }
+
+    /// `commit_to_view_with`, aware of the view's recorded conflicts and of who commits (res1):
+    /// - an `Update` or `Delete` of a block with a conflict in `conflicts` may name the conflict's
+    ///   base or any side's version as its base, and the change depends on every side, so it
+    ///   resolves the conflict; other ops check against `current` as ever. When the conflict's
+    ///   base or any side is a frozen decision the op is `Frozen`: resolving it would change or
+    ///   drop an accepted or rejected decision;
+    /// - a closed view refuses the commit;
+    /// - `claim` is the committer's owner: it owns a view the commit creates, and an `Own` op
+    ///   before the `Commit` claims an existing unowned view;
+    /// - the first commit into an empty unpinned view (which reads as canon) is preceded by a
+    ///   `Rebase` onto canon's head when its base is behind it (the float catch-up). The ops were
+    ///   checked against `current`, so `current` must answer as canon there: for every block the
+    ///   change writes, a `current` that differs from canon's version is refused (`StaleBase`
+    ///   naming the op's base and canon's version, or `AlreadyExists` for a create), since the
+    ///   write was based on a state the view no longer reads.
+    pub fn commit_to_view_resolving(
+        &mut self,
+        name: &str,
+        change: Change,
+        current: &dyn Fn(&BlockId) -> Option<Hash>,
+        conflicts: &[Conflict],
+        claim: Option<Owner>,
+    ) -> Result<Hash, StoreError> {
+        // 1. the head; a closed view takes no commit
+        let head = self.view_head(name)?;
+        if head.as_ref().is_some_and(|h| h.closed) {
+            return Err(StoreError::ViewClosed(name.to_string()));
+        }
+        // the float catch-up fires for an empty unpinned view behind canon; the view then reads
+        // as canon, so the ops must have been checked against canon on the blocks they write
+        let canon = self.canon_head()?;
+        let catch_up = head
+            .as_ref()
+            .is_some_and(|h| !h.pinned && h.len == 0 && canon.is_some() && canon != h.base);
+        if catch_up {
+            let canon_state = self.state_of(canon)?;
+            for op in &change.ops {
+                let id = op.block_id();
+                let actual = canon_state.blocks.get(id).copied();
+                if current(id) != actual {
+                    return Err(match op.base() {
+                        Some(expected) => StoreError::StaleBase {
+                            id: id.clone(),
+                            expected,
+                            actual,
+                        },
+                        None => StoreError::AlreadyExists(id.clone()),
+                    });
+                }
+            }
+        }
+        // 2. the ops. apply_op only reads and writes the ids the ops name, so seed a small state
+        // with those; an op on a conflicted block, first in this change to touch it, checks its
+        // base against the conflict's base and sides instead
         let mut state = StateSnapshot::default();
         for op in &change.ops {
-            let id = match op {
-                Op::Create { block } | Op::Update { block, .. } => &block.id,
-                Op::Delete { id, .. } => id,
-            };
+            let id = op.block_id();
             if let Some(v) = current(id) {
                 state.blocks.insert(id.clone(), v);
             }
         }
+        let mut touched: BTreeSet<&BlockId> = BTreeSet::new();
         for op in &change.ops {
-            apply_op(self, &mut state, op)?;
+            let id = op.block_id();
+            let conflict = match touched.insert(id) {
+                true => conflicts.iter().find(|c| c.block == *id),
+                false => None,
+            };
+            match (op, conflict) {
+                (Op::Update { base, .. } | Op::Delete { base, .. }, Some(c)) => {
+                    let accepted =
+                        c.base == Some(*base) || c.sides.iter().any(|s| s.version == Some(*base));
+                    if !accepted {
+                        return Err(StoreError::StaleBase {
+                            id: id.clone(),
+                            expected: *base,
+                            actual: current(id),
+                        });
+                    }
+                    // the base is one of these: a frozen version anywhere in the conflict means
+                    // the write would change or drop an accepted or rejected decision
+                    let versions = c
+                        .base
+                        .iter()
+                        .chain(c.sides.iter().filter_map(|s| s.version.as_ref()));
+                    for v in versions {
+                        if decision::is_frozen(&self.get_block(v)?) {
+                            return Err(StoreError::Frozen(id.clone()));
+                        }
+                    }
+                    match op {
+                        Op::Update { block, .. } => {
+                            state.blocks.insert(id.clone(), block.version_hash());
+                        }
+                        _ => {
+                            state.blocks.remove(id);
+                        }
+                    }
+                }
+                _ => apply_op(self, &mut state, op)?,
+            }
         }
-        // The commit op names the change id, which depends on deps, so the change, its view op
-        // and the view's head land in one write.
+        // 3. The commit op names the change id, which depends on deps, so the change, its view
+        // ops and the view's head land in one write.
         let mut change = change;
-        let (mut items, change_pos) = self.change_frames(&mut change, Some(name))?;
+        let (mut items, change_pos) = self.change_frames(&mut change, Some(name), conflicts)?;
         let cid = Hash::of(&items[change_pos].1);
         let p = &change.provenance;
         let view_op = |prev: Option<Hash>, op: ViewOpKind| ViewOp {
@@ -274,17 +384,14 @@ impl Store {
             run: p.run.clone(),
             at_ms: p.at_ms,
         };
-        let (create, prev, base, len0, owner, pinned) = match self.view_head(name)? {
-            Some(head) => (
-                None,
-                head.head,
-                head.base,
-                head.len,
-                head.owner,
-                head.pinned,
-            ),
+        // 4. the view ops before the commit: the implicit create, or the float catch-up and the
+        // claim, each op's prev the one before it
+        let (mut prev, mut base, len0, mut owner, pinned) = match head {
+            Some(head) => (head.head, head.base, head.len, head.owner, head.pinned),
             None => {
-                let base = self.canon_head()?;
+                let base = canon;
+                // M2b's rule: the implicit create's owner is the change's provenance (the
+                // engine's claim for a new view is that same owner)
                 let first = Some(Owner {
                     actor: p.actor.clone(),
                     run: p.run.clone(),
@@ -298,9 +405,37 @@ impl Store {
                     },
                 ));
                 let id = Hash::of(&create);
-                (Some(create), id, base, 0, first, false)
+                items.push((kinds::VIEW_OP, create));
+                (id, base, 0, first, false)
             }
         };
+        if catch_up && let Some(landing) = canon {
+            let rebase = encode(&view_op(
+                Some(prev),
+                ViewOpKind::Rebase {
+                    landing,
+                    dropped: vec![],
+                    remaining: vec![],
+                    conflicts: vec![],
+                },
+            ));
+            prev = Hash::of(&rebase);
+            base = canon;
+            items.push((kinds::VIEW_OP, rebase));
+        }
+        if owner.is_none()
+            && let Some(o) = claim
+        {
+            let own = encode(&view_op(
+                Some(prev),
+                ViewOpKind::Own {
+                    owner: Some(o.clone()),
+                },
+            ));
+            prev = Hash::of(&own);
+            owner = Some(o);
+            items.push((kinds::VIEW_OP, own));
+        }
         let commit = encode(&view_op(Some(prev), ViewOpKind::Commit { change: cid }));
         let new_head = ViewHead {
             head: Hash::of(&commit),
@@ -311,7 +446,6 @@ impl Store {
             closed: false,
             last_write_ms: p.at_ms,
         };
-        items.extend(create.map(|c| (kinds::VIEW_OP, c)));
         items.push((kinds::VIEW_OP, commit));
         items.extend(self.ref_items_pub(vec![(view_ref(name), encode(&new_head))]));
         let id = self.write(items)?[change_pos];
@@ -323,8 +457,23 @@ impl Store {
         Ok(id)
     }
 
+    /// Proposes view `view`'s included changes as a new proposal: the proposal, its ref
+    /// `proposal/<id>` (the latest version, itself) and `open/<view>` (its stable id, itself) in
+    /// one write. Returns the proposal's id.
     pub fn propose(&mut self, view: &str, title: &str, by: Provenance) -> Result<Hash, StoreError> {
         let changes = self.included(view)?.as_ref().clone();
+        self.propose_changes(view, title, by, changes)
+    }
+
+    /// `propose` with `changes` (a closed subset of the view's included changes, which the
+    /// caller checks) in place of the view's whole set. An empty `changes` is `EmptyProposal`.
+    pub fn propose_changes(
+        &mut self,
+        view: &str,
+        title: &str,
+        by: Provenance,
+        changes: Vec<Hash>,
+    ) -> Result<Hash, StoreError> {
         let p = Proposal {
             stable: None,
             prev: None,
@@ -333,30 +482,73 @@ impl Store {
             changes,
             alternative: None,
             provenance: by,
+            canon_at: self.canon_head()?,
         };
-        self.put(kinds::PROPOSAL, &p)
+        let id = Hash::of(&encode(&p));
+        self.write_version(&p, id)
     }
 
     /// Writes the next version of proposal `prev`: its changes followed by `add`, with `stable`
-    /// the first version's id and `prev` the version it follows. Returns the new version's id.
+    /// the first version's id and `prev` the version it follows, and moves `proposal/<stable>` to
+    /// it. Returns the new version's id.
     pub fn propose_version(&mut self, prev: &Hash, add: &[Hash]) -> Result<Hash, StoreError> {
-        let p = self.proposal(prev)?;
-        let mut changes = p.changes;
-        changes.extend_from_slice(add);
-        let next = Proposal {
-            stable: Some(p.stable.unwrap_or(*prev)),
-            prev: Some(*prev),
-            title: p.title,
-            view: p.view,
-            changes,
-            alternative: p.alternative,
-            provenance: p.provenance,
-        };
-        self.put(kinds::PROPOSAL, &next)
+        let mut p = self.proposal(prev)?;
+        p.changes.extend_from_slice(add);
+        self.next_version(prev, p)
     }
 
-    /// Lands proposal version `proposal` as is: `land_atomic` with no acceptance change and no
-    /// chosen alternative. Returns the landing id.
+    /// Writes the next version of proposal `prev` with `changes`, `title` and `by` in place of
+    /// its own (the view and the alternative carry over), and moves `proposal/<stable>` to it.
+    /// Returns the new version's id.
+    pub fn propose_next(
+        &mut self,
+        prev: &Hash,
+        changes: Vec<Hash>,
+        title: &str,
+        by: Provenance,
+    ) -> Result<Hash, StoreError> {
+        let p = Proposal {
+            changes,
+            title: title.to_string(),
+            provenance: by,
+            ..self.proposal(prev)?
+        };
+        self.next_version(prev, p)
+    }
+
+    /// Writes `p` as the version after `prev`: `stable` the first version's id, `prev` the
+    /// version it follows, `canon_at` canon's head now.
+    fn next_version(&mut self, prev: &Hash, p: Proposal) -> Result<Hash, StoreError> {
+        let stable = p.stable.unwrap_or(*prev);
+        let next = Proposal {
+            stable: Some(stable),
+            prev: Some(*prev),
+            canon_at: self.canon_head()?,
+            ..p
+        };
+        self.write_version(&next, stable)
+    }
+
+    /// Writes proposal version `p` with the refs `proposal/<stable>` = its id and
+    /// `open/<p.view>` = `stable`, in one write. Returns its id. A version with no changes is
+    /// refused (`EmptyProposal`): it would land as an empty landing, as often as it is approved.
+    fn write_version(&mut self, p: &Proposal, stable: Hash) -> Result<Hash, StoreError> {
+        if p.changes.is_empty() {
+            return Err(StoreError::EmptyProposal(p.view.clone()));
+        }
+        let bytes = encode(p);
+        let id = Hash::of(&bytes);
+        let mut items = vec![(kinds::PROPOSAL, bytes)];
+        items.extend(self.ref_items_pub(vec![
+            (proposal_ref(&stable), id.0.to_vec()),
+            (open_ref(&p.view), stable.0.to_vec()),
+        ]));
+        self.write(items)?;
+        Ok(id)
+    }
+
+    /// Lands proposal version `proposal` as is: `land_atomic` with no acceptance change, no
+    /// chosen alternative and no relay. Returns the landing id.
     pub fn land(&mut self, proposal: &Hash, approver: Provenance) -> Result<Hash, StoreError> {
         Ok(self
             .land_atomic(LandRequest {
@@ -364,6 +556,8 @@ impl Store {
                 accept: None,
                 approver,
                 chosen: None,
+                relay: None,
+                evidence: None,
             })?
             .landing)
     }

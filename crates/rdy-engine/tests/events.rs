@@ -104,6 +104,7 @@ fn evt1_a_landing_batch_gives_commit_proposed_landed_and_rebased() {
             EventKind::Proposed { .. } => "proposed",
             EventKind::Landed { .. } => "landed",
             EventKind::ViewRebased { .. } => "view_rebased",
+            EventKind::ViewClosed { .. } => "view_closed",
             EventKind::ViewOp { .. } => "view_op",
         })
         .collect();
@@ -214,6 +215,7 @@ fn orphan_landing(r: &mut Rdy, proposal: rdy_model::Hash) {
         relay_evidence: None,
         approved_version: None,
         rebased_from: vec![],
+        evidence: None,
     };
     r.store_mut().put(kinds::LANDING, &rec).unwrap();
 }

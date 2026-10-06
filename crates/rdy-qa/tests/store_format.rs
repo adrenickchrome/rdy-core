@@ -8,7 +8,10 @@ use rdy_store::{Store, StoreError, kinds};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const CURRENT_TEXT: &str = "rdy store format\nstore_format 3\n";
+/// The FORMAT text of this binary's format.
+fn current_text() -> String {
+    format!("rdy store format\nstore_format {STORE_FORMAT}\n")
+}
 
 /// Every path under `dir` with its contents (None for directories).
 fn tree(dir: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
@@ -32,9 +35,12 @@ fn fmt1_a_new_store_records_its_format_in_the_log_and_in_format() {
     let s = Store::create(&dir).unwrap();
     assert_eq!(
         std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
-        CURRENT_TEXT
+        current_text()
     );
-    assert_eq!(s.get_ref(REF_STORE_FORMAT).unwrap(), Some(b"3".to_vec()));
+    assert_eq!(
+        s.get_ref(REF_STORE_FORMAT).unwrap(),
+        Some(STORE_FORMAT.to_string().into_bytes())
+    );
     assert_eq!(s.verify().unwrap(), 1, "one format batch of one ref");
     drop(s);
     let s = Store::create(&dir).unwrap();
@@ -49,10 +55,13 @@ fn fmt1_format_refs_survive_reindex() {
     let mut s = Store::create(&dir).unwrap();
     s.put_blob(b"x").unwrap();
     s.reindex().unwrap();
-    assert_eq!(s.get_ref(REF_STORE_FORMAT).unwrap(), Some(b"3".to_vec()));
+    assert_eq!(
+        s.get_ref(REF_STORE_FORMAT).unwrap(),
+        Some(STORE_FORMAT.to_string().into_bytes())
+    );
     assert_eq!(
         std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
-        CURRENT_TEXT
+        current_text()
     );
 }
 
@@ -111,9 +120,14 @@ fn fmt2_a_store_of_a_newer_format_is_refused_before_anything_is_opened() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
     Store::create(&dir).unwrap().put_blob(b"x").unwrap();
-    std::fs::write(dir.join("FORMAT"), "rdy store format\nstore_format 4\n").unwrap();
+    let newer = STORE_FORMAT + 1;
+    std::fs::write(
+        dir.join("FORMAT"),
+        format!("rdy store format\nstore_format {newer}\n"),
+    )
+    .unwrap();
     let before = tree(&dir);
-    refused(&dir, "has store format 4");
+    refused(&dir, &format!("has store format {newer}"));
     assert_eq!(tree(&dir), before, "nothing under the store changed");
 }
 
@@ -148,11 +162,11 @@ fn fmt2_a_log_that_says_another_format_is_refused() {
     );
     assert_eq!(
         std::fs::read_to_string(dir.join("FORMAT")).unwrap(),
-        CURRENT_TEXT
+        current_text()
     );
 }
 
-/// A marked log with no format ref under a FORMAT that says 3: the index is built to find that
+/// A marked log with no format ref under a FORMAT that names the current format: the index is built to find that
 /// out; the log is untouched.
 #[test]
 fn fmt2_a_log_with_frames_and_no_store_format_is_refused() {
@@ -168,7 +182,7 @@ fn fmt2_a_log_with_frames_and_no_store_format_is_refused() {
         .unwrap();
         log.sync().unwrap();
     }
-    std::fs::write(dir.join("FORMAT"), CURRENT_TEXT).unwrap();
+    std::fs::write(dir.join("FORMAT"), current_text()).unwrap();
     let seg = std::fs::read(dir.join("segments/seg-000000.log")).unwrap();
     refused(&dir, "has a log with no store format");
     assert_eq!(
@@ -366,7 +380,7 @@ fn fmt3_a_directory_that_is_not_a_store_is_never_claimed() {
     drop(Store::create(&empty).unwrap());
     assert_eq!(
         std::fs::read_to_string(empty.join("FORMAT")).unwrap(),
-        CURRENT_TEXT
+        current_text()
     );
     drop(Store::open(&empty).unwrap());
 }
@@ -379,12 +393,12 @@ fn fmt3_init_on_a_fresh_path_makes_a_format_3_store_that_reopens() {
     let store = proj.join(".rdy/store");
     assert_eq!(
         std::fs::read_to_string(store.join("FORMAT")).unwrap(),
-        CURRENT_TEXT
+        current_text()
     );
     let r = Rdy::open(&proj).unwrap();
     assert_eq!(
         r.store().get_ref(REF_STORE_FORMAT).unwrap(),
-        Some(b"3".to_vec())
+        Some(STORE_FORMAT.to_string().into_bytes())
     );
 }
 

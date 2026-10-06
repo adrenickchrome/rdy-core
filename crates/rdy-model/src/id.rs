@@ -79,6 +79,14 @@ impl BlockId {
     }
 }
 
+impl std::str::FromStr for BlockId {
+    type Err = IdError;
+
+    fn from_str(s: &str) -> Result<BlockId, IdError> {
+        BlockId::parse(s)
+    }
+}
+
 fn valid_prefix(p: &str) -> bool {
     (1..=3).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphabetic())
 }
