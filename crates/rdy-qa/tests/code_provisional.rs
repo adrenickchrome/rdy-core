@@ -150,3 +150,32 @@ fn prov1_code_dependents_counts_distinct_commits_and_lists_files_at_head() {
     let a = r.read().code_dependents(&Scope::Canon, &s.a).unwrap();
     assert_eq!((a.commits, a.files.len()), (0, 0));
 }
+
+#[test]
+fn prov1_a_commit_citing_a_docs_path_does_not_count_toward_a_block_inside_it() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let g = linked(&r);
+    let d = s.decision.to_string();
+    g.write("src/doc.rs", "doc\n");
+    g.commit("feat: doc\n\nImplements: spec");
+    g.write("src/dec.rs", "dec\n");
+    g.commit(&format!("feat: dec\n\nImplements: {d}"));
+    let st = r.read();
+    let dep = st.code_dependents(&Scope::Canon, &s.decision).unwrap();
+    assert_eq!(
+        dep.commits, 1,
+        "the commit citing `spec` names the doc, not D"
+    );
+    let files: Vec<&str> = dep.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(files, vec!["src/dec.rs"]);
+    let a = st.code_dependents(&Scope::Canon, &s.a).unwrap();
+    assert_eq!((a.commits, a.files.len()), (0, 0));
+    let cb = st
+        .brief_code(&Scope::Canon, "src/dec.rs", None, None)
+        .unwrap();
+    let e = cb.code.implements.iter().find(|e| e.block == d).unwrap();
+    assert_eq!(e.dependent_commits, Some(1));
+    let doc = st.code_dependents(&Scope::Canon, &s.doc).unwrap();
+    assert_eq!(doc.commits, 1, "the doc itself is still named by its path");
+}

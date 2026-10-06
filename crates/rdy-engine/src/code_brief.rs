@@ -8,7 +8,7 @@ use crate::code_index::{CodeIndex, CodeRepo, code_repos, index_of};
 use crate::error::*;
 use crate::{Briefing, ReadState, Scope};
 use rdy_graph::DerivedStatus;
-use rdy_model::{Block, BlockId, FieldValue, key};
+use rdy_model::{Block, BlockId, FieldValue, key, tree};
 use rdy_schema::{Glob, REFLECTS_FIELD};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -130,8 +130,14 @@ fn normalise(
             .unwrap_or(full);
         for (i, repo) in repos.iter().enumerate() {
             if let Ok(rest) = p.strip_prefix(&repo.root) {
-                let parts: Option<Vec<&str>> =
-                    rest.components().map(|c| c.as_os_str().to_str()).collect();
+                // Normal components only: a path that did not canonicalise may still hold `..`.
+                let parts: Option<Vec<&str>> = rest
+                    .components()
+                    .map(|c| match c {
+                        std::path::Component::Normal(s) => s.to_str(),
+                        _ => None,
+                    })
+                    .collect();
                 return match parts {
                     Some(parts) if !parts.is_empty() => Ok((Some(i), parts.join("/"))),
                     _ => Err(not_a_code_path(code_path, top_fix)),
@@ -177,7 +183,12 @@ impl Names {
         Names {
             id: id.to_string(),
             key: m.get(id).and_then(|b| b.field_str("key")).map(key::fold),
-            path: m.path_of(id),
+            // Only a doc or folder has a path of its own; `path_of` gives any other block its
+            // doc's path, which `resolve_id` would resolve to the doc.
+            path: m
+                .get(id)
+                .filter(|b| tree::is_tree_type(&b.block_type))
+                .and_then(|_| m.path_of(id)),
         }
     }
 

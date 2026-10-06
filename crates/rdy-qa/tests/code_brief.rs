@@ -215,7 +215,12 @@ fn cbrief1_code_paths_are_repo_relative_and_never_escape() {
     let outside = tempfile::tempdir().unwrap();
     let elsewhere = outside.path().join("x.rs");
     std::fs::write(&elsewhere, "x").unwrap();
+    let escaping = format!(
+        "{}/nodir/../../etc/x.rs",
+        g.path().canonicalize().unwrap().display()
+    );
     for bad in [
+        escaping.as_str(),
         "",
         "../x.rs",
         "src/../a.rs",
