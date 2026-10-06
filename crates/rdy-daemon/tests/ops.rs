@@ -1,6 +1,6 @@
 //! ctl2, the read half: each op reads one snapshot; paths resolve against the session cwd;
 //! status reports the open and quarantine files; errors carry the M1 shape.
-use rdy_daemon::{ErrorReply, OPS, OpContext, dispatch, quarantine};
+use rdy_daemon::{ErrorReply, OPS, OpContext, clean_quarantine, dispatch, quarantine};
 use rdy_engine::engine::{Local, write_typed};
 use rdy_engine::{E_BAD_INPUT, Rdy, RdyError, Session, WriteRequest};
 use rdy_model::Role;
@@ -368,4 +368,59 @@ fn cbrf1_edit_block_bounds_max_tokens_like_the_brief_op() {
     )
     .unwrap();
     assert!(ok["change"].is_string(), "{ok}");
+}
+
+#[test]
+fn qclean1_clean_quarantine_removes_regular_quarantine_files_and_nothing_else() {
+    let d = tempfile::tempdir().unwrap();
+    let store = d.path().join(".rdy/store");
+    std::fs::create_dir_all(store.join("segments")).unwrap();
+    std::fs::write(store.join("segments/seg-00000001.log"), b"live segment").unwrap();
+    std::fs::write(store.join("segments/seg-00000001.log.torn-77"), b"torn").unwrap();
+    std::fs::write(store.join("index.redb"), b"live index").unwrap();
+    std::fs::write(store.join("index.redb.damaged-1"), b"old index").unwrap();
+    let outside = d.path().join("keep.txt");
+    std::fs::write(&outside, b"keep").unwrap();
+    std::os::unix::fs::symlink(&outside, store.join("segments/link.torn-5")).unwrap();
+    std::fs::create_dir(store.join("index.redb.damaged-dir")).unwrap();
+    std::fs::write(store.join("index.redb.damaged-dir/inner"), b"x").unwrap();
+    let c = clean_quarantine(d.path());
+    assert_eq!(
+        c.removed,
+        vec![
+            "index.redb.damaged-1".to_string(),
+            "segments/seg-00000001.log.torn-77".to_string()
+        ]
+    );
+    assert_eq!(
+        c.skipped,
+        vec![
+            (
+                "index.redb.damaged-dir".to_string(),
+                "not a regular file".to_string()
+            ),
+            (
+                "segments/link.torn-5".to_string(),
+                "not a regular file".to_string()
+            ),
+        ]
+    );
+    assert!(outside.exists(), "a symlink's target is never touched");
+    assert!(
+        store.join("index.redb.damaged-dir/inner").exists(),
+        "a directory is never recursed"
+    );
+    assert!(store.join("segments/seg-00000001.log").exists() && store.join("index.redb").exists());
+    assert_eq!(
+        quarantine(d.path()),
+        vec![
+            "index.redb.damaged-dir".to_string(),
+            "segments/link.torn-5".to_string()
+        ]
+    );
+    assert_eq!(
+        clean_quarantine(tempfile::tempdir().unwrap().path()),
+        Default::default(),
+        "no store, nothing to do"
+    );
 }

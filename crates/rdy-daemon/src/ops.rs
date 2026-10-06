@@ -58,6 +58,13 @@ struct NoArgs {}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct FsckArgs {
+    #[serde(default)]
+    clean_quarantine: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ShowArgs {
     id: String,
     scope: Option<String>,
@@ -275,6 +282,38 @@ pub fn quarantine(root: &Path) -> Vec<String> {
     out
 }
 
+/// What `clean_quarantine` did: the names it removed and the ones it left, with why.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Cleaned {
+    pub removed: Vec<String>,
+    pub skipped: Vec<(String, String)>,
+}
+
+/// Removes the quarantine files `quarantine(root)` names, in its order. Only regular files are
+/// removed: a symlink or a directory carrying a quarantine name is skipped untouched (never
+/// followed, never recursed), and an error leaves the file in `skipped` with the error text.
+pub fn clean_quarantine(root: &Path) -> Cleaned {
+    let store = root.join(".rdy/store");
+    let mut c = Cleaned::default();
+    for name in quarantine(root) {
+        let path = store.join(&name);
+        let result = std::fs::symlink_metadata(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|m| {
+                if m.file_type().is_file() {
+                    std::fs::remove_file(&path).map_err(|e| e.to_string())
+                } else {
+                    Err("not a regular file".to_string())
+                }
+            });
+        match result {
+            Ok(()) => c.removed.push(name),
+            Err(reason) => c.skipped.push((name, reason)),
+        }
+    }
+    c
+}
+
 /// A decision's derived status in words, e.g. "superseded by D-3K0TY" or "live".
 fn status_words(status: &Value) -> Option<String> {
     let word = status["status"].as_str()?.replace('_', " ");
@@ -351,10 +390,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             parse::<NoArgs>(op, args, "{}")?;
             reindex(cx)
         }
-        "fsck" => {
-            parse::<NoArgs>(op, args, "{}")?;
-            fsck(cx)
-        }
+        "fsck" => fsck(cx, parse(op, args, "{clean_quarantine?}")?),
         "view" => view_api::run_view(
             cx.engine,
             cx.session,
@@ -692,8 +728,27 @@ fn reindex(cx: &OpContext) -> Result<Value, RdyError> {
     }))
 }
 
-fn fsck(cx: &OpContext) -> Result<Value, RdyError> {
+/// `fsck`; with `clean_quarantine`, a passing check then removes the quarantine files (the
+/// human's only: an agent is refused before the check runs). A failed check removes nothing.
+fn fsck(cx: &OpContext, a: FsckArgs) -> Result<Value, RdyError> {
+    if a.clean_quarantine && !cx.session.is_human() {
+        return Err(RdyError::new(
+            E_PERMISSION,
+            "only the human removes quarantine files",
+            "run rdy fsck --clean-quarantine as the human (unset RDY_ACTOR)",
+        ));
+    }
     let mut v = write_typed(cx.engine, |r| r.fsck())?;
+    if a.clean_quarantine {
+        let c = clean_quarantine(&cx.engine.root());
+        v["removed"] = json!(c.removed);
+        v["skipped"] = json!(
+            c.skipped
+                .iter()
+                .map(|(n, r)| json!({"name": n, "reason": r}))
+                .collect::<Vec<_>>()
+        );
+    }
     v["open_report"] = open_report_json(&cx.engine.open_report());
     v["quarantine"] = json!(quarantine(&cx.engine.root()));
     Ok(v)

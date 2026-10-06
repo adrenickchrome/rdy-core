@@ -183,7 +183,11 @@ enum Cmd {
         view: String,
     },
     Reindex,
-    Fsck,
+    Fsck {
+        /// Also remove the quarantine files a crash left (.torn- segment tails and damaged indexes). Human only.
+        #[arg(long)]
+        clean_quarantine: bool,
+    },
     /// Run the MCP server over stdio.
     Mcp,
     /// Lint export-format-2 files (a doc file, a _folder.yaml or a directory) without touching the store.
@@ -1043,15 +1047,25 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             let v = call(env, "reindex", json!({}))?;
             Ok((v, "index rebuilt".into()))
         }
-        Cmd::Fsck => {
-            let v = call(env, "fsck", json!({}))?;
+        Cmd::Fsck { clean_quarantine } => {
+            let v = call(env, "fsck", json!({"clean_quarantine": clean_quarantine}))?;
             let mut t = format!(
-                "ok: {} frames, {} landings, {} versions{}",
+                "ok: {} frames, {} landings, {} versions",
                 num(&v["frames"]),
                 num(&v["landings"]),
                 num(&v["versions"]),
-                open_warnings(&v)
             );
+            for name in v["removed"].as_array().into_iter().flatten() {
+                t.push_str(&format!("\nremoved {}", text(name)));
+            }
+            for s in v["skipped"].as_array().into_iter().flatten() {
+                t.push_str(&format!(
+                    "\nskipped {}: {}",
+                    text(&s["name"]),
+                    text(&s["reason"])
+                ));
+            }
+            t.push_str(&open_warnings(&v));
             if v["open_report"]["unclean_shutdown"] == json!(true) {
                 t.push_str(&format!(
                     "\nnote: this daemon started after an unclean shutdown and recovered (caught up {} frames)",
