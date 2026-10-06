@@ -303,24 +303,6 @@ figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 }
 /* == /why == */
 
-/* == agents == */
-.agents { margin-top: 0.3rem; font-size: 0.8rem; color: var(--ink-faint); clear: right; }
-.agents summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; gap: 0.3rem; color: var(--ink-faint); font-weight: 500; font-size: 0.8rem; border-radius: 999px; padding: 0.15rem 0.6rem; margin-left: -0.6rem; }
-.agents summary::-webkit-details-marker { display: none; }
-.agents summary:hover { background: var(--surface); }
-.agents[open] summary { color: var(--ink-soft); }
-.agents dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.3rem 0.9rem; margin: 0.6rem 0 0.2rem; padding-top: 0.7rem; border-top: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line)); }
-.agents dt { font-weight: 600; }
-.agents dd { margin: 0; overflow-wrap: anywhere; }
-.agents code { font-size: 0.95em; }
-/* a governing decision that is live (approved and in force): the only state shown in success */
-.agents .state-live { color: var(--success); }
-@media (max-width: 900px) {
-  .agents dl { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; }
-  .agents dd { margin-bottom: 0.4rem; }
-}
-/* == /agents == */
-
 /* == home == */
 .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem; margin: 0.6rem 0 1.6rem; }
 .card { display: grid; gap: 0.3rem; align-content: start; padding: 1rem 1.1rem; text-decoration: none; color: var(--ink); border: 1px solid var(--line); border-radius: 10px; background: var(--bg); transition: border-color 0.15s, background 0.15s; }

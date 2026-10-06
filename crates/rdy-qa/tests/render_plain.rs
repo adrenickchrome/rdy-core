@@ -148,9 +148,6 @@ fn md1_no_page_shows_a_raw_marker() {
     for p in pages(out.path()) {
         for run in rdy_qa::site::visible_runs(&std::fs::read_to_string(&p).unwrap()) {
             use rdy_qa::site::Zone;
-            if run.zone == Zone::Agents {
-                continue;
-            }
             assert!(
                 !run.text.contains('`'),
                 "{}: backtick in {:?}",

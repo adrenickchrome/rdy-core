@@ -70,10 +70,10 @@ fn check(site: &Path, scope: &str, page: &str) {
 
 #[test]
 fn gold1_a_golden_line_is_zone_label_flag_and_text() {
-    let html = "<main><h1>Guards</h1><div data-rdy=\"content\"><p>A  guard\nis <code>x</code> evaluated.</p></div><details data-rdy=\"agents\"><summary>For agents</summary></details></main>";
+    let html = "<main><h1>Guards</h1><div data-rdy=\"content\"><p>A  guard\nis <code>x</code> evaluated.</p></div><div data-rdy=\"trail\"><p>Ruled.</p></div></main>";
     assert_eq!(
         render_runs(html),
-        "chrome\tL\tGuards\ncontent\t-\tA guard is\ncontent\t-\tevaluated.\nagents\tL\tFor agents\n"
+        "chrome\tL\tGuards\ncontent\t-\tA guard is\ncontent\t-\tevaluated.\ntrail\t-\tRuled.\n"
     );
 }
 

@@ -87,11 +87,11 @@ fn scan1_label_words_are_leaks_only_as_whole_labels() {
 }
 
 #[test]
-fn scan1_the_agents_zone_is_never_scanned_and_the_trail_is_scanned_like_content() {
+fn scan1_no_zone_is_skipped_and_the_trail_is_scanned_like_content() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("p.html"),
-        "<main><details data-rdy=\"agents\"><summary>For agents</summary><p>r-7KQ2M in .rdy/store</p></details><div data-rdy=\"trail\"><p>ruled in d-7KQ2M</p></div></main>",
+        "<main><details data-rdy=\"agents\"><p>r-7KQ2M</p></details><div data-rdy=\"trail\"><p>ruled in d-7KQ2M</p></div></main>",
     )
     .unwrap();
     let found = leaks(dir.path());
@@ -100,7 +100,10 @@ fn scan1_the_agents_zone_is_never_scanned_and_the_trail_is_scanned_like_content(
             .iter()
             .map(|l| (l.zone, l.pattern, l.text.as_str()))
             .collect::<Vec<_>>(),
-        [(Zone::Trail, "F1", "d-7KQ2M")]
+        [
+            (Zone::Chrome, "F1", "r-7KQ2M"),
+            (Zone::Trail, "F1", "d-7KQ2M")
+        ]
     );
 }
 

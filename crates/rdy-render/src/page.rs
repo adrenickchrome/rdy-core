@@ -2,7 +2,7 @@
 use crate::html::{self, BlockCtx, Link};
 use crate::inline::{self, Ctx};
 use crate::site::{Site, Url, rel};
-use crate::trail::{Agents, Trail};
+use crate::trail::Trail;
 use crate::{assets, home, machine, nav, search, toc, trail, version};
 use rdy_engine::{Materialized, VersionInfo, VersionPosition};
 use rdy_graph::{EdgeKind, Graph};
@@ -65,10 +65,9 @@ pub struct Item {
     /// Supporting text (a rationale): listed in the page JSON, not written on the page.
     pub supporting: bool,
     pub html: String,
-    /// The block's type is presentational: no marker, no "Why ?" trail, no agents' affordance.
+    /// The block's type is presentational: no marker, no "Why ?" trail.
     pub presentational: bool,
     pub trail: Trail,
-    pub agents: Agents,
     pub ref_head: String,
     #[serde(rename = "ref")]
     pub ref_: String,
@@ -438,7 +437,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         }
         Kind::Doc(id) => {
             let doc = sh.m.get(id).expect("a doc exists");
-            let (doc_body, built, mermaid) = doc_parts(sh, doc, &page_url, &json_href, &title);
+            let (doc_body, built, mermaid) = doc_parts(sh, doc, &page_url, &title);
             body.doc = Some(doc_body);
             items = built;
             has_mermaid = mermaid;
@@ -528,13 +527,7 @@ pub fn finish(
 }
 
 /// The doc's own part of the context, its blocks as items and whether one is a Mermaid diagram.
-fn doc_parts(
-    sh: &Shared,
-    doc: &Block,
-    page: &str,
-    json_href: &str,
-    title: &str,
-) -> (DocBody, Vec<Item>, bool) {
+fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec<Item>, bool) {
     let (m, site) = (sh.m, sh.site);
     let link = |id: &BlockId| sh.link(page, id);
     // the lede: the doc's first child when it is a prose of one paragraph (content directly in
@@ -605,7 +598,6 @@ fn doc_parts(
                 html: String::new(),
                 presentational: sh.pack.is_presentational(&b.block_type),
                 trail: Trail::default(),
-                agents: Agents::default(),
                 ref_head: String::new(),
                 ref_: String::new(),
             });
@@ -664,11 +656,6 @@ fn doc_parts(
                 Trail::default()
             } else {
                 trail::for_block(b, sh.g, m, site, page)
-            },
-            agents: if presentational {
-                Agents::default()
-            } else {
-                trail::agents(b, sh.g, m, sh.suspects, site, json_href)
             },
             ref_head,
             ref_,

@@ -91,7 +91,6 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "partials/block.html",
         "partials/tools.html",
         "partials/why.html",
-        "partials/agents.html",
         "partials/version.html",
         "partials/colophon.html",
     );

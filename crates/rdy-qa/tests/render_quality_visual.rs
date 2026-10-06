@@ -74,11 +74,11 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
             "focus #search, type `guard`, wait for #results".into(),
         ),
         (
-            "agents-open",
+            "toolbar-open",
             "canon",
             "specification/patterns.html",
             format!(
-                "open #{anchor}: click the summaries of details.why and details.agents; show the toolbar (Link, Copy ref, and Cite after selecting a phrase)"
+                "open #{anchor}: click the summary of details.why; hover the block to show the toolbar (Link, Copy ref, and Cite after selecting a phrase); at 360px, tap the block's text instead of hovering"
             ),
         ),
         (
