@@ -38,8 +38,8 @@ const ANCHOR_MAX: usize = 48;
 static ID_SHAPED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z]{1,3}-[0-9A-HJKMNP-TV-Z]{5}$").expect("a pattern"));
 
-/// Supporting text: in the page JSON, off the page (FW-D10). It has no anchor; a link to it
-/// leads to its doc's page.
+/// Supporting text: off the site (FW-D10). It has no anchor; a link to it leads to its doc's
+/// page.
 pub const RATIONALE: &str = "rationale";
 
 /// The block types numbered within their doc (`Table 2`, `Python code 3`, `Diagram 1`).
@@ -67,7 +67,7 @@ pub struct Site<'a> {
     /// Every folder and doc in tree order: a folder, then what it holds, siblings by their order.
     tree: Vec<BlockId>,
     /// The block each decision's permalink and references lead to: the first block it governs
-    /// in reading order (the page JSON lists every block it governs).
+    /// in reading order.
     governs: BTreeMap<BlockId, BlockId>,
     /// The questions no decision answers, in reading order of their docs.
     pub open_questions: Vec<BlockId>,
@@ -333,11 +333,6 @@ impl<'a> Site<'a> {
     /// Whether a doc or folder already has the page at `page`.
     fn page_taken(&self, page: &str) -> bool {
         self.page_owner.contains_key(page)
-    }
-
-    /// The folder or doc whose page is `page` (the first in tree order, should two share it).
-    pub fn page_block(&self, page: &str) -> Option<&'a Block> {
-        self.m.get(self.page_owner.get(page)?)
     }
 
     /// The page of a folder or doc.

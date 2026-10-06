@@ -112,19 +112,7 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
         let f = root.join(site).join(url);
         assert!(f.is_file(), "the review page {} is missing", f.display());
     }
-    // Page 8's anchor is a block of the long doc's JSON twin.
-    let json_twin = root.join("canon/specification/patterns.json");
-    let twin: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(&json_twin)
-            .unwrap_or_else(|e| panic!("{}: {e}", json_twin.display())),
-    )
-    .unwrap();
-    let text = twin.to_string();
-    assert!(
-        text.contains(&format!("\"{anchor}\"")),
-        "{anchor} is not in {}",
-        json_twin.display()
-    );
+    // Page 8's anchor is a block on page 8.
     let page8 = std::fs::read_to_string(root.join("canon/specification/patterns.html")).unwrap();
     assert!(
         page8.contains(&format!("id=\"{anchor}\"")),

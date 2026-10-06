@@ -327,7 +327,7 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             marker(ctx, t, &display_name(t)),
             body()
         ),
-        // supporting text: it stays in the page JSON, not on the page
+        // supporting text: off the site (FW-D10)
         "rationale" => String::new(),
         "term" => format!(
             "<dl class=\"term\"><dt id=\"{}\">{}</dt><dd>{}</dd></dl>",
@@ -425,7 +425,7 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
             inline::spans_html(b.field_str("prompt").unwrap_or(""), &ictx),
             body()
         ),
-        // a decision has no place in the text: the trail and the JSON carry it
+        // a decision has no place in the text: the trail carries it
         rdy_model::decision::DECISION => String::new(),
         // prose, and a type with no rendering of its own (presentational or not): plain text,
         // with no type label; its primary field (a statement, prompt, name or title) first, so

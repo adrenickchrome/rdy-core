@@ -3,21 +3,20 @@ use crate::html::{self, BlockCtx, Link};
 use crate::inline::{self, Ctx};
 use crate::site::{Site, Url, rel};
 use crate::trail::Trail;
-use crate::{assets, home, machine, nav, search, toc, trail, version};
+use crate::{assets, home, nav, search, toc, trail, version};
 use rdy_engine::{Materialized, VersionInfo, VersionPosition};
 use rdy_graph::{EdgeKind, Graph};
 use rdy_model::{Block, BlockId, Hash, decision, tree};
 use rdy_schema::Pack;
 use serde::Serialize;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// What a render reads, whichever page it builds.
 pub struct Shared<'a> {
     pub site: &'a Site<'a>,
     pub m: &'a Materialized,
     pub g: &'a Graph,
-    pub suspects: &'a BTreeSet<BlockId>,
     pub position: &'a VersionPosition,
     pub pack: &'a Pack,
     pub site_name: &'a str,
@@ -62,8 +61,6 @@ pub struct Item {
     pub kind_word: &'static str,
     /// The heading text of a section, the name of what a definition defines.
     pub title: Option<String>,
-    /// Supporting text (a rationale): listed in the page JSON, not written on the page.
-    pub supporting: bool,
     pub html: String,
     /// The block's type is presentational: no marker, no "Why ?" trail.
     pub presentational: bool,
@@ -183,8 +180,6 @@ pub struct PageContext {
     pub has_mermaid: bool,
     pub has_terms: bool,
     pub has_questions: bool,
-    /// The page's JSON twin, relative to the page.
-    pub json_href: String,
     pub items: Vec<Item>,
     pub body: Body,
 }
@@ -211,17 +206,6 @@ fn kind_word(block_type: &str) -> &'static str {
         "diagram" => "diagram",
         _ => "block",
     }
-}
-
-/// `wallets/transactions.html` is `transactions.json` beside it.
-fn json_name(page: &str) -> String {
-    let file = page.rsplit('/').next().unwrap_or(page);
-    format!("{}.json", file.strip_suffix(".html").unwrap_or(file))
-}
-
-/// The path of a page's JSON twin, relative to the site root.
-pub fn json_path(page: &str) -> String {
-    format!("{}.json", page.strip_suffix(".html").unwrap_or(page))
 }
 
 impl Shared<'_> {
@@ -379,11 +363,6 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
             )
         }
     };
-    let json_href = if kind_name == "redirect" {
-        String::new()
-    } else {
-        json_name(&page_url)
-    };
     let mut body = Body::default();
     let mut items = vec![];
     let mut has_mermaid = false;
@@ -488,7 +467,6 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         has_mermaid,
         has_terms,
         has_questions,
-        json_href,
         items,
         body,
         kind: kind_name,
@@ -504,26 +482,11 @@ pub fn redirect_target(sh: &Shared, id: &BlockId, url: &Url) -> (String, String,
     (page, sh.site.label(b), href)
 }
 
-/// The search entries and the JSON twin of a finished page, through the two modules that read
-/// one. A permalink page has neither.
-pub fn finish(
-    sh: &Shared,
-    ctx: &PageContext,
-    index: &mut search::Index,
-) -> Option<machine::PageTwin> {
-    if ctx.kind == "redirect" {
-        return None;
+/// Collects a finished page's search entries. A permalink page has none.
+pub fn finish(sh: &Shared, ctx: &PageContext, index: &mut search::Index) {
+    if ctx.kind != "redirect" {
+        search::collect(index, ctx, sh.m, sh.site);
     }
-    search::collect(index, ctx, sh.m, sh.site);
-    Some(machine::page_json(
-        ctx,
-        sh.m,
-        sh.g,
-        sh.suspects,
-        sh.position,
-        sh.site,
-        sh.pack,
-    ))
 }
 
 /// The doc's own part of the context, its blocks as items and whether one is a Mermaid diagram.
@@ -585,22 +548,8 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         if b.block_type == decision::DECISION || lede_block.is_some_and(|l| l.id == b.id) {
             continue;
         }
-        // a rationale is supporting text: in the page JSON, not on the page (FW-D10)
+        // a rationale is supporting text: off the site (FW-D10)
         if b.block_type == crate::site::RATIONALE {
-            items.push(Item {
-                id: b.id.to_string(),
-                block_type: b.block_type.clone(),
-                depth,
-                anchor: String::new(),
-                kind_word: kind_word(&b.block_type),
-                title: None,
-                supporting: true,
-                html: String::new(),
-                presentational: sh.pack.is_presentational(&b.block_type),
-                trail: Trail::default(),
-                ref_head: String::new(),
-                ref_: String::new(),
-            });
             continue;
         }
         if b.block_type == "diagram" && b.field_str("lang") == Some("mermaid") {
@@ -649,7 +598,6 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
             anchor: anchor.clone(),
             kind_word: kind_word(&b.block_type),
             title,
-            supporting: false,
             html: html::block_html(b, &ctx),
             presentational,
             trail: if presentational {

@@ -49,7 +49,7 @@ fn pres1_a_presentational_note_has_no_marker() {
 }
 
 #[test]
-fn pres1_presentational_blocks_render_plainly_and_are_flagged_in_json() {
+fn pres1_presentational_blocks_render_plainly() {
     let (_d, r, ids) = presentational_site();
     let out = tempfile::tempdir().unwrap();
     rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
@@ -61,15 +61,6 @@ fn pres1_presentational_blocks_render_plainly_and_are_flagged_in_json() {
             && !b.contains("<details class=\"why\">"),
         "{b}"
     );
-    let j: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(out.path().join("t.json")).unwrap()).unwrap();
-    let a = j["blocks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|x| x["id"] == ids.aside.to_string())
-        .unwrap();
-    assert_eq!(a["presentational"], true);
 }
 
 /// Neither a presentational aside nor a presentational note shows a trail or a Copy ref button,

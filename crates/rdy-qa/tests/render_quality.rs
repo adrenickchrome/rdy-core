@@ -1,8 +1,7 @@
-//! The leak scan and structure checks over the golden, hostile and generated projects (scan1, struct1, nojs1).
+//! The leak scan and structure checks over the golden, hostile and generated projects (scan1, struct1, nojs1, people1).
 use rdy_engine::Scope;
 use rdy_qa::{golden, site::*};
 use regex::Regex;
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -157,8 +156,6 @@ fn scan1_f11_leaves_nav_entries_that_mirror_authored_titles_alone() {
 struct Page {
     rel: String,
     html: String,
-    /// The `<page>.json` twin, when there is one.
-    json: Option<String>,
 }
 
 struct Canon {
@@ -180,7 +177,6 @@ fn canon() -> &'static Canon {
                     .to_string_lossy()
                     .replace('\\', "/"),
                 html: std::fs::read_to_string(&p).unwrap(),
-                json: std::fs::read_to_string(p.with_extension("json")).ok(),
             })
             .collect();
         Canon {
@@ -213,13 +209,6 @@ fn each_page(skip_go: bool, check: impl Fn(&Page)) {
         }
         check(page);
     }
-}
-
-fn block_ids(html: &str) -> BTreeSet<String> {
-    attrs(html, "data-rdy-block")
-        .into_iter()
-        .map(str::to_string)
-        .collect()
 }
 
 /// What is wrong with the `<h1>` count of a page, if anything. A `go/` permalink page is a
@@ -419,21 +408,15 @@ fn struct1_every_image_has_alt_text() {
     });
 }
 
+/// FW-D5 refined: no page points to a JSON twin.
 #[test]
-fn struct1_json_twin_ids_equal_the_pages_block_ids() {
-    each_page(true, |Page { rel, html, json }| {
-        let twin = json
-            .as_deref()
-            .unwrap_or_else(|| panic!("{rel}: no .json twin"));
-        let twin: serde_json::Value =
-            serde_json::from_str(twin).unwrap_or_else(|e| panic!("{rel}: twin is not JSON: {e}"));
-        let ids: BTreeSet<String> = twin["ids"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{rel}: twin has no `ids` array"))
-            .iter()
-            .map(|v| v.as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(ids, block_ids(html), "{rel}");
+fn people1_no_page_links_to_a_json_twin() {
+    let href_json = Regex::new(r#"href="[^"]*\.json""#).unwrap();
+    each_page(false, |Page { rel, html, .. }| {
+        assert!(
+            !html.contains("application/json") && !href_json.is_match(html),
+            "{rel} links to JSON"
+        );
     });
 }
 

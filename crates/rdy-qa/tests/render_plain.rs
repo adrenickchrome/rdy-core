@@ -1,4 +1,4 @@
-//! Plain text in search, the page JSON, labels and Copy ref (md1, dtext1, key1); content directly in a doc (direct1).
+//! Plain text in search, labels and Copy ref (md1, dtext1, key1); content directly in a doc (direct1).
 use rdy_engine::Scope;
 use rdy_qa::golden::*;
 use serde_json::{Value, json};
@@ -67,8 +67,8 @@ fn spec() -> (
 }
 
 #[test]
-fn md1_search_and_the_page_json_carry_plain_text() {
-    let (_d, mut r, ids) = spec();
+fn md1_search_carries_plain_text() {
+    let (_d, mut r, _ids) = spec();
     let out = render(&mut r);
     let idx = read_json(&out.path().join("search-index.json"));
     let texts: Vec<String> = idx["entries"]
@@ -86,24 +86,6 @@ fn md1_search_and_the_page_json_carry_plain_text() {
         joined.contains("The case clause") && joined.contains("the guard rule"),
         "{joined}"
     );
-    let j = read_json(&out.path().join("spec.json"));
-    let req = j["blocks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|b| b["id"] == ids["$r"])
-        .unwrap();
-    assert_eq!(req["summary"], "A guard runs after the pattern matches.");
-    let d = &j["decisions"][0];
-    assert_eq!(d["statement"], "Guards use if");
-    assert_eq!(d["options"], json!(["if", "when"]));
-    let sec = j["blocks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|b| b["id"] == ids["$s"])
-        .unwrap();
-    assert_eq!(sec["title"], "The case clause");
 }
 
 #[test]

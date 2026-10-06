@@ -3,7 +3,7 @@ mod highlight;
 mod home;
 mod html;
 pub mod inline;
-mod machine;
+mod llms;
 mod nav;
 mod page;
 mod search;
@@ -15,7 +15,7 @@ mod version;
 pub use html::{Link, escape, text_html};
 
 use rdy_engine::{E_IO, RdyError, ReadState, Scope};
-use rdy_model::{BlockId, Hash, tree};
+use rdy_model::{Hash, tree};
 use serde::Serialize;
 use site::Site;
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,8 +27,6 @@ pub struct RenderSummary {
     pub pages: usize,
     /// The figure files written under `assets/`.
     pub assets: usize,
-    /// The JSON twins written beside the pages.
-    pub json: usize,
     /// The permalink pages under `go/`.
     pub redirects: usize,
     /// Things the render left behind that the person should know about (a hidden old copy).
@@ -377,7 +375,6 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
         })
         .collect();
     let m = rdy.materialized(scope)?;
-    let suspects: BTreeSet<BlockId> = rdy.suspects(scope)?.into_iter().map(|s| s.block).collect();
     // the figure blobs the store holds (read before `g` borrows `rdy`)
     let mut blobs: BTreeMap<Hash, Vec<u8>> = BTreeMap::new();
     for b in m.iter().filter(|b| b.block_type == "figure") {
@@ -398,7 +395,6 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
         site: &site,
         m: &m,
         g: &g,
-        suspects: &suspects,
         position: &position,
         pack: &pack,
         site_name: &site_name,
@@ -411,7 +407,6 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
     let mut stats = RenderSummary {
         pages: 0,
         assets: 0,
-        json: 0,
         redirects: 0,
         warnings: vec![],
     };
@@ -479,17 +474,14 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
     let pages = (|| -> Result<bool, RdyError> {
         let mut index = search::Index::default();
         let mut contexts = vec![];
-        let mut twins = vec![];
         let mut has_mermaid = false;
         for kind in kinds {
             let ctx = page::build(&sh, kind);
             has_mermaid |= ctx.has_mermaid;
-            if let Some(twin) = page::finish(&sh, &ctx, &mut index) {
-                twins.push((page::json_path(&ctx.page_url), twin));
-            }
+            page::finish(&sh, &ctx, &mut index);
             contexts.push(ctx);
         }
-        // the pages are rendered, and their twins serialized, on a few threads
+        // the pages are rendered on a few threads
         let mut files = par_map(&contexts, |ctx| {
             let html = env
                 .get_template(template_of(ctx.kind))
@@ -499,23 +491,20 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
             Ok((ctx.page_url.clone(), html))
         })?;
         stats.pages = files.len();
-        files.extend(par_map(&twins, |(path, twin)| {
-            let text = serde_json::to_string_pretty(twin).expect("json") + "\n";
-            Ok((path.clone(), text))
-        })?);
-        stats.json = twins.len();
         files.retain(|(p, _)| !taken.contains(p));
         make_dirs(out, &files)?;
         write_all(out, &files)?;
         search::write(&index, &site_name, out)?;
-        machine::write_index(
+        let label = version::label(&position);
+        llms::write_index(
             &site,
             out,
             &contexts,
             &site_name,
             description.as_deref(),
-            &version::label(&position).text,
+            &label,
         )?;
+        llms::write_full(out, &contexts, &site_name, description.as_deref(), &label)?;
         Ok(has_mermaid)
     })();
     let written = writer.join().expect("the permalink writer does not panic");
