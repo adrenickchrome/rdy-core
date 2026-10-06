@@ -27,7 +27,7 @@ fn edit1_an_edit_that_changes_pins_is_refused_and_writes_nothing() {
     let mut pins_and_body = only_pins.clone();
     pins_and_body.body = "Uses the ledger.".into();
     for edited in [only_pins, pins_and_body] {
-        let e = r.edit_block(&writer(), "work", edited).unwrap_err();
+        let e = r.edit_block(&writer(), "work", edited, None).unwrap_err();
         assert_eq!(e.code, "E_BAD_INPUT", "{e}");
         assert!(e.fix.contains("pins are set by rdy"), "{e}");
     }

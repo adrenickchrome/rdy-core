@@ -91,7 +91,9 @@ fn clink1_links_are_stored_on_the_change_and_part_of_its_id() {
         justification: None,
         message: String::new(),
     };
-    let a = r.write_linked(&writer(), req("A"), links.clone()).unwrap();
+    let a = r
+        .write_linked(&writer(), req("A"), links.clone(), None)
+        .unwrap();
     let id: Hash = a.change.parse().unwrap();
     assert_eq!(r.store().change(&id).unwrap().links, links);
     let b = r.write(&writer(), req("B")).unwrap();

@@ -1293,6 +1293,7 @@ dependencies = [
 name = "rdy-graph"
 version = "0.1.0"
 dependencies = [
+ "imbl",
  "rdy-model",
  "serde",
 ]

@@ -1359,11 +1359,23 @@ fn build_ops(
 
 impl Rdy {
     pub fn write(&mut self, session: &Session, req: WriteRequest) -> Result<WriteResult, RdyError> {
-        self.write_linked(session, req, ChangeLinks::default())
+        self.write_briefed(session, req, None)
     }
 
-    /// `write`, with `links` (intent, alternative, client nonce) recorded on the change. MCP and
-    /// the CLI don't use it yet: M2d1 adds intents, and M2f the nonce.
+    /// `write`, citing the briefing whose token is `brief` (bwr1): a write that touches stable
+    /// content needs a current one; a draft-only write citing a stale one gets `W_BRIEF_STALE`.
+    pub fn write_briefed(
+        &mut self,
+        session: &Session,
+        req: WriteRequest,
+        brief: Option<String>,
+    ) -> Result<WriteResult, RdyError> {
+        self.write_linked(session, req, ChangeLinks::default(), brief.as_deref())
+    }
+
+    /// `write`, with `links` (intent, alternative, client nonce) recorded on the change and the
+    /// briefing `brief` cited (`write_briefed`). MCP and the CLI don't use it yet: M2d1 adds
+    /// intents, and M2f the nonce.
     ///
     /// The change is checked against the view as the published state holds it, which is the
     /// view's present state only if every store write made outside the engine was followed by
@@ -1374,6 +1386,7 @@ impl Rdy {
         session: &Session,
         req: WriteRequest,
         links: ChangeLinks,
+        brief: Option<&str>,
     ) -> Result<WriteResult, RdyError> {
         if !session.role.can_write() {
             return Err(RdyError::new(
@@ -1389,6 +1402,7 @@ impl Rdy {
         let st = self.read();
         check_view_access(&st, &req.view, session)?;
         let m = st.materialized(&scope)?;
+        let brief_warnings = crate::brief::check(&self.pack, &self.briefs, &m, &req.ops, brief)?;
         let (ops, created, touched, names) =
             build_ops(&self.pack, &self.store, &m, session, req.ops)?;
         let change = Change {
@@ -1426,6 +1440,7 @@ impl Rdy {
                 .collect();
             warnings.extend(skeleton_gaps(&self.pack, doc, &titles));
         }
+        warnings.extend(brief_warnings);
         Ok(WriteResult {
             change: id.to_string(),
             created,

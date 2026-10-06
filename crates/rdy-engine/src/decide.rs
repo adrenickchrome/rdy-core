@@ -37,6 +37,9 @@ pub struct DecisionInput {
     /// sup1: link kinds rdy_supersede must not copy from the old decision.
     #[serde(default)]
     pub no_inherit: Vec<String>,
+    /// bwr1: the briefing this decision's write cites (needed under a stable parent).
+    #[serde(default)]
+    pub brief: Option<String>,
 }
 
 fn links_of(d: &DecisionInput) -> BTreeMap<String, Vec<LinkInput>> {
@@ -94,6 +97,7 @@ impl Rdy {
         extra: Vec<(String, LinkInput)>,
         message: String,
     ) -> Result<WriteResult, RdyError> {
+        let brief = d.brief.clone();
         let mut links = links_of(&d);
         for (name, l) in extra {
             links.entry(name).or_default().push(l);
@@ -108,7 +112,7 @@ impl Rdy {
             body: d.body.clone(),
             links,
         };
-        self.write(
+        self.write_briefed(
             s,
             WriteRequest {
                 view: view.into(),
@@ -116,6 +120,7 @@ impl Rdy {
                 justification: None,
                 message,
             },
+            brief,
         )
     }
 
@@ -247,11 +252,13 @@ impl Rdy {
         target: &str,
         reason: &str,
         parent: &str,
+        brief: Option<String>,
     ) -> Result<WriteResult, RdyError> {
         let tid = self.require_decision(view, target)?;
         let d = DecisionInput {
             parent: parent.into(),
             statement: format!("Revoke {tid}: {reason}"),
+            brief,
             ..Default::default()
         };
         self.write_decision(

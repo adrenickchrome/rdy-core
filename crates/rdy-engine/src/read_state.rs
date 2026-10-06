@@ -10,7 +10,7 @@ use rdy_model::{Block, BlockId, Change, Hash, Op, Tag};
 use rdy_schema::Pack;
 use rdy_store::segment::Location;
 use rdy_store::{Conflict, Merged, StoreReader, ViewHead};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// What a write changed, so that `Rdy::publish` re-reads only that and carries the rest over.
@@ -50,6 +50,21 @@ impl Built {
             graph: OnceLock::new(),
             tree: OnceLock::new(),
         }
+    }
+
+    /// gcar1: this state with `ops` applied: the same conflicts and, only if this state's graph is
+    /// built, that graph carried across the ops (their blocks' old edges out, their new ones in),
+    /// which equals a rebuild. The tree is not carried.
+    pub(crate) fn after(&self, ops: &[Op]) -> Built {
+        let m = Arc::new(self.m.with(ops));
+        let next = Built::new(Arc::clone(&m), Arc::clone(&self.conflicts));
+        if let Some(g) = self.graph.get() {
+            let ids: BTreeSet<&BlockId> = ops.iter().map(Op::block_id).collect();
+            let old = ids.iter().filter_map(|id| self.m.get(id));
+            let new = ids.iter().filter_map(|id| m.get(id));
+            let _ = next.graph.set(Arc::new(g.with_changes(old, new)));
+        }
+        next
     }
 }
 

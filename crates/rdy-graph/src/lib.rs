@@ -1,3 +1,4 @@
+use imbl::OrdMap;
 use rdy_model::decision::{self, DecisionStatus};
 use rdy_model::{Block, BlockId, Hash};
 use serde::Serialize;
@@ -73,6 +74,20 @@ pub enum DerivedStatus {
     },
 }
 
+impl DerivedStatus {
+    /// The status's name, as its serialized `status` tag spells it.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            DerivedStatus::Proposed => "proposed",
+            DerivedStatus::Rejected => "rejected",
+            DerivedStatus::Live => "live",
+            DerivedStatus::PartiallySuperseded { .. } => "partially_superseded",
+            DerivedStatus::Superseded { .. } => "superseded",
+            DerivedStatus::Revoked { .. } => "revoked",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Suspect {
     pub block: BlockId,
@@ -80,12 +95,16 @@ pub struct Suspect {
     pub reason: String,
 }
 
-#[derive(Default)]
+/// The edges, versions and decision statuses of one state. Its maps are persistent, so a clone is
+/// O(1) and [`Graph::with_changes`] carries a graph across a write in O(changed edges × log n).
+/// Every edge list is ordered by (generator id, index within the generator's edges), where an
+/// edge's generator is the block whose own content makes it (see `Graph::edges_of`).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Graph {
-    out: BTreeMap<BlockId, Vec<Edge>>,
-    inc: BTreeMap<BlockId, Vec<Edge>>,
-    decision_status: BTreeMap<BlockId, DecisionStatus>,
-    versions: BTreeMap<BlockId, Hash>,
+    out: OrdMap<BlockId, Vec<Edge>>,
+    inc: OrdMap<BlockId, Vec<Edge>>,
+    decision_status: OrdMap<BlockId, DecisionStatus>,
+    versions: OrdMap<BlockId, Hash>,
 }
 
 const EMPTY: &[Edge] = &[];
@@ -131,7 +150,7 @@ fn unique(found: impl Iterator<Item = Suspect>) -> Vec<Suspect> {
 /// sus2: link kinds through which a changed or deleted target makes a block suspect: premises,
 /// and what the block implements or is decided by (spec §6.2: "references and premises").
 /// A superseded or revoked target is suspect through any link.
-const SUSPECT_LINKS: [&str; 4] = [
+pub const SUSPECT_LINKS: [&str; 4] = [
     decision::DEPENDS_ON,
     decision::CONDITIONAL_ON,
     decision::IMPLEMENTS,
@@ -139,7 +158,7 @@ const SUSPECT_LINKS: [&str; 4] = [
 ];
 
 /// imp2: link kinds impact follows: the dependency edges (with references).
-const IMPACT_LINKS: [&str; 6] = [
+pub const IMPACT_LINKS: [&str; 6] = [
     decision::DEPENDS_ON,
     decision::CONDITIONAL_ON,
     decision::IMPLEMENTS,
@@ -162,7 +181,38 @@ impl BlockLookup for BTreeMap<BlockId, Block> {
     }
 }
 
+/// The block whose own content makes `e`: the child for `Contains`, `from` otherwise.
+fn generator(e: &Edge) -> &BlockId {
+    match e.kind {
+        EdgeKind::Contains => &e.to,
+        _ => &e.from,
+    }
+}
+
+/// Removes the first element equal to `e` from `map[key]`, dropping the list once it is empty.
+fn unlist(map: &mut OrdMap<BlockId, Vec<Edge>>, key: &BlockId, e: &Edge) {
+    let Some(list) = map.get_mut(key) else {
+        return;
+    };
+    let start = list.partition_point(|x| generator(x) < generator(e));
+    if let Some(i) = list[start..].iter().position(|x| x == e) {
+        list.remove(start + i);
+    }
+    if list.is_empty() {
+        map.remove(key);
+    }
+}
+
+/// Inserts `e` into `map[key]` after every edge whose generator sorts at or before `e`'s, so a
+/// generator's edges, inserted in order, stay in its run and in their own order.
+fn enlist(map: &mut OrdMap<BlockId, Vec<Edge>>, key: BlockId, e: Edge) {
+    let list = map.entry(key).or_default();
+    let at = list.partition_point(|x| generator(x) <= generator(&e));
+    list.insert(at, e);
+}
+
 impl Graph {
+    /// The graph of `blocks`, which are visited in the order given (id order, for a state).
     pub fn build_from<'a>(blocks: impl IntoIterator<Item = &'a Block>) -> Graph {
         let mut g = Graph::default();
         for b in blocks {
@@ -170,42 +220,78 @@ impl Graph {
             if let Some(s) = decision::status(b) {
                 g.decision_status.insert(b.id.clone(), s);
             }
-            let mut edges = vec![];
-            if let Some(p) = &b.parent {
-                edges.push(Edge {
-                    from: p.clone(),
-                    to: b.id.clone(),
-                    kind: EdgeKind::Contains,
-                    part: None,
-                    pin: None,
-                });
-            }
-            for tok in b.ref_tokens() {
-                if let Ok(t) = BlockId::parse(&tok) {
-                    let pin = b.pins.get(&t).copied();
-                    edges.push(Edge {
-                        from: b.id.clone(),
-                        to: t,
-                        kind: EdgeKind::References,
-                        part: None,
-                        pin,
-                    });
-                }
-            }
-            for (name, links) in &b.links {
-                for l in links {
-                    edges.push(Edge {
-                        from: b.id.clone(),
-                        to: l.target.clone(),
-                        kind: EdgeKind::Link(name.clone()),
-                        part: l.part.clone(),
-                        pin: b.pins.get(&l.target).copied(),
-                    });
-                }
-            }
-            for e in edges {
+            for e in Graph::edges_of(b) {
                 g.inc.entry(e.to.clone()).or_default().push(e.clone());
                 g.out.entry(e.from.clone()).or_default().push(e);
+            }
+        }
+        g
+    }
+
+    /// The edges `b`'s own content makes, in order: `Contains` from its parent (if any), one
+    /// `References` edge per reference token in set order, then its links in map order.
+    fn edges_of(b: &Block) -> Vec<Edge> {
+        let mut edges = vec![];
+        if let Some(p) = &b.parent {
+            edges.push(Edge {
+                from: p.clone(),
+                to: b.id.clone(),
+                kind: EdgeKind::Contains,
+                part: None,
+                pin: None,
+            });
+        }
+        for tok in b.ref_tokens() {
+            if let Ok(t) = BlockId::parse(&tok) {
+                let pin = b.pins.get(&t).copied();
+                edges.push(Edge {
+                    from: b.id.clone(),
+                    to: t,
+                    kind: EdgeKind::References,
+                    part: None,
+                    pin,
+                });
+            }
+        }
+        for (name, links) in &b.links {
+            for l in links {
+                edges.push(Edge {
+                    from: b.id.clone(),
+                    to: l.target.clone(),
+                    kind: EdgeKind::Link(name.clone()),
+                    part: l.part.clone(),
+                    pin: b.pins.get(&l.target).copied(),
+                });
+            }
+        }
+        edges
+    }
+
+    /// gcar1: `self` with every edge, version and status the `old` blocks generate removed and
+    /// those of the `new` blocks added. With `old` the previous versions of a write's blocks and
+    /// `new` their current versions, the result equals a rebuild of the new state.
+    pub fn with_changes<'a>(
+        &self,
+        old: impl IntoIterator<Item = &'a Block>,
+        new: impl IntoIterator<Item = &'a Block>,
+    ) -> Graph {
+        let mut g = self.clone();
+        for b in old {
+            g.versions.remove(&b.id);
+            g.decision_status.remove(&b.id);
+            for e in Graph::edges_of(b) {
+                unlist(&mut g.out, &e.from, &e);
+                unlist(&mut g.inc, &e.to, &e);
+            }
+        }
+        for b in new {
+            g.versions.insert(b.id.clone(), b.version_hash());
+            if let Some(s) = decision::status(b) {
+                g.decision_status.insert(b.id.clone(), s);
+            }
+            for e in Graph::edges_of(b) {
+                enlist(&mut g.inc, e.to.clone(), e.clone());
+                enlist(&mut g.out, e.from.clone(), e);
             }
         }
         g

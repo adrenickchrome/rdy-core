@@ -3,11 +3,14 @@
 //! op parses and checks its role here, then runs its engine call as one `Engine::write`
 //! closure on the writer. Relative paths in args resolve against the session's working
 //! directory.
+use rdy_engine::brief::Coverage;
+use rdy_engine::consequence::write_and_report;
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::{
-    E_BAD_INPUT, E_PERMISSION, RdyError, ReadState, Scope, Session, block_from_yaml, block_to_yaml,
-    check_path, resolve_pack,
+    E_BAD_INPUT, E_LIMIT, E_PERMISSION, RdyError, ReadState, Scope, Session, block_from_yaml,
+    block_to_yaml, check_path, resolve_pack,
 };
+use rdy_mcp::tools::MAX_TOKENS_LIMIT;
 use rdy_model::Role;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -31,6 +34,7 @@ pub const OPS: &[&str] = &[
     "impact",
     "tags",
     "block",
+    "brief",
     "render",
     "export",
     "check",
@@ -81,6 +85,18 @@ struct BlockArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct BriefArgs {
+    ids: Option<Vec<String>>,
+    path: Option<String>,
+    scope: Option<String>,
+    /// A write target, resolved as `edit_block` writes it: this view when it has a head, else
+    /// canon.
+    view: Option<String>,
+    max_tokens: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OutArgs {
     out: String,
     scope: Option<String>,
@@ -114,6 +130,8 @@ struct NewDocArgs {
 struct EditBlockArgs {
     yaml: String,
     view: Option<String>,
+    brief: Option<String>,
+    max_tokens: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -288,12 +306,16 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             tags(cx)
         }
         "block" => block(cx, parse(op, args, "{id, view?}")?),
+        "brief" => brief(
+            cx,
+            parse(op, args, "{ids?, path?, scope?, view?, max_tokens?}")?,
+        ),
         "render" => render(cx, parse(op, args, "{out, scope?}")?),
         "export" => export(cx, parse(op, args, "{out, scope?}")?),
         "check" => check(cx, parse(op, args, "{path, pack?}")?),
         "new_folder" => new_folder(cx, parse(op, args, "{path, view?}")?),
         "new_doc" => new_doc(cx, parse(op, args, "{path, view?, doc_type?, title?}")?),
-        "edit_block" => edit_block(cx, parse(op, args, "{yaml, view?}")?),
+        "edit_block" => edit_block(cx, parse(op, args, "{yaml, view?, brief?, max_tokens?}")?),
         "propose" => propose(cx, parse(op, args, "{title, view?}")?),
         "approve" => approve(cx, parse(op, args, "{proposal}")?),
         "tag" => tag(cx, parse(op, args, "{version, landing?, message?}")?),
@@ -410,6 +432,56 @@ fn block(cx: &OpContext, a: BlockArgs) -> Result<Value, RdyError> {
     )
 }
 
+/// `E_LIMIT` for a `max_tokens` over `MAX_TOKENS_LIMIT`, as the MCP tools refuse it.
+fn check_max_tokens(max_tokens: Option<usize>) -> Result<(), RdyError> {
+    match max_tokens {
+        Some(n) if n > MAX_TOKENS_LIMIT => Err(RdyError::new(
+            E_LIMIT,
+            format!("max_tokens {n} is over the limit of {MAX_TOKENS_LIMIT}"),
+            format!("ask for at most {MAX_TOKENS_LIMIT} tokens"),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// A briefing over blocks and/or a doc or folder path, registered so its token can be cited.
+/// The scope is the one given (a read: an unknown view is `E_NOT_FOUND`); else `view` as a write
+/// target (that view when it has a head, else canon, as a write there would read it); else the
+/// session's default view when it has a head, else canon.
+fn brief(cx: &OpContext, a: BriefArgs) -> Result<Value, RdyError> {
+    check_max_tokens(a.max_tokens)?;
+    let st = cx.engine.read();
+    let own = cx.session.default_view();
+    if a.scope.is_some() && a.view.is_some() {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "brief takes scope or view, not both",
+            "pass scope to read a scope, or view to brief a write target",
+        ));
+    }
+    let scope = match (a.scope.as_deref(), a.view) {
+        (Some(t), _) => st.resolve_read_scope(t, Some(&own))?,
+        (None, view) => {
+            let target = view.unwrap_or(own);
+            if st.view_head(&target).is_some() {
+                Scope::View(target)
+            } else {
+                Scope::Canon
+            }
+        }
+    };
+    let b = st.brief(
+        &scope,
+        &Coverage {
+            ids: a.ids.unwrap_or_default(),
+            path: a.path,
+        },
+        a.max_tokens,
+    )?;
+    b.register(&cx.engine.briefs());
+    Ok(to_json(&b))
+}
+
 fn render(cx: &OpContext, a: OutArgs) -> Result<Value, RdyError> {
     let st = cx.engine.read();
     let scope = scope_of(&st, cx, a.scope.as_deref())?;
@@ -444,13 +516,17 @@ fn check(cx: &OpContext, a: CheckArgs) -> Result<Value, RdyError> {
 fn new_folder(cx: &OpContext, a: NewFolderArgs) -> Result<Value, RdyError> {
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
-    write_typed(cx.engine, move |r| r.new_folder(&s, &view, &a.path))
+    let v = view.clone();
+    write_and_report(cx.engine, &v, None, move |r| {
+        r.new_folder(&s, &view, &a.path)
+    })
 }
 
 fn new_doc(cx: &OpContext, a: NewDocArgs) -> Result<Value, RdyError> {
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
-    write_typed(cx.engine, move |r| {
+    let v = view.clone();
+    write_and_report(cx.engine, &v, None, move |r| {
         r.new_doc(
             &s,
             &view,
@@ -462,10 +538,14 @@ fn new_doc(cx: &OpContext, a: NewDocArgs) -> Result<Value, RdyError> {
 }
 
 fn edit_block(cx: &OpContext, a: EditBlockArgs) -> Result<Value, RdyError> {
+    check_max_tokens(a.max_tokens)?;
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
     let block = block_from_yaml(&a.yaml)?;
-    write_typed(cx.engine, move |r| r.edit_block(&s, &view, block))
+    let (brief, max_tokens, v) = (a.brief, a.max_tokens, view.clone());
+    write_and_report(cx.engine, &v, max_tokens, move |r| {
+        r.edit_block(&s, &view, block, brief)
+    })
 }
 
 fn propose(cx: &OpContext, a: ProposeArgs) -> Result<Value, RdyError> {
@@ -491,7 +571,8 @@ fn import(cx: &OpContext, a: ImportArgs) -> Result<Value, RdyError> {
     let view = view_of(&s, Some(a.view));
     let dir = resolve_path(cx.cwd, &a.dir);
     let scope = Scope::View(view.clone());
-    let mut v = write_typed(cx.engine, move |r| r.import(&s, &view, &dir))?;
+    let target = view.clone();
+    let mut v = write_and_report(cx.engine, &target, None, move |r| r.import(&s, &view, &dir))?;
     // each warning names its doc: the title as imported, then the id (the CLI prints it)
     let st = cx.engine.read();
     let docs: serde_json::Map<String, Value> = v["warnings"]

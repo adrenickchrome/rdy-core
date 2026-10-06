@@ -146,6 +146,13 @@ impl RdyServer {
     }
 
     #[tool(
+        description = "Brief before editing: for blocks (ids) or a doc or folder (path), the decisions that govern them, what depends on them, what will go stale if they change, their open suspects, and their current versions with the briefing token. Cite the token as brief on your next write; writes to stable content need it. To create a block, brief its parent."
+    )]
+    async fn rdy_brief(&self, Parameters(p): Parameters<BriefParams>) -> CallToolResult {
+        self.run("rdy_brief", p, tools::rdy_brief).await
+    }
+
+    #[tool(
         description = "By id or path: blast radius: blocks that depend on the given block through references or dependency links (depends_on, conditional_on, implements, decided_by, describes, affects), by depth. Decisions that refine or supersede it are listed at depth 1 and not followed. Each item's via says which edge reached it: via.kind (references or a link name) to via.from."
     )]
     async fn rdy_impact(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
@@ -160,25 +167,29 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Atomic batch write of ops (create, update, move, delete, rebalance, repin; rdy_schema lists them under \"ops\"). Place a block with after or before a sibling, or neither to append. Use id \"$name\" placeholders to refer to blocks created earlier in the same batch, including {{$name}} inside text. Reference blocks in text as {{id}}, or {{id|your words}} to choose the link text; a block's key (fields.key, e.g. REQ-12) works wherever an id does and is stored as the id. Bodies take a small Markdown subset (rdy_schema \"text\"). links: {\"<kind>\": [{\"target\": \"<id or path>\"}]}. An update replaces only the link kinds it names; \"<kind>\": [] removes that kind."
+        description = "Atomic batch write of ops (create, update, move, delete, rebalance, repin; rdy_schema lists them under \"ops\"). Place a block with after or before a sibling, or neither to append. Use id \"$name\" placeholders to refer to blocks created earlier in the same batch, including {{$name}} inside text. Reference blocks in text as {{id}}, or {{id|your words}} to choose the link text; a block's key (fields.key, e.g. REQ-12) works wherever an id does and is stored as the id. Bodies take a small Markdown subset (rdy_schema \"text\"). links: {\"<kind>\": [{\"target\": \"<id or path>\"}]}. An update replaces only the link kinds it names; \"<kind>\": [] removes that kind. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
     )]
     async fn rdy_write(&self, Parameters(p): Parameters<WriteParams>) -> CallToolResult {
         self.run("rdy_write", p, tools::rdy_write).await
     }
 
-    #[tool(description = "Propose a decision (status proposed; accepted when its proposal lands).")]
+    #[tool(
+        description = "Propose a decision (status proposed; accepted when its proposal lands). Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
+    )]
     async fn rdy_decide(&self, Parameters(p): Parameters<DecideParams>) -> CallToolResult {
         self.run("rdy_decide", p, tools::rdy_decide).await
     }
 
     #[tool(
-        description = "Propose a decision that supersedes an existing one, wholly or a named part. It inherits the old decision's affects, depends_on, conditional_on and refines links unless you give that kind (an empty list drops it); the result's inherited lists what was copied."
+        description = "Propose a decision that supersedes an existing one, wholly or a named part. It inherits the old decision's affects, depends_on, conditional_on and refines links unless you give that kind (an empty list drops it); the result's inherited lists what was copied. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
     )]
     async fn rdy_supersede(&self, Parameters(p): Parameters<SupersedeParams>) -> CallToolResult {
         self.run("rdy_supersede", p, tools::rdy_supersede).await
     }
 
-    #[tool(description = "Propose revoking an existing decision.")]
+    #[tool(
+        description = "Propose revoking an existing decision. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
+    )]
     async fn rdy_revoke(&self, Parameters(p): Parameters<RevokeParams>) -> CallToolResult {
         self.run("rdy_revoke", p, tools::rdy_revoke).await
     }
@@ -221,9 +232,12 @@ impl ServerHandler for RdyServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("rdy", env!("CARGO_PKG_VERSION")))
-            .with_instructions("rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Write with rdy_write; propose with rdy_propose.")
+            .with_instructions(INSTRUCTIONS)
     }
 }
+
+/// What the server tells a host about rdy.
+pub const INSTRUCTIONS: &str = "rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Read and write through rdy's tools, not the working-copy files. Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>). Write with rdy_write; propose with rdy_propose.";
 
 /// The longest id value [`IdScanner`] will capture; a longer one counts as no id.
 const MAX_ID_BYTES: usize = 1024;
@@ -401,12 +415,14 @@ async fn answer_oversized<W: AsyncWrite + Unpin>(
     scan: IdScanner,
     len: usize,
     on_drop: &mut (dyn FnMut(usize, Dropped) + Send),
+    on_line: &mut (dyn FnMut(&[u8]) + Send),
 ) -> std::io::Result<()> {
     match scan.finish() {
         Ok(id) => {
             let call = format!(
                 "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\"name\":\"{REQUEST_TOO_LARGE}\",\"arguments\":{{}}}}}}\n"
             );
+            on_line(call.as_bytes());
             w.write_all(call.as_bytes()).await?;
         }
         Err(why) => on_drop(len, why),
@@ -421,9 +437,21 @@ async fn answer_oversized<W: AsyncWrite + Unpin>(
 /// (without the newline) and the [`Dropped`] reason, once per dropped line.
 pub async fn pump_lines<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     r: R,
+    w: W,
+    max: usize,
+    on_drop: &mut (dyn FnMut(usize, Dropped) + Send),
+) -> std::io::Result<()> {
+    pump_lines_with(r, w, max, on_drop, &mut |_| {}).await
+}
+
+/// [`pump_lines`] with `on_line(line)` called for each line it forwards (a replacement call for
+/// an over-long line included), before writing it. The line is as written, newline and all.
+pub async fn pump_lines_with<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    r: R,
     mut w: W,
     max: usize,
     on_drop: &mut (dyn FnMut(usize, Dropped) + Send),
+    on_line: &mut (dyn FnMut(&[u8]) + Send),
 ) -> std::io::Result<()> {
     let mut r = BufReader::new(r);
     let mut line: Vec<u8> = Vec::new();
@@ -433,8 +461,11 @@ pub async fn pump_lines<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         let buf = r.fill_buf().await?;
         if buf.is_empty() {
             match over.take() {
-                Some((scan, len)) => answer_oversized(&mut w, scan, len, on_drop).await?,
-                None if !line.is_empty() => w.write_all(&line).await?,
+                Some((scan, len)) => answer_oversized(&mut w, scan, len, on_drop, on_line).await?,
+                None if !line.is_empty() => {
+                    on_line(&line);
+                    w.write_all(&line).await?
+                }
                 None => {}
             }
             w.flush().await?;
@@ -466,9 +497,12 @@ pub async fn pump_lines<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             match over.take() {
                 Some((scan, len)) => {
                     // `len` counts the newline that ended the line
-                    answer_oversized(&mut w, scan, len - 1, on_drop).await?
+                    answer_oversized(&mut w, scan, len - 1, on_drop, on_line).await?
                 }
-                None => w.write_all(&line).await?,
+                None => {
+                    on_line(&line);
+                    w.write_all(&line).await?
+                }
             }
             w.flush().await?;
             line.clear();

@@ -3,6 +3,18 @@
     "Ubuntu 24.04.5 LTS / AMD Ryzen 7 9800X3D 8-Core Processor / ext4": {
       "machine": "Ubuntu 24.04.5 LTS / AMD Ryzen 7 9800X3D 8-Core Processor / ext4",
       "ops": {
+        "brief_doc": {
+          "median_ms": 0.2047765,
+          "op": "brief_doc",
+          "p95_ms": 0.22833150000000002,
+          "runs": 20
+        },
+        "brief_doc_50k": {
+          "median_ms": 0.226157,
+          "op": "brief_doc_50k",
+          "p95_ms": 0.2916575,
+          "runs": 10
+        },
         "cold_open": {
           "median_ms": 46.818117,
           "op": "cold_open",
@@ -16,9 +28,9 @@
           "runs": 3
         },
         "cold_open_lagging": {
-          "median_ms": 58.125619,
+          "median_ms": 74.447,
           "op": "cold_open_lagging",
-          "p95_ms": 58.213146,
+          "p95_ms": 84.868,
           "runs": 5
         },
         "context": {
@@ -34,27 +46,27 @@
           "runs": 10
         },
         "daemon_cold_start": {
-          "median_ms": 53.982157,
+          "median_ms": 51.7300155,
           "op": "daemon_cold_start",
-          "p95_ms": 54.48041,
+          "p95_ms": 51.9525715,
           "runs": 3
         },
         "daemon_cold_start_50k": {
-          "median_ms": 193.127607,
+          "median_ms": 201.7264185,
           "op": "daemon_cold_start_50k",
-          "p95_ms": 193.38007,
+          "p95_ms": 203.97520350000002,
           "runs": 3
         },
         "daemon_write_single": {
-          "median_ms": 2.650549,
+          "median_ms": 2.6993145,
           "op": "daemon_write_single",
-          "p95_ms": 2.728508,
+          "p95_ms": 2.7833955,
           "runs": 30
         },
         "daemon_write_single_50k": {
-          "median_ms": 2.741444,
+          "median_ms": 2.828469,
           "op": "daemon_write_single_50k",
-          "p95_ms": 2.892672,
+          "p95_ms": 3.6724344999999996,
           "runs": 30
         },
         "export_import": {
@@ -176,6 +188,30 @@
           "op": "write_batch_200",
           "p95_ms": 8.217626000000001,
           "runs": 9
+        },
+        "write_briefed": {
+          "median_ms": 2.627187,
+          "op": "write_briefed",
+          "p95_ms": 2.732056,
+          "runs": 30
+        },
+        "write_briefed_50k": {
+          "median_ms": 2.804147,
+          "op": "write_briefed_50k",
+          "p95_ms": 2.863962,
+          "runs": 20
+        },
+        "write_consequences": {
+          "median_ms": 2.6097725,
+          "op": "write_consequences",
+          "p95_ms": 2.6538025000000003,
+          "runs": 30
+        },
+        "write_consequences_50k": {
+          "median_ms": 2.787821,
+          "op": "write_consequences_50k",
+          "p95_ms": 2.8469445,
+          "runs": 20
         },
         "write_single": {
           "median_ms": 2.627733,
