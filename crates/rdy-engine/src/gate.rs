@@ -214,6 +214,24 @@ fn resolve_in(st: &ReadState, text: &str) -> Result<ProposalRef, RdyError> {
 }
 
 /// Every block id `b` points at: inline references and link targets.
+/// The earlier of two points on canon's chain (`None` is before the first landing): `a`, unless
+/// `b` is `a` or one of its ancestors.
+fn earlier_landing(
+    st: &ReadState,
+    a: Option<Hash>,
+    b: Option<Hash>,
+) -> Result<Option<Hash>, RdyError> {
+    let Some(b) = b else { return Ok(None) };
+    let mut cur = a;
+    while let Some(h) = cur {
+        if h == b {
+            return Ok(Some(b));
+        }
+        cur = st.reader().landing(&h)?.prev;
+    }
+    Ok(a)
+}
+
 fn targets(b: &Block) -> BTreeSet<BlockId> {
     b.ref_tokens()
         .iter()
@@ -812,9 +830,12 @@ impl Rdy {
             e.issues = issues;
             return Err(e);
         }
-        // a view with no head floats on canon
+        // the version's keys were chosen against the view's base when it was proposed: a pinned
+        // view's base (at or before `canon_at`), or `canon_at` for a view a landing has rebased
+        // since (FW-HB1), where the view's current base would hide the re-key
         let view_base = st.view_head(&p.view).map_or(st.canon_head(), |h| h.base);
-        issues.extend(self.rekeyed_warnings(&st, view_base, &all)?);
+        let keyed_at = earlier_landing(&st, view_base, p.canon_at)?;
+        issues.extend(self.rekeyed_warnings(&st, keyed_at, &all)?);
         let landed_ops = applied_ops(&all, &order);
 
         // 4. land in one write (atom1): the acceptance change, the final proposal version, the

@@ -285,3 +285,54 @@ fn hb1_strict_and_require_up_to_date_refuse_any_moved_base() {
     assert_eq!(p2.version, 2, "re-proposed on the current canon");
     r.land_report(&approver(), &p2.r#ref).unwrap();
 }
+
+/// FW-HB1: a version approved across a landing that re-keyed its siblings warns at the approval.
+/// The landing rebased the view onto it, but the version's keys were chosen against its
+/// `canon_at`, so the warning is computed against that base, not the view's current one.
+#[test]
+fn hb1_approving_across_a_sibling_rekey_warns() {
+    let (_d, mut r) = project();
+    let res = write(&mut r, "seed", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
+        {"op": "create", "type": "claim", "id": "$f", "parent": "$s", "body": "first"},
+        {"op": "create", "type": "claim", "id": "$t", "parent": "$s", "after": "$f", "body": "second"}
+    ]))
+    .unwrap();
+    land(&mut r, "seed").unwrap();
+    let (s, first, second) = (
+        res.created["$s"].clone(),
+        res.created["$f"].clone(),
+        res.created["$t"].clone(),
+    );
+    // vb (unpinned) places a block after `first` and proposes: no re-key yet
+    write(
+        &mut r,
+        "vb",
+        json!([{"op": "create", "type": "claim", "parent": s, "after": first, "body": "from b"}]),
+    )
+    .unwrap();
+    let p = r.propose(&writer(), "vb", "b").unwrap();
+    assert!(
+        !p.warnings.iter().any(|i| i.code == "W_SIBLINGS_REKEYED"),
+        "{:?}",
+        p.warnings
+    );
+    // va moves `first` after `second` and lands; vb is rebased onto that landing
+    write(
+        &mut r,
+        "va",
+        json!([{"op": "move", "id": first, "parent": s, "after": second}]),
+    )
+    .unwrap();
+    land(&mut r, "va").unwrap();
+    // the frozen version lands as approved (FW-HB1) and the approver is told its siblings moved
+    let info = r.land_report(&approver(), &p.r#ref).unwrap();
+    assert_eq!(info.approved, p.r#ref);
+    let w = info
+        .warnings
+        .iter()
+        .find(|i| i.code == "W_SIBLINGS_REKEYED")
+        .unwrap_or_else(|| panic!("{:?}", info.warnings));
+    assert!(w.message.contains(&s), "{w:?}");
+}
