@@ -4,7 +4,7 @@
 //! Nothing here can reorder replies: one task reads stdin and writes the socket (through
 //! `pump_lines`, which refuses an over-long line before the daemon sees it), one task reads the
 //! socket and writes stdout, and the socket is a byte stream. The daemon answers each connection
-//! in request order (the FIFO ticket in `RdyServer::run`).
+//! in request order (its tool calls are stamped at the transport: `rdy_mcp::order`).
 
 use crate::client::{StartOptions, connect_or_start};
 use crate::ctl::MAX_CTL_LINE_BYTES;

@@ -234,8 +234,9 @@ async fn hello1_an_mcp_hello_hands_the_stream_to_the_handler_with_pipelined_byte
     task.await.unwrap().unwrap();
 }
 
-/// `Echo`, with a session start that takes `ms`.
-struct SlowStart(u64);
+/// `Echo`, with a session start that lasts until the test releases it (after it has read the
+/// `starting` line), so the progress timer always fires first, however the runtime schedules.
+struct SlowStart(std::sync::Arc<tokio::sync::Notify>);
 impl Handler for SlowStart {
     fn ctl(&self, s: &SessionInfo, r: CtlRequest) -> Result<Value, ErrorReply> {
         Echo::default().ctl(s, r)
@@ -245,8 +246,8 @@ impl Handler for SlowStart {
         &self,
         _session: &SessionInfo,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let ms = self.0;
-        Box::pin(async move { tokio::time::sleep(Duration::from_millis(ms)).await })
+        let release = std::sync::Arc::clone(&self.0);
+        Box::pin(async move { release.notified().await })
     }
 }
 
@@ -254,9 +255,10 @@ impl Handler for SlowStart {
 async fn reload1_a_slow_session_start_answers_one_starting_then_ready() {
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
     let mut d = Daemon::new(
         DaemonConfig::new(run.clone(), "1".into()),
-        std::sync::Arc::new(SlowStart(600)),
+        std::sync::Arc::new(SlowStart(std::sync::Arc::clone(&release))),
     );
     d.bind().await.unwrap();
     let handle = d.handle();
@@ -268,6 +270,8 @@ async fn reload1_a_slow_session_start_answers_one_starting_then_ready() {
         (v["status"].as_str(), v["progress"].as_str()),
         (Some("starting"), Some("reloading the pack"))
     );
+    // a permit, so the release is not lost if the start has not reached its wait yet
+    release.notify_one();
     let mut line = String::new();
     r.read_line(&mut line).await.unwrap();
     assert_eq!(parsed(&line)["status"], "ready", "one starting, then ready");

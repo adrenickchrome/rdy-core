@@ -28,7 +28,8 @@ pub use paths::TreeNode;
 pub use query::{Context, ImpactItem, ImpactVia, compact_summary, field_json, summary, summary_in};
 pub use read_state::{Delta, ReadState};
 pub use session::{
-    Scope, Session, SessionKind, classify, human_actor, human_actor_from_env, now_ms, rfc3339_now,
+    HUMAN_RUN, Scope, Session, SessionKind, classify, human_actor, human_actor_from_env, now_ms,
+    rfc3339_now,
 };
 pub use tree_io::Diagnostic;
 pub use version::{
@@ -300,10 +301,15 @@ impl Rdy {
     }
 
     pub fn open(project: &Path) -> Result<Rdy, RdyError> {
+        // the fingerprint before the config and pack are read: a file edited between the reads
+        // is then loaded new and fingerprinted old, so the watch's next `changed()` reloads it
+        // (never the other way, which would mark unloaded bytes as seen). The config's own
+        // error comes first (not a project, a bad config); an unreadable pack file fails the
+        // open before the store is locked.
+        let fingerprint = pack_fingerprint(project);
         let cfg = read_config(project)?;
+        let fingerprint = fingerprint?;
         let (pack, lineage) = load_pack(project, &cfg.pack)?;
-        // before the store is locked: an unreadable pack file fails the open
-        let fingerprint = pack_fingerprint(project)?;
         let store = layout::open_project_store(&project.join(".rdy"))?;
         let pack = Arc::new(pack);
         let as_of = Arc::new(AsOfCache::default());

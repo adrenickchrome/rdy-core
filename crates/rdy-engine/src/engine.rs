@@ -77,16 +77,32 @@ impl Local {
         Ok(Local::new(Rdy::open(project)?))
     }
 
+    /// A write that panicked may have left the caches half-updated: a poisoned lock is
+    /// recovered with an `invalidate` (the state is republished from the store) and the poison
+    /// is cleared, so the next lock pays nothing.
     fn lock(&self) -> MutexGuard<'_, Rdy> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        match self.0.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                let mut g = poisoned.into_inner();
+                g.invalidate();
+                self.0.clear_poison();
+                g
+            }
+        }
     }
 
     /// Closes the project's store cleanly.
     pub fn close(self) -> Result<(), RdyError> {
-        self.0
-            .into_inner()
-            .unwrap_or_else(|e| e.into_inner())
-            .close()
+        let r = match self.0.into_inner() {
+            Ok(r) => r,
+            Err(poisoned) => {
+                let mut r = poisoned.into_inner();
+                r.invalidate();
+                r
+            }
+        };
+        r.close()
     }
 
     /// Checkpoints if writes are waiting and the store has been idle long enough.

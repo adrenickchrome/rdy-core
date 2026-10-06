@@ -1,6 +1,6 @@
 //! wrt1: one writer thread; the published state is stored before the reply; a panic answers and the
 //! writer keeps serving; shutdown closes the store once.
-use rdy_daemon::{DaemonEngine, E_DAEMON_GONE, Shared, WriterHandle};
+use rdy_daemon::{CHECKPOINT_TICK, DaemonEngine, E_DAEMON_GONE, Shared, WriterHandle};
 use rdy_engine::engine::write_typed;
 use rdy_engine::{E_INTERNAL, Rdy, Scope, Session, WriteRequest};
 use rdy_model::Role;
@@ -163,18 +163,26 @@ fn wrt1_the_idle_tick_checkpoints_without_a_write() {
     doc(&mut r, "work", "a").unwrap();
     let before = r.store().checkpoint_count();
     let shared = Shared::new(r);
-    // the store's idle rule (2 s) plus two ticks
-    std::thread::sleep(Duration::from_millis(2_600));
-    let after = shared
-        .engine()
-        .write(Box::new(|r| {
-            Ok(serde_json::json!(r.store().checkpoint_count()))
-        }))
-        .unwrap();
-    assert!(
-        after.as_u64().unwrap() > before,
-        "no checkpoint from the tick"
-    );
+    // polled with a deadline (the store's idle rule is 2 s): each poll is a message, which
+    // restarts the writer's tick wait, so polls are two ticks apart to leave the tick room to
+    // fire between them; a starved tick only makes the poll take longer
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let after = shared
+            .engine()
+            .write(Box::new(|r| {
+                Ok(serde_json::json!(r.store().checkpoint_count()))
+            }))
+            .unwrap();
+        if after.as_u64().unwrap() > before {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no checkpoint from the tick within 30 s"
+        );
+        std::thread::sleep(CHECKPOINT_TICK * 2);
+    }
     shared.shutdown().unwrap();
     drop(d);
 }

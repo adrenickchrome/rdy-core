@@ -21,7 +21,7 @@ rdy tags                       # list versions
 rdy show <id> --scope tag:v0.1.0   # read as of a version (also landing:<id>)
 ```
 
-In M1, `rdy mcp` holds the project's store while it runs, so run the human commands (`rdy status`, `rdy propose`, `rdy approve`, ...) after the agent session ends. A shared multi-client daemon arrives in M2.
+Agent sessions (`rdy mcp`) and the human commands share the project's daemon (see Daemon below), so `rdy status`, `rdy propose`, `rdy approve` and the rest work while an agent session runs.
 
 A store written by a different `rdy` build is refused with `E_STORE_FORMAT` ("re-create it with this rdy").
 
@@ -51,7 +51,7 @@ first command run in a project starts it in the background (stderr shows `starti
 it opens the store and builds canon), and later commands reuse it.
 
 ```bash
-rdy serve              # run the daemon in the foreground (never idles out)
+rdy serve              # run the daemon in the foreground (never idles out; Ctrl-C stops it cleanly)
 rdy serve --detach     # start it in the background and return once it is ready
 rdy serve --stop       # stop it ("no daemon running" if there is none)
 ```

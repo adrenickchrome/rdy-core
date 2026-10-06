@@ -289,10 +289,12 @@ enum Conn {
         session: Session,
         cwd: PathBuf,
     },
-    /// `client` before `rt`: the connection drops while its runtime still runs.
+    /// `client` before `rt`: the connection drops while its runtime still runs. `pending` is
+    /// the notice the `session` reply carried, printed with the first op's.
     Daemon {
         client: Client,
         rt: tokio::runtime::Runtime,
+        pending: Option<String>,
     },
 }
 
@@ -323,13 +325,19 @@ impl Conn {
             let rt = runtime()?;
             let run_dir = RunDir::of_project(&env.project);
             let opts = start_options(&env.project, &env.cwd, Proto::Ctl);
-            let client = rt.block_on(async {
+            let mut client = rt.block_on(async {
                 let mut c = connect_or_start(&run_dir, opts).await?;
                 c.ctl("session", json!({"actor": actor, "run": run}))
                     .await?;
                 Ok::<Client, ErrorReply>(c)
             })?;
-            Ok(Conn::Daemon { rt, client })
+            // a pack_changed landing between ready and the session op rides on its reply
+            let pending = client.take_notice();
+            Ok(Conn::Daemon {
+                rt,
+                client,
+                pending,
+            })
         }
     }
 
@@ -347,9 +355,13 @@ impl Conn {
                 };
                 dispatch(&cx, op, args).map_err(ErrorReply::from)
             }
-            Conn::Daemon { rt, client } => {
+            Conn::Daemon {
+                rt,
+                client,
+                pending,
+            } => {
                 let out = rt.block_on(client.ctl(op, args));
-                if let Some(t) = client.take_notice() {
+                for t in notices(pending.take(), client.take_notice()) {
                     eprintln!("notice: {t}");
                 }
                 out
@@ -363,6 +375,18 @@ impl Conn {
             Conn::Daemon { client, .. } => client.close(),
         }
     }
+}
+
+/// The notices to print after an op: the one the `session` reply carried (if any, and not the
+/// same standing `pack_error` the op's reply repeats), then the op's.
+fn notices(session: Option<String>, op: Option<String>) -> Vec<String> {
+    let mut out: Vec<String> = session.into_iter().collect();
+    if let Some(t) = op
+        && !out.contains(&t)
+    {
+        out.push(t);
+    }
+    out
 }
 
 /// Closes a directly opened store. A failed close does not fail the command (its writes are
@@ -1067,5 +1091,27 @@ fn main() -> ExitCode {
             print_error(&e, as_json);
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::notices;
+
+    /// Final review fix round 1 (minor 11): a notice carried on the `session` reply is printed,
+    /// once, beside the op's.
+    #[test]
+    fn note1_the_session_replys_notice_is_kept_and_a_standing_one_prints_once() {
+        let changed = "pack_changed: the pack was reloaded (generation 1)".to_string();
+        let error = "pack_error: bad pack".to_string();
+        let some = |t: &String| Some(t.clone());
+        assert_eq!(notices(some(&changed), None), vec![changed.clone()]);
+        assert_eq!(notices(None, some(&error)), vec![error.clone()]);
+        assert_eq!(notices(some(&error), some(&error)), vec![error.clone()]);
+        assert_eq!(
+            notices(some(&changed), some(&error)),
+            vec![changed.clone(), error.clone()]
+        );
+        assert!(notices(None, None).is_empty());
     }
 }

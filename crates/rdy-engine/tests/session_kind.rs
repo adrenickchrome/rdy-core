@@ -188,3 +188,28 @@ fn sess2_human_provenance_records_the_cli_run() {
     let c = st.reader().change(&res.change.parse().unwrap()).unwrap();
     assert_eq!(c.provenance.run.as_deref(), Some("cli"));
 }
+
+/// Final review fix round 1 (minor 10): when the refused view is the agent's own default view,
+/// the fix does not send it back there.
+#[test]
+fn sess2_a_refused_default_view_suggests_a_run_name_or_a_fork_not_itself() {
+    let (_d, mut r) = project();
+    let h = Session::human("human:n".into(), Role::Writer);
+    doc(&mut r, &h, "work-agent-x", "a").unwrap();
+    let a = Session::agent("agent:x".into(), None, Role::Writer).unwrap();
+    assert_eq!(a.default_view(), "work-agent-x");
+    let e = doc(&mut r, &a, "work-agent-x", "b").unwrap_err();
+    assert_eq!(e.code, E_VIEW_OWNER);
+    assert!(
+        !e.fix.contains("write to your own view"),
+        "the fix names the view just refused: {e}"
+    );
+    assert!(e.fix.contains("RDY_RUN"), "{e}");
+    assert!(e.fix.contains("rdy_session"), "{e}");
+    assert!(e.fix.contains("fork"), "{e}");
+    // with a run, the default view is the run's name: the same fix
+    doc(&mut r, &h, "r9", "c").unwrap();
+    let a9 = Session::agent("agent:x".into(), Some("r9".into()), Role::Writer).unwrap();
+    let e = doc(&mut r, &a9, "r9", "d").unwrap_err();
+    assert!(e.fix.contains("RDY_RUN"), "{e}");
+}

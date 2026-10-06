@@ -219,9 +219,86 @@ fn open_store(project: &Path) -> Result<Rdy, RdyError> {
     }
 }
 
-/// `start(opts)?.wait()`.
+/// `start(opts)?.wait()`, with SIGINT (Ctrl-C) and SIGTERM taken as `rdy serve --stop`: the
+/// first one stops the daemon (it drains, the store closes cleanly and this returns `Stopped`);
+/// a second one while it drains exits the process at once, which loses nothing (the log is
+/// durable) and leaves the next open to catch up. The handlers are installed before the store
+/// opens, so no signal finds the store open without them.
 pub fn serve(opts: ServeOptions) -> Result<ExitReason, ServeError> {
-    start(opts)?.wait()
+    let signals = StopSignals::install();
+    let run = start(opts)?;
+    if let Some(s) = signals {
+        s.stop_on_signal(run.handle());
+    }
+    run.wait()
+}
+
+/// SIGINT and SIGTERM, registered on a runtime of their own (the daemon's runtime moves to the
+/// `rdy-serve` thread).
+struct StopSignals {
+    rt: tokio::runtime::Runtime,
+    int: tokio::signal::unix::Signal,
+    term: tokio::signal::unix::Signal,
+}
+
+impl StopSignals {
+    /// `None` (logged) if the handlers cannot be installed: the daemon then runs without them,
+    /// and `rdy serve --stop` still stops it cleanly.
+    fn install() -> Option<StopSignals> {
+        use tokio::signal::unix::{SignalKind, signal};
+        let installed = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .and_then(|rt| {
+                let (int, term) = {
+                    let _g = rt.enter();
+                    (
+                        signal(SignalKind::interrupt())?,
+                        signal(SignalKind::terminate())?,
+                    )
+                };
+                Ok(StopSignals { rt, int, term })
+            });
+        match installed {
+            Ok(s) => Some(s),
+            Err(e) => {
+                log(&format!(
+                    "could not install the SIGINT/SIGTERM handlers: {e}"
+                ));
+                None
+            }
+        }
+    }
+
+    /// Waits on a thread of its own (`rdy-signals`, alive until the process exits).
+    fn stop_on_signal(self, handle: DaemonHandle) {
+        let StopSignals {
+            rt,
+            mut int,
+            mut term,
+        } = self;
+        let spawned = std::thread::Builder::new()
+            .name("rdy-signals".into())
+            .spawn(move || {
+                rt.block_on(async move {
+                    let name = tokio::select! {
+                        _ = int.recv() => "SIGINT",
+                        _ = term.recv() => "SIGTERM",
+                    };
+                    log(&format!("{name}: stopping"));
+                    handle.stop();
+                    let name = tokio::select! {
+                        _ = int.recv() => "SIGINT",
+                        _ = term.recv() => "SIGTERM",
+                    };
+                    log(&format!("{name} again: exiting without draining"));
+                    std::process::exit(130);
+                })
+            });
+        if let Err(e) = spawned {
+            log(&format!("could not start the signal thread: {e}"));
+        }
+    }
 }
 
 /// Closes the store, logging a failed close.

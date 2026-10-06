@@ -21,6 +21,8 @@ pub const REQUEST_ENVELOPE_MARGIN: usize = 4096;
 /// The largest asset (raw bytes) whose base64 fits in one stdio request line with its envelope;
 /// over stdio this, not [`MAX_ASSET_BYTES`], is the effective limit.
 pub const MAX_ASSET_BYTES_STDIO: usize = (MAX_REQUEST_BYTES - REQUEST_ENVELOPE_MARGIN) / 4 * 3;
+/// `rdy_schema`'s note on the request-line limit, the same on both transports.
+pub const TRANSPORT_NOTE: &str = "one request is one JSON line of at most 16 MiB (request_bytes); the daemon's socket carries the same line limit as stdio (socket_line_bytes), so asset_bytes_stdio, the largest asset whose base64 fits in one line, binds on both";
 /// The largest `max_tokens` any read may ask for.
 pub const MAX_TOKENS_LIMIT: usize = 100_000;
 
@@ -59,12 +61,6 @@ impl McpState {
             sid: None,
             seen_gen,
         }
-    }
-
-    /// This state's daemon session id.
-    pub fn with_sid(mut self, sid: u64) -> McpState {
-        self.sid = Some(sid);
-        self
     }
 }
 
@@ -638,7 +634,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             "link_types": pack.link_types,
             "link_shape": {"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE},
             "ops": WRITE_OPS.iter().map(|(n, s)| (n.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
-            "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT, "socket_line_bytes": MAX_REQUEST_BYTES},
+            "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT, "socket_line_bytes": MAX_REQUEST_BYTES, "transport": TRANSPORT_NOTE},
             "errors": {
                 "E_VIEW_OWNER": {"when": "a non-human session commits into a view it doesn't own", "fix": "write to your own view, fork it, or include its changes into your own view"},
                 "E_DAEMON_START": {"when": "the daemon couldn't be started or reached", "fix": "read the last lines of .rdy/run/daemon.log it cites; run rdy serve in the foreground to see why"},

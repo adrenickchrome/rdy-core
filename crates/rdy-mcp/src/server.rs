@@ -1,3 +1,4 @@
+use crate::order::{Order, Ordered, Stamped};
 use crate::tools::{self, *};
 use rdy_engine::engine::{Engine, Local};
 use rdy_engine::{E_INTERNAL, E_LIMIT, RdyError};
@@ -22,9 +23,6 @@ pub const REQUEST_TOO_LARGE: &str = "rdy_request_too_large";
 #[derive(Clone)]
 pub struct RdyServer {
     state: Arc<Mutex<McpState>>,
-    /// The FIFO ticket that keeps requests in arrival order across `spawn_blocking` (see
-    /// [`RdyServer::run`]).
-    order: Arc<tokio::sync::Mutex<()>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -42,7 +40,6 @@ impl RdyServer {
         st.sid = sid;
         RdyServer {
             state: Arc::new(Mutex::new(st)),
-            order: Arc::new(tokio::sync::Mutex::new(())),
             tool_router: Self::tool_router(),
         }
     }
@@ -51,17 +48,14 @@ impl RdyServer {
     /// becomes an `E_INTERNAL` reply (so the request is still answered) and republishes a clean
     /// state, which the panic may have left half-updated.
     ///
-    /// Order is kept by a FIFO ticket: tokio's mutex is fair, and the ticket is held until this
-    /// call's reply is built, so the next request's body cannot start before this one is done.
-    /// Without it, requests awaiting the blocking pool would race for the state lock and writes
-    /// could apply, and replies come back, out of request order.
+    /// Order is not kept here: a session served through [`serve`] runs one stamped call at a
+    /// time, in arrival order, and writes the replies in that order (see [`crate::order`]).
     pub(crate) async fn run<P: Send + 'static>(
         &self,
         tool: &'static str,
         p: P,
         f: fn(&mut McpState, P) -> Result<serde_json::Value, RdyError>,
     ) -> CallToolResult {
-        let ticket = Arc::clone(&self.order).lock_owned().await;
         let state = Arc::clone(&self.state);
         let joined = tokio::task::spawn_blocking(move || {
             let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
@@ -100,15 +94,13 @@ impl RdyServer {
             }
         })
         .await;
-        let reply = joined.unwrap_or_else(|_| {
+        joined.unwrap_or_else(|_| {
             result(Err(RdyError::new(
                 E_INTERNAL,
                 format!("internal error in {tool}: the call was cancelled"),
                 "this is a bug in rdy; the request may or may not have been applied: re-read before retrying",
             )))
-        });
-        drop(ticket);
-        reply
+        })
     }
 
     #[tool(
@@ -517,10 +509,9 @@ impl IdleCheckpointLog {
 /// Serves MCP over stdin and stdout until stdin closes.
 ///
 /// The service runs on its own single-threaded runtime, and tools run on the blocking pool
-/// (`spawn_blocking`) holding the state lock for the call. rmcp runs every request in its own
-/// task; a body that awaits the pool yields, so order is kept by a FIFO ticket in
-/// [`RdyServer::run`]: a request takes the ticket in arrival order and holds it until its reply
-/// is built, so writes apply, and replies leave, in request order.
+/// (`spawn_blocking`) holding the state lock for the call. Writes apply, and replies leave, in
+/// request order because the calls are stamped at the transport ([`serve`]), not because of the
+/// runtime.
 pub async fn serve_stdio(project: PathBuf) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -561,8 +552,7 @@ async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
         })
     };
     // `serve` consumes the server (and with it the state's handle on the engine)
-    let service = server.serve((from_pump, tokio::io::stdout())).await?;
-    let quit = service.waiting().await;
+    let quit = serve(server, from_pump, tokio::io::stdout()).await;
     ticker.abort();
     let _ = ticker.await;
     let _ = tokio::task::spawn_blocking(move || {
@@ -589,37 +579,35 @@ async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Serves `server` over `(r, w)` until the peer closes, with the session's tool calls stamped
+/// at the transport, run one at a time in arrival order and answered in that order (see
+/// [`crate::order`]), on whatever runtime polls it.
+pub async fn serve<R, W>(server: RdyServer, r: R, w: W) -> anyhow::Result<()>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+    W: AsyncWrite + Send + Unpin + 'static,
+{
+    let order = Arc::new(Order::default());
+    let transport = Stamped::new(
+        rmcp::transport::async_rw::AsyncRwTransport::new_server(r, w),
+        Arc::clone(&order),
+    );
+    let service = Ordered::new(server, order).serve(transport).await?;
+    service.waiting().await?;
+    Ok(())
+}
+
 /// Serves one MCP session over `(r, w)` against `engine` until the peer closes. The daemon owns
 /// the checkpoint tick and the close, so neither runs here. `sid` is the daemon's session id.
-///
-/// The session runs on its own single-threaded runtime, on a blocking thread, as `serve_stdio`
-/// does: the FIFO ticket in [`RdyServer::run`] keeps arrival order only when rmcp's per-request
-/// tasks reach it in the order they were spawned, which a multi-threaded runtime does not
-/// promise (its LIFO slot polls the newest task first). Dropping the returned future ends the
-/// session: the service is cancelled and the stream closed; a tool call already on the
-/// session's blocking pool finishes first.
+/// It runs on the daemon's runtime: order is explicit (see [`serve`]), not a property of the
+/// runtime. Dropping the returned future ends the session: the service is cancelled and the
+/// stream closed; a tool call already on the blocking pool finishes first.
 pub async fn serve_on<R, W>(engine: Arc<dyn Engine>, sid: u64, r: R, w: W) -> anyhow::Result<()>
 where
     R: AsyncRead + Send + Unpin + 'static,
     W: AsyncWrite + Send + Unpin + 'static,
 {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    // dropped with this future, which ends the session
-    let (_cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
-    tokio::task::spawn_blocking(move || {
-        rt.block_on(async move {
-            let server = RdyServer::new(engine, Some(sid));
-            let service = server.serve((r, w)).await?;
-            tokio::select! {
-                quit = service.waiting() => { quit?; }
-                _ = cancelled => {}
-            }
-            Ok(())
-        })
-    })
-    .await?
+    serve(RdyServer::new(engine, Some(sid)), r, w).await
 }
 
 #[cfg(test)]

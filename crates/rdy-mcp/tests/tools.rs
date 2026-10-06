@@ -622,3 +622,17 @@ fn chain1_overview_counts_each_views_changes() {
     write_typed(&*st.engine, move |r| r.land(&approver(), &pid)).unwrap();
     assert_eq!(count(&mut st), 0);
 }
+
+/// Final review fix round 1 (minor 9): the schema says in words that the daemon's socket carries
+/// the same request-line limit as stdio.
+#[test]
+fn schema1_the_transport_note_says_the_socket_has_the_stdio_line_limit() {
+    let (_d, mut st) = state();
+    let all = rdy_schema(&mut st, serde_json::from_value(json!({})).unwrap()).unwrap();
+    let limits = &all["limits"];
+    assert_eq!(limits["socket_line_bytes"], limits["request_bytes"]);
+    let note = limits["transport"].as_str().expect("a transport note");
+    assert!(note.contains("socket"), "{note}");
+    assert!(note.contains("stdio"), "{note}");
+    assert!(note.contains("16 MiB"), "{note}");
+}

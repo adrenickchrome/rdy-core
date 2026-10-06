@@ -376,6 +376,16 @@ impl Served {
         cmd
     }
 
+    /// Starts `rdy --project <dir> <args>` as the human, without waiting (stdout and stderr
+    /// piped).
+    pub fn spawn(&self, args: &[&str]) -> std::process::Child {
+        self.command(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn rdy")
+    }
+
     /// Runs `rdy --project <dir> <args>` as the human.
     pub fn rdy(&self, args: &[&str]) -> std::process::Output {
         self.command(args).output().expect("run rdy")

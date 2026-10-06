@@ -1453,14 +1453,26 @@ pub(crate) fn check_view_access(st: &ReadState, view: &str, s: &Session) -> Resu
                     o.actor,
                     o.run.as_ref().map(|r| format!("/{r}")).unwrap_or_default()
                 ),
-                format!(
-                    "write to your own view ({}), fork it, or include its changes into your own view",
-                    s.default_view()
-                ),
+                own_view_fix(view, s),
             )),
             _ => Ok(()),
         },
         None => Ok(()),
+    }
+}
+
+/// The `E_VIEW_OWNER` fix. When the refused view is the session's own default view, sending the
+/// agent back there would loop: it is told to start a session with another run name, or fork.
+fn own_view_fix(view: &str, s: &Session) -> String {
+    let own = s.default_view();
+    if view == own {
+        "this is your default view and another session owns it: start a session with another run \
+         name (RDY_RUN, or rdy_session's run) to write to a view of that name, or fork this view"
+            .to_string()
+    } else {
+        format!(
+            "write to your own view ({own}), fork it, or include its changes into your own view"
+        )
     }
 }
 

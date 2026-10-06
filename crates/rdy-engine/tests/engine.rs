@@ -207,3 +207,54 @@ fn eng1_the_fingerprint_hashes_contents_not_only_mtimes() {
     );
     drop(r);
 }
+
+#[test]
+fn eng1_a_write_that_panics_leaves_local_republishing_the_store_on_the_next_lock() {
+    use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Op};
+    let (_d, r) = project();
+    let e = Local::new(r);
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = e.write(Box::new(|r| {
+            // a store write outside the engine's publish, then a panic before the republish:
+            // the read state is left behind the store, as a write that panics midway leaves it
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert("title".to_string(), FieldValue::Str("Half".into()));
+            fields.insert("doc_type".to_string(), FieldValue::Str("glossary".into()));
+            let block = Block {
+                id: BlockId::parse("d-AAAAB").unwrap(),
+                block_type: "doc".into(),
+                parent: None,
+                order: "V".into(),
+                fields,
+                body: String::new(),
+                links: Default::default(),
+                pins: Default::default(),
+            };
+            r.store_mut()
+                .commit_to_view(
+                    "work",
+                    Change {
+                        view: "work".into(),
+                        ops: vec![Op::Create { block }],
+                        deps: vec![],
+                        provenance: writer().provenance(),
+                        justification: None,
+                        message: "half".into(),
+                        links: ChangeLinks::default(),
+                    },
+                )
+                .unwrap();
+            panic!("a write panics after touching the store");
+        }));
+    }));
+    assert!(panicked.is_err());
+    assert_eq!(
+        e.read().view_names(),
+        vec!["work".to_string()],
+        "the poisoned lock is recovered with an invalidate, so the read sees the store"
+    );
+    // the poison is cleared: later writes go through as usual
+    write_typed(&e, |r| Ok(create_doc(r, "work", "b"))).unwrap();
+    assert_eq!(e.read().included("work").len(), 2);
+    e.close().unwrap();
+}

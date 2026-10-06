@@ -485,8 +485,9 @@ The daemon adds one socket round trip and one thread hand-off per write, and on 
 visible against the one durable flush that dominates the write: `daemon_write_single` reads within
 the noise of the in-process `new_doc_single` (and below it in both runs; `new_doc_single` writes into
 a fresh view, `vd`, where the daemon writes into `va`, so the pair is the same shape and not the same
-bytes). Reads take no lock. The FIFO ticket serializes requests per connection only, so one
-connection's writes queue behind each other and two connections' writes queue behind the one writer
-thread, and the flush is the cost either way. These are macOS numbers, where the flush is the floor
+bytes). Reads take no lock. A connection's requests run one at a time in arrival order (a `ctl`
+connection reads one line at a time; an MCP session's tool calls are stamped at the transport,
+`rdy_mcp::order`), so one connection's writes queue behind each other and two connections' writes
+queue behind the one writer thread, and the flush is the cost either way. These are macOS numbers, where the flush is the floor
 (`F_FULLFSYNC`, "Write p99: missed" above); whether the daemon's write meets "< 5 ms p99 on Linux
 NVMe" is judged on the bench.
