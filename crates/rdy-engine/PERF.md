@@ -500,3 +500,89 @@ connection reads one line at a time; an MCP session's tool calls are stamped at 
 queue behind the one writer thread, and the flush is the cost either way. On the Mac the flush is
 the floor (`F_FULLFSYNC`, "Write p99: missed" above); on the Linux bench the daemon's write is
 within "< 5 ms p99 on Linux NVMe" as above.
+
+## M2c: views (2026-10-06)
+
+`qa-perf` gains seven ops, in both tiers (the `_50k` names at the large tier), all run last in their
+tier on a reopened project so the views and landings they leave behind do not move the ops above
+them. They share one fixture: `vr`, an unpinned view of 200 one-claim changes, made before the
+typical tier's `propose_land_500_flat` landings so that they rebase it (the large tier lands one
+extra view to rebase it).
+
+| op | what is timed |
+|---|---|
+| `view_materialize_after_rebase` | `invalidate`, then `materialized` of `vr`: an unpinned view after landings rebased it (it reads on canon's head, through `Rebase` ops). The pinned `view_materialize_cold` no longer covers this |
+| `include_200` | `view_include` of `vr`'s 200 changes into a fresh view (the view's creation, the deps check and the store write, one flush each for the create and the include) |
+| `exclude_cold` | on a built 200-change view with canon built: one `view_exclude`, then the read that rebuilds the view |
+| `view_cold` | `invalidate`, then `materialized` of a fresh 200-change view that no landing has rebased |
+| `view_incremental` | one write into that view (untimed), then `materialized` of it: the cost of the read once the write's publish seeded the state. A regression that left the state unbuilt shows here as a cold rebuild |
+| `land_rebase_50` | `propose` and `land` of one view while 50 other non-empty unpinned views are present, 5 of them with a change on the claim the landing edits (each landing records 5 conflicts). The fifty are `vr`, the views earlier ops left and `lv<k>` views of 4 one-doc changes; the scratch views of the ops above are closed first, since a closed view is not rebased. The landing view is the 51st |
+| `view_ls_50` | `invalidate`, then `view_list(all = true, 14 days)` over those 50 views plus every closed and landed one |
+
+Targets (spec 15.1): view materialization < 50 ms cold and < 1 ms incremental (exclude counts as
+cold), landing with 50 views rebasing < 100 ms p99. The spec gives no figure for a 200-change
+include or for the list, so `include_200` is read against the 50 ms cold figure and `view_ls_50`
+has no target. `include_200`, `exclude_cold` and `land_rebase_50` end in durable flushes, so they
+take the wider (50%) regression margin that the write ops do. Each op's target text is in
+`spec_target` (`vperf1_the_view_ops_state_their_targets`), and `vperf1_the_view_ops_run_on_a_small_tree`
+runs the whole set on a small tree.
+
+### Judged figures: Linux bench
+
+Added at plan end by the orchestrator (Linux / x86_64, 8 cores / NVMe; two agreeing
+`PERF=1 rdy-bench.sh ... cargo qa --only perf` runs). Perf is judged there, not on the Mac.
+
+| op | Linux run 1 median / p95 | Linux run 2 median / p95 |
+|---|---|---|
+| (to be filled in) | | |
+
+### Mac figures (indicative: one smoke run, not quiet)
+
+macOS 26.6.2 / Apple M4 Pro / APFS, release build, one `cargo qa --only perf --deep` run under a load
+average of about 4 (a clippy run overlapped its first minute), so the figures are noisy and nothing
+here is judged. The same run read the existing ops 36 to 62% over their M2.0 baseline (`context`,
+`impact`, `resolve_path`, `export_import`, `cold_open`, `cold_open_lagging`), a uniform shift that
+points at the load and not at one op.
+
+| op | typical (10k) median / p95 ms | large (50k) median / p95 ms |
+|---|---|---|
+| `view_materialize_after_rebase` | 54.7 / 57.1 | 166.2 / 170.3 |
+| `include_200` | 68.3 / 75.8 | 184.8 / 197.4 |
+| `exclude_cold` | 63.2 / 66.2 | 179.8 / 192.0 |
+| `view_cold` | 56.1 / 71.0 | 166.9 / 173.9 |
+| `view_incremental` | 0.000 / 0.001 | 0.000 / 0.000 |
+| `land_rebase_50` | 36.7 / 36.9 | 85.6 / 99.5 |
+| `view_ls_50` | 567.6 / 586.3 | 1,623.2 / 1,692.0 |
+
+For reference, the pinned `view_materialize_cold` read 48.1 ms in the same run (164.8 ms at 50k), so
+a cold 200-change view costs the canon base plus a few ms of its own: on this Mac a cold
+materialization is at or just over the 50 ms figure at 10k blocks, and the target is judged on
+the bench. The landing is well inside its 100 ms at 10k (36.7 ms) and at 50k (85.6 ms median, 99.5 ms
+p95). `view_ls_50` is the one large number: `view_list` reads each open view's conflicts, which
+builds the view (closed views are skipped), so a cold list over the 50 live views is about 50 view
+builds (11 ms each at 10k). It is cold by construction (`invalidate` first); after any read of the views the list is a cache hit per view.
+It has no target, and a per-view cached conflict count would be the fix if `rdy view ls` on a
+cold daemon turns out to matter.
+
+### Landing with 50 views at 100k (`m2c_landing_with_50_views_at_100k`, ignored)
+
+100,000 blocks (`testkit::generate`, landed), 50 views of 20 changes each (1,000 writes, 5.1 s),
+the first 5 editing the five claims that five landings in turn edit; each landing is `propose` plus
+`land` of one more view. Recorded, not gated: the test asserts p99 < 500 ms (5x the target).
+
+| measurement | target | result |
+|---|---|---|
+| `propose` + `land` with 50 views present, 5 landings, p50 / p95 / p99 / max | < 100 ms p99 at the typical tier; 100k recorded | 159.1 ms / 184.1 ms / 184.1 ms / 184.1 ms (macOS, release, one run) |
+
+(With 5 samples the p95, p99 and max are the same sample.)
+
+### Rebase cost
+
+The merge work at a landing is O(touched): `merge_on_blocks` runs on the intersection of the
+landing's blocks and each view's blocks only (ruling "Rebase cost"). What is not O(touched) is
+finding each view's touched blocks: the landing collects them per landing by reading each live
+view's remaining changes once (a cached decode each), so the cost grows with the number of
+in-flight changes in unpinned views, not with the size of canon. That is the term the 100k figure
+reflects (1,000 in-flight changes there, against about 430 in the typical perf tier). If the bench misses the
+100 ms target, the fix is an incremental per-view touched-block index, a fix-forward task for the
+orchestrator to schedule.

@@ -348,3 +348,96 @@ fn chain1_log_bytes_per_write_stay_flat_to_10k() {
         "log bytes per write grew: {early:.1} at writes 900-1,000, {late:.1} at 9,900-10,000"
     );
 }
+
+/// m2c: landing with 50 non-empty unpinned views present, at 100k blocks. Fifty views of 20
+/// changes each (the first five edit the claims the landings edit, so each landing records five
+/// conflicts); five landings of one view each, timed over propose and land. The target is
+/// "< 100 ms p99" (M2 spec 15.1) at the typical tier; the 100k figure is recorded, not gated, so
+/// the assertion is 5x that. The perf tier's `land_rebase_50` is the judged measure.
+/// Run with: cargo test -p rdy-engine --release --test perf_budget -- --ignored --nocapture m2c_
+#[test]
+#[ignore]
+fn m2c_landing_with_50_views_at_100k() {
+    let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    const VIEWS: usize = 50;
+    const CHANGES: usize = 20;
+    const TOUCHING: usize = 5;
+    const LANDINGS: usize = 5;
+    let dir = tempfile::tempdir().unwrap();
+    let ids = testkit::generate(dir.path(), 100_000);
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let writer = Session::human("human:perf".into(), Role::Writer);
+    let approver = Session::human("human:perf".into(), Role::Approver);
+    let put = |r: &mut Rdy, view: &str, ops: serde_json::Value| {
+        r.write(
+            &writer,
+            WriteRequest {
+                view: view.into(),
+                ops: serde_json::from_value(ops).unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+        )
+        .unwrap();
+    };
+    // the generator never lands: land `work`, so every view below reads on the 100k canon
+    let p = r.propose(&writer, "work", "seed").unwrap();
+    r.land(&approver, &p.id).unwrap();
+
+    let claims: Vec<String> = ids[..LANDINGS].iter().map(|c| c.to_string()).collect();
+    let t = Instant::now();
+    for k in 0..VIEWS {
+        let view = format!("v{k}");
+        let mut first = vec![];
+        if k < TOUCHING {
+            for c in &claims {
+                first.push(json!({"op": "update", "id": c, "body": format!("Mine {k} {c}.")}));
+            }
+            put(&mut r, &view, json!(first));
+        }
+        for d in 0..(CHANGES - usize::from(k < TOUCHING)) {
+            put(
+                &mut r,
+                &view,
+                json!([{"op": "create", "type": "doc", "fields": {"name": format!("v-{k}-{d}"), "title": format!("V {k} {d}"), "doc_type": "constraints"}}]),
+            );
+        }
+    }
+    println!(
+        "{VIEWS} views of {CHANGES} changes written in {:?}",
+        t.elapsed()
+    );
+
+    let mut lands = vec![];
+    for (i, claim) in claims.iter().enumerate() {
+        let view = format!("land{i}");
+        put(
+            &mut r,
+            &view,
+            json!([{"op": "update", "id": claim, "body": format!("Landed {i}.")}]),
+        );
+        let t = Instant::now();
+        let p = r.propose(&writer, &view, "m2c").unwrap();
+        r.land(&approver, &p.id).unwrap();
+        lands.push(t.elapsed());
+    }
+    let land_p99 = p99(lands.clone());
+    println!(
+        "landing with {VIEWS} views (propose + land, {LANDINGS} landings): {}",
+        dist(&lands)
+    );
+    println!(
+        "landing p99 {land_p99:?} (target < 100 ms at 10k; recorded at 100k; asserted < 500 ms)"
+    );
+    assert!(
+        !r.read()
+            .conflicts(&Scope::View("v0".into()))
+            .unwrap()
+            .is_empty(),
+        "the touching views carry the landings' conflicts"
+    );
+    assert!(
+        land_p99 < Duration::from_millis(500),
+        "landing with {VIEWS} views at 100k: p99 {land_p99:?} (5x the 100 ms target)"
+    );
+}

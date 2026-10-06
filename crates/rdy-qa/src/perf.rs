@@ -1,7 +1,7 @@
 //! The perf-regression tier: a fixed workload, per-machine baselines, regression verdicts.
 use crate::fixtures::{approver, land, write, writer};
 use rdy_daemon::{Attempt, Client, Hello, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun};
-use rdy_engine::{Rdy, Scope, testkit};
+use rdy_engine::{Rdy, Scope, now_ms, testkit};
 use rdy_model::{Block, BlockId, Op};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -56,6 +56,25 @@ fn spec_target(op: &str) -> Option<String> {
         }
         "view_materialize_cold" => "< 50 ms cold (M2 spec 15.1)",
         "view_materialize_incremental" => "< 1 ms incremental (M2 spec 15.1)",
+        "view_materialize_after_rebase" => {
+            "< 50 ms cold, an unpinned view after the tier's landings rebased it (M2 spec 15.1)"
+        }
+        "include_200" => {
+            "< 50 ms: 200 changes included into a fresh view, store write included (M2 spec 15.1 gives no figure for a bulk include; read against the cold materialization figure)"
+        }
+        "exclude_cold" => {
+            "< 50 ms: one exclude from a 200-change view, then the read that rebuilds it (M2 spec 15.1: exclude counts as cold)"
+        }
+        "view_cold" => "< 50 ms cold, a fresh 200-change view (M2 spec 15.1)",
+        "view_incremental" => {
+            "< 1 ms incremental: the read of a 200-change view right after one write seeded it (M2 spec 15.1)"
+        }
+        "land_rebase_50" => {
+            "< 100 ms p99, one landing with 50 non-empty unpinned views rebasing, 5 of them on the landed blocks (M2 spec 15.1)"
+        }
+        "view_ls_50" => {
+            "no spec target: view_list(all) over 50 open views plus the closed ones, cold (recorded for M2c)"
+        }
         "render" => "< 2 s full render at 100k (spec 11)",
         "cold_open" => "< 2 s at 100k (spec 11)",
         "cold_open_lagging" => "< 2 s at 100k, index catch-up included (M2 spec 15.1)",
@@ -79,6 +98,9 @@ fn fsync_bound(op: &str) -> bool {
         || op.starts_with("propose")
         || op.starts_with("new_doc")
         || op.starts_with("daemon_write")
+        || op.starts_with("include_")
+        || op.starts_with("exclude_")
+        || op.starts_with("land_rebase")
 }
 
 pub fn compare(baseline: Option<&Baseline>, measured: &[Measure]) -> Vec<Verdict> {
@@ -301,6 +323,14 @@ struct Runs {
     tree: usize,
     materialize_cold: usize,
     incremental: usize,
+    /// Runs of `include_200` and `exclude_cold` (each makes a fresh 200-change view).
+    view_ops: usize,
+    /// Runs of `land_rebase_50` (at most [`LANDING_CLAIMS`]: each lands its own claim edit).
+    landing: usize,
+    /// Changes in `vr`, in the include source and in every view `tier_views` includes it into.
+    view_changes: usize,
+    /// Non-empty unpinned views present when `land_rebase_50` lands.
+    landing_views: usize,
 }
 
 const TYPICAL_RUNS: Runs = Runs {
@@ -309,6 +339,10 @@ const TYPICAL_RUNS: Runs = Runs {
     tree: 20,
     materialize_cold: 10,
     incremental: 20,
+    view_ops: 10,
+    landing: 5,
+    view_changes: 200,
+    landing_views: 50,
 };
 
 const LARGE_RUNS: Runs = Runs {
@@ -317,6 +351,10 @@ const LARGE_RUNS: Runs = Runs {
     tree: 20,
     materialize_cold: 5,
     incremental: 20,
+    view_ops: 5,
+    landing: 3,
+    view_changes: 200,
+    landing_views: 50,
 };
 
 /// `write_single` and the reads both tiers share, in the order the typical tier has always run
@@ -374,6 +412,230 @@ fn tier_reads(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs
     ));
 }
 
+/// Claims a run of `land_rebase_50` can land an edit of: the touching views edit all of them, so
+/// each run's landing intersects exactly the same five views.
+const LANDING_CLAIMS: usize = 5;
+/// Views that edit the landed claims (the "5 of them touching the landed blocks").
+const TOUCHING_VIEWS: usize = 5;
+/// Changes (separate writes) in each of the other landing views.
+const LANDING_VIEW_CHANGES: usize = 4;
+
+/// `n` one-claim changes in `view`, each its own write, so each is its own change.
+fn load_view(r: &mut Rdy, view: &str, section: &BlockId, n: usize) {
+    for i in 0..n {
+        write(
+            r,
+            view,
+            json!([{"op": "create", "type": "claim", "parent": section.to_string(), "body": format!("Load {view} {i}.")}]),
+        )
+        .expect("load write");
+    }
+}
+
+/// A write that creates one new doc, which touches no block any other view writes.
+fn doc_write(r: &mut Rdy, view: &str, name: &str) {
+    write(
+        r,
+        view,
+        json!([{"op": "create", "type": "doc", "fields": {"name": name, "title": name, "doc_type": "constraints"}}]),
+    )
+    .expect("doc write");
+}
+
+/// The included changes of `view`, as the strings `view_include` takes.
+fn change_ids(r: &Rdy, view: &str) -> Vec<String> {
+    r.read()
+        .included(view)
+        .iter()
+        .map(|h| h.to_string())
+        .collect()
+}
+
+/// Open views that are unpinned and non-empty: the ones a landing rebases (M2c reb1).
+fn live_unpinned(r: &Rdy) -> usize {
+    let st = r.read();
+    st.view_names()
+        .iter()
+        .filter(|n| {
+            st.view_head(n).is_some_and(|h| !h.pinned && !h.closed) && !st.included(n).is_empty()
+        })
+        .count()
+}
+
+/// The unpinned view `vr` with its changes. The typical tier makes it before its landings
+/// (`propose_land_500_flat`), which rebase it; [`prepare_rebased_view`] does both for the others.
+fn make_vr(r: &mut Rdy, fx: &Fixture, runs: &Runs) {
+    load_view(r, "vr", &fx.section, runs.view_changes);
+}
+
+/// `vr`, then one landing of another view, so `vr` is an unpinned view a landing has rebased.
+fn prepare_rebased_view(r: &mut Rdy, fx: &Fixture, runs: &Runs) {
+    make_vr(r, fx, runs);
+    doc_write(r, "lr", "rebase-vr");
+    land(r, "lr").expect("land lr");
+}
+
+/// The view ops on a project whose `vr` is an unpinned view a landing has rebased: the cold
+/// materialization of it, include, exclude, a fresh view's cold and incremental reads, one landing
+/// with `runs.landing_views` live views, and the view list. Run last in a tier, because the
+/// views it leaves behind would change the numbers of the ops before it.
+fn tier_views(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs: &Runs) {
+    assert!(runs.landing <= LANDING_CLAIMS, "one claim per landing run");
+    let human = writer();
+    // `vr` was rebased by the tier's landings: it reads on canon's head, through Rebase ops
+    let source = change_ids(r, "vr");
+    assert_eq!(source.len(), runs.view_changes, "vr holds its changes");
+    assert_eq!(
+        r.read().effective_base("vr"),
+        r.read().canon_head(),
+        "vr was not rebased onto canon's head"
+    );
+    {
+        let st = r.read();
+        let ops = st.reader().view_op_ids("vr").expect("vr's ops");
+        let rebases = ops
+            .iter()
+            .filter(|h| {
+                matches!(
+                    st.reader().view_op(h).expect("op").op,
+                    rdy_store::view::ViewOpKind::Rebase { .. }
+                )
+            })
+            .count();
+        assert!(rebases > 0, "vr's chain has no Rebase op");
+    }
+    let vr = Scope::View("vr".into());
+    out.push(measure_timed(
+        &format!("view_materialize_after_rebase{sfx}"),
+        runs.materialize_cold,
+        |_| cold(r, |r| r.read().materialized(&vr).expect("vr")).1,
+    ));
+
+    let mut scratch: Vec<String> = vec![];
+    // include 200 changes from `vr` into a fresh view, deps resolved
+    out.push(measure(&format!("include_200{sfx}"), runs.view_ops, |i| {
+        let name = format!("inc{i}");
+        let res = r.view_include(&human, &name, &source).expect("include");
+        assert_eq!(res.added.len(), runs.view_changes);
+        scratch.push(name);
+    }));
+    // exclude one change from a built 200-change view, then read it: the rebuild
+    out.push(measure_timed(
+        &format!("exclude_cold{sfx}"),
+        runs.view_ops,
+        |i| {
+            let name = format!("ex{i}");
+            r.view_include(&human, &name, &source).expect("include");
+            scratch.push(name.clone());
+            let scope = Scope::View(name.clone());
+            r.read().materialized(&scope).expect("build the view");
+            let last = source[source.len() - 1].clone();
+            let s = Instant::now();
+            r.view_exclude(&human, &name, &[last], false)
+                .expect("exclude");
+            let built = r.read().materialized(&scope).expect("rebuild");
+            let took = s.elapsed();
+            assert!(!built.is_empty());
+            took
+        },
+    ));
+    // a fresh 200-change view (never rebased), cold; then one write into it and the read
+    r.view_include(&human, "vc", &source).expect("include vc");
+    scratch.push("vc".into());
+    let vc = Scope::View("vc".into());
+    out.push(measure_timed(
+        &format!("view_cold{sfx}"),
+        runs.materialize_cold,
+        |_| cold(r, |r| r.read().materialized(&vc).expect("vc")).1,
+    ));
+    let section = fx.section.to_string();
+    out.push(measure_timed(
+        &format!("view_incremental{sfx}"),
+        runs.incremental,
+        |i| {
+            write(
+                r,
+                "vc",
+                json!([{"op": "create", "type": "claim", "parent": section, "body": format!("Inc {i}.")}]),
+            )
+            .expect("write into vc");
+            let s = Instant::now();
+            let built = r.read().materialized(&vc).expect("vc");
+            let took = s.elapsed();
+            assert!(!built.is_empty());
+            took
+        },
+    ));
+    // the scratch views are done: closed views are not rebased, so the landing below sees only
+    // the views it is meant to
+    r.view_close(&human, &scratch, "perf scratch")
+        .expect("close the scratch views");
+
+    // `landing_views` live views: the ones already there, then `lv<k>`. The first
+    // TOUCHING_VIEWS edit the claims the runs land; the rest create docs.
+    let claims: Vec<BlockId> = {
+        let canon = r.read().materialized(&Scope::Canon).expect("canon");
+        canon
+            .children(Some(&fx.section))
+            .iter()
+            .take(LANDING_CLAIMS)
+            .map(|b| b.id.clone())
+            .collect()
+    };
+    assert_eq!(claims.len(), LANDING_CLAIMS, "claims to edit");
+    let others = runs.landing_views - live_unpinned(r);
+    for k in 0..others {
+        let name = format!("lv{k}");
+        let docs = if k < TOUCHING_VIEWS {
+            let edits: Vec<_> = claims
+                .iter()
+                .map(|c| json!({"op": "update", "id": c.to_string(), "body": format!("Mine {k} {c}.")}))
+                .collect();
+            write(r, &name, json!(edits)).expect("touching write");
+            LANDING_VIEW_CHANGES - 1
+        } else {
+            LANDING_VIEW_CHANGES
+        };
+        for d in 0..docs {
+            doc_write(r, &name, &format!("lv-{k}-{d}"));
+        }
+    }
+    assert_eq!(live_unpinned(r), runs.landing_views, "the views to rebase");
+    out.push(measure_timed(
+        &format!("land_rebase_50{sfx}"),
+        runs.landing,
+        |i| {
+            let name = format!("ln{i}");
+            write(
+                r,
+                &name,
+                json!([{"op": "update", "id": claims[i].to_string(), "body": format!("Landed {i}.")}]),
+            )
+            .expect("landing view write");
+            let s = Instant::now();
+            land(r, &name).expect("land");
+            s.elapsed()
+        },
+    ));
+    assert!(
+        !r.read()
+            .conflicts(&Scope::View("lv0".into()))
+            .expect("lv0")
+            .is_empty(),
+        "the touching views carry the landing's conflicts"
+    );
+
+    // the list over every view there is, closed ones included
+    let now = now_ms();
+    out.push(measure_timed(
+        &format!("view_ls_50{sfx}"),
+        runs.read,
+        |_| cold(r, |r| r.read().view_list(true, 14, now).expect("list")).1,
+    ));
+    let listed = r.read().view_list(true, 14, now).expect("list").len();
+    assert!(listed >= runs.landing_views, "{listed} views listed");
+}
+
 fn tier_render(out: &mut Vec<Measure>, r: &Rdy, dir: &std::path::Path, sfx: &str, runs: usize) {
     out.push(measure(&format!("render{sfx}"), runs, |i| {
         let site = dir.join(format!("site{sfx}{i}"));
@@ -412,6 +674,10 @@ pub fn run_workload() -> Vec<Measure> {
     r.view_create(&crate::fixtures::writer(), "va", None, true)
         .expect("pin va");
     pending_writes(&mut r, &fx.section);
+    // `vr`: an unpinned view with 200 changes, which `propose_land_500_flat`'s landings rebase;
+    // `tier_views` measures it, and the include and exclude ops draw on its changes. Made
+    // before the snapshot below, so the lagging open still catches up the same frames.
+    make_vr(&mut r, &fx, &TYPICAL_RUNS);
 
     // The lagging-index snapshot: made after the pending writes and before the timed writes, so
     // the later writes (and the landings) are what a cold open has to catch the index up over.
@@ -506,6 +772,10 @@ pub fn run_workload() -> Vec<Measure> {
     }));
     drop(r);
     out.extend(daemon_ops(&proj, ""));
+    // the view ops last: the views and landings they leave behind would move the ops above
+    let mut r = Rdy::open(&proj).expect("open");
+    tier_views(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
+    drop(r);
     if crate::fixtures::deep() {
         out.extend(run_large_tier(dir.path()));
     }
@@ -591,7 +861,8 @@ fn daemon_ops(proj: &std::path::Path, sfx: &str) -> Vec<Measure> {
 /// landed, with twenty pending writes; the shared ops under the `_50k` names, and the daemon ops
 /// (`daemon_write_single_50k`, `daemon_cold_start_50k`) once every in-process handle is closed. `version_position`
 /// (its fixture is landing depth, not size), `cold_open_lagging`, `write_batch_200`,
-/// `propose_land_500_flat` and `export_import` stay typical-only.
+/// `propose_land_500_flat` and `export_import` stay typical-only. The view ops (`tier_views`) run last
+/// in both tiers.
 fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     rdy_model::seed_ids_for_tests(0x7064_6566);
     let sfx = LARGE_SUFFIX;
@@ -618,6 +889,10 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     drop(r);
     tier_cold_open(&mut out, &proj, sfx, 3);
     out.extend(daemon_ops(&proj, sfx));
+    // the view ops last, on a reopened project; no landing has rebased `vr` here, so one does
+    let mut r = Rdy::open(&proj).expect("open");
+    prepare_rebased_view(&mut r, &fx, &LARGE_RUNS);
+    tier_views(&mut out, &mut r, &fx, sfx, &LARGE_RUNS);
     out
 }
 
@@ -753,6 +1028,90 @@ mod tests {
                 .contains("< 1 ms incremental")
         );
         assert!(spec_target("version_position_cached").is_some());
+    }
+
+    #[test]
+    fn vperf1_the_view_ops_state_their_targets() {
+        for op in [
+            "include_200",
+            "exclude_cold",
+            "view_cold",
+            "view_incremental",
+            "land_rebase_50",
+            "view_ls_50",
+            "view_materialize_after_rebase",
+        ] {
+            let t = spec_target(op).unwrap_or_else(|| panic!("{op} has no target text"));
+            let large = spec_target(&format!("{op}_50k")).unwrap();
+            assert!(
+                large.contains(&t) && large.contains(LARGE_TIER_NOTE),
+                "{op}"
+            );
+        }
+        let t = spec_target("view_materialize_after_rebase").unwrap();
+        assert!(
+            t.contains("< 50 ms cold") && t.contains("unpinned view") && t.contains("rebased"),
+            "{t}"
+        );
+        assert!(
+            spec_target("land_rebase_50")
+                .unwrap()
+                .contains("< 100 ms p99")
+        );
+        assert!(
+            spec_target("view_incremental")
+                .unwrap()
+                .contains("< 1 ms incremental")
+        );
+        for op in ["include_200", "exclude_cold", "land_rebase_50"] {
+            assert!(fsync_bound(op), "{op} ends in a durable flush");
+        }
+        assert!(!fsync_bound("view_cold") && !fsync_bound("view_ls_50"));
+    }
+
+    /// The view ops run end to end on a small tree, with every precondition `tier_views` asserts
+    /// (the rebased `vr`, exactly the stated number of live views at the landing).
+    #[test]
+    fn vperf1_the_view_ops_run_on_a_small_tree() {
+        rdy_model::seed_ids_for_tests(0x7064_6566);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let fx = fixture(&r, &docs);
+        let runs = Runs {
+            write: 1,
+            read: 2,
+            tree: 1,
+            materialize_cold: 2,
+            incremental: 2,
+            view_ops: 2,
+            landing: 2,
+            view_changes: 12,
+            landing_views: 8,
+        };
+        prepare_rebased_view(&mut r, &fx, &runs);
+        let mut out = vec![];
+        tier_views(&mut out, &mut r, &fx, "", &runs);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "view_materialize_after_rebase",
+                "include_200",
+                "exclude_cold",
+                "view_cold",
+                "view_incremental",
+                "land_rebase_50",
+                "view_ls_50"
+            ]
+        );
+        for m in &out {
+            assert!(m.median_ms > 0.0 || m.op == "view_incremental", "{m:?}");
+        }
     }
 
     #[test]
