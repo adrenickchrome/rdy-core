@@ -40,10 +40,15 @@ fn merge1_a_proposal_made_before_another_landing_on_its_blocks_is_moved_at_land(
     let e = r.land(&approver(), &pb.id).unwrap_err();
     assert_eq!(e.code, "E_PROPOSAL_MOVED", "{e}");
     assert_eq!(r.store().canon_head().unwrap(), head);
+    // gconf1: the landing rebased b and recorded the collision as a conflict; proposing never
+    // refuses for it, the version marks it blocking and its landing is refused until resolved
+    let again = r.propose(&writer(), "b", "again").unwrap();
+    assert_eq!((again.conflicts.len(), again.blocking.len()), (1, 1));
     assert_eq!(
-        r.propose(&writer(), "b", "again").unwrap_err().code,
-        "E_STALE_BASE"
+        r.land(&approver(), &again.id).unwrap_err().code,
+        "E_CONFLICT_UNRESOLVED"
     );
+    assert_eq!(r.store().canon_head().unwrap(), head);
     check(&r, &Scope::Canon).unwrap();
 }
 

@@ -1,9 +1,9 @@
 use crate::error::*;
-use crate::views::ConflictInfo;
+use crate::views::{Action, ConflictInfo, conflict_infos, parse_change};
 use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, rfc3339_now};
 use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Op, Proposal, decision};
 use rdy_schema::{Issue, Severity, validate_block};
-use rdy_store::LandRequest;
+use rdy_store::{Conflict, LandRequest, MergeChange, merge_on_blocks};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
@@ -35,7 +35,11 @@ pub struct ProposalInfo {
     pub title: String,
     pub changes: usize,
     pub warnings: Vec<Issue>,
+    /// Every conflict of the view.
     pub conflicts: Vec<ConflictInfo>,
+    /// The conflicts this version carries on the blocks it writes: they refuse its landing
+    /// (`E_CONFLICT_UNRESOLVED`) until resolved in the view and proposed again.
+    pub blocking: Vec<ConflictInfo>,
     /// Canon's head when the version was written (FW-HB1).
     pub canon_at: Option<String>,
 }
@@ -255,6 +259,59 @@ fn landed_as(st: &ReadState, p: &Proposal) -> Result<Option<Hash>, RdyError> {
         }
     }
     Ok(None)
+}
+
+/// The landings at or before `base` on canon's chain (none for `None`).
+fn landings_through(st: &ReadState, base: Option<Hash>) -> Result<BTreeSet<Hash>, RdyError> {
+    let mut out = BTreeSet::new();
+    let mut cur = base;
+    while let Some(h) = cur {
+        out.insert(h);
+        cur = st.reader().landing(&h)?.prev;
+    }
+    Ok(out)
+}
+
+/// `E_CONFLICT_UNRESOLVED` for the conflicts a version carries on the blocks it writes: one
+/// issue per conflict, naming its sides (`canon` for a landed side).
+fn unresolved(st: &ReadState, view: &str, blocking: &[Conflict]) -> Result<RdyError, RdyError> {
+    let blocks = blocking
+        .iter()
+        .map(|c| c.block.to_string())
+        .collect::<Vec<_>>();
+    let mut e = RdyError::new(
+        E_CONFLICT_UNRESOLVED,
+        format!(
+            "{} unresolved conflict(s) on blocks this proposal writes: {}",
+            blocking.len(),
+            blocks.join(", ")
+        ),
+        format!(
+            "write each block in view {view:?} to resolve it (base = the conflict's base or one of its sides), then propose again and approve the new version"
+        ),
+    );
+    for c in blocking {
+        let mut sides = vec![];
+        for side in &c.sides {
+            sides.push(match side.change {
+                Some(ch) if st.reader().landing_of(&ch)?.is_none() => ch.short(),
+                _ => "canon".to_string(),
+            });
+        }
+        e.issues.push(Issue {
+            severity: Severity::Error,
+            code: E_CONFLICT_UNRESOLVED,
+            block: Some(c.block.clone()),
+            message: format!(
+                "{} has {} sides: {}",
+                c.block,
+                c.sides.len(),
+                sides.join(", ")
+            ),
+            fix: format!("rdy_context {} in view {view} shows the sides", c.block),
+        });
+    }
+    Ok(e)
 }
 
 /// The ops of the changes at `applied` (positions in `changes`), in applied order.
@@ -518,11 +575,62 @@ impl Rdy {
         Ok(out)
     }
 
+    /// Proposes view `view`'s included changes (a new version of its open proposal, if any).
     pub fn propose(
         &mut self,
         s: &Session,
         view: &str,
         title: &str,
+    ) -> Result<ProposalInfo, RdyError> {
+        self.propose_subset(s, view, title, None)
+    }
+
+    /// The conflicts the changes `changes` of view `view` carry on the blocks they write: their
+    /// merge onto the view's effective base, on those blocks only. For the view's whole set these
+    /// are the view's conflicts on the blocks it writes; a subset leaves out conflicts it does
+    /// not carry; a set without the view's later resolution still has the conflict.
+    fn blocking_conflicts(
+        &self,
+        st: &ReadState,
+        view: &str,
+        changes: &[Hash],
+    ) -> Result<Vec<Conflict>, RdyError> {
+        let reader = st.reader();
+        let state = reader.state_of(st.effective_base(view))?;
+        let cs = changes_of(st, changes)?;
+        let touched: BTreeSet<BlockId> = cs
+            .iter()
+            .flat_map(|c| c.ops.iter().map(|op| op.block_id().clone()))
+            .collect();
+        let input: Vec<MergeChange<'_>> = cs
+            .iter()
+            .zip(changes)
+            .map(|(c, id)| MergeChange {
+                id: *id,
+                deps: &c.deps,
+                ops: &c.ops,
+            })
+            .collect();
+        Ok(merge_on_blocks(
+            &state,
+            &input,
+            &|v| reader.producer(v).ok().flatten(),
+            &touched,
+        )
+        .conflicts)
+    }
+
+    /// Proposes `changes` of view `view` (its whole included set when `None`): a new version of
+    /// the view's open proposal, or a new proposal. A subset must be closed under dependencies
+    /// (each dep in the subset or landed in the view's base). Never refuses for a conflict:
+    /// `conflicts` lists every conflict of the view and `blocking` the ones on blocks the version
+    /// writes, which refuse its landing until they are resolved.
+    pub fn propose_subset(
+        &mut self,
+        s: &Session,
+        view: &str,
+        title: &str,
+        changes: Option<&[String]>,
     ) -> Result<ProposalInfo, RdyError> {
         if !s.role.can_write() {
             return Err(RdyError::new(
@@ -532,6 +640,7 @@ impl Rdy {
             ));
         }
         let st = self.read();
+        crate::views::check_view_op(&st, s, view, Action::Propose)?;
         let included = st.included(view);
         if included.is_empty() {
             return Err(RdyError::new(
@@ -540,16 +649,101 @@ impl Rdy {
                 "write to the view first",
             ));
         }
-        let changes = changes_of(&st, &included)?;
-        let (mut issues, _) = self.prospective_issues(&st, &changes)?;
-        if let Some(first) = issues.iter().find(|i| i.severity == Severity::Error) {
-            let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
-            e.issues = issues;
+        let ids: Vec<Hash> = match changes {
+            None => included.as_ref().clone(),
+            Some(list) => {
+                let in_view: BTreeSet<&Hash> = included.iter().collect();
+                let mut seen = BTreeSet::new();
+                let mut out = vec![];
+                for text in list {
+                    let h = parse_change(text)?;
+                    if !in_view.contains(&h) {
+                        return Err(RdyError::new(
+                            E_BAD_INPUT,
+                            format!("change {} is not in view {view:?}", h.short()),
+                            format!("rdy view show {view} lists its changes"),
+                        ));
+                    }
+                    if seen.insert(h) {
+                        out.push(h);
+                    }
+                }
+                out
+            }
+        };
+        let changes = changes_of(&st, &ids)?;
+        // closure: each dep is proposed with its dependent or landed in the view's base (the
+        // landings at or before the base are collected once, when a dep first needs them)
+        let base = st.effective_base(view);
+        let set: BTreeSet<&Hash> = ids.iter().collect();
+        let mut based: Option<BTreeSet<Hash>> = None;
+        let mut missing = vec![];
+        for (c, id) in changes.iter().zip(&ids) {
+            for dep in &c.deps {
+                if set.contains(dep) {
+                    continue;
+                }
+                let in_base = match st.reader().landing_of(dep)? {
+                    Some(l) => {
+                        if based.is_none() {
+                            based = Some(landings_through(&st, base)?);
+                        }
+                        based.as_ref().is_some_and(|b| b.contains(&l))
+                    }
+                    None => false,
+                };
+                if !in_base {
+                    missing.push((*id, *dep));
+                }
+            }
+        }
+        if !missing.is_empty() {
+            let mut deps: Vec<Hash> = vec![];
+            for (_, d) in &missing {
+                if !deps.contains(d) {
+                    deps.push(*d);
+                }
+            }
+            let shorts = deps.iter().map(Hash::short).collect::<Vec<_>>();
+            let mut e = RdyError::new(
+                E_DEPS_MISSING,
+                format!(
+                    "the proposal is not closed under dependencies: {} missing",
+                    deps.len()
+                ),
+                format!(
+                    "add {} to the proposal, or propose the whole view",
+                    shorts.join(", ")
+                ),
+            );
+            e.issues = missing
+                .iter()
+                .map(|(c, d)| Issue {
+                    severity: Severity::Error,
+                    code: E_DEPS_MISSING,
+                    block: None,
+                    message: format!("{} depends on {}", c.short(), d.short()),
+                    fix: format!("include {}", d.short()),
+                })
+                .collect();
             return Err(e);
         }
-        // a view with no head floats on canon
-        let view_base = st.view_head(view).map_or(st.canon_head(), |h| h.base);
-        issues.extend(self.rekeyed_warnings(&st, view_base, &changes)?);
+        let conflicts = conflict_infos(&st, &st.conflicts(&Scope::View(view.to_string()))?)?;
+        let blocking = conflict_infos(&st, &self.blocking_conflicts(&st, view, &ids)?)?;
+        // a version with a blocking conflict cannot land until it is resolved, and its merge onto
+        // canon would refuse at the first conflict: the gate validates it at landing (RF10)
+        let mut issues = vec![];
+        if blocking.is_empty() {
+            issues = self.prospective_issues(&st, &changes)?.0;
+            if let Some(first) = issues.iter().find(|i| i.severity == Severity::Error) {
+                let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
+                e.issues = issues;
+                return Err(e);
+            }
+            // a view with no head floats on canon
+            let view_base = st.view_head(view).map_or(st.canon_head(), |h| h.base);
+            issues.extend(self.rekeyed_warnings(&st, view_base, &changes)?);
+        }
         // pver1: a view with an open proposal (its latest version has not landed) gets the next
         // version of it; otherwise a new proposal starts
         let mut open = None;
@@ -562,18 +756,18 @@ impl Rdy {
                 open = Some((stable, latest));
             }
         }
+        let count = ids.len();
         let (id, stable, n) = match open {
             Some((stable, latest)) => {
-                let id = self.store.propose_next(
-                    &latest,
-                    included.as_ref().clone(),
-                    title,
-                    s.provenance(),
-                )?;
+                let id = self
+                    .store
+                    .propose_next(&latest, ids, title, s.provenance())?;
                 (id, stable, version_number(&st, &latest)? + 1)
             }
             None => {
-                let id = self.store.propose(view, title, s.provenance())?;
+                let id = self
+                    .store
+                    .propose_changes(view, title, s.provenance(), ids)?;
                 (id, id, 1)
             }
         };
@@ -590,9 +784,10 @@ impl Rdy {
             version: n,
             r#ref: pref.to_string(),
             title: title.into(),
-            changes: included.len(),
+            changes: count,
             warnings: issues,
-            conflicts: vec![],
+            conflicts,
+            blocking,
             canon_at: canon_at.map(|h| h.to_string()),
         })
     }
@@ -752,6 +947,12 @@ impl Rdy {
         let changes = changes_of(&st, &p.changes)?;
         // FW-HB1: canon may have moved since the version was proposed
         self.check_base_moved(&st, &pref, &p, &changes, &opts)?;
+        // gconf1: the version's own changes (not the view's current set) must carry no conflict
+        // on the blocks they write
+        let blocking = self.blocking_conflicts(&st, &p.view, &p.changes)?;
+        if !blocking.is_empty() {
+            return Err(unresolved(&st, &p.view, &blocking)?);
+        }
 
         // 1. prospective canon: canon + the proposal's own changes
         let ops: Vec<Op> = changes.iter().flat_map(|c| c.ops.iter().cloned()).collect();

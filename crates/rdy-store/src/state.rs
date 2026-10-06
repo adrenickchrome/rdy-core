@@ -456,6 +456,18 @@ impl Store {
     /// one write. Returns the proposal's id.
     pub fn propose(&mut self, view: &str, title: &str, by: Provenance) -> Result<Hash, StoreError> {
         let changes = self.included(view)?.as_ref().clone();
+        self.propose_changes(view, title, by, changes)
+    }
+
+    /// `propose` with `changes` (a closed subset of the view's included changes, which the
+    /// caller checks) in place of the view's whole set.
+    pub fn propose_changes(
+        &mut self,
+        view: &str,
+        title: &str,
+        by: Provenance,
+        changes: Vec<Hash>,
+    ) -> Result<Hash, StoreError> {
         let p = Proposal {
             stable: None,
             prev: None,

@@ -650,9 +650,17 @@ fn engine_split_brain_histories_keep_every_invariant() {
     let land = |code: &str| s.land_refused.get(code).copied().unwrap_or(0);
     let floors = [
         ("effective rebalances [23]", s.effective_rebalances, 16),
-        ("refused landings [36]", s.land_refused.values().sum(), 25),
+        // gconf1: a collision a landing recorded as a view conflict is refused as
+        // E_CONFLICT_UNRESOLVED, no longer E_STALE_BASE; the seeded run's 15 E_STALE_BASE
+        // refusals (the bracket said 19) are now 15 E_CONFLICT_UNRESOLVED, and the refused
+        // landings were 28 before and after (the bracket said 36)
+        ("refused landings [28]", s.land_refused.values().sum(), 19),
         ("refused-landing codes [4]", s.land_refused.len(), 3),
-        ("E_STALE_BASE landings [19]", land("E_STALE_BASE"), 13),
+        (
+            "E_CONFLICT_UNRESOLVED landings [15]",
+            land("E_CONFLICT_UNRESOLVED"),
+            10,
+        ),
         (
             "E_PARENT_CYCLE landings [7]",
             land("E_VALIDATION/E_PARENT_CYCLE"),

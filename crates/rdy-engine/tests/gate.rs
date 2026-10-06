@@ -256,7 +256,7 @@ fn revoke_links_and_requires_a_decision() {
 }
 
 #[test]
-fn propose_detects_stale_base_early() {
+fn propose_marks_a_collision_with_a_landing_as_blocking() {
     let (_d, mut r, s) = setup();
     let p = r.propose(&agent(), "work", "skeleton").unwrap();
     r.land(&founder(), &p.id).unwrap();
@@ -264,9 +264,13 @@ fn propose_detects_stale_base_early() {
     upd(&mut r, "b", &s, json!({"title": "B"})).unwrap();
     let pb = r.propose(&agent(), "b", "b").unwrap();
     r.land(&founder(), &pb.id).unwrap();
+    // gconf1: the landing rebased a and recorded the collision; propose reports it as blocking
+    // and the gate refuses the version until a resolves it
+    let pa = r.propose(&agent(), "a", "a").unwrap();
+    assert_eq!((pa.conflicts.len(), pa.blocking.len()), (1, 1));
     assert_eq!(
-        r.propose(&agent(), "a", "a").unwrap_err().code,
-        "E_STALE_BASE"
+        r.land(&founder(), &pa.id).unwrap_err().code,
+        "E_CONFLICT_UNRESOLVED"
     );
 }
 
