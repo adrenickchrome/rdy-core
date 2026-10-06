@@ -3,6 +3,7 @@
 use crate::inline::{self, Form};
 use rdy_engine::Materialized;
 use rdy_model::{Block, BlockId, RefMode, decision, tree};
+use rdy_schema::Pack;
 use regex::Regex;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -38,8 +39,8 @@ const ANCHOR_MAX: usize = 48;
 static ID_SHAPED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z]{1,3}-[0-9A-HJKMNP-TV-Z]{5}$").expect("a pattern"));
 
-/// Supporting text: in the page JSON, off the page (FW-D10). It has no anchor; a link to it
-/// leads to its doc's page.
+/// Supporting text: off the site (FW-D10). It has no anchor; a link to it leads to its doc's
+/// page.
 pub const RATIONALE: &str = "rationale";
 
 /// The block types numbered within their doc (`Table 2`, `Python code 3`, `Diagram 1`).
@@ -48,6 +49,16 @@ const NUMBERED: [&str; 3] = ["table", "code", "diagram"];
 /// How many references deep a label reads its references' labels; past it a reference reads
 /// as `…` (a title that names a block whose title names it back stops here).
 const LABEL_DEPTH: usize = 3;
+
+/// The key a reference typed as a key (`{{id|@key}}`) reads as, if the target has one. A doc, a
+/// folder or a section has a title a reader knows it by, so a key-typed reference to one reads as
+/// that title, as `{{id}}` does (FW-F2b); any other keyed block reads as its key (FW-F2a).
+pub fn typed_key(b: &Block) -> Option<&str> {
+    match b.block_type.as_str() {
+        tree::DOC | tree::FOLDER | "section" => None,
+        _ => b.field_str("key"),
+    }
+}
 
 /// The id inside a longer text, as the leak scan reads it.
 static ID_INSIDE: LazyLock<Regex> =
@@ -67,7 +78,7 @@ pub struct Site<'a> {
     /// Every folder and doc in tree order: a folder, then what it holds, siblings by their order.
     tree: Vec<BlockId>,
     /// The block each decision's permalink and references lead to: the first block it governs
-    /// in reading order (the page JSON lists every block it governs).
+    /// in reading order.
     governs: BTreeMap<BlockId, BlockId>,
     /// The questions no decision answers, in reading order of their docs.
     pub open_questions: Vec<BlockId>,
@@ -86,8 +97,14 @@ pub struct Site<'a> {
     nav_pos: BTreeMap<BlockId, usize>,
     /// The folder or doc whose page each page is (the first in tree order that has it).
     page_owner: BTreeMap<String, BlockId>,
-    /// Each doc's place in `order`.
+    /// The docs the previous/next pager walks: `order` less the docs left out of navigation.
+    pager_order: Vec<BlockId>,
+    /// Each doc's place in `pager_order`.
     order_pos: BTreeMap<BlockId, usize>,
+    /// The docs of a type with `nav: false`, and the folders holding only such docs and folders:
+    /// they have pages, but no place in the sidebar, a folder's index, the home page's contents,
+    /// the pager or the search index.
+    nav_hidden: BTreeSet<BlockId>,
     /// Every label worked out so far, by block and reference depth: a label is read many times
     /// per render (links, hovers, crumbs, the navigation, the search, the twins).
     labels: RefCell<HashMap<(BlockId, usize), String>>,
@@ -98,7 +115,7 @@ pub struct Site<'a> {
 }
 
 impl<'a> Site<'a> {
-    pub fn new(m: &'a Materialized) -> Site<'a> {
+    pub fn new(m: &'a Materialized, pack: &Pack) -> Site<'a> {
         // `level` folders are above `parent`'s children; only a damaged store nests deeper than
         // MAX_FOLDER_DEPTH, and what lies below it gets no page
         fn walk(
@@ -138,9 +155,34 @@ impl<'a> Site<'a> {
         walk(m, None, "", 0, &mut paths, &mut order, &mut tree_order);
         let (mut nav_lists, mut top_folders, mut nav_pos) =
             (BTreeMap::<_, Vec<&Block>>::new(), vec![], BTreeMap::new());
+        let mut nav_hidden: BTreeSet<BlockId> = order
+            .iter()
+            .filter(|id| {
+                m.get(id)
+                    .and_then(|b| b.field_str("doc_type"))
+                    .and_then(|t| pack.doc_types.get(t))
+                    .is_some_and(|t| !t.nav)
+            })
+            .cloned()
+            .collect();
+        // a folder whose every doc and folder is left out is left out too (an empty folder
+        // stays); children come after their folder in tree order, so walk it backwards
+        for id in tree_order.iter().rev() {
+            if m.get(id).is_none_or(|b| b.block_type != tree::FOLDER) {
+                continue;
+            }
+            let mut kids = m
+                .children(Some(id))
+                .into_iter()
+                .filter(|c| tree::is_tree_type(&c.block_type) && paths.contains_key(&c.id))
+                .peekable();
+            if kids.peek().is_some() && kids.all(|c| nav_hidden.contains(&c.id)) {
+                nav_hidden.insert(id.clone());
+            }
+        }
         for id in &tree_order {
             let Some(b) = m.get(id) else { continue };
-            if !tree::is_tree_type(&b.block_type) {
+            if !tree::is_tree_type(&b.block_type) || nav_hidden.contains(id) {
                 continue;
             }
             if b.parent.is_none() && b.block_type == tree::FOLDER {
@@ -167,7 +209,9 @@ impl<'a> Site<'a> {
             top_folders,
             nav_pos,
             page_owner: BTreeMap::new(),
+            pager_order: vec![],
             order_pos: BTreeMap::new(),
+            nav_hidden,
             labels: RefCell::default(),
             doc_blocks: BTreeMap::new(),
             summaries: RefCell::default(),
@@ -184,8 +228,14 @@ impl<'a> Site<'a> {
             }
         }
         site.page_owner = page_owner;
+        site.pager_order = site
+            .order
+            .iter()
+            .filter(|d| !site.nav_hidden.contains(*d))
+            .cloned()
+            .collect();
         let mut order_pos = BTreeMap::new();
-        for (i, d) in site.order.iter().enumerate() {
+        for (i, d) in site.pager_order.iter().enumerate() {
             order_pos.entry(d.clone()).or_insert(i);
         }
         site.order_pos = order_pos;
@@ -333,11 +383,6 @@ impl<'a> Site<'a> {
     /// Whether a doc or folder already has the page at `page`.
     fn page_taken(&self, page: &str) -> bool {
         self.page_owner.contains_key(page)
-    }
-
-    /// The folder or doc whose page is `page` (the first in tree order, should two share it).
-    pub fn page_block(&self, page: &str) -> Option<&'a Block> {
-        self.m.get(self.page_owner.get(page)?)
     }
 
     /// The page of a folder or doc.
@@ -537,10 +582,7 @@ impl<'a> Site<'a> {
             .and_then(|id| self.m.get(&id))
         {
             Some(_) if depth >= LABEL_DEPTH => "…".to_string(),
-            Some(t) => match t
-                .field_str("key")
-                .filter(|k| span.key_typed && !k.is_empty())
-            {
+            Some(t) => match typed_key(t).filter(|k| span.key_typed && !k.is_empty()) {
                 Some(k) => k.to_string(),
                 None => self.label_at(t, depth + 1),
             },
@@ -676,14 +718,22 @@ impl<'a> Site<'a> {
         out
     }
 
-    /// The docs before and after `doc` in reading order.
+    /// Whether `id` has a place in the site's navigation: false for a doc of a type with
+    /// `nav: false`, and for a folder holding only such docs (and such folders), which are
+    /// rendered but listed nowhere.
+    pub fn in_nav(&self, id: &BlockId) -> bool {
+        !self.nav_hidden.contains(id)
+    }
+
+    /// The docs before and after `doc` in reading order, those left out of navigation skipped
+    /// (a doc left out has neither).
     pub fn prev_next(&self, doc: &BlockId) -> (Option<BlockId>, Option<BlockId>) {
         let Some(&i) = self.order_pos.get(doc) else {
             return (None, None);
         };
         (
-            i.checked_sub(1).map(|p| self.order[p].clone()),
-            self.order.get(i + 1).cloned(),
+            i.checked_sub(1).map(|p| self.pager_order[p].clone()),
+            self.pager_order.get(i + 1).cloned(),
         )
     }
 }

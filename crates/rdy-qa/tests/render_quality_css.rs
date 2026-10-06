@@ -321,3 +321,58 @@ fn scroll1_no_unbreakable_token_longer_than_60_characters_outside_code() {
         "the long identifier is missing (longest token {longest})"
     );
 }
+
+/// Founder-reported (mcp-tools): table cells inherited `overflow-wrap: anywhere`, which shrank
+/// each cell's minimum width to one character, so narrow columns broke headers mid-word. No rule
+/// that applies to a `th` or `td` may let a word break, and a header never wraps; long content
+/// scrolls inside `.table-wrap`.
+#[test]
+fn twrap1_table_cells_never_break_inside_a_word() {
+    let css = canon_css();
+    let is_cell = |sel: &str| {
+        sel.split(',').any(|s| {
+            let last = s.trim().rsplit([' ', '>', '+', '~']).next().unwrap_or("");
+            let tag = last.split(['.', ':', '#', '[']).next().unwrap_or("");
+            tag == "th" || tag == "td"
+        })
+    };
+    let mut n = 0;
+    for b in css.blocks.iter().filter(|b| is_cell(&b.selector)) {
+        n += 1;
+        for (p, v) in &b.decls {
+            let v = v.replace(" !important", "");
+            let v = v.trim();
+            assert!(
+                !(p == "overflow-wrap" && (v == "anywhere" || v == "break-word"))
+                    && !(p == "word-break" && (v == "break-all" || v == "break-word")),
+                "{}: {p}: {v}",
+                b.selector
+            );
+        }
+    }
+    assert!(n >= 2, "the th and td rules were found");
+    for tag in ["th", "td"] {
+        for w in [360, 1280] {
+            let at = |prop: &str| cascaded(&css, tag, prop, w).unwrap_or_default();
+            assert_eq!(at("overflow-wrap"), "normal", "{tag}, width {w}");
+            assert_eq!(at("word-break"), "normal", "{tag}, width {w}");
+        }
+    }
+    assert_eq!(
+        cascaded(&css, "th", "white-space", 1280).as_deref(),
+        Some("nowrap")
+    );
+    assert!(
+        declares(&css, ".table-wrap", "overflow-x", &["auto"]),
+        "long content scrolls inside .table-wrap"
+    );
+    assert!(
+        declares(
+            &css,
+            r#"[data-rdy="content"]"#,
+            "overflow-wrap",
+            &["anywhere"]
+        ),
+        "running prose keeps overflow-wrap: anywhere"
+    );
+}

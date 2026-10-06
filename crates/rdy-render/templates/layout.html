@@ -7,7 +7,6 @@
 {% if site_description and kind == "home" %}<meta name="description" content="{{ site_description }}">{% endif %}
 <script>{{ init_js|safe }}</script>
 <link rel="stylesheet" href="{{ root }}assets/site.css">
-<link rel="alternate" type="application/json" href="{{ json_href }}">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -29,7 +28,7 @@
   <main class="content" id="main" tabindex="-1">
     <nav class="crumbs" aria-label="Breadcrumb">{% for c in crumbs %}{% if not loop.first %}<span class="crumb-sep" aria-hidden="true"></span>{% endif %}{% if c.href %}<a href="{{ c.href }}">{{ c.label }}</a>{% else %}<span aria-current="page">{{ c.label }}</span>{% endif %}{% endfor %}</nav>
     {% block content %}{% endblock %}
-    {% if kind == "doc" %}<nav class="pager" aria-label="Previous and next">{% include "partials/pager.html" %}</nav>{% endif %}
+    {% if kind == "doc" and (pager.prev or pager.next) %}<nav class="pager" aria-label="Previous and next">{% include "partials/pager.html" %}</nav>{% endif %}
     <footer class="foot">{% include "partials/colophon.html" %}</footer>
   </main>
   {% if toc.entries %}<aside class="index"><details class="toc-fold" open><summary class="fold-summary">On this page</summary><nav aria-label="On this page">{% include "partials/toc.html" %}</nav></details></aside>{% endif %}

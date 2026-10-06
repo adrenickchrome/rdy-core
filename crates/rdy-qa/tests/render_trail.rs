@@ -1,4 +1,4 @@
-//! The why trail and the agents affordance (why1).
+//! The why trail (why1); no agents' panel (people1).
 use rdy_engine::Scope;
 use rdy_qa::golden::*;
 
@@ -8,20 +8,6 @@ fn trail_of(h: &str, anchor: &str) -> String {
     let j = s.find("<details class=\"why\">").unwrap();
     let k = s[j..].find("</details>").unwrap();
     s[j..j + k].to_string()
-}
-
-/// `h` without its "For agents" blocks, which carry the status words as data.
-fn without_agents(h: &str) -> String {
-    let (mut out, mut rest) = (String::new(), h);
-    while let Some(i) = rest.find("<details class=\"agents\"") {
-        out.push_str(&rest[..i]);
-        let end = rest[i..]
-            .find("</details>")
-            .map_or(rest.len(), |k| i + k + 10);
-        rest = &rest[end..];
-    }
-    out.push_str(rest);
-    out
 }
 
 #[test]
@@ -89,53 +75,12 @@ fn why1_blocks_without_events_have_no_pill_and_nothing_shows_a_badge() {
         until_next("rules")
     );
     assert!(!plain.contains("class=\"why\""));
-    // the agents' block names a status as data; nothing else on the page does
-    let seen = without_agents(&h);
+    let seen = &h;
     assert!(
         !seen.contains("class=\"badge")
             && !seen.contains(">live<")
             && !seen.contains(">superseded<")
     );
-}
-
-#[test]
-fn why1_the_agents_affordance_is_collapsed_and_carries_id_type_lifecycle_and_governing() {
-    let (_d, r, ids) = decided_site();
-    let out = tempfile::tempdir().unwrap();
-    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
-    let h = std::fs::read_to_string(out.path().join("ledgers.html")).unwrap();
-    let i = h
-        .find(&format!("data-rdy-block=\"{}\"", ids.requirement))
-        .unwrap();
-    let s = &h[i..];
-    let a = &s[s
-        .find("<details class=\"agents\" data-rdy=\"agents\">")
-        .unwrap()..];
-    let a = &a[..a.find("</details>").unwrap()];
-    assert!(
-        a.contains("<summary>For agents</summary>")
-            && !a.contains("<details class=\"agents\" data-rdy=\"agents\" open")
-    );
-    assert!(
-        a.contains(&format!(
-            "<dt>Id</dt><dd><code>{}</code></dd>",
-            ids.requirement
-        )) && a.contains("<dt>Type</dt><dd><code>requirement</code></dd>")
-    );
-    // FW-T1: a live (approved) governing decision's status word carries the success colour
-    assert!(
-        a.contains(&format!(
-            "<code>{}</code> <span class=\"state-live\">live</span>",
-            ids.d1
-        )) && a.contains(&format!("<code>{}</code> <span>rejected</span>", ids.d2))
-    );
-    assert!(
-        a.contains(&format!(
-            "<dt>Permalink</dt><dd><code>go/{}.html</code></dd>",
-            ids.requirement
-        )) && a.contains("href=\"ledgers.json\"")
-    );
-    assert!(h.contains("class=\"tool copy-link\" data-href=\"#ledgers-are-atomic-when-settled\" aria-label=\"Copy link to this block\""));
 }
 
 /// Review Focus 5.
@@ -183,4 +128,51 @@ fn why1_the_trail_shows_no_id_and_no_second_full_stop() {
             assert!(!t.contains(&id.to_string()), "{id} in {t}");
         }
     }
+}
+
+/// FW-V1: no block carries a panel for agents; an id reaches a reader only inside a copied ref,
+/// so outside the block's own attributes no id appears in the page.
+#[test]
+fn people1_no_block_has_an_agents_panel_and_ids_sit_only_in_attributes() {
+    let (_d, r, ids) = decided_site();
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
+    let h = std::fs::read_to_string(out.path().join("ledgers.html")).unwrap();
+    for gone in [
+        "data-rdy=\"agents\"",
+        "class=\"agents\"",
+        "For agents",
+        "<dt>Id</dt>",
+        "<dt>Type</dt>",
+        "<dt>Permalink</dt>",
+        "Page data",
+        "state-live",
+    ] {
+        assert!(!h.contains(gone), "{gone} is still on the page");
+    }
+    // the trail is the only opt-in panel, and it is a reader's
+    assert!(h.contains(
+        "<details class=\"why\"><summary>Why</summary><div class=\"why-body\" data-rdy=\"trail\">"
+    ));
+    let attrs = regex::Regex::new(
+        r#" (data-rdy-block|data-ref-head|data-ref)="[^"]*"|<span id="[^"]*" class="id-anchor""#,
+    )
+    .unwrap();
+    let rest = attrs.replace_all(&h, "");
+    for id in [
+        &ids.requirement,
+        &ids.term,
+        &ids.d0,
+        &ids.d1,
+        &ids.d2,
+        &ids.d3,
+        &ids.d3_revoker,
+        &ids.q,
+    ] {
+        assert!(
+            !rest.contains(&id.to_string()),
+            "{id} appears outside the copied-ref attributes"
+        );
+    }
+    assert!(h.contains("class=\"tool copy-link\" data-href=\"#ledgers-are-atomic-when-settled\" aria-label=\"Copy link to this block\""));
 }

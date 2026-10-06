@@ -96,22 +96,6 @@ fn at(css: &rdy_qa::site::Css, sel: &str, prop: &str, w: u32) -> String {
     rdy_qa::site::cascaded(css, sel, prop, w).unwrap_or_default()
 }
 
-/// FF-A: on a phone the block toolbar is a row of its own, not a float beside the text, and its
-/// height is fixed so the Cite button appearing never moves the block.
-#[test]
-fn theme1_the_phone_toolbar_is_a_fixed_row_and_never_squeezes_the_block() {
-    let (_d, out) = site();
-    let css = css(out.path());
-    for w in [360, 600, 900] {
-        assert_eq!(at(&css, ".tools", "float", w), "none", "width {w}");
-        assert_eq!(at(&css, ".tools", "display", w), "flex", "width {w}");
-        assert_eq!(at(&css, ".tools", "flex-wrap", w), "nowrap", "width {w}");
-        assert_eq!(at(&css, ".tools", "height", w), "40px", "width {w}");
-        assert_eq!(at(&css, ".tools", "opacity", w), "1", "width {w}");
-    }
-    assert_eq!(at(&css, ".tools", "float", 1280), "right");
-}
-
 /// FF-B: an anchor lands below the sticky header, which is taller on a phone.
 #[test]
 fn theme1_anchors_land_below_the_sticky_header() {

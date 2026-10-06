@@ -160,3 +160,35 @@ fn key1_a_key_typed_reference_shows_the_targets_key_on_the_site() {
     );
     assert!(h.contains(">Guard</a>."), "{h}");
 }
+
+/// FW-F2b (founder ruling): a key-typed reference to a doc, a folder or a section shows the
+/// target's title, as `{{id}}` does, whatever key it holds; to any other keyed block (a
+/// requirement) it still shows the key. Link text, hover and the permalink page agree.
+#[test]
+fn ftitle1_a_key_typed_reference_to_a_doc_or_section_shows_its_title_and_to_a_requirement_shows_its_key()
+ {
+    let (_d, mut r) = tiny();
+    write(&mut r, "work", json!([
+        {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "area", "title": "Area", "key": "FOLD-1"}},
+        {"op": "create", "type": "doc", "id": "$t", "parent": "$f", "fields": {"name": "target", "title": "Target Doc", "doc_type": "overview", "key": "DOC-1"}},
+        {"op": "create", "type": "section", "id": "$ts", "parent": "$t", "fields": {"title": "Target Section", "key": "SEC-1"}},
+        {"op": "create", "type": "requirement", "id": "$q", "parent": "$ts", "fields": {"priority": "must", "key": "REQ-12"}, "body": "It must."},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "keys", "title": "Keys", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
+        {"op": "create", "type": "prose", "parent": "$s", "body": "Doc {{$t|@key}}, section {{$ts|@key}}, folder {{$f|@key}}, requirement {{$q|@key}}."}
+    ])).unwrap();
+    land(&mut r, "work").unwrap();
+    let out = render(&mut r);
+    let h = html(out.path(), "keys.html");
+    for want in [
+        ">Target Doc</a>, section ",
+        ">Target Section</a>, folder ",
+        ">Area</a>, requirement ",
+        ">REQ-12</a>.",
+    ] {
+        assert!(h.contains(want), "{want}\n{h}");
+    }
+    for key in ["DOC-1", "SEC-1", "FOLD-1"] {
+        assert!(!h.contains(key), "{key} shows nowhere\n{h}");
+    }
+}

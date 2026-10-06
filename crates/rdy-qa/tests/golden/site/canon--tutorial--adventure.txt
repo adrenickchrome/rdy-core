@@ -89,12 +89,6 @@ content	-	; the game splits the line into words and has to decide what to do. Ea
 content	L	Introduction
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	The tutorial teaches by example. The exact rules are in
@@ -102,118 +96,46 @@ content	-	The match statement and its patterns
 content	-	and the reasons for them in
 content	-	Why the design is what it is
 content	-	.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Matching sequences
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	Splitting the input gives a list of words. Instead of checking its length by hand, describe the shape you expect.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Python
 content	-	Copy
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	A pattern does two things. It verifies that the subject has a certain structure, here a list of exactly two items, and it binds names in the pattern to parts of the subject, here
 content	-	and
 content	-	.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Matching several patterns
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	Commands come in different lengths.
 content	-	is one word;
 content	-	is two.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Python
 content	-	Copy
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	The match statement checks patterns from top to bottom. If a pattern does not match the subject, the next one is tried.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Matching specific values
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	Literal values in a pattern filter for particular commands.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Python
 content	-	Copy
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	Literals are compared with
@@ -224,40 +146,16 @@ content	-	, which are compared with
 content	-	. The precise rule is in
 content	-	Sequence patterns
 content	-	and the sections around it.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Matching the rest
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	A star inside a sequence pattern works like extended unpacking.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Python
 content	-	Copy
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	This matches any sequence whose first element is
@@ -265,58 +163,22 @@ content	-	. The remaining elements are gathered into a list bound to
 content	-	. See
 content	-	Star subpatterns
 content	-	.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Adding a wildcard
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	To handle anything not yet covered, end with the wildcard.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Python
 content	-	Copy
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	The wildcard always matches and binds nothing, so it only makes sense on its own as the last case. The language enforces that.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Composing patterns
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	So far we have used three simple patterns: capture patterns, which are bare names like
@@ -325,157 +187,61 @@ content	-	,
 content	-	and
 content	-	; and the wildcard
 content	-	.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	Patterns nest.
 content	-	matches a sequence of at least three items whose first item equals
 content	-	and whose second item is itself a sequence of two.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Or patterns
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	A vertical bar joins alternatives. The first alternative that matches wins.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Python
 content	-	Copy
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	Every alternative must bind the same names.
 content	-	is not allowed, because after a successful match it would be unclear which of
 content	-	and
 content	-	had a value.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Capturing a sub-pattern
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	The
 content	-	keyword matches whatever is on its left and also binds the matched value to a name.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Python
 content	-	Copy
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Adding conditions
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	A guard adds a boolean test after the pattern. It is checked only if the pattern matched, and after all its names have been bound.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Python
 content	-	Copy
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	The guard stays out of the pattern, which keeps the pattern declarative.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Matching objects
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	Suppose the game is now driven by events from a window. A class pattern checks the type of the event and matches its attributes.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Python
 content	-	Copy
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	matches only if the event's type is
@@ -483,200 +249,80 @@ content	-	or a subclass, and then matches the nested pattern against its
 content	-	attribute. See
 content	-	Class patterns
 content	-	.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Matching positional attributes
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	A dataclass can be matched positionally, because the dataclass decorator declares the attribute order.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Python
 content	-	Copy
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	Any class can do the same by declaring
 content	-	__match_args__
 content	-	.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Python
 content	-	Copy
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Matching against constants
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	A dotted name in a pattern is looked up rather than bound, which is how to match an enumeration value.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Python
 content	-	Copy
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	Be careful: a bare name with no dots is always a capture.
 content	-	would bind
 content	-	to whatever the button was.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Note
 content	-	The most common slip in this feature is a bare name where a dotted one was meant. A reader should look twice at any capture that shares its spelling with a constant.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Matching mappings
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	If actions arrive from the network as dictionaries, mapping patterns pick them apart by key.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Python
 content	-	Copy
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	Keys must be literals; values can be any pattern. Extra keys in the subject are ignored, so a pattern with a text key and a color key also matches a dictionary that carries a font key. See
 content	-	Mapping patterns
 content	-	.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Matching built-in types
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	Any class is a valid match target, including
 content	-	,
 content	-	and
 content	-	. Wrapping a capture in one checks the type of data that came from outside.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Python
 content	-	Copy
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	Why a single positional argument means "the whole value" for these classes is explained under class patterns in
 content	-	Class patterns
 content	-	.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Worked examples
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
@@ -685,12 +331,6 @@ content	-	matches the case
 content	-	, binds
 content	-	to
 content	-	and runs the block that moves the player. The same line also matches the later wildcard, but the first matching case wins and the wildcard is never reached.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
@@ -699,152 +339,62 @@ content	-	matches
 content	-	and binds
 content	-	to a list of two items. The line
 content	-	alone binds it to an empty list.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Note
 content	-	The sample output in this tutorial is formatted for reading and carries no meaning of its own.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	The next section holds one very long listing, the parser written out many times over, to show how the page copes with it.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Exercises
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	Try each of these on the adventure parser.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
 content	-	Add a command
 content	-	that matches a three-word command with the word
 content	-	in the middle.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
 content	-	Make
 content	-	accept either a direction or a room name, and keep the guard that checks the exits.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
 content	-	Write a case that matches any command whose last word is
 content	-	, and gives the rest of the line to the next case.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Example
 content	-	Handle a command that arrives as a dictionary with a verb key and a list of objects.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Note
 content	-	There is no single right answer to any exercise; each has several readable patterns.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	A long listing
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Python
 content	-	Copy
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Terms
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Case block
 content	-	One
 content	-	clause with its pattern, optional guard and indented block.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Binding
 content	-	Giving a name a value as a result of a successful match. Bindings outlive the block.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Soft keyword
@@ -853,41 +403,17 @@ content	-	and
 content	-	are soft keywords. See
 content	-	match and case are soft keywords.
 content	-	.
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	L	Quick sketches
 content	-	Link
 content	-	Copy ref
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	L	Code
 content	-	Copy
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 content	-	Link
 content	-	Copy ref
 content	-	Diagram (source below)
 content	L	Diagram source
-agents	L	For agents
-agents	L	Id
-agents	L	Type
-agents	L	Permalink
-agents	L	Page data
-agents	-	JSON
 chrome	L	Previous
 chrome	L	Σημασιολογία
 chrome	L	Next
