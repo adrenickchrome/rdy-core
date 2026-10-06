@@ -169,11 +169,11 @@ pub enum Scope {
 
 /// UTC RFC 3339 timestamp with second precision, e.g. 2026-10-03T19:35:01Z.
 pub fn rfc3339_now() -> String {
-    rfc3339_of_ms(now_ms())
+    rfc3339(now_ms())
 }
 
 /// UTC RFC 3339 timestamp with second precision for `ms` milliseconds since the epoch.
-pub fn rfc3339_of_ms(ms: i64) -> String {
+pub fn rfc3339(ms: i64) -> String {
     let secs = ms.div_euclid(1000);
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // civil-from-days (Howard Hinnant)

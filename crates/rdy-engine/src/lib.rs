@@ -7,6 +7,7 @@ pub mod engine;
 mod error;
 pub mod events;
 mod gate;
+mod history;
 mod io;
 mod keys;
 mod lint;
@@ -31,6 +32,7 @@ pub use decide::DecisionInput;
 pub use error::*;
 pub use events::{Event, EventKind, Events};
 pub use gate::{LandInfo, LandOptions, LandingRow, ProposalInfo, ProposalRef, RebasedInfo};
+pub use history::{Author, HISTORY_MAX, History, HistoryEntry, JustificationInfo, LandingRef};
 pub use io::{ExportSummary, block_from_yaml, block_to_yaml};
 pub use lint::check_path;
 pub use materialize::{Materialized, PathMiss};
@@ -40,7 +42,7 @@ pub use rdy_store::Relay;
 pub use read_state::{Delta, ReadState};
 pub use session::{
     HUMAN_RUN, PinnedClock, Scope, Session, SessionKind, classify, human_actor,
-    human_actor_from_env, now_ms, pin_clock, rfc3339_now,
+    human_actor_from_env, now_ms, pin_clock, rfc3339, rfc3339_now,
 };
 pub use tree_io::Diagnostic;
 pub use version::{

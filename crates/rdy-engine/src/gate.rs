@@ -1,5 +1,5 @@
 use crate::error::*;
-use crate::session::rfc3339_of_ms;
+use crate::session::rfc3339;
 use crate::views::{
     Action, BaseBlocks, ConflictInfo, conflict_infos, creators, landings_through, missing_parents,
     parse_change,
@@ -1324,7 +1324,7 @@ impl ReadState {
                 card_hash: e.card_hash.map(|h| h.to_string()),
             }),
             rebased_from: rec.rebased_from.iter().map(|h| h.to_string()).collect(),
-            at: rfc3339_of_ms(rec.approved_by.at_ms),
+            at: rfc3339(rec.approved_by.at_ms),
             at_ms: rec.approved_by.at_ms,
             changes: p.changes.len(),
             tags,

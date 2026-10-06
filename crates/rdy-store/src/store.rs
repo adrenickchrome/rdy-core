@@ -1229,6 +1229,11 @@ impl StoreReader {
         }
         Ok(first.map(|(_, c)| c))
     }
+
+    /// The changes with an op that produces `version`, ascending.
+    pub fn producers(&self, version: &Hash) -> Result<Vec<Hash>, StoreError> {
+        self.index().producers(version)
+    }
 }
 
 impl Store {
