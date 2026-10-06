@@ -28,8 +28,14 @@ pub fn header(briefing: &Value) -> String {
         .map(|b| s(b, "id"))
         .collect();
     let token: String = s(base, "token").chars().take(12).collect();
+    // A code briefing for a file nothing cites covers no blocks.
+    let covered = if covered.is_empty() {
+        "no blocks".to_string()
+    } else {
+        covered.join(", ")
+    };
     let mut out = vec![
-        format!("# rdy briefing for {} (token {token})", covered.join(", ")),
+        format!("# rdy briefing for {covered} (token {token})"),
         "# Lines starting with # are dropped when you save.".to_string(),
     ];
     section(
@@ -290,6 +296,18 @@ mod tests {
         assert_eq!(
             plain(&b),
             "rdy briefing for c-A (token 0123456789ab)\ngoverns:\n  D-1 [live] Keep A\ndepends on this:\n  (none)\nwill go stale if this changes:\n  (none)\nopen suspects:\n  (none)\n"
+        );
+    }
+
+    #[test]
+    fn ccli1_a_briefing_that_covers_no_blocks_says_so() {
+        let b = json!({
+            "covers": 0, "governs": [], "dependents": [], "will_go_stale": [], "suspects": [],
+            "base": {"token": "0123456789abcdef0123", "blocks": [], "depends": 0}
+        });
+        assert_eq!(
+            plain(&b).lines().next(),
+            Some("rdy briefing for no blocks (token 0123456789ab)")
         );
     }
 }

@@ -254,3 +254,17 @@ fn cidx1_the_git_command_never_fetches_from_a_promisor_remote() {
         "{set:?}"
     );
 }
+
+#[test]
+fn cidx1_a_copy_status_parses_as_a_touch_of_the_copy() {
+    // `C` (copy detection, -C) names the source and the copy; only the copy changed.
+    let out = rec(
+        "aaaa",
+        "s-AAAAA",
+        &["C075", "src/a.rs", "src/b.rs", "M", "src/a.rs"],
+    );
+    assert_eq!(
+        parse_log(&out)[0].changes,
+        vec![t("src/b.rs"), t("src/a.rs")]
+    );
+}

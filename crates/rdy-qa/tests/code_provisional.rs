@@ -179,3 +179,72 @@ fn prov1_a_commit_citing_a_docs_path_does_not_count_toward_a_block_inside_it() {
     let doc = st.code_dependents(&Scope::Canon, &s.doc).unwrap();
     assert_eq!(doc.commits, 1, "the doc itself is still named by its path");
 }
+
+#[test]
+fn prov1_a_docs_path_counts_its_commits_whatever_its_case_or_trailing_slash() {
+    // `Spec` and `spec/` resolve to the doc (paths ignore case and empty segments), so
+    // code_dependents counts them as rdy_brief resolves them.
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let g = linked(&r);
+    g.write("src/a.rs", "a\n");
+    g.commit("feat: a\n\nImplements: Spec");
+    g.write("src/b.rs", "b\n");
+    g.commit("feat: b\n\nImplements: spec/");
+    let st = r.read();
+    for f in ["src/a.rs", "src/b.rs"] {
+        let cb = st.brief_code(&Scope::Canon, f, None, None).unwrap();
+        let ids: Vec<&str> = cb
+            .code
+            .implements
+            .iter()
+            .map(|x| x.block.as_str())
+            .collect();
+        assert_eq!(ids, vec![s.doc.to_string().as_str()], "{f}");
+    }
+    let doc = st.code_dependents(&Scope::Canon, &s.doc).unwrap();
+    assert_eq!(doc.commits, 2);
+    let files: Vec<&str> = doc.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(files, vec!["src/a.rs", "src/b.rs"]);
+    let sec = st.code_dependents(&Scope::Canon, &s.section).unwrap();
+    assert_eq!((sec.commits, sec.files.len()), (0, 0));
+}
+
+#[test]
+fn prov1_code_dependents_spans_every_linked_repo() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let (one, two) = (GitRepo::new(), GitRepo::new());
+    let (one_text, two_text) = (one.configured(), two.configured());
+    link_repos(r.root(), &[one_text.as_str(), two_text.as_str()]);
+    let d = s.decision.to_string();
+    one.write("src/x.rs", "x\n");
+    one.commit(&format!("feat: x\n\nImplements: {d}"));
+    two.write("lib/y.rs", "y\n");
+    two.commit(&format!("feat: y\n\nImplements: {d}"));
+    two.write("lib/y.rs", "y2\n");
+    two.commit(&format!("fix: y\n\nImplements: {d}"));
+    let dep = r
+        .read()
+        .code_dependents(&Scope::Canon, &s.decision)
+        .unwrap();
+    assert_eq!(dep.commits, 3, "commits from both repos");
+    let mut want = vec![
+        (one_text.clone(), "src/x.rs".to_string()),
+        (two_text.clone(), "lib/y.rs".to_string()),
+    ];
+    want.sort();
+    let got: Vec<(String, String)> = dep
+        .files
+        .iter()
+        .map(|f| (f.repo.clone(), f.path.clone()))
+        .collect();
+    assert_eq!(got, want);
+    let cb = r
+        .read()
+        .brief_code(&Scope::Canon, "lib/y.rs", None, None)
+        .unwrap();
+    assert_eq!(cb.code.repos, vec![one_text, two_text]);
+    let e = cb.code.implements.iter().find(|e| e.block == d).unwrap();
+    assert_eq!((e.commits, e.dependent_commits), (2, Some(3)));
+}

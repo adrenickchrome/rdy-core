@@ -12,7 +12,7 @@ use rdy_model::{Block, BlockId, FieldValue, key, tree};
 use rdy_schema::{Glob, REFLECTS_FIELD};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// The longest code path accepted, in bytes.
@@ -100,19 +100,68 @@ fn not_a_code_path(code_path: &str, fix: &str) -> RdyError {
     )
 }
 
-/// `code_path` as (the one repo it points into, if its form says so; its path in that repo).
+/// `full` with its nearest existing ancestor canonicalised and the rest re-joined, so a new file
+/// in a new folder under a symlinked prefix still lands under its repo's canonical root. A path
+/// whose missing tail holds `..` or `.` stays as given (the caller refuses its components).
+fn canonical(full: &Path) -> PathBuf {
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut cur = full;
+    loop {
+        if let Ok(mut p) = std::fs::canonicalize(cur) {
+            p.extend(tail.iter().rev());
+            return p;
+        }
+        match (cur.file_name(), cur.parent()) {
+            (Some(name), Some(parent)) => {
+                tail.push(name);
+                cur = parent;
+            }
+            _ => return full.to_path_buf(),
+        }
+    }
+}
+
+/// `full` as (its repo, its path in that repo), or `None` when it lies under no linked repo.
+fn inside(
+    repos: &[CodeRepo],
+    code_path: &str,
+    full: &Path,
+) -> Option<Result<(Option<usize>, String), RdyError>> {
+    let p = canonical(full);
+    repos.iter().enumerate().find_map(|(i, repo)| {
+        let rest = p.strip_prefix(&repo.root).ok()?;
+        // Normal components only: a path that did not canonicalise may still hold `..`.
+        let parts: Option<Vec<&str>> = rest
+            .components()
+            .map(|c| match c {
+                std::path::Component::Normal(s) => s.to_str(),
+                _ => None,
+            })
+            .collect();
+        Some(match parts {
+            Some(parts) if !parts.is_empty() => Ok((Some(i), parts.join("/"))),
+            _ => Err(not_a_code_path(code_path, TOP_FIX)),
+        })
+    })
+}
+
+const TOP_FIX: &str =
+    "give a file path relative to the code repo's top folder, such as src/main.rs";
+
+/// `code_path` as (the one repo it points into, if its form says so; its path in that repo). An
+/// absolute path must lie in a linked repo. A relative path naming a file from `cwd` inside a
+/// linked repo is that file; any other relative path is relative to the repos' top folders (so a
+/// same-named file in the docs project does not shadow the repo's).
 fn normalise(
     repos: &[CodeRepo],
     code_path: &str,
     cwd: Option<&Path>,
 ) -> Result<(Option<usize>, String), RdyError> {
-    let top_fix = "give a file path relative to the code repo's top folder, such as src/main.rs";
     if code_path.is_empty() || code_path.len() > MAX_CODE_PATH || code_path.contains('\0') {
-        return Err(not_a_code_path(code_path, top_fix));
+        return Err(not_a_code_path(code_path, TOP_FIX));
     }
     let given = Path::new(code_path);
-    let local = cwd.map(|c| c.join(given)).filter(|p| p.exists());
-    if given.is_absolute() || local.is_some() {
+    if given.is_absolute() {
         if repos.is_empty() {
             return Err(RdyError::new(
                 E_BAD_INPUT,
@@ -120,39 +169,22 @@ fn normalise(
                 "add code_repos: [<path to the repo>] to .rdy/config.yaml",
             ));
         }
-        let full = local.unwrap_or_else(|| given.to_path_buf());
-        let p = std::fs::canonicalize(&full)
-            .or_else(|_| {
-                let name = full.file_name().ok_or(std::io::ErrorKind::NotFound)?;
-                let parent = full.parent().ok_or(std::io::ErrorKind::NotFound)?;
-                Ok::<_, std::io::Error>(std::fs::canonicalize(parent)?.join(name))
-            })
-            .unwrap_or(full);
-        for (i, repo) in repos.iter().enumerate() {
-            if let Ok(rest) = p.strip_prefix(&repo.root) {
-                // Normal components only: a path that did not canonicalise may still hold `..`.
-                let parts: Option<Vec<&str>> = rest
-                    .components()
-                    .map(|c| match c {
-                        std::path::Component::Normal(s) => s.to_str(),
-                        _ => None,
-                    })
-                    .collect();
-                return match parts {
-                    Some(parts) if !parts.is_empty() => Ok((Some(i), parts.join("/"))),
-                    _ => Err(not_a_code_path(code_path, top_fix)),
-                };
-            }
-        }
-        let configured: Vec<&str> = repos.iter().map(|r| r.configured.as_str()).collect();
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            format!("{code_path} is not inside a linked code repo"),
-            format!(
-                "give a path inside one of: {}, or a path relative to a repo's top folder",
-                configured.join(", ")
-            ),
-        ));
+        return inside(repos, code_path, given).unwrap_or_else(|| {
+            let configured: Vec<&str> = repos.iter().map(|r| r.configured.as_str()).collect();
+            Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("{code_path} is not inside a linked code repo"),
+                format!(
+                    "give a path inside one of: {}, or a path relative to a repo's top folder",
+                    configured.join(", ")
+                ),
+            ))
+        });
+    }
+    if let Some(local) = cwd.map(|c| c.join(given)).filter(|p| p.exists())
+        && let Some(found) = inside(repos, code_path, &local)
+    {
+        return found;
     }
     let mut rest = code_path;
     while let Some(r) = rest.strip_prefix("./") {
@@ -170,32 +202,50 @@ fn normalise(
     Ok((None, rest.to_string()))
 }
 
-/// The three ways a cited text reaches a block, compared directly (a key is compared ignoring
-/// case): its id, its key, its path.
-struct Names {
-    id: String,
+/// The three ways a cited text reaches a block, as `resolve_id` reads them: its id (exactly), its
+/// key (ignoring case), its path (a doc or folder's; ignoring case and empty segments).
+struct Names<'a> {
+    m: &'a crate::Materialized,
+    id: BlockId,
     key: Option<String>,
+    /// The path folded as `fold_path` folds it.
     path: Option<String>,
 }
 
-impl Names {
-    fn of(m: &crate::Materialized, id: &BlockId) -> Names {
+/// A path as `child_named` compares it, ignoring case and empty segments.
+fn fold_path(text: &str) -> String {
+    text.split('/')
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+impl<'a> Names<'a> {
+    fn of(m: &'a crate::Materialized, id: &BlockId) -> Names<'a> {
         Names {
-            id: id.to_string(),
+            m,
+            id: id.clone(),
             key: m.get(id).and_then(|b| b.field_str("key")).map(key::fold),
             // Only a doc or folder has a path of its own; `path_of` gives any other block its
             // doc's path, which `resolve_id` would resolve to the doc.
             path: m
                 .get(id)
                 .filter(|b| tree::is_tree_type(&b.block_type))
-                .and_then(|_| m.path_of(id)),
+                .and_then(|_| m.path_of(id))
+                .map(|p| fold_path(&p)),
         }
     }
 
     fn names(&self, text: &str) -> bool {
-        text == self.id
-            || self.path.as_deref() == Some(text)
-            || self.key.as_ref().is_some_and(|k| key::fold(text) == *k)
+        if let Ok(id) = BlockId::parse(text) {
+            return id == self.id;
+        }
+        self.key.as_ref().is_some_and(|k| key::fold(text) == *k)
+            || self.path.as_deref() == Some(fold_path(text).as_str())
+                // the folded match is a cheap filter; two names differing only in case
+                // resolve to the exact one, as `child_named` picks it
+                && self.m.resolve_path(text).ok().as_ref() == Some(&self.id)
     }
 }
 

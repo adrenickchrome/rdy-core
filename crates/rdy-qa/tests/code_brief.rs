@@ -251,3 +251,76 @@ fn cbrief1_the_code_briefings_token_is_citable_on_a_stable_write() {
     )
     .expect("the code briefing covers A");
 }
+
+#[test]
+fn cbrief1_a_local_file_outside_every_repo_falls_back_to_the_repo_relative_path() {
+    // Run from the docs project, which has a README.md of its own: the caller meant the repo's.
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    std::fs::write(r.root().join("README.md"), "the project's\n").unwrap();
+    let g = linked(&r);
+    g.write("README.md", "the app's\n");
+    g.commit(&format!("docs: readme\n\nImplements: {}", s.a));
+    let cb = r
+        .read()
+        .brief_code(&Scope::Canon, "README.md", Some(r.root()), None)
+        .unwrap();
+    assert_eq!(cb.code.path, "README.md");
+    assert_eq!(implements(&cb), vec![s.a.to_string()]);
+}
+
+#[cfg(unix)]
+#[test]
+fn cbrief1_a_new_file_in_a_new_folder_under_a_symlinked_prefix_is_inside_the_repo() {
+    let (_d, r) = project();
+    let tmp = tempfile::tempdir().unwrap();
+    let g = GitRepo::at(&tmp.path().join("real"));
+    g.link(r.root());
+    std::os::unix::fs::symlink(g.path(), tmp.path().join("link")).unwrap();
+    let new = tmp.path().join("link/src/newdir/new.rs");
+    let cb = r
+        .read()
+        .brief_code(&Scope::Canon, new.to_str().unwrap(), None, None)
+        .unwrap();
+    assert_eq!(cb.code.path, "src/newdir/new.rs");
+}
+
+#[test]
+fn cbrief1_coverage_over_the_limit_is_e_limit() {
+    use rdy_engine::brief::MAX_BRIEF_BLOCKS;
+    let (_d, mut r) = project();
+    let work = Scope::View("work".into());
+    // the doc, its section and 4,998 claims: exactly the limit
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": "big", "title": "Big", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "All"}}),
+    ];
+    ops.extend((0..MAX_BRIEF_BLOCKS - 2).map(|i| {
+        json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": "$s", "body": format!("Claim {i}.")})
+    }));
+    let w = write(&mut r, "work", json!(ops)).unwrap();
+    let section = w.created["$s"].clone();
+    let g = linked(&r);
+    g.write("src/big.rs", "b\n");
+    g.commit("feat: big\n\nImplements: big");
+    let st = r.read();
+    let at_limit = st.brief_code(&work, "src/big.rs", None, None).unwrap();
+    assert_eq!(at_limit.briefing.covers, MAX_BRIEF_BLOCKS);
+    drop(st);
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "One more."}]),
+    )
+    .unwrap();
+    let e = r
+        .read()
+        .brief_code(&work, "src/big.rs", None, None)
+        .unwrap_err();
+    assert_eq!(e.code, "E_LIMIT", "{e}");
+    assert!(
+        e.message
+            .starts_with("the code briefing covers more than 5000 blocks"),
+        "{e}"
+    );
+}

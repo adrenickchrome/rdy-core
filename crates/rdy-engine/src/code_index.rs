@@ -44,7 +44,8 @@ pub struct CodeRepo {
     pub root: PathBuf,
 }
 
-/// The project's linked code checkouts, in config order, each canonical root once.
+/// The project's linked code checkouts, in config order, each canonical root once. No key, a
+/// null value and an empty list all link none.
 pub fn code_repos(project: &Path) -> Result<Vec<CodeRepo>, RdyError> {
     let text = std::fs::read_to_string(project.join(".rdy/config.yaml"))
         .map_err(|e| RdyError::new(E_IO, e.to_string(), "check file permissions"))?;
@@ -64,7 +65,7 @@ pub fn code_repos(project: &Path) -> Result<Vec<CodeRepo>, RdyError> {
         )
     };
     let seq = entries.as_sequence().ok_or_else(bad)?;
-    if seq.is_empty() || seq.len() > MAX_CODE_REPOS {
+    if seq.len() > MAX_CODE_REPOS {
         return Err(bad());
     }
     let mut repos: Vec<CodeRepo> = Vec::with_capacity(seq.len());
@@ -96,7 +97,8 @@ pub fn code_repos(project: &Path) -> Result<Vec<CodeRepo>, RdyError> {
 
 /// `git` reading the repository at `root` only: no fsmonitor, quoting, signatures or colour, none
 /// of the caller's git environment, and no lazy fetch of a partial clone's missing objects
-/// (`GIT_NO_LAZY_FETCH`, git >= 2.45). Callers append the subcommand.
+/// (`GIT_NO_LAZY_FETCH`, honoured by recent gits only; a partial clone is refused before any
+/// read, see `check_top`). Callers append the subcommand.
 pub fn git_command(root: &Path) -> Command {
     let mut c = Command::new("git");
     c.arg("-C").arg(root).args([
@@ -326,7 +328,8 @@ fn git_failed(repo: &CodeRepo, what: &str, out: &Output, fix: &str) -> RdyError 
     )
 }
 
-/// `repo.root` is a git checkout's top folder (checked once per process per root).
+/// `repo.root` is a git checkout's top folder and not a partial clone (checked once per process
+/// per root, and again after a read of HEAD fails).
 fn check_top(repo: &CodeRepo) -> Result<(), RdyError> {
     if lock(&TOPS).contains(&repo.root) {
         return Ok(());
@@ -355,21 +358,106 @@ fn check_top(repo: &CodeRepo) -> Result<(), RdyError> {
             format!("set code_repos to {}", top.display()),
         ));
     }
+    if is_partial_clone(repo)? {
+        // An older git ignores GIT_NO_LAZY_FETCH and would fetch into the repository.
+        return Err(RdyError::new(
+            E_CONFIG,
+            format!("code repo {} is a partial clone", repo.configured),
+            "link a full clone: rdy reads every commit and never fetches",
+        ));
+    }
     lock(&TOPS).insert(repo.root.clone());
     Ok(())
 }
 
-/// The commit HEAD names; `None` while HEAD is unborn.
-fn head_of(repo: &CodeRepo) -> Result<Option<String>, RdyError> {
+/// The repository's config names a promisor remote (`remote.<name>.promisor`) or a partial
+/// clone filter (`extensions.partialClone`): a partial clone, missing objects it would fetch.
+fn is_partial_clone(repo: &CodeRepo) -> Result<bool, RdyError> {
     let mut c = git_command(&repo.root);
-    c.args(["rev-parse", "-q", "--verify", "HEAD^{commit}"]);
+    c.args(["rev-parse", "--git-common-dir"]);
     let out = run(c)?;
     if !out.status.success() {
-        return Ok(None);
+        return Err(git_failed(
+            repo,
+            "rev-parse",
+            &out,
+            "check the repository with git status",
+        ));
     }
-    Ok(Some(
-        String::from_utf8_lossy(&out.stdout).trim().to_string(),
-    ))
+    let printed = String::from_utf8_lossy(&out.stdout);
+    let config = repo
+        .root
+        .join(printed.trim_end_matches(['\n', '\r']))
+        .join("config");
+    let text = std::fs::read_to_string(&config).map_err(|e| {
+        RdyError::new(
+            E_IO,
+            format!(
+                "code repo {}: reading {}: {e}",
+                repo.configured,
+                config.display()
+            ),
+            "check file permissions",
+        )
+    })?;
+    Ok(text.lines().any(|line| {
+        let line = line.split(['#', ';']).next().unwrap_or_default();
+        let (key, value) = line.split_once('=').unwrap_or((line, "true"));
+        let value = value.trim().trim_matches('"').to_ascii_lowercase();
+        match key.trim().to_ascii_lowercase().as_str() {
+            "partialclone" => !value.is_empty(),
+            "promisor" => !matches!(value.as_str(), "false" | "no" | "off" | "0" | ""),
+            _ => false,
+        }
+    }))
+}
+
+/// The commit HEAD names; `None` while HEAD is unborn. Any other failure is an error, and the
+/// root's top-level check runs again on the next read (the repository may have gone).
+fn head_of(repo: &CodeRepo) -> Result<Option<String>, RdyError> {
+    let head = read_head(repo);
+    if head.is_err() {
+        lock(&TOPS).remove(&repo.root);
+    }
+    head
+}
+
+fn read_head(repo: &CodeRepo) -> Result<Option<String>, RdyError> {
+    let verify = |what: &str| -> Result<Output, RdyError> {
+        let mut c = git_command(&repo.root);
+        c.args(["rev-parse", "-q", "--verify", what]);
+        run(c)
+    };
+    let printed = |out: &Output| String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let fix = "check the repository with git fsck";
+    let commit = verify("HEAD^{commit}")?;
+    if commit.status.success() {
+        return Ok(Some(printed(&commit)));
+    }
+    // `-q --verify` fails quietly with status 1 when HEAD names nothing; anything louder (no
+    // repository any more, a damaged HEAD file) is an error.
+    if commit.status.code() != Some(1) || !commit.stderr.is_empty() {
+        return Err(git_failed(repo, "rev-parse", &commit, fix));
+    }
+    let named = verify("HEAD")?;
+    if named.status.success() {
+        // HEAD's branch names an object that is missing or not a commit.
+        return Err(RdyError::new(
+            E_IO,
+            format!(
+                "git rev-parse failed in code repo {}: HEAD names {}, which is not a commit in the repository",
+                repo.configured,
+                printed(&named)
+            ),
+            fix,
+        ));
+    }
+    if named.status.code() != Some(1) || !named.stderr.is_empty() {
+        return Err(git_failed(repo, "rev-parse", &named, fix));
+    }
+    // HEAD's branch has no commit yet. (A branch file holding no hash at all reads the same:
+    // git's own `rev-parse` cannot tell the two apart.)
+    Ok(None)
 }
 
 /// The index of `head` (which HEAD named when it was read), read at that hash rather than at

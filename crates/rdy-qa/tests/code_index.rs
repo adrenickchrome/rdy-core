@@ -157,28 +157,9 @@ fn missing_objects(dir: &std::path::Path) -> usize {
         .count()
 }
 
-/// git's `(major, minor)` version, from `git --version`.
-fn git_version() -> (u32, u32) {
-    let out = std::process::Command::new("git")
-        .arg("--version")
-        .output()
-        .unwrap();
-    let text = String::from_utf8_lossy(&out.stdout);
-    let v = text.split_whitespace().nth(2).unwrap_or("0.0");
-    let mut it = v.split('.').map(|n| n.parse().unwrap_or(0));
-    (it.next().unwrap_or(0), it.next().unwrap_or(0))
-}
-
 #[test]
-fn cidx1_a_partial_clone_is_read_without_fetching() {
-    if git_version() < (2, 45) {
-        // GIT_NO_LAZY_FETCH arrived in git 2.45; older gits ignore it and fetch.
-        eprintln!(
-            "skipped: git {:?} predates GIT_NO_LAZY_FETCH",
-            git_version()
-        );
-        return;
-    }
+fn cidx1_a_partial_clone_is_refused_without_fetching() {
+    // Refused before any git log runs, so no git version (GIT_NO_LAZY_FETCH is recent) fetches.
     let g = GitRepo::new();
     g.run(&["config", "uploadpack.allowFilter", "true"]);
     g.write("src/old.rs", &lines(40, "old"));
@@ -207,11 +188,96 @@ fn cidx1_a_partial_clone_is_read_without_fetching() {
         root: std::fs::canonicalize(&clone).unwrap(),
     };
     let e = build(&r).unwrap_err();
-    assert_eq!(e.code, "E_IO");
+    assert_eq!(e.code, "E_CONFIG", "{e}");
+    assert!(e.message.contains("partial clone"), "{}", e.message);
     assert!(e.fix.contains("full clone"), "{}", e.fix);
     assert_eq!(
         missing_objects(&clone),
         before,
         "building the index fetched into the linked repository"
     );
+}
+
+#[test]
+fn cidx1_an_empty_code_repos_list_links_no_repo() {
+    let (d, _r) = project();
+    append_config(d.path(), "code_repos: []\n");
+    assert!(code_repos(d.path()).unwrap().is_empty());
+}
+
+#[test]
+fn cidx1_a_damaged_head_is_e_io_and_a_removed_repository_is_checked_again() {
+    let g = GitRepo::new();
+    g.write("a.rs", "a\n");
+    g.commit("feat: a\n\nImplements: c-AAAAA");
+    let r = repo_of(&g);
+    index_of(&r).unwrap();
+    // HEAD's branch names an object the repository does not have.
+    let branch = g.path().join(".git/refs/heads/main");
+    let good = std::fs::read_to_string(&branch).unwrap();
+    std::fs::write(&branch, "1111111111111111111111111111111111111111\n").unwrap();
+    let e = index_of(&r).unwrap_err();
+    assert_eq!(e.code, "E_IO", "{e}");
+    assert!(e.message.contains("not a commit"), "{}", e.message);
+    std::fs::write(&branch, good).unwrap();
+    assert!(index_of(&r).unwrap().files.contains_key("a.rs"));
+    // The repository goes away while the process lives: an error, never an empty index.
+    std::fs::remove_dir_all(g.path().join(".git")).unwrap();
+    let e = index_of(&r).unwrap_err();
+    assert_eq!(e.code, "E_IO", "{e}");
+    let e = index_of(&r).unwrap_err();
+    assert_eq!(e.code, "E_CONFIG", "the top-level check runs again: {e}");
+    assert!(e.message.contains("not a git repository"), "{}", e.message);
+}
+
+#[test]
+fn cidx1_a_merge_commits_own_trailer_is_not_read() {
+    let g = GitRepo::new();
+    g.write("a.rs", "a\n");
+    g.commit("feat: a\n\nImplements: c-AAAAA");
+    g.run(&["checkout", "-q", "-b", "topic"]);
+    g.write("b.rs", "b\n");
+    let b = g.commit("feat: b\n\nImplements: c-BBBBB");
+    g.run(&["checkout", "-q", "main"]);
+    g.write("c.rs", "c\n");
+    g.commit("feat: c");
+    g.run(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        "--no-verify",
+        "-m",
+        "merge topic\n\nImplements: c-MMMMM",
+        "topic",
+    ]);
+    let idx = index_of(&repo_of(&g)).unwrap();
+    assert_eq!(idx.commits, 3, "the merge is not read");
+    assert!(!idx.cited.contains_key("c-MMMMM"), "{:?}", idx.cited);
+    assert!(
+        idx.files.values().all(|f| !f.contains_key("c-MMMMM")),
+        "{:?}",
+        idx.files
+    );
+    assert_eq!(idx.files["b.rs"]["c-BBBBB"], vec![b]);
+}
+
+#[test]
+fn cidx1_a_copy_in_a_repo_that_detects_copies_inherits_no_citations() {
+    let g = GitRepo::new();
+    g.run(&["config", "diff.renames", "copies"]);
+    g.write("src/a.rs", &lines(40, "a"));
+    let c1 = g.commit("feat: a\n\nImplements: c-AAAAA");
+    g.write("src/b.rs", &lines(40, "a"));
+    g.write("src/a.rs", &(lines(40, "a") + "more\n"));
+    let c2 = g.commit("feat: copy\n\nImplements: c-BBBBB");
+    let idx = index_of(&repo_of(&g)).unwrap();
+    let b = &idx.files["src/b.rs"];
+    assert_eq!(
+        b.keys().collect::<Vec<_>>(),
+        vec!["c-BBBBB"],
+        "a copy is a new file, not a rename"
+    );
+    let a = &idx.files["src/a.rs"];
+    assert_eq!(a["c-AAAAA"], vec![c1]);
+    assert_eq!(a["c-BBBBB"], vec![c2]);
 }
