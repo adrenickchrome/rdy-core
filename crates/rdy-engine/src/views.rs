@@ -1,12 +1,16 @@
-//! Views as the engine shows and changes them (vcreate1): create and fork, the claim a commit
-//! makes on an unowned view, the closed-view rules, and the conflict reads.
+//! Views as the engine shows and changes them: create and fork (vcreate1), include with its
+//! dependency closure and exclude with its dependents (incl1, excl1), the claim a commit makes
+//! on an unowned view, the closed-view rules, and the conflict reads.
 use crate::error::*;
 use crate::read_state::ReadState;
 use crate::write::writable_view;
 use crate::{Delta, Rdy, Scope, Session};
-use rdy_model::{BlockId, Op};
+use rdy_model::{BlockId, Hash, Op};
+use rdy_schema::{Issue, Severity};
+use rdy_store::view::ViewOpKind;
 use rdy_store::{Conflict, Owner, StoreError};
 use serde::Serialize;
+use std::collections::{BTreeSet, VecDeque};
 
 /// A view's owner as reads show it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -126,7 +130,6 @@ fn no_create(s: &Session) -> Result<(), RdyError> {
 /// The role, existence and closed rules for `action` on `view`. A commit or an include into a
 /// view with no ref creates it; a closed view takes no commit, include or exclude. Propose keeps
 /// its own checks (legacy `:` views stay proposable).
-#[allow(dead_code)] // called by include, exclude, close, undo and propose
 pub(crate) fn check_view_op(
     st: &ReadState,
     s: &Session,
@@ -338,4 +341,277 @@ fn bad_base(name: &str) -> RdyError {
         "base must be canon, tag:<version> or landing:<id>",
         format!("to start from a view, fork it: rdy view fork <view> {name}"),
     )
+}
+
+/// A change id as include and exclude take it: a full hash.
+pub(crate) fn parse_change(s: &str) -> Result<Hash, RdyError> {
+    s.parse().map_err(|_| {
+        RdyError::new(
+            E_BAD_INPUT,
+            format!("{s:?} is not a change id"),
+            "pass the id returned by rdy_write, or one listed by rdy view show",
+        )
+    })
+}
+
+/// Whether `change` landed on canon's chain at or before landing `base` (None: nothing is).
+pub(crate) fn in_base(st: &ReadState, base: Option<Hash>, change: &Hash) -> Result<bool, RdyError> {
+    let Some(base) = base else { return Ok(false) };
+    let Some(l) = st.reader().landing_of(change)? else {
+        return Ok(false);
+    };
+    let mut reached = false;
+    for (h, _) in st.landings()? {
+        reached |= h == base;
+        if reached && h == l {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The changes of `included`, in included order and not in `gone`, whose deps meet `gone`
+/// transitively.
+pub(crate) fn dependents(
+    st: &ReadState,
+    included: &[Hash],
+    gone: &BTreeSet<Hash>,
+) -> Result<Vec<Hash>, RdyError> {
+    let reader = st.reader();
+    let deps: Vec<Vec<Hash>> = included
+        .iter()
+        .map(|c| Ok(reader.change(c)?.deps))
+        .collect::<Result<_, RdyError>>()?;
+    let mut out_set = gone.clone();
+    loop {
+        let mut grew = false;
+        for (c, ds) in included.iter().zip(&deps) {
+            if !out_set.contains(c) && ds.iter().any(|d| out_set.contains(d)) {
+                out_set.insert(*c);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    Ok(included
+        .iter()
+        .filter(|c| out_set.contains(c) && !gone.contains(c))
+        .copied()
+        .collect())
+}
+
+/// The requested ids, parsed, duplicates collapsed, in request order.
+fn parse_changes(changes: &[String]) -> Result<Vec<Hash>, RdyError> {
+    let mut seen = BTreeSet::new();
+    let mut out = vec![];
+    for text in changes {
+        let h = parse_change(text)?;
+        if seen.insert(h) {
+            out.push(h);
+        }
+    }
+    Ok(out)
+}
+
+fn strings(hs: &[Hash]) -> Vec<String> {
+    hs.iter().map(|h| h.to_string()).collect()
+}
+
+fn shorts(hs: &[Hash]) -> String {
+    hs.iter().map(|h| h.short()).collect::<Vec<_>>().join(", ")
+}
+
+/// The result of an include or exclude, read from the state after it.
+fn op_result(
+    st: &ReadState,
+    view: &str,
+    added: &[Hash],
+    added_deps: &[Hash],
+    removed: &[Hash],
+    cascaded: &[Hash],
+) -> Result<ViewOpResult, RdyError> {
+    let head = st.view_head(view).ok_or_else(|| no_view(view))?.head;
+    Ok(ViewOpResult {
+        view: view.to_string(),
+        head: head.to_string(),
+        changes: st.included(view).len(),
+        added: strings(added),
+        added_deps: strings(added_deps),
+        removed: strings(removed),
+        cascaded: strings(cascaded),
+        conflicts: conflict_infos(st, &st.conflicts(&Scope::View(view.to_string()))?)?,
+    })
+}
+
+impl Rdy {
+    /// incl1: includes `changes` (from any view) in `view`, with the deps they need that the view
+    /// neither includes nor has in its base. Changes already included are skipped; a landed
+    /// change is refused. An include into a view with no ref creates it, owned by the session.
+    pub fn view_include(
+        &mut self,
+        s: &Session,
+        view: &str,
+        changes: &[String],
+    ) -> Result<ViewOpResult, RdyError> {
+        // 1. the rules
+        let st = self.read();
+        check_view_op(&st, s, view, Action::Include)?;
+        // 2. the requested changes: present, not landed
+        if changes.is_empty() {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "name at least one change to include",
+                format!("rdy view include {view} <change>..."),
+            ));
+        }
+        let requested = parse_changes(changes)?;
+        let reader = st.reader();
+        for c in &requested {
+            if !reader.has_kind(rdy_store::kinds::CHANGE, c)? {
+                return Err(RdyError::new(
+                    E_NOT_FOUND,
+                    format!("no change {}", c.short()),
+                    "check the id with rdy view show <view>",
+                ));
+            }
+            if let Some(l) = reader.landing_of(c)? {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    format!("change {} already landed in {}", c.short(), l.short()),
+                    "it is in canon; nothing to include",
+                ));
+            }
+        }
+        // 3. what to add: the requested changes not included, then their missing deps (BFS)
+        let included: BTreeSet<Hash> = st.included(view).iter().copied().collect();
+        let base = st.effective_base(view);
+        let added: Vec<Hash> = requested
+            .into_iter()
+            .filter(|c| !included.contains(c))
+            .collect();
+        let added_set: BTreeSet<Hash> = added.iter().copied().collect();
+        let mut added_deps: Vec<Hash> = vec![];
+        let mut dep_set: BTreeSet<Hash> = BTreeSet::new();
+        let mut queue: VecDeque<Hash> = added.iter().copied().collect();
+        while let Some(c) = queue.pop_front() {
+            for d in reader.change(&c)?.deps {
+                if included.contains(&d)
+                    || added_set.contains(&d)
+                    || dep_set.contains(&d)
+                    || in_base(&st, base, &d)?
+                {
+                    continue;
+                }
+                dep_set.insert(d);
+                added_deps.push(d);
+                queue.push_back(d);
+            }
+        }
+        // 4. nothing new: no write
+        if added.is_empty() {
+            return op_result(&st, view, &[], &[], &[], &[]);
+        }
+        // 5. the writes: a new view is created first (its own batch and publish)
+        let exists = st.has_view(view);
+        drop(st);
+        if !exists {
+            self.store
+                .view_create(view, base, Some(owner_of(s)), false, &s.provenance())?;
+            self.publish(Delta::View {
+                view: view.to_string(),
+            })?;
+        }
+        let all: Vec<Hash> = added.iter().chain(&added_deps).copied().collect();
+        self.store.view_append(
+            view,
+            vec![ViewOpKind::Include { changes: all }],
+            &s.provenance(),
+        )?;
+        // 6. publish and report
+        self.publish(Delta::View {
+            view: view.to_string(),
+        })?;
+        op_result(&self.read(), view, &added, &added_deps, &[], &[])
+    }
+
+    /// excl1: excludes `changes` from `view`. Included changes that depend on them refuse the
+    /// exclude (`E_HAS_DEPENDENTS`) unless `cascade`, which excludes them too.
+    pub fn view_exclude(
+        &mut self,
+        s: &Session,
+        view: &str,
+        changes: &[String],
+        cascade: bool,
+    ) -> Result<ViewOpResult, RdyError> {
+        // 1. the rules
+        let st = self.read();
+        check_view_op(&st, s, view, Action::Exclude)?;
+        // 2. the requested changes: each included
+        if changes.is_empty() {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "name at least one change to exclude",
+                format!("rdy view show {view} lists its changes"),
+            ));
+        }
+        let requested = parse_changes(changes)?;
+        let included = st.included(view);
+        for c in &requested {
+            if !included.contains(c) {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    format!("change {} is not in view {view:?}", c.short()),
+                    format!("rdy view show {view} lists its changes"),
+                ));
+            }
+        }
+        // 3. the dependents
+        let gone: BTreeSet<Hash> = requested.iter().copied().collect();
+        let deps = dependents(&st, &included, &gone)?;
+        if !deps.is_empty() && !cascade {
+            let excluded: BTreeSet<Hash> = gone.iter().chain(&deps).copied().collect();
+            let reader = st.reader();
+            let mut issues = vec![];
+            for d in &deps {
+                let on: Vec<Hash> = reader
+                    .change(d)?
+                    .deps
+                    .into_iter()
+                    .filter(|x| excluded.contains(x))
+                    .collect();
+                issues.push(Issue {
+                    severity: Severity::Error,
+                    code: E_HAS_DEPENDENTS,
+                    block: None,
+                    message: format!("{} depends on {}", d.short(), shorts(&on)),
+                    fix: format!("exclude {} too", d.short()),
+                });
+            }
+            let mut e = RdyError::new(
+                E_HAS_DEPENDENTS,
+                format!(
+                    "{} included change(s) depend on what you are excluding: {}",
+                    deps.len(),
+                    shorts(&deps)
+                ),
+                "exclude them too with --cascade (MCP: cascade: true)",
+            );
+            e.issues = issues;
+            return Err(e);
+        }
+        // 4. the write
+        drop(st);
+        let all: Vec<Hash> = requested.iter().chain(&deps).copied().collect();
+        self.store.view_append(
+            view,
+            vec![ViewOpKind::Exclude { changes: all }],
+            &s.provenance(),
+        )?;
+        self.publish(Delta::View {
+            view: view.to_string(),
+        })?;
+        op_result(&self.read(), view, &[], &[], &requested, &deps)
+    }
 }
