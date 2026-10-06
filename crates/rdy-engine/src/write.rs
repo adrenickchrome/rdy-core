@@ -1551,7 +1551,7 @@ impl Rdy {
         }
         let scope = Scope::View(req.view.clone());
         let st = self.read();
-        check_view_access(&st, &req.view, session)?;
+        check_view_access(&st, &req.view, session, views::Action::Commit)?;
         let claim = views::commit_claim(&st, session, &req.view)?;
         let conflicts = st.conflicts(&scope)?;
         let m = st.materialized(&scope)?;
@@ -1606,28 +1606,65 @@ impl Rdy {
     }
 }
 
-/// May `s` write into `view`? The view must be writable at all (`writable_view`); then an agent
-/// session may only commit into a view with no head yet, an unowned head, or a head it owns
-/// (same actor and run). A human session may write into any view.
-pub(crate) fn check_view_access(st: &ReadState, view: &str, s: &Session) -> Result<(), RdyError> {
-    writable_view(view)?;
+/// May `s` do `action` on `view`? The view must be writable at all (`writable_view`; a proposal
+/// skips this, so legacy `:` views stay proposable by the human). A human session may do
+/// anything anywhere. An agent session never acts on the human's `work` view; otherwise it may
+/// act on a view with no head yet (commit and include create it), on an unowned head only by
+/// committing (the commit claims it), and on a head it owns (same actor and run).
+pub(crate) fn check_view_access(
+    st: &ReadState,
+    view: &str,
+    s: &Session,
+    action: views::Action,
+) -> Result<(), RdyError> {
+    let propose = action == views::Action::Propose;
+    if !propose {
+        writable_view(view)?;
+    }
     if s.kind != SessionKind::Agent {
         return Ok(());
     }
-    match st.view_head(view) {
-        Some(h) => match &h.owner {
-            Some(o) if (&o.actor, &o.run) != (&s.actor, &s.run) => Err(RdyError::new(
-                E_VIEW_OWNER,
+    if view == "work" {
+        return Err(RdyError::new(
+            E_VIEW_OWNER,
+            "view \"work\" is the human's default view",
+            own_view_fix(view, s),
+        ));
+    }
+    let Some(h) = st.view_head(view) else {
+        return Ok(());
+    };
+    match &h.owner {
+        None if action == views::Action::Commit => Ok(()),
+        None => Err(RdyError::new(
+            E_VIEW_OWNER,
+            format!("view {view:?} is unowned"),
+            if propose {
+                "commit to it to claim it, or include its changes into your own view and propose \
+                 that"
+                    .to_string()
+            } else {
+                format!("commit to it to claim it, or fork it (rdy view fork {view} <name>)")
+            },
+        )),
+        Some(o) if (&o.actor, &o.run) == (&s.actor, &s.run) => Ok(()),
+        Some(o) => Err(RdyError::new(
+            E_VIEW_OWNER,
+            format!(
+                "view {view:?} is owned by {}{}",
+                o.actor,
+                o.run.as_ref().map(|r| format!("/{r}")).unwrap_or_default()
+            ),
+            if propose && view != s.default_view() {
                 format!(
-                    "view {view:?} is owned by {}{}",
-                    o.actor,
-                    o.run.as_ref().map(|r| format!("/{r}")).unwrap_or_default()
-                ),
-                own_view_fix(view, s),
-            )),
-            _ => Ok(()),
-        },
-        None => Ok(()),
+                    "propose your own view ({}), or include its changes into your own view and \
+                     propose that",
+                    s.default_view()
+                )
+            } else {
+                own_view_fix(view, s)
+            },
+        )),
     }
 }
 

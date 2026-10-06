@@ -127,9 +127,11 @@ fn no_create(s: &Session) -> Result<(), RdyError> {
     ))
 }
 
-/// The role, existence and closed rules for `action` on `view`. A commit or an include into a
-/// view with no ref creates it; a closed view takes no commit, include or exclude. Propose keeps
-/// its own checks (legacy `:` views stay proposable).
+/// The role, existence, closed and ownership rules for `action` on `view`. A commit or an
+/// include into a view with no ref creates it; a closed view takes no commit, include or
+/// exclude; an agent acts only in a view it owns (`check_view_access`). Propose keeps its own
+/// role and existence checks and takes only the ownership rule (legacy `:` views stay
+/// proposable by the human).
 pub(crate) fn check_view_op(
     st: &ReadState,
     s: &Session,
@@ -137,7 +139,7 @@ pub(crate) fn check_view_op(
     action: Action,
 ) -> Result<(), RdyError> {
     if action == Action::Propose {
-        return Ok(());
+        return crate::write::check_view_access(st, view, s, action);
     }
     writable_view(view)?;
     if !s.role.can_write() {
@@ -148,15 +150,16 @@ pub(crate) fn check_view_op(
         ));
     }
     match st.view_head(view) {
-        None if matches!(action, Action::Commit | Action::Include) => Ok(()),
-        None => Err(no_view(view)),
+        None if matches!(action, Action::Commit | Action::Include) => {}
+        None => return Err(no_view(view)),
         Some(h)
             if h.closed && matches!(action, Action::Commit | Action::Include | Action::Exclude) =>
         {
-            Err(StoreError::ViewClosed(view.to_string()).into())
+            return Err(StoreError::ViewClosed(view.to_string()).into());
         }
-        Some(_) => Ok(()),
+        Some(_) => {}
     }
+    crate::write::check_view_access(st, view, s, action)
 }
 
 /// The owner a commit into `view` records: the session, for a view the commit creates or an
@@ -1087,4 +1090,80 @@ fn dependents_refusal(
     );
     e.issues = issues;
     Ok(e)
+}
+
+/// An owner as `rdy view own` takes it: `<actor>` or `<actor>/<run>`, split at the first `/`.
+fn parse_owner(text: &str) -> Result<Owner, RdyError> {
+    let (actor, run) = match text.split_once('/') {
+        Some((actor, run)) => (actor, Some(run)),
+        None => (text, None),
+    };
+    if actor.is_empty() || run.is_some_and(str::is_empty) {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "owner must be <actor>[/<run>]",
+            "for example agent:claude/r1, or agent:claude for a session with no run",
+        ));
+    }
+    Ok(Owner {
+        actor: actor.to_string(),
+        run: run.map(str::to_string),
+    })
+}
+
+impl Rdy {
+    /// own1: the human reassigns `view` to `owner` (`<actor>[/<run>]`), or leaves it unowned
+    /// (`None`), so that the next commit claims it. Works on a closed view and leaves it closed.
+    pub fn view_own(
+        &mut self,
+        s: &Session,
+        view: &str,
+        owner: Option<&str>,
+    ) -> Result<ViewHeadInfo, RdyError> {
+        if !s.is_human() {
+            return Err(RdyError::new(
+                E_PERMISSION,
+                "only a human reassigns a view",
+                "ask the human, or fork the view",
+            ));
+        }
+        if self.read().view_head(view).is_none() {
+            return Err(no_view(view));
+        }
+        let owner = owner.map(parse_owner).transpose()?;
+        self.store
+            .view_append(view, vec![ViewOpKind::Own { owner }], &s.provenance())?;
+        self.publish(Delta::View {
+            view: view.to_string(),
+        })?;
+        head_info(&self.read(), view)
+    }
+
+    /// own1: the human closes every open view idle for more than `days` days at `now_ms`, each
+    /// as `view_close` does, with the reason "idle for more than {days} days".
+    pub fn view_close_stale(
+        &mut self,
+        s: &Session,
+        days: u32,
+        now_ms: i64,
+    ) -> Result<Vec<CloseResult>, RdyError> {
+        if !s.is_human() {
+            return Err(RdyError::new(
+                E_PERMISSION,
+                "only a human closes views in bulk",
+                "run rdy view close --stale as the human",
+            ));
+        }
+        let idle: Vec<String> = self
+            .read()
+            .view_list(false, days, now_ms)?
+            .into_iter()
+            .filter(|v| v.idle)
+            .map(|v| v.name)
+            .collect();
+        if idle.is_empty() {
+            return Ok(vec![]);
+        }
+        self.view_close(s, &idle, &format!("idle for more than {days} days"))
+    }
 }

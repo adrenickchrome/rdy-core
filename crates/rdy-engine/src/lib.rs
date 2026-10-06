@@ -14,6 +14,7 @@ mod session;
 pub mod testkit;
 mod tree_io;
 mod version;
+pub mod view_api;
 pub mod view_query;
 pub mod views;
 mod write;

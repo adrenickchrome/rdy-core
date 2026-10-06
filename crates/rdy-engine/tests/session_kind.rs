@@ -143,7 +143,8 @@ fn sess2_an_agent_cannot_commit_into_a_view_another_session_owns() {
     let a = Session::agent("agent:w".into(), None, Role::Writer).unwrap();
     let e = doc(&mut r, &a, "work", "b").unwrap_err();
     assert_eq!(e.code, E_VIEW_OWNER);
-    assert_eq!(e.message, "view \"work\" is owned by human:n/cli");
+    // own1 (M2c Task 15): `work` is the human's default view, refused as such for any agent.
+    assert_eq!(e.message, "view \"work\" is the human's default view");
     assert!(e.fix.contains("work-agent-w"), "{e}");
     assert_eq!(r.read().included("work").len(), 1, "nothing was written");
     // the same actor from another run is another session
