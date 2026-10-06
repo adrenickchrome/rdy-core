@@ -1,4 +1,5 @@
 use crate::error::*;
+use crate::views::ConflictInfo;
 use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, rfc3339_now};
 use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Op, Proposal, decision};
 use rdy_schema::{Issue, Severity, validate_block};
@@ -6,28 +7,210 @@ use rdy_store::LandRequest;
 use serde::Serialize;
 use std::collections::BTreeSet;
 
+/// A proposal version as an approver names it: the version's hash, the proposal's stable id (its
+/// first version's hash) and the version number, counted from 1. Shown as `P-<stable short>@<n>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProposalRef {
+    pub version: Hash,
+    pub stable: Hash,
+    pub n: u32,
+}
+
+impl std::fmt::Display for ProposalRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "P-{}@{}", self.stable.short(), self.n)
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ProposalInfo {
+    /// The version's hash.
     pub id: String,
+    /// The proposal's stable id (its first version's hash).
+    pub stable: String,
+    /// The version number, counted from 1.
+    pub version: u32,
+    /// `P-<stable short>@<version>`: what an approver approves.
+    pub r#ref: String,
     pub title: String,
     pub changes: usize,
     pub warnings: Vec<Issue>,
+    pub conflicts: Vec<ConflictInfo>,
+    /// Canon's head when the version was written (FW-HB1).
+    pub canon_at: Option<String>,
+}
+
+/// One view a landing rebased: how many of its changes dropped out (they landed) and how many
+/// conflicts its remaining changes have with the new canon.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RebasedInfo {
+    pub view: String,
+    pub dropped: usize,
+    pub conflicts: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct LandInfo {
     pub landing: String,
+    /// The version approved, as `P-<stable short>@<n>`.
+    pub approved: String,
+    /// The landed version's title and change count.
+    pub title: String,
+    pub changes: usize,
     pub warnings: Vec<Issue>,
+    pub rebased: Vec<RebasedInfo>,
 }
 
-fn parse_hash(s: &str) -> Result<Hash, RdyError> {
-    s.parse().map_err(|_| {
-        RdyError::new(
+/// How an approval treats a canon that moved since the version was proposed (FW-HB1).
+#[derive(Clone, Debug, Default)]
+pub struct LandOptions {
+    /// Refuse any landing since the version was proposed, not only one on its blocks.
+    pub strict: bool,
+}
+
+/// The advice an approver gets when the version no longer applies to canon: the fix is the
+/// author's, never "re-read and retry", which is a writer's.
+const STALE_FOR_APPROVER: &str = "the proposal is stale: its author must rebase the view and propose again; then approve the new version";
+
+/// A 32-byte ref value as a hash.
+fn ref_hash(bytes: &[u8], what: &str) -> Result<Hash, RdyError> {
+    <[u8; 32]>::try_from(bytes)
+        .map(Hash)
+        .map_err(|_| rdy_store::StoreError::Decode(format!("{what} is not a hash")).into())
+}
+
+/// The latest version of the proposal whose stable id is `stable` (its `proposal/` ref).
+fn latest_version(st: &ReadState, stable: &Hash) -> Result<Hash, RdyError> {
+    match st.reader().get_ref(&format!("proposal/{stable}"))? {
+        Some(b) => ref_hash(&b, "a proposal ref"),
+        None => Err(rdy_store::StoreError::Decode(format!(
+            "proposal {stable} has no ref; run rdy reindex"
+        ))
+        .into()),
+    }
+}
+
+/// Version `h`'s number: 1 plus the length of its `prev` chain.
+fn version_number(st: &ReadState, h: &Hash) -> Result<u32, RdyError> {
+    let mut n = 1;
+    let mut cur = st.reader().proposal(h)?.prev;
+    while let Some(p) = cur {
+        n += 1;
+        cur = st.reader().proposal(&p)?.prev;
+    }
+    Ok(n)
+}
+
+/// `pref` is not its proposal's latest version: name the latest, and how to approve it.
+fn moved(
+    st: &ReadState,
+    pref: &ProposalRef,
+    latest: &Hash,
+    view: &str,
+) -> Result<RdyError, RdyError> {
+    let now = ProposalRef {
+        version: *latest,
+        stable: pref.stable,
+        n: version_number(st, latest)?,
+    };
+    Ok(RdyError::new(
+        E_PROPOSAL_MOVED,
+        format!("proposal {pref} moved: the latest version is {now}"),
+        format!("review {now} (rdy_propose's output, or rdy view show {view}), then approve {now}"),
+    ))
+}
+
+/// An `E_STALE_BASE` or `E_ALREADY_EXISTS` on the approve path keeps its code and message, with
+/// the approver's advice as its fix.
+fn approver_stale(mut e: RdyError) -> RdyError {
+    if e.code == E_STALE_BASE || e.code == E_ALREADY_EXISTS {
+        e.fix = STALE_FOR_APPROVER.into();
+    }
+    e
+}
+
+/// Resolves a proposal reference on `st`: a version hash, `P-<prefix>` (the latest version) or
+/// `P-<prefix>@<n>`.
+fn resolve_in(st: &ReadState, text: &str) -> Result<ProposalRef, RdyError> {
+    let reader = st.reader();
+    if let Ok(h) = text.parse::<Hash>() {
+        if !reader.has_kind(rdy_store::kinds::PROPOSAL, &h)? {
+            if reader.has(&h)? {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    format!("{text} is not a proposal"),
+                    "pass the id returned by rdy_propose",
+                ));
+            }
+            return Err(rdy_store::StoreError::NotFound(h).into());
+        }
+        let p = reader.proposal(&h)?;
+        return Ok(ProposalRef {
+            version: h,
+            stable: p.stable.unwrap_or(h),
+            n: version_number(st, &h)?,
+        });
+    }
+    let parsed = text.strip_prefix("P-").and_then(|rest| {
+        let (prefix, n) = match rest.split_once('@') {
+            Some((prefix, n)) => (prefix, Some(n.parse::<u32>().ok()?)),
+            None => (rest, None),
+        };
+        ((4..=64).contains(&prefix.len()) && prefix.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| (prefix.to_ascii_lowercase(), n))
+    });
+    let Some((prefix, want)) = parsed else {
+        return Err(RdyError::new(
             E_BAD_INPUT,
-            format!("{s:?} is not a proposal id"),
-            "pass the id returned by rdy_propose",
-        )
-    })
+            format!("{text:?} is not a proposal id"),
+            "pass P-<id> or P-<id>@<n> from rdy_propose, or a version hash",
+        ));
+    };
+    let found = reader.refs_with_prefix(&format!("proposal/{prefix}"))?;
+    let (name, value) = match found.as_slice() {
+        [] => {
+            return Err(RdyError::new(
+                E_NOT_FOUND,
+                format!("no proposal P-{prefix}"),
+                "list proposals with rdy log (or the id rdy_propose returned)",
+            ));
+        }
+        [one] => one,
+        many => {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("P-{prefix} is ambiguous ({} proposals)", many.len()),
+                "use more characters",
+            ));
+        }
+    };
+    let stable: Hash = name["proposal/".len()..]
+        .parse()
+        .map_err(|_| rdy_store::StoreError::Decode(format!("bad proposal ref {name:?}")))?;
+    let latest = ref_hash(value, "a proposal ref")?;
+    let latest_n = version_number(st, &latest)?;
+    let Some(n) = want else {
+        return Ok(ProposalRef {
+            version: latest,
+            stable,
+            n: latest_n,
+        });
+    };
+    if n == 0 || n > latest_n {
+        let short = stable.short();
+        return Err(RdyError::new(
+            E_NOT_FOUND,
+            format!("P-{short} has {latest_n} version(s)"),
+            format!("approve P-{short}@{latest_n}"),
+        ));
+    }
+    let mut version = latest;
+    for _ in 0..latest_n - n {
+        version = reader.proposal(&version)?.prev.ok_or_else(|| {
+            rdy_store::StoreError::Decode(format!("proposal {version} has no previous version"))
+        })?;
+    }
+    Ok(ProposalRef { version, stable, n })
 }
 
 /// Every block id `b` points at: inline references and link targets.
@@ -349,14 +532,155 @@ impl Rdy {
         // a view with no head floats on canon
         let view_base = st.view_head(view).map_or(st.canon_head(), |h| h.base);
         issues.extend(self.rekeyed_warnings(&st, view_base, &changes)?);
-        let id = self.store.propose(view, title, s.provenance())?;
+        // pver1: a view with an open proposal (its latest version has not landed) gets the next
+        // version of it; otherwise a new proposal starts
+        let mut open = None;
+        if let Some(b) = st.reader().get_ref(&format!("open/{view}"))?
+            && b.len() == 32
+        {
+            let stable = ref_hash(&b, "an open ref")?;
+            let latest = latest_version(&st, &stable)?;
+            if landed_as(&st, &st.reader().proposal(&latest)?)?.is_none() {
+                open = Some((stable, latest));
+            }
+        }
+        let (id, stable, n) = match open {
+            Some((stable, latest)) => {
+                let id = self.store.propose_next(
+                    &latest,
+                    included.as_ref().clone(),
+                    title,
+                    s.provenance(),
+                )?;
+                (id, stable, version_number(&st, &latest)? + 1)
+            }
+            None => {
+                let id = self.store.propose(view, title, s.provenance())?;
+                (id, id, 1)
+            }
+        };
+        let canon_at = self.store.proposal(&id)?.canon_at;
         self.publish(Delta::Seq)?;
+        let pref = ProposalRef {
+            version: id,
+            stable,
+            n,
+        };
         Ok(ProposalInfo {
             id: id.to_string(),
+            stable: stable.to_string(),
+            version: n,
+            r#ref: pref.to_string(),
             title: title.into(),
             changes: included.len(),
             warnings: issues,
+            conflicts: vec![],
+            canon_at: canon_at.map(|h| h.to_string()),
         })
+    }
+
+    /// Resolves a proposal reference: a version hash, `P-<prefix>` (the proposal's latest
+    /// version) or `P-<prefix>@<n>` (its version `n`, counted from 1).
+    pub fn resolve_proposal(&self, text: &str) -> Result<ProposalRef, RdyError> {
+        resolve_in(&self.read(), text)
+    }
+
+    /// FW-HB1: the landings since version `p` was proposed (`p.canon_at`). With none, or none
+    /// that wrote a block the version writes, the approval stands (the gate then validates the
+    /// version on the current canon); `strict` or `reviews.require_up_to_date` refuse any.
+    fn check_base_moved(
+        &self,
+        st: &ReadState,
+        pref: &ProposalRef,
+        p: &Proposal,
+        changes: &[Change],
+        opts: &LandOptions,
+    ) -> Result<(), RdyError> {
+        // head first, up to the landing the version was proposed on (every landing when that is
+        // none, or not on canon's chain)
+        let mut intervening = vec![];
+        let mut cur = st.canon_head();
+        while let Some(h) = cur {
+            if Some(h) == p.canon_at {
+                break;
+            }
+            let rec = st.reader().landing(&h)?;
+            cur = rec.prev;
+            intervening.push((h, rec));
+        }
+        if intervening.is_empty() {
+            return Ok(());
+        }
+        let since = || {
+            format!(
+                "proposal {pref} moved: canon has {} landing(s) since it was proposed ({})",
+                intervening.len(),
+                intervening
+                    .iter()
+                    .map(|(h, _)| h.short())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        if opts.strict {
+            return Err(RdyError::new(
+                E_PROPOSAL_MOVED,
+                since(),
+                "approve without --strict to accept a clean rebase, or ask its author to propose again on the current canon",
+            ));
+        }
+        if st.require_up_to_date() {
+            return Err(RdyError::new(
+                E_PROPOSAL_MOVED,
+                since(),
+                format!(
+                    "this project requires proposals on the current canon (reviews.require_up_to_date): its author must propose again (rdy propose --view {}); then approve the new version",
+                    p.view
+                ),
+            ));
+        }
+        let touched: BTreeSet<&BlockId> = changes
+            .iter()
+            .flat_map(|c| c.ops.iter().map(Op::block_id))
+            .collect();
+        for (l, rec) in intervening.iter().rev() {
+            let mut hit = BTreeSet::new();
+            for c in &rec.changes {
+                for op in &st.reader().change(c)?.ops {
+                    if touched.contains(op.block_id()) {
+                        hit.insert(op.block_id().clone());
+                    }
+                }
+            }
+            if hit.is_empty() {
+                continue;
+            }
+            let ids = hit.iter().map(|b| b.to_string()).collect::<Vec<_>>();
+            let mut e = RdyError::new(
+                E_PROPOSAL_MOVED,
+                format!(
+                    "proposal {pref} moved: landing {} changed {} after it was proposed",
+                    l.short(),
+                    ids.join(", ")
+                ),
+                format!(
+                    "the proposal is stale: its author must rebase the view and propose again (rdy propose --view {}); then approve the new version",
+                    p.view
+                ),
+            );
+            e.issues = hit
+                .into_iter()
+                .map(|id| Issue {
+                    severity: Severity::Error,
+                    code: E_PROPOSAL_MOVED,
+                    message: format!("{id} changed in landing {}", l.short()),
+                    fix: "propose again".into(),
+                    block: Some(id),
+                })
+                .collect();
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Lands a proposal; returns the landing id.
@@ -366,6 +690,17 @@ impl Rdy {
 
     /// Lands a proposal; returns the landing id and the gate's warnings.
     pub fn land_report(&mut self, s: &Session, proposal: &str) -> Result<LandInfo, RdyError> {
+        self.land_with(s, proposal, LandOptions::default())
+    }
+
+    /// Lands the proposal version `proposal` names (`P-x`, `P-x@n` or a version hash); returns
+    /// the landing, what was approved, the gate's warnings and the views the landing rebased.
+    pub fn land_with(
+        &mut self,
+        s: &Session,
+        proposal: &str,
+        opts: LandOptions,
+    ) -> Result<LandInfo, RdyError> {
         if !s.role.can_land() {
             return Err(RdyError::new(
                 E_PERMISSION,
@@ -373,18 +708,9 @@ impl Rdy {
                 "ask an approver to land it",
             ));
         }
-        let pid = parse_hash(proposal)?;
-        if !self.store.has_kind(rdy_store::kinds::PROPOSAL, &pid)? {
-            if self.store.has(&pid)? {
-                return Err(RdyError::new(
-                    E_BAD_INPUT,
-                    format!("{proposal} is not a proposal"),
-                    "pass the id returned by rdy_propose",
-                ));
-            }
-            return Err(rdy_store::StoreError::NotFound(pid).into());
-        }
         let st = self.read();
+        let pref = resolve_in(&st, proposal)?;
+        let pid = pref.version;
         let p = st.reader().proposal(&pid)?;
         // land1: a landed change is already in canon; replaying it would only fail obscurely
         if let Some(landing) = landed_as(&st, &p)? {
@@ -400,7 +726,14 @@ impl Rdy {
                 ),
             ));
         }
+        // pver1: the approval is bound to the version named; a newer version moves it
+        let latest = latest_version(&st, &pref.stable)?;
+        if latest != pid {
+            return Err(moved(&st, &pref, &latest, &p.view)?);
+        }
         let changes = changes_of(&st, &p.changes)?;
+        // FW-HB1: canon may have moved since the version was proposed
+        self.check_base_moved(&st, &pref, &p, &changes, &opts)?;
 
         // 1. prospective canon: canon + the proposal's own changes
         let ops: Vec<Op> = changes.iter().flat_map(|c| c.ops.iter().cloned()).collect();
@@ -473,7 +806,7 @@ impl Rdy {
         };
         let mut all = changes;
         all.extend(accept.clone());
-        let (mut issues, order) = self.prospective_issues(&st, &all)?;
+        let (mut issues, order) = self.prospective_issues(&st, &all).map_err(approver_stale)?;
         if let Some(first) = issues.iter().find(|i| i.severity == Severity::Error) {
             let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
             e.issues = issues;
@@ -487,14 +820,20 @@ impl Rdy {
         // 4. land in one write (atom1): the acceptance change, the final proposal version, the
         // snapshot, the landing, the view's rebase and the refs. A failed landing writes nothing,
         // so the published state stays as it is.
-        let out = self.store.land_atomic(LandRequest {
+        let out = match self.store.land_atomic(LandRequest {
             proposal: pid,
             accept,
             approver: s.provenance(),
             chosen: None,
             relay: None,
             evidence: None,
-        })?;
+        }) {
+            Ok(out) => out,
+            Err(rdy_store::StoreError::ProposalMoved { latest, .. }) => {
+                return Err(moved(&st, &pref, &latest, &p.view)?);
+            }
+            Err(e) => return Err(approver_stale(e.into())),
+        };
         // 5. publish canon incrementally: the previous canon with the landed ops (snap1)
         if let Err(e) = self.publish(Delta::Landed {
             landing: out.landing,
@@ -508,7 +847,19 @@ impl Rdy {
         }
         Ok(LandInfo {
             landing: out.landing.to_string(),
+            approved: pref.to_string(),
+            title: p.title.clone(),
+            changes: p.changes.len(),
             warnings: issues,
+            rebased: out
+                .rebased
+                .iter()
+                .map(|r| RebasedInfo {
+                    view: r.view.clone(),
+                    dropped: r.dropped.len(),
+                    conflicts: r.conflicts.len(),
+                })
+                .collect(),
         })
     }
 }

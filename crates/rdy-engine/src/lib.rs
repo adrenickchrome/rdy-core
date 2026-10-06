@@ -20,7 +20,7 @@ mod yaml_pos;
 pub use decide::DecisionInput;
 pub use error::*;
 pub use events::{Event, EventKind, Events};
-pub use gate::{LandInfo, ProposalInfo};
+pub use gate::{LandInfo, LandOptions, ProposalInfo, ProposalRef, RebasedInfo};
 pub use io::{ExportSummary, block_from_yaml, block_to_yaml};
 pub use lint::check_path;
 pub use materialize::{Materialized, PathMiss};

@@ -1,5 +1,6 @@
-//! The gate on the merge (plan M2a1, merge1): stale proposals keep E_STALE_BASE, a delete and a
-//! re-create under one id in separate writes still validate and land.
+//! The gate on the merge (plan M2a1, merge1): a proposal whose blocks another landing changed is
+//! E_PROPOSAL_MOVED at land (FW-HB1; E_STALE_BASE before M2c), a delete and a re-create under one
+//! id in separate writes still validate and land.
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
 use rdy_qa::invariants::check;
@@ -17,7 +18,7 @@ fn seed(r: &mut Rdy) -> (String, String) {
 }
 
 #[test]
-fn merge1_a_proposal_made_before_another_landing_is_e_stale_base_at_land() {
+fn merge1_a_proposal_made_before_another_landing_on_its_blocks_is_moved_at_land() {
     let (_d, mut r) = project();
     let (_s, c) = seed(&mut r);
     write(
@@ -37,7 +38,7 @@ fn merge1_a_proposal_made_before_another_landing_is_e_stale_base_at_land() {
     r.land(&approver(), &pa.id).unwrap();
     let head = r.store().canon_head().unwrap();
     let e = r.land(&approver(), &pb.id).unwrap_err();
-    assert_eq!(e.code, "E_STALE_BASE", "{e}");
+    assert_eq!(e.code, "E_PROPOSAL_MOVED", "{e}");
     assert_eq!(r.store().canon_head().unwrap(), head);
     assert_eq!(
         r.propose(&writer(), "b", "again").unwrap_err().code,
