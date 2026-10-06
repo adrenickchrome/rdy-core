@@ -203,10 +203,21 @@ pub fn generate_deep_chain(r: &mut Rdy, view: &str) {
     write(r, view, json!(ops)).expect("deep chain");
 }
 
+/// When the fixtures are written: 5 October 2026, 09:00 UTC. A fixture pins its thread's clock
+/// here while it writes, so every version, landing and decision date it renders is the same on
+/// every run (gold1).
+pub const FIXTURE_MS: i64 = 1_791_190_800_000;
+
+/// Pins this thread's clock at [`FIXTURE_MS`] until the guard drops.
+pub fn fixture_clock() -> rdy_engine::PinnedClock {
+    rdy_engine::pin_clock(FIXTURE_MS)
+}
+
 /// The golden project: the pattern matching corpus, landed and tagged `v1.0.0`, two landings
 /// after it, and a view `editing` with two unlanded changes. Canon reads
 /// `v1.0.0 + 2 landings`, the view `+ 2 unlanded changes`.
 pub fn project() -> (tempfile::TempDir, Rdy, Ids) {
+    let _clock = fixture_clock();
     let dir = tempfile::tempdir().expect("tempdir");
     // the store is locked while a handle is open: close it before the config is rewritten
     drop(Rdy::init(dir.path(), "rdy-standard").expect("init"));
@@ -374,6 +385,7 @@ pub fn pages(site: &Path) -> Vec<PathBuf> {
 /// The `render` area's hostile project: every context a renderer writes text into, holding
 /// [`EVIL`], landed and tagged.
 pub fn hostile() -> (tempfile::TempDir, Rdy) {
+    let _clock = fixture_clock();
     let (d, mut r) = fixtures::project();
     let blob = r.store_mut().put_blob(b"png").unwrap().to_string();
     let res = write(&mut r, "work", json!([
@@ -411,6 +423,7 @@ pub fn hostile() -> (tempfile::TempDir, Rdy) {
 /// terms, a figure, a diagram and three decisions (one superseded), landed and tagged `v1.0.0`,
 /// plus a view `draft` holding one unlanded doc.
 pub fn generated_tree() -> (tempfile::TempDir, Rdy) {
+    let _clock = fixture_clock();
     let (d, mut r) = fixtures::project();
     let blob = r.store_mut().put_blob(b"png").unwrap().to_string();
     let mut ops = vec![
@@ -515,6 +528,7 @@ fn named_project(name: &str) -> (tempfile::TempDir, Rdy) {
 
 /// An empty project named `Tiny`.
 pub fn tiny() -> (tempfile::TempDir, Rdy) {
+    let _clock = fixture_clock();
     named_project("Tiny")
 }
 
@@ -542,6 +556,7 @@ pub fn small_site(r: &mut Rdy) {
 
 /// `Tiny`, with one doc, "Identity", with two sections, landed.
 pub fn tiny_with_doc() -> (tempfile::TempDir, Rdy) {
+    let _clock = fixture_clock();
     let (d, mut r) = tiny();
     write(&mut r, "work", json!([
         {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Identity", "doc_type": "glossary"}},
@@ -573,6 +588,7 @@ fn created(res: &WriteResult, key: &str) -> BlockId {
 /// term "Ledger", a claim referencing the decision and the term, a question and a decision that
 /// affects the term; landed.
 pub fn site_with_decision() -> (tempfile::TempDir, Rdy, WalletIds) {
+    let _clock = fixture_clock();
     let (d, mut r) = named_project("Wallets");
     let res = write(&mut r, "work", json!([
         {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "wallets", "title": "Wallets"}},
@@ -623,6 +639,7 @@ pub fn site_with_decision() -> (tempfile::TempDir, Rdy, WalletIds) {
 /// `two` with one section), folder `b` ("Beta": folder `c` ("Gamma") holding doc `three` with
 /// five sections, the third holding a question); landed.
 pub fn tree_site() -> (tempfile::TempDir, Rdy) {
+    let _clock = fixture_clock();
     let (d, mut r) = named_project("Tree");
     let mut ops = vec![
         json!({"op": "create", "type": "doc", "id": "$intro", "fields": {"name": "intro", "title": "Intro", "doc_type": "overview"}}),
@@ -649,6 +666,7 @@ pub fn tree_site() -> (tempfile::TempDir, Rdy) {
 
 /// Project `Many`: folder `many` holding `n` docs, `Doc 1` to `Doc n` (names `doc-1`...); landed.
 pub fn wide_folder(n: usize) -> (tempfile::TempDir, Rdy) {
+    let _clock = fixture_clock();
     let (d, mut r) = named_project("Many");
     let mut ops = vec![
         json!({"op": "create", "type": "folder", "id": "$f", "fields": {"name": "many", "title": "Many"}}),
@@ -696,6 +714,7 @@ pub struct TypeIds {
 /// diagram, figure, code, question; a decision that affects the requirement; landed. A prose
 /// block with a dangling reference is in the view `dangling`, never landed.
 pub fn every_type_site() -> (tempfile::TempDir, Rdy, TypeIds) {
+    let _clock = fixture_clock();
     let (d, mut r) = named_project("All");
     let blob = r
         .store_mut()
@@ -805,6 +824,7 @@ pub struct DecidedIds {
 /// [`DecidedIds`]) and a question that references the requirement; landed. D4, proposed, is in
 /// the view `pending`, which is never landed (canon cannot hold a proposed decision).
 pub fn decided_site() -> (tempfile::TempDir, Rdy, DecidedIds) {
+    let _clock = fixture_clock();
     let (d, mut r) = named_project("Ledgers");
     let base = write(&mut r, "work", json!([
         {"op": "create", "type": "doc", "id": "$doc", "fields": {"name": "ledgers", "title": "Ledgers", "doc_type": "glossary"}},
@@ -962,6 +982,7 @@ pub struct PresentationalIds {
 /// ("T") with a section, an aside ("Decorative."), a claim that depends on it and an accepted
 /// decision (written by the approver) that affects the aside; landed.
 pub fn presentational_site() -> (tempfile::TempDir, Rdy, PresentationalIds) {
+    let _clock = fixture_clock();
     let dir = tempfile::tempdir().expect("tempdir");
     drop(Rdy::init(dir.path(), "rdy-standard").expect("init"));
     std::fs::write(dir.path().join(".rdy/packs/p.yaml"), PRESENTATIONAL_PACK).expect("pack");
