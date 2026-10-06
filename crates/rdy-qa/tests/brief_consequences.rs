@@ -455,6 +455,34 @@ fn csq1_a_revoked_decision_dependent_has_no_entry() {
 }
 
 #[test]
+fn csq1_a_rejected_decision_dependent_has_no_entry() {
+    use rdy_qa::golden::write_as;
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    // An approver may write a decision with a non-proposed status; the golden fixture does too.
+    let res = write_as(
+        &approver(),
+        &mut r,
+        "w",
+        json!([{"op": "create", "type": "decision", "id": "$x", "parent": s.section.to_string(),
+            "fields": {"statement": "Build on A", "status": "rejected",
+                       "decided_at": "2021-01-10T09:00:00Z", "recorded_at": "2021-01-10T09:00:00Z",
+                       "options": ["yes", "no"]},
+            "links": {"depends_on": [{"target": s.a.to_string()}]}}]),
+    )
+    .unwrap();
+    let x = BlockId::parse(&res.created["$x"]).unwrap();
+    land(&mut r, "w").unwrap();
+    let res = update_a(&mut r, &s);
+    let c = after(&r, &res.change);
+    assert!(
+        !has(&c, &x),
+        "a rejected decision asserts nothing live: {c:?}"
+    );
+    assert!(has(&c, &s.b), "other dependents are still listed");
+}
+
+#[test]
 fn csq1_a_fully_superseded_decision_dependent_has_no_entry() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
