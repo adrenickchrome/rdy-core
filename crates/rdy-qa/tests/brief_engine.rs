@@ -110,6 +110,61 @@ fn brf1_a_doc_path_covers_the_doc_and_a_folder_path_every_doc_under_it() {
 }
 
 #[test]
+fn brf1_ids_inside_the_path_subtree_still_cover_the_whole_subtree() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let path_only = r
+        .read()
+        .brief(
+            &Scope::Canon,
+            &Coverage {
+                ids: vec![],
+                path: Some("spec".into()),
+            },
+            None,
+        )
+        .unwrap();
+    for given in [&s.section, &s.doc, &s.a] {
+        let both = r
+            .read()
+            .brief(
+                &Scope::Canon,
+                &Coverage {
+                    ids: vec![given.to_string()],
+                    path: Some("spec".into()),
+                },
+                None,
+            )
+            .unwrap();
+        let want = subtree(&r, &Scope::Canon, &s.doc);
+        assert_eq!(both.covers, want.len(), "ids {given} inside the path");
+        assert_eq!(both.record.covers, want, "subtree ∪ ids");
+        assert!(want.iter().all(|id| both.record.covers(id)));
+        assert_eq!(both.base.token, path_only.base.token);
+    }
+    r.new_folder(&writer(), "w", "area").unwrap();
+    r.new_doc(&writer(), "w", "area/inner", None, None).unwrap();
+    let outside = r
+        .read()
+        .brief(
+            &w(),
+            &Coverage {
+                ids: vec![s.section.to_string()],
+                path: Some("area".into()),
+            },
+            None,
+        )
+        .unwrap();
+    let folder_id = r.read().resolve_id(&w(), "area").unwrap();
+    let mut want = subtree(&r, &w(), &folder_id);
+    want.insert(s.section.clone());
+    assert_eq!(
+        outside.record.covers, want,
+        "an id outside the path is added"
+    );
+}
+
+#[test]
 fn brf1_a_briefing_lists_governs_dependents_will_go_stale_and_suspects() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);

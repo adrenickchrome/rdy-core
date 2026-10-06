@@ -367,16 +367,18 @@ impl ReadState {
         }
         if let Some(path) = &cov.path {
             let root = known(path)?;
-            let mut todo = vec![root.clone()];
-            ids.insert(root);
+            // the walk keeps its own visited set: a block also named in `ids` is still walked
+            let mut seen = BTreeSet::from([root.clone()]);
+            let mut todo = vec![root];
             while let Some(cur) = todo.pop() {
                 for c in m.children(Some(&cur)) {
                     // a block already seen is not walked again (a damaged store may loop)
-                    if ids.insert(c.id.clone()) {
+                    if seen.insert(c.id.clone()) {
                         todo.push(c.id.clone());
                     }
                 }
             }
+            ids.extend(seen);
         }
         if ids.is_empty() {
             return Err(RdyError::new(
