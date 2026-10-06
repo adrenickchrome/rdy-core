@@ -38,6 +38,7 @@ fn rv1_the_navigation_marks_edited_and_new_docs_and_lists_removed_ones() {
     assert_eq!(next("Removed").as_deref(), Some("Old guide"), "{nav:?}");
     assert!(h.contains("<li class=\"nav-item nav-removed\">Old guide</li>"));
     assert!(!h.contains("old.html"));
+    assert!(h.contains("<li class=\"nav-group chg\"><span class=\"nav-group-label\">Removed</span><ul><li class=\"nav-item nav-removed\">Old guide</li>"));
     assert!(h.contains(">Intro</a><span class=\"chg chg-label chg-edited\">Edited</span>"));
 }
 
