@@ -29,6 +29,7 @@ fn people1_the_read_tools_give_an_agent_what_the_twin_gave() {
         .find(&format!("data-rdy-block=\"{}\"", ids.requirement))
         .unwrap();
     let copied = rdy_qa::site::unescape(rdy_qa::site::attrs(&h[at..], "data-ref")[0]);
+    let project = (r.read().project_name(), r.read().project_description());
     let mut st = McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
     rdy_session(
         &mut st,
@@ -97,6 +98,13 @@ fn people1_the_read_tools_give_an_agent_what_the_twin_gave() {
     let v = &ov["version_position"]["version"];
     assert_eq!(v["name"], "v1.0.0", "{ov}");
     assert_eq!(v["landing"].as_str().unwrap().len(), 64);
+    // the project: its name and description, as the site shows them
+    assert_eq!(ov["project"]["name"], project.0, "{ov}");
+    assert_eq!(
+        ov["project"]["description"],
+        serde_json::to_value(&project.1).unwrap(),
+        "{ov}"
+    );
 
     // whether a type is presentational: the pack's traits
     let s = rdy_schema(&mut st, p(json!({}))).unwrap();

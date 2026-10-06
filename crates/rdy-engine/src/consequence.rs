@@ -1,8 +1,9 @@
 //! What a write leaves for its author to do: the blocks that depend on what the write changed,
 //! read from the state the write published. Each entry has a stable id (`cq-<16 hex>`).
-use crate::brief::{BRIEF_DEFAULT_TOKENS, FollowUp, follow_up};
+use crate::brief::{BRIEF_DEFAULT_TOKENS, FollowUp, expand_error, follow_up};
+use crate::engine::{Engine, write_typed};
 use crate::error::RdyError;
-use crate::{ReadState, Scope};
+use crate::{Rdy, ReadState, Scope};
 use rdy_graph::{Edge, EdgeKind, IMPACT_LINKS, SUSPECT_LINKS, Suspect};
 use rdy_model::decision::{DECISION, REVOKES, SUPERSEDES};
 use rdy_model::{BlockId, Hash, Op};
@@ -221,4 +222,52 @@ impl ReadState {
         }
         Ok(out)
     }
+}
+
+/// `write_typed`, then the write's consequences read from the state it published: on success
+/// `consequences` is always present (with `consequences_omitted` when a cut dropped some, or
+/// `consequences_error` when they could not be read; the write stands); on a briefing refusal
+/// the error carries a fresh briefing for exactly the blocks the write touches.
+pub fn write_and_report<T: Serialize + 'static>(
+    engine: &dyn Engine,
+    view: &str,
+    max_tokens: Option<usize>,
+    f: impl FnOnce(&mut Rdy) -> Result<T, RdyError> + Send + 'static,
+) -> Result<serde_json::Value, RdyError> {
+    let mut v = match write_typed(engine, f) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(expand_error(
+                e,
+                &engine.read(),
+                view,
+                &engine.briefs(),
+                max_tokens,
+            ));
+        }
+    };
+    let change = v
+        .get("change")
+        .and_then(|c| c.as_str())
+        .and_then(|c| c.parse::<Hash>().ok());
+    match change {
+        Some(h) => match engine
+            .read()
+            .consequences(&Scope::View(view.into()), &h, max_tokens)
+        {
+            Ok(c) => {
+                v["consequences"] = serde_json::to_value(&c.items).unwrap_or_default();
+                if !c.omitted.is_empty() {
+                    v["consequences_omitted"] =
+                        serde_json::to_value(&c.omitted).unwrap_or_default();
+                }
+            }
+            Err(e) => {
+                v["consequences"] = serde_json::json!([]);
+                v["consequences_error"] = format!("{}: {}", e.code, e.message).into();
+            }
+        },
+        None => v["consequences"] = serde_json::json!([]),
+    }
+    Ok(v)
 }
