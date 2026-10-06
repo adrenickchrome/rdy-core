@@ -20,11 +20,13 @@ pub enum Delta {
     Full,
     /// `ops` were committed to `view`.
     Commit { view: String, ops: Vec<Op> },
-    /// `view`'s proposal landed as `landing`, applying `ops` to canon.
+    /// `view`'s proposal landed as `landing`, applying `ops` to canon; the same batch rebased
+    /// the views in `rebased` (the proposing view included).
     Landed {
         landing: Hash,
         view: String,
         ops: Vec<Op>,
+        rebased: Vec<String>,
     },
     /// A tag was written.
     Tags,

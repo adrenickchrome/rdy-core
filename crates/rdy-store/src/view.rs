@@ -295,11 +295,7 @@ impl StoreReader {
     /// The head of view `name`'s chain, or None if the view has no ref.
     pub fn view_head(&self, name: &str) -> Result<Option<ViewHead>, StoreError> {
         self.get_ref(&format!("view/{name}"))?
-            .map(|bytes| {
-                postcard::from_bytes(&bytes).map_err(|e| {
-                    StoreError::Decode(format!("view {name:?}: its ref is not a view head: {e}"))
-                })
-            })
+            .map(|bytes| decode_head(name, &bytes))
             .transpose()
     }
 
@@ -394,6 +390,12 @@ impl StoreReader {
     }
 }
 
+/// View `name`'s head from the value of its `view/` ref.
+pub(crate) fn decode_head(name: &str, bytes: &[u8]) -> Result<ViewHead, StoreError> {
+    postcard::from_bytes(bytes)
+        .map_err(|e| StoreError::Decode(format!("view {name:?}: its ref is not a view head: {e}")))
+}
+
 /// A view op of `name` by `by`, after `prev`.
 fn view_op(name: &str, prev: Option<Hash>, op: ViewOpKind, by: &Provenance) -> ViewOp {
     ViewOp {
@@ -407,7 +409,7 @@ fn view_op(name: &str, prev: Option<Hash>, op: ViewOpKind, by: &Provenance) -> V
 }
 
 fn exists(name: &str) -> StoreError {
-    StoreError::Decode(format!("view {name:?} exists"))
+    StoreError::ViewExists(name.to_string())
 }
 
 impl Store {

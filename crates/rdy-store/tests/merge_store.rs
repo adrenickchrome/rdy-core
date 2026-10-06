@@ -190,22 +190,12 @@ fn merge1_a_change_that_covers_canon_and_its_own_side_lands() {
     let changes = [s.change(&c).unwrap(), s.change(&r_id).unwrap()];
     let m = s.merge_onto(&s.canon_state().unwrap(), &changes).unwrap();
     assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
-    let prop = Proposal {
-        stable: None,
-        prev: None,
-        title: "resolved".into(),
-        view: "v".into(),
-        changes: vec![c, r_id],
-        alternative: None,
-        provenance: prov(Role::Writer),
-        canon_at: None,
-    };
+    // a version carrying the view's change and the resolution (written raw, so not in the view);
+    // a landing needs the proposal's ref, which propose and propose_next write
+    let p0 = s.propose("v", "resolved", prov(Role::Writer)).unwrap();
     let pid = s
-        .write(vec![(
-            kinds::PROPOSAL,
-            postcard::to_allocvec(&prop).unwrap(),
-        )])
-        .unwrap()[0];
+        .propose_next(&p0, vec![c, r_id], "resolved", prov(Role::Writer))
+        .unwrap();
     s.land(&pid, prov(Role::Approver)).unwrap();
     assert_eq!(
         s.canon_state().unwrap().blocks[&x0.id],
@@ -276,7 +266,15 @@ fn merge1_a_canon_version_names_the_change_that_landed_it() {
             }],
         )
     };
-    // view a takes its base while X is still x0
+    // view a takes its base while X is still x0, pinned so b's landing does not rebase it (reb1)
+    s.view_create(
+        "a",
+        s.canon_head().unwrap(),
+        None,
+        true,
+        &prov(Role::Writer),
+    )
+    .unwrap();
     s.commit_to_view(
         "a",
         change(

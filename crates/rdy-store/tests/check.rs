@@ -53,9 +53,10 @@ fn fsck2_a_healthy_store_checks_clean_and_counts() {
     busy(&mut s);
     let c = s.check_objects().unwrap();
     assert_eq!((c.views, c.landed_changes), (2, 2));
+    // reb1: a's landing also rebases b (open, unpinned, non-empty)
     assert_eq!(
-        c.view_ops, 7,
-        "a: create, 2 commits, rebase, commit; b: create, commit"
+        c.view_ops, 8,
+        "a: create, 2 commits, rebase, commit; b: create, commit, rebase"
     );
 }
 
@@ -92,7 +93,9 @@ fn fsck2_a_chain_that_starts_with_a_commit_is_reported() {
     let mut s = Store::open(&dir.path().join("s")).unwrap();
     busy(&mut s);
     let h = s.view_head("b").unwrap().unwrap();
-    let commit = s.view_op(&h.head).unwrap();
+    // reb1: b's head is the rebase a's landing wrote; its commit is the op before it
+    let rebase = s.view_op(&h.head).unwrap();
+    let commit = s.view_op(&rebase.prev.unwrap()).unwrap();
     let orphan = rdy_store::ViewOp {
         prev: None,
         ..commit

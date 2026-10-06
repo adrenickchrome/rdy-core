@@ -197,6 +197,26 @@ fn kind(c: &Cmd) -> &'static str {
     }
 }
 
+/// `scope`'s violations now (none when it passes the checker).
+fn violations(r: &Rdy, scope: &Scope) -> Vec<rdy_qa::invariants::Violation> {
+    check(r, scope).err().unwrap_or_default()
+}
+
+/// The violations `scope` has now that it did not have `before`. A landing rebases every open
+/// unpinned view with work (reb1), so a view can carry a clash that canon's landing brought in
+/// (two blocks given one name, say); a write must not add one, and such a view is refused when
+/// it lands, as before.
+fn new_violations(
+    before: &[rdy_qa::invariants::Violation],
+    r: &Rdy,
+    scope: &Scope,
+) -> Vec<rdy_qa::invariants::Violation> {
+    violations(r, scope)
+        .into_iter()
+        .filter(|x| !before.contains(x))
+        .collect()
+}
+
 fn refusal(e: &RdyError) -> String {
     match e
         .issues
@@ -217,10 +237,11 @@ impl Sim<'_> {
         Scope::View(self.view(slot))
     }
 
-    /// One write; on success the view must pass the checker.
+    /// One write; on success the view must gain no violation from it.
     fn write(&mut self, slot: u8, ops: serde_json::Value, c: &Cmd) -> Result<bool, TestCaseError> {
         let view = self.view(slot);
         let rebalance = ops[0]["op"] == "rebalance";
+        let before = violations(&self.r, &Scope::View(view.clone()));
         match write(&mut self.r, &view, ops) {
             Ok(_) => {
                 let mut s = self.stats.borrow_mut();
@@ -229,7 +250,8 @@ impl Sim<'_> {
                     s.effective_rebalances += 1;
                 }
                 drop(s);
-                if let Err(x) = check(&self.r, &Scope::View(view.clone())) {
+                let x = new_violations(&before, &self.r, &Scope::View(view.clone()));
+                if !x.is_empty() {
                     return Err(TestCaseError::fail(format!(
                         "after {c:?}, view {view} broke: {x:?}"
                     )));
@@ -527,6 +549,7 @@ impl Sim<'_> {
                     statement: format!("decided in {view}"),
                     ..Default::default()
                 };
+                let before = violations(&self.r, &sc);
                 match self.r.decide(&writer(), &view, d) {
                     Ok(_) => {
                         *self
@@ -535,7 +558,8 @@ impl Sim<'_> {
                             .writes_ok
                             .entry("decide")
                             .or_default() += 1;
-                        if let Err(x) = check(&self.r, &sc) {
+                        let x = new_violations(&before, &self.r, &sc);
+                        if !x.is_empty() {
                             return Err(TestCaseError::fail(format!(
                                 "after {c:?}, view {view} broke: {x:?}"
                             )));
@@ -639,7 +663,6 @@ fn engine_split_brain_histories_keep_every_invariant() {
             land("E_VALIDATION/E_PATH_CLASH"),
             5,
         ),
-        ("W_SIBLINGS_REKEYED [7]", s.siblings_rekeyed, 4),
         (
             "E_FROZEN writes [5]",
             s.write_refused.get(E_FROZEN).copied().unwrap_or(0),
@@ -650,4 +673,7 @@ fn engine_split_brain_histories_keep_every_invariant() {
     for (what, got, min) in floors {
         assert!(got >= min, "{what}: {got} < floor {min}: {s:#?}");
     }
+    // reb1: the four views are unpinned, so every landing rebases them onto the re-keyed
+    // siblings and W_SIBLINGS_REKEYED (a pinned view's warning) is never raised here
+    assert_eq!(s.siblings_rekeyed, 0, "{s:#?}");
 }

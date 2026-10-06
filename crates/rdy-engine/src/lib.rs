@@ -392,7 +392,12 @@ impl Rdy {
                 }
                 (Arc::clone(&prev.canon), views, Arc::clone(&prev.tags))
             }
-            Delta::Landed { landing, view, ops } => {
+            Delta::Landed {
+                landing,
+                view,
+                ops,
+                rebased,
+            } => {
                 let mut canon = Entry::new(None, Some(landing), None, Arc::new(vec![]));
                 if let Some(b) = prev.canon.built_ok() {
                     canon.seed(read_state::Built::new(
@@ -400,13 +405,22 @@ impl Rdy {
                         Arc::new(vec![]),
                     ));
                 }
+                // the proposing view and every view the landing rebased (it is one of them) start
+                // unbuilt, on the landing: a stale entry would seed the next commit into it from
+                // the old base
                 let mut views = prev.views.clone();
-                match self.view_entry(&view)? {
-                    Some(next) => {
-                        views.insert(view, Arc::new(next));
-                    }
-                    None => {
-                        views.remove(&view);
+                let mut names = rebased;
+                if !names.contains(&view) {
+                    names.push(view);
+                }
+                for name in names {
+                    match self.view_entry(&name)? {
+                        Some(next) => {
+                            views.insert(name, Arc::new(next));
+                        }
+                        None => {
+                            views.remove(&name);
+                        }
                     }
                 }
                 (Arc::new(canon), views, Arc::clone(&prev.tags))

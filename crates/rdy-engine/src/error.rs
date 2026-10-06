@@ -35,6 +35,12 @@ pub const E_INTERNAL: &str = "E_INTERNAL";
 pub const E_LIMIT: &str = "E_LIMIT";
 /// Two blocks would hold the same key (compared ignoring case).
 pub const E_KEY_CLASH: &str = "E_KEY_CLASH";
+/// A view of that name exists.
+pub const E_VIEW_EXISTS: &str = "E_VIEW_EXISTS";
+/// The view is closed: it takes no commit, include or exclude.
+pub const E_VIEW_CLOSED: &str = "E_VIEW_CLOSED";
+/// The proposal version named is not its latest.
+pub const E_PROPOSAL_MOVED: &str = "E_PROPOSAL_MOVED";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RdyError {
@@ -140,6 +146,30 @@ impl From<StoreError> for RdyError {
                 E_NOT_FOUND,
                 format!("no view {v:?}"),
                 "check the view name with rdy status",
+            ),
+            StoreError::ViewExists(v) => RdyError::new(
+                E_VIEW_EXISTS,
+                format!("view {v:?} exists"),
+                format!("pick a free name, or fork {v} under another name"),
+            ),
+            StoreError::ViewClosed(v) => RdyError::new(
+                E_VIEW_CLOSED,
+                format!("view {v:?} is closed"),
+                format!(
+                    "reopen it with rdy undo --view {v} <close op> (rdy view show {v} lists the ops), or fork it"
+                ),
+            ),
+            StoreError::ProposalMoved { stable, latest } => RdyError::new(
+                E_PROPOSAL_MOVED,
+                format!(
+                    "proposal P-{} moved: its latest version is {}",
+                    stable.short(),
+                    latest.short()
+                ),
+                format!(
+                    "review the latest version, then approve it as P-{}@<n>",
+                    stable.short()
+                ),
             ),
             StoreError::Conflict { id } => RdyError::new(
                 E_STALE_BASE,

@@ -492,12 +492,15 @@ impl Rdy {
             accept,
             approver: s.provenance(),
             chosen: None,
+            relay: None,
+            evidence: None,
         })?;
         // 5. publish canon incrementally: the previous canon with the landed ops (snap1)
         if let Err(e) = self.publish(Delta::Landed {
             landing: out.landing,
             view: p.view.clone(),
             ops: landed_ops,
+            rebased: out.rebased.iter().map(|r| r.view.clone()).collect(),
         }) {
             // the landing is written: never leave the published state behind it
             let _ = self.publish(Delta::Full);

@@ -25,6 +25,16 @@ pub(crate) fn view_ref(name: &str) -> String {
     format!("view/{name}")
 }
 
+/// The ref naming the latest version of the proposal whose first version is `stable`.
+pub(crate) fn proposal_ref(stable: &Hash) -> String {
+    format!("proposal/{stable}")
+}
+
+/// The ref naming the stable id of view `view`'s open proposal (empty when it has none).
+pub(crate) fn open_ref(view: &str) -> String {
+    format!("open/{view}")
+}
+
 fn tag_ref(name: &str) -> String {
     format!("tag/{name}")
 }
@@ -282,7 +292,7 @@ impl Store {
         // 1. the head; a closed view takes no commit
         let head = self.view_head(name)?;
         if head.as_ref().is_some_and(|h| h.closed) {
-            return Err(StoreError::Decode(format!("view {name:?} is closed")));
+            return Err(StoreError::ViewClosed(name.to_string()));
         }
         // the float catch-up fires for an empty unpinned view behind canon; the view then reads
         // as canon, so the ops must have been checked against canon on the blocks they write
@@ -431,6 +441,9 @@ impl Store {
         Ok(id)
     }
 
+    /// Proposes view `view`'s included changes as a new proposal: the proposal, its ref
+    /// `proposal/<id>` (the latest version, itself) and `open/<view>` (its stable id, itself) in
+    /// one write. Returns the proposal's id.
     pub fn propose(&mut self, view: &str, title: &str, by: Provenance) -> Result<Hash, StoreError> {
         let changes = self.included(view)?.as_ref().clone();
         let p = Proposal {
@@ -443,30 +456,67 @@ impl Store {
             provenance: by,
             canon_at: self.canon_head()?,
         };
-        self.put(kinds::PROPOSAL, &p)
+        let id = Hash::of(&encode(&p));
+        self.write_version(&p, id)
     }
 
     /// Writes the next version of proposal `prev`: its changes followed by `add`, with `stable`
-    /// the first version's id and `prev` the version it follows. Returns the new version's id.
+    /// the first version's id and `prev` the version it follows, and moves `proposal/<stable>` to
+    /// it. Returns the new version's id.
     pub fn propose_version(&mut self, prev: &Hash, add: &[Hash]) -> Result<Hash, StoreError> {
-        let p = self.proposal(prev)?;
-        let mut changes = p.changes;
-        changes.extend_from_slice(add);
-        let next = Proposal {
-            stable: Some(p.stable.unwrap_or(*prev)),
-            prev: Some(*prev),
-            title: p.title,
-            view: p.view,
-            changes,
-            alternative: p.alternative,
-            provenance: p.provenance,
-            canon_at: self.canon_head()?,
-        };
-        self.put(kinds::PROPOSAL, &next)
+        let mut p = self.proposal(prev)?;
+        p.changes.extend_from_slice(add);
+        self.next_version(prev, p)
     }
 
-    /// Lands proposal version `proposal` as is: `land_atomic` with no acceptance change and no
-    /// chosen alternative. Returns the landing id.
+    /// Writes the next version of proposal `prev` with `changes`, `title` and `by` in place of
+    /// its own (the view and the alternative carry over), and moves `proposal/<stable>` to it.
+    /// Returns the new version's id.
+    pub fn propose_next(
+        &mut self,
+        prev: &Hash,
+        changes: Vec<Hash>,
+        title: &str,
+        by: Provenance,
+    ) -> Result<Hash, StoreError> {
+        let p = Proposal {
+            changes,
+            title: title.to_string(),
+            provenance: by,
+            ..self.proposal(prev)?
+        };
+        self.next_version(prev, p)
+    }
+
+    /// Writes `p` as the version after `prev`: `stable` the first version's id, `prev` the
+    /// version it follows, `canon_at` canon's head now.
+    fn next_version(&mut self, prev: &Hash, p: Proposal) -> Result<Hash, StoreError> {
+        let stable = p.stable.unwrap_or(*prev);
+        let next = Proposal {
+            stable: Some(stable),
+            prev: Some(*prev),
+            canon_at: self.canon_head()?,
+            ..p
+        };
+        self.write_version(&next, stable)
+    }
+
+    /// Writes proposal version `p` with the refs `proposal/<stable>` = its id and
+    /// `open/<p.view>` = `stable`, in one write. Returns its id.
+    fn write_version(&mut self, p: &Proposal, stable: Hash) -> Result<Hash, StoreError> {
+        let bytes = encode(p);
+        let id = Hash::of(&bytes);
+        let mut items = vec![(kinds::PROPOSAL, bytes)];
+        items.extend(self.ref_items_pub(vec![
+            (proposal_ref(&stable), id.0.to_vec()),
+            (open_ref(&p.view), stable.0.to_vec()),
+        ]));
+        self.write(items)?;
+        Ok(id)
+    }
+
+    /// Lands proposal version `proposal` as is: `land_atomic` with no acceptance change, no
+    /// chosen alternative and no relay. Returns the landing id.
     pub fn land(&mut self, proposal: &Hash, approver: Provenance) -> Result<Hash, StoreError> {
         Ok(self
             .land_atomic(LandRequest {
@@ -474,6 +524,8 @@ impl Store {
                 accept: None,
                 approver,
                 chosen: None,
+                relay: None,
+                evidence: None,
             })?
             .landing)
     }

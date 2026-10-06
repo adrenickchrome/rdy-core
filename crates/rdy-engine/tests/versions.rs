@@ -284,6 +284,12 @@ fn position_of_a_view_with_unlanded_changes() {
 fn a_view_behind_canon_counts_to_its_own_base() {
     let (_d, mut r, _) = project(1);
     r.tag(&founder(), "v1.0.0", None, None).unwrap();
+    // pinned, so the landing below does not rebase it (reb1 rebases open unpinned views)
+    let ch = r.read().canon_head();
+    r.store_mut()
+        .view_create("slow", ch, None, true, &writer().provenance())
+        .unwrap();
+    r.invalidate();
     r.write(
         &writer(),
         WriteRequest {

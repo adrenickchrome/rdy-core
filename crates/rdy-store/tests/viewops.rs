@@ -451,12 +451,13 @@ fn vop1_a_fork_of_a_view_behind_canon_is_rebased_onto_canon_in_the_same_write() 
         ),
     )
     .unwrap();
-    let p = s.propose("seed", "t", prov("human:h")).unwrap();
-    let l1 = s.land(&p, prov("human:h")).unwrap();
     s.view_append("a", vec![ViewOpKind::Include { changes: vec![c2] }], &by)
         .unwrap();
+    // closed before the landing, so the landing leaves it behind canon (reb1 skips closed views)
     s.view_append("a", vec![ViewOpKind::Close { reason: "x".into() }], &by)
         .unwrap();
+    let p = s.propose("seed", "t", prov("human:h")).unwrap();
+    let l1 = s.land(&p, prov("human:h")).unwrap();
     assert_eq!(
         s.view_head("a").unwrap().unwrap().base,
         None,
