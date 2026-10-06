@@ -102,6 +102,7 @@ fn evt1_a_landing_batch_gives_commit_proposed_landed_and_rebased() {
             EventKind::Proposed { .. } => "proposed",
             EventKind::Landed { .. } => "landed",
             EventKind::ViewRebased { .. } => "view_rebased",
+            EventKind::ViewClosed { .. } => "view_closed",
             EventKind::ViewOp { .. } => "view_op",
         })
         .collect();

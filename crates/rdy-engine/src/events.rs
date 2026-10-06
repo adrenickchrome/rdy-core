@@ -26,16 +26,24 @@ pub enum EventKind {
         actor: String,
         run: Option<String>,
     },
-    /// Any view op other than a commit or a rebase; `kind` is `create`, `fork`, `include`,
-    /// `exclude`, `undo`, `close` or `own`.
+    /// Any view op other than a commit, a rebase or a close; `kind` is `create`, `fork`,
+    /// `include`, `exclude`, `undo` or `own`.
     ViewOp {
         view: String,
         op: Hash,
         kind: String,
     },
+    /// A landing rebased `view`; `conflicts` are the ids of the conflicts the `Rebase` op
+    /// recorded, in op order.
     ViewRebased {
         view: String,
         landing: Hash,
+        conflicts: Vec<Hash>,
+    },
+    /// A `Close` op on `view`.
+    ViewClosed {
+        view: String,
+        reason: String,
     },
     Proposed {
         proposal: Hash,
@@ -67,9 +75,16 @@ pub fn events_for_batch(
                         actor: op.actor,
                         run: op.run,
                     },
-                    ViewOpKind::Rebase { landing, .. } => EventKind::ViewRebased {
+                    ViewOpKind::Rebase {
+                        landing, conflicts, ..
+                    } => EventKind::ViewRebased {
                         view: op.view,
                         landing,
+                        conflicts: conflicts.iter().map(|c| c.id).collect(),
+                    },
+                    ViewOpKind::Close { reason } => EventKind::ViewClosed {
+                        view: op.view,
+                        reason,
                     },
                     other => EventKind::ViewOp {
                         view: op.view,
