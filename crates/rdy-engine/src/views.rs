@@ -642,8 +642,8 @@ pub struct CloseResult {
     pub reason: String,
 }
 
-/// An op kind in snake case, as undo reports it.
-fn kind_name(k: &ViewOpKind) -> &'static str {
+/// An op kind in snake case, as undo and `view show` report it.
+pub(crate) fn kind_name(k: &ViewOpKind) -> &'static str {
     match k {
         ViewOpKind::Create { .. } => "create",
         ViewOpKind::Fork { .. } => "fork",
@@ -655,6 +655,24 @@ fn kind_name(k: &ViewOpKind) -> &'static str {
         ViewOpKind::Close { .. } => "close",
         ViewOpKind::Own { .. } => "own",
     }
+}
+
+/// The net undone set of a view's op chain (newest first): each undone op mapped to the live
+/// undo of it. An op is undone when its newest undo is live, that is, not itself undone. Newest
+/// first, every undo of an undo is decided before the undo it targets, so after a redo the
+/// redone op is live again. One rule for `undo` and `view show`.
+pub(crate) fn net_undone(chain: &[(Hash, ViewOp)]) -> HashMap<Hash, Hash> {
+    let mut undone: HashMap<Hash, Hash> = HashMap::new();
+    let mut decided: HashSet<Hash> = HashSet::new();
+    for (h, op) in chain {
+        if let ViewOpKind::Undo { target } = op.op
+            && decided.insert(target)
+            && !undone.contains_key(h)
+        {
+            undone.insert(target, *h);
+        }
+    }
+    undone
 }
 
 fn undo_landing(message: String) -> RdyError {
@@ -739,19 +757,8 @@ impl Rdy {
             cur = op.prev;
             chain.push((h, op));
         }
-        // The net undone set: an op is undone when its newest undo is live, that is not itself
-        // undone. Newest first, every undo of an undo is decided before the undo it targets, so
-        // after a redo the redone op is live again and an op maps to the live undo of it.
-        let mut undone: HashMap<Hash, Hash> = HashMap::new();
-        let mut decided: HashSet<Hash> = HashSet::new();
-        for (h, op) in &chain {
-            if let ViewOpKind::Undo { target } = op.op
-                && decided.insert(target)
-                && !undone.contains_key(h)
-            {
-                undone.insert(target, *h);
-            }
-        }
+        // The net undone set: see `net_undone`.
+        let undone = net_undone(&chain);
         let included_list = st.included(view);
         let included: BTreeSet<Hash> = included_list.iter().copied().collect();
         // 3 and 4. the target, its effect, and the rules on it

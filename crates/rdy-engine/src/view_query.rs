@@ -3,7 +3,9 @@
 //! answer is compact: ids, versions and field names, never block bodies.
 use crate::error::*;
 use crate::read_state::ReadState;
-use crate::views::{ConflictInfo, OwnerInfo, ViewHeadInfo, conflict_infos, head_info};
+use crate::views::{
+    ConflictInfo, OwnerInfo, ViewHeadInfo, conflict_infos, head_info, kind_name, net_undone,
+};
 use crate::{Materialized, Scope};
 use rdy_model::{Block, BlockId, Hash, tree};
 use rdy_store::view::{ViewOp, ViewOpKind};
@@ -103,21 +105,6 @@ fn scope_text(s: &Scope) -> String {
         Scope::Canon => "canon".to_string(),
         Scope::View(v) => v.clone(),
         Scope::At(h) => format!("landing:{}", h.short()),
-    }
-}
-
-/// An op kind in snake case.
-fn kind_name(k: &ViewOpKind) -> &'static str {
-    match k {
-        ViewOpKind::Create { .. } => "create",
-        ViewOpKind::Fork { .. } => "fork",
-        ViewOpKind::Commit { .. } => "commit",
-        ViewOpKind::Include { .. } => "include",
-        ViewOpKind::Exclude { .. } => "exclude",
-        ViewOpKind::Rebase { .. } => "rebase",
-        ViewOpKind::Undo { .. } => "undo",
-        ViewOpKind::Close { .. } => "close",
-        ViewOpKind::Own { .. } => "own",
     }
 }
 
@@ -251,18 +238,7 @@ impl ReadState {
             cur = if is_checkpoint(&op.op) { None } else { op.prev };
             chain.push((h, op));
         }
-        // An op is undone while its newest undo is live (an undo that is not itself undone):
-        // newest first, an undo of an undo is decided before the undo it targets.
-        let mut undone: HashSet<Hash> = HashSet::new();
-        let mut decided: HashSet<Hash> = HashSet::new();
-        for (h, op) in &chain {
-            if let ViewOpKind::Undo { target } = op.op
-                && decided.insert(target)
-                && !undone.contains(h)
-            {
-                undone.insert(target);
-            }
-        }
+        let undone = net_undone(&chain);
         let ops = chain
             .iter()
             .map(|(h, op)| OpSummary {
@@ -271,7 +247,7 @@ impl ReadState {
                 actor: op.actor.clone(),
                 run: op.run.clone(),
                 at_ms: op.at_ms,
-                undone: undone.contains(h),
+                undone: undone.contains_key(h),
             })
             .collect();
         Ok(ViewDetail {
