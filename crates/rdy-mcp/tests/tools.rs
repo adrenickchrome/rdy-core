@@ -369,7 +369,14 @@ fn rdy_tags_lists_versions() {
     start(&mut st);
     let landing = land_and_tag(&mut st);
     let mut v = rdy_tags(&mut st, TagsParams::default()).unwrap();
-    v["versions"][0].as_object_mut().unwrap().remove("at_ms");
+    let row = v["versions"][0].as_object_mut().unwrap();
+    row.remove("at_ms");
+    // `tag` is the tag object's full hash: a 64-hex id, not the landing it names.
+    let tag = row.remove("tag").unwrap();
+    let tag = tag.as_str().unwrap();
+    assert_eq!(tag.len(), 64);
+    assert!(tag.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_ne!(tag, landing);
     assert_eq!(
         v,
         json!({
