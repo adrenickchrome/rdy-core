@@ -442,6 +442,7 @@ fn csq1_a_revoked_decision_dependent_has_no_entry() {
         &x.to_string(),
         "not needed",
         &s.section.to_string(),
+        None,
     )
     .unwrap();
     land(&mut r, "w").unwrap();
