@@ -760,8 +760,10 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                 json!({"out": path_arg(&out)?, "scope": scope}),
             )?;
             let t = format!(
-                "rendered {} pages to {}{}",
+                "rendered {} pages, {} permalinks and {} assets to {}{}",
                 num(&v["pages"]),
+                num(&v["redirects"]),
+                num(&v["assets"]),
                 out.display(),
                 warning_lines(&v["warnings"])
             );
@@ -786,7 +788,18 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::Import { dir, view } => {
             let v = call(env, "import", json!({"dir": path_arg(&dir)?, "view": view}))?;
             let n = v["created"].as_object().map_or(0, |m| m.len());
-            Ok((v, format!("imported {n} blocks into view {view}")))
+            let mut t = format!("imported {n} blocks into view {view}");
+            for w in v["warnings"].as_array().into_iter().flatten() {
+                let doc = w["block"]
+                    .as_str()
+                    .map_or("", |id| text(&v["warning_docs"][id]));
+                t.push_str(&format!(
+                    "\nwarning {}: {doc}{}",
+                    text(&w["code"]),
+                    text(&w["message"])
+                ));
+            }
+            Ok((v, t))
         }
         Cmd::Reindex => {
             let v = call(env, "reindex", json!({}))?;

@@ -349,8 +349,14 @@ fn status(cx: &OpContext) -> Result<Value, RdyError> {
 
 fn show(cx: &OpContext, a: ShowArgs) -> Result<Value, RdyError> {
     let st = cx.engine.read();
-    let scope = scope_of(&st, cx, a.scope.as_deref())?;
-    let bid = st.resolve_id(&scope, &a.id)?;
+    // refv1: `id@version` or a ref line reads under that version; a clashing scope is refused
+    let target = rdy_model::reference::parse_target(&a.id)
+        .map_err(|m| RdyError::new(E_BAD_INPUT, m, rdy_model::reference::BAD_REF_FIX))?;
+    let text = target
+        .scope_text(a.scope.as_deref())
+        .map_err(|m| RdyError::new(E_BAD_INPUT, m, rdy_model::reference::PIN_CLASH_FIX))?;
+    let scope = scope_of(&st, cx, text.as_deref())?;
+    let bid = st.resolve_id(&scope, &target.id)?;
     let ctx = st.context(&scope, &bid)?;
     let mut v = to_json(&ctx);
     let words = status_words(&v["status"]);
@@ -484,7 +490,32 @@ fn import(cx: &OpContext, a: ImportArgs) -> Result<Value, RdyError> {
     let s = approver(cx.session)?;
     let view = view_of(&s, Some(a.view));
     let dir = resolve_path(cx.cwd, &a.dir);
-    write_typed(cx.engine, move |r| r.import(&s, &view, &dir))
+    let scope = Scope::View(view.clone());
+    let mut v = write_typed(cx.engine, move |r| r.import(&s, &view, &dir))?;
+    // each warning names its doc: the title as imported, then the id (the CLI prints it)
+    let st = cx.engine.read();
+    let docs: serde_json::Map<String, Value> = v["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|w| w["block"].as_str())
+        .filter_map(|id| {
+            let bid = rdy_model::BlockId::parse(id).ok()?;
+            let label = match st.block(&scope, &bid).ok().and_then(|b| {
+                b.field_str("title")
+                    .or(b.field_str("name"))
+                    .map(str::to_string)
+            }) {
+                Some(t) if !t.trim().is_empty() => format!("{} ({id}): ", t.trim()),
+                _ => format!("{id}: "),
+            };
+            Some((id.to_string(), Value::String(label)))
+        })
+        .collect();
+    if !docs.is_empty() {
+        v["warning_docs"] = Value::Object(docs);
+    }
+    Ok(v)
 }
 
 fn reindex(cx: &OpContext) -> Result<Value, RdyError> {
