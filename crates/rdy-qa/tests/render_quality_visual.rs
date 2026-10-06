@@ -1,5 +1,5 @@
-//! The visual review set (vis1). Renders the golden project's three sites into a fixed
-//! directory under `target/qa/site/` and writes `review-set.json`: the eleven pages with their
+//! The visual review set (vis1). Renders the golden project's three sites and the review project's draft into a fixed
+//! directory under `target/qa/site/` and writes `review-set.json`: the thirteen pages with their
 //! URLs and the browser state to reach. The reviewer screenshots this render, so the set is
 //! always the gate's own.
 use rdy_qa::golden;
@@ -41,6 +41,15 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
     replace_dir(frozen.path(), &root.join("frozen"));
     let (_d3, _r3, _i3, view) = golden::site_view();
     replace_dir(view.path(), &root.join("view"));
+    let (_d4, r4, _i4) = golden::review_project();
+    let review = tempfile::tempdir().unwrap();
+    rdy_render::render_site(
+        &r4.read(),
+        &rdy_engine::Scope::View(golden::REVIEW_VIEW.into()),
+        review.path(),
+    )
+    .unwrap();
+    replace_dir(review.path(), &root.join("review"));
 
     let anchor = ids.soft_keywords_requirement.to_string();
     let guards = ids.guards_section.to_string();
@@ -99,6 +108,18 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
             "tutorial/adventure.html",
             "scroll to the `Quick sketches` section".into(),
         ),
+        (
+            "draft-home",
+            "review",
+            "index.html",
+            "none: the Changes in this draft list above Contents".into(),
+        ),
+        (
+            "draft-page",
+            "review",
+            "intro.html",
+            "none; then open the Removed line; then press Show changes (the markers hide, the button reads not pressed)".into(),
+        ),
     ];
     let set: Vec<_> = rows
         .iter()
@@ -107,7 +128,7 @@ fn vis1_the_review_set_renders_and_the_manifest_matches() {
             json!({"n": i + 1, "name": name, "site": site, "url": format!("{site}/{url}"), "state": state})
         })
         .collect();
-    assert_eq!(set.len(), 11);
+    assert_eq!(set.len(), 13);
     for (_, site, url, _) in &rows {
         let f = root.join(site).join(url);
         assert!(f.is_file(), "the review page {} is missing", f.display());
