@@ -698,3 +698,34 @@ socket is there, so it never sleeps in that loop, and the row moves by the noise
 at 10k, -4%; 193.1 to 201.7 ms at 50k, +4%, inside the 8 to 12 ms cold-open drift between bench
 sessions noted under M2b). The saving is on the paths that spawn a daemon and wait for its socket
 (the CLI and the MCP proxy), which no `qa-perf` op times.
+
+## M2b2: history, blame and log
+
+The `qa-perf` tier gained four ops for the history reads. Each warms the read state outside the
+timer (`materialized(&Scope::Canon)`) and times only the call, and each asserts its result size.
+
+| op | what it times | project | runs | target |
+|---|---|---|---|---|
+| `history_100` | `history(Canon, claim, 101)`: every version of a block updated 100 times, each in its own landed view | `deep_block`, its own project (101 versions) | 20 | < 5 ms p99 (reads, spec 11) |
+| `log_page_20` | `log_page(None, Some(20))`: the newest 20 rows of the log | `deep_history` (2000 landings) | 20 | < 5 ms p99 (reads, spec 11) |
+| `log_full` | `log_rows()`: the whole log | `deep_history` (2000 landings) | 5 | recorded, no spec target |
+| `last_changes_doc` | `last_changes(Canon, subtree(doc))`: the last change of every block of the fixture doc | the tier's project (`last_changes_doc_50k` at 50k, the same budget with the large-tier note) | 20 (10 at 50k) | < 5 ms p99 (reads, spec 11) |
+
+What each cost grows with:
+
+- `history` grows with the block's version count: each version costs one producer lookup, one
+  change read and one landing lookup. `history_100` is the 101-version case; a block with a
+  handful of versions costs a handful of those.
+- `last_changes` grows with the number of distinct changes in the subtree, not with the number of
+  blocks: blocks written by the same change share one memoised change read.
+- `log_page` builds a row (one proposal read each) only for the rows it returns, while the
+  landing list and the version tags are listed whole; `log_full` builds a row for every landing
+  and grows with the length of the chain.
+
+`deep_block` is built outside every timer in its own directory, so the workload project, and with
+it `cold_open_lagging`'s frame count, is unchanged.
+
+No laptop figures are recorded here: the Mac is shared while this plan runs, so the first timing
+of these ops is the Linux bench's.
+
+Linux bench rows: <orchestrator fills in (two agreeing runs)>
