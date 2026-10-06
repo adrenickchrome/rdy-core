@@ -216,6 +216,9 @@ pub fn error_json(e: &RdyError) -> Value {
         .unwrap_or_else(|_| json!({"code": e.code, "message": e.message, "fix": e.fix}))
 }
 
+/// How many versions `rdy_context` carries of a block's history.
+pub const CONTEXT_HISTORY: usize = 20;
+
 pub fn budget(v: Value, max_tokens: Option<usize>) -> Value {
     let max = max_tokens.unwrap_or(4000);
     let size = |v: &Value| serde_json::to_string(v).map(|s| s.len() / 4).unwrap_or(0);
@@ -543,6 +546,21 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
             "use compact, markdown or yaml",
         ));
     }
+    // compact lines mark the justification of the change that last wrote each block
+    let justified: std::collections::BTreeMap<BlockId, String> = if format == "compact" {
+        let mut ids = vec![];
+        let mut walk = vec![root];
+        while let Some(b) = walk.pop() {
+            ids.push(b.id.clone());
+            walk.extend(m.children(Some(&b.id)));
+        }
+        st_.last_changes(&scope, &ids)?
+            .into_iter()
+            .filter_map(|(id, e)| e.justification.map(|j| (id, j.label())))
+            .collect()
+    } else {
+        Default::default()
+    };
     let mut lines = vec![];
     let mut stack = vec![(root, 0usize)];
     while let Some((b, depth)) = stack.pop() {
@@ -577,6 +595,9 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
                 if let Some(s) = &status {
                     line.push_str(&format!(" [{s}]"));
                 }
+                if let Some(j) = justified.get(&b.id) {
+                    line.push_str(&format!(" [{j}]"));
+                }
                 lines.push(line);
             }
         }
@@ -606,6 +627,10 @@ pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     if let Some(c) = st_.conflict_info(&scope, &id)? {
         v["conflict"] = json!(c);
     }
+    let h = st_.history(&scope, &id, CONTEXT_HISTORY)?;
+    v["justification"] = json!(h.entries.first().and_then(|e| e.justification.clone()));
+    v["history_more"] = json!(h.more);
+    v["history"] = json!(h.entries);
     Ok(budget(v, p.max_tokens))
 }
 

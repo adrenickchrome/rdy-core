@@ -126,14 +126,14 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Read a document, folder or subtree by id or path (e.g. wallets/transactions) as compact lines (default: each block's id, type and its whole statement, prompt, name or title, else its body's first sentence; references as bare ids), markdown or yaml. max_tokens cuts long output. scope is 'canon', an existing view's name (or your session's), 'tag:<version>' or 'landing:<id>'; an unknown view is E_NOT_FOUND. `id` may be `id@version` or a ref line `[id@version] …`, read under that version."
+        description = "Read a document, folder or subtree by id or path (e.g. wallets/transactions) as compact lines (default: each block's id, type and its whole statement, prompt, name or title, else its body's first sentence; references as bare ids), markdown or yaml. max_tokens cuts long output. scope is 'canon', an existing view's name (or your session's), 'tag:<version>' or 'landing:<id>'; an unknown view is E_NOT_FOUND. A compact line ends with [implements <decision>] or [editorial <class>] when the change that last wrote the block carried one. `id` may be `id@version` or a ref line `[id@version] …`, read under that version."
     )]
     async fn rdy_read(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
         self.run("rdy_read", p, tools::rdy_read).await
     }
 
     #[tool(
-        description = "By id or path: everything about one block: fields, body, version (use as base for updates), doc, links in and out, decision status, governing decisions, suspects. `id` may be `id@version` or a ref line `[id@version] …`, read under that version."
+        description = "By id or path: everything about one block: fields, body, version (use as base for updates), doc, links in and out, decision status, governing decisions, suspects. Also the block's history (newest 20 versions: change, author, justification, landing and approver) and the justification of the change that last wrote it. `id` may be `id@version` or a ref line `[id@version] …`, read under that version."
     )]
     async fn rdy_context(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
         self.run("rdy_context", p, tools::rdy_context).await
