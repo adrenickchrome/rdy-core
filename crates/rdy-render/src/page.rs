@@ -3,7 +3,7 @@ use crate::html::{self, BlockCtx, Link};
 use crate::inline::{self, Ctx};
 use crate::site::{Site, Url, rel};
 use crate::trail::Trail;
-use crate::{assets, home, nav, search, toc, trail, version};
+use crate::{assets, home, nav, review, search, toc, trail, version};
 use rdy_engine::{Materialized, VersionInfo, VersionPosition};
 use rdy_graph::{EdgeKind, Graph};
 use rdy_model::{Block, BlockId, Hash, decision, tree};
@@ -26,6 +26,8 @@ pub struct Shared<'a> {
     pub landed_ms: &'a BTreeMap<String, i64>,
     /// The figure blobs the store holds, by hash, with their bytes.
     pub blobs: &'a BTreeMap<Hash, Vec<u8>>,
+    /// What a draft changes against the canon it is based on; none for canon and tags.
+    pub review: Option<&'a review::Review>,
     /// The blobs some page links to, by the site-relative path of their file, filled as pages
     /// are built.
     pub used_blobs: RefCell<BTreeMap<String, Hash>>,
@@ -180,6 +182,8 @@ pub struct PageContext {
     pub has_mermaid: bool,
     pub has_terms: bool,
     pub has_questions: bool,
+    /// A draft render, which offers Show changes.
+    pub draft: bool,
     pub items: Vec<Item>,
     pub body: Body,
 }
@@ -467,6 +471,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         has_mermaid,
         has_terms,
         has_questions,
+        draft: sh.review.is_some(),
         items,
         body,
         kind: kind_name,

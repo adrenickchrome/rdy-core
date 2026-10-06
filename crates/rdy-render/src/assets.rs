@@ -27,6 +27,7 @@ const APP_JS: &[&[u8]] = &[
     theme!("js/search.js"),
     theme!("js/copy.js"),
     theme!("js/code.js"),
+    theme!("js/review.js"),
 ];
 
 /// The diagram library, written only for a site that has a diagram.

@@ -341,3 +341,28 @@ figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 .version .snapshot { font-size: 0.64rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
 .colophon { margin: 0; }
 /* == /version == */
+
+/* == review == */
+/* a draft's changes: a bar and a word on what changed; the word carries the meaning, colour repeats it */
+.has-chg { border-inline-start: 3px solid transparent; padding-inline-start: 0.75rem; }
+.has-chg.chg-edited { border-inline-start-color: var(--accent); }
+.has-chg.chg-new { border-inline-start-color: var(--success); }
+.chg-label { display: inline-block; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); user-select: none; -webkit-user-select: none; }
+.block > .chg-label, .page-head > .chg-label { display: block; margin-bottom: 0.25rem; }
+.chg-removed { margin: 0.6rem 0; padding-inline-start: 0.75rem; border-inline-start: 3px solid var(--line-ui); color: var(--ink-soft); font-size: 0.85rem; }
+.chg-removed > summary { cursor: pointer; color: var(--ink-soft); font-weight: 500; }
+.chg-old { margin-top: 0.4rem; color: var(--ink-soft); text-decoration: none; overflow-wrap: anywhere; }
+.nav-removed { padding: 0.3rem 0.6rem; color: var(--ink-soft); line-height: 1.4; overflow-wrap: anywhere; }
+.nav-group .chg-label, .nav-item .chg-label { margin-inline-start: 0.4rem; }
+.changes { list-style: none; margin: 0 0 1rem; padding: 0; }
+.changes li { margin: 0 0 0.35rem; overflow-wrap: anywhere; }
+.changes .chg-label { margin-inline: 0.4rem; }
+#show-changes { font-size: 0.78rem; font-weight: 600; color: var(--ink); background: var(--surface); border: 1px solid var(--line-ui); border-radius: 8px; padding: 0.25rem 0.7rem; white-space: nowrap; }
+#show-changes[aria-pressed="false"] { font-weight: 400; color: var(--ink-soft); background: var(--bg); border-style: dashed; }
+/* above 900px the bar sits in the left gutter and the text column does not move */
+@media (min-width: 901px) {
+  .has-chg { margin-inline-start: calc(-3px - 0.75rem); }
+}
+:root[data-changes="hidden"] .chg { display: none; }
+:root[data-changes="hidden"] .has-chg { border-inline-start-color: transparent; }
+/* == /review == */
