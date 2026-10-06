@@ -9,7 +9,7 @@ fn h(n: u8) -> Hash {
 
 fn store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
-    let s = Store::open(&dir.path().join("s")).unwrap();
+    let s = Store::create(&dir.path().join("s")).unwrap();
     (dir, s)
 }
 
@@ -253,7 +253,7 @@ fn create(view: &str, id: &str) -> Change {
 #[test]
 fn chain1_the_first_write_creates_the_view_and_each_write_appends_one_op() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     let c1 = s.commit_to_view("work", create("work", "b-00001")).unwrap();
     let h1 = s.view_head("work").unwrap().unwrap();
     let commit1 = s.view_op(&h1.head).unwrap();
@@ -267,14 +267,26 @@ fn chain1_the_first_write_creates_the_view_and_each_write_appends_one_op() {
         first.op,
         ViewOpKind::Create {
             base: None,
-            owner: None,
+            owner: Some(Owner {
+                actor: "someone".into(),
+                run: None
+            }),
             pinned: false
         }
     );
     assert_eq!(first.prev, None);
     assert_eq!(
         (h1.len, h1.base, h1.owner.clone(), h1.pinned, h1.closed),
-        (1, None, None, false, false)
+        (
+            1,
+            None,
+            Some(Owner {
+                actor: "someone".into(),
+                run: None
+            }),
+            false,
+            false
+        )
     );
     let c2 = s.commit_to_view("work", create("work", "b-00002")).unwrap();
     let h2 = s.view_head("work").unwrap().unwrap();
@@ -295,7 +307,7 @@ fn chain1_the_first_write_creates_the_view_and_each_write_appends_one_op() {
 #[test]
 fn chain1_bytes_written_per_commit_do_not_grow_with_the_view() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     let mut sizes = vec![];
     for i in 0..300 {
         let before = s.log_end();
@@ -316,7 +328,7 @@ fn chain1_bytes_written_per_commit_do_not_grow_with_the_view() {
 #[test]
 fn chain1_landing_appends_a_rebase_checkpoint_with_the_remaining_changes() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     let c1 = s.commit_to_view("work", create("work", "b-00001")).unwrap();
     let p = s.propose("work", "one", prov(Role::Writer)).unwrap();
     let c2 = s.commit_to_view("work", create("work", "b-00002")).unwrap();
@@ -345,7 +357,7 @@ fn chain1_the_walk_stops_at_the_latest_checkpoint() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
     {
-        let mut s = Store::open(&dir).unwrap();
+        let mut s = Store::create(&dir).unwrap();
         for i in 0..50 {
             s.commit_to_view("work", create("work", &format!("b-{i:05}")))
                 .unwrap();
@@ -357,7 +369,7 @@ fn chain1_the_walk_stops_at_the_latest_checkpoint() {
                 .unwrap();
         }
     }
-    let s = Store::open(&dir).unwrap();
+    let s = Store::create(&dir).unwrap();
     let before = s.frames_read();
     assert_eq!(s.included("work").unwrap().len(), 2);
     assert!(
@@ -372,7 +384,7 @@ fn chain1_a_broken_chain_is_an_error_naming_the_view() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
     {
-        let mut s = Store::open(&dir).unwrap();
+        let mut s = Store::create(&dir).unwrap();
         s.commit_to_view("a", create("a", "b-00001")).unwrap();
         s.commit_to_view("b", create("b", "b-00002")).unwrap();
         let hb = s.view_head("b").unwrap().unwrap();
@@ -381,7 +393,7 @@ fn chain1_a_broken_chain_is_an_error_naming_the_view() {
         s.set_refs(vec![("view/a".into(), postcard::to_allocvec(&ha).unwrap())])
             .unwrap();
     }
-    let s = Store::open(&dir).unwrap();
+    let s = Store::create(&dir).unwrap();
     match s.view("a") {
         Err(StoreError::Decode(m)) => assert!(
             m.contains("view chain of \"a\" is broken at") && m.contains("belongs to view \"b\""),
@@ -389,4 +401,33 @@ fn chain1_a_broken_chain_is_an_error_naming_the_view() {
         ),
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn sess2_an_implicit_create_records_the_changes_actor_and_run_as_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
+    let mut c = create("v", "b-00001");
+    c.provenance.actor = "agent:w".into();
+    c.provenance.run = Some("r1".into());
+    s.commit_to_view("v", c).unwrap();
+    let owner = Owner {
+        actor: "agent:w".into(),
+        run: Some("r1".into()),
+    };
+    let h = s.view_head("v").unwrap().unwrap();
+    assert_eq!(h.owner, Some(owner.clone()));
+    let commit = s.view_op(&h.head).unwrap();
+    let first = s.view_op(&commit.prev.unwrap()).unwrap();
+    assert_eq!(
+        first.op,
+        ViewOpKind::Create {
+            base: None,
+            owner: Some(owner.clone()),
+            pinned: false
+        }
+    );
+    // a later write by someone else does not take the view
+    s.commit_to_view("v", create("v", "b-00002")).unwrap();
+    assert_eq!(s.view_head("v").unwrap().unwrap().owner, Some(owner));
 }

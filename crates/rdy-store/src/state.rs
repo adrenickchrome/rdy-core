@@ -3,7 +3,7 @@ use crate::kinds;
 use crate::land::LandRequest;
 use crate::merge::{MergeChange, Merged, merge_indexed};
 use crate::store::encode;
-use crate::view::{ViewHead, ViewOp, ViewOpKind};
+use crate::view::{Owner, ViewHead, ViewOp, ViewOpKind};
 use crate::{Store, StoreReader};
 use rdy_model::{
     Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance, StateSnapshot, Tag,
@@ -285,16 +285,20 @@ impl Store {
             ),
             None => {
                 let base = self.canon_head()?;
+                let first = Some(Owner {
+                    actor: p.actor.clone(),
+                    run: p.run.clone(),
+                });
                 let create = encode(&view_op(
                     None,
                     ViewOpKind::Create {
                         base,
-                        owner: None,
+                        owner: first.clone(),
                         pinned: false,
                     },
                 ));
                 let id = Hash::of(&create);
-                (Some(create), id, base, 0, None, false)
+                (Some(create), id, base, 0, first, false)
             }
         };
         let commit = encode(&view_op(Some(prev), ViewOpKind::Commit { change: cid }));

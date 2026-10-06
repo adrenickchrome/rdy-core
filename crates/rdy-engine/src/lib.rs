@@ -1,4 +1,5 @@
 mod decide;
+pub mod engine;
 mod error;
 pub mod events;
 mod gate;
@@ -26,12 +27,18 @@ pub use materialize::{Materialized, PathMiss};
 pub use paths::TreeNode;
 pub use query::{Context, ImpactItem, ImpactVia, compact_summary, field_json, summary, summary_in};
 pub use read_state::{Delta, ReadState};
-pub use session::{PinnedClock, Scope, Session, now_ms, pin_clock, rfc3339_now};
+pub use session::{
+    HUMAN_RUN, PinnedClock, Scope, Session, SessionKind, classify, human_actor,
+    human_actor_from_env, now_ms, pin_clock, rfc3339_now,
+};
 pub use tree_io::Diagnostic;
 pub use version::{
     AS_OF_CACHE_ENTRIES, VersionInfo, VersionPosition, VersionRef, ViewPosition, parse_version,
 };
 pub use write::{LinkInput, OpInput, WriteRequest, WriteResult, json_to_field};
+
+pub use engine::{Engine, Local, WriteFn};
+pub use rdy_store::OpenReport;
 
 use arc_swap::ArcSwap;
 use rdy_schema::{Pack, PackSet};
@@ -40,6 +47,7 @@ use rdy_store::{Store, kinds, layout};
 use read_state::{AsOfCache, Entry};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Config {
@@ -50,6 +58,121 @@ struct Config {
     /// One sentence about the project, shown on the site's home page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    #[serde(default, skip_serializing_if = "ServeSection::is_empty")]
+    serve: ServeSection,
+}
+
+/// The `serve:` section of `.rdy/config.yaml`, in seconds.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ServeSection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    start_timeout: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    idle_timeout: Option<u64>,
+}
+
+impl ServeSection {
+    fn is_empty(&self) -> bool {
+        self.start_timeout.is_none() && self.idle_timeout.is_none()
+    }
+
+    fn resolve(&self) -> ServeConfig {
+        ServeConfig {
+            start_timeout: self
+                .start_timeout
+                .map_or(ServeConfig::DEFAULT.start_timeout, Duration::from_secs),
+            idle_timeout: self
+                .idle_timeout
+                .map_or(ServeConfig::DEFAULT.idle_timeout, Duration::from_secs),
+        }
+    }
+}
+
+/// How long a client waits for a daemon to start and how long an idle daemon stays up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServeConfig {
+    pub start_timeout: Duration,
+    pub idle_timeout: Duration,
+}
+
+impl ServeConfig {
+    pub const DEFAULT: ServeConfig = ServeConfig {
+        start_timeout: Duration::from_secs(30),
+        idle_timeout: Duration::from_secs(600),
+    };
+}
+
+/// The project's `serve:` settings, read without opening the store. A missing file, a missing
+/// section or an unreadable value gives the default for what is missing and never an error: a
+/// client must be able to start a daemon on a project whose config is broken, and the daemon
+/// then reports the config error.
+pub fn serve_config(project: &Path) -> ServeConfig {
+    let section = std::fs::read_to_string(project.join(".rdy/config.yaml"))
+        .ok()
+        .and_then(|t| serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&t).ok())
+        .and_then(|v| v.get("serve").cloned());
+    let secs = |key: &str| {
+        section
+            .as_ref()
+            .and_then(|s| s.get(key))
+            .and_then(serde_yaml_ng::Value::as_u64)
+    };
+    ServeSection {
+        start_timeout: secs("start_timeout"),
+        idle_timeout: secs("idle_timeout"),
+    }
+    .resolve()
+}
+
+/// What the pack-defining files looked like at one moment: `.rdy/config.yaml` and every
+/// `.rdy/packs/*.yaml` (and `.yml`), sorted by path, each as `(path, length, mtime in unix ms)`;
+/// `hash` is BLAKE3 over each file's path bytes, a NUL, its contents and a NUL, in that order.
+/// Equal hashes mean equal bytes whatever the mtimes say.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackFingerprint {
+    pub files: Vec<(PathBuf, u64, i64)>,
+    pub hash: rdy_model::Hash,
+}
+
+pub fn pack_fingerprint(project: &Path) -> Result<PackFingerprint, RdyError> {
+    let mut paths = vec![project.join(".rdy/config.yaml")];
+    paths.extend(pack_files(&project.join(".rdy/packs"))?);
+    let mut files = Vec::with_capacity(paths.len());
+    let mut buf = Vec::new();
+    for path in paths {
+        let meta = std::fs::metadata(&path).map_err(io)?;
+        let bytes = std::fs::read(&path).map_err(io)?;
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_millis() as i64);
+        buf.extend_from_slice(path.as_os_str().as_encoded_bytes());
+        buf.push(0);
+        buf.extend_from_slice(&bytes);
+        buf.push(0);
+        files.push((path, meta.len(), mtime));
+    }
+    Ok(PackFingerprint {
+        files,
+        hash: rdy_model::Hash::of(&buf),
+    })
+}
+
+/// What `Rdy::reload_pack` did.
+#[derive(Debug)]
+pub enum ReloadOutcome {
+    /// The pack files and the config are byte-for-byte what is loaded.
+    Unchanged,
+    /// The config and pack were re-read and the state republished with the new pack.
+    Reloaded,
+    /// The files changed but do not resolve; the loaded pack stays. `fingerprint` is the files
+    /// as this reload read them, taken before their bytes were evaluated: recording it as seen
+    /// never marks newer, unevaluated bytes as seen.
+    Invalid {
+        error: RdyError,
+        fingerprint: PackFingerprint,
+    },
 }
 
 pub struct Rdy {
@@ -73,6 +196,9 @@ pub struct Rdy {
     pack: Arc<Pack>,
     /// The project's pack followed by every pack it extends, nearest first.
     lineage: Vec<String>,
+    /// The pack files as they were when `pack` was last loaded.
+    fingerprint: PackFingerprint,
+    serve: ServeConfig,
 }
 
 fn io(e: std::io::Error) -> RdyError {
@@ -84,31 +210,56 @@ pub fn resolve_pack(project: &Path, name: &str) -> Result<Pack, RdyError> {
     Ok(load_pack(project, name)?.0)
 }
 
+/// The pack the project at `project` names in `.rdy/config.yaml`, resolved without opening its
+/// store (so it works while another process holds the store). A missing or unreadable config is
+/// the same error `Rdy::open` gives.
+pub fn project_pack(project: &Path) -> Result<Pack, RdyError> {
+    let cfg = read_config(project)?;
+    resolve_pack(project, &cfg.pack)
+}
+
+/// The `.yaml` and `.yml` files of a packs directory, sorted; none if it does not exist.
+fn pack_files(dir: &Path) -> Result<Vec<PathBuf>, RdyError> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .map_err(io)?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .collect();
+    files.sort();
+    files.retain(|f| f.extension().is_some_and(|x| x == "yaml" || x == "yml"));
+    Ok(files)
+}
+
+fn read_config(root: &Path) -> Result<Config, RdyError> {
+    let cfg_path = root.join(".rdy/config.yaml");
+    if !cfg_path.exists() {
+        return Err(RdyError::new(
+            E_NO_PROJECT,
+            format!("{} is not an rdy project", root.display()),
+            "run rdy init in the project directory",
+        ));
+    }
+    let text = std::fs::read_to_string(&cfg_path).map_err(io)?;
+    serde_yaml_ng::from_str(&text)
+        .map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "fix .rdy/config.yaml"))
+}
+
 fn load_pack(root: &Path, name: &str) -> Result<(Pack, Vec<String>), RdyError> {
     let mut set = PackSet::with_builtin();
-    let dir = root.join(".rdy/packs");
-    if dir.exists() {
-        let mut files: Vec<_> = std::fs::read_dir(&dir)
-            .map_err(io)?
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .collect();
-        files.sort();
-        for f in files
-            .into_iter()
-            .filter(|f| f.extension().is_some_and(|x| x == "yaml" || x == "yml"))
-        {
-            let text = std::fs::read_to_string(&f).map_err(io)?;
-            set.add_yaml_from(&text, &f.display().to_string())
-                .map_err(|e| match e {
-                    rdy_schema::SchemaError::Duplicate { .. } => RdyError::new(
-                        E_CONFIG,
-                        e.to_string(),
-                        "give each pack its own name; to change a pack, write a differently named pack that extends it",
-                    ),
-                    e => RdyError::new(E_CONFIG, format!("{}: {e}", f.display()), "fix the pack file"),
-                })?;
-        }
+    for f in pack_files(&root.join(".rdy/packs"))? {
+        let text = std::fs::read_to_string(&f).map_err(io)?;
+        set.add_yaml_from(&text, &f.display().to_string())
+            .map_err(|e| match e {
+                rdy_schema::SchemaError::Duplicate { .. } => RdyError::new(
+                    E_CONFIG,
+                    e.to_string(),
+                    "give each pack its own name; to change a pack, write a differently named pack that extends it",
+                ),
+                e => RdyError::new(E_CONFIG, format!("{}: {e}", f.display()), "fix the pack file"),
+            })?;
     }
     let config = |e: rdy_schema::SchemaError| {
         RdyError::new(
@@ -135,10 +286,14 @@ impl Rdy {
         // dur1: .rdy and .rdy/packs are fsynced into their parents (the store adds .rdy/store)
         rdy_store::fsutil::create_dir_durable(&dot.join("packs")).map_err(io)?;
         load_pack(project, pack)?;
+        // the store first: a directory there that is not empty and not a format-3 store is
+        // refused before the config makes this a project (fmt3)
+        layout::create_project_store(&dot)?.close()?;
         let cfg = serde_yaml_ng::to_string(&Config {
             pack: pack.to_string(),
             name: None,
             description: None,
+            serve: ServeSection::default(),
         })
         .expect("config yaml");
         rdy_store::fsutil::write_durable(&dot.join("config.yaml"), cfg.as_bytes()).map_err(io)?;
@@ -146,17 +301,14 @@ impl Rdy {
     }
 
     pub fn open(project: &Path) -> Result<Rdy, RdyError> {
-        let cfg_path = project.join(".rdy/config.yaml");
-        if !cfg_path.exists() {
-            return Err(RdyError::new(
-                E_NO_PROJECT,
-                format!("{} is not an rdy project", project.display()),
-                "run rdy init in the project directory",
-            ));
-        }
-        let text = std::fs::read_to_string(&cfg_path).map_err(io)?;
-        let cfg: Config = serde_yaml_ng::from_str(&text)
-            .map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "fix .rdy/config.yaml"))?;
+        // the fingerprint before the config and pack are read: a file edited between the reads
+        // is then loaded new and fingerprinted old, so the watch's next `changed()` reloads it
+        // (never the other way, which would mark unloaded bytes as seen). The config's own
+        // error comes first (not a project, a bad config); an unreadable pack file fails the
+        // open before the store is locked.
+        let fingerprint = pack_fingerprint(project);
+        let cfg = read_config(project)?;
+        let fingerprint = fingerprint?;
         let (pack, lineage) = load_pack(project, &cfg.pack)?;
         let store = layout::open_project_store(&project.join(".rdy"))?;
         let pack = Arc::new(pack);
@@ -190,6 +342,8 @@ impl Rdy {
             store,
             pack,
             lineage,
+            fingerprint,
+            serve: cfg.serve.resolve(),
         };
         r.invalidate();
         Ok(r)
@@ -201,6 +355,58 @@ impl Rdy {
     pub fn pack(&self) -> &Pack {
         &self.pack
     }
+    /// The `serve:` settings the config had when it was last loaded.
+    pub fn serve_config(&self) -> ServeConfig {
+        self.serve
+    }
+
+    /// What the last `Store::open` did (a clone of the store's report).
+    pub fn open_report(&self) -> OpenReport {
+        self.store.open_report().clone()
+    }
+
+    /// The pack files as they were when the loaded pack was read: at open and after each
+    /// successful reload.
+    pub fn pack_fingerprint(&self) -> &PackFingerprint {
+        &self.fingerprint
+    }
+
+    /// Re-reads the config and packs if their bytes changed since they were loaded. A config or
+    /// pack that does not resolve is `Invalid`: the loaded pack, lineage and fingerprint stay, so
+    /// a later fix counts as a change and a still-invalid state is reported again. On success the
+    /// state is republished with the new pack. `Err` is only an I/O error reading the
+    /// fingerprint (or a failed republish).
+    pub fn reload_pack(&mut self) -> Result<ReloadOutcome, RdyError> {
+        let fp = pack_fingerprint(&self.root)?;
+        if fp.hash == self.fingerprint.hash {
+            return Ok(ReloadOutcome::Unchanged);
+        }
+        let loaded = read_config(&self.root)
+            .and_then(|cfg| load_pack(&self.root, &cfg.pack).map(|(p, l)| (cfg, p, l)));
+        let (cfg, pack, lineage) = match loaded {
+            Ok(v) => v,
+            Err(error) => {
+                return Ok(ReloadOutcome::Invalid {
+                    error,
+                    fingerprint: fp,
+                });
+            }
+        };
+        self.pack = Arc::new(pack);
+        self.lineage = lineage;
+        self.serve = cfg.serve.resolve();
+        self.fingerprint = fp;
+        // entries built under the old pack must not serve the new one
+        self.as_of
+            .lru
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        *self.vpos.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
+        self.publish(Delta::Full)?;
+        Ok(ReloadOutcome::Reloaded)
+    }
+
     pub fn store(&self) -> &Store {
         &self.store
     }
@@ -352,7 +558,7 @@ impl Rdy {
         // the config is re-read only by a full publish (open, invalidate, reindex); every other
         // publish carries the previous state's name and description
         let (name, description) = match delta {
-            Delta::Full => site_identity(&prev.root, read_config(&prev.root).as_ref()),
+            Delta::Full => site_identity(&prev.root, read_config_lenient(&prev.root).as_ref()),
             _ => (Arc::clone(&prev.name), prev.description.clone()),
         };
         let (canon, views, tags) = match delta {
@@ -498,7 +704,7 @@ impl Rdy {
 }
 
 /// The config at `root` as it is on disk; any read or parse error reads as no config.
-fn read_config(root: &Path) -> Option<Config> {
+fn read_config_lenient(root: &Path) -> Option<Config> {
     let text = std::fs::read_to_string(root.join(".rdy/config.yaml")).ok()?;
     serde_yaml_ng::from_str(&text).ok()
 }

@@ -21,6 +21,7 @@ fn bench(c: &mut Criterion) {
         actor: "agent:bench".into(),
         run: None,
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     };
     let parent = r
         .read()

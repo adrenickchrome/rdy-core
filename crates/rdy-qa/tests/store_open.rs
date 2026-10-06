@@ -15,18 +15,18 @@ fn seg1_a_segment_after_a_gap_refuses_to_open() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
     let h = {
-        let mut s = Store::open(&dir).unwrap();
+        let mut s = Store::create(&dir).unwrap();
         s.put_blob(b"acknowledged").unwrap()
     };
     // a later segment exists, but the one before it is gone
     std::fs::copy(seg(&dir, 0), seg(&dir, 2)).unwrap();
-    let e = Store::open(&dir).err().expect("open must refuse");
+    let e = Store::create(&dir).err().expect("open must refuse");
     assert!(matches!(&e, StoreError::MissingFrames { .. }), "{e}");
     assert!(e.to_string().contains("seg-000001.log"), "{e}");
     // nothing was rebuilt or truncated: removing the stray segment gives a working store again
     std::fs::remove_file(seg(&dir, 2)).unwrap();
     assert_eq!(
-        Store::open(&dir).unwrap().get_blob(&h).unwrap(),
+        Store::create(&dir).unwrap().get_blob(&h).unwrap(),
         b"acknowledged"
     );
 }
@@ -36,7 +36,7 @@ fn seg1_an_index_ahead_of_the_log_refuses_instead_of_rolling_back() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
     let (first, second, cut) = {
-        let mut s = Store::open(&dir).unwrap();
+        let mut s = Store::create(&dir).unwrap();
         let first = s.put_blob(b"first").unwrap();
         let cut = std::fs::metadata(seg(&dir, 0)).unwrap().len() as usize;
         let second = s.put_blob(b"second").unwrap();
@@ -45,14 +45,14 @@ fn seg1_an_index_ahead_of_the_log_refuses_instead_of_rolling_back() {
     let full = std::fs::read(seg(&dir, 0)).unwrap();
     // the second acknowledged write is gone from the log, cut at a frame boundary (not torn)
     std::fs::write(seg(&dir, 0), &full[..cut]).unwrap();
-    let e = Store::open(&dir)
+    let e = Store::create(&dir)
         .err()
         .expect("open must refuse, not reindex over the loss");
     assert!(matches!(&e, StoreError::MissingFrames { .. }), "{e}");
     assert!(e.to_string().contains("seg-000000.log"), "{e}");
     // the index was kept: restoring the segment brings both writes back
     std::fs::write(seg(&dir, 0), &full).unwrap();
-    let s = Store::open(&dir).unwrap();
+    let s = Store::create(&dir).unwrap();
     assert_eq!(s.get_blob(&first).unwrap(), b"first");
     assert_eq!(s.get_blob(&second).unwrap(), b"second");
 }
@@ -86,14 +86,14 @@ fn seg1_quarantined_tails_are_not_segments() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
     let h = {
-        let mut s = Store::open(&dir).unwrap();
+        let mut s = Store::create(&dir).unwrap();
         s.put_blob(b"kept").unwrap()
     };
     // an unacknowledged torn tail: the next open quarantines it as seg-000000.log.torn-<offset>
     let mut bytes = std::fs::read(seg(&dir, 0)).unwrap();
     bytes.extend([0u8; 50]);
     std::fs::write(seg(&dir, 0), &bytes).unwrap();
-    drop(Store::open(&dir).unwrap());
+    drop(Store::create(&dir).unwrap());
     let torn = std::fs::read_dir(dir.join("segments"))
         .unwrap()
         .filter(|e| {
@@ -105,14 +105,14 @@ fn seg1_quarantined_tails_are_not_segments() {
         })
         .count();
     assert_eq!(torn, 1);
-    assert_eq!(Store::open(&dir).unwrap().get_blob(&h).unwrap(), b"kept");
+    assert_eq!(Store::create(&dir).unwrap().get_blob(&h).unwrap(), b"kept");
 }
 
 #[test]
 fn dur1_opening_a_new_store_fsyncs_every_directory_it_created() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("a/b/store");
-    let s = Store::open(&dir).unwrap();
+    let s = Store::create(&dir).unwrap();
     let synced: std::collections::BTreeSet<PathBuf> = s.durable_dirs().iter().cloned().collect();
     for want in [
         base.path().to_path_buf(),
@@ -127,7 +127,7 @@ fn dur1_opening_a_new_store_fsyncs_every_directory_it_created() {
         );
     }
     drop(s);
-    let s = Store::open(&dir).unwrap();
+    let s = Store::create(&dir).unwrap();
     assert!(
         s.durable_dirs().is_empty(),
         "a reopen creates nothing: {:?}",
@@ -173,8 +173,10 @@ fn lock1_only_a_held_lock_is_e_locked() {
 fn lock1_a_second_open_is_still_e_locked() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let _held = Store::open(&dir).unwrap();
-    let e = Store::open(&dir).err().expect("the second open is refused");
+    let _held = Store::create(&dir).unwrap();
+    let e = Store::create(&dir)
+        .err()
+        .expect("the second open is refused");
     assert!(matches!(e, StoreError::Locked(_)), "{e}");
 }
 

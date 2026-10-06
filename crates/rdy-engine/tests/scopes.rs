@@ -7,6 +7,7 @@ fn session(role: Role) -> Session {
         actor: "human:founder".into(),
         run: None,
         role,
+        kind: rdy_engine::SessionKind::Human,
     }
 }
 fn writer() -> Session {

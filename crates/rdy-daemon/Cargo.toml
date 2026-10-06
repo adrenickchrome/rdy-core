@@ -11,6 +11,13 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 libc.workspace = true
+rdy-engine.workspace = true
+rdy-mcp.workspace = true
+rdy-render.workspace = true
+rdy-model.workspace = true
+rmcp.workspace = true
+arc-swap.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+rdy-schema.workspace = true

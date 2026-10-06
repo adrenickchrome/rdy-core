@@ -9,6 +9,8 @@ pub const E_DAEMON_VERSION: &str = "E_DAEMON_VERSION";
 pub const E_DAEMON_GONE: &str = "E_DAEMON_GONE";
 pub const E_BAD_INPUT: &str = "E_BAD_INPUT";
 pub const E_LIMIT: &str = "E_LIMIT";
+/// An op that needs a session ran before the `session` op.
+pub const E_NO_SESSION: &str = "E_NO_SESSION";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ErrorReply {
@@ -37,3 +39,19 @@ impl std::fmt::Display for ErrorReply {
 }
 
 impl std::error::Error for ErrorReply {}
+
+impl From<rdy_engine::RdyError> for ErrorReply {
+    fn from(e: rdy_engine::RdyError) -> Self {
+        let mut r = ErrorReply::new(e.code, e.message, e.fix);
+        if !e.issues.is_empty() {
+            r.extra.insert(
+                "issues".into(),
+                serde_json::to_value(&e.issues).unwrap_or(Value::Null),
+            );
+        }
+        if let Some(c) = e.corrected {
+            r.extra.insert("corrected".into(), c);
+        }
+        r
+    }
+}

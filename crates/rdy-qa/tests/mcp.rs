@@ -161,7 +161,8 @@ fn mcp2_an_oversized_request_with_the_id_last_gets_a_reply() {
 #[test]
 fn mcp2_the_asset_limit_is_checked_before_decoding() {
     let (dir, r) = project();
-    let mut st = rdy_mcp::tools::McpState::new(r);
+    let mut st =
+        rdy_mcp::tools::McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
     rdy_mcp::tools::rdy_session(
         &mut st,
         serde_json::from_value(json!({"actor": "agent:qa", "role": "writer"})).unwrap(),
@@ -262,23 +263,4 @@ fn mcp_pipelined_requests_are_all_answered_in_time() {
         );
         assert_eq!(v["id"], *id, "reply {n} out of order: {v}");
     }
-}
-
-#[test]
-fn mcp_a_second_server_on_the_same_project_is_refused_quickly() {
-    let (dir, mut c) = server();
-    session(&mut c);
-    let out = std::process::Command::new(rdy_bin())
-        .args(["mcp", "--project"])
-        .arg(dir.path())
-        .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("E_LOCKED") || err.to_lowercase().contains("lock"),
-        "{err}"
-    );
-    c.alive();
 }

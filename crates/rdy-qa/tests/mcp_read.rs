@@ -42,7 +42,7 @@ fn md1_markdown_carries_every_blocks_content_and_id() {
         },
     )
     .unwrap();
-    let mut st = McpState::new(r);
+    let mut st = McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
     rdy_session(
         &mut st,
         serde_json::from_value(json!({"actor": "agent:qa", "role": "writer", "view": "work"}))
@@ -96,7 +96,7 @@ fn md1_markdown_carries_every_blocks_content_and_id() {
         "lang in:\n{text}"
     );
     let ids: Vec<String> = st
-        .rdy
+        .engine
         .read()
         .materialized(&Scope::View("work".into()))
         .unwrap()

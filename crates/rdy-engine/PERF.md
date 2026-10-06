@@ -451,3 +451,52 @@ at the time); the write and the incremental step do not move with size.
   first pass did not stand out against the 2 s target here (it was 2.06 s in the pre-QA run, taken
   while the OS flushed the freshly generated store). One run does not prove it is gone; the median
   of 3 is kept as the judged number.
+
+## M2b: write through the daemon, daemon cold start (2026-10-05)
+
+`qa-perf` (typical tier, about 10k blocks) gains three ops. `new_doc_single` is the in-process
+comparator: one `new_doc` (a doc and its skeleton) on a `Rdy` handle. `daemon_write_single` is the
+same write, `new_doc` on view `va`, over one `ctl` connection to `rdy_daemon::start` in this process
+(30 runs each). `daemon_cold_start` is `start` to `ready` on the same project once its index is
+current (3 runs), so it is the warm-up of canon plus the socket bind; a lagging index is
+`cold_open_lagging`'s case. `write_single` is a one-claim write and is shown for reference only: the
+two new rows are the like-for-like pair.
+
+Medians and p95 in ms. Mac: macOS 26.6.2 / Apple M4 Pro / APFS, release build, two back-to-back runs
+under a load average of about 4 (other builds on the machine, so not quiet). Linux: Ubuntu 24.04 /
+AMD Ryzen 7 9800X3D / ext4 on consumer NVMe, isolated bench, release build, two `cargo qa --deep`
+runs (run 1 at the plan's last task, run 3 after the final review's fix round; a run 2 between
+them agreed with both).
+
+| op | Mac run 1 median / p95 | Mac run 2 median / p95 | Linux run 1 median / p95 | Linux run 3 median / p95 |
+|---|---|---|---|---|
+| `write_single` (reference) | 8.523 / 11.204 | 4.356 / 5.348 | 2.478 / 2.520 | 2.537 / 25.158 |
+| `new_doc_single` (in-process) | 6.014 / 8.317 | 6.311 / 7.170 | 3.636 / 3.686 | 3.662 / 3.705 |
+| `daemon_write_single` | 4.562 / 8.281 | 4.982 / 5.792 | 2.606 / 2.705 | 2.651 / 2.729 |
+| `daemon_cold_start` | 81.966 / 91.641 | 87.277 / 87.280 | 52.938 / 54.341 | 53.982 / 54.480 |
+| `daemon_write_single_50k` | 5.151 / 6.277 (one run) | - | 2.733 / 2.856 | 2.741 / 2.893 |
+| `daemon_cold_start_50k` | 258.337 / 264.108 (one run) | - | 193.934 / 195.657 | 193.128 / 193.380 |
+
+`qa-baseline.json` records the Linux run 3 rows for the five new ops (run 2: `daemon_write_single`
+2.771, `daemon_cold_start` 53.741, `new_doc_single` 3.880, `daemon_write_single_50k` 2.678,
+`daemon_cold_start_50k` 193.742 ms median). On Linux the daemon's write is 2.6 to 2.8 ms median and
+under 3 ms p95 in every run, so "< 5 ms p99 on Linux NVMe" holds as far as the tier measures (it
+records p95, not p99, over 30 runs). The 25 ms `write_single` p95 in run 3 is an ext4 journal
+stall in that op's runs, not the daemon's path.
+`daemon_cold_start` is about 54 ms at 10k blocks and 193 ms at 50k, far under its "< 2 s at
+100k" target; it tracks `cold_open` (about 51 ms and 165 ms in the same runs) plus the canon
+warm-up. `new_doc_single` is measured after the cold opens (it writes 30 docs into view `vd`, which
+the cold opens would otherwise open too). The cold-open medians drift between bench sessions by
+about 8 ms (`cold_open`) and 12 ms (`cold_open_lagging`) for `main` and this branch alike, so the
+`cold_open_lagging` row's +23% against its baseline is the machine, not the daemon.
+
+The daemon adds one socket round trip and one thread hand-off per write, and on the Mac that is not
+visible against the one durable flush that dominates the write: `daemon_write_single` reads within
+the noise of the in-process `new_doc_single` (and below it in every run, Mac and Linux; `new_doc_single` writes into
+a fresh view, `vd`, where the daemon writes into `va`, so the pair is the same shape and not the same
+bytes). Reads take no lock. A connection's requests run one at a time in arrival order (a `ctl`
+connection reads one line at a time; an MCP session's tool calls are stamped at the transport,
+`rdy_mcp::order`), so one connection's writes queue behind each other and two connections' writes
+queue behind the one writer thread, and the flush is the cost either way. On the Mac the flush is
+the floor (`F_FULLFSYNC`, "Write p99: missed" above); on the Linux bench the daemon's write is
+within "< 5 ms p99 on Linux NVMe" as above.

@@ -106,7 +106,8 @@ fn link1_rdy_edit_removing_a_link_kind_still_removes_it() {
 #[test]
 fn link1_schema_explains_link_updates() {
     let (_d, r) = project();
-    let mut st = rdy_mcp::tools::McpState::new(r);
+    let mut st =
+        rdy_mcp::tools::McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
     let s =
         rdy_mcp::tools::rdy_schema(&mut st, serde_json::from_value(json!({})).unwrap()).unwrap();
     assert!(

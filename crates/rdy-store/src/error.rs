@@ -11,7 +11,7 @@ pub enum StoreError {
     Decode(String),
     #[error("object {0} not found")]
     NotFound(Hash),
-    #[error("store at {0} is already open in another process")]
+    #[error("store at {0} is locked by another process")]
     Locked(PathBuf),
     /// The store's lock was free but its index is still open: a `StoreReader` (or a state built
     /// on one) of an earlier open in this process outlived its store.

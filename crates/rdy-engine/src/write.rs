@@ -1,6 +1,6 @@
 use crate::error::*;
 use crate::keys::{self, Keys};
-use crate::{Delta, Materialized, Rdy, Scope, Session};
+use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, SessionKind};
 use rdy_model::tree;
 use rdy_model::{
     Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Justification, Link, Op, RefMode,
@@ -1382,12 +1382,12 @@ impl Rdy {
                 "start the session as a writer",
             ));
         }
-        writable_view(&req.view)?;
         if req.ops.is_empty() {
             return Err(bad("no ops given", "pass at least one op"));
         }
         let scope = Scope::View(req.view.clone());
         let st = self.read();
+        check_view_access(&st, &req.view, session)?;
         let m = st.materialized(&scope)?;
         let (ops, created, touched, names) =
             build_ops(&self.pack, &self.store, &m, session, req.ops)?;
@@ -1433,6 +1433,46 @@ impl Rdy {
             inherited: BTreeMap::new(),
             warnings,
         })
+    }
+}
+
+/// May `s` write into `view`? The view must be writable at all (`writable_view`); then an agent
+/// session may only commit into a view with no head yet, an unowned head, or a head it owns
+/// (same actor and run). A human session may write into any view.
+pub(crate) fn check_view_access(st: &ReadState, view: &str, s: &Session) -> Result<(), RdyError> {
+    writable_view(view)?;
+    if s.kind != SessionKind::Agent {
+        return Ok(());
+    }
+    match st.view_head(view) {
+        Some(h) => match &h.owner {
+            Some(o) if (&o.actor, &o.run) != (&s.actor, &s.run) => Err(RdyError::new(
+                E_VIEW_OWNER,
+                format!(
+                    "view {view:?} is owned by {}{}",
+                    o.actor,
+                    o.run.as_ref().map(|r| format!("/{r}")).unwrap_or_default()
+                ),
+                own_view_fix(view, s),
+            )),
+            _ => Ok(()),
+        },
+        None => Ok(()),
+    }
+}
+
+/// The `E_VIEW_OWNER` fix. When the refused view is the session's own default view, sending the
+/// agent back there would loop: it is told to start a session with another run name, or fork.
+fn own_view_fix(view: &str, s: &Session) -> String {
+    let own = s.default_view();
+    if view == own {
+        "this is your default view and another session owns it: start a session with another run \
+         name (RDY_RUN, or rdy_session's run) to write to a view of that name, or fork this view"
+            .to_string()
+    } else {
+        format!(
+            "write to your own view ({own}), fork it, or include its changes into your own view"
+        )
     }
 }
 

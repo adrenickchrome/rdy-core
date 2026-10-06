@@ -34,6 +34,8 @@ fn spawn1_the_serve_command_has_the_right_shape_and_no_rdy_env() {
         vec![
             OsStr::new("serve"),
             OsStr::new("--detach"),
+            // fix forward (cli2): the spawned child serves in place rather than spawning again
+            OsStr::new("--spawned"),
             OsStr::new("--project"),
             dir.path().as_os_str()
         ]
@@ -88,8 +90,21 @@ fn spawn1_a_spawned_child_writes_to_the_log_in_its_own_process_group() {
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut cmd = serve_command(&fake, dir.path(), &run).unwrap();
     spawn_serve(&mut cmd).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(700));
-    let text = std::fs::read_to_string(run.log_file()).unwrap();
+    // poll until the child has written both lines (its name, then its pgid); a fixed sleep flaked
+    // under load (two tracks building on one machine)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let text = loop {
+        let text = std::fs::read_to_string(run.log_file()).unwrap_or_default();
+        let done = text.contains("child-")
+            && text
+                .lines()
+                .last()
+                .is_some_and(|l| l.trim().parse::<i32>().is_ok());
+        if done || std::time::Instant::now() > deadline {
+            break text;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
     assert!(text.contains("child-"), "{text}");
     let pgid: i32 = text.lines().last().unwrap().trim().parse().unwrap();
     assert_ne!(
@@ -229,4 +244,69 @@ fn spawn1_the_serve_command_refuses_a_socket_path_over_the_limit() {
         !run.path().exists(),
         "no run dir or log for a daemon that could not bind"
     );
+}
+
+/// A relative project reaches the child as an absolute path: the child runs in the project, so
+/// a relative `--project` would resolve against the project itself (`<p>/<p>`) and the daemon
+/// would exit with `E_NO_PROJECT` (cli2 fix round 1).
+#[test]
+fn spawn1_a_relative_project_reaches_the_child_absolute() {
+    let _env = env_lock();
+    let dir = short_tempdir();
+    let run = RunDir::of_project(dir.path());
+    let rel = std::path::Path::new("docs");
+    let cmd = serve_command(std::path::Path::new("/usr/local/bin/rdy"), rel, &run).unwrap();
+    let want = std::env::current_dir().unwrap().join("docs");
+    let args: Vec<&OsStr> = cmd.get_args().collect();
+    assert_eq!(args.last(), Some(&want.as_os_str()), "{args:?}");
+    assert_eq!(cmd.get_current_dir(), Some(want.as_path()));
+}
+
+/// A spawned child that exits is reaped even after its `Spawned` is dropped: without a reaper a
+/// long-lived spawner (`rdy edit`, an `rdy mcp` proxy) keeps the daemon as a zombie, which
+/// `process_alive` still reports, so `rdy serve --stop` waits it out and fails (cli2 fix round 1).
+#[test]
+fn spawn1_a_spawned_child_is_reaped_and_reports_its_code_after_the_spawned_is_dropped() {
+    let _env = env_lock();
+    let dir = short_tempdir();
+    let run = RunDir::of_project(dir.path());
+    let fake = dir.path().join("fake-rdy");
+    std::fs::write(&fake, "#!/bin/sh\necho pid-$$ >&2\nexit 3\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let wait = std::time::Duration::from_secs(5);
+    // the exit code is still reported
+    let mut spawned = spawn_serve(&mut serve_command(&fake, dir.path(), &run).unwrap()).unwrap();
+    let t0 = std::time::Instant::now();
+    let code = loop {
+        if let Some(c) = (spawned.exited)() {
+            break c;
+        }
+        assert!(t0.elapsed() < wait, "no exit code");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(code, 3);
+    // and a child whose Spawned is dropped at once does not stay behind as a zombie
+    drop(spawn_serve(&mut serve_command(&fake, dir.path(), &run).unwrap()).unwrap());
+    let t0 = std::time::Instant::now();
+    let pid: u32 = loop {
+        let text = std::fs::read_to_string(run.log_file()).unwrap_or_default();
+        let pids: Vec<&str> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("pid-"))
+            .collect();
+        if pids.len() == 2 {
+            break pids[1].trim().parse().unwrap();
+        }
+        assert!(t0.elapsed() < wait, "no second pid line: {text}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let t0 = std::time::Instant::now();
+    while process_alive(pid) {
+        assert!(
+            t0.elapsed() < wait,
+            "the exited child {pid} was never reaped (a zombie still counts as alive)"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }

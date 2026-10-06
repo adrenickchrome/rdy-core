@@ -1,9 +1,11 @@
 //! Gate helpers for the `daemon` area: an echo daemon run in a child process (the test binary
 //! re-executed with `RDY_DAEMON_CHILD`), a spawner that starts it, and client options for it.
 use rdy_daemon::{
-    CtlRequest, Daemon, DaemonConfig, E_BAD_INPUT, ErrorReply, Handler, Proto, RunDir, SessionInfo,
-    StartOptions, spawn_serve,
+    Attempt, Client, CtlRequest, Daemon, DaemonConfig, E_BAD_INPUT, ErrorReply, ExitReason,
+    Handler, Hello, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun, SessionInfo, Spawned,
+    StartOptions, connect, spawn_serve, start,
 };
+use rdy_engine::Rdy;
 use serde_json::{Value, json};
 use std::fs::OpenOptions;
 use std::io;
@@ -14,6 +16,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use tokio::net::UnixStream;
 
 /// The child's project root; unset in a normal test run.
 const ENV_CHILD: &str = "RDY_DAEMON_CHILD";
@@ -139,8 +142,8 @@ pub struct ChildSpawner {
 impl ChildSpawner {
     /// Runs `<current_exe> <test_fn> --exact --nocapture` with `RDY_DAEMON_CHILD` set to the
     /// project root, stdin null, stdout and stderr appended to the run dir's log, in a process
-    /// group of its own. Does not wait for it (a thread reaps it), and counts the spawn.
-    pub fn spawn(&self, run: &RunDir) -> io::Result<()> {
+    /// group of its own. Does not wait for it (the `Spawned` watches it), and counts the spawn.
+    pub fn spawn(&self, run: &RunDir) -> io::Result<Spawned> {
         if *run != self.run {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -175,9 +178,9 @@ impl ChildSpawner {
         for (k, v) in &self.extra_env {
             cmd.env(k, v);
         }
-        spawn_serve(&mut cmd)?;
+        let spawned = spawn_serve(&mut cmd)?;
         self.count.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Ok(spawned)
     }
 }
 
@@ -223,4 +226,293 @@ pub fn client(_run: &RunDir, version: &str, cwd: &Path, spawner: ChildSpawner) -
     );
     opts.start_timeout = CLIENT_START_TIMEOUT;
     opts
+}
+
+/// A real host (`rdy_daemon::start`) in this process over a fresh `rdy-standard` project, with a
+/// 60 s idle timeout. Dropping it stops the daemon and waits for the store to close.
+pub struct Hosted {
+    pub dir: tempfile::TempDir,
+    pub run: Option<ServeRun>,
+}
+
+/// How long `Hosted`'s clients wait for `ready`.
+const HOSTED_READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+impl Hosted {
+    /// `new_with_human("human:qa")`.
+    pub fn new() -> Hosted {
+        Hosted::new_with_human("human:qa")
+    }
+
+    /// A host whose configured human actor is `human`.
+    pub fn new_with_human(human: &str) -> Hosted {
+        let dir = short_tempdir();
+        drop(Rdy::init(dir.path(), "rdy-standard").expect("init the hosted project"));
+        let run = start(ServeOptions {
+            project: dir.path().to_path_buf(),
+            version: "t".into(),
+            detach: false,
+            idle_timeout: Some(Duration::from_secs(60)),
+            human_actor: Some(human.into()),
+        })
+        .unwrap_or_else(|e| panic!("start the host: {e}"));
+        Hosted {
+            dir,
+            run: Some(run),
+        }
+    }
+
+    /// A runtime for the test's client side.
+    pub fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("client runtime")
+    }
+
+    /// A connection of `proto` past `ready`.
+    async fn connect(&self, proto: Proto) -> Client {
+        let hello = Hello {
+            rdy: PROTO_VERSION,
+            version: "t".into(),
+            proto,
+            cwd: self.dir.path().into(),
+        };
+        let run = RunDir::of_project(self.dir.path());
+        match connect(&run, &hello).await {
+            Attempt::Ready(c) => c,
+            Attempt::Starting(p) => p
+                .wait(
+                    std::time::Instant::now() + HOSTED_READY_TIMEOUT,
+                    &mut |_| {},
+                )
+                .await
+                .unwrap_or_else(|e| panic!("the host did not become ready: {e}")),
+            other => panic!("the host did not answer the hello: {other:?}"),
+        }
+    }
+
+    /// A `ctl` connection past `ready` whose session op sent `actor` and `run`.
+    pub async fn client(&self, actor: Option<&str>, run: Option<&str>) -> Client {
+        let mut c = self.connect(Proto::Ctl).await;
+        c.ctl("session", json!({"actor": actor, "run": run}))
+            .await
+            .unwrap_or_else(|e| panic!("the session op failed: {e}"));
+        c
+    }
+
+    /// An `mcp` connection past `ready`.
+    pub async fn mcp_stream(&self) -> UnixStream {
+        self.connect(Proto::Mcp).await.into_stream()
+    }
+
+    /// Stops the daemon and waits for it (the store is closed when this returns).
+    pub fn stop(&mut self) -> ExitReason {
+        let run = self.run.take().expect("the host is running");
+        run.handle().stop();
+        run.wait()
+            .unwrap_or_else(|e| panic!("the host failed: {e}"))
+    }
+}
+
+impl Default for Hosted {
+    fn default() -> Self {
+        Hosted::new()
+    }
+}
+
+impl Drop for Hosted {
+    fn drop(&mut self) {
+        if let Some(run) = self.run.take() {
+            run.handle().stop();
+            // a failing host must not panic inside a drop (the test may already be unwinding)
+            if let Err(e) = run.wait() {
+                eprintln!("the hosted daemon exited with an error: {e}");
+            }
+        }
+    }
+}
+
+/// A fresh `rdy-standard` project whose commands run the real `rdy` binary as a client of its
+/// daemon: `.rdy/config.yaml` sets `serve.idle_timeout: 60`, the human actor is `human:qa` (a
+/// user config under `XDG_CONFIG_HOME`), and dropping it runs `rdy serve --stop`.
+pub struct Served {
+    pub dir: tempfile::TempDir,
+    /// Holds the user config `env` points at.
+    #[allow(dead_code)]
+    cfg: tempfile::TempDir,
+    env: Vec<(String, String)>,
+}
+
+/// How long `Served::kill9` waits for the killed daemon's socket to stop answering.
+const KILL_WAIT: Duration = Duration::from_secs(10);
+
+impl Served {
+    pub fn new() -> Served {
+        let dir = short_tempdir();
+        drop(Rdy::init(dir.path(), "rdy-standard").expect("init the served project"));
+        let mut cfg = OpenOptions::new()
+            .append(true)
+            .open(dir.path().join(".rdy/config.yaml"))
+            .expect("open the project config");
+        io::Write::write_all(&mut cfg, b"serve:\n  idle_timeout: 60\n")
+            .expect("append the serve section");
+        let (cfg, env) = crate::fixtures::human_env("human:qa");
+        Served { dir, cfg, env }
+    }
+
+    /// The command `rdy --project <dir> <args>` in the project, as the human: no `RDY_ACTOR`,
+    /// `RDY_RUN` or `RDY_NO_DAEMON` from this process, the user config of `human:qa`.
+    fn command(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new(crate::fixtures::rdy_bin());
+        cmd.arg("--project")
+            .arg(self.dir.path())
+            .args(args)
+            .env_remove("RDY_ACTOR")
+            .env_remove("RDY_RUN")
+            .env_remove("RDY_NO_DAEMON")
+            .envs(self.env.iter().map(|(k, v)| (k, v)))
+            .current_dir(self.dir.path());
+        cmd
+    }
+
+    /// Starts `rdy --project <dir> <args>` as the human, without waiting (stdout and stderr
+    /// piped).
+    pub fn spawn(&self, args: &[&str]) -> std::process::Child {
+        self.command(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn rdy")
+    }
+
+    /// Runs `rdy --project <dir> <args>` as the human.
+    pub fn rdy(&self, args: &[&str]) -> std::process::Output {
+        self.command(args).output().expect("run rdy")
+    }
+
+    /// Runs `rdy --project <dir> <args>` with `RDY_ACTOR=actor` and, if given, `RDY_RUN=run`.
+    pub fn rdy_as(&self, actor: &str, run: Option<&str>, args: &[&str]) -> std::process::Output {
+        let mut cmd = self.command(args);
+        cmd.env("RDY_ACTOR", actor);
+        if let Some(r) = run {
+            cmd.env("RDY_RUN", r);
+        }
+        cmd.output().expect("run rdy")
+    }
+
+    /// Whether the command succeeded, and its JSON: stdout on success, stderr on failure.
+    fn parsed(out: std::process::Output) -> (bool, Value) {
+        let ok = out.status.success();
+        let text = String::from_utf8_lossy(if ok { &out.stdout } else { &out.stderr }).into_owned();
+        let v = serde_json::from_str(text.trim())
+            .or_else(|_| serde_json::from_str(text.trim().lines().last().unwrap_or("")))
+            .unwrap_or(Value::String(text));
+        (ok, v)
+    }
+
+    /// `rdy(args)`, parsed (pass `--json` in `args`).
+    pub fn json(&self, args: &[&str]) -> (bool, Value) {
+        Served::parsed(self.rdy(args))
+    }
+
+    /// `rdy_as(actor, run, args)`, parsed (pass `--json` in `args`).
+    pub fn json_as(&self, actor: &str, run: Option<&str>, args: &[&str]) -> (bool, Value) {
+        Served::parsed(self.rdy_as(actor, run, args))
+    }
+
+    /// The human's environment (`XDG_CONFIG_HOME`), for commands a test builds itself.
+    pub fn env_pairs(&self) -> Vec<(String, String)> {
+        self.env.clone()
+    }
+
+    pub fn run_dir(&self) -> RunDir {
+        RunDir::of_project(self.dir.path())
+    }
+
+    /// The pid in `.rdy/run/daemon.pid`, if it parses and that process is alive.
+    pub fn daemon_pid(&self) -> Option<u32> {
+        let pid = self.pid_file()?;
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+            .then_some(pid)
+    }
+
+    fn pid_file(&self) -> Option<u32> {
+        std::fs::read_to_string(self.run_dir().pid_file())
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    /// SIGKILLs the daemon named by the pid file, then waits until a connect finds no daemon.
+    /// Callable from inside a tokio runtime: the wait runs its own runtime on its own thread.
+    pub fn kill9(&self) {
+        let pid = self.pid_file().expect("a daemon pid file");
+        let status = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status()
+            .expect("run kill");
+        assert!(status.success(), "kill -9 {pid} failed");
+        let run = self.run_dir();
+        let hello = Hello {
+            rdy: PROTO_VERSION,
+            version: env!("CARGO_PKG_VERSION").into(),
+            proto: Proto::Ctl,
+            cwd: self.dir.path().into(),
+        };
+        let gone = std::thread::scope(|sc| {
+            sc.spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("kill9 runtime");
+                let deadline = std::time::Instant::now() + KILL_WAIT;
+                loop {
+                    if let Attempt::NoDaemon(_) = rt.block_on(connect(&run, &hello)) {
+                        return true;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            })
+            .join()
+            .expect("the kill9 wait thread")
+        });
+        assert!(
+            gone,
+            "the daemon {pid} still answers {} s after kill -9",
+            KILL_WAIT.as_secs()
+        );
+    }
+
+    /// `rdy serve --stop`; a failure is reported on stderr, never a panic.
+    pub fn stop(&self) {
+        match self.command(&["serve", "--stop"]).output() {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => eprintln!(
+                "rdy serve --stop failed: {}",
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            Err(e) => eprintln!("rdy serve --stop did not run: {e}"),
+        }
+    }
+}
+
+impl Default for Served {
+    fn default() -> Self {
+        Served::new()
+    }
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }

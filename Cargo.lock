@@ -1237,6 +1237,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rdy-daemon",
  "rdy-engine",
  "rdy-mcp",
  "rdy-model",
@@ -1252,7 +1253,14 @@ dependencies = [
 name = "rdy-daemon"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "libc",
+ "rdy-engine",
+ "rdy-mcp",
+ "rdy-model",
+ "rdy-render",
+ "rdy-schema",
+ "rmcp",
  "serde",
  "serde_json",
  "tempfile",

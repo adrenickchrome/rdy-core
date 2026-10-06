@@ -41,7 +41,7 @@ fn change(view: &str, ops: Vec<Op>) -> Change {
 #[test]
 fn repr1_reading_the_wrong_kind_names_what_was_found() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     let h = s.put(kinds::SNAPSHOT, &StateSnapshot::default()).unwrap();
     for (what, r) in [
         ("proposal", s.proposal(&h).map(|_| ())),
@@ -65,7 +65,7 @@ fn repr1_reading_the_wrong_kind_names_what_was_found() {
 #[test]
 fn repr1_objects_read_back_in_their_kind_with_their_ids() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     let linked = Change {
         links: ChangeLinks {
             client_nonce: Some("n".into()),
@@ -124,7 +124,7 @@ fn repr1_objects_read_back_in_their_kind_with_their_ids() {
 #[test]
 fn repr1_a_landing_with_every_field_set_survives_the_store_and_a_reindex() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     let by = prov(Role::Approver);
     let l = LandingRecord {
         proposal: Hash::of(b"p"),

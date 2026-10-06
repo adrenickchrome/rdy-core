@@ -23,6 +23,16 @@ fn render_runs(html: &str) -> String {
         .collect()
 }
 
+/// Masks the date a landing was made on: the project's landings are stamped with the wall clock,
+/// so the home page's "<date> · Accepted by …" line changes every day (not a rendering change).
+fn mask_landing_date(runs: &str) -> String {
+    let re = regex::Regex::new(
+        r"(?m)^(chrome\t-\t)\d{1,2} (?:January|February|March|April|May|June|July|August|September|October|November|December) \d{4}( · )",
+    )
+    .expect("landing date pattern");
+    re.replace_all(runs, "${1}<landing date>${2}").into_owned()
+}
+
 /// Compares the visible text of `page` in `site` with `golden/site/<name>.txt` (written
 /// instead when `RDY_QA_BLESS` is set).
 fn check(site: &Path, scope: &str, page: &str) {
@@ -31,7 +41,7 @@ fn check(site: &Path, scope: &str, page: &str) {
         page.trim_end_matches(".html").replace('/', "--")
     );
     let file = golden_dir().join(format!("{name}.txt"));
-    let now = render_runs(&golden::html(site, page));
+    let now = mask_landing_date(&render_runs(&golden::html(site, page)));
     if std::env::var_os("RDY_QA_BLESS").is_some() {
         std::fs::create_dir_all(golden_dir()).unwrap();
         std::fs::write(&file, &now).unwrap();
@@ -43,6 +53,7 @@ fn check(site: &Path, scope: &str, page: &str) {
             file.display()
         )
     });
+    let want = mask_landing_date(&want);
     if want != now {
         let (a, b): (Vec<&str>, Vec<&str>) = (want.lines().collect(), now.lines().collect());
         let at = (0..a.len().max(b.len()))
@@ -63,6 +74,15 @@ fn gold1_a_golden_line_is_zone_label_flag_and_text() {
     assert_eq!(
         render_runs(html),
         "chrome\tL\tGuards\ncontent\t-\tA guard is\ncontent\t-\tevaluated.\nagents\tL\tFor agents\n"
+    );
+}
+
+#[test]
+fn gold1_the_landing_date_is_masked_in_the_home_pages_status_line() {
+    let runs = "chrome\t-\t6 October 2026 · Accepted by the Steering Council\nchrome\t-\t12 May 2026 · Dated\n";
+    assert_eq!(
+        mask_landing_date(runs),
+        "chrome\t-\t<landing date> · Accepted by the Steering Council\nchrome\t-\t<landing date> · Dated\n"
     );
 }
 

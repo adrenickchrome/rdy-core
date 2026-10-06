@@ -10,7 +10,7 @@ use std::time::Duration;
 fn opts(
     version: &str,
     cwd: &std::path::Path,
-    spawn: impl FnMut(&RunDir) -> std::io::Result<()> + Send + 'static,
+    spawn: impl FnMut(&RunDir) -> std::io::Result<Spawned> + Send + 'static,
 ) -> StartOptions {
     let mut o = StartOptions::new(
         version.into(),
@@ -22,12 +22,19 @@ fn opts(
     o
 }
 
+/// A spawned daemon that never exits (an in-process one has no child to watch).
+fn running() -> Spawned {
+    Spawned {
+        exited: Box::new(|| None),
+    }
+}
+
 /// A spawn closure that starts an in-process echo daemon of `version` on the runtime (counting calls).
 fn in_process_spawn(
     version: &'static str,
     count: Arc<AtomicUsize>,
     ready_after: Duration,
-) -> impl FnMut(&RunDir) -> std::io::Result<()> + Send + 'static {
+) -> impl FnMut(&RunDir) -> std::io::Result<Spawned> + Send + 'static {
     move |run: &RunDir| {
         count.fetch_add(1, Ordering::SeqCst);
         let run = run.clone();
@@ -44,7 +51,7 @@ fn in_process_spawn(
             r.ready();
             let _ = t.await;
         });
-        Ok(())
+        Ok(running())
     }
 }
 
@@ -466,7 +473,7 @@ async fn start1_a_symlinked_daemon_log_is_never_read_into_an_error() {
     let v = victim(dir.path());
     std::os::unix::fs::symlink(&v, run.log_file()).unwrap();
     assert!(log_tail(&run, LOG_TAIL_LINES).is_empty());
-    let mut o = opts("1", dir.path(), |_| Ok(()));
+    let mut o = opts("1", dir.path(), |_| Ok(running()));
     o.start_timeout = Duration::from_millis(300);
     let e = connect_or_start(&run, o).await.unwrap_err();
     assert_eq!(e.code, E_DAEMON_START);
@@ -494,7 +501,7 @@ async fn start1_a_socket_path_over_the_limit_is_e_daemon_start_at_once_and_nothi
         &run,
         opts("1", &deep, move |_| {
             spawned.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            Ok(running())
         }),
     )
     .await
@@ -573,4 +580,33 @@ async fn start1_into_stream_after_reading_past_a_reply_is_a_bug() {
     };
     assert_eq!(c.ctl("echo", json!({})).await.unwrap(), json!(1));
     let _ = c.into_stream();
+}
+
+/// A spawned daemon that exits before it answers (it found the store locked, say) fails the
+/// client within one retry interval, citing the log, rather than at the start timeout.
+#[tokio::test]
+async fn cli2_a_spawned_daemon_that_exits_before_ready_is_e_daemon_start_at_once() {
+    let dir = short_tempdir();
+    let run = RunDir::of_project(dir.path());
+    run.ensure().unwrap();
+    std::fs::write(run.log_file(), "already running: the store at x\n").unwrap();
+    let t0 = std::time::Instant::now();
+    let mut o = opts("1", dir.path(), |_| {
+        Ok(Spawned {
+            exited: Box::new(|| Some(2)),
+        })
+    });
+    o.start_timeout = Duration::from_secs(10);
+    let e = connect_or_start(&run, o).await.unwrap_err();
+    assert_eq!(e.code, E_DAEMON_START);
+    assert!(
+        e.message
+            .starts_with("the daemon exited with code 2 before it was ready"),
+        "{e}"
+    );
+    assert_eq!(
+        e.extra["log_tail"],
+        json!(["already running: the store at x"])
+    );
+    assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
 }
