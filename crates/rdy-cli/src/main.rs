@@ -83,6 +83,12 @@ enum Cmd {
         #[arg(long = "max-tokens")]
         max_tokens: Option<usize>,
     },
+    /// List the suspects in a scope (default canon), as rdy_suspects does.
+    Suspects {
+        /// canon (the default), an existing view's name, tag:<version>, landing:<id> or view:<name>.
+        #[arg(long)]
+        scope: Option<String>,
+    },
     Propose {
         #[arg(long)]
         title: String,
@@ -650,6 +656,25 @@ fn impact_text(v: &Value) -> String {
         .join("\n")
 }
 
+fn suspects_text(v: &Value) -> String {
+    let items = v["items"].as_array().cloned().unwrap_or_default();
+    if items.is_empty() {
+        return "no suspects".to_string();
+    }
+    items
+        .iter()
+        .map(|i| {
+            format!(
+                "{} -> {}  {}",
+                text(&i["block"]),
+                text(&i["target"]),
+                text(&i["reason"])
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn tags_text(v: &Value) -> String {
     let versions = v["versions"].as_array().cloned().unwrap_or_default();
     if versions.is_empty() {
@@ -854,6 +879,11 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                 json!({"code_path": code, "scope": scope, "max_tokens": max_tokens}),
             )?;
             let t = format!("{}{}", brief_text::code_text(&v), brief_text::plain(&v));
+            Ok((v, t))
+        }
+        Cmd::Suspects { scope } => {
+            let v = call(env, "suspects", json!({"scope": scope}))?;
+            let t = suspects_text(&v);
             Ok((v, t))
         }
         Cmd::Propose { title, view } => {

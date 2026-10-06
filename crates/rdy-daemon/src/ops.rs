@@ -33,6 +33,7 @@ pub const OPS: &[&str] = &[
     "ls",
     "log",
     "impact",
+    "suspects",
     "tags",
     "block",
     "brief",
@@ -75,6 +76,12 @@ struct LsArgs {
 struct ImpactArgs {
     id: String,
     depth: Option<u32>,
+    scope: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopeArgs {
     scope: Option<String>,
 }
 
@@ -309,6 +316,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             log(cx)
         }
         "impact" => impact(cx, parse(op, args, "{id, depth?, scope?}")?),
+        "suspects" => suspects(cx, parse(op, args, "{scope?}")?),
         "tags" => {
             parse::<NoArgs>(op, args, "{}")?;
             tags(cx)
@@ -433,6 +441,12 @@ fn impact(cx: &OpContext, a: ImpactArgs) -> Result<Value, RdyError> {
     let scope = scope_of(&st, cx, a.scope.as_deref())?;
     let bid = st.resolve_id(&scope, &a.id)?;
     Ok(to_json(&st.impact(&scope, &bid, a.depth.unwrap_or(3))?))
+}
+
+fn suspects(cx: &OpContext, a: ScopeArgs) -> Result<Value, RdyError> {
+    let st = cx.engine.read();
+    let scope = scope_of(&st, cx, a.scope.as_deref())?;
+    Ok(json!({"items": st.suspects(&scope)?}))
 }
 
 fn tags(cx: &OpContext) -> Result<Value, RdyError> {
