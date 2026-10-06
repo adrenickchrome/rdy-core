@@ -489,7 +489,7 @@ pub fn run_workload() -> Vec<Measure> {
         "cold_open_lagging: caught up {} frames",
         lag.expect("ran at least once")
     );
-    out.extend(daemon_ops(&proj));
+    out.extend(daemon_ops(&proj, ""));
     if crate::fixtures::deep() {
         out.extend(run_large_tier(dir.path()));
     }
@@ -537,8 +537,8 @@ fn daemon_stop(run: ServeRun) {
 /// The daemon ops, on the typical project once every in-process handle on it is closed:
 /// `daemon_write_single` (one `new_doc` over a `ctl` connection, the same shape as
 /// `new_doc_single`) and `daemon_cold_start` (start to `ready` on a project whose index is
-/// current: the warm-up plus the bind, not a catch-up).
-fn daemon_ops(proj: &std::path::Path) -> Vec<Measure> {
+/// current: the warm-up plus the bind, not a catch-up). `sfx` names the tier (`""` or `_50k`).
+fn daemon_ops(proj: &std::path::Path, sfx: &str) -> Vec<Measure> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -549,7 +549,7 @@ fn daemon_ops(proj: &std::path::Path) -> Vec<Measure> {
     // the human session, who may write into `va`
     rt.block_on(c.ctl("session", json!({"actor": null, "run": null})))
         .unwrap_or_else(|e| panic!("the session op failed: {e}"));
-    out.push(measure("daemon_write_single", 30, |i| {
+    out.push(measure(&format!("daemon_write_single{sfx}"), 30, |i| {
         rt.block_on(c.ctl("new_doc", json!({"path": format!("dw-{i}"), "view": "va"})))
             .unwrap_or_else(|e| panic!("new_doc: {e}"));
     }));
@@ -559,7 +559,7 @@ fn daemon_ops(proj: &std::path::Path) -> Vec<Measure> {
     let run = daemon_start(proj);
     drop(rt.block_on(daemon_ready(proj)));
     daemon_stop(run);
-    out.push(measure_timed("daemon_cold_start", 3, |_| {
+    out.push(measure_timed(&format!("daemon_cold_start{sfx}"), 3, |_| {
         let s = Instant::now();
         let run = daemon_start(proj);
         let c = rt.block_on(daemon_ready(proj));
@@ -572,7 +572,8 @@ fn daemon_ops(proj: &std::path::Path) -> Vec<Measure> {
 }
 
 /// The large tier (`RDY_QA_DEEP=1`): a ~50k-block project, ids seeded as for the typical tier,
-/// landed, with twenty pending writes; the shared ops under the `_50k` names. `version_position`
+/// landed, with twenty pending writes; the shared ops under the `_50k` names, and the daemon ops
+/// (`daemon_write_single_50k`, `daemon_cold_start_50k`) once every in-process handle is closed. `version_position`
 /// (its fixture is landing depth, not size), `cold_open_lagging`, `write_batch_200`,
 /// `propose_land_500_flat` and `export_import` stay typical-only.
 fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
@@ -600,6 +601,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     tier_render(&mut out, &r, parent, sfx, 3);
     drop(r);
     tier_cold_open(&mut out, &proj, sfx, 3);
+    out.extend(daemon_ops(&proj, sfx));
     out
 }
 
@@ -758,6 +760,24 @@ mod tests {
         assert!(typical.ops.contains_key("context") && !typical.ops.contains_key("context_50k"));
         let fresh = merge_baseline(None, "y", &[m("context", 3.0)]);
         assert_eq!((fresh.machine.as_str(), fresh.ops.len()), ("y", 1));
+    }
+
+    #[test]
+    #[ignore = "builds the 50k project; run with --ignored"]
+    fn dperf1_the_large_tier_runs_the_daemon_ops_at_50k() {
+        assert!(spec_target("daemon_write_single_50k").is_some());
+        assert!(spec_target("daemon_cold_start_50k").is_some());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ms = run_large_tier(dir.path());
+        rdy_model::unseed_ids_for_tests();
+        for op in ["daemon_write_single_50k", "daemon_cold_start_50k"] {
+            let m = ms
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            eprintln!("{op}: median {:.3} ms, p95 {:.3} ms", m.median_ms, m.p95_ms);
+            assert!(m.median_ms > 0.0, "{op}: {m:?}");
+        }
     }
 
     #[test]

@@ -476,7 +476,10 @@ AMD Ryzen 7 9800X3D / ext4, isolated bench.
 The Linux column is filled in after the isolated bench run (DECISIONS-rdy-m2 §8: in-workflow gates
 skip perf while two tracks run); the three rows are recorded in `qa-baseline.json` from that run.
 `daemon_cold_start` is far under its "< 2 s at 100k" target at 10k blocks (about 85 ms, against a
-`cold_open` of about 90 to 100 ms); the 100k and 50k figures come from the deep tier and the bench.
+`cold_open` of about 90 to 100 ms). The deep tier (`RDY_QA_DEEP=1`) runs both daemon ops on the
+50k project as `daemon_write_single_50k` and `daemon_cold_start_50k`; on the Mac (one run, load about
+4) they measured 5.151 / 6.277 ms and 258.337 / 264.108 ms (median / p95). The 100k figures come from
+the bench.
 
 The daemon adds one socket round trip and one thread hand-off per write, and on the Mac that is not
 visible against the one durable flush that dominates the write: `daemon_write_single` reads within
