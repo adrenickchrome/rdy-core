@@ -243,10 +243,32 @@ fn names_clash_ignoring_case_across_docs_and_folders() {
 fn ops_take_paths_for_ids_parents_and_links() {
     let (_d, mut r) = project();
     let res = tree(&mut r);
-    let made = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "parent": "wallets/cards", "fields": {"title": "Limits", "doc_type": "overview"}},
-        {"op": "update", "id": "wallets/transactions", "fields": {"lifecycle": "stable"}}
-    ])).unwrap();
+    // bwr1: making wallets/transactions stable touches stable content: brief it first
+    let cov = Coverage {
+        ids: vec!["wallets/transactions".into()],
+        path: None,
+    };
+    let b = r
+        .read()
+        .brief(&Scope::View("work".into()), &cov, None)
+        .unwrap();
+    b.register(&r.briefs());
+    let made = r
+        .write_briefed(
+            &agent(),
+            WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(json!([
+                    {"op": "create", "type": "doc", "parent": "wallets/cards", "fields": {"title": "Limits", "doc_type": "overview"}},
+                    {"op": "update", "id": "wallets/transactions", "fields": {"lifecycle": "stable"}}
+                ]))
+                .unwrap(),
+                justification: None,
+                message: String::new(),
+            },
+            Some(b.base.token.clone()),
+        )
+        .unwrap();
     let limits = r
         .read()
         .block(

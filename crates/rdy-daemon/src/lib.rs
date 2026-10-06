@@ -29,8 +29,8 @@ pub mod lock;
 pub mod spawn;
 
 pub use client::{
-    Attempt, CONNECT_RETRY, Client, DEFAULT_START_TIMEOUT, LOCK_RETRY, LOG_TAIL_LINES, Pending,
-    SpawnFn, StartOptions, connect, connect_or_start, log_tail,
+    Attempt, Client, DEFAULT_START_TIMEOUT, HELD_GRACE, LOCK_RETRY, LOG_TAIL_LINES, Pending,
+    SpawnFn, StartOptions, connect, connect_backoff, connect_or_start, log_tail, log_tail_since,
 };
 pub use spawn::{Spawned, detach, process_alive, serve_command, spawn_serve};
 pub mod shared;

@@ -148,8 +148,15 @@ impl Writer {
                 sh.watch.seen(rdy.pack_fingerprint());
                 // the files are back to the loaded pack's bytes: nothing stands in error, and the
                 // pack did not change
-                if sh.pack_error_lock().take().is_some() {
-                    log("pack error cleared: the files are back to the loaded pack");
+                let mut error = sh.pack_error_lock();
+                if error.take().is_some() {
+                    // each session hears `pack_changed` once: the pack stands as loaded, but the
+                    // `pack_error` it was told about is gone
+                    let generation = sh.pack_gen.fetch_add(1, Ordering::SeqCst) + 1;
+                    drop(error);
+                    log(&format!(
+                        "pack error cleared: the files are back to the loaded pack (generation {generation})"
+                    ));
                 }
             }
             Err(e) => log(&format!("pack check failed: {e}")),

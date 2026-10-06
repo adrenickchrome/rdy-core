@@ -1,6 +1,7 @@
 //! rdy's QA gate: fixtures, the invariant checker, an MCP client with deadlines, the perf
 //! workload and the gate report. The tests live in `tests/`, one file per area.
 pub mod daemon;
+pub mod edit_loop;
 pub mod fixtures;
 pub mod golden;
 pub mod invariants;

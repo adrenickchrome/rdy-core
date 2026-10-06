@@ -1,3 +1,5 @@
+pub mod brief;
+pub mod consequence;
 mod decide;
 pub mod engine;
 mod error;
@@ -20,6 +22,9 @@ pub mod views;
 mod write;
 mod yaml_pos;
 
+pub use brief::{
+    BriefRegistry, Briefing, Coverage, E_BRIEF_REQUIRED, E_BRIEF_STALE, W_BRIEF_STALE,
+};
 pub use decide::DecisionInput;
 pub use error::*;
 pub use events::{Event, EventKind, Events};
@@ -182,7 +187,8 @@ pub enum ReloadOutcome {
     /// as this reload read them, taken before their bytes were evaluated: recording it as seen
     /// never marks newer, unevaluated bytes as seen.
     Invalid {
-        error: RdyError,
+        /// Boxed: a `RdyError` with its optional payloads outweighs the other variants.
+        error: Box<RdyError>,
         fingerprint: PackFingerprint,
     },
 }
@@ -239,6 +245,8 @@ pub struct Rdy {
     /// The pack files as they were when `pack` was last loaded.
     fingerprint: PackFingerprint,
     serve: ServeConfig,
+    /// The registered briefings (in memory; one registry per open project).
+    briefs: Arc<brief::BriefRegistry>,
 }
 
 fn io(e: std::io::Error) -> RdyError {
@@ -390,6 +398,7 @@ impl Rdy {
             lineage,
             fingerprint,
             serve: cfg.serve.resolve(),
+            briefs: Arc::new(brief::BriefRegistry::new(brief::BRIEF_REGISTRY_CAP)),
         };
         r.invalidate();
         Ok(r)
@@ -404,6 +413,11 @@ impl Rdy {
     /// The `serve:` settings the config had when it was last loaded.
     pub fn serve_config(&self) -> ServeConfig {
         self.serve
+    }
+
+    /// The project's briefing registry: the same one for as long as this `Rdy` is open.
+    pub fn briefs(&self) -> Arc<brief::BriefRegistry> {
+        Arc::clone(&self.briefs)
     }
 
     /// What the last `Store::open` did (a clone of the store's report).
@@ -433,7 +447,7 @@ impl Rdy {
             Ok(v) => v,
             Err(error) => {
                 return Ok(ReloadOutcome::Invalid {
-                    error,
+                    error: Box::new(error),
                     fingerprint: fp,
                 });
             }
@@ -659,10 +673,7 @@ impl Rdy {
                             _ => None,
                         };
                         if let Some(b) = pred.filter(|b| b.conflicts.is_empty()) {
-                            next.seed(read_state::Built::new(
-                                Arc::new(b.m.with(&ops)),
-                                Arc::clone(&b.conflicts),
-                            ));
+                            next.seed(b.after(&ops));
                         }
                         views.insert(view, Arc::new(next));
                     }
@@ -680,10 +691,7 @@ impl Rdy {
             } => {
                 let mut canon = Entry::new(None, Some(landing), None, Arc::new(vec![]));
                 if let Some(b) = prev.canon.built_ok() {
-                    canon.seed(read_state::Built::new(
-                        Arc::new(b.m.with(&ops)),
-                        Arc::new(vec![]),
-                    ));
+                    canon.seed(b.after(&ops));
                 }
                 // the proposing view and every view the landing rebased (it is one of them) start
                 // unbuilt, on the landing: a stale entry would seed the next commit into it from

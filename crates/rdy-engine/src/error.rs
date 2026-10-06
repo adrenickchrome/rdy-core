@@ -65,6 +65,10 @@ pub struct RdyError {
     /// A corrected payload the caller can resend, where rdy can compute one safely.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub corrected: Option<serde_json::Value>,
+    /// bwr1: a briefing refusal's ids to brief (`{"ids": [...]}`), replaced by the fresh
+    /// briefing itself once a tool expands the error (`brief::expand_error`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub briefing: Option<serde_json::Value>,
 }
 
 impl RdyError {
@@ -75,6 +79,7 @@ impl RdyError {
             fix: fix.into(),
             issues: vec![],
             corrected: None,
+            briefing: None,
         }
     }
 

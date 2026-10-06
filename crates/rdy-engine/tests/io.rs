@@ -20,6 +20,17 @@ fn founder() -> Session {
     }
 }
 
+/// Briefs `id` in `scope`, registers the briefing and returns its token.
+fn brief_of(r: &Rdy, scope: &Scope, id: &BlockId) -> String {
+    let cov = Coverage {
+        ids: vec![id.to_string()],
+        path: None,
+    };
+    let b = r.read().brief(scope, &cov, None).unwrap();
+    b.register(&r.briefs());
+    b.base.token
+}
+
 fn rich_project(dir: &std::path::Path) -> Rdy {
     let mut r = Rdy::init(dir, "rdy-standard").unwrap();
     let blob = r
@@ -135,7 +146,8 @@ fn single_block_yaml_round_trip_and_edit() {
 
     let mut edited = term.clone();
     edited.body = "Edited definition.".into();
-    r.edit_block(&founder(), "work", edited.clone()).unwrap();
+    r.edit_block(&founder(), "work", edited.clone(), None)
+        .unwrap();
     assert_eq!(
         r.read()
             .block(&Scope::View("work".into()), &term.id)
@@ -147,7 +159,9 @@ fn single_block_yaml_round_trip_and_edit() {
     let mut moved = term.clone();
     moved.order = "zz".into();
     assert_eq!(
-        r.edit_block(&founder(), "work", moved).unwrap_err().code,
+        r.edit_block(&founder(), "work", moved, None)
+            .unwrap_err()
+            .code,
         "E_BAD_INPUT"
     );
     assert_eq!(block_from_yaml("id: [").unwrap_err().code, "E_BAD_INPUT");
@@ -355,7 +369,7 @@ fn edit_block_applies_field_unset_and_links_changes() {
         .clone();
     let mut e = claim.clone();
     e.links.clear();
-    r.edit_block(&founder(), "work", e).unwrap();
+    r.edit_block(&founder(), "work", e, None).unwrap();
     assert!(
         r.read()
             .block(&Scope::View("work".into()), &claim.id)
@@ -377,7 +391,9 @@ fn edit_block_applies_field_unset_and_links_changes() {
         .insert("title".into(), FieldValue::Str("Renamed".into()));
     e.fields
         .insert("lifecycle".into(), FieldValue::Str("stable".into()));
-    r.edit_block(&founder(), "work", e)
+    // bwr1: making the section stable touches stable content, so the edit cites a briefing
+    let t = brief_of(&r, &Scope::Canon, &sec.id);
+    r.edit_block(&founder(), "work", e, Some(t))
         .unwrap_or_else(|x| panic!("{x}"));
     let got = r
         .read()
@@ -386,7 +402,8 @@ fn edit_block_applies_field_unset_and_links_changes() {
     assert_eq!(got.field_str("title"), Some("Renamed"));
     let mut e = got.clone();
     e.fields.remove("lifecycle");
-    r.edit_block(&founder(), "work", e).unwrap();
+    let t = brief_of(&r, &Scope::View("work".into()), &sec.id);
+    r.edit_block(&founder(), "work", e, Some(t)).unwrap();
     assert!(
         !r.read()
             .block(&Scope::View("work".into()), &sec.id)
@@ -412,7 +429,7 @@ fn edit_block_respects_decision_rules() {
     let mut e = dec.clone();
     e.body = "changed".into();
     assert_eq!(
-        r.edit_block(&founder(), "work", e).unwrap_err().code,
+        r.edit_block(&founder(), "work", e, None).unwrap_err().code,
         "E_FROZEN"
     );
 
@@ -433,7 +450,7 @@ fn edit_block_respects_decision_rules() {
     e.fields
         .insert("status".into(), FieldValue::Str("accepted".into()));
     assert_eq!(
-        r.edit_block(&agent(), "work", e).unwrap_err().code,
+        r.edit_block(&agent(), "work", e, None).unwrap_err().code,
         "E_PERMISSION"
     );
 }
@@ -493,7 +510,7 @@ fn edit_block_refuses_a_no_op_edit() {
         .find(|x| x.block_type == "term")
         .unwrap()
         .clone();
-    let e = r.edit_block(&founder(), "work", term).unwrap_err();
+    let e = r.edit_block(&founder(), "work", term, None).unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT");
     assert!(e.message.contains("nothing changed"), "{}", e.message);
 }

@@ -1,4 +1,5 @@
 use base64::Engine as _;
+use rdy_engine::consequence::write_and_report;
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::*;
 use rdy_model::{BlockId, EditorialClass, Justification, Role};
@@ -130,6 +131,10 @@ pub struct WriteParams {
     pub implements: Option<String>,
     pub editorial: Option<EditorialParams>,
     pub message: Option<String>,
+    /// The briefing token from rdy_brief. Required when the write touches stable content.
+    pub brief: Option<String>,
+    /// The budget for the response's consequences.
+    pub max_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -151,6 +156,10 @@ pub struct DecideParams {
     pub answers: Option<Vec<String>>,
     /// When the decision takes effect (RFC 3339); defaults to when it is recorded.
     pub effective_from: Option<String>,
+    /// The briefing token from rdy_brief. Required when the write touches stable content.
+    pub brief: Option<String>,
+    /// The budget for the response's consequences.
+    pub max_tokens: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -168,6 +177,22 @@ pub struct RevokeParams {
     pub target: String,
     pub reason: String,
     pub parent: String,
+    /// The briefing token from rdy_brief. Required when the write touches stable content.
+    pub brief: Option<String>,
+    /// The budget for the response's consequences.
+    pub max_tokens: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct BriefParams {
+    /// Blocks to brief on (ids, keys or paths).
+    pub ids: Option<Vec<String>>,
+    /// A doc or folder path: brief on every block under it.
+    pub path: Option<String>,
+    /// The view to brief in; defaults to the session's view.
+    pub scope: Option<String>,
+    /// The budget for the briefing; the longest lists are cut to fit.
+    pub max_tokens: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -465,6 +490,7 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     Ok(budget(
         json!({
             "pack": st_.pack().name, "session": {"actor": s.actor, "view": st.view},
+            "project": {"name": st_.project_name(), "description": st_.project_description()},
             "canon": {"landings": landings},
             "open_report": open_report_json(&st.engine.open_report()),
             "views": views, "tree": tree, "version_position": position,
@@ -604,6 +630,9 @@ pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
 /// What bodies and text fields accept (md1, dtext1, key1).
 const TEXT_RULES: &str = "Bodies and text fields: **bold**, *italic*, `code`, [link](https://… or a relative path), and in bodies - bullets and 1. numbered lists (indent two spaces to nest). No raw HTML. {{id}} or {{id|words}} references a block; \\{{ is a literal {{ and a leading @ in words is written \\@. fields.key: optional short human id, unique per project ignoring case, letters/digits/-_. , not shaped like a block id.";
 
+/// How to edit with briefings, in `rdy_schema`.
+pub const EDIT_LOOP_DOC: &str = "Brief before editing: rdy_brief {ids or path} returns governs, dependents, will_go_stale, suspects and base (each covered block's version and the briefing token). Pass brief: <token> on rdy_write, rdy_decide, rdy_supersede (inside decision) and rdy_revoke. A write that touches stable content (a block whose own or inherited lifecycle is stable before or after the op; for a create, its parent's) needs a current briefing that covers it: brief the block, or its parent to create under it. A briefing is current while no block it recorded has moved in the write's view. Drafts need none; a stale one there only warns (W_BRIEF_STALE). E_BRIEF_REQUIRED and E_BRIEF_STALE carry a fresh briefing for exactly the blocks the write touches: retry with its base.token. Every write response lists consequences: {id, block, kind (suspect or dependent), because {edge, changed}, follow_up (update, confirm, reaffirm or resolve)}; max_tokens bounds them.";
+
 pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError> {
     let st_ = st.engine.read();
     let pack = st_.pack();
@@ -667,14 +696,42 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
                 "E_DAEMON_START": {"when": "the daemon couldn't be started or reached", "fix": "read the last lines of .rdy/run/daemon.log it cites; run rdy serve in the foreground to see why"},
                 "E_DAEMON_VERSION": {"when": "another binary version's daemon has clients", "fix": "close them, or rdy serve --stop"},
                 "E_DAEMON_GONE": {"when": "the daemon closed mid-request", "fix": "check rdy_overview or rdy status; a write may or may not have committed; it is not retried"},
+                "E_BRIEF_REQUIRED": {"when": "a write touches stable content and cites no briefing, or one that does not cover the block", "fix": "retry with the token of the briefing the error carries"},
+                "E_BRIEF_STALE": {"when": "the cited briefing is unknown, or a block it recorded moved in the write's view", "fix": "read what moved, then retry with the token of the briefing the error carries"},
+                "W_BRIEF_STALE": {"when": "a write to drafts cited a stale or unknown briefing (it went ahead)", "fix": "brief again before the next write if the moved blocks matter"},
             },
             "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
             "text": TEXT_RULES,
+            "edit_loop": EDIT_LOOP_DOC,
         })),
     }
 }
 
+pub fn rdy_brief(st: &mut McpState, p: BriefParams) -> Result<Value, RdyError> {
+    check_tokens(p.max_tokens)?;
+    session(st)?;
+    let st_ = st.engine.read();
+    let scope = scope_of(st, &st_, &p.scope)?;
+    let b = st_.brief(
+        &scope,
+        &Coverage {
+            ids: p.ids.unwrap_or_default(),
+            path: p.path,
+        },
+        p.max_tokens,
+    )?;
+    b.register(&st.engine.briefs());
+    serde_json::to_value(&b).map_err(|e| {
+        RdyError::new(
+            E_INTERNAL,
+            format!("a briefing did not serialize: {e}"),
+            "report this as a bug in rdy",
+        )
+    })
+}
+
 pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
+    check_tokens(p.max_tokens)?;
     let s = session(st)?;
     if p.ops.len() > MAX_OPS_PER_WRITE {
         return Err(limit(
@@ -734,7 +791,10 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
         justification,
         message: p.message.unwrap_or_default(),
     };
-    write_typed(&*st.engine, move |r| r.write(&s, req))
+    let (brief, max_tokens, view) = (p.brief, p.max_tokens, req.view.clone());
+    write_and_report(&*st.engine, &view, max_tokens, move |r| {
+        r.write_briefed(&s, req, brief)
+    })
 }
 
 fn decision_input(p: DecideParams) -> DecisionInput {
@@ -766,30 +826,42 @@ fn decision_input(p: DecideParams) -> DecisionInput {
         refines: p.refines.unwrap_or_default(),
         answers: p.answers.unwrap_or_default(),
         no_inherit,
+        brief: p.brief,
     }
 }
 
 pub fn rdy_decide(st: &mut McpState, p: DecideParams) -> Result<Value, RdyError> {
+    check_tokens(p.max_tokens)?;
     let s = session(st)?;
     let view = p.view.clone().unwrap_or_else(|| st.view.clone());
+    let max_tokens = p.max_tokens;
     let input = decision_input(p);
-    write_typed(&*st.engine, move |r| r.decide(&s, &view, input))
+    let v = view.clone();
+    write_and_report(&*st.engine, &v, max_tokens, move |r| {
+        r.decide(&s, &view, input)
+    })
 }
 
 pub fn rdy_supersede(st: &mut McpState, p: SupersedeParams) -> Result<Value, RdyError> {
+    check_tokens(p.decision.max_tokens)?;
     let s = session(st)?;
     let view = p.decision.view.clone().unwrap_or_else(|| st.view.clone());
+    let max_tokens = p.decision.max_tokens;
     let (old, part, input) = (p.old, p.part, decision_input(p.decision));
-    write_typed(&*st.engine, move |r| {
+    let v = view.clone();
+    write_and_report(&*st.engine, &v, max_tokens, move |r| {
         r.supersede(&s, &view, &old, part, input)
     })
 }
 
 pub fn rdy_revoke(st: &mut McpState, p: RevokeParams) -> Result<Value, RdyError> {
+    check_tokens(p.max_tokens)?;
     let s = session(st)?;
     let view = p.view.unwrap_or_else(|| st.view.clone());
-    write_typed(&*st.engine, move |r| {
-        r.revoke(&s, &view, &p.target, &p.reason, &p.parent)
+    let (brief, max_tokens) = (p.brief, p.max_tokens);
+    let v = view.clone();
+    write_and_report(&*st.engine, &v, max_tokens, move |r| {
+        r.revoke(&s, &view, &p.target, &p.reason, &p.parent, brief)
     })
 }
 

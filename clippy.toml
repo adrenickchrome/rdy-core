@@ -1,0 +1,2 @@
+# RdyError carries two optional JSON payloads (`corrected`, `briefing`): 152 bytes.
+large-error-threshold = 160

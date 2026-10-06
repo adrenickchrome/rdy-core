@@ -93,14 +93,7 @@ fn cli2_a_daemon_cannot_start_while_no_daemon_holds_the_store() {
     let (ok, v) = s.json(&["--json", "status"]);
     assert!(!ok);
     assert_eq!(v["code"], E_DAEMON_START, "{v}");
-    let tail = v["log_tail"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|l| l.as_str().unwrap())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(tail.contains("already running: the store at"), "{tail}");
+    assert!(v["fix"].as_str().unwrap().contains("--no-daemon"), "{v}");
     assert!(
         t.elapsed() < Duration::from_secs(29),
         "the client did not wait out the start timeout: {:?}",

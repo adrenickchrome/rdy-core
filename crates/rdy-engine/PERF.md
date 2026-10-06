@@ -593,3 +593,108 @@ in-flight changes in unpinned views, not with the size of canon. That is the ter
 reflects (1,000 in-flight changes there, against about 430 in the typical perf tier). If the bench misses the
 100 ms target, the fix is an incremental per-view touched-block index, a fix-forward task for the
 orchestrator to schedule.
+
+## M2b3: the edit loop (2026-10-06)
+
+`qa-perf` gains three ops, each at 10k (typical tier) and 50k (`_50k`), run in a fresh view `eb`
+where the fixture's section is `stable`, so every write there is checked against the briefing
+registry. `brief_doc` is `ReadState::brief` over the fixture's doc by path plus `register`, timed on
+the read pool with the view's graph carried (an untimed briefed write creates the new state first).
+`write_briefed` is one claim create that cites a current briefing: the check runs and hits.
+`write_consequences` is a briefed `update` of a claim that another claim references, then
+`ReadState::consequences` over the change, asserting the referrer comes back as one `suspect` entry
+(the assert is outside the timer); the briefing of the claim is made untimed. `write_single` is
+shown from the same runs as the like-for-like write without a briefing.
+
+Medians and p95 in ms. Linux: Ubuntu 24.04.5 LTS / AMD Ryzen 7 9800X3D 8-Core Processor / ext4,
+isolated bench, release build, two `cargo qa --only perf --deep` runs back to back (the bench idle
+at the start of each, `PERF.lock` held by the helper); every new op's median differs by at most 4.3%
+between the runs (`brief_doc` 4.3%, the rest under 1%), so both are recorded. The Mac was not
+measured (the perf rows come from the bench only).
+
+| op | 10k run 1 median / p95 | 10k run 2 median / p95 | 50k run 1 median / p95 | 50k run 2 median / p95 |
+|---|---|---|---|---|
+| `write_single` (reference, same runs) | 0.532 / 0.578 | 0.528 / 0.566 | 0.548 / 0.576 | 0.549 / 0.571 |
+| `write_briefed` | 0.574 / 0.593 | 0.576 / 0.597 | 0.642 / 0.678 | 0.644 / 0.676 |
+| `write_consequences` (write + consequences) | 0.568 / 0.587 | 0.569 / 0.601 | 0.624 / 0.651 | 0.628 / 0.656 |
+| `brief_doc` | 0.201 / 0.228 | 0.209 / 0.229 | 0.227 / 0.284 | 0.226 / 0.299 |
+
+Every row is far under "< 5 ms p99 on Linux NVMe" (writes) and "< 5 ms p99" (`brief_doc`) at both
+sizes, so none is a miss. The briefing check adds about 0.04 ms at 10k and 0.09 ms at 50k to a write
+(`write_briefed` against `write_single`): the check is one registry read and one version lookup per
+recorded block on the writer, the registry read being a mutex-guarded hash-map lookup. A write plus
+its consequences costs no more than the briefed write (the tier records p95, not p99, over 20 to 30
+runs), because the consequences run on the read pool over the carried graph (Tasks 2 and 4), a graph
+walk over the changed block's incoming edges and not a rebuild; a cold graph build is about 30 ms at
+10k, and the carry is what keeps it off this path. `brief_doc` over a 97-claim doc is about 0.2 ms
+at both sizes: its cost follows the doc, not the project.
+
+The daemon rows, before (`main`'s baseline in `qa-baseline.json`, the M2b run) and after (this
+branch, both runs):
+
+| op | before median / p95 | after run 1 median / p95 | after run 2 median / p95 |
+|---|---|---|---|
+| `daemon_write_single` | 2.651 / 2.729 | 0.671 / 0.830 | 0.664 / 0.688 |
+| `daemon_write_single_50k` | 2.741 / 2.893 | 0.672 / 0.793 | 0.687 / 0.799 |
+| `daemon_cold_start` | 53.982 / 54.480 | 51.860 / 52.013 | 51.600 / 51.892 |
+| `daemon_cold_start_50k` | 193.128 / 193.380 | 202.307 / 202.529 | 201.146 / 205.422 |
+
+### The write floor is the drive's, and it moves (confirmed 2026-10-06)
+
+The first two runs above read a write floor of about 0.53 ms (`write_single`) where the baseline's
+old rows have 2.6 ms. That is not this branch and not the bench's setup; it is the drive, and it
+moves between about 0.4 and 2.6 ms per flush on the same machine class.
+
+- **`main` shows the same floor.** The pre-plan base (`f558724`) on the same bench, same command
+  (`cargo qa --only perf --deep`), two runs: `write_single` 0.528 and 0.531 ms, `new_doc_single`
+  1.684 and 1.681 ms, `daemon_write_single` 0.647 and 0.652 ms, `write_single_50k` 0.550 and 0.547
+  ms, `daemon_write_single_50k` 0.664 and 0.657 ms, `daemon_cold_start` 49.5 and 49.7 ms (50k: 190.7
+  and 190.2 ms). So the 4x drop of `daemon_write_single` against its old baseline is not the daemon
+  work of this plan.
+- **The temp dir is the same mount.** The perf tier's `tempfile::tempdir()` is `/tmp`, on the root
+  ext4 filesystem on the NVMe (`/dev/nvme0n1p5`), the same one the machine-class string names; the
+  kernel reports the device write cache as `write back` with FUA, so `fsync` issues a real flush.
+  The block layer's own flush counter (`/sys/block/nvme0n1/stat`) went up by exactly 600 for 600
+  `fsync`/`fdatasync` calls of a 4 KB-write micro-benchmark, at about 0.29 ms of device time each:
+  every flush reaches the device, and the device answers fast in that state.
+- **The device is bimodal over minutes.** The micro-benchmark (4 KB `pwrite` + `fdatasync`, 300
+  runs) read p50 0.43 ms with the bench idle, then 2.4 to 2.6 ms (what "Linux" at the top of this
+  file and the M2b baseline record) minutes after the perf runs, and 1.4 to 1.6 ms in between; it
+  flipped within a single `qa-perf` run (a 10k tier at 2.6 ms, the 50k tier at 0.55 ms). It is
+  reproducible on demand: 20 GB of sequential writes (`dd`, `conv=fsync`) took the idle 0.43 ms to
+  2.6 ms, held for minutes. So the floor tracks recent write volume on the drive (a consumer NVMe
+  without power-loss protection; the cause inside the drive is not established here). The M2.0 notes
+  of this file saw the same swing (flush p99 0.31 ms in one run, 1.3 to 1.4 ms in the next).
+
+Which gives the baseline rule (`perf.rs`: a row fails only when worse than its baseline by the
+margin and by more than `FLOOR_MS`): every floor-bound Linux row is baselined on the **slow floor**
+(about 2.6 ms per durable flush), where `write_single`, `write_single_50k`, `new_doc_single` and
+`write_batch_200` already were. A row baselined on the fast floor fails when the drive is in the
+slow state: the first baseline of this branch did, and the bench said so (`write_briefed` 2.62 ms
+against 0.575 ms, `daemon_write_single` 2.68 ms against 0.668 ms: FAIL). On the slow floor a
+fast-state run reads as an improvement and passes. The `write_briefed`, `write_consequences` and
+`daemon_write_single` rows (and `_50k`) are the mean of two runs taken in the slow state:
+
+| op | 10k run A / run B | 50k run A / run B |
+|---|---|---|
+| `write_briefed` | 2.615 / 2.639 | 2.802 / 2.806 |
+| `write_consequences` | 2.590 / 2.630 | 2.782 / 2.793 |
+| `daemon_write_single` | 2.678 / 2.721 | 2.839 / 2.818 |
+
+(medians in ms; each pair agrees within 1.6%. The 10k pair is two runs with the drive left slow by
+the preceding runs, the 50k pair two runs after a 20 GB `dd` to put it there. The floor also moves
+inside a run, so the unchanged `write_single` of those same runs reads 2.5 to 2.8 ms in three of
+the four and 1.5 to 1.7 ms in the others; the rows above are the pairs where the op itself ran on
+the slow floor.) Against `write_single` in the same run the briefing check adds 0.01 to 0.1 ms in
+either state; the briefed write is the flush plus that. `brief_doc` and the
+two `daemon_cold_start` rows do not depend on the flush floor and stay as the first two runs
+recorded them. The same baseline now holds one floor for every write row, so the other Linux write
+rows need no change.
+
+The cold start lost its fixed client poll (Task 6: `connect_backoff`, 1 ms doubling to 50 ms,
+replaces the 100 ms `CONNECT_RETRY` between connects while a spawned daemon comes up), but this
+tier cannot show it: `daemon_cold_start` starts the daemon in this process and connects once the
+socket is there, so it never sleeps in that loop, and the row moves by the noise (54.0 to 51.7 ms
+at 10k, -4%; 193.1 to 201.7 ms at 50k, +4%, inside the 8 to 12 ms cold-open drift between bench
+sessions noted under M2b). The saving is on the paths that spawn a daemon and wait for its socket
+(the CLI and the MCP proxy), which no `qa-perf` op times.

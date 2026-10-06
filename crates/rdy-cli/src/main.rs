@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+mod brief_text;
 mod view_cmd;
 
 /// This binary's version: the hello's `version`, so a client only talks to a daemon of its own.
@@ -466,8 +467,8 @@ fn ls_text(nodes: &Value, depth: usize, out: &mut Vec<String>) {
     }
 }
 
-/// The `warning:` lines for what the store's open left behind: quarantine files and an unclean
-/// shutdown (`status` and `fsck` replies).
+/// The `warning:` lines for what the store's open left behind: quarantine files (`status` and
+/// `fsck` replies). An unclean shutdown is no warning: the open recovered from it.
 fn open_warnings(v: &Value) -> String {
     let mut out = String::new();
     let names: Vec<&str> = v["quarantine"]
@@ -478,9 +479,6 @@ fn open_warnings(v: &Value) -> String {
         .collect();
     if !names.is_empty() {
         out.push_str(&format!("\nwarning: quarantine: {}", names.join(", ")));
-    }
-    if v["open_report"]["unclean_shutdown"] == json!(true) {
-        out.push_str("\nwarning: the last run did not close the store cleanly");
     }
     out
 }
@@ -662,20 +660,32 @@ fn tags_text(v: &Value) -> String {
         .join("\n")
 }
 
-/// `rdy edit`: the block as YAML from the `block` op, `$EDITOR` on a temp file, then the
-/// `edit_block` op. Each op runs on a session of its own: the editor may stay open for long, and
+/// `rdy edit`: the block as YAML from the `block` op, its briefing from the `brief` op shown as
+/// `#` lines above the YAML, `$EDITOR` on a temp file, then the `edit_block` op citing the
+/// briefing's token (a briefing that moved while the editor was open is `E_BRIEF_STALE`, and the
+/// edit is kept). Each op runs on a session of its own: the editor may stay open for long, and
 /// the daemon may stop meanwhile (`rdy serve --stop` after a rebuild), so the write connects
 /// afresh (starting a daemon again if need be); it is sent once and never retried. When the write
 /// fails, the edited file is kept and named in the error (`fix`, and `saved_edit` in JSON).
 fn edit(env: &Env, id: &str, view: Option<&str>) -> Result<Value, ErrorReply> {
     let block = call(env, "block", json!({"id": id, "view": view}))?;
+    // cbrf1 (Q6c): brief the block, show the briefing as `#` lines above the YAML and cite its
+    // token
+    let briefing = call(
+        env,
+        "brief",
+        json!({"ids": [text(&block["id"])], "view": view}),
+    )?;
     let tmp = tempfile::Builder::new()
         .prefix("rdy-edit-")
         .suffix(".yaml")
         .tempfile()
         .map_err(|e| io_error(e, "check the temp directory"))?;
-    std::fs::write(tmp.path(), text(&block["yaml"]))
-        .map_err(|e| io_error(e, "check the temp directory"))?;
+    std::fs::write(
+        tmp.path(),
+        format!("{}{}", brief_text::header(&briefing), text(&block["yaml"])),
+    )
+    .map_err(|e| io_error(e, "check the temp directory"))?;
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
     let status = std::process::Command::new("sh")
         .arg("-c")
@@ -695,7 +705,13 @@ fn edit(env: &Env, id: &str, view: Option<&str>) -> Result<Value, ErrorReply> {
         ));
     }
     let yaml = std::fs::read_to_string(tmp.path()).map_err(|e| io_error(e, "retry"))?;
-    call(env, "edit_block", json!({"yaml": yaml, "view": view})).map_err(|mut e| {
+    let brief = text(&briefing["base"]["token"]);
+    call(
+        env,
+        "edit_block",
+        json!({"yaml": yaml, "view": view, "brief": brief}),
+    )
+    .map_err(|mut e| {
         if let Ok(path) = tmp.into_temp_path().keep() {
             e.fix = format!(
                 "{}; your edit is saved at {}: run rdy edit {id} again and paste it in",
@@ -785,7 +801,11 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                 .rfind(|id| id.starts_with(prefix))
                 .unwrap_or_default()
                 .to_string();
-            Ok((v, format!("created {kind} {path} ({last})")))
+            let t = format!(
+                "created {kind} {path} ({last}){}",
+                brief_text::consequences_text(&v)
+            );
+            Ok((v, t))
         }
         Cmd::Ls { path, scope, depth } => {
             let v = call(
@@ -908,7 +928,11 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         }
         Cmd::Edit { id, view } => {
             let v = edit(env, &id, view.as_deref())?;
-            let t = format!("change {}", hash_short(text(&v["change"])));
+            let t = format!(
+                "change {}{}",
+                hash_short(text(&v["change"])),
+                brief_text::consequences_text(&v)
+            );
             Ok((v, t))
         }
         Cmd::Render { out, scope } => {
@@ -957,6 +981,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                     text(&w["message"])
                 ));
             }
+            t.push_str(&brief_text::consequences_text(&v));
             Ok((v, t))
         }
         Cmd::Reindex => {
@@ -965,13 +990,19 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         }
         Cmd::Fsck => {
             let v = call(env, "fsck", json!({}))?;
-            let t = format!(
+            let mut t = format!(
                 "ok: {} frames, {} landings, {} versions{}",
                 num(&v["frames"]),
                 num(&v["landings"]),
                 num(&v["versions"]),
                 open_warnings(&v)
             );
+            if v["open_report"]["unclean_shutdown"] == json!(true) {
+                t.push_str(&format!(
+                    "\nnote: this daemon started after an unclean shutdown and recovered (caught up {} frames)",
+                    num(&v["open_report"]["caught_up_frames"])
+                ));
+            }
             Ok((v, t))
         }
         Cmd::Check { .. } | Cmd::Serve { .. } => unreachable!("handled in main"),

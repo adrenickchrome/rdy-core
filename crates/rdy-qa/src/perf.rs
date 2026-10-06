@@ -1,8 +1,11 @@
 //! The perf-regression tier: a fixed workload, per-machine baselines, regression verdicts.
+use crate::edit_loop::{brief_of, write_cited};
 use crate::fixtures::{approver, land, write, writer};
 use rdy_daemon::{Attempt, Client, Hello, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun};
+use rdy_engine::brief::Coverage;
+use rdy_engine::consequence::ConsequenceKind;
 use rdy_engine::{Rdy, Scope, now_ms, testkit};
-use rdy_model::{Block, BlockId, Op};
+use rdy_model::{Block, BlockId, Hash, Op};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -47,6 +50,7 @@ fn spec_target(op: &str) -> Option<String> {
         o if o.starts_with("write") || o.starts_with("propose") => {
             "< 5 ms p99 on Linux NVMe; one durable flush + < 1 ms on macOS (spec 11, restated per hardware class)"
         }
+        "brief_doc" => "< 5 ms p99 at 10k with the view's graph carried (the read budget, spec 11)",
         "context" | "impact" | "version_position" | "resolve_path" | "tree_full" => {
             "< 5 ms p99 (spec 11)"
         }
@@ -636,6 +640,90 @@ fn tier_views(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs
     assert!(listed >= runs.landing_views, "{listed} views listed");
 }
 
+/// The edit loop: a briefing over a doc, a write that cites a briefing (the check on, a hit) and a
+/// write followed by its consequences. Run in a fresh view `eb` where the fixture's section is
+/// `stable`, so every write there is checked against the registry. `sfx` as for [`tier_reads`].
+fn tier_edit_loop(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs: &Runs) {
+    let eb = Scope::View("eb".into());
+    let (section, claim) = (fx.section.to_string(), fx.claim.to_string());
+    // setup, untimed: the section stable in `eb`, a current briefing of it, a claim that
+    // references the fixture's claim (it becomes suspect when that claim changes), the graph built
+    let t0 = brief_of(r, &Scope::Canon, &[&fx.section]).base.token;
+    write_cited(
+        r,
+        "eb",
+        json!([{"op": "update", "id": section, "fields": {"lifecycle": "stable"}}]),
+        Some(&t0),
+    )
+    .expect("make the section stable in eb");
+    let ts = brief_of(r, &eb, &[&fx.section]).base.token;
+    write_cited(
+        r,
+        "eb",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": format!("{{{{{claim}}}}}")}]),
+        Some(&ts),
+    )
+    .expect("the referrer");
+    r.read().graph(&eb).expect("graph");
+
+    let cov = Coverage {
+        ids: vec![],
+        path: Some(fx.doc_path.clone()),
+    };
+    out.push(measure_timed(&format!("brief_doc{sfx}"), runs.read, |i| {
+        write_cited(
+            r,
+            "eb",
+            json!([{"op": "create", "type": "claim", "parent": section, "body": format!("Briefed {i}.")}]),
+            Some(&ts),
+        )
+        .expect("write for brief_doc");
+        let s = Instant::now();
+        let b = r.read().brief(&eb, &cov, None).expect("brief");
+        b.register(&r.briefs());
+        let took = s.elapsed();
+        assert!(b.covers > 0);
+        took
+    }));
+    out.push(measure(&format!("write_briefed{sfx}"), runs.write, |i| {
+        write_cited(
+            r,
+            "eb",
+            json!([{"op": "create", "type": "claim", "parent": section, "body": format!("Cited {i}.")}]),
+            Some(&ts),
+        )
+        .expect("write_briefed");
+    }));
+    out.push(measure_timed(
+        &format!("write_consequences{sfx}"),
+        runs.write,
+        |i| {
+            let tc = brief_of(r, &eb, &[&fx.claim]).base.token;
+            let s = Instant::now();
+            let w = write_cited(
+                r,
+                "eb",
+                json!([{"op": "update", "id": claim, "body": format!("Changed {i}.")}]),
+                Some(&tc),
+            )
+            .expect("write for consequences");
+            let change: Hash = w.change.parse().expect("change hash");
+            let cq = r
+                .read()
+                .consequences(&eb, &change, None)
+                .expect("consequences");
+            let took = s.elapsed();
+            let suspects = cq
+                .items
+                .iter()
+                .filter(|c| c.kind == ConsequenceKind::Suspect)
+                .count();
+            assert_eq!(suspects, 1, "the referrer from the setup: {cq:?}");
+            took
+        },
+    ));
+}
+
 fn tier_render(out: &mut Vec<Measure>, r: &Rdy, dir: &std::path::Path, sfx: &str, runs: usize) {
     out.push(measure(&format!("render{sfx}"), runs, |i| {
         let site = dir.join(format!("site{sfx}{i}"));
@@ -734,6 +822,7 @@ pub fn run_workload() -> Vec<Measure> {
         "va was rebased: the view reads would measure a different view"
     );
     tier_reads(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
+    tier_edit_loop(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
     tier_render(&mut out, &r, dir.path(), "", 5);
     out.push(measure("export_import", 5, |i| {
         let export = dir.path().join(format!("export{i}"));
@@ -885,6 +974,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
         .expect("write");
     }));
     tier_reads(&mut out, &mut r, &fx, sfx, &LARGE_RUNS);
+    tier_edit_loop(&mut out, &mut r, &fx, sfx, &LARGE_RUNS);
     tier_render(&mut out, &r, parent, sfx, 3);
     drop(r);
     tier_cold_open(&mut out, &proj, sfx, 3);
@@ -1152,6 +1242,22 @@ mod tests {
                 .unwrap_or_else(|| panic!("{op} missing"));
             eprintln!("{op}: median {:.3} ms, p95 {:.3} ms", m.median_ms, m.p95_ms);
             assert!(m.median_ms > 0.0, "{op}: {m:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "runs the typical perf workload; cargo test -p rdy-qa --release --lib -- --ignored bperf1"]
+    fn bperf1_the_edit_loop_ops_have_spec_targets_and_run() {
+        for op in ["brief_doc", "write_briefed", "write_consequences"] {
+            assert!(spec_target(op).is_some(), "{op} has no target");
+        }
+        let ms = run_workload();
+        for op in ["brief_doc", "write_briefed", "write_consequences"] {
+            let m = ms
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            assert!(m.median_ms > 0.0);
         }
     }
 

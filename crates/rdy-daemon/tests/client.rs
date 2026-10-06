@@ -184,17 +184,21 @@ async fn start1_a_daemon_that_never_becomes_ready_is_e_daemon_start_with_the_log
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
     run.ensure().unwrap();
-    std::fs::write(
-        run.log_file(),
-        (1..=30).map(|i| format!("line {i}\n")).collect::<String>(),
-    )
-    .unwrap();
+    // lines from an earlier run, then the 30 lines this start's daemon writes
+    std::fs::write(run.log_file(), "from an earlier run\n").unwrap();
     let n = Arc::new(AtomicUsize::new(0));
-    let mut o = opts(
-        "1",
-        dir.path(),
-        in_process_spawn("1", n, Duration::from_secs(60)),
-    );
+    let mut inner = in_process_spawn("1", n, Duration::from_secs(60));
+    let mut o = opts("1", dir.path(), move |run: &RunDir| {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(run.log_file())
+            .unwrap();
+        for i in 1..=30 {
+            writeln!(f, "line {i}").unwrap();
+        }
+        inner(run)
+    });
     o.start_timeout = Duration::from_millis(1500);
     let e = connect_or_start(&run, o).await.unwrap_err();
     assert_eq!(e.code, E_DAEMON_START);
@@ -205,7 +209,9 @@ async fn start1_a_daemon_that_never_becomes_ready_is_e_daemon_start_with_the_log
         e.message
     );
     assert!(
-        e.message.contains("line 30") && !e.message.contains("line 10\n"),
+        e.message.contains("line 30")
+            && !e.message.contains("line 10\n")
+            && !e.message.contains("earlier run"),
         "{}",
         e.message
     );
@@ -478,7 +484,9 @@ async fn start1_a_symlinked_daemon_log_is_never_read_into_an_error() {
     let e = connect_or_start(&run, o).await.unwrap_err();
     assert_eq!(e.code, E_DAEMON_START);
     assert!(
-        !e.message.contains("keep") && e.message.ends_with("\n(no daemon.log)"),
+        !e.message.contains("keep")
+            && e.message
+                .ends_with("\n(the daemon wrote nothing to daemon.log)"),
         "{e}"
     );
     assert_eq!(e.extra["log_tail"], json!([]));
@@ -589,9 +597,15 @@ async fn cli2_a_spawned_daemon_that_exits_before_ready_is_e_daemon_start_at_once
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
     run.ensure().unwrap();
-    std::fs::write(run.log_file(), "already running: the store at x\n").unwrap();
+    std::fs::write(run.log_file(), "from an earlier run\n").unwrap();
     let t0 = std::time::Instant::now();
-    let mut o = opts("1", dir.path(), |_| {
+    let mut o = opts("1", dir.path(), |run: &RunDir| {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(run.log_file())
+            .unwrap();
+        writeln!(f, "already running: the store at x").unwrap();
         Ok(Spawned {
             exited: Box::new(|| Some(2)),
         })

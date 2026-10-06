@@ -213,10 +213,9 @@ fn reload1_reverting_an_invalid_pack_to_the_loaded_bytes_clears_the_error() {
         a.ctl("new_doc", json!({"path": "d3", "view": null}))
             .await
             .unwrap();
-        assert!(
-            a.take_notice().is_none(),
-            "the error clears with the revert"
-        );
+        // each session hears once that the error it was told about is gone
+        let n = a.take_notice().expect("a notice when the error clears");
+        assert!(n.starts_with("pack_changed"), "{n}");
         assert_eq!(a.ctl("status", json!({})).await.unwrap()["pack"], "proj");
         assert!(a.take_notice().is_none());
     });
