@@ -22,11 +22,40 @@ pub struct Session {
     pub kind: SessionKind,
 }
 
+thread_local! {
+    /// The pinned clock of this thread: the next time [`now_ms`] reads, if pinned.
+    static PINNED: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+/// The time in milliseconds since the epoch: the wall clock, or this thread's pinned clock.
 pub fn now_ms() -> i64 {
+    if let Some(t) = PINNED.with(|p| {
+        let t = p.get()?;
+        p.set(Some(t + 1));
+        Some(t)
+    }) {
+        return t;
+    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Pins this thread's clock at `start_ms` until the guard drops, so fixtures stamp the same
+/// dates on every run. Each read advances it by a millisecond, keeping stamps ordered.
+pub fn pin_clock(start_ms: i64) -> PinnedClock {
+    PinnedClock(PINNED.with(|p| p.replace(Some(start_ms))))
+}
+
+/// Restores the clock that [`pin_clock`] replaced when dropped.
+#[must_use = "the clock is pinned only while the guard lives"]
+pub struct PinnedClock(Option<i64>);
+
+impl Drop for PinnedClock {
+    fn drop(&mut self) {
+        PINNED.with(|p| p.set(self.0));
+    }
 }
 
 impl Session {

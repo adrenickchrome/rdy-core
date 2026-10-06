@@ -113,3 +113,30 @@ fn gold1_the_view_page_matches_its_text_golden() {
     let (_d, _r, _ids, out) = golden::site_view();
     check(out.path(), "view", "tutorial/adventure.html");
 }
+
+/// The golden project is written on a pinned clock: every landing it holds and its version are
+/// stamped in the fixture's first hour (each read of the clock advances it a millisecond),
+/// whatever the wall clock reads, so the goldens' dates are fixed.
+#[test]
+fn gold1_the_golden_project_is_dated_by_the_fixture_clock_not_the_wall_clock() {
+    let (_d, r, _ids) = golden::project();
+    let hour = golden::FIXTURE_MS..golden::FIXTURE_MS + 3_600_000;
+    let read = r.read();
+    let landings = read.landings().expect("landings");
+    assert!(!landings.is_empty());
+    for (h, rec) in &landings {
+        assert!(
+            hour.contains(&rec.approved_by.at_ms),
+            "landing {h} is stamped {} ms, not in the fixture's hour",
+            rec.approved_by.at_ms
+        );
+    }
+    for v in read.versions().expect("versions") {
+        assert!(
+            hour.contains(&v.at_ms),
+            "version {} is stamped {} ms, not in the fixture's hour",
+            v.name,
+            v.at_ms
+        );
+    }
+}
