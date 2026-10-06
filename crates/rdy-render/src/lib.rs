@@ -6,6 +6,7 @@ pub mod inline;
 mod llms;
 mod nav;
 mod page;
+pub mod review;
 mod search;
 mod site;
 mod toc;
