@@ -187,6 +187,8 @@ pub struct ReadState {
     pub(crate) description: Option<Arc<str>>,
     /// `reviews.require_up_to_date` in `.rdy/config.yaml`, read by a full publish (FW-HB1).
     pub(crate) require_up_to_date: bool,
+    /// `views.idle_days` in `.rdy/config.yaml` (default 14), read by a full publish.
+    pub(crate) idle_days: u32,
     pub(crate) reader: StoreReader,
     pub(crate) as_of: Arc<AsOfCache>,
     /// The version-position cache, shared like `as_of` (read by the state's version reads).
@@ -253,6 +255,12 @@ impl ReadState {
     /// (`reviews.require_up_to_date`), as the config read when this state was published.
     pub fn require_up_to_date(&self) -> bool {
         self.require_up_to_date
+    }
+
+    /// Days without a write after which an open view is idle (`views.idle_days`), as the config
+    /// read when this state was published.
+    pub fn idle_days(&self) -> u32 {
+        self.idle_days
     }
 
     /// The landing view `name` reads on: canon's head for a view with no ref or one that floats

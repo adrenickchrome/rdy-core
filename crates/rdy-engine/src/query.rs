@@ -19,6 +19,10 @@ pub struct Context {
     pub status: Option<DerivedStatus>,
     pub governing: Vec<String>,
     pub suspects: Vec<Suspect>,
+    /// When a decision takes effect: its `effective_from`, else when it was recorded. Absent for
+    /// every other block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_from: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -214,6 +218,7 @@ impl ReadState {
             status: g.status(id),
             governing: g.governing(id).iter().map(|d| d.to_string()).collect(),
             suspects,
+            effective_from: rdy_model::decision::effective_from(&block).map(str::to_string),
         })
     }
 

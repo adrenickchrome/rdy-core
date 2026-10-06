@@ -13,6 +13,7 @@ mod session;
 pub mod testkit;
 mod tree_io;
 mod version;
+pub mod view_query;
 pub mod views;
 mod write;
 mod yaml_pos;
@@ -33,6 +34,7 @@ pub use tree_io::Diagnostic;
 pub use version::{
     AS_OF_CACHE_ENTRIES, VersionInfo, VersionPosition, VersionRef, ViewPosition, parse_version,
 };
+pub use view_query::{ChangeSummary, Compare, CompareEntry, OpSummary, ViewDetail, ViewSummary};
 pub use views::{ConflictInfo, ConflictSide, OwnerInfo, ViewHeadInfo, ViewOpResult};
 pub use write::{LinkInput, OpInput, WriteRequest, WriteResult, json_to_field};
 
@@ -56,7 +58,19 @@ struct Config {
     /// How proposals are reviewed (FW-HB1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reviews: Option<ReviewsConfig>,
+    /// How views are listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    views: Option<ViewsConfig>,
 }
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ViewsConfig {
+    /// Days without a write after which `rdy view ls` flags an open view as idle.
+    idle_days: u32,
+}
+
+/// `views.idle_days` when the config does not set it.
+const DEFAULT_IDLE_DAYS: u32 = 14;
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct ReviewsConfig {
@@ -69,6 +83,11 @@ impl Config {
     fn require_up_to_date(cfg: Option<&Config>) -> bool {
         cfg.and_then(|c| c.reviews.as_ref())
             .is_some_and(|r| r.require_up_to_date)
+    }
+
+    fn idle_days(cfg: Option<&Config>) -> u32 {
+        cfg.and_then(|c| c.views.as_ref())
+            .map_or(DEFAULT_IDLE_DAYS, |v| v.idle_days)
     }
 }
 
@@ -160,6 +179,7 @@ impl Rdy {
             name: None,
             description: None,
             reviews: None,
+            views: None,
         })
         .expect("config yaml");
         rdy_store::fsutil::write_durable(&dot.join("config.yaml"), cfg.as_bytes()).map_err(io)?;
@@ -185,6 +205,7 @@ impl Rdy {
         let vpos: Arc<Mutex<version::VposCache>> = Default::default();
         let (name, description) = site_identity(project, Some(&cfg));
         let require_up_to_date = Config::require_up_to_date(Some(&cfg));
+        let idle_days = Config::idle_days(Some(&cfg));
         // a placeholder until the first publish below, which replaces all of it
         let state = ArcSwap::from_pointee(ReadState {
             seq: store.log_end(),
@@ -197,6 +218,7 @@ impl Rdy {
             name,
             description,
             require_up_to_date,
+            idle_days,
             reader: store.reader(),
             as_of: Arc::clone(&as_of),
             vpos: Arc::clone(&vpos),
@@ -254,6 +276,11 @@ impl Rdy {
         self.state.load_full()
     }
 
+    /// Days without a write after which an open view is idle (`views.idle_days`, default 14).
+    pub fn idle_days(&self) -> u32 {
+        self.read().idle_days()
+    }
+
     /// Publishes the state after a write (snap1), re-reading what `delta` names and carrying the
     /// rest over from the current state. Every write calls it before returning `Ok`. If reading
     /// fails, the published state holds the error, every read of it returns that error, and the
@@ -294,6 +321,7 @@ impl Rdy {
                     name: Arc::clone(&prev.name),
                     description: prev.description.clone(),
                     require_up_to_date: prev.require_up_to_date,
+                    idle_days: prev.idle_days,
                     reader: self.store.reader(),
                     as_of: Arc::clone(&self.as_of),
                     vpos: Arc::clone(&self.vpos),
@@ -375,16 +403,22 @@ impl Rdy {
         let canon_head = self.store.canon_head()?;
         // the config is re-read only by a full publish (open, invalidate, reindex); every other
         // publish carries the previous state's name, description and review rules
-        let (name, description, require_up_to_date) = match delta {
+        let (name, description, require_up_to_date, idle_days) = match delta {
             Delta::Full => {
                 let cfg = read_config(&prev.root);
                 let (name, description) = site_identity(&prev.root, cfg.as_ref());
-                (name, description, Config::require_up_to_date(cfg.as_ref()))
+                (
+                    name,
+                    description,
+                    Config::require_up_to_date(cfg.as_ref()),
+                    Config::idle_days(cfg.as_ref()),
+                )
             }
             _ => (
                 Arc::clone(&prev.name),
                 prev.description.clone(),
                 prev.require_up_to_date,
+                prev.idle_days,
             ),
         };
         let (canon, views, tags) = match delta {
@@ -507,6 +541,7 @@ impl Rdy {
             name,
             description,
             require_up_to_date,
+            idle_days,
             reader: self.store.reader(),
             as_of: Arc::clone(&self.as_of),
             vpos: Arc::clone(&self.vpos),

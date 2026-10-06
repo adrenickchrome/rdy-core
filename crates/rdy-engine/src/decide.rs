@@ -22,6 +22,9 @@ pub struct DecisionInput {
     pub kind: Option<String>,
     #[serde(default)]
     pub review_by: Option<String>,
+    /// When the decision takes effect (RFC 3339); recorded_at when absent.
+    #[serde(default)]
+    pub effective_from: Option<String>,
     #[serde(default)]
     pub body: String,
     #[serde(default)]
@@ -77,6 +80,7 @@ fn fields_of(d: &DecisionInput) -> BTreeMap<String, Value> {
         ("reversibility", &d.reversibility),
         ("kind", &d.kind),
         ("review_by", &d.review_by),
+        (decision::EFFECTIVE_FROM, &d.effective_from),
     ] {
         if let Some(v) = v {
             f.insert(k.into(), json!(v));

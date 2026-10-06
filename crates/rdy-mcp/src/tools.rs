@@ -727,6 +727,8 @@ fn decision_input(p: DecideParams) -> DecisionInput {
         reversibility: p.reversibility,
         kind: p.kind,
         review_by: p.review_by,
+        // the MCP parameter is Task 17's
+        effective_from: None,
         body: p.body.unwrap_or_default(),
         affects: p.affects.unwrap_or_default(),
         depends_on: p.depends_on.unwrap_or_default(),
