@@ -101,8 +101,9 @@ pub struct Site<'a> {
     pager_order: Vec<BlockId>,
     /// Each doc's place in `pager_order`.
     order_pos: BTreeMap<BlockId, usize>,
-    /// The docs of a type with `nav: false`: they have pages, but no place in the sidebar, a
-    /// folder's index, the home page's contents, the pager or the search index.
+    /// The docs of a type with `nav: false`, and the folders holding only such docs and folders:
+    /// they have pages, but no place in the sidebar, a folder's index, the home page's contents,
+    /// the pager or the search index.
     nav_hidden: BTreeSet<BlockId>,
     /// Every label worked out so far, by block and reference depth: a label is read many times
     /// per render (links, hovers, crumbs, the navigation, the search, the twins).
@@ -154,7 +155,7 @@ impl<'a> Site<'a> {
         walk(m, None, "", 0, &mut paths, &mut order, &mut tree_order);
         let (mut nav_lists, mut top_folders, mut nav_pos) =
             (BTreeMap::<_, Vec<&Block>>::new(), vec![], BTreeMap::new());
-        let nav_hidden: BTreeSet<BlockId> = order
+        let mut nav_hidden: BTreeSet<BlockId> = order
             .iter()
             .filter(|id| {
                 m.get(id)
@@ -164,6 +165,21 @@ impl<'a> Site<'a> {
             })
             .cloned()
             .collect();
+        // a folder whose every doc and folder is left out is left out too (an empty folder
+        // stays); children come after their folder in tree order, so walk it backwards
+        for id in tree_order.iter().rev() {
+            if m.get(id).is_none_or(|b| b.block_type != tree::FOLDER) {
+                continue;
+            }
+            let mut kids = m
+                .children(Some(id))
+                .into_iter()
+                .filter(|c| tree::is_tree_type(&c.block_type) && paths.contains_key(&c.id))
+                .peekable();
+            if kids.peek().is_some() && kids.all(|c| nav_hidden.contains(&c.id)) {
+                nav_hidden.insert(id.clone());
+            }
+        }
         for id in &tree_order {
             let Some(b) = m.get(id) else { continue };
             if !tree::is_tree_type(&b.block_type) || nav_hidden.contains(id) {
@@ -703,7 +719,8 @@ impl<'a> Site<'a> {
     }
 
     /// Whether `id` has a place in the site's navigation: false for a doc of a type with
-    /// `nav: false`, which is rendered but listed nowhere.
+    /// `nav: false`, and for a folder holding only such docs (and such folders), which are
+    /// rendered but listed nowhere.
     pub fn in_nav(&self, id: &BlockId) -> bool {
         !self.nav_hidden.contains(id)
     }
