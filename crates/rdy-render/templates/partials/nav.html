@@ -1,8 +1,8 @@
 {%- macro entries(list) -%}
 {%- for e in list -%}
 {%- if e.more -%}<li class="more"><a href="{{ e.more[1] }}">+{{ e.more[0] }} more</a></li>
-{%- else -%}<li class="nav-item{% if e.current %} is-active{% endif %}{% if e.on_path %} on-path{% endif %}"><a href="{{ e.href }}"{% if e.current %} aria-current="page"{% endif %}>{{ e.label }}</a>{% if e.children %}<ul class="nav-sub">{{ entries(e.children) }}</ul>{% endif %}</li>
+{%- else -%}<li class="nav-item{% if e.current %} is-active{% endif %}{% if e.on_path %} on-path{% endif %}"><a href="{{ e.href }}"{% if e.current %} aria-current="page"{% endif %}>{{ e.label }}</a>{% if e.change %}<span class="chg chg-label chg-{{ e.change }}">{{ e.change | capitalize }}</span>{% endif %}{% if e.children %}<ul class="nav-sub">{{ entries(e.children) }}</ul>{% endif %}</li>
 {%- endif -%}
 {%- endfor -%}
 {%- endmacro -%}
-<ul class="nav-root">{% for g in nav.groups %}<li class="nav-group">{% if g.label %}{% if g.href %}<a class="nav-group-link" href="{{ g.href }}"{% if g.current %} aria-current="page"{% endif %}><span class="nav-group-label">{{ g.label }}</span></a>{% else %}<span class="nav-group-label">{{ g.label }}</span>{% endif %}{% endif %}<ul>{{ entries(g.entries) }}</ul></li>{% endfor %}</ul>
+<ul class="nav-root">{% for g in nav.groups %}<li class="nav-group">{% if g.label %}{% if g.href %}<a class="nav-group-link" href="{{ g.href }}"{% if g.current %} aria-current="page"{% endif %}><span class="nav-group-label">{{ g.label }}</span>{% if g.change %}<span class="chg chg-label chg-{{ g.change }}">{{ g.change | capitalize }}</span>{% endif %}</a>{% else %}<span class="nav-group-label">{{ g.label }}</span>{% if g.change %}<span class="chg chg-label chg-{{ g.change }}">{{ g.change | capitalize }}</span>{% endif %}{% endif %}{% endif %}<ul>{{ entries(g.entries) }}</ul></li>{% endfor %}{% if nav.removed %}<li class="nav-group"><span class="nav-group-label">Removed</span><ul>{% for l in nav.removed %}<li class="nav-item nav-removed">{{ l }}</li>{% endfor %}</ul></li>{% endif %}</ul>

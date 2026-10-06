@@ -1,6 +1,7 @@
 //! The home page's context: a card for every top-level folder and doc, and the versions, newest
 //! first, in a reader's words (a date and the message, never a hash).
 use crate::inline::Form;
+use crate::review::{Mark, Review};
 use crate::site::{Site, rel};
 use rdy_engine::{Materialized, VersionInfo};
 use rdy_model::{Block, RefMode, tree};
@@ -17,6 +18,20 @@ pub struct Card {
     pub summary: String,
 }
 
+/// One line of the home page's list of a draft's changes.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChangeRow {
+    pub title: String,
+    /// The page, or none for a removed page (there is nothing to link to).
+    pub href: Option<String>,
+    /// `edited`, `new` or `removed`.
+    pub mark: &'static str,
+    /// The word a reader sees.
+    pub word: &'static str,
+    /// For an edited doc: `2 edited · 1 new · 1 removed`.
+    pub counts: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Version {
     pub name: String,
@@ -29,11 +44,15 @@ pub struct Version {
 #[derive(Clone, Debug, Serialize)]
 pub struct Home {
     pub description: Option<String>,
+    /// What a draft changes: its changed docs in reading order, then the pages it removed; empty
+    /// for canon, tags and a draft with nothing a reader sees changed.
+    pub changes: Vec<ChangeRow>,
     pub cards: Vec<Card>,
     /// Newest first.
     pub versions: Vec<Version>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     site: &Site,
     m: &Materialized,
@@ -42,6 +61,7 @@ pub fn build(
     description: Option<&str>,
     has_terms: bool,
     has_questions: bool,
+    review: Option<&Review>,
 ) -> Home {
     let mut cards: Vec<Card> = m
         .children(None)
@@ -78,6 +98,7 @@ pub fn build(
     let current = versions.last().map(|v| &v.name);
     Home {
         description: description.map(String::from),
+        changes: review.map(|r| changes(site, r)).unwrap_or_default(),
         cards,
         versions: versions
             .iter()
@@ -93,6 +114,35 @@ pub fn build(
             })
             .collect(),
     }
+}
+
+/// The changed docs of a draft in reading order, then its removed pages.
+fn changes(site: &Site, review: &Review) -> Vec<ChangeRow> {
+    let mut rows: Vec<ChangeRow> = site
+        .tree_pages()
+        .filter_map(|id| {
+            let change = review.doc(id)?;
+            let b = site.m.get(id)?;
+            Some(ChangeRow {
+                title: site.label(b),
+                href: site.page(id).map(|p| rel("index.html", &p)),
+                mark: match change.mark {
+                    Mark::Edited => "edited",
+                    Mark::New => "new",
+                },
+                word: change.mark.word(),
+                counts: change.counts(),
+            })
+        })
+        .collect();
+    rows.extend(review.removed_pages().iter().map(|b| ChangeRow {
+        title: site.label(b),
+        href: None,
+        mark: "removed",
+        word: "Removed",
+        counts: None,
+    }));
+    rows
 }
 
 /// The first prose block under `b` (depth first, in order), as plain text: a reference reads as

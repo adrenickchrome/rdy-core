@@ -397,6 +397,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
                 sh.description,
                 has_terms,
                 has_questions,
+                sh.review,
             ));
         }
         Kind::Folder(id) => {
@@ -479,7 +480,14 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         nav: if redirect {
             nav::Nav::default()
         } else {
-            nav::build(site, current, &page_url, has_terms, has_questions)
+            nav::build(
+                site,
+                current,
+                &page_url,
+                has_terms,
+                has_questions,
+                sh.review,
+            )
         },
         toc: toc::build(&items),
         pager,
