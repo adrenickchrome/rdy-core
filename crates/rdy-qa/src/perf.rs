@@ -466,11 +466,6 @@ pub fn run_workload() -> Vec<Measure> {
         let mut r2 = Rdy::init(&fresh, "rdy-standard").expect("init");
         r2.import(&approver(), "work", &export).expect("import");
     }));
-    // the in-process comparator for `daemon_write_single`: one `new_doc` (a doc and its skeleton)
-    out.push(measure("new_doc_single", 30, |i| {
-        r.new_doc(&writer(), "vd", &format!("nd-{i}"), None, None)
-            .expect("new_doc");
-    }));
     drop(r);
     tier_cold_open(&mut out, &proj, "", 5);
     // Cold open with a lagging index: the project is closed, so put the old index back over the
@@ -489,6 +484,16 @@ pub fn run_workload() -> Vec<Measure> {
         "cold_open_lagging: caught up {} frames",
         lag.expect("ran at least once")
     );
+    // the in-process comparator for `daemon_write_single`: one `new_doc` (a doc and its
+    // skeleton). After the cold opens, so they open the same project as before the daemon ops
+    // were added (before them, its 30 docs in `vd` gave the lagging open 271 more frames to
+    // catch up: 4,822 instead of 4,551)
+    let mut r = Rdy::open(&proj).expect("open");
+    out.push(measure("new_doc_single", 30, |i| {
+        r.new_doc(&writer(), "vd", &format!("nd-{i}"), None, None)
+            .expect("new_doc");
+    }));
+    drop(r);
     out.extend(daemon_ops(&proj, ""));
     if crate::fixtures::deep() {
         out.extend(run_large_tier(dir.path()));
