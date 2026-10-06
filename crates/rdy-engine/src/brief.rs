@@ -9,7 +9,6 @@ use crate::query::summary_in;
 use crate::write::OpInput;
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, EdgeKind, IMPACT_LINKS, SUSPECT_LINKS, Suspect};
-use rdy_model::decision::is_frozen;
 use rdy_model::{Block, BlockId, FieldValue, Hash};
 use rdy_schema::{Issue, Pack, Severity, Trait};
 use serde::{Deserialize, Serialize};
@@ -169,12 +168,38 @@ pub enum FollowUp {
     Resolve,
 }
 
-/// The follow-up a dependent block owes, by its kind (exact, in order): a frozen decision
-/// reaffirms; a `normative` or `defines` type, or a `table` marked `normative: true`, updates;
-/// anything else confirms.
-pub fn follow_up(pack: &Pack, dependent: &Block) -> FollowUp {
-    if is_frozen(dependent) {
-        return FollowUp::Reaffirm;
+/// The follow-up a dependent block owes when a block it depends on changed. `status` is the
+/// dependent's derived decision status (`None` for a block that is not a decision);
+/// `target_deleted` says the changed block no longer exists. `None` means no follow-up at all.
+///
+/// Exact, in order:
+/// 1. a decision that asserts nothing live (rejected, revoked or fully superseded): `None`;
+/// 2. a live or partially superseded decision: `Reaffirm`, whatever the target did;
+/// 3. a proposed decision (mutable): `Update`;
+/// 4. any other block while the target is deleted (a repin cannot pin to a block that is gone):
+///    `Update`;
+/// 5. a `normative` or `defines` type, or a `table` marked `normative: true`: `Update`;
+/// 6. anything else (informative, structural, no classifying trait, asset): `Confirm`.
+pub fn follow_up(
+    pack: &Pack,
+    dependent: &Block,
+    status: Option<&DerivedStatus>,
+    target_deleted: bool,
+) -> Option<FollowUp> {
+    match status {
+        Some(
+            DerivedStatus::Rejected
+            | DerivedStatus::Superseded { .. }
+            | DerivedStatus::Revoked { .. },
+        ) => return None,
+        Some(DerivedStatus::Live | DerivedStatus::PartiallySuperseded { .. }) => {
+            return Some(FollowUp::Reaffirm);
+        }
+        Some(DerivedStatus::Proposed) => return Some(FollowUp::Update),
+        None => {}
+    }
+    if target_deleted {
+        return Some(FollowUp::Update);
     }
     let classifying = pack
         .block_types
@@ -184,11 +209,11 @@ pub fn follow_up(pack: &Pack, dependent: &Block) -> FollowUp {
         });
     let normative_table = dependent.block_type == "table"
         && dependent.fields.get("normative") == Some(&FieldValue::Bool(true));
-    if classifying || normative_table {
+    Some(if classifying || normative_table {
         FollowUp::Update
     } else {
         FollowUp::Confirm
-    }
+    })
 }
 
 /// A live decision governing covered blocks.
@@ -473,8 +498,10 @@ impl ReadState {
                 if edge_in(&e.kind, &SUSPECT_LINKS)
                     && e.pin.is_some()
                     && let Some(from) = m.get(&e.from)
+                    && let Some(f) =
+                        follow_up(pack, from, g.status(&e.from).as_ref(), m.get(id).is_none())
                 {
-                    stale.insert(key, follow_up(pack, from));
+                    stale.insert(key, f);
                 }
             }
         }
