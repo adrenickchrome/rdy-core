@@ -87,6 +87,12 @@ fn spec_target(op: &str) -> Option<String> {
             "< 5 ms p99 on Linux NVMe; one durable flush plus < 1 ms on macOS (DECISIONS-rdy-m2 §1 Q1)"
         }
         "daemon_cold_start" => "< 2 s at 100k (M2 spec 15.1)",
+        "code_index_build" => {
+            "a full rebuild in seconds (FW-C6): 2,000 commits, 400 files; recorded, no spec budget"
+        }
+        "brief_code" => {
+            "recorded, no spec budget: one git rev-parse per call plus a briefing over the file's anchors (warm index)"
+        }
         _ => return None,
     };
     Some(if large {
@@ -724,6 +730,41 @@ fn tier_edit_loop(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, 
     ));
 }
 
+/// The code index: a full rebuild over a 2,000-commit, 400-file synthetic history whose commits
+/// cite the fixture's claims, and a briefing of one file against the warm index. The project's
+/// config is put back afterwards, so later ops see it unchanged. Typical tier only.
+fn tier_code(out: &mut Vec<Measure>, r: &Rdy, fx: &Fixture, _dir: &std::path::Path) {
+    use rdy_engine::code_index::{build, code_repos};
+    // setup, untimed: the history, the link, the warm index
+    let cite: Vec<String> = {
+        let m = r.read().materialized(&Scope::Canon).expect("canon");
+        m.children(Some(&fx.section))
+            .iter()
+            .take(50)
+            .map(|b| b.id.to_string())
+            .collect()
+    };
+    let g = crate::git_repo::GitRepo::synthetic(2000, 400, &cite);
+    let config = r.root().join(".rdy/config.yaml");
+    let saved = std::fs::read(&config).expect("read the project config");
+    g.link(r.root());
+    let repo = code_repos(r.root()).expect("code_repos")[0].clone();
+    r.read()
+        .brief_code(&Scope::Canon, "src/f0.rs", None, None)
+        .expect("warm brief_code");
+    out.push(measure("code_index_build", 5, |_| {
+        build(&repo).expect("build");
+    }));
+    out.push(measure("brief_code", 30, |_| {
+        let b = r
+            .read()
+            .brief_code(&Scope::Canon, "src/f0.rs", None, None)
+            .expect("brief_code");
+        assert!(b.briefing.covers > 0);
+    }));
+    std::fs::write(&config, saved).expect("restore the project config");
+}
+
 fn tier_render(out: &mut Vec<Measure>, r: &Rdy, dir: &std::path::Path, sfx: &str, runs: usize) {
     out.push(measure(&format!("render{sfx}"), runs, |i| {
         let site = dir.join(format!("site{sfx}{i}"));
@@ -823,6 +864,7 @@ pub fn run_workload() -> Vec<Measure> {
     );
     tier_reads(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
     tier_edit_loop(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
+    tier_code(&mut out, &r, &fx, dir.path());
     tier_render(&mut out, &r, dir.path(), "", 5);
     out.push(measure("export_import", 5, |i| {
         let export = dir.path().join(format!("export{i}"));
@@ -1259,6 +1301,37 @@ mod tests {
                 .unwrap_or_else(|| panic!("{op} missing"));
             assert!(m.median_ms > 0.0);
         }
+    }
+
+    #[test]
+    #[ignore = "runs the typical perf workload; cargo test -p rdy-qa --release --lib -- --ignored cperf1"]
+    fn cperf1_the_code_index_ops_have_targets_and_run() {
+        for op in ["code_index_build", "brief_code"] {
+            assert!(spec_target(op).is_some(), "{op} has no target");
+        }
+        let ms = run_workload();
+        for op in ["code_index_build", "brief_code"] {
+            let m = ms
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            assert!(m.median_ms > 0.0);
+        }
+    }
+
+    #[test]
+    fn cperf1_a_synthetic_history_has_every_commit_and_its_citations() {
+        let cite = vec!["c-AAAAA".to_string(), "c-BBBBB".to_string()];
+        let g = crate::git_repo::GitRepo::synthetic(30, 7, &cite);
+        assert_eq!(g.run(&["rev-list", "--count", "HEAD"]), "30");
+        let repo = rdy_engine::code_index::CodeRepo {
+            configured: g.configured(),
+            root: std::fs::canonicalize(g.path()).unwrap(),
+        };
+        let idx = rdy_engine::code_index::build(&repo).unwrap();
+        assert_eq!(idx.commits, 30);
+        assert_eq!(idx.cited["c-AAAAA"].len(), 30, "every commit cites both");
+        assert!(idx.files.contains_key("src/f0.rs"));
     }
 
     #[test]

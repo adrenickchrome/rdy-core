@@ -66,6 +66,11 @@ serve:
   idle_timeout: 600   # a background daemon with no connections exits after this long
 ```
 
+The same file links the code that implements the docs: `code_repos: [<path to a git checkout's
+top folder>, …]` (absolute or relative to the project; full clones; at most 16).
+`rdy brief --code <file>` reads their `Implements:` trailers with `git log`. The key moves to
+`.rdy.yaml` with M2f.
+
 `--no-daemon` (or `RDY_NO_DAEMON=1`) opens the store in the command's own process instead. Only
 one process can hold a store: a `--no-daemon` command while the daemon runs fails with
 `E_LOCKED` ("drop --no-daemon, or stop the daemon with rdy serve --stop"), and a daemon cannot

@@ -1,4 +1,5 @@
 use base64::Engine as _;
+use rdy_engine::code_brief::e_code_path_alone;
 use rdy_engine::consequence::write_and_report;
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::*;
@@ -189,6 +190,8 @@ pub struct BriefParams {
     pub ids: Option<Vec<String>>,
     /// A doc or folder path: brief on every block under it.
     pub path: Option<String>,
+    /// A file in a linked code repo (relative to its top folder): brief on the design blocks its commits implement (Implements: trailers) and the blocks whose reflects globs match it. Not with ids or path.
+    pub code_path: Option<String>,
     /// The view to brief in; defaults to the session's view.
     pub scope: Option<String>,
     /// The budget for the briefing; the longest lists are cut to fit.
@@ -628,7 +631,7 @@ pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
 }
 
 /// What bodies and text fields accept (md1, dtext1, key1).
-const TEXT_RULES: &str = "Bodies and text fields: **bold**, *italic*, `code`, [link](https://… or a relative path), and in bodies - bullets and 1. numbered lists (indent two spaces to nest). No raw HTML. {{id}} or {{id|words}} references a block; \\{{ is a literal {{ and a leading @ in words is written \\@. fields.key: optional short human id, unique per project ignoring case, letters/digits/-_. , not shaped like a block id.";
+const TEXT_RULES: &str = "Bodies and text fields: **bold**, *italic*, `code`, [link](https://… or a relative path), and in bodies - bullets and 1. numbered lists (indent two spaces to nest). No raw HTML. {{id}} or {{id|words}} references a block; \\{{ is a literal {{ and a leading @ in words is written \\@. fields.key: optional short human id, unique per project ignoring case, letters/digits/-_. , not shaped like a block id. fields.reflects: optional list of code path globs (e.g. crates/*/src/error.rs) this block follows; rdy_brief {code_path} lists the blocks whose globs match a file.";
 
 /// How to edit with briefings, in `rdy_schema`.
 pub const EDIT_LOOP_DOC: &str = "Brief before editing: rdy_brief {ids or path} returns governs, dependents, will_go_stale, suspects and base (each covered block's version and the briefing token). Pass brief: <token> on rdy_write, rdy_decide, rdy_supersede (inside decision) and rdy_revoke. A write that touches stable content (a block whose own or inherited lifecycle is stable before or after the op; for a create, its parent's) needs a current briefing that covers it: brief the block, or its parent to create under it. A briefing is current while no block it recorded has moved in the write's view. Drafts need none; a stale one there only warns (W_BRIEF_STALE). E_BRIEF_REQUIRED and E_BRIEF_STALE carry a fresh briefing for exactly the blocks the write touches: retry with its base.token. Every write response lists consequences: {id, block, kind (suspect or dependent), because {edge, changed}, follow_up (update, confirm, reaffirm or resolve)}; max_tokens bounds them.";
@@ -712,6 +715,14 @@ pub fn rdy_brief(st: &mut McpState, p: BriefParams) -> Result<Value, RdyError> {
     session(st)?;
     let st_ = st.engine.read();
     let scope = scope_of(st, &st_, &p.scope)?;
+    if let Some(cp) = &p.code_path {
+        if p.ids.is_some() || p.path.is_some() {
+            return Err(e_code_path_alone());
+        }
+        let b = st_.brief_code(&scope, cp, None, p.max_tokens)?;
+        b.briefing.register(&st.engine.briefs());
+        return serialize_briefing(&b);
+    }
     let b = st_.brief(
         &scope,
         &Coverage {
@@ -721,7 +732,11 @@ pub fn rdy_brief(st: &mut McpState, p: BriefParams) -> Result<Value, RdyError> {
         p.max_tokens,
     )?;
     b.register(&st.engine.briefs());
-    serde_json::to_value(&b).map_err(|e| {
+    serialize_briefing(&b)
+}
+
+fn serialize_briefing<T: serde::Serialize>(b: &T) -> Result<Value, RdyError> {
+    serde_json::to_value(b).map_err(|e| {
         RdyError::new(
             E_INTERNAL,
             format!("a briefing did not serialize: {e}"),

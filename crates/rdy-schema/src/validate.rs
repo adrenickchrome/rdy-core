@@ -1,3 +1,4 @@
+use crate::glob::Glob;
 use crate::pack::{BodyRule, FieldKind, Pack};
 use rdy_model::tree;
 use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
@@ -18,6 +19,25 @@ pub struct Issue {
     pub message: String,
     pub fix: String,
 }
+
+/// The engine field naming the code a block reflects: a list of path globs, on content block types.
+pub const REFLECTS_FIELD: &str = "reflects";
+
+/// Block types that may not carry `reflects`: supporting types, which link to code another way
+/// (a decision through `Implements:` trailers). Named until M2f's type classing replaces this list.
+pub const REFLECTS_EXCLUDED_TYPES: &[&str] = &[
+    "decision",
+    "question",
+    "rationale",
+    "review",
+    "tension",
+    "intent",
+    "finding",
+    "source",
+];
+
+/// The most path globs one `reflects` field may hold.
+pub const MAX_REFLECTS_GLOBS: usize = 32;
 
 fn err(block: &Block, code: &'static str, message: String, fix: String) -> Issue {
     Issue {
@@ -47,6 +67,45 @@ fn kind_matches(kind: FieldKind, v: &FieldValue) -> bool {
 /// The pack-YAML spelling of a field kind (`str`, `int`, ...).
 fn kind_word(kind: FieldKind) -> String {
     format!("{kind:?}").to_lowercase()
+}
+
+/// Checks the `reflects` field: a list of at most `MAX_REFLECTS_GLOBS` strings, each a path glob.
+fn check_reflects(block: &Block, v: &FieldValue, out: &mut Vec<Issue>) {
+    let globs: Option<Vec<&str>> = match v {
+        FieldValue::List(items) => items.iter().map(FieldValue::as_str).collect(),
+        _ => None,
+    };
+    let (Some(globs), FieldValue::List(items)) = (globs, v) else {
+        out.push(err(
+            block,
+            "E_FIELD_KIND",
+            format!("field {REFLECTS_FIELD:?} must be a list of code path globs"),
+            "write reflects as a list of strings such as [crates/*/src/error.rs]".to_string(),
+        ));
+        return;
+    };
+    if items.len() > MAX_REFLECTS_GLOBS {
+        out.push(err(
+            block,
+            "E_LIMIT",
+            format!(
+                "field {REFLECTS_FIELD:?} holds at most {MAX_REFLECTS_GLOBS} path globs; this one has {}",
+                items.len()
+            ),
+            "split the block, or use a broader glob such as src/**/*.rs".to_string(),
+        ));
+        return;
+    }
+    for glob in globs {
+        if let Err(e) = Glob::compile(glob) {
+            out.push(err(
+                block,
+                "E_BAD_GLOB",
+                format!("reflects glob {glob:?}: {e}"),
+                "write a path glob relative to the code repo's top folder, such as crates/*/src/error.rs".to_string(),
+            ));
+        }
+    }
 }
 
 pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec<Issue> {
@@ -99,6 +158,23 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
                     }
                 }
             }
+            continue;
+        }
+        if name == REFLECTS_FIELD {
+            // `reflects` is an engine field on content types, never listed per type.
+            if REFLECTS_EXCLUDED_TYPES.contains(&block.block_type.as_str()) {
+                out.push(err(
+                    block,
+                    "E_FIELD_UNKNOWN",
+                    format!(
+                        "type {} cannot carry {REFLECTS_FIELD:?}: reflects justifies content; a decision links to code through Implements: trailers",
+                        block.block_type
+                    ),
+                    "remove reflects; a decision links to code through Implements: trailers on the commit".to_string(),
+                ));
+                continue;
+            }
+            check_reflects(block, v, &mut out);
             continue;
         }
         match def.fields.get(name) {
