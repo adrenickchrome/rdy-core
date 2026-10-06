@@ -273,8 +273,8 @@ fn reading_order<'m>(m: &'m Materialized, root: &BlockId) -> Vec<(&'m Block, usi
     out
 }
 
-/// The removed lines of base doc `doc`: one per top-most gone block, holding it and its gone
-/// visible descendants, placed before the next block after it that stays in the doc.
+/// The removed lines of base doc `doc`: one per gone block with no gone base ancestor, holding it
+/// and its gone visible descendants, placed before the next block after it that stays in the doc.
 fn removed_lines(
     doc: &BlockId,
     gone: &HashSet<BlockId>,
@@ -311,11 +311,13 @@ fn removed_lines(
     }
     let left = |b: &Block| dm.get(&b.id).is_none() || doc_id(dm, &b.id) != Some(doc);
     let mut lines = vec![];
+    // the end of the last line's subtree: a gone block before it has a gone base ancestor
+    let mut inside = 0;
     for (i, (b, _)) in order.iter().enumerate() {
-        let top = gone.contains(&b.id) && !b.parent.as_ref().is_some_and(|p| gone.contains(p));
-        if !top {
+        if i < inside || !gone.contains(&b.id) {
             continue;
         }
+        inside = end[i];
         let mut blocks = vec![(*b).clone()];
         blocks.extend(
             order[i + 1..end[i]]

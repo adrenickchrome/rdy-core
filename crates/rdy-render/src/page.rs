@@ -33,6 +33,16 @@ pub struct Shared<'a> {
     pub used_blobs: RefCell<BTreeMap<String, Hash>>,
 }
 
+/// What the navigation and the home page know about the render beyond the tree: the reference
+/// pages it has, and a draft's changes.
+#[derive(Clone, Copy)]
+pub struct SiteFacts<'a> {
+    pub has_terms: bool,
+    pub has_questions: bool,
+    /// What a draft changes against the canon it is based on; none for canon and tags.
+    pub review: Option<&'a review::Review>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Crumb {
     pub label: String,
@@ -324,6 +334,11 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
     let site = sh.site;
     let has_terms = !site.terms.is_empty();
     let has_questions = !site.open_questions.is_empty();
+    let facts = SiteFacts {
+        has_terms,
+        has_questions,
+        review: sh.review,
+    };
     let (page_url, kind_name, title, current, chain, tail): (
         String,
         &'static str,
@@ -395,9 +410,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
                 sh.versions,
                 sh.landed_ms,
                 sh.description,
-                has_terms,
-                has_questions,
-                sh.review,
+                facts,
             ));
         }
         Kind::Folder(id) => {
@@ -480,14 +493,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         nav: if redirect {
             nav::Nav::default()
         } else {
-            nav::build(
-                site,
-                current,
-                &page_url,
-                has_terms,
-                has_questions,
-                sh.review,
-            )
+            nav::build(site, current, &page_url, facts)
         },
         toc: toc::build(&items),
         pager,

@@ -225,3 +225,39 @@ fn rv1_counts_name_only_what_changed() {
     );
     assert_eq!(c(0, 0, 0).counts(), None);
 }
+
+#[test]
+fn rv1_a_removed_block_inside_a_removed_section_shows_once_when_its_parent_moved_out() {
+    // base: doc > S > T > P, then Q; the draft moves T out of S, deletes P and deletes S. P's
+    // parent T stays, but P is still under the removed S: it is part of S's line only.
+    let (_d, mut r) = tiny();
+    let c = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "nest", "title": "Nest", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Outer"}},
+        {"op": "create", "type": "section", "id": "$t", "parent": "$s", "fields": {"title": "Inner"}},
+        {"op": "create", "type": "prose", "id": "$p", "parent": "$t", "body": "Nested text."},
+        {"op": "create", "type": "prose", "id": "$q", "parent": "$d", "body": "Stays after."}
+    ]))
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let id = |k: &str| BlockId::parse(&c.created[k]).unwrap();
+    write(
+        &mut r,
+        "nest",
+        json!([
+            {"op": "move", "id": id("$t").to_string(), "parent": id("$d").to_string()},
+            {"op": "delete", "id": id("$p").to_string()},
+            {"op": "delete", "id": id("$s").to_string()}
+        ]),
+    )
+    .unwrap();
+    let rv = review::build(&r.read(), &Scope::View("nest".into()))
+        .unwrap()
+        .expect("a draft has a review");
+    assert_eq!(
+        lines(&rv, &id("$d")),
+        vec![(Some(id("$q")), vec![id("$s"), id("$p")])]
+    );
+    assert_eq!(rv.doc(&id("$d")).unwrap().removed, 1);
+    assert_eq!(rv.mark(&id("$t")), Some(Mark::Edited));
+}

@@ -1,4 +1,5 @@
 //! The left navigation: the neighbourhood of the page a reader is on, bounded by a cap.
+use crate::page::SiteFacts;
 use crate::review::{Mark, Review};
 use crate::site::Site;
 use rdy_model::{Block, BlockId, tree};
@@ -45,14 +46,8 @@ pub struct NavEntry {
 }
 
 /// The navigation as page `from` shows it, `current` being the block the page is for.
-pub fn build(
-    site: &Site,
-    current: Option<&BlockId>,
-    from: &str,
-    has_terms: bool,
-    has_questions: bool,
-    review: Option<&Review>,
-) -> Nav {
+pub fn build(site: &Site, current: Option<&BlockId>, from: &str, facts: SiteFacts) -> Nav {
+    let review = facts.review;
     let chain = current.map(|c| site.chain(c)).unwrap_or_default();
     let ctx = Ctx {
         site,
@@ -87,10 +82,10 @@ pub fn build(
         });
     }
     let mut reference = vec![];
-    if has_terms {
+    if facts.has_terms {
         reference.push(plain("Glossary", "glossary.html"));
     }
-    if has_questions {
+    if facts.has_questions {
         reference.push(plain("Open questions", "questions.html"));
     }
     if !reference.is_empty() {

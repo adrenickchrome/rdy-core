@@ -100,6 +100,147 @@ fn rv1_the_stylesheet_hides_markers_only_when_show_changes_is_off() {
     }
 }
 
+/// The draft site's stylesheet, and the value of `prop` for `sel` at width `w` (empty if unset).
+fn review_css() -> rdy_qa::site::Css {
+    let (_d, _r, _ids, out) = review_site(&Scope::View(REVIEW_VIEW.into()));
+    parse_css(&std::fs::read_to_string(out.path().join("assets/site.css")).unwrap())
+}
+
+#[test]
+fn rv1_at_phone_width_show_changes_sits_on_the_version_row_and_row_one_keeps_the_brand() {
+    let css = review_css();
+    let at = |sel: &str, prop: &str, w: u32| cascaded(&css, sel, prop, w);
+    let tools = ".head:has(#show-changes) .head-tools";
+    for w in [360, 480, 900] {
+        // the tools stop being one box, so the button can leave the first row
+        assert_eq!(
+            at(tools, "display", w).as_deref(),
+            Some("contents"),
+            "width {w}"
+        );
+        assert_eq!(
+            at("#show-changes", "grid-row", w).as_deref(),
+            Some("2"),
+            "width {w}"
+        );
+        assert_eq!(
+            at("#show-changes", "justify-self", w).as_deref(),
+            Some("end"),
+            "width {w}"
+        );
+        for first in [
+            ".head:has(#show-changes) .theme",
+            ".head:has(#show-changes) #menu",
+        ] {
+            assert_eq!(
+                at(first, "grid-row", w).as_deref(),
+                Some("1"),
+                "{first} width {w}"
+            );
+        }
+        // the pill shares row 2 and leaves the button its width and a gap
+        assert_eq!(
+            at(".version", "grid-row", w).as_deref(),
+            Some("2"),
+            "width {w}"
+        );
+        assert_eq!(
+            at("#show-changes", "width", w).as_deref(),
+            Some("7.5rem"),
+            "width {w}"
+        );
+        assert_eq!(
+            at(
+                ".head:has(#show-changes:not([hidden])) .version",
+                "max-width",
+                w
+            )
+            .as_deref(),
+            Some("calc(100% - 8rem)"),
+            "width {w}"
+        );
+        // the brand keeps the flexible first column of row 1
+        assert_eq!(
+            at(".brand", "grid-row", w).as_deref(),
+            Some("1"),
+            "width {w}"
+        );
+        assert_eq!(
+            at(".brand", "grid-column", w).as_deref(),
+            Some("1"),
+            "width {w}"
+        );
+        assert!(
+            at(".head:has(#show-changes)", "grid-template-columns", w)
+                .is_some_and(|c| c.starts_with("minmax(0, 1fr)")),
+            "width {w}"
+        );
+    }
+    for w in [901, 1280] {
+        assert_eq!(at(tools, "display", w), None, "width {w}");
+        assert_eq!(at("#show-changes", "grid-row", w), None, "width {w}");
+    }
+}
+
+#[test]
+fn rv1_the_removed_line_rule_styles_only_the_line_and_its_bar_sits_with_the_others() {
+    let css = review_css();
+    let at = |sel: &str, prop: &str, w: u32| cascaded(&css, sel, prop, w);
+    for w in [360, 900, 901, 1280] {
+        // the home list's `chg-label chg-removed` word is a label like Edited and New
+        for prop in [
+            "margin",
+            "padding-inline-start",
+            "border-inline-start",
+            "font-size",
+        ] {
+            assert_eq!(at(".chg-removed", prop, w), None, "{prop} width {w}");
+        }
+        assert!(
+            at("details.chg-removed", "border-inline-start", w).is_some(),
+            "width {w}"
+        );
+    }
+    for w in [901, 1280] {
+        let gutter = at(".has-chg", "margin-inline-start", w);
+        assert!(gutter.is_some(), "width {w}");
+        assert_eq!(
+            at("details.chg-removed", "margin-inline-start", w),
+            gutter,
+            "width {w}"
+        );
+    }
+    for w in [360, 900] {
+        assert_eq!(
+            at("details.chg-removed", "margin-inline-start", w),
+            None,
+            "width {w}"
+        );
+    }
+}
+
+#[test]
+fn rv1_with_changes_hidden_a_changed_block_keeps_no_indent_at_phone_width() {
+    let css = review_css();
+    let hidden = ":root[data-changes=\"hidden\"] .has-chg";
+    // neither the padding nor the transparent bar's width is left
+    for w in [360, 900] {
+        for prop in ["padding-inline-start", "border-inline-start-width"] {
+            assert_eq!(
+                cascaded(&css, hidden, prop, w).as_deref(),
+                Some("0"),
+                "{prop} width {w}"
+            );
+        }
+    }
+    // above 900px the bar is in the gutter and the text column does not move: both stay
+    for w in [901, 1280] {
+        for prop in ["padding-inline-start", "border-inline-start-width"] {
+            assert_eq!(cascaded(&css, hidden, prop, w), None, "{prop} width {w}");
+        }
+    }
+}
+
 /// A just-enough DOM for `review.js`: a root element, the button, and a session storage that can
 /// be made to throw. It loads the script, clicks, reloads, and reports the state after each.
 const TOGGLE_HARNESS: &str = r##"

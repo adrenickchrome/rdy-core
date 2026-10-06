@@ -1,6 +1,7 @@
 //! The home page's context: a card for every top-level folder and doc, and the versions, newest
 //! first, in a reader's words (a date and the message, never a hash).
 use crate::inline::Form;
+use crate::page::SiteFacts;
 use crate::review::{Mark, Review};
 use crate::site::{Site, rel};
 use rdy_engine::{Materialized, VersionInfo};
@@ -52,16 +53,13 @@ pub struct Home {
     pub versions: Vec<Version>,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn build(
     site: &Site,
     m: &Materialized,
     versions: &[VersionInfo],
     landed_ms: &BTreeMap<String, i64>,
     description: Option<&str>,
-    has_terms: bool,
-    has_questions: bool,
-    review: Option<&Review>,
+    facts: SiteFacts,
 ) -> Home {
     let mut cards: Vec<Card> = m
         .children(None)
@@ -81,14 +79,14 @@ pub fn build(
             })
         })
         .collect();
-    if has_terms {
+    if facts.has_terms {
         cards.push(Card {
             title: "Glossary".into(),
             href: "glossary.html".into(),
             summary: "The terms this project defines.".into(),
         });
     }
-    if has_questions {
+    if facts.has_questions {
         cards.push(Card {
             title: "Open questions".into(),
             href: "questions.html".into(),
@@ -98,7 +96,7 @@ pub fn build(
     let current = versions.last().map(|v| &v.name);
     Home {
         description: description.map(String::from),
-        changes: review.map(|r| changes(site, r)).unwrap_or_default(),
+        changes: facts.review.map(|r| changes(site, r)).unwrap_or_default(),
         cards,
         versions: versions
             .iter()

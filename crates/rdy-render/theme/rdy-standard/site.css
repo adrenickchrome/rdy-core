@@ -349,8 +349,9 @@ figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 .has-chg.chg-new { border-inline-start-color: var(--success); }
 .chg-label { display: inline-block; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft); user-select: none; -webkit-user-select: none; }
 .block > .chg-label, .page-head > .chg-label { display: block; margin-bottom: 0.25rem; }
-.chg-removed { margin: 0.6rem 0; padding-inline-start: 0.75rem; border-inline-start: 3px solid var(--line-ui); color: var(--ink-soft); font-size: 0.85rem; }
-.chg-removed > summary { cursor: pointer; color: var(--ink-soft); font-weight: 500; }
+/* the line only: the home list's Removed word is a `chg-label chg-removed` like Edited and New */
+details.chg-removed { margin: 0.6rem 0; padding-inline-start: 0.75rem; border-inline-start: 3px solid var(--line-ui); color: var(--ink-soft); font-size: 0.85rem; }
+details.chg-removed > summary { cursor: pointer; color: var(--ink-soft); font-weight: 500; }
 .chg-old { margin-top: 0.4rem; color: var(--ink-soft); text-decoration: none; overflow-wrap: anywhere; }
 .nav-removed { padding: 0.3rem 0.6rem; color: var(--ink-soft); line-height: 1.4; overflow-wrap: anywhere; }
 .nav-group .chg-label, .nav-item .chg-label { margin-inline-start: 0.4rem; }
@@ -361,9 +362,22 @@ figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 /* the author rule `.head button { display: inline-flex }` at phone width would otherwise beat [hidden] */
 #show-changes[hidden] { display: none; }
 #show-changes[aria-pressed="false"] { font-weight: 400; color: var(--ink-soft); background: var(--bg); border-style: dashed; }
-/* above 900px the bar sits in the left gutter and the text column does not move */
+/* above 900px every bar, the Removed line's too, sits in the left gutter and the text column does not move */
 @media (min-width: 901px) {
-  .has-chg { margin-inline-start: calc(-3px - 0.75rem); }
+  .has-chg, details.chg-removed { margin-inline-start: calc(-3px - 0.75rem); }
+}
+/* at 900px and below, a draft's header keeps the brand, the theme and the menu on row 1 and puts
+   Show changes at the end of row 2, the version pill's row, the pill leaving it room; the taller
+   header pushes anchors further down; with changes hidden, a changed block keeps no indent */
+@media (max-width: 900px) {
+  .head:has(#show-changes) { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .head:has(#show-changes) .head-tools { display: contents; }
+  .head:has(#show-changes) .theme { grid-column: 2; grid-row: 1; }
+  .head:has(#show-changes) #menu { grid-column: 3; grid-row: 1; }
+  #show-changes { grid-column: 1 / -1; grid-row: 2; justify-self: end; width: 7.5rem; }
+  .head:has(#show-changes:not([hidden])) .version { max-width: calc(100% - 8rem); }
+  :root:has(#show-changes:not([hidden])) [id] { scroll-margin-top: 11rem; }
+  :root[data-changes="hidden"] .has-chg { padding-inline-start: 0; border-inline-start-width: 0; }
 }
 :root[data-changes="hidden"] .chg { display: none; }
 :root[data-changes="hidden"] .has-chg { border-inline-start-color: transparent; }
