@@ -84,6 +84,13 @@ fn tbar1_the_toolbar_takes_no_layout_space_at_any_width() {
             "0",
             "anchored to the block's corner, width {w}"
         );
+        // the bar sits above the block's top edge, in the gap between blocks, so it covers no
+        // glyph of the block it belongs to
+        assert_eq!(
+            at(".tools", "transform", w),
+            "translateY(-100%)",
+            "lifted into the gap above the block, width {w}"
+        );
         assert_eq!(at(".tools", "margin", w), "", "no margin row, width {w}");
         assert_eq!(
             at(".block", "position", w),
@@ -108,8 +115,17 @@ fn tbar1_the_toolbar_takes_no_layout_space_at_any_width() {
             ".tool.cite",
         ] {
             for prop in [
-                "position", "float", "display", "margin", "width", "height", "top", "right",
-                "padding", "border",
+                "position",
+                "float",
+                "display",
+                "margin",
+                "width",
+                "height",
+                "top",
+                "right",
+                "padding",
+                "border",
+                "transform",
             ] {
                 assert_eq!(at(rule, prop, w), "", "{rule} sets {prop}, width {w}");
             }

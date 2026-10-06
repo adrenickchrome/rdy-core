@@ -278,8 +278,8 @@ figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 /* == /diagram == */
 
 /* == why == */
-/* on a phone the toolbar lies over the block's corner, shown by a tap (copy.js), focus or a selection; at rest it takes no space and no taps */
-.tools { position: absolute; top: 0; right: 0; float: none; z-index: 2; display: flex; flex-wrap: nowrap; justify-content: flex-end; align-items: center; gap: 0.35rem; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; opacity: 0; pointer-events: none; transition: opacity 0.15s; }
+/* the toolbar sits just above the block's top-right corner, in the gap between blocks, so it covers none of the block's own text; shown by hover, a tap (copy.js), focus or a selection; at rest it takes no space and no taps */
+.tools { position: absolute; top: 0; right: 0; transform: translateY(-100%); float: none; z-index: 2; display: flex; flex-wrap: nowrap; justify-content: flex-end; align-items: center; gap: 0.35rem; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; opacity: 0; pointer-events: none; transition: opacity 0.15s; }
 .block:hover .tools, .block:focus-within .tools, .block.tools-open .tools, .tools:hover, .tools:focus-within, .tools:has(.cite), .tools:has(+ .block:hover), .tools:has(+ .block:focus-within) { opacity: 1; pointer-events: auto; }
 .tool { list-style: none; cursor: pointer; display: inline-flex; align-items: center; color: var(--accent); font-weight: 500; font-size: 0.78rem; line-height: 1.4; border-radius: 999px; padding: 0.1rem 0.6rem; }
 .tool:hover { background: var(--accent-soft); }
