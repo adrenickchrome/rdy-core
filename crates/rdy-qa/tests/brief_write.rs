@@ -312,6 +312,66 @@ fn bwr1_presentational_blocks_are_exempt() {
     assert_eq!(e.code, E_BRIEF_REQUIRED, "{e}");
 }
 
+/// A create's subject is its parent (its coverage target), so the exemption follows the
+/// parent's type, as for `rebalance`: a presentational block created under stable content
+/// needs the parent briefed, and anything created under a presentational parent is exempt.
+#[test]
+fn bwr1_a_create_is_exempt_by_its_parents_type_not_its_own() {
+    let (_d, mut r, ids) = rdy_qa::golden::presentational_site();
+    let t = brief_of(&r, &Scope::Canon, &[&ids.doc]).base.token;
+    write_cited(
+        &mut r,
+        "w",
+        json!([{"op": "update", "id": ids.doc.to_string(), "fields": {"lifecycle": "stable"}}]),
+        Some(&t),
+    )
+    .unwrap();
+    let section = r
+        .read()
+        .block(&Scope::Canon, &ids.aside)
+        .unwrap()
+        .parent
+        .unwrap();
+    let aside = json!([{"op": "create", "type": "aside", "parent": section.to_string(), "body": "More decoration."}]);
+    let e = write_cited(&mut r, "w", aside, None).unwrap_err();
+    assert_eq!(
+        e.code, E_BRIEF_REQUIRED,
+        "the stable section is the subject: {e}"
+    );
+    assert_eq!(
+        e.briefing.as_ref().unwrap()["ids"],
+        json!([section.to_string()])
+    );
+
+    // a pack whose presentational `aside` may hold claims
+    let dir = tempfile::tempdir().unwrap();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    let pack = rdy_qa::golden::PRESENTATIONAL_PACK
+        .replace("body: required }", "body: required, children: [claim] }");
+    std::fs::write(dir.path().join(".rdy/packs/p.yaml"), pack).unwrap();
+    std::fs::write(
+        dir.path().join(".rdy/config.yaml"),
+        "pack: p\nname: Presentational\n",
+    )
+    .unwrap();
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let base = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "t", "title": "T", "doc_type": "glossary", "lifecycle": "stable"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
+        {"op": "create", "type": "aside", "id": "$a", "parent": "$s", "body": "Decorative."}
+    ]))
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let container = &base.created["$a"];
+    write_cited(
+        &mut r,
+        "w",
+        json!([{"op": "create", "type": "claim", "parent": container, "body": "Inside the aside."}]),
+        None,
+    )
+    .expect("Q6d: a presentational parent is exempt");
+}
+
 #[test]
 fn bwr1_a_mixed_batch_without_a_briefing_lands_nothing() {
     let (_d, mut r) = project();

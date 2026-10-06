@@ -588,7 +588,8 @@ fn effective_stable(m: &Materialized, id: Option<&BlockId>) -> bool {
 }
 
 /// The subjects of `ops` against `m` (the target view before the write), in op order. Ops whose
-/// block does not resolve are skipped; presentational blocks are exempt (Q6d).
+/// block does not resolve are skipped; a subject of a presentational type is exempt (Q6d), and
+/// for `create` and `rebalance` the subject is the parent.
 fn subjects(pack: &Pack, m: &Materialized, ops: &[OpInput]) -> Vec<Subject> {
     // the anchor each create of this batch hangs from, by the id it was given ($name or an id)
     let mut created: HashMap<&str, Anchor> = HashMap::new();
@@ -610,18 +611,15 @@ fn subjects(pack: &Pack, m: &Materialized, ops: &[OpInput]) -> Vec<Subject> {
     let mut out = vec![];
     for op in ops {
         match op {
-            OpInput::Create {
-                block_type,
-                id,
-                parent,
-                ..
-            } => {
+            OpInput::Create { id, parent, .. } => {
+                // the subject is the parent's nearest existing ancestor (the coverage target),
+                // so its type decides the exemption; the new block's own type does not count
                 let a = anchor(&created, parent.as_deref());
                 if let Some(id) = id {
                     created.insert(id.as_str(), a.clone());
                 }
                 if let Anchor::At(p) = a
-                    && !pack.is_presentational(block_type)
+                    && m.get(&p).is_some_and(|b| !exempt(b))
                 {
                     out.push(Subject {
                         stable: effective_stable(m, Some(&p)),
