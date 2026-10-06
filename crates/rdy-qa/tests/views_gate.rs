@@ -244,3 +244,53 @@ fn gconf1_a_pinned_views_canon_collision_stays_e_stale_base() {
         "no conflict was recorded for a pinned view: {e}"
     );
 }
+
+/// Found by the deep run after M2c (sb2's `E_STALE_BASE` landing): a view that includes another
+/// view's delete of a proposed decision also holds the decision's creation, which the delete
+/// depends on. The version lists the delete before the creation, so folding the ops in list
+/// order revived the decision in the prospective canon and the acceptance step then found the
+/// view (where the decision is deleted) "changed after the proposal". The ops fold in dependency
+/// order, as the merge applies them.
+#[test]
+fn gconf1_a_version_listing_a_delete_before_its_decisions_creation_lands() {
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let (sa, sb, sc) = (
+        human_writer(),
+        as_agent("agent:b", "r1"),
+        as_agent("agent:c", "r1"),
+    );
+    // a records a proposed decision; b includes it and deletes it
+    let decided = r
+        .decide(
+            &sa,
+            "a",
+            DecisionInput {
+                parent: section,
+                statement: "to be dropped".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    r.view_include(&sb, "b", std::slice::from_ref(&decided.change))
+        .unwrap();
+    let d = decided.created.values().next().unwrap().clone();
+    let deleted = write_as(&mut r, &sb, "b", json!([{"op": "delete", "id": d}])).unwrap();
+    // c includes b's delete: the include adds the creation too, after it in the set
+    r.view_include(&sc, "c", std::slice::from_ref(&deleted.change))
+        .unwrap();
+    let p = r.propose(&sc, "c", "net nothing").unwrap();
+    assert_eq!(p.changes, 2, "the delete and the creation it depends on");
+    let info = r.land_report(&approver(), &p.r#ref).unwrap();
+    assert!(info.warnings.is_empty(), "{info:?}");
+    assert!(
+        r.read()
+            .materialized(&Scope::Canon)
+            .unwrap()
+            .get(&rdy_model::BlockId::parse(&d).unwrap())
+            .is_none(),
+        "the decision is deleted in canon"
+    );
+    check(&r, &Scope::Canon).unwrap();
+}

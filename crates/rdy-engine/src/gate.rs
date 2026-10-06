@@ -1097,7 +1097,15 @@ impl Rdy {
         }
 
         // 1. prospective canon: canon + the proposal's own changes
-        let ops: Vec<Op> = changes.iter().flat_map(|c| c.ops.iter().cloned()).collect();
+        // the ops fold in the order the merge applies the changes (deps first), not the list
+        // order: a version can list a delete before the creation it depends on. A merge that
+        // refuses is left to `prospective_issues` below, which reports it.
+        let reader = st.reader();
+        let applied = reader
+            .state_of(st.canon_head())
+            .and_then(|canon| reader.merge_checked(&canon, &changes))
+            .map_or_else(|_| (0..changes.len()).collect(), |(_, at)| at);
+        let ops = applied_ops(&changes, &applied);
         let prospective = st.materialized(&Scope::Canon)?.with(&ops);
         let mut ids = BTreeSet::new();
         for c in &changes {
