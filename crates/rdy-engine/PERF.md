@@ -451,3 +451,39 @@ at the time); the write and the incremental step do not move with size.
   first pass did not stand out against the 2 s target here (it was 2.06 s in the pre-QA run, taken
   while the OS flushed the freshly generated store). One run does not prove it is gone; the median
   of 3 is kept as the judged number.
+
+## M2b: write through the daemon, daemon cold start (2026-10-05)
+
+`qa-perf` (typical tier, about 10k blocks) gains three ops. `new_doc_single` is the in-process
+comparator: one `new_doc` (a doc and its skeleton) on a `Rdy` handle. `daemon_write_single` is the
+same write, `new_doc` on view `va`, over one `ctl` connection to `rdy_daemon::start` in this process
+(30 runs each). `daemon_cold_start` is `start` to `ready` on the same project once its index is
+current (3 runs), so it is the warm-up of canon plus the socket bind; a lagging index is
+`cold_open_lagging`'s case. `write_single` is a one-claim write and is shown for reference only: the
+two new rows are the like-for-like pair.
+
+Medians and p95 in ms. Mac: macOS 26.6.2 / Apple M4 Pro / APFS, release build, two back-to-back runs
+under a load average of about 4 (other builds on the machine, so not quiet). Linux: Ubuntu 24.04 /
+AMD Ryzen 7 9800X3D / ext4, isolated bench.
+
+| op | Mac run 1 median / p95 | Mac run 2 median / p95 | Linux median / p95 |
+|---|---|---|---|
+| `write_single` (reference) | 8.523 / 11.204 | 4.356 / 5.348 | not yet measured |
+| `new_doc_single` (in-process) | 6.014 / 8.317 | 6.311 / 7.170 | not yet measured |
+| `daemon_write_single` | 4.562 / 8.281 | 4.982 / 5.792 | not yet measured |
+| `daemon_cold_start` | 81.966 / 91.641 | 87.277 / 87.280 | not yet measured |
+
+The Linux column is filled in after the isolated bench run (DECISIONS-rdy-m2 §8: in-workflow gates
+skip perf while two tracks run); the three rows are recorded in `qa-baseline.json` from that run.
+`daemon_cold_start` is far under its "< 2 s at 100k" target at 10k blocks (about 85 ms, against a
+`cold_open` of about 90 to 100 ms); the 100k and 50k figures come from the deep tier and the bench.
+
+The daemon adds one socket round trip and one thread hand-off per write, and on the Mac that is not
+visible against the one durable flush that dominates the write: `daemon_write_single` reads within
+the noise of the in-process `new_doc_single` (and below it in both runs; `new_doc_single` writes into
+a fresh view, `vd`, where the daemon writes into `va`, so the pair is the same shape and not the same
+bytes). Reads take no lock. The FIFO ticket serializes requests per connection only, so one
+connection's writes queue behind each other and two connections' writes queue behind the one writer
+thread, and the flush is the cost either way. These are macOS numbers, where the flush is the floor
+(`F_FULLFSYNC`, "Write p99: missed" above); whether the daemon's write meets "< 5 ms p99 on Linux
+NVMe" is judged on the bench.
