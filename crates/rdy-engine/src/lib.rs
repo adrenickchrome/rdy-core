@@ -597,10 +597,7 @@ impl Rdy {
                             None => None,
                         };
                         if let Some(b) = pred.filter(|b| b.conflicts.is_empty()) {
-                            next.seed(read_state::Built::new(
-                                Arc::new(b.m.with(&ops)),
-                                Arc::clone(&b.conflicts),
-                            ));
+                            next.seed(b.after(&ops));
                         }
                         views.insert(view, Arc::new(next));
                     }
@@ -613,10 +610,7 @@ impl Rdy {
             Delta::Landed { landing, view, ops } => {
                 let mut canon = Entry::new(None, Some(landing), None, Arc::new(vec![]));
                 if let Some(b) = prev.canon.built_ok() {
-                    canon.seed(read_state::Built::new(
-                        Arc::new(b.m.with(&ops)),
-                        Arc::new(vec![]),
-                    ));
+                    canon.seed(b.after(&ops));
                 }
                 let mut views = prev.views.clone();
                 match self.view_entry(&view)? {
