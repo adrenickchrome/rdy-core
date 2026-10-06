@@ -389,3 +389,110 @@ fn reb1_an_index_failure_during_a_landing_with_rebases_writes_nothing() {
         "nothing of the landing survives a reopen"
     );
 }
+
+/// Fix round 1: two views write a byte-identical version of X, a third collides, and the view
+/// that lands is not the first writer. Canon's side of the recorded conflict names the change
+/// that landed (the producer the index prefers after the write), so the record and the merge
+/// derive the same conflict id.
+#[test]
+fn reb1_canon_side_names_the_landed_producer_when_another_view_wrote_the_same_version() {
+    let d = tempfile::tempdir().unwrap();
+    let mut s = Store::open(&d.path().join("s")).unwrap();
+    create(&mut s, "seed", "c-00001");
+    land(&mut s, "seed");
+    let x = canon_version(&s, "c-00001");
+    let cc = update(&mut s, "c", "c-00001", x, "same");
+    let ca = update(&mut s, "a", "c-00001", x, "same");
+    assert_ne!(cc, ca);
+    update(&mut s, "b", "c-00001", x, "other");
+    let out = land(&mut s, "a");
+    let (_, _, remaining, conflicts) = rebase_of(&s, "b");
+    assert_eq!(conflicts.len(), 1);
+    assert!(
+        conflicts[0]
+            .sides
+            .iter()
+            .any(|side| side.change == Some(ca)),
+        "canon's side names a's landed change"
+    );
+    assert!(
+        conflicts[0]
+            .sides
+            .iter()
+            .all(|side| side.change != Some(cc)),
+        "not c's unlanded change"
+    );
+    assert!(
+        conflicts[0]
+            .sides
+            .iter()
+            .any(|side| side.change == Some(remaining[0]))
+    );
+    let rb = out.rebased.iter().find(|r| r.view == "b").unwrap();
+    assert_eq!(
+        rb.conflicts, conflicts,
+        "the outcome reports what the op records"
+    );
+    assert_eq!(
+        s.view_merge("b").unwrap().conflicts,
+        conflicts,
+        "the merge agrees with the record"
+    );
+}
+
+/// Fix round 1: the acceptance change writes a version another view already wrote. Canon's side
+/// names the acceptance change (it landed), not the other view's unlanded change.
+#[test]
+fn reb1_canon_side_names_the_acceptance_change_when_another_view_wrote_the_same_version() {
+    let d = tempfile::tempdir().unwrap();
+    let mut s = Store::open(&d.path().join("s")).unwrap();
+    for b in ["c-00001", "c-00002"] {
+        create(&mut s, "seed", b);
+    }
+    land(&mut s, "seed");
+    let x = canon_version(&s, "c-00001");
+    let y = canon_version(&s, "c-00002");
+    let cc = update(&mut s, "c", "c-00001", x, "same");
+    update(&mut s, "a", "c-00002", y, "a");
+    update(&mut s, "b", "c-00001", x, "other");
+    let p = s.propose("a", "t", prov("human:h")).unwrap();
+    let out = s
+        .land_atomic(LandRequest {
+            proposal: p,
+            accept: Some(change(
+                "a",
+                vec![Op::Update {
+                    base: x,
+                    block: block("c-00001", "same"),
+                }],
+                &prov("human:h"),
+            )),
+            approver: prov("human:h"),
+            chosen: None,
+            relay: None,
+            evidence: None,
+        })
+        .unwrap();
+    let aid = out.accept.unwrap();
+    let (_, _, _, conflicts) = rebase_of(&s, "b");
+    assert_eq!(conflicts.len(), 1);
+    assert!(
+        conflicts[0]
+            .sides
+            .iter()
+            .any(|side| side.change == Some(aid)),
+        "canon's side names the acceptance change"
+    );
+    assert!(
+        conflicts[0]
+            .sides
+            .iter()
+            .all(|side| side.change != Some(cc)),
+        "not c's unlanded change"
+    );
+    assert_eq!(
+        s.view_merge("b").unwrap().conflicts,
+        conflicts,
+        "the merge agrees with the record"
+    );
+}

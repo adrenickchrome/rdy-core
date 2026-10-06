@@ -186,7 +186,26 @@ impl Store {
                 .collect(),
             _ => HashMap::new(),
         };
+        // A version's producer as the index will answer after this write: when none of the
+        // version's producers has landed yet, the ones this landing lands (the acceptance change
+        // included) win, smallest hash first, as `Store::producer` breaks ties within a landing.
+        // Otherwise an earlier landing's producer already wins, before the write and after it.
         let producer = |v: &Hash| {
+            let all = self.index().producers(v).ok().unwrap_or_default();
+            let landed_before = all
+                .iter()
+                .any(|c| self.landing_of(c).ok().flatten().is_some());
+            if !landed_before {
+                let mine = all
+                    .iter()
+                    .filter(|c| landed.contains(c))
+                    .chain(accepted.get(v))
+                    .min()
+                    .copied();
+                if mine.is_some() {
+                    return mine;
+                }
+            }
             self.producer(v)
                 .ok()
                 .flatten()
