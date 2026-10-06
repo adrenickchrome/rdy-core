@@ -28,9 +28,9 @@
           "runs": 3
         },
         "cold_open_lagging": {
-          "median_ms": 58.125619,
+          "median_ms": 74.447,
           "op": "cold_open_lagging",
-          "p95_ms": 58.213146,
+          "p95_ms": 84.868,
           "runs": 5
         },
         "context": {
