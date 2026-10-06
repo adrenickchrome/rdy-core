@@ -131,7 +131,7 @@ fn unique(found: impl Iterator<Item = Suspect>) -> Vec<Suspect> {
 /// sus2: link kinds through which a changed or deleted target makes a block suspect: premises,
 /// and what the block implements or is decided by (spec §6.2: "references and premises").
 /// A superseded or revoked target is suspect through any link.
-const SUSPECT_LINKS: [&str; 4] = [
+pub const SUSPECT_LINKS: [&str; 4] = [
     decision::DEPENDS_ON,
     decision::CONDITIONAL_ON,
     decision::IMPLEMENTS,
@@ -139,7 +139,7 @@ const SUSPECT_LINKS: [&str; 4] = [
 ];
 
 /// imp2: link kinds impact follows: the dependency edges (with references).
-const IMPACT_LINKS: [&str; 6] = [
+pub const IMPACT_LINKS: [&str; 6] = [
     decision::DEPENDS_ON,
     decision::CONDITIONAL_ON,
     decision::IMPLEMENTS,

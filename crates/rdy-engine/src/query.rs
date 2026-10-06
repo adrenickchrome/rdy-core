@@ -172,7 +172,7 @@ impl ReadState {
     /// A change to a presentational block (the suspect's `target`, the block whose version
     /// moved) makes nothing suspect. A target that is gone is typed by the version the suspect
     /// pinned, read back through the store.
-    fn is_presentational_source(&self, m: &Materialized, s: &Suspect) -> bool {
+    pub(crate) fn is_presentational_source(&self, m: &Materialized, s: &Suspect) -> bool {
         let presentational = |b: &Block| self.pack().is_presentational(&b.block_type);
         match m.get(&s.target) {
             Some(b) => presentational(b),

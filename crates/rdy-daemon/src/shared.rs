@@ -5,7 +5,7 @@ use crate::watch::PackWatch;
 use crate::writer::{Writer, WriterHandle};
 use arc_swap::ArcSwap;
 use rdy_engine::engine::{Engine, WriteFn};
-use rdy_engine::{OpenReport, Rdy, RdyError, ReadState};
+use rdy_engine::{BriefRegistry, OpenReport, Rdy, RdyError, ReadState};
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,6 +27,8 @@ pub struct Shared {
     /// Why the pack files on disk do not load, while they do not. The writer sets it before it
     /// bumps `pack_gen`, under this lock.
     pub pack_error: Mutex<Option<String>>,
+    /// The project's briefing registry, taken from the `Rdy` before the writer owns it.
+    pub briefs: Arc<BriefRegistry>,
     session_end: Mutex<Vec<SessionEndHook>>,
     /// Test hook: run once by the writer right after `reload_pack` returns.
     #[cfg(test)]
@@ -40,6 +42,7 @@ impl Shared {
         let root = rdy.root().to_path_buf();
         let state = ArcSwap::new(rdy.read());
         let watch = PackWatch::new(&root, rdy.pack_fingerprint());
+        let briefs = rdy.briefs();
         Arc::new_cyclic(|weak| Shared {
             state,
             open_report,
@@ -48,6 +51,7 @@ impl Shared {
             watch,
             pack_gen: AtomicU64::new(0),
             pack_error: Mutex::new(None),
+            briefs,
             session_end: Mutex::new(Vec::new()),
             #[cfg(test)]
             after_reload: Mutex::new(None),
@@ -112,6 +116,10 @@ impl Engine for DaemonEngine {
 
     fn root(&self) -> PathBuf {
         self.0.root.clone()
+    }
+
+    fn briefs(&self) -> Arc<BriefRegistry> {
+        Arc::clone(&self.0.briefs)
     }
 
     fn pack_generation(&self) -> u64 {
