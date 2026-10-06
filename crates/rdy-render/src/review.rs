@@ -139,6 +139,16 @@ fn ids(entries: &[CompareEntry]) -> impl Iterator<Item = BlockId> + '_ {
     entries.iter().filter_map(|e| BlockId::parse(&e.id).ok())
 }
 
+/// The changed entries a reader can see: an entry whose `fields` is empty differs only in its
+/// pins (compare never lists pins), so it carries no Edited mark (orchestrator ruling,
+/// DX4 final review).
+fn seen_changes(entries: &[CompareEntry]) -> impl Iterator<Item = BlockId> + '_ {
+    entries
+        .iter()
+        .filter(|e| !e.fields.is_empty())
+        .filter_map(|e| BlockId::parse(&e.id).ok())
+}
+
 fn doc_id<'m>(m: &'m Materialized, id: &BlockId) -> Option<&'m BlockId> {
     m.doc_of(id).map(|d| &d.id)
 }
@@ -155,7 +165,7 @@ fn review(cmp: &Compare, dm: &Materialized, bm: &Materialized) -> Review {
         .filter(|(b, _)| b.block_type == tree::DOC)
         .map(|(b, _)| &b.id)
         .collect();
-    let edited: Vec<(&Block, Mark)> = ids(&cmp.changed)
+    let edited: Vec<(&Block, Mark)> = seen_changes(&cmp.changed)
         .chain(ids(&cmp.moved))
         .filter_map(|id| dm.get(&id))
         .map(|b| (b, Mark::Edited))
@@ -349,4 +359,28 @@ fn removed_pages(cmp: &Compare, bm: &Materialized) -> Vec<Block> {
         stack.extend(bm.children(Some(&b.id)).into_iter().rev());
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: &str, fields: &[&str]) -> CompareEntry {
+        CompareEntry {
+            id: id.to_string(),
+            block_type: "prose".to_string(),
+            path: None,
+            fields: fields.iter().map(|f| f.to_string()).collect(),
+            from_parent: None,
+            to_parent: None,
+            conflict: None,
+        }
+    }
+
+    #[test]
+    fn rv1_a_pins_only_change_is_not_edited() {
+        let e = [entry("p-AAAAA", &[]), entry("p-BBBBB", &["body"])];
+        let seen: Vec<String> = seen_changes(&e).map(|b| b.to_string()).collect();
+        assert_eq!(seen, vec!["p-BBBBB".to_string()]);
+    }
 }
