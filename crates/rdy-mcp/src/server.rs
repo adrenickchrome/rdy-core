@@ -146,7 +146,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Brief before editing: for blocks (ids) or a doc or folder (path), the decisions that govern them, what depends on them, what will go stale if they change, their open suspects, and their current versions with the briefing token. Cite the token as brief on your next write; writes to stable content need it. To create a block, brief its parent."
+        description = "Brief before editing: for blocks (ids) or a doc or folder (path), the decisions that govern them, what depends on them, what will go stale if they change, their open suspects, and their current versions with the briefing token. Cite the token as brief on your next write; writes to stable content need it. To create a block, brief its parent. For a code file, pass code_path alone: the blocks its commits implement (Implements: trailers) and the blocks whose reflects globs match it, plus a code section (provisional when a cited decision is still proposed, rework when it was rejected)."
     )]
     async fn rdy_brief(&self, Parameters(p): Parameters<BriefParams>) -> CallToolResult {
         self.run("rdy_brief", p, tools::rdy_brief).await

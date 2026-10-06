@@ -70,6 +70,18 @@ enum Cmd {
         #[arg(long, default_value = "canon")]
         scope: String,
     },
+    /// Brief on a file in a linked code repo: the design blocks its commits implement and the blocks whose reflects globs match it.
+    Brief {
+        /// A file in a linked code repo: relative to the repo's top folder, or a path from here.
+        #[arg(long = "code")]
+        code: String,
+        /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
+        #[arg(long)]
+        scope: Option<String>,
+        /// The budget for the briefing; the longest lists are cut to fit.
+        #[arg(long = "max-tokens")]
+        max_tokens: Option<usize>,
+    },
     Propose {
         #[arg(long)]
         title: String,
@@ -747,6 +759,19 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                 json!({"id": id, "depth": depth, "scope": scope}),
             )?;
             let t = impact_text(&v);
+            Ok((v, t))
+        }
+        Cmd::Brief {
+            code,
+            scope,
+            max_tokens,
+        } => {
+            let v = call(
+                env,
+                "brief",
+                json!({"code_path": code, "scope": scope, "max_tokens": max_tokens}),
+            )?;
+            let t = format!("{}{}", brief_text::code_text(&v), brief_text::plain(&v));
             Ok((v, t))
         }
         Cmd::Propose { title, view } => {

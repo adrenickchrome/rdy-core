@@ -4,6 +4,7 @@
 //! closure on the writer. Relative paths in args resolve against the session's working
 //! directory.
 use rdy_engine::brief::Coverage;
+use rdy_engine::code_brief::e_code_path_alone;
 use rdy_engine::consequence::write_and_report;
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::{
@@ -88,6 +89,7 @@ struct BlockArgs {
 struct BriefArgs {
     ids: Option<Vec<String>>,
     path: Option<String>,
+    code_path: Option<String>,
     scope: Option<String>,
     /// A write target, resolved as `edit_block` writes it: this view when it has a head, else
     /// canon.
@@ -308,7 +310,11 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "block" => block(cx, parse(op, args, "{id, view?}")?),
         "brief" => brief(
             cx,
-            parse(op, args, "{ids?, path?, scope?, view?, max_tokens?}")?,
+            parse(
+                op,
+                args,
+                "{ids?, path?, code_path?, scope?, view?, max_tokens?}",
+            )?,
         ),
         "render" => render(cx, parse(op, args, "{out, scope?}")?),
         "export" => export(cx, parse(op, args, "{out, scope?}")?),
@@ -470,6 +476,14 @@ fn brief(cx: &OpContext, a: BriefArgs) -> Result<Value, RdyError> {
             }
         }
     };
+    if let Some(cp) = &a.code_path {
+        if a.ids.is_some() || a.path.is_some() {
+            return Err(e_code_path_alone());
+        }
+        let b = st.brief_code(&scope, cp, Some(cx.cwd), a.max_tokens)?;
+        b.briefing.register(&cx.engine.briefs());
+        return Ok(to_json(&b));
+    }
     let b = st.brief(
         &scope,
         &Coverage {
