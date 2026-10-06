@@ -20,8 +20,21 @@ pub struct Issue {
     pub fix: String,
 }
 
-/// The engine field naming the code a block reflects: a list of path globs, on every block type.
+/// The engine field naming the code a block reflects: a list of path globs, on content block types.
 pub const REFLECTS_FIELD: &str = "reflects";
+
+/// Block types that may not carry `reflects`: supporting types, which link to code another way
+/// (a decision through `Implements:` trailers). Named until M2f's type classing replaces this list.
+pub const REFLECTS_EXCLUDED_TYPES: &[&str] = &[
+    "decision",
+    "question",
+    "rationale",
+    "review",
+    "tension",
+    "intent",
+    "finding",
+    "source",
+];
 
 /// The most path globs one `reflects` field may hold.
 pub const MAX_REFLECTS_GLOBS: usize = 32;
@@ -148,7 +161,19 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
             continue;
         }
         if name == REFLECTS_FIELD {
-            // `reflects` is an engine field on every type, never listed per type.
+            // `reflects` is an engine field on content types, never listed per type.
+            if REFLECTS_EXCLUDED_TYPES.contains(&block.block_type.as_str()) {
+                out.push(err(
+                    block,
+                    "E_FIELD_UNKNOWN",
+                    format!(
+                        "type {} cannot carry {REFLECTS_FIELD:?}: reflects justifies content; a decision links to code through Implements: trailers",
+                        block.block_type
+                    ),
+                    "remove reflects; a decision links to code through Implements: trailers on the commit".to_string(),
+                ));
+                continue;
+            }
             check_reflects(block, v, &mut out);
             continue;
         }

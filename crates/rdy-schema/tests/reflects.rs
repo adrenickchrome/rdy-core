@@ -1,4 +1,4 @@
-//! refl1: `reflects` is an engine field on every block type: a list of code path globs.
+//! refl1: `reflects` is an engine field on content block types: a list of code path globs.
 use rdy_model::{Block, BlockId, FieldValue};
 use rdy_schema::*;
 use std::collections::BTreeMap;
@@ -46,7 +46,7 @@ fn codes(b: &Block) -> Vec<&'static str> {
 }
 
 #[test]
-fn refl1_reflects_is_accepted_on_any_type_as_a_list_of_path_globs() {
+fn refl1_reflects_is_accepted_on_content_types_as_a_list_of_path_globs() {
     assert!(codes(&claim(globs(&["crates/*/src/error.rs", "docs/**"]))).is_empty());
     let mut doc = block("d-AAAAA", "doc", None);
     for (k, v) in [
@@ -59,6 +59,66 @@ fn refl1_reflects_is_accepted_on_any_type_as_a_list_of_path_globs() {
     doc.fields
         .insert(REFLECTS_FIELD.into(), globs(&["crates/*/src/error.rs"]));
     assert!(validate_block(&pack(), &doc, None).is_empty());
+}
+
+fn with_reflects(ty: &str, prefix: &str) -> Block {
+    let mut b = block(&format!("{prefix}-AAAAA"), ty, Some("s-SECT1"));
+    b.body = "Text.".into();
+    b.fields
+        .insert(REFLECTS_FIELD.into(), globs(&["crates/*/src/error.rs"]));
+    b
+}
+
+#[test]
+fn refl1_reflects_is_refused_on_a_decision_and_accepted_on_a_table() {
+    let issues = validate_block(&pack(), &with_reflects("decision", "D"), Some(&section()));
+    let hit: Vec<_> = issues
+        .iter()
+        .filter(|i| i.message.contains(REFLECTS_FIELD) || i.fix.contains("Implements"))
+        .collect();
+    assert_eq!(hit.len(), 1, "{issues:?}");
+    assert_eq!(hit[0].code, "E_FIELD_UNKNOWN");
+    assert_eq!(hit[0].severity, Severity::Error);
+    let text = format!("{} {}", hit[0].message, hit[0].fix);
+    assert!(
+        text.contains("reflects justifies content") && text.contains("Implements: trailers"),
+        "{text}"
+    );
+    let table = with_reflects("table", "t");
+    assert!(
+        !validate_block(&pack(), &table, Some(&section()))
+            .iter()
+            .any(|i| i.message.contains(REFLECTS_FIELD) || i.fix.contains("Implements")),
+    );
+}
+
+#[test]
+fn refl1_reflects_is_refused_on_every_supporting_type() {
+    for (ty, prefix) in [("question", "q"), ("rationale", "ra")] {
+        let issues = validate_block(&pack(), &with_reflects(ty, prefix), Some(&section()));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.code == "E_FIELD_UNKNOWN" && i.fix.contains("Implements")),
+            "{ty}: {issues:?}"
+        );
+    }
+    for ty in REFLECTS_EXCLUDED_TYPES {
+        assert!(
+            [
+                "decision",
+                "question",
+                "rationale",
+                "review",
+                "tension",
+                "intent",
+                "finding",
+                "source"
+            ]
+            .contains(ty),
+            "{ty}"
+        );
+    }
 }
 
 #[test]
