@@ -5,14 +5,13 @@ use regex::Regex;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::LazyLock;
 
-/// Where a run of text sits on the page: authored content, the "Why ?" trail, the agents'
-/// affordance, or chrome (everything else).
+/// Where a run of text sits on the page: authored content, the "Why ?" trail, or chrome
+/// (everything else).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Zone {
     Chrome,
     Content,
     Trail,
-    Agents,
 }
 
 /// One run of visible text (between two tags, entity-decoded, whitespace collapsed).
@@ -250,10 +249,14 @@ pub fn visible_runs(html: &str) -> Vec<Run> {
                 if text.is_empty() {
                     continue;
                 }
-                let zone = match stack.iter().rev().find_map(|e| e.rdy.as_deref()) {
+                // the innermost `content` or `trail` element; any other `data-rdy` is ignored
+                let zone = match stack.iter().rev().find_map(|e| {
+                    e.rdy
+                        .as_deref()
+                        .filter(|v| matches!(*v, "content" | "trail"))
+                }) {
                     Some("content") => Zone::Content,
                     Some("trail") => Zone::Trail,
-                    Some("agents") => Zone::Agents,
                     _ => Zone::Chrome,
                 };
                 *per_element.entry(top.id).or_default() += 1;
@@ -456,7 +459,6 @@ fn storage_position(run: &Run) -> bool {
 
 /// Every leak of one run, in [`PATTERNS`] order.
 fn run_leaks(page: &str, run: &Run, out: &mut Vec<Leak>) {
-    let scanned = matches!(run.zone, Zone::Chrome | Zone::Content | Zone::Trail);
     let labelled = run.label && matches!(run.zone, Zone::Chrome | Zone::Content);
     let mut push = |pattern: &'static str, text: &str| {
         out.push(Leak {
@@ -468,7 +470,7 @@ fn run_leaks(page: &str, run: &Run, out: &mut Vec<Leak>) {
     };
     for (id, rule) in PATTERNS.iter() {
         match rule {
-            Rule::AllText(rx) if scanned => {
+            Rule::AllText(rx) => {
                 rx.find_iter(&run.text).for_each(|m| push(id, m.as_str()));
             }
             Rule::Running(rx) if matches!(run.zone, Zone::Content | Zone::Trail) && !run.label => {
@@ -499,7 +501,7 @@ fn run_leaks(page: &str, run: &Run, out: &mut Vec<Leak>) {
 }
 
 /// Every leak on every `.html` page of the site at `site`: pages in path order, runs in
-/// document order, patterns in [`PATTERNS`] order. Agents runs are never scanned.
+/// document order, patterns in [`PATTERNS`] order. Every zone is scanned.
 pub fn leaks(site: &std::path::Path) -> Vec<Leak> {
     let mut out = vec![];
     for path in crate::golden::pages(site) {
@@ -1189,10 +1191,9 @@ mod tests {
         );
         assert_eq!(
             text(Zone::Content),
-            "A guard is | evaluated | after | the pattern. | Why"
+            "A guard is | evaluated | after | the pattern. | Why | For agents | Id | r-7KQ2M"
         );
         assert_eq!(text(Zone::Trail), "8 February 2021: ruled.");
-        assert_eq!(text(Zone::Agents), "For agents | Id | r-7KQ2M");
         let labels: Vec<&str> = runs
             .iter()
             .filter(|r| r.label)
@@ -1347,7 +1348,7 @@ mod tests {
     #[test]
     fn scan1_f12_reads_raw_markdown_in_running_text_and_backticks_and_links_everywhere() {
         // Founder ruling FW-F1a: underscores are literal, so `__` is never an F12 hit.
-        let page = r#"<html><body><nav class="crumbs"><a href="x.html">`rdy check`</a></nav><main data-rdy="content"><h2>__match_args__ and **x**</h2><p>a__b and **left** and ![alt](x.png)</p><p><code>`kept` **kept**</code></p><dl><dt>`stray</dt></dl></main><div data-rdy="trail"><p>**raw**</p></div><div data-rdy="agents"><p>**never**</p></div></body></html>"#;
+        let page = r#"<html><body><nav class="crumbs"><a href="x.html">`rdy check`</a></nav><main data-rdy="content"><h2>__match_args__ and **x**</h2><p>a__b and **left** and ![alt](x.png)</p><p><code>`kept` **kept**</code></p><dl><dt>`stray</dt></dl></main><div data-rdy="trail"><p>**raw**</p></div></body></html>"#;
         let mut out = vec![];
         for run in visible_runs(page) {
             run_leaks("p.html", &run, &mut out);

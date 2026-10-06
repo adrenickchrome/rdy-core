@@ -87,11 +87,13 @@ fn fsck_project(n: usize) -> (tempfile::TempDir, rdy_engine::Rdy, Vec<Hash>) {
         actor: "agent:a".into(),
         run: None,
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     };
     let a = Session {
         actor: "human:founder".into(),
         run: None,
         role: Role::Approver,
+        kind: rdy_engine::SessionKind::Human,
     };
     let mut out = vec![];
     for i in 0..n {
@@ -136,6 +138,7 @@ fn fsck_counts_valid_versions() {
         actor: "human:founder".into(),
         run: None,
         role: Role::Approver,
+        kind: rdy_engine::SessionKind::Human,
     };
     r.tag(&a, "v0.1.0", None, None).unwrap();
     assert_eq!(r.fsck().unwrap().versions, 1);

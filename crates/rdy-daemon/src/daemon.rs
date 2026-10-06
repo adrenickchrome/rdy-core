@@ -508,6 +508,11 @@ impl Conn {
             peer_uid,
         );
         end.session = Some(session.clone());
+        // the host's start of the session (a pack reload) before `ready`; a stop closes the
+        // connection, and one `starting` reply goes out if it takes a while
+        if !self.start_session(&mut stream, &session, &mut stop).await {
+            return;
+        }
         let ready = HelloReply::Ready {
             version: self.version.clone(),
             session: session.id,
@@ -546,6 +551,39 @@ impl Conn {
             }
         }
         // (f) runs in `end`'s drop
+    }
+
+    /// Awaits `Handler::session_started`. Past `PROGRESS_MIN_INTERVAL` it writes one `starting`
+    /// reply (`reloading the pack`) and keeps waiting. False on a stop or a write error.
+    async fn start_session(
+        &self,
+        stream: &mut UnixStream,
+        session: &SessionInfo,
+        stop: &mut watch::Receiver<bool>,
+    ) -> bool {
+        if *stop.borrow_and_update() {
+            return false;
+        }
+        let mut started = self.handler.session_started(session);
+        let progress_at = tokio::time::sleep(PROGRESS_MIN_INTERVAL);
+        tokio::pin!(progress_at);
+        let mut told = false;
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop.changed() => return false,
+                () = &mut started => return true,
+                () = &mut progress_at, if !told => {
+                    told = true;
+                    let reply = HelloReply::Starting {
+                        progress: "reloading the pack".into(),
+                    };
+                    if write_reply(stream, &reply).await.is_err() {
+                        return false;
+                    }
+                }
+            }
+        }
     }
 
     /// Writes `starting` replies until ready (true), or returns false on a stop or a write

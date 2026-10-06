@@ -88,6 +88,7 @@ fn spec_11_targets_at_100k_blocks() {
         actor: "agent:perf".into(),
         run: None,
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     };
     let parent = r
         .read()
@@ -194,6 +195,7 @@ fn spec_11_targets_at_100k_blocks() {
         actor: "human:perf".into(),
         run: None,
         role: Role::Approver,
+        kind: rdy_engine::SessionKind::Human,
     };
     let p = r.propose(&s, "work", "seed").unwrap();
     r.land(&approver, &p.id).unwrap();
@@ -267,6 +269,7 @@ fn chain1_log_bytes_per_write_stay_flat_to_10k() {
         actor: "agent:perf".into(),
         run: None,
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     };
     let write = |r: &mut Rdy, ops: serde_json::Value| {
         r.write(
@@ -330,6 +333,7 @@ fn chain1_log_bytes_per_write_stay_flat_to_10k() {
         actor: "human:perf".into(),
         run: None,
         role: Role::Approver,
+        kind: rdy_engine::SessionKind::Human,
     };
     let t = Instant::now();
     let p = r.propose(&s, "work", "chain1").unwrap();

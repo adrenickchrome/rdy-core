@@ -261,3 +261,40 @@ async fn ctl1_an_oversized_line_drains_pipelined_input_before_the_close() {
     assert_eq!(v["error"]["code"], "E_LIMIT");
     assert!(r.is_empty(), "{} pipelined bytes left unread", r.len());
 }
+
+/// `Echo`, plus a notice on every reply.
+struct Noticing;
+impl Handler for Noticing {
+    fn ctl(&self, s: &SessionInfo, r: CtlRequest) -> Result<Value, ErrorReply> {
+        Echo.ctl(s, r)
+    }
+
+    fn notice(&self, _session: &SessionInfo) -> Option<String> {
+        Some("n".into())
+    }
+}
+
+#[tokio::test]
+async fn reload1_a_reply_carries_the_handlers_notice() {
+    let served = |handler: Arc<dyn Handler>| {
+        let info = info();
+        let (client, server) = tokio::io::duplex(1 << 20);
+        let session = info.sessions.insert(Proto::Ctl, "t".into(), "/".into(), 0);
+        let (r, w) = tokio::io::split(server);
+        tokio::spawn(serve_ctl(r, w, session, handler, info));
+        client
+    };
+    let mut c = served(Arc::new(Noticing));
+    let v = roundtrip(&mut c, r#"{"id":1,"op":"echo","args":{}}"#).await;
+    assert_eq!(v["ok"]["args"], json!({}));
+    assert_eq!(v["notice"], "n", "{v}");
+    let v = roundtrip(&mut c, r#"{"id":2,"op":"ping"}"#).await;
+    assert!(v["ok"]["pid"].is_number(), "{v}");
+    assert_eq!(v["notice"], "n", "built-ins too: {v}");
+    let mut c = served(Arc::new(Echo));
+    for line in [r#"{"id":1,"op":"echo"}"#, r#"{"id":2,"op":"ping"}"#] {
+        let v = roundtrip(&mut c, line).await;
+        assert!(v.get("ok").is_some(), "{v}");
+        assert!(v.get("notice").is_none(), "no notice key by default: {v}");
+    }
+}

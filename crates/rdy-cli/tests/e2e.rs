@@ -52,12 +52,23 @@ impl Mcp {
     }
 }
 
+/// A user config naming `human:founder` as the human actor.
+fn human_config() -> tempfile::TempDir {
+    let cfg = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(cfg.path().join("rdy")).unwrap();
+    std::fs::write(cfg.path().join("rdy/config.yaml"), "actor: human:founder\n").unwrap();
+    cfg
+}
+
+/// `rdy --no-daemon --json <args>` in `dir` as the human `human:founder`.
 fn rdy(dir: &std::path::Path, args: &[&str]) -> Value {
+    let cfg = human_config();
     let out = Command::new(env!("CARGO_BIN_EXE_rdy"))
-        .arg("--json")
+        .args(["--no-daemon", "--json"])
         .args(args)
         .current_dir(dir)
         .env("RDY_ACTOR", "human:founder")
+        .env("XDG_CONFIG_HOME", cfg.path())
         .output()
         .unwrap();
     assert!(
@@ -73,9 +84,11 @@ fn agent_over_mcp_then_human_approves() {
     let dir = tempfile::tempdir().unwrap();
     rdy(dir.path(), &["init"]);
 
+    let cfg = human_config();
     let mut child = Command::new(env!("CARGO_BIN_EXE_rdy"))
-        .arg("mcp")
+        .args(["--no-daemon", "mcp"])
         .current_dir(dir.path())
+        .env("XDG_CONFIG_HOME", cfg.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

@@ -83,7 +83,7 @@ fn text_evidence() -> ApprovalEvidence {
 #[test]
 fn pver1_propose_writes_the_refs_and_propose_next_moves_the_latest() {
     let d = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&d.path().join("s")).unwrap();
+    let mut s = Store::create(&d.path().join("s")).unwrap();
     let c1 = create(&mut s, "v", "c-00001");
     let p1 = s.propose("v", "t", prov("agent:v")).unwrap();
     let hash = |v: Option<Vec<u8>>| v.map(|b| Hash(b.try_into().unwrap()));
@@ -128,7 +128,7 @@ fn pver1_propose_writes_the_refs_and_propose_next_moves_the_latest() {
 #[test]
 fn pver1_landing_an_older_version_is_proposal_moved_and_writes_nothing() {
     let d = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&d.path().join("s")).unwrap();
+    let mut s = Store::create(&d.path().join("s")).unwrap();
     let c1 = create(&mut s, "v", "c-00001");
     let p1 = s.propose("v", "t", prov("agent:v")).unwrap();
     let c2 = create(&mut s, "v", "c-00002");
@@ -182,7 +182,7 @@ fn pver1_landing_an_older_version_is_proposal_moved_and_writes_nothing() {
 #[test]
 fn pver1_a_relayed_landing_records_the_relay_and_assurance_relayed() {
     let d = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&d.path().join("s")).unwrap();
+    let mut s = Store::create(&d.path().join("s")).unwrap();
     create(&mut s, "v", "c-00001");
     let p = s.propose("v", "t", prov("agent:v")).unwrap();
     let relay = rdy_store::Relay {
@@ -229,7 +229,7 @@ fn pver1_a_relayed_landing_records_the_relay_and_assurance_relayed() {
 #[test]
 fn evk1_an_elicited_approval_is_local_and_a_relay_needs_a_relay_kind() {
     let d = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&d.path().join("s")).unwrap();
+    let mut s = Store::create(&d.path().join("s")).unwrap();
     create(&mut s, "v", "c-00001");
     let p = s.propose("v", "t", prov("agent:v")).unwrap();
     let relay = rdy_store::Relay {
@@ -288,7 +288,7 @@ fn evk1_an_elicited_approval_is_local_and_a_relay_needs_a_relay_kind() {
 #[test]
 fn pver1_every_version_records_the_canon_it_was_proposed_on() {
     let d = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&d.path().join("s")).unwrap();
+    let mut s = Store::create(&d.path().join("s")).unwrap();
     create(&mut s, "seed", "c-00001");
     let p0 = s.propose("seed", "t", prov("agent:v")).unwrap();
     assert_eq!(s.proposal(&p0).unwrap().canon_at, None);
@@ -306,7 +306,7 @@ fn pver1_every_version_records_the_canon_it_was_proposed_on() {
 #[test]
 fn gconf1_the_store_refuses_an_empty_proposal_version() {
     let d = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&d.path().join("s")).unwrap();
+    let mut s = Store::create(&d.path().join("s")).unwrap();
     let e = s.propose("v", "t", prov("agent:v")).unwrap_err();
     assert!(
         matches!(e, StoreError::EmptyProposal(ref v) if v == "v"),

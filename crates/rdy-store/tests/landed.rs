@@ -42,7 +42,7 @@ fn create(view: &str, id: &str) -> Change {
 #[test]
 fn lidx1_every_landed_change_names_its_landing_and_reindex_rebuilds_it() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     let c1 = s.commit_to_view("work", create("work", "b-00001")).unwrap();
     let c2 = s.commit_to_view("work", create("work", "b-00002")).unwrap();
     let p = s.propose("work", "two", prov(Role::Writer)).unwrap();

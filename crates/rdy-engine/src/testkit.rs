@@ -10,6 +10,7 @@ pub fn generate(project: &Path, blocks: usize) -> Vec<BlockId> {
         actor: "agent:bench".into(),
         run: None,
         role: Role::Writer,
+        kind: crate::SessionKind::Human,
     };
     let mut ids = vec![];
     let mut doc_no = 0;
@@ -107,6 +108,7 @@ pub fn generate_tree(
         actor: "agent:bench".into(),
         run: None,
         role: Role::Writer,
+        kind: crate::SessionKind::Human,
     };
     let w = |r: &mut Rdy, ops: Vec<serde_json::Value>| {
         r.write(

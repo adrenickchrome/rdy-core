@@ -22,7 +22,7 @@ fn tag(name: &str, landing: Hash) -> Tag {
 #[test]
 fn a_tag_round_trips_with_its_ref_in_one_write() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let t = tag("v1.0.0", Hash([3; 32]));
     let frames_before = s.verify().unwrap();
     let h = s.put_tag(&t).unwrap();
@@ -40,25 +40,25 @@ fn tag_refs_survive_reindex_and_a_damaged_index() {
     let dir = tempfile::tempdir().unwrap();
     let t = tag("v1.0.0", Hash([3; 32]));
     {
-        let mut s = Store::open(dir.path()).unwrap();
+        let mut s = Store::create(dir.path()).unwrap();
         s.put_tag(&t).unwrap();
         s.reindex().unwrap();
         assert_eq!(s.tags().unwrap().len(), 1);
     }
     std::fs::write(dir.path().join("index.redb"), b"not a database").unwrap();
-    let s = Store::open(dir.path()).unwrap();
+    let s = Store::create(dir.path()).unwrap();
     assert_eq!(s.tags().unwrap()[0].2, t);
 }
 
 #[test]
 fn a_failed_tag_write_leaves_no_ref() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     s.fail_next_index_apply();
     assert!(s.put_tag(&tag("v1.0.0", Hash([3; 32]))).is_err());
     assert!(s.tags().unwrap().is_empty());
     drop(s);
-    let s = Store::open(dir.path()).unwrap();
+    let s = Store::create(dir.path()).unwrap();
     assert!(
         s.tags().unwrap().is_empty(),
         "nothing unacknowledged survives a reopen"
@@ -68,7 +68,7 @@ fn a_failed_tag_write_leaves_no_ref() {
 #[test]
 fn reading_a_tag_checks_the_object_kind() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let snap = s.put(kinds::SNAPSHOT, &StateSnapshot::default()).unwrap();
     assert!(matches!(s.read_tag(&snap), Err(StoreError::Decode(_))));
     assert!(matches!(

@@ -1,4 +1,4 @@
-//! The "Why ?" trail of a block, the agents' affordance and the copied reference.
+//! The "Why ?" trail of a block and the copied reference.
 use crate::html::{self, Link};
 use crate::inline;
 use crate::site::{Site, rel};
@@ -28,20 +28,6 @@ pub struct Event {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Trail {
     pub events: Vec<Event>,
-}
-
-/// What the collapsed "For agents" block of a page shows about a block.
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct Agents {
-    pub id: String,
-    pub block_type: String,
-    pub lifecycle: Option<String>,
-    /// The decisions that govern the block, each with its status word.
-    pub governing: Vec<(String, String)>,
-    pub suspect: bool,
-    pub json_href: String,
-    /// The `go/<id>.html` page, relative to the site root.
-    pub permalink: String,
 }
 
 static REVOKE_PREFIX: LazyLock<Regex> =
@@ -368,7 +354,7 @@ fn link_in<'a>(
             href: url.href_from(from),
             label: site.summary(b),
             title: String::new(),
-            key: b.field_str("key").map(String::from),
+            key: crate::site::typed_key(b).map(String::from),
         })
     }
 }
@@ -423,59 +409,6 @@ pub fn for_block(b: &Block, g: &Graph, m: &Materialized, site: &Site, from: &str
     }
     Trail {
         events: events.into_values().collect(),
-    }
-}
-
-fn status_word(s: &DerivedStatus) -> &'static str {
-    match s {
-        DerivedStatus::Proposed => "proposed",
-        DerivedStatus::Rejected => "rejected",
-        DerivedStatus::Live => "live",
-        DerivedStatus::PartiallySuperseded { .. } => "partially superseded",
-        DerivedStatus::Superseded { .. } => "superseded",
-        DerivedStatus::Revoked { .. } => "revoked",
-    }
-}
-
-/// What the "For agents" block of `b` shows. `json_href` is the page's JSON twin.
-pub fn agents(
-    b: &Block,
-    g: &Graph,
-    m: &Materialized,
-    suspects: &BTreeSet<BlockId>,
-    site: &Site,
-    json_href: &str,
-) -> Agents {
-    let link = |_: &BlockId| None;
-    let doc_page = |_: &BlockId| String::new();
-    let cx = Cx {
-        g,
-        m,
-        link: &link,
-        doc_page: &doc_page,
-    };
-    let mut governing: Vec<(String, String, String)> = cx
-        .governing(b)
-        .into_iter()
-        .filter_map(|id| {
-            let d = m.get(&id)?;
-            let status = g.status(&id)?;
-            Some((
-                d.field_str("decided_at").unwrap_or("9999").to_string(),
-                id.to_string(),
-                status_word(&status).to_string(),
-            ))
-        })
-        .collect();
-    governing.sort();
-    Agents {
-        id: b.id.to_string(),
-        block_type: b.block_type.clone(),
-        lifecycle: b.field_str("lifecycle").map(String::from),
-        governing: governing.into_iter().map(|(_, id, s)| (id, s)).collect(),
-        suspect: suspects.contains(&b.id),
-        json_href: json_href.to_string(),
-        permalink: site.go_page(&b.id),
     }
 }
 

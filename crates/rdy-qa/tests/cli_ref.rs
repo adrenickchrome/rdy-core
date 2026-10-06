@@ -3,7 +3,9 @@ use rdy_qa::{fixtures::rdy_bin, golden::*};
 use std::process::Command;
 
 fn rdy(dir: &std::path::Path, args: &[&str]) -> (bool, String, String) {
+    // direct mode: no test leaves a detached daemon behind
     let out = Command::new(rdy_bin())
+        .arg("--no-daemon")
         .args(args)
         .current_dir(dir)
         .env("RDY_ACTOR", "human:qa")

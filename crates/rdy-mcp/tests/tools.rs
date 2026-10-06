@@ -1,11 +1,12 @@
 use rdy_engine::Rdy;
+use rdy_engine::engine::{Local, write_typed};
 use rdy_mcp::tools::*;
 use serde_json::{Value, json};
 
 fn state() -> (tempfile::TempDir, McpState) {
     let dir = tempfile::tempdir().unwrap();
     let rdy = Rdy::init(dir.path(), "rdy-standard").unwrap();
-    (dir, McpState::new(rdy))
+    (dir, McpState::new(std::sync::Arc::new(Local::new(rdy))))
 }
 
 fn start(st: &mut McpState) {
@@ -264,11 +265,9 @@ fn justification_mapping_and_conflict() {
     let e = rdy_write(&mut st, serde_json::from_value(json!({"ops": [{"op": "update", "id": c, "body": "X."}], "implements": did, "editorial": {"class": "typo", "reason": "r"}})).unwrap()).unwrap_err();
     assert_eq!(e.code, "E_BAD_INPUT");
     let last = |st: &McpState| {
-        let v = st.rdy.store().view("run-7").unwrap();
-        st.rdy
-            .store()
-            .get::<Change>(v.changes.last().unwrap())
-            .unwrap()
+        let r = st.engine.read();
+        let v = r.reader().view("run-7").unwrap();
+        r.reader().get::<Change>(v.changes.last().unwrap()).unwrap()
     };
     rdy_write(&mut st, serde_json::from_value(json!({"ops": [{"op": "update", "id": c, "body": "Edited."}], "editorial": {"class": "clarify", "reason": "why"}})).unwrap()).unwrap();
     assert_eq!(
@@ -323,6 +322,7 @@ fn approver() -> rdy_engine::Session {
         actor: "human:founder".into(),
         run: None,
         role: rdy_model::Role::Approver,
+        kind: rdy_engine::SessionKind::Human,
     }
 }
 
@@ -334,11 +334,13 @@ fn land_and_tag(st: &mut McpState) -> String {
         serde_json::from_value(json!({"title": "seed"})).unwrap(),
     )
     .unwrap();
-    let landing = st.rdy.land(&approver(), p["id"].as_str().unwrap()).unwrap();
-    st.rdy
-        .tag(&approver(), "v0.1.0", None, Some("first".into()))
-        .unwrap();
-    landing
+    let pid = p["id"].as_str().unwrap().to_string();
+    let landing = write_typed(&*st.engine, move |r| r.land(&approver(), &pid)).unwrap();
+    write_typed(&*st.engine, |r| {
+        r.tag(&approver(), "v0.1.0", None, Some("first".into()))
+    })
+    .unwrap();
+    landing.as_str().unwrap().to_string()
 }
 
 #[test]
@@ -407,7 +409,7 @@ fn read_as_of_a_version() {
     start(&mut st);
     land_and_tag(&mut st);
     let doc = st
-        .rdy
+        .engine
         .read()
         .materialized(&rdy_engine::Scope::Canon)
         .unwrap()
@@ -415,7 +417,7 @@ fn read_as_of_a_version() {
         .id
         .to_string();
     let section = st
-        .rdy
+        .engine
         .read()
         .materialized(&rdy_engine::Scope::Canon)
         .unwrap()
@@ -616,6 +618,21 @@ fn chain1_overview_counts_each_views_changes() {
         serde_json::from_value(json!({"title": "two"})).unwrap(),
     )
     .unwrap();
-    st.rdy.land(&approver(), p["id"].as_str().unwrap()).unwrap();
+    let pid = p["id"].as_str().unwrap().to_string();
+    write_typed(&*st.engine, move |r| r.land(&approver(), &pid)).unwrap();
     assert_eq!(count(&mut st), 0);
+}
+
+/// Final review fix round 1 (minor 9): the schema says in words that the daemon's socket carries
+/// the same request-line limit as stdio.
+#[test]
+fn schema1_the_transport_note_says_the_socket_has_the_stdio_line_limit() {
+    let (_d, mut st) = state();
+    let all = rdy_schema(&mut st, serde_json::from_value(json!({})).unwrap()).unwrap();
+    let limits = &all["limits"];
+    assert_eq!(limits["socket_line_bytes"], limits["request_bytes"]);
+    let note = limits["transport"].as_str().expect("a transport note");
+    assert!(note.contains("socket"), "{note}");
+    assert!(note.contains("stdio"), "{note}");
+    assert!(note.contains("16 MiB"), "{note}");
 }

@@ -101,5 +101,5 @@ chrome	-	What is still undecided.
 chrome	L	Versions
 chrome	L	v1.0.0
 chrome	L	(current)
-chrome	-	5 October 2026 · Accepted by the Steering Council
+chrome	-	<landing date> · Accepted by the Steering Council
 chrome	L	Structural pattern matching, v1.0.0, 2 changes since.

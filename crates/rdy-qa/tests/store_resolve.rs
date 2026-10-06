@@ -37,7 +37,7 @@ fn change(view: &str, ops: Vec<Op>, by: &Provenance) -> Change {
 }
 fn store() -> (tempfile::TempDir, Store) {
     let d = tempfile::tempdir().unwrap();
-    let s = Store::open(&d.path().join("s")).unwrap();
+    let s = Store::create(&d.path().join("s")).unwrap();
     (d, s)
 }
 fn id(s: &str) -> BlockId {

@@ -49,7 +49,7 @@ fn pres1_a_presentational_note_has_no_marker() {
 }
 
 #[test]
-fn pres1_presentational_blocks_render_plainly_and_are_flagged_in_json() {
+fn pres1_presentational_blocks_render_plainly() {
     let (_d, r, ids) = presentational_site();
     let out = tempfile::tempdir().unwrap();
     rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
@@ -58,25 +58,15 @@ fn pres1_presentational_blocks_render_plainly_and_are_flagged_in_json() {
     assert!(
         b.contains("<p>Decorative.</p>")
             && !b.contains("class=\"marker\"")
-            && !b.contains("<details class=\"why\">")
-            && !b.contains("<dt>Governed by</dt>"),
+            && !b.contains("<details class=\"why\">"),
         "{b}"
     );
-    let j: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(out.path().join("t.json")).unwrap()).unwrap();
-    let a = j["blocks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|x| x["id"] == ids.aside.to_string())
-        .unwrap();
-    assert_eq!(a["presentational"], true);
 }
 
-/// Neither a presentational aside nor a presentational note shows a trail, an agents' block or
-/// a Copy ref button, though decisions govern both (Task 11's carry-forward).
+/// Neither a presentational aside nor a presentational note shows a trail or a Copy ref button,
+/// though decisions govern both.
 #[test]
-fn pres1_asides_and_notes_get_no_trail_agents_or_copy_ref() {
+fn pres1_asides_and_notes_get_no_trail_or_copy_ref() {
     let dir = tempfile::tempdir().unwrap();
     drop(rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap());
     let pack = PRESENTATIONAL_PACK.replace(
@@ -120,16 +110,7 @@ fn pres1_asides_and_notes_get_no_trail_agents_or_copy_ref() {
     rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
     let h = std::fs::read_to_string(out.path().join("t.html")).unwrap();
     assert!(h.contains("Decorative.") && h.contains("Margin."), "{h}");
-    assert!(
-        !h.contains("class=\"why\"") && !h.contains("<dt>Governed by</dt>"),
-        "{h}"
-    );
-    for id in [&aside, &note] {
-        assert!(
-            !h.contains(&format!("<code>{id}</code>")),
-            "{id} shows in an agents block"
-        );
-    }
+    assert!(!h.contains("class=\"why\""), "{h}");
     // only the section has a reference to copy; the three blocks each have a link
     assert_eq!(h.matches("class=\"tool copy-ref\"").count(), 1, "{h}");
     assert_eq!(h.matches("class=\"tool copy-link\"").count(), 3, "{h}");

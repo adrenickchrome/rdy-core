@@ -1,5 +1,6 @@
 //! The perf-regression tier: a fixed workload, per-machine baselines, regression verdicts.
-use crate::fixtures::{approver, land, write};
+use crate::fixtures::{approver, land, write, writer};
+use rdy_daemon::{Attempt, Client, Hello, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun};
 use rdy_engine::{Rdy, Scope, testkit};
 use rdy_model::{Block, BlockId, Op};
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,11 @@ fn spec_target(op: &str) -> Option<String> {
         "render" => "< 2 s full render at 100k (spec 11)",
         "cold_open" => "< 2 s at 100k (spec 11)",
         "cold_open_lagging" => "< 2 s at 100k, index catch-up included (M2 spec 15.1)",
+        "new_doc_single" => "in-process comparator for daemon_write_single (no spec target)",
+        "daemon_write_single" => {
+            "< 5 ms p99 on Linux NVMe; one durable flush plus < 1 ms on macOS (DECISIONS-rdy-m2 §1 Q1)"
+        }
+        "daemon_cold_start" => "< 2 s at 100k (M2 spec 15.1)",
         _ => return None,
     };
     Some(if large {
@@ -67,16 +73,20 @@ fn spec_target(op: &str) -> Option<String> {
     })
 }
 
+/// The ops that end in a durable flush, so their medians move with the disk: they get the wider margin.
+fn fsync_bound(op: &str) -> bool {
+    op.starts_with("write")
+        || op.starts_with("propose")
+        || op.starts_with("new_doc")
+        || op.starts_with("daemon_write")
+}
+
 pub fn compare(baseline: Option<&Baseline>, measured: &[Measure]) -> Vec<Verdict> {
     measured
         .iter()
         .map(|m| {
             let base = baseline.and_then(|b| b.ops.get(&m.op)).map(|b| b.median_ms);
-            let margin = if m.op.starts_with("write") || m.op.starts_with("propose") {
-                0.50
-            } else {
-                0.25
-            };
+            let margin = if fsync_bound(&m.op) { 0.50 } else { 0.25 };
             let pass = match base {
                 None => true,
                 Some(b) => !(m.median_ms > b * (1.0 + margin) && m.median_ms - b > FLOOR_MS),
@@ -485,6 +495,17 @@ pub fn run_workload() -> Vec<Measure> {
         "cold_open_lagging: caught up {} frames",
         lag.expect("ran at least once")
     );
+    // the in-process comparator for `daemon_write_single`: one `new_doc` (a doc and its
+    // skeleton). After the cold opens, so they open the same project as before the daemon ops
+    // were added (before them, its 30 docs in `vd` gave the lagging open 271 more frames to
+    // catch up: 4,822 instead of 4,551)
+    let mut r = Rdy::open(&proj).expect("open");
+    out.push(measure("new_doc_single", 30, |i| {
+        r.new_doc(&writer(), "vd", &format!("nd-{i}"), None, None)
+            .expect("new_doc");
+    }));
+    drop(r);
+    out.extend(daemon_ops(&proj, ""));
     if crate::fixtures::deep() {
         out.extend(run_large_tier(dir.path()));
     }
@@ -492,8 +513,83 @@ pub fn run_workload() -> Vec<Measure> {
     out
 }
 
+/// Starts a daemon over `proj` (idle timeout 60 s, human actor `human:qa`, the fixture writer).
+fn daemon_start(proj: &std::path::Path) -> ServeRun {
+    rdy_daemon::start(ServeOptions {
+        project: proj.to_path_buf(),
+        version: "perf".into(),
+        detach: false,
+        idle_timeout: Some(Duration::from_secs(60)),
+        human_actor: Some("human:qa".into()),
+    })
+    .unwrap_or_else(|e| panic!("start the daemon: {e}"))
+}
+
+/// A `ctl` connection to the daemon at `proj`, past `ready` (waits for it while it is `starting`).
+async fn daemon_ready(proj: &std::path::Path) -> Client {
+    let hello = Hello {
+        rdy: PROTO_VERSION,
+        version: "perf".into(),
+        proto: Proto::Ctl,
+        cwd: proj.to_path_buf(),
+    };
+    let run = RunDir::of_project(proj);
+    match rdy_daemon::connect(&run, &hello).await {
+        Attempt::Ready(c) => c,
+        Attempt::Starting(p) => p
+            .wait(Instant::now() + Duration::from_secs(30), &mut |_| {})
+            .await
+            .unwrap_or_else(|e| panic!("the daemon did not become ready: {e}")),
+        other => panic!("the daemon did not answer the hello: {other:?}"),
+    }
+}
+
+fn daemon_stop(run: ServeRun) {
+    run.handle().stop();
+    run.wait()
+        .unwrap_or_else(|e| panic!("the daemon failed: {e}"));
+}
+
+/// The daemon ops, on the typical project once every in-process handle on it is closed:
+/// `daemon_write_single` (one `new_doc` over a `ctl` connection, the same shape as
+/// `new_doc_single`) and `daemon_cold_start` (start to `ready` on a project whose index is
+/// current: the warm-up plus the bind, not a catch-up). `sfx` names the tier (`""` or `_50k`).
+fn daemon_ops(proj: &std::path::Path, sfx: &str) -> Vec<Measure> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("client runtime");
+    let mut out = vec![];
+    let run = daemon_start(proj);
+    let mut c = rt.block_on(daemon_ready(proj));
+    // the human session, who may write into `va`
+    rt.block_on(c.ctl("session", json!({"actor": null, "run": null})))
+        .unwrap_or_else(|e| panic!("the session op failed: {e}"));
+    out.push(measure(&format!("daemon_write_single{sfx}"), 30, |i| {
+        rt.block_on(c.ctl("new_doc", json!({"path": format!("dw-{i}"), "view": "va"})))
+            .unwrap_or_else(|e| panic!("new_doc: {e}"));
+    }));
+    drop(c);
+    daemon_stop(run);
+    // one untimed start and stop, so the timed starts open a current index
+    let run = daemon_start(proj);
+    drop(rt.block_on(daemon_ready(proj)));
+    daemon_stop(run);
+    out.push(measure_timed(&format!("daemon_cold_start{sfx}"), 3, |_| {
+        let s = Instant::now();
+        let run = daemon_start(proj);
+        let c = rt.block_on(daemon_ready(proj));
+        let took = s.elapsed();
+        drop(c);
+        daemon_stop(run);
+        took
+    }));
+    out
+}
+
 /// The large tier (`RDY_QA_DEEP=1`): a ~50k-block project, ids seeded as for the typical tier,
-/// landed, with twenty pending writes; the shared ops under the `_50k` names. `version_position`
+/// landed, with twenty pending writes; the shared ops under the `_50k` names, and the daemon ops
+/// (`daemon_write_single_50k`, `daemon_cold_start_50k`) once every in-process handle is closed. `version_position`
 /// (its fixture is landing depth, not size), `cold_open_lagging`, `write_batch_200`,
 /// `propose_land_500_flat` and `export_import` stay typical-only.
 fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
@@ -521,6 +617,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     tier_render(&mut out, &r, parent, sfx, 3);
     drop(r);
     tier_cold_open(&mut out, &proj, sfx, 3);
+    out.extend(daemon_ops(&proj, sfx));
     out
 }
 
@@ -679,5 +776,39 @@ mod tests {
         assert!(typical.ops.contains_key("context") && !typical.ops.contains_key("context_50k"));
         let fresh = merge_baseline(None, "y", &[m("context", 3.0)]);
         assert_eq!((fresh.machine.as_str(), fresh.ops.len()), ("y", 1));
+    }
+
+    #[test]
+    #[ignore = "builds the 50k project; run with --ignored"]
+    fn dperf1_the_large_tier_runs_the_daemon_ops_at_50k() {
+        assert!(spec_target("daemon_write_single_50k").is_some());
+        assert!(spec_target("daemon_cold_start_50k").is_some());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ms = run_large_tier(dir.path());
+        rdy_model::unseed_ids_for_tests();
+        for op in ["daemon_write_single_50k", "daemon_cold_start_50k"] {
+            let m = ms
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            eprintln!("{op}: median {:.3} ms, p95 {:.3} ms", m.median_ms, m.p95_ms);
+            assert!(m.median_ms > 0.0, "{op}: {m:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "runs the full workload; run with --ignored"]
+    fn dperf1_the_daemon_ops_have_spec_targets_and_run() {
+        assert!(spec_target("daemon_write_single").is_some());
+        assert!(spec_target("daemon_cold_start").is_some());
+        assert!(spec_target("new_doc_single").is_some());
+        let ms = run_workload();
+        for op in ["new_doc_single", "daemon_write_single", "daemon_cold_start"] {
+            let m = ms
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            assert!(m.median_ms > 0.0, "{op}: {m:?}");
+        }
     }
 }

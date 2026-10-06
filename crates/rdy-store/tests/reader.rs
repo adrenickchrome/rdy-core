@@ -40,7 +40,7 @@ fn change(view: &str, ops: Vec<Op>) -> rdy_model::Change {
 fn rdr1_the_reader_is_send_sync_and_clone() {
     assert_send_sync::<StoreReader>();
     let dir = tempfile::tempdir().unwrap();
-    let s = Store::open(dir.path()).unwrap();
+    let s = Store::create(dir.path()).unwrap();
     let r = s.reader();
     let _r2 = r.clone();
 }
@@ -48,7 +48,7 @@ fn rdr1_the_reader_is_send_sync_and_clone() {
 #[test]
 fn rdr1_a_reader_reads_through_a_roll_and_never_past_the_end() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     s.set_segment_max(2_000);
     let r = s.reader();
     let start = s.log_end();
@@ -77,7 +77,7 @@ fn rdr1_a_reader_reads_through_a_roll_and_never_past_the_end() {
 #[test]
 fn rdr1_last_batch_names_the_frames_of_the_last_write_only() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     assert!(s.last_batch().is_empty());
     let a = s
         .write(vec![
@@ -106,7 +106,7 @@ fn rdr1_last_batch_names_the_frames_of_the_last_write_only() {
 #[test]
 fn rdr1_commit_to_view_with_checks_bases_through_the_closure() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let b = block("b-AAAAA", "claim", "x");
     let v1 = b.version_hash();
     let create = change("v", vec![Op::Create { block: b.clone() }]);
@@ -133,7 +133,7 @@ fn rdr1_commit_to_view_with_checks_bases_through_the_closure() {
 #[test]
 fn rdr1_a_reader_survives_a_reindex() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let h = s
         .write(vec![(kinds::BLOB_CHUNK, b"keep".to_vec())])
         .unwrap()[0];
@@ -158,7 +158,7 @@ fn rdr1_a_reader_survives_a_reindex() {
 #[test]
 fn rdr1_concurrent_readers_see_only_acknowledged_frames() {
     let dir = tempfile::tempdir().unwrap();
-    let s = Arc::new(std::sync::Mutex::new(Store::open(dir.path()).unwrap()));
+    let s = Arc::new(std::sync::Mutex::new(Store::create(dir.path()).unwrap()));
     let r = s.lock().unwrap().reader();
     let start = Arc::new(Barrier::new(3));
     let writer = {
@@ -210,13 +210,13 @@ fn rdr1_concurrent_readers_see_only_acknowledged_frames() {
 #[test]
 fn rdr1_a_reader_that_outlives_its_store_makes_a_reopen_refuse_not_rebuild() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let h = s.write(vec![(kinds::BLOB_CHUNK, b"x".to_vec())]).unwrap()[0];
     let r = s.reader();
     drop(s);
     assert!(
         matches!(
-            Store::open(dir.path()),
+            Store::create(dir.path()),
             Err(rdy_store::StoreError::HeldByReader(_))
         ),
         "a live reader still holds the index"
@@ -228,7 +228,7 @@ fn rdr1_a_reader_that_outlives_its_store_makes_a_reopen_refuse_not_rebuild() {
     assert!(!set_aside, "the index was not set aside");
     assert_eq!(r.get_raw(&h).unwrap().1, b"x");
     drop(r);
-    let s = Store::open(dir.path()).unwrap();
+    let s = Store::create(dir.path()).unwrap();
     assert!(!s.open_report().index_rebuilt);
 }
 
@@ -268,7 +268,7 @@ fn record_len(r: &StoreReader, rec: &rdy_store::ViewRecord) -> usize {
 #[test]
 fn rdr1_compound_reads_answer_for_one_head_while_the_writer_lands() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let r = s.reader();
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let start = Arc::new(Barrier::new(4));

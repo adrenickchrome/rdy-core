@@ -52,7 +52,7 @@ fn seeded(s: &mut Store, b: &Block) {
 #[test]
 fn merge1_delete_then_recreate_in_one_view_gets_a_dep_and_lands() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     let x = block("b-00001", "one");
     seeded(&mut s, &x);
     let d = s
@@ -91,7 +91,7 @@ fn merge1_delete_then_recreate_in_one_view_gets_a_dep_and_lands() {
 #[test]
 fn merge1_landing_over_a_conflict_is_stale_base_naming_both_versions() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     let x = block("b-00001", "zero");
     seeded(&mut s, &x);
     let (va, vb) = (block("b-00001", "a"), block("b-00001", "b"));
@@ -142,7 +142,7 @@ fn merge1_landing_over_a_conflict_is_stale_base_naming_both_versions() {
 #[test]
 fn merge1_a_change_that_covers_canon_and_its_own_side_lands() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     let x0 = block("b-00001", "zero");
     seeded(&mut s, &x0);
     let cv = block("b-00001", "view");
@@ -210,7 +210,7 @@ fn merge1_a_change_that_covers_canon_and_its_own_side_lands() {
 fn merge1_a_follow_up_to_an_edit_another_view_made_identically_depends_on_its_own_view() {
     for i in 0..16 {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = Store::open(&dir.path().join("s")).unwrap();
+        let mut s = Store::create(&dir.path().join("s")).unwrap();
         let x0 = block("b-00001", "zero");
         seeded(&mut s, &x0);
         let same = block("b-00001", "same");
@@ -253,7 +253,7 @@ fn merge1_a_follow_up_to_an_edit_another_view_made_identically_depends_on_its_ow
 #[test]
 fn merge1_a_canon_version_names_the_change_that_landed_it() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&dir.path().join("s")).unwrap();
+    let mut s = Store::create(&dir.path().join("s")).unwrap();
     let x0 = block("b-00001", "zero");
     seeded(&mut s, &x0);
     let same = block("b-00001", "same");

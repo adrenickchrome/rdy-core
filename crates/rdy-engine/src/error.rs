@@ -7,6 +7,8 @@ pub const E_LOCKED: &str = "E_LOCKED";
 pub const E_NO_PROJECT: &str = "E_NO_PROJECT";
 pub const E_CONFIG: &str = "E_CONFIG";
 pub const E_PERMISSION: &str = "E_PERMISSION";
+/// An agent session wrote into a view another session owns.
+pub const E_VIEW_OWNER: &str = "E_VIEW_OWNER";
 pub const E_BAD_INPUT: &str = "E_BAD_INPUT";
 pub const E_VALIDATION: &str = "E_VALIDATION";
 pub const E_UNKNOWN_REF: &str = "E_UNKNOWN_REF";
@@ -96,10 +98,10 @@ impl From<StoreError> for RdyError {
             StoreError::Locked(p) => RdyError::new(
                 E_LOCKED,
                 format!(
-                    "the project store at {} is open in another rdy process",
+                    "the project store at {} is held by another rdy process (the daemon, or a command run with --no-daemon)",
                     p.display()
                 ),
-                "close the other rdy process (or MCP server) and retry",
+                "drop --no-daemon, or stop the daemon with rdy serve --stop",
             ),
             StoreError::HeldByReader(p) => RdyError::new(
                 E_LOCKED,

@@ -1,9 +1,9 @@
 //! The human boundary's output: edit (edit1), show (show1), impact (imp1).
 use rdy_engine::*;
 use rdy_model::BlockId;
+use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::*;
 use serde_json::{Value, json};
-use std::process::Command;
 
 #[test]
 fn edit1_an_edit_that_changes_pins_is_refused_and_writes_nothing() {
@@ -38,19 +38,21 @@ fn edit1_an_edit_that_changes_pins_is_refused_and_writes_nothing() {
     );
 }
 
-fn rdy(dir: &std::path::Path, args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(rdy_bin())
-        .args(args)
-        .current_dir(dir)
-        .env("RDY_ACTOR", "human:qa")
-        .env("EDITOR", "true")
-        .output()
-        .unwrap();
+/// `rdy <args>` against the served project as the human, through its daemon.
+fn rdy(s: &Served, args: &[&str]) -> (bool, String, String) {
+    let out = s.rdy(args);
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into(),
         String::from_utf8_lossy(&out.stderr).into(),
     )
+}
+
+/// A served project opened in this process for seeding; drop the `Rdy` before running `rdy`.
+fn served() -> (Served, Rdy) {
+    let s = Served::new();
+    let r = Rdy::open(s.dir.path()).unwrap();
+    (s, r)
 }
 
 fn decisions_section(r: &mut Rdy) -> String {
@@ -64,14 +66,14 @@ fn decisions_section(r: &mut Rdy) -> String {
 
 #[test]
 fn show1_text_show_prints_the_derived_status() {
-    let (dir, mut r) = project();
-    let s = decisions_section(&mut r);
+    let (srv, mut r) = served();
+    let sec = decisions_section(&mut r);
     let d1 = r
         .decide(
             &writer(),
             "work",
             DecisionInput {
-                parent: s.clone(),
+                parent: sec.clone(),
                 statement: "Wallets move".into(),
                 ..Default::default()
             },
@@ -87,7 +89,7 @@ fn show1_text_show_prints_the_derived_status() {
             &d1,
             None,
             DecisionInput {
-                parent: s.clone(),
+                parent: sec.clone(),
                 statement: "Wallets stay".into(),
                 ..Default::default()
             },
@@ -97,17 +99,17 @@ fn show1_text_show_prints_the_derived_status() {
         .clone();
     land(&mut r, "work").unwrap();
     drop(r);
-    let (ok, out, err) = rdy(dir.path(), &["show", &d1]);
+    let (ok, out, err) = rdy(&srv, &["show", &d1]);
     assert!(ok, "{err}");
     assert!(
         out.contains(&format!("status: superseded by {d2}")),
         "{out}"
     );
     assert!(!out.contains("\"status\": \"accepted\""), "{out}");
-    let (_, out, _) = rdy(dir.path(), &["show", &d2]);
+    let (_, out, _) = rdy(&srv, &["show", &d2]);
     assert!(out.contains("status: live"), "{out}");
     // JSON keeps the stored field and the derived status side by side
-    let (_, out, _) = rdy(dir.path(), &["--json", "show", &d1]);
+    let (_, out, _) = rdy(&srv, &["--json", "show", &d1]);
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["fields"]["status"], "accepted");
     assert_eq!(v["status"]["status"], "superseded");
@@ -115,7 +117,7 @@ fn show1_text_show_prints_the_derived_status() {
 
 #[test]
 fn imp1_impact_items_say_which_edge_reached_them() {
-    let (dir, mut r) = project();
+    let (srv, mut r) = served();
     let res = write(&mut r, "work", json!([
         {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
         {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
@@ -153,7 +155,7 @@ fn imp1_impact_items_say_which_edge_reached_them() {
         ]
     );
     drop(r);
-    let (ok, out, err) = rdy(dir.path(), &["impact", &t]);
+    let (ok, out, err) = rdy(&srv, &["impact", &t]);
     assert!(ok, "{err}");
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 2, "{out}");
@@ -166,7 +168,7 @@ fn imp1_impact_items_say_which_edge_reached_them() {
         "{out}"
     );
     assert!(lines[1].ends_with(&format!("[references {c}]")), "{out}");
-    let (_, out, _) = rdy(dir.path(), &["--json", "impact", &t]);
+    let (_, out, _) = rdy(&srv, &["--json", "impact", &t]);
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v[1]["via"], json!({"from": c, "kind": "references"}));
 }

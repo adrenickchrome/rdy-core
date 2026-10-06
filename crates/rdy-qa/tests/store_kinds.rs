@@ -13,7 +13,7 @@ const MIB: usize = 1024 * 1024;
 
 fn store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
-    let s = Store::open(&dir.path().join("s")).unwrap();
+    let s = Store::create(&dir.path().join("s")).unwrap();
     (dir, s)
 }
 
@@ -116,7 +116,7 @@ fn kind1_a_forged_manifest_naming_a_snapshot_is_not_a_blob() {
 fn kind1_reindex_rebuilds_the_typed_entries() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let mut s = Store::open(&dir).unwrap();
+    let mut s = Store::create(&dir).unwrap();
     let bytes = b"twice".to_vec();
     plant(&mut s, kinds::BLOB_CHUNK, bytes.clone());
     let h = plant(&mut s, kinds::SNAPSHOT, bytes);

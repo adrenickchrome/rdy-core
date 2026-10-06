@@ -7,6 +7,7 @@ fn agent() -> Session {
         actor: "agent:designer".into(),
         run: Some("run-1".into()),
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     }
 }
 fn founder() -> Session {
@@ -14,6 +15,7 @@ fn founder() -> Session {
         actor: "human:founder".into(),
         run: None,
         role: Role::Approver,
+        kind: rdy_engine::SessionKind::Human,
     }
 }
 
@@ -315,6 +317,7 @@ fn readers_cannot_propose() {
         actor: "agent:r".into(),
         run: None,
         role: Role::Reader,
+        kind: rdy_engine::SessionKind::Human,
     };
     let e = r.propose(&reader, "work", "nope").unwrap_err();
     assert_eq!(e.code, E_PERMISSION);
@@ -348,6 +351,7 @@ fn two_views() -> (tempfile::TempDir, Rdy, Session) {
         actor: "agent:designer".into(),
         run: Some("run-2".into()),
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     };
     w(&mut r, &run2, "run-2", json!([{"op": "create", "type": "claim", "parent": s, "body": "Uses the {{" .to_string() + &t + "}}."}])).unwrap();
     w(
@@ -426,6 +430,7 @@ fn propose_refuses_deleting_a_parent_that_gained_a_child_in_canon() {
         actor: "agent:designer".into(),
         run: Some("run-2".into()),
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     };
     // run-1 deletes S while S is childless in its view
     w(
@@ -477,6 +482,7 @@ fn deleting_a_parent_that_gained_a_moved_child_in_canon_is_refused() {
         actor: "agent:designer".into(),
         run: Some("run-2".into()),
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     };
     w(
         &mut r,

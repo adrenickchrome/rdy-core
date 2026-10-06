@@ -346,10 +346,53 @@ pub const CHECKPOINT_FRAMES: u64 = 1000;
 pub const CHECKPOINT_IDLE: Duration = Duration::from_secs(2);
 
 impl Store {
+    /// Creates a store, as `rdy init` does: in a directory that does not exist or is wholly
+    /// empty, `FORMAT` is written first (the claim), then the log gets its format ref. A
+    /// directory holding anything is never claimed: it is opened as `open` does, so a current-format
+    /// store opens (an init retried after a crash) and anything else is refused.
+    pub fn create(dir: &Path) -> Result<Store, StoreError> {
+        let mut synced = match std::fs::symlink_metadata(dir) {
+            Ok(m) if m.file_type().is_dir() => {
+                if std::fs::read_dir(dir)?.next().is_some() {
+                    return Store::open(dir);
+                }
+                vec![]
+            }
+            Ok(_) => return Store::open(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // dur1: each directory created here is fsynced into its parent
+                fsutil::create_dir_durable(dir)?
+            }
+            Err(e) => return Err(e.into()),
+        };
+        format::write_format_file(dir, Format::CURRENT)?;
+        synced.push(dir.to_path_buf());
+        Store::open_current_format(dir, synced)
+    }
+
+    /// Opens an existing store. Opening never creates, upgrades or claims a store (fmt3): a path
+    /// that is not a directory with a `FORMAT` file naming the current store format is refused before
+    /// anything in it is created, locked, opened or written.
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
-        // dur1: each directory created here is fsynced into its parent before any write is acked
-        let mut synced = fsutil::create_dir_durable(dir)?;
+        match std::fs::symlink_metadata(dir) {
+            Ok(m) if m.file_type().is_dir() => {}
+            Ok(_) => return Err(format::other_build(dir, "is not a directory")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format::no_store(dir));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        match format::read_format_file(dir)? {
+            Some(f) => format::check_format(f, dir)?,
+            None => return Err(format::other_build(dir, "has no FORMAT file")),
+        }
+        Store::open_current_format(dir, vec![])
+    }
+
+    /// Opens a store whose `FORMAT` names the current store format (`STORE_FORMAT`).
+    fn open_current_format(dir: &Path, mut synced: Vec<PathBuf>) -> Result<Store, StoreError> {
         let segments = dir.join("segments");
+        // dur1: each directory created here is fsynced into its parent before any write is acked
         synced.extend(fsutil::create_dir_durable(&segments)?);
         let fresh = !dir.join("index.redb").exists() || !dir.join("lock").exists();
         let lock = OpenOptions::new()
@@ -360,11 +403,6 @@ impl Store {
         let lock = HeldLock::take(lock, dir)?; // lock1
         // the sentinel of a process that died with the store open
         let unclean = std::fs::symlink_metadata(dir.join(INDEX_OPEN_SENTINEL)).is_ok();
-        // a store of another format is refused before the index is opened or anything is written
-        let format_file = format::read_format_file(dir)?;
-        if let Some(f) = format_file {
-            format::check_format(f, dir)?;
-        }
         // seg1: a gap in the segment numbers means acknowledged frames are missing
         if let Some((missing, later)) = find_gap(&segments)? {
             return Err(StoreError::MissingFrames {
@@ -445,14 +483,14 @@ impl Store {
                 ),
             });
         }
-        // a store of another format whose FORMAT is lost is refused before the index moves
+        // FORMAT says 3; a log that says otherwise is refused before the index moves
         if let Some(n) = store.format_ref()? {
             format::check_format(Format { store_format: n }, dir)?;
         }
         let caught_up = store.catch_up()?;
         store.report.caught_up_frames = caught_up.frames;
         store.report.catch_up_commits = caught_up.commits;
-        store.ensure_format(format_file.is_some())?;
+        store.ensure_format()?;
         // Losing this file to a power loss only costs a needless rebuild, so it is not synced.
         // It is only ever created, never opened: an existing one (a kill's, or a link planted
         // there) is left as it is, and nothing is followed or truncated.
@@ -486,24 +524,19 @@ impl Store {
             .transpose()
     }
 
-    /// Makes the log hold the store's format and `FORMAT` mirror it. The log's ref is the truth:
-    /// any other number there is refused, and so is a log with frames and no number. A new store
-    /// (an empty log) gets the ref as one marked batch, then a checkpoint, then `FORMAT`, so the
-    /// marker is in the log before `FORMAT` exists; a missing `FORMAT` is rewritten from the ref.
-    /// Both steps are idempotent, so a crash between them is finished by the next open.
-    fn ensure_format(&mut self, has_format_file: bool) -> Result<(), StoreError> {
+    /// Makes the log hold the store's format, which `FORMAT` (already checked) says. The log's
+    /// ref is the truth: any other number there is refused, and so is a log with frames and no
+    /// number. A new store (an empty log; `create` wrote `FORMAT` first) gets the ref as one
+    /// marked batch, then a checkpoint. A crash before that leaves `FORMAT` and an empty log,
+    /// which the next open finishes.
+    fn ensure_format(&mut self) -> Result<(), StoreError> {
         let held_frames = self.log.end()
             != Location {
                 segment: 0,
                 offset: 0,
             };
         match self.format_ref()? {
-            Some(n) => {
-                format::check_format(Format { store_format: n }, &self.dir)?;
-                if !has_format_file {
-                    format::write_format_file(&self.dir, Format::CURRENT)?;
-                }
-            }
+            Some(n) => format::check_format(Format { store_format: n }, &self.dir)?,
             None if held_frames => {
                 return Err(format::other_build(
                     &self.dir,
@@ -517,7 +550,6 @@ impl Store {
                 )])?;
                 // a new store is durable from its first open
                 self.checkpoint()?;
-                format::write_format_file(&self.dir, Format::CURRENT)?;
             }
         }
         Ok(())

@@ -362,3 +362,268 @@ fn nav1_previous_and_next_stack_below_900px() {
         );
     }
 }
+
+/// FW-B15: a doc type with `nav: false` is rendered (the Why? trail and permalinks link into it)
+/// but left out of the sidebar, its folder's index page, the home page's contents cards, the
+/// previous/next pager and the search index.
+#[test]
+fn rec1_a_doc_type_with_nav_false_is_rendered_but_left_out_of_nav_folder_index_home_pager_and_search()
+ {
+    let (dir, r) = tiny();
+    // the store is locked while a handle is open
+    drop(r);
+    let pack = "name: p\nversion: '1'\nextends: rdy-standard\ndoc_types:\n  record: { nav: false, skeleton: [] }\n";
+    std::fs::write(dir.path().join(".rdy/packs/p.yaml"), pack).unwrap();
+    std::fs::write(
+        dir.path().join(".rdy/config.yaml"),
+        "pack: p\nname: Records\n",
+    )
+    .unwrap();
+    let mut r = rdy_engine::Rdy::open(dir.path()).unwrap();
+    let doc = |id: &str, parent: Option<&str>, name: &str, title: &str, ty: &str| {
+        let mut d = serde_json::json!({"op": "create", "type": "doc", "id": id,
+            "fields": {"name": name, "title": title, "doc_type": ty}});
+        if let Some(p) = parent {
+            d["parent"] = p.into();
+        }
+        d
+    };
+    let sec = |parent: &str, title: &str| serde_json::json!({"op": "create", "type": "section", "parent": parent, "fields": {"title": title}});
+    let prose = |parent: &str, body: &str| serde_json::json!({"op": "create", "type": "prose", "parent": parent, "body": body});
+    let res = write(&mut r, "work", serde_json::json!([
+        {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "area", "title": "Area"}},
+        doc("$a", Some("$f"), "alpha", "Alpha Page", "overview"),
+        {"op": "create", "type": "section", "id": "$as", "parent": "$a", "fields": {"title": "Alpha Part"}},
+        doc("$rec", Some("$f"), "rec-in", "Hidden Record", "record"),
+        {"op": "create", "type": "section", "id": "$rs", "parent": "$rec", "fields": {"title": "Zebra Facts"}},
+        prose("$rs", "Zebracontent lives here."),
+        doc("$b", Some("$f"), "beta", "Beta Page", "overview"),
+        sec("$b", "Beta Part"),
+        doc("$top", None, "rec-top", "Top Record", "record"),
+        sec("$top", "Top Facts"),
+        doc("$vis", None, "visible", "Visible Top", "overview"),
+        sec("$vis", "Visible Part")
+    ]))
+    .unwrap();
+    let rec = res.created["$rec"].clone();
+    write(
+        &mut r,
+        "work",
+        serde_json::json!([prose(
+            res.created["$as"].as_str(),
+            &format!("See {{{{{rec}}}}} for the record.")
+        )]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
+    let read = |p: &str| std::fs::read_to_string(out.path().join(p)).unwrap();
+
+    // rendered: both records have their pages, and a link into one leads there
+    assert!(read("area/rec-in.html").contains("Zebracontent lives here."));
+    assert!(read("rec-top.html").contains("Top Facts"));
+    let alpha = read("area/alpha.html");
+    assert!(
+        alpha.contains(">Hidden Record</a> for the record"),
+        "a reference to a record still links\n{alpha}"
+    );
+    assert!(
+        alpha.contains("rec-in.html\" title=\"Hidden Record\""),
+        "{alpha}"
+    );
+
+    // the sidebar, from every page
+    for page in [
+        "index.html",
+        "area/alpha.html",
+        "area/rec-in.html",
+        "visible.html",
+    ] {
+        let h = read(page);
+        let nav = &h[h.find("<nav aria-label=\"Pages\">").unwrap()..h.find("</aside>").unwrap()];
+        assert!(
+            !nav.contains("Hidden Record") && !nav.contains("Top Record"),
+            "{page}: {nav}"
+        );
+        assert!(nav.contains(">Visible Top</a>"), "{page}: {nav}");
+    }
+    // the folder's index page
+    let idx = read("area/index.html");
+    assert!(
+        idx.contains(">Alpha Page</a>") && idx.contains(">Beta Page</a>"),
+        "{idx}"
+    );
+    assert!(
+        !idx.contains("Hidden Record") && !idx.contains("rec-in.html"),
+        "{idx}"
+    );
+    // the home page's contents cards
+    let home = read("index.html");
+    let cards = &home[home.find("<div class=\"cards\">").unwrap()..];
+    let cards = &cards[..cards.find("</section>").unwrap()];
+    assert!(
+        cards.contains("Area") && cards.contains("Visible Top"),
+        "{cards}"
+    );
+    assert!(
+        !cards.contains("Top Record") && !cards.contains("rec-top.html"),
+        "{cards}"
+    );
+    // the pager skips the record: Alpha's next is Beta, Beta's previous is Alpha
+    let alpha_next = &alpha[alpha.find("class=\"pager-next\"").unwrap()..];
+    assert!(
+        alpha_next[..alpha_next.find("</a>").unwrap()].contains("Beta Page"),
+        "{alpha}"
+    );
+    let beta = read("area/beta.html");
+    let beta_prev = &beta[beta.find("class=\"pager-prev\"").unwrap()..];
+    assert!(
+        beta_prev[..beta_prev.find("</a>").unwrap()].contains("Alpha Page"),
+        "{beta}"
+    );
+    // a record's own page is out of the reading order, and carries no empty pager landmark
+    let recp = read("area/rec-in.html");
+    assert!(
+        !recp.contains("class=\"pager-prev\"") && !recp.contains("class=\"pager-next\""),
+        "{recp}"
+    );
+    assert!(
+        !recp.contains("class=\"pager\"") && !recp.contains("Previous and next"),
+        "{recp}"
+    );
+    // the search index
+    // (Alpha's own text says "Hidden Record": a reference reads as its target's title)
+    let search = read("search-index.json");
+    for gone in ["Top Record", "Zebra", "rec-in.html", "rec-top.html"] {
+        assert!(!search.contains(gone), "{gone}: {search}");
+    }
+    assert!(!search.contains("\"title\":\"Hidden Record\""), "{search}");
+    assert!(
+        search.contains("Alpha Page") && search.contains("Beta Part"),
+        "{search}"
+    );
+}
+
+/// FW-B15: a folder whose every doc is of a `nav: false` type (recursively: a folder holding only
+/// such folders too) is left out of navigation where its docs are: the sidebar, its parent's
+/// index page, the home page's contents and the search index. Its own index page still renders.
+/// A folder with one listed doc stays.
+#[test]
+fn rec1_a_folder_whose_docs_are_all_nav_false_is_left_out_of_nav_home_folder_index_and_search_but_still_renders()
+ {
+    let (dir, r) = tiny();
+    // the store is locked while a handle is open
+    drop(r);
+    let pack = "name: p\nversion: '1'\nextends: rdy-standard\ndoc_types:\n  record: { nav: false, skeleton: [] }\n";
+    std::fs::write(dir.path().join(".rdy/packs/p.yaml"), pack).unwrap();
+    std::fs::write(
+        dir.path().join(".rdy/config.yaml"),
+        "pack: p\nname: Records\n",
+    )
+    .unwrap();
+    let mut r = rdy_engine::Rdy::open(dir.path()).unwrap();
+    let folder = |id: &str, parent: Option<&str>, name: &str, title: &str| {
+        let mut f = serde_json::json!({"op": "create", "type": "folder", "id": id,
+            "fields": {"name": name, "title": title}});
+        if let Some(p) = parent {
+            f["parent"] = p.into();
+        }
+        f
+    };
+    let doc = |id: &str, parent: &str, name: &str, title: &str, ty: &str| {
+        serde_json::json!({"op": "create", "type": "doc", "id": id, "parent": parent,
+            "fields": {"name": name, "title": title, "doc_type": ty}})
+    };
+    let sec = |parent: &str, title: &str| serde_json::json!({"op": "create", "type": "section", "parent": parent, "fields": {"title": title}});
+    write(
+        &mut r,
+        "work",
+        serde_json::json!([
+            // only records, and a folder holding only records
+            folder("$dec", None, "decisions", "Decisionfolder"),
+            doc("$d1", "$dec", "d1", "Record One", "record"),
+            sec("$d1", "One Facts"),
+            folder("$old", Some("$dec"), "old", "Oldfolder"),
+            doc("$d2", "$old", "d2", "Record Two", "record"),
+            sec("$d2", "Two Facts"),
+            // one listed doc beside a record, and a subfolder of only records
+            folder("$area", None, "area", "Areafolder"),
+            doc("$a", "$area", "alpha", "Alpha Page", "overview"),
+            sec("$a", "Alpha Part"),
+            doc("$d3", "$area", "d3", "Record Three", "record"),
+            sec("$d3", "Three Facts"),
+            folder("$sub", Some("$area"), "sub", "Subfolder"),
+            doc("$d4", "$sub", "d4", "Record Four", "record"),
+            sec("$d4", "Four Facts")
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
+    let read = |p: &str| std::fs::read_to_string(out.path().join(p)).unwrap();
+
+    // rendered: the hidden folders' index pages still exist
+    for page in [
+        "decisions/index.html",
+        "decisions/old/index.html",
+        "area/sub/index.html",
+    ] {
+        assert!(out.path().join(page).exists(), "{page}");
+    }
+    assert!(read("decisions/old/index.html").contains("Oldfolder"));
+
+    // the sidebar, from every page
+    for page in [
+        "index.html",
+        "area/index.html",
+        "area/alpha.html",
+        "decisions/index.html",
+        "area/sub/index.html",
+    ] {
+        let h = read(page);
+        let nav = &h[h.find("<nav aria-label=\"Pages\">").unwrap()..h.find("</aside>").unwrap()];
+        for gone in ["Decisionfolder", "Oldfolder", "Subfolder"] {
+            assert!(!nav.contains(gone), "{page}: {gone}: {nav}");
+        }
+        assert!(nav.contains("Areafolder"), "{page}: {nav}");
+    }
+    // the parent folder's index pages
+    let idx = read("area/index.html");
+    assert!(idx.contains(">Alpha Page</a>"), "{idx}");
+    assert!(
+        !idx.contains("Subfolder") && !idx.contains("sub/index.html"),
+        "{idx}"
+    );
+    let dec = read("decisions/index.html");
+    assert!(
+        !dec.contains("Oldfolder") && !dec.contains("old/index.html"),
+        "{dec}"
+    );
+    // the home page's contents cards
+    let home = read("index.html");
+    let cards = &home[home.find("<div class=\"cards\">").unwrap()..];
+    let cards = &cards[..cards.find("</section>").unwrap()];
+    assert!(cards.contains("Areafolder"), "{cards}");
+    assert!(
+        !cards.contains("Decisionfolder") && !cards.contains("decisions/index.html"),
+        "{cards}"
+    );
+    // the search index
+    let search = read("search-index.json");
+    for gone in [
+        "Decisionfolder",
+        "Oldfolder",
+        "Subfolder",
+        "decisions/index.html",
+        "decisions/old/index.html",
+        "area/sub/index.html",
+    ] {
+        assert!(!search.contains(gone), "{gone}: {search}");
+    }
+    assert!(
+        search.contains("Areafolder") && search.contains("Alpha Part"),
+        "{search}"
+    );
+}

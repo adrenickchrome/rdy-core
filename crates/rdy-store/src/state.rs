@@ -390,17 +390,23 @@ impl Store {
             Some(head) => (head.head, head.base, head.len, head.owner, head.pinned),
             None => {
                 let base = canon;
+                // M2b's rule: the implicit create's owner is the change's provenance (the
+                // engine's claim for a new view is that same owner)
+                let first = Some(Owner {
+                    actor: p.actor.clone(),
+                    run: p.run.clone(),
+                });
                 let create = encode(&view_op(
                     None,
                     ViewOpKind::Create {
                         base,
-                        owner: claim.clone(),
+                        owner: first.clone(),
                         pinned: false,
                     },
                 ));
                 let id = Hash::of(&create);
                 items.push((kinds::VIEW_OP, create));
-                (id, base, 0, claim.clone(), false)
+                (id, base, 0, first, false)
             }
         };
         if catch_up && let Some(landing) = canon {

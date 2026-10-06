@@ -16,7 +16,7 @@ pub use daemon::{
     Readiness, STOP_GRACE,
 };
 pub use error::{
-    E_BAD_INPUT, E_DAEMON_GONE, E_DAEMON_START, E_DAEMON_VERSION, E_LIMIT, ErrorReply,
+    E_BAD_INPUT, E_DAEMON_GONE, E_DAEMON_START, E_DAEMON_VERSION, E_LIMIT, E_NO_SESSION, ErrorReply,
 };
 pub use handler::Handler;
 pub use hello::{HELLO_TIMEOUT, Hello, HelloReply, MAX_HELLO_BYTES, PROTO_VERSION, read_hello};
@@ -32,4 +32,22 @@ pub use client::{
     Attempt, CONNECT_RETRY, Client, DEFAULT_START_TIMEOUT, LOCK_RETRY, LOG_TAIL_LINES, Pending,
     SpawnFn, StartOptions, connect, connect_or_start, log_tail,
 };
-pub use spawn::{detach, serve_command, spawn_serve};
+pub use spawn::{Spawned, detach, process_alive, serve_command, spawn_serve};
+pub mod shared;
+pub mod writer;
+
+pub use shared::{DaemonEngine, Shared};
+pub use writer::{CHECKPOINT_TICK, Writer, WriterHandle};
+pub mod ops;
+
+pub use ops::{OPS, OpContext, dispatch, quarantine};
+pub mod serve;
+
+pub use serve::{CtlSession, ServeError, ServeHandler, ServeOptions, ServeRun, serve, start};
+pub mod proxy;
+
+pub use proxy::run_stdio;
+
+pub mod watch;
+
+pub use watch::PackWatch;

@@ -467,3 +467,19 @@ fn scan1_f12_names_raw_markdown_the_renderer_left_as_written() {
     // Founder ruling FW-F1a: underscores are literal text, so `a__b` is not a hit.
     assert_eq!(f12, ["`", "[chart](c.png)"]);
 }
+
+/// FW-V1: no page of the golden site carries an agents zone or panel.
+#[test]
+fn people1_no_page_of_the_golden_site_has_an_agents_zone_or_panel() {
+    let (_d, _r, _ids, out) = canon();
+    for p in golden::pages(out.path()) {
+        let h = read(&p);
+        assert!(
+            !h.contains("data-rdy=\"agents\"")
+                && !h.contains("class=\"agents\"")
+                && !h.contains("For agents"),
+            "{}",
+            p.display()
+        );
+    }
+}

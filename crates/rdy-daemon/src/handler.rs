@@ -24,6 +24,18 @@ pub trait Handler: Send + Sync + 'static {
         Box::pin(async {})
     }
 
+    /// A session was opened (its hello passed, it is in the table); its `ready` reply waits for
+    /// this future. The default does nothing (the host reloads a changed pack here).
+    fn session_started(&self, _session: &SessionInfo) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async {})
+    }
+
+    /// The notice to carry on the session's next ctl reply, if any. Called for every reply, so
+    /// it must be cheap.
+    fn notice(&self, _session: &SessionInfo) -> Option<String> {
+        None
+    }
+
     /// The session's connection has closed. Called exactly once per session, after it is removed
     /// from the table.
     fn session_ended(&self, _session: &SessionInfo) {}

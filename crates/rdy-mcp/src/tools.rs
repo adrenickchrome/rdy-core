@@ -1,10 +1,12 @@
-use base64::Engine;
+use base64::Engine as _;
+use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::*;
 use rdy_model::{BlockId, EditorialClass, Justification, Role};
 use rdy_schema::{BodyRule, Trait};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 pub const E_NO_SESSION: &str = "E_NO_SESSION";
 
@@ -19,6 +21,8 @@ pub const REQUEST_ENVELOPE_MARGIN: usize = 4096;
 /// The largest asset (raw bytes) whose base64 fits in one stdio request line with its envelope;
 /// over stdio this, not [`MAX_ASSET_BYTES`], is the effective limit.
 pub const MAX_ASSET_BYTES_STDIO: usize = (MAX_REQUEST_BYTES - REQUEST_ENVELOPE_MARGIN) / 4 * 3;
+/// `rdy_schema`'s note on the request-line limit, the same on both transports.
+pub const TRANSPORT_NOTE: &str = "one request is one JSON line of at most 16 MiB (request_bytes); the daemon's socket carries the same line limit as stdio (socket_line_bytes), so asset_bytes_stdio, the largest asset whose base64 fits in one line, binds on both";
 /// The largest `max_tokens` any read may ask for.
 pub const MAX_TOKENS_LIMIT: usize = 100_000;
 
@@ -37,17 +41,25 @@ fn check_tokens(max_tokens: Option<usize>) -> Result<(), RdyError> {
 }
 
 pub struct McpState {
-    pub rdy: Rdy,
+    /// The one door to the project: reads from the published state, writes on the writer.
+    pub engine: Arc<dyn Engine>,
     pub session: Option<Session>,
     pub view: String,
+    /// The daemon's id for this connection (`SessionId.0`); `None` for stdio.
+    pub sid: Option<u64>,
+    /// The pack generation this session has heard of (its `pack_changed` notice).
+    pub seen_gen: u64,
 }
 
 impl McpState {
-    pub fn new(rdy: Rdy) -> McpState {
+    pub fn new(engine: Arc<dyn Engine>) -> McpState {
+        let seen_gen = engine.pack_generation();
         McpState {
-            rdy,
+            engine,
             session: None,
             view: "work".into(),
+            sid: None,
+            seen_gen,
         }
     }
 }
@@ -380,10 +392,6 @@ fn fit_tree(mut nodes: Vec<TreeNode>, max_tokens: usize) -> Vec<TreeNode> {
     nodes
 }
 
-fn ok<T: serde::Serialize>(t: T) -> Result<Value, RdyError> {
-    Ok(serde_json::to_value(t).expect("serializable"))
-}
-
 pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyError> {
     // compiled only for this crate's own tests: a release binary has no hook and reads no env
     #[cfg(test)]
@@ -409,21 +417,15 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
             ));
         }
     };
-    let view = match p.view {
-        Some(v) if v.contains(':') => {
-            return Err(RdyError::new(
-                E_RESERVED_VIEW,
-                format!("view names cannot contain ':' ({v:?})"),
-                "pick a view name without ':'",
-            ));
-        }
-        Some(v) => v,
-        None => p
-            .run
-            .as_deref()
-            .map(|r| r.replace(':', "-"))
-            .unwrap_or_else(|| "work".into()),
-    };
+    if let Some(v) = p.view.as_deref().filter(|v| v.contains(':')) {
+        return Err(RdyError::new(
+            E_RESERVED_VIEW,
+            format!("view names cannot contain ':' ({v:?})"),
+            "pick a view name without ':'",
+        ));
+    }
+    let session = Session::agent(p.actor, p.run, role)?;
+    let view = p.view.unwrap_or_else(|| session.default_view());
     // ses1: a reader may read canon by default; a session that writes needs a view of its own
     if view == "canon" && role != Role::Reader {
         return Err(RdyError::new(
@@ -433,18 +435,14 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
         ));
     }
     st.view = view;
-    st.session = Some(Session {
-        actor: p.actor,
-        run: p.run,
-        role,
-    });
+    st.session = Some(session);
     Ok(json!({ "view": st.view, "role": p.role }))
 }
 
 pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     let s = session(st)?;
-    let st_ = st.rdy.read();
+    let st_ = st.engine.read();
     let scope = scope_of(st, &st_, &p.scope)?;
     let position = st_.version_position(&scope)?;
     let max = p.max_tokens.unwrap_or(4000);
@@ -460,9 +458,10 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     let landings = st_.landings()?.len();
     Ok(budget(
         json!({
-            "pack": st.rdy.pack().name, "session": {"actor": s.actor, "view": st.view},
-            "canon": {"landings": landings}, "views": views, "tree": tree,
-            "version_position": position,
+            "pack": st_.pack().name, "session": {"actor": s.actor, "view": st.view},
+            "canon": {"landings": landings},
+            "open_report": open_report_json(&st.engine.open_report()),
+            "views": views, "tree": tree, "version_position": position,
         }),
         p.max_tokens,
     ))
@@ -473,7 +472,7 @@ pub struct TagsParams {}
 
 pub fn rdy_tags(st: &mut McpState, _p: TagsParams) -> Result<Value, RdyError> {
     session(st)?;
-    let st_ = st.rdy.read();
+    let st_ = st.engine.read();
     let versions = st_.versions()?;
     let current = versions.last().map(|v| v.name.clone());
     Ok(json!({"versions": versions, "current": current}))
@@ -482,7 +481,7 @@ pub fn rdy_tags(st: &mut McpState, _p: TagsParams) -> Result<Value, RdyError> {
 pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
-    let st_ = st.rdy.read();
+    let st_ = st.engine.read();
     let (scope, id) = read_target(st, &st_, &p.id, &p.scope)?;
     let suspects: std::collections::BTreeSet<BlockId> =
         st_.suspects(&scope)?.into_iter().map(|s| s.block).collect();
@@ -555,7 +554,7 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
 pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
-    let st_ = st.rdy.read();
+    let st_ = st.engine.read();
     let (scope, id) = read_target(st, &st_, &p.id, &p.scope)?;
     let ctx = st_.context(&scope, &id)?;
     Ok(budget(
@@ -567,7 +566,7 @@ pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
 pub fn rdy_impact(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
-    let st_ = st.rdy.read();
+    let st_ = st.engine.read();
     let scope = scope_of(st, &st_, &p.scope)?;
     let id = st_.resolve_id(&scope, &p.id)?;
     let items = st_.impact(&scope, &id, p.depth.unwrap_or(3))?;
@@ -577,7 +576,7 @@ pub fn rdy_impact(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
 pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
-    let st_ = st.rdy.read();
+    let st_ = st.engine.read();
     let scope = scope_of(st, &st_, &p.scope)?;
     Ok(budget(
         json!({"items": st_.suspects(&scope)?}),
@@ -589,7 +588,8 @@ pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
 const TEXT_RULES: &str = "Bodies and text fields: **bold**, *italic*, `code`, [link](https://… or a relative path), and in bodies - bullets and 1. numbered lists (indent two spaces to nest). No raw HTML. {{id}} or {{id|words}} references a block; \\{{ is a literal {{ and a leading @ in words is written \\@. fields.key: optional short human id, unique per project ignoring case, letters/digits/-_. , not shaped like a block id.";
 
 pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError> {
-    let pack = st.rdy.pack();
+    let st_ = st.engine.read();
+    let pack = st_.pack();
     let traits = |ts: &std::collections::BTreeSet<Trait>| {
         ts.iter()
             .map(|t| format!("{t:?}").to_lowercase())
@@ -634,7 +634,13 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             "link_types": pack.link_types,
             "link_shape": {"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE},
             "ops": WRITE_OPS.iter().map(|(n, s)| (n.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
-            "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT},
+            "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT, "socket_line_bytes": MAX_REQUEST_BYTES, "transport": TRANSPORT_NOTE},
+            "errors": {
+                "E_VIEW_OWNER": {"when": "a non-human session commits into a view it doesn't own", "fix": "write to your own view, fork it, or include its changes into your own view"},
+                "E_DAEMON_START": {"when": "the daemon couldn't be started or reached", "fix": "read the last lines of .rdy/run/daemon.log it cites; run rdy serve in the foreground to see why"},
+                "E_DAEMON_VERSION": {"when": "another binary version's daemon has clients", "fix": "close them, or rdy serve --stop"},
+                "E_DAEMON_GONE": {"when": "the daemon closed mid-request", "fix": "check rdy_overview or rdy status; a write may or may not have committed; it is not retried"},
+            },
             "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
             "text": TEXT_RULES,
         })),
@@ -695,15 +701,13 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
         (None, None) => None,
     };
     let view = p.view.unwrap_or_else(|| st.view.clone());
-    ok(st.rdy.write(
-        &s,
-        WriteRequest {
-            view,
-            ops,
-            justification,
-            message: p.message.unwrap_or_default(),
-        },
-    )?)
+    let req = WriteRequest {
+        view,
+        ops,
+        justification,
+        message: p.message.unwrap_or_default(),
+    };
+    write_typed(&*st.engine, move |r| r.write(&s, req))
 }
 
 fn decision_input(p: DecideParams) -> DecisionInput {
@@ -742,21 +746,25 @@ fn decision_input(p: DecideParams) -> DecisionInput {
 pub fn rdy_decide(st: &mut McpState, p: DecideParams) -> Result<Value, RdyError> {
     let s = session(st)?;
     let view = p.view.clone().unwrap_or_else(|| st.view.clone());
-    ok(st.rdy.decide(&s, &view, decision_input(p))?)
+    let input = decision_input(p);
+    write_typed(&*st.engine, move |r| r.decide(&s, &view, input))
 }
 
 pub fn rdy_supersede(st: &mut McpState, p: SupersedeParams) -> Result<Value, RdyError> {
     let s = session(st)?;
     let view = p.decision.view.clone().unwrap_or_else(|| st.view.clone());
-    ok(st
-        .rdy
-        .supersede(&s, &view, &p.old, p.part, decision_input(p.decision))?)
+    let (old, part, input) = (p.old, p.part, decision_input(p.decision));
+    write_typed(&*st.engine, move |r| {
+        r.supersede(&s, &view, &old, part, input)
+    })
 }
 
 pub fn rdy_revoke(st: &mut McpState, p: RevokeParams) -> Result<Value, RdyError> {
     let s = session(st)?;
     let view = p.view.unwrap_or_else(|| st.view.clone());
-    ok(st.rdy.revoke(&s, &view, &p.target, &p.reason, &p.parent)?)
+    write_typed(&*st.engine, move |r| {
+        r.revoke(&s, &view, &p.target, &p.reason, &p.parent)
+    })
 }
 
 pub fn rdy_propose(st: &mut McpState, p: ProposeParams) -> Result<Value, RdyError> {
@@ -765,7 +773,7 @@ pub fn rdy_propose(st: &mut McpState, p: ProposeParams) -> Result<Value, RdyErro
         .view
         .map(|v| v.strip_prefix("view:").map(String::from).unwrap_or(v))
         .unwrap_or_else(|| st.view.clone());
-    ok(st.rdy.propose(&s, &view, &p.title)?)
+    write_typed(&*st.engine, move |r| r.propose(&s, &view, &p.title))
 }
 
 pub fn rdy_asset(st: &mut McpState, p: AssetParams) -> Result<Value, RdyError> {
@@ -798,8 +806,9 @@ pub fn rdy_asset(st: &mut McpState, p: AssetParams) -> Result<Value, RdyError> {
     if bytes.len() > MAX_ASSET_BYTES {
         return Err(too_big());
     }
-    let h = st.rdy.store_mut().put_blob(&bytes)?;
-    Ok(
-        json!({"hash": h.to_string(), "bytes": bytes.len(), "use": "set a figure block's `blob` field to this hash"}),
-    )
+    let n = bytes.len();
+    let h = st.engine.write(Box::new(move |r| {
+        Ok(json!(r.store_mut().put_blob(&bytes)?.to_string()))
+    }))?;
+    Ok(json!({"hash": h, "bytes": n, "use": "set a figure block's `blob` field to this hash"}))
 }

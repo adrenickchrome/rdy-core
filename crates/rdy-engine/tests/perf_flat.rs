@@ -11,6 +11,7 @@ fn agent() -> Session {
         actor: "agent:a".into(),
         run: None,
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     }
 }
 fn founder() -> Session {
@@ -18,6 +19,7 @@ fn founder() -> Session {
         actor: "human:founder".into(),
         run: None,
         role: Role::Approver,
+        kind: rdy_engine::SessionKind::Human,
     }
 }
 

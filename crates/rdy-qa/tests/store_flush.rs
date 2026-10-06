@@ -99,10 +99,10 @@ fn mark1_every_store_write_ends_with_a_marker_that_matches_its_batch() {
 fn mark1_damage_inside_an_acknowledged_batch_is_refused_even_when_the_index_lags() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    Store::open(&dir).unwrap().put_blob(b"first").unwrap();
+    Store::create(&dir).unwrap().put_blob(b"first").unwrap();
     let early_index = std::fs::read(dir.join("index.redb")).unwrap();
     let end1 = {
-        let mut s = Store::open(&dir).unwrap();
+        let mut s = Store::create(&dir).unwrap();
         let end1 = s.log_end();
         s.put_blob(b"second").unwrap();
         s.put_blob(b"third").unwrap();
@@ -113,7 +113,7 @@ fn mark1_damage_inside_an_acknowledged_batch_is_refused_even_when_the_index_lags
     bytes[end1.offset as usize + 40] ^= 0xff; // inside the second write's first frame
     std::fs::write(&path, &bytes).unwrap();
     std::fs::write(dir.join("index.redb"), &early_index).unwrap(); // the index lags the log
-    let e = Store::open(&dir)
+    let e = Store::create(&dir)
         .err()
         .expect("an acknowledged batch follows the damage");
     assert!(
@@ -129,8 +129,8 @@ fn mark1_damage_inside_an_acknowledged_batch_is_refused_even_when_the_index_lags
 fn mark1_open_fsyncs_the_last_segment_it_accepts() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    Store::open(&dir).unwrap().put_blob(b"accepted").unwrap();
-    let (s, synced) = rdy_store::fsutil::record_syncs(|| Store::open(&dir));
+    Store::create(&dir).unwrap().put_blob(b"accepted").unwrap();
+    let (s, synced) = rdy_store::fsutil::record_syncs(|| Store::create(&dir));
     s.unwrap();
     assert!(synced.contains(&seg(&dir, 0)), "{synced:?}");
 }
@@ -143,7 +143,7 @@ fn mark1_a_torn_write_that_embeds_a_copy_of_a_segment_opens() {
     let base = tempfile::tempdir().unwrap();
     let a = base.path().join("a");
     {
-        let mut s = Store::open(&a).unwrap();
+        let mut s = Store::create(&a).unwrap();
         for i in 0..5u8 {
             s.put_blob(&[i; 40]).unwrap();
         }
@@ -151,17 +151,17 @@ fn mark1_a_torn_write_that_embeds_a_copy_of_a_segment_opens() {
     let mut chunk = std::fs::read(seg(&a, 0)).unwrap();
     chunk.extend_from_slice(&[9u8; 2000]);
     let b = base.path().join("b");
-    Store::open(&b).unwrap().put_blob(b"first").unwrap();
+    Store::create(&b).unwrap().put_blob(b"first").unwrap();
     let early_index = std::fs::read(b.join("index.redb")).unwrap();
     let before = std::fs::read(seg(&b, 0)).unwrap();
-    Store::open(&b).unwrap().put_blob(&chunk).unwrap();
+    Store::create(&b).unwrap().put_blob(&chunk).unwrap();
     let path = seg(&b, 0);
     let mut bytes = std::fs::read(&path).unwrap();
     let embedded_end = before.len() + 37 + 37 + a_len(&a);
     bytes.truncate(embedded_end + 500); // a short write, after the embedded copy
     std::fs::write(&path, &bytes).unwrap();
     std::fs::write(b.join("index.redb"), &early_index).unwrap();
-    let s = Store::open(&b).expect("a torn unacknowledged write is quarantined, not refused");
+    let s = Store::create(&b).expect("a torn unacknowledged write is quarantined, not refused");
     assert_eq!(
         s.open_report().quarantined.len(),
         1,
@@ -192,12 +192,12 @@ fn damaged_files(dir: &Path) -> usize {
 fn kill1_a_copy_of_a_live_store_opens_by_rollback_not_rebuild() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let mut s = Store::open(&dir).unwrap();
+    let mut s = Store::create(&dir).unwrap();
     let hs: Vec<_> = (0..3u8).map(|i| s.put_blob(&[i; 5]).unwrap()).collect();
     assert!(dir.join(rdy_store::INDEX_OPEN_SENTINEL).exists());
     let copy = base.path().join("copy");
     copy_store(&dir, &copy);
-    let c = Store::open(&copy).unwrap();
+    let c = Store::create(&copy).unwrap();
     let r = c.open_report().clone();
     assert!(r.unclean_shutdown, "{r:?}");
     assert!(!r.index_rebuilt, "a kill is not damage: {r:?}");
@@ -211,9 +211,9 @@ fn kill1_a_copy_of_a_live_store_opens_by_rollback_not_rebuild() {
 fn kill1_a_clean_close_removes_the_open_sentinel() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    Store::open(&dir).unwrap().put_blob(b"x").unwrap();
+    Store::create(&dir).unwrap().put_blob(b"x").unwrap();
     assert!(!dir.join(rdy_store::INDEX_OPEN_SENTINEL).exists());
-    assert!(!Store::open(&dir).unwrap().open_report().unclean_shutdown);
+    assert!(!Store::create(&dir).unwrap().open_report().unclean_shutdown);
 }
 
 /// A child process spawned by another thread while the store is open holds a duplicate of the
@@ -224,11 +224,11 @@ fn kill1_a_clean_close_removes_the_open_sentinel() {
 fn kill1_a_clean_close_releases_the_lock_a_spawned_child_still_shares() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let mut s = Store::open(&dir).unwrap();
+    let mut s = Store::create(&dir).unwrap();
     s.put_blob(b"x").unwrap();
     let child_copy = s.share_lock_descriptor_for_tests().unwrap();
     drop(s);
-    let r = Store::open(&dir).map(|s| s.open_report().clone());
+    let r = Store::create(&dir).map(|s| s.open_report().clone());
     drop(child_copy);
     let r = r.expect("a closed store reopens while a spawned child still holds its descriptor");
     assert!(!r.unclean_shutdown, "{r:?}");
@@ -240,7 +240,7 @@ fn kill1_a_clean_close_releases_the_lock_a_spawned_child_still_shares() {
 fn kill1_a_refused_open_keeps_a_kills_sentinel() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let mut s = Store::open(&dir).unwrap();
+    let mut s = Store::create(&dir).unwrap();
     // M2a1 (fmt2): the one format ref, set to another format, in place of min_reader. vop1 made
     // 4 the current format, so the literal `4` this test held stopped being "another": the
     // other format is derived from STORE_FORMAT so a later bump cannot do that again.
@@ -253,7 +253,7 @@ fn kill1_a_refused_open_keeps_a_kills_sentinel() {
     let copy = base.path().join("copy");
     copy_store(&dir, &copy); // what a kill leaves, sentinel included
     drop(s);
-    let e = Store::open(&copy)
+    let e = Store::create(&copy)
         .err()
         .expect("the log says another rdy build wrote it");
     assert!(matches!(e, StoreError::Format { .. }), "{e}");
@@ -268,12 +268,12 @@ fn kill1_a_refused_open_keeps_a_kills_sentinel() {
 fn kill1_a_damaged_index_after_a_clean_close_is_still_rebuilt() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let h = Store::open(&dir).unwrap().put_blob(b"kept").unwrap();
+    let h = Store::create(&dir).unwrap().put_blob(b"kept").unwrap();
     let idx = dir.join("index.redb");
     let mut bytes = std::fs::read(&idx).unwrap();
     bytes[..512].fill(0xAB);
     std::fs::write(&idx, bytes).unwrap();
-    let s = Store::open(&dir).unwrap();
+    let s = Store::create(&dir).unwrap();
     assert!(s.open_report().index_rebuilt);
     assert_eq!(s.get_blob(&h).unwrap(), b"kept");
     assert_eq!(damaged_files(&dir), 1);
@@ -283,13 +283,13 @@ fn kill1_a_damaged_index_after_a_clean_close_is_still_rebuilt() {
 fn ckpt1_a_write_leaves_the_durable_index_behind_the_log() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let mut s = Store::open(&dir).unwrap(); // a new store: format batch, then a checkpoint
+    let mut s = Store::create(&dir).unwrap(); // a new store: format batch, then a checkpoint
     for i in 0..5u8 {
         s.put_blob(&[i; 7]).unwrap();
     }
     let copy = base.path().join("copy");
     copy_store(&dir, &copy);
-    let c = Store::open(&copy).unwrap();
+    let c = Store::create(&copy).unwrap();
     // 5 writes x (chunk, manifest, marker): acknowledged by the log flush alone
     assert_eq!(
         c.open_report().caught_up_frames,
@@ -303,7 +303,7 @@ fn ckpt1_a_write_leaves_the_durable_index_behind_the_log() {
 fn ckpt1_a_checkpoint_makes_the_index_durable() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let mut s = Store::open(&dir).unwrap();
+    let mut s = Store::create(&dir).unwrap();
     for i in 0..5u8 {
         s.put_blob(&[i; 7]).unwrap();
     }
@@ -311,7 +311,7 @@ fn ckpt1_a_checkpoint_makes_the_index_durable() {
     let copy = base.path().join("copy");
     copy_store(&dir, &copy);
     assert_eq!(
-        Store::open(&copy).unwrap().open_report().caught_up_frames,
+        Store::create(&copy).unwrap().open_report().caught_up_frames,
         0
     );
 }
@@ -320,8 +320,8 @@ fn ckpt1_a_checkpoint_makes_the_index_durable() {
 fn ckpt1_the_index_checkpoints_every_1000_frames() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    drop(Store::open(&dir).unwrap());
-    let mut s = Store::open(&dir).unwrap();
+    drop(Store::create(&dir).unwrap());
+    let mut s = Store::create(&dir).unwrap();
     assert_eq!(s.checkpoint_count(), 0);
     for i in 0..400u32 {
         s.put_blob(&i.to_le_bytes()).unwrap(); // 3 frames each
@@ -334,7 +334,7 @@ fn ckpt1_the_index_checkpoints_every_1000_frames() {
 #[test]
 fn ckpt1_an_idle_store_checkpoints_after_two_seconds() {
     let base = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&base.path().join("s")).unwrap();
+    let mut s = Store::create(&base.path().join("s")).unwrap();
     s.put_blob(b"idle").unwrap();
     assert!(!s.checkpoint_if_idle(Instant::now()).unwrap());
     assert!(
@@ -354,12 +354,12 @@ fn ckpt1_a_clean_close_leaves_a_durable_index() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
     {
-        let mut s = Store::open(&dir).unwrap();
+        let mut s = Store::create(&dir).unwrap();
         for i in 0..3u8 {
             s.put_blob(&[i; 3]).unwrap();
         }
     }
-    let r = Store::open(&dir).unwrap().open_report().clone();
+    let r = Store::create(&dir).unwrap().open_report().clone();
     assert_eq!(r.caught_up_frames, 0, "{r:?}");
     assert!(!r.unclean_shutdown);
 }
@@ -368,7 +368,7 @@ fn ckpt1_a_clean_close_leaves_a_durable_index() {
 #[test]
 fn ckpt1_a_failed_checkpoint_never_fails_the_write() {
     let base = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&base.path().join("s")).unwrap();
+    let mut s = Store::create(&base.path().join("s")).unwrap();
     s.set_checkpoint_frames(1);
     s.fail_next_checkpoint();
     let h = s.put_blob(b"durable in the log").unwrap();
@@ -386,7 +386,7 @@ fn ckpt1_a_failed_checkpoint_never_fails_the_write() {
 #[test]
 fn ckpt1_a_failed_idle_checkpoint_is_recorded_until_one_succeeds() {
     let base = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&base.path().join("s")).unwrap();
+    let mut s = Store::create(&base.path().join("s")).unwrap();
     s.put_blob(b"idle").unwrap();
     s.fail_next_checkpoint();
     let later = Instant::now() + CHECKPOINT_IDLE;
@@ -411,13 +411,13 @@ fn ckpt1_a_failed_idle_checkpoint_is_recorded_until_one_succeeds() {
 fn ckpt1_close_returns_a_failed_checkpoint_and_keeps_the_sentinel() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let mut s = Store::open(&dir).unwrap();
+    let mut s = Store::create(&dir).unwrap();
     let h = s.put_blob(b"durable in the log").unwrap();
     s.fail_next_checkpoint();
     let e = s.close().unwrap_err();
     assert!(e.to_string().contains("injected"), "{e}");
     assert!(dir.join(rdy_store::INDEX_OPEN_SENTINEL).exists());
-    let s = Store::open(&dir).unwrap();
+    let s = Store::create(&dir).unwrap();
     assert!(s.open_report().unclean_shutdown, "{:?}", s.open_report());
     assert!(!s.open_report().index_rebuilt, "{:?}", s.open_report());
     assert_eq!(s.get_blob(&h).unwrap(), b"durable in the log");
@@ -427,11 +427,11 @@ fn ckpt1_close_returns_a_failed_checkpoint_and_keeps_the_sentinel() {
 fn ckpt1_close_checkpoints_and_removes_the_sentinel() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let mut s = Store::open(&dir).unwrap();
+    let mut s = Store::create(&dir).unwrap();
     s.put_blob(b"x").unwrap();
     s.close().unwrap();
     assert!(!dir.join(rdy_store::INDEX_OPEN_SENTINEL).exists());
-    let r = Store::open(&dir).unwrap().open_report().clone();
+    let r = Store::create(&dir).unwrap().open_report().clone();
     assert!(!r.unclean_shutdown, "{r:?}");
     assert_eq!(r.caught_up_frames, 0, "{r:?}");
 }
@@ -442,11 +442,11 @@ fn ckpt1_close_checkpoints_and_removes_the_sentinel() {
 fn kill1_the_sentinel_never_truncates_through_a_symlink() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    drop(Store::open(&dir).unwrap());
+    drop(Store::create(&dir).unwrap());
     let target = base.path().join("precious");
     std::fs::write(&target, b"keep me").unwrap();
     std::os::unix::fs::symlink(&target, dir.join(rdy_store::INDEX_OPEN_SENTINEL)).unwrap();
-    let s = Store::open(&dir).unwrap();
+    let s = Store::create(&dir).unwrap();
     assert_eq!(std::fs::read(&target).unwrap(), b"keep me");
     drop(s);
     assert_eq!(std::fs::read(&target).unwrap(), b"keep me");
@@ -470,7 +470,7 @@ fn ckpt1_the_mcp_server_checkpoints_when_idle() {
     // M2a1 (fmt2): the store is .rdy/store again
     copy_store(&dir.path().join(".rdy/store"), copy.path());
     assert_eq!(
-        Store::open(copy.path())
+        Store::create(copy.path())
             .unwrap()
             .open_report()
             .caught_up_frames,
@@ -479,19 +479,19 @@ fn ckpt1_the_mcp_server_checkpoints_when_idle() {
 }
 
 /// Carry-forward (Task 3 review): the marker rule must not depend on seeing a marker before the
-/// first bad frame once the index lags. With FORMAT gone and the index at the start, the M1 rule
-/// would take the lagging `indexed_upto` as the acknowledged boundary and truncate acknowledged
+/// first bad frame once the index lags. With the index at the start, the M1 rule would take the lagging `indexed_upto` as the acknowledged boundary and truncate acknowledged
 /// batches after damage in the first batch.
 #[test]
-fn mark1_lagging_index_without_format_still_refuses_damage_in_the_first_batch() {
+fn mark1_a_lagging_index_still_refuses_damage_in_the_first_batch() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
     {
-        let mut s = Store::open(&dir).unwrap();
+        let mut s = Store::create(&dir).unwrap();
         s.put_blob(b"second").unwrap();
         s.put_blob(b"third").unwrap();
     }
-    // an index that never got past the start of the log, and no FORMAT file
+    // an index that never got past the start of the log (a store with no FORMAT is refused
+    // before its log is read: fmt3)
     std::fs::remove_file(dir.join("index.redb")).unwrap();
     {
         let idx = rdy_store::index::Index::open(&dir.join("index.redb")).unwrap();
@@ -504,12 +504,11 @@ fn mark1_lagging_index_without_format_still_refuses_damage_in_the_first_batch() 
         )
         .unwrap();
     }
-    std::fs::remove_file(dir.join("FORMAT")).unwrap();
     let path = seg(&dir, 0);
     let mut bytes = std::fs::read(&path).unwrap();
     bytes[40] ^= 0xff; // inside the first batch's first frame
     std::fs::write(&path, &bytes).unwrap();
-    let e = Store::open(&dir)
+    let e = Store::create(&dir)
         .err()
         .expect("acknowledged batches follow the damage");
     assert!(
@@ -541,11 +540,11 @@ fn mark1_lagging_index_without_format_still_refuses_damage_in_the_first_batch() 
 fn kill1_a_pending_non_durable_commit_is_a_rollback_that_catches_up() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let mut s = Store::open(&dir).unwrap();
+    let mut s = Store::create(&dir).unwrap();
     let hs: Vec<_> = (0..4u8).map(|i| s.put_blob(&[i; 9]).unwrap()).collect();
     let copy = base.path().join("copy");
     copy_store(&dir, &copy);
-    let c = Store::open(&copy).unwrap();
+    let c = Store::create(&copy).unwrap();
     let r = c.open_report().clone();
     assert!(r.unclean_shutdown, "{r:?}");
     assert!(
@@ -563,7 +562,7 @@ fn kill1_a_pending_non_durable_commit_is_a_rollback_that_catches_up() {
 /// Three batches of 1,000 frames each, with no checkpoint: a copy must catch up 3,003 frames.
 fn lagging_copy(base: &Path) -> PathBuf {
     let dir = base.join("s");
-    let mut s = Store::open(&dir).unwrap();
+    let mut s = Store::create(&dir).unwrap();
     s.set_checkpoint_frames(u64::MAX);
     for b in 0..3 {
         let items = (0..1000)
@@ -580,7 +579,7 @@ fn lagging_copy(base: &Path) -> PathBuf {
 fn cat1_catch_up_streams_in_chunks_of_1000_frames() {
     let base = tempfile::tempdir().unwrap();
     let copy = lagging_copy(base.path());
-    let s = Store::open(&copy).unwrap();
+    let s = Store::create(&copy).unwrap();
     let r = s.open_report().clone();
     assert_eq!(r.caught_up_frames, 3003, "{r:?}");
     assert_eq!(r.catch_up_commits, 4, "1000 + 1000 + 1000 + 3: {r:?}");
@@ -591,11 +590,14 @@ fn cat1_catch_up_streams_in_chunks_of_1000_frames() {
 fn cat1_a_catch_up_ends_with_a_checkpoint() {
     let base = tempfile::tempdir().unwrap();
     let copy = lagging_copy(base.path());
-    let _caught_up = Store::open(&copy).unwrap(); // still open: the index file is what a kill leaves
+    let _caught_up = Store::create(&copy).unwrap(); // still open: the index file is what a kill leaves
     let again = base.path().join("again");
     copy_store(&copy, &again);
     assert_eq!(
-        Store::open(&again).unwrap().open_report().caught_up_frames,
+        Store::create(&again)
+            .unwrap()
+            .open_report()
+            .caught_up_frames,
         0
     );
 }
@@ -604,7 +606,7 @@ fn cat1_a_catch_up_ends_with_a_checkpoint() {
 fn cat1_an_index_point_inside_a_frame_rebuilds_from_the_whole_log() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let h = Store::open(&dir).unwrap().put_blob(b"kept").unwrap();
+    let h = Store::create(&dir).unwrap().put_blob(b"kept").unwrap();
     {
         let idx = rdy_store::index::Index::open(&dir.join("index.redb")).unwrap();
         idx.apply(
@@ -617,7 +619,7 @@ fn cat1_an_index_point_inside_a_frame_rebuilds_from_the_whole_log() {
         .unwrap();
         idx.checkpoint().unwrap();
     }
-    let s = Store::open(&dir).unwrap_or_else(|e| panic!("{e}"));
+    let s = Store::create(&dir).unwrap_or_else(|e| panic!("{e}"));
     assert!(s.open_report().index_rebuilt, "{:?}", s.open_report());
     assert_eq!(s.get_blob(&h).unwrap(), b"kept");
 }
@@ -629,7 +631,7 @@ fn cat1_an_index_point_inside_a_frame_rebuilds_from_the_whole_log() {
 fn cat1_damage_in_a_sealed_segment_after_the_index_point_keeps_the_index() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let mut s = Store::open(&dir).unwrap();
+    let mut s = Store::create(&dir).unwrap();
     s.set_segment_max(4096);
     s.set_checkpoint_frames(u64::MAX);
     for i in 0..20u32 {
@@ -643,7 +645,7 @@ fn cat1_damage_in_a_sealed_segment_after_the_index_point_keeps_the_index() {
     let mut bytes = std::fs::read(&path).unwrap();
     bytes[40] ^= 0xff; // inside segment 1's first payload
     std::fs::write(&path, &bytes).unwrap();
-    assert!(Store::open(&copy).is_err());
+    assert!(Store::create(&copy).is_err());
     assert_eq!(damaged_files(&copy), 0, "the index was not set aside");
 }
 
@@ -654,7 +656,7 @@ fn cat1_damage_in_a_sealed_segment_after_the_index_point_keeps_the_index() {
 fn cat1_an_index_point_past_the_end_of_a_sealed_segment_refuses_and_keeps_the_index() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let mut s = Store::open(&dir).unwrap();
+    let mut s = Store::create(&dir).unwrap();
     s.set_segment_max(4096);
     s.set_checkpoint_frames(u64::MAX);
     s.set_refs(vec![("r".into(), b"v1".to_vec())]).unwrap();
@@ -677,7 +679,7 @@ fn cat1_an_index_point_past_the_end_of_a_sealed_segment_refuses_and_keeps_the_in
     copy_store(&dir, &copy);
     drop(s);
     std::fs::write(seg(&copy, 1), b"").unwrap(); // segment 1 lost what the index acknowledged
-    let e = Store::open(&copy)
+    let e = Store::create(&copy)
         .err()
         .expect("open must refuse, not rebuild over the loss");
     assert!(matches!(&e, StoreError::MissingFrames { .. }), "{e}");
@@ -685,7 +687,7 @@ fn cat1_an_index_point_past_the_end_of_a_sealed_segment_refuses_and_keeps_the_in
     assert_eq!(damaged_files(&copy), 0, "the index was not set aside");
     // the index was kept: restoring the segment brings the writes back, with no rebuild
     std::fs::copy(seg(&dir, 1), seg(&copy, 1)).unwrap();
-    let s = Store::open(&copy).unwrap();
+    let s = Store::create(&copy).unwrap();
     assert!(!s.open_report().index_rebuilt, "{:?}", s.open_report());
     assert_eq!(s.get_ref("r").unwrap().unwrap(), b"v2");
     assert_eq!(s.get_blob(&blob).unwrap(), b"in segment one");
@@ -697,7 +699,7 @@ fn cat1_an_index_point_past_the_end_of_a_sealed_segment_refuses_and_keeps_the_in
 fn roll1_every_sealed_segment_of_a_rolling_store_ends_at_a_marker() {
     let base = tempfile::tempdir().unwrap();
     let dir = base.path().join("s");
-    let mut s = Store::open(&dir).unwrap();
+    let mut s = Store::create(&dir).unwrap();
     s.set_segment_max(400);
     let blobs: Vec<_> = (0..12u8)
         .map(|i| (s.put_blob(&[i; 60]).unwrap(), [i; 60]))
@@ -716,7 +718,7 @@ fn roll1_every_sealed_segment_of_a_rolling_store_ends_at_a_marker() {
             "segment {i} ends at a marker"
         );
     }
-    let s = Store::open(&dir).unwrap();
+    let s = Store::create(&dir).unwrap();
     for (h, bytes) in blobs {
         assert_eq!(s.get_blob(&h).unwrap(), bytes);
     }

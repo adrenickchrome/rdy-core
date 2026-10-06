@@ -39,7 +39,7 @@ fn change(view: &str, ops: Vec<Op>) -> Change {
 #[test]
 fn writes_go_to_the_view_not_canon_until_landed() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let b = block("b-AAAAA", "claim", "x");
     s.commit_to_view(
         "work",
@@ -63,7 +63,7 @@ fn writes_go_to_the_view_not_canon_until_landed() {
 #[test]
 fn stale_base_is_refused_and_names_the_current_version() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let v1 = block("b-AAAAA", "claim", "one");
     let v2 = block("b-AAAAA", "claim", "two");
     s.commit_to_view("w", change("w", vec![Op::Create { block: v1.clone() }]))
@@ -101,7 +101,7 @@ fn stale_base_is_refused_and_names_the_current_version() {
 #[test]
 fn frozen_decisions_cannot_be_updated_or_deleted() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let mut d = block("D-W2HXR", decision::DECISION, "");
     d.fields
         .insert("status".into(), FieldValue::Str("accepted".into()));
@@ -138,7 +138,7 @@ fn frozen_decisions_cannot_be_updated_or_deleted() {
 #[test]
 fn landing_a_stale_view_fails_without_overwriting_canon() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let v1 = block("b-AAAAA", "claim", "one");
     s.commit_to_view("a", change("a", vec![Op::Create { block: v1.clone() }]))
         .unwrap();
@@ -182,7 +182,7 @@ fn landing_a_stale_view_fails_without_overwriting_canon() {
 fn history_and_as_of_survive_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let (first, b2) = {
-        let mut s = Store::open(dir.path()).unwrap();
+        let mut s = Store::create(dir.path()).unwrap();
         let b1 = block("b-AAAAA", "claim", "one");
         s.commit_to_view("w", change("w", vec![Op::Create { block: b1 }]))
             .unwrap();
@@ -195,7 +195,7 @@ fn history_and_as_of_survive_reopen() {
         s.land(&p2, prov(Role::Approver)).unwrap();
         (first, b2)
     };
-    let s = Store::open(dir.path()).unwrap();
+    let s = Store::create(dir.path()).unwrap();
     let hist = s.landings().unwrap();
     assert_eq!(hist.len(), 2);
     assert_eq!(hist[1].0, first);
@@ -207,7 +207,7 @@ fn history_and_as_of_survive_reopen() {
 #[test]
 fn commit_with_known_state_checks_against_that_state_without_replaying() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = Store::open(dir.path()).unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
     let v1 = block("b-AAAAA", "claim", "one");
     let v2 = block("b-AAAAA", "claim", "two");
     s.commit_to_view("w", change("w", vec![Op::Create { block: v1.clone() }]))

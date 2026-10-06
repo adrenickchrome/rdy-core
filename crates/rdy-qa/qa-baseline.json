@@ -33,6 +33,30 @@
           "p95_ms": 160.250273,
           "runs": 10
         },
+        "daemon_cold_start": {
+          "median_ms": 53.982157,
+          "op": "daemon_cold_start",
+          "p95_ms": 54.48041,
+          "runs": 3
+        },
+        "daemon_cold_start_50k": {
+          "median_ms": 193.127607,
+          "op": "daemon_cold_start_50k",
+          "p95_ms": 193.38007,
+          "runs": 3
+        },
+        "daemon_write_single": {
+          "median_ms": 2.650549,
+          "op": "daemon_write_single",
+          "p95_ms": 2.728508,
+          "runs": 30
+        },
+        "daemon_write_single_50k": {
+          "median_ms": 2.741444,
+          "op": "daemon_write_single_50k",
+          "p95_ms": 2.892672,
+          "runs": 30
+        },
         "export_import": {
           "median_ms": 257.592935,
           "op": "export_import",
@@ -50,6 +74,12 @@
           "op": "impact_50k",
           "p95_ms": 160.256714,
           "runs": 10
+        },
+        "new_doc_single": {
+          "median_ms": 3.662134,
+          "op": "new_doc_single",
+          "p95_ms": 3.705076,
+          "runs": 30
         },
         "propose_land_500_flat": {
           "median_ms": 89.49213999999999,

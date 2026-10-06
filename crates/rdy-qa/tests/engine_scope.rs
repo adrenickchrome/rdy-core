@@ -56,9 +56,11 @@ fn scope1_mcp_and_cli_reads_refuse_an_unknown_view() {
     // CLI first: it needs the store unlocked
     let (dir, r, doc, landing) = seeded();
     drop(r);
+    let (_cfg, env) = human_env("human:qa");
     let out = Command::new(rdy_bin())
-        .args(["show", doc.as_str(), "--scope", "nope"])
+        .args(["--no-daemon", "show", doc.as_str(), "--scope", "nope"])
         .current_dir(dir.path())
+        .envs(env)
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -68,7 +70,9 @@ fn scope1_mcp_and_cli_reads_refuse_an_unknown_view() {
         String::from_utf8_lossy(&out.stderr)
     );
     // MCP: a writer's own (unwritten) view reads fine; an unknown view doesn't
-    let mut st = McpState::new(Rdy::open(dir.path()).unwrap());
+    let mut st = McpState::new(std::sync::Arc::new(
+        rdy_engine::engine::Local::open(dir.path()).unwrap(),
+    ));
     rdy_session(
         &mut st,
         serde_json::from_value(json!({"actor": "agent:qa", "run": "r1", "role": "writer"}))

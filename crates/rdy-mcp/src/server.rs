@@ -1,5 +1,7 @@
+use crate::order::{Order, Ordered, Stamped};
 use crate::tools::{self, *};
-use rdy_engine::{E_INTERNAL, E_LIMIT, Rdy, RdyError};
+use rdy_engine::engine::{Engine, Local};
+use rdy_engine::{E_INTERNAL, E_LIMIT, RdyError};
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -21,9 +23,6 @@ pub const REQUEST_TOO_LARGE: &str = "rdy_request_too_large";
 #[derive(Clone)]
 pub struct RdyServer {
     state: Arc<Mutex<McpState>>,
-    /// The FIFO ticket that keeps requests in arrival order across `spawn_blocking` (see
-    /// [`RdyServer::run`]).
-    order: Arc<tokio::sync::Mutex<()>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -36,10 +35,11 @@ fn result(r: Result<serde_json::Value, RdyError>) -> CallToolResult {
 
 #[tool_router]
 impl RdyServer {
-    pub fn new(rdy: Rdy) -> Self {
+    pub fn new(engine: Arc<dyn Engine>, sid: Option<u64>) -> Self {
+        let mut st = McpState::new(engine);
+        st.sid = sid;
         RdyServer {
-            state: Arc::new(Mutex::new(McpState::new(rdy))),
-            order: Arc::new(tokio::sync::Mutex::new(())),
+            state: Arc::new(Mutex::new(st)),
             tool_router: Self::tool_router(),
         }
     }
@@ -48,25 +48,38 @@ impl RdyServer {
     /// becomes an `E_INTERNAL` reply (so the request is still answered) and republishes a clean
     /// state, which the panic may have left half-updated.
     ///
-    /// Order is kept by a FIFO ticket: tokio's mutex is fair, and the ticket is held until this
-    /// call's reply is built, so the next request's body cannot start before this one is done.
-    /// Without it, requests awaiting the blocking pool would race for the state lock and writes
-    /// could apply, and replies come back, out of request order.
+    /// Order is not kept here: a session served through [`serve`] runs one stamped call at a
+    /// time, in arrival order, and writes the replies in that order (see [`crate::order`]).
     pub(crate) async fn run<P: Send + 'static>(
         &self,
         tool: &'static str,
         p: P,
         f: fn(&mut McpState, P) -> Result<serde_json::Value, RdyError>,
     ) -> CallToolResult {
-        let ticket = Arc::clone(&self.order).lock_owned().await;
         let state = Arc::clone(&self.state);
         let joined = tokio::task::spawn_blocking(move || {
             let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
             let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut st, p)));
             match out {
-                Ok(r) => result(r),
+                Ok(mut r) => {
+                    // the pack notice rides on an object result; otherwise it waits for one
+                    if let Ok(serde_json::Value::Object(m)) = &mut r {
+                        let generation = st.engine.pack_generation();
+                        let error = st.engine.pack_error();
+                        if let Some(n) =
+                            rdy_engine::engine::notice(&mut st.seen_gen, generation, error.as_deref())
+                        {
+                            m.insert("notice".into(), serde_json::Value::String(n));
+                        }
+                    }
+                    result(r)
+                }
                 Err(panic) => {
-                    st.rdy.invalidate();
+                    // the invalidate runs on the writer, where `Rdy` is
+                    let _ = st.engine.write(Box::new(|r| {
+                        r.invalidate();
+                        Ok(serde_json::Value::Null)
+                    }));
                     let msg = panic
                         .downcast_ref::<&str>()
                         .map(|s| s.to_string())
@@ -81,19 +94,17 @@ impl RdyServer {
             }
         })
         .await;
-        let reply = joined.unwrap_or_else(|_| {
+        joined.unwrap_or_else(|_| {
             result(Err(RdyError::new(
                 E_INTERNAL,
                 format!("internal error in {tool}: the call was cancelled"),
                 "this is a bug in rdy; the request may or may not have been applied: re-read before retrying",
             )))
-        });
-        drop(ticket);
-        reply
+        })
     }
 
     #[tool(
-        description = "Start a session: who you are (actor), your run, and role (reader, writer, reviewer). Required before other tools. Your writes go to a view named after your run; a reader may pass view \"canon\" to read canon by default."
+        description = "Start a session: who you are (actor), your run, and role (reader, writer, reviewer). Required before other tools. Your writes go to a view named after your run, or work-<actor> without one; a reader may pass view \"canon\" to read canon by default."
     )]
     async fn rdy_session(&self, Parameters(p): Parameters<SessionParams>) -> CallToolResult {
         self.run("rdy_session", p, tools::rdy_session).await
@@ -498,10 +509,9 @@ impl IdleCheckpointLog {
 /// Serves MCP over stdin and stdout until stdin closes.
 ///
 /// The service runs on its own single-threaded runtime, and tools run on the blocking pool
-/// (`spawn_blocking`) holding the state lock for the call. rmcp runs every request in its own
-/// task; a body that awaits the pool yields, so order is kept by a FIFO ticket in
-/// [`RdyServer::run`]: a request takes the ticket in arrival order and holds it until its reply
-/// is built, so writes apply, and replies leave, in request order.
+/// (`spawn_blocking`) holding the state lock for the call. Writes apply, and replies leave, in
+/// request order because the calls are stamped at the transport ([`serve`]), not because of the
+/// runtime.
 pub async fn serve_stdio(project: PathBuf) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -510,7 +520,7 @@ pub async fn serve_stdio(project: PathBuf) -> anyhow::Result<()> {
 }
 
 async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
-    let rdy = Rdy::open(&project)?;
+    let local = Arc::new(Local::open(&project)?);
     let (to_server, from_pump) = tokio::io::duplex(1 << 16);
     tokio::spawn(async move {
         let _ = pump_lines(
@@ -521,22 +531,17 @@ async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
         )
         .await;
     });
-    let server = RdyServer::new(rdy);
-    // `serve` consumes the server: keep the state for the idle ticker and the close at exit
-    let state = Arc::clone(&server.state);
+    let server = RdyServer::new(Arc::clone(&local) as Arc<dyn Engine>, None);
     let ticker = {
-        let state = Arc::clone(&state);
+        let local = Arc::clone(&local);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(CHECKPOINT_TICK);
             let log = Arc::new(Mutex::new(IdleCheckpointLog::default()));
             loop {
                 tick.tick().await;
-                let (state, log) = (Arc::clone(&state), Arc::clone(&log));
+                let (local, log) = (Arc::clone(&local), Arc::clone(&log));
                 let _ = tokio::task::spawn_blocking(move || {
-                    let r = {
-                        let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
-                        st.rdy.checkpoint_if_idle()
-                    };
+                    let r = local.checkpoint_if_idle();
                     let mut log = log.lock().unwrap_or_else(|p| p.into_inner());
                     if let Some(line) = log.note(&r) {
                         eprintln!("{line}");
@@ -546,21 +551,22 @@ async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
             }
         })
     };
-    let service = server.serve((from_pump, tokio::io::stdout())).await?;
-    let quit = service.waiting().await;
+    // `serve` consumes the server (and with it the state's handle on the engine)
+    let quit = serve(server, from_pump, tokio::io::stdout()).await;
     ticker.abort();
     let _ = ticker.await;
     let _ = tokio::task::spawn_blocking(move || {
         // the clean close: checkpoint, close the index, remove the sentinel; a tool call still
-        // holding the state (none should, once the service has ended) leaves the close to the
+        // holding the engine (none should, once the service has ended) leaves the close to the
         // last drop, which reports a failure the same way
-        let closed = match Arc::try_unwrap(state) {
-            Ok(st) => st.into_inner().unwrap_or_else(|p| p.into_inner()).rdy.close(),
-            Err(state) => state
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .rdy
-                .checkpoint(),
+        let closed = match Arc::try_unwrap(local) {
+            Ok(local) => local.close(),
+            Err(local) => local
+                .write(Box::new(|r| {
+                    r.checkpoint()?;
+                    Ok(serde_json::Value::Null)
+                }))
+                .map(|_| ()),
         };
         if let Err(e) = closed {
             eprintln!(
@@ -571,6 +577,37 @@ async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
     .await;
     quit?;
     Ok(())
+}
+
+/// Serves `server` over `(r, w)` until the peer closes, with the session's tool calls stamped
+/// at the transport, run one at a time in arrival order and answered in that order (see
+/// [`crate::order`]), on whatever runtime polls it.
+pub async fn serve<R, W>(server: RdyServer, r: R, w: W) -> anyhow::Result<()>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+    W: AsyncWrite + Send + Unpin + 'static,
+{
+    let order = Arc::new(Order::default());
+    let transport = Stamped::new(
+        rmcp::transport::async_rw::AsyncRwTransport::new_server(r, w),
+        Arc::clone(&order),
+    );
+    let service = Ordered::new(server, order).serve(transport).await?;
+    service.waiting().await?;
+    Ok(())
+}
+
+/// Serves one MCP session over `(r, w)` against `engine` until the peer closes. The daemon owns
+/// the checkpoint tick and the close, so neither runs here. `sid` is the daemon's session id.
+/// It runs on the daemon's runtime: order is explicit (see [`serve`]), not a property of the
+/// runtime. Dropping the returned future ends the session: the service is cancelled and the
+/// stream closed; a tool call already on the blocking pool finishes first.
+pub async fn serve_on<R, W>(engine: Arc<dyn Engine>, sid: u64, r: R, w: W) -> anyhow::Result<()>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+    W: AsyncWrite + Send + Unpin + 'static,
+{
+    serve(RdyServer::new(engine, Some(sid)), r, w).await
 }
 
 #[cfg(test)]
@@ -820,8 +857,8 @@ mod mcp1_id_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn hook1_the_panic_hook_exists_only_under_cfg_test() {
         let dir = tempfile::tempdir().unwrap();
-        let rdy = Rdy::init(dir.path(), "rdy-standard").unwrap();
-        let server = RdyServer::new(rdy);
+        let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let server = RdyServer::new(Arc::new(Local::new(rdy)), None);
         let p = SessionParams {
             actor: "__rdy_test_panic__".into(),
             run: None,
@@ -850,7 +887,12 @@ mod mcp1_id_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn port1_a_tool_panic_on_the_blocking_pool_still_answers_and_the_server_stays_usable() {
         let dir = tempfile::tempdir().unwrap();
-        let server = RdyServer::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
+        let server = RdyServer::new(
+            Arc::new(Local::new(
+                rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap(),
+            )),
+            None,
+        );
         let bad = SessionParams {
             actor: "__rdy_test_panic__".into(),
             run: Some("x".into()),

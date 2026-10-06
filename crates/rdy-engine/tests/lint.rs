@@ -239,11 +239,13 @@ fn inside_a_project_canon_resolves_references_and_parents() {
         actor: "agent:a".into(),
         run: None,
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     };
     let founder = Session {
         actor: "human:founder".into(),
         run: None,
         role: Role::Approver,
+        kind: rdy_engine::SessionKind::Human,
     };
     let dir = tempfile::tempdir().unwrap();
     let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();

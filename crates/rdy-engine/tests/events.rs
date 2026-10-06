@@ -10,6 +10,7 @@ fn writer() -> Session {
         actor: "a".into(),
         run: Some("r".into()),
         role: Role::Writer,
+        kind: rdy_engine::SessionKind::Human,
     }
 }
 
@@ -91,6 +92,7 @@ fn evt1_a_landing_batch_gives_commit_proposed_landed_and_rebased() {
         actor: "h".into(),
         run: None,
         role: Role::Approver,
+        kind: rdy_engine::SessionKind::Human,
     };
     r.land(&approver, &p.id).unwrap();
     let lf = r.store().last_batch().to_vec();

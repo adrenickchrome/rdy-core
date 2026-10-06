@@ -508,7 +508,7 @@ impl Rdy {
                 "run the import as an approver session",
             ));
         }
-        crate::write::writable_view(view)?;
+        crate::write::check_view_access(&self.read(), view, s)?;
         // sym1: the export's own root entries are never followed either
         for root in ["rdy-export.yaml", "docs", "blobs"] {
             refuse_symlink(&dir.join(root))?;

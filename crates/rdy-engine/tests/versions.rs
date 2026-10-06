@@ -11,6 +11,7 @@ fn session(role: Role) -> Session {
         },
         run: None,
         role,
+        kind: rdy_engine::SessionKind::Human,
     }
 }
 fn writer() -> Session {

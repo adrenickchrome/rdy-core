@@ -98,7 +98,7 @@ fn rebase_of(s: &Store, view: &str) -> (Hash, Vec<Hash>, Vec<Hash>, Vec<rdy_stor
 /// is closed; f is created and left empty. Returns the store and canon's version of X.
 fn scene() -> (tempfile::TempDir, Store, Hash) {
     let d = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&d.path().join("s")).unwrap();
+    let mut s = Store::create(&d.path().join("s")).unwrap();
     for b in ["c-00001", "c-00002", "c-00003"] {
         create(&mut s, "seed", b);
     }
@@ -207,7 +207,7 @@ fn reb1_a_landing_rebases_every_live_unpinned_nonempty_view_and_skips_the_rest()
 #[test]
 fn reb1_conflicts_are_computed_on_the_intersection_only() {
     let d = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&d.path().join("s")).unwrap();
+    let mut s = Store::create(&d.path().join("s")).unwrap();
     for b in ["c-00001", "c-00002", "c-00003"] {
         create(&mut s, "seed", b);
     }
@@ -248,7 +248,7 @@ fn reb1_conflicts_are_computed_on_the_intersection_only() {
 #[test]
 fn reb1_a_cascade_across_five_views_re_keys_the_conflict_at_each_landing() {
     let d = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&d.path().join("s")).unwrap();
+    let mut s = Store::create(&d.path().join("s")).unwrap();
     create(&mut s, "seed", "c-00001");
     land(&mut s, "seed");
     let x = canon_version(&s, "c-00001");
@@ -397,7 +397,7 @@ fn reb1_an_index_failure_during_a_landing_with_rebases_writes_nothing() {
 #[test]
 fn reb1_canon_side_names_the_landed_producer_when_another_view_wrote_the_same_version() {
     let d = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&d.path().join("s")).unwrap();
+    let mut s = Store::create(&d.path().join("s")).unwrap();
     create(&mut s, "seed", "c-00001");
     land(&mut s, "seed");
     let x = canon_version(&s, "c-00001");
@@ -445,7 +445,7 @@ fn reb1_canon_side_names_the_landed_producer_when_another_view_wrote_the_same_ve
 #[test]
 fn reb1_canon_side_names_the_acceptance_change_when_another_view_wrote_the_same_version() {
     let d = tempfile::tempdir().unwrap();
-    let mut s = Store::open(&d.path().join("s")).unwrap();
+    let mut s = Store::create(&d.path().join("s")).unwrap();
     for b in ["c-00001", "c-00002"] {
         create(&mut s, "seed", b);
     }
