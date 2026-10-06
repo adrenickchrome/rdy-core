@@ -3,7 +3,7 @@
 //! on an unowned view, the closed-view rules, the conflict reads, and undo and close (undo1).
 use crate::error::*;
 use crate::read_state::ReadState;
-use crate::write::writable_view;
+use crate::write::{not_humans_view, writable_view};
 use crate::{Delta, Rdy, Scope, Session};
 use rdy_model::{BlockId, Hash, Op};
 use rdy_schema::{Issue, Severity};
@@ -289,6 +289,7 @@ impl Rdy {
     ) -> Result<ViewHeadInfo, RdyError> {
         writable_view(name)?;
         no_create(s)?;
+        not_humans_view(name, s)?;
         let st = self.read();
         if st.has_view(name) {
             return Err(StoreError::ViewExists(name.to_string()).into());
@@ -321,6 +322,7 @@ impl Rdy {
     ) -> Result<ViewHeadInfo, RdyError> {
         writable_view(name)?;
         no_create(s)?;
+        not_humans_view(name, s)?;
         let st = self.read();
         if !st.has_view(from) {
             return Err(no_view(from));

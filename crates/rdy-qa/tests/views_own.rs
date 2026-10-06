@@ -1,5 +1,7 @@
 //! own1: non-human sessions include, exclude, undo and close only in views they own; a human
 //! does all of these anywhere; `own` and `close --stale` are the human's.
+use rdy_engine::engine::{Engine, Local};
+use rdy_engine::view_api::{ViewRequest, run_view};
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
 use rdy_qa::invariants::check;
@@ -259,6 +261,17 @@ fn own1_work_is_the_humans_view() {
         "the fix names the agent's own view: {e}"
     );
     assert!(r.read().view_head("work").is_none(), "nothing was created");
+    // Nor can an agent create `work` outright, or fork another view into it.
+    let a = as_agent("agent:a", "r1");
+    let e = r.view_create(&a, "work", None, false).unwrap_err();
+    assert_eq!(e.code, E_VIEW_OWNER, "{e}");
+    assert!(e.message.contains("the human's default view"), "{e}");
+    assert!(e.fix.contains("r1"), "{e}");
+    r.view_create(&a, "r1", None, false).unwrap();
+    let e = r.view_fork(&a, "r1", "work").unwrap_err();
+    assert_eq!(e.code, E_VIEW_OWNER, "{e}");
+    assert!(e.message.contains("the human's default view"), "{e}");
+    assert!(r.read().view_head("work").is_none(), "nothing was created");
     // An agent whose run is literally `work` gets the loop-breaking fix, not "write to work".
     let e = write_as(&mut r, &as_agent("agent:w", "work"), "work", new_doc("w2")).unwrap_err();
     assert_eq!(e.code, E_VIEW_OWNER, "{e}");
@@ -301,4 +314,22 @@ fn own1_work_is_the_humans_view() {
         "an agent's commit does not claim an unowned work: {e}"
     );
     write(&mut r, "work", new_doc("w6")).unwrap();
+    // The one-call MCP path (`run_view`) refuses an agent's create or fork of `work` too.
+    let (_d2, r2) = project();
+    let e = Local::new(r2);
+    for v in [
+        json!({"op": "create", "name": "work"}),
+        json!({"op": "fork", "from": "r1", "name": "work"}),
+    ] {
+        if v["op"] == "fork" {
+            run_view(&e, &a, "r1", req(json!({"op": "create", "name": "r1"}))).unwrap();
+        }
+        let err = run_view(&e, &a, "r1", req(v)).unwrap_err();
+        assert_eq!(err.code, E_VIEW_OWNER, "{err}");
+        assert!(e.read().view_head("work").is_none(), "nothing was created");
+    }
+}
+
+fn req(v: serde_json::Value) -> ViewRequest {
+    serde_json::from_value(v).unwrap()
 }

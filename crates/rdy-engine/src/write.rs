@@ -1624,13 +1624,7 @@ pub(crate) fn check_view_access(
     if s.kind != SessionKind::Agent {
         return Ok(());
     }
-    if view == "work" {
-        return Err(RdyError::new(
-            E_VIEW_OWNER,
-            "view \"work\" is the human's default view",
-            own_view_fix(view, s),
-        ));
-    }
+    not_humans_view(view, s)?;
     let Some(h) = st.view_head(view) else {
         return Ok(());
     };
@@ -1666,6 +1660,18 @@ pub(crate) fn check_view_access(
             },
         )),
     }
+}
+
+/// An agent session never acts on, creates or forks into the human's `work` view.
+pub(crate) fn not_humans_view(view: &str, s: &Session) -> Result<(), RdyError> {
+    if s.kind == SessionKind::Agent && view == "work" {
+        return Err(RdyError::new(
+            E_VIEW_OWNER,
+            "view \"work\" is the human's default view",
+            own_view_fix(view, s),
+        ));
+    }
+    Ok(())
 }
 
 /// The `E_VIEW_OWNER` fix. When the refused view is the session's own default view, sending the
