@@ -150,7 +150,13 @@ fn fsck2_a_landing_with_every_new_field_set_checks_clean() {
         }),
         approved_version: Some(rec.proposal),
         rebased_from: vec![l],
-        evidence: None,
+        // fsck3: a relayed landing names its evidence kind
+        evidence: Some(ApprovalEvidence {
+            kind: EvidenceKind::Text,
+            options: vec![],
+            choice: None,
+            card_hash: None,
+        }),
     };
     let lid = s
         .write(vec![(
