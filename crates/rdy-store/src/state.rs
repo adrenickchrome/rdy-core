@@ -218,8 +218,14 @@ impl StoreReader {
 }
 
 impl Store {
+    /// Commits `change` into view `name`, checked against what the view reads: its state, or
+    /// canon's for an empty unpinned view (the floating read rule), so the check agrees with the
+    /// float catch-up that moves such a view onto canon in the same batch.
     pub fn commit_to_view(&mut self, name: &str, change: Change) -> Result<Hash, StoreError> {
-        let state = self.view_state(name)?;
+        let state = match self.view_head(name)? {
+            Some(h) if !h.pinned && h.len == 0 => self.canon_state()?,
+            _ => self.view_state(name)?,
+        };
         self.commit_to_view_at(name, change, &state)
     }
 
@@ -239,7 +245,10 @@ impl Store {
 
     /// `commit_to_view_at` with the view's present state read through `current`: the version of
     /// a block id in the view now, or None if the view has no such block. The same contract:
-    /// `current` MUST answer as `view_state(name)` would.
+    /// `current` MUST answer as the view reads, which is `view_state(name)` except for an empty
+    /// unpinned view, which reads as canon (the floating read rule): there `current` MUST answer
+    /// as `canon_state()`. When the float catch-up fires, the store enforces this on the blocks
+    /// the change writes (see `commit_to_view_resolving`).
     pub fn commit_to_view_with(
         &mut self,
         name: &str,
@@ -257,7 +266,11 @@ impl Store {
     /// - `claim` is the committer's owner: it owns a view the commit creates, and an `Own` op
     ///   before the `Commit` claims an existing unowned view;
     /// - the first commit into an empty unpinned view (which reads as canon) is preceded by a
-    ///   `Rebase` onto canon's head when its base is behind it (the float catch-up).
+    ///   `Rebase` onto canon's head when its base is behind it (the float catch-up). The ops were
+    ///   checked against `current`, so `current` must answer as canon there: for every block the
+    ///   change writes, a `current` that differs from canon's version is refused (`StaleBase`
+    ///   naming the op's base and canon's version, or `AlreadyExists` for a create), since the
+    ///   write was based on a state the view no longer reads.
     pub fn commit_to_view_resolving(
         &mut self,
         name: &str,
@@ -270,6 +283,29 @@ impl Store {
         let head = self.view_head(name)?;
         if head.as_ref().is_some_and(|h| h.closed) {
             return Err(StoreError::Decode(format!("view {name:?} is closed")));
+        }
+        // the float catch-up fires for an empty unpinned view behind canon; the view then reads
+        // as canon, so the ops must have been checked against canon on the blocks they write
+        let canon = self.canon_head()?;
+        let catch_up = head
+            .as_ref()
+            .is_some_and(|h| !h.pinned && h.len == 0 && canon.is_some() && canon != h.base);
+        if catch_up {
+            let canon_state = self.state_of(canon)?;
+            for op in &change.ops {
+                let id = op.block_id();
+                let actual = canon_state.blocks.get(id).copied();
+                if current(id) != actual {
+                    return Err(match op.base() {
+                        Some(expected) => StoreError::StaleBase {
+                            id: id.clone(),
+                            expected,
+                            actual,
+                        },
+                        None => StoreError::AlreadyExists(id.clone()),
+                    });
+                }
+            }
         }
         // 2. the ops. apply_op only reads and writes the ids the ops name, so seed a small state
         // with those; an op on a conflicted block, first in this change to touch it, checks its
@@ -333,7 +369,7 @@ impl Store {
         let (mut prev, mut base, len0, mut owner, pinned) = match head {
             Some(head) => (head.head, head.base, head.len, head.owner, head.pinned),
             None => {
-                let base = self.canon_head()?;
+                let base = canon;
                 let create = encode(&view_op(
                     None,
                     ViewOpKind::Create {
@@ -347,24 +383,19 @@ impl Store {
                 (id, base, 0, claim.clone(), false)
             }
         };
-        if !pinned && len0 == 0 {
-            let canon = self.canon_head()?;
-            if let Some(landing) = canon
-                && canon != base
-            {
-                let rebase = encode(&view_op(
-                    Some(prev),
-                    ViewOpKind::Rebase {
-                        landing,
-                        dropped: vec![],
-                        remaining: vec![],
-                        conflicts: vec![],
-                    },
-                ));
-                prev = Hash::of(&rebase);
-                base = canon;
-                items.push((kinds::VIEW_OP, rebase));
-            }
+        if catch_up && let Some(landing) = canon {
+            let rebase = encode(&view_op(
+                Some(prev),
+                ViewOpKind::Rebase {
+                    landing,
+                    dropped: vec![],
+                    remaining: vec![],
+                    conflicts: vec![],
+                },
+            ));
+            prev = Hash::of(&rebase);
+            base = canon;
+            items.push((kinds::VIEW_OP, rebase));
         }
         if owner.is_none()
             && let Some(o) = claim

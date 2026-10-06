@@ -423,3 +423,131 @@ fn res1_merge_on_blocks_matches_the_full_merge_on_the_named_blocks() {
     );
     assert_eq!(part2.order, full.order, "the order is the full order");
 }
+
+/// View a lands X (→ L1, a empty on L1, unpinned); view b updates X and creates Z (→ L2).
+/// Returns (L1, L2, X's version at L1, X's version at L2).
+fn emptied_behind_canon() -> (tempfile::TempDir, Store, Hash, Hash, Hash, Hash) {
+    let (d, mut s) = store();
+    let by = prov("agent:a");
+    let x1 = Op::Create {
+        block: block("c-00001", "x1"),
+    };
+    s.commit_to_view("a", change("a", vec![x1], &by)).unwrap();
+    let l1 = land(&mut s, "a");
+    let v1 = version(&s, "a", "c-00001");
+    let ops = vec![
+        Op::Update {
+            base: v1,
+            block: block("c-00001", "x2 by b"),
+        },
+        Op::Create {
+            block: block("c-00002", "z by b"),
+        },
+    ];
+    s.commit_to_view("b", change("b", ops, &prov("agent:b")))
+        .unwrap();
+    let l2 = land(&mut s, "b");
+    let v2 = *s.canon_state().unwrap().blocks.get(&id("c-00001")).unwrap();
+    let h = s.view_head("a").unwrap().unwrap();
+    assert_eq!((h.base, h.len, h.pinned), (Some(l1), 0, false));
+    (d, s, l1, l2, v1, v2)
+}
+
+/// Fix round 1: the catch-up moves the view onto canon, so a write checked against a `current`
+/// that disagrees with canon on the blocks it writes was based on a state the view no longer
+/// reads; it is refused and the view is left as it was.
+#[test]
+fn res1_a_write_checked_against_the_old_base_of_an_emptied_floating_view_is_stale() {
+    let (_d, mut s, l1, _l2, v1, v2) = emptied_behind_canon();
+    let by = prov("agent:a");
+    let old = s.state_of(Some(l1)).unwrap();
+    let current = |b: &BlockId| old.blocks.get(b).copied();
+    let upd = Op::Update {
+        base: v1,
+        block: block("c-00001", "x3 by a"),
+    };
+    let e = s
+        .commit_to_view_resolving("a", change("a", vec![upd], &by), &current, &[], None)
+        .unwrap_err();
+    match e {
+        StoreError::StaleBase {
+            id: i,
+            expected,
+            actual,
+        } => {
+            assert_eq!((i, expected, actual), (id("c-00001"), v1, Some(v2)));
+        }
+        e => panic!("expected StaleBase, got {e}"),
+    }
+    let mk = Op::Create {
+        block: block("c-00002", "z by a"),
+    };
+    let e = s
+        .commit_to_view_resolving("a", change("a", vec![mk], &by), &current, &[], None)
+        .unwrap_err();
+    assert!(
+        matches!(e, StoreError::AlreadyExists(ref i) if *i == id("c-00002")),
+        "{e}"
+    );
+    let h = s.view_head("a").unwrap().unwrap();
+    assert_eq!(
+        (h.base, h.len),
+        (Some(l1), 0),
+        "a refused write moves nothing"
+    );
+    // a block canon and the old base agree on passes: the check is per written block
+    let ok = Op::Create {
+        block: block("c-00003", "y"),
+    };
+    s.commit_to_view_resolving("a", change("a", vec![ok], &by), &current, &[], None)
+        .unwrap();
+    assert!(s.view_merge("a").unwrap().conflicts.is_empty());
+}
+
+/// Fix round 1: `commit_to_view` reads an empty unpinned view as canon (the floating read rule),
+/// so it agrees with its own catch-up: a canon base is accepted and reads clean, the old base is
+/// stale, and an id canon holds already exists.
+#[test]
+fn res1_commit_to_view_reads_an_emptied_floating_view_as_canon() {
+    let (_d, mut s, _l1, l2, v1, v2) = emptied_behind_canon();
+    let by = prov("agent:a");
+    let stale = Op::Update {
+        base: v1,
+        block: block("c-00001", "x3 by a"),
+    };
+    let e = s
+        .commit_to_view("a", change("a", vec![stale], &by))
+        .unwrap_err();
+    assert!(
+        matches!(e, StoreError::StaleBase { expected, actual: Some(a), .. } if expected == v1 && a == v2),
+        "{e}"
+    );
+    let dup = Op::Create {
+        block: block("c-00002", "z by a"),
+    };
+    let e = s
+        .commit_to_view("a", change("a", vec![dup], &by))
+        .unwrap_err();
+    assert!(matches!(e, StoreError::AlreadyExists(_)), "{e}");
+    let upd = Op::Update {
+        base: v2,
+        block: block("c-00001", "x3 by a"),
+    };
+    s.commit_to_view("a", change("a", vec![upd], &by)).unwrap();
+    let h = s.view_head("a").unwrap().unwrap();
+    assert_eq!((h.base, h.len), (Some(l2), 1));
+    let m = s.view_merge("a").unwrap();
+    assert!(m.conflicts.is_empty(), "{m:?}");
+    assert_eq!(
+        s.get_block(m.state.blocks.get(&id("c-00001")).unwrap())
+            .unwrap()
+            .body,
+        "x3 by a"
+    );
+    assert!(
+        m.state.blocks.contains_key(&id("c-00002")),
+        "the view carries canon's Z"
+    );
+    let p = s.propose("a", "t", prov("human:h")).unwrap();
+    s.land(&p, prov("human:h")).unwrap();
+}
