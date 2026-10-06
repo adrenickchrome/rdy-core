@@ -49,7 +49,12 @@ block_types:
       name: { kind: str, required: true }
       steps: { kind: list, required: true }
   example:     { prefix: e,  traits: [informative], body: required }
-  note:        { prefix: n,  traits: [informative], body: required }
+  note:
+    prefix: n
+    traits: [informative]
+    body: required
+    fields:
+      planned: { kind: bool }
   rationale:   { prefix: ra, traits: [informative], body: required }
   table:
     prefix: tb

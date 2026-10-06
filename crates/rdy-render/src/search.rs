@@ -195,6 +195,10 @@ pub fn collect(index: &mut Index, page: &PageContext, m: &Materialized, site: &S
     else {
         return;
     };
+    // a doc left out of navigation is left out of search too
+    if !site.in_nav(&id) {
+        return;
+    }
     let mut add = |entry: Entry| index.entries.push((rank, entry));
     let entry = |kind, anchor: Option<String>, title: String, text: String| Entry {
         kind,

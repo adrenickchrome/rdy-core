@@ -362,3 +362,141 @@ fn nav1_previous_and_next_stack_below_900px() {
         );
     }
 }
+
+/// FW-B15: a doc type with `nav: false` is rendered (the Why? trail and permalinks link into it)
+/// but left out of the sidebar, its folder's index page, the home page's contents cards, the
+/// previous/next pager and the search index.
+#[test]
+fn rec1_a_doc_type_with_nav_false_is_rendered_but_left_out_of_nav_folder_index_home_pager_and_search()
+ {
+    let (dir, r) = tiny();
+    // the store is locked while a handle is open
+    drop(r);
+    let pack = "name: p\nversion: '1'\nextends: rdy-standard\ndoc_types:\n  record: { nav: false, skeleton: [] }\n";
+    std::fs::write(dir.path().join(".rdy/packs/p.yaml"), pack).unwrap();
+    std::fs::write(
+        dir.path().join(".rdy/config.yaml"),
+        "pack: p\nname: Records\n",
+    )
+    .unwrap();
+    let mut r = rdy_engine::Rdy::open(dir.path()).unwrap();
+    let doc = |id: &str, parent: Option<&str>, name: &str, title: &str, ty: &str| {
+        let mut d = serde_json::json!({"op": "create", "type": "doc", "id": id,
+            "fields": {"name": name, "title": title, "doc_type": ty}});
+        if let Some(p) = parent {
+            d["parent"] = p.into();
+        }
+        d
+    };
+    let sec = |parent: &str, title: &str| serde_json::json!({"op": "create", "type": "section", "parent": parent, "fields": {"title": title}});
+    let prose = |parent: &str, body: &str| serde_json::json!({"op": "create", "type": "prose", "parent": parent, "body": body});
+    let res = write(&mut r, "work", serde_json::json!([
+        {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "area", "title": "Area"}},
+        doc("$a", Some("$f"), "alpha", "Alpha Page", "overview"),
+        {"op": "create", "type": "section", "id": "$as", "parent": "$a", "fields": {"title": "Alpha Part"}},
+        doc("$rec", Some("$f"), "rec-in", "Hidden Record", "record"),
+        {"op": "create", "type": "section", "id": "$rs", "parent": "$rec", "fields": {"title": "Zebra Facts"}},
+        prose("$rs", "Zebracontent lives here."),
+        doc("$b", Some("$f"), "beta", "Beta Page", "overview"),
+        sec("$b", "Beta Part"),
+        doc("$top", None, "rec-top", "Top Record", "record"),
+        sec("$top", "Top Facts"),
+        doc("$vis", None, "visible", "Visible Top", "overview"),
+        sec("$vis", "Visible Part")
+    ]))
+    .unwrap();
+    let rec = res.created["$rec"].clone();
+    write(
+        &mut r,
+        "work",
+        serde_json::json!([prose(
+            res.created["$as"].as_str(),
+            &format!("See {{{{{rec}}}}} for the record.")
+        )]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
+    let read = |p: &str| std::fs::read_to_string(out.path().join(p)).unwrap();
+
+    // rendered: both records have their pages, and a link into one leads there
+    assert!(read("area/rec-in.html").contains("Zebracontent lives here."));
+    assert!(read("rec-top.html").contains("Top Facts"));
+    let alpha = read("area/alpha.html");
+    assert!(
+        alpha.contains(">Hidden Record</a> for the record"),
+        "a reference to a record still links\n{alpha}"
+    );
+    assert!(
+        alpha.contains("rec-in.html\" title=\"Hidden Record\""),
+        "{alpha}"
+    );
+
+    // the sidebar, from every page
+    for page in [
+        "index.html",
+        "area/alpha.html",
+        "area/rec-in.html",
+        "visible.html",
+    ] {
+        let h = read(page);
+        let nav = &h[h.find("<nav aria-label=\"Pages\">").unwrap()..h.find("</aside>").unwrap()];
+        assert!(
+            !nav.contains("Hidden Record") && !nav.contains("Top Record"),
+            "{page}: {nav}"
+        );
+        assert!(nav.contains(">Visible Top</a>"), "{page}: {nav}");
+    }
+    // the folder's index page
+    let idx = read("area/index.html");
+    assert!(
+        idx.contains(">Alpha Page</a>") && idx.contains(">Beta Page</a>"),
+        "{idx}"
+    );
+    assert!(
+        !idx.contains("Hidden Record") && !idx.contains("rec-in.html"),
+        "{idx}"
+    );
+    // the home page's contents cards
+    let home = read("index.html");
+    let cards = &home[home.find("<div class=\"cards\">").unwrap()..];
+    let cards = &cards[..cards.find("</section>").unwrap()];
+    assert!(
+        cards.contains("Area") && cards.contains("Visible Top"),
+        "{cards}"
+    );
+    assert!(
+        !cards.contains("Top Record") && !cards.contains("rec-top.html"),
+        "{cards}"
+    );
+    // the pager skips the record: Alpha's next is Beta, Beta's previous is Alpha
+    let alpha_next = &alpha[alpha.find("class=\"pager-next\"").unwrap()..];
+    assert!(
+        alpha_next[..alpha_next.find("</a>").unwrap()].contains("Beta Page"),
+        "{alpha}"
+    );
+    let beta = read("area/beta.html");
+    let beta_prev = &beta[beta.find("class=\"pager-prev\"").unwrap()..];
+    assert!(
+        beta_prev[..beta_prev.find("</a>").unwrap()].contains("Alpha Page"),
+        "{beta}"
+    );
+    // a record's own page is out of the reading order
+    let recp = read("area/rec-in.html");
+    assert!(
+        !recp.contains("class=\"pager-prev\"") && !recp.contains("class=\"pager-next\""),
+        "{recp}"
+    );
+    // the search index
+    // (Alpha's own text says "Hidden Record": a reference reads as its target's title)
+    let search = read("search-index.json");
+    for gone in ["Top Record", "Zebra", "rec-in.html", "rec-top.html"] {
+        assert!(!search.contains(gone), "{gone}: {search}");
+    }
+    assert!(!search.contains("\"title\":\"Hidden Record\""), "{search}");
+    assert!(
+        search.contains("Alpha Page") && search.contains("Beta Part"),
+        "{search}"
+    );
+}

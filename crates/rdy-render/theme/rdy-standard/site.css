@@ -134,6 +134,12 @@ dfn { font-style: normal; font-weight: 600; }
 table { border-collapse: collapse; width: 100%; font-size: 0.88rem; line-height: 1.5; }
 th { text-align: left; font-weight: 600; font-size: 0.78rem; letter-spacing: 0.03em; color: var(--ink-soft); padding: 0.6rem 0.9rem; background: var(--surface); border-bottom: 1px solid var(--line); }
 td { vertical-align: top; padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--line); }
+/* a word never breaks inside a cell: the page's `overflow-wrap: anywhere` would shrink each cell's
+   minimum width to a character and starve the narrow columns; long content scrolls in .table-wrap */
+th, td { overflow-wrap: normal; word-break: normal; hyphens: manual; }
+th { white-space: nowrap; }
+.table-wrap code { overflow-wrap: normal; word-break: normal; }
+td code, th code { white-space: nowrap; }
 tr:last-child td { border-bottom: 0; }
 figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
 .glossary dt { font-weight: 600; margin-top: 1rem; }

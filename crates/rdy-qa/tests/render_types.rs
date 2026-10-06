@@ -292,3 +292,38 @@ fn type1_titles_that_reference_each_other_read_as_labels_a_bounded_number_of_tim
     assert!(h.contains("Alpha before Beta after Alpha before …"), "{h}");
     assert!(!h.contains("{{"), "{h}");
 }
+
+/// FW-B16: a note whose `planned` field is true carries a quiet "Planned" marker in place of the
+/// "Note" eyebrow; a plain note keeps "Note".
+#[test]
+fn plan1_a_planned_note_shows_the_planned_marker_and_a_plain_note_does_not() {
+    let (_d, mut r) = tiny();
+    write(&mut r, "work", serde_json::json!([
+        {"op":"create","type":"doc","id":"$d","fields":{"name":"plans","title":"Plans","doc_type":"overview"}},
+        {"op":"create","type":"section","id":"$s","parent":"$d","fields":{"title":"S"}},
+        {"op":"create","type":"note","parent":"$s","fields":{"planned":true},"body":"Coming later."},
+        {"op":"create","type":"note","parent":"$s","fields":{"planned":false},"body":"Explicitly not planned."},
+        {"op":"create","type":"note","parent":"$s","body":"Plain words."}
+    ]))
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let out = tempfile::tempdir().unwrap();
+    rdy_render::render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
+    let h = std::fs::read_to_string(out.path().join("plans.html")).unwrap();
+    assert!(
+        h.contains(
+            "<aside class=\"callout callout-note\"><span class=\"marker\">Planned</span><div><p>Coming later.</p></div></aside>"
+        ),
+        "{h}"
+    );
+    for plain in ["Explicitly not planned.", "Plain words."] {
+        assert!(
+            h.contains(&format!(
+                "<aside class=\"callout callout-note\"><span class=\"marker\">Note</span><div><p>{plain}</p></div></aside>"
+            )),
+            "{h}"
+        );
+    }
+    assert_eq!(h.matches(">Planned</span>").count(), 1, "{h}");
+    assert_eq!(h.matches(">Note</span>").count(), 2, "{h}");
+}

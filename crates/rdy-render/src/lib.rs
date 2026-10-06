@@ -390,7 +390,7 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
     let pack = rdy.pack().clone();
     let g = rdy.graph(scope)?;
     let env = env()?;
-    let site = Site::new(&m);
+    let site = Site::new(&m, &pack);
     let sh = page::Shared {
         site: &site,
         m: &m,

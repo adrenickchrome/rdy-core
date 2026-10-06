@@ -260,3 +260,26 @@ fn default_doc_type_must_exist_and_is_inherited() {
         .unwrap();
     assert!(matches!(set.resolve(&bad), Err(SchemaError::Invalid(_))));
 }
+
+/// FW-B15: a doc type may set `nav: false`; it defaults to true, and only a boolean is a value.
+#[test]
+fn rec1_a_doc_type_may_set_nav_false_and_it_defaults_to_true() {
+    let mut set = PackSet::with_builtin();
+    let child = set
+        .add_yaml(
+            "name: kid\nversion: \"1\"\nextends: rdy-standard\ndoc_types:\n  record: { nav: false, skeleton: [{ title: Facts, required: true }] }\n  memo: { skeleton: [] }\n",
+        )
+        .unwrap();
+    let pack = set.resolve(&child).unwrap();
+    assert!(!pack.doc_types["record"].nav);
+    assert!(pack.doc_types["memo"].nav, "the default is true");
+    assert!(
+        pack.doc_types["glossary"].nav,
+        "an inherited doc type keeps the default"
+    );
+    assert!(
+        PackSet::with_builtin()
+            .add_yaml("name: a\nversion: \"1\"\ndoc_types:\n  d: { nav: maybe }\n")
+            .is_err()
+    );
+}

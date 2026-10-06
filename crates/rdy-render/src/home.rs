@@ -46,7 +46,7 @@ pub fn build(
     let mut cards: Vec<Card> = m
         .children(None)
         .into_iter()
-        .filter(|b| tree::is_tree_type(&b.block_type))
+        .filter(|b| tree::is_tree_type(&b.block_type) && site.in_nav(&b.id))
         .filter_map(|b| {
             let page = site.page(&b.id)?;
             let summary = if b.block_type == tree::FOLDER {

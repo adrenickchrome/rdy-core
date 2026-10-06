@@ -28,7 +28,8 @@ pub struct Link {
     pub label: String,
     /// The hover text (`Doc › Section`, `Doc`, `Glossary`, `Open questions`); empty for none.
     pub title: String,
-    /// The target's key, which a reference the author typed as a key shows (FW-F2a).
+    /// The target's key, which a reference the author typed as a key shows (FW-F2a). None for a
+    /// doc, a folder or a section, whose title shows instead (FW-F2b; see `site::typed_key`).
     pub key: Option<String>,
 }
 
@@ -322,11 +323,21 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
                 body()
             )
         }
-        "example" | "note" => format!(
-            "<aside class=\"callout callout-{t}\">{}<div>{}</div></aside>",
-            marker(ctx, t, &display_name(t)),
-            body()
-        ),
+        "example" | "note" => {
+            // a note that is `planned` carries the quiet "Planned" marker, not its type's eyebrow
+            let planned =
+                t == "note" && matches!(b.fields.get("planned"), Some(FieldValue::Bool(true)));
+            let eyebrow = if planned {
+                "Planned".into()
+            } else {
+                display_name(t)
+            };
+            format!(
+                "<aside class=\"callout callout-{t}\">{}<div>{}</div></aside>",
+                marker(ctx, t, &eyebrow),
+                body()
+            )
+        }
         // supporting text: off the site (FW-D10)
         "rationale" => String::new(),
         "term" => format!(

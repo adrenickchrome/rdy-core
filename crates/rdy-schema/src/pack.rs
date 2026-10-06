@@ -75,6 +75,15 @@ pub struct SkeletonSection {
 pub struct DocTypeDef {
     #[serde(default)]
     pub skeleton: Vec<SkeletonSection>,
+    /// Whether docs of this type are listed in the site's navigation (the sidebar, folder index
+    /// pages, the home page's contents, the previous/next pager and the search index). A doc of
+    /// a type with `nav: false` still has its page, which links reach.
+    #[serde(default = "nav_default")]
+    pub nav: bool,
+}
+
+fn nav_default() -> bool {
+    true
 }
 
 /// A named part of the documentation tree, declared by path globs.

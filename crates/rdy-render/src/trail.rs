@@ -354,7 +354,7 @@ fn link_in<'a>(
             href: url.href_from(from),
             label: site.summary(b),
             title: String::new(),
-            key: b.field_str("key").map(String::from),
+            key: crate::site::typed_key(b).map(String::from),
         })
     }
 }

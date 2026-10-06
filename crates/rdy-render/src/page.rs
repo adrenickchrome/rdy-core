@@ -219,7 +219,7 @@ impl Shared<'_> {
             label: self.site.label(b),
             // the hover describes where the link leads: for a decision, the block it governs
             title: self.hover(self.site.destination(id).unwrap_or(b), &url),
-            key: b.field_str("key").map(String::from),
+            key: crate::site::typed_key(b).map(String::from),
         })
     }
 
@@ -384,7 +384,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
             let children =
                 sh.m.children(Some(id))
                     .into_iter()
-                    .filter(|c| tree::is_tree_type(&c.block_type))
+                    .filter(|c| tree::is_tree_type(&c.block_type) && site.in_nav(&c.id))
                     .filter_map(|c| {
                         Some(ChildRow {
                             href: rel(&page_url, &site.page(&c.id)?),
