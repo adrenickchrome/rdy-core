@@ -500,3 +500,62 @@ connection reads one line at a time; an MCP session's tool calls are stamped at 
 queue behind the one writer thread, and the flush is the cost either way. On the Mac the flush is
 the floor (`F_FULLFSYNC`, "Write p99: missed" above); on the Linux bench the daemon's write is
 within "< 5 ms p99 on Linux NVMe" as above.
+
+## M2b3: the edit loop (2026-10-06)
+
+`qa-perf` gains three ops, each at 10k (typical tier) and 50k (`_50k`), run in a fresh view `eb`
+where the fixture's section is `stable`, so every write there is checked against the briefing
+registry. `brief_doc` is `ReadState::brief` over the fixture's doc by path plus `register`, timed on
+the read pool with the view's graph carried (an untimed briefed write creates the new state first).
+`write_briefed` is one claim create that cites a current briefing: the check runs and hits.
+`write_consequences` is a briefed `update` of a claim that another claim references, then
+`ReadState::consequences` over the change, asserting the referrer comes back as one `suspect`
+entry (the assert is outside the timer); the briefing of the claim is made untimed. `write_single` is
+shown from the same runs as the like-for-like write without a briefing.
+
+Medians and p95 in ms. Linux: Ubuntu 24.04.5 LTS / AMD Ryzen 7 9800X3D 8-Core Processor / ext4,
+isolated bench, release build, two `cargo qa --only perf --deep` runs back to back (the bench idle
+at the start of each, `PERF.lock` held by the helper); every new op's median differs by at most 4.3% between the
+runs (`brief_doc` 4.3%, the rest under 1%), so both are recorded. The Mac was not measured (the
+perf rows come from the bench only).
+
+| op | 10k run 1 median / p95 | 10k run 2 median / p95 | 50k run 1 median / p95 | 50k run 2 median / p95 |
+|---|---|---|---|---|
+| `write_single` (reference, same runs) | 0.532 / 0.578 | 0.528 / 0.566 | 0.548 / 0.576 | 0.549 / 0.571 |
+| `write_briefed` | 0.574 / 0.593 | 0.576 / 0.597 | 0.642 / 0.678 | 0.644 / 0.676 |
+| `write_consequences` (write + consequences) | 0.568 / 0.587 | 0.569 / 0.601 | 0.624 / 0.651 | 0.628 / 0.656 |
+| `brief_doc` | 0.201 / 0.228 | 0.209 / 0.229 | 0.227 / 0.284 | 0.226 / 0.299 |
+
+Every row is far under "< 5 ms p99 on Linux NVMe" (writes) and "< 5 ms p99" (`brief_doc`) at both
+sizes, so none is a miss. The briefing check adds about 0.04 ms at 10k and 0.09 ms at 50k to a
+write (`write_briefed` against `write_single`): the check is one registry read and one version
+lookup per recorded block on the writer, the registry read being a mutex-guarded hash-map lookup. A write plus its consequences costs no more than the
+briefed write (the tier records p95, not p99, over 20 to 30 runs), because the consequences run on the read pool over the carried graph (Tasks 2 and
+4), a graph walk over the changed block's incoming edges and not a rebuild; a cold graph build is
+about 30 ms at 10k, and the carry is what keeps it off this path. `brief_doc` over a 97-claim doc
+is about 0.2 ms at both sizes: its cost follows the doc, not the project.
+
+The daemon rows, before (`main`'s baseline in `qa-baseline.json`, the M2b run) and after (this
+branch, both runs):
+
+| op | before median / p95 | after run 1 median / p95 | after run 2 median / p95 |
+|---|---|---|---|
+| `daemon_write_single` | 2.651 / 2.729 | 0.671 / 0.830 | 0.664 / 0.688 |
+| `daemon_write_single_50k` | 2.741 / 2.893 | 0.672 / 0.793 | 0.687 / 0.799 |
+| `daemon_cold_start` | 53.982 / 54.480 | 51.860 / 52.013 | 51.600 / 51.892 |
+| `daemon_cold_start_50k` | 193.128 / 193.380 | 202.307 / 202.529 | 201.146 / 205.422 |
+
+The bench's write floor moved between the M2b session and this one, and the move is not this
+branch's: `write_single`, which this branch did not touch, reads 0.53 ms here where the baseline has
+2.63 ms, and `new_doc_single` 1.68 ms where the baseline has 3.66 ms. So the `daemon_write_single`
+drop (about 2.65 to 0.67 ms) is the disk, not the daemon. The `write_single` and other baseline rows
+this branch did not change are left as recorded; the next bench run compares faster than them and
+passes.
+
+The cold start lost its fixed client poll (Task 6: `connect_backoff`, 1 ms doubling to 50 ms,
+replaces the 100 ms `CONNECT_RETRY` between connects while a spawned daemon comes up), but this
+tier cannot show it: `daemon_cold_start` starts the daemon in this process and connects once the
+socket is there, so it never sleeps in that loop, and the row moves by the noise (54.0 to 51.7 ms
+at 10k, -4%; 193.1 to 201.7 ms at 50k, +4%, inside the 8 to 12 ms cold-open drift between bench
+sessions noted under M2b). The saving is on the paths that spawn a daemon and wait for its socket
+(the CLI and the MCP proxy), which no `qa-perf` op times.
