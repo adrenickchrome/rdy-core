@@ -271,7 +271,9 @@ impl Store {
     /// `commit_to_view_with`, aware of the view's recorded conflicts and of who commits (res1):
     /// - an `Update` or `Delete` of a block with a conflict in `conflicts` may name the conflict's
     ///   base or any side's version as its base, and the change depends on every side, so it
-    ///   resolves the conflict; other ops check against `current` as ever;
+    ///   resolves the conflict; other ops check against `current` as ever. When the conflict's
+    ///   base or any side is a frozen decision the op is `Frozen`: resolving it would change or
+    ///   drop an accepted or rejected decision;
     /// - a closed view refuses the commit;
     /// - `claim` is the committer's owner: it owns a view the commit creates, and an `Own` op
     ///   before the `Commit` claims an existing unowned view;
@@ -345,8 +347,16 @@ impl Store {
                             actual: current(id),
                         });
                     }
-                    if decision::is_frozen(&self.get_block(base)?) {
-                        return Err(StoreError::Frozen(id.clone()));
+                    // the base is one of these: a frozen version anywhere in the conflict means
+                    // the write would change or drop an accepted or rejected decision
+                    let versions = c
+                        .base
+                        .iter()
+                        .chain(c.sides.iter().filter_map(|s| s.version.as_ref()));
+                    for v in versions {
+                        if decision::is_frozen(&self.get_block(v)?) {
+                            return Err(StoreError::Frozen(id.clone()));
+                        }
                     }
                     match op {
                         Op::Update { block, .. } => {

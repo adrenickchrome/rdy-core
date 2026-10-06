@@ -551,3 +551,73 @@ fn res1_commit_to_view_reads_an_emptied_floating_view_as_canon() {
     let p = s.propose("a", "t", prov("human:h")).unwrap();
     s.land(&p, prov("human:h")).unwrap();
 }
+
+/// Fix round 1: a conflict one of whose sides is a frozen decision cannot be resolved by a
+/// write, from its base or from any side: the write would rewrite (or delete) an accepted
+/// decision. Canon holds a proposed decision; a edits its statement, b accepts it; a includes b.
+#[test]
+fn res1_a_conflict_with_a_frozen_side_refuses_every_resolving_write() {
+    let (_d, mut s) = store();
+    let by = prov("agent:a");
+    let decision = |status: &str, statement: &str| {
+        let mut b = block("D-00001", "");
+        b.block_type = decision::DECISION.into();
+        b.fields
+            .insert("status".into(), FieldValue::Str(status.into()));
+        b.fields
+            .insert("statement".into(), FieldValue::Str(statement.into()));
+        b
+    };
+    let d0 = decision("proposed", "D");
+    s.commit_to_view("seed", change("seed", vec![Op::Create { block: d0 }], &by))
+        .unwrap();
+    land(&mut s, "seed");
+    let v0 = version(&s, "seed", "D-00001");
+    let upd = |b: Block| Op::Update { base: v0, block: b };
+    s.commit_to_view(
+        "a",
+        change("a", vec![upd(decision("proposed", "D by a"))], &by),
+    )
+    .unwrap();
+    let cb = s
+        .commit_to_view(
+            "b",
+            change("b", vec![upd(decision("accepted", "D"))], &prov("agent:b")),
+        )
+        .unwrap();
+    s.view_append("a", vec![ViewOpKind::Include { changes: vec![cb] }], &by)
+        .unwrap();
+    let m = s.view_merge("a").unwrap();
+    assert_eq!(m.conflicts.len(), 1, "{m:?}");
+    let current = |b: &BlockId| m.state.blocks.get(b).copied();
+    let mut bases = vec![v0];
+    bases.extend(m.conflicts[0].sides.iter().filter_map(|x| x.version));
+    for base in bases {
+        for op in [
+            Op::Update {
+                base,
+                block: decision("proposed", "rewritten"),
+            },
+            Op::Delete {
+                base,
+                id: id("D-00001"),
+            },
+        ] {
+            let e = s
+                .commit_to_view_resolving(
+                    "a",
+                    change("a", vec![op], &by),
+                    &current,
+                    &m.conflicts,
+                    None,
+                )
+                .unwrap_err();
+            assert!(matches!(e, StoreError::Frozen(_)), "base {base}: {e}");
+        }
+    }
+    assert_eq!(
+        s.view_merge("a").unwrap().conflicts.len(),
+        1,
+        "nothing written"
+    );
+}

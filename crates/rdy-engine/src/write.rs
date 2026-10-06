@@ -334,6 +334,26 @@ impl Resolver<'_> {
         }
     }
 
+    /// An edit's key against the view: `was` is what the view held before the op. An edit that
+    /// sets a key or ends with another key than `was` is checked, and a changed key is noted.
+    /// (For a conflicted block `was` is the conflict's base, while an edit from a side starts
+    /// from the side's block, whose key the view may not hold.)
+    fn check_rekey(
+        &mut self,
+        block: &Block,
+        was: Option<&Block>,
+        sets_key: bool,
+    ) -> Result<(), RdyError> {
+        let changed = keys::key_of(block) != was.and_then(keys::key_of);
+        if sets_key || changed {
+            self.check_key(block)?;
+        }
+        if changed {
+            self.note_key(&block.id, Some(block));
+        }
+        Ok(())
+    }
+
     /// Refuses `block`'s key when another block already holds it (ignoring case).
     fn check_key(&self, block: &Block) -> Result<(), RdyError> {
         let Some(new) = keys::key_of(block) else {
@@ -574,6 +594,7 @@ fn conflicted_for_edit<'b>(
 ) -> Result<(Hash, Cow<'b, Block>), RdyError> {
     let cid = c.id.short();
     let sides: Vec<Hash> = c.sides.iter().filter_map(|s| s.version).collect();
+    frozen_in_conflict(id, c, store)?;
     let Some(b) = parse_base(base)? else {
         let side_list = sides
             .iter()
@@ -612,6 +633,62 @@ fn conflicted_for_edit<'b>(
         Some(cur) => Ok((b, Cow::Borrowed(cur))),
         None => Ok((b, Cow::Owned(store.get_block(&b)?))),
     }
+}
+
+/// cres1: a conflict whose base or any side is a frozen decision cannot be resolved by an edit,
+/// from any version: the edit would change or drop an accepted or rejected decision. The way out
+/// is to drop the stale change(s) or to supersede the decision.
+fn frozen_in_conflict(
+    id: &BlockId,
+    c: &Conflict,
+    store: &rdy_store::Store,
+) -> Result<(), RdyError> {
+    let mut frozen = None;
+    if let Some(cb) = c.base
+        && decision::is_frozen(&store.get_block(&cb)?)
+    {
+        frozen = Some(format!("its base {}", cb.short()));
+    }
+    let mut stale = vec![];
+    for s in &c.sides {
+        let side_frozen = match s.version {
+            Some(v) => decision::is_frozen(&store.get_block(&v)?),
+            None => false,
+        };
+        match (side_frozen, s.change) {
+            (true, change) if frozen.is_none() => {
+                let landing = match change {
+                    Some(ch) => store.landing_of(&ch)?,
+                    None => None,
+                };
+                frozen = Some(match (change, landing) {
+                    (Some(ch), Some(l)) => format!("side {} landed in {}", ch.short(), l.short()),
+                    (Some(ch), None) => format!("side {}", ch.short()),
+                    (None, _) => "a side in canon".to_string(),
+                });
+            }
+            (false, Some(ch)) => stale.push(ch.to_string()),
+            _ => {}
+        }
+    }
+    let Some(which) = frozen else {
+        return Ok(());
+    };
+    let exclude = match stale.as_slice() {
+        [] => "exclude the stale change from the view (rdy view exclude)".to_string(),
+        [one] => format!("exclude the stale change {one} from the view (rdy view exclude)"),
+        many => format!(
+            "exclude the stale changes {} from the view (rdy view exclude)",
+            many.join(", ")
+        ),
+    };
+    Err(RdyError::new(
+        E_FROZEN,
+        format!(
+            "{id} is an accepted or rejected decision ({which}) and cannot change; this conflict cannot be resolved by an edit"
+        ),
+        format!("{exclude}, or write a new decision that supersedes or revokes {id}"),
+    ))
 }
 
 fn check_not_frozen(id: &BlockId, cur: &Block) -> Result<(), RdyError> {
@@ -749,7 +826,14 @@ fn check_depth(ov: &Overlay, block: &Block, below: usize) -> Result<(), RdyError
 }
 
 /// Checks a doc's or folder's name: valid, and unique among its siblings ignoring case.
-fn check_name(ov: &Overlay, block: &Block, op: usize, is_move: bool) -> Result<(), RdyError> {
+/// `no_fields` names the op when it takes no fields (a move, or a repin resolving a conflict from
+/// a side that carries another name), so the fix says to rename first.
+fn check_name(
+    ov: &Overlay,
+    block: &Block,
+    op: usize,
+    no_fields: Option<&str>,
+) -> Result<(), RdyError> {
     if !tree::is_tree_type(&block.block_type) {
         return Ok(());
     }
@@ -776,13 +860,12 @@ fn check_name(ov: &Overlay, block: &Block, op: usize, is_move: bool) -> Result<(
                     "{} would be named {name:?}, which {other} already uses here (names are unique ignoring case)",
                     block.id
                 ),
-                if is_move {
-                    format!("a move takes no fields: rename {} first with an update (e.g. to {fixed:?}), then move it", block.id)
-                } else {
-                    format!("choose another name, e.g. {fixed:?}")
+                match no_fields {
+                    Some(kind) => format!("a {kind} takes no fields: rename {} first with an update (e.g. to {fixed:?}), then {kind} it", block.id),
+                    None => format!("choose another name, e.g. {fixed:?}"),
                 },
             );
-            return Err(if is_move {
+            return Err(if no_fields.is_some() {
                 err
             } else {
                 err.with_corrected(serde_json::json!({"op": op, "fields": {"name": fixed}}))
@@ -969,7 +1052,7 @@ fn build_ops(
                         .insert("name".into(), FieldValue::Str(name.clone()));
                     names.insert(block.id.to_string(), name);
                 } else {
-                    check_name(&ov, &block, i, false)?;
+                    check_name(&ov, &block, i, None)?;
                 }
                 check_decided_at(session, &block, None)?;
                 check_depth(&ov, &block, 0)?;
@@ -1021,16 +1104,12 @@ fn build_ops(
                 }
                 check_decided_at(session, &block, Some(cur))?;
                 prior.push((false, cur.pins.clone()));
-                let renamed = block.field_str("name") != cur.field_str("name");
-                if renamed {
-                    check_name(&ov, &block, i, false)?;
+                // names and keys against what the view held, not the side an edit starts from
+                let was = ov.get(&id);
+                if block.field_str("name") != was.and_then(|w| w.field_str("name")) {
+                    check_name(&ov, &block, i, None)?;
                 }
-                if sets_key {
-                    res.check_key(&block)?;
-                }
-                if keys::key_of(&block) != keys::key_of(cur) {
-                    res.note_key(&id, Some(&block));
-                }
+                res.check_rekey(&block, was, sets_key)?;
                 touched.insert(id.clone());
                 ov.set(id, Some(block.clone()));
                 ops.push(Op::Update {
@@ -1085,7 +1164,8 @@ fn build_ops(
                 }
                 block.parent = parent.clone();
                 block.order = place(&ov, parent.as_ref(), after.as_ref(), before.as_ref())?;
-                check_name(&ov, &block, i, true)?;
+                check_name(&ov, &block, i, Some("move"))?;
+                res.check_rekey(&block, ov.get(&id), false)?;
                 if block.block_type == tree::FOLDER {
                     check_depth(&ov, &block, folders_below(&ov, &id))?;
                 } else {
@@ -1118,7 +1198,8 @@ fn build_ops(
                         "delete or move its children first",
                     ));
                 }
-                if keys::key_of(cur).is_some() {
+                // the key the view held (a conflicted block's base), not the side's
+                if ov.get(&id).and_then(keys::key_of).is_some() {
                     res.note_key(&id, None);
                 }
                 touched.insert(id.clone());
@@ -1280,6 +1361,12 @@ fn build_ops(
                         "a superseded or revoked suspect clears only when the citation changes, not by repinning; rdy_context lists the block's suspects",
                     ));
                 }
+                // a repin from a conflict's side carries the side's name and key
+                let was = ov.get(&id);
+                if block.field_str("name") != was.and_then(|w| w.field_str("name")) {
+                    check_name(&ov, &block, i, Some("repin"))?;
+                }
+                res.check_rekey(&block, was, false)?;
                 repinned.extend(wanted);
                 prior.push((true, block.pins.clone())); // pins set here; the second pass keeps them
                 touched.insert(id.clone());
