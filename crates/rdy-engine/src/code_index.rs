@@ -94,8 +94,9 @@ pub fn code_repos(project: &Path) -> Result<Vec<CodeRepo>, RdyError> {
     Ok(repos)
 }
 
-/// `git` reading the repository at `root` only: no fsmonitor, quoting, signatures or colour, and
-/// none of the caller's git environment. Callers append the subcommand.
+/// `git` reading the repository at `root` only: no fsmonitor, quoting, signatures or colour, none
+/// of the caller's git environment, and no lazy fetch of a partial clone's missing objects
+/// (`GIT_NO_LAZY_FETCH`, git >= 2.45). Callers append the subcommand.
 pub fn git_command(root: &Path) -> Command {
     let mut c = Command::new("git");
     c.arg("-C").arg(root).args([
@@ -111,6 +112,7 @@ pub fn git_command(root: &Path) -> Command {
     for k in GIT_ENV_REMOVED {
         c.env_remove(k);
     }
+    c.env("GIT_NO_LAZY_FETCH", "1");
     c.stdin(Stdio::null());
     c
 }
@@ -370,7 +372,8 @@ fn head_of(repo: &CodeRepo) -> Result<Option<String>, RdyError> {
     ))
 }
 
-/// The index of `head` (which HEAD named when it was read).
+/// The index of `head` (which HEAD named when it was read), read at that hash rather than at
+/// `HEAD`, so HEAD moving meanwhile cannot give an index labelled with another commit.
 fn build_at(repo: &CodeRepo, head: String) -> Result<CodeIndex, RdyError> {
     let mut c = git_command(&repo.root);
     c.args([
@@ -383,18 +386,19 @@ fn build_at(repo: &CodeRepo, head: String) -> Result<CodeIndex, RdyError> {
         "--no-color",
     ])
     .arg(format!("--format={LOG_FORMAT}"))
-    .args(["HEAD", "--"]);
+    .args([head.as_str(), "--"]);
     let log = run(c)?;
     if !log.status.success() {
         return Err(git_failed(
             repo,
             "log",
             &log,
-            "check the repository with git log",
+            "check the repository with git log; link a full clone: rdy does not fetch",
         ));
     }
     let mut c = git_command(&repo.root);
-    c.args(["ls-tree", "-r", "-z", "--name-only", "--full-tree", "HEAD"]);
+    c.args(["ls-tree", "-r", "-z", "--name-only", "--full-tree"])
+        .arg(&head);
     let tree = run(c)?;
     if !tree.status.success() {
         return Err(git_failed(
@@ -440,4 +444,69 @@ pub fn index_of(repo: &CodeRepo) -> Result<Arc<CodeIndex>, RdyError> {
     let idx = Arc::new(build_at(repo, head)?);
     lock(&CACHE).insert(repo.root.clone(), Arc::clone(&idx));
     Ok(idx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=qa",
+                "-c",
+                "user.email=qa",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn commit(dir: &Path, path: &str, message: &str) -> String {
+        std::fs::write(dir.join(path), "x\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "--no-verify", "-m", message]);
+        git(dir, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn cidx1_the_index_is_built_at_the_hash_it_is_labelled_with() {
+        // HEAD moving between reading the hash and running git log / ls-tree must not
+        // give an index labelled with one commit and built from another.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "--initial-branch=main"]);
+        let c1 = commit(dir, "a.rs", "feat: a\n\nImplements: c-AAAAA");
+        commit(dir, "b.rs", "feat: b\n\nImplements: c-BBBBB");
+        let repo = CodeRepo {
+            configured: dir.to_string_lossy().into_owned(),
+            root: std::fs::canonicalize(dir).unwrap(),
+        };
+        let idx = build_at(&repo, c1.clone()).unwrap();
+        assert_eq!(idx.head.as_deref(), Some(c1.as_str()));
+        assert_eq!(idx.commits, 1, "git log ran at HEAD, not at {c1}");
+        assert_eq!(
+            idx.files.keys().collect::<Vec<_>>(),
+            vec!["a.rs"],
+            "ls-tree ran at HEAD, not at {c1}"
+        );
+        assert!(!idx.cited.contains_key("c-BBBBB"));
+    }
 }

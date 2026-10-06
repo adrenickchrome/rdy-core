@@ -136,3 +136,82 @@ fn cidx1_a_linked_path_that_is_not_a_repository_top_is_e_config() {
     assert_eq!(e.code, "E_CONFIG");
     assert!(e.message.contains("top folder"), "{}", e.message);
 }
+
+/// Missing objects in the partial clone at `dir`, as `git rev-list --missing=print` lists them.
+fn missing_objects(dir: &std::path::Path) -> usize {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-list", "--objects", "--all", "--missing=print"])
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.starts_with('?'))
+        .count()
+}
+
+/// git's `(major, minor)` version, from `git --version`.
+fn git_version() -> (u32, u32) {
+    let out = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let v = text.split_whitespace().nth(2).unwrap_or("0.0");
+    let mut it = v.split('.').map(|n| n.parse().unwrap_or(0));
+    (it.next().unwrap_or(0), it.next().unwrap_or(0))
+}
+
+#[test]
+fn cidx1_a_partial_clone_is_read_without_fetching() {
+    if git_version() < (2, 45) {
+        // GIT_NO_LAZY_FETCH arrived in git 2.45; older gits ignore it and fetch.
+        eprintln!(
+            "skipped: git {:?} predates GIT_NO_LAZY_FETCH",
+            git_version()
+        );
+        return;
+    }
+    let g = GitRepo::new();
+    g.run(&["config", "uploadpack.allowFilter", "true"]);
+    g.write("src/old.rs", &lines(40, "old"));
+    g.commit("feat: old\n\nImplements: c-AAAAA");
+    g.mv("src/old.rs", "src/new.rs");
+    g.write("src/new.rs", &(lines(40, "old") + "one more\n"));
+    g.commit("refactor: move\n\nImplements: c-CCCCC");
+    let parent = tempfile::tempdir().unwrap();
+    let clone = parent.path().join("clone");
+    let out = std::process::Command::new("git")
+        .args(["clone", "-q", "--filter=blob:none"])
+        .arg(format!("file://{}", g.path().display()))
+        .arg(&clone)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let before = missing_objects(&clone);
+    assert!(before > 0, "the old blob is not in the blobless clone");
+    let r = CodeRepo {
+        configured: clone.to_string_lossy().into_owned(),
+        root: std::fs::canonicalize(&clone).unwrap(),
+    };
+    let e = build(&r).unwrap_err();
+    assert_eq!(e.code, "E_IO");
+    assert!(e.fix.contains("full clone"), "{}", e.fix);
+    assert_eq!(
+        missing_objects(&clone),
+        before,
+        "building the index fetched into the linked repository"
+    );
+}

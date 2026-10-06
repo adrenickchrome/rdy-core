@@ -232,3 +232,25 @@ fn cidx1_the_git_command_sheds_the_callers_git_environment() {
         "{args:?}"
     );
 }
+
+#[test]
+fn cidx1_the_git_command_never_fetches_from_a_promisor_remote() {
+    // A partial clone lazily fetches missing blobs (rename detection reads them); rdy reads
+    // git and never writes it, so the command forbids that fetch (git >= 2.45).
+    let c = git_command(Path::new("/repo"));
+    let set: Vec<(String, String)> = c
+        .get_envs()
+        .filter_map(|(k, v)| {
+            v.map(|v| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.to_string_lossy().into_owned(),
+                )
+            })
+        })
+        .collect();
+    assert!(
+        set.contains(&("GIT_NO_LAZY_FETCH".to_string(), "1".to_string())),
+        "{set:?}"
+    );
+}
