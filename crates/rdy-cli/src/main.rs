@@ -17,6 +17,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 mod brief_text;
+mod history_text;
 mod view_cmd;
 
 /// This binary's version: the hello's `version`, so a client only talks to a daemon of its own.
@@ -60,6 +61,9 @@ enum Cmd {
         /// canon (the default), an existing view's name, tag:<version>, landing:<id> or view:<name>.
         #[arg(long)]
         scope: Option<String>,
+        /// Also list every version: its change, author, landing and approver.
+        #[arg(long)]
+        blame: bool,
     },
     Log,
     Impact {
@@ -561,6 +565,10 @@ fn show_text(v: &Value) -> String {
     if let Some(s) = status {
         out.push_str(&format!("status: {s}\n"));
     }
+    if let Some(line) = history_text::last_change_line(&v["history"][0]) {
+        out.push_str(&line);
+        out.push('\n');
+    }
     if let Some(from) = v["effective_from"].as_str() {
         out.push_str(&format!("effective from: {from}\n"));
     }
@@ -808,9 +816,16 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             let t = status_text(&v);
             Ok((v, t))
         }
-        Cmd::Show { id, scope } => {
-            let v = call(env, "show", json!({"id": id, "scope": scope}))?;
-            let t = show_text(&v);
+        Cmd::Show { id, scope, blame } => {
+            let v = call(
+                env,
+                "show",
+                json!({"id": id, "scope": scope, "blame": blame}),
+            )?;
+            let mut t = show_text(&v);
+            if blame {
+                t.push_str(&history_text::blame_text(&v));
+            }
             Ok((v, t))
         }
         Cmd::New { what } => {

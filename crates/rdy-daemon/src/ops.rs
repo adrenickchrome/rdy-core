@@ -8,8 +8,8 @@ use rdy_engine::code_brief::e_code_path_alone;
 use rdy_engine::consequence::write_and_report;
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::{
-    E_BAD_INPUT, E_LIMIT, E_PERMISSION, LandOptions, RdyError, ReadState, Relay, Scope, Session,
-    block_from_yaml, block_to_yaml, check_path, resolve_pack, view_api,
+    E_BAD_INPUT, E_LIMIT, E_PERMISSION, HISTORY_MAX, LandOptions, RdyError, ReadState, Relay,
+    Scope, Session, block_from_yaml, block_to_yaml, check_path, resolve_pack, view_api,
 };
 use rdy_mcp::tools::MAX_TOKENS_LIMIT;
 use rdy_model::{ActorRun, RelayEvidence, Role};
@@ -68,6 +68,8 @@ struct FsckArgs {
 struct ShowArgs {
     id: String,
     scope: Option<String>,
+    #[serde(default)]
+    blame: bool,
 }
 
 #[derive(Deserialize)]
@@ -348,7 +350,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             parse::<NoArgs>(op, args, "{}")?;
             status(cx)
         }
-        "show" => show(cx, parse(op, args, "{id, scope?}")?),
+        "show" => show(cx, parse(op, args, "{id, scope?, blame?}")?),
         "ls" => ls(cx, parse(op, args, "{path?, scope?, depth?}")?),
         "log" => {
             parse::<NoArgs>(op, args, "{}")?;
@@ -459,6 +461,14 @@ fn show(cx: &OpContext, a: ShowArgs) -> Result<Value, RdyError> {
     if let Some(conflict) = st.conflict_info(&scope, &bid)? {
         v["conflict"] = to_json(&conflict);
     }
+    // blame1: the last change (or, with `blame`, every version) with its author, landing and why
+    let h = st.history(&scope, &bid, if a.blame { HISTORY_MAX } else { 1 })?;
+    v["justification"] = h
+        .entries
+        .first()
+        .map_or(Value::Null, |e| to_json(&e.justification));
+    v["history"] = to_json(&h.entries);
+    v["history_more"] = Value::Bool(h.more);
     Ok(v)
 }
 
