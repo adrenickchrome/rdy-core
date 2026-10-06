@@ -60,6 +60,11 @@ fn cli_errors_are_clean_on_every_command() {
             vec!["show", "--scope", "landing:zz", "c-ZZZZZ"],
         ),
         ("E_UNKNOWN_BLOCK", vec!["edit", "c-ZZZZZ"]),
+        ("E_NOT_FOUND", vec!["view", "show", "nope"]),
+        ("E_NOT_FOUND", vec!["view", "fork", "nope", "x"]),
+        ("E_BAD_INPUT", vec!["view", "include", "work", "zz"]),
+        ("E_NOT_FOUND", vec!["view", "close", "nope"]),
+        ("E_NOT_FOUND", vec!["undo", "--view", "nope"]),
         (
             "E_NO_PROJECT",
             vec!["status", "--project", "/no/such/project"],
@@ -84,6 +89,10 @@ fn cli_errors_are_clean_on_every_command() {
             .unwrap_or_else(|e| panic!("{args:?}: stderr is not JSON ({e}): {err}"));
         assert_eq!(v["code"].as_str(), Some(*code), "{args:?}: {v}");
     }
+    // a clap usage error (no daemon, no JSON): `view compare` needs a scope
+    let (ok, out, err) = rdy(&s, &["view", "compare"]);
+    assert!(!ok && out.is_empty(), "{out}");
+    assert!(err.contains("Usage") && !err.contains("panicked"), "{err}");
     for args in [
         vec!["status"],
         vec!["log"],

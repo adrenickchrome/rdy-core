@@ -6,7 +6,7 @@
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::{
     E_BAD_INPUT, E_PERMISSION, LandOptions, RdyError, ReadState, Relay, Scope, Session,
-    block_from_yaml, block_to_yaml, check_path, resolve_pack,
+    block_from_yaml, block_to_yaml, check_path, resolve_pack, view_api,
 };
 use rdy_model::{ActorRun, RelayEvidence, Role};
 use serde::Deserialize;
@@ -43,6 +43,7 @@ pub const OPS: &[&str] = &[
     "import",
     "reindex",
     "fsck",
+    "view",
 ];
 
 #[derive(Deserialize)]
@@ -318,6 +319,16 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             parse::<NoArgs>(op, args, "{}")?;
             fsck(cx)
         }
+        "view" => view_api::run_view(
+            cx.engine,
+            cx.session,
+            &cx.session.default_view(),
+            parse(
+                op,
+                args,
+                "{op, name?, from?, base?, pin?, view?, views?, changes?, cascade?, a?, b?, all?, stale?, reason?, owner?, none?, target?}",
+            )?,
+        ),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),
@@ -373,6 +384,9 @@ fn show(cx: &OpContext, a: ShowArgs) -> Result<Value, RdyError> {
     let mut v = to_json(&ctx);
     let words = status_words(&v["status"]);
     v["status_words"] = words.map_or(Value::Null, Value::String);
+    if let Some(conflict) = st.conflict_info(&scope, &bid)? {
+        v["conflict"] = to_json(&conflict);
+    }
     Ok(v)
 }
 

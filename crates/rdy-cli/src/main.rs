@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+mod view_cmd;
+
 /// This binary's version: the hello's `version`, so a client only talks to a daemon of its own.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -93,6 +95,22 @@ enum Cmd {
         /// Refuse the approval when canon has moved since the version was proposed.
         #[arg(long)]
         strict: bool,
+    },
+    /// Create, fork, include, exclude, compare, list, show, close and hand over views.
+    View {
+        #[command(subcommand)]
+        cmd: view_cmd::ViewCmd,
+    },
+    /// Undo the newest op of this session on a view, or the named op.
+    Undo {
+        /// The view (default: the session's own).
+        #[arg(long)]
+        view: Option<String>,
+        /// The view op to undo (default: this session's newest undoable op).
+        op: Option<String>,
+        /// Also exclude the included changes that depend on the ones the undo excludes.
+        #[arg(long)]
+        cascade: bool,
     },
     /// Name a landing (default: canon's head) as a version, e.g. v1.2.0. Approver only.
     Tag {
@@ -523,11 +541,18 @@ fn show_text(v: &Value) -> String {
     if let Some(s) = status {
         out.push_str(&format!("status: {s}\n"));
     }
+    if let Some(from) = v["effective_from"].as_str() {
+        out.push_str(&format!("effective from: {from}\n"));
+    }
     out.push_str(&format!(
         "{}\n{}",
         serde_json::to_string_pretty(&fields).unwrap_or_default(),
         text(&v["body"])
     ));
+    if v["conflict"].is_object() {
+        out.push('\n');
+        out.push_str(&view_cmd::conflict_text(v));
+    }
     out
 }
 
@@ -845,6 +870,18 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                     text(&w["message"])
                 ));
             }
+            Ok((v, t))
+        }
+        Cmd::View { cmd } => {
+            let args = view_cmd::args_of(&cmd);
+            let op = text(&args["op"]).to_string();
+            let v = call(env, "view", args)?;
+            let t = view_cmd::render(&op, &v);
+            Ok((v, t))
+        }
+        Cmd::Undo { view, op, cascade } => {
+            let v = call(env, "view", view_cmd::undo_args(view, op, cascade))?;
+            let t = view_cmd::render("undo", &v);
             Ok((v, t))
         }
         Cmd::Tag {
