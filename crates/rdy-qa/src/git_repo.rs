@@ -46,6 +46,67 @@ impl GitRepo {
         g
     }
 
+    /// A new repository on branch `main` with `commits` linear commits over `files` files
+    /// (`src/f{k}.rs`), built in one `git fast-import` run. Commit `c` touches two files and
+    /// cites `cite[c % n]` and `cite[(c + 1) % n]` in an `Implements:` trailer; `cite` must not
+    /// be empty. For the perf ops: a real history at a size no per-commit `git commit` loop
+    /// could build in reasonable time.
+    pub fn synthetic(commits: usize, files: usize, cite: &[String]) -> GitRepo {
+        use std::process::Stdio;
+        assert!(!cite.is_empty(), "synthetic needs at least one id to cite");
+        let g = GitRepo::new();
+        let n = cite.len();
+        let mut s: Vec<u8> = Vec::new();
+        for c in 0..commits {
+            let msg = format!(
+                "change {c}\n\nImplements: {}, {}\n",
+                cite[c % n],
+                cite[(c + 1) % n]
+            );
+            s.extend_from_slice(b"commit refs/heads/main\n");
+            s.extend_from_slice(format!("mark :{}\n", c + 1).as_bytes());
+            s.extend_from_slice(b"committer qa <qa> 1767225600 +0000\n");
+            s.extend_from_slice(format!("data {}\n{msg}", msg.len()).as_bytes());
+            if c > 0 {
+                s.extend_from_slice(format!("from :{c}\n").as_bytes());
+            }
+            let first = (c * 7) % files;
+            let second = (c * 13 + 1) % files;
+            let content = format!("// commit {c}\n").repeat(20);
+            for k in [Some(first), (second != first).then_some(second)]
+                .into_iter()
+                .flatten()
+            {
+                s.extend_from_slice(format!("M 100644 inline src/f{k}.rs\n").as_bytes());
+                s.extend_from_slice(format!("data {}\n{content}", content.len()).as_bytes());
+            }
+            s.push(b'\n');
+        }
+        let mut child = g
+            .git()
+            .args(["fast-import", "--quiet"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn git fast-import");
+        // a writer thread: the stream can outgrow the pipe buffer while git is still reading
+        let mut stdin = child.stdin.take().expect("fast-import stdin");
+        let writer = std::thread::spawn(move || stdin.write_all(&s));
+        let out = child.wait_with_output().expect("wait for git fast-import");
+        writer
+            .join()
+            .expect("writer thread")
+            .expect("feed git fast-import");
+        assert!(
+            out.status.success(),
+            "git fast-import: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        g.run(&["reset", "-q", "--hard", "main"]);
+        g
+    }
+
     /// A new repository on branch `main` at `dir` (created if missing); removed with its parent.
     pub fn at(dir: &Path) -> GitRepo {
         std::fs::create_dir_all(dir).expect("mkdir");
