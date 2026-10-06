@@ -93,6 +93,7 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "partials/version.html",
         "partials/colophon.html",
         "partials/change.html",
+        "partials/removed.html",
     );
     Ok(env)
 }
