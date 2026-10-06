@@ -207,10 +207,53 @@ impl Lines {
     }
 }
 
+/// The value of attribute `key` in a start tag's text (its name, then its attributes), as written:
+/// quoted values may hold spaces and `=`, so a title or href that mentions an attribute is not one.
+fn attr<'a>(tag: &'a str, key: &str) -> Option<&'a str> {
+    let mut rest = tag.trim_start_matches(|c: char| !c.is_whitespace());
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '/');
+        if rest.is_empty() {
+            return None;
+        }
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '=' || c == '/')
+            .unwrap_or(rest.len());
+        let name = &rest[..end];
+        rest = rest[end..].trim_start();
+        let value = match rest.strip_prefix('=') {
+            Some(v) => {
+                let v = v.trim_start();
+                let (value, after) = match v.chars().next() {
+                    Some(q @ ('"' | '\'')) => {
+                        let body = &v[1..];
+                        let close = body.find(q).unwrap_or(body.len());
+                        (&body[..close], body.get(close + 1..).unwrap_or_default())
+                    }
+                    _ => {
+                        let close = v.find(char::is_whitespace).unwrap_or(v.len());
+                        (&v[..close], &v[close..])
+                    }
+                };
+                rest = after;
+                value
+            }
+            None => "",
+        };
+        if name.eq_ignore_ascii_case(key) {
+            return Some(value);
+        }
+    }
+}
+
 /// An element whose words a reader never sees on the page: a button's label, what only a screen
-/// reader hears, and the diagram canvas (its words are under "Diagram source").
+/// reader hears (`class="visually-hidden"`), and the diagram canvas (`aria-hidden="true"`; its
+/// words are under "Diagram source"). Only the attributes count, never an href or title that
+/// mentions them.
 fn unseen(name: &str, tag: &str) -> bool {
-    name == "button" || tag.contains("aria-hidden=\"true\"") || tag.contains("visually-hidden")
+    name == "button"
+        || attr(tag, "aria-hidden") == Some("true")
+        || attr(tag, "class").is_some_and(|c| c.split_whitespace().any(|c| c == "visually-hidden"))
 }
 
 /// The elements that have no closing tag.
@@ -442,6 +485,21 @@ mod tests {
             "## The case clause\n\nA guard & a pattern.\n\n- one\n- two\n  1. first\n\n\
              Table 1\n\n| A | B |\n| --- | --- |\n| a \\| b | 2 |\n\nPython\n\n\
              ```\nif x < 1:\n    pass\n```\n\nAlt"
+        );
+    }
+
+    #[test]
+    fn llms1_a_link_keeps_its_words_whatever_its_href_or_title_says() {
+        let html = "<p>Screen readers hear <a href=\"#the-visually-hidden-pattern\" \
+            title=\"Accessibility \u{203a} The visually-hidden pattern\">The visually-hidden \
+            pattern</a> when the text is off screen; see also <a href=\"https://example.invalid/\
+            visually-hidden/\" title=\"x aria-hidden=&quot;true&quot; visually-hidden\">the \
+            pattern</a>.</p><p class=\"note visually-hidden\">Gone</p>\
+            <span data-x=\"class=visually-hidden\" aria-hidden=\"true\">Gone too</span>";
+        assert_eq!(
+            reader_text(html),
+            "Screen readers hear The visually-hidden pattern when the text is off screen; see \
+             also the pattern."
         );
     }
 }
