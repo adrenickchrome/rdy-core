@@ -5,10 +5,10 @@
 //! directory.
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::{
-    E_BAD_INPUT, E_PERMISSION, RdyError, ReadState, Scope, Session, block_from_yaml, block_to_yaml,
-    check_path, resolve_pack,
+    E_BAD_INPUT, E_PERMISSION, LandOptions, RdyError, ReadState, Relay, Scope, Session,
+    block_from_yaml, block_to_yaml, check_path, resolve_pack,
 };
-use rdy_model::Role;
+use rdy_model::{ActorRun, RelayEvidence, Role};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -127,6 +127,11 @@ struct ProposeArgs {
 #[serde(deny_unknown_fields)]
 struct ApproveArgs {
     proposal: String,
+    relayed_by: Option<String>,
+    evidence: Option<String>,
+    question: Option<String>,
+    session_ref: Option<String>,
+    strict: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -295,7 +300,14 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "new_doc" => new_doc(cx, parse(op, args, "{path, view?, doc_type?, title?}")?),
         "edit_block" => edit_block(cx, parse(op, args, "{yaml, view?}")?),
         "propose" => propose(cx, parse(op, args, "{title, view?}")?),
-        "approve" => approve(cx, parse(op, args, "{proposal}")?),
+        "approve" => approve(
+            cx,
+            parse(
+                op,
+                args,
+                "{proposal, relayed_by?, evidence?, question?, session_ref?, strict?}",
+            )?,
+        ),
         "tag" => tag(cx, parse(op, args, "{version, landing?, message?}")?),
         "import" => import(cx, parse(op, args, "{dir, view}")?),
         "reindex" => {
@@ -371,18 +383,7 @@ fn ls(cx: &OpContext, a: LsArgs) -> Result<Value, RdyError> {
 }
 
 fn log(cx: &OpContext) -> Result<Value, RdyError> {
-    let st = cx.engine.read();
-    let mut tags: std::collections::HashMap<String, Vec<String>> = Default::default();
-    for v in st.versions()? {
-        tags.entry(v.landing.clone()).or_default().push(v.name);
-    }
-    let mut rows = vec![];
-    for (id, rec) in st.landings()? {
-        let p = st.reader().proposal(&rec.proposal)?;
-        let names = tags.get(&id.to_string()).cloned().unwrap_or_default();
-        rows.push(json!({"landing": id.to_string(), "title": p.title, "approved_by": rec.approved_by.actor, "assurance": rec.assurance.as_str(), "at_ms": rec.approved_by.at_ms, "changes": p.changes.len(), "tags": names}));
-    }
-    Ok(Value::Array(rows))
+    Ok(to_json(&cx.engine.read().log_rows()?))
 }
 
 fn impact(cx: &OpContext, a: ImpactArgs) -> Result<Value, RdyError> {
@@ -476,7 +477,50 @@ fn propose(cx: &OpContext, a: ProposeArgs) -> Result<Value, RdyError> {
 
 fn approve(cx: &OpContext, a: ApproveArgs) -> Result<Value, RdyError> {
     let s = approver(cx.session)?;
-    write_typed(cx.engine, move |r| r.land_report(&s, &a.proposal))
+    let bad = |message: &str, fix: &str| RdyError::new(E_BAD_INPUT, message, fix);
+    let relay = match (a.relayed_by, a.evidence) {
+        (Some(by), Some(quoted)) => {
+            let (actor, run) = match by.split_once('/') {
+                Some((actor, run)) => (actor.to_string(), Some(run.to_string())),
+                None => (by, None),
+            };
+            Some(Relay {
+                by: ActorRun { actor, run },
+                evidence: RelayEvidence {
+                    quoted,
+                    session_ref: a.session_ref.unwrap_or_else(|| "cli".into()),
+                    question: a.question.filter(|q| !q.trim().is_empty()),
+                },
+            })
+        }
+        (None, None) => {
+            if a.session_ref.is_some() {
+                return Err(bad(
+                    "session_ref needs relayed_by",
+                    "pass relayed_by and evidence with it, or drop session_ref",
+                ));
+            }
+            if a.question.is_some() {
+                return Err(bad(
+                    "question needs relayed_by",
+                    "pass relayed_by and evidence with it, or drop question",
+                ));
+            }
+            None
+        }
+        _ => {
+            return Err(bad(
+                "relayed_by and evidence go together",
+                "pass both (--relayed-by and --evidence) or neither",
+            ));
+        }
+    };
+    let opts = LandOptions {
+        strict: a.strict.unwrap_or(false),
+        relay,
+        evidence: None,
+    };
+    write_typed(cx.engine, move |r| r.land_with(&s, &a.proposal, opts))
 }
 
 fn tag(cx: &OpContext, a: TagArgs) -> Result<Value, RdyError> {

@@ -1,9 +1,13 @@
 use crate::error::*;
+use crate::session::rfc3339_of_ms;
 use crate::views::{Action, ConflictInfo, conflict_infos, parse_change};
 use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, rfc3339_now};
-use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Op, Proposal, decision};
+use rdy_model::{
+    ApprovalEvidence, Block, BlockId, Change, ChangeLinks, EvidenceKind, FieldValue, Hash,
+    LandingRecord, Op, Proposal, decision,
+};
 use rdy_schema::{Issue, Severity, validate_block};
-use rdy_store::{Conflict, LandRequest, MergeChange, merge_on_blocks};
+use rdy_store::{Conflict, LandRequest, MergeChange, Relay, merge_on_blocks};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
@@ -61,15 +65,74 @@ pub struct LandInfo {
     /// The landed version's title and change count.
     pub title: String,
     pub changes: usize,
+    /// `local`, or `relayed` when an agent relayed the human's approval (FW-B9).
+    pub assurance: String,
     pub warnings: Vec<Issue>,
     pub rebased: Vec<RebasedInfo>,
 }
 
-/// How an approval treats a canon that moved since the version was proposed (FW-HB1).
+/// How an approval treats a canon that moved since the version was proposed (FW-HB1), and the
+/// relay that carried it (FW-B9).
 #[derive(Clone, Debug, Default)]
 pub struct LandOptions {
     /// Refuse any landing since the version was proposed, not only one on its blocks.
     pub strict: bool,
+    /// The agent that relayed the human's approval, and what the human said.
+    pub relay: Option<Relay>,
+    /// How the approval was obtained. A relay from the command line is `text`, which is what a
+    /// relay with no evidence kind gets.
+    pub evidence: Option<ApprovalEvidence>,
+}
+
+/// Who relayed an approval, as shown in a landing row.
+#[derive(Clone, Debug, Serialize)]
+pub struct RelayedByRow {
+    pub actor: String,
+    pub run: Option<String>,
+}
+
+/// What a relayed approval quoted, as shown in a landing row.
+#[derive(Clone, Debug, Serialize)]
+pub struct RelayEvidenceRow {
+    pub quoted: String,
+    pub session_ref: String,
+    pub question: Option<String>,
+}
+
+/// How an approval was obtained, as shown in a landing row.
+#[derive(Clone, Debug, Serialize)]
+pub struct EvidenceRow {
+    pub kind: String,
+    /// The options offered; `null` when there were none.
+    pub options: Option<Vec<String>>,
+    pub choice: Option<String>,
+    pub card_hash: Option<String>,
+}
+
+/// One landing as `rdy log` shows it (H3-C5). Every key is always present, in this order; a
+/// member that does not apply is `null`. Not a stored type: the record is postcard.
+#[derive(Clone, Debug, Serialize)]
+pub struct LandingRow {
+    pub landing: String,
+    pub prev: Option<String>,
+    /// The landed proposal version.
+    pub proposal: String,
+    pub approved_version: Option<String>,
+    /// `P-<stable short>@<n>` of `approved_version`.
+    pub approved: Option<String>,
+    pub title: String,
+    /// The approving actor.
+    pub approved_by: String,
+    pub assurance: String,
+    pub relayed_by: Option<RelayedByRow>,
+    pub relay_evidence: Option<RelayEvidenceRow>,
+    pub evidence: Option<EvidenceRow>,
+    pub rebased_from: Vec<String>,
+    /// When the landing was approved, RFC 3339 UTC.
+    pub at: String,
+    pub at_ms: i64,
+    pub changes: usize,
+    pub tags: Vec<String>,
 }
 
 /// The advice an approver gets when the version no longer applies to canon: the fix is the
@@ -131,6 +194,75 @@ fn approver_stale(mut e: RdyError) -> RdyError {
         e.fix = STALE_FOR_APPROVER.into();
     }
     e
+}
+
+/// FW-B9: what a relayed approval must satisfy, and the evidence it records. Only a human
+/// session records a relay, and it names the exact version it relays (the one the human was
+/// shown): a full hash or `P-<id>@<n>`. Returns the evidence to store: the options' own for a
+/// local approval, `text` for a relay that names none.
+fn relay_evidence_kind(
+    s: &Session,
+    text: &str,
+    pref: &ProposalRef,
+    opts: &LandOptions,
+) -> Result<Option<ApprovalEvidence>, RdyError> {
+    let Some(relay) = &opts.relay else {
+        return Ok(opts.evidence.clone());
+    };
+    if !s.is_human() {
+        return Err(RdyError::new(
+            E_PERMISSION,
+            "only a human session records a relayed approval",
+            "run rdy approve as the human; the relaying agent is named by --relayed-by",
+        ));
+    }
+    let exact = (text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit()))
+        || (text.starts_with("P-") && text.contains('@'));
+    if !exact {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "a relayed approval names the exact version it relays",
+            format!("approve {pref} (the version the human was shown)"),
+        ));
+    }
+    if relay.evidence.quoted.trim().is_empty() {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "the evidence quote is empty",
+            "quote the human's words with --evidence",
+        ));
+    }
+    if relay.by.actor.is_empty() {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "relayed_by needs an actor",
+            "name the relaying agent, e.g. --relayed-by agent:name",
+        ));
+    }
+    match &opts.evidence {
+        Some(e) if e.kind != EvidenceKind::Text => Err(RdyError::new(
+            E_BAD_INPUT,
+            "only a text relay is recorded from the command line",
+            "quote the human's words with --evidence",
+        )),
+        Some(e) => Ok(Some(e.clone())),
+        None => Ok(Some(ApprovalEvidence {
+            kind: EvidenceKind::Text,
+            options: vec![],
+            choice: None,
+            card_hash: None,
+        })),
+    }
+}
+
+/// `h`'s proposal reference, as the approver saw it: `P-<stable short>@<n>`.
+fn version_ref(st: &ReadState, h: &Hash) -> Result<ProposalRef, RdyError> {
+    let p = st.reader().proposal(h)?;
+    Ok(ProposalRef {
+        version: *h,
+        stable: p.stable.unwrap_or(*h),
+        n: version_number(st, h)?,
+    })
 }
 
 /// Resolves a proposal reference on `st`: a version hash, `P-<prefix>` (the latest version) or
@@ -932,6 +1064,7 @@ impl Rdy {
         }
         let st = self.read();
         let pref = resolve_in(&st, proposal)?;
+        let evidence = relay_evidence_kind(s, proposal, &pref, &opts)?;
         let pid = pref.version;
         let p = st.reader().proposal(&pid)?;
         // land1: a landed change is already in canon; replaying it would only fail obscurely
@@ -1056,8 +1189,8 @@ impl Rdy {
             accept,
             approver: s.provenance(),
             chosen: None,
-            relay: None,
-            evidence: None,
+            relay: opts.relay,
+            evidence,
         }) {
             Ok(out) => out,
             Err(rdy_store::StoreError::ProposalMoved { latest, .. }) => {
@@ -1076,11 +1209,18 @@ impl Rdy {
             let _ = self.publish(Delta::Full);
             return Err(e);
         }
+        let assurance = self
+            .store
+            .landing(&out.landing)?
+            .assurance
+            .as_str()
+            .to_string();
         Ok(LandInfo {
             landing: out.landing.to_string(),
             approved: pref.to_string(),
             title: p.title.clone(),
             changes: p.changes.len(),
+            assurance,
             warnings: issues,
             rebased: out
                 .rebased
@@ -1091,6 +1231,65 @@ impl Rdy {
                     conflicts: r.conflicts.len(),
                 })
                 .collect(),
+        })
+    }
+}
+
+impl ReadState {
+    /// Canon's landings as `rdy log` shows them, head first (H3-C5).
+    pub fn log_rows(&self) -> Result<Vec<LandingRow>, RdyError> {
+        let mut tags: std::collections::HashMap<String, Vec<String>> = Default::default();
+        for v in self.versions()? {
+            tags.entry(v.landing).or_default().push(v.name);
+        }
+        let mut rows = vec![];
+        for (id, rec) in self.landings()? {
+            let tags = tags.remove(&id.to_string()).unwrap_or_default();
+            rows.push(self.landing_row(id, &rec, tags)?);
+        }
+        Ok(rows)
+    }
+
+    fn landing_row(
+        &self,
+        id: Hash,
+        rec: &LandingRecord,
+        tags: Vec<String>,
+    ) -> Result<LandingRow, RdyError> {
+        let p = self.reader().proposal(&rec.proposal)?;
+        let approved = match &rec.approved_version {
+            Some(h) => Some(version_ref(self, h)?.to_string()),
+            None => None,
+        };
+        Ok(LandingRow {
+            landing: id.to_string(),
+            prev: rec.prev.map(|h| h.to_string()),
+            proposal: rec.proposal.to_string(),
+            approved_version: rec.approved_version.map(|h| h.to_string()),
+            approved,
+            title: p.title.clone(),
+            approved_by: rec.approved_by.actor.clone(),
+            assurance: rec.assurance.as_str().into(),
+            relayed_by: rec.relayed_by.as_ref().map(|r| RelayedByRow {
+                actor: r.actor.clone(),
+                run: r.run.clone(),
+            }),
+            relay_evidence: rec.relay_evidence.as_ref().map(|e| RelayEvidenceRow {
+                quoted: e.quoted.clone(),
+                session_ref: e.session_ref.clone(),
+                question: e.question.clone(),
+            }),
+            evidence: rec.evidence.as_ref().map(|e| EvidenceRow {
+                kind: e.kind.as_str().into(),
+                options: (!e.options.is_empty()).then(|| e.options.clone()),
+                choice: e.choice.clone(),
+                card_hash: e.card_hash.map(|h| h.to_string()),
+            }),
+            rebased_from: rec.rebased_from.iter().map(|h| h.to_string()).collect(),
+            at: rfc3339_of_ms(rec.approved_by.at_ms),
+            at_ms: rec.approved_by.at_ms,
+            changes: p.changes.len(),
+            tags,
         })
     }
 }

@@ -33,6 +33,8 @@ pub(crate) struct VposCache {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VersionInfo {
     pub name: String,
+    /// The full hash of the tag object.
+    pub tag: String,
     /// The full hash of the landing the version names.
     pub landing: String,
     pub message: Option<String>,
@@ -43,6 +45,7 @@ pub struct VersionInfo {
 fn info(t: &Tag) -> VersionInfo {
     VersionInfo {
         name: t.name.clone(),
+        tag: t.id().to_string(),
         landing: t.landing.to_string(),
         message: t.message.clone(),
         tagged_by: t.tagged_by.actor.clone(),
