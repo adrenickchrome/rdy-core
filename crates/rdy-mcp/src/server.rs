@@ -1,5 +1,6 @@
 use crate::order::{Order, Ordered, Stamped};
 use crate::tools::{self, *};
+use crate::view_tools;
 use rdy_engine::engine::{Engine, Local};
 use rdy_engine::{E_INTERNAL, E_LIMIT, RdyError};
 use rmcp::{
@@ -196,6 +197,20 @@ impl RdyServer {
     async fn rdy_asset(&self, Parameters(p): Parameters<AssetParams>) -> CallToolResult {
         self.run("rdy_asset", p, tools::rdy_asset).await
     }
+
+    #[tool(
+        description = "Create, fork, include, exclude, compare, list, show, close or undo views. Include, exclude, close and undo need ownership of the target view."
+    )]
+    async fn rdy_view(&self, Parameters(p): Parameters<view_tools::ViewParams>) -> CallToolResult {
+        self.run("rdy_view", p, view_tools::rdy_view).await
+    }
+
+    #[tool(
+        description = "Canon's landings, newest first: who approved which proposal version, how (assurance, relay, evidence), and the tags on each."
+    )]
+    async fn rdy_log(&self, Parameters(p): Parameters<view_tools::LogParams>) -> CallToolResult {
+        self.run("rdy_log", p, view_tools::rdy_log).await
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -221,7 +236,7 @@ impl ServerHandler for RdyServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("rdy", env!("CARGO_PKG_VERSION")))
-            .with_instructions("rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Write with rdy_write; propose with rdy_propose.")
+            .with_instructions("rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Write with rdy_write; propose with rdy_propose. Work in your own view; include others' changes, never write into their views. Conflicts are recorded, not errors: resolve one by writing the block.")
     }
 }
 

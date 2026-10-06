@@ -8,6 +8,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
+use crate::view_tools;
+
 pub const E_NO_SESSION: &str = "E_NO_SESSION";
 
 /// The most ops one `rdy_write` may carry.
@@ -30,7 +32,7 @@ fn limit(what: impl Into<String>, fix: impl Into<String>) -> RdyError {
     RdyError::new(E_LIMIT, what, fix)
 }
 
-fn check_tokens(max_tokens: Option<usize>) -> Result<(), RdyError> {
+pub(crate) fn check_tokens(max_tokens: Option<usize>) -> Result<(), RdyError> {
     match max_tokens {
         Some(n) if n > MAX_TOKENS_LIMIT => Err(limit(
             format!("max_tokens {n} is over the limit of {MAX_TOKENS_LIMIT}"),
@@ -147,6 +149,8 @@ pub struct DecideParams {
     pub conditional_on: Option<Vec<String>>,
     pub refines: Option<Vec<String>>,
     pub answers: Option<Vec<String>>,
+    /// When the decision takes effect (RFC 3339); defaults to when it is recorded.
+    pub effective_from: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -170,6 +174,8 @@ pub struct RevokeParams {
 pub struct ProposeParams {
     pub view: Option<String>,
     pub title: String,
+    /// Propose only these changes (ids from rdy_view show). The set must be closed under dependencies, or it is E_DEPS_MISSING. Omit to propose all the view's changes. A new version of an open proposal replaces the old one.
+    pub changes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -252,7 +258,7 @@ pub fn budget(v: Value, max_tokens: Option<usize>) -> Value {
     v
 }
 
-fn session(st: &McpState) -> Result<Session, RdyError> {
+pub(crate) fn session(st: &McpState) -> Result<Session, RdyError> {
     st.session.clone().ok_or_else(|| {
         RdyError::new(
             E_NO_SESSION,
@@ -485,6 +491,12 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     let (scope, id) = read_target(st, &st_, &p.id, &p.scope)?;
     let suspects: std::collections::BTreeSet<BlockId> =
         st_.suspects(&scope)?.into_iter().map(|s| s.block).collect();
+    // the scope's recorded conflicts by block, for the marker on each conflicted block's line
+    let conflicts: std::collections::BTreeMap<BlockId, String> = st_
+        .conflicts(&scope)?
+        .iter()
+        .map(|c| (c.block.clone(), c.id.short()))
+        .collect();
     let m = st_.materialized(&scope)?;
     let g = st_.graph(&scope)?;
     let root = m.get(&id).ok_or_else(|| {
@@ -530,6 +542,9 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
                 if suspects.contains(&b.id) {
                     line.push_str(" [suspect]");
                 }
+                if let Some(c) = conflicts.get(&b.id) {
+                    line.push_str(&format!(" [conflict {c}]"));
+                }
                 if let Some(s) = &status {
                     line.push_str(&format!(" [{s}]"));
                 }
@@ -545,10 +560,11 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
         "markdown" => "\n\n",
         _ => "\n",
     };
-    Ok(budget(
-        json!({"id": id.to_string(), "format": format, "text": lines.join(sep)}),
-        p.max_tokens,
-    ))
+    let mut out = json!({"id": id.to_string(), "format": format, "text": lines.join(sep)});
+    if let Some(c) = st_.conflict_info(&scope, &id)? {
+        out["conflict"] = json!(c);
+    }
+    Ok(budget(out, p.max_tokens))
 }
 
 pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
@@ -557,10 +573,11 @@ pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     let st_ = st.engine.read();
     let (scope, id) = read_target(st, &st_, &p.id, &p.scope)?;
     let ctx = st_.context(&scope, &id)?;
-    Ok(budget(
-        serde_json::to_value(ctx).expect("context json"),
-        p.max_tokens,
-    ))
+    let mut v = serde_json::to_value(ctx).expect("context json");
+    if let Some(c) = st_.conflict_info(&scope, &id)? {
+        v["conflict"] = json!(c);
+    }
+    Ok(budget(v, p.max_tokens))
 }
 
 pub fn rdy_impact(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
@@ -634,9 +651,19 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             "link_types": pack.link_types,
             "link_shape": {"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE},
             "ops": WRITE_OPS.iter().map(|(n, s)| (n.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
+            "views": view_tools::SCHEMA_DOC,
             "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT, "socket_line_bytes": MAX_REQUEST_BYTES, "transport": TRANSPORT_NOTE},
             "errors": {
                 "E_VIEW_OWNER": {"when": "a non-human session commits into a view it doesn't own", "fix": "write to your own view, fork it, or include its changes into your own view"},
+                "E_VIEW_EXISTS": {"when": "a view of that name exists", "fix": "pick a free name, or fork the view under another name"},
+                "E_VIEW_CLOSED": {"when": "the view is closed and takes no write, include or exclude", "fix": "reopen it with rdy_view {op: \"undo\", view, target: <the close op>}, or fork it"},
+                "E_HAS_DEPENDENTS": {"when": "changes in the view depend on a change you exclude (each is an issue)", "fix": "exclude them too, or pass cascade: true"},
+                "E_DEPS_MISSING": {"when": "a proposal subset leaves out changes its members depend on (each is an issue)", "fix": "add the missing changes to rdy_propose's changes"},
+                "E_CONFLICT_UNRESOLVED": {"when": "the proposal version carries a conflict it does not resolve (each is an issue)", "fix": "write the block from the version you want, then propose again"},
+                "E_PROPOSAL_MOVED": {"when": "a newer version exists, or a landing since the version changed blocks it writes, or the project requires proposals on the current canon", "fix": "propose again; a human approves the latest P-x@n"},
+                "E_UNDO_BLOCKED": {"when": "an undo would leave the view inconsistent (each blocking op is an issue)", "fix": "undo with cascade: true, or undo the dependent ops first"},
+                "E_UNDO_LANDING": {"when": "an undo would bring back or remove work that has landed", "fix": "a landing is undone by a revoking decision (rdy_revoke)"},
+                "E_NOTHING_TO_UNDO": {"when": "you have no undoable op of your own on the view", "fix": "name an op with target (rdy_view show lists them)"},
                 "E_DAEMON_START": {"when": "the daemon couldn't be started or reached", "fix": "read the last lines of .rdy/run/daemon.log it cites; run rdy serve in the foreground to see why"},
                 "E_DAEMON_VERSION": {"when": "another binary version's daemon has clients", "fix": "close them, or rdy serve --stop"},
                 "E_DAEMON_GONE": {"when": "the daemon closed mid-request", "fix": "check rdy_overview or rdy status; a write may or may not have committed; it is not retried"},
@@ -731,8 +758,7 @@ fn decision_input(p: DecideParams) -> DecisionInput {
         reversibility: p.reversibility,
         kind: p.kind,
         review_by: p.review_by,
-        // the MCP parameter is Task 17's
-        effective_from: None,
+        effective_from: p.effective_from,
         body: p.body.unwrap_or_default(),
         affects: p.affects.unwrap_or_default(),
         depends_on: p.depends_on.unwrap_or_default(),
@@ -773,7 +799,10 @@ pub fn rdy_propose(st: &mut McpState, p: ProposeParams) -> Result<Value, RdyErro
         .view
         .map(|v| v.strip_prefix("view:").map(String::from).unwrap_or(v))
         .unwrap_or_else(|| st.view.clone());
-    write_typed(&*st.engine, move |r| r.propose(&s, &view, &p.title))
+    let changes = p.changes.clone();
+    write_typed(&*st.engine, move |r| {
+        r.propose_subset(&s, &view, &p.title, changes.as_deref())
+    })
 }
 
 pub fn rdy_asset(st: &mut McpState, p: AssetParams) -> Result<Value, RdyError> {
