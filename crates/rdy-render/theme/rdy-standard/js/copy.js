@@ -1,4 +1,4 @@
-// Copy link, Copy ref and Cite: the toolbar of a block. No context menu is touched.
+// Copy link, Copy ref and Cite: the toolbar of a block, and the tap that shows it on a touch screen. No context menu is touched.
 (function () {
   "use strict";
   var COPIED_MS = 1500;
@@ -112,6 +112,22 @@
     var active = document.activeElement;
     if (active && active.classList && active.classList.contains("cite")) return;
     showCite();
+  });
+
+  // a tap (touch or pen; a mouse has hover) on a block shows its toolbar and hides every other;
+  // a second tap hides it. A tap on a link, a control or the toolbar itself does not toggle.
+  document.addEventListener("pointerup", function (ev) {
+    if (ev.pointerType !== "touch" && ev.pointerType !== "pen") return;
+    var t = elementOf(ev.target);
+    if (t && t.closest && t.closest(".tools, a, button, summary, input, textarea, select, label")) return;
+    var sel = window.getSelection ? window.getSelection() : null;
+    if (sel && sel.rangeCount > 0 && !sel.isCollapsed) return;
+    var block = blockOf(t);
+    var open = document.querySelectorAll(".tools-open");
+    for (var i = 0; i < open.length; i++) {
+      if (open[i] !== block) open[i].classList.remove("tools-open");
+    }
+    if (block) block.classList.toggle("tools-open");
   });
 
   document.addEventListener("click", function (ev) {

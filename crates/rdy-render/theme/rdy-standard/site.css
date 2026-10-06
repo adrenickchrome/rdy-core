@@ -278,8 +278,9 @@ figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 /* == /diagram == */
 
 /* == why == */
-.tools { float: right; display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.35rem; margin: 0 0 0.2rem 0.75rem; opacity: 0; transition: opacity 0.15s; }
-.block:hover .tools, .block:focus-within .tools, .tools:hover, .tools:focus-within, .tools:has(+ .block:hover), .tools:has(+ .block:focus-within) { opacity: 1; }
+/* on a phone the toolbar lies over the block's corner, shown by a tap (copy.js), focus or a selection; at rest it takes no space and no taps */
+.tools { position: absolute; top: 0; right: 0; float: none; z-index: 2; display: flex; flex-wrap: nowrap; justify-content: flex-end; align-items: center; gap: 0.35rem; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; opacity: 0; pointer-events: none; transition: opacity 0.15s; }
+.block:hover .tools, .block:focus-within .tools, .block.tools-open .tools, .tools:hover, .tools:focus-within, .tools:has(.cite), .tools:has(+ .block:hover), .tools:has(+ .block:focus-within) { opacity: 1; pointer-events: auto; }
 .tool { list-style: none; cursor: pointer; display: inline-flex; align-items: center; color: var(--accent); font-weight: 500; font-size: 0.78rem; line-height: 1.4; border-radius: 999px; padding: 0.1rem 0.6rem; }
 .tool:hover { background: var(--accent-soft); }
 .why { margin-top: 0.3rem; font-size: 0.9rem; clear: right; }
@@ -295,10 +296,7 @@ figure.diagram.diagram-error .diagram-canvas { border-style: dashed; }
 .trail li.open .trail-when { color: var(--accent-ink); }
 .trail-when { font-size: 0.78rem; font-weight: 600; color: var(--ink); padding-top: 0.1rem; }
 .trail-what { font-size: 0.88rem; line-height: 1.5; }
-/* on a phone the toolbar is a row of its own above the block, always shown: it never narrows the
-   block beside it, and its height is fixed so the Cite button appearing moves nothing */
 @media (max-width: 900px) {
-  .tools { float: none; display: flex; flex-wrap: nowrap; justify-content: flex-end; align-items: center; height: 40px; margin: 0 0 0.2rem; opacity: 1; }
   .trail li { grid-template-columns: 1fr; gap: 0.15rem; }
 }
 /* == /why == */
