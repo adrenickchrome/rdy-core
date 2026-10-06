@@ -3,6 +3,7 @@
 pub mod daemon;
 pub mod edit_loop;
 pub mod fixtures;
+pub mod git_repo;
 pub mod golden;
 pub mod invariants;
 pub mod mcp;
