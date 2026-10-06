@@ -9,6 +9,12 @@ use rdy_qa::mcp::McpClient;
 use serde_json::json;
 use std::time::{Duration, Instant};
 
+/// Each call's budget. These tests check what lands and in what order, not latency (that is
+/// the perf tier's): on ext4 one `fdatasync` stalls for hundreds of ms while the other tests in
+/// this binary flush, and eight agents queue their writes behind the one writer, so the default
+/// 2 s budget failed `conc1_eight...` on the Linux bench with no defect behind it.
+const CALL_BUDGET: Duration = Duration::from_secs(30);
+
 #[test]
 fn conc1_eight_mcp_proxies_and_a_cli_hammer_one_daemon() {
     let s = Served::new();
@@ -17,13 +23,13 @@ fn conc1_eight_mcp_proxies_and_a_cli_hammer_one_daemon() {
         .map(|a| {
             let mut c = McpClient::start_proxy(&s);
             std::thread::spawn(move || {
-                let r = c.call("rdy_session", json!({"actor": format!("agent:a{a}"), "role": "writer"}));
+                let r = c.call_within("rdy_session", json!({"actor": format!("agent:a{a}"), "role": "writer"}), CALL_BUDGET);
                 assert!(r.code().is_none());
                 for i in 0..per {
-                    let w = c.call("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "fields": {"name": format!("a{a}-{i}"), "title": "A", "doc_type": "glossary"}}]}));
+                    let w = c.call_within("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "fields": {"name": format!("a{a}-{i}"), "title": "A", "doc_type": "glossary"}}]}), CALL_BUDGET);
                     assert!(w.code().is_none(), "agent {a} write {i}: {:?}", w.ok());
                     if i % 5 == 0 {
-                        let o = c.call("rdy_overview", json!({}));
+                        let o = c.call_within("rdy_overview", json!({}), CALL_BUDGET);
                         assert!(o.code().is_none());
                     }
                 }
@@ -92,11 +98,12 @@ fn conc1_eight_mcp_proxies_and_a_cli_hammer_one_daemon() {
 fn conc1_reads_on_another_connection_never_wait_behind_a_long_write() {
     let s = Served::new();
     let mut a = McpClient::start_proxy(&s);
-    a.call(
+    a.call_within(
         "rdy_session",
         json!({"actor": "agent:big", "role": "writer"}),
+        CALL_BUDGET,
     );
-    let w = a.call("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "big", "title": "B", "doc_type": "constraints"}}, {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}]})).ok();
+    let w = a.call_within("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "big", "title": "B", "doc_type": "constraints"}}, {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}]}), CALL_BUDGET).ok();
     let section = w["created"]["$s"]
         .as_str()
         .expect("the section id")
@@ -140,14 +147,17 @@ fn conc1_reads_on_another_connection_never_wait_behind_a_long_write() {
 fn conc1_read_your_writes_across_processes() {
     let s = Served::new();
     let mut m = McpClient::start_proxy(&s);
-    m.call(
+    m.call_within(
         "rdy_session",
         json!({"actor": "agent:r", "role": "reader", "view": "canon"}),
+        CALL_BUDGET,
     );
     for i in 0..10 {
         let (ok, _) = s.json(&["--json", "new", "doc", &format!("d{i}")]);
         assert!(ok);
-        let o = m.call("rdy_overview", json!({"scope": "work"})).ok();
+        let o = m
+            .call_within("rdy_overview", json!({"scope": "work"}), CALL_BUDGET)
+            .ok();
         let work = o["views"]
             .as_array()
             .unwrap()
@@ -169,7 +179,7 @@ fn conc1_two_connections_each_keep_their_own_order_under_the_pool() {
         .map(|k| {
             let mut c = McpClient::start_proxy(&s);
             std::thread::spawn(move || {
-                c.call("rdy_session", json!({"actor": format!("agent:k{k}"), "role": "writer"}));
+                c.call_within("rdy_session", json!({"actor": format!("agent:k{k}"), "role": "writer"}), CALL_BUDGET);
                 let mut ids = vec![];
                 for i in 0..60 {
                     let w = c.next_id();
