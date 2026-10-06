@@ -7,7 +7,9 @@ use rdy_model::{
     decision, order_between, ref_spans,
 };
 use rdy_schema::{Issue, Pack, has_errors, skeleton_gaps, validate_block};
+use rdy_store::Conflict;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
@@ -512,17 +514,30 @@ fn place(
     }
 }
 
+/// The block an update, move, delete or repin of `id` starts from, and the base its op records.
+///
+/// cres1: a block with a recorded conflict reads as the conflict's base, and an edit of it must
+/// name the version it was made from: the conflict's base or one of its sides' versions. The
+/// edit then starts from that version and, through the store, depends on every side, so it
+/// resolves the conflict. A clean block keeps M1's strict check against its current version.
 fn current_for_edit<'b>(
     ov: &'b Overlay,
     id: &BlockId,
     base: &Option<String>,
     touched: &BTreeSet<BlockId>,
-) -> Result<(Hash, &'b Block), RdyError> {
+    conflicts: &[Conflict],
+    store: &rdy_store::Store,
+) -> Result<(Hash, Cow<'b, Block>), RdyError> {
     if touched.contains(id) {
         return Err(bad(
             format!("{id} is changed more than once in this write"),
             "combine the edits into one op",
         ));
+    }
+    if let Some(c) = conflicts.iter().find(|c| c.block == *id) {
+        let (b, cur) = conflicted_for_edit(ov, id, base, c, store)?;
+        check_not_frozen(id, &cur)?;
+        return Ok((b, cur));
     }
     let cur = ov.get(id).ok_or_else(|| {
         RdyError::new(
@@ -545,6 +560,61 @@ fn current_for_edit<'b>(
             format!("re-read {id} (rdy_context) and retry with base={cur_hash}"),
         ));
     }
+    check_not_frozen(id, cur)?;
+    Ok((cur_hash, Cow::Borrowed(cur)))
+}
+
+/// cres1: the base and starting block of an edit of `id`, which has the recorded conflict `c`.
+fn conflicted_for_edit<'b>(
+    ov: &'b Overlay,
+    id: &BlockId,
+    base: &Option<String>,
+    c: &Conflict,
+    store: &rdy_store::Store,
+) -> Result<(Hash, Cow<'b, Block>), RdyError> {
+    let cid = c.id.short();
+    let sides: Vec<Hash> = c.sides.iter().filter_map(|s| s.version).collect();
+    let Some(b) = parse_base(base)? else {
+        let side_list = sides
+            .iter()
+            .map(|h| h.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let fix = match c.base {
+            Some(cb) => format!(
+                "pass base={cb} (its base) or one of its sides' versions ({side_list}); rdy_context shows them"
+            ),
+            None => format!(
+                "pass base=<one of its sides' versions> ({side_list}); rdy_context shows them"
+            ),
+        };
+        return Err(bad(
+            format!("{id} is conflicted ({cid}): name the version you edited"),
+            fix,
+        ));
+    };
+    if c.base != Some(b) && !sides.contains(&b) {
+        let (its_base, retry) = match c.base {
+            Some(cb) => (cb.short(), format!("base={cb} or a side's version")),
+            None => ("none".to_string(), "base=<a side's version>".to_string()),
+        };
+        return Err(RdyError::new(
+            E_STALE_BASE,
+            format!(
+                "{id} is conflicted ({cid}): your base {} is neither its base {its_base} nor a side",
+                b.short()
+            ),
+            format!("re-read {id} (rdy_context lists the sides) and retry with {retry}"),
+        ));
+    }
+    // the view reads the conflict's base, so the overlay holds it; a side's block is in the store
+    match ov.get(id).filter(|cur| cur.version_hash() == b) {
+        Some(cur) => Ok((b, Cow::Borrowed(cur))),
+        None => Ok((b, Cow::Owned(store.get_block(&b)?))),
+    }
+}
+
+fn check_not_frozen(id: &BlockId, cur: &Block) -> Result<(), RdyError> {
     if decision::is_frozen(cur) {
         return Err(RdyError::new(
             E_FROZEN,
@@ -552,7 +622,7 @@ fn current_for_edit<'b>(
             format!("write a new decision that supersedes or revokes {id}"),
         ));
     }
-    Ok((cur_hash, cur))
+    Ok(())
 }
 
 type Built = (
@@ -783,6 +853,7 @@ fn build_ops(
     base: &Materialized,
     session: &Session,
     inputs: Vec<OpInput>,
+    conflicts: &[Conflict],
 ) -> Result<Built, RdyError> {
     let mut ov = Overlay::new(base);
     let mut res = Resolver::new(base);
@@ -920,7 +991,8 @@ fn build_ops(
                 links,
             } => {
                 let id = res.id(&id)?;
-                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched)?;
+                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched, conflicts, store)?;
+                let cur: &Block = &cur;
                 let mut block = cur.clone();
                 // a doc from M1 stores the name readers already use for it on its first write
                 if block.block_type == tree::DOC
@@ -983,7 +1055,8 @@ fn build_ops(
                         "name another sibling as before, or omit it",
                     ));
                 }
-                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched)?;
+                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched, conflicts, store)?;
+                let cur: &Block = &cur;
                 let mut block = cur.clone();
                 if block.block_type == tree::DOC
                     && !block.fields.contains_key("name")
@@ -1028,7 +1101,8 @@ fn build_ops(
             }
             OpInput::Delete { id, base: b } => {
                 let id = res.id(&id)?;
-                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched)?;
+                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched, conflicts, store)?;
+                let cur: &Block = &cur;
                 if cur.block_type == decision::QUESTION {
                     return Err(bad(
                         format!(
@@ -1122,7 +1196,9 @@ fn build_ops(
                     if decision::is_frozen(b) || b.order == k {
                         continue;
                     }
-                    let (base_hash, cur) = current_for_edit(&ov, &b.id, &None, &touched)?;
+                    let (base_hash, cur) =
+                        current_for_edit(&ov, &b.id, &None, &touched, conflicts, store)?;
+                    let cur: &Block = &cur;
                     let mut block = cur.clone();
                     // like a move, a doc from M1 stores the name readers already use for it
                     if block.block_type == tree::DOC
@@ -1150,7 +1226,8 @@ fn build_ops(
                 targets,
             } => {
                 let id = res.id(&id)?;
-                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched)?;
+                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched, conflicts, store)?;
+                let cur: &Block = &cur;
                 let cited: BTreeSet<BlockId> = cur
                     .ref_tokens()
                     .iter()
@@ -1389,9 +1466,10 @@ impl Rdy {
         let scope = Scope::View(req.view.clone());
         let st = self.read();
         let claim = views::commit_claim(&st, session, &req.view)?;
+        let conflicts = st.conflicts(&scope)?;
         let m = st.materialized(&scope)?;
         let (ops, created, touched, names) =
-            build_ops(&self.pack, &self.store, &m, session, req.ops)?;
+            build_ops(&self.pack, &self.store, &m, session, req.ops, &conflicts)?;
         let change = Change {
             view: req.view.clone(),
             ops: ops.clone(),
@@ -1405,7 +1483,7 @@ impl Rdy {
             &req.view,
             change,
             &|id| m.version_of(id),
-            &[],
+            &conflicts,
             claim,
         )?;
         self.publish(Delta::Commit {
