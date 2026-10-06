@@ -460,7 +460,7 @@ impl Store {
     }
 
     /// `propose` with `changes` (a closed subset of the view's included changes, which the
-    /// caller checks) in place of the view's whole set.
+    /// caller checks) in place of the view's whole set. An empty `changes` is `EmptyProposal`.
     pub fn propose_changes(
         &mut self,
         view: &str,
@@ -524,8 +524,12 @@ impl Store {
     }
 
     /// Writes proposal version `p` with the refs `proposal/<stable>` = its id and
-    /// `open/<p.view>` = `stable`, in one write. Returns its id.
+    /// `open/<p.view>` = `stable`, in one write. Returns its id. A version with no changes is
+    /// refused (`EmptyProposal`): it would land as an empty landing, as often as it is approved.
     fn write_version(&mut self, p: &Proposal, stable: Hash) -> Result<Hash, StoreError> {
+        if p.changes.is_empty() {
+            return Err(StoreError::EmptyProposal(p.view.clone()));
+        }
         let bytes = encode(p);
         let id = Hash::of(&bytes);
         let mut items = vec![(kinds::PROPOSAL, bytes)];

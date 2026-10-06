@@ -300,3 +300,34 @@ fn pver1_every_version_records_the_canon_it_was_proposed_on() {
     let p2 = s.propose_next(&p1, set, "t2", prov("agent:v")).unwrap();
     assert_eq!(s.proposal(&p2).unwrap().canon_at, Some(l));
 }
+
+/// gconf1 fix round 1 (defence in depth): the store writes no proposal version with no changes,
+/// whichever path asks for one.
+#[test]
+fn gconf1_the_store_refuses_an_empty_proposal_version() {
+    let d = tempfile::tempdir().unwrap();
+    let mut s = Store::open(&d.path().join("s")).unwrap();
+    let e = s.propose("v", "t", prov("agent:v")).unwrap_err();
+    assert!(
+        matches!(e, StoreError::EmptyProposal(ref v) if v == "v"),
+        "{e}"
+    );
+    let c1 = create(&mut s, "v", "c-00001");
+    let e = s
+        .propose_changes("v", "t", prov("agent:v"), vec![])
+        .unwrap_err();
+    assert!(matches!(e, StoreError::EmptyProposal(_)), "{e}");
+    assert_eq!(s.get_ref("open/v").unwrap(), None, "nothing written");
+    let p1 = s.propose("v", "t", prov("agent:v")).unwrap();
+    let e = s
+        .propose_next(&p1, vec![], "t2", prov("agent:v"))
+        .unwrap_err();
+    assert!(matches!(e, StoreError::EmptyProposal(_)), "{e}");
+    let hash = |v: Option<Vec<u8>>| v.map(|b| Hash(b.try_into().unwrap()));
+    assert_eq!(
+        hash(s.get_ref(&format!("proposal/{p1}")).unwrap()),
+        Some(p1),
+        "the latest version did not move"
+    );
+    assert_eq!(s.proposal(&p1).unwrap().changes, vec![c1]);
+}

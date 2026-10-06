@@ -183,6 +183,11 @@ impl From<StoreError> for RdyError {
                     stable.short()
                 ),
             ),
+            StoreError::EmptyProposal(v) => RdyError::new(
+                E_BAD_INPUT,
+                format!("a proposal of view {v:?} needs at least one change"),
+                format!("rdy view show {v} lists its changes; write to the view first"),
+            ),
             StoreError::Conflict { id } => RdyError::new(
                 E_STALE_BASE,
                 format!("conflict on {id}"),

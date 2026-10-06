@@ -668,6 +668,15 @@ impl Rdy {
                         out.push(h);
                     }
                 }
+                if out.is_empty() {
+                    return Err(RdyError::new(
+                        E_BAD_INPUT,
+                        "name at least one change to propose",
+                        format!(
+                            "rdy view show {view} lists its changes; omit changes to propose the whole view"
+                        ),
+                    ));
+                }
                 out
             }
         };

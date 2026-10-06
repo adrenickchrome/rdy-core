@@ -121,7 +121,7 @@ fn gconf1_propose_lists_every_conflict_and_marks_the_blocking_ones() {
     )
     .unwrap()
     .change;
-    r.view_include(&sa, "a", &[cb.clone()]).unwrap();
+    r.view_include(&sa, "a", std::slice::from_ref(&cb)).unwrap();
     let whole = r.propose(&sa, "a", "whole").unwrap();
     assert_eq!(whole.conflicts.len(), 1);
     assert_eq!(
@@ -135,7 +135,7 @@ fn gconf1_propose_lists_every_conflict_and_marks_the_blocking_ones() {
     let e = r.land_report(&approver(), &whole.r#ref).unwrap_err();
     assert_eq!(e.code, E_CONFLICT_UNRESOLVED, "{e}");
     let subset = r
-        .propose_subset(&sa, "a", "just y", Some(&[cy.clone()]))
+        .propose_subset(&sa, "a", "just y", Some(std::slice::from_ref(&cy)))
         .unwrap();
     assert_eq!(
         (subset.changes, subset.version),
@@ -170,7 +170,7 @@ fn gconf1_a_subset_must_be_closed_and_name_changes_in_the_view() {
         .unwrap()
         .change;
     let e = r
-        .propose_subset(&sa, "a", "t", Some(&[c2.clone()]))
+        .propose_subset(&sa, "a", "t", Some(std::slice::from_ref(&c2)))
         .unwrap_err();
     assert_eq!(e.code, E_DEPS_MISSING, "{e}");
     assert_eq!(e.issues.len(), 1);
@@ -189,6 +189,32 @@ fn gconf1_a_subset_must_be_closed_and_name_changes_in_the_view() {
     assert_eq!(ok.changes, 2);
     r.land_report(&approver(), &ok.r#ref).unwrap();
     assert_eq!(body_of(&r, &Scope::Canon, &x), "x2");
+}
+
+/// Fix round 1: an empty subset is refused before anything is written; it used to write a
+/// version with no changes that landed again and again as empty landings.
+#[test]
+fn gconf1_an_empty_subset_is_refused_and_writes_no_proposal() {
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let sa = as_agent("agent:a", "r1");
+    write_as(&mut r, &sa, "a", claim(&section, "x")).unwrap();
+    let e = r.propose_subset(&sa, "a", "empty", Some(&[])).unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT, "{e}");
+    assert!(e.message.contains("at least one change"), "{e}");
+    assert!(
+        e.fix.contains("rdy view show a") && e.fix.contains("omit changes"),
+        "{e}"
+    );
+    assert_eq!(
+        r.read().reader().get_ref("open/a").unwrap(),
+        None,
+        "no proposal ref is written"
+    );
+    let whole = r.propose(&sa, "a", "whole").unwrap();
+    assert_eq!((whole.version, whole.changes), (1, 1));
+    r.fsck().unwrap();
 }
 
 #[test]
