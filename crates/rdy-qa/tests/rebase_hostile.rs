@@ -259,15 +259,61 @@ fn include_project(dir: &Path) -> String {
         .change
 }
 
-fn child(dir: &Path, mode: &str, point: CrashPoint, arg: &str) {
-    let _ = std::process::Command::new(std::env::current_exe().unwrap())
+/// The child's exit code when the armed crash point was never reached and the operation finished.
+const FINISHED: i32 = 3;
+
+/// Whether the armed point is on the path of a landing or an include; the others are never
+/// reached, so the child finishes (exit code `FINISHED`) instead of aborting.
+fn reached(point: CrashPoint) -> bool {
+    matches!(
+        point,
+        CrashPoint::BeforeMarker
+            | CrashPoint::BeforeSync
+            | CrashPoint::AfterSync
+            | CrashPoint::AfterIndex
+    )
+}
+
+/// The child ended as the point demands: killed by the abort signal where the point is on the
+/// operation's path, or exiting `FINISHED` where it is not. Any other end (a panic, an exit 0
+/// from a filter that matched nothing) is the child failing before it acted.
+fn ended_as_expected(point: CrashPoint, status: &std::process::ExitStatus) -> bool {
+    use std::os::unix::process::ExitStatusExt;
+    if reached(point) {
+        status.signal().is_some()
+    } else {
+        status.code() == Some(FINISHED)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Included {
+    Absent,
+    EmptyOwned,
+    Holds,
+}
+
+/// What a kill (or a finish) at `point` leaves of an include into a new view, which is two
+/// batches: the creation, then the include.
+fn include_outcome(point: CrashPoint) -> Included {
+    match point {
+        CrashPoint::BeforeMarker => Included::Absent,
+        CrashPoint::BeforeSync | CrashPoint::AfterSync | CrashPoint::AfterIndex => {
+            Included::EmptyOwned
+        }
+        _ => Included::Holds,
+    }
+}
+
+fn child(dir: &Path, mode: &str, point: CrashPoint, arg: &str) -> std::process::ExitStatus {
+    std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
         .env("RDY_VH_DIR", dir)
         .env("RDY_VH_MODE", mode)
         .env("RDY_VH_POINT", point.name())
         .env("RDY_VH_ARG", arg)
         .status()
-        .unwrap();
+        .unwrap()
 }
 
 #[test]
@@ -283,7 +329,7 @@ fn vhost1_a_kill_at_any_point_of_a_landing_with_rebases_is_all_or_nothing() {
             let _ = r.view_include(&as_agent("agent:b", "r2"), "fresh", &[arg]);
         }
         // a crash point this operation does not reach: it finished, which is also a valid end
-        std::process::exit(0);
+        std::process::exit(FINISHED);
     }
     for point in CrashPoint::ALL {
         // the landing
@@ -303,11 +349,17 @@ fn vhost1_a_kill_at_any_point_of_a_landing_with_rebases_is_all_or_nothing() {
                 .collect()
         };
         let canon = Rdy::open(&dir).unwrap().read().canon_head();
-        child(&dir, "land", point, &pid);
+        let status = child(&dir, "land", point, &pid);
+        assert!(
+            ended_as_expected(point, &status),
+            "{point:?}: land child ended {status:?}"
+        );
         let r = Rdy::open(&dir).unwrap();
         r.fsck().unwrap_or_else(|e| panic!("{point:?}: {e}"));
         let st = r.read();
-        if st.canon_head() != canon {
+        let moved = st.canon_head() != canon;
+        assert_eq!(moved, point != CrashPoint::BeforeMarker, "{point:?}");
+        if moved {
             let landing = st.canon_head().unwrap();
             for (name, old) in &before {
                 if matches!(name.as_str(), "seed") {
@@ -335,6 +387,15 @@ fn vhost1_a_kill_at_any_point_of_a_landing_with_rebases_is_all_or_nothing() {
         }
         check(&r, &Scope::Canon).unwrap_or_else(|e| panic!("{point:?}: {e:?}"));
         drop(st);
+        let mut r = r;
+        if !moved {
+            // the store recovers: the same landing now goes through and rebases the views
+            r.land_report(&approver(), &pid)
+                .unwrap_or_else(|e| panic!("{point:?}: re-landing: {e:?}"));
+            assert_ne!(r.read().canon_head(), canon, "{point:?}");
+            r.fsck().unwrap_or_else(|e| panic!("{point:?}: {e}"));
+            check(&r, &Scope::Canon).unwrap_or_else(|e| panic!("{point:?}: {e:?}"));
+        }
         drop(r);
         drop(base);
 
@@ -343,33 +404,63 @@ fn vhost1_a_kill_at_any_point_of_a_landing_with_rebases_is_all_or_nothing() {
         let dir = base.path().join("p");
         std::fs::create_dir_all(&dir).unwrap();
         let change = include_project(&dir);
-        child(&dir, "include", point, &change);
-        let r = Rdy::open(&dir).unwrap();
+        let status = child(&dir, "include", point, &change);
+        assert!(
+            ended_as_expected(point, &status),
+            "{point:?}: include child ended {status:?}"
+        );
+        let mut r = Rdy::open(&dir).unwrap();
         r.fsck().unwrap_or_else(|e| panic!("{point:?}: {e}"));
-        let st = r.read();
-        match st.view_head("fresh") {
-            None => {}
-            Some(head) => {
-                let inc = st.included("fresh");
-                if inc.is_empty() {
-                    assert_eq!(
-                        head.owner,
-                        Some(Owner {
-                            actor: "agent:b".into(),
-                            run: Some("r2".into())
-                        }),
-                        "{point:?}: an empty view is owned"
-                    );
-                } else {
-                    assert_eq!(
-                        inc.iter().map(|h| h.to_string()).collect::<Vec<_>>(),
-                        vec![change],
-                        "{point:?}"
-                    );
-                }
+        let owner = Owner {
+            actor: "agent:b".into(),
+            run: Some("r2".into()),
+        };
+        let (head, included): (Option<rdy_store::ViewHead>, Vec<String>) = {
+            let st = r.read();
+            (
+                st.view_head("fresh").cloned(),
+                st.included("fresh").iter().map(|h| h.to_string()).collect(),
+            )
+        };
+        match include_outcome(point) {
+            Included::Absent => {
+                assert!(head.is_none(), "{point:?}: the view should be absent");
+            }
+            Included::EmptyOwned => {
+                let head = head.unwrap_or_else(|| panic!("{point:?}: the view should exist"));
+                assert!(included.is_empty(), "{point:?}: {included:?}");
+                assert_eq!(
+                    head.owner,
+                    Some(owner.clone()),
+                    "{point:?}: an empty view is owned"
+                );
+            }
+            Included::Holds => {
+                let head = head.unwrap_or_else(|| panic!("{point:?}: the view should exist"));
+                assert_eq!(included, vec![change.clone()], "{point:?}");
+                assert_eq!(head.owner, Some(owner.clone()), "{point:?}");
             }
         }
         check(&r, &Scope::Canon).unwrap_or_else(|e| panic!("{point:?}: {e:?}"));
+        if include_outcome(point) != Included::Holds {
+            // the store recovers: the same include now goes through
+            r.invalidate();
+            r.view_include(
+                &as_agent("agent:b", "r2"),
+                "fresh",
+                std::slice::from_ref(&change),
+            )
+            .unwrap_or_else(|e| panic!("{point:?}: re-including: {e:?}"));
+            let inc: Vec<String> = r
+                .read()
+                .included("fresh")
+                .iter()
+                .map(|h| h.to_string())
+                .collect();
+            assert_eq!(inc, vec![change.clone()], "{point:?}");
+            r.fsck().unwrap_or_else(|e| panic!("{point:?}: {e}"));
+            check(&r, &Scope::Canon).unwrap_or_else(|e| panic!("{point:?}: {e:?}"));
+        }
     }
 }
 

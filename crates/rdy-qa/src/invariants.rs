@@ -282,17 +282,38 @@ pub fn check_views(r: &Rdy) -> Result<(), Vec<Violation>> {
         }
         // 3. conflict sides: those a landing recorded, and those the view's merge derives
         let mut conflicts: Vec<Conflict> = vec![];
-        for h in store.view_op_ids(&name).unwrap_or_default() {
-            if let Ok(op) = store.view_op(&h)
-                && let ViewOpKind::Rebase { conflicts: cs, .. } = op.op
-            {
-                conflicts.extend(cs);
+        match store.view_op_ids(&name) {
+            Ok(ids) => {
+                for h in ids {
+                    match store.view_op(&h) {
+                        Ok(op) => {
+                            if let ViewOpKind::Rebase { conflicts: cs, .. } = op.op {
+                                conflicts.extend(cs);
+                            }
+                        }
+                        Err(e) => out.push(v(
+                            "conflict_sides",
+                            None,
+                            format!("view {name:?}: cannot read op {h}: {e}"),
+                        )),
+                    }
+                }
             }
+            Err(e) => out.push(v(
+                "conflict_sides",
+                None,
+                format!("view {name:?}: cannot list its ops: {e}"),
+            )),
         }
-        if !head.closed
-            && let Ok(cs) = st.conflicts(&Scope::View(name.clone()))
-        {
-            conflicts.extend(cs.iter().cloned());
+        if !head.closed {
+            match st.conflicts(&Scope::View(name.clone())) {
+                Ok(cs) => conflicts.extend(cs.iter().cloned()),
+                Err(e) => out.push(v(
+                    "conflict_sides",
+                    None,
+                    format!("view {name:?}: cannot materialize it to derive its conflicts: {e}"),
+                )),
+            }
         }
         for c in &conflicts {
             for side in &c.sides {

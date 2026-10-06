@@ -118,3 +118,32 @@ fn vinv1_a_clean_swarm_passes() {
         check(&r, &Scope::View(v)).unwrap();
     }
 }
+
+#[test]
+fn vinv1_a_view_that_cannot_be_read_is_a_violation_not_a_pass() {
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = as_agent("agent:a", "r1");
+    write_as(&mut r, &a, "a", claim(&section, "a")).unwrap();
+    assert!(rules(&r).is_empty(), "{:?}", check_views(&r));
+    // an include of a change the store does not hold: the view's merge cannot be built
+    let ghost: rdy_model::Hash = "ab".repeat(32).parse().unwrap();
+    r.store_mut()
+        .view_append(
+            "a",
+            vec![ViewOpKind::Include {
+                changes: vec![ghost],
+            }],
+            &a.provenance(),
+        )
+        .unwrap();
+    r.invalidate();
+    let found = check_views(&r).expect_err("an unreadable view must be reported");
+    assert!(
+        found
+            .iter()
+            .any(|x| x.rule == "conflict_sides" && x.detail.contains("\"a\"")),
+        "rule 3 must report the failed read, got {found:?}"
+    );
+}
