@@ -658,10 +658,12 @@ fn engine_split_brain_histories_keep_every_invariant() {
             land("E_VALIDATION/E_PARENT_CYCLE"),
             4,
         ),
+        // vcreate1: an empty unpinned view reads canon (the floating rule), so writes into it no
+        // longer read a stale base; the seeded run's path clashes at landing fell from 5 to 4
         (
-            "E_PATH_CLASH landings [8]",
+            "E_PATH_CLASH landings [4]",
             land("E_VALIDATION/E_PATH_CLASH"),
-            5,
+            3,
         ),
         (
             "E_FROZEN writes [5]",

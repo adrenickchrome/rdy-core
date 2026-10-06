@@ -28,6 +28,8 @@ pub enum Delta {
         ops: Vec<Op>,
         rebased: Vec<String>,
     },
+    /// View `view` was created, forked, or had view ops appended (its head and set re-read).
+    View { view: String },
     /// A tag was written.
     Tags,
     /// Only the log moved (a proposal): no view content changed.
@@ -90,7 +92,18 @@ impl Entry {
 
     /// Pre-sets the build (a seed the writer computed in O(ops)).
     pub(crate) fn seed(&mut self, built: Built) {
-        self.cell = OnceLock::from(Ok(Arc::new(built)));
+        self.seed_shared(Arc::new(built));
+    }
+
+    /// Pre-sets the build to one another entry holds (same base, same set).
+    pub(crate) fn seed_shared(&mut self, built: Arc<Built>) {
+        self.cell = OnceLock::from(Ok(built));
+    }
+
+    /// Whether this view entry floats on canon: a view (with a head) that is unpinned and
+    /// includes nothing reads as canon, whatever its stored base.
+    pub(crate) fn floats(&self) -> bool {
+        self.head.as_ref().is_some_and(|h| !h.pinned) && self.included.is_empty()
     }
 }
 
@@ -172,6 +185,8 @@ pub struct ReadState {
     /// The site's name and description, parsed from `.rdy/config.yaml` by a full publish.
     pub(crate) name: Arc<str>,
     pub(crate) description: Option<Arc<str>>,
+    /// `reviews.require_up_to_date` in `.rdy/config.yaml`, read by a full publish (FW-HB1).
+    pub(crate) require_up_to_date: bool,
     pub(crate) reader: StoreReader,
     pub(crate) as_of: Arc<AsOfCache>,
     /// The version-position cache, shared like `as_of` (read by the state's version reads).
@@ -234,6 +249,30 @@ impl ReadState {
             .unwrap_or_default()
     }
 
+    /// Whether the project requires a proposal's base to be canon's head when it lands
+    /// (`reviews.require_up_to_date`), as the config read when this state was published.
+    pub fn require_up_to_date(&self) -> bool {
+        self.require_up_to_date
+    }
+
+    /// The landing view `name` reads on: canon's head for a view with no ref or one that floats
+    /// (unpinned, nothing included), else the view's stored base.
+    pub fn effective_base(&self, name: &str) -> Option<Hash> {
+        match self.views.get(name) {
+            Some(e) if !e.floats() => e.head.as_ref().and_then(|h| h.base),
+            _ => self.canon_head,
+        }
+    }
+
+    /// The conflict the scope's merge recorded on block `id`, if any.
+    pub fn conflict_on(&self, scope: &Scope, id: &BlockId) -> Result<Option<Conflict>, RdyError> {
+        Ok(self
+            .conflicts(scope)?
+            .iter()
+            .find(|c| c.block == *id)
+            .cloned())
+    }
+
     pub fn materialized(&self, scope: &Scope) -> Result<Arc<Materialized>, RdyError> {
         Ok(Arc::clone(&self.built(scope)?.m))
     }
@@ -266,7 +305,11 @@ impl ReadState {
     pub fn is_built(&self, scope: &Scope) -> (bool, bool) {
         let entry = match scope {
             Scope::Canon => Some(Arc::clone(&self.canon)),
-            Scope::View(v) => self.views.get(v).cloned(),
+            // a floating view reads canon's entry
+            Scope::View(v) => match self.views.get(v) {
+                Some(e) if e.floats() => Some(Arc::clone(&self.canon)),
+                e => e.cloned(),
+            },
             Scope::At(h) => self.as_of.peek(h),
         };
         match entry.as_deref().and_then(Entry::built_ok) {
@@ -276,7 +319,8 @@ impl ReadState {
     }
 
     /// The one lookup behind every read of a scope: its entry's build, built on first use. A view
-    /// with no ref reads canon's entry; an as-of read marks its entry used in the shared cache.
+    /// with no ref, or one that floats (unpinned, nothing included), reads canon's entry; an
+    /// as-of read marks its entry used in the shared cache.
     pub(crate) fn built(&self, scope: &Scope) -> Result<Arc<Built>, RdyError> {
         if let Some(e) = &self.error {
             return Err(e.clone());
@@ -284,8 +328,8 @@ impl ReadState {
         match scope {
             Scope::Canon => self.build(&self.canon),
             Scope::View(v) => match self.views.get(v) {
-                Some(entry) => self.build(entry),
-                None => self.build(&self.canon),
+                Some(entry) if !entry.floats() => self.build(entry),
+                _ => self.build(&self.canon),
             },
             Scope::At(h) => {
                 let entry = self.as_of.touch(&self.reader, h)?;

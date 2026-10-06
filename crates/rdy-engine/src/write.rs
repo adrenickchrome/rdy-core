@@ -1,6 +1,6 @@
 use crate::error::*;
 use crate::keys::{self, Keys};
-use crate::{Delta, Materialized, Rdy, Scope, Session};
+use crate::{Delta, Materialized, Rdy, Scope, Session, views};
 use rdy_model::tree;
 use rdy_model::{
     Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Justification, Link, Op, RefMode,
@@ -1388,6 +1388,7 @@ impl Rdy {
         }
         let scope = Scope::View(req.view.clone());
         let st = self.read();
+        let claim = views::commit_claim(&st, session, &req.view)?;
         let m = st.materialized(&scope)?;
         let (ops, created, touched, names) =
             build_ops(&self.pack, &self.store, &m, session, req.ops)?;
@@ -1400,9 +1401,13 @@ impl Rdy {
             message: req.message,
             links,
         };
-        let id = self
-            .store
-            .commit_to_view_with(&req.view, change, &|id| m.version_of(id))?;
+        let id = self.store.commit_to_view_resolving(
+            &req.view,
+            change,
+            &|id| m.version_of(id),
+            &[],
+            claim,
+        )?;
         self.publish(Delta::Commit {
             view: req.view.clone(),
             ops,

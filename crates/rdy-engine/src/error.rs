@@ -41,6 +41,18 @@ pub const E_VIEW_EXISTS: &str = "E_VIEW_EXISTS";
 pub const E_VIEW_CLOSED: &str = "E_VIEW_CLOSED";
 /// The proposal version named is not its latest.
 pub const E_PROPOSAL_MOVED: &str = "E_PROPOSAL_MOVED";
+/// Changes in the view depend on the change being excluded (each one is an issue).
+pub const E_HAS_DEPENDENTS: &str = "E_HAS_DEPENDENTS";
+/// A subset leaves out changes its members depend on (each one is an issue).
+pub const E_DEPS_MISSING: &str = "E_DEPS_MISSING";
+/// The version being landed carries conflicts it has not resolved (each one is an issue).
+pub const E_CONFLICT_UNRESOLVED: &str = "E_CONFLICT_UNRESOLVED";
+/// An undo would leave the view inconsistent (each blocking op is an issue).
+pub const E_UNDO_BLOCKED: &str = "E_UNDO_BLOCKED";
+/// An undo would bring back or remove work that has landed.
+pub const E_UNDO_LANDING: &str = "E_UNDO_LANDING";
+/// The session has no op of its own on the view that can be undone.
+pub const E_NOTHING_TO_UNDO: &str = "E_NOTHING_TO_UNDO";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RdyError {

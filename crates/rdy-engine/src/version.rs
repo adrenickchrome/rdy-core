@@ -481,7 +481,8 @@ impl ReadState {
                     name: name.clone(),
                     unlanded_changes: head.as_ref().map_or(0, |h| h.len as u32),
                 };
-                (head.map_or(canon, |h| h.base), Some(pos))
+                // a floating view stands where canon stands
+                (self.effective_base(name), Some(pos))
             }
         };
         // the highest version on each landing (version_tags is in ascending order)

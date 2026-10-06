@@ -13,6 +13,7 @@ mod session;
 pub mod testkit;
 mod tree_io;
 mod version;
+pub mod views;
 mod write;
 mod yaml_pos;
 
@@ -25,12 +26,14 @@ pub use lint::check_path;
 pub use materialize::{Materialized, PathMiss};
 pub use paths::TreeNode;
 pub use query::{Context, ImpactItem, ImpactVia, compact_summary, field_json, summary, summary_in};
+pub use rdy_store::Relay;
 pub use read_state::{Delta, ReadState};
 pub use session::{PinnedClock, Scope, Session, now_ms, pin_clock, rfc3339_now};
 pub use tree_io::Diagnostic;
 pub use version::{
     AS_OF_CACHE_ENTRIES, VersionInfo, VersionPosition, VersionRef, ViewPosition, parse_version,
 };
+pub use views::{ConflictInfo, ConflictSide, OwnerInfo, ViewHeadInfo, ViewOpResult};
 pub use write::{LinkInput, OpInput, WriteRequest, WriteResult, json_to_field};
 
 use arc_swap::ArcSwap;
@@ -50,6 +53,23 @@ struct Config {
     /// One sentence about the project, shown on the site's home page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    /// How proposals are reviewed (FW-HB1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reviews: Option<ReviewsConfig>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct ReviewsConfig {
+    /// A proposal lands only on the canon head it was proposed on.
+    #[serde(default)]
+    require_up_to_date: bool,
+}
+
+impl Config {
+    fn require_up_to_date(cfg: Option<&Config>) -> bool {
+        cfg.and_then(|c| c.reviews.as_ref())
+            .is_some_and(|r| r.require_up_to_date)
+    }
 }
 
 pub struct Rdy {
@@ -139,6 +159,7 @@ impl Rdy {
             pack: pack.to_string(),
             name: None,
             description: None,
+            reviews: None,
         })
         .expect("config yaml");
         rdy_store::fsutil::write_durable(&dot.join("config.yaml"), cfg.as_bytes()).map_err(io)?;
@@ -163,6 +184,7 @@ impl Rdy {
         let as_of = Arc::new(AsOfCache::default());
         let vpos: Arc<Mutex<version::VposCache>> = Default::default();
         let (name, description) = site_identity(project, Some(&cfg));
+        let require_up_to_date = Config::require_up_to_date(Some(&cfg));
         // a placeholder until the first publish below, which replaces all of it
         let state = ArcSwap::from_pointee(ReadState {
             seq: store.log_end(),
@@ -174,6 +196,7 @@ impl Rdy {
             root: Arc::from(project),
             name,
             description,
+            require_up_to_date,
             reader: store.reader(),
             as_of: Arc::clone(&as_of),
             vpos: Arc::clone(&vpos),
@@ -270,6 +293,7 @@ impl Rdy {
                     root: Arc::clone(&prev.root),
                     name: Arc::clone(&prev.name),
                     description: prev.description.clone(),
+                    require_up_to_date: prev.require_up_to_date,
                     reader: self.store.reader(),
                     as_of: Arc::clone(&self.as_of),
                     vpos: Arc::clone(&self.vpos),
@@ -350,10 +374,18 @@ impl Rdy {
         let seq = self.store.log_end();
         let canon_head = self.store.canon_head()?;
         // the config is re-read only by a full publish (open, invalidate, reindex); every other
-        // publish carries the previous state's name and description
-        let (name, description) = match delta {
-            Delta::Full => site_identity(&prev.root, read_config(&prev.root).as_ref()),
-            _ => (Arc::clone(&prev.name), prev.description.clone()),
+        // publish carries the previous state's name, description and review rules
+        let (name, description, require_up_to_date) = match delta {
+            Delta::Full => {
+                let cfg = read_config(&prev.root);
+                let (name, description) = site_identity(&prev.root, cfg.as_ref());
+                (name, description, Config::require_up_to_date(cfg.as_ref()))
+            }
+            _ => (
+                Arc::clone(&prev.name),
+                prev.description.clone(),
+                prev.require_up_to_date,
+            ),
         };
         let (canon, views, tags) = match delta {
             Delta::Full => {
@@ -371,12 +403,19 @@ impl Rdy {
                 let mut views = prev.views.clone();
                 match self.view_entry(&view)? {
                     Some(mut next) => {
-                        // the entry the write read: the view's own, or canon's for a view with
-                        // no ref yet (it floated on canon)
+                        // the build the write applied to: the view's own on the same base; or
+                        // canon's, for a view that read canon (no ref yet, or empty) and now
+                        // sits on canon's head (the float catch-up may have moved its base).
+                        // A build on an old base never seeds the write after a catch-up.
                         let pred = match prev.views.get(&view) {
-                            Some(e) => e.built_ok(),
+                            Some(e) if e.base == next.base && e.built_ok().is_some() => {
+                                e.built_ok()
+                            }
+                            Some(e) if e.included.is_empty() && next.base == prev.canon_head => {
+                                prev.canon.built_ok()
+                            }
                             None if next.base == prev.canon_head => prev.canon.built_ok(),
-                            None => None,
+                            _ => None,
                         };
                         if let Some(b) = pred.filter(|b| b.conflicts.is_empty()) {
                             next.seed(read_state::Built::new(
@@ -425,6 +464,27 @@ impl Rdy {
                 }
                 (Arc::new(canon), views, Arc::clone(&prev.tags))
             }
+            Delta::View { view } => {
+                let mut views = prev.views.clone();
+                match self.view_entry(&view)? {
+                    Some(mut next) => {
+                        // view ops that left the base and the set as they were (a close, an
+                        // own) keep the build; any other change starts unbuilt
+                        if let Some(e) = prev.views.get(&view)
+                            && e.base == next.base
+                            && e.included == next.included
+                            && let Some(b) = e.built_ok()
+                        {
+                            next.seed_shared(Arc::clone(b));
+                        }
+                        views.insert(view, Arc::new(next));
+                    }
+                    None => {
+                        views.remove(&view);
+                    }
+                }
+                (Arc::clone(&prev.canon), views, Arc::clone(&prev.tags))
+            }
             Delta::Tags => (
                 Arc::clone(&prev.canon),
                 prev.views.clone(),
@@ -446,6 +506,7 @@ impl Rdy {
             root: Arc::clone(&prev.root),
             name,
             description,
+            require_up_to_date,
             reader: self.store.reader(),
             as_of: Arc::clone(&self.as_of),
             vpos: Arc::clone(&self.vpos),
