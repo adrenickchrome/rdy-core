@@ -3,6 +3,7 @@ use crate::format::{self, Format};
 use crate::fsutil;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
+use crate::merge::Conflict;
 use crate::segment::{CrashPoint, Location, SegmentLog, SegmentReader, find_gap, seg_path};
 use crate::view::ViewOp;
 use rdy_model::{Block, Change, Hash, LandingRecord, Op, Proposal};
@@ -949,7 +950,7 @@ impl Store {
         mut change: Change,
         refs: Vec<(String, Vec<u8>)>,
     ) -> Result<Hash, StoreError> {
-        let (mut items, change_pos) = self.change_frames(&mut change, None)?;
+        let (mut items, change_pos) = self.change_frames(&mut change, None, &[])?;
         items.extend(self.ref_items(refs));
         Ok(self.write(items)?[change_pos])
     }
@@ -1208,8 +1209,9 @@ impl Store {
         &self,
         change: &mut Change,
         view: Option<&str>,
+        conflicts: &[Conflict],
     ) -> Result<(Frames, usize), StoreError> {
-        change.deps = self.change_deps(change, view)?;
+        change.deps = self.change_deps_resolving(change, view, conflicts)?;
         let mut items = vec![];
         for op in &change.ops {
             if let Op::Create { block } | Op::Update { block, .. } = op {
@@ -1238,6 +1240,18 @@ impl StoreReader {
         &self,
         change: &Change,
         view: Option<&str>,
+    ) -> Result<Vec<Hash>, StoreError> {
+        self.change_deps_resolving(change, view, &[])
+    }
+
+    /// `change_deps`, plus, for each op whose block has a conflict in `conflicts`, the change of
+    /// every side that has one: a write under a recorded conflict depends on every side, so the
+    /// merge reads it as the conflict's resolution (res1).
+    pub fn change_deps_resolving(
+        &self,
+        change: &Change,
+        view: Option<&str>,
+        conflicts: &[Conflict],
     ) -> Result<Vec<Hash>, StoreError> {
         let mut deps = BTreeSet::new();
         // `view`'s included set, read once and only when a dep needs it
@@ -1273,6 +1287,11 @@ impl StoreReader {
                     }
                     deps.insert(self.producer(base)?.ok_or(StoreError::NotFound(*base))?);
                 }
+            }
+        }
+        for op in &change.ops {
+            if let Some(c) = conflicts.iter().find(|c| c.block == *op.block_id()) {
+                deps.extend(c.sides.iter().filter_map(|s| s.change));
             }
         }
         Ok(deps.into_iter().collect())

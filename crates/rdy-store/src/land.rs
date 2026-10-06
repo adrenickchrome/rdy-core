@@ -54,7 +54,7 @@ impl Store {
         let mut accept_change = None;
         let (tip, final_id, aid) = match req.accept {
             Some(mut accept) => {
-                let (frames, pos) = self.change_frames(&mut accept, Some(&p.view))?;
+                let (frames, pos) = self.change_frames(&mut accept, Some(&p.view), &[])?;
                 let aid = Hash::of(&frames[pos].1);
                 items.extend(frames);
                 let by = &accept.provenance;

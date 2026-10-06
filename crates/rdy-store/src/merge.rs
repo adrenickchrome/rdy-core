@@ -8,7 +8,7 @@ use rdy_model::{BlockId, Hash, Op, StateSnapshot};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 
 /// One change as the merge sees it.
 #[derive(Clone, Copy, Debug)]
@@ -123,6 +123,43 @@ pub fn merge(
     producer: &dyn Fn(&Hash) -> Option<Hash>,
 ) -> Merged {
     merge_indexed(base, changes, producer).0
+}
+
+/// `merge` restricted to `blocks`: the base holds only those blocks and each change only its ops
+/// on them (a change left with no ops stays, so the order and the deps are the full merge's).
+/// Its conflicts are the full merge's conflicts on `blocks`, and its state holds only `blocks`.
+pub fn merge_on_blocks(
+    base: &StateSnapshot,
+    changes: &[MergeChange<'_>],
+    producer: &dyn Fn(&Hash) -> Option<Hash>,
+    blocks: &BTreeSet<BlockId>,
+) -> Merged {
+    let base = StateSnapshot {
+        blocks: blocks
+            .iter()
+            .filter_map(|b| base.blocks.get(b).map(|v| (b.clone(), *v)))
+            .collect(),
+    };
+    let ops: Vec<Vec<Op>> = changes
+        .iter()
+        .map(|c| {
+            c.ops
+                .iter()
+                .filter(|op| blocks.contains(op.block_id()))
+                .cloned()
+                .collect()
+        })
+        .collect();
+    let changes: Vec<MergeChange<'_>> = changes
+        .iter()
+        .zip(&ops)
+        .map(|(c, ops)| MergeChange {
+            id: c.id,
+            deps: c.deps,
+            ops,
+        })
+        .collect();
+    merge(&base, &changes, producer)
 }
 
 /// `merge`, with each entry of `Merged::order` also given as its position in `changes` (its
