@@ -1,12 +1,20 @@
 //! dfu1: the M2b demo's daemon rough edges.
+use rdy_daemon::client::connect_or_start;
 use rdy_daemon::client::{HELD_GRACE, connect_backoff, log_tail_since};
 use rdy_daemon::proxy::InFlight;
 use rdy_daemon::{E_DAEMON_START, RunDir};
 use rdy_engine::Rdy;
 use rdy_qa::daemon::{Hosted, Served};
+use rdy_qa::daemon::{child_daemon_entry, client as client_opts, spawn_child_daemon};
 use rdy_qa::mcp::McpClient;
 use serde_json::{Value, json};
 use std::time::Duration;
+
+/// The re-exec child of `dfu1_a_store_held_by_a_predecessor_that_is_exiting_is_waited_for`.
+#[test]
+fn dfu1_child() {
+    child_daemon_entry();
+}
 
 #[test]
 fn dfu1_in_flight_tracking_answers_exactly_the_unanswered_requests() {
@@ -123,6 +131,71 @@ fn dfu1_a_store_held_by_no_daemon_is_refused_without_spawning_and_with_the_speci
         s.json(&["--json", "status"]).0,
         "once the store is free, the daemon starts"
     );
+}
+
+/// Holds `<project>/.rdy/store/lock` for `hold`, as a draining daemon (or a `--no-daemon` rdy)
+/// would, until the returned thread is joined.
+fn hold_store_lock(project: &std::path::Path, hold: Duration) -> std::thread::JoinHandle<()> {
+    let lock = project.join(".rdy/store/lock");
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock)
+        .unwrap();
+    f.lock().unwrap();
+    std::thread::spawn(move || {
+        std::thread::sleep(hold);
+        drop(f);
+    })
+}
+
+#[test]
+fn dfu1_a_store_held_while_a_daemon_pid_is_live_is_not_refused() {
+    let s = Served::new();
+    // the lock is released by someone else after longer than HELD_GRACE; the pid file names a
+    // live process (this one), so the held lock may be a daemon's: spawn, let its open retry
+    let run = s.run_dir();
+    run.ensure().unwrap();
+    std::fs::write(run.pid_file(), format!("{}\n", std::process::id())).unwrap();
+    let holder = Rdy::open(s.dir.path()).unwrap();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(HELD_GRACE * 3);
+        drop(holder);
+    });
+    let (ok, v) = s.json(&["--json", "status"]);
+    releaser.join().unwrap();
+    assert!(
+        ok,
+        "a live daemon pid means the holder may be draining: {v}"
+    );
+}
+
+#[test]
+fn dfu1_a_store_held_by_a_predecessor_that_is_exiting_is_waited_for() {
+    let dir = rdy_qa::daemon::short_tempdir();
+    let run = RunDir::of_project(dir.path());
+    let (spawn_old, _) = spawn_child_daemon("dfu1_child", &run, "0.1.0", &[]);
+    let (spawn_new, count_new) = spawn_child_daemon("dfu1_child", &run, "0.2.0", &[]);
+    let rt = Hosted::rt();
+    rt.block_on(async {
+        let old = connect_or_start(&run, client_opts(&run, "0.1.0", dir.path(), spawn_old))
+            .await
+            .unwrap();
+        old.close();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // the old daemon is replaced (it answers `exiting` and drops its socket) but its store
+        // lock is still held for longer than HELD_GRACE
+        let holder = hold_store_lock(dir.path(), HELD_GRACE * 3);
+        let mut new = connect_or_start(&run, client_opts(&run, "0.2.0", dir.path(), spawn_new))
+            .await
+            .unwrap_or_else(|e| panic!("a draining predecessor is not a --no-daemon holder: {e}"));
+        assert_eq!(new.version(), "0.2.0");
+        assert_eq!(count_new.load(std::sync::atomic::Ordering::SeqCst), 1);
+        new.ctl("stop", json!({})).await.unwrap();
+        holder.join().unwrap();
+    });
 }
 
 #[test]

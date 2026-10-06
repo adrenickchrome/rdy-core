@@ -150,6 +150,15 @@ fn log_len(run: &RunDir) -> u64 {
 
 /// Whether the store's lock file is held by a process right now. A missing lock file or any other
 /// probe error counts as not held.
+/// Whether `daemon.pid` names a live process: a daemon (starting, or draining its store) that a
+/// held store lock may belong to.
+fn daemon_pid_alive(run: &RunDir) -> bool {
+    fs::read_to_string(run.pid_file())
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .is_some_and(crate::spawn::process_alive)
+}
+
 fn store_lock_held(lock: &std::path::Path) -> bool {
     let Ok(f) = fs::File::open(lock) else {
         return false;
@@ -536,6 +545,8 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
         cwd,
     };
     let progress: &mut (dyn FnMut(&str) + Send) = &mut *progress;
+    // whether a daemon told us it is exiting: it then still holds the store while it drains
+    let mut saw_exiting = false;
     // 1. a daemon may be running
     match connect(run, &hello).await {
         Attempt::Ready(c) => return Ok(c),
@@ -543,7 +554,8 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
             return finish(p, run, deadline, start_timeout, progress, None).await;
         }
         Attempt::Refused(e) => return Err(e),
-        Attempt::Exiting | Attempt::NoDaemon(_) => {}
+        Attempt::Exiting => saw_exiting = true,
+        Attempt::NoDaemon(_) => {}
     }
 
     // a daemon spawned for a socket path over `sun_path` would only die at its bind; refuse it
@@ -587,16 +599,25 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
             return finish(p, run, deadline, start_timeout, progress, None).await;
         }
         Attempt::Refused(e) => return Err(e),
-        Attempt::Exiting | Attempt::NoDaemon(_) => {}
+        Attempt::Exiting => saw_exiting = true,
+        Attempt::NoDaemon(_) => {}
     }
 
     // a store held by a process that is not a daemon (a --no-daemon rdy) would only make the
     // daemon we spawn die at its open: refuse that here, without a spawn, once it has had a
-    // moment to let go
+    // moment to let go. A daemon that is draining holds the store too (it removes its socket and
+    // pid file first), and the successor's own open retries for LOCKED_RETRY to outlast it: so
+    // wait that long when a daemon just told us it is exiting, and do not refuse at all while
+    // the pid file names a live process.
     if let Some(store) = run.path().parent().map(|p| p.join("store")) {
         let lock = store.join("lock");
-        let give_up = (Instant::now() + HELD_GRACE).min(deadline);
-        while store_lock_held(&lock) {
+        let grace = if saw_exiting {
+            crate::serve::LOCKED_RETRY
+        } else {
+            HELD_GRACE
+        };
+        let give_up = (Instant::now() + grace).min(deadline);
+        while store_lock_held(&lock) && !daemon_pid_alive(run) {
             match connect(run, &hello).await {
                 Attempt::Ready(c) => return Ok(c),
                 Attempt::Starting(p) => {
@@ -605,7 +626,8 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
                 Attempt::Refused(e) => return Err(e),
                 Attempt::Exiting | Attempt::NoDaemon(_) => {}
             }
-            if Instant::now() >= give_up {
+            let now = Instant::now();
+            if now >= give_up {
                 return Err(ErrorReply::new(
                     E_DAEMON_START,
                     format!(
