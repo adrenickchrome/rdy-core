@@ -779,6 +779,7 @@ impl Rdy {
         s: &Session,
         view: &str,
         edited: Block,
+        brief: Option<String>,
     ) -> Result<WriteResult, RdyError> {
         let scope = Scope::View(view.to_string());
         let cur = self.read().block(&scope, &edited.id)?;
@@ -850,7 +851,7 @@ impl Rdy {
             body: (cur.body != edited.body).then(|| edited.body.clone()),
             links,
         };
-        self.write(
+        self.write_briefed(
             s,
             WriteRequest {
                 view: view.into(),
@@ -858,6 +859,7 @@ impl Rdy {
                 justification: None,
                 message: format!("edit {}", edited.id),
             },
+            brief,
         )
     }
 }

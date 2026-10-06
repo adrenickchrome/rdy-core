@@ -237,7 +237,7 @@ fn revoke_links_and_requires_a_decision() {
     let p = r.propose(&agent(), "work", "p").unwrap();
     r.land(&founder(), &p.id).unwrap();
     let rv = r
-        .revoke(&agent(), "work", &did, "no longer true", &s)
+        .revoke(&agent(), "work", &did, "no longer true", &s, None)
         .unwrap();
     let b = r
         .read()
@@ -252,7 +252,9 @@ fn revoke_links_and_requires_a_decision() {
         Some(format!("Revoke {did}: no longer true").as_str())
     );
     assert_eq!(
-        r.revoke(&agent(), "work", &s, "x", &s).unwrap_err().code,
+        r.revoke(&agent(), "work", &s, "x", &s, None)
+            .unwrap_err()
+            .code,
         "E_BAD_INPUT"
     );
 }

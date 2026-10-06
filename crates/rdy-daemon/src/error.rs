@@ -52,6 +52,9 @@ impl From<rdy_engine::RdyError> for ErrorReply {
         if let Some(c) = e.corrected {
             r.extra.insert("corrected".into(), c);
         }
+        if let Some(b) = e.briefing {
+            r.extra.insert("briefing".into(), b);
+        }
         r
     }
 }

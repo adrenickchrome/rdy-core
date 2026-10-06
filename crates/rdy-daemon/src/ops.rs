@@ -465,7 +465,7 @@ fn edit_block(cx: &OpContext, a: EditBlockArgs) -> Result<Value, RdyError> {
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
     let block = block_from_yaml(&a.yaml)?;
-    write_typed(cx.engine, move |r| r.edit_block(&s, &view, block))
+    write_typed(cx.engine, move |r| r.edit_block(&s, &view, block, None))
 }
 
 fn propose(cx: &OpContext, a: ProposeArgs) -> Result<Value, RdyError> {

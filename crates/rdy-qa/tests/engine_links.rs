@@ -94,7 +94,7 @@ fn link1_rdy_edit_removing_a_link_kind_still_removes_it() {
     let dd = BlockId::parse(ids["$dd"].as_str().unwrap()).unwrap();
     let mut edited = r.read().block(&scope, &dd).unwrap();
     edited.links.remove("answers");
-    r.edit_block(&writer(), "work", edited).unwrap();
+    r.edit_block(&writer(), "work", edited, None).unwrap();
     let b = r.read().block(&scope, &dd).unwrap();
     assert!(!b.links.contains_key("answers"), "{:?}", b.links);
     assert_eq!(

@@ -738,6 +738,7 @@ fn decision_input(p: DecideParams) -> DecisionInput {
         refines: p.refines.unwrap_or_default(),
         answers: p.answers.unwrap_or_default(),
         no_inherit,
+        brief: None,
     }
 }
 
@@ -761,7 +762,7 @@ pub fn rdy_revoke(st: &mut McpState, p: RevokeParams) -> Result<Value, RdyError>
     let s = session(st)?;
     let view = p.view.unwrap_or_else(|| st.view.clone());
     write_typed(&*st.engine, move |r| {
-        r.revoke(&s, &view, &p.target, &p.reason, &p.parent)
+        r.revoke(&s, &view, &p.target, &p.reason, &p.parent, None)
     })
 }
 

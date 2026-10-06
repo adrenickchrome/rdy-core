@@ -4,12 +4,14 @@
 //! block or one of their dependencies changes version. Registered briefings live in memory
 //! (`BriefRegistry`), one registry per open project.
 use crate::error::*;
+use crate::keys;
 use crate::query::summary_in;
+use crate::write::OpInput;
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, EdgeKind, IMPACT_LINKS, SUSPECT_LINKS, Suspect};
 use rdy_model::decision::is_frozen;
 use rdy_model::{Block, BlockId, FieldValue, Hash};
-use rdy_schema::{Pack, Trait};
+use rdy_schema::{Issue, Pack, Severity, Trait};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -534,4 +536,371 @@ impl ReadState {
         briefing.cut(max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS));
         Ok(briefing)
     }
+}
+
+// ---- bwr1: briefings on the write path ----
+
+/// The lifecycle that counts as stable.
+const STABLE: &str = "stable";
+
+/// The block of `m` an op's parent text names, as the pre-pass sees it.
+#[derive(Clone, Debug)]
+enum Anchor {
+    /// The top level: no parent.
+    Top,
+    /// The nearest existing ancestor.
+    At(BlockId),
+    /// The text names nothing in `m` (or this batch): `build_ops` reports it.
+    Unknown,
+}
+
+/// What one op is about: the block a briefing must cover, and whether the op touches stable
+/// content.
+#[derive(Clone, Debug)]
+struct Subject {
+    target: BlockId,
+    stable: bool,
+}
+
+/// A block's own `lifecycle`, if it has one (a null value counts as none).
+fn own_lifecycle(b: &Block) -> Option<&FieldValue> {
+    b.fields
+        .get("lifecycle")
+        .filter(|v| **v != FieldValue::Null)
+}
+
+/// The `lifecycle` of `id` or of its nearest ancestor that has one is `stable`.
+fn effective_stable(m: &Materialized, id: Option<&BlockId>) -> bool {
+    let mut cur = id.and_then(|i| m.get(i));
+    // a damaged store may loop: never walk more steps than there are blocks
+    let mut steps = 0;
+    while let Some(b) = cur {
+        if let Some(l) = own_lifecycle(b) {
+            return l.as_str() == Some(STABLE);
+        }
+        steps += 1;
+        if steps > m.len() {
+            break;
+        }
+        cur = b.parent.as_ref().and_then(|p| m.get(p));
+    }
+    false
+}
+
+/// The subjects of `ops` against `m` (the target view before the write), in op order. Ops whose
+/// block does not resolve are skipped; presentational blocks are exempt (Q6d).
+fn subjects(pack: &Pack, m: &Materialized, ops: &[OpInput]) -> Vec<Subject> {
+    // the anchor each create of this batch hangs from, by the id it was given ($name or an id)
+    let mut created: HashMap<&str, Anchor> = HashMap::new();
+    let existing = |text: &str| -> Option<BlockId> {
+        keys::resolve_text(m, text)
+            .ok()
+            .filter(|id| m.get(id).is_some())
+    };
+    let anchor = |created: &HashMap<&str, Anchor>, text: Option<&str>| -> Anchor {
+        match text {
+            None => Anchor::Top,
+            Some(t) => match created.get(t) {
+                Some(a) => a.clone(),
+                None => existing(t).map_or(Anchor::Unknown, Anchor::At),
+            },
+        }
+    };
+    let exempt = |b: &Block| pack.is_presentational(&b.block_type);
+    let mut out = vec![];
+    for op in ops {
+        match op {
+            OpInput::Create {
+                block_type,
+                id,
+                parent,
+                ..
+            } => {
+                let a = anchor(&created, parent.as_deref());
+                if let Some(id) = id {
+                    created.insert(id.as_str(), a.clone());
+                }
+                if let Anchor::At(p) = a
+                    && !pack.is_presentational(block_type)
+                {
+                    out.push(Subject {
+                        stable: effective_stable(m, Some(&p)),
+                        target: p,
+                    });
+                }
+            }
+            OpInput::Update {
+                id, fields, unset, ..
+            } => {
+                let Some(b) = existing(id).and_then(|i| m.get(&i)) else {
+                    continue;
+                };
+                if exempt(b) {
+                    continue;
+                }
+                let before = effective_stable(m, Some(&b.id));
+                let after = if let Some(l) = fields.get("lifecycle") {
+                    l.as_str() == Some(STABLE)
+                } else if unset.iter().any(|u| u == "lifecycle") {
+                    effective_stable(m, b.parent.as_ref())
+                } else {
+                    before
+                };
+                out.push(Subject {
+                    target: b.id.clone(),
+                    stable: before || after,
+                });
+            }
+            OpInput::Move { id, parent, .. } => {
+                let Some(b) = existing(id).and_then(|i| m.get(&i)) else {
+                    continue;
+                };
+                if exempt(b) {
+                    continue;
+                }
+                let before = effective_stable(m, Some(&b.id));
+                let after = match own_lifecycle(b) {
+                    Some(l) => l.as_str() == Some(STABLE),
+                    None => match anchor(&created, parent.as_deref()) {
+                        Anchor::At(p) => effective_stable(m, Some(&p)),
+                        Anchor::Top | Anchor::Unknown => false,
+                    },
+                };
+                out.push(Subject {
+                    target: b.id.clone(),
+                    stable: before || after,
+                });
+            }
+            OpInput::Delete { id, .. } | OpInput::Repin { id, .. } => {
+                let Some(b) = existing(id).and_then(|i| m.get(&i)) else {
+                    continue;
+                };
+                if exempt(b) {
+                    continue;
+                }
+                out.push(Subject {
+                    target: b.id.clone(),
+                    stable: effective_stable(m, Some(&b.id)),
+                });
+            }
+            OpInput::Rebalance { parent } => match anchor(&created, parent.as_deref()) {
+                Anchor::At(p) => {
+                    if m.get(&p).is_some_and(|b| !exempt(b)) {
+                        out.push(Subject {
+                            stable: effective_stable(m, Some(&p)),
+                            target: p,
+                        });
+                    }
+                }
+                Anchor::Top => {
+                    // a top-level rebalance touches every stable top-level block
+                    for b in m.children(None) {
+                        if !exempt(b)
+                            && own_lifecycle(b).and_then(FieldValue::as_str) == Some(STABLE)
+                        {
+                            out.push(Subject {
+                                target: b.id.clone(),
+                                stable: true,
+                            });
+                        }
+                    }
+                }
+                Anchor::Unknown => {}
+            },
+        }
+    }
+    out
+}
+
+fn joined(ids: &BTreeSet<BlockId>) -> String {
+    ids.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The first 8 characters of a cited token, as given.
+fn short_token(t: &str) -> String {
+    t.chars().take(8).collect()
+}
+
+/// bwr1: checks that `ops`, about to be written to the view `m` materializes, cite a current
+/// briefing where they touch stable content. Writes that touch only drafts are never refused;
+/// an unknown or stale cited briefing is a `W_BRIEF_STALE` warning on them. A refusal names, in
+/// `briefing.ids`, every block a fresh briefing must cover (`expand_error` computes it).
+pub(crate) fn check(
+    pack: &Pack,
+    reg: &BriefRegistry,
+    m: &Materialized,
+    ops: &[OpInput],
+    brief: Option<&str>,
+) -> Result<Vec<Issue>, RdyError> {
+    let subjects = subjects(pack, m, ops);
+    let stable: BTreeSet<BlockId> = subjects
+        .iter()
+        .filter(|s| s.stable)
+        .map(|s| s.target.clone())
+        .collect();
+    if stable.is_empty() {
+        let Some(t) = brief else {
+            return Ok(vec![]);
+        };
+        let message = match reg.get(t) {
+            None => Some(format!(
+                "the cited briefing {} is unknown; this write touches only drafts, so it went ahead",
+                short_token(t)
+            )),
+            Some(rec) => {
+                let moved: BTreeSet<BlockId> = rec.moved(m).into_iter().collect();
+                (!moved.is_empty()).then(|| {
+                    format!(
+                        "the cited briefing is stale: {} moved since it was made; this write touches only drafts, so it went ahead",
+                        joined(&moved)
+                    )
+                })
+            }
+        };
+        return Ok(message
+            .map(|message| Issue {
+                severity: Severity::Warning,
+                code: W_BRIEF_STALE,
+                block: None,
+                message,
+                fix: "brief again before the next write if the moved blocks matter".into(),
+            })
+            .into_iter()
+            .collect());
+    }
+    let ids: BTreeSet<String> = subjects.iter().map(|s| s.target.to_string()).collect();
+    let refuse = |code: &'static str, message: String, issues: Vec<Issue>| {
+        let mut e = RdyError::new(
+            code,
+            message,
+            "brief these blocks (rdy_brief) and retry with the token",
+        );
+        e.issues = issues;
+        e.briefing = Some(serde_json::json!({ "ids": ids }));
+        e
+    };
+    let block_issue = |id: &BlockId, message: &str, fix: &str| Issue {
+        severity: Severity::Error,
+        code: E_BRIEF_REQUIRED,
+        block: Some(id.clone()),
+        message: message.into(),
+        fix: fix.into(),
+    };
+    let Some(t) = brief else {
+        return Err(refuse(
+            E_BRIEF_REQUIRED,
+            format!(
+                "this write touches stable content ({}) and cites no briefing",
+                joined(&stable)
+            ),
+            vec![],
+        ));
+    };
+    let Some(rec) = reg.get(t) else {
+        return Err(refuse(
+            E_BRIEF_STALE,
+            format!(
+                "the cited briefing {} is unknown: the daemon restarted, or the briefing was evicted",
+                short_token(t)
+            ),
+            vec![],
+        ));
+    };
+    let missing: BTreeSet<BlockId> = stable.into_iter().filter(|id| !rec.covers(id)).collect();
+    if !missing.is_empty() {
+        let issues = missing
+            .iter()
+            .map(|id| {
+                block_issue(
+                    id,
+                    "not covered by the cited briefing",
+                    "brief it (or, to create under it, its parent)",
+                )
+            })
+            .collect();
+        return Err(refuse(
+            E_BRIEF_REQUIRED,
+            format!(
+                "the cited briefing does not cover {}, which this write touches on stable content",
+                joined(&missing)
+            ),
+            issues,
+        ));
+    }
+    let moved: BTreeSet<BlockId> = rec.moved(m).into_iter().collect();
+    if !moved.is_empty() {
+        let issues = moved
+            .iter()
+            .map(|id| {
+                let mut i = block_issue(
+                    id,
+                    "moved since the briefing",
+                    "read it (rdy_context) before you retry",
+                );
+                i.code = E_BRIEF_STALE;
+                i
+            })
+            .collect();
+        return Err(refuse(
+            E_BRIEF_STALE,
+            format!(
+                "the cited briefing is stale: {} moved since it was made",
+                joined(&moved)
+            ),
+            issues,
+        ));
+    }
+    Ok(vec![])
+}
+
+/// Turns a briefing refusal's ids into a fresh, registered briefing of exactly those blocks
+/// (in `view`, or canon while the view has no head), computed from the published state `st`,
+/// and rewrites the fix to cite its token. Any other error, or one whose briefing cannot be
+/// computed, comes back unchanged.
+pub fn expand_error(
+    mut e: RdyError,
+    st: &ReadState,
+    view: &str,
+    reg: &BriefRegistry,
+    max_tokens: Option<usize>,
+) -> RdyError {
+    if e.code != E_BRIEF_REQUIRED && e.code != E_BRIEF_STALE {
+        return e;
+    }
+    let Some(texts) = e
+        .briefing
+        .as_ref()
+        .and_then(|b| b.get("ids"))
+        .and_then(|ids| ids.as_array())
+    else {
+        return e;
+    };
+    let Some(ids) = texts
+        .iter()
+        .map(|t| t.as_str().and_then(|s| BlockId::parse(s).ok()))
+        .collect::<Option<BTreeSet<BlockId>>>()
+    else {
+        return e;
+    };
+    let scope = if st.has_view(view) {
+        Scope::View(view.to_string())
+    } else {
+        Scope::Canon
+    };
+    let Ok(b) = st.brief_ids(&scope, &ids, max_tokens) else {
+        return e;
+    };
+    let Ok(json) = serde_json::to_value(&b) else {
+        return e;
+    };
+    b.register(reg);
+    e.fix = format!(
+        "retry with brief: \"{}\"; this error's briefing covers exactly the blocks the write touches",
+        b.base.token
+    );
+    e.briefing = Some(json);
+    e
 }

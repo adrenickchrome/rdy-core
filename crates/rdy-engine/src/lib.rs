@@ -174,7 +174,8 @@ pub enum ReloadOutcome {
     /// as this reload read them, taken before their bytes were evaluated: recording it as seen
     /// never marks newer, unevaluated bytes as seen.
     Invalid {
-        error: RdyError,
+        /// Boxed: a `RdyError` with its optional payloads outweighs the other variants.
+        error: Box<RdyError>,
         fingerprint: PackFingerprint,
     },
 }
@@ -399,7 +400,7 @@ impl Rdy {
             Ok(v) => v,
             Err(error) => {
                 return Ok(ReloadOutcome::Invalid {
-                    error,
+                    error: Box::new(error),
                     fingerprint: fp,
                 });
             }
