@@ -396,6 +396,11 @@ pub fn run_workload() -> Vec<Measure> {
     // A fixed doc, its section and its first claim.
     let fx = fixture(&r, &docs);
     let section = fx.section.to_string();
+    // `va` is pinned on this canon so that `propose_land_500_flat`'s landings (which rebase every
+    // unpinned non-empty view, M2c reb1) leave it where the view reads have always measured it:
+    // the 10k canon plus its own changes. Unpinned, it would read 2,500 landed docs more.
+    r.view_create(&crate::fixtures::writer(), "va", None, true)
+        .expect("pin va");
     pending_writes(&mut r, &fx.section);
 
     // The lagging-index snapshot: made after the pending writes and before the timed writes, so
@@ -446,6 +451,12 @@ pub fn run_workload() -> Vec<Measure> {
     out.push(measure("version_position_cached", 200, |_| {
         r.read().version_position(&Scope::Canon).expect("position");
     }));
+    // the flat landings moved canon on, and `va` (pinned) stayed on the 10k canon
+    assert_ne!(
+        r.read().effective_base("va"),
+        r.read().canon_head(),
+        "va was rebased: the view reads would measure a different view"
+    );
     tier_reads(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
     tier_render(&mut out, &r, dir.path(), "", 5);
     out.push(measure("export_import", 5, |i| {
