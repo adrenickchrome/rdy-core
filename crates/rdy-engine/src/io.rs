@@ -996,6 +996,8 @@ impl Rdy {
             unset,
             body: (cur.body != edited.body).then(|| edited.body.clone()),
             links,
+            block_type: None,
+            move_to: None,
         };
         self.write_briefed(
             s,

@@ -25,7 +25,6 @@ fn issue_at(l: &Loaded, code: &str, message: &str) -> (usize, usize) {
     let key = |k: &str| l.keys.get(k).copied();
     let found = match code {
         "E_UNKNOWN_TYPE" => key("type"),
-        "E_PREFIX" => key("id"),
         "E_BODY_REQUIRED" | "E_BODY_FORBIDDEN" => key("body"),
         "E_LINK_TYPE" => key("links"),
         "E_CHILD_TYPE" | "E_ORPHAN" | "E_MISSING_PARENT" => key("parent"),

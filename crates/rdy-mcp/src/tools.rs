@@ -150,7 +150,7 @@ pub struct WriteParams {
     pub view: Option<String>,
     /// Ops, each a JSON object (rdy_schema lists them under "ops"):
     /// {"op":"create","type":<type>,"id":"$name"?,"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?,"fields":{..}?,"body":".."?,"links":{..}?}
-    /// {"op":"update","id":<id or path>,"base":<version>?,"fields":{..}?,"unset":[<field>]?,"body":".."?,"links":{..}?}
+    /// {"op":"update","id":<id or path>,"base":<version>?,"fields":{..}?,"unset":[<field>]?,"body":".."?,"links":{..}?,"type":<new type>?,"move_to":{"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?}?} type changes a content block's type in place (same id); move_to moves it in the same op.
     /// {"op":"move","id":<id or path>,"base":<version>?,"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?}
     /// {"op":"delete","id":<id or path>,"base":<version>?}
     /// {"op":"rebalance","parent":<id or path>?}
@@ -430,7 +430,7 @@ pub const WRITE_OPS: &[(&str, &str)] = &[
     ),
     (
         "update",
-        r#"{"op":"update","id":<id or path>,"base":<version>?,"fields":{..}?,"unset":[<field>]?,"body":".."?,"links":{..}?}"#,
+        r#"{"op":"update","id":<id or path>,"base":<version>?,"fields":{..}?,"unset":[<field>]?,"body":".."?,"links":{..}?,"type":<new type>?,"move_to":{"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?}?} type changes a content block's type in place (same id); move_to moves it in the same op."#,
     ),
     (
         "move",

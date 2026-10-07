@@ -107,23 +107,6 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
         ));
         return out;
     };
-    if block.id.prefix() != def.prefix {
-        out.push(err(
-            block,
-            "E_PREFIX",
-            format!(
-                "id {} has prefix {:?} but type {} uses {:?}",
-                block.id,
-                block.id.prefix(),
-                block.block_type,
-                def.prefix
-            ),
-            format!(
-                "omit the id to let rdy generate one, or use the prefix {:?}",
-                def.prefix
-            ),
-        ));
-    }
     for (name, v) in &block.fields {
         if name == "key" {
             // `key` is an engine field on every type, never listed per type.

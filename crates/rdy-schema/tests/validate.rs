@@ -47,8 +47,9 @@ fn type_prefix_and_fields() {
         )),
         vec!["E_UNKNOWN_TYPE"]
     );
+    // R-P1: a retyped block keeps its id, so the prefix is checked only when a write creates one
     assert!(
-        codes(&validate_block(
+        !codes(&validate_block(
             &p,
             &b("t-AAAAA", "claim", Some("s-SECT1"), "x"),
             Some(&section())

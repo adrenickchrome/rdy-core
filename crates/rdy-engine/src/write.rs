@@ -6,7 +6,7 @@ use rdy_model::{
     Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Justification, Link, Op, RefMode,
     decision, order_between, ref_spans,
 };
-use rdy_schema::{Issue, Pack, has_errors, skeleton_gaps, validate_block};
+use rdy_schema::{Issue, Pack, TypeClass, has_errors, skeleton_gaps, validate_block};
 use rdy_store::Conflict;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -113,6 +113,12 @@ pub enum OpInput {
         body: Option<String>,
         #[serde(default, deserialize_with = "link_map_opt")]
         links: Option<BTreeMap<String, Vec<LinkInput>>>,
+        /// rtyp1: a content block's new type, in place (same id).
+        #[serde(rename = "type", default)]
+        block_type: Option<String>,
+        /// wcmv1: moves the block in the same op, as a `move` would.
+        #[serde(default)]
+        move_to: Option<MoveTo>,
     },
     Move {
         id: String,
@@ -145,6 +151,18 @@ pub enum OpInput {
         #[serde(default)]
         targets: Vec<String>,
     },
+}
+
+/// wcmv1: where an update moves its block: the same keys as a `move` (no parent: the top level).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MoveTo {
+    #[serde(default)]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub after: Option<String>,
+    #[serde(default)]
+    pub before: Option<String>,
 }
 
 pub struct WriteRequest {
@@ -935,6 +953,131 @@ fn check_decided_at(
     Ok(())
 }
 
+/// The refusal of a type the pack does not define.
+fn unknown_type(pack: &Pack, block_type: &str) -> RdyError {
+    RdyError::new(
+        E_VALIDATION,
+        format!("unknown block type {block_type:?}"),
+        format!(
+            "use one of: {}",
+            pack.block_types
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    )
+}
+
+/// One validation issue as the error a write returns.
+fn invalid(block: &BlockId, code: &'static str, message: String, fix: String) -> RdyError {
+    let mut e = RdyError::new(E_VALIDATION, message.clone(), fix.clone());
+    e.issues = vec![Issue {
+        severity: rdy_schema::Severity::Error,
+        code,
+        block: Some(block.clone()),
+        message,
+        fix,
+    }];
+    e
+}
+
+/// rtyp1: changes `block`'s type to `t` in place; the block keeps its id (FW-F5). Docs, folders
+/// and supporting types keep their type, and the new type must hold every current child.
+fn retype(pack: &Pack, ov: &Overlay, block: &mut Block, t: String) -> Result<(), RdyError> {
+    let (id, cur) = (&block.id, block.block_type.as_str());
+    if tree::is_tree_type(cur) || tree::is_tree_type(&t) {
+        return Err(bad(
+            format!("{id} is a {cur}: docs and folders keep their type"),
+            format!("create a new {t} and move the content into it"),
+        ));
+    }
+    let def = pack
+        .block_types
+        .get(&t)
+        .ok_or_else(|| unknown_type(pack, &t))?;
+    if pack.class_of(cur) == TypeClass::Supporting || pack.class_of(&t) == TypeClass::Supporting {
+        return Err(bad(
+            format!("{id} is a {cur} and cannot become a {t}: supporting types keep their type"),
+            format!(
+                "record a new block with the type's own tool (rdy_decide for decisions), or create a new {t}"
+            ),
+        ));
+    }
+    let kids: Vec<BlockId> = ov.with_sibs(Some(id), |s| {
+        s.order.iter().map(|(_, k)| k.clone()).collect()
+    });
+    for k in kids {
+        if let Some(child) = ov.get(&k)
+            && !def.children.contains(&child.block_type)
+        {
+            return Err(invalid(
+                id,
+                "E_CHILD_TYPE",
+                format!("a {t} cannot contain a {} ({k})", child.block_type),
+                "move or delete that child first".into(),
+            ));
+        }
+    }
+    block.block_type = t;
+    Ok(())
+}
+
+/// Places `block` (the edit of `id`) under `parent`, after or before a sibling (none: appended;
+/// no parent: the top level), with a move's checks in a move's order. Returns whether its parent
+/// or order key changed.
+#[allow(clippy::too_many_arguments)]
+fn relocate(
+    ov: &Overlay,
+    res: &mut Resolver,
+    block: &mut Block,
+    id: &BlockId,
+    parent: Option<String>,
+    after: Option<String>,
+    before: Option<String>,
+    i: usize,
+) -> Result<bool, RdyError> {
+    let parent = parent.as_deref().map(|p| res.id(p)).transpose()?;
+    let after = after.as_deref().map(|a| res.id(a)).transpose()?;
+    let before = before.as_deref().map(|b| res.id(b)).transpose()?;
+    if before.as_ref() == Some(id) {
+        return Err(bad(
+            format!("cannot move {id} before itself"),
+            "name another sibling as before, or omit it",
+        ));
+    }
+    if let Some(p) = &parent {
+        if ov.get(p).is_none() {
+            return Err(RdyError::new(
+                E_UNKNOWN_BLOCK,
+                format!("parent {p} does not exist"),
+                "check the parent id",
+            ));
+        }
+        let mut walk = Some(p.clone());
+        while let Some(w) = walk {
+            if w == *id {
+                return Err(bad(
+                    format!("cannot move {id} under itself or one of its descendants"),
+                    "choose a parent outside the subtree being moved",
+                ));
+            }
+            walk = ov.get(&w).and_then(|b| b.parent.clone());
+        }
+    }
+    let was = (block.parent.take(), std::mem::take(&mut block.order));
+    block.parent = parent;
+    block.order = place(ov, block.parent.as_ref(), after.as_ref(), before.as_ref())?;
+    check_name(ov, block, i, Some("move"))?;
+    res.check_rekey(block, ov.get(id), false)?;
+    if block.block_type == tree::FOLDER {
+        check_depth(ov, block, folders_below(ov, id))?;
+    } else {
+        check_depth(ov, block, 0)?;
+    }
+    Ok(block.parent != was.0 || block.order != was.1)
+}
+
 fn build_ops(
     pack: &Pack,
     store: &rdy_store::Store,
@@ -965,20 +1108,10 @@ fn build_ops(
                 body,
                 links,
             } => {
-                let def = pack.block_types.get(&block_type).ok_or_else(|| {
-                    RdyError::new(
-                        E_VALIDATION,
-                        format!("unknown block type {block_type:?}"),
-                        format!(
-                            "use one of: {}",
-                            pack.block_types
-                                .keys()
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                    )
-                })?;
+                let def = pack
+                    .block_types
+                    .get(&block_type)
+                    .ok_or_else(|| unknown_type(pack, &block_type))?;
                 let new_id = match id.as_deref() {
                     Some(p) if p.starts_with('$') => {
                         if res.placeholders.contains_key(p) {
@@ -997,6 +1130,23 @@ fn build_ops(
                     }
                     Some(explicit) => {
                         let g = res.id(explicit)?;
+                        // R-P1: an id's prefix is the type it was created with, so only a create
+                        // checks it
+                        if g.prefix() != def.prefix {
+                            return Err(invalid(
+                                &g,
+                                "E_PREFIX",
+                                format!(
+                                    "id {g} has prefix {:?} but type {block_type} uses {:?}",
+                                    g.prefix(),
+                                    def.prefix
+                                ),
+                                format!(
+                                    "omit the id to let rdy generate one, or use the prefix {:?}",
+                                    def.prefix
+                                ),
+                            ));
+                        }
                         created.insert(format!("op{i}"), g.to_string());
                         g
                     }
@@ -1077,6 +1227,8 @@ fn build_ops(
                 unset,
                 body,
                 links,
+                block_type,
+                move_to,
             } => {
                 let id = res.id(&id)?;
                 let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched, conflicts, store)?;
@@ -1088,6 +1240,15 @@ fn build_ops(
                     && let Some(n) = ov.base.name_of(&id)
                 {
                     block.fields.insert("name".into(), FieldValue::Str(n));
+                }
+                let retyped = block_type.filter(|t| *t != cur.block_type);
+                let edits = retyped.is_some()
+                    || !fields.is_empty()
+                    || !unset.is_empty()
+                    || body.is_some()
+                    || links.is_some();
+                if let Some(t) = retyped {
+                    retype(pack, &ov, &mut block, t)?;
                 }
                 let sets_key = fields.contains_key("key");
                 block.fields.extend(res.fields(fields)?);
@@ -1107,8 +1268,15 @@ fn build_ops(
                         }
                     }
                 }
+                let moves = move_to.is_some();
+                if let Some(m) = move_to {
+                    relocate(
+                        &ov, &mut res, &mut block, &id, m.parent, m.after, m.before, i,
+                    )?;
+                }
                 check_decided_at(session, &block, Some(cur))?;
-                prior.push((false, cur.pins.clone()));
+                // a move-only update keeps the pins, as a move does
+                prior.push((moves && !edits, cur.pins.clone()));
                 // names and keys against what the view held, not the side an edit starts from
                 let was = ov.get(&id);
                 if block.field_str("name") != was.and_then(|w| w.field_str("name")) {
@@ -1130,52 +1298,15 @@ fn build_ops(
                 before,
             } => {
                 let id = res.id(&id)?;
-                let parent = parent.as_deref().map(|p| res.id(p)).transpose()?;
-                let after = after.as_deref().map(|a| res.id(a)).transpose()?;
-                let before = before.as_deref().map(|b| res.id(b)).transpose()?;
-                if before.as_ref() == Some(&id) {
-                    return Err(bad(
-                        format!("cannot move {id} before itself"),
-                        "name another sibling as before, or omit it",
-                    ));
-                }
                 let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched, conflicts, store)?;
-                let cur: &Block = &cur;
-                let mut block = cur.clone();
+                let mut block = cur.into_owned();
                 if block.block_type == tree::DOC
                     && !block.fields.contains_key("name")
                     && let Some(n) = ov.base.name_of(&id)
                 {
                     block.fields.insert("name".into(), FieldValue::Str(n));
                 }
-                if let Some(p) = &parent {
-                    if ov.get(p).is_none() {
-                        return Err(RdyError::new(
-                            E_UNKNOWN_BLOCK,
-                            format!("parent {p} does not exist"),
-                            "check the parent id",
-                        ));
-                    }
-                    let mut walk = Some(p.clone());
-                    while let Some(w) = walk {
-                        if w == id {
-                            return Err(bad(
-                                format!("cannot move {id} under itself or one of its descendants"),
-                                "choose a parent outside the subtree being moved",
-                            ));
-                        }
-                        walk = ov.get(&w).and_then(|b| b.parent.clone());
-                    }
-                }
-                block.parent = parent.clone();
-                block.order = place(&ov, parent.as_ref(), after.as_ref(), before.as_ref())?;
-                check_name(&ov, &block, i, Some("move"))?;
-                res.check_rekey(&block, ov.get(&id), false)?;
-                if block.block_type == tree::FOLDER {
-                    check_depth(&ov, &block, folders_below(&ov, &id))?;
-                } else {
-                    check_depth(&ov, &block, 0)?;
-                }
+                relocate(&ov, &mut res, &mut block, &id, parent, after, before, i)?;
                 prior.push((true, block.pins.clone()));
                 touched.insert(id.clone());
                 ov.set(id, Some(block.clone()));
