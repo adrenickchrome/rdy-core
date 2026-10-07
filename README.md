@@ -1,6 +1,10 @@
 # rdy
 
-Version control for agent-aided design. Design content and the decisions behind it are stored as typed blocks in an append-only, content-addressed store. Agents write through MCP; humans read the rendered site and approve proposals into canon.
+rdy is a system for keeping decisions and documentation consistent while agents change them.
+
+Agents should never change the accepted design blind. rdy computes. Agents write. People decide.
+
+Documentation and the decisions behind it are stored as typed blocks in an append-only, content-addressed store. Agents read and write through MCP tools, with a briefing before they edit accepted content; people read the rendered site and approve proposals into canon. Local-first, deterministic, model-free, and built in Rust.
 
 ## Quick start
 
