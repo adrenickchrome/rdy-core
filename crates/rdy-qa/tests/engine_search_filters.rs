@@ -11,7 +11,8 @@ use std::collections::BTreeMap;
 /// Folder guides / doc alpha / section A (stable): claim ac, code ak. Doc beta / section B
 /// (draft): claim bg, decision d (affects bg), rejected decision r, term t, claim bc (decided_by
 /// d), claim bd (describes t), claim be (references t), claim bf (implements d). Each says
-/// "needle". Landed. Returns the ids by placeholder, and the landing id under "landing".
+/// "needle". The term is named "Needle gauge", so the query names no entity (esrch1). Landed.
+/// Returns the ids by placeholder, and the landing id under "landing".
 fn corpus(r: &mut Rdy) -> BTreeMap<String, String> {
     let w = write_as(&approver(), r, "work", json!([
         {"op": "create", "type": "folder", "id": "$g", "fields": {"name": "guides", "title": "Guides"}},
@@ -27,7 +28,7 @@ fn corpus(r: &mut Rdy) -> BTreeMap<String, String> {
         {"op": "create", "type": "decision", "id": "$r", "parent": "$bs",
          "fields": {"statement": "A needle may be wood", "status": "rejected",
                     "decided_at": "2021-01-10T09:00:00Z", "recorded_at": "2021-01-10T09:00:00Z", "options": ["yes", "no"]}},
-        {"op": "create", "type": "term", "id": "$t", "parent": "$bs", "fields": {"name": "Needle"}, "body": "A thin needle."},
+        {"op": "create", "type": "term", "id": "$t", "parent": "$bs", "fields": {"name": "Needle gauge"}, "body": "A thin needle."},
         {"op": "create", "type": "claim", "id": "$bc", "parent": "$bs", "body": "A decided needle.", "links": {"decided_by": [{"target": "$d"}]}},
         {"op": "create", "type": "claim", "id": "$bd", "parent": "$bs", "body": "A described needle.", "links": {"describes": [{"target": "$t"}]}},
         {"op": "create", "type": "claim", "id": "$be", "parent": "$bs", "body": "Per {{$t}}, a needle."},

@@ -2,7 +2,10 @@
 //! each block's body and string fields, in reading order, with lines windowed and capped per
 //! block, pages cut by a token budget and a stateless cursor that a changed match set stales.
 use crate::error::{E_BAD_INPUT, E_LIMIT, E_PAGE_STALE, E_UNKNOWN_BLOCK, PAGE_STALE_FIX, RdyError};
+use crate::factsheet::{FactSheet, MAX_RESOLVED};
+use crate::lexicon::{link_kind_for, tied};
 use crate::materialize::Materialized;
+use crate::suggest::{Suggestion, suggestion_id};
 use crate::{ReadState, Scope};
 use rdy_graph::EdgeKind;
 use rdy_model::decision::{AFFECTS, DECIDED_BY, DECISION, DESCRIBES, IMPLEMENTS};
@@ -97,6 +100,13 @@ pub struct SearchResult {
     pub query: String,
     pub regex: bool,
     pub ignore_case: bool,
+    /// esrch1 (FW-EN1, FW-SR1): on the first page, the fact sheets of the entities a literal
+    /// query names (its key, name or alias), at most `MAX_RESOLVED`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<FactSheet>,
+    /// Named entities past `MAX_RESOLVED`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub entities_omitted: usize,
     /// Matching blocks over the whole search, every page.
     pub total: usize,
     /// stot1 (FW-SR3): hits per doc path and per block type over the whole search, every page.
@@ -133,13 +143,19 @@ pub struct SearchMatch {
     /// `history`, in result order. Never cut.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub also: Vec<SearchAlso>,
+    /// esrch1: a link from this block to each entity the query names, when the block holds the
+    /// query as a phrase and is not tied to the entity yet.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<Suggestion>,
 }
 
-/// A hit folded into an earlier entry.
+/// A hit folded into an earlier entry. It keeps its own suggestions.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SearchAlso {
     pub id: String,
     pub path: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<Suggestion>,
 }
 
 /// Hits over the whole search: per doc path (most hits first, at most `TOTALS_DOCS`) and per
@@ -234,6 +250,7 @@ impl ReadState {
                         lines,
                         more_lines,
                         history: early.unwrap_or_else(|| history_of(b)),
+                        suggestions: vec![],
                     };
                     if words {
                         all_words.push(hit);
@@ -243,6 +260,42 @@ impl ReadState {
                 }
             }
             stack.extend(m.children(Some(&b.id)).into_iter().rev().map(|c| (c, own)));
+        }
+
+        // 3b (esrch1): a literal that names entities starts from them. Hits the sheets hold (the
+        // entities, and blocks tied to one) drop out; each other phrase hit gets a link
+        // suggestion per entity.
+        let resolved = if q.regex {
+            vec![]
+        } else {
+            self.resolve_entities(scope, &q.text)?
+        };
+        if !resolved.is_empty() {
+            let held = |h: &Hit| {
+                resolved
+                    .iter()
+                    .any(|(e, _)| h.block.id == *e || tied(&graph, &h.block.id, e))
+            };
+            phrase.retain(|h| !held(h));
+            all_words.retain(|h| !held(h));
+            let pack = self.pack();
+            for h in &mut phrase {
+                let (Some(kind), Some(first)) = (link_kind_for(pack, h.block), h.lines.first())
+                else {
+                    continue;
+                };
+                for (e, _) in &resolved {
+                    let (block, target) = (h.block.id.to_string(), e.to_string());
+                    h.suggestions.push(Suggestion::Link {
+                        id: suggestion_id(kind, &block, &target),
+                        block,
+                        link: kind.to_string(),
+                        target,
+                        mention: q.text.clone(),
+                        field: first.field.clone(),
+                    });
+                }
+            }
         }
 
         let mut token = TOKEN_DOMAIN.to_vec();
@@ -265,6 +318,21 @@ impl ReadState {
             token.extend_from_slice(&version.0);
             token.push(u8::from(h.history));
             token.push(u8::from(i >= words_from));
+        }
+        if !resolved.is_empty() {
+            token.extend_from_slice(b"entities\0");
+            for (e, kind) in &resolved {
+                // resolved ids are in the scope, so each has a version
+                let version = m
+                    .version_of(e)
+                    .or_else(|| m.get(e).map(Block::version_hash));
+                token.extend_from_slice(e.as_str().as_bytes());
+                token.push(0);
+                token.push(*kind as u8);
+                if let Some(v) = version {
+                    token.extend_from_slice(&v.0);
+                }
+            }
         }
         let token = Hash::of(&token).to_string();
 
@@ -289,6 +357,7 @@ impl ReadState {
                 entries[at].also.push(SearchAlso {
                     id: h.block.id.to_string(),
                     path,
+                    suggestions: h.suggestions,
                 });
                 continue;
             }
@@ -301,6 +370,7 @@ impl ReadState {
                 history: key.history,
                 all_words: key.all_words,
                 also: vec![],
+                suggestions: h.suggestions,
             });
             seen.insert(key, entries.len() - 1);
         }
@@ -320,10 +390,26 @@ impl ReadState {
             Some((_, offset)) => offset,
         };
 
-        // the totals come first, so they take their share of the budget
-        let budget = max_tokens
+        // the first page's fact sheets (FW-SR1: entity matches first)
+        let mut entities = vec![];
+        if cursor.is_none() {
+            for (e, kind) in resolved.iter().take(MAX_RESOLVED) {
+                entities.push(self.fact_sheet(scope, e, *kind)?);
+            }
+        }
+        let entities_omitted = if cursor.is_none() {
+            resolved.len() - entities.len()
+        } else {
+            0
+        };
+
+        // the totals come first, then the sheets, so they take their share of the budget
+        let mut budget = max_tokens
             .unwrap_or(DEFAULT_SEARCH_TOKENS)
             .saturating_sub(tokens_of(&totals));
+        if !entities.is_empty() {
+            budget = budget.saturating_sub(tokens_of(&entities));
+        }
         let mut used = 0;
         let mut matches = vec![];
         for entry in entries.into_iter().skip(offset) {
@@ -340,6 +426,8 @@ impl ReadState {
             query: q.text.clone(),
             regex: q.regex,
             ignore_case: q.ignore_case,
+            entities,
+            entities_omitted,
             total,
             totals,
             matches,
@@ -356,6 +444,8 @@ struct Hit<'a> {
     lines: Vec<SearchLine>,
     more_lines: usize,
     history: bool,
+    /// esrch1: link suggestions; not part of the collapse key.
+    suggestions: Vec<Suggestion>,
 }
 
 /// What two hits share to share an entry.
