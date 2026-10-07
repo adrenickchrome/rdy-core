@@ -1,4 +1,6 @@
 //! The left navigation: the neighbourhood of the page a reader is on, bounded by a cap.
+use crate::page::SiteFacts;
+use crate::review::{Mark, Review};
 use crate::site::Site;
 use rdy_model::{Block, BlockId, tree};
 use serde::Serialize;
@@ -9,6 +11,8 @@ const CAP: usize = 50;
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct Nav {
     pub groups: Vec<NavGroup>,
+    /// The docs and folders a draft removed, by the label they had; empty for canon and tags.
+    pub removed: Vec<String>,
 }
 
 /// A labelled run of entries: the top-level docs, one top-level folder, or the collected pages.
@@ -20,6 +24,8 @@ pub struct NavGroup {
     pub href: Option<String>,
     /// The page the reader is on is the one the heading leads to.
     pub current: bool,
+    /// The word a draft gives the folder the group is for.
+    pub change: Option<Mark>,
     pub entries: Vec<NavEntry>,
 }
 
@@ -35,22 +41,20 @@ pub struct NavEntry {
     pub children: Vec<NavEntry>,
     /// Instead of a page: how many entries the cap hid, and the folder page that lists them.
     pub more: Option<(usize, String)>,
+    /// The word a draft gives the page.
+    pub change: Option<Mark>,
 }
 
 /// The navigation as page `from` shows it, `current` being the block the page is for.
-pub fn build(
-    site: &Site,
-    current: Option<&BlockId>,
-    from: &str,
-    has_terms: bool,
-    has_questions: bool,
-) -> Nav {
+pub fn build(site: &Site, current: Option<&BlockId>, from: &str, facts: SiteFacts) -> Nav {
+    let review = facts.review;
     let chain = current.map(|c| site.chain(c)).unwrap_or_default();
     let ctx = Ctx {
         site,
         from,
         current,
         chain: &chain,
+        review,
     };
     let plain = |label: &str, to: &str| NavEntry {
         label: label.to_string(),
@@ -72,15 +76,16 @@ pub fn build(
         groups.push(NavGroup {
             label: Some(site.label(folder)),
             current: current == Some(&folder.id),
+            change: review.and_then(|r| r.page_mark(&folder.id)),
             entries: ctx.list(Some(&folder.id), href.clone()),
             href: Some(href),
         });
     }
     let mut reference = vec![];
-    if has_terms {
+    if facts.has_terms {
         reference.push(plain("Glossary", "glossary.html"));
     }
-    if has_questions {
+    if facts.has_questions {
         reference.push(plain("Open questions", "questions.html"));
     }
     if !reference.is_empty() {
@@ -90,7 +95,10 @@ pub fn build(
             ..NavGroup::default()
         });
     }
-    Nav { groups }
+    let removed = review
+        .map(|r| r.removed_pages().iter().map(|b| site.label(b)).collect())
+        .unwrap_or_default();
+    Nav { groups, removed }
 }
 
 /// The shortest link from page `from` to page `to`, both site-relative: a sibling is its bare
@@ -118,6 +126,8 @@ struct Ctx<'a> {
     current: Option<&'a BlockId>,
     /// The folders and doc from the top level down to the current page.
     chain: &'a [BlockId],
+    /// What a draft changes; none for canon and tags.
+    review: Option<&'a Review>,
 }
 
 impl Ctx<'_> {
@@ -143,6 +153,7 @@ impl Ctx<'_> {
             on_path,
             children,
             more: None,
+            change: self.review.and_then(|r| r.page_mark(&b.id)),
         }
     }
 

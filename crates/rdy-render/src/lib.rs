@@ -6,6 +6,7 @@ pub mod inline;
 mod llms;
 mod nav;
 mod page;
+pub mod review;
 mod search;
 mod site;
 mod toc;
@@ -91,6 +92,8 @@ fn env() -> Result<minijinja::Environment<'static>, RdyError> {
         "partials/why.html",
         "partials/version.html",
         "partials/colophon.html",
+        "partials/change.html",
+        "partials/removed.html",
     );
     Ok(env)
 }
@@ -391,6 +394,7 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
     let g = rdy.graph(scope)?;
     let env = env()?;
     let site = Site::new(&m, &pack);
+    let review = review::build(rdy, scope)?;
     let sh = page::Shared {
         site: &site,
         m: &m,
@@ -402,6 +406,7 @@ fn render_into(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSumma
         versions: &versions,
         landed_ms: &landed_ms,
         blobs: &blobs,
+        review: review.as_ref(),
         used_blobs: Default::default(),
     };
     let mut stats = RenderSummary {

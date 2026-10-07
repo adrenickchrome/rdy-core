@@ -1,6 +1,8 @@
 {% extends "layout.html" %}
 {% block content %}
-<article class="page" data-rdy="content"><header class="page-head">{% if body.doc.eyebrow %}<p class="eyebrow">{{ body.doc.eyebrow }}</p>{% endif %}<h1>{{ title }}</h1>{% if body.doc.lede %}<p class="lede"{% if body.doc.lede_anchor %} id="{{ body.doc.lede_anchor }}"{% endif %}>{{ body.doc.lede|safe }}</p>{% endif %}</header>
-{% for item in items %}{% include "partials/block.html" %}
+<article class="page" data-rdy="content"><header class="page-head{% if body.doc.change %} has-chg chg-{{ body.doc.change }}{% endif %}">{% if body.doc.eyebrow %}<p class="eyebrow">{{ body.doc.eyebrow }}</p>{% endif %}<h1>{{ title }}</h1>{% if body.doc.change %}{% set mark = body.doc.change %}{% include "partials/change.html" %}{% endif %}{% if body.doc.lede %}{% if body.doc.lede_change %}{% set mark = body.doc.lede_change %}{% include "partials/change.html" %}{% endif %}<p class="lede{% if body.doc.lede_change %} has-chg chg-{{ body.doc.lede_change }}{% endif %}"{% if body.doc.lede_anchor %} id="{{ body.doc.lede_anchor }}"{% endif %}>{{ body.doc.lede|safe }}</p>{% endif %}</header>
+{% for item in items %}{% for line in item.removed_before %}{% include "partials/removed.html" %}
+{% endfor %}{% include "partials/block.html" %}
+{% endfor %}{% for line in body.doc.removed_end %}{% include "partials/removed.html" %}
 {% endfor %}</article>
 {% endblock %}
