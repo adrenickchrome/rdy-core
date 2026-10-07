@@ -25,12 +25,14 @@ pub enum Delta {
         ops: Vec<Op>,
     },
     /// `view`'s proposal landed as `landing`, applying `ops` to canon; the same batch rebased
-    /// the views in `rebased` (the proposing view included).
+    /// the views in `rebased` (the proposing view included) and closed the views in `closed`
+    /// (the other members of the alternative set the landing chose, altg1).
     Landed {
         landing: Hash,
         view: String,
         ops: Vec<Op>,
         rebased: Vec<String>,
+        closed: Vec<String>,
     },
     /// View `view` was created, forked, or had view ops appended (its head and set re-read).
     View { view: String },

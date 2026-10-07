@@ -283,7 +283,7 @@ fn altw1_landing_a_member_chooses_it_and_closes_the_others() {
     commit_create(&mut s, "b", "c-BBBBB");
     let first = s.put_alt_set(&set(&["a", "b"])).unwrap();
     let p = s
-        .propose_changes("a", "pick a", None, prov("agent:a"), vec![ca])
+        .propose_changes("a", "pick a", None, prov("agent:a"), vec![ca], None)
         .unwrap();
     let out = s
         .land_atomic(LandRequest {
@@ -350,7 +350,7 @@ fn altw1_a_set_that_moved_refuses_the_landing_and_writes_nothing() {
         })
         .unwrap();
     let p = s
-        .propose_changes("a", "pick a", None, prov("agent:a"), vec![ca])
+        .propose_changes("a", "pick a", None, prov("agent:a"), vec![ca], None)
         .unwrap();
     let before = s.write_count();
     let e = s

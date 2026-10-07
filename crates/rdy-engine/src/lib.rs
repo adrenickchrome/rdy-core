@@ -682,12 +682,20 @@ impl Rdy {
                 prev.idle_days,
             ),
         };
-        // the coordination refs: re-read by a publish that may have moved them, else carried
-        let coord_heads = match &delta {
-            Delta::Full | Delta::Coord { .. } | Delta::Landed { .. } => {
-                Arc::new(self.coord_heads(&prev.coord_heads)?)
-            }
-            _ => Arc::clone(&prev.coord_heads),
+        // the coordination refs: re-read by a publish that may have moved them, else carried. A
+        // landing moves them only when it closed members of a set or chose an alternative (its
+        // record says so; altg1)
+        let coord_moved = match &delta {
+            Delta::Full | Delta::Coord { .. } => true,
+            Delta::Landed {
+                landing, closed, ..
+            } => !closed.is_empty() || self.store.landing(landing)?.chosen.is_some(),
+            _ => false,
+        };
+        let coord_heads = if coord_moved {
+            Arc::new(self.coord_heads(&prev.coord_heads)?)
+        } else {
+            Arc::clone(&prev.coord_heads)
         };
         let (canon, views, tags, inflight_cell) = match delta {
             Delta::Full => {
@@ -747,6 +755,7 @@ impl Rdy {
                 view,
                 ops,
                 rebased,
+                closed,
             } => {
                 let mut canon = Entry::new(None, Some(landing), None, Arc::new(vec![]));
                 if let Some(b) = prev.canon.built_ok() {
@@ -769,6 +778,11 @@ impl Rdy {
                             views.remove(&name);
                         }
                     }
+                }
+                // the members the landing closed (not rebased): their heads re-read, their
+                // builds kept
+                for name in closed {
+                    self.reread_view(prev, &mut views, name)?;
                 }
                 (
                     Arc::new(canon),

@@ -6,8 +6,8 @@ use crate::store::encode;
 use crate::view::{Owner, ViewHead, ViewOp, ViewOpKind};
 use crate::{Store, StoreReader};
 use rdy_model::{
-    Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance, StateSnapshot, Tag,
-    decision,
+    AltChoice, Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance,
+    StateSnapshot, Tag, decision,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -462,12 +462,13 @@ impl Store {
     /// one write. Returns the proposal's id.
     pub fn propose(&mut self, view: &str, title: &str, by: Provenance) -> Result<Hash, StoreError> {
         let changes = self.included(view)?.as_ref().clone();
-        self.propose_changes(view, title, None, by, changes)
+        self.propose_changes(view, title, None, by, changes, None)
     }
 
     /// `propose` with `changes` (a closed subset of the view's included changes, which the
     /// caller checks) in place of the view's whole set. An empty `changes` is `EmptyProposal`.
-    /// A blank `summary` is `None`.
+    /// A blank `summary` is `None`. `alternative` is the member the version chooses, which the
+    /// caller checks.
     pub fn propose_changes(
         &mut self,
         view: &str,
@@ -475,6 +476,7 @@ impl Store {
         summary: Option<&str>,
         by: Provenance,
         changes: Vec<Hash>,
+        alternative: Option<AltChoice>,
     ) -> Result<Hash, StoreError> {
         let p = Proposal {
             stable: None,
@@ -482,7 +484,7 @@ impl Store {
             title: title.to_string(),
             view: view.to_string(),
             changes,
-            alternative: None,
+            alternative,
             provenance: by,
             canon_at: self.canon_head()?,
             summary: clean_summary(summary),
@@ -500,10 +502,10 @@ impl Store {
         self.next_version(prev, p)
     }
 
-    /// Writes the next version of proposal `prev` with `changes`, `title` and `by` in place of
-    /// its own (the view and the alternative carry over), and moves `proposal/<stable>` to it.
-    /// A non-blank `summary` replaces the previous version's; a blank or `None` one keeps it.
-    /// Returns the new version's id.
+    /// Writes the next version of proposal `prev` with `changes`, `title`, `by` and
+    /// `alternative` in place of its own (the view carries over), and moves `proposal/<stable>`
+    /// to it. A non-blank `summary` replaces the previous version's; a blank or `None` one keeps
+    /// it. Returns the new version's id.
     pub fn propose_next(
         &mut self,
         prev: &Hash,
@@ -511,12 +513,14 @@ impl Store {
         title: &str,
         summary: Option<&str>,
         by: Provenance,
+        alternative: Option<AltChoice>,
     ) -> Result<Hash, StoreError> {
         let before = self.proposal(prev)?;
         let p = Proposal {
             changes,
             title: title.to_string(),
             provenance: by,
+            alternative,
             summary: clean_summary(summary).or_else(|| before.summary.clone()),
             ..before
         };

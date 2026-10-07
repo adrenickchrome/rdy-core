@@ -1,3 +1,5 @@
+use crate::alt::{AltPick, alt_label};
+use crate::coord_graph::AltRef;
 use crate::error::*;
 use crate::session::rfc3339;
 use crate::views::{
@@ -6,11 +8,11 @@ use crate::views::{
 };
 use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, rfc3339_now};
 use rdy_model::{
-    ApprovalEvidence, Block, BlockId, Change, ChangeLinks, EvidenceKind, FieldValue, Hash,
-    LandingRecord, Op, Proposal, decision,
+    AltChoice, AltSet, AltStatus, ApprovalEvidence, Block, BlockId, Change, ChangeLinks,
+    EvidenceKind, FieldValue, Hash, LandingRecord, Op, Proposal, decision,
 };
 use rdy_schema::{Issue, Severity, validate_block};
-use rdy_store::{Conflict, LandRequest, MergeChange, Relay, merge_on_blocks};
+use rdy_store::{AltLanding, Conflict, LandRequest, MergeChange, Relay, merge_on_blocks};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
@@ -51,6 +53,9 @@ pub struct ProposalInfo {
     pub blocking: Vec<ConflictInfo>,
     /// Canon's head when the version was written (FW-HB1).
     pub canon_at: Option<String>,
+    /// The alternative set the version chooses its own view's member of (altg1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alternative: Option<AltRef>,
 }
 
 /// One view a landing rebased: how many of its changes dropped out (they landed) and how many
@@ -77,6 +82,12 @@ pub struct LandInfo {
     pub assurance: String,
     pub warnings: Vec<Issue>,
     pub rebased: Vec<RebasedInfo>,
+    /// The alternative set the landing chose its proposing view's member of (altg1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<AltRef>,
+    /// The set's other member views the landing closed, in view order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub closed: Vec<String>,
 }
 
 /// How an approval treats a canon that moved since the version was proposed (FW-HB1), and the
@@ -118,7 +129,8 @@ pub struct EvidenceRow {
 }
 
 /// One landing as `rdy log` shows it (H3-C5). Every key is always present, in this order; a
-/// member that does not apply is `null`. Not a stored type: the record is postcard.
+/// member that does not apply is `null`, except `chosen`, which only a landing that chose an
+/// alternative has (altg1). Not a stored type: the record is postcard.
 #[derive(Clone, Debug, Serialize)]
 pub struct LandingRow {
     pub landing: String,
@@ -145,6 +157,9 @@ pub struct LandingRow {
     pub at_ms: i64,
     pub changes: usize,
     pub tags: Vec<String>,
+    /// The alternative set member the landing chose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<AltRef>,
 }
 
 /// The advice an approver gets when the version no longer applies to canon: the fix is the
@@ -506,6 +521,142 @@ fn unresolved(st: &ReadState, view: &str, blocking: &[Conflict]) -> Result<RdyEr
     Ok(e)
 }
 
+/// `open`, `chosen` or `abandoned`.
+fn alt_status(s: &AltStatus) -> &'static str {
+    match s {
+        AltStatus::Open => "open",
+        AltStatus::Chosen { .. } => "chosen",
+        AltStatus::Abandoned { .. } => "abandoned",
+    }
+}
+
+/// View `view`'s label in `set`, or the view's name when it is not a member.
+fn member_label<'a>(set: &'a AltSet, view: &'a str) -> &'a str {
+    set.members
+        .iter()
+        .find(|m| m.view == view)
+        .map_or(view, |m| m.label.as_str())
+}
+
+/// altg1, the member rule at propose: a member view of an open set names its own member, and a
+/// pick names an open set the view is a member of, and the view's own member (by label or view
+/// name). Returns the choice the version stores.
+fn proposed_alt(
+    st: &ReadState,
+    view: &str,
+    alternative: Option<&AltPick>,
+) -> Result<Option<AltChoice>, RdyError> {
+    let Some(pick) = alternative else {
+        return match st.alt_of_view(view)? {
+            Some((stable, _, set)) => {
+                let id = alt_label(&stable);
+                Err(RdyError::new(
+                    E_ALT_UNCHOSEN,
+                    format!(
+                        "view {view} is a member of {id} ({}): name the choice",
+                        set.title
+                    ),
+                    format!(
+                        "propose with alternatives: {{set: \"{id}\", chosen: \"{}\"}}",
+                        member_label(&set, view)
+                    ),
+                ))
+            }
+            None => Ok(None),
+        };
+    };
+    let (stable, _, set) = st.resolve_alt(&pick.set)?;
+    let id = alt_label(&stable);
+    if set.status != AltStatus::Open {
+        return Err(RdyError::new(
+            E_ALT_MEMBER,
+            format!("{id} is {}", alt_status(&set.status)),
+            "only an open set takes a choice: propose without alternatives",
+        ));
+    }
+    let Some(own) = set.members.iter().find(|m| m.view == view) else {
+        return Err(RdyError::new(
+            E_ALT_MEMBER,
+            format!("view {view} is not a member of {id}"),
+            "propose without alternatives, or from a member view",
+        ));
+    };
+    if pick.chosen != own.label && pick.chosen != own.view {
+        let fix = match set
+            .members
+            .iter()
+            .find(|m| m.label == pick.chosen || m.view == pick.chosen)
+        {
+            Some(m) => format!("propose from {} to choose it", m.view),
+            None => format!("name view {view}'s member: chosen: \"{}\"", own.label),
+        };
+        return Err(RdyError::new(
+            E_ALT_MEMBER,
+            format!("{id}: {} is not view {view}'s member", pick.chosen),
+            fix,
+        ));
+    }
+    Ok(Some(AltChoice {
+        set: stable,
+        member: view.to_string(),
+    }))
+}
+
+/// altg1, the gate rule at land: the set the version chose must still be open with the
+/// proposing view a member, and a version that chose nothing must not come from a member view
+/// (the view joined a set after it was proposed). Returns what the landing records and closes:
+/// the set's latest version, and every other member view.
+fn landing_alt(st: &ReadState, p: &Proposal) -> Result<Option<AltLanding>, RdyError> {
+    let Some(a) = &p.alternative else {
+        return match st.alt_of_view(&p.view)? {
+            Some((stable, _, set)) => Err(RdyError::new(
+                E_ALT_UNCHOSEN,
+                format!(
+                    "view {} is a member of {} ({}): this proposal names no choice",
+                    p.view,
+                    alt_label(&stable),
+                    set.title
+                ),
+                "propose again with alternatives",
+            )),
+            None => Ok(None),
+        };
+    };
+    let (stable, version, set) = st.resolve_alt(&a.set.to_string())?;
+    let id = alt_label(&stable);
+    if set.status != AltStatus::Open {
+        return Err(RdyError::new(
+            E_ALT_MEMBER,
+            format!(
+                "{id} is {}; this proposal can no longer land",
+                alt_status(&set.status)
+            ),
+            "propose from a view outside the set",
+        ));
+    }
+    if !set.members.iter().any(|m| m.view == a.member) {
+        return Err(RdyError::new(
+            E_ALT_MEMBER,
+            format!(
+                "view {} is no longer a member of {id}; this proposal can no longer land",
+                a.member
+            ),
+            "propose again: from a member view with alternatives, or without them",
+        ));
+    }
+    Ok(Some(AltLanding {
+        set: stable,
+        prev: version,
+        member: p.view.clone(),
+        close: set
+            .members
+            .iter()
+            .filter(|m| m.view != p.view)
+            .map(|m| m.view.clone())
+            .collect(),
+    }))
+}
+
 /// The ops of the changes at `applied` (positions in `changes`), in applied order.
 pub(crate) fn applied_ops(changes: &[Change], applied: &[usize]) -> Vec<Op> {
     applied
@@ -774,7 +925,7 @@ impl Rdy {
         view: &str,
         title: &str,
     ) -> Result<ProposalInfo, RdyError> {
-        self.propose_subset(s, view, title, None, None)
+        self.propose_with(s, view, title, None, None, None)
     }
 
     /// Proposes `changes` of view `view` (its whole included set when `None`): a new version of
@@ -791,6 +942,21 @@ impl Rdy {
         changes: Option<&[String]>,
         summary: Option<&str>,
     ) -> Result<ProposalInfo, RdyError> {
+        self.propose_with(s, view, title, changes, summary, None)
+    }
+
+    /// `propose_subset` with the alternative the version chooses (altg1). A member view of an
+    /// open set must name its own member (`E_ALT_UNCHOSEN`); a pick must name an open set the
+    /// view is a member of, and the view's own member by label or view name (`E_ALT_MEMBER`).
+    pub fn propose_with(
+        &mut self,
+        s: &Session,
+        view: &str,
+        title: &str,
+        changes: Option<&[String]>,
+        summary: Option<&str>,
+        alternative: Option<&AltPick>,
+    ) -> Result<ProposalInfo, RdyError> {
         if !s.role.can_write() {
             return Err(RdyError::new(
                 E_PERMISSION,
@@ -800,6 +966,7 @@ impl Rdy {
         }
         let st = self.read();
         crate::views::check_view_op(&st, s, view, Action::Propose)?;
+        let alternative = proposed_alt(&st, view, alternative)?;
         let included = st.included(view);
         if included.is_empty() {
             return Err(RdyError::new(
@@ -963,17 +1130,31 @@ impl Rdy {
             }
         }
         let count = ids.len();
+        let chosen = alternative.as_ref().map(|a| AltRef {
+            set: alt_label(&a.set),
+            member: a.member.clone(),
+        });
         let (id, stable, n) = match open {
             Some((stable, latest)) => {
-                let id = self
-                    .store
-                    .propose_next(&latest, ids, title, summary, s.provenance())?;
+                let id = self.store.propose_next(
+                    &latest,
+                    ids,
+                    title,
+                    summary,
+                    s.provenance(),
+                    alternative,
+                )?;
                 (id, stable, version_number(&st, &latest)? + 1)
             }
             None => {
-                let id = self
-                    .store
-                    .propose_changes(view, title, summary, s.provenance(), ids)?;
+                let id = self.store.propose_changes(
+                    view,
+                    title,
+                    summary,
+                    s.provenance(),
+                    ids,
+                    alternative,
+                )?;
                 (id, id, 1)
             }
         };
@@ -997,6 +1178,7 @@ impl Rdy {
             conflicts,
             blocking,
             canon_at: canon_at.map(|h| h.to_string()),
+            alternative: chosen,
         })
     }
 
@@ -1153,6 +1335,13 @@ impl Rdy {
         if latest != pid {
             return Err(moved(&st, &pref, &latest, &p.view)?);
         }
+        // altg1: the set is re-checked at approval, before the base check, so a set an earlier
+        // landing chose is reported as such
+        let alt = landing_alt(&st, &p)?;
+        let chosen = alt.as_ref().map(|a| AltRef {
+            set: alt_label(&a.set),
+            member: a.member.clone(),
+        });
         let changes = changes_of(&st, &p.changes)?;
         // FW-HB1: canon may have moved since the version was proposed
         self.check_base_moved(&st, &pref, &p, &changes, &opts)?;
@@ -1263,7 +1452,7 @@ impl Rdy {
             proposal: pid,
             accept,
             approver: s.provenance(),
-            alt: None,
+            alt,
             relay: opts.relay,
             evidence,
         }) {
@@ -1279,6 +1468,7 @@ impl Rdy {
             view: p.view.clone(),
             ops: landed_ops,
             rebased: out.rebased.iter().map(|r| r.view.clone()).collect(),
+            closed: out.closed.clone(),
         }) {
             // the landing is written: never leave the published state behind it
             let _ = self.publish(Delta::Full);
@@ -1308,6 +1498,8 @@ impl Rdy {
                     conflicts: r.conflicts.len(),
                 })
                 .collect(),
+            chosen: chosen.filter(|_| out.alt_version.is_some()),
+            closed: out.closed,
         })
     }
 }
@@ -1423,6 +1615,10 @@ impl ReadState {
             at_ms: rec.approved_by.at_ms,
             changes: p.changes.len(),
             tags,
+            chosen: rec.chosen.as_ref().map(|c| AltRef {
+                set: alt_label(&c.set),
+                member: c.member.clone(),
+            }),
         })
     }
 }
