@@ -2,6 +2,7 @@
 //! and shared. The writer publishes a new one after every write, before the write returns, and
 //! seeds the cells it can fill in O(ops) (the written view after a commit, canon after a landing).
 use crate::error::*;
+use crate::lexicon::Lexicon;
 use crate::paths::TreeNode;
 use crate::version::VposCache;
 use crate::{AS_OF_CACHE_ENTRIES, Materialized, Scope};
@@ -44,6 +45,8 @@ pub(crate) struct Built {
     pub(crate) graph: OnceLock<Arc<Graph>>,
     /// The full tree, memoised (filled by the tree reads).
     pub(crate) tree: OnceLock<Arc<Vec<TreeNode>>>,
+    /// The entity lexicon (FW-EN1), memoised; carried across a write like the graph.
+    pub(crate) lexicon: OnceLock<Arc<Lexicon>>,
 }
 
 impl Built {
@@ -53,20 +56,29 @@ impl Built {
             conflicts,
             graph: OnceLock::new(),
             tree: OnceLock::new(),
+            lexicon: OnceLock::new(),
         }
     }
 
     /// gcar1: this state with `ops` applied: the same conflicts and, only if this state's graph is
     /// built, that graph carried across the ops (their blocks' old edges out, their new ones in),
-    /// which equals a rebuild. The tree is not carried.
+    /// which equals a rebuild. The lexicon is carried the same way when it is built (lex1). The
+    /// tree is not carried.
     pub(crate) fn after(&self, ops: &[Op]) -> Built {
         let m = Arc::new(self.m.with(ops));
         let next = Built::new(Arc::clone(&m), Arc::clone(&self.conflicts));
-        if let Some(g) = self.graph.get() {
-            let ids: BTreeSet<&BlockId> = ops.iter().map(Op::block_id).collect();
-            let old = ids.iter().filter_map(|id| self.m.get(id));
-            let new = ids.iter().filter_map(|id| m.get(id));
-            let _ = next.graph.set(Arc::new(g.with_changes(old, new)));
+        let (graph, lexicon) = (self.graph.get(), self.lexicon.get());
+        if graph.is_none() && lexicon.is_none() {
+            return next;
+        }
+        let ids: BTreeSet<&BlockId> = ops.iter().map(Op::block_id).collect();
+        let old = || ids.iter().filter_map(|id| self.m.get(id));
+        let new = || ids.iter().filter_map(|id| m.get(id));
+        if let Some(g) = graph {
+            let _ = next.graph.set(Arc::new(g.with_changes(old(), new())));
+        }
+        if let Some(l) = lexicon {
+            let _ = next.lexicon.set(Arc::new(l.with_changes(old(), new())));
         }
         next
     }
@@ -322,6 +334,36 @@ impl ReadState {
         Ok(Arc::clone(built.graph.get_or_init(|| {
             Arc::new(Graph::build_from(built.m.iter()))
         })))
+    }
+
+    /// The scope's entity lexicon (FW-EN1), built with the scope and filled on first use.
+    pub fn lexicon(&self, scope: &Scope) -> Result<Arc<Lexicon>, RdyError> {
+        let built = self.built(scope)?;
+        Ok(Arc::clone(built.lexicon.get_or_init(|| {
+            Arc::new(Lexicon::build(&self.pack, built.m.iter()))
+        })))
+    }
+
+    /// Whether `scope`'s lexicon is built in this state. Never builds, and never marks an as-of
+    /// scope used.
+    pub fn lexicon_built(&self, scope: &Scope) -> bool {
+        // as `is_built` reads the entry; a scope without an entry here has no lexicon
+        let entry = if let Scope::View(v) = scope {
+            match self.views.get(v) {
+                Some(e) if e.floats() => Some(Arc::clone(&self.canon)),
+                e => e.cloned(),
+            }
+        } else if let Scope::At(h) = scope {
+            self.as_of.peek(h)
+        } else if matches!(scope, Scope::Canon) {
+            Some(Arc::clone(&self.canon))
+        } else {
+            None
+        };
+        entry
+            .as_deref()
+            .and_then(Entry::built_ok)
+            .is_some_and(|b| b.lexicon.get().is_some())
     }
 
     /// The conflicts the scope's merge recorded (always empty for canon and as-of scopes).
