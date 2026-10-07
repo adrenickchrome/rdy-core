@@ -212,3 +212,94 @@ fn cgr1_an_in_flight_decision_affects_its_own_docs_area_and_its_targets_areas() 
         "Q4: (a) payments, its own doc; (c) identity, its target"
     );
 }
+
+/// Fix round 1: the user surfaces of the in-flight list. `rdy_context` and the daemon's
+/// `show` read the block's history in the scope they are given, and history refuses the
+/// inflight scope, so both left out the history there instead of failing.
+fn claim_in_flight_with_a_proposal() -> (tempfile::TempDir, Rdy, String, String) {
+    let (d, mut r) = project();
+    let (_doc, _section, claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = agent("agent:a", Some("ra"));
+    let v = version_of(&r, &Scope::Canon, &claim);
+    let c = write_as(
+        &mut r,
+        &a,
+        "ra",
+        json!([{"op": "update", "id": claim, "base": v, "body": "a1"}]),
+    )
+    .unwrap()
+    .change;
+    r.propose(&a, "ra", "a's work").unwrap();
+    (d, r, claim, c)
+}
+
+#[test]
+fn cgr1_rdy_context_in_the_inflight_scope_lists_the_in_flight_changes() {
+    use rdy_engine::engine::Local;
+    use rdy_mcp::tools::{McpState, rdy_context, rdy_session};
+    use serde_json::from_value;
+    let (_d, r, claim, c) = claim_in_flight_with_a_proposal();
+    let mut st = McpState::new(std::sync::Arc::new(Local::new(r)));
+    rdy_session(
+        &mut st,
+        from_value(json!({"actor": "agent:qa", "role": "writer", "view": "work"})).unwrap(),
+    )
+    .unwrap();
+    let v = rdy_context(
+        &mut st,
+        from_value(json!({"id": claim, "scope": "inflight"})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(v["inflight"][0]["change"], c, "{v}");
+    assert_eq!(v["inflight"][0]["views"], json!(["ra"]));
+    let props = v["inflight"][0]["proposals"].as_array().unwrap();
+    assert_eq!(props.len(), 1, "{v}");
+    assert!(props[0].as_str().unwrap().starts_with("P-"), "{v}");
+    assert!(
+        v.get("history").is_none(),
+        "no history in the inflight scope: {v}"
+    );
+    // canon still carries the history and no in-flight list
+    let v = rdy_context(
+        &mut st,
+        from_value(json!({"id": claim, "scope": "canon"})).unwrap(),
+    )
+    .unwrap();
+    assert!(v.get("inflight").is_none(), "{v}");
+    assert_eq!(v["history"].as_array().unwrap().len(), 1, "{v}");
+}
+
+#[test]
+fn cgr1_show_in_the_inflight_scope_lists_the_in_flight_changes() {
+    use rdy_daemon::{OpContext, dispatch};
+    use rdy_engine::engine::Local;
+    let (d, r, claim, c) = claim_in_flight_with_a_proposal();
+    let e = Local::new(r);
+    let s = writer();
+    let cx = OpContext {
+        engine: &e,
+        session: &s,
+        cwd: d.path(),
+    };
+    let v = dispatch(&cx, "show", json!({"id": claim, "scope": "inflight"})).unwrap();
+    assert_eq!(v["inflight"][0]["change"], c, "{v}");
+    assert_eq!(v["inflight"][0]["views"], json!(["ra"]));
+    assert_eq!(
+        v["inflight"][0]["proposals"].as_array().unwrap().len(),
+        1,
+        "{v}"
+    );
+    assert!(
+        v.get("history").is_none(),
+        "no history in the inflight scope: {v}"
+    );
+    // blame still names the scopes it reads
+    let err = dispatch(
+        &cx,
+        "show",
+        json!({"id": claim, "scope": "inflight", "blame": true}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err:?}");
+}

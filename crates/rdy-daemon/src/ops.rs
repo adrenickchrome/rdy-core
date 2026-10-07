@@ -484,6 +484,11 @@ fn show(cx: &OpContext, a: ShowArgs) -> Result<Value, RdyError> {
     if let Some(conflict) = st.conflict_info(&scope, &bid)? {
         v["conflict"] = to_json(&conflict);
     }
+    // cgr1: inflight is an analysis scope with no history; its context carries `inflight`
+    // instead. `--blame` there still asks history, which names the scopes it reads.
+    if scope == Scope::Inflight && !a.blame {
+        return Ok(v);
+    }
     // blame1: the last change (or, with `blame`, every version) with its author, landing and why
     let h = st.history(&scope, &bid, if a.blame { HISTORY_MAX } else { 1 })?;
     v["justification"] = h

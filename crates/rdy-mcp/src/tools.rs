@@ -955,10 +955,13 @@ pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     if let Some(c) = st_.conflict_info(&scope, &id)? {
         v["conflict"] = json!(c);
     }
-    let h = st_.history(&scope, &id, CONTEXT_HISTORY)?;
-    v["justification"] = json!(h.entries.first().and_then(|e| e.justification.clone()));
-    v["history_more"] = json!(h.more);
-    v["history"] = json!(h.entries);
+    // cgr1: inflight is an analysis scope with no history; its context carries `inflight` instead
+    if scope != Scope::Inflight {
+        let h = st_.history(&scope, &id, CONTEXT_HISTORY)?;
+        v["justification"] = json!(h.entries.first().and_then(|e| e.justification.clone()));
+        v["history_more"] = json!(h.more);
+        v["history"] = json!(h.entries);
+    }
     Ok(budget(v, p.max_tokens))
 }
 
