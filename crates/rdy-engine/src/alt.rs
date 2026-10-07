@@ -203,6 +203,19 @@ impl ReadState {
             .map(|(stable, version, set)| (*stable, *version, set.clone())))
     }
 
+    /// A chosen or abandoned set whose latest version lists view `view` and did not choose it,
+    /// if any (the first by stable id): its stable id and that version. One lookup in the
+    /// published settled-set index (`CoordHeads::lost_members`).
+    pub fn alt_lost_by(&self, view: &str) -> Option<(Hash, AltSet)> {
+        let heads = &self.coord_heads;
+        heads.lost_members.get(view)?.iter().find_map(|stable| {
+            heads
+                .settled_alts
+                .get(stable)
+                .map(|(_, set)| (*stable, set.clone()))
+        })
+    }
+
     /// The open sets, or every set when `all`, by title then id.
     pub fn alt_sets(&self, all: bool) -> Result<Vec<AltSetInfo>, RdyError> {
         let mut out = vec![];

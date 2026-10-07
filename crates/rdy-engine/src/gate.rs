@@ -562,7 +562,10 @@ fn proposed_alt(
                     ),
                 ))
             }
-            None => Ok(None),
+            None => not_lost(st, view, |label| {
+                format!("view {view} is its member {label}, and its work can no longer land")
+            })
+            .map(|()| None),
         };
     };
     let (stable, _, set) = st.resolve_alt(&pick.set)?;
@@ -619,7 +622,10 @@ fn landing_alt(st: &ReadState, p: &Proposal) -> Result<Option<AltLanding>, RdyEr
                 ),
                 "propose again with alternatives",
             )),
-            None => Ok(None),
+            None => not_lost(st, &p.view, |_| {
+                "this proposal can no longer land".to_string()
+            })
+            .map(|()| None),
         };
     };
     let (stable, version, set) = st.resolve_alt(&a.set.to_string())?;
@@ -655,6 +661,63 @@ fn landing_alt(st: &ReadState, p: &Proposal) -> Result<Option<AltLanding>, RdyEr
             .map(|m| m.view.clone())
             .collect(),
     }))
+}
+
+/// altg1: a view that a chosen or abandoned set did not choose (the set's latest version lists
+/// it) lands nothing that chose nothing: its work is the set's rejected alternative, even when
+/// the version was made before the view joined the set. `what` names what is refused, given the
+/// view's label in the set.
+fn not_lost(st: &ReadState, view: &str, what: impl Fn(&str) -> String) -> Result<(), RdyError> {
+    match st.alt_lost_by(view) {
+        Some((stable, set)) => Err(RdyError::new(
+            E_ALT_MEMBER,
+            format!(
+                "{} is {}; {}",
+                alt_label(&stable),
+                alt_status(&set.status),
+                what(member_label(&set, view))
+            ),
+            "propose from a view outside the set",
+        )),
+        None => Ok(()),
+    }
+}
+
+/// altg1: a change written in a member view of an open set (its `links.alternative`) is that
+/// member's alternative: it lands only in a version proposed from that member's view that chose
+/// that member (`chosen`). A member since removed from the set no longer binds its changes.
+fn linked_alts(
+    st: &ReadState,
+    view: &str,
+    chosen: Option<&AltChoice>,
+    ids: &[Hash],
+    changes: &[Change],
+) -> Result<(), RdyError> {
+    for (id, c) in ids.iter().zip(changes) {
+        let Some(a) = &c.links.alternative else {
+            continue;
+        };
+        let Some((_, set)) = st.coord_heads().open_alts.get(&a.set) else {
+            continue;
+        };
+        if !set.members.iter().any(|m| m.view == a.member) {
+            continue;
+        }
+        if a.member == view && chosen == Some(a) {
+            continue;
+        }
+        return Err(RdyError::new(
+            E_ALT_MEMBER,
+            format!(
+                "change {} is {} member {}'s alternative",
+                id.short(),
+                alt_label(&a.set),
+                member_label(set, &a.member)
+            ),
+            format!("propose from {} to choose it", a.member),
+        ));
+    }
+    Ok(())
 }
 
 /// The ops of the changes at `applied` (positions in `changes`), in applied order.
@@ -948,6 +1011,8 @@ impl Rdy {
     /// `propose_subset` with the alternative the version chooses (altg1). A member view of an
     /// open set must name its own member (`E_ALT_UNCHOSEN`); a pick must name an open set the
     /// view is a member of, and the view's own member by label or view name (`E_ALT_MEMBER`).
+    /// A view a chosen or abandoned set did not choose proposes nothing, and a change written in
+    /// a member view of an open set is proposed only from that view, choosing it (`E_ALT_MEMBER`).
     pub fn propose_with(
         &mut self,
         s: &Session,
@@ -1008,6 +1073,7 @@ impl Rdy {
             }
         };
         let changes = changes_of(&st, &ids)?;
+        linked_alts(&st, view, alternative.as_ref(), &ids, &changes)?;
         // closure: each dep is proposed with its dependent or landed in the view's base (the
         // landings at or before the base are collected once, when a dep first needs them)
         let base = st.effective_base(view);
@@ -1343,6 +1409,7 @@ impl Rdy {
             member: a.member.clone(),
         });
         let changes = changes_of(&st, &p.changes)?;
+        linked_alts(&st, &p.view, p.alternative.as_ref(), &p.changes, &changes)?;
         // FW-HB1: canon may have moved since the version was proposed
         self.check_base_moved(&st, &pref, &p, &changes, &opts)?;
         // gconf1: the version's own changes (not the view's current set) must carry no conflict

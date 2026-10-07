@@ -168,3 +168,152 @@ fn altg1_land_rechecks_the_set_at_approval() {
     r.alt_abandon(&writer(), &u, "no").unwrap();
     assert_eq!(r.land(&approver(), &p2.id).unwrap_err().code, E_ALT_MEMBER);
 }
+
+/// Canon with a seeded section; view a creates claim `alt A` and view b creates claim `alt B`,
+/// both before any set exists (their changes carry no alternative link). Returns the section.
+fn two_claims(r: &mut Rdy) -> String {
+    let (_doc, section, _claim) = seed_doc(r, "seed");
+    land(r, "seed").unwrap();
+    for (view, body) in [("a", "alt A"), ("b", "alt B")] {
+        write(
+            r,
+            view,
+            json!([{"op": "create", "type": "claim", "parent": section, "body": body}]),
+        )
+        .unwrap();
+    }
+    section
+}
+
+fn canon_bodies(r: &Rdy) -> Vec<String> {
+    let st = r.read();
+    let m = st.materialized(&Scope::Canon).unwrap();
+    m.iter().map(|b| b.body.clone()).collect()
+}
+
+#[test]
+fn altg1_a_proposal_from_before_the_set_cannot_land_once_another_member_is_chosen() {
+    let (_d, mut r) = project();
+    let section = two_claims(&mut r);
+    let pb = r.propose(&writer(), "b", "b early").unwrap();
+    let set = r
+        .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap()
+        .id;
+    assert_eq!(
+        r.land(&approver(), &pb.id).unwrap_err().code,
+        E_ALT_UNCHOSEN
+    );
+    let pa = r
+        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .unwrap();
+    r.land(&approver(), &pa.id).unwrap();
+    let e = r.land(&approver(), &pb.id).unwrap_err();
+    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
+    assert!(
+        e.message
+            .contains("is chosen; this proposal can no longer land"),
+        "{}",
+        e.message
+    );
+    let bodies = canon_bodies(&r);
+    assert!(bodies.iter().any(|b| b == "alt A"));
+    assert!(!bodies.iter().any(|b| b == "alt B"), "{bodies:?}");
+    // the chosen member's own view goes on landing work without naming a choice
+    write(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "after"}]),
+    )
+    .unwrap();
+    let later = r.propose(&writer(), "a", "after").unwrap();
+    r.land(&approver(), &later.id).unwrap();
+}
+
+#[test]
+fn altg1_a_proposal_from_before_the_set_cannot_land_once_the_set_is_abandoned() {
+    let (_d, mut r) = project();
+    two_claims(&mut r);
+    let pb = r.propose(&writer(), "b", "b early").unwrap();
+    let set = r
+        .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap()
+        .id;
+    r.alt_abandon(&writer(), &set, "neither").unwrap();
+    let e = r.land(&approver(), &pb.id).unwrap_err();
+    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
+    assert!(
+        e.message
+            .contains("is abandoned; this proposal can no longer land"),
+        "{}",
+        e.message
+    );
+    assert!(!canon_bodies(&r).iter().any(|b| b == "alt B"));
+}
+
+#[test]
+fn altg1_a_members_change_lands_only_from_its_own_view_with_its_pick() {
+    let (_d, mut r) = project();
+    let section = two_claims(&mut r);
+    let set = r
+        .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap()
+        .id;
+    // written in member view b while the set is open: the change carries b's link
+    let b2 = write(
+        &mut r,
+        "b",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "alt B2"}]),
+    )
+    .unwrap()
+    .change;
+    // included into a view outside the set, it cannot be proposed from there
+    r.view_include(&writer(), "d", std::slice::from_ref(&b2))
+        .unwrap();
+    let e = r.propose(&writer(), "d", "d").unwrap_err();
+    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
+    assert!(
+        e.message.contains("member y's alternative"),
+        "{}",
+        e.message
+    );
+    assert!(e.fix.contains("propose from b"), "{}", e.fix);
+    // nor from another member view, under that member's own pick
+    r.view_include(&writer(), "a", std::slice::from_ref(&b2))
+        .unwrap();
+    let e = r
+        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .unwrap_err();
+    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
+    // from its own view with its own pick it proposes and lands
+    let pb = r
+        .propose_with(&writer(), "b", "y", None, None, Some(&pick(&set, "y")))
+        .unwrap();
+    r.land(&approver(), &pb.id).unwrap();
+    assert!(canon_bodies(&r).iter().any(|b| b == "alt B2"));
+}
+
+#[test]
+fn altg1_a_reopened_member_view_the_set_did_not_choose_cannot_propose() {
+    let (_d, mut r) = project();
+    two_claims(&mut r);
+    let set = r
+        .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap()
+        .id;
+    let pa = r
+        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .unwrap();
+    r.land(&approver(), &pa.id).unwrap();
+    assert!(r.read().view_head("b").unwrap().closed);
+    let u = r.undo(&writer(), "b", None, false).unwrap();
+    assert!(u.reopened);
+    let e = r.propose(&writer(), "b", "b again").unwrap_err();
+    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
+    assert!(
+        e.message.contains("view b is its member y"),
+        "{}",
+        e.message
+    );
+    assert!(e.fix.contains("outside the set"), "{}", e.fix);
+}

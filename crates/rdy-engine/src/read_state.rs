@@ -148,8 +148,9 @@ pub struct InflightSet {
 }
 
 /// The coordination refs as a state was published: each intent's and each alternative set's
-/// stable id mapped to its latest version, and an index of the open sets, so that a write reads
-/// its view's set without reading every set ever made.
+/// stable id mapped to its latest version, and indexes of the open and the settled sets, so that
+/// a write reads its view's set, and the gate a member view's settled set, without reading every
+/// set ever made.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CoordHeads {
     pub intents: BTreeMap<Hash, Hash>,
@@ -158,6 +159,12 @@ pub struct CoordHeads {
     pub open_alts: BTreeMap<Hash, (Hash, AltSet)>,
     /// Each member view of an open set, mapped to that set's stable id.
     pub alt_members: BTreeMap<String, Hash>,
+    /// Each chosen or abandoned set: stable id to its latest version and that version.
+    pub settled_alts: BTreeMap<Hash, (Hash, AltSet)>,
+    /// Each member view of a settled set's latest version that the set did not choose (every
+    /// member of an abandoned set, every other member of a chosen one), mapped to those sets'
+    /// stable ids. A version of such a view that chose nothing can no longer land (altg1).
+    pub lost_members: BTreeMap<String, Vec<Hash>>,
 }
 
 impl CoordHeads {
@@ -172,16 +179,21 @@ impl CoordHeads {
         alt_sets: BTreeMap<Hash, Hash>,
     ) -> Result<CoordHeads, RdyError> {
         let mut open_alts = BTreeMap::new();
+        let mut settled_alts = BTreeMap::new();
         for (stable, version) in &alt_sets {
             if prev.alt_sets.get(stable) == Some(version) {
                 if let Some(entry) = prev.open_alts.get(stable) {
                     open_alts.insert(*stable, entry.clone());
+                } else if let Some(entry) = prev.settled_alts.get(stable) {
+                    settled_alts.insert(*stable, entry.clone());
                 }
                 continue;
             }
             let set = reader.alt_set(version)?;
             if set.status == AltStatus::Open {
                 open_alts.insert(*stable, (*version, set));
+            } else {
+                settled_alts.insert(*stable, (*version, set));
             }
         }
         let mut alt_members = BTreeMap::new();
@@ -191,11 +203,30 @@ impl CoordHeads {
                 alt_members.entry(m.view.clone()).or_insert(*stable);
             }
         }
+        let mut lost_members: BTreeMap<String, Vec<Hash>> = BTreeMap::new();
+        for (stable, (_, set)) in &settled_alts {
+            let chosen = match &set.status {
+                AltStatus::Chosen { member, .. } => Some(member.as_str()),
+                _ => None,
+            };
+            for m in set
+                .members
+                .iter()
+                .filter(|m| Some(m.view.as_str()) != chosen)
+            {
+                lost_members
+                    .entry(m.view.clone())
+                    .or_default()
+                    .push(*stable);
+            }
+        }
         Ok(CoordHeads {
             intents,
             alt_sets,
             open_alts,
             alt_members,
+            settled_alts,
+            lost_members,
         })
     }
 }
