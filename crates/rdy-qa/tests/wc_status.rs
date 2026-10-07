@@ -212,3 +212,58 @@ fn wcss1_a_staged_rename_and_move_are_one_entry_each_and_a_folder_has_a_slash() 
         "{v}"
     );
 }
+
+#[test]
+fn wcss1_a_half_staged_rename_leaves_the_old_path_unstaged() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::rename(at(&s, "notes.yaml"), at(&s, "journal.yaml")).unwrap();
+    let (okk, v) = json(&s, &["add", "journal.yaml"]);
+    assert!(okk, "{v}");
+    let (_, v) = json(&s, &["status"]);
+    let w = &v["working_copy"];
+    assert_eq!(
+        changes(&w["staged"]),
+        vec![("added".to_string(), "journal.yaml".to_string())],
+        "the stage holds only the new copy: {v}"
+    );
+    assert_eq!(
+        changes(&w["unstaged"]),
+        vec![("deleted".to_string(), "notes.yaml".to_string())],
+        "the old path's deletion is not staged: {v}"
+    );
+    // staging the deletion too makes it one staged rename and nothing unstaged
+    let (okk, v) = json(&s, &["add", "notes.yaml"]);
+    assert!(okk, "{v}");
+    let (_, v) = json(&s, &["status"]);
+    let w = &v["working_copy"];
+    assert_eq!(
+        changes(&w["staged"]),
+        vec![("renamed".to_string(), "journal.yaml".to_string())],
+        "{v}"
+    );
+    assert!(w["unstaged"].as_array().unwrap().is_empty(), "{v}");
+}
+
+#[test]
+fn wcss1_a_staged_deletion_whose_file_is_back_is_listed_as_not_staged() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    let base_bytes = read(&s, "notes.yaml");
+    std::fs::remove_file(at(&s, "notes.yaml")).unwrap();
+    let (okk, v) = json(&s, &["add", "notes.yaml"]);
+    assert!(okk, "{v}");
+    std::fs::write(at(&s, "notes.yaml"), base_bytes).unwrap();
+    let (_, v) = json(&s, &["status"]);
+    let w = &v["working_copy"];
+    assert_eq!(
+        changes(&w["staged"]),
+        vec![("deleted".to_string(), "notes.yaml".to_string())],
+        "{v}"
+    );
+    assert_eq!(
+        changes(&w["unstaged"]),
+        vec![("added".to_string(), "notes.yaml".to_string())],
+        "the file is in the tree but the stage deletes it: {v}"
+    );
+}

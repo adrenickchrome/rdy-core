@@ -205,9 +205,12 @@ pub fn compute(place: &Place, st: &WcState, tree: &WcTree) -> WcStatus {
 
     let work_vacated =
         |p: &str, h: &BlockId| working.get(p).and_then(|i| i.head.as_ref()) != Some(h);
-    let stage_vacated = |p: &str, h: &BlockId| {
-        copies.get(p).and_then(|i| i.head.as_ref()) != Some(h)
-            && (st.stage.deleted.contains(p) || work_vacated(p, h))
+    // A base path is vacated in the stage only by what the stage holds: a staged copy at the path
+    // with another head, or a staged deletion. The working tree does not count (a half-staged
+    // rename is not a staged rename).
+    let stage_vacated = |p: &str, h: &BlockId| match copies.get(p) {
+        Some(c) => c.head.as_ref() != Some(h),
+        None => st.stage.deleted.contains(p),
     };
 
     let mut staged = vec![];
@@ -230,6 +233,8 @@ pub fn compute(place: &Place, st: &WcState, tree: &WcTree) -> WcStatus {
     }
 
     let mut unstaged = vec![];
+    // base paths that an unstaged `renamed` or `moved` entry already reports as vacated
+    let mut reported_from: BTreeSet<String> = BTreeSet::new();
     for (p, item) in &working {
         let change = classify(place, st, p, item, &work_vacated);
         match (copies.get(*p), change) {
@@ -239,16 +244,36 @@ pub fn compute(place: &Place, st: &WcState, tree: &WcTree) -> WcStatus {
                 change: ChangeKind::Modified,
                 from: None,
             }),
-            (_, Some((change, from))) => unstaged.push(StatusEntry {
-                path: shown(p),
-                change,
-                from,
-            }),
+            (_, Some((change, from))) => {
+                reported_from.extend(from.clone());
+                unstaged.push(StatusEntry {
+                    path: shown(p),
+                    change,
+                    from,
+                });
+            }
             (None, None) => {}
         }
     }
+    // A staged deletion whose file is in the tree again: the stage and the tree disagree.
+    for p in &st.stage.deleted {
+        if working.contains_key(p.as_str()) && !unstaged.iter().any(|e| e.path == shown(p)) {
+            unstaged.push(StatusEntry {
+                path: shown(p),
+                change: ChangeKind::Added,
+                from: None,
+            });
+        }
+    }
     for (p, h) in &st.base.files {
-        if !working_heads.contains(h) && !st.stage.deleted.contains(p) {
+        if st.stage.deleted.contains(p) || reported_from.contains(&shown(p)) {
+            continue;
+        }
+        // Gone from the tree and its head nowhere in it, or moved on in the tree while the stage
+        // still keeps the head here (only the new copy is staged).
+        let gone = !working_heads.contains(h);
+        let half_staged = work_vacated(p, h) && staged_heads.contains(h) && !stage_vacated(p, h);
+        if gone || half_staged {
             unstaged.push(deleted(p));
         }
     }
