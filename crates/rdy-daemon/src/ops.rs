@@ -8,9 +8,10 @@ use rdy_engine::brief::e_page_alone;
 use rdy_engine::code_brief::e_code_path_alone;
 use rdy_engine::consequence::{land_and_report, propose_and_report, write_and_report};
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
+use rdy_engine::search::SearchFilters;
 use rdy_engine::{
     E_BAD_INPUT, E_LIMIT, E_PERMISSION, HISTORY_MAX, LandOptions, RdyError, ReadState, Relay,
-    Scope, Session, block_to_yaml, check_path, resolve_pack, view_api,
+    Scope, SearchQuery, Session, block_to_yaml, check_path, resolve_pack, view_api,
 };
 use rdy_mcp::tools::MAX_TOKENS_LIMIT;
 use rdy_model::{ActorRun, RelayEvidence, Role};
@@ -38,11 +39,13 @@ pub const OPS: &[&str] = &[
     "tags",
     "block",
     "brief",
+    "search",
     "render",
     "export",
     "check",
     "new_folder",
     "new_doc",
+    "keys_assign",
     "edit_block",
     "propose",
     "approve",
@@ -126,6 +129,27 @@ struct BriefArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SearchArgs {
+    query: String,
+    regex: Option<bool>,
+    ignore_case: Option<bool>,
+    scope: Option<String>,
+    max_tokens: Option<usize>,
+    page: Option<String>,
+    types: Option<Vec<String>>,
+    traits: Option<Vec<String>>,
+    path: Option<String>,
+    lifecycle: Option<String>,
+    changed_since: Option<String>,
+    exclude_history: Option<bool>,
+    governed_by: Option<String>,
+    describes: Option<String>,
+    linked_to: Option<String>,
+    suspect: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OutArgs {
     out: String,
     scope: Option<String>,
@@ -152,6 +176,12 @@ struct NewDocArgs {
     view: Option<String>,
     doc_type: Option<String>,
     title: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeysAssignArgs {
+    view: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -380,11 +410,20 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{ids?, path?, code_path?, page?, scope?, view?, max_tokens?}",
             )?,
         ),
+        "search" => search(
+            cx,
+            parse(
+                op,
+                args,
+                "{query, regex?, ignore_case?, scope?, max_tokens?, page?, types?, traits?, path?, lifecycle?, changed_since?, exclude_history?, governed_by?, describes?, linked_to?, suspect?}",
+            )?,
+        ),
         "render" => render(cx, parse(op, args, "{out, scope?}")?),
         "export" => export(cx, parse(op, args, "{out, scope?}")?),
         "check" => check(cx, parse(op, args, "{path, pack?}")?),
         "new_folder" => new_folder(cx, parse(op, args, "{path, view?}")?),
         "new_doc" => new_doc(cx, parse(op, args, "{path, view?, doc_type?, title?}")?),
+        "keys_assign" => keys_assign(cx, parse(op, args, "{view?}")?),
         "edit_block" => edit_block(cx, parse(op, args, "{yaml, view?, brief?, max_tokens?}")?),
         "propose" => propose(
             cx,
@@ -605,6 +644,36 @@ fn brief(cx: &OpContext, a: BriefArgs) -> Result<Value, RdyError> {
     Ok(to_json(&b))
 }
 
+/// msrch1: the blocks whose text matches, in canon unless a scope is named.
+fn search(cx: &OpContext, a: SearchArgs) -> Result<Value, RdyError> {
+    check_max_tokens(a.max_tokens)?;
+    let st = cx.engine.read();
+    let scope = scope_of(&st, cx, a.scope.as_deref())?;
+    let r = st.search(
+        &scope,
+        &SearchQuery {
+            text: a.query,
+            regex: a.regex.unwrap_or(false),
+            ignore_case: a.ignore_case.unwrap_or(false),
+            filters: SearchFilters {
+                types: a.types.unwrap_or_default(),
+                traits: a.traits.unwrap_or_default(),
+                path: a.path,
+                lifecycle: a.lifecycle,
+                changed_since: a.changed_since,
+                exclude_history: a.exclude_history.unwrap_or(false),
+                governed_by: a.governed_by,
+                describes: a.describes,
+                linked_to: a.linked_to,
+                suspect: a.suspect.unwrap_or(false),
+            },
+        },
+        a.page.as_deref(),
+        a.max_tokens,
+    )?;
+    Ok(to_json(&r))
+}
+
 fn render(cx: &OpContext, a: OutArgs) -> Result<Value, RdyError> {
     let st = cx.engine.read();
     let scope = scope_of(&st, cx, a.scope.as_deref())?;
@@ -658,6 +727,15 @@ fn new_doc(cx: &OpContext, a: NewDocArgs) -> Result<Value, RdyError> {
             a.title.as_deref(),
         )
     })
+}
+
+fn keys_assign(cx: &OpContext, a: KeysAssignArgs) -> Result<Value, RdyError> {
+    let s = cx.session.clone();
+    let view = view_of(&s, a.view);
+    let (v, name) = (view.clone(), view.clone());
+    let mut out = write_and_report(cx.engine, &v, None, move |r| r.assign_keys(&s, &view))?;
+    out["view"] = json!(name);
+    Ok(out)
 }
 
 fn edit_block(cx: &OpContext, a: EditBlockArgs) -> Result<Value, RdyError> {

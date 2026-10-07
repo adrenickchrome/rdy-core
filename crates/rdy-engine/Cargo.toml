@@ -17,6 +17,7 @@ semver.workspace = true
 saphyr-parser.workspace = true
 imbl.workspace = true
 arc-swap.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

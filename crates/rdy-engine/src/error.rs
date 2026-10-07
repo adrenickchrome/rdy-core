@@ -57,8 +57,8 @@ pub const E_UNDO_LANDING: &str = "E_UNDO_LANDING";
 pub const E_NOTHING_TO_UNDO: &str = "E_NOTHING_TO_UNDO";
 /// A page cursor is unknown, or what it pages (a briefing, a read, a search) moved since its first page.
 pub const E_PAGE_STALE: &str = "E_PAGE_STALE";
-/// The fix of every `E_PAGE_STALE`, for a briefing cursor and a read cursor alike.
-pub const PAGE_STALE_FIX: &str = "the read or briefing moved; start again without a cursor";
+/// The fix of every `E_PAGE_STALE`, for a briefing, read and search cursor alike.
+pub const PAGE_STALE_FIX: &str = "the read, briefing or search moved; start again without a cursor";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RdyError {

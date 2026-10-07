@@ -1280,6 +1280,7 @@ dependencies = [
  "rdy-model",
  "rdy-schema",
  "rdy-store",
+ "regex",
  "saphyr-parser",
  "semver",
  "serde",

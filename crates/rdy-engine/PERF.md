@@ -762,3 +762,37 @@ Baseline: `qa-baseline.json` is not changed here.
 Linux bench rows: (bench: the orchestrator fills these rows from two cargo qa --only perf --deep runs on the isolated Linux bench)
 
 Deep gate (bench): <orchestrator fills in>
+
+
+## Agent ergonomics 2: search (2026-10-06)
+
+The `qa-perf` tier gained one op for block-text search (FW-PR1). It runs in `tier_reads`, after
+`tree_full_memo`, so the canon state is warm and the timer holds only the search.
+
+| op | what it times | project | runs | target |
+|---|---|---|---|---|
+| `search_literal` | `search(Canon, "Claim", first page, 4000 tokens)`: a literal that every generated claim holds | the tier's project (about 10k blocks) | 20 | no spec target: a full scan of block text, first page (recorded for FW-PR1; semantic search is M5) |
+| `search_literal_50k` | the same call at 50k blocks | the large tier's project | 10 | the same, with the large-tier note |
+
+What the cost grows with:
+
+- The walk visits every block in reading order and matches each line of the body and of every
+  string field. The cost grows with the total text in the scope, not with the page size.
+- Each matching block adds its id and version hash to the page token. The search hashes once
+  over all matches, so a query that most blocks match costs more than a rare one.
+- Every matching block gets its path, because the totals count hits per doc. Only the entries
+  on the page are serialised for the token budget.
+- Each search reads the scope's graph (built once per state, then cached), because a match
+  inside a superseded, rejected or revoked decision is marked `history`.
+
+The regex crate matches in linear time, so one search of a line costs one linear pass. Compile
+size is capped at 1 MiB (`REGEX_SIZE_LIMIT`), and the lazy-DFA cache of one search at 16 MiB
+(`REGEX_DFA_LIMIT`). A pattern that matches empty text restarts after each empty match, and a
+restart can scan to the end of the line. Each restart after the first on a line is charged the
+rest of the line, and a search whose charge passes 32 MiB (`EMPTY_RESCAN_LIMIT`) is `E_LIMIT`.
+The charge is the worst case, so a pattern that matches empty text at each position (`q*`, `x?`)
+is refused when the scope has one line over about 8 KiB, even though it is cheap.
+
+No laptop figures are recorded here: the first timing of these ops is the Linux bench's.
+
+Linux bench rows: (bench: the orchestrator fills these rows from two cargo qa --only perf --deep runs on the isolated Linux bench)
