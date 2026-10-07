@@ -4,7 +4,7 @@ use crate::fixtures::{approver, land, write, writer};
 use rdy_daemon::{Attempt, Client, Hello, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun};
 use rdy_engine::brief::Coverage;
 use rdy_engine::consequence::ConsequenceKind;
-use rdy_engine::{Rdy, Scope, now_ms, testkit};
+use rdy_engine::{Materialized, Rdy, Scope, now_ms, testkit};
 use rdy_model::{Block, BlockId, Hash, Op};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -93,6 +93,8 @@ fn spec_target(op: &str) -> Option<String> {
         "brief_code" => {
             "recorded, no spec budget: one git rev-parse per call plus a briefing over the file's anchors (warm index)"
         }
+        "history_100" | "last_changes_doc" | "log_page_20" => "< 5 ms p99 (reads, spec 11)",
+        "log_full" => "recorded: 2000 landings, no spec target",
         _ => return None,
     };
     Some(if large {
@@ -274,6 +276,51 @@ fn deep_history(parent: &std::path::Path) -> Rdy {
     r
 }
 
+/// Versions a claim of [`deep_block`] has been updated to (it holds one more: its create).
+pub const DEEP_VERSIONS: usize = 100;
+
+/// A project with one claim written [`DEEP_VERSIONS`] + 1 times, each version in its own view and
+/// landed. Returns the project and the claim.
+fn deep_block(parent: &std::path::Path) -> (Rdy, BlockId) {
+    let proj = parent.join("deep-block");
+    std::fs::create_dir_all(&proj).expect("mkdir");
+    let mut r = Rdy::init(&proj, "rdy-standard").expect("init");
+    let res = write(
+        &mut r,
+        "b0",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "glossary", "title": "Glossary", "doc_type": "glossary"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}},
+            {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Version 0."}
+        ]),
+    )
+    .expect("deep block write");
+    let claim = BlockId::parse(&res.created["$c"]).expect("claim id");
+    land(&mut r, "b0").expect("deep block land");
+    for i in 1..=DEEP_VERSIONS {
+        let view = format!("b{i}");
+        write(
+            &mut r,
+            &view,
+            json!([{"op": "update", "id": claim.to_string(), "body": format!("Version {i}.")}]),
+        )
+        .expect("deep block update");
+        land(&mut r, &view).expect("deep block land");
+    }
+    (r, claim)
+}
+
+/// `root` and every block under it.
+fn subtree(m: &Materialized, root: &BlockId) -> Vec<BlockId> {
+    let mut out = vec![];
+    let mut stack = vec![root.clone()];
+    while let Some(id) = stack.pop() {
+        stack.extend(m.children(Some(&id)).iter().map(|b| b.id.clone()));
+        out.push(id);
+    }
+    out
+}
+
 /// What the read ops need from a built project: a doc, its section and a claim under it.
 struct Fixture {
     doc_path: String,
@@ -417,6 +464,25 @@ fn tier_reads(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs
             let next = built.with(&op);
             let took = s.elapsed();
             assert_eq!(next.len(), built.len() + 1);
+            took
+        },
+    ));
+    // The last change of every block in the fixture doc, warm (the state is built outside the
+    // timer): the cost is one memoised walk per distinct change in the subtree.
+    let doc = r
+        .read()
+        .resolve_path(&Scope::Canon, doc_path)
+        .expect("fixture doc");
+    let st = r.read();
+    let ids = subtree(&st.materialized(&Scope::Canon).expect("canon"), &doc);
+    out.push(measure_timed(
+        &format!("last_changes_doc{sfx}"),
+        runs.read,
+        |_| {
+            let s = Instant::now();
+            let got = st.last_changes(&Scope::Canon, &ids).expect("last changes");
+            let took = s.elapsed();
+            assert_eq!(got.len(), ids.len());
             took
         },
     ));
@@ -821,6 +887,8 @@ pub fn run_workload() -> Vec<Measure> {
     let mut out = vec![];
     // built once, outside every timer, and before the heavy ops so it stays small on disk
     let mut deep = deep_history(dir.path());
+    // a block 101 versions deep, in its own project: the workload project stays as it was
+    let (deep_block_project, deep_claim) = deep_block(dir.path());
 
     out.push(measure("write_single", TYPICAL_RUNS.write, |i| {
         write(
@@ -856,6 +924,39 @@ pub fn run_workload() -> Vec<Measure> {
     out.push(measure("version_position_cached", 200, |_| {
         r.read().version_position(&Scope::Canon).expect("position");
     }));
+    // history of a 101-version block, the log's first page and the whole log: the state is
+    // warmed outside each timer
+    {
+        let st = deep_block_project.read();
+        st.materialized(&Scope::Canon).expect("warm");
+        out.push(measure_timed("history_100", 20, |_| {
+            let s = Instant::now();
+            let h = st
+                .history(&Scope::Canon, &deep_claim, DEEP_VERSIONS + 1)
+                .expect("history");
+            let took = s.elapsed();
+            assert_eq!(h.entries.len(), DEEP_VERSIONS + 1);
+            took
+        }));
+    }
+    {
+        let st = deep.read();
+        st.materialized(&Scope::Canon).expect("warm");
+        out.push(measure_timed("log_page_20", 20, |_| {
+            let s = Instant::now();
+            let rows = st.log_page(None, Some(20)).expect("log page");
+            let took = s.elapsed();
+            assert_eq!(rows.len(), 20);
+            took
+        }));
+        out.push(measure_timed("log_full", 5, |_| {
+            let s = Instant::now();
+            let rows = st.log_rows().expect("log");
+            let took = s.elapsed();
+            assert_eq!(rows.len(), DEEP_LANDINGS);
+            took
+        }));
+    }
     // the flat landings moved canon on, and `va` (pinned) stayed on the 10k canon
     assert_ne!(
         r.read().effective_base("va"),
@@ -1039,6 +1140,24 @@ mod tests {
             p95_ms: median,
             runs: 1,
         }
+    }
+
+    #[test]
+    fn hperf1_the_history_ops_state_their_targets() {
+        for op in [
+            "history_100",
+            "last_changes_doc",
+            "log_page_20",
+            "last_changes_doc_50k",
+        ] {
+            assert!(spec_target(op).unwrap().contains("< 5 ms p99"), "{op}");
+        }
+        assert!(
+            spec_target("last_changes_doc_50k")
+                .unwrap()
+                .contains("large tier")
+        );
+        assert!(spec_target("log_full").unwrap().contains("no spec target"));
     }
 
     #[test]

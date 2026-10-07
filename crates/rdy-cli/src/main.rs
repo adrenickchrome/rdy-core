@@ -17,6 +17,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 mod brief_text;
+mod history_text;
 mod view_cmd;
 
 /// This binary's version: the hello's `version`, so a client only talks to a daemon of its own.
@@ -60,8 +61,18 @@ enum Cmd {
         /// canon (the default), an existing view's name, tag:<version>, landing:<id> or view:<name>.
         #[arg(long)]
         scope: Option<String>,
+        /// Also list every version: its change, author, landing and approver.
+        #[arg(long)]
+        blame: bool,
     },
-    Log,
+    Log {
+        /// At most this many landings, newest first.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Only landings after this one: a landing id (at least 6 hex characters), landing:<id> or tag:<version>.
+        #[arg(long)]
+        since: Option<String>,
+    },
     Impact {
         /// An id or a path such as wallets/transactions.
         id: String,
@@ -82,6 +93,12 @@ enum Cmd {
         /// The budget for the briefing; the longest lists are cut to fit.
         #[arg(long = "max-tokens")]
         max_tokens: Option<usize>,
+    },
+    /// List the suspects in a scope (default canon), as rdy_suspects does.
+    Suspects {
+        /// canon (the default), an existing view's name, tag:<version>, landing:<id> or view:<name>.
+        #[arg(long)]
+        scope: Option<String>,
     },
     Propose {
         #[arg(long)]
@@ -177,7 +194,11 @@ enum Cmd {
         view: String,
     },
     Reindex,
-    Fsck,
+    Fsck {
+        /// Also remove the quarantine files a crash left (.torn- segment tails and damaged indexes). Human only.
+        #[arg(long)]
+        clean_quarantine: bool,
+    },
     /// Run the MCP server over stdio.
     Mcp,
     /// Lint export-format-2 files (a doc file, a _folder.yaml or a directory) without touching the store.
@@ -551,6 +572,10 @@ fn show_text(v: &Value) -> String {
     if let Some(s) = status {
         out.push_str(&format!("status: {s}\n"));
     }
+    if let Some(line) = history_text::last_change_line(&v["history"][0]) {
+        out.push_str(&line);
+        out.push('\n');
+    }
     if let Some(from) = v["effective_from"].as_str() {
         out.push_str(&format!("effective from: {from}\n"));
     }
@@ -566,38 +591,14 @@ fn show_text(v: &Value) -> String {
     out
 }
 
-/// `actor` or `actor/run`, from a `{actor, run}` object.
-fn actor_run(v: &Value) -> String {
-    match v["run"].as_str() {
-        Some(run) => format!("{}/{run}", text(&v["actor"])),
-        None => text(&v["actor"]).to_string(),
-    }
-}
-
 fn log_text(v: &Value) -> String {
+    let rows = v.as_array().map(Vec::as_slice).unwrap_or_default();
+    if rows.is_empty() {
+        return "no landings".to_string();
+    }
     let mut out = String::new();
-    for row in v.as_array().into_iter().flatten() {
-        out.push_str(&format!(
-            "{}  {}  by {}",
-            hash_short(text(&row["landing"])),
-            text(&row["title"]),
-            text(&row["approved_by"])
-        ));
-        if let Some(a) = row["approved"].as_str() {
-            out.push_str(&format!("  approved {a}"));
-        }
-        if row["relayed_by"].is_object() {
-            out.push_str(&format!(", relayed by {}", actor_run(&row["relayed_by"])));
-        }
-        let tags: Vec<&str> = row["tags"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect();
-        if !tags.is_empty() {
-            out.push_str(&format!("  [{}]", tags.join(", ")));
-        }
+    for row in rows {
+        out.push_str(&history_text::log_head_line(row));
         out.push('\n');
         let (ev, relay) = (&row["evidence"], &row["relay_evidence"]);
         if ev.is_object() || relay.is_object() {
@@ -644,6 +645,25 @@ fn impact_text(v: &Value) -> String {
                 text(&i["summary"]),
                 text(&i["via"]["kind"]),
                 text(&i["via"]["from"])
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn suspects_text(v: &Value) -> String {
+    let items = v["items"].as_array().cloned().unwrap_or_default();
+    if items.is_empty() {
+        return "no suspects".to_string();
+    }
+    items
+        .iter()
+        .map(|i| {
+            format!(
+                "{} -> {}  {}",
+                text(&i["block"]),
+                text(&i["target"]),
+                text(&i["reason"])
             )
         })
         .collect::<Vec<_>>()
@@ -779,9 +799,16 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             let t = status_text(&v);
             Ok((v, t))
         }
-        Cmd::Show { id, scope } => {
-            let v = call(env, "show", json!({"id": id, "scope": scope}))?;
-            let t = show_text(&v);
+        Cmd::Show { id, scope, blame } => {
+            let v = call(
+                env,
+                "show",
+                json!({"id": id, "scope": scope, "blame": blame}),
+            )?;
+            let mut t = show_text(&v);
+            if blame {
+                t.push_str(&history_text::blame_text(&v));
+            }
             Ok((v, t))
         }
         Cmd::New { what } => {
@@ -829,8 +856,8 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             ls_text(&v, 0, &mut lines);
             Ok((v, lines.join("\n")))
         }
-        Cmd::Log => {
-            let v = call(env, "log", json!({}))?;
+        Cmd::Log { limit, since } => {
+            let v = call(env, "log", json!({"limit": limit, "since": since}))?;
             let t = log_text(&v);
             Ok((v, t))
         }
@@ -854,6 +881,11 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                 json!({"code_path": code, "scope": scope, "max_tokens": max_tokens}),
             )?;
             let t = format!("{}{}", brief_text::code_text(&v), brief_text::plain(&v));
+            Ok((v, t))
+        }
+        Cmd::Suspects { scope } => {
+            let v = call(env, "suspects", json!({"scope": scope}))?;
+            let t = suspects_text(&v);
             Ok((v, t))
         }
         Cmd::Propose { title, view } => {
@@ -1013,15 +1045,25 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             let v = call(env, "reindex", json!({}))?;
             Ok((v, "index rebuilt".into()))
         }
-        Cmd::Fsck => {
-            let v = call(env, "fsck", json!({}))?;
+        Cmd::Fsck { clean_quarantine } => {
+            let v = call(env, "fsck", json!({"clean_quarantine": clean_quarantine}))?;
             let mut t = format!(
-                "ok: {} frames, {} landings, {} versions{}",
+                "ok: {} frames, {} landings, {} versions",
                 num(&v["frames"]),
                 num(&v["landings"]),
                 num(&v["versions"]),
-                open_warnings(&v)
             );
+            for name in v["removed"].as_array().into_iter().flatten() {
+                t.push_str(&format!("\nremoved {}", text(name)));
+            }
+            for s in v["skipped"].as_array().into_iter().flatten() {
+                t.push_str(&format!(
+                    "\nskipped {}: {}",
+                    text(&s["name"]),
+                    text(&s["reason"])
+                ));
+            }
+            t.push_str(&open_warnings(&v));
             if v["open_report"]["unclean_shutdown"] == json!(true) {
                 t.push_str(&format!(
                     "\nnote: this daemon started after an unclean shutdown and recovered (caught up {} frames)",

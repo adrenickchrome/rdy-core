@@ -1,5 +1,5 @@
 use crate::error::*;
-use crate::session::rfc3339_of_ms;
+use crate::session::rfc3339;
 use crate::views::{
     Action, BaseBlocks, ConflictInfo, conflict_infos, creators, landings_through, missing_parents,
     parse_change,
@@ -126,6 +126,8 @@ pub struct LandingRow {
     pub title: String,
     /// The approving actor.
     pub approved_by: String,
+    /// The provenance of the proposal version that landed.
+    pub proposed_by: RelayedByRow,
     pub assurance: String,
     pub relayed_by: Option<RelayedByRow>,
     pub relay_evidence: Option<RelayEvidenceRow>,
@@ -1276,12 +1278,63 @@ impl Rdy {
 impl ReadState {
     /// Canon's landings as `rdy log` shows them, head first (H3-C5).
     pub fn log_rows(&self) -> Result<Vec<LandingRow>, RdyError> {
+        self.log_page(None, None)
+    }
+
+    /// logt1: a page of the log, newest first. `since` is a landing id (at least 6 hex
+    /// characters), `landing:<id>` or `tag:<version>`: only landings after it are listed. `limit`
+    /// is at least 1. `since` is resolved first, so a bad one is an error even on an empty page.
+    pub fn log_page(
+        &self,
+        since: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<LandingRow>, RdyError> {
+        if limit == Some(0) {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "limit must be at least 1",
+                "omit limit to list every landing",
+            ));
+        }
+        // the page reads canon's chain once, from the head, only as far as it lists; a landing
+        // id is matched against the whole chain (a prefix two landings share is an error), so
+        // that walk reads the chain first and pages from what it read
+        type Walk<'s> = Box<dyn Iterator<Item = Result<(Hash, LandingRecord), RdyError>> + 's>;
+        let (stop, walk): (Option<Hash>, Walk<'_>) = match since {
+            None => (None, Box::new(self.landing_walk())),
+            Some(text) if text.starts_with("tag:") => match self.resolve_scope(text)? {
+                Scope::At(h) => (Some(h), Box::new(self.landing_walk())),
+                _ => {
+                    return Err(RdyError::new(
+                        E_INTERNAL,
+                        format!("{text:?} did not resolve to a landing"),
+                        "report this as a bug in rdy",
+                    ));
+                }
+            },
+            Some(text) => {
+                let chain = self.landings()?;
+                let ids: Vec<Hash> = chain.iter().map(|(h, _)| *h).collect();
+                let stop = crate::version::match_prefix(
+                    &ids,
+                    text.strip_prefix("landing:").unwrap_or(text),
+                )?;
+                (Some(stop), Box::new(chain.into_iter().map(Ok)))
+            }
+        };
         let mut tags: std::collections::HashMap<String, Vec<String>> = Default::default();
         for v in self.versions()? {
             tags.entry(v.landing).or_default().push(v.name);
         }
         let mut rows = vec![];
-        for (id, rec) in self.landings()? {
+        for item in walk {
+            if limit.is_some_and(|n| rows.len() >= n) {
+                break;
+            }
+            let (id, rec) = item?;
+            if Some(id) == stop {
+                break;
+            }
             let tags = tags.remove(&id.to_string()).unwrap_or_default();
             rows.push(self.landing_row(id, &rec, tags)?);
         }
@@ -1307,6 +1360,10 @@ impl ReadState {
             approved,
             title: p.title.clone(),
             approved_by: rec.approved_by.actor.clone(),
+            proposed_by: RelayedByRow {
+                actor: p.provenance.actor.clone(),
+                run: p.provenance.run.clone(),
+            },
             assurance: rec.assurance.as_str().into(),
             relayed_by: rec.relayed_by.as_ref().map(|r| RelayedByRow {
                 actor: r.actor.clone(),
@@ -1324,7 +1381,7 @@ impl ReadState {
                 card_hash: e.card_hash.map(|h| h.to_string()),
             }),
             rebased_from: rec.rebased_from.iter().map(|h| h.to_string()).collect(),
-            at: rfc3339_of_ms(rec.approved_by.at_ms),
+            at: rfc3339(rec.approved_by.at_ms),
             at_ms: rec.approved_by.at_ms,
             changes: p.changes.len(),
             tags,

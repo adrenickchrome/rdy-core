@@ -8,8 +8,8 @@ use rdy_engine::code_brief::e_code_path_alone;
 use rdy_engine::consequence::write_and_report;
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::{
-    E_BAD_INPUT, E_LIMIT, E_PERMISSION, LandOptions, RdyError, ReadState, Relay, Scope, Session,
-    block_from_yaml, block_to_yaml, check_path, resolve_pack, view_api,
+    E_BAD_INPUT, E_LIMIT, E_PERMISSION, HISTORY_MAX, LandOptions, RdyError, ReadState, Relay,
+    Scope, Session, block_from_yaml, block_to_yaml, check_path, resolve_pack, view_api,
 };
 use rdy_mcp::tools::MAX_TOKENS_LIMIT;
 use rdy_model::{ActorRun, RelayEvidence, Role};
@@ -33,6 +33,7 @@ pub const OPS: &[&str] = &[
     "ls",
     "log",
     "impact",
+    "suspects",
     "tags",
     "block",
     "brief",
@@ -57,9 +58,25 @@ struct NoArgs {}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct LogArgs {
+    limit: Option<usize>,
+    since: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FsckArgs {
+    #[serde(default)]
+    clean_quarantine: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ShowArgs {
     id: String,
     scope: Option<String>,
+    #[serde(default)]
+    blame: bool,
 }
 
 #[derive(Deserialize)]
@@ -75,6 +92,12 @@ struct LsArgs {
 struct ImpactArgs {
     id: String,
     depth: Option<u32>,
+    scope: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopeArgs {
     scope: Option<String>,
 }
 
@@ -268,6 +291,38 @@ pub fn quarantine(root: &Path) -> Vec<String> {
     out
 }
 
+/// What `clean_quarantine` did: the names it removed and the ones it left, with why.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Cleaned {
+    pub removed: Vec<String>,
+    pub skipped: Vec<(String, String)>,
+}
+
+/// Removes the quarantine files `quarantine(root)` names, in its order. Only regular files are
+/// removed: a symlink or a directory carrying a quarantine name is skipped untouched (never
+/// followed, never recursed), and an error leaves the file in `skipped` with the error text.
+pub fn clean_quarantine(root: &Path) -> Cleaned {
+    let store = root.join(".rdy/store");
+    let mut c = Cleaned::default();
+    for name in quarantine(root) {
+        let path = store.join(&name);
+        let result = std::fs::symlink_metadata(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|m| {
+                if m.file_type().is_file() {
+                    std::fs::remove_file(&path).map_err(|e| e.to_string())
+                } else {
+                    Err("not a regular file".to_string())
+                }
+            });
+        match result {
+            Ok(()) => c.removed.push(name),
+            Err(reason) => c.skipped.push((name, reason)),
+        }
+    }
+    c
+}
+
 /// A decision's derived status in words, e.g. "superseded by D-3K0TY" or "live".
 fn status_words(status: &Value) -> Option<String> {
     let word = status["status"].as_str()?.replace('_', " ");
@@ -302,13 +357,11 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             parse::<NoArgs>(op, args, "{}")?;
             status(cx)
         }
-        "show" => show(cx, parse(op, args, "{id, scope?}")?),
+        "show" => show(cx, parse(op, args, "{id, scope?, blame?}")?),
         "ls" => ls(cx, parse(op, args, "{path?, scope?, depth?}")?),
-        "log" => {
-            parse::<NoArgs>(op, args, "{}")?;
-            log(cx)
-        }
+        "log" => log(cx, parse(op, args, "{limit?, since?}")?),
         "impact" => impact(cx, parse(op, args, "{id, depth?, scope?}")?),
+        "suspects" => suspects(cx, parse(op, args, "{scope?}")?),
         "tags" => {
             parse::<NoArgs>(op, args, "{}")?;
             tags(cx)
@@ -343,10 +396,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             parse::<NoArgs>(op, args, "{}")?;
             reindex(cx)
         }
-        "fsck" => {
-            parse::<NoArgs>(op, args, "{}")?;
-            fsck(cx)
-        }
+        "fsck" => fsck(cx, parse(op, args, "{clean_quarantine?}")?),
         "view" => view_api::run_view(
             cx.engine,
             cx.session,
@@ -415,6 +465,14 @@ fn show(cx: &OpContext, a: ShowArgs) -> Result<Value, RdyError> {
     if let Some(conflict) = st.conflict_info(&scope, &bid)? {
         v["conflict"] = to_json(&conflict);
     }
+    // blame1: the last change (or, with `blame`, every version) with its author, landing and why
+    let h = st.history(&scope, &bid, if a.blame { HISTORY_MAX } else { 1 })?;
+    v["justification"] = h
+        .entries
+        .first()
+        .map_or(Value::Null, |e| to_json(&e.justification));
+    v["history"] = to_json(&h.entries);
+    v["history_more"] = Value::Bool(h.more);
     Ok(v)
 }
 
@@ -424,8 +482,9 @@ fn ls(cx: &OpContext, a: LsArgs) -> Result<Value, RdyError> {
     Ok(to_json(&st.tree(&scope, a.path.as_deref(), a.depth)?))
 }
 
-fn log(cx: &OpContext) -> Result<Value, RdyError> {
-    Ok(to_json(&cx.engine.read().log_rows()?))
+fn log(cx: &OpContext, a: LogArgs) -> Result<Value, RdyError> {
+    let st = cx.engine.read();
+    Ok(to_json(&st.log_page(a.since.as_deref(), a.limit)?))
 }
 
 fn impact(cx: &OpContext, a: ImpactArgs) -> Result<Value, RdyError> {
@@ -433,6 +492,12 @@ fn impact(cx: &OpContext, a: ImpactArgs) -> Result<Value, RdyError> {
     let scope = scope_of(&st, cx, a.scope.as_deref())?;
     let bid = st.resolve_id(&scope, &a.id)?;
     Ok(to_json(&st.impact(&scope, &bid, a.depth.unwrap_or(3))?))
+}
+
+fn suspects(cx: &OpContext, a: ScopeArgs) -> Result<Value, RdyError> {
+    let st = cx.engine.read();
+    let scope = scope_of(&st, cx, a.scope.as_deref())?;
+    Ok(json!({"items": st.suspects(&scope)?}))
 }
 
 fn tags(cx: &OpContext) -> Result<Value, RdyError> {
@@ -678,8 +743,27 @@ fn reindex(cx: &OpContext) -> Result<Value, RdyError> {
     }))
 }
 
-fn fsck(cx: &OpContext) -> Result<Value, RdyError> {
+/// `fsck`; with `clean_quarantine`, a passing check then removes the quarantine files (the
+/// human's only: an agent is refused before the check runs). A failed check removes nothing.
+fn fsck(cx: &OpContext, a: FsckArgs) -> Result<Value, RdyError> {
+    if a.clean_quarantine && !cx.session.is_human() {
+        return Err(RdyError::new(
+            E_PERMISSION,
+            "only the human removes quarantine files",
+            "run rdy fsck --clean-quarantine as the human (unset RDY_ACTOR)",
+        ));
+    }
     let mut v = write_typed(cx.engine, |r| r.fsck())?;
+    if a.clean_quarantine {
+        let c = clean_quarantine(&cx.engine.root());
+        v["removed"] = json!(c.removed);
+        v["skipped"] = json!(
+            c.skipped
+                .iter()
+                .map(|(n, r)| json!({"name": n, "reason": r}))
+                .collect::<Vec<_>>()
+        );
+    }
     v["open_report"] = open_report_json(&cx.engine.open_report());
     v["quarantine"] = json!(quarantine(&cx.engine.root()));
     Ok(v)

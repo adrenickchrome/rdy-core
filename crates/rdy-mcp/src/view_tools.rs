@@ -50,6 +50,10 @@ pub struct ViewParams {
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct LogParams {
+    /// At most this many landings, newest first.
+    pub limit: Option<usize>,
+    /// Only landings after this one: a landing id, landing:<id> or tag:<version>.
+    pub since: Option<String>,
     pub max_tokens: Option<usize>,
 }
 
@@ -106,7 +110,7 @@ pub fn rdy_log(st: &mut McpState, p: LogParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.engine.read();
-    let rows = serde_json::to_value(st_.log_rows()?).map_err(|e| {
+    let rows = serde_json::to_value(st_.log_page(p.since.as_deref(), p.limit)?).map_err(|e| {
         RdyError::new(
             E_INTERNAL,
             format!("the log did not serialize: {e}"),
