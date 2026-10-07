@@ -1,6 +1,7 @@
 pub mod block;
 mod canon;
 mod change;
+mod coord;
 pub mod decision;
 mod hash;
 mod id;
@@ -17,6 +18,7 @@ pub use canon::{
 pub use change::{
     AltChoice, Change, ChangeLinks, EditorialClass, Justification, Op, Provenance, Role,
 };
+pub use coord::{AltMember, AltSet, AltStatus, Intent, IntentStatus};
 pub use hash::Hash;
 pub use id::{BlockId, CROCKFORD, IdError};
 #[doc(hidden)]
