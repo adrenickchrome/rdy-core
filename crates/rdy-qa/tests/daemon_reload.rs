@@ -131,6 +131,15 @@ fn reload1_an_invalid_pack_keeps_the_previous_one_and_reports_on_every_reply() {
 #[test]
 fn reload1_the_watch_reads_bytes_only_when_a_stat_changes() {
     let h = Hosted::new();
+    // files written just now are racily clean (read on every check) until their mtimes are
+    // safely past: move them into the past, a stat change the first write reads once
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+    set_mtime(&h.dir.path().join(".rdy/config.yaml"), past);
+    if let Ok(packs) = std::fs::read_dir(h.dir.path().join(".rdy/packs")) {
+        for p in packs {
+            set_mtime(&p.unwrap().path(), past);
+        }
+    }
     let rt = Hosted::rt();
     rt.block_on(async {
         let mut a = h.client(None, None).await;
@@ -218,5 +227,38 @@ fn reload1_reverting_an_invalid_pack_to_the_loaded_bytes_clears_the_error() {
         assert!(n.starts_with("pack_changed"), "{n}");
         assert_eq!(a.ctl("status", json!({})).await.unwrap()["pack"], "proj");
         assert!(a.take_notice().is_none());
+    });
+}
+
+/// Sets `path`'s mtime to `t`, as a coarse filesystem does for two writes in one tick.
+fn set_mtime(path: &std::path::Path, t: std::time::SystemTime) {
+    let f = std::fs::File::options().write(true).open(path).unwrap();
+    f.set_modified(t).unwrap();
+}
+
+#[test]
+fn racy1_a_same_length_edit_in_the_loaded_files_mtime_tick_reports_the_pack_error() {
+    let h = Hosted::new();
+    let rt = Hosted::rt();
+    rt.block_on(async {
+        let mut a = h.client(None, None).await;
+        switch_to(&h, PACK_A);
+        // stamped a minute ahead: d1's reload reads PACK_A inside its mtime tick however slow
+        // the machine (a write just before the read is too, but only for the racy window)
+        let pack = h.dir.path().join(".rdy/packs/proj.yaml");
+        let m = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        set_mtime(&pack, m);
+        a.ctl("new_doc", json!({"path": "d1", "view": null}))
+            .await
+            .unwrap();
+        assert!(a.take_notice().unwrap().starts_with("pack_changed"));
+        assert_eq!(PACK_A.len(), PACK_BAD.len());
+        std::fs::write(&pack, PACK_BAD).unwrap();
+        set_mtime(&pack, m);
+        a.ctl("new_doc", json!({"path": "d2", "view": null}))
+            .await
+            .unwrap();
+        let n = a.take_notice().expect("the bad pack is seen");
+        assert!(n.starts_with("pack_error"), "{n}");
     });
 }

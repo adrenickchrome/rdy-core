@@ -160,16 +160,20 @@ pub fn serve_config(project: &Path) -> ServeConfig {
 }
 
 /// What the pack-defining files looked like at one moment: `.rdy/config.yaml` and every
-/// `.rdy/packs/*.yaml` (and `.yml`), sorted by path, each as `(path, length, mtime in unix ms)`;
-/// `hash` is BLAKE3 over each file's path bytes, a NUL, its contents and a NUL, in that order.
-/// Equal hashes mean equal bytes whatever the mtimes say.
+/// `.rdy/packs/*.yaml` (and `.yml`), sorted by path, each as `(path, length, mtime)` stat'ed just
+/// before its bytes were read; `hash` is BLAKE3 over each file's path bytes, a NUL, its contents
+/// and a NUL, in that order. Equal hashes mean equal bytes whatever the mtimes say. `at` is the
+/// wall clock (the clock mtimes come from) read before the first stat: a file whose mtime is not
+/// safely before `at` can change again without a new mtime (it is "racily clean").
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackFingerprint {
-    pub files: Vec<(PathBuf, u64, i64)>,
+    pub files: Vec<(PathBuf, u64, std::time::SystemTime)>,
     pub hash: rdy_model::Hash,
+    pub at: std::time::SystemTime,
 }
 
 pub fn pack_fingerprint(project: &Path) -> Result<PackFingerprint, RdyError> {
+    let at = std::time::SystemTime::now();
     let mut paths = vec![project.join(".rdy/config.yaml")];
     paths.extend(pack_files(&project.join(".rdy/packs"))?);
     let mut files = Vec::with_capacity(paths.len());
@@ -177,11 +181,7 @@ pub fn pack_fingerprint(project: &Path) -> Result<PackFingerprint, RdyError> {
     for path in paths {
         let meta = std::fs::metadata(&path).map_err(io)?;
         let bytes = std::fs::read(&path).map_err(io)?;
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_millis() as i64);
+        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
         buf.extend_from_slice(path.as_os_str().as_encoded_bytes());
         buf.push(0);
         buf.extend_from_slice(&bytes);
@@ -191,6 +191,7 @@ pub fn pack_fingerprint(project: &Path) -> Result<PackFingerprint, RdyError> {
     Ok(PackFingerprint {
         files,
         hash: rdy_model::Hash::of(&buf),
+        at,
     })
 }
 

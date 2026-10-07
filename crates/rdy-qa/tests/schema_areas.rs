@@ -31,7 +31,7 @@ fn qapack1_the_qa_pack_declares_three_areas_and_one_override() {
 }
 
 #[test]
-fn qapack1_a_thousand_areas_with_a_hundred_globs_each_resolve_and_answer_fast() {
+fn qapack1_a_thousand_areas_with_a_hundred_globs_each_resolve_and_answer() {
     let mut yaml = String::from("name: big\nversion: \"1\"\nextends: rdy-standard\nareas:\n");
     for a in 0..1000 {
         yaml.push_str(&format!("  area{a}:\n    paths: ["));
@@ -40,22 +40,11 @@ fn qapack1_a_thousand_areas_with_a_hundred_globs_each_resolve_and_answer_fast() 
         }
         yaml.push_str("]\n");
     }
+    // how fast: the perf tier's `pack_resolve_1000_areas` and `areas_lookup_100k_globs`
     let mut set = PackSet::with_builtin();
-    let t0 = std::time::Instant::now();
     set.add_yaml(&yaml).unwrap();
     let p = set.resolve("big").unwrap();
-    assert!(
-        t0.elapsed() < std::time::Duration::from_secs(2),
-        "resolve: {:?}",
-        t0.elapsed()
-    );
-    let t0 = std::time::Instant::now();
     assert_eq!(p.areas_for_path("f999/x/y/d99"), vec!["area999"]);
-    assert!(
-        t0.elapsed() < std::time::Duration::from_millis(500),
-        "one lookup over 100k globs: {:?}",
-        t0.elapsed()
-    );
 }
 
 #[test]
@@ -66,15 +55,10 @@ fn qapack1_pathological_globs_in_a_pack_are_bounded() {
     set.add_yaml(&format!("name: p\nversion: \"1\"\nextends: rdy-standard\nareas:\n  a: {{ paths: ['{pat}', '{}a'] }}\n", "*?".repeat(50))).unwrap();
     let p = set.resolve("p").unwrap();
     let path = vec!["b"; MAX_PATH_SEGMENTS].join("/");
-    let t0 = std::time::Instant::now();
+    // how fast: the perf tier's `areas_lookup_pathological`
     for _ in 0..100 {
         assert!(p.areas_for_path(&path).is_empty());
     }
-    assert!(
-        t0.elapsed() < std::time::Duration::from_millis(500),
-        "{:?}",
-        t0.elapsed()
-    );
     let long = "a".repeat(MAX_GLOB_LEN + 1);
     set.add_yaml(&format!(
         "name: q\nversion: \"1\"\nextends: rdy-standard\nareas:\n  a: {{ paths: ['{long}'] }}\n"

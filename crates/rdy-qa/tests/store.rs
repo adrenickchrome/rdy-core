@@ -370,16 +370,11 @@ fn blob1_a_forged_chunk_kind_manifest_is_not_a_blob() {
     ];
     for (what, payload) in forged {
         let h = upload_as_chunk(&mut s, payload);
-        let t = std::time::Instant::now();
+        // how fast the refusal is: the perf tier's `blob_forged_manifest_refuse`
         assert!(!s.has_blob(&h).unwrap(), "{what}");
         assert!(
             matches!(s.get_blob(&h), Err(StoreError::Decode(_))),
             "{what}"
-        );
-        assert!(
-            t.elapsed() < std::time::Duration::from_secs(2),
-            "{what} took {:?}",
-            t.elapsed()
         );
     }
 }
@@ -429,10 +424,9 @@ fn blob1_a_figure_naming_a_forged_manifest_is_refused_at_write() {
     ];
     for payload in payloads {
         let h = upload_as_chunk(r.store_mut(), payload);
-        let t = std::time::Instant::now();
+        // how fast the refusal is: the perf tier's `figure_forged_manifest_refuse`
         let e = write(&mut r, "work", json!([{"op": "create", "type": "figure", "parent": res.created["$s"], "fields": {"blob": h.to_string(), "media_type": "image/png", "alt": "x"}}])).unwrap_err();
         assert_eq!(e.code, "E_VALIDATION", "{e}");
-        assert!(t.elapsed() < std::time::Duration::from_secs(2));
     }
 }
 

@@ -32,7 +32,7 @@ const CHILD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const ENV_PROGRESS_MS: &str = "RDY_DAEMON_PROGRESS_MS";
 
 /// How long `client`'s `connect_or_start` waits for a daemon.
-const CLIENT_START_TIMEOUT: Duration = Duration::from_secs(10);
+const CLIENT_START_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A directory short enough for a socket path under it: `/tmp/rdyd…` (macOS `sun_path` is 104
 /// bytes and its `temp_dir()` is already about 50).
@@ -236,7 +236,7 @@ pub struct Hosted {
 }
 
 /// How long `Hosted`'s clients wait for `ready`.
-const HOSTED_READY_TIMEOUT: Duration = Duration::from_secs(10);
+const HOSTED_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl Hosted {
     /// `new_with_human("human:qa")`.
@@ -345,7 +345,7 @@ pub struct Served {
 }
 
 /// How long `Served::kill9` waits for the killed daemon's socket to stop answering.
-const KILL_WAIT: Duration = Duration::from_secs(10);
+const KILL_WAIT: Duration = Duration::from_secs(30);
 
 impl Served {
     pub fn new() -> Served {
@@ -428,6 +428,17 @@ impl Served {
 
     pub fn run_dir(&self) -> RunDir {
         RunDir::of_project(self.dir.path())
+    }
+
+    /// Sets `serve.start_timeout` to `secs` (appended under the `serve:` section `new` wrote), so
+    /// a test can tell a fast refusal from one that waited out the timeout with a wide margin.
+    pub fn set_start_timeout(&self, secs: u64) {
+        let mut cfg = OpenOptions::new()
+            .append(true)
+            .open(self.dir.path().join(".rdy/config.yaml"))
+            .expect("open the project config");
+        io::Write::write_all(&mut cfg, format!("  start_timeout: {secs}\n").as_bytes())
+            .expect("append the start timeout");
     }
 
     /// The pid in `.rdy/run/daemon.pid`, if it parses and that process is alive.

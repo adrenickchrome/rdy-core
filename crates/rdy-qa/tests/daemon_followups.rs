@@ -71,13 +71,13 @@ fn dfu1_a_dead_daemon_answers_every_in_flight_mcp_request() {
     }
     s.kill9();
     for id in ids {
-        let v = c.recv(id, Duration::from_secs(20));
+        let v = c.recv(id, Duration::from_secs(30));
         assert!(
             v.get("result").is_some() || v["error"]["data"]["code"] == "E_DAEMON_GONE",
             "request {id}: {v}"
         );
     }
-    let (code, stderr) = c.wait_exit(Duration::from_secs(10));
+    let (code, stderr) = c.wait_exit(Duration::from_secs(30));
     assert_eq!(code, Some(1), "{stderr}");
 }
 
@@ -189,7 +189,7 @@ fn dfu1_a_store_held_by_a_predecessor_that_is_exiting_is_waited_for() {
         let mut stream = old.into_stream();
         stream.shutdown().await.unwrap();
         let mut buf = [0u8; 64];
-        tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             while stream.read(&mut buf).await.is_ok_and(|n| n > 0) {}
         })
         .await

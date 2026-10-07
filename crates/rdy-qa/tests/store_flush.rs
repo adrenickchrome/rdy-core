@@ -465,17 +465,26 @@ fn ckpt1_the_mcp_server_checkpoints_when_idle() {
         Reply::Ok(_)
     ));
     c.call("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "fields": {"title": "Idle", "doc_type": "glossary"}}]})).ok();
-    std::thread::sleep(Duration::from_secs(3));
-    let copy = tempfile::tempdir().unwrap();
-    // M2a1 (fmt2): the store is .rdy/store again
-    copy_store(&dir.path().join(".rdy/store"), copy.path());
-    assert_eq!(
-        Store::create(copy.path())
-            .unwrap()
-            .open_report()
-            .caught_up_frames,
-        0
-    );
+    // the checkpoint lands once the server has been idle for CHECKPOINT_IDLE: poll a copy of
+    // the store until an open of it has nothing to catch up, with a generous deadline
+    let t = std::time::Instant::now();
+    loop {
+        std::thread::sleep(Duration::from_millis(200));
+        let copy = tempfile::tempdir().unwrap();
+        // M2a1 (fmt2): the store is .rdy/store again
+        copy_store(&dir.path().join(".rdy/store"), copy.path());
+        // a copy taken mid-checkpoint may not open: not checkpointed yet, poll again
+        let caught_up = Store::create(copy.path())
+            .map(|s| s.open_report().caught_up_frames)
+            .unwrap_or(u64::MAX);
+        if caught_up == 0 {
+            break;
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "the idle server never checkpointed: {caught_up} frames to catch up"
+        );
+    }
 }
 
 /// Carry-forward (Task 3 review): the marker rule must not depend on seeing a marker before the

@@ -107,6 +107,32 @@ fn spec_target(op: &str) -> Option<String> {
         }
         "history_100" | "last_changes_doc" | "log_page_20" => "< 5 ms p99 (reads, spec 11)",
         "log_full" => "recorded: 2000 landings, no spec target",
+        // bounds on refusing hostile input and on big packs, moved here from the functional
+        // tests (a wall-clock bound in a functional gate fails on a loaded machine)
+        "refuse_import_20mb_scalar" | "refuse_check_20mb_scalar" | "refuse_import_symlink" => {
+            "recorded, no spec budget: a hostile export refused in bounded time (was < 5 s in io, io_tree)"
+        }
+        "blob_forged_manifest_refuse" | "figure_forged_manifest_refuse" => {
+            "recorded, no spec budget: a forged 30,000-chunk manifest refused by structure, no chunk read (was < 2 s in store blob1)"
+        }
+        "pack_resolve_1000_areas" => {
+            "recorded, no spec budget: 1,000 areas of 100 globs resolve (was < 2 s in qapack1)"
+        }
+        "areas_lookup_100k_globs" => {
+            "recorded, no spec budget: one path against 100k globs (was < 500 ms in qapack1)"
+        }
+        "areas_lookup_pathological" => {
+            "recorded, no spec budget: 100 lookups of a 64-segment path against 60 `**` and 50 `*?` (was < 500 ms in qapack1)"
+        }
+        "pack_resolve_2000_types" => {
+            "recorded, no spec budget: a pack of 2,000 block types resolves (was < 2 s in schema)"
+        }
+        "daemon_read_during_big_write" => {
+            "< 5 ms p99 (the read budget, spec 11): a status read on another connection while a write of the most ops one write takes runs (was < 50 ms in conc1)"
+        }
+        "daemon_mcp_overview" => {
+            "< 5 ms p99 (the read budget, spec 11): rdy_overview over an mcp connection to the daemon (was < 2 s per call in mcp, mcp_pool)"
+        }
         _ => return None,
     };
     Some(if large {
@@ -1092,6 +1118,7 @@ pub fn run_workload() -> Vec<Measure> {
     }));
     drop(r);
     out.extend(daemon_ops(&proj, ""));
+    out.extend(bound_ops(dir.path()));
     // the view ops last: the views and landings they leave behind would move the ops above
     let mut r = Rdy::open(&proj).expect("open");
     tier_views(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
@@ -1159,6 +1186,9 @@ fn daemon_ops(proj: &std::path::Path, sfx: &str) -> Vec<Measure> {
         rt.block_on(c.ctl("new_doc", json!({"path": format!("dw-{i}"), "view": "va"})))
             .unwrap_or_else(|e| panic!("new_doc: {e}"));
     }));
+    if sfx.is_empty() {
+        out.extend(rt.block_on(daemon_mcp_ops(proj, &mut c)));
+    }
     drop(c);
     daemon_stop(run);
     // one untimed start and stop, so the timed starts open a current index
@@ -1173,6 +1203,274 @@ fn daemon_ops(proj: &std::path::Path, sfx: &str) -> Vec<Measure> {
         drop(c);
         daemon_stop(run);
         took
+    }));
+    out
+}
+
+/// One JSON-RPC line out, and the reply with `id` back (other lines are skipped).
+async fn mcp_call(
+    w: &mut tokio::net::unix::OwnedWriteHalf,
+    r: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    id: u64,
+    tool: &str,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    mcp_send(w, id, tool, args).await;
+    mcp_reply(r, id).await
+}
+
+async fn mcp_send(
+    w: &mut tokio::net::unix::OwnedWriteHalf,
+    id: u64,
+    tool: &str,
+    args: serde_json::Value,
+) {
+    use tokio::io::AsyncWriteExt;
+    let line = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": tool, "arguments": args}});
+    w.write_all(format!("{line}\n").as_bytes())
+        .await
+        .expect("mcp write");
+}
+
+async fn mcp_reply(
+    r: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    id: u64,
+) -> serde_json::Value {
+    use tokio::io::AsyncBufReadExt;
+    loop {
+        let mut line = String::new();
+        let n = r.read_line(&mut line).await.expect("mcp read");
+        assert!(n > 0, "the daemon closed the mcp connection");
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+        if v["id"] == json!(id) {
+            return v;
+        }
+    }
+}
+
+/// The ops over an `mcp` connection to the daemon at `proj` (typical tier only), with `c` a
+/// `ctl` connection that has a session: `daemon_mcp_overview` (one `rdy_overview` round trip)
+/// and `daemon_read_during_big_write` (a `status` read on `c` while the mcp connection's write
+/// of `MAX_OPS_PER_WRITE` claims runs on the writer; one write per run, its reply read after
+/// the timed read).
+async fn daemon_mcp_ops(proj: &std::path::Path, c: &mut Client) -> Vec<Measure> {
+    use tokio::io::AsyncWriteExt;
+    let hello = Hello {
+        rdy: PROTO_VERSION,
+        version: "perf".into(),
+        proto: Proto::Mcp,
+        cwd: proj.to_path_buf(),
+    };
+    let stream = match rdy_daemon::connect(&RunDir::of_project(proj), &hello).await {
+        Attempt::Ready(c) => c.into_stream(),
+        other => panic!("the daemon did not answer the mcp hello: {other:?}"),
+    };
+    let (r, mut w) = stream.into_split();
+    let mut r = tokio::io::BufReader::new(r);
+    let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": crate::mcp::PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "perf", "version": "0"}}});
+    w.write_all(format!("{init}\n").as_bytes())
+        .await
+        .expect("mcp write");
+    mcp_reply(&mut r, 1).await;
+    w.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+        .await
+        .expect("mcp write");
+    let mut id = 1;
+    let mut next = || {
+        id += 1;
+        id
+    };
+    mcp_call(
+        &mut w,
+        &mut r,
+        next(),
+        "rdy_session",
+        json!({"actor": "agent:perf", "role": "writer"}),
+    )
+    .await;
+    let made = mcp_call(&mut w, &mut r, next(), "rdy_write", json!({"ops": [
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "perf-big", "title": "B", "doc_type": "constraints"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}
+    ]})).await;
+    let text = made["result"]["content"][0]["text"]
+        .as_str()
+        .expect("the write's result");
+    let made: serde_json::Value = serde_json::from_str(text).expect("the write's json");
+    let section = made["created"]["$s"]
+        .as_str()
+        .expect("the section id")
+        .to_string();
+    let mut out = vec![];
+    let mut overview = vec![];
+    for _ in 0..30 {
+        let n = next();
+        let s = Instant::now();
+        mcp_call(&mut w, &mut r, n, "rdy_overview", json!({})).await;
+        overview.push(s.elapsed());
+    }
+    let mut overview = overview.into_iter();
+    out.push(measure_timed("daemon_mcp_overview", 30, |_| {
+        overview.next().expect("a run")
+    }));
+    let mut during = vec![];
+    for run in 0..20 {
+        let ops: Vec<_> = (0..rdy_mcp::tools::MAX_OPS_PER_WRITE)
+            .map(|i| json!({"op": "create", "type": "claim", "parent": section, "body": format!("Big {run} claim {i}.")}))
+            .collect();
+        let n = next();
+        mcp_send(&mut w, n, "rdy_write", json!({"ops": ops})).await;
+        let s = Instant::now();
+        c.ctl("status", json!({})).await.expect("status");
+        during.push(s.elapsed());
+        let v = mcp_reply(&mut r, n).await;
+        assert!(v["result"].is_object(), "the big write: {v}");
+    }
+    let mut during = during.into_iter();
+    out.push(measure_timed("daemon_read_during_big_write", 20, |_| {
+        during.next().expect("a run")
+    }));
+    out
+}
+
+/// The ops whose bounds the functional tests used to assert by the clock: hostile exports
+/// refused, forged blob manifests refused, big packs resolved and their area lookups. Each on
+/// its own fixture under `parent`, built outside the timed region.
+fn bound_ops(parent: &std::path::Path) -> Vec<Measure> {
+    use rdy_schema::{MAX_PATH_SEGMENTS, PackSet};
+    let mut out = vec![];
+    const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: glossary\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
+    let export = |name: &str| {
+        let t = parent.join(name);
+        std::fs::create_dir_all(t.join("docs")).expect("mkdir");
+        std::fs::write(
+            t.join("rdy-export.yaml"),
+            "format: 2\npack: rdy-standard\nscope: canon\n",
+        )
+        .expect("manifest");
+        t
+    };
+    // a 20 MB scalar in a doc file that does not validate
+    let big = export("bound-big");
+    std::fs::write(
+        big.join("docs/big.yaml"),
+        format!(
+            "{DOC}- id: c-AAAAA\n  type: claim\n  parent: s-AAAAA\n  order: a2\n  body: \"{}\"\n  fields:\n    bogus: x\n",
+            "x".repeat(20_000_000)
+        ),
+    )
+    .expect("big doc");
+    // a symlink loop under docs/
+    let link = export("bound-link");
+    std::os::unix::fs::symlink(link.join("docs"), link.join("docs/loop")).expect("symlink");
+    let pack = PackSet::with_builtin()
+        .resolve("rdy-standard")
+        .expect("rdy-standard");
+    for (op, dir) in [
+        ("refuse_import_20mb_scalar", &big),
+        ("refuse_import_symlink", &link),
+    ] {
+        out.push(measure_timed(op, 5, |i| {
+            let proj = parent.join(format!("{op}-{i}"));
+            std::fs::create_dir_all(&proj).expect("mkdir");
+            let mut r = Rdy::init(&proj, "rdy-standard").expect("init");
+            let s = Instant::now();
+            r.import(&approver(), "import", dir)
+                .expect_err("a hostile export is refused");
+            s.elapsed()
+        }));
+    }
+    out.push(measure("refuse_check_20mb_scalar", 5, |_| {
+        rdy_engine::check_path(&pack, None, &big).expect("check runs");
+    }));
+    // forged chunk-kind manifests: 30,000 chunks of 1 MiB named by a manifest an agent uploaded
+    {
+        use rdy_store::kinds::{self, BlobManifest};
+        const MIB: usize = 1024 * 1024;
+        let proj = parent.join("bound-blob");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let mut r = Rdy::init(&proj, "rdy-standard").expect("init");
+        let made = write(&mut r, "work", json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
+        ]))
+        .expect("doc");
+        let section = made.created["$s"].to_string();
+        let chunk = r
+            .store_mut()
+            .write(vec![(kinds::BLOB_CHUNK, vec![9u8; MIB])])
+            .expect("chunk")[0];
+        let n = 30_000usize;
+        let forged = postcard::to_allocvec(&BlobManifest {
+            len: (n * MIB) as u64,
+            chunks: vec![chunk; n],
+        })
+        .expect("manifest");
+        let h = r
+            .store_mut()
+            .write(vec![(kinds::BLOB_CHUNK, forged)])
+            .expect("forged")[0];
+        out.push(measure("blob_forged_manifest_refuse", 5, |_| {
+            assert!(!r.store().has_blob(&h).expect("has_blob"));
+            r.store().get_blob(&h).expect_err("a forged manifest");
+        }));
+        out.push(measure("figure_forged_manifest_refuse", 5, |_| {
+            let e = write(&mut r, "work", json!([{"op": "create", "type": "figure", "parent": section, "fields": {"blob": h.to_string(), "media_type": "image/png", "alt": "x"}}]))
+                .expect_err("a figure naming a forged manifest");
+            assert_eq!(e.code, "E_VALIDATION", "{e}");
+        }));
+    }
+    // a thousand areas of a hundred globs each
+    let mut areas = String::from("name: big\nversion: \"1\"\nextends: rdy-standard\nareas:\n");
+    for a in 0..1000 {
+        areas.push_str(&format!("  area{a}:\n    paths: ["));
+        for g in 0..100 {
+            areas.push_str(&format!("'f{a}/**/d{g}', "));
+        }
+        areas.push_str("]\n");
+    }
+    let mut resolved = None;
+    out.push(measure("pack_resolve_1000_areas", 5, |_| {
+        let mut set = PackSet::with_builtin();
+        set.add_yaml(&areas).expect("areas yaml");
+        resolved = Some(set.resolve("big").expect("resolve"));
+    }));
+    let p = resolved.expect("resolved at least once");
+    out.push(measure("areas_lookup_100k_globs", 20, |_| {
+        assert_eq!(p.areas_for_path("f999/x/y/d99"), vec!["area999"]);
+    }));
+    let mut set = PackSet::with_builtin();
+    let pat = format!("{}/a", vec!["**"; 60].join("/"));
+    set.add_yaml(&format!(
+        "name: p\nversion: \"1\"\nextends: rdy-standard\nareas:\n  a: {{ paths: ['{pat}', '{}a'] }}\n",
+        "*?".repeat(50)
+    ))
+    .expect("pathological yaml");
+    let p = set.resolve("p").expect("resolve");
+    let path = vec!["b"; MAX_PATH_SEGMENTS].join("/");
+    out.push(measure("areas_lookup_pathological", 5, |_| {
+        for _ in 0..100 {
+            assert!(p.areas_for_path(&path).is_empty());
+        }
+    }));
+    // two thousand block types
+    let letters = b"abcdefghijklmnopqrstuvwxyz";
+    let mut types = String::from("name: big\nversion: \"1\"\nblock_types:\n");
+    for i in 0..2000 {
+        let prefix = format!(
+            "{}{}{}",
+            letters[i % 26] as char,
+            letters[(i / 26) % 26] as char,
+            letters[(i / 676) % 26] as char
+        );
+        types.push_str(&format!("  t{i}: {{ prefix: {prefix} }}\n"));
+    }
+    out.push(measure("pack_resolve_2000_types", 5, |_| {
+        let mut set = PackSet::with_builtin();
+        // a prefix clash with a built-in type is an error, as in the functional test: either
+        // way the resolve ran to its end
+        if let Ok(n) = set.add_yaml(&types) {
+            let _ = set.resolve(&n);
+        }
     }));
     out
 }
@@ -1575,6 +1873,51 @@ mod tests {
         assert_eq!(idx.commits, 30);
         assert_eq!(idx.cited["c-AAAAA"].len(), 30, "every commit cites both");
         assert!(idx.files.contains_key("src/f0.rs"));
+    }
+
+    #[test]
+    fn hf1perf_the_bound_ops_have_targets_and_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let ms = bound_ops(dir.path());
+        for op in [
+            "refuse_import_20mb_scalar",
+            "refuse_check_20mb_scalar",
+            "refuse_import_symlink",
+            "blob_forged_manifest_refuse",
+            "figure_forged_manifest_refuse",
+            "pack_resolve_1000_areas",
+            "areas_lookup_100k_globs",
+            "areas_lookup_pathological",
+            "pack_resolve_2000_types",
+        ] {
+            assert!(spec_target(op).is_some(), "{op}");
+            let m = ms
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            assert!(m.median_ms > 0.0, "{op}: {m:?}");
+        }
+    }
+
+    #[test]
+    fn hf1perf_the_daemon_mcp_ops_have_targets_and_run_on_a_small_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).unwrap();
+        testkit::generate_tree(&proj, 1, 2, 3);
+        let mut r = Rdy::open(&proj).unwrap();
+        land(&mut r, "work").unwrap();
+        r.view_create(&writer(), "va", None, true).unwrap();
+        drop(r);
+        let ms = daemon_ops(&proj, "");
+        for op in ["daemon_mcp_overview", "daemon_read_during_big_write"] {
+            assert!(spec_target(op).is_some(), "{op}");
+            let m = ms
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            assert!(m.median_ms > 0.0, "{op}: {m:?}");
+        }
     }
 
     #[test]
