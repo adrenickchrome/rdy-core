@@ -78,3 +78,33 @@ fn akey1_a_taken_key_gets_the_first_free_numeric_suffix_within_32_characters() {
     let sep = "abcdefghijklmnopqrstuvwxyzabc-de";
     assert_eq!(unique(sep, |k| k == sep), "abcdefghijklmnopqrstuvwxyzabc-2");
 }
+
+#[test]
+fn akey1_a_taken_p_gets_a_suffix_that_is_still_a_valid_key() {
+    // "p-2" would read as a proposal id, so every "p-N" is refused: the suffix differs
+    for base in ["p", "P"] {
+        let k = unique(base, |k| k == base);
+        assert!(problem(&k).is_none(), "{base}: {k:?} {:?}", problem(&k));
+        assert_ne!(k, base);
+    }
+    let taken = ["p", "p_2"];
+    let k = unique("p", |k| taken.contains(&k));
+    assert!(
+        problem(&k).is_none() && !taken.contains(&k.as_str()),
+        "{k:?}"
+    );
+}
+
+#[test]
+fn akey1_a_suffix_never_makes_a_key_that_reads_as_a_block_id() {
+    // a base of 1 to 3 letters with a 5-digit suffix is a block id ("ab-10000"): skipped
+    let taken = |k: &str| {
+        k == "ab"
+            || k.strip_prefix("ab-")
+                .and_then(|n| n.parse::<u64>().ok())
+                .is_some_and(|n| n < 10_000)
+    };
+    let k = unique("ab", taken);
+    assert!(problem(&k).is_none(), "{k:?} {:?}", problem(&k));
+    assert_eq!(k, "ab-100000");
+}

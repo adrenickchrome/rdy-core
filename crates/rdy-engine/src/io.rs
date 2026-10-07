@@ -254,14 +254,22 @@ fn resolve_import_keys(blocks: &mut [Block], existing: &Materialized) -> Result<
             return Err(crate::keys::clash_error(k, &b.id, other));
         }
     }
-    let lookup = |t: &str| {
-        incoming
-            .get(t)
-            .or_else(|| view_keys().get(t))
-            .map(|(_, id)| id.clone())
+    // a key the view holds twice (a floating view after another view landed it) is refused; a
+    // view block the import replaces holds the key it brings, so its view key does not count
+    let ids: BTreeSet<BlockId> = blocks.iter().map(|b| b.id.clone()).collect();
+    let lookup = |t: &str| match incoming.get(t) {
+        Some((_, id)) => Ok(Some(id.clone())),
+        None => crate::keys::sole_holder(
+            t,
+            view_keys()
+                .holders(t)
+                .iter()
+                .map(|(_, id)| id)
+                .filter(|id| !ids.contains(*id)),
+        ),
     };
     for b in blocks.iter_mut() {
-        crate::keys::rewrite_block(b, &lookup);
+        crate::keys::rewrite_block(b, &lookup)?;
     }
     Ok(())
 }
@@ -269,7 +277,9 @@ fn resolve_import_keys(blocks: &mut [Block], existing: &Materialized) -> Result<
 /// akey1 (FW-PR3): gives each incoming doc and folder without a key the key derived from its
 /// path, in (path, id) order, and returns them by block id. A path walks parents through the
 /// incoming blocks, then the view. Taken: every incoming key, every key in the view held by a
-/// block the import does not bring, and the keys assigned so far (all compared folded).
+/// block the import does not bring, the keys assigned so far, and the name of every other
+/// top-level doc or folder after the import (a key that is another block's path would make that
+/// path unreachable); all compared folded.
 fn assign_import_keys(blocks: &mut [Block], existing: &Materialized) -> BTreeMap<String, String> {
     let wanted: Vec<usize> = (0..blocks.len())
         .filter(|&i| {
@@ -316,6 +326,26 @@ fn assign_import_keys(blocks: &mut [Block], existing: &Materialized) -> BTreeMap
     let incoming_keys = Keys::of(blocks.iter());
     let ids: BTreeSet<BlockId> = blocks.iter().map(|b| b.id.clone()).collect();
     let view_keys = Keys::of(existing.iter());
+    // folded top-level name → the docs and folders using it, as the view holds them after import
+    let mut top: BTreeMap<String, BTreeSet<BlockId>> = BTreeMap::new();
+    for b in blocks.iter().filter(|b| b.parent.is_none()) {
+        if tree::is_tree_type(&b.block_type)
+            && let Some(n) = b.field_str("name")
+        {
+            top.entry(rdy_model::key::fold(n))
+                .or_default()
+                .insert(b.id.clone());
+        }
+    }
+    for b in existing.children(None) {
+        if !ids.contains(&b.id)
+            && let Some(n) = existing.name_of(&b.id)
+        {
+            top.entry(rdy_model::key::fold(&n))
+                .or_default()
+                .insert(b.id.clone());
+        }
+    }
     let mut assigned: BTreeSet<String> = BTreeSet::new();
     let mut out = BTreeMap::new();
     for (path, id, i) in order {
@@ -323,6 +353,9 @@ fn assign_import_keys(blocks: &mut [Block], existing: &Materialized) -> BTreeMap
             incoming_keys.get(c).is_some()
                 || view_keys.holders(c).iter().any(|(_, h)| !ids.contains(h))
                 || assigned.contains(&rdy_model::key::fold(c))
+                || top
+                    .get(&rdy_model::key::fold(c))
+                    .is_some_and(|holders| holders.iter().any(|h| h != &id))
         });
         assigned.insert(rdy_model::key::fold(&k));
         blocks[i]

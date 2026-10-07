@@ -108,9 +108,12 @@ pub fn from_path(path: &str, block_type: &str) -> String {
     k
 }
 
-/// `base` if `taken` does not hold it, else the first of `base-2`, `base-3`, … that `taken` does
-/// not hold. Each candidate fits 32 characters: `base` is cut to make room for the suffix, and
-/// trailing separators are trimmed from the cut. `taken` is asked with the candidates as built
+/// `base` if `taken` does not hold it, else the first of `base-2`, `base-3`, … that is a valid
+/// key and that `taken` does not hold. Each candidate fits 32 characters: `base` is cut to make
+/// room for the suffix, and trailing separators are trimmed from the cut. Two rules keep every
+/// candidate a valid key: after a stem `p` (any case) the suffix is `_{n}`, because `p-2` reads
+/// as a proposal id; and a candidate that reads as a block id (a stem of 1 to 3 letters with a
+/// 5-digit suffix, `ab-10000`) is skipped. `taken` is asked with the candidates as built
 /// (lowercase for a key from `from_path`); callers compare keys folded.
 pub fn unique(base: &str, taken: impl Fn(&str) -> bool) -> String {
     if !taken(base) {
@@ -120,8 +123,13 @@ pub fn unique(base: &str, taken: impl Fn(&str) -> bool) -> String {
         .map(|n| {
             let suffix = format!("-{n}");
             let stem = cut(base, MAX_LEN.saturating_sub(suffix.len()));
-            format!("{stem}{suffix}")
+            let sep = if stem.eq_ignore_ascii_case("p") {
+                '_'
+            } else {
+                '-'
+            };
+            format!("{stem}{sep}{n}")
         })
-        .find(|c| !taken(c))
+        .find(|c| problem(c).is_none() && !taken(c))
         .expect("an unbounded range always finds a free candidate")
 }

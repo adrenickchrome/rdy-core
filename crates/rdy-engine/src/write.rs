@@ -307,7 +307,25 @@ impl Resolver<'_> {
         }
         // not an id: a key (as this write has left them), else a folder or doc path, read in the
         // view as it was before this write
-        keys::resolve_with(self.base, s, &|t| self.key_holder(t).map(|(_, id)| id))
+        keys::resolve_with(self.base, s, &|t| self.key_target(t))
+    }
+
+    /// The one block holding key `text` (ignoring case) after the earlier ops of this write, for a
+    /// reference or an id-taking field. A key two blocks hold (a floating view after another view
+    /// landed the same key) is refused: the first holder must not win silently.
+    fn key_target(&self, text: &str) -> Result<Option<BlockId>, RdyError> {
+        let set = self
+            .set_keys
+            .get(&rdy_model::key::fold(text))
+            .map(|(_, id)| id);
+        let base = self
+            .base_keys
+            .get_or_init(|| Keys::of(self.base.iter()))
+            .holders(text)
+            .iter()
+            .map(|(_, id)| id)
+            .filter(|id| !self.rekeyed.contains(*id));
+        keys::sole_holder(text, set.into_iter().chain(base))
     }
 
     /// The block holding key `text` (ignoring case) after the earlier ops of this write.
@@ -374,7 +392,7 @@ impl Resolver<'_> {
 
     /// Replaces `{{$name}}` references (as `mode` reads them) with the created ids, then
     /// `{{KEY}}` references with the ids holding those keys.
-    fn text(&self, s: &str, mode: RefMode) -> String {
+    fn text(&self, s: &str, mode: RefMode) -> Result<String, RdyError> {
         let mut out = String::with_capacity(s.len());
         let mut last = 0;
         for span in ref_spans(s, mode) {
@@ -385,20 +403,25 @@ impl Resolver<'_> {
             }
         }
         out.push_str(&s[last..]);
-        keys::rewrite(&out, mode, &|t| self.key_holder(t).map(|(_, id)| id))
+        keys::rewrite(&out, mode, &|t| self.key_target(t))
     }
 
-    fn value(&self, v: FieldValue) -> FieldValue {
-        match v {
-            FieldValue::Str(s) => FieldValue::Str(self.text(&s, RefMode::Strict)),
-            FieldValue::List(items) => {
-                FieldValue::List(items.into_iter().map(|i| self.value(i)).collect())
-            }
-            FieldValue::Map(m) => {
-                FieldValue::Map(m.into_iter().map(|(k, v)| (k, self.value(v))).collect())
-            }
+    fn value(&self, v: FieldValue) -> Result<FieldValue, RdyError> {
+        Ok(match v {
+            FieldValue::Str(s) => FieldValue::Str(self.text(&s, RefMode::Strict)?),
+            FieldValue::List(items) => FieldValue::List(
+                items
+                    .into_iter()
+                    .map(|i| self.value(i))
+                    .collect::<Result<_, _>>()?,
+            ),
+            FieldValue::Map(m) => FieldValue::Map(
+                m.into_iter()
+                    .map(|(k, v)| Ok((k, self.value(v)?)))
+                    .collect::<Result<_, RdyError>>()?,
+            ),
             other => other,
-        }
+        })
     }
 
     fn links(
@@ -434,7 +457,7 @@ impl Resolver<'_> {
                     k.clone(),
                     self.value(json_to_field(&v).map_err(|e| {
                         bad(format!("field {k}: {e}"), "write the value as a string")
-                    })?),
+                    })?)?,
                 ))
             })
             .collect()
@@ -1057,7 +1080,7 @@ fn build_ops(
                 let after = after.as_deref().map(|a| res.id(a)).transpose()?;
                 let before = before.as_deref().map(|b| res.id(b)).transpose()?;
                 let order = place(&ov, parent.as_ref(), after.as_ref(), before.as_ref())?;
-                let body = res.text(&body, RefMode::for_body(&block_type));
+                let body = res.text(&body, RefMode::for_body(&block_type))?;
                 let sets_key = fields.contains_key("key");
                 let mut block = Block {
                     id: new_id.clone(),
@@ -1117,7 +1140,7 @@ fn build_ops(
                     block.fields.remove(&k);
                 }
                 if let Some(body) = body {
-                    block.body = res.text(&body, RefMode::for_body(&block.block_type));
+                    block.body = res.text(&body, RefMode::for_body(&block.block_type))?;
                 }
                 if let Some(links) = links {
                     // link1: an update replaces only the link kinds it names; "<kind>": [] removes one
@@ -1407,7 +1430,9 @@ fn build_ops(
     }
     // akey1 (FW-PR3): a doc or folder created without a key gets one from its path, once every
     // op has applied, so the keys of the view, of earlier ops and every explicit key anywhere in
-    // the batch are taken; it runs before the second pass, so pins and validation see the key
+    // the batch are taken, and so is the name of every other top-level doc or folder (a key that
+    // is another block's path would make that path unreachable); it runs before the second
+    // pass, so pins and validation see the key
     let mut assigned = BTreeMap::new();
     for op in &mut ops {
         let Op::Create { block } = op else { continue };
@@ -1418,7 +1443,13 @@ fn build_ops(
         let Some(path) = tree_path(&ov, &block.id) else {
             continue;
         };
-        let k = keys::auto_key(&path, &block.block_type, &|c| res.key_holder(c).is_some());
+        let k = keys::auto_key(&path, &block.block_type, &|c| {
+            res.key_holder(c).is_some()
+                || ov.with_sibs(None, |s| {
+                    s.holder(&rdy_model::key::fold(c), Some(&block.id))
+                        .is_some()
+                })
+        });
         block
             .fields
             .insert("key".into(), FieldValue::Str(k.clone()));

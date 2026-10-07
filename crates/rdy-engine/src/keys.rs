@@ -66,6 +66,42 @@ pub(crate) fn clash_error(k: &str, a: &BlockId, b: &BlockId) -> RdyError {
     )
 }
 
+/// The `E_BAD_INPUT` error for key `text` held by more than one block (`holders`, distinct): a
+/// floating view can hold a key twice once another view lands the same key, and the first
+/// holder must not win silently.
+pub(crate) fn ambiguous_key(text: &str, holders: &[BlockId]) -> RdyError {
+    let mut ids: Vec<String> = holders.iter().map(BlockId::to_string).collect();
+    ids.sort();
+    ids.dedup();
+    let named = match ids.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => ids.join(""),
+    };
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("key {text:?} is held by {named} in this view"),
+        "use the id",
+    )
+}
+
+/// The one block in `holders` (deduplicated), `None` for none, an `ambiguous_key` error for more.
+pub(crate) fn sole_holder<'a>(
+    text: &str,
+    holders: impl IntoIterator<Item = &'a BlockId>,
+) -> Result<Option<BlockId>, RdyError> {
+    let mut ids: Vec<BlockId> = vec![];
+    for id in holders {
+        if !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
+    match ids.len() {
+        0 => Ok(None),
+        1 => Ok(ids.pop()),
+        _ => Err(ambiguous_key(text, &ids)),
+    }
+}
+
 /// The section titles under each parent among `blocks`, in the order given (skel1: what a doc
 /// holds for `skeleton_gaps`, read by import and check).
 pub(crate) fn section_titles<'a>(
@@ -109,14 +145,15 @@ pub(crate) fn clashes<'a>(
 
 /// `text` with every `{{KEY}}` and `{{KEY|words}}` that `lookup` resolves stored as the id. In
 /// `Strict` text only: a key typed bare keeps the key-typed mark (`{{id|@key}}`, FW-F2a), and
-/// display text is kept. Ids, `$placeholder`s and unresolved tokens are copied unchanged.
+/// display text is kept. Ids, `$placeholder`s and unresolved tokens are copied unchanged. An
+/// error from `lookup` (a key held twice) is returned.
 pub(crate) fn rewrite(
     text: &str,
     mode: RefMode,
-    lookup: &dyn Fn(&str) -> Option<BlockId>,
-) -> String {
+    lookup: &dyn Fn(&str) -> Result<Option<BlockId>, RdyError>,
+) -> Result<String, RdyError> {
     if mode != RefMode::Strict || !text.contains("{{") {
-        return text.to_string();
+        return Ok(text.to_string());
     }
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
@@ -127,7 +164,7 @@ pub(crate) fn rewrite(
         {
             continue;
         }
-        let Some(id) = lookup(&span.token) else {
+        let Some(id) = lookup(&span.token)? else {
             continue;
         };
         let mut stored = span.clone();
@@ -137,17 +174,20 @@ pub(crate) fn rewrite(
         last = span.range.end;
     }
     out.push_str(&text[last..]);
-    out
+    Ok(out)
 }
 
 /// A block id, else a key, else a path. A text that is both the key of one block and the path of
-/// another is refused rather than letting one silently win.
+/// another, or the key of two blocks, is refused rather than letting one silently win.
 pub(crate) fn resolve_text(m: &Materialized, text: &str) -> Result<BlockId, RdyError> {
     resolve_with(m, text, &|t| {
         let folded = key::fold(t);
-        m.iter()
-            .find(|b| key_of(b).is_some_and(|k| key::fold(k) == folded))
-            .map(|b| b.id.clone())
+        sole_holder(
+            t,
+            m.iter()
+                .filter(|b| key_of(b).is_some_and(|k| key::fold(k) == folded))
+                .map(|b| &b.id),
+        )
     })
 }
 
@@ -155,13 +195,13 @@ pub(crate) fn resolve_text(m: &Materialized, text: &str) -> Result<BlockId, RdyE
 pub(crate) fn resolve_with(
     m: &Materialized,
     text: &str,
-    key_lookup: &dyn Fn(&str) -> Option<BlockId>,
+    key_lookup: &dyn Fn(&str) -> Result<Option<BlockId>, RdyError>,
 ) -> Result<BlockId, RdyError> {
     if let Ok(id) = BlockId::parse(text) {
         return Ok(id);
     }
     let by_key = if key::problem(text).is_none() {
-        key_lookup(text)
+        key_lookup(text)?
     } else {
         None
     };
@@ -179,15 +219,20 @@ pub(crate) fn resolve_with(
 
 /// `b` with its body (as its type reads references) and every string field (strictly, through
 /// lists and maps) passed through `rewrite`.
-pub(crate) fn rewrite_block(b: &mut Block, lookup: &dyn Fn(&str) -> Option<BlockId>) {
-    fn value(v: &mut FieldValue, lookup: &dyn Fn(&str) -> Option<BlockId>) {
+pub(crate) fn rewrite_block(
+    b: &mut Block,
+    lookup: &dyn Fn(&str) -> Result<Option<BlockId>, RdyError>,
+) -> Result<(), RdyError> {
+    type Lookup<'a> = &'a dyn Fn(&str) -> Result<Option<BlockId>, RdyError>;
+    fn value(v: &mut FieldValue, lookup: Lookup) -> Result<(), RdyError> {
         match v {
-            FieldValue::Str(s) => *s = rewrite(s, RefMode::Strict, lookup),
-            FieldValue::List(items) => items.iter_mut().for_each(|i| value(i, lookup)),
-            FieldValue::Map(m) => m.values_mut().for_each(|i| value(i, lookup)),
+            FieldValue::Str(s) => *s = rewrite(s, RefMode::Strict, lookup)?,
+            FieldValue::List(items) => items.iter_mut().try_for_each(|i| value(i, lookup))?,
+            FieldValue::Map(m) => m.values_mut().try_for_each(|i| value(i, lookup))?,
             _ => {}
         }
+        Ok(())
     }
-    b.body = rewrite(&b.body, RefMode::for_body(&b.block_type), lookup);
-    b.fields.values_mut().for_each(|v| value(v, lookup));
+    b.body = rewrite(&b.body, RefMode::for_body(&b.block_type), lookup)?;
+    b.fields.values_mut().try_for_each(|v| value(v, lookup))
 }
