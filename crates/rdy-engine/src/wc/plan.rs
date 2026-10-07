@@ -5,9 +5,9 @@
 //! is one `move_to`; a link kind is named only when the file changed it, and then with the links
 //! the file never shows.
 
-use crate::error::{E_IO, W_WC_UNSTAGED_MOVE};
+use crate::error::{E_IO, E_PATH_CLASH, E_WC_INVALID, W_WC_UNSTAGED_MOVE};
 use crate::query::field_json;
-use crate::tree_io::Diagnostic;
+use crate::tree_io::{Diagnostic, FOLDER_FILE};
 use crate::wc::ignore::Ignore;
 use crate::wc::layout::{WcBlock, WcTree, read_tree};
 use crate::wc::lint::lint_tree;
@@ -69,8 +69,10 @@ pub fn plan_commit(place: &Place, st: &WcState, pack: &Pack) -> Result<CommitPla
     let commit = built.map(|()| read_tree(&dir, &Ignore::empty(), pack));
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir(&tmp); // only when nothing else is in it
-    let commit = commit.map_err(|d| WcInvalid { diags: vec![d] })?;
-    let diags = lint_tree(&commit, pack, None);
+    let commit = commit.map_err(|diags| WcInvalid { diags })?;
+    let mut diags = lint_tree(&commit, pack, None);
+    diags.extend(unread(&commit, st, &staged));
+    diags.sort_by(|a, b| (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column)));
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Err(WcInvalid { diags });
     }
@@ -122,43 +124,220 @@ fn under(dir: &Path, rel: &str) -> Result<PathBuf, Diagnostic> {
     Ok(dir.join(p))
 }
 
-/// Links `from` at `to` (a copy where the file system refuses a link).
-fn link_in(from: &Path, to: &Path, rel: &str) -> Result<(), Diagnostic> {
+/// Links `from` at a new `to`; where the file system refuses a link, copies it into a new file.
+/// Never writes through a file already at `to` (it may be a link to a base copy): that is
+/// `AlreadyExists`.
+fn link_in(from: &Path, to: &Path) -> std::io::Result<()> {
     if let Some(parent) = to.parent() {
-        fs::create_dir_all(parent).map_err(|e| io_diag(rel, "create a directory", e))?;
+        fs::create_dir_all(parent)?;
     }
-    if fs::hard_link(from, to).is_err() {
-        fs::copy(from, to).map_err(|e| io_diag(rel, "copy the file", e))?;
+    match fs::hard_link(from, to) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
+            let mut src = fs::File::open(from)?;
+            let mut dst = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(to)?;
+            std::io::copy(&mut src, &mut dst).map(|_| ())
+        }
+        r => r,
     }
-    Ok(())
+}
+
+/// The error of a staged path that names the same file as a base path, the file system ignoring
+/// case or Unicode form; `shared` is the part of the two paths that clashes.
+fn clash(staged: &str, base: &str, shared: Option<(&str, &str)>) -> Diagnostic {
+    let message = match shared {
+        Some((a, b)) if a != staged => format!(
+            "{staged} and {base} are under directories with the same name ignoring case ({a} and {b})"
+        ),
+        _ => format!("{staged} and {base} have the same name ignoring case"),
+    };
+    Diagnostic::error(
+        staged,
+        (1, 1),
+        E_PATH_CLASH,
+        message,
+        format!(
+            "stage the deletion of {base} as well (a rename), or give {staged} the spelling {base} has"
+        ),
+    )
+}
+
+/// The staged paths that clash, ignoring case, with a base path that stays in the commit tree:
+/// on a file system that ignores case both name one file, so one would land on the other.
+fn clashes(staged: &[String], kept: &[&String]) -> Vec<Diagnostic> {
+    let prefixes = |p: &'_ str| -> Vec<String> {
+        let mut out = vec![];
+        for (i, c) in p.char_indices() {
+            if c == '/' {
+                out.push(p[..i].to_string());
+            }
+        }
+        out.push(p.to_string());
+        out
+    };
+    let mut seen: BTreeMap<String, (String, &str)> = BTreeMap::new();
+    for rel in kept {
+        for pre in prefixes(rel) {
+            seen.entry(pre.to_lowercase())
+                .or_insert((pre, rel.as_str()));
+        }
+    }
+    let mut out = vec![];
+    for rel in staged {
+        for pre in prefixes(rel) {
+            if let Some((theirs, base)) = seen.get(&pre.to_lowercase())
+                && *theirs != pre
+            {
+                out.push(clash(rel, base, Some((&pre, theirs))));
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Rebuilds `dir`: every base file that is not staged, linked from its base copy; every staged
-/// copy, linked from the stage; a staged deletion left out.
+/// copy, linked from the stage; a staged deletion left out. A staged path that clashes with a
+/// base file is refused before anything is linked.
 fn build_commit_tree(
     place: &Place,
     st: &WcState,
     staged: &[String],
     dir: &Path,
-) -> Result<(), Diagnostic> {
+) -> Result<(), Vec<Diagnostic>> {
     let shown = dir.display().to_string();
     match fs::remove_dir_all(dir) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io_diag(&shown, "clear the commit tree", e)),
+        Err(e) => return Err(vec![io_diag(&shown, "clear the commit tree", e)]),
     }
-    fs::create_dir_all(dir).map_err(|e| io_diag(&shown, "create the commit tree", e))?;
+    fs::create_dir_all(dir).map_err(|e| vec![io_diag(&shown, "create the commit tree", e)])?;
     let is_staged: BTreeSet<&str> = staged.iter().map(String::as_str).collect();
-    for rel in st.base.files.keys() {
-        if is_staged.contains(rel.as_str()) || st.stage.deleted.contains(rel) {
-            continue;
-        }
-        link_in(&place.base_file(rel), &under(dir, rel)?, rel)?;
+    let kept: Vec<&String> = st
+        .base
+        .files
+        .keys()
+        .filter(|rel| !is_staged.contains(rel.as_str()) && !st.stage.deleted.contains(*rel))
+        .collect();
+    let found = clashes(staged, &kept);
+    if !found.is_empty() {
+        return Err(found);
+    }
+    let one = |e: Diagnostic| vec![e];
+    for rel in &kept {
+        link_in(&place.base_file(rel), &under(dir, rel).map_err(one)?)
+            .map_err(|e| one(io_diag(rel, "link the base copy", e)))?;
     }
     for rel in staged {
-        link_in(&place.stage_file(rel), &under(dir, rel)?, rel)?;
+        let to = under(dir, rel).map_err(one)?;
+        match link_in(&place.stage_file(rel), &to) {
+            Ok(()) => {}
+            // the file system names it as a kept base file (Unicode form or case folding
+            // beyond what `clashes` sees)
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let base = kept
+                    .iter()
+                    .find(|b| under(dir, b).is_ok_and(|p| same_file(&p, &to)))
+                    .map_or("a base file", |b| b.as_str());
+                return Err(one(clash(rel, base, None)));
+            }
+            Err(e) => return Err(one(io_diag(rel, "link the staged copy", e))),
+        }
     }
     Ok(())
+}
+
+/// Whether `a` and `b` are one file.
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::symlink_metadata(a), fs::symlink_metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
+}
+
+/// The errors of a commit tree that does not read every file it holds: a file the reader leaves
+/// untracked (it does not parse, its first entry is not the doc, it is too large), and a file
+/// the reader never reaches (its directory has no `_folder.yaml`, or one that does not load).
+/// Each staged path and each base path not staged for deletion must be read, so that no block
+/// of a file that is not read turns into a delete.
+fn unread(commit: &WcTree, st: &WcState, staged: &[String]) -> Vec<Diagnostic> {
+    let untracked: BTreeMap<&str, &str> = commit
+        .untracked
+        .iter()
+        .map(|u| (u.path.as_str(), u.reason.as_str()))
+        .collect();
+    let mut out: Vec<Diagnostic> = commit
+        .untracked
+        .iter()
+        .map(|u| {
+            Diagnostic::error(
+                &u.path,
+                (1, 1),
+                E_WC_INVALID,
+                format!("{} is not read: {}", u.path, u.reason),
+                format!("rdy check {}", u.path),
+            )
+        })
+        .collect();
+    let expected: BTreeSet<&String> = staged
+        .iter()
+        .chain(
+            st.base
+                .files
+                .keys()
+                .filter(|rel| !st.stage.deleted.contains(*rel)),
+        )
+        .collect();
+    let blobs: BTreeSet<&str> = commit.blobs.iter().map(String::as_str).collect();
+    for rel in expected {
+        if commit.files.contains_key(rel.as_str())
+            || untracked.contains_key(rel.as_str())
+            || blobs.contains(rel.as_str())
+        {
+            continue;
+        }
+        let dirs = rel
+            .char_indices()
+            .filter(|&(_, c)| c == '/')
+            .map(|(i, _)| &rel[..i]);
+        let mut why = None;
+        for d in dirs {
+            let ff = format!("{d}/{FOLDER_FILE}");
+            if *rel == ff {
+                break;
+            }
+            if let Some(reason) = untracked.get(d) {
+                why = Some((
+                    format!("{rel} is in {d}, which is not read: {reason}"),
+                    format!("rdy check {d}"),
+                ));
+            } else if commit.files.contains_key(&ff) {
+                continue;
+            } else if untracked.contains_key(ff.as_str()) {
+                why = Some((
+                    format!("{rel} is in {d}, whose {ff} does not load"),
+                    format!("fix {ff} (rdy check {ff}) and stage it"),
+                ));
+            } else {
+                why = Some((
+                    format!("{rel} is in {d}, which has no {ff}"),
+                    format!("restore {ff} and stage it, or move {rel} into a folder"),
+                ));
+            }
+            break;
+        }
+        let (message, fix) = why.unwrap_or_else(|| {
+            (
+                format!("{rel} is not read as a member of the commit"),
+                format!("rdy check {rel}"),
+            )
+        });
+        out.push(Diagnostic::error(rel, (1, 1), E_WC_INVALID, message, fix));
+    }
+    out
 }
 
 /// A tree's blocks by id (the first entry of an id) and by parent, in tree order.
@@ -371,8 +550,10 @@ impl<'a> Diff<'a> {
 
     /// Where each placed block goes (R-P4): per parent, the content children the commit tree
     /// holds in file order; a child outside the longest run kept in base order, or one whose
-    /// parent changed, or a new one, sits after its previous sibling (before the next one when
-    /// first). A doc or folder whose parent changed moves under its new parent.
+    /// parent changed, or a new one, sits after its previous sibling. When first, it sits before
+    /// the first later sibling in the run (the only siblings under the parent when its op runs),
+    /// or is appended when there is none. A doc or folder whose parent changed moves under its
+    /// new parent.
     fn placements(&self) -> BTreeMap<&'a BlockId, Map<String, Value>> {
         let mut out = BTreeMap::new();
         let base_pos: BTreeMap<&BlockId, usize> = self
@@ -408,7 +589,9 @@ impl<'a> Diff<'a> {
                 }
                 if i > 0 {
                     m.insert("after".into(), content[i - 1].block.id.to_string().into());
-                } else if let Some(next) = content.get(1) {
+                } else if let Some(next) = content[1..].iter().find(|n| run.contains(&n.block.id)) {
+                    // the ops follow F, so only a block of the run is under P when this one is
+                    // placed; with none, it is appended and the rest of F follows it
                     m.insert("before".into(), next.block.id.to_string().into());
                 }
                 out.insert(id, m);

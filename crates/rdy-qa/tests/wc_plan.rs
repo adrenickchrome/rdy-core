@@ -14,10 +14,77 @@ fn pack() -> rdy_schema::Pack {
         .unwrap()
 }
 
+/// Plans the commit, and checks that planning left every base copy as it was.
 fn plan(s: &Served) -> Result<CommitPlan, WcInvalid> {
     let place = Place::locate(s.dir.path()).unwrap();
     let st = WcState::load(&place).unwrap();
-    plan_commit(&place, &st, &pack())
+    let before = snapshot(&place.state.join("base/files"));
+    let p = plan_commit(&place, &st, &pack());
+    assert_eq!(
+        snapshot(&place.state.join("base/files")),
+        before,
+        "planning changed base/files"
+    );
+    p
+}
+
+/// Every file under `dir`, by relative path, with its bytes.
+fn snapshot(dir: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let path = e.path();
+            if e.file_type().unwrap().is_dir() {
+                todo.push(path);
+            } else {
+                let rel = path
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                out.insert(rel, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    out
+}
+
+/// Sends the plan's ops to the bound view through the engine, as one write.
+fn send(s: &Served, p: &CommitPlan) -> Result<rdy_engine::WriteResult, rdy_engine::RdyError> {
+    let place = Place::locate(s.dir.path()).unwrap();
+    let view = WcState::load(&place).unwrap().bound.unwrap().view;
+    s.stop();
+    let mut r = rdy_engine::Rdy::open(s.dir.path()).unwrap();
+    let w = rdy_qa::fixtures::write(&mut r, &view, Value::Array(p.ops.clone()));
+    r.close().unwrap();
+    w
+}
+
+/// No `before` names a block that a later op creates or moves: the engine places each op
+/// against the blocks that already sit under the parent.
+fn assert_befores_exist(p: &CommitPlan) {
+    for (i, o) in p.ops.iter().enumerate() {
+        let before = o
+            .get("before")
+            .or_else(|| o.get("move_to").and_then(|m| m.get("before")));
+        let Some(before) = before else { continue };
+        let later = p.ops[i + 1..]
+            .iter()
+            .any(|l| l["id"] == *before && (l["op"] == "create" || l.get("move_to").is_some()));
+        assert!(
+            !later,
+            "op {i} is placed before {before}, which a later op places: {:?}",
+            p.ops
+        );
+    }
+}
+
+/// Whether the refusal holds an error with `code` at `file` whose message names `text`.
+fn refused_at(e: &WcInvalid, code: &str, file: &str, text: &str) -> bool {
+    e.diags
+        .iter()
+        .any(|d| d.code == code && d.file == file && d.message.contains(text))
 }
 
 /// Stages paths as `rdy add` does (Task 7 builds it in parallel): a file's bytes, or a deletion.
@@ -446,4 +513,243 @@ fn wcdf1_the_lint_refuses_rdys_own_fields() {
         "{:?}",
         e.diags
     );
+}
+
+#[test]
+fn wcdf1_a_new_doc_with_two_paragraphs_commits() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    put(
+        &s,
+        "fresh.yaml",
+        "- type: doc\n  fields:\n    title: Fresh\n    doc_type: page\n- type: prose\n  body: One.\n- type: prose\n  body: Two.\n",
+    );
+    stage(&s, &["fresh.yaml"]);
+    let p = plan(&s).unwrap();
+    assert_befores_exist(&p);
+    let one = p.ops.iter().find(|o| o["body"] == "One.").unwrap();
+    let two = p.ops.iter().find(|o| o["body"] == "Two.").unwrap();
+    assert!(
+        one.get("before").is_none() && one.get("after").is_none(),
+        "{one}"
+    );
+    assert_eq!(two["after"], one["id"], "{two}");
+    send(&s, &p).unwrap();
+}
+
+#[test]
+fn wcdf1_two_new_paragraphs_at_the_top_of_a_section_commit() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    edit(&s, "guides/intro.yaml", |l| {
+        let i = l
+            .iter()
+            .position(|e| e["id"].as_str() == Some(seed.prose.as_str()))
+            .unwrap();
+        l.insert(
+            i,
+            yaml(&format!(
+                "type: prose\nparent: {}\nbody: Second.\n",
+                seed.section
+            )),
+        );
+        l.insert(
+            i,
+            yaml(&format!(
+                "type: prose\nparent: {}\nbody: First.\n",
+                seed.section
+            )),
+        );
+    });
+    stage(&s, &["guides/intro.yaml"]);
+    let p = plan(&s).unwrap();
+    assert_befores_exist(&p);
+    let first = p.ops.iter().find(|o| o["body"] == "First.").unwrap();
+    let second = p.ops.iter().find(|o| o["body"] == "Second.").unwrap();
+    assert_eq!(
+        first["before"],
+        seed.prose.as_str(),
+        "the first kept sibling: {first}"
+    );
+    assert_eq!(second["after"], first["id"], "{second}");
+    send(&s, &p).unwrap();
+}
+
+#[test]
+fn wcdf1_a_paragraph_moved_in_at_the_top_then_a_new_one_commits() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let mut moved = None;
+    edit(&s, "notes.yaml", |l| {
+        let i = l
+            .iter()
+            .position(|e| e["id"].as_str() == Some(seed.note.as_str()))
+            .unwrap();
+        moved = Some(l.remove(i));
+    });
+    let mut n = moved.unwrap();
+    n.as_mapping_mut()
+        .unwrap()
+        .insert("parent".into(), seed.section.clone().into());
+    edit(&s, "guides/intro.yaml", |l| {
+        let i = l
+            .iter()
+            .position(|e| e["id"].as_str() == Some(seed.prose.as_str()))
+            .unwrap();
+        l.insert(
+            i,
+            yaml(&format!(
+                "type: prose\nparent: {}\nbody: After the note.\n",
+                seed.section
+            )),
+        );
+        l.insert(i, n);
+    });
+    stage(&s, &["guides/intro.yaml", "notes.yaml"]);
+    let p = plan(&s).unwrap();
+    assert_befores_exist(&p);
+    assert_eq!(
+        op(&p, "update", &seed.note)["move_to"],
+        json!({"parent": seed.section, "before": seed.prose})
+    );
+    send(&s, &p).unwrap();
+}
+
+#[test]
+fn wcdf1_a_staged_file_that_does_not_parse_is_refused_not_deleted() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    put(
+        &s,
+        "notes.yaml",
+        &format!("- type: doc\n  id: {}\n  fields: [\n", seed.notes),
+    );
+    stage(&s, &["notes.yaml"]);
+    let e = plan(&s).unwrap_err();
+    assert!(
+        refused_at(&e, "E_WC_INVALID", "notes.yaml", "notes.yaml is not read"),
+        "{:?}",
+        e.diags
+    );
+}
+
+#[test]
+fn wcdf1_a_staged_file_whose_first_entry_is_not_the_doc_is_refused() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    edit(&s, "notes.yaml", |l| l.reverse());
+    stage(&s, &["notes.yaml"]);
+    let e = plan(&s).unwrap_err();
+    assert!(
+        refused_at(&e, "E_WC_INVALID", "notes.yaml", "notes.yaml is not read"),
+        "{:?}",
+        e.diags
+    );
+}
+
+#[test]
+fn wcdf1_a_broken_folder_file_refuses_every_file_under_it() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    put(
+        &s,
+        "guides/_folder.yaml",
+        "- type: folder\n  fields: {title: \"Guides\n",
+    );
+    stage(&s, &["guides/_folder.yaml"]);
+    let e = plan(&s).unwrap_err();
+    assert!(
+        refused_at(
+            &e,
+            "E_WC_INVALID",
+            "guides/_folder.yaml",
+            "guides/_folder.yaml is not read"
+        ),
+        "{:?}",
+        e.diags
+    );
+    assert!(
+        refused_at(
+            &e,
+            "E_WC_INVALID",
+            "guides/intro.yaml",
+            "guides/_folder.yaml"
+        ),
+        "{:?}",
+        e.diags
+    );
+}
+
+#[test]
+fn wcdf1_a_staged_deletion_of_only_the_folder_file_is_refused() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::remove_file(at(&s, "guides/_folder.yaml")).unwrap();
+    stage(&s, &["guides/_folder.yaml"]);
+    let e = plan(&s).unwrap_err();
+    assert!(
+        refused_at(
+            &e,
+            "E_WC_INVALID",
+            "guides/intro.yaml",
+            "guides/_folder.yaml"
+        ),
+        "{:?}",
+        e.diags
+    );
+}
+
+#[test]
+fn wcdf1_a_doc_moved_into_a_directory_that_is_not_a_folder_is_refused() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::create_dir_all(at(&s, "archive")).unwrap();
+    std::fs::rename(at(&s, "notes.yaml"), at(&s, "archive/notes.yaml")).unwrap();
+    stage(&s, &["notes.yaml", "archive/notes.yaml"]);
+    let e = plan(&s).unwrap_err();
+    assert!(
+        refused_at(
+            &e,
+            "E_WC_INVALID",
+            "archive/notes.yaml",
+            "archive/_folder.yaml"
+        ),
+        "{:?}",
+        e.diags
+    );
+}
+
+#[test]
+fn wcdf1_a_case_only_rename_without_the_old_path_is_a_clash() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let place = Place::locate(s.dir.path()).unwrap();
+    let base = std::fs::read(place.base_file("notes.yaml")).unwrap();
+    set_body(&s, "notes.yaml", &seed.note, "Edited.");
+    std::fs::rename(at(&s, "notes.yaml"), at(&s, "Notes.yaml")).unwrap();
+    stage(&s, &["Notes.yaml"]);
+    let e = plan(&s).unwrap_err();
+    assert!(
+        e.diags.iter().any(|d| d.code == "E_PATH_CLASH"
+            && d.file == "Notes.yaml"
+            && d.message.contains("notes.yaml")),
+        "{:?}",
+        e.diags
+    );
+    assert_eq!(std::fs::read(place.base_file("notes.yaml")).unwrap(), base);
+}
+
+#[test]
+fn wcdf1_a_case_only_rename_with_the_old_path_deleted_is_a_rename() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::rename(at(&s, "notes.yaml"), at(&s, "Notes.yaml")).unwrap();
+    stage(&s, &["Notes.yaml"]);
+    let place = Place::locate(s.dir.path()).unwrap();
+    let mut st = WcState::load(&place).unwrap();
+    st.stage.deleted.insert("notes.yaml".into());
+    st.save(&place).unwrap();
+    let p = plan(&s).unwrap();
+    assert_eq!(p.ops.len(), 1, "{:?}", p.ops);
+    assert_eq!(op(&p, "update", &seed.notes)["fields"]["name"], "Notes");
 }
