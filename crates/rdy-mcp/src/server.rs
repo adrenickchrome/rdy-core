@@ -1,3 +1,4 @@
+use crate::entity_tools::{self, AcceptParams};
 use crate::order::{Order, Ordered, Stamped};
 use crate::params::Parameters;
 use crate::search_tools::{self, SearchParams};
@@ -119,7 +120,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Project overview: pack, the folder and doc tree, views, canon history and the version position."
+        description = "Project overview: pack, the folder and doc tree, views, canon history and the version position. Also graph coverage: facts and content tied to entities, entity mentions linked, docs nothing links to, entity kinds."
     )]
     async fn rdy_overview(&self, Parameters(p): Parameters<ScopeParams>) -> CallToolResult {
         self.run("rdy_overview", p, tools::rdy_overview).await
@@ -154,17 +155,24 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Brief before editing: for blocks (ids) or a doc or folder (path), the decisions that govern them, what depends on them, their lineage (the decisions they refine, supersede or revoke, and the ones that do so to them), what will go stale if they change, their open suspects, work in flight (other views and open proposals that change them), and their current versions with the briefing token. Cite the token as brief on your next write; writes to stable content need it. To create a block, brief its parent. A cut briefing carries next: pass page: <next> alone (same scope) to continue it. For a code file, pass code_path alone: the blocks its commits implement (Implements: trailers) and the blocks whose reflects globs match it, plus a code section (provisional when a cited decision is still proposed, rework when it was rejected)."
+        description = "Brief before editing: for blocks (ids) or a doc or folder (path), the decisions that govern them, what depends on them, their lineage (the decisions they refine, supersede or revoke, and the ones that do so to them), what will go stale if they change, their open suspects, work in flight (other views and open proposals that change them), and their current versions with the briefing token. Cite the token as brief on your next write; writes to stable content need it. To create a block, brief its parent. A cut briefing carries next: pass page: <next> alone (same scope) to continue it. For a code file, pass code_path alone: the blocks its commits implement (Implements: trailers) and the blocks whose reflects globs match it, plus a code section (provisional when a cited decision is still proposed, rework when it was rejected). A briefing also gives graph coverage for what it covers, for a new doc the blocks that mention it, and for a decision its related decisions."
     )]
     async fn rdy_brief(&self, Parameters(p): Parameters<BriefParams>) -> CallToolResult {
         self.run("rdy_brief", p, tools::rdy_brief).await
     }
 
     #[tool(
-        description = "Find text in blocks: a literal (or, with regex: true, a pattern) in every block's body and string fields, code included, within scope (default: your session's view). The result starts with totals (hits per doc path and per block type). Each entry gives the block's id, type, path and matching lines (field, line number, text); blocks with identical matching lines collapse into one entry whose also lists the others. A literal of several words finds the exact phrase first, then blocks holding all the words (all_words: true), each in reading order. Filters combine with AND: types, traits, path, lifecycle, changed_since, exclude_history, governed_by, describes, linked_to, suspect. A match inside a superseded, rejected or revoked decision carries history: true. brief: true adds a registered briefing over the page's hits: cite its base.token to write them. Deterministic, no model. A cut result carries next: pass it as page with the same query and filters to continue. References are stored as ids, so search a block's id to find text that references it."
+        description = "Find text in blocks: a literal (or, with regex: true, a pattern) in every block's body and string fields, code included, within scope (default: your session's view). The result starts with totals (hits per doc path and per block type). Each entry gives the block's id, type, path and matching lines (field, line number, text); blocks with identical matching lines collapse into one entry whose also lists the others. A literal of several words finds the exact phrase first, then blocks holding all the words (all_words: true), each in reading order. Filters combine with AND: types, traits, path, lifecycle, changed_since, exclude_history, governed_by, describes, linked_to, suspect. A match inside a superseded, rejected or revoked decision carries history: true. brief: true adds a registered briefing over the page's hits: cite its base.token to write them. Deterministic, no model. A cut result carries next: pass it as page with the same query and filters to continue. References are stored as ids, so search a block's id to find text that references it. A literal query that names an entity (its key, name or alias, any case) also returns its fact sheet in entities on the first page: definition, value, facts, governing decisions, dependents. Text matches the sheet already holds drop out, and each other match carries a suggestion to link it."
     )]
     async fn rdy_search(&self, Parameters(p): Parameters<SearchParams>) -> CallToolResult {
         self.run("rdy_search", p, search_tools::rdy_search).await
+    }
+
+    #[tool(
+        description = "Accept suggestions in bulk: pass suggestion objects from a write or search response unchanged (an entity suggestion may add name, type, entity_kind, value, unit, parent). Links are added, never replaced; a link already there is skipped. New entities go under parent. One write: cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences and suggestions."
+    )]
+    async fn rdy_accept(&self, Parameters(p): Parameters<AcceptParams>) -> CallToolResult {
+        self.run("rdy_accept", p, entity_tools::rdy_accept).await
     }
 
     #[tool(
@@ -266,7 +274,7 @@ impl ServerHandler for RdyServer {
 }
 
 /// What the server tells a host about rdy.
-pub const INSTRUCTIONS: &str = "rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Read and write through rdy's tools, not the working-copy files. Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>). Write with rdy_write; propose with rdy_propose. Work in your own view; include others' changes, never write into their views. Conflicts are recorded, not errors: resolve one by writing the block. When a block comes back as a consequence a second time in a session, do not rewrite it again: confirm it (repin) or ask the person, and show what remains as a change plan. Before editing a block, read it with format markdown or yaml: compact lines are a summary. When a change retires only some of a decision's rules, supersede that part (rdy_supersede with part), not the whole decision. Record decisions in the project's decision home (rdy_decide without parent records there; rdy_schema names it) and link content to them with decided_by; don't put decisions inside content docs.";
+pub const INSTRUCTIONS: &str = "rdy keeps decisions and documentation consistent while agents change them. Call rdy_session first, then rdy_overview. Read and write through rdy's tools, not the working-copy files. Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>). Write with rdy_write; propose with rdy_propose. Work in your own view; include others' changes, never write into their views. Conflicts are recorded, not errors: resolve one by writing the block. When a block comes back as a consequence a second time in a session, do not rewrite it again: confirm it (repin) or ask the person, and show what remains as a change plan. Before editing a block, read it with format markdown or yaml: compact lines are a summary. When a change retires only some of a decision's rules, supersede that part (rdy_supersede with part), not the whole decision. Record decisions in the project's decision home (rdy_decide without parent records there; rdy_schema names it) and link content to them with decided_by; don't put decisions inside content docs. Search a thing's name, key or alias with rdy_search to get its fact sheet. Write responses carry suggestions (links to the entities your text names, new entities for literals that recur): accept the right ones with one rdy_accept call; they never block.";
 
 /// The longest id value [`IdScanner`] will capture; a longer one counts as no id.
 const MAX_ID_BYTES: usize = 1024;

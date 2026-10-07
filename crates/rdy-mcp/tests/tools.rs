@@ -504,7 +504,7 @@ fn overview_collapses_the_deepest_levels_first() {
     .unwrap();
     let ov = rdy_overview(
         &mut st,
-        serde_json::from_value(json!({"max_tokens": 400})).unwrap(),
+        serde_json::from_value(json!({"max_tokens": 1000})).unwrap(),
     )
     .unwrap();
     assert_eq!(ov["tree"][0]["path"], "a");
