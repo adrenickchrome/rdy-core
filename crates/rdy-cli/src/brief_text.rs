@@ -7,11 +7,26 @@ fn s<'a>(v: &'a Value, key: &str) -> &'a str {
     v[key].as_str().unwrap_or_default()
 }
 
-/// One section: its title line, then its entry lines (or `(none)`).
+/// `text` on one line: every control character, and the Unicode line and paragraph separators,
+/// becomes a space. libyaml breaks lines at `\r`, `\n`, NEL, U+2028 and U+2029, and a break would
+/// end a `#` comment, so free text (titles, view names, statements) cannot leak into the YAML.
+fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// One section: its title line, then its entry lines (or `(none)`), each on one line.
 fn section(out: &mut Vec<String>, title: &str, entries: impl Iterator<Item = String>) {
     out.push(format!("# {title}:"));
     let before = out.len();
-    out.extend(entries.map(|e| format!("#   {e}")));
+    out.extend(entries.map(|e| format!("#   {}", one_line(&e))));
     if out.len() == before {
         out.push("#   (none)".into());
     }
@@ -35,7 +50,7 @@ pub fn header(briefing: &Value) -> String {
         covered.join(", ")
     };
     let mut out = vec![
-        format!("# rdy briefing for {covered} (token {token})"),
+        format!("# rdy briefing for {} (token {token})", one_line(&covered)),
         "# Lines starting with # are dropped when you save.".to_string(),
     ];
     section(
@@ -380,5 +395,37 @@ mod tests {
             ]
         );
         assert_eq!(lines[at + 4], "#");
+    }
+
+    #[test]
+    fn infl1_free_text_with_line_breaks_stays_inside_the_comment() {
+        // libyaml (under serde_yaml_ng) also breaks lines at NEL, U+2028 and U+2029.
+        let b = json!({
+            "governs": [{"decision": "D-1", "status": "live", "statement": "Keep A\nbody: X", "blocks": ["c-A"]}],
+            "dependents": [], "will_go_stale": [], "suspects": [],
+            "inflight": {
+                "views": [{"view": "vb\n[", "owner": null, "last_write": "t", "last_write_ms": 1, "blocks": ["c-A"]}],
+                "proposals": [{"ref": "P-abcdef012345@1", "view": "va\r\n- x",
+                    "title": "Change A\nbody: INJECTED\n#\tz\u{7}\u{85}a\u{2028}b\u{2029}c", "blocks": ["c-A"]}]
+            },
+            "base": {"token": "0123456789abcdef0123", "blocks": [{"id": "c-A", "version": "ff"}], "depends": 0}
+        });
+        let h = header(&b);
+        assert!(h.lines().all(|l| l.starts_with('#')), "{h}");
+        let breaks =
+            |c: char| (c.is_control() && c != '\n') || matches!(c, '\u{2028}' | '\u{2029}');
+        assert!(!h.chars().any(breaks), "{h:?}");
+        let lines: Vec<&str> = h.lines().collect();
+        assert!(lines.contains(&"#   D-1 [live] Keep A body: X"), "{h}");
+        assert!(
+            lines.contains(&"#   view vb [, unowned (last write t): c-A"),
+            "{h}"
+        );
+        assert!(
+            lines.contains(
+                &"#   proposal P-abcdef012345@1 from va  - x \"Change A body: INJECTED # z  a b c\": c-A"
+            ),
+            "{h}"
+        );
     }
 }
