@@ -144,7 +144,8 @@ pub struct SearchMatch {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub also: Vec<SearchAlso>,
     /// esrch1: a link from this block to each entity the query names, when the block holds the
-    /// query as a phrase and is not tied to the entity yet.
+    /// query as a phrase, names the entity by name or alias as whole words, and is not tied to
+    /// the entity yet.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub suggestions: Vec<Suggestion>,
 }
@@ -262,29 +263,62 @@ impl ReadState {
             stack.extend(m.children(Some(&b.id)).into_iter().rev().map(|c| (c, own)));
         }
 
-        // 3b (esrch1): a literal that names entities starts from them. Hits the sheets hold (the
-        // entities, and blocks tied to one) drop out; each other phrase hit gets a link
-        // suggestion per entity.
+        // 3b (esrch1): a literal that names entities starts from them. The first page shows the
+        // sheets of the first `MAX_RESOLVED`; every page builds them, so every page drops the
+        // same hits.
         let resolved = if q.regex {
             vec![]
         } else {
             self.resolve_entities(scope, &q.text)?
         };
+        let sheets: Vec<FactSheet> = resolved
+            .iter()
+            .take(MAX_RESOLVED)
+            .map(|(e, kind)| self.fact_sheet(scope, e, *kind))
+            .collect::<Result<_, _>>()?;
         if !resolved.is_empty() {
-            let held = |h: &Hit| {
-                resolved
-                    .iter()
-                    .any(|(e, _)| h.block.id == *e || tied(&graph, &h.block.id, e))
-            };
-            phrase.retain(|h| !held(h));
-            all_words.retain(|h| !held(h));
+            // A hit drops out only when a sheet holds it: the sheet's entity, or a block tied to
+            // the entity that one of its lists shows (a history decision is not listed, and a
+            // list's cut is not shown). A filtered search keeps every hit: a sheet shows no
+            // suspect, change or filter target.
+            if q.filters == SearchFilters::default() {
+                let mut held: BTreeSet<BlockId> = BTreeSet::new();
+                for ((e, _), sheet) in resolved.iter().zip(&sheets) {
+                    held.insert(e.clone());
+                    let listed = sheet
+                        .facts
+                        .iter()
+                        .chain(&sheet.also_described_in)
+                        .chain(&sheet.dependents)
+                        .map(|b| b.id.as_str())
+                        .chain(sheet.decisions.iter().map(|d| d.id.as_str()));
+                    for id in listed {
+                        if let Ok(id) = BlockId::parse(id)
+                            && tied(&graph, &id, e)
+                        {
+                            held.insert(id);
+                        }
+                    }
+                }
+                phrase.retain(|h| !held.contains(&h.block.id));
+                all_words.retain(|h| !held.contains(&h.block.id));
+            }
+            // a link suggestion per entity the hit's text names as whole words (a name or an
+            // alias, as a write's suggestions read it) and is not tied to yet
             let pack = self.pack();
+            let lexicon = self.lexicon(scope)?;
             for h in &mut phrase {
-                let (Some(kind), Some(first)) = (link_kind_for(pack, h.block), h.lines.first())
-                else {
+                let Some(kind) = link_kind_for(pack, h.block) else {
                     continue;
                 };
+                let mentions = lexicon.mentions(h.block);
                 for (e, _) in &resolved {
+                    let Some(mention) = mentions.iter().find(|mn| mn.entity == e.as_str()) else {
+                        continue;
+                    };
+                    if h.block.id == *e || tied(&graph, &h.block.id, e) {
+                        continue;
+                    }
                     let (block, target) = (h.block.id.to_string(), e.to_string());
                     h.suggestions.push(Suggestion::Link {
                         id: suggestion_id(kind, &block, &target),
@@ -292,7 +326,7 @@ impl ReadState {
                         link: kind.to_string(),
                         target,
                         mention: q.text.clone(),
-                        field: first.field.clone(),
+                        field: mention.field.clone(),
                     });
                 }
             }
@@ -391,16 +425,11 @@ impl ReadState {
         };
 
         // the first page's fact sheets (FW-SR1: entity matches first)
-        let mut entities = vec![];
-        if cursor.is_none() {
-            for (e, kind) in resolved.iter().take(MAX_RESOLVED) {
-                entities.push(self.fact_sheet(scope, e, *kind)?);
-            }
-        }
-        let entities_omitted = if cursor.is_none() {
-            resolved.len() - entities.len()
+        let (entities, entities_omitted) = if cursor.is_none() {
+            let omitted = resolved.len() - sheets.len();
+            (sheets, omitted)
         } else {
-            0
+            (vec![], 0)
         };
 
         // the totals come first, then the sheets, so they take their share of the budget

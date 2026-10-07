@@ -484,3 +484,210 @@ fn esrch1_a_collapsed_hit_keeps_its_own_suggestion() {
         }]
     );
 }
+
+// Fix round 1: a hit drops out only when a returned sheet lists it (the sheet's entity, or a
+// block tied to it that a list holds inside its cap); a filtered search keeps its tied hits; a
+// link suggestion needs the entity's name or alias as whole words in the block's mention text.
+
+fn link_targets(m: &rdy_engine::search::SearchMatch) -> Vec<String> {
+    m.suggestions
+        .iter()
+        .map(|s| match s {
+            Suggestion::Link { target, .. } => target.clone(),
+            Suggestion::Entity { .. } => panic!("a search suggests links only"),
+        })
+        .collect()
+}
+
+#[test]
+fn esrch1_a_decision_the_sheet_does_not_list_stays_a_match() {
+    let (_d, mut r) = project();
+    let o = ops(&mut r);
+    let w = rdy_qa::golden::write_as(&approver(), &mut r, "work", json!([
+        {"op": "create", "type": "decision", "id": "$x", "parent": o.s,
+         "fields": {"statement": "The ledger may be eventually consistent", "status": "rejected",
+                    "decided_at": "2021-01-10T09:00:00Z", "recorded_at": "2021-01-10T09:00:00Z", "options": ["yes", "no"]},
+         "links": {"affects": [{"target": o.e}]}}
+    ]))
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let x = w.created["$x"].clone();
+    let res = find(&r, "ledger", false, None, 100_000);
+    assert!(
+        res.entities[0].decisions.iter().all(|d| d.id != x),
+        "a rejected decision is not listed"
+    );
+    let m = res
+        .matches
+        .iter()
+        .find(|m| m.id == x)
+        .unwrap_or_else(|| panic!("{:?}", res.matches));
+    assert!(m.history && m.suggestions.is_empty(), "{m:?}");
+    assert_eq!(
+        res.total, 2,
+        "p1 and the rejected decision: {:?}",
+        res.matches
+    );
+}
+
+#[test]
+fn esrch1_entities_past_max_resolved_and_their_blocks_stay_matches() {
+    let (_d, mut r) = project();
+    let o = ops(&mut r);
+    let more: Vec<Value> = (0..9)
+        .map(|i| json!({"op": "create", "type": "entity", "parent": o.s, "fields": {"name": format!("Ledger {i}"), "aliases": ["ledger"]}}))
+        .collect();
+    let w = write(&mut r, "work", Value::Array(more)).unwrap();
+    land(&mut r, "work").unwrap();
+    let mut all: Vec<String> = w.created.values().cloned().collect();
+    all.push(o.e.clone());
+    let res = find(&r, "ledger", false, None, 100_000);
+    assert_eq!((res.entities.len(), res.entities_omitted), (8, 2));
+    let unsheeted: Vec<String> = all
+        .iter()
+        .filter(|id| res.entities.iter().all(|s| s.id != **id))
+        .cloned()
+        .collect();
+    assert_eq!(unsheeted.len(), 2);
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "claim", "id": "$c", "parent": o.s, "body": "The ledger posts here.", "links": {"describes": [{"target": unsheeted[0]}]}}
+    ]))
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let c = w.created["$c"].clone();
+    let res = find(&r, "ledger", false, None, 100_000);
+    // the two entities' alias lines are identical, so one may sit in the other's `also`
+    let ids: Vec<&str> = res
+        .matches
+        .iter()
+        .flat_map(|m| std::iter::once(m.id.as_str()).chain(m.also.iter().map(|a| a.id.as_str())))
+        .collect();
+    for want in [&c, &unsheeted[0], &unsheeted[1]] {
+        assert!(
+            ids.contains(&want.as_str()),
+            "{want} is on no sheet, so it stays a match: {ids:?}"
+        );
+    }
+    let cm = res.matches.iter().find(|m| m.id == c).unwrap();
+    let targets = link_targets(cm);
+    assert_eq!(
+        targets.len(),
+        9,
+        "every resolved entity but the one it describes: {targets:?}"
+    );
+    assert!(!targets.contains(&unsheeted[0]));
+}
+
+#[test]
+fn esrch1_blocks_past_a_sheet_cap_stay_matches() {
+    let (_d, mut r) = project();
+    let o = ops(&mut r);
+    let more: Vec<Value> = (0..25)
+        .map(|i| json!({"op": "create", "type": "claim", "parent": o.s, "body": format!("The ledger keeps entry {i}."), "links": {"describes": [{"target": o.e}]}}))
+        .collect();
+    let w = write(&mut r, "work", Value::Array(more)).unwrap();
+    land(&mut r, "work").unwrap();
+    let mut claims: Vec<String> = w.created.values().cloned().collect();
+    claims.push(o.c1.clone());
+    let res = find(&r, "ledger", false, None, 100_000);
+    let s = &res.entities[0];
+    assert_eq!(
+        (s.facts.len(), s.omitted.get("facts").copied()),
+        (20, Some(7))
+    );
+    let mut cut: Vec<String> = claims
+        .iter()
+        .filter(|c| s.facts.iter().all(|f| f.id != **c))
+        .cloned()
+        .collect();
+    cut.sort();
+    assert!(!cut.is_empty());
+    let mut got: Vec<String> = res
+        .matches
+        .iter()
+        .map(|m| m.id.clone())
+        .filter(|id| *id != o.p1)
+        .collect();
+    got.sort();
+    assert_eq!(got, cut, "the claims the cap cut stay matches");
+    assert_eq!(res.total, cut.len() + 1);
+    assert!(
+        res.matches
+            .iter()
+            .filter(|m| m.id != o.p1)
+            .all(|m| m.suggestions.is_empty()),
+        "tied blocks get no suggestion"
+    );
+}
+
+#[test]
+fn esrch1_a_filtered_search_keeps_tied_blocks_and_the_sheet() {
+    let (_d, mut r) = project();
+    let o = ops(&mut r);
+    let q = SearchQuery {
+        text: "ledger".into(),
+        filters: rdy_engine::search::SearchFilters {
+            types: vec!["claim".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let res = r
+        .read()
+        .search(&Scope::Canon, &q, None, Some(100_000))
+        .unwrap();
+    assert_eq!(res.entities.len(), 1, "the sheet still comes first");
+    assert_eq!(
+        res.matches
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![o.c1.as_str()]
+    );
+    assert!(
+        res.matches[0].suggestions.is_empty(),
+        "c1 describes the entity already"
+    );
+}
+
+#[test]
+fn esrch1_a_suggestion_needs_the_name_as_whole_words() {
+    let (_d, mut r) = project();
+    let o = ops(&mut r);
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "prose", "id": "$sub", "parent": o.s, "body": "The subledger reconciles nightly."},
+        {"op": "create", "type": "code", "id": "$code", "parent": o.s, "body": "ledger_client.connect()", "fields": {"lang": "py"}},
+        {"op": "create", "type": "note", "id": "$note", "parent": o.s, "body": "Notes.", "fields": {"key": "LEDGER-NOTES"}}
+    ]))
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let id = |k: &str| w.created[k].clone();
+    let q = SearchQuery {
+        text: "ledger".into(),
+        ignore_case: true,
+        ..Default::default()
+    };
+    let res = r
+        .read()
+        .search(&Scope::Canon, &q, None, Some(100_000))
+        .unwrap();
+    let all: Vec<&rdy_engine::search::SearchMatch> = res.matches.iter().collect();
+    let get = |k: &str| {
+        *all.iter()
+            .find(|m| m.id == id(k))
+            .unwrap_or_else(|| panic!("{k} is a hit: {all:?}"))
+    };
+    for k in ["$sub", "$code", "$note"] {
+        assert!(
+            get(k).suggestions.is_empty(),
+            "{k}: {:?}",
+            get(k).suggestions
+        );
+    }
+    let p1 = res.matches.iter().find(|m| m.id == o.p1).unwrap();
+    assert_eq!(
+        link_targets(p1),
+        vec![o.e.clone()],
+        "guard: a whole-word mention keeps its suggestion"
+    );
+}
