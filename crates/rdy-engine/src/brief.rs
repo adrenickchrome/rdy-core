@@ -546,7 +546,7 @@ fn e_page_moved() -> RdyError {
     RdyError::new(
         E_PAGE_STALE,
         "the briefing moved since its first page: brief again",
-        "brief again without page, then page from the new next",
+        PAGE_STALE_FIX,
     )
 }
 
@@ -744,7 +744,7 @@ impl ReadState {
             return Err(RdyError::new(
                 E_PAGE_STALE,
                 "the briefing behind this page is unknown (the daemon restarted, or it was evicted): brief again",
-                "brief again without page, then page from the new next",
+                PAGE_STALE_FIX,
             ));
         };
         let (skip, digest, made_in) = parse_tail(rest)?;

@@ -35,6 +35,10 @@ fn erow1_every_view_brief_and_daemon_code_has_a_row() {
         let (when, fix) = row(code);
         assert!(!when.is_empty() && !fix.is_empty(), "{code}");
     }
+    // one fix for every E_PAGE_STALE, briefing cursor and read cursor alike
+    assert_eq!(row(E_PAGE_STALE).1, PAGE_STALE_FIX);
+    let (_, fix) = row("W_SKELETON_MISSING");
+    assert!(fix.contains("add the section"), "{fix}");
     let codes: Vec<&str> = ERROR_ROWS.iter().map(|(c, _, _)| *c).collect();
     let mut unique = codes.clone();
     unique.sort_unstable();

@@ -558,6 +558,12 @@ fn status_text(v: &Value) -> String {
 }
 
 fn show_text(v: &Value) -> String {
+    if v["proposal"].is_object() {
+        // the printer ends every output with a newline; proposal_text already does
+        return rdy_engine::proposal_text(&v["proposal"])
+            .trim_end_matches('\n')
+            .to_string();
+    }
     let status = v["status_words"].as_str();
     let mut fields = v["fields"].clone();
     if status.is_some()

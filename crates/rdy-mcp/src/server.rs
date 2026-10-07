@@ -1,11 +1,12 @@
 use crate::order::{Order, Ordered, Stamped};
+use crate::params::Parameters;
 use crate::tools::{self, *};
 use crate::view_tools;
 use rdy_engine::engine::{Engine, Local};
 use rdy_engine::{E_INTERNAL, E_LIMIT, RdyError};
 use rmcp::{
     ServerHandler, ServiceExt,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::router::tool::ToolRouter,
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
         ServerCapabilities, ServerConfig,
@@ -47,16 +48,21 @@ impl RdyServer {
 
     /// Runs one tool on the blocking pool, so no tool blocks the executor. A panic inside it
     /// becomes an `E_INTERNAL` reply (so the request is still answered) and republishes a clean
-    /// state, which the panic may have left half-updated.
+    /// state, which the panic may have left half-updated. Parameters that did not parse
+    /// (`Err`, see [`crate::params`]) are answered at once, as an ordinary tool error.
     ///
     /// Order is not kept here: a session served through [`serve`] runs one stamped call at a
     /// time, in arrival order, and writes the replies in that order (see [`crate::order`]).
     pub(crate) async fn run<P: Send + 'static>(
         &self,
         tool: &'static str,
-        p: P,
+        p: Result<P, RdyError>,
         f: fn(&mut McpState, P) -> Result<serde_json::Value, RdyError>,
     ) -> CallToolResult {
+        let p = match p {
+            Ok(p) => p,
+            Err(e) => return result(Err(e)),
+        };
         let state = Arc::clone(&self.state);
         let joined = tokio::task::spawn_blocking(move || {
             let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
@@ -126,9 +132,9 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Read a document, folder or subtree by id or path (e.g. wallets/transactions) as compact lines (default: each block's id, type and its whole statement, prompt, name or title, else its body's first sentence; references as bare ids), markdown or yaml. max_tokens cuts long output. scope is 'canon', an existing view's name (or your session's), 'tag:<version>' or 'landing:<id>'; an unknown view is E_NOT_FOUND. A compact line ends with [implements <decision>] or [editorial <class>] when the change that last wrote the block carried one; when the store cannot say which change that was, the markers are left out and warnings says why. `id` may be `id@version` or a ref line `[id@version] …`, read under that version."
+        description = "Read a document, folder or subtree by id or path (e.g. wallets/transactions) as compact lines (default: each block's id, type and its whole statement, prompt, name or title, else its body's first sentence; references as bare ids), markdown or yaml. max_tokens pages long output by whole blocks: a cut read returns truncated, omitted (the blocks left) and next; pass next as page to continue. A block larger than max_tokens is shown alone and cut, and cut: {id, omitted_bytes} names it. scope is 'canon', an existing view's name (or your session's), 'tag:<version>' or 'landing:<id>'; an unknown view is E_NOT_FOUND. A compact line ends with [implements <decision>] or [editorial <class>] when the change that last wrote the block carried one; when the store cannot say which change that was, the markers are left out and warnings says why. `id` may be `id@version` or a ref line `[id@version] …`, read under that version. id may also be a proposal version, P-<id>@<n> or P-<id> (its latest): its title, proposer, changes with block counts, the conflicts and other reasons that block approving it, and its version chain. pattern keeps only matching blocks (a substring, or /regex/); <doc>#<heading-slug> reads one section."
     )]
-    async fn rdy_read(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
+    async fn rdy_read(&self, Parameters(p): Parameters<ReadParams>) -> CallToolResult {
         self.run("rdy_read", p, tools::rdy_read).await
     }
 
@@ -182,7 +188,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Propose a decision that supersedes an existing one, wholly or a named part. It inherits the old decision's affects, depends_on, conditional_on and refines links unless you give that kind (an empty list drops it); the result's inherited lists what was copied. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
+        description = "Propose a decision that supersedes an existing one. When the change retires only some of the old decision's rules, pass part (the words of the rules it retires) and the rest stays in force; omit part to supersede all of it. It inherits the old decision's affects, depends_on, conditional_on and refines links unless you give that kind (an empty list drops it); the result's inherited lists what was copied. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
     )]
     async fn rdy_supersede(&self, Parameters(p): Parameters<SupersedeParams>) -> CallToolResult {
         self.run("rdy_supersede", p, tools::rdy_supersede).await
@@ -252,7 +258,7 @@ impl ServerHandler for RdyServer {
 }
 
 /// What the server tells a host about rdy.
-pub const INSTRUCTIONS: &str = "rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Read and write through rdy's tools, not the working-copy files. Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>). Write with rdy_write; propose with rdy_propose. Work in your own view; include others' changes, never write into their views. Conflicts are recorded, not errors: resolve one by writing the block. When a block comes back as a consequence a second time in a session, do not rewrite it again: confirm it (repin) or ask the person, and show what remains as a change plan.";
+pub const INSTRUCTIONS: &str = "rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Read and write through rdy's tools, not the working-copy files. Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>). Write with rdy_write; propose with rdy_propose. Work in your own view; include others' changes, never write into their views. Conflicts are recorded, not errors: resolve one by writing the block. When a block comes back as a consequence a second time in a session, do not rewrite it again: confirm it (repin) or ask the person, and show what remains as a change plan. Before editing a block, read it with format markdown or yaml: compact lines are a summary. When a change retires only some of a decision's rules, supersede that part (rdy_supersede with part), not the whole decision.";
 
 /// The longest id value [`IdScanner`] will capture; a longer one counts as no id.
 const MAX_ID_BYTES: usize = 1024;
@@ -914,7 +920,7 @@ mod mcp1_id_tests {
             role: "writer".into(),
             view: None,
         };
-        let out = serde_json::to_value(server.run("rdy_session", p, tools::rdy_session).await)
+        let out = serde_json::to_value(server.run("rdy_session", Ok(p), tools::rdy_session).await)
             .unwrap()
             .to_string();
         assert!(
@@ -928,8 +934,8 @@ mod mcp1_id_tests {
             role: "writer".into(),
             view: None,
         };
-        let out =
-            serde_json::to_value(server.run("rdy_session", p, tools::rdy_session).await).unwrap();
+        let out = serde_json::to_value(server.run("rdy_session", Ok(p), tools::rdy_session).await)
+            .unwrap();
         assert_ne!(out["isError"], true, "{out}");
     }
 
@@ -948,9 +954,10 @@ mod mcp1_id_tests {
             role: "writer".into(),
             view: None,
         };
-        let out = serde_json::to_value(server.run("rdy_session", bad, tools::rdy_session).await)
-            .unwrap()
-            .to_string();
+        let out =
+            serde_json::to_value(server.run("rdy_session", Ok(bad), tools::rdy_session).await)
+                .unwrap()
+                .to_string();
         assert!(
             out.contains("E_INTERNAL") && out.contains("deliberate panic"),
             "{out}"
@@ -961,14 +968,18 @@ mod mcp1_id_tests {
             role: "writer".into(),
             view: None,
         };
-        let out =
-            serde_json::to_value(server.run("rdy_session", ok, tools::rdy_session).await).unwrap();
+        let out = serde_json::to_value(server.run("rdy_session", Ok(ok), tools::rdy_session).await)
+            .unwrap();
         assert_ne!(out["isError"], true, "{out}");
         for _ in 0..3 {
             let t = std::time::Instant::now();
             let o = serde_json::to_value(
                 server
-                    .run("rdy_overview", ScopeParams::default(), tools::rdy_overview)
+                    .run(
+                        "rdy_overview",
+                        Ok(ScopeParams::default()),
+                        tools::rdy_overview,
+                    )
                     .await,
             )
             .unwrap();
