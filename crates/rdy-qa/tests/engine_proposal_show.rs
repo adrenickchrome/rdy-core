@@ -89,10 +89,21 @@ fn pshow1_an_old_version_is_superseded_and_a_landed_one_names_its_landing() {
         ("landed", Some(landing.as_str()))
     );
     assert_eq!(s.blocking, vec![format!("landed in {}", &landing[..12])]);
+    // @2 carried @1's change too, so @1 has landed as well, as approving it now would say
+    // (E_ALREADY_LANDED)
     assert!(
-        s.versions[1].landed && !s.versions[0].landed,
+        s.versions[1].landed && s.versions[0].landed,
         "{:?}",
         s.versions
+    );
+    let old = r.read().proposal_show(&p1.r#ref).unwrap();
+    assert_eq!(
+        (old.state.as_str(), old.landing.as_deref()),
+        ("landed", Some(landing.as_str()))
+    );
+    assert_eq!(
+        r.land_report(&approver(), &p1.r#ref).unwrap_err().code,
+        E_ALREADY_LANDED
     );
 }
 
@@ -161,4 +172,64 @@ fn pshow1_refs_are_recognised_and_unknown_ones_surface() {
         st.proposal_show(&format!("{stable}@9")).unwrap_err().code,
         E_NOT_FOUND
     );
+}
+
+/// Approving a version that carries a decision lands an acceptance change in a final version
+/// (`P-x@2`); the version the human approved still reads as landed, as the gate and the log say.
+#[test]
+fn pshow1_an_approved_version_with_a_decision_reads_landed_like_the_gate_and_the_log() {
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    r.decide(
+        &writer(),
+        "work",
+        DecisionInput {
+            parent: section,
+            statement: "Pins record content".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let p1 = r.propose(&writer(), "work", "decide").unwrap();
+    let info = r.land_report(&approver(), &p1.r#ref).unwrap();
+    assert_eq!(info.approved, p1.r#ref);
+    let st = r.read();
+    let row = st.log_rows().unwrap().remove(0);
+    assert_eq!(row.landing, info.landing);
+    assert_eq!(row.approved.as_deref(), Some(p1.r#ref.as_str()));
+    assert_ne!(
+        row.proposal, p1.id,
+        "the fixture lands an acceptance version after the approved one"
+    );
+    let s = st.proposal_show(&p1.r#ref).unwrap();
+    assert_eq!(
+        (s.state.as_str(), s.landing.as_deref()),
+        ("landed", Some(info.landing.as_str()))
+    );
+    assert_eq!(
+        s.blocking,
+        vec![format!("landed in {}", &info.landing[..12])]
+    );
+    assert!(s.conflicts.is_empty(), "{s:?}");
+    let chain: Vec<(&str, bool, bool)> = s
+        .versions
+        .iter()
+        .map(|v| (v.id.as_str(), v.latest, v.landed))
+        .collect();
+    assert_eq!(
+        chain,
+        vec![
+            (p1.id.as_str(), false, true),
+            (row.proposal.as_str(), true, true)
+        ]
+    );
+    let fin = st.proposal_show(&stable_of(&p1)).unwrap();
+    assert_eq!(
+        (fin.id.as_str(), fin.state.as_str(), fin.landing.as_deref()),
+        (row.proposal.as_str(), "landed", Some(info.landing.as_str()))
+    );
+    drop(st);
+    let e = r.land_report(&approver(), &p1.r#ref).unwrap_err();
+    assert_eq!(e.code, E_ALREADY_LANDED, "{e}");
 }

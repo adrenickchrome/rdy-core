@@ -32,7 +32,8 @@ pub struct ProposalVersionRow {
     pub id: String,
     /// Only the last version of the chain.
     pub latest: bool,
-    /// True only for the latest version, when it has landed.
+    /// Any of its changes landed (the gate's `landed_as` test): the version a human approved and
+    /// the final version a landing wrote after it both read landed.
     pub landed: bool,
 }
 
@@ -54,7 +55,8 @@ pub struct ProposalShow {
     pub proposed_at: String,
     /// Canon's head when this version was written.
     pub canon_at: Option<String>,
-    /// `open`, `superseded` or `landed`.
+    /// `landed` if any of its changes landed, else `superseded` if a newer version exists, else
+    /// `open`.
     pub state: String,
     /// The landing that carried this version, when `state` is `landed`.
     pub landing: Option<String>,
@@ -95,33 +97,32 @@ impl ReadState {
         } else {
             reader.proposal(&latest)?
         };
-        let latest_landing = landed_as(self, &latest_p)?;
-        // The chain, oldest first.
-        let mut chain = vec![latest];
+        // The chain, oldest first, each version with the gate's own landed test.
+        let mut chain = vec![(latest, landed_as(self, &latest_p)?.is_some())];
         let mut cur = latest_p.prev;
         while let Some(h) = cur {
-            chain.push(h);
-            cur = reader.proposal(&h)?.prev;
+            let v = reader.proposal(&h)?;
+            chain.push((h, landed_as(self, &v)?.is_some()));
+            cur = v.prev;
         }
         chain.reverse();
         let stable_short = pref.stable.short();
         let versions: Vec<ProposalVersionRow> = chain
             .iter()
             .enumerate()
-            .map(|(i, h)| {
-                let is_latest = *h == latest;
-                ProposalVersionRow {
-                    r#ref: format!("P-{stable_short}@{}", i + 1),
-                    id: h.to_string(),
-                    latest: is_latest,
-                    landed: is_latest && latest_landing.is_some(),
-                }
+            .map(|(i, (h, landed))| ProposalVersionRow {
+                r#ref: format!("P-{stable_short}@{}", i + 1),
+                id: h.to_string(),
+                latest: *h == latest,
+                landed: *landed,
             })
             .collect();
-        let (state, landing) = if pref.version != latest {
-            ("superseded", None)
-        } else if let Some(l) = latest_landing {
+        // landed first, as the gate refuses it (E_ALREADY_LANDED): approving a version that
+        // carries a decision lands a later, final version, and the approved one has landed too
+        let (state, landing) = if let Some(l) = landed_as(self, &p)? {
             ("landed", Some(l))
+        } else if pref.version != latest {
+            ("superseded", None)
         } else {
             ("open", None)
         };
