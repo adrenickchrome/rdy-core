@@ -114,6 +114,48 @@ fn fields_of(d: &DecisionInput) -> BTreeMap<String, Value> {
 }
 
 impl Rdy {
+    /// The parent a decision is recorded under (FW-PR2): `given` as it is, else the doc that
+    /// `decisions.home` names in `view`. Fails with `E_BAD_INPUT` when there is neither, and with
+    /// `E_CONFIG` when the home names no block or a block that is not a doc.
+    pub fn decision_parent(&self, view: &str, given: Option<&str>) -> Result<String, RdyError> {
+        if let Some(p) = given {
+            return Ok(p.to_string());
+        }
+        let st = self.read();
+        let Some(home) = st.decisions_home() else {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "no parent given, and the project names no decision home",
+                "pass parent (the doc or section to record the decision in), or set decisions.home in .rdy/config.yaml to a doc's path, key or id",
+            ));
+        };
+        let scope = Scope::View(view.to_string());
+        let named = st
+            .resolve_id(&scope, home)
+            .and_then(|id| st.block(&scope, &id));
+        let block = named.map_err(|e| {
+            RdyError::new(
+                E_CONFIG,
+                format!(
+                    "decisions.home {home:?} names no block in view {view}: {}",
+                    e.message
+                ),
+                "set decisions.home in .rdy/config.yaml to an existing doc's path, key or id",
+            )
+        })?;
+        if block.block_type != "doc" {
+            return Err(RdyError::new(
+                E_CONFIG,
+                format!(
+                    "decisions.home {home:?} is a {}, not a doc",
+                    block.block_type
+                ),
+                "name a doc: a decision cannot sit directly in a folder yet",
+            ));
+        }
+        Ok(block.id.to_string())
+    }
+
     fn write_decision(
         &mut self,
         s: &Session,

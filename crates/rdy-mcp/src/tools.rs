@@ -164,7 +164,8 @@ pub struct WriteParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct DecideParams {
     pub view: Option<String>,
-    pub parent: String,
+    /// The doc or section to record the decision in (id, key or path). Omit to record it in the project's decision home (decisions.home).
+    pub parent: Option<String>,
     pub statement: String,
     pub options: Option<Vec<String>>,
     pub authority_basis: Option<String>,
@@ -202,7 +203,8 @@ pub struct RevokeParams {
     pub view: Option<String>,
     pub target: String,
     pub reason: String,
-    pub parent: String,
+    /// The doc or section to record the revoking decision in (id, key or path). Omit to record it in the project's decision home (decisions.home).
+    pub parent: Option<String>,
     /// The briefing token from rdy_brief. Required when the write touches stable content.
     pub brief: Option<String>,
     /// The budget for the response's consequences.
@@ -982,6 +984,9 @@ pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
 const TEXT_RULES: &str = "Bodies and text fields: **bold**, *italic*, `code`, [link](https://… or a relative path), and in bodies - bullets and 1. numbered lists (indent two spaces to nest). No raw HTML. {{id}} or {{id|words}} references a block; \\{{ is a literal {{ and a leading @ in words is written \\@. fields.key: optional short human id, unique per project ignoring case, letters/digits/-_. , not shaped like a block id; a doc or folder created without one gets one from its path and fields.key_auto: true. If another block holds a key rdy derived when the doc is proposed or landed, rdy gives it a new one (rdy_propose and the landing list it under keys); a key you set is never changed, and a clash on it is E_KEY_CLASH. fields.reflects: optional list of code path globs (e.g. crates/*/src/error.rs) this block follows; rdy_brief {code_path} lists the blocks whose globs match a file.";
 
 /// How to edit with briefings, in `rdy_schema`.
+/// The decision home's rule, in `rdy_schema` (FW-PR2).
+pub const DECISIONS_RULE: &str = "Record new decisions in the decision home (rdy_decide without parent records there) and link the content they govern to them with decided_by; don't put decisions inside content docs. With no home configured, pass parent, or set decisions.home in .rdy/config.yaml.";
+
 pub const EDIT_LOOP_DOC: &str = "Brief before editing: rdy_brief {ids or path} returns governs, dependents, will_go_stale, suspects and base (each covered block's version and the briefing token). Pass brief: <token> on rdy_write, rdy_decide, rdy_supersede (inside decision) and rdy_revoke. A write that touches stable content (a block whose own or inherited lifecycle is stable before or after the op; for a create, its parent's) needs a current briefing that covers it: brief the block, or its parent to create under it. A briefing is current while no block it recorded has moved in the write's view. Drafts need none; a stale one there only warns (W_BRIEF_STALE). E_BRIEF_REQUIRED and E_BRIEF_STALE carry a fresh briefing for exactly the blocks the write touches: retry with its base.token. Every write response lists consequences: {id, block, kind (suspect or dependent), because {edge, changed}, follow_up (update, confirm, reaffirm or resolve)}; max_tokens bounds them.";
 
 pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError> {
@@ -1032,6 +1037,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             "link_shape": {"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE},
             "ops": WRITE_OPS.iter().map(|(n, s)| (n.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
             "views": view_tools::SCHEMA_DOC,
+            "decisions": {"home": st_.decisions_home(), "rule": DECISIONS_RULE},
             "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT, "socket_line_bytes": MAX_REQUEST_BYTES, "transport": TRANSPORT_NOTE},
             "errors": {
                 "E_VIEW_OWNER": {"when": "a non-human session commits into a view it doesn't own", "fix": "write to your own view, fork it, or include its changes into your own view"},
@@ -1176,7 +1182,8 @@ fn decision_input(p: DecideParams) -> DecisionInput {
     .map(|(k, _)| k.to_string())
     .collect();
     DecisionInput {
-        parent: p.parent,
+        // a placeholder: the tools overwrite it with the resolved parent (given, or the home)
+        parent: p.parent.unwrap_or_default(),
         statement: p.statement,
         options: p.options.unwrap_or_default(),
         authority_basis: p.authority_basis,
@@ -1205,9 +1212,11 @@ pub fn rdy_decide(st: &mut McpState, p: DecideParams) -> Result<Value, RdyError>
     let s = session(st)?;
     let view = p.view.clone().unwrap_or_else(|| st.view.clone());
     let max_tokens = p.max_tokens;
-    let input = decision_input(p);
+    let parent = p.parent.clone();
+    let mut input = decision_input(p);
     let v = view.clone();
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
+        input.parent = r.decision_parent(&view, parent.as_deref())?;
         r.decide(&s, &view, input)
     })
     .map(|v| report_once(st, v))
@@ -1218,9 +1227,11 @@ pub fn rdy_supersede(st: &mut McpState, p: SupersedeParams) -> Result<Value, Rdy
     let s = session(st)?;
     let view = p.decision.view.clone().unwrap_or_else(|| st.view.clone());
     let max_tokens = p.decision.max_tokens;
-    let (old, part, input) = (p.old, p.part, decision_input(p.decision));
+    let parent = p.decision.parent.clone();
+    let (old, part, mut input) = (p.old, p.part, decision_input(p.decision));
     let v = view.clone();
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
+        input.parent = r.decision_parent(&view, parent.as_deref())?;
         r.supersede(&s, &view, &old, part, input)
     })
     .map(|v| report_once(st, v))
@@ -1230,10 +1241,11 @@ pub fn rdy_revoke(st: &mut McpState, p: RevokeParams) -> Result<Value, RdyError>
     check_tokens(p.max_tokens)?;
     let s = session(st)?;
     let view = p.view.unwrap_or_else(|| st.view.clone());
-    let (brief, max_tokens) = (p.brief, p.max_tokens);
+    let (brief, max_tokens, parent) = (p.brief, p.max_tokens, p.parent.clone());
     let v = view.clone();
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
-        r.revoke(&s, &view, &p.target, &p.reason, &p.parent, brief)
+        let pid = r.decision_parent(&view, parent.as_deref())?;
+        r.revoke(&s, &view, &p.target, &p.reason, &pid, brief)
     })
     .map(|v| report_once(st, v))
 }

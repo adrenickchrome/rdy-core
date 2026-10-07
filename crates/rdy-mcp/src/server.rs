@@ -181,7 +181,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Propose a decision (status proposed; accepted when its proposal lands). Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
+        description = "Propose a decision (status proposed; accepted when its proposal lands). Omit parent to record it in the project's decision home. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
     )]
     async fn rdy_decide(&self, Parameters(p): Parameters<DecideParams>) -> CallToolResult {
         self.run("rdy_decide", p, tools::rdy_decide).await
@@ -195,7 +195,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Propose revoking an existing decision. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
+        description = "Propose revoking an existing decision. Omit parent to record it in the project's decision home. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
     )]
     async fn rdy_revoke(&self, Parameters(p): Parameters<RevokeParams>) -> CallToolResult {
         self.run("rdy_revoke", p, tools::rdy_revoke).await
@@ -258,7 +258,7 @@ impl ServerHandler for RdyServer {
 }
 
 /// What the server tells a host about rdy.
-pub const INSTRUCTIONS: &str = "rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Read and write through rdy's tools, not the working-copy files. Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>). Write with rdy_write; propose with rdy_propose. Work in your own view; include others' changes, never write into their views. Conflicts are recorded, not errors: resolve one by writing the block. Before editing a block, read it with format markdown or yaml: compact lines are a summary. When a change retires only some of a decision's rules, supersede that part (rdy_supersede with part), not the whole decision.";
+pub const INSTRUCTIONS: &str = "rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Read and write through rdy's tools, not the working-copy files. Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>). Write with rdy_write; propose with rdy_propose. Work in your own view; include others' changes, never write into their views. Conflicts are recorded, not errors: resolve one by writing the block. Before editing a block, read it with format markdown or yaml: compact lines are a summary. When a change retires only some of a decision's rules, supersede that part (rdy_supersede with part), not the whole decision. Record decisions in the project's decision home (rdy_decide without parent records there; rdy_schema names it) and link content to them with decided_by; don't put decisions inside content docs.";
 
 /// The longest id value [`IdScanner`] will capture; a longer one counts as no id.
 const MAX_ID_BYTES: usize = 1024;
