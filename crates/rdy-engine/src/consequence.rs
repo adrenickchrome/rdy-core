@@ -460,7 +460,8 @@ pub(crate) fn attach(v: &mut serde_json::Value, c: Result<Consequences, RdyError
 
 /// `write_typed`, then the write's consequences read from the state it published: on success
 /// `consequences` is always present (with `consequences_omitted` when a cut dropped some, or
-/// `consequences_error` when they could not be read; the write stands); on a briefing refusal
+/// `consequences_error` when they could not be read; the write stands), and the write's
+/// suggestions (FW-EN3), which never fail the write; on a briefing refusal
 /// the error carries a fresh briefing for exactly the blocks the write touches.
 pub fn write_and_report<T: Serialize + 'static>(
     engine: &dyn Engine,
@@ -492,6 +493,22 @@ pub fn write_and_report<T: Serialize + 'static>(
             attach(&mut v, c);
         }
         None => v["consequences"] = serde_json::json!([]),
+    }
+    match change {
+        Some(h) => match engine.read().suggestions(&Scope::View(view.into()), &h) {
+            Ok((s, n)) => {
+                v["suggestions"] =
+                    serde_json::to_value(&s).expect("suggestions serialize: strings only");
+                if n > 0 {
+                    v["suggestions_omitted"] = n.into();
+                }
+            }
+            Err(e) => {
+                v["suggestions"] = serde_json::json!([]);
+                v["suggestions_error"] = format!("{}: {}", e.code, e.message).into();
+            }
+        },
+        None => v["suggestions"] = serde_json::json!([]),
     }
     Ok(v)
 }
