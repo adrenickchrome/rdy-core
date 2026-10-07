@@ -322,7 +322,8 @@ impl ReadState {
     }
 
     /// What differs from `b` to `a`, block by block, sorted by id. `conflicted` lists the blocks
-    /// `a`'s merge (and `b`'s, when it is a view) records a conflict on.
+    /// `a`'s merge (and `b`'s, when `b` is a view or `inflight`) records a conflict on. Canon
+    /// and an as-of scope have no conflicts.
     pub fn compare(&self, a: &Scope, b: &Scope) -> Result<Compare, RdyError> {
         let (ma, mb) = (self.materialized(a)?, self.materialized(b)?);
         let ids: BTreeSet<&BlockId> = ma.ids().chain(mb.ids()).collect();
@@ -359,7 +360,7 @@ impl ReadState {
             }
         }
         let mut conflicts = (*self.conflicts(a)?).clone();
-        if matches!(b, Scope::View(_)) {
+        if !matches!(b, Scope::Canon | Scope::At(_)) {
             conflicts.extend(self.conflicts(b)?.iter().cloned());
         }
         let mut by_block: BTreeMap<BlockId, String> = BTreeMap::new();

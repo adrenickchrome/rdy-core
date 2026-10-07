@@ -82,6 +82,44 @@ fn insc1_two_views_editing_one_block_read_as_a_conflict_in_flight() {
 }
 
 #[test]
+fn insc1_compare_lists_inflight_conflicts_on_either_side() {
+    let (_d, mut r) = project();
+    let (_doc, _section, claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let v = version_of(&r, &Scope::Canon, &claim);
+    for view in ["a", "b"] {
+        write(
+            &mut r,
+            view,
+            json!([{"op": "update", "id": claim, "base": v, "body": view}]),
+        )
+        .unwrap();
+    }
+    let st = r.read();
+    let conflicted = |a: &Scope, b: &Scope| -> Vec<(String, Option<String>)> {
+        st.compare(a, b)
+            .unwrap()
+            .conflicted
+            .into_iter()
+            .map(|e| (e.id, e.conflict))
+            .collect()
+    };
+    let forward = conflicted(&Scope::Inflight, &Scope::Canon);
+    assert_eq!(forward.len(), 1);
+    assert_eq!(forward[0].0, claim);
+    assert_eq!(
+        conflicted(&Scope::Canon, &Scope::Inflight),
+        forward,
+        "compare lists b's in-flight conflicts too"
+    );
+    // a view compared with the in-flight state sees the in-flight conflict
+    assert_eq!(
+        conflicted(&Scope::View("a".into()), &Scope::Inflight),
+        forward
+    );
+}
+
+#[test]
 fn insc1_inflight_is_a_reserved_name_and_a_read_only_scope() {
     let (_d, mut r) = project();
     seed_doc(&mut r, "seed");
