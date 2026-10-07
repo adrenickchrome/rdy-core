@@ -107,31 +107,49 @@ fn spec_target(op: &str) -> Option<String> {
         }
         "history_100" | "last_changes_doc" | "log_page_20" => "< 5 ms p99 (reads, spec 11)",
         "log_full" => "recorded: 2000 landings, no spec target",
-        // bounds on refusing hostile input and on big packs, moved here from the functional
-        // tests (a wall-clock bound in a functional gate fails on a loaded machine)
-        "refuse_import_20mb_scalar" | "refuse_check_20mb_scalar" | "refuse_import_symlink" => {
-            "recorded, no spec budget: a hostile export refused in bounded time (was < 5 s in io, io_tree)"
+        // bounds the functional tests used to assert by the clock, moved here (a wall-clock bound
+        // in a functional gate fails on a loaded machine, not on a defect); each keeps its figure
+        "refuse_import_20mb_scalar" => {
+            "< 5 s: an export with a 20 MB scalar refused by import (the old io bound)"
         }
-        "blob_forged_manifest_refuse" | "figure_forged_manifest_refuse" => {
-            "recorded, no spec budget: a forged 30,000-chunk manifest refused by structure, no chunk read (was < 2 s in store blob1)"
+        "refuse_check_20mb_scalar" => {
+            "< 5 s: the same export reported by rdy check (the old io bound)"
+        }
+        "refuse_import_symlink" => {
+            "< 5 s: an export with a symlink loop refused by import (the old io_tree bound)"
+        }
+        "blob_forged_manifest_refuse" => {
+            "< 2 s: has_blob and get_blob of a forged 30,000-chunk manifest (the old store blob1 bound)"
+        }
+        "figure_forged_manifest_refuse" => {
+            "< 2 s: a figure write naming a forged 30,000-chunk manifest refused (the old store blob1 bound)"
         }
         "pack_resolve_1000_areas" => {
-            "recorded, no spec budget: 1,000 areas of 100 globs resolve (was < 2 s in qapack1)"
+            "< 2 s: 1,000 areas of 100 globs added and resolved (the old qapack1 bound)"
         }
         "areas_lookup_100k_globs" => {
-            "recorded, no spec budget: one path against 100k globs (was < 500 ms in qapack1)"
+            "< 500 ms: one path against 100k globs (the old qapack1 bound)"
         }
         "areas_lookup_pathological" => {
-            "recorded, no spec budget: 100 lookups of a 64-segment path against 60 `**` and 50 `*?` (was < 500 ms in qapack1)"
+            "< 500 ms: 100 lookups of a 64-segment path against 60 `**` and 50 `*?` (the old qapack1 bound)"
         }
         "pack_resolve_2000_types" => {
-            "recorded, no spec budget: a pack of 2,000 block types resolves (was < 2 s in schema)"
+            "< 2 s: a pack of 2,000 block types added and resolved (the old schema bound)"
         }
         "daemon_read_during_big_write" => {
-            "< 5 ms p99 (the read budget, spec 11): a status read on another connection while a write of the most ops one write takes runs (was < 50 ms in conc1)"
+            "< 50 ms: the worst status read on another connection while a write of the most ops one write takes runs (the old conc1 bound)"
         }
         "daemon_mcp_overview" => {
-            "< 5 ms p99 (the read budget, spec 11): rdy_overview over an mcp connection to the daemon (was < 2 s per call in mcp, mcp_pool)"
+            "< 5 ms p99 (the read budget, spec 11): rdy_overview over an mcp connection to the daemon"
+        }
+        "mcp_stdio_overview" => {
+            "< 2 s per call: rdy_overview over `rdy mcp --no-daemon` (the old mcp and mcp_pool bound)"
+        }
+        "mcp_stdio_write_max_ops" => {
+            "< 5 s: the largest allowed write (5,000 ops) over `rdy mcp --no-daemon` (the old mcp2 bound)"
+        }
+        "mcp_stdio_oversized_line" => {
+            "< 10 s: a 17 MiB request line sent and refused over `rdy mcp --no-daemon` (the old mcp2 bound)"
         }
         _ => return None,
     };
@@ -1118,7 +1136,9 @@ pub fn run_workload() -> Vec<Measure> {
     }));
     drop(r);
     out.extend(daemon_ops(&proj, ""));
+    out.extend(daemon_mcp_on_copy(&proj, dir.path()));
     out.extend(bound_ops(dir.path()));
+    out.extend(stdio_mcp_ops(dir.path()));
     // the view ops last: the views and landings they leave behind would move the ops above
     let mut r = Rdy::open(&proj).expect("open");
     tier_views(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
@@ -1186,9 +1206,6 @@ fn daemon_ops(proj: &std::path::Path, sfx: &str) -> Vec<Measure> {
         rt.block_on(c.ctl("new_doc", json!({"path": format!("dw-{i}"), "view": "va"})))
             .unwrap_or_else(|e| panic!("new_doc: {e}"));
     }));
-    if sfx.is_empty() {
-        out.extend(rt.block_on(daemon_mcp_ops(proj, &mut c)));
-    }
     drop(c);
     daemon_stop(run);
     // one untimed start and stop, so the timed starts open a current index
@@ -1204,6 +1221,47 @@ fn daemon_ops(proj: &std::path::Path, sfx: &str) -> Vec<Measure> {
         daemon_stop(run);
         took
     }));
+    out
+}
+
+/// Copies the project at `from` to `to` (no handle may be open on it), leaving out `.rdy/run`.
+fn copy_project(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("mkdir");
+    for e in std::fs::read_dir(from).expect("read_dir") {
+        let p = e.expect("entry").path();
+        let name = p.file_name().expect("a name");
+        if name == "run"
+            && p.parent()
+                .and_then(|d| d.file_name())
+                .is_some_and(|d| d == ".rdy")
+        {
+            continue;
+        }
+        let t = to.join(name);
+        if p.is_dir() {
+            copy_project(&p, &t);
+        } else {
+            std::fs::copy(&p, &t).expect("copy");
+        }
+    }
+}
+
+/// The daemon's mcp ops ([`daemon_mcp_ops`]) on a copy of the typical project under `parent`:
+/// their big writes would otherwise grow the project the later ops (and the cold starts) open.
+fn daemon_mcp_on_copy(proj: &std::path::Path, parent: &std::path::Path) -> Vec<Measure> {
+    let copy = parent.join("p-mcp");
+    copy_project(proj, &copy);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("client runtime");
+    let run = daemon_start(&copy);
+    let mut c = rt.block_on(daemon_ready(&copy));
+    rt.block_on(c.ctl("session", json!({"actor": null, "run": null})))
+        .unwrap_or_else(|e| panic!("the session op failed: {e}"));
+    let out = rt.block_on(daemon_mcp_ops(&copy, &mut c));
+    drop(c);
+    daemon_stop(run);
     out
 }
 
@@ -1312,19 +1370,39 @@ async fn daemon_mcp_ops(proj: &std::path::Path, c: &mut Client) -> Vec<Measure> 
     out.push(measure_timed("daemon_mcp_overview", 30, |_| {
         overview.next().expect("a run")
     }));
+    // per run: the worst of the status reads made until the write's reply arrives (the reply
+    // is awaited on its own task, so every read but possibly the last overlaps the write)
     let mut during = vec![];
+    let mut reads = 0usize;
     for run in 0..20 {
         let ops: Vec<_> = (0..rdy_mcp::tools::MAX_OPS_PER_WRITE)
             .map(|i| json!({"op": "create", "type": "claim", "parent": section, "body": format!("Big {run} claim {i}.")}))
             .collect();
         let n = next();
         mcp_send(&mut w, n, "rdy_write", json!({"ops": ops})).await;
-        let s = Instant::now();
-        c.ctl("status", json!({})).await.expect("status");
-        during.push(s.elapsed());
-        let v = mcp_reply(&mut r, n).await;
+        let reply = tokio::spawn(async move {
+            let v = mcp_reply(&mut r, n).await;
+            (r, v)
+        });
+        let mut worst = Duration::ZERO;
+        loop {
+            let s = Instant::now();
+            c.ctl("status", json!({})).await.expect("status");
+            worst = worst.max(s.elapsed());
+            reads += 1;
+            if reply.is_finished() {
+                break;
+            }
+            // a pause between reads, outside the timed region: the reads sample the write
+            // rather than flood the daemon
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let (back, v) = reply.await.expect("the reply task");
+        r = back;
         assert!(v["result"].is_object(), "the big write: {v}");
+        during.push(worst);
     }
+    eprintln!("daemon_read_during_big_write: {reads} status reads over 20 big writes");
     let mut during = during.into_iter();
     out.push(measure_timed("daemon_read_during_big_write", 20, |_| {
         during.next().expect("a run")
@@ -1466,11 +1544,74 @@ fn bound_ops(parent: &std::path::Path) -> Vec<Measure> {
     }
     out.push(measure("pack_resolve_2000_types", 5, |_| {
         let mut set = PackSet::with_builtin();
-        // a prefix clash with a built-in type is an error, as in the functional test: either
-        // way the resolve ran to its end
-        if let Ok(n) = set.add_yaml(&types) {
-            let _ = set.resolve(&n);
-        }
+        let n = set.add_yaml(&types).expect("the 2,000-type pack is added");
+        let p = set.resolve(&n).expect("the 2,000-type pack resolves");
+        assert!(p.block_types.len() >= 2000);
+    }));
+    out
+}
+
+/// The ops over `rdy mcp --no-daemon` (the stdio server the mcp and mcp_pool tests drive), on
+/// a fresh project under `parent`: `mcp_stdio_overview` (one `rdy_overview` call),
+/// `mcp_stdio_write_max_ops` (a write of `MAX_OPS_PER_WRITE` claims) and
+/// `mcp_stdio_oversized_line` (a 17 MiB request line, sent and refused). Each run is timed from
+/// the send to the reply.
+fn stdio_mcp_ops(parent: &std::path::Path) -> Vec<Measure> {
+    use crate::mcp::{McpClient, Reply};
+    let budget = Duration::from_secs(120);
+    let proj = parent.join("stdio");
+    std::fs::create_dir_all(&proj).expect("mkdir");
+    drop(Rdy::init(&proj, "rdy-standard").expect("init"));
+    let mut c = McpClient::start(&proj);
+    c.call_within(
+        "rdy_session",
+        json!({"actor": "agent:perf", "role": "writer"}),
+        budget,
+    )
+    .ok();
+    let made = c
+        .call_within("rdy_write", json!({"ops": [
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Big", "doc_type": "glossary"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
+        ]}), budget)
+        .ok();
+    let section = made["created"]["$s"]
+        .as_str()
+        .expect("the section id")
+        .to_string();
+    let mut out = vec![];
+    out.push(measure("mcp_stdio_overview", 30, |_| {
+        assert!(matches!(
+            c.call_within("rdy_overview", json!({}), budget),
+            Reply::Ok(_)
+        ));
+    }));
+    out.push(measure_timed("mcp_stdio_write_max_ops", 5, |run| {
+        let ops: Vec<_> = (0..rdy_mcp::tools::MAX_OPS_PER_WRITE)
+            .map(|i| json!({"op": "create", "type": "claim", "parent": section, "body": format!("Max {run} claim {i}.")}))
+            .collect();
+        let args = json!({"ops": ops});
+        let s = Instant::now();
+        let r = c.call_within("rdy_write", args, budget);
+        let took = s.elapsed();
+        assert!(matches!(r, Reply::Ok(_)), "the largest write: {r:?}");
+        took
+    }));
+    let big = "x".repeat(17 * 1024 * 1024);
+    out.push(measure_timed("mcp_stdio_oversized_line", 3, |_| {
+        let id = c.next_id();
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"rdy_write","arguments":{{"message":"{big}","ops":[]}}}}}}"#
+        );
+        let s = Instant::now();
+        c.send_raw_within(&line, budget);
+        let reply = c.recv(id, budget);
+        let took = s.elapsed();
+        assert!(
+            reply.to_string().contains("rdy_request_too_large"),
+            "{reply}"
+        );
+        took
     }));
     out
 }
@@ -1909,8 +2050,26 @@ mod tests {
         land(&mut r, "work").unwrap();
         r.view_create(&writer(), "va", None, true).unwrap();
         drop(r);
-        let ms = daemon_ops(&proj, "");
+        let ms = daemon_mcp_on_copy(&proj, dir.path());
         for op in ["daemon_mcp_overview", "daemon_read_during_big_write"] {
+            assert!(spec_target(op).is_some(), "{op}");
+            let m = ms
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            assert!(m.median_ms > 0.0, "{op}: {m:?}");
+        }
+    }
+
+    #[test]
+    fn hf1perf_the_stdio_mcp_ops_have_targets_and_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let ms = stdio_mcp_ops(dir.path());
+        for op in [
+            "mcp_stdio_overview",
+            "mcp_stdio_write_max_ops",
+            "mcp_stdio_oversized_line",
+        ] {
             assert!(spec_target(op).is_some(), "{op}");
             let m = ms
                 .iter()

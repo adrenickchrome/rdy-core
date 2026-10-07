@@ -131,15 +131,9 @@ fn reload1_an_invalid_pack_keeps_the_previous_one_and_reports_on_every_reply() {
 #[test]
 fn reload1_the_watch_reads_bytes_only_when_a_stat_changes() {
     let h = Hosted::new();
-    // files written just now are racily clean (read on every check) until their mtimes are
-    // safely past: move them into the past, a stat change the first write reads once
-    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
-    set_mtime(&h.dir.path().join(".rdy/config.yaml"), past);
-    if let Ok(packs) = std::fs::read_dir(h.dir.path().join(".rdy/packs")) {
-        for p in packs {
-            set_mtime(&p.unwrap().path(), past);
-        }
-    }
+    // files written just now are racily clean (read on every check) until their ctimes are
+    // safely past, and no tool can set a ctime back: wait out the window (only ever older after)
+    std::thread::sleep(rdy_daemon::watch::RACY + std::time::Duration::from_millis(500));
     let rt = Hosted::rt();
     rt.block_on(async {
         let mut a = h.client(None, None).await;
@@ -243,15 +237,14 @@ fn racy1_a_same_length_edit_in_the_loaded_files_mtime_tick_reports_the_pack_erro
     rt.block_on(async {
         let mut a = h.client(None, None).await;
         switch_to(&h, PACK_A);
-        // stamped a minute ahead: d1's reload reads PACK_A inside its mtime tick however slow
-        // the machine (a write just before the read is too, but only for the racy window)
         let pack = h.dir.path().join(".rdy/packs/proj.yaml");
-        let m = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
-        set_mtime(&pack, m);
         a.ctl("new_doc", json!({"path": "d1", "view": null}))
             .await
             .unwrap();
         assert!(a.take_notice().unwrap().starts_with("pack_changed"));
+        // a coarse filesystem gives the second write the first one's mtime; the watch sees it
+        // either way: inside the racy window it reads the bytes, past it the ctime has moved
+        let m = std::fs::metadata(&pack).unwrap().modified().unwrap();
         assert_eq!(PACK_A.len(), PACK_BAD.len());
         std::fs::write(&pack, PACK_BAD).unwrap();
         set_mtime(&pack, m);

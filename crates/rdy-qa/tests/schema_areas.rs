@@ -59,6 +59,22 @@ fn qapack1_pathological_globs_in_a_pack_are_bounded() {
     for _ in 0..100 {
         assert!(p.areas_for_path(&path).is_empty());
     }
+    // bounded: the matcher's steps stay polynomial in the pattern and the path, whatever the
+    // stars (a backtracking matcher takes exponentially many on these)
+    let segs = |x: &str| x.split('/').count();
+    for g in [pat.clone(), format!("{}a", "*?".repeat(50))] {
+        let glob = Glob::compile(&g).unwrap();
+        let (covered, steps) = glob.covers_counting(&path);
+        assert!(!covered, "{g}");
+        let bound = ((g.len() + segs(&g) + 1) * (path.len() + segs(&path) + 1)) as u64;
+        assert!(steps <= bound, "{g}: {steps} steps, bound {bound}");
+    }
+    // and on a long single name against the starred segment
+    let name = "b".repeat(200);
+    let g = format!("{}a", "*?".repeat(50));
+    let (_, steps) = Glob::compile(&g).unwrap().covers_counting(&name);
+    let bound = ((g.len() + 2) * (name.len() + 2)) as u64;
+    assert!(steps <= bound, "{steps} steps, bound {bound}");
     let long = "a".repeat(MAX_GLOB_LEN + 1);
     set.add_yaml(&format!(
         "name: q\nversion: \"1\"\nextends: rdy-standard\nareas:\n  a: {{ paths: ['{long}'] }}\n"

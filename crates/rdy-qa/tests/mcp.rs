@@ -102,7 +102,8 @@ fn mcp2_write_ops_and_max_tokens_are_limited() {
             .code(),
         Some("E_LIMIT")
     );
-    // the largest allowed write finishes within its named budget
+    // the largest allowed write succeeds (how fast: the perf tier's `mcp_stdio_write_max_ops`,
+    // < 5 s); 30 s is a deadline for a hung server, not a speed claim
     let max: Vec<_> = (0..5_000).map(op).collect();
     assert!(matches!(
         c.call_within("rdy_write", json!({"ops": max}), Duration::from_secs(30)),
@@ -127,7 +128,8 @@ fn mcp2_an_oversized_request_gets_a_reply_and_the_server_lives() {
     session(&mut c);
     let id = c.next_id();
     let big = "x".repeat(17 * 1024 * 1024);
-    // a 17 MiB line needs more than the default 2 s write deadline; 10 s is its named budget
+    // a 17 MiB line gets a reply (how fast: the perf tier's `mcp_stdio_oversized_line`, < 10 s);
+    // 30 s is a deadline for a hung server, not a speed claim
     c.send_raw_within(
         &format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"rdy_write","arguments":{{"message":"{big}","ops":[]}}}}}}"#),
         Duration::from_secs(30),

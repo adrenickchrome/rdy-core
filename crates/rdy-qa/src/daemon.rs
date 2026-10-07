@@ -248,6 +248,15 @@ impl Hosted {
     pub fn new_with_human(human: &str) -> Hosted {
         let dir = short_tempdir();
         drop(Rdy::init(dir.path(), "rdy-standard").expect("init the hosted project"));
+        Hosted::serve(dir, human)
+    }
+
+    /// A host over the project already in `dir` (human actor `human:qa`).
+    pub fn start_in(dir: tempfile::TempDir) -> Hosted {
+        Hosted::serve(dir, "human:qa")
+    }
+
+    fn serve(dir: tempfile::TempDir, human: &str) -> Hosted {
         let run = start(ServeOptions {
             project: dir.path().to_path_buf(),
             version: "t".into(),
@@ -439,6 +448,13 @@ impl Served {
             .expect("open the project config");
         io::Write::write_all(&mut cfg, format!("  start_timeout: {secs}\n").as_bytes())
             .expect("append the start timeout");
+        // a config that no longer parses falls back to the 30 s default, which would hide a
+        // client that waits the timeout out: the setting must be the one the CLI reads
+        assert_eq!(
+            rdy_engine::serve_config(self.dir.path()).start_timeout,
+            Duration::from_secs(secs),
+            "serve.start_timeout did not take"
+        );
     }
 
     /// The pid in `.rdy/run/daemon.pid`, if it parses and that process is alive.
