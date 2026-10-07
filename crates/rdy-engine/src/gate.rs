@@ -398,6 +398,31 @@ fn landed_as(st: &ReadState, p: &Proposal) -> Result<Option<Hash>, RdyError> {
     Ok(None)
 }
 
+/// Every open proposal at its latest version: each `open/<view>` ref whose latest version has
+/// not landed, sorted by the ref's text (`P-<stable short>@<n>`).
+pub(crate) fn open_proposals(st: &ReadState) -> Result<Vec<(ProposalRef, Proposal)>, RdyError> {
+    let mut open = vec![];
+    for (_, b) in st.reader().refs_with_prefix("open/")? {
+        if b.len() != 32 {
+            continue;
+        }
+        let stable = ref_hash(&b, "an open ref")?;
+        let latest = latest_version(st, &stable)?;
+        let p = st.reader().proposal(&latest)?;
+        if landed_as(st, &p)?.is_some() {
+            continue;
+        }
+        let pref = ProposalRef {
+            version: latest,
+            stable,
+            n: version_number(st, &latest)?,
+        };
+        open.push((pref, p));
+    }
+    open.sort_by_cached_key(|(pref, _)| pref.to_string());
+    Ok(open)
+}
+
 /// `E_CONFLICT_UNRESOLVED` for the conflicts a version carries on the blocks it writes: one
 /// issue per conflict, naming its sides (`canon` for a landed side).
 fn unresolved(st: &ReadState, view: &str, blocking: &[Conflict]) -> Result<RdyError, RdyError> {

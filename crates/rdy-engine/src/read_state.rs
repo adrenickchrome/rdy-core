@@ -84,6 +84,8 @@ pub(crate) struct Entry {
     /// How many blocks the entry's merge records a conflict on, when counted without a build
     /// (`ReadState::view_list`); an entry carried over by a publish keeps it.
     pub(crate) conflict_count: OnceLock<usize>,
+    /// The block ids the included changes write, memoised (`ReadState::view_touched`).
+    pub(crate) touched: OnceLock<Arc<BTreeSet<BlockId>>>,
 }
 
 impl Entry {
@@ -101,6 +103,7 @@ impl Entry {
             included,
             cell: OnceLock::new(),
             conflict_count: OnceLock::new(),
+            touched: OnceLock::new(),
         }
     }
 

@@ -88,6 +88,46 @@ pub fn header(briefing: &Value) -> String {
             )
         }),
     );
+    let inflight = &briefing["inflight"];
+    if inflight.is_object() {
+        let at = |k: &str| inflight[k].as_array().into_iter().flatten();
+        let blocks = |x: &Value| {
+            x["blocks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let views = at("views").map(|v| {
+            let o = &v["owner"];
+            let by = if o.is_object() {
+                match o["run"].as_str() {
+                    Some(run) => format!(" by {}/{run}", s(o, "actor")),
+                    None => format!(" by {}", s(o, "actor")),
+                }
+            } else {
+                ", unowned".to_string()
+            };
+            format!(
+                "view {}{by} (last write {}): {}",
+                s(v, "view"),
+                s(v, "last_write"),
+                blocks(v)
+            )
+        });
+        let proposals = at("proposals").map(|p| {
+            format!(
+                "proposal {} from {} \"{}\": {}",
+                s(p, "ref"),
+                s(p, "view"),
+                s(p, "title"),
+                blocks(p)
+            )
+        });
+        section(&mut out, "in flight", views.chain(proposals));
+    }
     if let Some(m) = briefing["omitted"].as_object().filter(|m| !m.is_empty()) {
         let mut names: Vec<_> = m.iter().collect();
         names.sort_by_key(|(k, _)| k.as_str());
@@ -309,5 +349,36 @@ mod tests {
             plain(&b).lines().next(),
             Some("rdy briefing for no blocks (token 0123456789ab)")
         );
+    }
+
+    #[test]
+    fn infl1_the_header_lists_work_in_flight_when_the_briefing_has_it() {
+        let b = json!({
+            "governs": [], "dependents": [], "will_go_stale": [], "suspects": [],
+            "inflight": {
+                "views": [
+                    {"view": "va", "owner": {"actor": "agent:a", "run": "r1"}, "last_write": "2026-10-06T10:00:00Z", "last_write_ms": 1, "blocks": ["c-A"]},
+                    {"view": "vu", "owner": null, "last_write": "2026-10-06T11:00:00Z", "last_write_ms": 2, "blocks": ["c-A", "c-B"]}
+                ],
+                "proposals": [{"ref": "P-abcdef012345@2", "view": "pa", "title": "Change A", "blocks": ["c-A"]}]
+            },
+            "base": {"token": "0123456789abcdef0123", "blocks": [{"id": "c-A", "version": "ff"}], "depends": 0}
+        });
+        let h = header(&b);
+        let lines: Vec<&str> = h.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| *l == "# in flight:")
+            .expect("the section");
+        assert_eq!(lines[at - 2], "# open suspects:");
+        assert_eq!(
+            &lines[at + 1..at + 4],
+            &[
+                "#   view va by agent:a/r1 (last write 2026-10-06T10:00:00Z): c-A",
+                "#   view vu, unowned (last write 2026-10-06T11:00:00Z): c-A, c-B",
+                "#   proposal P-abcdef012345@2 from pa \"Change A\": c-A",
+            ]
+        );
+        assert_eq!(lines[at + 4], "#");
     }
 }

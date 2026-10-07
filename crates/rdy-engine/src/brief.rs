@@ -4,6 +4,7 @@
 //! block or one of their dependencies changes version. Registered briefings live in memory
 //! (`BriefRegistry`), one registry per open project.
 use crate::error::*;
+use crate::inflight::Inflight;
 use crate::keys;
 use crate::query::summary_in;
 use crate::write::OpInput;
@@ -307,6 +308,8 @@ pub struct Briefing {
     pub dependents: Vec<Dependent>,
     pub will_go_stale: Vec<WillGoStale>,
     pub suspects: Vec<Suspect>,
+    /// Other views and open proposals that change a covered block (not part of the token).
+    pub inflight: Inflight,
     pub base: Base,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
@@ -331,8 +334,8 @@ impl Briefing {
     }
 
     /// Halves the longest detail list (ties: governs, dependents, will_go_stale, suspects,
-    /// base.blocks) until the briefing fits `max` tokens or every list is empty. Coverage, the
-    /// token and the record are never cut.
+    /// inflight.views, inflight.proposals, base.blocks) until the briefing fits `max` tokens or
+    /// every list is empty. Coverage, the token and the record are never cut.
     fn cut(&mut self, max: usize) {
         while self.tokens() > max {
             let lens = [
@@ -340,6 +343,8 @@ impl Briefing {
                 self.dependents.len(),
                 self.will_go_stale.len(),
                 self.suspects.len(),
+                self.inflight.views.len(),
+                self.inflight.proposals.len(),
                 self.base.blocks.len(),
             ];
             let longest = lens.iter().copied().max().unwrap_or(0);
@@ -367,6 +372,14 @@ impl Briefing {
                 3 => {
                     self.suspects.truncate(keep);
                     "suspects"
+                }
+                4 => {
+                    self.inflight.views.truncate(keep);
+                    "inflight.views"
+                }
+                5 => {
+                    self.inflight.proposals.truncate(keep);
+                    "inflight.proposals"
                 }
                 _ => {
                     self.base.blocks.truncate(keep);
@@ -573,6 +586,7 @@ impl ReadState {
             suspects.extend(found);
         }
         suspects.sort_by(|a, b| (&a.block, &a.target).cmp(&(&b.block, &b.target)));
+        let inflight = self.inflight(scope, ids)?;
 
         let base = Base {
             token: token.to_string(),
@@ -593,6 +607,7 @@ impl ReadState {
             dependents,
             will_go_stale,
             suspects,
+            inflight,
             base,
             truncated: false,
             omitted: BTreeMap::new(),

@@ -8,6 +8,7 @@ mod error;
 pub mod events;
 mod gate;
 mod history;
+pub mod inflight;
 mod io;
 mod keys;
 mod lint;
