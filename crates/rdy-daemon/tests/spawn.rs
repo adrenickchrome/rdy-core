@@ -91,8 +91,9 @@ fn spawn1_a_spawned_child_writes_to_the_log_in_its_own_process_group() {
     let mut cmd = serve_command(&fake, dir.path(), &run).unwrap();
     spawn_serve(&mut cmd).unwrap();
     // poll until the child has written both lines (its name, then its pgid); a fixed sleep flaked
-    // under load (two tracks building on one machine)
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    // under load (two tracks building on one machine); 60 s: it took 24.7 s while another worktree
+    // built
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let text = loop {
         let text = std::fs::read_to_string(run.log_file()).unwrap_or_default();
         let done = text.contains("child-")
