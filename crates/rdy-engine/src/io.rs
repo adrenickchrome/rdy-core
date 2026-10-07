@@ -463,8 +463,21 @@ fn parse_yaml(text: &str) -> Result<(Block, Vec<KeyedLink>), RdyError> {
     from_yaml_struct(y)
 }
 
+/// insc1: an export (or a rendered site) is a state someone can read back, so never `inflight`.
+pub fn refuse_inflight_export(scope: &Scope) -> Result<(), RdyError> {
+    if *scope == Scope::Inflight {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "inflight is an analysis scope: export (render) canon, a view or a version",
+            "export or render canon, a view (view:<name>) or a version (tag:<version>)",
+        ));
+    }
+    Ok(())
+}
+
 impl ReadState {
     pub fn export(&self, scope: &Scope, out: &Path) -> Result<ExportSummary, RdyError> {
+        refuse_inflight_export(scope)?;
         if out.exists() && std::fs::read_dir(out).map_err(io_err)?.next().is_some() {
             return Err(RdyError::new(
                 E_BAD_INPUT,
@@ -553,6 +566,7 @@ impl ReadState {
             Scope::View(v) if v.contains(':') => format!("view:{v}"),
             Scope::View(v) => v.clone(),
             Scope::At(h) => format!("landing:{h}"),
+            Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
         };
         let manifest = Manifest {
             format: 3,
@@ -863,6 +877,7 @@ impl Rdy {
         )?;
         self.publish(crate::Delta::Commit {
             view: view.to_string(),
+            change: id,
             ops: ops.clone(),
         })?;
         let created = ops

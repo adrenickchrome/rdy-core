@@ -10,7 +10,7 @@ use rdy_model::{Block, BlockId, Change, Hash, Op, Tag};
 use rdy_schema::{AreaMatcher, Pack};
 use rdy_store::segment::Location;
 use rdy_store::{Conflict, Merged, StoreReader, ViewHead};
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// What a write changed, so that `Rdy::publish` re-reads only that and carries the rest over.
@@ -18,8 +18,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub enum Delta {
     /// Re-read everything; every cell starts empty.
     Full,
-    /// `ops` were committed to `view`.
-    Commit { view: String, ops: Vec<Op> },
+    /// `ops` were committed to `view` as the change `change`.
+    Commit {
+        view: String,
+        change: Hash,
+        ops: Vec<Op>,
+    },
     /// `view`'s proposal landed as `landing`, applying `ops` to canon; the same batch rebased
     /// the views in `rebased` (the proposing view included).
     Landed {
@@ -30,6 +34,9 @@ pub enum Delta {
     },
     /// View `view` was created, forked, or had view ops appended (its head and set re-read).
     View { view: String },
+    /// Coordination objects (intents, alternative sets) were written, and the same batch closed
+    /// the views in `closed` (each one's head and set re-read, as `View` does).
+    Coord { closed: Vec<String> },
     /// A tag was written.
     Tags,
     /// Only the log moved (a proposal): no view content changed.
@@ -129,6 +136,124 @@ impl Entry {
     }
 }
 
+/// insc1: the changes the in-flight state merges onto canon: the distinct changes of every open
+/// view that includes any (from a pinned view, those not yet landed), sorted by hash, and for
+/// each the open views whose set holds it, by name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InflightSet {
+    pub changes: Vec<Hash>,
+    pub views_of: BTreeMap<Hash, Vec<String>>,
+}
+
+/// The coordination refs as a state was published: each intent's and each alternative set's
+/// stable id mapped to its latest version.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CoordHeads {
+    pub intents: BTreeMap<Hash, Hash>,
+    pub alt_sets: BTreeMap<Hash, Hash>,
+}
+
+/// For each block an in-flight change writes, the last such change in the merge's order.
+pub(crate) type LastWriters = imbl::HashMap<BlockId, Hash>;
+
+/// The in-flight scope's cell: its set, then the entry built from it (named `inflight`, on
+/// canon's head), both computed on first read unless a publish carried them over. `last` is
+/// filled with the build (or carried with it): a commit carries the build only when its change
+/// merges after the last writer of every block it writes (see `Rdy::inflight_after_commit`).
+#[derive(Default)]
+pub(crate) struct InflightCell {
+    pub(crate) set: OnceLock<Result<Arc<InflightSet>, RdyError>>,
+    pub(crate) entry: OnceLock<Result<Arc<Entry>, RdyError>>,
+    pub(crate) last: OnceLock<Arc<LastWriters>>,
+}
+
+impl InflightCell {
+    /// A cell whose set is known and whose entry is still to build.
+    pub(crate) fn with_set(set: Arc<InflightSet>) -> InflightCell {
+        InflightCell {
+            set: OnceLock::from(Ok(set)),
+            entry: OnceLock::new(),
+            last: OnceLock::new(),
+        }
+    }
+
+    /// The set, if it was computed without an error.
+    pub(crate) fn set_ok(&self) -> Option<&Arc<InflightSet>> {
+        self.set.get().and_then(|r| r.as_ref().ok())
+    }
+
+    /// The entry's build, if one finished without an error.
+    pub(crate) fn built_ok(&self) -> Option<&Arc<Built>> {
+        self.entry
+            .get()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|e| e.built_ok())
+    }
+}
+
+/// The in-flight entry for `set` on canon's head `canon_head`, unbuilt.
+pub(crate) fn inflight_entry(canon_head: Option<Hash>, set: &InflightSet) -> Entry {
+    Entry::new(
+        Some(crate::session::INFLIGHT_SCOPE.to_string()),
+        canon_head,
+        None,
+        Arc::new(set.changes.clone()),
+    )
+}
+
+/// The in-flight set of `views` (insc1): every open view with a non-empty set contributes its
+/// changes, a pinned view only those no landing carried yet.
+pub(crate) fn inflight_set_of(
+    reader: &StoreReader,
+    views: &imbl::HashMap<String, Arc<Entry>>,
+) -> Result<InflightSet, RdyError> {
+    let mut views_of: BTreeMap<Hash, Vec<String>> = BTreeMap::new();
+    for (name, entry) in views {
+        let Some(head) = entry.head.as_ref() else {
+            continue;
+        };
+        if head.closed || entry.included.is_empty() {
+            continue;
+        }
+        for c in entry.included.iter() {
+            if head.pinned && reader.landing_of(c)?.is_some() {
+                continue;
+            }
+            views_of.entry(*c).or_default().push(name.clone());
+        }
+    }
+    for names in views_of.values_mut() {
+        names.sort();
+        names.dedup();
+    }
+    Ok(InflightSet {
+        changes: views_of.keys().copied().collect(),
+        views_of,
+    })
+}
+
+/// Whether `ops`, in order, apply cleanly to `m`: each create names a block absent there, and
+/// each update or delete names as its base the block's version there (after the earlier ops).
+pub(crate) fn applies_cleanly(m: &Materialized, ops: &[Op]) -> bool {
+    let mut now: HashMap<&BlockId, Option<Hash>> = HashMap::new();
+    for op in ops {
+        let id = op.block_id();
+        let current = match now.get(id) {
+            Some(v) => *v,
+            None => m.version_of(id),
+        };
+        if current != op.base() {
+            return false;
+        }
+        let next = match op {
+            Op::Create { block } | Op::Update { block, .. } => Some(block.version_hash()),
+            Op::Delete { .. } => None,
+        };
+        now.insert(id, next);
+    }
+    true
+}
+
 /// The as-of entries, shared by `Rdy` and every state it publishes: at most
 /// `AS_OF_CACHE_ENTRIES`, least recently used at the front.
 #[derive(Default)]
@@ -219,6 +344,10 @@ pub struct ReadState {
     pub(crate) vpos: Arc<Mutex<VposCache>>,
     /// The blocks each open proposal version writes, shared like `vpos` (read by `inflight`).
     pub(crate) proposal_touched: crate::inflight::ProposalTouched,
+    /// insc1: the in-flight scope's set and build.
+    pub(crate) inflight_cell: Arc<InflightCell>,
+    /// The coordination refs as this state was published.
+    pub(crate) coord_heads: Arc<CoordHeads>,
     /// A `Full` publish that failed to read the heads: every read of this state returns it.
     pub(crate) error: Option<RdyError>,
 }
@@ -333,10 +462,44 @@ impl ReadState {
         })
     }
 
+    /// insc1: the changes the in-flight scope merges onto canon, and the open views holding each.
+    pub fn inflight_set(&self) -> Result<Arc<InflightSet>, RdyError> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        self.inflight_cell
+            .set
+            .get_or_init(|| inflight_set_of(&self.reader, &self.views).map(Arc::new))
+            .clone()
+    }
+
+    /// The coordination refs (intents and alternative sets, stable id to latest version) as
+    /// this state was published.
+    pub fn coord_heads(&self) -> &CoordHeads {
+        &self.coord_heads
+    }
+
+    /// The in-flight entry, made from the set on first use.
+    fn inflight_entry(&self) -> Result<Arc<Entry>, RdyError> {
+        self.inflight_cell
+            .entry
+            .get_or_init(|| {
+                let set = self.inflight_set()?;
+                Ok(Arc::new(inflight_entry(self.canon_head, &set)))
+            })
+            .clone()
+    }
+
     /// Test hook: whether `scope`'s materialization and graph are built in this state. Never
     /// builds, and never marks an as-of scope used.
     #[doc(hidden)]
     pub fn is_built(&self, scope: &Scope) -> (bool, bool) {
+        if let Scope::Inflight = scope {
+            return match self.inflight_cell.built_ok() {
+                Some(b) => (true, b.graph.get().is_some()),
+                None => (false, false),
+            };
+        }
         let entry = match scope {
             Scope::Canon => Some(Arc::clone(&self.canon)),
             // a floating view reads canon's entry
@@ -345,6 +508,7 @@ impl ReadState {
                 e => e.cloned(),
             },
             Scope::At(h) => self.as_of.peek(h),
+            Scope::Inflight => None,
         };
         match entry.as_deref().and_then(Entry::built_ok) {
             Some(b) => (true, b.graph.get().is_some()),
@@ -373,6 +537,13 @@ impl ReadState {
                 }
                 built
             }
+            Scope::Inflight => {
+                let entry = self.inflight_entry()?;
+                entry
+                    .cell
+                    .get_or_init(|| self.build_inflight(&entry).map(Arc::new))
+                    .clone()
+            }
         }
     }
 
@@ -390,6 +561,36 @@ impl ReadState {
                 .map(Arc::new)
             })
             .clone()
+    }
+
+    /// The in-flight entry's build (`build_entry`'s), recording the last writer of each block
+    /// in the merge's order in the cell.
+    fn build_inflight(&self, entry: &Entry) -> Result<Built, RdyError> {
+        let canon = self.canon_for(entry).map(|b| &**b);
+        if entry.included.is_empty() {
+            let _ = self.inflight_cell.last.set(Arc::default());
+            return build_entry(&self.reader, &self.pack, canon, entry, None);
+        }
+        let list = entry
+            .included
+            .iter()
+            .map(|c| self.reader.change(c))
+            .collect::<Result<Vec<Change>, _>>()?;
+        let merged = self
+            .reader
+            .merge_onto(&self.reader.state_of(entry.base)?, &list)?;
+        let by_id: HashMap<Hash, Change> = entry.included.iter().copied().zip(list).collect();
+        let mut last = LastWriters::new();
+        for id in &merged.order {
+            if let Some(c) = by_id.get(id) {
+                for op in &c.ops {
+                    last.insert(op.block_id().clone(), *id);
+                }
+            }
+        }
+        let built = build_merged(&self.reader, canon, entry, merged, &by_id)?;
+        let _ = self.inflight_cell.last.set(Arc::new(last));
+        Ok(built)
     }
 
     /// Canon's build when `entry` is a view on canon's head and canon is already built: what
@@ -440,6 +641,20 @@ pub(crate) fn build_entry(
             (merged, by_id)
         }
     };
+    build_merged(reader, canon, entry, merged, &changes)
+}
+
+/// `build_entry` once the merge is known: seeded from canon's build when there is one and the
+/// merge is clean, else built from the merged state. `changes` holds the changes already read
+/// (any other is read by hash).
+fn build_merged(
+    reader: &StoreReader,
+    canon: Option<&Built>,
+    entry: &Entry,
+    merged: Merged,
+    changes: &HashMap<Hash, Change>,
+) -> Result<Built, RdyError> {
+    let canon = canon.filter(|_| entry.name.is_some());
     let m = match canon {
         Some(c) if merged.conflicts.is_empty() => {
             let mut m: Option<Materialized> = None;

@@ -5,6 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The run a human session records: the CLI is the human's one run.
 pub const HUMAN_RUN: &str = "cli";
+/// The scope text of the in-flight state (insc1): canon plus every open view's changes. A
+/// reserved name: no view can take it.
+pub const INFLIGHT_SCOPE: &str = "inflight";
 
 /// Who is on the other end: the configured human, or anything else (an agent).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
@@ -165,6 +168,9 @@ pub enum Scope {
     View(String),
     /// Canon as of a landing in canon's chain (a version or a landing id). Read-only.
     At(rdy_model::Hash),
+    /// insc1: canon plus the distinct changes of every open view, merged. An analysis scope:
+    /// read-only, with no head and no owner.
+    Inflight,
 }
 
 /// UTC RFC 3339 timestamp with second precision, e.g. 2026-10-03T19:35:01Z.

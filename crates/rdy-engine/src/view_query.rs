@@ -107,6 +107,7 @@ fn scope_text(s: &Scope) -> String {
         Scope::Canon => "canon".to_string(),
         Scope::View(v) => v.clone(),
         Scope::At(h) => format!("landing:{}", h.short()),
+        Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
     }
 }
 

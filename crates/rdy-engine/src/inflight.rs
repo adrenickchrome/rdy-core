@@ -131,7 +131,7 @@ impl ReadState {
     pub fn inflight(&self, scope: &Scope, ids: &BTreeSet<BlockId>) -> Result<Inflight, RdyError> {
         let own = match scope {
             Scope::View(v) => Some(v.as_str()),
-            Scope::Canon | Scope::At(_) => None,
+            Scope::Canon | Scope::At(_) | Scope::Inflight => None,
         };
         let mut views = vec![];
         for name in self.view_names() {

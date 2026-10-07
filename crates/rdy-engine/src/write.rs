@@ -1566,6 +1566,7 @@ impl Rdy {
         )?;
         self.publish(Delta::Commit {
             view: req.view.clone(),
+            change: id,
             ops,
         })?;
 
@@ -1689,6 +1690,13 @@ pub(crate) fn writable_view(name: &str) -> Result<(), RdyError> {
             E_RESERVED_VIEW,
             "canon cannot be written directly",
             "write to a view and land it with rdy_propose",
+        ));
+    }
+    if name == crate::session::INFLIGHT_SCOPE {
+        return Err(RdyError::new(
+            E_RESERVED_VIEW,
+            "inflight is a read scope (canon plus every live view's changes), not a view",
+            "write to a view under another name",
         ));
     }
     if name.contains(':') {

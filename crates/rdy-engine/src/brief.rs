@@ -572,7 +572,20 @@ fn cursor_scope(scope: &Scope) -> String {
         Scope::Canon => "canon".to_string(),
         Scope::View(v) => format!("view:{v}"),
         Scope::At(h) => format!("landing:{h}"),
+        Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
     }
+}
+
+/// insc1: a briefing is made in the scope its reader will write in, never in `inflight`.
+pub(crate) fn refuse_inflight(scope: &Scope) -> Result<(), RdyError> {
+    if *scope == Scope::Inflight {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "inflight is an analysis scope: a briefing reads the view you will write in",
+            "brief with the scope of your view (the default)",
+        ));
+    }
+    Ok(())
 }
 
 /// How many hex digits of a briefing's digest a cursor carries (64 bits).
@@ -614,6 +627,7 @@ fn scope_label(scope: &Scope) -> String {
         Scope::Canon => "canon".to_string(),
         Scope::View(v) => format!("view {v}"),
         Scope::At(h) => format!("landing:{h}"),
+        Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
     }
 }
 
@@ -644,6 +658,7 @@ impl ReadState {
         cov: &Coverage,
         max_tokens: Option<usize>,
     ) -> Result<Briefing, RdyError> {
+        refuse_inflight(scope)?;
         let m = self.materialized(scope)?;
         let known = |text: &str| -> Result<BlockId, RdyError> {
             let id = self.resolve_id(scope, text)?;
@@ -715,6 +730,7 @@ impl ReadState {
         ids: &BTreeSet<BlockId>,
         max_tokens: Option<usize>,
     ) -> Result<Briefing, RdyError> {
+        refuse_inflight(scope)?;
         let mut briefing = self.assemble(scope, ids)?;
         let m = self.materialized(scope)?;
         briefing.page(
@@ -739,6 +755,7 @@ impl ReadState {
         cursor: &str,
         max_tokens: Option<usize>,
     ) -> Result<Briefing, RdyError> {
+        refuse_inflight(scope)?;
         let (token, rest) = parse_cursor(cursor)?;
         let Some(rec) = reg.get(token) else {
             return Err(RdyError::new(
