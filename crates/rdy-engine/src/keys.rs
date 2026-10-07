@@ -99,7 +99,8 @@ impl Rdy {
     }
 }
 
-/// K1 (FW-PR3): the docs and folders among `created` whose key rdy derived (`key::AUTO_FIELD`)
+/// K1 (FW-PR3): the docs and folders among `created` (the blocks a version creates, and the
+/// ones whose key followed a move or rename, kfol1) whose key rdy derived (`key::AUTO_FIELD`)
 /// and that clash in `next`, each with the key it gets instead, in (path, id) order. A key
 /// clashes when another block holds it, or when it is the name of another top-level doc or
 /// folder (that path would be unreachable). A block that is not re-derived keeps its key; when
@@ -353,8 +354,9 @@ pub(crate) fn resolve_with(
     };
     let by_path = crate::paths::resolve_in(m, text);
     match (by_key, by_path) {
-        // K2: a doc renamed away keeps its key, so a new doc can take the old path; the error
-        // names both blocks so the agent can pick one by id
+        // K2: a doc renamed away keeps an explicit key (a key rdy assigned follows the path,
+        // FW-PR3a), so a new doc can take the old path; the error names both blocks so the
+        // agent can pick one by id
         (Some(k), Ok(p)) if k != p => {
             let at = m
                 .path_of(&k)

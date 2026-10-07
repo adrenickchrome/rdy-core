@@ -1,5 +1,6 @@
 //! akey1: docs and folders created without a key get one from their path, on write and on import
-//! (FW-PR3); an explicit key always wins; the key stays on move and rename.
+//! (FW-PR3); an explicit key always wins and stays on move and rename; a key rdy assigned follows
+//! the path (FW-PR3a, kfol1).
 use rdy_engine::{Rdy, Scope};
 use rdy_model::BlockId;
 use rdy_qa::fixtures::*;
@@ -51,7 +52,7 @@ fn akey1_an_explicit_key_wins_even_later_in_the_batch() {
 }
 
 #[test]
-fn akey1_the_key_stays_on_rename_and_move_and_a_new_doc_takes_the_next_suffix() {
+fn akey1_an_rdy_key_follows_rename_and_move_and_a_new_doc_takes_the_key_it_left() {
     let (_d, mut r) = project();
     let w = write(&mut r, "work", json!([
         {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}},
@@ -71,15 +72,12 @@ fn akey1_the_key_stays_on_rename_and_move_and_a_new_doc_takes_the_next_suffix() 
         json!([{"op": "move", "id": d, "parent": a}]),
     )
     .unwrap();
-    assert_eq!(key(&r, "work", &d).as_deref(), Some("notes"));
+    assert_eq!(key(&r, "work", &d).as_deref(), Some("archive.old-notes"));
     let w2 = write(&mut r, "work", json!([
         {"op": "create", "type": "doc", "id": "$n", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}}
     ]))
     .unwrap();
-    assert_eq!(
-        key(&r, "work", &w2.created["$n"]).as_deref(),
-        Some("notes-2")
-    );
+    assert_eq!(key(&r, "work", &w2.created["$n"]).as_deref(), Some("notes"));
 }
 
 #[test]
@@ -497,15 +495,18 @@ fn rkey1_two_top_level_spec_docs_land_once_one_is_renamed() {
         Some("spec"),
         "a refused proposal writes nothing"
     );
-    write(
+    let w = write(
         &mut r,
         "b",
         json!([{"op": "update", "id": db, "fields": {"name": "spec-b"}}]),
     )
     .unwrap();
+    assert_eq!(
+        w.keys[&db], "spec-b",
+        "the key follows the rename (FW-PR3a)"
+    );
     let p = r.propose(&writer(), "b", "b").unwrap();
-    assert_eq!(p.keys.len(), 1, "{:?}", p.keys);
-    assert_eq!(p.keys[&db], "spec-b", "re-derived from the doc's path now");
+    assert!(p.keys.is_empty(), "nothing clashes now: {:?}", p.keys);
     r.land(&approver(), &p.id).unwrap();
     let c = Scope::Canon;
     assert_eq!(r.read().resolve_id(&c, "spec").unwrap().to_string(), da);
@@ -595,10 +596,11 @@ fn rkey1_an_explicit_key_still_refuses_and_setting_a_key_makes_it_explicit() {
 
 #[test]
 fn kamb1_a_key_that_is_another_docs_path_names_both_blocks_and_the_fix() {
-    // P2: notes is renamed old-notes and keeps its key; a new doc named notes takes notes-2
+    // P2 with an explicit key (FW-PR3a): notes, keyed notes by the agent, is renamed old-notes
+    // and keeps its key; a new doc named notes takes notes-2
     let (_d, mut r) = project();
     let old = write(&mut r, "work", json!([
-        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}}
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview", "key": "notes"}}
     ]))
     .unwrap()
     .created["$d"]
@@ -820,4 +822,270 @@ fn rkey1_a_land_time_re_key_does_not_take_a_key_the_view_holds() {
     assert_eq!(l.keys.len(), 1, "{:?}", l.keys);
     assert_eq!(l.keys[&m], "manual-3");
     manual_2_stays_the_agents(&mut r, &m, &o);
+}
+
+// kfol1 (FW-PR3a, D-0KPYK): on a move or rename, a key rdy assigned follows the new path,
+// re-derived with the usual suffix rule, and keeps its marker; an explicit key stays.
+
+/// Creates the top-level doc `name` in `view` without a key and returns its id.
+fn doc(r: &mut Rdy, view: &str, name: &str) -> String {
+    write(r, view, json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "T", "doc_type": "overview"}}
+    ]))
+    .unwrap()
+    .created["$d"]
+    .clone()
+}
+
+#[test]
+fn kfol1_a_renamed_doc_s_rdy_key_follows_its_path_and_the_result_lists_it() {
+    let (_d, mut r) = project();
+    let d = doc(&mut r, "work", "notes");
+    assert_eq!(key(&r, "work", &d).as_deref(), Some("notes"));
+    let w = write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": d, "fields": {"name": "old-notes"}}]),
+    )
+    .unwrap();
+    assert_eq!(key(&r, "work", &d).as_deref(), Some("old-notes"));
+    assert!(key_auto(&r, "work", &d), "the key is still rdy's");
+    assert_eq!(w.keys.len(), 1, "{:?}", w.keys);
+    assert_eq!(w.keys[&d], "old-notes");
+    // an edit that keeps the path keeps the key, and lists nothing
+    let w = write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": d, "fields": {"title": "Old notes"}}]),
+    )
+    .unwrap();
+    assert!(w.keys.is_empty(), "{:?}", w.keys);
+    assert_eq!(key(&r, "work", &d).as_deref(), Some("old-notes"));
+}
+
+#[test]
+fn kfol1_a_new_doc_takes_the_name_and_key_a_renamed_doc_left() {
+    // P2, which K2 refused: the old key followed the rename, so `notes` names one block
+    let (_d, mut r) = project();
+    let old = doc(&mut r, "work", "notes");
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": old, "fields": {"name": "old-notes"}}]),
+    )
+    .unwrap();
+    let new = doc(&mut r, "work", "notes");
+    assert_eq!(key(&r, "work", &new).as_deref(), Some("notes"));
+    let work = Scope::View("work".into());
+    assert_eq!(
+        r.read().resolve_id(&work, "notes").unwrap().to_string(),
+        new
+    );
+    assert_eq!(
+        r.read().resolve_id(&work, "old-notes").unwrap().to_string(),
+        old
+    );
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "section", "parent": "notes", "fields": {"title": "S"}}]),
+    )
+    .unwrap();
+    // the rename and the new doc in one write: the new doc still gets `notes`
+    let (_d2, mut r2) = project();
+    let old2 = doc(&mut r2, "work", "notes");
+    let w = write(&mut r2, "work", json!([
+        {"op": "update", "id": old2, "fields": {"name": "old-notes"}},
+        {"op": "create", "type": "doc", "id": "$n", "fields": {"name": "notes", "title": "T", "doc_type": "overview"}}
+    ]))
+    .unwrap();
+    let new2 = w.created["$n"].clone();
+    assert_eq!(w.keys[&old2], "old-notes");
+    assert_eq!(w.keys[&new2], "notes");
+}
+
+#[test]
+fn kfol1_an_explicit_key_stays_through_rename_and_move() {
+    let (_d, mut r) = project();
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "notes", "title": "N", "doc_type": "overview", "key": "NOTES-1"}},
+        {"op": "create", "type": "folder", "id": "$a", "fields": {"name": "archive", "title": "A"}}
+    ]))
+    .unwrap();
+    let (d, a) = (w.created["$d"].clone(), w.created["$a"].clone());
+    let w1 = write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": d, "fields": {"name": "old-notes"}}]),
+    )
+    .unwrap();
+    let w2 = write(
+        &mut r,
+        "work",
+        json!([{"op": "move", "id": d, "parent": a}]),
+    )
+    .unwrap();
+    assert!(
+        w1.keys.is_empty() && w2.keys.is_empty(),
+        "{:?} {:?}",
+        w1.keys,
+        w2.keys
+    );
+    assert_eq!(key(&r, "work", &d).as_deref(), Some("NOTES-1"));
+    assert!(!key_auto(&r, "work", &d));
+}
+
+#[test]
+fn kfol1_moving_or_renaming_a_folder_re_derives_the_rdy_keys_under_it() {
+    let (_d, mut r) = project();
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "folder", "id": "$g", "fields": {"name": "guides", "title": "G"}},
+        {"op": "create", "type": "doc", "id": "$i", "parent": "$g", "fields": {"name": "intro", "title": "I", "doc_type": "overview"}},
+        {"op": "create", "type": "folder", "id": "$s", "parent": "$g", "fields": {"name": "sub", "title": "S"}},
+        {"op": "create", "type": "doc", "id": "$e", "parent": "$s", "fields": {"name": "deep", "title": "D", "doc_type": "overview"}},
+        {"op": "create", "type": "doc", "id": "$x", "parent": "$g", "fields": {"name": "mine", "title": "M", "doc_type": "overview", "key": "MINE-1"}},
+        {"op": "create", "type": "folder", "id": "$a", "fields": {"name": "archive", "title": "A"}}
+    ]))
+    .unwrap();
+    let id = |p: &str| w.created[p].clone();
+    let (g, i, s, e, x, a) = (id("$g"), id("$i"), id("$s"), id("$e"), id("$x"), id("$a"));
+    assert_eq!(key(&r, "work", &e).as_deref(), Some("guides.sub.deep"));
+    let m = write(
+        &mut r,
+        "work",
+        json!([{"op": "move", "id": g, "parent": a}]),
+    )
+    .unwrap();
+    let want = [
+        (&g, "archive.guides"),
+        (&i, "archive.guides.intro"),
+        (&s, "archive.guides.sub"),
+        (&e, "archive.guides.sub.deep"),
+    ];
+    assert_eq!(m.keys.len(), want.len(), "{:?}", m.keys);
+    for (b, k) in want {
+        assert_eq!(key(&r, "work", b).as_deref(), Some(k), "{b}");
+        assert_eq!(m.keys[b], k);
+        assert!(key_auto(&r, "work", b), "{b}");
+    }
+    assert_eq!(key(&r, "work", &x).as_deref(), Some("MINE-1"));
+    assert_eq!(
+        key(&r, "work", &a).as_deref(),
+        Some("archive"),
+        "the new parent keeps its key"
+    );
+    let n = write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": s, "fields": {"name": "inner"}}]),
+    )
+    .unwrap();
+    assert_eq!(n.keys.len(), 2, "{:?}", n.keys);
+    assert_eq!(n.keys[&s], "archive.guides.inner");
+    assert_eq!(n.keys[&e], "archive.guides.inner.deep");
+    assert_eq!(key(&r, "work", &i).as_deref(), Some("archive.guides.intro"));
+}
+
+#[test]
+fn kfol1_a_re_derived_key_that_is_taken_gets_the_next_suffix() {
+    let (_d, mut r) = project();
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "other", "title": "O", "doc_type": "overview", "key": "old-notes"}},
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "notes", "title": "N", "doc_type": "overview"}}
+    ]))
+    .unwrap();
+    let (o, d) = (w.created["$o"].clone(), w.created["$d"].clone());
+    let w = write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": d, "fields": {"name": "old-notes"}}]),
+    )
+    .unwrap();
+    assert_eq!(w.keys[&d], "old-notes-2");
+    assert_eq!(key(&r, "work", &d).as_deref(), Some("old-notes-2"));
+    assert_eq!(key(&r, "work", &o).as_deref(), Some("old-notes"));
+    assert!(key_auto(&r, "work", &d));
+}
+
+/// The kfol1 scenario: (path, key) of every doc and folder in `work`, sorted.
+fn kfol1_scenario() -> Vec<(String, String)> {
+    let (_d, mut r) = project();
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "folder", "id": "$g", "fields": {"name": "guides", "title": "G"}},
+        {"op": "create", "type": "doc", "id": "$i", "parent": "$g", "fields": {"name": "intro", "title": "I", "doc_type": "overview"}},
+        {"op": "create", "type": "doc", "id": "$j", "parent": "$g", "fields": {"name": "notes", "title": "J", "doc_type": "overview"}},
+        {"op": "create", "type": "folder", "id": "$a", "fields": {"name": "archive", "title": "A"}},
+        {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "taken", "title": "O", "doc_type": "overview", "key": "archive.guides.intro"}}
+    ]))
+    .unwrap();
+    let (g, a) = (w.created["$g"].clone(), w.created["$a"].clone());
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "move", "id": g, "parent": a}]),
+    )
+    .unwrap();
+    doc(&mut r, "work", "guides");
+    let st = r.read();
+    let m = st.materialized(&Scope::View("work".into())).unwrap();
+    let mut out: Vec<(String, String)> = m
+        .iter()
+        .filter(|b| rdy_model::tree::is_tree_type(&b.block_type))
+        .map(|b| {
+            (
+                m.path_of(&b.id).unwrap(),
+                b.field_str("key").unwrap().to_string(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn kfol1_re_derivation_is_deterministic() {
+    let first = kfol1_scenario();
+    assert!(
+        first.contains(&(
+            "archive/guides/intro".into(),
+            "archive.guides.intro-2".into()
+        )),
+        "{first:?}"
+    );
+    assert!(
+        first.contains(&("guides".into(), "guides".into())),
+        "{first:?}"
+    );
+    for _ in 0..3 {
+        assert_eq!(kfol1_scenario(), first);
+    }
+}
+
+#[test]
+fn kfol1_two_views_whose_moves_derive_the_same_key_both_land() {
+    // K1 stands: a key re-derived on a rename that another view landed first is re-derived again
+    let (_d, mut r) = project();
+    let d = doc(&mut r, "work", "draft");
+    land(&mut r, "work").unwrap();
+    let a = write(&mut r, "a", json!([
+        {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "a-long-folder-name-for-team-a-docs", "title": "A"}},
+        {"op": "create", "type": "doc", "id": "$g", "parent": "$f", "fields": {"name": "guide", "title": "G", "doc_type": "overview"}}
+    ]))
+    .unwrap();
+    let ga = a.created["$g"].clone();
+    assert_eq!(a.keys[&ga], "guide");
+    let w = write(
+        &mut r,
+        "b",
+        json!([{"op": "update", "id": d, "fields": {"name": "guide"}}]),
+    )
+    .unwrap();
+    assert_eq!(w.keys[&d], "guide");
+    land(&mut r, "a").unwrap();
+    let p = r.propose(&writer(), "b", "b").unwrap();
+    assert_eq!(p.keys.len(), 1, "{:?}", p.keys);
+    assert_eq!(p.keys[&d], "guide-2");
+    r.land(&approver(), &p.id).unwrap();
+    let c = Scope::Canon;
+    assert_eq!(r.read().resolve_id(&c, "guide-2").unwrap().to_string(), d);
 }

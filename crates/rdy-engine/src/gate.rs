@@ -526,13 +526,23 @@ fn prospective(st: &ReadState, changes: &[Change]) -> Result<(Materialized, Vec<
     Ok((next, applied))
 }
 
-/// The ids `changes` create (the changes at `applied`).
-fn created_in(changes: &[Change], applied: &[usize]) -> BTreeSet<BlockId> {
+/// The ids whose key rdy may derive again when `changes` (the changes at `applied`) land on
+/// `canon`: the blocks they create, and (kfol1, FW-PR3a) the docs and folders they give another
+/// key than canon holds, as a key that followed a move or rename. `keys::rederive` keeps only
+/// those whose key is rdy's.
+fn rekeyable_in(changes: &[Change], applied: &[usize], canon: &Materialized) -> BTreeSet<BlockId> {
     applied
         .iter()
         .flat_map(|&i| changes[i].ops.iter())
         .filter_map(|op| match op {
             Op::Create { block } => Some(block.id.clone()),
+            Op::Update { block, .. }
+                if rdy_model::tree::is_tree_type(&block.block_type)
+                    && crate::keys::key_of(block)
+                        != canon.get(&block.id).and_then(crate::keys::key_of) =>
+            {
+                Some(block.id.clone())
+            }
             _ => None,
         })
         .collect()
@@ -1042,7 +1052,11 @@ impl Rdy {
             // block in the prospective canon, is re-derived by a change rdy adds to the view
             let (next, applied) = prospective(&st, &changes)?;
             let vm = st.materialized(&Scope::View(view.to_string()))?;
-            let re = crate::keys::rederive(&next, &created_in(&changes, &applied), &vm);
+            let re = crate::keys::rederive(
+                &next,
+                &rekeyable_in(&changes, &applied, &*st.materialized(&Scope::Canon)?),
+                &vm,
+            );
             if re.is_empty() {
                 issues = self.issues_in(&st, &changes, &next, &applied)?;
             } else {
@@ -1350,7 +1364,11 @@ impl Rdy {
         // K1 (FW-PR3): a block landed since the proposal can hold a key rdy derived for a block
         // this version creates; the acceptance change re-derives it, past the keys the view holds
         let vm = st.materialized(&view)?;
-        let re = crate::keys::rederive(&prospective, &created_in(&changes, &applied), &vm);
+        let re = crate::keys::rederive(
+            &prospective,
+            &rekeyable_in(&changes, &applied, &*st.materialized(&Scope::Canon)?),
+            &vm,
+        );
         let accepts = accept_ops.len();
         for (id, k) in &re {
             let b = prospective

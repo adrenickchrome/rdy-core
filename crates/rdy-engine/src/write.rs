@@ -161,7 +161,8 @@ pub struct WriteResult {
     /// Names rdy assigned to created docs and folders, by block id.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub names: BTreeMap<String, String>,
-    /// Keys rdy assigned to created docs and folders, by block id (FW-PR3).
+    /// Keys rdy assigned, by block id: to created docs and folders (FW-PR3), and to docs and
+    /// folders whose key followed a move or rename (FW-PR3a).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub keys: BTreeMap<String, String>,
     /// sup1: links rdy_supersede copied from the old decision, by kind.
@@ -1486,6 +1487,17 @@ fn build_ops(
     // is another block's path would make that path unreachable); it runs before the second
     // pass, so pins and validation see the key
     let mut assigned = BTreeMap::new();
+    // kfol1 runs first, so a key a renamed block leaves is free for a block created here
+    let followed = follow_keys(
+        &mut ov,
+        &mut res,
+        &mut ops,
+        &mut prior,
+        &touched,
+        conflicts,
+        &mut assigned,
+    );
+    touched.extend(followed.iter().cloned());
     for op in &mut ops {
         let Op::Create { block } = op else { continue };
         if !tree::is_tree_type(&block.block_type) || block.fields.contains_key("key") {
@@ -1618,7 +1630,107 @@ fn build_ops(
         e.issues = issues;
         return Err(e);
     }
+    // a block whose only change is a key that followed its path is not one the caller edited
+    let touched: BTreeSet<BlockId> = touched.difference(&followed).cloned().collect();
     Ok((ops, created, touched, names, assigned))
+}
+
+/// kfol1 (FW-PR3a): on a move or rename, a key rdy assigned (`key_auto`) follows the new path.
+/// The roots are the docs and folders an op of this write updated whose path changed; each root
+/// and every doc and folder under it whose derived key changes with the path is re-derived, in
+/// (new path, id) order, with the first free numeric suffix. All of them give up their old keys
+/// first, so one can take a key another left. Taken, as on create: every key the view and this
+/// write's ops hold, and the name of every other top-level doc or folder. An explicit key (no
+/// marker) stays. A block under a moved folder that this write does not edit gets an update op of
+/// its own, keeping its pins; one with a recorded conflict keeps its key (an edit of it must name
+/// a version). Each new key goes into `assigned`; returns the blocks that only this pass changed.
+fn follow_keys(
+    ov: &mut Overlay,
+    res: &mut Resolver,
+    ops: &mut Vec<Op>,
+    prior: &mut Vec<Prior>,
+    touched: &BTreeSet<BlockId>,
+    conflicts: &[Conflict],
+    assigned: &mut BTreeMap<String, String>,
+) -> BTreeSet<BlockId> {
+    let base = ov.base;
+    let mut stack: Vec<BlockId> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Update { block, .. } if tree::is_tree_type(&block.block_type) => {
+                let now = tree_path(ov, &block.id)?;
+                (Some(now) != base.path_of(&block.id)).then(|| block.id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let mut seen = BTreeSet::new();
+    let mut follow: Vec<(String, BlockId)> = vec![];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let kids: Vec<BlockId> = ov.with_sibs(Some(&id), |s| {
+            s.order.iter().map(|(_, k)| k.clone()).collect()
+        });
+        stack.extend(
+            kids.into_iter()
+                .filter(|k| ov.get(k).is_some_and(|b| tree::is_tree_type(&b.block_type))),
+        );
+        let Some(b) = ov.get(&id) else { continue };
+        let auto = b.fields.get(rdy_model::key::AUTO_FIELD) == Some(&FieldValue::Bool(true));
+        if !auto || keys::key_of(b).is_none() {
+            continue;
+        }
+        if !touched.contains(&id) && conflicts.iter().any(|c| c.block == id) {
+            continue;
+        }
+        let (Some(now), Some(was)) = (tree_path(ov, &id), base.path_of(&id)) else {
+            continue;
+        };
+        let from = |p: &str| rdy_model::key::from_path(p, &b.block_type);
+        if from(&now) != from(&was) {
+            follow.push((now, id));
+        }
+    }
+    follow.sort();
+    for (_, id) in &follow {
+        res.note_key(id, None);
+    }
+    let mut only = BTreeSet::new();
+    for (path, id) in follow {
+        let cur = ov.get(&id).expect("a followed block is in the view");
+        let was = cur.version_hash();
+        let mut block = cur.clone();
+        let k = keys::auto_key(&path, &block.block_type, &|c| {
+            res.key_holder(c).is_some()
+                || ov.with_sibs(None, |s| {
+                    s.holder(&rdy_model::key::fold(c), Some(&id)).is_some()
+                })
+        });
+        block
+            .fields
+            .insert("key".into(), FieldValue::Str(k.clone()));
+        res.note_key(&id, Some(&block));
+        let in_write = ops.iter_mut().find_map(|op| match op {
+            Op::Update { block: b, .. } if b.id == id => Some(b),
+            _ => None,
+        });
+        match in_write {
+            Some(b) => *b = block.clone(),
+            None => {
+                prior.push((true, block.pins.clone()));
+                ops.push(Op::Update {
+                    base: was,
+                    block: block.clone(),
+                });
+                only.insert(id.clone());
+            }
+        }
+        ov.set(id.clone(), Some(block));
+        assigned.insert(id.to_string(), k);
+    }
+    only
 }
 
 impl Rdy {
