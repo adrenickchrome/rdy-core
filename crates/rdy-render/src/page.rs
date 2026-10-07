@@ -3,7 +3,7 @@ use crate::html::{self, BlockCtx, Link};
 use crate::inline::{self, Ctx};
 use crate::site::{Site, Url, rel};
 use crate::trail::Trail;
-use crate::{assets, home, nav, search, toc, trail, version};
+use crate::{assets, home, nav, review, search, toc, trail, version};
 use rdy_engine::{Materialized, VersionInfo, VersionPosition};
 use rdy_graph::{EdgeKind, Graph};
 use rdy_model::{Block, BlockId, Hash, decision, tree};
@@ -26,9 +26,21 @@ pub struct Shared<'a> {
     pub landed_ms: &'a BTreeMap<String, i64>,
     /// The figure blobs the store holds, by hash, with their bytes.
     pub blobs: &'a BTreeMap<Hash, Vec<u8>>,
+    /// What a draft changes against the canon it is based on; none for canon and tags.
+    pub review: Option<&'a review::Review>,
     /// The blobs some page links to, by the site-relative path of their file, filled as pages
     /// are built.
     pub used_blobs: RefCell<BTreeMap<String, Hash>>,
+}
+
+/// What the navigation and the home page know about the render beyond the tree: the reference
+/// pages it has, and a draft's changes.
+#[derive(Clone, Copy)]
+pub struct SiteFacts<'a> {
+    pub has_terms: bool,
+    pub has_questions: bool,
+    /// What a draft changes against the canon it is based on; none for canon and tags.
+    pub review: Option<&'a review::Review>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -68,6 +80,16 @@ pub struct Item {
     pub ref_head: String,
     #[serde(rename = "ref")]
     pub ref_: String,
+    /// The word the block carries in a draft render; none on canon and tags.
+    pub change: Option<review::Mark>,
+    /// The removed lines a draft shows just before this block.
+    pub removed_before: Vec<RemovedLine>,
+}
+
+/// One removed line of a draft: the old text of a block the draft took out, as HTML.
+#[derive(Clone, Debug, Serialize)]
+pub struct RemovedLine {
+    pub html: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -80,6 +102,12 @@ pub struct DocBody {
     pub lede: Option<String>,
     /// The anchor the lede has on the page (it keeps the one its block would have had).
     pub lede_anchor: Option<String>,
+    /// The word the doc's own block carries in a draft render.
+    pub change: Option<review::Mark>,
+    /// The word the lede carries in a draft render.
+    pub lede_change: Option<review::Mark>,
+    /// The removed lines a draft shows after the last block.
+    pub removed_end: Vec<RemovedLine>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -180,6 +208,8 @@ pub struct PageContext {
     pub has_mermaid: bool,
     pub has_terms: bool,
     pub has_questions: bool,
+    /// A draft render, which offers Show changes.
+    pub draft: bool,
     pub items: Vec<Item>,
     pub body: Body,
 }
@@ -304,6 +334,11 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
     let site = sh.site;
     let has_terms = !site.terms.is_empty();
     let has_questions = !site.open_questions.is_empty();
+    let facts = SiteFacts {
+        has_terms,
+        has_questions,
+        review: sh.review,
+    };
     let (page_url, kind_name, title, current, chain, tail): (
         String,
         &'static str,
@@ -375,8 +410,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
                 sh.versions,
                 sh.landed_ms,
                 sh.description,
-                has_terms,
-                has_questions,
+                facts,
             ));
         }
         Kind::Folder(id) => {
@@ -459,7 +493,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         nav: if redirect {
             nav::Nav::default()
         } else {
-            nav::build(site, current, &page_url, has_terms, has_questions)
+            nav::build(site, current, &page_url, facts)
         },
         toc: toc::build(&items),
         pager,
@@ -467,6 +501,7 @@ pub fn build(sh: &Shared, kind: Kind) -> PageContext {
         has_mermaid,
         has_terms,
         has_questions,
+        draft: sh.review.is_some(),
         items,
         body,
         kind: kind_name,
@@ -526,11 +561,14 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         .as_ref()
         .and_then(|p| m.get(p))
         .map(|f| site.label(f));
-    let doc_body = DocBody {
+    let mut doc_body = DocBody {
         title: title.to_string(),
         eyebrow,
         lede: lede_block.map(|p| inline::spans_html(&p.body, &own)),
         lede_anchor: lede_block.and_then(|p| site.anchors.get(&p.id).cloned()),
+        change: sh.review.and_then(|r| r.mark(&doc.id)),
+        lede_change: lede_block.and_then(|l| sh.review.and_then(|r| r.mark(&l.id))),
+        removed_end: vec![],
     };
     let (mut items, mut has_mermaid) = (vec![], false);
     let mut stack: Vec<(&Block, usize)> = m
@@ -607,9 +645,80 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
             },
             ref_head,
             ref_,
+            change: sh.review.and_then(|r| r.mark(&b.id)),
+            removed_before: vec![],
         });
     }
+    // the removed lines: before the block they stood before, else at the doc's end
+    for line in sh.review.map(|r| r.removed_in(&doc.id)).unwrap_or_default() {
+        let html = RemovedLine {
+            html: removed_html(sh, &line.blocks, page),
+        };
+        let target = match &line.before {
+            Some(b) if lede_block.is_some_and(|l| l.id == *b) => items.first_mut(),
+            Some(b) => {
+                let id = b.to_string();
+                items.iter_mut().find(|i| i.id == id)
+            }
+            None => None,
+        };
+        match target {
+            Some(item) => item.removed_before.push(html),
+            None => doc_body.removed_end.push(html),
+        }
+    }
     (doc_body, items, has_mermaid)
+}
+
+/// The old text of removed blocks as HTML, written outside the block pipeline: each heading text
+/// is a plain paragraph (the page's outline stays the draft's), and no element has an id.
+fn removed_html(sh: &Shared, blocks: &[Block], page: &str) -> String {
+    let link = |id: &BlockId| sh.link(page, id);
+    let ictx = Ctx {
+        link: &link,
+        doc_page: "",
+    };
+    let used = &sh.used_blobs;
+    let present = |h: &Hash| sh.blobs.contains_key(h);
+    let asset_href = |h: &Hash, media: &str| {
+        let path = assets::blob_path(&h.to_string(), media);
+        used.borrow_mut().insert(path.clone(), *h);
+        rel(page, &path)
+    };
+    let blob_len = |h: &Hash| sh.blobs.get(h).map(|b| b.len() as u64);
+    let ctx = BlockCtx {
+        depth: 1,
+        anchor: "",
+        link: &link,
+        doc_page: "",
+        pack: sh.pack,
+        present: &present,
+        asset_href: &asset_href,
+        blob_len: &blob_len,
+        table_number: None,
+        described_by: &[],
+    };
+    let mut out = String::new();
+    for b in blocks {
+        let heading = ["title", "name", "statement", "prompt"]
+            .into_iter()
+            .find_map(|f| b.field_str(f));
+        if let Some(t) = heading {
+            out.push_str(&format!(
+                "<p class=\"chg-old-title\">{}</p>",
+                inline::label_html(t, &ictx)
+            ));
+        }
+        match b.block_type.as_str() {
+            "code" | "diagram" => out.push_str(&format!(
+                "<pre><code>{}</code></pre>",
+                html::escape(&b.body)
+            )),
+            "table" | "figure" => out.push_str(&html::block_html(b, &ctx)),
+            _ => out.push_str(&inline::body_html(&b.body, &ictx)),
+        }
+    }
+    out
 }
 
 /// The title of a block's doc and of the nearest section above it, as a reader says where it is;

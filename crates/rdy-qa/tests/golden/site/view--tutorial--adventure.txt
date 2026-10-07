@@ -9,15 +9,19 @@ chrome	-	Dark
 chrome	L	Pages
 chrome	L	Home
 chrome	L	Overview
+chrome	L	Edited
 chrome	L	Specification
 chrome	L	The match statement and its patterns
+chrome	L	Edited
 chrome	L	How a match runs
+chrome	L	Edited
 chrome	L	Depth 0
 chrome	L	Rationale
 chrome	L	Why the design is what it is
 chrome	L	Σημασιολογία
 chrome	L	Tutorial
 chrome	L	Pattern matching by example
+chrome	L	Edited
 chrome	L	Proposals
 chrome	L	Unused variable syntax
 chrome	L	Explicit pattern syntax
@@ -179,6 +183,7 @@ content	-	The wildcard always matches and binds nothing, so it only makes sense 
 content	L	Composing patterns
 content	-	Link
 content	-	Copy ref
+content	-	Edited
 content	-	Link
 content	-	Copy ref
 content	-	So far we have used three simple patterns: capture patterns, which are bare names like

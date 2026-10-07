@@ -1020,3 +1020,111 @@ pub fn presentational_site() -> (tempfile::TempDir, Rdy, PresentationalIds) {
     };
     (dir, r, ids)
 }
+
+/// The view [`review_project`] writes its draft into.
+pub const REVIEW_VIEW: &str = "rewrite";
+
+/// The blocks [`review_project`] names.
+#[derive(Clone, Debug)]
+pub struct ReviewIds {
+    pub intro: BlockId,
+    pub lede: BlockId,
+    pub summary: BlockId,
+    pub kept: BlockId,
+    pub edited: BlockId,
+    pub gone: BlockId,
+    pub after: BlockId,
+    pub added: BlockId,
+    pub keep: BlockId,
+    pub keep_summary: BlockId,
+    pub keep_prose: BlockId,
+    pub old: BlockId,
+    pub fresh: BlockId,
+    pub fresh_prose: BlockId,
+}
+
+/// DX4's review project `Review`, on the fixture clock. Canon holds three top-level docs: `Intro`
+/// (a one-paragraph lede, then a `Summary` of four proses), `Keep` and `Old guide`, landed and
+/// tagged `v1.0.0`. The view [`REVIEW_VIEW`], written on that landing, edits the lede and one
+/// prose, removes one prose, adds a prose and a decision, adds the doc `Fresh` and removes
+/// `Old guide`. After it, a landing from the view `later` edits `Keep`'s prose in canon.
+pub fn review_project() -> (tempfile::TempDir, Rdy, ReviewIds) {
+    let _clock = fixture_clock();
+    let (d, mut r) = named_project("Review");
+    let canon = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$intro", "fields": {"name": "intro", "title": "Intro", "doc_type": "overview"}},
+        {"op": "create", "type": "prose", "id": "$lede", "parent": "$intro", "body": "Where to start."},
+        {"op": "create", "type": "section", "id": "$summary", "parent": "$intro", "fields": {"title": "Summary"}},
+        {"op": "create", "type": "prose", "id": "$kept", "parent": "$summary", "body": "Kept as it was."},
+        {"op": "create", "type": "prose", "id": "$edited", "parent": "$summary", "body": "Old wording."},
+        {"op": "create", "type": "prose", "id": "$gone", "parent": "$summary", "body": "Gone soon."},
+        {"op": "create", "type": "prose", "id": "$after", "parent": "$summary", "body": "Stays after."},
+        {"op": "create", "type": "doc", "id": "$keep", "fields": {"name": "keep", "title": "Keep", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$ks", "parent": "$keep", "fields": {"title": "Summary"}},
+        {"op": "create", "type": "prose", "id": "$kp", "parent": "$ks", "body": "Nothing changes here."},
+        {"op": "create", "type": "doc", "id": "$old", "fields": {"name": "old", "title": "Old guide", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$os", "parent": "$old", "fields": {"title": "Summary"}},
+        {"op": "create", "type": "prose", "id": "$op", "parent": "$os", "body": "Old guide text."}
+    ]))
+    .expect("the canon docs");
+    land(&mut r, "work").expect("land the canon docs");
+    r.tag(&approver(), "v1.0.0", None, None)
+        .expect("tag v1.0.0");
+    let s = |res: &WriteResult, k: &str| res.created[k].clone();
+    let id = |res: &WriteResult, k: &str| BlockId::parse(&res.created[k]).expect("a created id");
+    let draft = write(&mut r, REVIEW_VIEW, json!([
+        {"op": "update", "id": s(&canon, "$lede"), "body": "Where to begin."},
+        {"op": "update", "id": s(&canon, "$edited"), "body": "New wording."},
+        {"op": "delete", "id": s(&canon, "$gone")},
+        {"op": "create", "type": "prose", "id": "$added", "parent": s(&canon, "$summary"), "body": "Brand new paragraph."},
+        {"op": "create", "type": "doc", "id": "$fresh", "fields": {"name": "fresh", "title": "Fresh", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$fs", "parent": "$fresh", "fields": {"title": "Summary"}},
+        {"op": "create", "type": "prose", "id": "$fp", "parent": "$fs", "body": "Fresh text."},
+        {"op": "delete", "id": s(&canon, "$op")},
+        {"op": "delete", "id": s(&canon, "$os")},
+        {"op": "delete", "id": s(&canon, "$old")}
+    ]))
+    .expect("the draft");
+    r.decide(
+        &writer(),
+        REVIEW_VIEW,
+        DecisionInput {
+            parent: s(&canon, "$summary"),
+            statement: "Keep the summary short".into(),
+            ..Default::default()
+        },
+    )
+    .expect("a decision in the draft");
+    write(
+        &mut r,
+        "later",
+        json!([{"op": "update", "id": s(&canon, "$kp"), "body": "Changed in canon later."}]),
+    )
+    .expect("a later canon edit");
+    land(&mut r, "later").expect("land the later edit");
+    let ids = ReviewIds {
+        intro: id(&canon, "$intro"),
+        lede: id(&canon, "$lede"),
+        summary: id(&canon, "$summary"),
+        kept: id(&canon, "$kept"),
+        edited: id(&canon, "$edited"),
+        gone: id(&canon, "$gone"),
+        after: id(&canon, "$after"),
+        added: id(&draft, "$added"),
+        keep: id(&canon, "$keep"),
+        keep_summary: id(&canon, "$ks"),
+        keep_prose: id(&canon, "$kp"),
+        old: id(&canon, "$old"),
+        fresh: id(&draft, "$fresh"),
+        fresh_prose: id(&draft, "$fp"),
+    };
+    (d, r, ids)
+}
+
+/// [`review_project`], then the site of `scope` rendered into the fourth value.
+pub fn review_site(scope: &Scope) -> (tempfile::TempDir, Rdy, ReviewIds, tempfile::TempDir) {
+    let (dir, r, ids) = review_project();
+    let out = tempfile::tempdir().expect("tempdir");
+    rdy_render::render_site(&r.read(), scope, out.path()).expect("render the review project");
+    (dir, r, ids, out)
+}
