@@ -372,20 +372,21 @@ pub(crate) fn session(st: &McpState) -> Result<Session, RdyError> {
 
 /// The scope a tool reads, resolved on the state the tool reads (`read`), so that a view created
 /// by a later publish is never accepted here and then read on a state without it.
-fn scope_of(st: &McpState, read: &ReadState, s: &Option<String>) -> Result<Scope, RdyError> {
+/// The scope `s` names for a session whose view is `view` (the session's view when `s` is none).
+fn scope_of(view: &str, read: &ReadState, s: &Option<String>) -> Result<Scope, RdyError> {
     match s {
         // scope1: an unknown view is not found, unless it is this session's own view
-        Some(text) => read.resolve_read_scope(text, Some(&st.view)),
+        Some(text) => read.resolve_read_scope(text, Some(view)),
         // ses1: a reader session whose view is canon reads canon by default
-        None if st.view == "canon" => Ok(Scope::Canon),
-        None => Ok(Scope::View(st.view.clone())),
+        None if view == "canon" => Ok(Scope::Canon),
+        None => Ok(Scope::View(view.to_string())),
     }
 }
 
 /// refv1: the scope and the block id of a read call whose `id` may be `id@version` or a ref line.
 /// A pinned version reads under `tag:<version>`; an explicit scope that differs is refused.
 fn read_target(
-    st: &McpState,
+    view: &str,
     read: &ReadState,
     id: &str,
     scope: &Option<String>,
@@ -396,8 +397,8 @@ fn read_target(
         .scope_text(scope.as_deref())
         .map_err(|m| RdyError::new(E_BAD_INPUT, m, rdy_model::reference::PIN_CLASH_FIX))?;
     let scope = match pinned {
-        Some(text) => read.resolve_read_scope(&text, Some(&st.view))?,
-        None => scope_of(st, read, scope)?,
+        Some(text) => read.resolve_read_scope(&text, Some(view))?,
+        None => scope_of(view, read, scope)?,
     };
     let bid = read.resolve_id(&scope, &t.id)?;
     Ok((scope, bid))
@@ -552,7 +553,7 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     check_tokens(p.max_tokens)?;
     let s = session(st)?;
     let st_ = st.engine.read();
-    let scope = scope_of(st, &st_, &p.scope)?;
+    let scope = scope_of(&st.view, &st_, &p.scope)?;
     let position = st_.version_position(&scope)?;
     let max = p.max_tokens.unwrap_or(4000);
     let tree = fit_tree(st_.tree(&scope, None, None)?, max.saturating_sub(300));
@@ -676,6 +677,7 @@ pub fn rdy_read(st: &mut McpState, p: ReadParams) -> Result<Value, RdyError> {
     let q = read_page::ReadQuery {
         id: id.to_string(),
         scope: p.scope.clone(),
+        view: st.view.clone(),
         format: p.format.clone().unwrap_or_else(|| "compact".into()),
         pattern: p.pattern.clone(),
     };
@@ -695,16 +697,10 @@ fn read_page_of(
     max_tokens: Option<usize>,
 ) -> Value {
     let max = max_tokens.unwrap_or(4000);
-    let end = read_page::page_entries(
-        &read.entries,
-        from,
-        read.sep,
-        (max * 4).saturating_sub(400).max(1),
-    );
     let mut out = json!({
         "id": read.root.to_string(),
         "format": read.format,
-        "text": read.entries[from..end].join(read.sep),
+        "text": "",
     });
     if let Some(c) = read.conflict {
         out["conflict"] = c;
@@ -715,6 +711,21 @@ fn read_page_of(
     if let Some(n) = read.matched {
         out["matched"] = json!(n);
     }
+    // the page's text gets what the envelope leaves: measured with the longest next, truncated
+    // and omitted a page of this read can carry, so the whole page fits max_tokens
+    let all = read.entries.len();
+    let mut envelope = out.clone();
+    envelope["truncated"] = json!(true);
+    envelope["omitted"] = json!(all);
+    envelope["next"] = json!(format!("{token}:{all}"));
+    let envelope_bytes = serde_json::to_string(&envelope).map_or(0, |e| e.len());
+    let end = read_page::page_entries(
+        &read.entries,
+        from,
+        read.sep,
+        (max * 4).saturating_sub(envelope_bytes).max(1),
+    );
+    out["text"] = json!(read.entries[from..end].join(read.sep));
     if end < read.entries.len() {
         out["truncated"] = json!(true);
         out["omitted"] = json!(read.entries.len() - end);
@@ -755,7 +766,7 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
         ));
     }
     let st_ = st.engine.read();
-    let (scope, id) = read_target(st, &st_, target, &q.scope)?;
+    let (scope, id) = read_target(&q.view, &st_, target, &q.scope)?;
     let suspects: std::collections::BTreeSet<BlockId> =
         st_.suspects(&scope)?.into_iter().map(|s| s.block).collect();
     // the scope's recorded conflicts by block, for the marker on each conflicted block's line
@@ -933,7 +944,7 @@ pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.engine.read();
-    let (scope, id) = read_target(st, &st_, &p.id, &p.scope)?;
+    let (scope, id) = read_target(&st.view, &st_, &p.id, &p.scope)?;
     let ctx = st_.context(&scope, &id)?;
     let mut v = serde_json::to_value(ctx).expect("context json");
     if let Some(c) = st_.conflict_info(&scope, &id)? {
@@ -950,7 +961,7 @@ pub fn rdy_impact(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.engine.read();
-    let scope = scope_of(st, &st_, &p.scope)?;
+    let scope = scope_of(&st.view, &st_, &p.scope)?;
     let id = st_.resolve_id(&scope, &p.id)?;
     let items = st_.impact(&scope, &id, p.depth.unwrap_or(3))?;
     Ok(budget(json!({"items": items}), p.max_tokens))
@@ -960,7 +971,7 @@ pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.engine.read();
-    let scope = scope_of(st, &st_, &p.scope)?;
+    let scope = scope_of(&st.view, &st_, &p.scope)?;
     Ok(budget(
         json!({"items": st_.suspects(&scope)?}),
         p.max_tokens,
@@ -1052,7 +1063,7 @@ pub fn rdy_brief(st: &mut McpState, p: BriefParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.engine.read();
-    let scope = scope_of(st, &st_, &p.scope)?;
+    let scope = scope_of(&st.view, &st_, &p.scope)?;
     if let Some(cp) = &p.code_path {
         if p.ids.is_some() || p.path.is_some() {
             return Err(e_code_path_alone());

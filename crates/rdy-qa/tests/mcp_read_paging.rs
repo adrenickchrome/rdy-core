@@ -259,3 +259,69 @@ fn rpat1_compact_matches_a_blocks_whole_text_as_markdown_does() {
         );
     }
 }
+
+#[test]
+fn rpag1_a_page_keeps_its_reads_view_after_rdy_session_moves() {
+    let (_d, mut st, c) = st_with(many(200));
+    let first = read(&mut st, json!({"id": c["$d"], "max_tokens": 300})).unwrap();
+    let next = first["next"].as_str().unwrap().to_string();
+    let want = read(&mut st, json!({"page": next, "max_tokens": 300})).unwrap();
+    rdy_session(
+        &mut st,
+        serde_json::from_value(json!({"actor": "agent:qa", "role": "writer", "view": "other"}))
+            .unwrap(),
+    )
+    .unwrap();
+    let e = read(&mut st, json!({"id": c["$d"]})).unwrap_err();
+    assert_eq!(
+        e.code, "E_UNKNOWN_BLOCK",
+        "guard: the doc is not in the new view: {e}"
+    );
+    let v = read(&mut st, json!({"page": next, "max_tokens": 300})).unwrap();
+    assert_eq!(v, want, "the cursor continues its own read");
+}
+
+#[test]
+fn rpag1_every_page_fits_max_tokens_under_a_conflict_on_the_root() {
+    let (_d, mut r) = project();
+    let res = write(&mut r, "seed", many(60)).unwrap();
+    land(&mut r, "seed").unwrap();
+    let s = res.created["$s"].clone();
+    let base = version_of(&r, &rdy_engine::Scope::Canon, &s);
+    let (sa, sb) = (as_agent("agent:a", "r1"), as_agent("agent:b", "r1"));
+    for (who, view, title) in [(&sa, "a", "A's claims"), (&sb, "b", "B's claims")] {
+        write_as(
+            &mut r,
+            who,
+            view,
+            json!([{"op": "update", "id": s, "base": base, "fields": {"title": title}}]),
+        )
+        .unwrap();
+    }
+    let pa = r.propose(&sa, "a", "a").unwrap();
+    r.land_report(&approver(), &pa.r#ref).unwrap();
+    let mut st = McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
+    rdy_session(
+        &mut st,
+        serde_json::from_value(json!({"actor": "agent:b", "role": "writer", "view": "b"})).unwrap(),
+    )
+    .unwrap();
+    let max = 300;
+    let mut v = read(&mut st, json!({"id": s, "max_tokens": max})).unwrap();
+    assert!(
+        serde_json::to_string(&v["conflict"]).unwrap().len() > 400,
+        "guard: the root's conflict is larger than the old 400-byte reserve: {v}"
+    );
+    let mut pages = 1;
+    loop {
+        assert!(serde_json::to_string(&v).unwrap().len() / 4 <= max, "{v}");
+        assert!(v.get("cut").is_none(), "{v}");
+        let Some(next) = v["next"].as_str().map(String::from) else {
+            break;
+        };
+        v = read(&mut st, json!({"page": next, "max_tokens": max})).unwrap();
+        pages += 1;
+        assert!(pages < 100, "paging does not end");
+    }
+    assert!(pages > 1, "{pages}");
+}

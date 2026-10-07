@@ -17,6 +17,9 @@ pub const MAX_PATTERN: usize = 1024;
 pub struct ReadQuery {
     pub id: String,
     pub scope: Option<String>,
+    /// The session view when the read began: a page call resolves `scope` against it, so a
+    /// later `rdy_session` does not move the read.
+    pub view: String,
     pub format: String,
     pub pattern: Option<String>,
 }
@@ -181,6 +184,7 @@ mod tests {
         ReadQuery {
             id: id.into(),
             scope: None,
+            view: "work".into(),
             format: "compact".into(),
             pattern: None,
         }
