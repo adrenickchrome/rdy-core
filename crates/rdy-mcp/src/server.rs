@@ -188,7 +188,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Propose a decision that supersedes an existing one, wholly or a named part. It inherits the old decision's affects, depends_on, conditional_on and refines links unless you give that kind (an empty list drops it); the result's inherited lists what was copied. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
+        description = "Propose a decision that supersedes an existing one. When the change retires only some of the old decision's rules, pass part (the words of the rules it retires) and the rest stays in force; omit part to supersede all of it. It inherits the old decision's affects, depends_on, conditional_on and refines links unless you give that kind (an empty list drops it); the result's inherited lists what was copied. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
     )]
     async fn rdy_supersede(&self, Parameters(p): Parameters<SupersedeParams>) -> CallToolResult {
         self.run("rdy_supersede", p, tools::rdy_supersede).await
@@ -258,7 +258,7 @@ impl ServerHandler for RdyServer {
 }
 
 /// What the server tells a host about rdy.
-pub const INSTRUCTIONS: &str = "rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Read and write through rdy's tools, not the working-copy files. Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>). Write with rdy_write; propose with rdy_propose. Work in your own view; include others' changes, never write into their views. Conflicts are recorded, not errors: resolve one by writing the block.";
+pub const INSTRUCTIONS: &str = "rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Read and write through rdy's tools, not the working-copy files. Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>). Write with rdy_write; propose with rdy_propose. Work in your own view; include others' changes, never write into their views. Conflicts are recorded, not errors: resolve one by writing the block. Before editing a block, read it with format markdown or yaml: compact lines are a summary. When a change retires only some of a decision's rules, supersede that part (rdy_supersede with part), not the whole decision.";
 
 /// The longest id value [`IdScanner`] will capture; a longer one counts as no id.
 const MAX_ID_BYTES: usize = 1024;
