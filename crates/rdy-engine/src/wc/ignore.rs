@@ -1,9 +1,12 @@
 //! The .rdyignore matcher (FW-X5): a subset of gitignore. Patterns are matched by walking a table
 //! of reachable states over a path's segments and each segment's characters, never by recursive
-//! backtracking, so a hostile pattern stays linear in the length of the path.
+//! backtracking, so a hostile pattern stays linear in the length of the path. A walk carries the
+//! segment states from a directory to its entries (`IgnoreAt`), so deciding one entry costs one
+//! segment step per pattern, whatever its depth.
 
 use crate::error::*;
 use std::io::Read;
+use std::ops::Range;
 use std::path::Path;
 
 /// The ignore file, in the root of the working tree (or of an import directory).
@@ -19,6 +22,15 @@ const LIMIT_FIX: &str = "shorten .rdyignore; one pattern can cover many files (*
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ignore {
     patterns: Vec<Pattern>,
+    /// The length of an `IgnoreAt`: one slot per segment state of each anchored pattern.
+    slots: usize,
+}
+
+/// Where the matcher stands in one directory: for each anchored pattern, the segment states
+/// reachable after the directory's path. A walk carries it from a directory to its entries.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct IgnoreAt {
+    reach: Vec<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,6 +43,8 @@ struct Pattern {
     /// matches the last segment at any depth (then `segs` holds one glob).
     anchored: bool,
     segs: Vec<Seg>,
+    /// An anchored pattern's first slot in an `IgnoreAt`.
+    base: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,13 +111,14 @@ impl Ignore {
             return Err(over_bytes());
         }
         let mut patterns = Vec::new();
+        let mut slots = 0;
         for raw in text.split('\n') {
             let line = raw.strip_suffix('\r').unwrap_or(raw);
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
             let line = trim_trailing_spaces(line);
-            let Some(p) = Pattern::parse(line) else {
+            let Some(mut p) = Pattern::parse(line) else {
                 continue;
             };
             if patterns.len() == MAX_IGNORE_PATTERNS {
@@ -113,9 +128,13 @@ impl Ignore {
                     LIMIT_FIX,
                 ));
             }
+            if p.anchored {
+                p.base = slots;
+                slots += p.segs.len() + 1;
+            }
             patterns.push(p);
         }
-        Ok(Ignore { patterns })
+        Ok(Ignore { patterns, slots })
     }
 
     /// Whether `rel` (relative to the root, `/`-separated) is ignored. Each parent directory is
@@ -125,19 +144,49 @@ impl Ignore {
             return false;
         }
         let segs: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
-        if segs.is_empty() {
-            return false;
+        let mut at = self.root();
+        for (k, name) in segs.iter().enumerate() {
+            let last = k + 1 == segs.len();
+            if self.ignores(&at, name, is_dir || !last) {
+                return true;
+            }
+            if !last {
+                at = self.enter(&at, name);
+            }
         }
-        (1..segs.len()).any(|k| self.decide(&segs[..k], true)) || self.decide(&segs, is_dir)
+        false
     }
 
-    /// The last pattern that matches decides.
-    fn decide(&self, segs: &[&str], is_dir: bool) -> bool {
+    /// The matcher's state at the root.
+    pub(crate) fn root(&self) -> IgnoreAt {
+        let mut reach = vec![false; self.slots];
+        for p in self.patterns.iter().filter(|p| p.anchored) {
+            let set = &mut reach[p.range()];
+            set[0] = true;
+            p.close(set);
+        }
+        IgnoreAt { reach }
+    }
+
+    /// Whether the entry `name` of the directory at `at` is ignored; the last pattern that
+    /// matches decides. Only the entry is decided: a walk enters no ignored directory, so the
+    /// entry's parents were decided (not ignored) on the way down.
+    pub(crate) fn ignores(&self, at: &IgnoreAt, name: &str, is_dir: bool) -> bool {
+        let mut scratch = Vec::new();
         self.patterns
             .iter()
             .rev()
-            .find(|p| p.matches(segs, is_dir))
+            .find(|p| p.matches(at, name, is_dir, &mut scratch))
             .is_some_and(|p| !p.negate)
+    }
+
+    /// The matcher's state inside the directory `name` of the directory at `at`.
+    pub(crate) fn enter(&self, at: &IgnoreAt, name: &str) -> IgnoreAt {
+        let mut reach = vec![false; self.slots];
+        for p in self.patterns.iter().filter(|p| p.anchored) {
+            p.advance(&at.reach[p.range()], name, &mut reach[p.range()]);
+        }
+        IgnoreAt { reach }
     }
 }
 
@@ -198,20 +247,69 @@ impl Pattern {
             dir_only,
             anchored,
             segs,
+            base: 0,
         })
     }
 
-    fn matches(&self, path: &[&str], is_dir: bool) -> bool {
+    /// An anchored pattern's slots in an `IgnoreAt`.
+    fn range(&self) -> Range<usize> {
+        self.base..self.base + self.segs.len() + 1
+    }
+
+    /// Whether the pattern matches the entry `name` of the directory at `at`.
+    fn matches(&self, at: &IgnoreAt, name: &str, is_dir: bool, scratch: &mut Vec<bool>) -> bool {
         if self.dir_only && !is_dir {
             return false;
         }
         if !self.anchored {
-            let (Some(Seg::Glob(toks)), Some(name)) = (self.segs.first(), path.last()) else {
+            let Some(Seg::Glob(toks)) = self.segs.first() else {
                 return false;
             };
             return glob_match(toks, name);
         }
-        segs_match(&self.segs, path)
+        let n = self.segs.len();
+        scratch.clear();
+        scratch.resize(n + 1, false);
+        self.advance(&at.reach[self.range()], name, scratch);
+        scratch[n]
+    }
+
+    /// A `**` reaches the segment after it without taking one, except as the last segment
+    /// (`x/**`), where it matches one or more.
+    fn close(&self, set: &mut [bool]) {
+        for i in 0..self.segs.len().saturating_sub(1) {
+            if set[i] && self.segs[i] == Seg::Any {
+                set[i + 1] = true;
+            }
+        }
+    }
+
+    /// One path segment: the states reachable from `cur` (all false in `next` on entry).
+    fn advance(&self, cur: &[bool], name: &str, next: &mut [bool]) {
+        let n = self.segs.len();
+        if !cur.contains(&true) {
+            return;
+        }
+        count(n + 1);
+        for i in 0..n {
+            if !cur[i] {
+                continue;
+            }
+            match &self.segs[i] {
+                Seg::Any => {
+                    next[i] = true;
+                    if i + 1 == n {
+                        next[n] = true;
+                    }
+                }
+                Seg::Glob(toks) => {
+                    if glob_match(toks, name) {
+                        next[i + 1] = true;
+                    }
+                }
+            }
+        }
+        self.close(next);
     }
 }
 
@@ -290,6 +388,20 @@ fn class(chars: &[char], start: usize) -> Option<(Tok, usize)> {
     None
 }
 
+// Matcher steps, counted in unit tests only: a guard that the work per entry stays bounded.
+#[cfg(test)]
+thread_local! {
+    static STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count(n: usize) {
+    STEPS.with(|s| s.set(s.get() + n as u64));
+}
+
+#[cfg(not(test))]
+fn count(_: usize) {}
+
 fn tok_takes(t: &Tok, c: char) -> bool {
     match t {
         Tok::Lit(x) => *x == c,
@@ -317,6 +429,7 @@ fn glob_match(toks: &[Tok], name: &str) -> bool {
     cur[0] = true;
     close(&mut cur);
     for c in name.chars() {
+        count(n + 1);
         next.fill(false);
         for i in 0..n {
             if !cur[i] {
@@ -328,50 +441,6 @@ fn glob_match(toks: &[Tok], name: &str) -> bool {
                 }
             } else if tok_takes(&toks[i], c) {
                 next[i + 1] = true;
-            }
-        }
-        close(&mut next);
-        std::mem::swap(&mut cur, &mut next);
-        if !cur.iter().any(|s| *s) {
-            return false;
-        }
-    }
-    cur[n]
-}
-
-/// A path's segments against an anchored pattern's segments, the same way. A `**` matches zero
-/// or more segments, except as the last segment (`x/**`), where it matches one or more.
-fn segs_match(segs: &[Seg], path: &[&str]) -> bool {
-    let n = segs.len();
-    let close = |set: &mut [bool]| {
-        for i in 0..n.saturating_sub(1) {
-            if set[i] && segs[i] == Seg::Any {
-                set[i + 1] = true;
-            }
-        }
-    };
-    let mut cur = vec![false; n + 1];
-    let mut next = vec![false; n + 1];
-    cur[0] = true;
-    close(&mut cur);
-    for name in path {
-        next.fill(false);
-        for i in 0..n {
-            if !cur[i] {
-                continue;
-            }
-            match &segs[i] {
-                Seg::Any => {
-                    next[i] = true;
-                    if i + 1 == n {
-                        next[n] = true;
-                    }
-                }
-                Seg::Glob(toks) => {
-                    if glob_match(toks, name) {
-                        next[i + 1] = true;
-                    }
-                }
             }
         }
         close(&mut next);
@@ -418,6 +487,63 @@ mod tests {
             i.is_ignored("sp ", false),
             "an escaped trailing space stays"
         );
+    }
+
+    fn steps() -> u64 {
+        STEPS.with(std::cell::Cell::get)
+    }
+
+    /// A pattern built to be slow, 1024 times, against a 32-deep tree: an entry a walk decides
+    /// costs one step of each pattern whatever its depth (its parents were decided on the way
+    /// down), and `is_ignored` on a deep path one step per segment.
+    #[test]
+    fn hostile_patterns_cost_one_step_per_entry() {
+        const STARS: usize = 28;
+        let text = format!("**/{}*b\n", "*a".repeat(STARS)).repeat(MAX_IGNORE_PATTERNS);
+        assert!(text.len() <= MAX_IGNORE_BYTES);
+        let ig = Ignore::parse(&text).unwrap();
+        let t = tempfile::tempdir().unwrap();
+        let folder = "a".repeat(27);
+        let mut dir = t.path().to_path_buf();
+        let mut rel = vec![];
+        for i in 0..rdy_model::tree::MAX_FOLDER_DEPTH {
+            dir.push(&folder);
+            rel.push(folder.as_str());
+            std::fs::create_dir(&dir).unwrap();
+            let f = format!("id: fd-{i:05}\ntype: folder\norder: a1\nfields:\n  title: F\n");
+            std::fs::write(dir.join("_folder.yaml"), f).unwrap();
+        }
+        for i in 0..20 {
+            let d = format!("- id: d-{i:05}\n  type: doc\n  order: a1\n  fields:\n    title: T\n");
+            std::fs::write(dir.join(format!("{}{i:02}.yaml", "a".repeat(24))), d).unwrap();
+        }
+        // one unit: every pattern's glob run once over the longest name (31 characters)
+        let unit = (MAX_IGNORE_PATTERNS * (2 * STARS + 2 + 1) * (31 + 1)) as u64;
+        let pack = rdy_schema::PackSet::with_builtin()
+            .resolve("rdy-standard")
+            .unwrap();
+
+        let s = steps();
+        let w = crate::tree_io::read_wc(t.path(), &ig, &pack);
+        let wc = steps() - s;
+        assert_eq!(w.files.len(), 52, "the walk reaches the deepest folder");
+        let s = steps();
+        let (loaded, _) = crate::tree_io::read_tree_with(t.path(), "docs", Some(&ig));
+        let export = steps() - s;
+        assert_eq!(
+            loaded.len(),
+            52,
+            "the export walk reaches the deepest folder"
+        );
+        let deep = format!("{}/x.yaml", rel.join("/"));
+        let s = steps();
+        assert!(!ig.is_ignored(&deep, false));
+        let one = steps() - s;
+
+        // 32 folders: the directory, its _folder.yaml twice and the step into it; 20 docs
+        assert!(wc <= 160 * unit, "working-copy walk: {} units", wc / unit);
+        assert!(export <= 160 * unit, "export walk: {} units", export / unit);
+        assert!(one <= 2 * 33 * unit, "one deep path: {} units", one / unit);
     }
 
     #[test]

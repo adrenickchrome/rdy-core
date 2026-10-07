@@ -176,3 +176,78 @@ fn wcly1_hostile_entries_are_untracked_never_followed() {
         "{reasons:?}"
     );
 }
+
+#[test]
+fn wcly1_a_doc_entry_that_does_not_load_stays_visible() {
+    let t = tempfile::tempdir().unwrap();
+    let r = t.path();
+    let other = |c: &str| DOC.replace("AAAAA", &c.repeat(5));
+    // the doc keeps a readable id: the file stays a member, and the diagnostic says why
+    put(
+        r,
+        "typo.yaml",
+        &DOC.replace("  fields:", "  titel: x\n  fields:"),
+    );
+    put(
+        r,
+        "moved.yaml",
+        &other("B").replace(
+            "  order: a1\n  fields:",
+            "  order: a1\n  parent: fd-AAAAA\n  fields:",
+        ),
+    );
+    put(
+        r,
+        "named.yaml",
+        &other("C").replace("    title: Intro", "    title: Intro\n    name: other"),
+    );
+    // no id to keep: untracked, the first diagnostic as its reason
+    put(
+        r,
+        "fresh.yaml",
+        "- type: doc\n  titel: x\n  fields:\n    title: Fresh\n    doc_type: page\n",
+    );
+    let w = read_tree(r, &Ignore::empty(), &pack());
+    for (path, head) in [
+        ("typo.yaml", "d-AAAAA"),
+        ("moved.yaml", "d-BBBBB"),
+        ("named.yaml", "d-CCCCC"),
+    ] {
+        let f = w
+            .files
+            .get(path)
+            .unwrap_or_else(|| panic!("{path} is a member: {:?}", w.files.keys()));
+        assert_eq!(
+            (f.kind, f.head.to_string(), f.new_head),
+            (FileKind::Doc, head.to_string(), false),
+            "{path}"
+        );
+        assert!(
+            w.diags
+                .iter()
+                .any(|d| d.file == path && d.code == "E_FILE_FORMAT"),
+            "{path}: {:?}",
+            w.diags
+        );
+    }
+    assert!(
+        w.diags
+            .iter()
+            .any(|d| d.file == "typo.yaml" && d.message.contains("\"titel\"")),
+        "{:?}",
+        w.diags
+    );
+    let untracked: Vec<(&str, &str)> = w
+        .untracked
+        .iter()
+        .map(|u| (u.path.as_str(), u.reason.as_str()))
+        .collect();
+    assert_eq!(untracked.len(), 1, "{untracked:?}");
+    assert_eq!(untracked[0].0, "fresh.yaml");
+    assert!(untracked[0].1.contains("\"titel\""), "{untracked:?}");
+    assert!(
+        w.diags.iter().all(|d| d.file != "fresh.yaml"),
+        "{:?}",
+        w.diags
+    );
+}

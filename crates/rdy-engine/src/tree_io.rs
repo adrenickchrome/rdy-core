@@ -3,7 +3,7 @@
 //! that leave out `id`, `order` and `parent`.
 use crate::error::*;
 use crate::io::{BlockYaml, KeyedLink, from_yaml_struct};
-use crate::wc::ignore::Ignore;
+use crate::wc::ignore::{Ignore, IgnoreAt};
 use crate::wc::layout::{BLOBS_DIR, FileKind, MAX_MEMBER_BYTES, THEIRS_SUFFIX, Untracked, WcFile};
 use crate::yaml_pos::{Positions, Seg, positions};
 use rdy_model::{Block, BlockId, FieldValue, Hash, tree};
@@ -86,8 +86,6 @@ struct Reader<'a> {
     text: String,
     /// Paths to skip, relative to the root read.
     ignore: Option<&'a Ignore>,
-    /// How the root appears in messages: `ignore` matches what follows it.
-    base: String,
     /// Working-copy mode: the pack whose prefixes give new entries their ids.
     wc: Option<&'a Pack>,
     /// Working-copy mode: ids in use, which a fresh id avoids.
@@ -111,10 +109,10 @@ pub(crate) fn read_tree_with(
 ) -> (Vec<Loaded>, Vec<Diagnostic>) {
     let mut r = Reader {
         ignore,
-        base: shown.to_string(),
         ..Reader::default()
     };
-    r.dir(root, shown, None);
+    let at = r.ignore_root();
+    r.dir(root, shown, None, &at);
     (r.loaded, r.diags)
 }
 
@@ -144,7 +142,8 @@ pub(crate) fn read_wc(root: &Path, ignore: &Ignore, pack: &Pack) -> WcRead {
             taken: reserved.clone(),
             ..Reader::default()
         };
-        r.wc_dir(root, "", None, 0);
+        let at = r.ignore_root();
+        r.wc_dir(root, "", None, 0, &at);
         tries += 1;
         // a fresh id is never one the tree holds: one drawn before a later file named it is
         // drawn again on a second read, which avoids every id the first one saw
@@ -261,7 +260,8 @@ pub(crate) fn link_diag(shown: &str) -> Diagnostic {
 }
 
 impl Reader<'_> {
-    fn dir(&mut self, dir: &Path, shown: &str, parent: Option<&BlockId>) {
+    /// One directory of an export tree; `at` is the ignore matcher's state in it.
+    fn dir(&mut self, dir: &Path, shown: &str, parent: Option<&BlockId>, at: &IgnoreAt) {
         let mut entries: Vec<_> = match std::fs::read_dir(dir) {
             Ok(rd) => rd.filter_map(Result::ok).map(|e| e.path()).collect(),
             Err(e) => {
@@ -297,13 +297,9 @@ impl Reader<'_> {
                 continue;
             }
             let here = format!("{shown}/{fname}");
-            if let Some(ig) = self.ignore {
-                let rel = here
-                    .strip_prefix(self.base.as_str())
-                    .unwrap_or(&here)
-                    .trim_start_matches('/');
+            if self.ignore.is_some() {
                 let is_dir = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir());
-                if ig.is_ignored(rel, is_dir) {
+                if self.ignored(at, &fname, is_dir) {
                     continue;
                 }
             }
@@ -349,7 +345,8 @@ impl Reader<'_> {
                     continue;
                 }
                 if let Some(id) = self.folder_file(&ff, &ff_shown, &name, parent) {
-                    self.dir(&path, &here, Some(&id));
+                    let inner = self.enter(at, &fname);
+                    self.dir(&path, &here, Some(&id), &inner);
                 }
             } else {
                 self.doc_file(&path, &here, &name, parent);
@@ -884,8 +881,20 @@ impl Reader<'_> {
         });
     }
 
-    fn ignored(&self, rel: &str, is_dir: bool) -> bool {
-        self.ignore.is_some_and(|i| i.is_ignored(rel, is_dir))
+    /// The ignore matcher's state at the root read.
+    fn ignore_root(&self) -> IgnoreAt {
+        self.ignore.map(Ignore::root).unwrap_or_default()
+    }
+
+    /// Whether the entry `name` of the directory at `at` is ignored. The walks decide each entry
+    /// only: they enter no ignored directory, so its parents are not ignored.
+    fn ignored(&self, at: &IgnoreAt, name: &str, is_dir: bool) -> bool {
+        self.ignore.is_some_and(|i| i.ignores(at, name, is_dir))
+    }
+
+    /// The ignore matcher's state inside the directory `name` of the directory at `at`.
+    fn enter(&self, at: &IgnoreAt, name: &str) -> IgnoreAt {
+        self.ignore.map(|i| i.enter(at, name)).unwrap_or_default()
     }
 
     /// The entries of `dir`, sorted by name; a directory that cannot be read is a diagnostic.
@@ -913,7 +922,14 @@ impl Reader<'_> {
     /// One directory of the working tree: the root (`rel` empty, `depth` 0) or a folder's.
     /// Checks run in the spec's order, and every type check uses `symlink_metadata` before any
     /// open, so a link is never followed and a FIFO never blocks the scan.
-    fn wc_dir(&mut self, dir: &Path, rel: &str, parent: Option<&BlockId>, depth: usize) {
+    fn wc_dir(
+        &mut self,
+        dir: &Path,
+        rel: &str,
+        parent: Option<&BlockId>,
+        depth: usize,
+        at: &IgnoreAt,
+    ) {
         let Some(entries) = self.listing(dir, rel) else {
             return;
         };
@@ -934,7 +950,7 @@ impl Reader<'_> {
                     continue;
                 }
             };
-            if self.ignored(&here, meta.is_dir()) {
+            if self.ignored(at, &lossy, meta.is_dir()) {
                 continue;
             }
             if let Some(why) = member_problem(&meta) {
@@ -947,9 +963,10 @@ impl Reader<'_> {
             };
             if meta.is_dir() {
                 if rel.is_empty() && fname == BLOBS_DIR {
-                    self.wc_blobs(&path, &here);
+                    let inner = self.enter(at, fname);
+                    self.wc_blobs(&path, &here, &inner);
                 } else {
-                    self.wc_folder(&path, &here, fname, parent, depth + 1, &mut seen);
+                    self.wc_folder(&path, &here, parent, depth + 1, at, &mut seen);
                 }
             } else if fname.ends_with(THEIRS_SUFFIX) {
                 self.theirs.push(here);
@@ -963,7 +980,7 @@ impl Reader<'_> {
     }
 
     /// `_blobs/` at the root: its regular files are figures, never docs.
-    fn wc_blobs(&mut self, dir: &Path, rel: &str) {
+    fn wc_blobs(&mut self, dir: &Path, rel: &str, at: &IgnoreAt) {
         let Some(entries) = self.listing(dir, rel) else {
             return;
         };
@@ -983,7 +1000,7 @@ impl Reader<'_> {
                     continue;
                 }
             };
-            if self.ignored(&here, meta.is_dir()) || meta.is_dir() {
+            if self.ignored(at, &lossy, meta.is_dir()) || meta.is_dir() {
                 continue;
             }
             if let Some(why) = member_problem(&meta) {
@@ -1013,21 +1030,24 @@ impl Reader<'_> {
 
     /// A directory: a folder when it holds a `_folder.yaml` that is one folder entry; skipped
     /// with its contents when it holds none; untracked when that file is not one.
+    /// `at` is the ignore matcher's state in the directory that holds `dir`.
     fn wc_folder(
         &mut self,
         dir: &Path,
         here: &str,
-        name: &str,
         parent: Option<&BlockId>,
         depth: usize,
+        at: &IgnoreAt,
         seen: &mut BTreeMap<String, String>,
     ) {
+        let name = here.rsplit('/').next().unwrap_or(here);
         let ff = dir.join(FOLDER_FILE);
         let ff_rel = format!("{here}/{FOLDER_FILE}");
         let Ok(meta) = std::fs::symlink_metadata(&ff) else {
             return; // no _folder.yaml: not a folder, and nothing under it is read
         };
-        if self.ignored(&ff_rel, meta.is_dir()) {
+        let inner = self.enter(at, name);
+        if self.ignored(&inner, FOLDER_FILE, meta.is_dir()) {
             return;
         }
         if depth > tree::MAX_FOLDER_DEPTH {
@@ -1070,7 +1090,7 @@ impl Reader<'_> {
                         hash,
                     },
                 );
-                self.wc_dir(dir, here, Some(&id), depth);
+                self.wc_dir(dir, here, Some(&id), depth, &inner);
             }
             None => {
                 let reason = self
@@ -1085,7 +1105,9 @@ impl Reader<'_> {
     }
 
     /// A `*.yaml` file: a doc member when it is a YAML list whose first entry has `type: doc`;
-    /// else untracked. Problems in later entries are diagnostics.
+    /// else untracked. Problems in later entries are diagnostics. When the doc entry itself does
+    /// not load, the file stays a member under the id it gives (its blocks are not read and the
+    /// diagnostics say why), or is untracked when it gives no id that parses.
     fn wc_doc_file(
         &mut self,
         path: &Path,
@@ -1131,17 +1153,44 @@ impl Reader<'_> {
         self.check_name(stem, here);
         let hash = Hash::of(self.text.as_bytes());
         let start = self.loaded.len();
-        if let Some(head) = self.doc_items(items, &pos, here, stem, parent) {
-            let new_head = self.loaded.get(start).is_some_and(|l| l.new);
-            self.files.insert(
-                here.to_string(),
-                WcFile {
-                    kind: FileKind::Doc,
-                    head,
-                    new_head,
-                    hash,
-                },
-            );
-        }
+        let before = self.diags.len();
+        // the id the doc entry gives, read on its own: it keeps the file a member when the rest
+        // of the entry does not load (a typo key, a parent or a name field)
+        let given = items
+            .first()
+            .and_then(|e| e.get("id"))
+            .and_then(serde_yaml_ng::Value::as_str)
+            .and_then(|s| BlockId::parse(s).ok());
+        let (head, new_head) = match self.doc_items(items, &pos, here, stem, parent) {
+            Some(head) => (head, self.loaded.get(start).is_some_and(|l| l.new)),
+            // the doc entry did not load: its diagnostics stay, so status shows the file as
+            // changed, add stages it and the commit's lint names the problem
+            None => match given {
+                Some(id) => {
+                    self.taken.insert(id.clone());
+                    (id, false)
+                }
+                // no id to keep: untracked, as a _folder.yaml that does not load is
+                None => {
+                    let reason = self
+                        .diags
+                        .get(before)
+                        .map(|d| d.message.clone())
+                        .unwrap_or_else(|| "the doc entry does not load".into());
+                    self.diags.truncate(before);
+                    self.untrack(here.to_string(), reason);
+                    return;
+                }
+            },
+        };
+        self.files.insert(
+            here.to_string(),
+            WcFile {
+                kind: FileKind::Doc,
+                head,
+                new_head,
+                hash,
+            },
+        );
     }
 }
