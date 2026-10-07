@@ -9,7 +9,7 @@ use rdy_engine::consequence::write_and_report;
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::{
     E_BAD_INPUT, E_LIMIT, E_PERMISSION, HISTORY_MAX, LandOptions, RdyError, ReadState, Relay,
-    Scope, Session, block_from_yaml, block_to_yaml, check_path, resolve_pack, view_api,
+    Scope, Session, block_to_yaml, check_path, resolve_pack, view_api,
 };
 use rdy_mcp::tools::MAX_TOKENS_LIMIT;
 use rdy_model::{ActorRun, RelayEvidence, Role};
@@ -635,10 +635,9 @@ fn edit_block(cx: &OpContext, a: EditBlockArgs) -> Result<Value, RdyError> {
     check_max_tokens(a.max_tokens)?;
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
-    let block = block_from_yaml(&a.yaml)?;
-    let (brief, max_tokens, v) = (a.brief, a.max_tokens, view.clone());
+    let (yaml, brief, max_tokens, v) = (a.yaml, a.brief, a.max_tokens, view.clone());
     write_and_report(cx.engine, &v, max_tokens, move |r| {
-        r.edit_block(&s, &view, block, brief)
+        r.edit_yaml(&s, &view, &yaml, brief)
     })
 }
 

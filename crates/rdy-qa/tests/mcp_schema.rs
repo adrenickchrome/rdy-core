@@ -60,7 +60,7 @@ fn doc1_a_malformed_links_value_gets_a_hint_with_the_shape() {
     .unwrap();
     for links in [
         json!(["D-AAAAA"]),
-        json!({"decided_by": "D-AAAAA"}),
+        json!({"decided_by": 7}),
         json!({"decided_by": [{"id": "D-AAAAA"}]}),
     ] {
         let e = rdy_write(&mut st, p(json!({"ops": [{"op": "create", "type": "claim", "parent": s, "body": "x", "links": links}]})))

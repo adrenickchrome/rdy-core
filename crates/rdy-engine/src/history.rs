@@ -27,15 +27,15 @@ pub struct Author {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JustificationInfo {
-    Implements(String),
+    Implements(Vec<String>),
     Editorial { class: String, reason: String },
 }
 
 impl JustificationInfo {
-    /// `implements <id>` or `editorial <class>`.
+    /// `implements <id>, <id>` or `editorial <class>`.
     pub fn label(&self) -> String {
         match self {
-            JustificationInfo::Implements(id) => format!("implements {id}"),
+            JustificationInfo::Implements(ids) => format!("implements {}", ids.join(", ")),
             JustificationInfo::Editorial { class, .. } => format!("editorial {class}"),
         }
     }
@@ -101,7 +101,9 @@ fn author(p: &Provenance) -> Author {
 
 fn justification(j: &Justification) -> JustificationInfo {
     match j {
-        Justification::Implements(id) => JustificationInfo::Implements(id.to_string()),
+        Justification::Implements(ids) => {
+            JustificationInfo::Implements(ids.iter().map(ToString::to_string).collect())
+        }
         Justification::Editorial { class, reason } => JustificationInfo::Editorial {
             class: class_str(*class).into(),
             reason: reason.clone(),

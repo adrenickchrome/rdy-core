@@ -187,6 +187,11 @@ pub fn check_path(
                 .flatten()
                 .map(|l| ("links".to_string(), l.target.to_string())),
         );
+        refs.extend(
+            l.keyed
+                .iter()
+                .map(|k| ("links".to_string(), k.text().to_string())),
+        );
         for (key, tok) in refs {
             if unknown(&tok) {
                 let at = l.keys.get(&key).copied().unwrap_or(l.at);

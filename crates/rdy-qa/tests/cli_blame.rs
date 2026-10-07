@@ -49,7 +49,9 @@ fn seeded() -> (Served, Seed) {
             WriteRequest {
                 view: "ra".into(),
                 ops: from_value(json!([{"op": "update", "id": claim, "body": "Two."}])).unwrap(),
-                justification: Some(Justification::Implements(BlockId::parse(&dec).unwrap())),
+                justification: Some(Justification::Implements(vec![
+                    BlockId::parse(&dec).unwrap(),
+                ])),
                 message: "tighten".into(),
             },
         )
@@ -95,7 +97,7 @@ fn blame1_show_prints_the_last_change_with_its_justification() {
     assert!(!out.contains("history:"), "{out}");
     let (ok, v) = s.json(&["--json", "show", &x.claim]);
     assert!(ok, "{v}");
-    assert_eq!(v["justification"], json!({"implements": x.dec}));
+    assert_eq!(v["justification"], json!({"implements": [x.dec]}));
     assert_eq!(v["history"].as_array().unwrap().len(), 1);
     assert_eq!(v["history_more"], true);
     // a decision: the status line, then the last change

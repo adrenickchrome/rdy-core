@@ -287,9 +287,9 @@ fn justification_mapping_and_conflict() {
     .unwrap();
     assert_eq!(
         last(&st).justification,
-        Some(Justification::Implements(
+        Some(Justification::Implements(vec![
             rdy_model::BlockId::parse(&did).unwrap()
-        ))
+        ]))
     );
 }
 

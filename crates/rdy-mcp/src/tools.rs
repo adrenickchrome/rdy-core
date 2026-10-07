@@ -113,6 +113,14 @@ pub struct EditorialParams {
     pub reason: String,
 }
 
+/// llst1: one text, or a list of them.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WriteParams {
     pub view: Option<String>,
@@ -123,13 +131,13 @@ pub struct WriteParams {
     /// {"op":"delete","id":<id or path>,"base":<version>?}
     /// {"op":"rebalance","parent":<id or path>?}
     /// {"op":"repin","id":<id or path>,"base":<version>?,"targets":[<id or path>]?}
-    /// links: {"<kind>": [{"target": "<id or path>", "part": "<optional words>"}]}, e.g. {"decided_by": [{"target": "D-W2HXR"}]}. An update replaces only the link kinds it names; "<kind>": [] removes that kind.
+    /// links: {"<kind>": <target> | [<target>, …] | [{"target": "<id, key or path>", "part": "<optional words>"}]}, e.g. {"decided_by": [{"target": "D-W2HXR"}]}. An update replaces only the link kinds it names; "<kind>": [] removes that kind.
     /// after puts a block behind a sibling and before ahead of one (before the first child makes it first); give one, or neither to append.
     /// repin re-pins a block's references and links (all, or the targets named) to their current versions, after you've checked them: it clears "changed" suspects.
     /// Ids, parents, afters, befores and link targets also take paths (wallets/transactions); a move without parent goes to the top level (docs and folders); rebalance re-keys a parent's children (frozen decisions stay put; in one write it must come before any other op on those children, and a child it re-keys can't be edited again in the same write).
     pub ops: Vec<Value>,
-    /// The decision this change carries out.
-    pub implements: Option<String>,
+    /// The decisions this change carries out: an id, key or path, or a list of them.
+    pub implements: Option<OneOrMany>,
     pub editorial: Option<EditorialParams>,
     pub message: Option<String>,
     /// The briefing token from rdy_brief. Required when the write touches stable content.
@@ -332,11 +340,6 @@ fn read_target(
     Ok((scope, bid))
 }
 
-fn id_of(s: &str) -> Result<BlockId, RdyError> {
-    BlockId::parse(s)
-        .map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "ids look like b-7KQ2M"))
-}
-
 const NAME_RULES: &str = "names: 1-64 characters from A-Z a-z 0-9 . _ -; not starting with . or _; not ending .yaml or .yml; not index; not shaped like a block id; not a Windows device name (con, prn, aux, nul, com1-9, lpt1-9); unique among siblings ignoring case. Omit name on create to have one assigned from the title.";
 
 /// Every write op and its JSON shape (`?` marks optional keys). rdy_schema lists them under
@@ -366,7 +369,7 @@ pub const WRITE_OPS: &[(&str, &str)] = &[
 ];
 
 /// doc1: the shape of a block's `links`.
-pub const LINK_SHAPE: &str = r#"links: {"<kind>": [{"target": "<id or path>", "part": "<optional: the words of the target this link is about>"}]}"#;
+pub const LINK_SHAPE: &str = r#"links: {"<kind>": "<id, key or path>" | ["<target>", …] | [{"target": "<id, key or path>", "part": "<optional: the words of the target this link is about>"}]}"#;
 pub const LINK_EXAMPLE: &str =
     r#"{"decided_by": [{"target": "D-W2HXR"}], "describes": [{"target": "wallets/transactions"}]}"#;
 
@@ -377,16 +380,14 @@ fn link_example() -> Value {
     serde_json::from_str(LINK_EXAMPLE).expect("LINK_EXAMPLE is JSON")
 }
 
-/// Whether `v` has the shape {"<kind>": [{"target": "<id or path>", ...}]}.
+/// Whether `v` has the shape of `LINK_SHAPE`: each kind is a string, or a list of strings and
+/// `{"target": <string>, ...}` objects.
 fn links_shape_ok(v: &Value) -> bool {
+    let entry = |x: &Value| x.is_string() || x.get("target").is_some_and(Value::is_string);
     v.as_object().is_some_and(|kinds| {
-        kinds.values().all(|l| {
-            l.as_array().is_some_and(|items| {
-                items
-                    .iter()
-                    .all(|x| x.get("target").is_some_and(Value::is_string))
-            })
-        })
+        kinds
+            .values()
+            .all(|l| l.is_string() || l.as_array().is_some_and(|items| items.iter().all(entry)))
     })
 }
 
@@ -817,7 +818,29 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
                 "implements for decision-backed changes, editorial for typo/restructure/clarify",
             ));
         }
-        (Some(d), None) => Some(Justification::Implements(id_of(&d)?)),
+        (Some(d), None) => {
+            let texts = match d {
+                OneOrMany::One(t) => vec![t],
+                OneOrMany::Many(v) => v,
+            };
+            if texts.is_empty() {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    "implements is empty",
+                    "name the decision this change carries out, or leave implements out",
+                ));
+            }
+            let scope = Scope::View(p.view.clone().unwrap_or_else(|| st.view.clone()));
+            let read = st.engine.read();
+            let mut ids: Vec<BlockId> = vec![];
+            for t in &texts {
+                let id = read.resolve_id(&scope, t)?;
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            Some(Justification::Implements(ids))
+        }
         (None, Some(e)) => Some(Justification::Editorial {
             class: match e.class.as_str() {
                 "typo" => EditorialClass::Typo,

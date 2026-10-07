@@ -61,7 +61,9 @@ fn hist1_versions_list_newest_first_with_author_justification_and_landing() {
             req(
                 "ra",
                 json!([{"op": "update", "id": claim, "body": "Two."}]),
-                Some(Justification::Implements(BlockId::parse(&dec).unwrap())),
+                Some(Justification::Implements(vec![
+                    BlockId::parse(&dec).unwrap(),
+                ])),
                 "tighten",
             ),
         )
@@ -120,7 +122,7 @@ fn hist1_versions_list_newest_first_with_author_justification_and_landing() {
     assert_eq!(e[1].message, "tighten");
     assert_eq!(
         e[1].justification,
-        Some(JustificationInfo::Implements(dec.clone()))
+        Some(JustificationInfo::Implements(vec![dec.clone()]))
     );
     let l = e[1].landing.as_ref().expect("landed");
     assert_eq!(
@@ -135,7 +137,7 @@ fn hist1_versions_list_newest_first_with_author_justification_and_landing() {
     assert_eq!(c.entries[0].change, w2.change);
     // the JSON shape every surface carries
     let v = serde_json::to_value(&e[1]).unwrap();
-    assert_eq!(v["justification"], json!({"implements": dec}));
+    assert_eq!(v["justification"], json!({"implements": [dec]}));
     assert_eq!(v["landing"]["id"], head);
     assert_eq!(
         v["author"],
@@ -245,7 +247,9 @@ fn hist1_last_changes_match_each_blocks_newest_entry() {
         req(
             "ra",
             json!([{"op": "update", "id": claim, "body": "Two."}]),
-            Some(Justification::Implements(BlockId::parse(&dec).unwrap())),
+            Some(Justification::Implements(vec![
+                BlockId::parse(&dec).unwrap(),
+            ])),
             "",
         ),
     )
@@ -270,7 +274,7 @@ fn hist1_last_changes_match_each_blocks_newest_entry() {
     let bid = |s: &str| BlockId::parse(s).unwrap();
     assert_eq!(
         last[&bid(&claim)].justification,
-        Some(JustificationInfo::Implements(dec))
+        Some(JustificationInfo::Implements(vec![dec]))
     );
     assert_eq!(
         last[&bid(&doc)].change,

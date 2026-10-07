@@ -21,6 +21,64 @@ pub struct LinkInput {
     pub part: Option<String>,
 }
 
+/// llst1: one entry of a link kind's list: a target string or a `{target, part?}` object.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LinkEntry {
+    Text(String),
+    Full(LinkInput),
+}
+
+/// llst1: a link kind's value: one target string, or a list of entries.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LinkValue {
+    One(String),
+    Many(Vec<LinkEntry>),
+    Bad(serde::de::IgnoredAny),
+}
+
+/// The text a malformed link kind value gets.
+const LINK_FORMS: &str = "a link kind takes a target string, a list of target strings, or a list of {target, part?} objects";
+
+/// llst1: the `deserialize_with` for link kinds: each kind is a string (one target), a list of
+/// strings, or a list of `{target, part?}` objects (strings and objects may mix in a list).
+pub fn link_map<'de, D>(d: D) -> Result<BTreeMap<String, Vec<LinkInput>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = BTreeMap::<String, LinkValue>::deserialize(d)?;
+    raw.into_iter()
+        .map(|(kind, v)| {
+            let entries = match v {
+                LinkValue::One(t) => vec![LinkEntry::Text(t)],
+                LinkValue::Many(v) => v,
+                LinkValue::Bad(_) => {
+                    return Err(serde::de::Error::custom(format!("{kind}: {LINK_FORMS}")));
+                }
+            };
+            let links = entries
+                .into_iter()
+                .map(|e| match e {
+                    LinkEntry::Text(target) => LinkInput { target, part: None },
+                    LinkEntry::Full(l) => l,
+                })
+                .collect();
+            Ok((kind, links))
+        })
+        .collect()
+}
+
+/// `link_map` for an optional map (an update that names no links keeps them).
+pub fn link_map_opt<'de, D>(d: D) -> Result<Option<BTreeMap<String, Vec<LinkInput>>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct Wrap(#[serde(deserialize_with = "link_map")] BTreeMap<String, Vec<LinkInput>>);
+    Ok(Option::<Wrap>::deserialize(d)?.map(|w| w.0))
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum OpInput {
@@ -40,7 +98,7 @@ pub enum OpInput {
         fields: BTreeMap<String, serde_json::Value>,
         #[serde(default)]
         body: String,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "link_map")]
         links: BTreeMap<String, Vec<LinkInput>>,
     },
     Update {
@@ -53,7 +111,7 @@ pub enum OpInput {
         unset: Vec<String>,
         #[serde(default)]
         body: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "link_map_opt")]
         links: Option<BTreeMap<String, Vec<LinkInput>>>,
     },
     Move {
