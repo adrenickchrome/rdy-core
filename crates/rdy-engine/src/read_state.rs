@@ -7,7 +7,7 @@ use crate::version::VposCache;
 use crate::{AS_OF_CACHE_ENTRIES, Materialized, Scope};
 use rdy_graph::Graph;
 use rdy_model::{Block, BlockId, Change, Hash, Op, Tag};
-use rdy_schema::Pack;
+use rdy_schema::{AreaMatcher, Pack};
 use rdy_store::segment::Location;
 use rdy_store::{Conflict, Merged, StoreReader, ViewHead};
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -202,6 +202,8 @@ pub struct ReadState {
     pub(crate) views: imbl::HashMap<String, Arc<Entry>>,
     pub(crate) tags: Arc<Vec<(semver::Version, Tag)>>,
     pub(crate) pack: Arc<Pack>,
+    /// The pack's areas, compiled once (arn1).
+    pub(crate) areas: Arc<AreaMatcher>,
     /// The project directory.
     pub(crate) root: Arc<std::path::Path>,
     /// The site's name and description, parsed from `.rdy/config.yaml` by a full publish.

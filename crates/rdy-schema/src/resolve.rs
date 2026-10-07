@@ -24,6 +24,64 @@ pub enum SchemaError {
     },
 }
 
+/// The message of `e`; for a duplicate-key error, its location moved from where the repeated
+/// mapping starts (all serde_yaml_ng gives) to the line and column of the second use of the key.
+fn with_duplicate_line(e: &serde_yaml_ng::Error, yaml: &str) -> String {
+    let text = e.to_string();
+    let (Some(at), Some(loc)) = (text.find("duplicate entry with key \""), e.location()) else {
+        return text;
+    };
+    let rest = &text[at + "duplicate entry with key \"".len()..];
+    let Some(key) = rest.split('"').next() else {
+        return text;
+    };
+    let Some((line, col)) = second_use_of(yaml, key, loc.line(), loc.column()) else {
+        return text;
+    };
+    text.replace(
+        &format!("at line {} column {}", loc.line(), loc.column()),
+        &format!("at line {line} column {col}"),
+    )
+}
+
+/// The 1-based line and column of the second `key:` at the indentation of the block mapping that
+/// starts at `line`, `col` (both 1-based); None for a flow mapping or when it is not found.
+fn second_use_of(yaml: &str, key: &str, line: usize, col: usize) -> Option<(usize, usize)> {
+    let indent = col.checked_sub(1)?;
+    let mut seen = 0;
+    for (i, text) in yaml.lines().enumerate().skip(line.checked_sub(1)?) {
+        let body = if i + 1 == line {
+            text.get(indent..)?
+        } else {
+            let trimmed = text.trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let ind = text.len() - trimmed.len();
+            if ind < indent {
+                return None;
+            }
+            if ind > indent {
+                continue;
+            }
+            trimmed
+        };
+        let is_key = [key.to_string(), format!("\"{key}\""), format!("'{key}'")]
+            .iter()
+            .any(|k| {
+                body.strip_prefix(k.as_str())
+                    .is_some_and(|r| r.trim_start().starts_with(':'))
+            });
+        if is_key {
+            seen += 1;
+            if seen == 2 {
+                return Some((i + 1, indent + 1));
+            }
+        }
+    }
+    None
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct PackSet {
     raw: BTreeMap<String, Pack>,
@@ -46,6 +104,10 @@ impl PackSet {
     /// Adds a pack read from `source`. A name already taken is refused (pack1): a pack is
     /// replaced only by a differently named pack, which may extend it (spec §4.5).
     pub fn add_yaml_from(&mut self, yaml: &str, source: &str) -> Result<String, SchemaError> {
+        // pkdup1: a repeated map key anywhere in the file is refused (the typed parse would keep
+        // the last value silently). serde_yaml_ng's `Value` mapping refuses it and names the key.
+        serde_yaml_ng::from_str::<serde_yaml_ng::Value>(yaml)
+            .map_err(|e| SchemaError::Yaml(with_duplicate_line(&e, yaml)))?;
         let pack: Pack =
             serde_yaml_ng::from_str(yaml).map_err(|e| SchemaError::Yaml(e.to_string()))?;
         let name = pack.name.clone();

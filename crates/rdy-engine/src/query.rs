@@ -23,6 +23,9 @@ pub struct Context {
     /// every other block.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effective_from: Option<String>,
+    /// The pack areas the block is in (arn1); absent when it is in none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub areas: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -32,6 +35,9 @@ pub struct ImpactItem {
     pub block_type: String,
     pub summary: String,
     pub via: ImpactVia,
+    /// The pack areas the item is in (arn1); absent when it is in none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub areas: Vec<String>,
 }
 
 /// The edge that first reached an impact item: the item depends on `from` through `kind`.
@@ -233,6 +239,7 @@ impl ReadState {
             governing: g.governing(id).iter().map(|d| d.to_string()).collect(),
             suspects,
             effective_from: rdy_model::decision::effective_from(&block).map(str::to_string),
+            areas: self.areas_of(scope, id)?,
         })
     }
 
@@ -257,6 +264,7 @@ impl ReadState {
                         from: h.via.from.to_string(),
                         kind: h.via.kind,
                     },
+                    areas: self.areas_in(&m, b),
                 })
             })
             .collect())

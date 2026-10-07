@@ -243,6 +243,18 @@ impl Pack {
             .collect()
     }
 
+    /// arn1: the areas' patterns compiled once, for callers that ask about many paths. Answers
+    /// as [`Pack::areas_for_path`] does.
+    pub fn area_matcher(&self) -> AreaMatcher {
+        AreaMatcher {
+            areas: self
+                .areas
+                .keys()
+                .map(|name| (name.clone(), self.area_globs(name)))
+                .collect(),
+        }
+    }
+
     /// The compiled patterns of one area; empty for an unknown area.
     pub fn area_globs(&self, name: &str) -> Vec<Glob> {
         self.areas
@@ -284,5 +296,28 @@ impl Pack {
         self.block_types
             .get(block_type)
             .is_some_and(|t| t.traits.contains(&Trait::Presentational))
+    }
+}
+
+/// arn1: a pack's areas with their path patterns compiled once, in area-name order. A pattern that
+/// does not compile (impossible after `resolve`) covers nothing, as in [`Pack::areas_for_path`].
+#[derive(Clone, Debug, Default)]
+pub struct AreaMatcher {
+    areas: Vec<(String, Vec<Glob>)>,
+}
+
+impl AreaMatcher {
+    /// The names, ascending, of every area with a path pattern that covers `path`.
+    pub fn areas_for_path(&self, path: &str) -> Vec<&str> {
+        self.areas
+            .iter()
+            .filter(|(_, globs)| globs.iter().any(|g| g.covers(path)))
+            .map(|(n, _)| n.as_str())
+            .collect()
+    }
+
+    /// Whether the pack declares no areas.
+    pub fn is_empty(&self) -> bool {
+        self.areas.is_empty()
     }
 }

@@ -170,7 +170,10 @@ fn imp1_impact_items_say_which_edge_reached_them() {
     assert!(lines[1].ends_with(&format!("[references {c}]")), "{out}");
     let (_, out, _) = rdy(&srv, &["--json", "impact", &t]);
     let v: Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(v[1]["via"], json!({"from": c, "kind": "references"}));
+    assert_eq!(
+        v["items"][1]["via"],
+        json!({"from": c, "kind": "references"})
+    );
 }
 
 #[test]

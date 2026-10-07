@@ -100,7 +100,10 @@ fn ctl2_show_ls_impact_tags_log_read_canon_by_default_and_a_view_on_request() {
     let v = dispatch(&c, "ls", json!({})).unwrap();
     assert_eq!(v.as_array().unwrap().len(), 0, "canon is empty");
     let v = dispatch(&c, "impact", json!({"id": id, "scope": "work"})).unwrap();
-    assert!(v.is_array());
+    assert!(
+        v["items"].is_array(),
+        "impact is {{items, by_area?}} like rdy_impact"
+    );
     let v = dispatch(&c, "tags", json!({})).unwrap();
     assert_eq!(v["versions"], json!([]));
     let v = dispatch(&c, "log", json!({})).unwrap();

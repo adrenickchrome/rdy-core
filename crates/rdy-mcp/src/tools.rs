@@ -969,7 +969,12 @@ pub fn rdy_impact(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     let scope = scope_of(&st.view, &st_, &p.scope)?;
     let id = st_.resolve_id(&scope, &p.id)?;
     let items = st_.impact(&scope, &id, p.depth.unwrap_or(3))?;
-    Ok(budget(json!({"items": items}), p.max_tokens))
+    let mut v = json!({"items": items});
+    let by_area = rdy_engine::by_area(&items);
+    if !by_area.is_empty() {
+        v["by_area"] = json!(by_area);
+    }
+    Ok(budget(v, p.max_tokens))
 }
 
 pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError> {
@@ -1128,6 +1133,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             "pack": pack.name,
             "types": pack.block_types.iter().map(|(n, d)| json!({"type": n, "prefix": d.prefix, "traits": traits(&d.traits)})).collect::<Vec<_>>(),
             "link_types": pack.link_types,
+            "areas": pack.areas.iter().map(|(n, a)| json!({"name": n, "description": a.description, "paths": a.paths})).collect::<Vec<_>>(),
             "link_shape": {"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE},
             "ops": WRITE_OPS.iter().map(|(n, s)| (n.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
             "views": view_tools::SCHEMA_DOC,

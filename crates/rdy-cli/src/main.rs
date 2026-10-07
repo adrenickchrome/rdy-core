@@ -642,7 +642,8 @@ fn log_text(v: &Value) -> String {
 }
 
 fn impact_text(v: &Value) -> String {
-    v.as_array()
+    let mut lines: Vec<String> = v["items"]
+        .as_array()
         .into_iter()
         .flatten()
         .map(|i| {
@@ -656,8 +657,15 @@ fn impact_text(v: &Value) -> String {
                 text(&i["via"]["from"])
             )
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    if let Some(areas) = v["by_area"].as_object().filter(|a| !a.is_empty()) {
+        let parts: Vec<String> = areas
+            .iter()
+            .map(|(n, c)| format!("{n} ({})", num(c)))
+            .collect();
+        lines.push(format!("areas: {}", parts.join(", ")));
+    }
+    lines.join("\n")
 }
 
 fn suspects_text(v: &Value) -> String {
@@ -798,9 +806,21 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             cmd: PackCmd::Check,
         } => {
             let pack = project_pack(&env.project)?;
+            let areas: Vec<Value> = pack
+                .areas
+                .iter()
+                .map(|(n, a)| json!({"name": n, "description": a.description, "paths": a.paths}))
+                .collect();
+            let mut text = format!("pack {} {} ok", pack.name, pack.version);
+            for (name, a) in &pack.areas {
+                text.push_str(&format!("\narea {name}: {}", a.paths.join(", ")));
+                if !a.description.is_empty() {
+                    text.push_str(&format!(" ({})", a.description));
+                }
+            }
             Ok((
-                json!({"pack": pack.name, "version": pack.version, "types": pack.block_types.len()}),
-                format!("pack {} {} ok", pack.name, pack.version),
+                json!({"pack": pack.name, "version": pack.version, "types": pack.block_types.len(), "areas": areas}),
+                text,
             ))
         }
         Cmd::Status => {

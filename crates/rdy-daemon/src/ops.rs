@@ -510,7 +510,13 @@ fn impact(cx: &OpContext, a: ImpactArgs) -> Result<Value, RdyError> {
     let st = cx.engine.read();
     let scope = scope_of(&st, cx, a.scope.as_deref())?;
     let bid = st.resolve_id(&scope, &a.id)?;
-    Ok(to_json(&st.impact(&scope, &bid, a.depth.unwrap_or(3))?))
+    let items = st.impact(&scope, &bid, a.depth.unwrap_or(3))?;
+    let mut v = json!({"items": items});
+    let by_area = rdy_engine::by_area(&items);
+    if !by_area.is_empty() {
+        v["by_area"] = json!(by_area);
+    }
+    Ok(v)
 }
 
 fn suspects(cx: &OpContext, a: ScopeArgs) -> Result<Value, RdyError> {

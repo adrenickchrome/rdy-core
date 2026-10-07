@@ -1,3 +1,4 @@
+mod areas;
 pub mod brief;
 pub mod code_brief;
 pub mod code_index;
@@ -27,6 +28,7 @@ pub mod views;
 mod write;
 mod yaml_pos;
 
+pub use areas::by_area;
 pub use brief::{
     BriefRegistry, Briefing, Coverage, E_BRIEF_REQUIRED, E_BRIEF_STALE, W_BRIEF_STALE,
 };
@@ -65,7 +67,7 @@ pub use engine::{Engine, Local, WriteFn};
 pub use rdy_store::OpenReport;
 
 use arc_swap::ArcSwap;
-use rdy_schema::{Pack, PackSet};
+use rdy_schema::{AreaMatcher, Pack, PackSet};
 use rdy_store::segment::Location;
 use rdy_store::{Store, kinds, layout};
 use read_state::{AsOfCache, Entry};
@@ -255,6 +257,8 @@ pub struct Rdy {
     emit_error: Option<RdyError>,
     store: Store,
     pack: Arc<Pack>,
+    /// `pack`'s areas, compiled once (arn1).
+    areas: Arc<AreaMatcher>,
     /// The project's pack followed by every pack it extends, nearest first.
     lineage: Vec<String>,
     /// The pack files as they were when `pack` was last loaded.
@@ -324,12 +328,15 @@ fn load_pack(root: &Path, name: &str) -> Result<(Pack, Vec<String>), RdyError> {
                 e => RdyError::new(E_CONFIG, format!("{}: {e}", f.display()), "fix the pack file"),
             })?;
     }
-    let config = |e: rdy_schema::SchemaError| {
-        RdyError::new(
+    // pkfix1: only an unknown pack name is fixed in the config; a pack that exists but does not
+    // resolve (an invalid area, a cycle) is fixed in its file.
+    let config = |e: rdy_schema::SchemaError| match e {
+        rdy_schema::SchemaError::UnknownPack(_) => RdyError::new(
             E_CONFIG,
             e.to_string(),
             "set `pack:` in .rdy/config.yaml to an available pack (rdy-standard is built in)",
-        )
+        ),
+        e => RdyError::new(E_CONFIG, e.to_string(), "fix the pack file"),
     };
     let pack = set.resolve(name).map_err(config)?;
     let lineage = set.lineage(name).map_err(config)?;
@@ -376,6 +383,7 @@ impl Rdy {
         let fingerprint = fingerprint?;
         let (pack, lineage) = load_pack(project, &cfg.pack)?;
         let store = layout::open_project_store(&project.join(".rdy"))?;
+        let areas = Arc::new(pack.area_matcher());
         let pack = Arc::new(pack);
         let as_of = Arc::new(AsOfCache::default());
         let vpos: Arc<Mutex<version::VposCache>> = Default::default();
@@ -391,6 +399,7 @@ impl Rdy {
             views: imbl::HashMap::new(),
             tags: Arc::new(vec![]),
             pack: Arc::clone(&pack),
+            areas: Arc::clone(&areas),
             root: Arc::from(project),
             name,
             description,
@@ -413,6 +422,7 @@ impl Rdy {
             emit_error: None,
             store,
             pack,
+            areas,
             lineage,
             fingerprint,
             serve: cfg.serve.resolve(),
@@ -470,6 +480,7 @@ impl Rdy {
                 });
             }
         };
+        self.areas = Arc::new(pack.area_matcher());
         self.pack = Arc::new(pack);
         self.lineage = lineage;
         self.serve = cfg.serve.resolve();
@@ -556,6 +567,7 @@ impl Rdy {
                     views: prev.views.clone(),
                     tags: Arc::clone(&prev.tags),
                     pack: Arc::clone(&self.pack),
+                    areas: Arc::clone(&self.areas),
                     root: Arc::clone(&prev.root),
                     name: Arc::clone(&prev.name),
                     description: prev.description.clone(),
@@ -771,6 +783,7 @@ impl Rdy {
             views,
             tags,
             pack: Arc::clone(&self.pack),
+            areas: Arc::clone(&self.areas),
             root: Arc::clone(&prev.root),
             name,
             description,
