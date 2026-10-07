@@ -212,6 +212,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PackCmd,
     },
+    /// Keys: short names for docs and folders.
+    Keys {
+        #[command(subcommand)]
+        cmd: KeysCmd,
+    },
     /// Run the project's daemon in the foreground (every other command starts one as needed).
     Serve {
         /// Start the daemon in the background and return once it is ready.
@@ -241,6 +246,16 @@ enum NewCmd {
         #[arg(long)]
         title: Option<String>,
         /// The view to write (default: the session's, `work` for the human).
+        #[arg(long)]
+        view: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum KeysCmd {
+    /// Give every doc and folder without a key the key derived from its path, in one change.
+    Assign {
+        /// The view (default: the session's, `work` for the human).
         #[arg(long)]
         view: Option<String>,
     },
@@ -799,6 +814,21 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                 json!({"pack": pack.name, "version": pack.version, "types": pack.block_types.len()}),
                 format!("pack {} {} ok", pack.name, pack.version),
             ))
+        }
+        Cmd::Keys {
+            cmd: KeysCmd::Assign { view },
+        } => {
+            let v = call(env, "keys_assign", json!({"view": view}))?;
+            let keys = v["keys"].as_object().cloned().unwrap_or_default();
+            let mut lines = vec![format!(
+                "assigned {} keys in view {}",
+                keys.len(),
+                v["view"].as_str().unwrap_or_default()
+            )];
+            for (id, k) in &keys {
+                lines.push(format!("  {id}  {}", k.as_str().unwrap_or_default()));
+            }
+            Ok((v, lines.join("\n")))
         }
         Cmd::Status => {
             let v = call(env, "status", json!({}))?;

@@ -42,6 +42,7 @@ pub const OPS: &[&str] = &[
     "check",
     "new_folder",
     "new_doc",
+    "keys_assign",
     "edit_block",
     "propose",
     "approve",
@@ -149,6 +150,12 @@ struct NewDocArgs {
     view: Option<String>,
     doc_type: Option<String>,
     title: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeysAssignArgs {
+    view: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -380,6 +387,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "check" => check(cx, parse(op, args, "{path, pack?}")?),
         "new_folder" => new_folder(cx, parse(op, args, "{path, view?}")?),
         "new_doc" => new_doc(cx, parse(op, args, "{path, view?, doc_type?, title?}")?),
+        "keys_assign" => keys_assign(cx, parse(op, args, "{view?}")?),
         "edit_block" => edit_block(cx, parse(op, args, "{yaml, view?, brief?, max_tokens?}")?),
         "propose" => propose(cx, parse(op, args, "{title, view?}")?),
         "approve" => approve(
@@ -640,6 +648,15 @@ fn new_doc(cx: &OpContext, a: NewDocArgs) -> Result<Value, RdyError> {
             a.title.as_deref(),
         )
     })
+}
+
+fn keys_assign(cx: &OpContext, a: KeysAssignArgs) -> Result<Value, RdyError> {
+    let s = cx.session.clone();
+    let view = view_of(&s, a.view);
+    let (v, name) = (view.clone(), view.clone());
+    let mut out = write_and_report(cx.engine, &v, None, move |r| r.assign_keys(&s, &view))?;
+    out["view"] = json!(name);
+    Ok(out)
 }
 
 fn edit_block(cx: &OpContext, a: EditBlockArgs) -> Result<Value, RdyError> {

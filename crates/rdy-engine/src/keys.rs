@@ -1,7 +1,7 @@
 //! Keys: short human ids (`fields.key`, e.g. `REQ-12`), unique per project ignoring case. The
 //! engine resolves them on write and import, so the store, pins and the graph stay id-only.
-use crate::Materialized;
 use crate::error::*;
+use crate::{Coverage, Materialized, OpInput, Rdy, Scope, Session, WriteRequest, WriteResult};
 use rdy_model::{Block, BlockId, FieldValue, RefMode, key, ref_spans};
 use std::collections::BTreeMap;
 
@@ -15,6 +15,86 @@ pub(crate) fn key_of(b: &Block) -> Option<&str> {
 /// holds it. `taken` is asked with lowercase candidates and compares keys folded.
 pub(crate) fn auto_key(path: &str, block_type: &str, taken: &dyn Fn(&str) -> bool) -> String {
     key::unique(&key::from_path(path, block_type), taken)
+}
+
+impl Rdy {
+    /// `rdy keys assign` (FW-PR3): gives every doc and folder in `view` that has no key the key
+    /// derived from its path, in one change. A key rdy chose carries `key_auto: true`, as a key
+    /// assigned on create does. Docs marked stable need a cited briefing, so the change briefs
+    /// exactly the blocks it rekeys and cites that briefing. A view with more than
+    /// `MAX_BRIEF_BLOCKS` keyless docs and folders gets `E_LIMIT` from the briefing.
+    pub fn assign_keys(&mut self, s: &Session, view: &str) -> Result<WriteResult, RdyError> {
+        let scope = Scope::View(view.into());
+        let st = self.read();
+        let m = st.materialized(&scope)?;
+        let mut todo: Vec<(String, BlockId)> = m
+            .iter()
+            .filter(|b| rdy_model::tree::is_tree_type(&b.block_type) && key_of(b).is_none())
+            .filter_map(|b| Some((m.path_of(&b.id)?, b.id.clone())))
+            .collect();
+        if todo.is_empty() {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("every doc and folder in view {view} has a key"),
+                "nothing to assign",
+            ));
+        }
+        todo.sort();
+        let held = Keys::of(m.iter());
+        let mut given: BTreeMap<String, String> = BTreeMap::new();
+        let mut assigned: Vec<(BlockId, String)> = vec![];
+        for (path, id) in &todo {
+            let b = m.get(id).expect("a block listed from the view is in it");
+            // a key is also taken when it is the name of another top-level doc or folder
+            let k = auto_key(path, &b.block_type, &|c| {
+                !held.holders(c).is_empty()
+                    || given.contains_key(&key::fold(c))
+                    || m.named(None, &key::fold(c)).iter().any(|o| o != id)
+            });
+            given.insert(key::fold(&k), id.to_string());
+            assigned.push((id.clone(), k));
+        }
+        let ops: Vec<OpInput> = assigned
+            .iter()
+            .map(|(id, k)| OpInput::Update {
+                id: id.to_string(),
+                base: None,
+                fields: BTreeMap::from([
+                    ("key".to_string(), serde_json::Value::String(k.clone())),
+                    (key::AUTO_FIELD.to_string(), serde_json::Value::Bool(true)),
+                ]),
+                unset: vec![],
+                body: None,
+                links: None,
+            })
+            .collect();
+        let n = ops.len();
+        let brief = st.brief(
+            &scope,
+            &Coverage {
+                ids: todo.iter().map(|(_, id)| id.to_string()).collect(),
+                path: None,
+            },
+            None,
+        )?;
+        brief.register(&self.briefs);
+        let token = brief.base.token.clone();
+        let mut w = self.write_briefed(
+            s,
+            WriteRequest {
+                view: view.into(),
+                ops,
+                justification: None,
+                message: format!("assign keys to {n} docs and folders"),
+            },
+            Some(token),
+        )?;
+        w.keys = assigned
+            .into_iter()
+            .map(|(id, k)| (id.to_string(), k))
+            .collect();
+        Ok(w)
+    }
 }
 
 /// K1 (FW-PR3): the docs and folders among `created` whose key rdy derived (`key::AUTO_FIELD`)
