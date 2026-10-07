@@ -5,6 +5,7 @@ use rdy_daemon::{
     process_alive, serve, serve_command, spawn_serve,
 };
 use rdy_engine::engine::Local;
+use rdy_engine::wc::state::{Place, WcState};
 use rdy_engine::{
     E_BAD_INPUT, E_CONFIG, E_IO, E_NO_PROJECT, Rdy, RdyError, Session, check_path, classify,
     human_actor_for_env, project_pack, serve_config,
@@ -20,6 +21,7 @@ mod brief_text;
 mod config_cmd;
 mod history_text;
 mod view_cmd;
+mod wc;
 
 /// This binary's version: the hello's `version`, so a client only talks to a daemon of its own.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -289,6 +291,8 @@ enum Cmd {
         #[arg(long)]
         show_origin: bool,
     },
+    #[command(flatten)]
+    Wc(wc::WcCmd),
 }
 
 #[derive(Subcommand)]
@@ -391,6 +395,52 @@ struct Env {
     project: PathBuf,
     cwd: PathBuf,
     no_daemon: bool,
+    /// The working copy the command runs in: the one `cwd` is inside when it belongs to the
+    /// command's project, else the project's own.
+    place: Option<Place>,
+}
+
+/// The ops that write to a view; for the human, the bound view is their default view (R-P10).
+const BOUND_VIEW_OPS: &[&str] = &[
+    "new_folder",
+    "new_doc",
+    "block",
+    "edit_block",
+    "propose",
+    "keys_assign",
+];
+
+/// The view the working copy is bound to, read from `bound.yaml` without the lock; `None` when
+/// it is not bound (or the file does not read).
+fn bound_view(env: &Env) -> Option<String> {
+    let place = env.place.as_ref()?;
+    Some(WcState::load_bound(place).ok()??.view)
+}
+
+/// Whether the command runs as the human: `RDY_ACTOR` unset or naming the human actor.
+fn human_session(env: &Env) -> bool {
+    match std::env::var("RDY_ACTOR") {
+        Ok(a) => a == human_actor_for_env(&env.project),
+        Err(_) => true,
+    }
+}
+
+/// `args` with the bound view as `view` for an op in `BOUND_VIEW_OPS` that names none, and for
+/// `brief` naming neither `view` nor `scope`; only in a human session.
+fn with_bound_view(env: &Env, op: &str, mut args: Value) -> Value {
+    let wants = if op == "brief" {
+        args["view"].is_null() && args["scope"].is_null()
+    } else {
+        BOUND_VIEW_OPS.contains(&op) && args["view"].is_null()
+    };
+    if wants
+        && (args.is_object() || args.is_null())
+        && human_session(env)
+        && let Some(view) = bound_view(env)
+    {
+        args["view"] = Value::String(view);
+    }
+    args
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime, ErrorReply> {
@@ -544,6 +594,7 @@ fn close_local(local: Local) {
 
 /// Runs one ctl op on a session of its own.
 fn call(env: &Env, op: &str, args: Value) -> Result<Value, ErrorReply> {
+    let args = with_bound_view(env, op, args);
     let mut c = Conn::open(env)?;
     let out = c.op(op, args);
     c.close();
@@ -908,6 +959,7 @@ fn edit(env: &Env, id: &str, view: Option<&str>) -> Result<Value, ErrorReply> {
 fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
     match cli.cmd {
         Cmd::Config { show_origin } => config_cmd::run(&env.project, show_origin),
+        Cmd::Wc(c) => wc::run(c, env),
         Cmd::Init { dir, pack } => {
             let dir = dir.or(cli.project).unwrap_or_else(|| env.cwd.clone());
             Rdy::init(&dir, &pack)?;
@@ -1521,10 +1573,19 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let project = cli.project.clone().unwrap_or_else(|| find_project(&cwd));
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    };
+    let place = Place::locate(&cwd)
+        .filter(|p| same(&p.project, &project))
+        .unwrap_or_else(|| Place::main(&project));
     let env = Env {
-        project: cli.project.clone().unwrap_or_else(|| find_project(&cwd)),
+        project,
         cwd,
         no_daemon: cli.no_daemon || std::env::var("RDY_NO_DAEMON").is_ok_and(|v| v == "1"),
+        place: Some(place),
     };
     match &cli.cmd {
         Cmd::Check { path, pack } => return run_check(&env, path, pack.as_deref(), as_json),

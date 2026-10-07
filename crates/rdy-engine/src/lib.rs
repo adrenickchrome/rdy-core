@@ -63,6 +63,7 @@ pub use version::{
 };
 pub use view_query::{ChangeSummary, Compare, CompareEntry, OpSummary, ViewDetail, ViewSummary};
 pub use views::{ConflictInfo, ConflictSide, OwnerInfo, ViewHeadInfo, ViewOpResult};
+pub use wc::project::Projection;
 pub use write::{LinkInput, OpInput, WriteRequest, WriteResult, json_to_field};
 
 pub use engine::{Engine, Local, WriteFn};

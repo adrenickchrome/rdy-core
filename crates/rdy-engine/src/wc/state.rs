@@ -240,13 +240,18 @@ impl WcState {
                 .map_err(|e| io_err(&s.join("base/blocks.json"), "parse", e))?,
         };
         Ok(WcState {
-            bound: load_yaml(&s.join("bound.yaml"))?,
+            bound: WcState::load_bound(place)?,
             base,
             stage: load_yaml(&s.join("stage/deleted.yaml"))?.unwrap_or_default(),
             conflicts: load_yaml(&s.join("conflicts.yaml"))?.unwrap_or_default(),
             pending: load_yaml(&s.join("pending.yaml"))?,
             briefs: load_yaml(&s.join("briefs.yaml"))?.unwrap_or_default(),
         })
+    }
+
+    /// Reads only `bound.yaml` (what the working copy is bound to); a missing file is `None`.
+    pub fn load_bound(place: &Place) -> Result<Option<Bound>, RdyError> {
+        load_yaml(&place.state.join("bound.yaml"))
     }
 
     /// Writes every file with `write_durable`. An empty `pending` or `bound` deletes its file.

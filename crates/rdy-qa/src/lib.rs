@@ -11,3 +11,4 @@ pub mod packs;
 pub mod perf;
 pub mod report;
 pub mod site;
+pub mod wc;

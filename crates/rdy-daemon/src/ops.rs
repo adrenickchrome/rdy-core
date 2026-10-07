@@ -10,8 +10,9 @@ use rdy_engine::consequence::{land_and_report, propose_and_report, write_and_rep
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::search::SearchFilters;
 use rdy_engine::{
-    E_BAD_INPUT, E_LIMIT, E_PERMISSION, HISTORY_MAX, LandOptions, RdyError, ReadState, Relay,
-    Scope, SearchQuery, Session, block_to_yaml, check_path, resolve_pack, view_api,
+    E_BAD_INPUT, E_IO, E_LIMIT, E_NOT_FOUND, E_PERMISSION, HISTORY_MAX, LandOptions, RdyError,
+    ReadState, Relay, Scope, SearchQuery, Session, block_to_yaml, check_path, resolve_pack,
+    view_api,
 };
 use rdy_mcp::tools::MAX_TOKENS_LIMIT;
 use rdy_model::{ActorRun, RelayEvidence, Role};
@@ -54,6 +55,7 @@ pub const OPS: &[&str] = &[
     "reindex",
     "fsck",
     "view",
+    "wc_view",
 ];
 
 #[derive(Deserialize)]
@@ -219,6 +221,14 @@ struct TagArgs {
     version: String,
     landing: Option<String>,
     message: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WcViewArgs {
+    view: Option<String>,
+    ids: Option<Vec<String>>,
+    blobs_dir: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -454,6 +464,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{op, name?, from?, base?, pin?, view?, views?, changes?, cascade?, a?, b?, all?, stale?, reason?, owner?, none?, target?, max_tokens?}",
             )?,
         ),
+        "wc_view" => wc_view(cx, parse(op, args, "{view?, ids?, blobs_dir?}")?),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),
@@ -876,4 +887,62 @@ fn fsck(cx: &OpContext, a: FsckArgs) -> Result<Value, RdyError> {
     v["open_report"] = open_report_json(&cx.engine.open_report());
     v["quarantine"] = json!(quarantine(&cx.engine.root()));
     Ok(v)
+}
+
+/// wcco1: a view as working-copy files. The scope is the view when it has a head, else canon;
+/// `ids` resolve in that scope. With `blobs_dir` (resolved against the session's directory), each
+/// blob whose file is not there yet is written from the store; a blob the store lacks is
+/// `E_NOT_FOUND`, as export's is.
+fn wc_view(cx: &OpContext, a: WcViewArgs) -> Result<Value, RdyError> {
+    let st = cx.engine.read();
+    let view = view_of(cx.session, a.view);
+    let scope = if st.view_head(&view).is_some() {
+        Scope::View(view.clone())
+    } else {
+        Scope::Canon
+    };
+    let ids = a
+        .ids
+        .map(|ids| {
+            ids.iter()
+                .map(|t| st.resolve_id(&scope, t))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+    let mut proj = st.wc_project(&scope, ids.as_deref())?;
+    proj.view = view;
+    if let Some(dir) = a.blobs_dir {
+        let dir = resolve_path(cx.cwd, &dir);
+        for b in &proj.blobs {
+            let path = dir.join(&b.name);
+            if std::fs::symlink_metadata(&path).is_ok() {
+                continue;
+            }
+            let not_found = || {
+                RdyError::new(
+                    E_NOT_FOUND,
+                    format!(
+                        "a figure names blob {}, which is not a blob in the store",
+                        b.hash
+                    ),
+                    "attach the asset again (rdy_asset) and point the figure at it, or delete the figure",
+                )
+            };
+            let h: rdy_model::Hash = b.hash.parse().map_err(|_| not_found())?;
+            if !st.reader().has_blob(&h)? {
+                return Err(not_found());
+            }
+            let bytes = st.reader().get_blob(&h)?;
+            let io = |e: std::io::Error| {
+                RdyError::new(
+                    E_IO,
+                    format!("cannot write {}: {e}", path.display()),
+                    "check the directory and its permissions",
+                )
+            };
+            std::fs::create_dir_all(&dir).map_err(io)?;
+            std::fs::write(&path, bytes).map_err(io)?;
+        }
+    }
+    Ok(to_json(&proj))
 }
