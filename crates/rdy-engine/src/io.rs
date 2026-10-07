@@ -698,7 +698,8 @@ impl Rdy {
         }
         // lpin1: every pin is recomputed from the imported content, as a write's create pins
         // it: each cited target (reference or link) to its content hash, the incoming block
-        // with that id first, else the view's. Pins in the files are ignored.
+        // with that id first, else the view's. A block is never pinned to itself. Pins in the
+        // files are ignored.
         let content = |id: &BlockId| {
             incoming
                 .get(id)
@@ -713,6 +714,7 @@ impl Rdy {
                 let refs = refs.iter().filter_map(|t| BlockId::parse(t).ok());
                 let links = b.links.values().flatten().map(|l| l.target.clone());
                 refs.chain(links)
+                    .filter(|t| *t != b.id)
                     .filter_map(|t| content(&t).map(|h| (t, h)))
                     .collect()
             })

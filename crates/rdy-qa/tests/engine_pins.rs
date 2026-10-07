@@ -202,3 +202,115 @@ fn lpin1_import_recomputes_every_pin_from_the_imported_content() {
     assert_eq!(e.code, E_BAD_INPUT, "{e}");
     assert!(e.message.contains("unsupported export format 1"), "{e}");
 }
+
+/// Fix round 1: a block that cites itself is never pinned to itself, so an edit to it does not
+/// make it a suspect of itself, and a repin of its other targets is not refused by sus3.
+#[test]
+fn lpin1_a_block_citing_itself_is_not_pinned_to_itself_on_write() {
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "work");
+    write(&mut r, "work", json!([
+        {"op": "create", "type": "claim", "id": "c-BBBBB", "parent": section, "body": "B."},
+        {"op": "create", "type": "claim", "id": "c-AAAAA", "parent": section, "body": "This claim, {{c-AAAAA}}, holds per {{c-BBBBB}}."}
+    ]))
+    .unwrap();
+    let a = r.read().block(&work(), &id("c-AAAAA")).unwrap();
+    let b = r.read().block(&work(), &id("c-BBBBB")).unwrap();
+    assert_eq!(
+        a.pins,
+        std::collections::BTreeMap::from([(b.id.clone(), b.content_hash())]),
+        "no self-pin on create"
+    );
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": "c-AAAAA", "body": "This claim, {{c-AAAAA}}, holds firmly per {{c-BBBBB}}."}]),
+    )
+    .unwrap();
+    assert!(
+        suspect_pairs(&r, &work()).is_empty(),
+        "an edit does not make a block a suspect of itself: {:?}",
+        suspect_pairs(&r, &work())
+    );
+    assert!(
+        !r.read()
+            .block(&work(), &id("c-AAAAA"))
+            .unwrap()
+            .pins
+            .contains_key(&a.id)
+    );
+    // B drifts: A is suspect of B only, and a repin of everything A cites clears it
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": "c-BBBBB", "body": "B, changed."}]),
+    )
+    .unwrap();
+    assert_eq!(
+        suspect_pairs(&r, &work()),
+        vec![(
+            "c-AAAAA".to_string(),
+            "c-BBBBB".to_string(),
+            "changed".to_string()
+        )]
+    );
+    write(&mut r, "work", json!([{"op": "repin", "id": "c-AAAAA"}])).unwrap();
+    assert!(
+        suspect_pairs(&r, &work()).is_empty(),
+        "{:?}",
+        suspect_pairs(&r, &work())
+    );
+    assert!(
+        !r.read()
+            .block(&work(), &id("c-AAAAA"))
+            .unwrap()
+            .pins
+            .contains_key(&a.id)
+    );
+    // a repin naming the block itself says so, not that the target changes in this write
+    let e = write(
+        &mut r,
+        "work",
+        json!([{"op": "repin", "id": "c-AAAAA", "targets": ["c-AAAAA"]}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT, "{e}");
+    assert!(
+        e.message.contains("c-AAAAA is never pinned to itself"),
+        "{e}"
+    );
+}
+
+#[test]
+fn lpin1_a_block_citing_itself_is_not_pinned_to_itself_on_import() {
+    let tree = format!(
+        "{OLD_TREE}- id: c-AAAAA\n  type: claim\n  parent: s-AAAAA\n  order: a2\n  body: This claim, {{{{c-AAAAA}}}}, holds per {{{{r-AAAAA}}}}.\n"
+    );
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(
+        t.path().join("rdy-export.yaml"),
+        "format: 3\npack: rdy-standard\nscope: canon\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(t.path().join("docs")).unwrap();
+    std::fs::write(t.path().join("docs/spec.yaml"), tree).unwrap();
+    let (_d, mut r) = project();
+    r.import(&approver(), "work", t.path()).unwrap();
+    let target = r.read().block(&work(), &id("r-AAAAA")).unwrap();
+    assert_eq!(
+        r.read().block(&work(), &id("c-AAAAA")).unwrap().pins,
+        std::collections::BTreeMap::from([(target.id.clone(), target.content_hash())]),
+        "no self-pin on import"
+    );
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": "c-AAAAA", "body": "This claim, {{c-AAAAA}}, holds firmly per {{r-AAAAA}}."}]),
+    )
+    .unwrap();
+    assert!(
+        suspect_pairs(&r, &work()).is_empty(),
+        "{:?}",
+        suspect_pairs(&r, &work())
+    );
+}

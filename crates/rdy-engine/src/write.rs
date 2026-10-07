@@ -1263,8 +1263,9 @@ fn build_ops(
                     .chain(cur.links.values().flatten().map(|l| l.target.clone()))
                     .collect();
                 let targets_given = !targets.is_empty();
+                // a block is never pinned to itself, so a repin of everything skips its own id
                 let wanted: Vec<BlockId> = if targets.is_empty() {
-                    cited.iter().cloned().collect()
+                    cited.iter().filter(|t| **t != id).cloned().collect()
                 } else {
                     targets
                         .iter()
@@ -1273,6 +1274,12 @@ fn build_ops(
                 };
                 let mut block = cur.clone();
                 for t in &wanted {
+                    if *t == id {
+                        return Err(bad(
+                            format!("{id} is never pinned to itself"),
+                            "a block's own edits never make it a suspect; repin the other targets it cites",
+                        ));
+                    }
                     if !cited.contains(t) {
                         return Err(bad(
                             format!("{id} does not reference or link to {t}"),
@@ -1411,9 +1418,10 @@ fn build_ops(
         issues.extend(validate_block(pack, block, parent));
         if !is_move {
             check_asset_blob(pack, store, block)?;
-            // a pin the block already holds is kept; every other cited target is pinned now
+            // a pin the block already holds is kept; every other cited target is pinned now.
+            // A block is never pinned to itself: its own edits would make it its own suspect
             let mut pins = BTreeMap::new();
-            for (target, current) in targets {
+            for (target, current) in targets.into_iter().filter(|(t, _)| *t != block.id) {
                 let h = old_pins.get(&target).copied().unwrap_or(current);
                 pins.insert(target, h);
             }

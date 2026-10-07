@@ -298,3 +298,15 @@ fn suspects_of_matches_the_whole_scope_suspects_filtered_to_one_block() {
     assert_eq!(g.suspects_of(&claim.id).len(), 1);
     assert!(g.suspects_of(&revoker.id).is_empty());
 }
+
+/// Fix round 1: a stray self-pin never surfaces as a suspect, whatever its value.
+#[test]
+fn a_self_pin_is_never_a_suspect() {
+    let mut c = b("c-AAAAA", "claim", Some("s-SSSSS"));
+    c.body = "This claim, {{c-AAAAA}}, holds.".into();
+    c.pins.insert(c.id.clone(), Hash([7; 32]));
+    let blocks = map(vec![c.clone()]);
+    let g = Graph::build_from(blocks.values());
+    assert!(g.suspects().is_empty(), "{:?}", g.suspects());
+    assert!(g.suspects_of(&c.id).is_empty());
+}
