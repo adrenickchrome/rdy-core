@@ -4,7 +4,7 @@ use crate::inline::Form;
 use crate::page::PageContext;
 use crate::site::Site;
 use rdy_engine::{E_IO, Materialized, RdyError};
-use rdy_model::{Block, BlockId, FieldValue, RefMode, decision, tree};
+use rdy_model::{Block, BlockId, FieldValue, RefMode, decision, entity, tree};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -116,8 +116,14 @@ fn own_text(b: &Block, site: &Site) -> String {
     match b.block_type.as_str() {
         // a decision has no place in the text
         decision::DECISION => String::new(),
-        "term" | "component" | "actor" | "interface" => {
+        "term" | "component" | "actor" | "interface" | "entity" => {
             format!("{}: {}", field(b, "name", site), body())
+        }
+        "value" => {
+            let v = entity::value_text(b).unwrap_or_default();
+            format!("{}: {v} {}", field(b, "name", site), body())
+                .trim_end()
+                .to_string()
         }
         "question" => field(b, "prompt", site),
         "diagram" | "figure" => field(b, "alt", site),
