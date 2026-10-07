@@ -2,6 +2,7 @@ pub mod block;
 mod canon;
 mod change;
 pub mod decision;
+pub mod entity;
 mod hash;
 mod id;
 pub mod key;
