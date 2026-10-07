@@ -204,7 +204,7 @@ pub enum FollowUp {
     Update,
     Confirm,
     Reaffirm,
-    /// Declared for M2c3 and M2d2; never produced here.
+    /// For conflicts (M2c3) and tensions (M2d2).
     Resolve,
 }
 

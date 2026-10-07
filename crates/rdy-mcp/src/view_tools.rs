@@ -83,6 +83,7 @@ pub fn rdy_view(st: &mut McpState, p: ViewParams) -> Result<Value, RdyError> {
         owner: p.owner,
         none: p.none,
         target: p.target,
+        max_tokens: p.max_tokens,
     };
     let op = req.op.clone();
     let mut v = run_view(&*st.engine, &s, &st.view, req)?;

@@ -950,10 +950,8 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             Ok((v, t))
         }
         Cmd::View { cmd } => {
-            let args = view_cmd::args_of(&cmd);
-            let op = text(&args["op"]).to_string();
-            let v = call(env, "view", args)?;
-            let t = view_cmd::render(&op, &v);
+            let v = call(env, "view", view_cmd::args_of(&cmd))?;
+            let t = view_cmd::render_view(&cmd, &v);
             Ok((v, t))
         }
         Cmd::Undo { view, op, cascade } => {

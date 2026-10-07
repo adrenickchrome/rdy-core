@@ -39,7 +39,12 @@ pub enum ViewCmd {
         stale: Option<u32>,
     },
     /// A view's changes, conflicts and recent ops.
-    Show { view: String },
+    Show {
+        view: String,
+        /// Print every block id of each change (default: the count and the first 10).
+        #[arg(long)]
+        all: bool,
+    },
     /// Close views, or with --stale the views idle that many days. Human only for --stale.
     Close {
         views: Vec<String>,
@@ -74,7 +79,7 @@ pub fn args_of(cmd: &ViewCmd) -> Value {
         } => json!({"op": "exclude", "view": view, "changes": changes, "cascade": cascade}),
         ViewCmd::Compare { a, b } => json!({"op": "compare", "a": a, "b": b}),
         ViewCmd::Ls { all, stale } => json!({"op": "list", "all": all, "stale": stale}),
-        ViewCmd::Show { view } => json!({"op": "show", "view": view}),
+        ViewCmd::Show { view, .. } => json!({"op": "show", "view": view}),
         ViewCmd::Close {
             views,
             reason,
@@ -290,7 +295,24 @@ fn ls_text(v: &Value) -> String {
         .join("\n")
 }
 
-fn show_text(v: &Value) -> String {
+/// How many block ids `rdy view show` prints per change without `--all`.
+pub const SHOW_BLOCKS: usize = 10;
+
+/// A change's block ids: every one when `all` or there are at most `SHOW_BLOCKS`, else the
+/// count, the first `SHOW_BLOCKS` and how many more.
+fn blocks_text(blocks: &[&str], all: bool) -> String {
+    let n = blocks.len();
+    if all || n <= SHOW_BLOCKS {
+        return format!("[{}]", blocks.join(", "));
+    }
+    format!(
+        "[{n} blocks: {}, … +{} more (--all)]",
+        blocks[..SHOW_BLOCKS].join(", "),
+        n - SHOW_BLOCKS
+    )
+}
+
+fn show_text(v: &Value, all: bool) -> String {
     let mut out = head_line(&v["head"]);
     out.push_str("\nchanges:");
     for c in v["changes"].as_array().into_iter().flatten() {
@@ -302,11 +324,11 @@ fn show_text(v: &Value) -> String {
             .filter_map(Value::as_str)
             .collect();
         out.push_str(&format!(
-            "\n  {} {} {} [{}]",
+            "\n  {} {} {} {}",
             short(text(&c["id"])),
             text(&c["actor"]),
             if message.is_empty() { "-" } else { message },
-            blocks.join(", ")
+            blocks_text(&blocks, all)
         ));
     }
     out.push_str("\nconflicts:");
@@ -343,8 +365,17 @@ fn close_text(v: &Value) -> String {
     lines.join("\n")
 }
 
+/// The text of the `view` op's reply to `cmd`.
+pub fn render_view(cmd: &ViewCmd, reply: &Value) -> String {
+    match cmd {
+        ViewCmd::Show { all, .. } => show_text(reply, *all),
+        _ => render(text(&args_of(cmd)["op"]), reply),
+    }
+}
+
 /// The text of the `view` op's reply to a request of kind `op` (`create`, `fork`, `include`,
-/// `exclude`, `compare`, `list`, `show`, `close`, `own` or `undo`).
+/// `exclude`, `compare`, `list`, `show`, `close`, `own` or `undo`). Include, exclude and undo
+/// end with their consequences.
 pub fn render(op: &str, reply: &Value) -> String {
     match op {
         "create" | "fork" => head_line(reply),
@@ -358,6 +389,7 @@ pub fn render(op: &str, reply: &Value) -> String {
                 out.push_str(&format!(" (+{} dependencies)", count(&reply["added_deps"])));
             }
             out.push_str(&conflict_lines(&reply["conflicts"], ""));
+            out.push_str(&crate::brief_text::consequences_text(reply));
             out
         }
         "exclude" => {
@@ -369,11 +401,12 @@ pub fn render(op: &str, reply: &Value) -> String {
             if count(&reply["cascaded"]) > 0 {
                 out.push_str(&format!(" (+{} dependents)", count(&reply["cascaded"])));
             }
+            out.push_str(&crate::brief_text::consequences_text(reply));
             out
         }
         "compare" => compare_text(reply),
         "list" => ls_text(reply),
-        "show" => show_text(reply),
+        "show" => show_text(reply, false),
         "close" => close_text(reply),
         "own" => format!(
             "view {} owner {}",
@@ -395,6 +428,7 @@ pub fn render(op: &str, reply: &Value) -> String {
                 out.push_str(", rebased onto canon");
             }
             out.push_str(&conflict_lines(&reply["conflicts"], ""));
+            out.push_str(&crate::brief_text::consequences_text(reply));
             out
         }
         _ => serde_json::to_string_pretty(reply).unwrap_or_default(),
@@ -424,4 +458,72 @@ pub fn conflict_text(block: &Value) -> String {
         c["base"].as_str().map_or("none", short),
         sides.join(", ")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn detail(n: usize) -> Value {
+        let blocks: Vec<String> = (0..n).map(|i| format!("c-{i:05}")).collect();
+        json!({
+            "head": {"view": "big", "head": "ab".repeat(32), "base": null, "owner": null, "pinned": false, "closed": false, "changes": 1},
+            "effective_base": null,
+            "changes": [{"id": "cd".repeat(32), "actor": "human:qa", "run": null, "at_ms": 1, "message": "bulk", "blocks": blocks}],
+            "blocks": n, "conflicts": [], "ops": []
+        })
+    }
+
+    #[test]
+    fn vshw1_show_prints_the_count_and_the_first_ten_blocks_of_a_large_change() {
+        let t = show_text(&detail(15), false);
+        let line = t.lines().find(|l| l.contains("bulk")).unwrap();
+        assert!(
+            line.ends_with("[15 blocks: c-00000, c-00001, c-00002, c-00003, c-00004, c-00005, c-00006, c-00007, c-00008, c-00009, … +5 more (--all)]"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn vshw1_show_all_and_a_small_change_list_every_block() {
+        let all = show_text(&detail(15), true);
+        assert!(
+            all.contains("c-00014]") && !all.contains("(--all)"),
+            "{all}"
+        );
+        let small = show_text(&detail(10), false);
+        assert!(
+            small.contains("[c-00000, c-00001")
+                && small.contains("c-00009]")
+                && !small.contains("blocks:"),
+            "{small}"
+        );
+    }
+
+    #[test]
+    fn vshw1_include_exclude_and_undo_print_their_consequences() {
+        let cq = json!([
+            {"id": "cq-1", "block": "c-B", "kind": "suspect", "because": {"edge": "references", "changed": "c-A"}, "follow_up": "update"},
+            {"id": "cq-2", "block": "c-A", "kind": "conflict", "because": {"edge": "conflict", "changed": "c-A"}, "follow_up": "resolve", "conflict": "ee", "fix": "write the block"}
+        ]);
+        let want = "\nconsequences:\n  suspect c-B: update (references c-A)\n  conflict c-A: resolve (conflict c-A)\n    fix: write the block";
+        for (op, reply) in [
+            (
+                "include",
+                json!({"view": "r1", "added": ["x"], "added_deps": [], "conflicts": [], "consequences": cq}),
+            ),
+            (
+                "exclude",
+                json!({"view": "r1", "removed": ["x"], "cascaded": [], "consequences": cq}),
+            ),
+            (
+                "undo",
+                json!({"kind": "include", "undone": "ab".repeat(32), "effect": "excluded 1", "rebased": false, "conflicts": [], "consequences": cq}),
+            ),
+        ] {
+            let t = render(op, &reply);
+            assert!(t.ends_with(want), "{op}: {t}");
+        }
+    }
 }
