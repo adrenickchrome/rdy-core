@@ -24,6 +24,7 @@ mod version;
 pub mod view_api;
 pub mod view_query;
 pub mod views;
+pub mod wc;
 mod write;
 mod yaml_pos;
 
