@@ -147,7 +147,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Brief before editing: for blocks (ids) or a doc or folder (path), the decisions that govern them, what depends on them, what will go stale if they change, their open suspects, and their current versions with the briefing token. Cite the token as brief on your next write; writes to stable content need it. To create a block, brief its parent. For a code file, pass code_path alone: the blocks its commits implement (Implements: trailers) and the blocks whose reflects globs match it, plus a code section (provisional when a cited decision is still proposed, rework when it was rejected)."
+        description = "Brief before editing: for blocks (ids) or a doc or folder (path), the decisions that govern them, what depends on them, what will go stale if they change, their open suspects, work in flight (other views and open proposals that change them), and their current versions with the briefing token. Cite the token as brief on your next write; writes to stable content need it. To create a block, brief its parent. For a code file, pass code_path alone: the blocks its commits implement (Implements: trailers) and the blocks whose reflects globs match it, plus a code section (provisional when a cited decision is still proposed, rework when it was rejected)."
     )]
     async fn rdy_brief(&self, Parameters(p): Parameters<BriefParams>) -> CallToolResult {
         self.run("rdy_brief", p, tools::rdy_brief).await
@@ -196,7 +196,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Propose your view's changes for canon. A human approves it with rdy approve."
+        description = "Propose your view's changes for canon. A human approves it with rdy approve. The result lists the consequences for canon: what landing it would make suspect, with follow-ups (advice)."
     )]
     async fn rdy_propose(&self, Parameters(p): Parameters<ProposeParams>) -> CallToolResult {
         self.run("rdy_propose", p, tools::rdy_propose).await
@@ -210,7 +210,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Create, fork, include, exclude, compare, list, show, close or undo views. Include, exclude, close and undo need ownership of the target view."
+        description = "Create, fork, include, exclude, compare, list, show, close or undo views. Include, exclude, close and undo need ownership of the target view. Include, exclude and undo return the op's consequences, with conflict entries to resolve."
     )]
     async fn rdy_view(&self, Parameters(p): Parameters<view_tools::ViewParams>) -> CallToolResult {
         self.run("rdy_view", p, view_tools::rdy_view).await
@@ -252,7 +252,7 @@ impl ServerHandler for RdyServer {
 }
 
 /// What the server tells a host about rdy.
-pub const INSTRUCTIONS: &str = "rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Read and write through rdy's tools, not the working-copy files. Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>). Write with rdy_write; propose with rdy_propose. Work in your own view; include others' changes, never write into their views. Conflicts are recorded, not errors: resolve one by writing the block.";
+pub const INSTRUCTIONS: &str = "rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Read and write through rdy's tools, not the working-copy files. Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>). Write with rdy_write; propose with rdy_propose. Work in your own view; include others' changes, never write into their views. Conflicts are recorded, not errors: resolve one by writing the block. When a block comes back as a consequence a second time in a session, do not rewrite it again: confirm it (repin) or ask the person, and show what remains as a change plan.";
 
 /// The longest id value [`IdScanner`] will capture; a longer one counts as no id.
 const MAX_ID_BYTES: usize = 1024;
