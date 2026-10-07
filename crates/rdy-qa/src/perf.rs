@@ -79,6 +79,15 @@ fn spec_target(op: &str) -> Option<String> {
         "land_rebase_50" => {
             "< 100 ms p99, one landing with 50 non-empty unpinned views rebasing, 5 of them on the landed blocks (M2 spec 15.1)"
         }
+        "brief_inflight_50" => {
+            "< 5 ms p99 at 10k with 50 live views (the read budget, spec 11; amendment §4.5 item 1)"
+        }
+        "view_consequences_200" => {
+            "no spec target: the consequences of a 200-change include, on the read pool (recorded for M2c3; read against the < 50 ms cold figure)"
+        }
+        "landing_consequences" => {
+            "no spec target: a proposal's consequences for canon, on the read pool (recorded for M2c3)"
+        }
         "view_ls_50" => {
             "no spec target: view_list(all) over 50 open views plus the closed ones, cold (recorded for M2c)"
         }
@@ -723,6 +732,72 @@ fn tier_views(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs
     ));
     let listed = r.read().view_list(true, 14, now).expect("list").len();
     assert!(listed >= runs.landing_views, "{listed} views listed");
+
+    // M2c3: a briefing over the landing claims with the views above live (the touching ones change
+    // those claims), the consequences of a fresh include, and a proposal's consequences for canon
+    let cov = Coverage {
+        ids: claims.iter().map(|c| c.to_string()).collect(),
+        path: None,
+    };
+    out.push(measure_timed(
+        &format!("brief_inflight_50{sfx}"),
+        runs.read,
+        |_| {
+            let st = r.read();
+            let s = Instant::now();
+            let b = st.brief(&Scope::Canon, &cov, None).expect("brief");
+            let took = s.elapsed();
+            assert!(
+                !b.inflight.views.is_empty(),
+                "the touching views are in flight"
+            );
+            took
+        },
+    ));
+    out.push(measure_timed(
+        &format!("view_consequences_200{sfx}"),
+        runs.view_ops,
+        |i| {
+            let name = format!("vq{i}");
+            let before = r.read();
+            let res = r.view_include(&human, &name, &source).expect("include");
+            let after = r.read();
+            let head: Hash = res.head.parse().expect("head");
+            let changes: Vec<Hash> = res
+                .added
+                .iter()
+                .chain(&res.added_deps)
+                .map(|h| h.parse().expect("change"))
+                .collect();
+            let s = Instant::now();
+            after
+                .view_consequences(&before, &name, &head, Some(&changes), None)
+                .expect("view consequences");
+            s.elapsed()
+        },
+    ));
+    r.read()
+        .graph(&Scope::Canon)
+        .expect("canon's graph, built once");
+    out.push(measure_timed(
+        &format!("landing_consequences{sfx}"),
+        runs.view_ops,
+        |i| {
+            let name = format!("pq{i}");
+            write(
+                r,
+                &name,
+                json!([{"op": "update", "id": claims[i % claims.len()].to_string(), "body": format!("Proposed {i}.")}]),
+            )
+            .expect("proposal write");
+            let p = r.propose(&human, &name, &name).expect("propose");
+            let version: Hash = p.id.parse().expect("version");
+            let st = r.read();
+            let s = Instant::now();
+            st.landing_consequences(&version, None).expect("consequences");
+            s.elapsed()
+        },
+    ));
 }
 
 /// The edit loop: a briefing over a doc, a write that cites a briefing (the check on, a hit) and a
@@ -1370,7 +1445,10 @@ mod tests {
                 "view_cold",
                 "view_incremental",
                 "land_rebase_50",
-                "view_ls_50"
+                "view_ls_50",
+                "brief_inflight_50",
+                "view_consequences_200",
+                "landing_consequences"
             ]
         );
         for m in &out {
@@ -1445,6 +1523,27 @@ mod tests {
             .find(|m| m.op == "search_literal")
             .expect("search_literal missing");
         assert!(m.median_ms > 0.0);
+    }
+
+    #[test]
+    #[ignore = "runs the typical perf workload; cargo test -p rdy-qa --release --lib -- --ignored c3perf1"]
+    fn c3perf1_the_m2c3_ops_have_spec_targets_and_run() {
+        let ops = [
+            "brief_inflight_50",
+            "view_consequences_200",
+            "landing_consequences",
+        ];
+        for op in ops {
+            assert!(spec_target(op).is_some(), "{op} has no target");
+        }
+        let ms = run_workload();
+        for op in ops {
+            let m = ms
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            assert!(m.median_ms > 0.0);
+        }
     }
 
     #[test]

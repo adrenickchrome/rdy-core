@@ -730,6 +730,40 @@ of these ops is the Linux bench's.
 
 Linux bench rows: <orchestrator fills in (two agreeing runs)>
 
+## M2c3: briefing in views (2026-10-06)
+
+The `qa-perf` tier gained three ops at the end of `tier_views`, after `view_ls_50`. The views the
+tier leaves behind are live while they run: the 50 landing views (5 of them touching the landing
+claims), the `inc*` views of `include_200` and the closed ones. Each large-tier twin
+(`brief_inflight_50_50k`, `view_consequences_200_50k`, `landing_consequences_50k`) carries the
+typical tier's budget at 50k blocks.
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `brief_inflight_50` | `brief(Canon, claims)` over the landing claims, with the 50 live views up. The touching views change those claims, so `inflight.views` is not empty (asserted) | `runs.read` | < 5 ms p99 at 10k with 50 live views (the read budget, spec 11; amendment §4.5 item 1) |
+| `view_consequences_200` | `view_consequences` for a fresh 200-change include, on the read pool. The include itself (a store write) is outside the timer; the read states before and after it are captured outside too | `runs.view_ops` | no spec target (recorded for M2c3; read against the < 50 ms cold figure) |
+| `landing_consequences` | `landing_consequences` of a new proposal (one claim updated in its own view), on the read pool. The write and the propose are outside the timer. Canon's graph is built once before the op | `runs.view_ops` | no spec target (recorded for M2c3) |
+
+What each cost grows with:
+
+- `brief_inflight_50` adds, to the briefing, one lookup per live view in a memoised set of the
+  block ids that view's changes touch (`Entry.touched`, built once per view entry), and one pass
+  over the open proposals. The first read of a view entry builds its set; a publish that changes
+  the view makes a new entry.
+- `view_consequences_200` compares the view's materialization before and after the op, only for
+  the blocks the op's changes touch, then derives the consequences of the changed blocks from the
+  view's graph. It grows with the number of changes the op added.
+- `landing_consequences` merges the proposal's changes onto canon, applies the applied ops to
+  canon's materialization and carries canon's graph across them. It grows with the number of ops
+  in the version, not with the project.
+
+Baseline: `qa-baseline.json` is not changed here.
+
+Linux bench rows: (bench: the orchestrator fills these rows from two cargo qa --only perf --deep runs on the isolated Linux bench)
+
+Deep gate (bench): <orchestrator fills in>
+
+
 ## Agent ergonomics 2: search (2026-10-06)
 
 The `qa-perf` tier gained one op for block-text search (FW-PR1). It runs in `tier_reads`, after

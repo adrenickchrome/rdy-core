@@ -167,8 +167,7 @@ impl ReadState {
             stable: pref.stable.to_string(),
             version: pref.n,
             title: p.title.clone(),
-            // M2c3 hook: Proposal.summary (FW-G7c), once it exists
-            summary: None,
+            summary: p.summary.clone(),
             view: p.view.clone(),
             proposed_by: RelayedByRow {
                 actor: p.provenance.actor.clone(),

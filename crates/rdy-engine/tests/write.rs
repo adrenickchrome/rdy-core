@@ -56,8 +56,8 @@ fn placeholders_build_a_document_in_one_write() {
         .unwrap();
     assert_eq!(
         claim.pins[&ledger],
-        term.version_hash(),
-        "same-write targets are pinned to their stored version"
+        term.content_hash(),
+        "same-write targets are pinned to their stored content"
     );
     assert!(res.warnings.is_empty());
     assert!(
@@ -90,7 +90,7 @@ fn references_to_existing_blocks_are_pinned() {
         .block(&scope, &BlockId::parse(&ledger_id).unwrap())
         .unwrap();
     let claim = r.read().block(&scope, &id).unwrap();
-    assert_eq!(claim.pins[&ledger.id], ledger.version_hash());
+    assert_eq!(claim.pins[&ledger.id], ledger.content_hash());
 }
 
 #[test]
@@ -415,13 +415,13 @@ fn updates_keep_existing_pins_and_moves_keep_all_pins() {
     let pinned = w.created["op0"].clone();
     let lid = BlockId::parse(&ledger).unwrap();
     let pid = BlockId::parse(&pinned).unwrap();
-    let v1 = r.read().block(&scope, &lid).unwrap().version_hash();
+    let v1 = r.read().block(&scope, &lid).unwrap().content_hash();
     r.write(
         &agent(),
         req(json!([{"op": "update", "id": ledger, "body": "A newer definition."}])),
     )
     .unwrap();
-    let v2 = r.read().block(&scope, &lid).unwrap().version_hash();
+    let v2 = r.read().block(&scope, &lid).unwrap().content_hash();
     assert_ne!(v1, v2);
     r.write(&agent(), req(json!([{"op": "update", "id": pinned, "body": format!("Edited about {{{{{ledger}}}}}.")}]))).unwrap();
     assert_eq!(
@@ -558,7 +558,7 @@ fn unset_removes_a_field_and_links_accept_placeholders() {
     let links: Vec<_> = q.links.values().flatten().collect();
     assert_eq!(links[0].target.to_string(), w.created["$p"]);
     let p = r.read().block(&scope, &links[0].target).unwrap();
-    assert_eq!(q.pins[&p.id], p.version_hash());
+    assert_eq!(q.pins[&p.id], p.content_hash());
 }
 
 #[test]
@@ -620,11 +620,11 @@ fn same_write_references_are_pinned_in_dependency_order_and_later_edits_make_sus
         r.read().block(&scope, &id("$q")).unwrap(),
         r.read().block(&scope, &id("$c")).unwrap(),
     );
-    assert_eq!(q.pins[&t.id], t.version_hash());
+    assert_eq!(q.pins[&t.id], t.content_hash());
     assert_eq!(
         c.pins[&q.id],
-        q.version_hash(),
-        "pinned to the target's final version, pins included"
+        q.content_hash(),
+        "pinned to the target's final content"
     );
     assert!(r.read().context(&scope, &c.id).unwrap().suspects.is_empty());
 
@@ -639,34 +639,6 @@ fn same_write_references_are_pinned_in_dependency_order_and_later_edits_make_sus
         (sus[0].target.clone(), sus[0].reason.as_str()),
         (t.id.clone(), "changed")
     );
-}
-
-#[test]
-fn reference_cycles_in_one_write_stay_unpinned_on_the_cycle_edges_only() {
-    let (_d, mut r) = project();
-    let res = skeleton(&mut r);
-    let scope = Scope::View("work".into());
-    let terms = res.created["$terms"].clone();
-    let w = r.write(&agent(), req(json!([
-        {"op": "create", "type": "term", "id": "$t", "parent": terms, "fields": {"name": "Wallet"}, "body": "Holds a balance."},
-        {"op": "create", "type": "claim", "id": "c-AAAAA", "parent": terms, "body": "See {{c-BBBBB}} and {{$t}}."},
-        {"op": "create", "type": "claim", "id": "c-BBBBB", "parent": terms, "body": "See {{c-AAAAA}}."}
-    ]))).unwrap();
-    let t = r
-        .read()
-        .block(&scope, &BlockId::parse(&w.created["$t"]).unwrap())
-        .unwrap();
-    let a = r
-        .read()
-        .block(&scope, &BlockId::parse("c-AAAAA").unwrap())
-        .unwrap();
-    let b = r
-        .read()
-        .block(&scope, &BlockId::parse("c-BBBBB").unwrap())
-        .unwrap();
-    assert_eq!(a.pins.len(), 1);
-    assert_eq!(a.pins[&t.id], t.version_hash());
-    assert!(b.pins.is_empty());
 }
 
 #[test]

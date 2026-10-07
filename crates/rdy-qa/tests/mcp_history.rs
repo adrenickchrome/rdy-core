@@ -47,7 +47,9 @@ fn seeded(r: &mut Rdy) -> Seed {
             WriteRequest {
                 view: "ra".into(),
                 ops: from_value(json!([{"op": "update", "id": claim, "body": "Two."}])).unwrap(),
-                justification: Some(Justification::Implements(BlockId::parse(&dec).unwrap())),
+                justification: Some(Justification::Implements(vec![
+                    BlockId::parse(&dec).unwrap(),
+                ])),
                 message: String::new(),
             },
         )
@@ -96,7 +98,7 @@ fn mhist1_rdy_context_carries_the_justification_and_the_history_newest_first() {
         from_value(json!({"id": s.claim, "scope": "canon"})).unwrap(),
     )
     .unwrap();
-    assert_eq!(v["justification"], json!({"implements": s.dec}));
+    assert_eq!(v["justification"], json!({"implements": [s.dec]}));
     let h = v["history"].as_array().unwrap();
     assert_eq!(h.len(), 2, "{v}");
     assert_eq!(h[0]["change"], s.change);

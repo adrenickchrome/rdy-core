@@ -14,7 +14,7 @@ use std::path::Path;
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct LinkYaml {
-    target: BlockId,
+    target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     part: Option<String>,
 }
@@ -31,10 +31,81 @@ pub(crate) struct BlockYaml {
     pub(crate) fields: BTreeMap<String, serde_yaml_ng::Value>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) body: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "link_yaml_map"
+    )]
     pub(crate) links: BTreeMap<String, Vec<LinkYaml>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) pins: BTreeMap<BlockId, String>,
+}
+
+/// llst1: a link kind is a string, a list of strings, or a list of `{target, part?}` objects.
+fn link_yaml_map<'de, D>(d: D) -> Result<BTreeMap<String, Vec<LinkYaml>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(crate::write::link_map(d)?
+        .into_iter()
+        .map(|(k, v)| {
+            let v = v
+                .into_iter()
+                .map(|l| LinkYaml {
+                    target: l.target,
+                    part: l.part,
+                })
+                .collect();
+            (k, v)
+        })
+        .collect())
+}
+
+/// lkey1: a link target written as a key, held until the keys of the import or the view can
+/// resolve it. `at` is its position in the kind's list.
+pub(crate) struct KeyedLink {
+    kind: String,
+    at: usize,
+    text: String,
+    part: Option<String>,
+}
+
+impl KeyedLink {
+    /// The text a keyed target was written as.
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+/// lkey1: puts each keyed target in its place in `b`'s link lists, as the id `lookup` gives.
+pub(crate) fn place_keyed(
+    b: &mut Block,
+    mut keyed: Vec<KeyedLink>,
+    lookup: &dyn Fn(&str) -> Result<Option<BlockId>, RdyError>,
+) -> Result<(), RdyError> {
+    keyed.sort_by(|x, y| (&x.kind, x.at).cmp(&(&y.kind, y.at)));
+    for k in keyed {
+        let Some(target) = lookup(&k.text)? else {
+            return Err(RdyError::new(
+                E_UNKNOWN_REF,
+                format!(
+                    "{} links to {} ({}), which no block holds as its key",
+                    b.id, k.text, k.kind
+                ),
+                "use the target's id, or give the target that key",
+            ));
+        };
+        let list = b.links.entry(k.kind).or_default();
+        let at = k.at.min(list.len());
+        list.insert(
+            at,
+            Link {
+                target,
+                part: k.part,
+            },
+        );
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -130,53 +201,8 @@ fn export_level(
     Ok(())
 }
 
-/// The M1 flat layout: `docs/*.yaml`, one list of blocks per doc.
-fn read_format_1(dir: &Path) -> Result<Vec<Block>, RdyError> {
-    let mut files: Vec<_> = std::fs::read_dir(dir.join("docs"))
-        .map_err(io_err)?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| !is_hidden(p) && p.extension().is_some_and(|x| x == "yaml"))
-        .collect();
-    files.sort();
-    // A format-1 export is flat: a directory under docs/ is a format-2 tree, and reading it as
-    // format 1 would silently import nothing.
-    if let Some(d) = std::fs::read_dir(dir.join("docs"))
-        .map_err(io_err)?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.is_dir() && !is_hidden(p))
-        .min()
-    {
-        return Err(RdyError::new(
-            E_FILE_FORMAT,
-            format!(
-                "{}: a format-1 export is flat, but docs/ holds a directory (a format-2 tree?)",
-                d.display()
-            ),
-            "set `format: 2` in rdy-export.yaml, or re-export",
-        ));
-    }
-    let mut blocks: Vec<Block> = vec![];
-    for f in files {
-        refuse_symlink(&f)?;
-        let text = std::fs::read_to_string(&f).map_err(io_err)?;
-        let list: Vec<BlockYaml> = serde_yaml_ng::from_str(&text).map_err(|e| {
-            RdyError::new(
-                E_BAD_INPUT,
-                format!("{}: {e}", f.display()),
-                "fix or re-export the file",
-            )
-        })?;
-        for y in list {
-            blocks.push(from_yaml_struct(y)?);
-        }
-    }
-    Ok(blocks)
-}
-
-/// A format-1 export from M1 has docs without a name: give each the name readers already use,
-/// de-duplicated against names under the same parent in the import and in the view.
+/// A doc imported without a name gets the name readers already use, de-duplicated against names
+/// under the same parent in the import and in the view.
 fn assign_missing_names(blocks: &mut [Block], existing: &Materialized) {
     let mut taken: BTreeMap<Option<BlockId>, BTreeSet<String>> = BTreeMap::new();
     for b in blocks.iter().filter(|b| tree::is_tree_type(&b.block_type)) {
@@ -237,8 +263,13 @@ fn check_import_names(blocks: &[Block], existing: &Materialized) -> Result<(), R
 }
 
 /// key1: refuses a key held twice (ignoring case) among the incoming blocks or between an
-/// incoming block and another block of the view, then stores every key reference as its id.
-fn resolve_import_keys(blocks: &mut [Block], existing: &Materialized) -> Result<(), RdyError> {
+/// incoming block and another block of the view, then stores every key reference (and, lkey1,
+/// every key link target) as its id.
+fn resolve_import_keys(
+    blocks: &mut [Block],
+    keyed: Vec<Vec<KeyedLink>>,
+    existing: &Materialized,
+) -> Result<(), RdyError> {
     if let Some((k, a, b)) = crate::keys::clashes(blocks.iter()).first() {
         return Err(crate::keys::clash_error(k, a, b));
     }
@@ -268,7 +299,8 @@ fn resolve_import_keys(blocks: &mut [Block], existing: &Materialized) -> Result<
                 .filter(|id| !ids.contains(*id)),
         ),
     };
-    for b in blocks.iter_mut() {
+    for (b, keyed) in blocks.iter_mut().zip(keyed) {
+        place_keyed(b, keyed, &lookup)?;
         crate::keys::rewrite_block(b, &lookup)?;
     }
     Ok(())
@@ -409,7 +441,7 @@ pub(crate) fn to_yaml_struct(b: &Block) -> BlockYaml {
                     k.clone(),
                     v.iter()
                         .map(|l| LinkYaml {
-                            target: l.target.clone(),
+                            target: l.target.to_string(),
                             part: l.part.clone(),
                         })
                         .collect(),
@@ -424,9 +456,42 @@ pub(crate) fn to_yaml_struct(b: &Block) -> BlockYaml {
     }
 }
 
-pub(crate) fn from_yaml_struct(y: BlockYaml) -> Result<Block, RdyError> {
+/// A block read from YAML, and its link targets written as keys (lkey1). A target that parses as
+/// a block id is a link; else a text that is a well-formed key is kept to be resolved; else the
+/// YAML is refused.
+pub(crate) fn from_yaml_struct(y: BlockYaml) -> Result<(Block, Vec<KeyedLink>), RdyError> {
     let bad = |m: String| RdyError::new(E_BAD_INPUT, m, "fix the YAML and retry");
-    Ok(Block {
+    let mut keyed = vec![];
+    let mut links = BTreeMap::new();
+    for (kind, list) in y.links {
+        let mut out = Vec::with_capacity(list.len());
+        for (at, l) in list.into_iter().enumerate() {
+            if let Ok(target) = BlockId::parse(&l.target) {
+                out.push(Link {
+                    target,
+                    part: l.part,
+                });
+            } else if rdy_model::key::problem(&l.target).is_none() {
+                keyed.push(KeyedLink {
+                    kind: kind.clone(),
+                    at,
+                    text: l.target,
+                    part: l.part,
+                });
+            } else {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    format!(
+                        "link target {:?} in {kind} is neither a block id nor a key",
+                        l.target
+                    ),
+                    "write the target's id or its key",
+                ));
+            }
+        }
+        links.insert(kind, out);
+    }
+    let block = Block {
         id: y.id,
         block_type: y.block_type,
         parent: y.parent,
@@ -442,27 +507,14 @@ pub(crate) fn from_yaml_struct(y: BlockYaml) -> Result<Block, RdyError> {
             })
             .collect::<Result<_, RdyError>>()?,
         body: y.body,
-        links: y
-            .links
-            .into_iter()
-            .map(|(k, v)| {
-                (
-                    k,
-                    v.into_iter()
-                        .map(|l| Link {
-                            target: l.target,
-                            part: l.part,
-                        })
-                        .collect(),
-                )
-            })
-            .collect(),
+        links,
         pins: y
             .pins
             .into_iter()
             .map(|(k, v)| Ok((k, v.parse::<Hash>().map_err(|e| bad(e.to_string()))?)))
             .collect::<Result<_, RdyError>>()?,
-    })
+    };
+    Ok((block, keyed))
 }
 
 /// Dotfiles (e.g. `.DS_Store`) are never part of an export.
@@ -491,7 +543,24 @@ pub fn block_to_yaml(b: &Block) -> String {
     serde_yaml_ng::to_string(&to_yaml_struct(b)).expect("block yaml")
 }
 
+/// A block read from YAML whose link targets are ids; a key as a link target needs the keys of a
+/// view, so it is refused here (`Rdy::edit_yaml` resolves it).
 pub fn block_from_yaml(text: &str) -> Result<Block, RdyError> {
+    let (block, keyed) = parse_yaml(text)?;
+    if let Some(k) = keyed.first() {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            format!(
+                "link target {:?} in {} is a key, which needs a view to resolve it",
+                k.text, k.kind
+            ),
+            "write the target's id, or edit through a view",
+        ));
+    }
+    Ok(block)
+}
+
+fn parse_yaml(text: &str) -> Result<(Block, Vec<KeyedLink>), RdyError> {
     let y: BlockYaml = serde_yaml_ng::from_str(text)
         .map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "fix the YAML and retry"))?;
     from_yaml_struct(y)
@@ -589,7 +658,7 @@ impl ReadState {
             Scope::At(h) => format!("landing:{h}"),
         };
         let manifest = Manifest {
-            format: 2,
+            format: 3,
             pack: self.pack().name.clone(),
             scope: scope_name,
         };
@@ -631,11 +700,13 @@ impl Rdy {
                 "re-export the project",
             )
         })?;
-        if !(1..=2).contains(&manifest.format) {
+        // lpin1: format 3 pins hold content hashes; import recomputes every pin, so a format-2
+        // tree reads the same way
+        if !(2..=3).contains(&manifest.format) {
             return Err(RdyError::new(
                 E_BAD_INPUT,
                 format!("unsupported export format {}", manifest.format),
-                "this rdy reads export formats 1 and 2",
+                "this rdy reads export formats 2 and 3; re-export with this rdy",
             ));
         }
         if !self.lineage.contains(&manifest.pack) {
@@ -678,19 +749,15 @@ impl Rdy {
                 blob_bytes.push(bytes);
             }
         }
-        let mut blocks: Vec<Block> = match manifest.format {
-            1 => read_format_1(dir)?,
-            2 => {
-                let (loaded, diags) = tree_io::read_tree(&dir.join("docs"), "docs");
-                if let Some(d) = diags
-                    .iter()
-                    .find(|d| d.severity == rdy_schema::Severity::Error)
-                {
-                    return Err(d.to_error());
-                }
-                loaded.into_iter().map(|l| l.block).collect()
+        let (mut blocks, keyed): (Vec<Block>, Vec<Vec<KeyedLink>>) = {
+            let (loaded, diags) = tree_io::read_tree(&dir.join("docs"), "docs");
+            if let Some(d) = diags
+                .iter()
+                .find(|d| d.severity == rdy_schema::Severity::Error)
+            {
+                return Err(d.to_error());
             }
-            _ => unreachable!("format checked above"),
+            loaded.into_iter().map(|l| (l.block, l.keyed)).unzip()
         };
         let scope = Scope::View(view.to_string());
         // an import is a commit: it claims an unowned view and checks against the view's
@@ -714,7 +781,7 @@ impl Rdy {
         drop(ids);
         assign_missing_names(&mut blocks, &existing);
         check_import_names(&blocks, &existing)?;
-        resolve_import_keys(&mut blocks, &existing)?;
+        resolve_import_keys(&mut blocks, keyed, &existing)?;
         let keys = assign_import_keys(&mut blocks, &existing);
         let incoming: BTreeMap<BlockId, &Block> =
             blocks.iter().map(|b| (b.id.clone(), b)).collect();
@@ -847,6 +914,32 @@ impl Rdy {
             e.issues = issues;
             return Err(e);
         }
+        // lpin1: every pin is recomputed from the imported content, as a write's create pins
+        // it: each cited target (reference or link) to its content hash, the incoming block
+        // with that id first, else the view's. A block is never pinned to itself. Pins in the
+        // files are ignored.
+        let content = |id: &BlockId| {
+            incoming
+                .get(id)
+                .copied()
+                .or_else(|| existing.get(id))
+                .map(Block::content_hash)
+        };
+        let pins: Vec<BTreeMap<BlockId, Hash>> = blocks
+            .iter()
+            .map(|b| {
+                let refs = b.ref_tokens();
+                let refs = refs.iter().filter_map(|t| BlockId::parse(t).ok());
+                let links = b.links.values().flatten().map(|l| l.target.clone());
+                refs.chain(links)
+                    .filter(|t| *t != b.id)
+                    .filter_map(|t| content(&t).map(|h| (t, h)))
+                    .collect()
+            })
+            .collect();
+        for (b, p) in blocks.iter_mut().zip(pins) {
+            b.pins = p;
+        }
         // blobs go in only once the import is known to be valid, so a refused import stores nothing
         for bytes in &blob_bytes {
             self.store.put_blob(bytes)?;
@@ -889,6 +982,27 @@ impl Rdy {
             inherited: BTreeMap::new(),
             warnings,
         })
+    }
+
+    /// lkey1: `edit_block` for a block written as YAML, a key as a link target resolved with the
+    /// keys of the view.
+    pub fn edit_yaml(
+        &mut self,
+        s: &Session,
+        view: &str,
+        yaml: &str,
+        brief: Option<String>,
+    ) -> Result<WriteResult, RdyError> {
+        let (mut edited, keyed) = parse_yaml(yaml)?;
+        if !keyed.is_empty() {
+            let m = self.read().materialized(&Scope::View(view.to_string()))?;
+            let keys = Keys::of(m.iter());
+            // a key two blocks of the view hold is refused, as in a write
+            place_keyed(&mut edited, keyed, &|t| {
+                crate::keys::sole_holder(t, keys.holders(t).iter().map(|(_, id)| id))
+            })?;
+        }
+        self.edit_block(s, view, edited, brief)
     }
 
     pub fn edit_block(

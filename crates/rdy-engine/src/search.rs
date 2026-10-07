@@ -1,7 +1,7 @@
 //! FW-PR1: deterministic search over block text. A literal or a regex, matched line by line in
 //! each block's body and string fields, in reading order, with lines windowed and capped per
 //! block, pages cut by a token budget and a stateless cursor that a changed match set stales.
-use crate::error::{E_BAD_INPUT, E_LIMIT, E_PAGE_STALE, E_UNKNOWN_BLOCK, RdyError};
+use crate::error::{E_BAD_INPUT, E_LIMIT, E_PAGE_STALE, E_UNKNOWN_BLOCK, PAGE_STALE_FIX, RdyError};
 use crate::materialize::Materialized;
 use crate::{ReadState, Scope};
 use rdy_graph::EdgeKind;
@@ -313,7 +313,7 @@ impl ReadState {
                 return Err(RdyError::new(
                     E_PAGE_STALE,
                     "the matches behind this page changed since the first page, or the query differs",
-                    "search again without page",
+                    PAGE_STALE_FIX,
                 ));
             }
             Some((_, offset)) if offset >= count => return Err(bad_page()),

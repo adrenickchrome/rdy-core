@@ -782,7 +782,13 @@ fn rkey1_a_subset_proposal_does_not_re_key_onto_a_key_its_own_view_holds() {
     let (c1, m, o) = manual_views(&mut r);
     land(&mut r, "a").unwrap();
     let p = r
-        .propose_subset(&writer(), "e", "manual", Some(std::slice::from_ref(&c1)))
+        .propose_subset(
+            &writer(),
+            "e",
+            "manual",
+            Some(std::slice::from_ref(&c1)),
+            None,
+        )
         .unwrap();
     assert_eq!(p.keys.len(), 1, "{:?}", p.keys);
     assert_eq!(p.keys[&m], "manual-3");
@@ -796,7 +802,13 @@ fn rkey1_a_land_time_re_key_does_not_take_a_key_the_view_holds() {
     let (c1, m, o) = manual_views(&mut r);
     let pa = r.propose(&writer(), "a", "a").unwrap();
     let p = r
-        .propose_subset(&writer(), "e", "manual", Some(std::slice::from_ref(&c1)))
+        .propose_subset(
+            &writer(),
+            "e",
+            "manual",
+            Some(std::slice::from_ref(&c1)),
+            None,
+        )
         .unwrap();
     assert!(
         p.keys.is_empty(),

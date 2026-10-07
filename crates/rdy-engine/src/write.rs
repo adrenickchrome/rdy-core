@@ -21,6 +21,64 @@ pub struct LinkInput {
     pub part: Option<String>,
 }
 
+/// llst1: one entry of a link kind's list: a target string or a `{target, part?}` object.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LinkEntry {
+    Text(String),
+    Full(LinkInput),
+}
+
+/// llst1: a link kind's value: one target string, or a list of entries.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LinkValue {
+    One(String),
+    Many(Vec<LinkEntry>),
+    Bad(serde::de::IgnoredAny),
+}
+
+/// The text a malformed link kind value gets.
+const LINK_FORMS: &str = "a link kind takes a target string, a list of target strings, or a list of {target, part?} objects";
+
+/// llst1: the `deserialize_with` for link kinds: each kind is a string (one target), a list of
+/// strings, or a list of `{target, part?}` objects (strings and objects may mix in a list).
+pub fn link_map<'de, D>(d: D) -> Result<BTreeMap<String, Vec<LinkInput>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = BTreeMap::<String, LinkValue>::deserialize(d)?;
+    raw.into_iter()
+        .map(|(kind, v)| {
+            let entries = match v {
+                LinkValue::One(t) => vec![LinkEntry::Text(t)],
+                LinkValue::Many(v) => v,
+                LinkValue::Bad(_) => {
+                    return Err(serde::de::Error::custom(format!("{kind}: {LINK_FORMS}")));
+                }
+            };
+            let links = entries
+                .into_iter()
+                .map(|e| match e {
+                    LinkEntry::Text(target) => LinkInput { target, part: None },
+                    LinkEntry::Full(l) => l,
+                })
+                .collect();
+            Ok((kind, links))
+        })
+        .collect()
+}
+
+/// `link_map` for an optional map (an update that names no links keeps them).
+pub fn link_map_opt<'de, D>(d: D) -> Result<Option<BTreeMap<String, Vec<LinkInput>>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct Wrap(#[serde(deserialize_with = "link_map")] BTreeMap<String, Vec<LinkInput>>);
+    Ok(Option::<Wrap>::deserialize(d)?.map(|w| w.0))
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum OpInput {
@@ -40,7 +98,7 @@ pub enum OpInput {
         fields: BTreeMap<String, serde_json::Value>,
         #[serde(default)]
         body: String,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "link_map")]
         links: BTreeMap<String, Vec<LinkInput>>,
     },
     Update {
@@ -53,7 +111,7 @@ pub enum OpInput {
         unset: Vec<String>,
         #[serde(default)]
         body: Option<String>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "link_map_opt")]
         links: Option<BTreeMap<String, Vec<LinkInput>>>,
     },
     Move {
@@ -761,59 +819,6 @@ fn tree_path(ov: &Overlay, id: &BlockId) -> Option<String> {
 
 type Prior = (bool, BTreeMap<BlockId, Hash>);
 
-/// Strongly connected components of the graph `deps` (node -> nodes it points at), numbered so
-/// that every component is numbered after all components it points at (Tarjan, iterative).
-fn components(deps: &[Vec<usize>]) -> Vec<usize> {
-    const NONE: usize = usize::MAX;
-    let n = deps.len();
-    let (mut index, mut low, mut comp) = (vec![NONE; n], vec![0; n], vec![NONE; n]);
-    let mut on_stack = vec![false; n];
-    let (mut stack, mut next, mut ncomp) = (vec![], 0, 0);
-    for root in 0..n {
-        if index[root] != NONE {
-            continue;
-        }
-        let mut call = vec![(root, 0usize)];
-        index[root] = next;
-        low[root] = next;
-        next += 1;
-        stack.push(root);
-        on_stack[root] = true;
-        while let Some(&(v, e)) = call.last() {
-            if let Some(&w) = deps[v].get(e) {
-                call.last_mut().expect("frame").1 += 1;
-                if index[w] == NONE {
-                    index[w] = next;
-                    low[w] = next;
-                    next += 1;
-                    stack.push(w);
-                    on_stack[w] = true;
-                    call.push((w, 0));
-                } else if on_stack[w] {
-                    low[v] = low[v].min(index[w]);
-                }
-            } else {
-                call.pop();
-                if let Some(&(u, _)) = call.last() {
-                    low[u] = low[u].min(low[v]);
-                }
-                if low[v] == index[v] {
-                    loop {
-                        let w = stack.pop().expect("on stack");
-                        on_stack[w] = false;
-                        comp[w] = ncomp;
-                        if w == v {
-                            break;
-                        }
-                    }
-                    ncomp += 1;
-                }
-            }
-        }
-    }
-    comp
-}
-
 /// How many folders are on the chain from `parent` up, stopping past `tree::MAX_FOLDER_DEPTH`.
 fn folders_from(ov: &Overlay, parent: Option<&BlockId>) -> usize {
     let mut n = 0;
@@ -1406,8 +1411,9 @@ fn build_ops(
                     .chain(cur.links.values().flatten().map(|l| l.target.clone()))
                     .collect();
                 let targets_given = !targets.is_empty();
+                // a block is never pinned to itself, so a repin of everything skips its own id
                 let wanted: Vec<BlockId> = if targets.is_empty() {
-                    cited.iter().cloned().collect()
+                    cited.iter().filter(|t| **t != id).cloned().collect()
                 } else {
                     targets
                         .iter()
@@ -1416,6 +1422,12 @@ fn build_ops(
                 };
                 let mut block = cur.clone();
                 for t in &wanted {
+                    if *t == id {
+                        return Err(bad(
+                            format!("{id} is never pinned to itself"),
+                            "a block's own edits never make it a suspect; repin the other targets it cites",
+                        ));
+                    }
                     if !cited.contains(t) {
                         return Err(bad(
                             format!("{id} does not reference or link to {t}"),
@@ -1431,7 +1443,7 @@ fn build_ops(
                             ),
                         )
                     })?;
-                    block.pins.insert(t.clone(), target.version_hash());
+                    block.pins.insert(t.clone(), target.content_hash());
                 }
                 // like a no-op rebalance, a repin that changes no pin is refused, per op
                 if block.pins == cur.pins {
@@ -1517,20 +1529,11 @@ fn build_ops(
         ));
     }
 
-    // second pass: references, decision permissions, schema validation; pins to blocks outside
-    // this write are set here, pins to blocks touched by it wait for the third pass
-    let slot: BTreeMap<BlockId, usize> = ops
-        .iter()
-        .enumerate()
-        .filter_map(|(i, op)| match op {
-            Op::Create { block } | Op::Update { block, .. } => Some((block.id.clone(), i)),
-            Op::Delete { .. } => None,
-        })
-        .collect();
-    let mut deps: Vec<Vec<usize>> = vec![vec![]; ops.len()];
-    let mut pinsets: Vec<Option<BTreeMap<BlockId, Hash>>> = vec![None; ops.len()];
+    // second pass: references, decision permissions, schema validation, pins. `ov` holds every
+    // block of this write at its final content (content does not depend on pins), so a target
+    // in this write, a reference cycle included, is pinned to its final content here (lpin1)
     let mut issues = vec![];
-    for (i, (op, (is_move, old_pins))) in ops.iter().zip(prior).enumerate() {
+    for (op, (is_move, old_pins)) in ops.iter_mut().zip(prior) {
         let block = match op {
             Op::Create { block } | Op::Update { block, .. } => block,
             Op::Delete { .. } => continue,
@@ -1563,7 +1566,7 @@ fn build_ops(
                     "fix the id, or create the target in the same write",
                 )
             })?;
-            targets.push((target, t.version_hash()));
+            targets.push((target, t.content_hash()));
         }
         for link in block.links.values().flatten() {
             let t = ov.get(&link.target).ok_or_else(|| {
@@ -1576,20 +1579,7 @@ fn build_ops(
                     "fix the link target id",
                 )
             })?;
-            targets.push((link.target.clone(), t.version_hash()));
-        }
-        if !is_move {
-            let mut pins = BTreeMap::new();
-            for (target, current) in targets {
-                if let Some(h) = old_pins.get(&target) {
-                    pins.insert(target, *h);
-                } else if let Some(&j) = slot.get(&target) {
-                    deps[i].push(j);
-                } else {
-                    pins.insert(target, current);
-                }
-            }
-            pinsets[i] = Some(pins);
+            targets.push((link.target.clone(), t.content_hash()));
         }
         if block.block_type == decision::DECISION
             && block.field_str("status") != Some("proposed")
@@ -1609,26 +1599,13 @@ fn build_ops(
         issues.extend(validate_block(pack, block, parent));
         if !is_move {
             check_asset_blob(pack, store, block)?;
-        }
-    }
-
-    // third pass: pin references between blocks of this write to the targets' final versions,
-    // targets first; edges inside a reference cycle stay unpinned
-    let comp = components(&deps);
-    let mut order: Vec<usize> = (0..ops.len()).collect();
-    order.sort_by_key(|&i| comp[i]);
-    for i in order {
-        let Some(mut pins) = pinsets[i].take() else {
-            continue;
-        };
-        for &j in &deps[i] {
-            if comp[j] != comp[i]
-                && let Op::Create { block: t } | Op::Update { block: t, .. } = &ops[j]
-            {
-                pins.insert(t.id.clone(), t.version_hash());
+            // a pin the block already holds is kept; every other cited target is pinned now.
+            // A block is never pinned to itself: its own edits would make it its own suspect
+            let mut pins = BTreeMap::new();
+            for (target, current) in targets.into_iter().filter(|(t, _)| *t != block.id) {
+                let h = old_pins.get(&target).copied().unwrap_or(current);
+                pins.insert(target, h);
             }
-        }
-        if let Op::Create { block } | Op::Update { block, .. } = &mut ops[i] {
             block.pins = pins;
         }
     }

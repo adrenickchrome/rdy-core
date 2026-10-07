@@ -53,10 +53,11 @@ pub(crate) fn log_head_line(row: &Value) -> String {
     line
 }
 
-/// `implements <id>` or `editorial <class>: <reason>`; `None` for no justification.
+/// `implements <id>, <id>` or `editorial <class>: <reason>`; `None` for no justification.
 pub(crate) fn justification_text(j: &Value) -> Option<String> {
-    if let Some(id) = j["implements"].as_str() {
-        return Some(format!("implements {id}"));
+    if let Some(ids) = j["implements"].as_array() {
+        let ids: Vec<&str> = ids.iter().filter_map(Value::as_str).collect();
+        return Some(format!("implements {}", ids.join(", ")));
     }
     let e = &j["editorial"];
     e.is_object()

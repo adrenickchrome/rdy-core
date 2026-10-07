@@ -131,6 +131,7 @@ fn kind1_an_asset_with_a_future_proposals_bytes_does_not_hide_it() {
         alternative: None,
         provenance: by(Role::Writer),
         canon_at: st.engine.read().canon_head(),
+        summary: None,
     };
     upload(&mut st, &postcard::to_allocvec(&predicted).unwrap());
     let p: Hash = on_writer(&st, |r| {
