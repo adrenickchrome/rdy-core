@@ -111,6 +111,9 @@ impl PackSet {
                 let mut fields = parent_def.fields.clone();
                 fields.extend(tdef.fields);
                 tdef.fields = fields;
+                if tdef.class.is_none() {
+                    tdef.class = parent_def.class;
+                }
             }
             out.block_types.insert(tname, tdef);
         }
@@ -153,8 +156,15 @@ fn inject_engine_types(pack: &mut Pack) {
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
     .collect();
-    force(pack, tree::DOC, "d", Trait::Structural, doc_core);
-    force(pack, tree::FOLDER, "fd", Trait::Structural, folder_core);
+    force(pack, tree::DOC, "d", Trait::Structural, doc_core, None);
+    force(
+        pack,
+        tree::FOLDER,
+        "fd",
+        Trait::Structural,
+        folder_core,
+        None,
+    );
     for t in [tree::DOC, tree::FOLDER] {
         let def = pack.block_types.get_mut(t).expect("forced above");
         def.traits = BTreeSet::from([Trait::Structural]);
@@ -205,8 +215,29 @@ fn inject_engine_types(pack: &mut Pack) {
             .into_iter()
             .collect();
 
-    force(pack, d::DECISION, "D", Trait::Normative, decision_core);
-    force(pack, d::QUESTION, "Q", Trait::Informative, question_core);
+    force(
+        pack,
+        d::DECISION,
+        "D",
+        Trait::Normative,
+        decision_core,
+        Some(TypeClass::Supporting),
+    );
+    force(
+        pack,
+        d::QUESTION,
+        "Q",
+        Trait::Informative,
+        question_core,
+        Some(TypeClass::Supporting),
+    );
+    // A rationale explains a decision, so it may sit under one.
+    if pack.block_types.contains_key("rationale") {
+        let decision = pack.block_types.get_mut(d::DECISION).expect("forced above");
+        if !decision.children.iter().any(|c| c == "rationale") {
+            decision.children.push("rationale".to_string());
+        }
+    }
     for l in [
         d::SUPERSEDES,
         d::REFINES,
@@ -254,7 +285,14 @@ fn check_folder_extension(pack: &Pack) -> Result<(), SchemaError> {
     Ok(())
 }
 
-fn force(pack: &mut Pack, name: &str, prefix: &str, tr: Trait, core: BTreeMap<String, FieldDef>) {
+fn force(
+    pack: &mut Pack,
+    name: &str,
+    prefix: &str,
+    tr: Trait,
+    core: BTreeMap<String, FieldDef>,
+    class: Option<TypeClass>,
+) {
     let def = pack
         .block_types
         .entry(name.to_string())
@@ -264,8 +302,12 @@ fn force(pack: &mut Pack, name: &str, prefix: &str, tr: Trait, core: BTreeMap<St
             fields: BTreeMap::new(),
             children: vec![],
             body: BodyRule::Optional,
+            class: None,
         });
     def.prefix = prefix.to_string();
+    if class.is_some() {
+        def.class = class;
+    }
     def.traits.insert(tr);
     def.fields.extend(core);
 }

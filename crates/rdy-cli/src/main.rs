@@ -798,9 +798,18 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             cmd: PackCmd::Check,
         } => {
             let pack = project_pack(&env.project)?;
+            let classes: serde_json::Map<String, Value> = pack
+                .block_types
+                .keys()
+                .map(|t| (t.clone(), json!(pack.class_of(t).as_str())))
+                .collect();
+            let mut text = format!("pack {} {} ok", pack.name, pack.version);
+            for t in pack.block_types.keys() {
+                text.push_str(&format!("\n  {t}  {}", pack.class_of(t).as_str()));
+            }
             Ok((
-                json!({"pack": pack.name, "version": pack.version, "types": pack.block_types.len()}),
-                format!("pack {} {} ok", pack.name, pack.version),
+                json!({"pack": pack.name, "version": pack.version, "types": pack.block_types.len(), "classes": classes}),
+                text,
             ))
         }
         Cmd::Status => {

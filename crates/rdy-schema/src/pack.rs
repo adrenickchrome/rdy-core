@@ -48,6 +48,36 @@ pub enum BodyRule {
     Forbidden,
 }
 
+/// What a block type is for. A doc asset is content a person reads and edits in a working-copy
+/// file; a supporting type (decisions, questions, rationale) lives in the store and is reached
+/// by links and tools.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypeClass {
+    #[default]
+    DocAsset,
+    Supporting,
+}
+
+impl TypeClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TypeClass::DocAsset => "doc_asset",
+            TypeClass::Supporting => "supporting",
+        }
+    }
+}
+
+/// Link kinds that live only in the store: a working-copy file never shows them.
+pub const STORE_ONLY_LINK_KINDS: &[&str] = &["decided_by", "implements"];
+
+/// A link of any other kind whose target has one of these types is store-only too.
+pub const STORE_ONLY_TARGET_TYPES: &[&str] = &["decision", "question"];
+
+/// Fields rdy sets and keeps in the store: a working-copy file never shows them, and a file that
+/// sets one is refused. Must equal `rdy_model::key::AUTO_FIELD` once AE2 merges.
+pub const STORE_ONLY_FIELDS: &[&str] = &["key_auto"];
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlockTypeDef {
@@ -60,6 +90,9 @@ pub struct BlockTypeDef {
     pub children: Vec<String>,
     #[serde(default)]
     pub body: BodyRule,
+    /// `None` until the pack resolves: a child keeps its parent's class; the default is a doc asset.
+    #[serde(default)]
+    pub class: Option<TypeClass>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -220,6 +253,22 @@ impl fmt::Display for TensionSeverity {
 }
 
 impl Pack {
+    /// The class of a block type; a doc asset when the type is unknown or sets none.
+    pub fn class_of(&self, block_type: &str) -> TypeClass {
+        self.block_types
+            .get(block_type)
+            .and_then(|t| t.class)
+            .unwrap_or_default()
+    }
+
+    /// The class of the type whose `prefix` is `prefix`; `None` when no type has it.
+    pub fn class_of_prefix(&self, prefix: &str) -> Option<TypeClass> {
+        self.block_types
+            .values()
+            .find(|t| t.prefix == prefix)
+            .map(|t| t.class.unwrap_or_default())
+    }
+
     pub fn type_for_prefix(&self, prefix: &str) -> Option<&str> {
         self.block_types
             .iter()

@@ -103,21 +103,8 @@ fn refl1_reflects_is_refused_on_every_supporting_type() {
             "{ty}: {issues:?}"
         );
     }
-    for ty in REFLECTS_EXCLUDED_TYPES {
-        assert!(
-            [
-                "decision",
-                "question",
-                "rationale",
-                "review",
-                "tension",
-                "intent",
-                "finding",
-                "source"
-            ]
-            .contains(ty),
-            "{ty}"
-        );
+    for ty in ["decision", "question", "rationale"] {
+        assert_eq!(pack().class_of(ty), TypeClass::Supporting, "{ty}");
     }
 }
 

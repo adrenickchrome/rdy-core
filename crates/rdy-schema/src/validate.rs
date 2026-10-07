@@ -1,5 +1,5 @@
 use crate::glob::Glob;
-use crate::pack::{BodyRule, FieldKind, Pack};
+use crate::pack::{BodyRule, FieldKind, Pack, TypeClass};
 use rdy_model::tree;
 use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
 use serde::Serialize;
@@ -22,19 +22,6 @@ pub struct Issue {
 
 /// The engine field naming the code a block reflects: a list of path globs, on content block types.
 pub const REFLECTS_FIELD: &str = "reflects";
-
-/// Block types that may not carry `reflects`: supporting types, which link to code another way
-/// (a decision through `Implements:` trailers). Named until M2f's type classing replaces this list.
-pub const REFLECTS_EXCLUDED_TYPES: &[&str] = &[
-    "decision",
-    "question",
-    "rationale",
-    "review",
-    "tension",
-    "intent",
-    "finding",
-    "source",
-];
 
 /// The most path globs one `reflects` field may hold.
 pub const MAX_REFLECTS_GLOBS: usize = 32;
@@ -162,7 +149,7 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
         }
         if name == REFLECTS_FIELD {
             // `reflects` is an engine field on content types, never listed per type.
-            if REFLECTS_EXCLUDED_TYPES.contains(&block.block_type.as_str()) {
+            if pack.class_of(&block.block_type) == TypeClass::Supporting {
                 out.push(err(
                     block,
                     "E_FIELD_UNKNOWN",

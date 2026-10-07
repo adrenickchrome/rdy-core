@@ -1116,7 +1116,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             if def.body == BodyRule::Required {
                 example["body"] = json!("…");
             }
-            let mut out = json!({"type": t, "prefix": def.prefix, "traits": traits(&def.traits), "body": format!("{:?}", def.body).to_lowercase(), "fields": fields, "children": def.children, "example": example});
+            let mut out = json!({"type": t, "prefix": def.prefix, "class": pack.class_of(&t).as_str(), "traits": traits(&def.traits), "body": format!("{:?}", def.body).to_lowercase(), "fields": fields, "children": def.children, "example": example});
             out["links"] = json!({"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE, "kinds": pack.link_types});
             if rdy_model::tree::is_tree_type(&t) {
                 out["example"]["parent"] = json!("<folder id or path; omit for the top level>");
@@ -1126,7 +1126,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
         }
         None => Ok(json!({
             "pack": pack.name,
-            "types": pack.block_types.iter().map(|(n, d)| json!({"type": n, "prefix": d.prefix, "traits": traits(&d.traits)})).collect::<Vec<_>>(),
+            "types": pack.block_types.iter().map(|(n, d)| json!({"type": n, "prefix": d.prefix, "class": pack.class_of(n).as_str(), "traits": traits(&d.traits)})).collect::<Vec<_>>(),
             "link_types": pack.link_types,
             "link_shape": {"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE},
             "ops": WRITE_OPS.iter().map(|(n, s)| (n.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
