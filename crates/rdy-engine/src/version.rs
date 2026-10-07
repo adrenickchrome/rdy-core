@@ -346,17 +346,29 @@ impl ReadState {
 
     /// Canon's landings from this state's head, head first.
     pub fn landings(&self) -> Result<Vec<(Hash, LandingRecord)>, RdyError> {
-        if let Some(e) = &self.error {
-            return Err(e.clone());
-        }
-        let mut out = vec![];
+        self.landing_walk().collect()
+    }
+
+    /// `landings`, each record read only when the walk reaches it; the walk ends after an error.
+    pub(crate) fn landing_walk(
+        &self,
+    ) -> impl Iterator<Item = Result<(Hash, LandingRecord), RdyError>> + '_ {
+        let mut failed = self.error.clone();
         let mut cur = self.canon_head;
-        while let Some(h) = cur {
-            let rec = self.reader.landing(&h)?;
-            cur = rec.prev;
-            out.push((h, rec));
-        }
-        Ok(out)
+        std::iter::from_fn(move || {
+            if let Some(e) = failed.take() {
+                cur = None;
+                return Some(Err(e));
+            }
+            let h = cur.take()?;
+            Some(match self.reader.landing(&h) {
+                Ok(rec) => {
+                    cur = rec.prev;
+                    Ok((h, rec))
+                }
+                Err(e) => Err(e.into()),
+            })
+        })
     }
 
     /// Every version, oldest first (precedence order, which the order rules make canon order).

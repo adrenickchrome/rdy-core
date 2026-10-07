@@ -1296,10 +1296,14 @@ impl ReadState {
                 "omit limit to list every landing",
             ));
         }
-        let stop = match since {
-            None => None,
+        // the page reads canon's chain once, from the head, only as far as it lists; a landing
+        // id is matched against the whole chain (a prefix two landings share is an error), so
+        // that walk reads the chain first and pages from what it read
+        type Walk<'s> = Box<dyn Iterator<Item = Result<(Hash, LandingRecord), RdyError>> + 's>;
+        let (stop, walk): (Option<Hash>, Walk<'_>) = match since {
+            None => (None, Box::new(self.landing_walk())),
             Some(text) if text.starts_with("tag:") => match self.resolve_scope(text)? {
-                Scope::At(h) => Some(h),
+                Scope::At(h) => (Some(h), Box::new(self.landing_walk())),
                 _ => {
                     return Err(RdyError::new(
                         E_INTERNAL,
@@ -1309,7 +1313,13 @@ impl ReadState {
                 }
             },
             Some(text) => {
-                Some(self.resolve_landing(text.strip_prefix("landing:").unwrap_or(text))?)
+                let chain = self.landings()?;
+                let ids: Vec<Hash> = chain.iter().map(|(h, _)| *h).collect();
+                let stop = crate::version::match_prefix(
+                    &ids,
+                    text.strip_prefix("landing:").unwrap_or(text),
+                )?;
+                (Some(stop), Box::new(chain.into_iter().map(Ok)))
             }
         };
         let mut tags: std::collections::HashMap<String, Vec<String>> = Default::default();
@@ -1317,8 +1327,12 @@ impl ReadState {
             tags.entry(v.landing).or_default().push(v.name);
         }
         let mut rows = vec![];
-        for (id, rec) in self.landings()? {
-            if Some(id) == stop || limit.is_some_and(|n| rows.len() >= n) {
+        for item in walk {
+            if limit.is_some_and(|n| rows.len() >= n) {
+                break;
+            }
+            let (id, rec) = item?;
+            if Some(id) == stop {
                 break;
             }
             let tags = tags.remove(&id.to_string()).unwrap_or_default();

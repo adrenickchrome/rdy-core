@@ -177,3 +177,69 @@ fn mhist1_rdy_read_compact_lines_carry_each_blocks_justification() {
         "yaml stays content only"
     );
 }
+
+#[test]
+fn mhist1_rdy_read_survives_a_damaged_producer_index_without_markers() {
+    // fix round 1 (M1): a compact read degrades to no justification markers and a warning
+    let (d, mut r) = project();
+    let s = seeded(&mut r);
+    // a change in view work that does not write the claim's version, indexed as its producer
+    let x = write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": s.term, "body": "Balances, by wallet."}]),
+    )
+    .unwrap();
+    let claim = BlockId::parse(&s.claim).unwrap();
+    let v = r
+        .read()
+        .materialized(&Scope::View("work".into()))
+        .unwrap()
+        .version_of(&claim)
+        .unwrap();
+    r.close().unwrap();
+    {
+        let idx = rdy_store::index::Index::open(&d.path().join(".rdy/store/index.redb")).unwrap();
+        let upto = idx.indexed_upto().unwrap();
+        idx.apply_durable(
+            &[rdy_store::index::IndexEntry::Producer {
+                version: v,
+                change: x.change.parse::<rdy_model::Hash>().unwrap(),
+            }],
+            upto,
+        )
+        .unwrap();
+    }
+    let r = Rdy::open(d.path()).unwrap();
+    assert_eq!(
+        r.read()
+            .last_changes(&Scope::View("work".into()), &[claim])
+            .unwrap_err()
+            .code,
+        E_IO,
+        "the damage is real"
+    );
+    let mut st = mcp(r);
+    let v = rdy_read(
+        &mut st,
+        from_value(json!({"id": s.doc, "scope": "work", "max_tokens": 20000})).unwrap(),
+    )
+    .unwrap();
+    let text = v["text"].as_str().unwrap();
+    assert!(text.contains(&s.claim), "{v}");
+    assert!(
+        !text.contains("[implements") && !text.contains("[editorial"),
+        "{v}"
+    );
+    let w = v["warnings"].as_array().expect("warnings");
+    assert_eq!(w.len(), 1, "{v}");
+    assert_eq!(w[0]["code"], E_IO);
+    assert!(
+        w[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not write version"),
+        "{v}"
+    );
+    assert!(w[0]["fix"].as_str().unwrap().contains("rdy fsck"), "{v}");
+}

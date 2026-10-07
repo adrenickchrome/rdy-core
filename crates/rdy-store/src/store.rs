@@ -1230,6 +1230,64 @@ impl StoreReader {
         Ok(first.map(|(_, c)| c))
     }
 
+    /// Of `changes` (producers of one version), the one that last wrote it as of landing `head`:
+    /// the one whose landing was written last at or before `head` (of one landing's, the one
+    /// written last), or, when none had landed by then (or there is no `head`), the one written
+    /// first. A block written back to an earlier text has that text's version again; blame
+    /// names the change that wrote it last, where `producer` names the one canon first got it
+    /// from.
+    pub fn producer_at(
+        &self,
+        changes: &[Hash],
+        head: Option<&Hash>,
+    ) -> Result<Option<Hash>, StoreError> {
+        if changes.len() <= 1 {
+            return Ok(changes.first().copied());
+        }
+        let at = |kind: u8, h: &Hash| -> Result<Location, StoreError> {
+            self.index().typed(kind, h)?.ok_or(StoreError::NotFound(*h))
+        };
+        if let Some(head) = head {
+            let bound = at(kinds::LANDING, head)?;
+            let mut landed: Option<(Location, Location, Hash)> = None;
+            for c in changes {
+                if let Some(l) = self.index().landing_of(c)? {
+                    let l = at(kinds::LANDING, &l)?;
+                    if l <= bound {
+                        let key = (l, at(kinds::CHANGE, c)?, *c);
+                        landed = Some(landed.map_or(key, |k| k.max(key)));
+                    }
+                }
+            }
+            if let Some((_, _, c)) = landed {
+                return Ok(Some(c));
+            }
+        }
+        let mut first: Option<(Location, Hash)> = None;
+        for c in changes {
+            let key = (at(kinds::CHANGE, c)?, *c);
+            first = Some(first.map_or(key, |k| k.min(key)));
+        }
+        Ok(first.map(|(_, c)| c))
+    }
+
+    /// Of `changes`, the one written last.
+    pub fn written_last(&self, changes: &[Hash]) -> Result<Option<Hash>, StoreError> {
+        if changes.len() <= 1 {
+            return Ok(changes.first().copied());
+        }
+        let mut last: Option<(Location, Hash)> = None;
+        for c in changes {
+            let loc = self
+                .index()
+                .typed(kinds::CHANGE, c)?
+                .ok_or(StoreError::NotFound(*c))?;
+            let key = (loc, *c);
+            last = Some(last.map_or(key, |k| k.max(key)));
+        }
+        Ok(last.map(|(_, c)| c))
+    }
+
     /// The changes with an op that produces `version`, ascending.
     pub fn producers(&self, version: &Hash) -> Result<Vec<Hash>, StoreError> {
         self.index().producers(version)

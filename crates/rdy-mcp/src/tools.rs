@@ -546,7 +546,9 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
             "use compact, markdown or yaml",
         ));
     }
-    // compact lines mark the justification of the change that last wrote each block
+    // compact lines mark the justification of the change that last wrote each block; a damaged
+    // producer index (status and fsck report it) costs the markers and a warning, not the read
+    let mut warnings = vec![];
     let justified: std::collections::BTreeMap<BlockId, String> = if format == "compact" {
         let mut ids = vec![];
         let mut walk = vec![root];
@@ -554,10 +556,16 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
             ids.push(b.id.clone());
             walk.extend(m.children(Some(&b.id)));
         }
-        st_.last_changes(&scope, &ids)?
-            .into_iter()
-            .filter_map(|(id, e)| e.justification.map(|j| (id, j.label())))
-            .collect()
+        match st_.last_changes(&scope, &ids) {
+            Ok(last) => last
+                .into_iter()
+                .filter_map(|(id, e)| e.justification.map(|j| (id, j.label())))
+                .collect(),
+            Err(e) => {
+                warnings.push(json!({"code": e.code, "message": e.message, "fix": e.fix}));
+                Default::default()
+            }
+        }
     } else {
         Default::default()
     };
@@ -613,6 +621,9 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     let mut out = json!({"id": id.to_string(), "format": format, "text": lines.join(sep)});
     if let Some(c) = st_.conflict_info(&scope, &id)? {
         out["conflict"] = json!(c);
+    }
+    if !warnings.is_empty() {
+        out["warnings"] = json!(warnings);
     }
     Ok(budget(out, p.max_tokens))
 }

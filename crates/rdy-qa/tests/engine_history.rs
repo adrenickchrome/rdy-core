@@ -290,3 +290,216 @@ fn hist1_times_format_as_rfc3339_utc_to_the_second() {
     assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
     assert_eq!(rfc3339(-1), "1969-12-31T23:59:59Z");
 }
+
+/// The change that created `id` (its canon history's last entry).
+fn creator(r: &Rdy, id: &BlockId) -> String {
+    let h = r.read().history(&Scope::Canon, id, HISTORY_MAX).unwrap();
+    let e = h.entries.last().unwrap();
+    assert_eq!(e.op, "create");
+    e.change.clone()
+}
+
+fn changes(h: &History) -> Vec<&str> {
+    h.entries.iter().map(|e| e.change.as_str()).collect()
+}
+
+#[test]
+fn hist1_a_block_written_back_to_its_earlier_text_in_one_view_ends_at_the_create() {
+    // fix round 1 (C1): the restore has the earlier version's hash; the walk never picks a
+    // change twice, so it does not cycle between the restore and the change before it
+    let (_d, mut r) = project();
+    let (_doc, _s, claim, _dec) = seeded(&mut r);
+    let id = BlockId::parse(&claim).unwrap();
+    let create = creator(&r, &id);
+    let a = agent("agent:a", Some("ra"));
+    let w2 = r
+        .write(
+            &a,
+            req(
+                "ra",
+                json!([{"op": "update", "id": claim, "body": "Two."}]),
+                None,
+                "",
+            ),
+        )
+        .unwrap();
+    let w3 = r
+        .write(
+            &a,
+            req(
+                "ra",
+                json!([{"op": "update", "id": claim, "body": "One."}]),
+                None,
+                "",
+            ),
+        )
+        .unwrap();
+    let ra = Scope::View("ra".into());
+    let st = r.read();
+    let h = st.history(&ra, &id, HISTORY_MAX).unwrap();
+    assert_eq!(
+        changes(&h),
+        vec![w3.change.as_str(), w2.change.as_str(), create.as_str()],
+        "{h:?}"
+    );
+    assert_eq!(
+        h.entries[0].version, h.entries[2].version,
+        "one version hash"
+    );
+    assert!(!h.more);
+    let two = st.history(&ra, &id, 2).unwrap();
+    assert_eq!((two.entries.len(), two.more), (2, true));
+    assert_eq!(
+        st.last_changes(&ra, std::slice::from_ref(&id)).unwrap()[&id].change,
+        w3.change
+    );
+}
+
+#[test]
+fn hist1_a_landed_block_restored_in_another_view_ends_at_the_create() {
+    // fix round 1 (C1): agent b writes back the text agent a's landed change replaced
+    let (_d, mut r) = project();
+    let (_doc, _s, claim, _dec) = seeded(&mut r);
+    let id = BlockId::parse(&claim).unwrap();
+    let create = creator(&r, &id);
+    let w2 = r
+        .write(
+            &agent("agent:a", Some("ra")),
+            req(
+                "ra",
+                json!([{"op": "update", "id": claim, "body": "Two."}]),
+                None,
+                "",
+            ),
+        )
+        .unwrap();
+    land(&mut r, "ra").unwrap();
+    let w3 = r
+        .write(
+            &agent("agent:b", Some("rb")),
+            req(
+                "rb",
+                json!([{"op": "update", "id": claim, "body": "One."}]),
+                None,
+                "",
+            ),
+        )
+        .unwrap();
+    let st = r.read();
+    let h = st
+        .history(&Scope::View("rb".into()), &id, HISTORY_MAX)
+        .unwrap();
+    assert_eq!(
+        changes(&h),
+        vec![w3.change.as_str(), w2.change.as_str(), create.as_str()],
+        "{h:?}"
+    );
+    assert!(!h.more);
+    let c = st.history(&Scope::Canon, &id, HISTORY_MAX).unwrap();
+    assert_eq!(changes(&c), vec![w2.change.as_str(), create.as_str()]);
+}
+
+#[test]
+fn hist1_a_landed_revert_is_the_last_change_and_as_of_scopes_name_their_own_writer() {
+    // fix round 1 (I1): of a version's producers, canon and as-of scopes take the one landed
+    // last at or before the scope's head, not the first landed
+    let (_d, mut r) = project();
+    let (_doc, _s, claim, _dec) = seeded(&mut r);
+    let id = BlockId::parse(&claim).unwrap();
+    let create = creator(&r, &id);
+    let l1 = r.read().canon_head().unwrap();
+    let w2 = write(
+        &mut r,
+        "w2",
+        json!([{"op": "update", "id": claim, "body": "Two."}]),
+    )
+    .unwrap();
+    land(&mut r, "w2").unwrap();
+    let l2 = r.read().canon_head().unwrap();
+    let w3 = write(
+        &mut r,
+        "w3",
+        json!([{"op": "update", "id": claim, "body": "One."}]),
+    )
+    .unwrap();
+    land(&mut r, "w3").unwrap();
+    let l3 = r.read().canon_head().unwrap();
+    let st = r.read();
+    let h = st.history(&Scope::Canon, &id, HISTORY_MAX).unwrap();
+    assert_eq!(
+        changes(&h),
+        vec![w3.change.as_str(), w2.change.as_str(), create.as_str()],
+        "newest first: {h:?}"
+    );
+    assert!(!h.more);
+    assert_eq!(h.entries[0].op, "update");
+    assert_eq!(
+        h.entries[0].landing.as_ref().map(|l| l.id.clone()),
+        Some(l3.to_string()),
+        "the last change landed at L3"
+    );
+    let last = st
+        .last_changes(&Scope::Canon, std::slice::from_ref(&id))
+        .unwrap();
+    assert_eq!(last[&id], h.entries[0], "the `last change:` entry");
+    let at2 = st.history(&Scope::At(l2), &id, HISTORY_MAX).unwrap();
+    assert_eq!(changes(&at2), vec![w2.change.as_str(), create.as_str()]);
+    let at1 = st.history(&Scope::At(l1), &id, HISTORY_MAX).unwrap();
+    assert_eq!(changes(&at1), vec![create.as_str()]);
+}
+
+#[test]
+fn hist1_a_block_toggled_in_one_view_lists_every_write_newest_first() {
+    // fix round 1 (C1): the view holds several producers of one version; the walk takes the one
+    // written last first, so every write shows, in order, down to the view's own create
+    let (_d, mut r) = project();
+    let (_doc, section, _claim, _dec) = seeded(&mut r);
+    let a = agent("agent:a", Some("ra"));
+    let w1 = r
+        .write(
+            &a,
+            req(
+                "ra",
+                json!([{"op": "create", "type": "claim", "id": "$c", "parent": section, "body": "One."}]),
+                None,
+                "",
+            ),
+        )
+        .unwrap();
+    let id = BlockId::parse(&w1.created["$c"]).unwrap();
+    let mut want = vec![w1.change.clone()];
+    for body in ["Two.", "One.", "Two.", "One."] {
+        let w = r
+            .write(
+                &a,
+                req(
+                    "ra",
+                    json!([{"op": "update", "id": id.to_string(), "body": body}]),
+                    None,
+                    "",
+                ),
+            )
+            .unwrap();
+        want.push(w.change);
+    }
+    want.reverse();
+    let h = r
+        .read()
+        .history(&Scope::View("ra".into()), &id, HISTORY_MAX)
+        .unwrap();
+    assert_eq!(
+        changes(&h),
+        want.iter().map(String::as_str).collect::<Vec<_>>(),
+        "{h:?}"
+    );
+    assert!(!h.more);
+    // one landing carries all five; of its producers of one version, canon takes the one
+    // written last
+    land(&mut r, "ra").unwrap();
+    let c = r.read().history(&Scope::Canon, &id, HISTORY_MAX).unwrap();
+    assert_eq!(
+        changes(&c),
+        want.iter().map(String::as_str).collect::<Vec<_>>(),
+        "{c:?}"
+    );
+}

@@ -1,7 +1,7 @@
 //! A block's history: the versions it has had, each with the change that wrote it, who wrote it,
 //! why, and the landing that carried it into canon (hist1).
 use crate::error::*;
-use crate::{ReadState, Scope};
+use crate::{Materialized, ReadState, Scope};
 use rdy_model::{
     BlockId, Change, EditorialClass, Hash, Justification, LandingRecord, Op, Provenance, Role,
 };
@@ -109,49 +109,68 @@ fn justification(j: &Justification) -> JustificationInfo {
     }
 }
 
-/// What one call has already decoded: changes and landing refs by hash, and the view's included
-/// set. Never kept across calls, so a landing shows on the first read after it.
+/// What one call has already decoded: changes by hash, landing refs by change and by landing
+/// hash, the view's included set, and the landing the scope reads as of. Never kept across
+/// calls, so a landing shows on the first read after it.
 struct Memo<'a> {
     reader: &'a StoreReader,
     included: Option<HashSet<Hash>>,
+    head: Option<Hash>,
     changes: HashMap<Hash, Arc<Change>>,
-    landings: HashMap<Hash, Option<LandingRef>>,
+    landed: HashMap<Hash, Option<Hash>>,
+    landings: HashMap<Hash, LandingRef>,
+}
+
+fn no_writer(version: &Hash, id: &BlockId) -> RdyError {
+    RdyError::new(
+        E_IO,
+        format!("no change wrote version {} of {id}", version.short()),
+        "run rdy fsck; rdy reindex rebuilds the producer index",
+    )
 }
 
 impl<'a> Memo<'a> {
     fn new(state: &'a ReadState, scope: &Scope) -> Self {
-        let included = match scope {
-            Scope::View(name) => Some(state.included(name).iter().copied().collect()),
-            _ => None,
+        let (included, head) = match scope {
+            Scope::View(name) => (
+                Some(state.included(name).iter().copied().collect()),
+                state.effective_base(name),
+            ),
+            Scope::Canon => (None, state.canon_head()),
+            Scope::At(h) => (None, Some(*h)),
         };
         Memo {
             reader: state.reader(),
             included,
+            head,
             changes: HashMap::new(),
+            landed: HashMap::new(),
             landings: HashMap::new(),
         }
     }
 
-    /// The change that wrote `version` of `id` in this scope (ruling 4).
-    fn writer_of(&self, version: &Hash, id: &BlockId) -> Result<Hash, RdyError> {
-        let mut found = None;
+    /// The change that wrote `version` in this scope, never one in `used` (ruling 4): of the
+    /// version's other producers, the one the view includes that was written last; else the one
+    /// landed last at or before the scope's landing; else the one written first. `None` when every producer is
+    /// in `used`; a version with no producer at all is index damage (`E_IO`).
+    fn writer_of(
+        &self,
+        version: &Hash,
+        id: &BlockId,
+        used: &HashSet<Hash>,
+    ) -> Result<Option<Hash>, RdyError> {
+        let all = self.reader.producers(version)?;
+        if all.is_empty() {
+            return Err(no_writer(version, id));
+        }
+        let free: Vec<Hash> = all.into_iter().filter(|c| !used.contains(c)).collect();
         if let Some(set) = &self.included {
-            found = self
-                .reader
-                .producers(version)?
-                .into_iter()
-                .find(|c| set.contains(c));
+            let own: Vec<Hash> = free.iter().copied().filter(|c| set.contains(c)).collect();
+            if !own.is_empty() {
+                return Ok(self.reader.written_last(&own)?);
+            }
         }
-        if found.is_none() {
-            found = self.reader.producer(version)?;
-        }
-        found.ok_or_else(|| {
-            RdyError::new(
-                E_IO,
-                format!("no change wrote version {} of {id}", version.short()),
-                "run rdy fsck; rdy reindex rebuilds the producer index",
-            )
-        })
+        Ok(self.reader.producer_at(&free, self.head.as_ref())?)
     }
 
     fn change(&mut self, c: &Hash) -> Result<Arc<Change>, RdyError> {
@@ -164,32 +183,37 @@ impl<'a> Memo<'a> {
     }
 
     fn landing(&mut self, c: &Hash) -> Result<Option<LandingRef>, RdyError> {
-        if let Some(l) = self.landings.get(c) {
-            return Ok(l.clone());
-        }
-        let l = match self.reader.landing_of(c)? {
-            Some(h) => {
-                let rec: LandingRecord = self.reader.landing(&h)?;
-                Some(LandingRef {
-                    id: h.to_string(),
-                    approved_by: rec.approved_by.actor.clone(),
-                    at_ms: rec.approved_by.at_ms,
-                    assurance: rec.assurance.as_str().into(),
-                })
+        let h = match self.landed.get(c) {
+            Some(h) => *h,
+            None => {
+                let h = self.reader.landing_of(c)?;
+                self.landed.insert(*c, h);
+                h
             }
-            None => None,
         };
-        self.landings.insert(*c, l.clone());
-        Ok(l)
+        let Some(h) = h else { return Ok(None) };
+        if let Some(l) = self.landings.get(&h) {
+            return Ok(Some(l.clone()));
+        }
+        let rec: LandingRecord = self.reader.landing(&h)?;
+        let l = LandingRef {
+            id: h.to_string(),
+            approved_by: rec.approved_by.actor.clone(),
+            at_ms: rec.approved_by.at_ms,
+            assurance: rec.assurance.as_str().into(),
+        };
+        self.landings.insert(h, l.clone());
+        Ok(Some(l))
     }
 
-    /// The entry for `version` of `id`, and the version before it (None after a create).
+    /// The entry change `c` gives for `version` of `id`, and the version before it (None after a
+    /// create).
     fn entry(
         &mut self,
+        c: Hash,
         version: &Hash,
         id: &BlockId,
     ) -> Result<(HistoryEntry, Option<Hash>), RdyError> {
-        let c = self.writer_of(version, id)?;
         let change = self.change(&c)?;
         let (op, prev) = change
             .ops
@@ -230,13 +254,33 @@ impl<'a> Memo<'a> {
         Ok((entry, prev))
     }
 
+    /// The newest entry for `version` of `id`.
+    fn last(&mut self, version: &Hash, id: &BlockId) -> Result<HistoryEntry, RdyError> {
+        let c = self
+            .writer_of(version, id, &HashSet::new())?
+            .ok_or_else(|| no_writer(version, id))?;
+        Ok(self.entry(c, version, id)?.0)
+    }
+
+    /// Follows each update's base from `start`, never taking a change twice: a block written back
+    /// to an earlier text has that text's version again, and the walk goes on past it to the
+    /// create instead of cycling. A version whose producers are all taken ends the walk.
     fn walk(&mut self, start: Hash, id: &BlockId, limit: usize) -> Result<History, RdyError> {
         let mut entries = Vec::new();
+        let mut used = HashSet::new();
         let mut version = start;
+        let mut c = self
+            .writer_of(&version, id, &used)?
+            .ok_or_else(|| no_writer(&version, id))?;
         loop {
-            let (entry, prev) = self.entry(&version, id)?;
+            used.insert(c);
+            let (entry, prev) = self.entry(c, &version, id)?;
             entries.push(entry);
-            match prev {
+            let next = match prev {
+                Some(base) => self.writer_of(&base, id, &used)?.map(|n| (base, n)),
+                None => None,
+            };
+            match next {
                 None => {
                     return Ok(History {
                         entries,
@@ -249,10 +293,21 @@ impl<'a> Memo<'a> {
                         more: true,
                     });
                 }
-                Some(base) => version = base,
+                Some((base, n)) => (version, c) = (base, n),
             }
         }
     }
+}
+
+/// The version `scope` holds of `id`, from the materialization's version map (no clone, no hash).
+fn version_in(m: &Materialized, id: &BlockId) -> Result<Hash, RdyError> {
+    m.version_of(id).ok_or_else(|| {
+        RdyError::new(
+            E_UNKNOWN_BLOCK,
+            format!("no block {id}"),
+            "check the id with rdy_read",
+        )
+    })
 }
 
 impl ReadState {
@@ -266,7 +321,7 @@ impl ReadState {
                 "ask for 1 to 1000 versions",
             ));
         }
-        let version = self.block(scope, id)?.version_hash();
+        let version = version_in(&*self.materialized(scope)?, id)?;
         Memo::new(self, scope).walk(version, id, limit)
     }
 
@@ -276,14 +331,15 @@ impl ReadState {
         scope: &Scope,
         ids: &[BlockId],
     ) -> Result<BTreeMap<BlockId, HistoryEntry>, RdyError> {
+        let m = self.materialized(scope)?;
         let mut memo = Memo::new(self, scope);
         let mut out = BTreeMap::new();
         for id in ids {
             if out.contains_key(id) {
                 continue;
             }
-            let version = self.block(scope, id)?.version_hash();
-            out.insert(id.clone(), memo.entry(&version, id)?.0);
+            let version = version_in(&m, id)?;
+            out.insert(id.clone(), memo.last(&version, id)?);
         }
         Ok(out)
     }

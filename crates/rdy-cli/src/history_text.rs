@@ -19,9 +19,9 @@ pub(crate) fn who(author: &Value) -> String {
     }
 }
 
-/// `ms` as RFC 3339 UTC to the second.
+/// `ms` as RFC 3339 UTC to the second; `?` when the reply has no integer time.
 pub(crate) fn time(ms: &Value) -> String {
-    rdy_engine::rfc3339(ms.as_i64().unwrap_or(0))
+    ms.as_i64().map_or_else(|| "?".into(), rdy_engine::rfc3339)
 }
 
 /// logt1: the first line of a `rdy log` entry: the landing, when, the title, who proposed it and
@@ -30,7 +30,7 @@ pub(crate) fn log_head_line(row: &Value) -> String {
     let mut line = format!(
         "{}  {}  {}  proposed by {}  ",
         short(s(row, "landing")),
-        s(row, "at"),
+        row["at"].as_str().unwrap_or("?"),
         s(row, "title"),
         who(&row["proposed_by"])
     );
@@ -120,4 +120,24 @@ pub(crate) fn blame_text(reply: &Value) -> String {
         out.push_str("\n  … older versions not shown");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn blame1_a_missing_time_prints_a_placeholder_not_the_epoch() {
+        // fix round 1 (M4): a malformed reply reads as malformed
+        assert_eq!(time(&Value::Null), "?");
+        assert_eq!(time(&json!("soon")), "?");
+        assert_eq!(time(&json!(0)), "1970-01-01T00:00:00Z");
+        let row = json!({"landing": "abcdef0123456789", "title": "T", "approved_by": "human:qa",
+            "proposed_by": {"actor": "agent:a", "run": "ra"}});
+        assert_eq!(
+            log_head_line(&row),
+            "abcdef012345  ?  T  proposed by agent:a/ra  approved by human:qa"
+        );
+    }
 }

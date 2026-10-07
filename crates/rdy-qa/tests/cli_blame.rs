@@ -199,3 +199,34 @@ fn blame1_an_unlanded_write_reads_not_landed() {
     assert!(ok);
     assert_eq!(v["justification"], serde_json::Value::Null);
 }
+
+#[test]
+fn blame1_a_landed_revert_is_the_last_change_and_blame_lists_it() {
+    // fix round 1 (I1): writing "One." back and landing it names the revert, not the create
+    let (s, x) = seeded();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    let w = write(
+        &mut r,
+        "revert",
+        json!([{"op": "update", "id": x.claim, "body": "One."}]),
+    )
+    .unwrap();
+    land(&mut r, "revert").unwrap();
+    let l3 = r.read().canon_head().unwrap().to_string();
+    r.close().unwrap();
+    let out = text(&s, &["show", &x.claim]);
+    let line = out.lines().nth(1).unwrap();
+    assert!(
+        line.starts_with(&format!("last change: {} by human:qa at ", &w.change[..12]))
+            && line.ends_with(&format!(", landed {}", &l3[..12])),
+        "{out}"
+    );
+    let (ok, v) = s.json(&["--json", "show", &x.claim, "--blame"]);
+    assert!(ok, "{v}");
+    let h = v["history"].as_array().unwrap();
+    let got: Vec<&str> = h.iter().map(|e| e["change"].as_str().unwrap()).collect();
+    assert_eq!(got.len(), 3, "{v}");
+    assert_eq!((got[0], got[1]), (w.change.as_str(), x.change.as_str()));
+    assert_eq!(h[2]["op"], "create");
+    assert_eq!(v["history_more"], false);
+}
