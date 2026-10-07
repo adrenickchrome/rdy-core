@@ -652,3 +652,160 @@ fn kamb1_a_key_that_is_another_docs_path_names_both_blocks_and_the_fix() {
     )
     .unwrap();
 }
+
+/// The single issue code of a refused write, with the error's code.
+fn refused(e: &rdy_engine::RdyError) -> (&str, Vec<&str>) {
+    (e.code, e.issues.iter().map(|i| i.code).collect())
+}
+
+#[test]
+fn rkey1_an_agent_cannot_set_key_auto_and_any_key_it_sets_is_explicit() {
+    // final review 1 (Q1, Q2a, Q2b): only rdy marks a key as its own
+    let (_d, mut r) = project();
+    let e = write(&mut r, "b", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "other", "title": "O", "doc_type": "overview", "key": "guide", "key_auto": true}}
+    ]))
+    .unwrap_err();
+    assert_eq!(
+        refused(&e),
+        ("E_VALIDATION", vec!["E_FIELD_UNKNOWN"]),
+        "{e}"
+    );
+    assert!(
+        e.message.contains("key_auto") && e.message.contains("rdy sets it"),
+        "{e}"
+    );
+    let w = write(&mut r, "b", json!([
+        {"op": "create", "type": "doc", "id": "$x", "fields": {"name": "third", "title": "T", "doc_type": "overview", "key": "third-key"}},
+        {"op": "create", "type": "doc", "id": "$y", "fields": {"name": "fourth", "title": "F", "doc_type": "overview"}}
+    ]))
+    .unwrap();
+    let (x, y) = (w.created["$x"].clone(), w.created["$y"].clone());
+    assert!(key_auto(&r, "b", &y));
+    for id in [&x, &y] {
+        let e = write(
+            &mut r,
+            "b",
+            json!([{"op": "update", "id": id, "fields": {"key_auto": true}}]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            refused(&e),
+            ("E_VALIDATION", vec!["E_FIELD_UNKNOWN"]),
+            "{id}: {e}"
+        );
+    }
+    assert!(!key_auto(&r, "b", &x), "a refused update writes nothing");
+    write(
+        &mut r,
+        "b",
+        json!([{"op": "update", "id": y, "fields": {"key": "fourth"}}]),
+    )
+    .unwrap();
+    assert_eq!(key(&r, "b", &y).as_deref(), Some("fourth"));
+    assert!(
+        !key_auto(&r, "b", &y),
+        "a key the agent writes is explicit, even the same value"
+    );
+}
+
+#[test]
+fn rkey1_an_import_of_an_export_keeps_rdys_marker() {
+    let (_d, mut r) = project();
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "guide", "title": "G", "doc_type": "overview"}},
+        {"op": "create", "type": "doc", "id": "$e", "fields": {"name": "mine", "title": "M", "doc_type": "overview", "key": "MINE-1"}}
+    ]))
+    .unwrap();
+    let (d, e) = (w.created["$d"].clone(), w.created["$e"].clone());
+    let out = tempfile::tempdir().unwrap();
+    r.read()
+        .export(&Scope::View("work".into()), &out.path().join("x"))
+        .unwrap();
+    let (_d2, mut r2) = project();
+    let i = r2
+        .import(&approver(), "work", &out.path().join("x"))
+        .unwrap();
+    assert!(
+        i.keys.is_empty(),
+        "every block came with its key: {:?}",
+        i.keys
+    );
+    assert_eq!(key(&r2, "work", &d).as_deref(), Some("guide"));
+    assert!(key_auto(&r2, "work", &d), "rdy's own export round-trips");
+    assert!(!key_auto(&r2, "work", &e));
+}
+
+/// View `e`: c1 puts doc `manual` under a long folder (derived key `manual`); c2 creates doc
+/// `other2` with the explicit key `manual-2`. View `a` creates the top-level doc `manual`.
+/// Returns (c1's change, the doc of c1, the doc of c2).
+fn manual_views(r: &mut Rdy) -> (String, String, String) {
+    write(r, "a", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "manual", "title": "M", "doc_type": "overview"}}
+    ]))
+    .unwrap();
+    let c1 = write(r, "e", json!([
+        {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "a-very-long-folder-name-for-e-docs", "title": "E"}},
+        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "manual", "title": "M", "doc_type": "overview"}}
+    ]))
+    .unwrap();
+    let m = c1.created["$d"].clone();
+    assert_eq!(c1.keys[&m], "manual");
+    let c2 = write(r, "e", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "other2", "title": "O", "doc_type": "overview", "key": "manual-2"}}
+    ]))
+    .unwrap();
+    (c1.change, m, c2.created["$d"].clone())
+}
+
+/// After c1 landed with re-derived key `manual-3`, the view's own explicit `manual-2` still
+/// resolves and proposes.
+fn manual_2_stays_the_agents(r: &mut Rdy, m: &str, o: &str) {
+    let e = Scope::View("e".into());
+    assert_eq!(r.read().resolve_id(&e, "manual-2").unwrap().to_string(), o);
+    assert_eq!(r.read().resolve_id(&e, "manual-3").unwrap().to_string(), m);
+    let p = r.propose(&writer(), "e", "rest").unwrap();
+    r.land(&approver(), &p.id).unwrap();
+    assert_eq!(
+        r.read()
+            .resolve_id(&Scope::Canon, "manual-2")
+            .unwrap()
+            .to_string(),
+        o
+    );
+}
+
+#[test]
+fn rkey1_a_subset_proposal_does_not_re_key_onto_a_key_its_own_view_holds() {
+    // final review 2 (Q3): the re-derived key skips manual-2, which the unproposed c2 holds
+    let (_d, mut r) = project();
+    let (c1, m, o) = manual_views(&mut r);
+    land(&mut r, "a").unwrap();
+    let p = r
+        .propose_subset(&writer(), "e", "manual", Some(std::slice::from_ref(&c1)))
+        .unwrap();
+    assert_eq!(p.keys.len(), 1, "{:?}", p.keys);
+    assert_eq!(p.keys[&m], "manual-3");
+    r.land(&approver(), &p.id).unwrap();
+    manual_2_stays_the_agents(&mut r, &m, &o);
+}
+
+#[test]
+fn rkey1_a_land_time_re_key_does_not_take_a_key_the_view_holds() {
+    let (_d, mut r) = project();
+    let (c1, m, o) = manual_views(&mut r);
+    let pa = r.propose(&writer(), "a", "a").unwrap();
+    let p = r
+        .propose_subset(&writer(), "e", "manual", Some(std::slice::from_ref(&c1)))
+        .unwrap();
+    assert!(
+        p.keys.is_empty(),
+        "no clash when e is proposed: {:?}",
+        p.keys
+    );
+    r.land(&approver(), &pa.id).unwrap();
+    let l = r.land_report(&approver(), &p.id).unwrap();
+    assert_eq!(l.keys.len(), 1, "{:?}", l.keys);
+    assert_eq!(l.keys[&m], "manual-3");
+    manual_2_stays_the_agents(&mut r, &m, &o);
+}

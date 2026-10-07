@@ -39,6 +39,9 @@ const TOKEN_DOMAIN: &[u8] = b"rdy-search-1\0";
 /// starts again one character on, and it can scan to the end of the line, so a pattern that
 /// matches empty text costs a line's length squared. The first restart on a line is free (it costs
 /// at most one more pass, as the first search does); each later one is charged the rest of the line.
+/// The charge is the worst case, so a pattern that matches empty text at each position of a line
+/// over about 8 KiB (half its length squared passes the limit) is refused, even a cheap one like
+/// `q*`. A cheaper estimate needs the `regex-automata` edge.
 const EMPTY_RESCAN_LIMIT: usize = 32 << 20;
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -487,7 +490,8 @@ impl ReadState {
         let path = match &f.path {
             None => None,
             Some(p) => {
-                let p = p.trim_end_matches('/');
+                // a leading slash is the project root, a trailing one the folder itself
+                let p = p.trim_matches('/');
                 if p.is_empty() {
                     return Err(RdyError::new(
                         E_BAD_INPUT,
@@ -834,7 +838,7 @@ fn first_match(re: &Regex, line: &str, rescan: &mut usize) -> Result<Option<usiz
             if *rescan > EMPTY_RESCAN_LIMIT {
                 return Err(RdyError::new(
                     E_LIMIT,
-                    "the pattern matches empty text too often; searching past those matches costs too much",
+                    "the pattern can match empty text, and searching past empty matches on a line over about 8 KiB can cost too much: rdy refuses it in this scope",
                     "make the pattern match at least one character, e.g. x+ rather than x*",
                 ));
             }

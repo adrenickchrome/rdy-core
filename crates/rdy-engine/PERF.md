@@ -746,10 +746,18 @@ What the cost grows with:
   string field. The cost grows with the total text in the scope, not with the page size.
 - Each matching block adds its id and version hash to the page token. The search hashes once
   over all matches, so a query that most blocks match costs more than a rare one.
-- Only the matches on the page get a path and are serialised for the token budget.
+- Every matching block gets its path, because the totals count hits per doc. Only the entries
+  on the page are serialised for the token budget.
+- Each search reads the scope's graph (built once per state, then cached), because a match
+  inside a superseded, rejected or revoked decision is marked `history`.
 
-The regex crate matches in linear time, so a hostile pattern costs one linear pass per line.
-Compile size is capped at 1 MiB (`REGEX_SIZE_LIMIT`).
+The regex crate matches in linear time, so one search of a line costs one linear pass. Compile
+size is capped at 1 MiB (`REGEX_SIZE_LIMIT`), and the lazy-DFA cache of one search at 16 MiB
+(`REGEX_DFA_LIMIT`). A pattern that matches empty text restarts after each empty match, and a
+restart can scan to the end of the line. Each restart after the first on a line is charged the
+rest of the line, and a search whose charge passes 32 MiB (`EMPTY_RESCAN_LIMIT`) is `E_LIMIT`.
+The charge is the worst case, so a pattern that matches empty text at each position (`q*`, `x?`)
+is refused when the scope has one line over about 8 KiB, even though it is cheap.
 
 No laptop figures are recorded here: the first timing of these ops is the Linux bench's.
 

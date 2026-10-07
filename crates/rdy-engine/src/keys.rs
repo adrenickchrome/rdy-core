@@ -59,10 +59,7 @@ impl Rdy {
             .map(|(id, k)| OpInput::Update {
                 id: id.to_string(),
                 base: None,
-                fields: BTreeMap::from([
-                    ("key".to_string(), serde_json::Value::String(k.clone())),
-                    (key::AUTO_FIELD.to_string(), serde_json::Value::Bool(true)),
-                ]),
+                fields: BTreeMap::from([("key".to_string(), serde_json::Value::String(k.clone()))]),
                 unset: vec![],
                 body: None,
                 links: None,
@@ -79,7 +76,10 @@ impl Rdy {
         )?;
         brief.register(&self.briefs);
         let token = brief.base.token.clone();
-        let mut w = self.write_briefed(
+        // the keys are rdy's: the engine's route marks them `key_auto`
+        let ours: std::collections::BTreeSet<BlockId> =
+            assigned.iter().map(|(id, _)| id.clone()).collect();
+        let mut w = self.write_marked(
             s,
             WriteRequest {
                 view: view.into(),
@@ -87,7 +87,9 @@ impl Rdy {
                 justification: None,
                 message: format!("assign keys to {n} docs and folders"),
             },
-            Some(token),
+            rdy_model::ChangeLinks::default(),
+            Some(&token),
+            &ours,
         )?;
         w.keys = assigned
             .into_iter()
@@ -102,10 +104,13 @@ impl Rdy {
 /// clashes when another block holds it, or when it is the name of another top-level doc or
 /// folder (that path would be unreachable). A block that is not re-derived keeps its key; when
 /// two re-derivable blocks share one, the first in (path, id) order keeps it. The new key is
-/// derived from the block's path in `next`, with the first free numeric suffix.
+/// derived from the block's path in `next`, with the first free numeric suffix; a key another
+/// block holds in `view` (the proposing view, with the changes a subset leaves out) is taken too,
+/// so the view never holds a key twice.
 pub(crate) fn rederive(
     next: &Materialized,
     created: &std::collections::BTreeSet<BlockId>,
+    view: &Materialized,
 ) -> Vec<(BlockId, String)> {
     let auto = |b: &Block| b.fields.get(key::AUTO_FIELD) == Some(&FieldValue::Bool(true));
     let mut cands: Vec<(String, BlockId)> = created
@@ -124,6 +129,7 @@ pub(crate) fn rederive(
     }
     cands.sort();
     let keys = Keys::of(next.iter());
+    let in_view = Keys::of(view.iter());
     let is_cand: std::collections::BTreeSet<&BlockId> = cands.iter().map(|(_, id)| id).collect();
     let top = |folded: &str, id: &BlockId| next.named(None, folded).iter().any(|o| o != id);
     // folded keys a processed candidate keeps or got
@@ -146,7 +152,10 @@ pub(crate) fn rederive(
             continue;
         }
         let new = auto_key(path, &b.block_type, &|c| {
-            claimed.contains(c) || top(c, id) || keys.holders(c).iter().any(|(_, o)| o != id)
+            claimed.contains(c)
+                || top(c, id)
+                || keys.holders(c).iter().any(|(_, o)| o != id)
+                || in_view.holders(c).iter().any(|(_, o)| o != id)
         });
         claimed.insert(key::fold(&new));
         out.push((id.clone(), new));

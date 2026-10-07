@@ -1007,7 +1007,8 @@ impl Rdy {
             // K1 (FW-PR3): a key rdy derived for a block this version creates, held by another
             // block in the prospective canon, is re-derived by a change rdy adds to the view
             let (next, applied) = prospective(&st, &changes)?;
-            let re = crate::keys::rederive(&next, &created_in(&changes, &applied));
+            let vm = st.materialized(&Scope::View(view.to_string()))?;
+            let re = crate::keys::rederive(&next, &created_in(&changes, &applied), &vm);
             if re.is_empty() {
                 issues = self.issues_in(&st, &changes, &next, &applied)?;
             } else {
@@ -1311,14 +1312,15 @@ impl Rdy {
             });
         }
         // K1 (FW-PR3): a block landed since the proposal can hold a key rdy derived for a block
-        // this version creates; the acceptance change re-derives it
-        let re = crate::keys::rederive(&prospective, &created_in(&changes, &applied));
+        // this version creates; the acceptance change re-derives it, past the keys the view holds
+        let vm = st.materialized(&view)?;
+        let re = crate::keys::rederive(&prospective, &created_in(&changes, &applied), &vm);
         let accepts = accept_ops.len();
         for (id, k) in &re {
             let b = prospective
                 .get(id)
                 .expect("a re-derived block is in the prospective canon");
-            let in_view = st.materialized(&view)?.get(id).map(|v| v.version_hash());
+            let in_view = vm.get(id).map(|v| v.version_hash());
             if in_view != Some(b.version_hash()) {
                 stale.push(RdyError::new(
                     E_STALE_BASE,

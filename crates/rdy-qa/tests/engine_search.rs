@@ -6,8 +6,7 @@ use rdy_engine::*;
 use rdy_qa::fixtures::*;
 use serde_json::{Value, json};
 
-// `..Default::default()` leaves room for the filters a later task adds to `SearchQuery`.
-#[allow(clippy::needless_update)]
+// no filters
 fn q(text: &str, regex: bool, ignore_case: bool) -> SearchQuery {
     SearchQuery {
         text: text.into(),
@@ -296,13 +295,15 @@ fn bsrch1_a_pattern_that_matches_empty_text_on_a_long_line_is_bounded() {
         r.read()
             .search(&Scope::Canon, &q(text, regex, false), None, None)
     };
-    for pattern in ["(?:x[^z]*z)?", "(?:.*TODO)?"] {
+    // the charge is the worst case, so even q* (cheap per restart) is refused on a line over
+    // about 8 KiB: a deterministic bound, recorded in PERF.md (final review 3)
+    for pattern in ["(?:x[^z]*z)?", "(?:.*TODO)?", "q*"] {
         let e = run(pattern, true).unwrap_err();
         assert_eq!(e.code, E_LIMIT, "{pattern}: {e}");
         assert_eq!(
             (e.message.as_str(), e.fix.as_str()),
             (
-                "the pattern matches empty text too often; searching past those matches costs too much",
+                "the pattern can match empty text, and searching past empty matches on a line over about 8 KiB can cost too much: rdy refuses it in this scope",
                 "make the pattern match at least one character, e.g. x+ rather than x*"
             ),
             "{pattern}"

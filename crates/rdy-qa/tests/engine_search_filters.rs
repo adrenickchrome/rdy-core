@@ -144,6 +144,12 @@ fn sflt1_path_takes_whole_segments_and_lifecycle_is_inherited() {
     assert_eq!(hits(&r, path("guides")), pick(&ids, &["$ac", "$ak"]));
     assert_eq!(hits(&r, path("guides/")), pick(&ids, &["$ac", "$ak"]));
     assert_eq!(hits(&r, path("guides/alpha")), pick(&ids, &["$ac", "$ak"]));
+    // final review 4: a leading slash reads as the project root, as a trailing one is dropped
+    assert_eq!(hits(&r, path("/guides")), pick(&ids, &["$ac", "$ak"]));
+    assert_eq!(
+        hits(&r, path("/guides/alpha/")),
+        pick(&ids, &["$ac", "$ak"])
+    );
     assert_eq!(
         hits(&r, path("gui")),
         Vec::<String>::new(),

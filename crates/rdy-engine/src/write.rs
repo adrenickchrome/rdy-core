@@ -980,6 +980,34 @@ fn check_decided_at(
     Ok(())
 }
 
+/// rkey1: `key_auto` marks a key rdy chose (a create without a key, an import, `rdy keys
+/// assign`). An agent never sends it: a copied marker would let rdy re-derive a key the agent chose.
+fn refuse_key_auto(fields: &BTreeMap<String, serde_json::Value>, at: &str) -> Result<(), RdyError> {
+    if !fields.contains_key(rdy_model::key::AUTO_FIELD) {
+        return Ok(());
+    }
+    let message = format!(
+        "{at} sets {:?}, and rdy sets it: it marks a key rdy derived from the path",
+        rdy_model::key::AUTO_FIELD
+    );
+    let fix = format!(
+        "remove {}; set key to choose the key yourself, or leave key out and rdy derives one",
+        rdy_model::key::AUTO_FIELD
+    );
+    let mut e = RdyError::new(E_VALIDATION, message.clone(), fix.clone());
+    e.issues = vec![Issue {
+        severity: rdy_schema::Severity::Error,
+        code: "E_FIELD_UNKNOWN",
+        block: BlockId::parse(at).ok(),
+        message,
+        fix,
+    }];
+    Err(e)
+}
+
+/// Builds the ops of `inputs` against `base`. `rdy_keys` names the blocks whose key an update
+/// in `inputs` sets on rdy's behalf (`rdy keys assign`): those keys get `key_auto`; any other
+/// key an update sets is the caller's.
 fn build_ops(
     pack: &Pack,
     store: &rdy_store::Store,
@@ -987,6 +1015,7 @@ fn build_ops(
     session: &Session,
     inputs: Vec<OpInput>,
     conflicts: &[Conflict],
+    rdy_keys: &BTreeSet<BlockId>,
 ) -> Result<Built, RdyError> {
     let mut ov = Overlay::new(base);
     let mut res = Resolver::new(base);
@@ -1081,6 +1110,7 @@ fn build_ops(
                 let before = before.as_deref().map(|b| res.id(b)).transpose()?;
                 let order = place(&ov, parent.as_ref(), after.as_ref(), before.as_ref())?;
                 let body = res.text(&body, RefMode::for_body(&block_type))?;
+                refuse_key_auto(&fields, &format!("op {i}"))?;
                 let sets_key = fields.contains_key("key");
                 let mut block = Block {
                     id: new_id.clone(),
@@ -1124,6 +1154,7 @@ fn build_ops(
                 links,
             } => {
                 let id = res.id(&id)?;
+                refuse_key_auto(&fields, id.as_str())?;
                 let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched, conflicts, store)?;
                 let cur: &Block = &cur;
                 let mut block = cur.clone();
@@ -1135,14 +1166,17 @@ fn build_ops(
                     block.fields.insert("name".into(), FieldValue::Str(n));
                 }
                 let sets_key = fields.contains_key("key");
-                let sets_auto = fields.contains_key(rdy_model::key::AUTO_FIELD);
                 block.fields.extend(res.fields(fields)?);
                 for k in unset {
                     block.fields.remove(&k);
                 }
-                // K1: a key the agent changes is the agent's, not rdy's; no key, no marker
-                let key_now = block.field_str("key");
-                if (key_now != cur.field_str("key") && !sets_auto) || key_now.is_none() {
+                // K1: a key the caller writes is the caller's, even the same value, unless rdy
+                // writes it (`rdy keys assign`); no key, no marker
+                if sets_key && rdy_keys.contains(&id) && block.fields.contains_key("key") {
+                    block
+                        .fields
+                        .insert(rdy_model::key::AUTO_FIELD.into(), FieldValue::Bool(true));
+                } else if sets_key || block.field_str("key").is_none() {
                     block.fields.remove(rdy_model::key::AUTO_FIELD);
                 }
                 if let Some(body) = body {
@@ -1641,6 +1675,19 @@ impl Rdy {
         links: ChangeLinks,
         brief: Option<&str>,
     ) -> Result<WriteResult, RdyError> {
+        self.write_marked(session, req, links, brief, &BTreeSet::new())
+    }
+
+    /// `write_linked`, where the keys that updates set on the blocks in `rdy_keys` are rdy's
+    /// (`key_auto`): the engine's own route for `rdy keys assign`, which agent input never takes.
+    pub(crate) fn write_marked(
+        &mut self,
+        session: &Session,
+        req: WriteRequest,
+        links: ChangeLinks,
+        brief: Option<&str>,
+        rdy_keys: &BTreeSet<BlockId>,
+    ) -> Result<WriteResult, RdyError> {
         if !session.role.can_write() {
             return Err(RdyError::new(
                 E_PERMISSION,
@@ -1658,8 +1705,15 @@ impl Rdy {
         let conflicts = st.conflicts(&scope)?;
         let m = st.materialized(&scope)?;
         let brief_warnings = crate::brief::check(&self.pack, &self.briefs, &m, &req.ops, brief)?;
-        let (ops, created, touched, names, keys) =
-            build_ops(&self.pack, &self.store, &m, session, req.ops, &conflicts)?;
+        let (ops, created, touched, names, keys) = build_ops(
+            &self.pack,
+            &self.store,
+            &m,
+            session,
+            req.ops,
+            &conflicts,
+            rdy_keys,
+        )?;
         let change = Change {
             view: req.view.clone(),
             ops: ops.clone(),
