@@ -44,6 +44,9 @@ pub(crate) fn check_tokens(max_tokens: Option<usize>) -> Result<(), RdyError> {
     }
 }
 
+/// Warning codes that are advisory: reported once per doc per MCP session (adv1).
+pub const ADVISORY_ONCE: [&str; 1] = ["W_SKELETON_MISSING"];
+
 pub struct McpState {
     /// The one door to the project: reads from the published state, writes on the writer.
     pub engine: Arc<dyn Engine>,
@@ -53,6 +56,9 @@ pub struct McpState {
     pub sid: Option<u64>,
     /// The pack generation this session has heard of (its `pack_changed` notice).
     pub seen_gen: u64,
+    /// The advisories this session has reported, as `(code, block or "", message)` (adv1).
+    /// Cleared by a successful `rdy_session`.
+    pub reported: std::collections::BTreeSet<(String, String, String)>,
 }
 
 impl McpState {
@@ -64,6 +70,7 @@ impl McpState {
             view: "work".into(),
             sid: None,
             seen_gen,
+            reported: Default::default(),
         }
     }
 }
@@ -216,6 +223,35 @@ pub struct AssetParams {
 pub fn error_json(e: &RdyError) -> Value {
     serde_json::to_value(e)
         .unwrap_or_else(|_| json!({"code": e.code, "message": e.message, "fix": e.fix}))
+}
+
+/// adv1: drop the advisory warnings (`ADVISORY_ONCE`) this session already reported and count
+/// them in `warnings_repeated`. The `warnings` array stays, possibly empty.
+fn report_once(st: &mut McpState, mut v: Value) -> Value {
+    let Some(warnings) = v.get_mut("warnings").and_then(Value::as_array_mut) else {
+        return v;
+    };
+    let mut dropped = 0u64;
+    warnings.retain(|w| {
+        let code = w["code"].as_str().unwrap_or("");
+        if !ADVISORY_ONCE.contains(&code) {
+            return true;
+        }
+        let key = (
+            code.to_string(),
+            w["block"].as_str().unwrap_or("").to_string(),
+            w["message"].as_str().unwrap_or("").to_string(),
+        );
+        let fresh = st.reported.insert(key);
+        if !fresh {
+            dropped += 1;
+        }
+        fresh
+    });
+    if dropped > 0 {
+        v["warnings_repeated"] = json!(dropped);
+    }
+    v
 }
 
 /// How many versions `rdy_context` carries of a block's history.
@@ -475,6 +511,7 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
     }
     st.view = view;
     st.session = Some(session);
+    st.reported.clear();
     Ok(json!({ "view": st.view, "role": p.role }))
 }
 
@@ -884,6 +921,7 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
     write_and_report(&*st.engine, &view, max_tokens, move |r| {
         r.write_briefed(&s, req, brief)
     })
+    .map(|v| report_once(st, v))
 }
 
 fn decision_input(p: DecideParams) -> DecisionInput {
@@ -933,6 +971,7 @@ pub fn rdy_decide(st: &mut McpState, p: DecideParams) -> Result<Value, RdyError>
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
         r.decide(&s, &view, input)
     })
+    .map(|v| report_once(st, v))
 }
 
 pub fn rdy_supersede(st: &mut McpState, p: SupersedeParams) -> Result<Value, RdyError> {
@@ -945,6 +984,7 @@ pub fn rdy_supersede(st: &mut McpState, p: SupersedeParams) -> Result<Value, Rdy
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
         r.supersede(&s, &view, &old, part, input)
     })
+    .map(|v| report_once(st, v))
 }
 
 pub fn rdy_revoke(st: &mut McpState, p: RevokeParams) -> Result<Value, RdyError> {
@@ -956,6 +996,7 @@ pub fn rdy_revoke(st: &mut McpState, p: RevokeParams) -> Result<Value, RdyError>
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
         r.revoke(&s, &view, &p.target, &p.reason, &p.parent, brief)
     })
+    .map(|v| report_once(st, v))
 }
 
 pub fn rdy_propose(st: &mut McpState, p: ProposeParams) -> Result<Value, RdyError> {

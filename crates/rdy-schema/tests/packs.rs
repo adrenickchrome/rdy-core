@@ -296,3 +296,14 @@ fn ppfx1_a_pack_type_with_prefix_p_is_refused() {
         "{e}"
     );
 }
+
+#[test]
+fn dtype1_rdy_standard_has_a_page_type_with_no_skeleton() {
+    let p = PackSet::with_builtin().resolve("rdy-standard").unwrap();
+    assert!(p.doc_types["page"].skeleton.is_empty());
+    assert_eq!(
+        p.default_doc_type.as_deref(),
+        Some("overview"),
+        "rdy new doc still scaffolds"
+    );
+}
