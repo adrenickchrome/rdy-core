@@ -338,3 +338,83 @@ fn iwr1_write_and_report_carries_intents_only_when_there_are_some() {
     assert!(out.get("intents").is_none(), "{out}");
     let _ = engine.read();
 }
+
+#[test]
+fn iwr1_a_delete_or_a_move_out_of_an_area_still_hears_of_the_area_intent() {
+    use rdy_engine::consequence::write_and_report;
+    use rdy_engine::engine::Local;
+    let (_d, mut r) = qa_project();
+    r.new_doc(
+        &writer(),
+        "seed",
+        "payments/fees",
+        Some("glossary"),
+        Some("Fees"),
+    )
+    .unwrap();
+    r.new_doc(
+        &writer(),
+        "seed",
+        "notes/other",
+        Some("glossary"),
+        Some("Other"),
+    )
+    .unwrap();
+    let doc = r
+        .read()
+        .resolve_path(&Scope::View("seed".into()), "payments/fees")
+        .unwrap()
+        .to_string();
+    let other = r
+        .read()
+        .resolve_path(&Scope::View("seed".into()), "notes/other")
+        .unwrap()
+        .to_string();
+    let res = write(&mut r, "seed", json!([
+        {"op": "create", "type": "section", "id": "$s", "parent": doc, "fields": {"title": "S"}},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "fee"}
+    ])).unwrap();
+    land(&mut r, "seed").unwrap();
+    let section = res.created["$s"].clone();
+    let claim = res.created["$c"].clone();
+    let ia = r
+        .intent_post(
+            &agent("agent:a", Some("ra")),
+            None,
+            Some("payments"),
+            &[],
+            "rework fees",
+            None,
+        )
+        .unwrap();
+    let vc = version_of(&r, &Scope::Canon, &claim);
+    let vs = version_of(&r, &Scope::Canon, &section);
+    let engine = Local::new(r);
+    let b = agent("agent:b", Some("rb"));
+    let report = |ops: serde_json::Value| {
+        let b = b.clone();
+        let ops: Vec<OpInput> = serde_json::from_value(ops).unwrap();
+        write_and_report(&engine, "rb", None, move |r| {
+            r.write(
+                &b,
+                WriteRequest {
+                    view: "rb".into(),
+                    ops,
+                    justification: None,
+                    message: String::new(),
+                },
+            )
+        })
+        .unwrap()
+    };
+    // a delete: the claim is gone after the write, but it was in payments before it
+    let out = report(json!([{"op": "delete", "id": claim, "base": vc}]));
+    assert_eq!(out["intents"].as_array().map(Vec::len), Some(1), "{out}");
+    assert_eq!(out["intents"][0]["id"], ia.id.as_str());
+    assert_eq!(out["intents"][0]["blocks"], json!([claim]));
+    // a move out of payments: the section's new path is in no area, its old one was in payments
+    let out = report(json!([{"op": "move", "id": section, "base": vs, "parent": other}]));
+    assert_eq!(out["intents"].as_array().map(Vec::len), Some(1), "{out}");
+    assert_eq!(out["intents"][0]["id"], ia.id.as_str());
+    assert_eq!(out["intents"][0]["blocks"], json!([section]));
+}

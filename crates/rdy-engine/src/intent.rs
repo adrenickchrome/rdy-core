@@ -302,10 +302,38 @@ impl ReadState {
         touched: &BTreeSet<BlockId>,
         now_ms: i64,
     ) -> Result<Vec<IntentNote>, RdyError> {
+        self.notes(None, scope, actor, run, touched, now_ms)
+    }
+
+    /// [`ReadState::intent_notes`] for a write that took `before` to this state: a touched block
+    /// is in the areas it has in `scope` here or had there, so a block the write deleted, or moved
+    /// out of an area, still hears of an intent on the area it left.
+    pub fn intent_notes_since(
+        &self,
+        before: &ReadState,
+        scope: &Scope,
+        actor: &str,
+        run: Option<&str>,
+        touched: &BTreeSet<BlockId>,
+        now_ms: i64,
+    ) -> Result<Vec<IntentNote>, RdyError> {
+        self.notes(Some(before), scope, actor, run, touched, now_ms)
+    }
+
+    fn notes(
+        &self,
+        before: Option<&ReadState>,
+        scope: &Scope,
+        actor: &str,
+        run: Option<&str>,
+        touched: &BTreeSet<BlockId>,
+        now_ms: i64,
+    ) -> Result<Vec<IntentNote>, RdyError> {
         if self.coord_heads.intents.is_empty() || touched.is_empty() {
             return Ok(vec![]);
         }
-        // each touched block's areas, read once, when an area intent first needs them
+        // each touched block's areas (here, and `before` when given), read once, when an area
+        // intent first needs them
         let mut areas: BTreeMap<&BlockId, Vec<String>> = BTreeMap::new();
         let mut out = vec![];
         for (&stable, latest) in &self.coord_heads.intents {
@@ -322,7 +350,11 @@ impl ReadState {
                         None => false,
                         Some(area) => {
                             if !areas.contains_key(b) {
-                                areas.insert(b, self.block_areas(scope, b)?);
+                                let mut found = self.block_areas(scope, b)?;
+                                if let Some(before) = before {
+                                    found.extend(before.block_areas(scope, b)?);
+                                }
+                                areas.insert(b, found);
                             }
                             areas[b].contains(area)
                         }
