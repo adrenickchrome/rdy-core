@@ -462,15 +462,17 @@ impl Store {
     /// one write. Returns the proposal's id.
     pub fn propose(&mut self, view: &str, title: &str, by: Provenance) -> Result<Hash, StoreError> {
         let changes = self.included(view)?.as_ref().clone();
-        self.propose_changes(view, title, by, changes)
+        self.propose_changes(view, title, None, by, changes)
     }
 
     /// `propose` with `changes` (a closed subset of the view's included changes, which the
     /// caller checks) in place of the view's whole set. An empty `changes` is `EmptyProposal`.
+    /// A blank `summary` is `None`.
     pub fn propose_changes(
         &mut self,
         view: &str,
         title: &str,
+        summary: Option<&str>,
         by: Provenance,
         changes: Vec<Hash>,
     ) -> Result<Hash, StoreError> {
@@ -483,6 +485,7 @@ impl Store {
             alternative: None,
             provenance: by,
             canon_at: self.canon_head()?,
+            summary: clean_summary(summary),
         };
         let id = Hash::of(&encode(&p));
         self.write_version(&p, id)
@@ -499,19 +502,23 @@ impl Store {
 
     /// Writes the next version of proposal `prev` with `changes`, `title` and `by` in place of
     /// its own (the view and the alternative carry over), and moves `proposal/<stable>` to it.
+    /// A non-blank `summary` replaces the previous version's; a blank or `None` one keeps it.
     /// Returns the new version's id.
     pub fn propose_next(
         &mut self,
         prev: &Hash,
         changes: Vec<Hash>,
         title: &str,
+        summary: Option<&str>,
         by: Provenance,
     ) -> Result<Hash, StoreError> {
+        let before = self.proposal(prev)?;
         let p = Proposal {
             changes,
             title: title.to_string(),
             provenance: by,
-            ..self.proposal(prev)?
+            summary: clean_summary(summary).or_else(|| before.summary.clone()),
+            ..before
         };
         self.next_version(prev, p)
     }
@@ -574,4 +581,12 @@ impl Store {
         self.write(items)?;
         Ok(id)
     }
+}
+
+/// A proposal summary as stored: trimmed, and `None` when blank.
+fn clean_summary(summary: Option<&str>) -> Option<String> {
+    summary
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }

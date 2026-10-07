@@ -505,7 +505,7 @@ fn vhost1_a_huge_bad_id_comes_back_clipped_in_the_error() {
         ("exclude", r.view_exclude(&a, "a", one, false).unwrap_err()),
         (
             "propose",
-            r.propose_subset(&a, "a", "t", Some(one)).unwrap_err(),
+            r.propose_subset(&a, "a", "t", Some(one), None).unwrap_err(),
         ),
         ("undo", r.undo(&a, "a", Some(&huge), false).unwrap_err()),
         ("approve", r.resolve_proposal(&huge).unwrap_err()),

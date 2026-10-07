@@ -122,6 +122,7 @@ impl Store {
                     alternative: p.alternative.clone(),
                     provenance: p.provenance.clone(),
                     canon_at: p.canon_at,
+                    summary: p.summary.clone(),
                 });
                 let final_id = Hash::of(&fin);
                 items.push((kinds::PROPOSAL, fin));

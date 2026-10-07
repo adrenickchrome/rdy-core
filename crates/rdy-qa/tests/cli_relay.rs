@@ -310,6 +310,7 @@ fn logj1_log_text_shows_the_version_and_the_relay_and_tags_json_carries_the_tag_
         "approved_version",
         "approved",
         "title",
+        "summary",
         "approved_by",
         "proposed_by",
         "assurance",

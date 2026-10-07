@@ -5,7 +5,7 @@
 //! directory.
 use rdy_engine::brief::Coverage;
 use rdy_engine::code_brief::e_code_path_alone;
-use rdy_engine::consequence::write_and_report;
+use rdy_engine::consequence::{land_and_report, propose_and_report, write_and_report};
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::{
     E_BAD_INPUT, E_LIMIT, E_PERMISSION, HISTORY_MAX, LandOptions, RdyError, ReadState, Relay,
@@ -165,6 +165,8 @@ struct EditBlockArgs {
 struct ProposeArgs {
     title: String,
     view: Option<String>,
+    summary: Option<String>,
+    max_tokens: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -381,7 +383,10 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "new_folder" => new_folder(cx, parse(op, args, "{path, view?}")?),
         "new_doc" => new_doc(cx, parse(op, args, "{path, view?, doc_type?, title?}")?),
         "edit_block" => edit_block(cx, parse(op, args, "{yaml, view?, brief?, max_tokens?}")?),
-        "propose" => propose(cx, parse(op, args, "{title, view?}")?),
+        "propose" => propose(
+            cx,
+            parse(op, args, "{title, view?, summary?, max_tokens?}")?,
+        ),
         "approve" => approve(
             cx,
             parse(
@@ -642,9 +647,12 @@ fn edit_block(cx: &OpContext, a: EditBlockArgs) -> Result<Value, RdyError> {
 }
 
 fn propose(cx: &OpContext, a: ProposeArgs) -> Result<Value, RdyError> {
+    check_max_tokens(a.max_tokens)?;
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
-    write_typed(cx.engine, move |r| r.propose(&s, &view, &a.title))
+    propose_and_report(cx.engine, a.max_tokens, move |r| {
+        r.propose_subset(&s, &view, &a.title, None, a.summary.as_deref())
+    })
 }
 
 fn approve(cx: &OpContext, a: ApproveArgs) -> Result<Value, RdyError> {
@@ -692,7 +700,7 @@ fn approve(cx: &OpContext, a: ApproveArgs) -> Result<Value, RdyError> {
         relay,
         evidence: None,
     };
-    write_typed(cx.engine, move |r| r.land_with(&s, &a.proposal, opts))
+    land_and_report(cx.engine, move |r| r.land_with(&s, &a.proposal, opts))
 }
 
 fn tag(cx: &OpContext, a: TagArgs) -> Result<Value, RdyError> {

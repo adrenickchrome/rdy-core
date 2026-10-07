@@ -40,6 +40,8 @@ pub struct ProposalInfo {
     /// `P-<stable short>@<version>`: what an approver approves.
     pub r#ref: String,
     pub title: String,
+    /// The proposer's plain-words summary, kept from the last version when none is given.
+    pub summary: Option<String>,
     pub changes: usize,
     pub warnings: Vec<Issue>,
     /// Every conflict of the view.
@@ -65,8 +67,11 @@ pub struct LandInfo {
     pub landing: String,
     /// The version approved, as `P-<stable short>@<n>`.
     pub approved: String,
-    /// The landed version's title and change count.
+    /// The approved version's hash (the id its consequences carry).
+    pub version: String,
+    /// The landed version's title, summary and change count.
     pub title: String,
+    pub summary: Option<String>,
     pub changes: usize,
     /// `local`, or `relayed` when an agent relayed the human's approval (FW-B9).
     pub assurance: String,
@@ -124,6 +129,8 @@ pub struct LandingRow {
     /// `P-<stable short>@<n>` of `approved_version`.
     pub approved: Option<String>,
     pub title: String,
+    /// The proposer's summary of the landed version.
+    pub summary: Option<String>,
     /// The approving actor.
     pub approved_by: String,
     /// The provenance of the proposal version that landed.
@@ -381,7 +388,7 @@ fn targets(b: &Block) -> BTreeSet<BlockId> {
         .collect()
 }
 
-fn changes_of(st: &ReadState, ids: &[Hash]) -> Result<Vec<Change>, RdyError> {
+pub(crate) fn changes_of(st: &ReadState, ids: &[Hash]) -> Result<Vec<Change>, RdyError> {
     ids.iter()
         .map(|h| st.reader().change(h).map_err(RdyError::from))
         .collect()
@@ -389,7 +396,7 @@ fn changes_of(st: &ReadState, ids: &[Hash]) -> Result<Vec<Change>, RdyError> {
 
 /// The landing that already carried any of `p`'s changes into canon: one index lookup per
 /// change (lidx1).
-fn landed_as(st: &ReadState, p: &Proposal) -> Result<Option<Hash>, RdyError> {
+pub(crate) fn landed_as(st: &ReadState, p: &Proposal) -> Result<Option<Hash>, RdyError> {
     for c in &p.changes {
         if let Some(l) = st.reader().landing_of(c)? {
             return Ok(Some(l));
@@ -466,7 +473,7 @@ fn unresolved(st: &ReadState, view: &str, blocking: &[Conflict]) -> Result<RdyEr
 }
 
 /// The ops of the changes at `applied` (positions in `changes`), in applied order.
-fn applied_ops(changes: &[Change], applied: &[usize]) -> Vec<Op> {
+pub(crate) fn applied_ops(changes: &[Change], applied: &[usize]) -> Vec<Op> {
     applied
         .iter()
         .flat_map(|&i| changes[i].ops.iter().cloned())
@@ -733,7 +740,7 @@ impl Rdy {
         view: &str,
         title: &str,
     ) -> Result<ProposalInfo, RdyError> {
-        self.propose_subset(s, view, title, None)
+        self.propose_subset(s, view, title, None, None)
     }
 
     /// The conflicts the changes `changes` of view `view` carry on the blocks they write: their
@@ -775,13 +782,15 @@ impl Rdy {
     /// the view's open proposal, or a new proposal. A subset must be closed under dependencies
     /// (each dep in the subset or landed in the view's base). Never refuses for a conflict:
     /// `conflicts` lists every conflict of the view and `blocking` the ones on blocks the version
-    /// writes, which refuse its landing until they are resolved.
+    /// writes, which refuse its landing until they are resolved. A non-blank `summary` is stored
+    /// with the version; a version proposed without one keeps the last version's.
     pub fn propose_subset(
         &mut self,
         s: &Session,
         view: &str,
         title: &str,
         changes: Option<&[String]>,
+        summary: Option<&str>,
     ) -> Result<ProposalInfo, RdyError> {
         if !s.role.can_write() {
             return Err(RdyError::new(
@@ -959,17 +968,18 @@ impl Rdy {
             Some((stable, latest)) => {
                 let id = self
                     .store
-                    .propose_next(&latest, ids, title, s.provenance())?;
+                    .propose_next(&latest, ids, title, summary, s.provenance())?;
                 (id, stable, version_number(&st, &latest)? + 1)
             }
             None => {
                 let id = self
                     .store
-                    .propose_changes(view, title, s.provenance(), ids)?;
+                    .propose_changes(view, title, summary, s.provenance(), ids)?;
                 (id, id, 1)
             }
         };
-        let canon_at = self.store.proposal(&id)?.canon_at;
+        let stored = self.store.proposal(&id)?;
+        let canon_at = stored.canon_at;
         self.publish(Delta::Seq)?;
         let pref = ProposalRef {
             version: id,
@@ -982,6 +992,7 @@ impl Rdy {
             version: n,
             r#ref: pref.to_string(),
             title: title.into(),
+            summary: stored.summary,
             changes: count,
             warnings: issues,
             conflicts,
@@ -1283,7 +1294,9 @@ impl Rdy {
         Ok(LandInfo {
             landing: out.landing.to_string(),
             approved: pref.to_string(),
+            version: pid.to_string(),
             title: p.title.clone(),
+            summary: p.summary.clone(),
             changes: p.changes.len(),
             assurance,
             warnings: issues,
@@ -1384,6 +1397,7 @@ impl ReadState {
             approved_version: rec.approved_version.map(|h| h.to_string()),
             approved,
             title: p.title.clone(),
+            summary: p.summary.clone(),
             approved_by: rec.approved_by.actor.clone(),
             proposed_by: RelayedByRow {
                 actor: p.provenance.actor.clone(),

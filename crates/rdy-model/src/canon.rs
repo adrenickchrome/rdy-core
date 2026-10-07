@@ -26,6 +26,8 @@ pub struct Proposal {
     pub provenance: Provenance,
     /// Canon's head when this version was written; `None` before the first landing.
     pub canon_at: Option<Hash>,
+    /// The proposer's plain-words summary for the approver (FW-G7c); `None` when none was given.
+    pub summary: Option<String>,
 }
 
 impl Proposal {

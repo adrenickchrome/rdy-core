@@ -135,7 +135,7 @@ fn gconf1_propose_lists_every_conflict_and_marks_the_blocking_ones() {
     let e = r.land_report(&approver(), &whole.r#ref).unwrap_err();
     assert_eq!(e.code, E_CONFLICT_UNRESOLVED, "{e}");
     let subset = r
-        .propose_subset(&sa, "a", "just y", Some(std::slice::from_ref(&cy)))
+        .propose_subset(&sa, "a", "just y", Some(std::slice::from_ref(&cy)), None)
         .unwrap();
     assert_eq!(
         (subset.changes, subset.version),
@@ -170,7 +170,7 @@ fn gconf1_a_subset_must_be_closed_and_name_changes_in_the_view() {
         .unwrap()
         .change;
     let e = r
-        .propose_subset(&sa, "a", "t", Some(std::slice::from_ref(&c2)))
+        .propose_subset(&sa, "a", "t", Some(std::slice::from_ref(&c2)), None)
         .unwrap_err();
     assert_eq!(e.code, E_DEPS_MISSING, "{e}");
     assert_eq!(e.issues.len(), 1);
@@ -180,11 +180,11 @@ fn gconf1_a_subset_must_be_closed_and_name_changes_in_the_view() {
         e.issues[0]
     );
     let e = r
-        .propose_subset(&sa, "a", "t", Some(&["b".repeat(64)]))
+        .propose_subset(&sa, "a", "t", Some(&["b".repeat(64)]), None)
         .unwrap_err();
     assert_eq!(e.code, E_BAD_INPUT, "{e}");
     let ok = r
-        .propose_subset(&sa, "a", "t", Some(&[c2.clone(), c1.change.clone()]))
+        .propose_subset(&sa, "a", "t", Some(&[c2.clone(), c1.change.clone()]), None)
         .unwrap();
     assert_eq!(ok.changes, 2);
     r.land_report(&approver(), &ok.r#ref).unwrap();
@@ -200,7 +200,9 @@ fn gconf1_an_empty_subset_is_refused_and_writes_no_proposal() {
     land(&mut r, "seed").unwrap();
     let sa = as_agent("agent:a", "r1");
     write_as(&mut r, &sa, "a", claim(&section, "x")).unwrap();
-    let e = r.propose_subset(&sa, "a", "empty", Some(&[])).unwrap_err();
+    let e = r
+        .propose_subset(&sa, "a", "empty", Some(&[]), None)
+        .unwrap_err();
     assert_eq!(e.code, E_BAD_INPUT, "{e}");
     assert!(e.message.contains("at least one change"), "{e}");
     assert!(
@@ -314,7 +316,7 @@ fn gconf1_a_subset_without_the_creation_of_a_childs_parent_is_e_deps_missing() {
     let new = c1.created.values().next().unwrap().clone();
     let c2 = write_as(&mut r, &sa, "a", claim(&new, "child")).unwrap();
     let e = r
-        .propose_subset(&sa, "a", "t", Some(std::slice::from_ref(&c2.change)))
+        .propose_subset(&sa, "a", "t", Some(std::slice::from_ref(&c2.change)), None)
         .unwrap_err();
     assert_eq!(e.code, E_DEPS_MISSING, "{e}");
     assert_eq!(e.issues.len(), 1, "{e:?}");
@@ -326,7 +328,13 @@ fn gconf1_a_subset_without_the_creation_of_a_childs_parent_is_e_deps_missing() {
     assert!(e.fix.contains(&c1.change[..12]), "{e}");
     assert_eq!(r.read().reader().get_ref("open/a").unwrap(), None);
     let ok = r
-        .propose_subset(&sa, "a", "t", Some(&[c2.change.clone(), c1.change.clone()]))
+        .propose_subset(
+            &sa,
+            "a",
+            "t",
+            Some(&[c2.change.clone(), c1.change.clone()]),
+            None,
+        )
         .unwrap();
     r.land_report(&approver(), &ok.r#ref).unwrap();
     let child = c2.created.values().next().unwrap().clone();

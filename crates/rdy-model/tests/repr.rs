@@ -138,6 +138,7 @@ fn repr1_proposal_and_landing_field_order_is_frozen() {
         alternative: Some(alt()),
         provenance: prov(),
         canon_at: Some(Hash::of(b"canon")),
+        summary: Some("what it does".into()),
     };
     assert_eq!(
         enc(&p),
@@ -150,6 +151,7 @@ fn repr1_proposal_and_landing_field_order_is_frozen() {
             &p.alternative,
             &p.provenance,
             p.canon_at,
+            &p.summary,
         ))
     );
     assert_eq!(p.id(), Hash::of(&enc(&p)));

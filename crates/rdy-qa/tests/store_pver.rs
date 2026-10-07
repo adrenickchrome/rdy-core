@@ -94,7 +94,7 @@ fn pver1_propose_writes_the_refs_and_propose_next_moves_the_latest() {
     assert_eq!(hash(s.get_ref("open/v").unwrap()), Some(p1));
     let c2 = create(&mut s, "v", "c-00002");
     let p2 = s
-        .propose_next(&p1, vec![c1, c2], "t2", prov("agent:v2"))
+        .propose_next(&p1, vec![c1, c2], "t2", None, prov("agent:v2"))
         .unwrap();
     let v2 = s.proposal(&p2).unwrap();
     assert_eq!(
@@ -133,7 +133,7 @@ fn pver1_landing_an_older_version_is_proposal_moved_and_writes_nothing() {
     let p1 = s.propose("v", "t", prov("agent:v")).unwrap();
     let c2 = create(&mut s, "v", "c-00002");
     let p2 = s
-        .propose_next(&p1, vec![c1, c2], "t", prov("agent:v"))
+        .propose_next(&p1, vec![c1, c2], "t", None, prov("agent:v"))
         .unwrap();
     let end = s.log_end();
     let e = s
@@ -297,7 +297,9 @@ fn pver1_every_version_records_the_canon_it_was_proposed_on() {
     let p1 = s.propose("v", "t", prov("agent:v")).unwrap();
     assert_eq!(s.proposal(&p1).unwrap().canon_at, Some(l));
     let set = s.included("v").unwrap().as_ref().clone();
-    let p2 = s.propose_next(&p1, set, "t2", prov("agent:v")).unwrap();
+    let p2 = s
+        .propose_next(&p1, set, "t2", None, prov("agent:v"))
+        .unwrap();
     assert_eq!(s.proposal(&p2).unwrap().canon_at, Some(l));
 }
 
@@ -314,13 +316,13 @@ fn gconf1_the_store_refuses_an_empty_proposal_version() {
     );
     let c1 = create(&mut s, "v", "c-00001");
     let e = s
-        .propose_changes("v", "t", prov("agent:v"), vec![])
+        .propose_changes("v", "t", None, prov("agent:v"), vec![])
         .unwrap_err();
     assert!(matches!(e, StoreError::EmptyProposal(_)), "{e}");
     assert_eq!(s.get_ref("open/v").unwrap(), None, "nothing written");
     let p1 = s.propose("v", "t", prov("agent:v")).unwrap();
     let e = s
-        .propose_next(&p1, vec![], "t2", prov("agent:v"))
+        .propose_next(&p1, vec![], "t2", None, prov("agent:v"))
         .unwrap_err();
     assert!(matches!(e, StoreError::EmptyProposal(_)), "{e}");
     let hash = |v: Option<Vec<u8>>| v.map(|b| Hash(b.try_into().unwrap()));

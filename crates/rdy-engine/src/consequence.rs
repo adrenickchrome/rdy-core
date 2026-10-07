@@ -4,6 +4,7 @@
 use crate::brief::{BRIEF_DEFAULT_TOKENS, FollowUp, expand_error, follow_up};
 use crate::engine::{Engine, write_typed};
 use crate::error::RdyError;
+use crate::gate::{LandInfo, ProposalInfo, applied_ops, changes_of, landed_as};
 use crate::views::{UndoResult, ViewOpResult};
 use crate::{Materialized, Rdy, ReadState, Scope};
 use rdy_graph::{Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, Suspect};
@@ -262,6 +263,57 @@ impl ReadState {
         ))
     }
 
+    /// The consequences of landing proposal version `version` on canon (Q2b): what would turn
+    /// suspect or dependent in canon. When one of the version's changes has landed, canon as it is
+    /// (the landing is in it); otherwise the version's changes merged onto canon, applied to
+    /// canon's materialization, with canon's graph carried across the applied ops. The batch is
+    /// the version hash, so the propose and the approval give each entry the same id. A version
+    /// that does not merge onto canon is an error (the caller reports it).
+    pub fn landing_consequences(
+        &self,
+        version: &Hash,
+        max_tokens: Option<usize>,
+    ) -> Result<Consequences, RdyError> {
+        let p = self.reader().proposal(version)?;
+        let changes = changes_of(self, &p.changes)?;
+        let ops: Vec<Op> = changes.iter().flat_map(|c| c.ops.iter().cloned()).collect();
+        let (touched, changed) = changed_by_ops(&ops);
+        let only_creates = ops.iter().all(|o| matches!(o, Op::Create { .. }));
+        if only_creates && changed == touched {
+            return Ok(Consequences::default());
+        }
+        // build canon's graph first, so that `after` carries it instead of building another
+        self.graph(&Scope::Canon)?;
+        let (m, g) = if landed_as(self, &p)?.is_some() {
+            (
+                self.materialized(&Scope::Canon)?,
+                self.graph(&Scope::Canon)?,
+            )
+        } else {
+            let reader = self.reader();
+            let (_, applied) =
+                reader.merge_checked(&reader.state_of(self.canon_head())?, &changes)?;
+            let next = self
+                .built(&Scope::Canon)?
+                .after(&applied_ops(&changes, &applied));
+            let g = Arc::clone(
+                next.graph
+                    .get_or_init(|| Arc::new(Graph::build_from(next.m.iter()))),
+            );
+            (Arc::clone(&next.m), g)
+        };
+        Ok(self.consequences_in(
+            &g,
+            &m,
+            version,
+            &touched,
+            &changed,
+            &|_| false,
+            vec![],
+            max_tokens,
+        ))
+    }
+
     /// The entries for `changed` in graph `g` over `m`: for each changed block, each block
     /// outside `touched` that points at it. `conflicts` come first, then suspect entries, then
     /// dependent ones, each by block id; `written` marks `already_written`. The list is cut
@@ -504,4 +556,50 @@ pub fn view_op_and_report<T: Serialize + 'static>(
     let c = after.view_consequences(&before, view, &e.batch, changes, max_tokens);
     attach(&mut v, c);
     Ok(v)
+}
+
+/// `write_typed` for a proposal (`f` returns its `ProposalInfo`), then the consequences of
+/// landing it on canon (see `ReadState::landing_consequences`): `consequences` is always present
+/// in the reply, with `consequences_omitted` when a cut dropped some, or `consequences_error`
+/// when the version does not merge onto canon (the proposal stands).
+pub fn propose_and_report(
+    engine: &dyn Engine,
+    max_tokens: Option<usize>,
+    f: impl FnOnce(&mut Rdy) -> Result<ProposalInfo, RdyError> + Send + 'static,
+) -> Result<serde_json::Value, RdyError> {
+    let mut v = write_typed(engine, f)?;
+    report_landing(engine, &mut v, "id", max_tokens);
+    Ok(v)
+}
+
+/// `write_typed` for an approval (`f` returns its `LandInfo`), then the consequences of the
+/// version it landed, read from canon (with the default budget). The ids match those the propose
+/// reported.
+pub fn land_and_report(
+    engine: &dyn Engine,
+    f: impl FnOnce(&mut Rdy) -> Result<LandInfo, RdyError> + Send + 'static,
+) -> Result<serde_json::Value, RdyError> {
+    let mut v = write_typed(engine, f)?;
+    report_landing(engine, &mut v, "version", None);
+    Ok(v)
+}
+
+/// Attaches the landing consequences of the version hash in `v[key]`.
+fn report_landing(
+    engine: &dyn Engine,
+    v: &mut serde_json::Value,
+    key: &str,
+    max_tokens: Option<usize>,
+) {
+    match v
+        .get(key)
+        .and_then(|h| h.as_str())
+        .and_then(|h| h.parse::<Hash>().ok())
+    {
+        Some(h) => {
+            let c = engine.read().landing_consequences(&h, max_tokens);
+            attach(v, c);
+        }
+        None => v["consequences"] = serde_json::json!([]),
+    }
 }

@@ -1,7 +1,7 @@
 use base64::Engine as _;
 use rdy_engine::code_brief::e_code_path_alone;
-use rdy_engine::consequence::write_and_report;
-use rdy_engine::engine::{Engine, open_report_json, write_typed};
+use rdy_engine::consequence::{propose_and_report, write_and_report};
+use rdy_engine::engine::{Engine, open_report_json};
 use rdy_engine::*;
 use rdy_model::{BlockId, EditorialClass, Justification, Role};
 use rdy_schema::{BodyRule, Trait};
@@ -212,6 +212,10 @@ pub struct ProposeParams {
     pub title: String,
     /// Propose only these changes (ids from rdy_view show). The set must be closed under dependencies, or it is E_DEPS_MISSING. Omit to propose all the view's changes. A new version of an open proposal replaces the old one.
     pub changes: Option<Vec<String>>,
+    /// Your plain-words summary of the proposal, for the person who approves it. Stored with the version; a new version without it keeps the last one.
+    pub summary: Option<String>,
+    /// The budget for the consequences in the result.
+    pub max_tokens: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -940,14 +944,21 @@ pub fn rdy_revoke(st: &mut McpState, p: RevokeParams) -> Result<Value, RdyError>
 }
 
 pub fn rdy_propose(st: &mut McpState, p: ProposeParams) -> Result<Value, RdyError> {
+    check_tokens(p.max_tokens)?;
     let s = session(st)?;
     let view = p
         .view
         .map(|v| v.strip_prefix("view:").map(String::from).unwrap_or(v))
         .unwrap_or_else(|| st.view.clone());
     let changes = p.changes.clone();
-    write_typed(&*st.engine, move |r| {
-        r.propose_subset(&s, &view, &p.title, changes.as_deref())
+    propose_and_report(&*st.engine, p.max_tokens, move |r| {
+        r.propose_subset(
+            &s,
+            &view,
+            &p.title,
+            changes.as_deref(),
+            p.summary.as_deref(),
+        )
     })
 }
 
