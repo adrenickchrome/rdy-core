@@ -1020,8 +1020,9 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             Ok((v, lines.join("\n")))
         }
         Cmd::Status => {
-            let v = call(env, "status", json!({}))?;
-            let t = status_text(&v);
+            let mut v = call(env, "status", json!({}))?;
+            let mut t = status_text(&v);
+            wc::status::attach(env, &mut v, &mut t)?;
             Ok((v, t))
         }
         Cmd::Show { id, scope, blame } => {

@@ -10,13 +10,14 @@ use rdy_engine::wc::state::{LOCK_WAIT, Place, WcLock, WcState};
 use rdy_engine::{E_BAD_INPUT, project_pack};
 use rdy_schema::Pack;
 use serde_json::Value;
+use std::path::PathBuf;
 
 mod add;
 mod brief;
 mod checkout;
 mod commit;
 mod new_files;
-mod status;
+pub(crate) mod status;
 mod update;
 mod worktree;
 
@@ -30,11 +31,18 @@ pub enum WcCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Stage files, directories, deletions and renames for the next commit.
+    Add {
+        /// The files or directories to stage (`.` for everything).
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+    },
 }
 
 pub fn run(cmd: WcCmd, env: &Env) -> Result<(Value, String), ErrorReply> {
     match cmd {
         WcCmd::Checkout { view, force } => checkout::run(env, view, force),
+        WcCmd::Add { paths } => add::run(env, paths),
     }
 }
 
