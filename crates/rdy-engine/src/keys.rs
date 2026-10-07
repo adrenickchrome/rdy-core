@@ -17,6 +17,63 @@ pub(crate) fn auto_key(path: &str, block_type: &str, taken: &dyn Fn(&str) -> boo
     key::unique(&key::from_path(path, block_type), taken)
 }
 
+/// K1 (FW-PR3): the docs and folders among `created` whose key rdy derived (`key::AUTO_FIELD`)
+/// and that clash in `next`, each with the key it gets instead, in (path, id) order. A key
+/// clashes when another block holds it, or when it is the name of another top-level doc or
+/// folder (that path would be unreachable). A block that is not re-derived keeps its key; when
+/// two re-derivable blocks share one, the first in (path, id) order keeps it. The new key is
+/// derived from the block's path in `next`, with the first free numeric suffix.
+pub(crate) fn rederive(
+    next: &Materialized,
+    created: &std::collections::BTreeSet<BlockId>,
+) -> Vec<(BlockId, String)> {
+    let auto = |b: &Block| b.fields.get(key::AUTO_FIELD) == Some(&FieldValue::Bool(true));
+    let mut cands: Vec<(String, BlockId)> = created
+        .iter()
+        .filter_map(|id| {
+            let b = next.get(id)?;
+            if !rdy_model::tree::is_tree_type(&b.block_type) || !auto(b) {
+                return None;
+            }
+            key_of(b)?;
+            Some((next.path_of(id)?, id.clone()))
+        })
+        .collect();
+    if cands.is_empty() {
+        return vec![];
+    }
+    cands.sort();
+    let keys = Keys::of(next.iter());
+    let is_cand: std::collections::BTreeSet<&BlockId> = cands.iter().map(|(_, id)| id).collect();
+    let top = |folded: &str, id: &BlockId| next.named(None, folded).iter().any(|o| o != id);
+    // folded keys a processed candidate keeps or got
+    let mut claimed: std::collections::BTreeSet<String> = Default::default();
+    let mut done: std::collections::BTreeSet<&BlockId> = Default::default();
+    let mut out = vec![];
+    for (path, id) in &cands {
+        let b = next.get(id).expect("a candidate is in next");
+        let k = key_of(b).expect("a candidate has a key");
+        let folded = key::fold(k);
+        let clash = claimed.contains(&folded)
+            || top(&folded, id)
+            || keys
+                .holders(k)
+                .iter()
+                .any(|(_, o)| o != id && (!is_cand.contains(o) || done.contains(o)));
+        done.insert(id);
+        if !clash {
+            claimed.insert(folded);
+            continue;
+        }
+        let new = auto_key(path, &b.block_type, &|c| {
+            claimed.contains(c) || top(c, id) || keys.holders(c).iter().any(|(_, o)| o != id)
+        });
+        claimed.insert(key::fold(&new));
+        out.push((id.clone(), new));
+    }
+    out
+}
+
 /// Folded key → its holders (key as written, id), in the order the blocks were given.
 #[derive(Default)]
 pub(crate) struct Keys {
@@ -207,11 +264,21 @@ pub(crate) fn resolve_with(
     };
     let by_path = crate::paths::resolve_in(m, text);
     match (by_key, by_path) {
-        (Some(k), Ok(p)) if k != p => Err(RdyError::new(
-            E_BAD_INPUT,
-            format!("{text:?} is both the key of {k} and the path of {p}"),
-            "use the id",
-        )),
+        // K2: a doc renamed away keeps its key, so a new doc can take the old path; the error
+        // names both blocks so the agent can pick one by id
+        (Some(k), Ok(p)) if k != p => {
+            let at = m
+                .path_of(&k)
+                .map(|path| format!(" ({path})"))
+                .unwrap_or_default();
+            Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("{text:?} is both the key of {k}{at} and the path of {p}"),
+                format!(
+                    "address it by id ({k} holds the key, {p} the path), or rename one: change the key of {k} or the name of {p}"
+                ),
+            ))
+        }
         (Some(k), _) => Ok(k),
         (None, path) => path,
     }

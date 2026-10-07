@@ -904,6 +904,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                     "\nblocking: {blocking} conflict(s) on blocks this proposal writes"
                 ));
             }
+            t.push_str(&new_keys_text(&v));
             t.push_str(&format!("\napprove with: rdy approve {pref}"));
             Ok((v, t))
         }
@@ -946,6 +947,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                     ));
                 }
             }
+            t.push_str(&new_keys_text(&v));
             for w in v["warnings"].as_array().into_iter().flatten() {
                 t.push_str(&format!(
                     "\nwarning {}: {}",
@@ -1330,6 +1332,18 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// One line per key rdy re-derived on propose or approve (`keys`: block id → new key, K1).
+fn new_keys_text(v: &Value) -> String {
+    let mut t = String::new();
+    for (id, k) in v["keys"].as_object().into_iter().flatten() {
+        t.push_str(&format!(
+            "\nnew key {id}: {} (another block holds the key rdy derived)",
+            text(k)
+        ));
+    }
+    t
 }
 
 #[cfg(test)]

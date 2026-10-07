@@ -12,7 +12,7 @@ use rdy_model::{
 use rdy_schema::{Issue, Severity, validate_block};
 use rdy_store::{Conflict, LandRequest, MergeChange, Relay, merge_on_blocks};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A proposal version as an approver names it: the version's hash, the proposal's stable id (its
 /// first version's hash) and the version number, counted from 1. Shown as `P-<stable short>@<n>`.
@@ -49,6 +49,10 @@ pub struct ProposalInfo {
     pub blocking: Vec<ConflictInfo>,
     /// Canon's head when the version was written (FW-HB1).
     pub canon_at: Option<String>,
+    /// Keys rdy re-derived when proposing, by block id: a key rdy gave a doc or folder this
+    /// version creates that another block holds (K1, FW-PR3).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub keys: BTreeMap<String, String>,
 }
 
 /// One view a landing rebased: how many of its changes dropped out (they landed) and how many
@@ -72,6 +76,10 @@ pub struct LandInfo {
     pub assurance: String,
     pub warnings: Vec<Issue>,
     pub rebased: Vec<RebasedInfo>,
+    /// Keys rdy re-derived when landing, by block id: a key rdy gave a doc or folder the version
+    /// creates that a block landed since the proposal holds (K1, FW-PR3).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub keys: BTreeMap<String, String>,
 }
 
 /// How an approval treats a canon that moved since the version was proposed (FW-HB1), and the
@@ -474,6 +482,30 @@ fn unresolved(st: &ReadState, view: &str, blocking: &[Conflict]) -> Result<RdyEr
     Ok(e)
 }
 
+/// The canon that would result from landing `changes` on `st`'s canon, and each applied change's
+/// position in `changes`, in applied order. The merge surfaces E_STALE_BASE, E_ALREADY_EXISTS and
+/// E_FROZEN early.
+fn prospective(st: &ReadState, changes: &[Change]) -> Result<(Materialized, Vec<usize>), RdyError> {
+    let reader = st.reader();
+    let (_, applied) = reader.merge_checked(&reader.state_of(st.canon_head())?, changes)?;
+    let next = st
+        .materialized(&Scope::Canon)?
+        .with(&applied_ops(changes, &applied));
+    Ok((next, applied))
+}
+
+/// The ids `changes` create (the changes at `applied`).
+fn created_in(changes: &[Change], applied: &[usize]) -> BTreeSet<BlockId> {
+    applied
+        .iter()
+        .flat_map(|&i| changes[i].ops.iter())
+        .filter_map(|op| match op {
+            Op::Create { block } => Some(block.id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The ops of the changes at `applied` (positions in `changes`), in applied order.
 fn applied_ops(changes: &[Change], applied: &[usize]) -> Vec<Op> {
     applied
@@ -490,13 +522,18 @@ impl Rdy {
         st: &ReadState,
         changes: &[Change],
     ) -> Result<(Vec<Issue>, Vec<usize>), RdyError> {
-        // merge onto the state's canon to surface E_STALE_BASE / E_ALREADY_EXISTS / E_FROZEN
-        // early
-        let reader = st.reader();
-        let (_, applied) = reader.merge_checked(&reader.state_of(st.canon_head())?, changes)?;
-        let next: Materialized = st
-            .materialized(&Scope::Canon)?
-            .with(&applied_ops(changes, &applied));
+        let (next, applied) = prospective(st, changes)?;
+        Ok((self.issues_in(st, changes, &next, &applied)?, applied))
+    }
+
+    /// The issues of `next`, the canon that landing `changes` (applied at `applied`) would give.
+    fn issues_in(
+        &self,
+        st: &ReadState,
+        changes: &[Change],
+        next: &Materialized,
+        applied: &[usize],
+    ) -> Result<Vec<Issue>, RdyError> {
         let mut touched = BTreeSet::new();
         let mut deleted = BTreeSet::new();
         for c in applied.iter().map(|&i| &changes[i]) {
@@ -656,7 +693,7 @@ impl Rdy {
                 }
             }
         }
-        Ok((issues, applied))
+        Ok(issues)
     }
 
     /// Warns when the proposal places blocks (creates or moves) under a parent whose siblings, as
@@ -733,6 +770,66 @@ impl Rdy {
             }
         }
         Ok(out)
+    }
+
+    /// K1: the change that gives each block in `re` its re-derived key in view `view`, from the
+    /// view's current version of the block, with the deps the store will give it. Every dep must
+    /// be among `ids`, the changes proposed: a subset that leaves out a later edit of the block
+    /// cannot carry the re-key.
+    fn rekey_change(
+        &self,
+        st: &ReadState,
+        s: &Session,
+        view: &str,
+        re: &[(BlockId, String)],
+        ids: &[Hash],
+    ) -> Result<Change, RdyError> {
+        let vm = st.materialized(&Scope::View(view.to_string()))?;
+        let mut ops = vec![];
+        for (id, k) in re {
+            let cur = vm.get(id).ok_or_else(|| {
+                RdyError::new(
+                    E_UNKNOWN_BLOCK,
+                    format!("{id} is proposed from view {view:?} but the view no longer has it"),
+                    "propose the whole view",
+                )
+            })?;
+            let mut b = cur.clone();
+            b.fields.insert("key".into(), FieldValue::Str(k.clone()));
+            ops.push(Op::Update {
+                base: cur.version_hash(),
+                block: b,
+            });
+        }
+        let names = re
+            .iter()
+            .map(|(id, k)| format!("{id} {k}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut change = Change {
+            view: view.to_string(),
+            ops,
+            deps: vec![],
+            provenance: s.provenance(),
+            justification: None,
+            message: format!("new keys rdy derived, as another block holds the old ones: {names}"),
+            links: ChangeLinks::default(),
+        };
+        change.deps = self.store.change_deps(&change, Some(view))?;
+        if let Some(d) = change.deps.iter().find(|d| !ids.contains(d)) {
+            return Err(RdyError::new(
+                E_DEPS_MISSING,
+                format!(
+                    "rdy must give {names} a new key (another block holds the old one), and that builds on change {}, which this proposal leaves out",
+                    d.short()
+                ),
+                format!(
+                    "add {} to the proposal, or propose the whole view",
+                    d.short()
+                ),
+            ));
+        }
+        Ok(change)
     }
 
     /// Proposes view `view`'s included changes (a new version of its open proposal, if any).
@@ -905,8 +1002,21 @@ impl Rdy {
         // a version with a blocking conflict cannot land until it is resolved, and its merge onto
         // canon would refuse at the first conflict: the gate validates it at landing (RF10)
         let mut issues = vec![];
+        let mut rekey = None;
         if blocking.is_empty() {
-            issues = self.prospective_issues(&st, &changes)?.0;
+            // K1 (FW-PR3): a key rdy derived for a block this version creates, held by another
+            // block in the prospective canon, is re-derived by a change rdy adds to the view
+            let (next, applied) = prospective(&st, &changes)?;
+            let re = crate::keys::rederive(&next, &created_in(&changes, &applied));
+            if re.is_empty() {
+                issues = self.issues_in(&st, &changes, &next, &applied)?;
+            } else {
+                let change = self.rekey_change(&st, s, view, &re, &ids)?;
+                let mut all = changes.clone();
+                all.push(change.clone());
+                issues = self.prospective_issues(&st, &all)?.0;
+                rekey = Some((change, re));
+            }
             if let Some(first) = issues.iter().find(|i| i.severity == Severity::Error) {
                 let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
                 e.issues = issues;
@@ -915,6 +1025,23 @@ impl Rdy {
             // a view with no head floats on canon
             let view_base = st.view_head(view).map_or(st.canon_head(), |h| h.base);
             issues.extend(self.rekeyed_warnings(&st, view_base, &changes)?);
+        }
+        let mut ids = ids;
+        let mut keys = BTreeMap::new();
+        if let Some((mut change, re)) = rekey {
+            // the store gives the change its deps again as it commits it
+            change.deps.clear();
+            let ops = change.ops.clone();
+            let vm = st.materialized(&Scope::View(view.to_string()))?;
+            let h = self
+                .store
+                .commit_to_view_with(view, change, &|id| vm.version_of(id))?;
+            self.publish(Delta::Commit {
+                view: view.to_string(),
+                ops,
+            })?;
+            ids.push(h);
+            keys = re.into_iter().map(|(id, k)| (id.to_string(), k)).collect();
         }
         // pver1: a view with an open proposal (its latest version has not landed) gets the next
         // version of it; otherwise a new proposal starts
@@ -961,6 +1088,7 @@ impl Rdy {
             conflicts,
             blocking,
             canon_at: canon_at.map(|h| h.to_string()),
+            keys,
         })
     }
 
@@ -1182,6 +1310,35 @@ impl Rdy {
                 block: acc,
             });
         }
+        // K1 (FW-PR3): a block landed since the proposal can hold a key rdy derived for a block
+        // this version creates; the acceptance change re-derives it
+        let re = crate::keys::rederive(&prospective, &created_in(&changes, &applied));
+        let accepts = accept_ops.len();
+        for (id, k) in &re {
+            let b = prospective
+                .get(id)
+                .expect("a re-derived block is in the prospective canon");
+            let in_view = st.materialized(&view)?.get(id).map(|v| v.version_hash());
+            if in_view != Some(b.version_hash()) {
+                stale.push(RdyError::new(
+                    E_STALE_BASE,
+                    format!(
+                        "{id} needs a new key (another block holds its key now), but it changed in view {:?} after the proposal was made",
+                        p.view
+                    ),
+                    format!("the view has later edits to {id}; propose again to include them"),
+                ));
+                continue;
+            }
+            let mut rekeyed = b.clone();
+            rekeyed
+                .fields
+                .insert("key".into(), FieldValue::Str(k.clone()));
+            accept_ops.push(Op::Update {
+                base: b.version_hash(),
+                block: rekeyed,
+            });
+        }
         if let Some(e) = stale.into_iter().next() {
             return Err(e);
         }
@@ -1198,7 +1355,11 @@ impl Rdy {
                 deps: vec![],
                 provenance: s.provenance(),
                 justification: None,
-                message: format!("accept decisions in {}", p.title),
+                message: match (accepts, re.is_empty()) {
+                    (_, true) => format!("accept decisions in {}", p.title),
+                    (0, false) => format!("give new keys in {}", p.title),
+                    _ => format!("accept decisions and give new keys in {}", p.title),
+                },
                 links: ChangeLinks::default(),
             };
             change.deps = self.store.change_deps(&change, Some(&p.view))?;
@@ -1270,6 +1431,7 @@ impl Rdy {
                     conflicts: r.conflicts.len(),
                 })
                 .collect(),
+            keys: re.into_iter().map(|(id, k)| (id.to_string(), k)).collect(),
         })
     }
 }

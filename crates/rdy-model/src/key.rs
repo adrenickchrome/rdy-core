@@ -2,6 +2,11 @@
 
 use crate::BlockId;
 
+/// The engine field that marks a doc's or folder's key as one rdy derived from its path
+/// (FW-PR3): `true`, or absent. Such a key gets a new numeric suffix when the doc is proposed or
+/// landed and another block holds it (K1); a key an agent sets is never changed.
+pub const AUTO_FIELD: &str = "key_auto";
+
 /// The longest key, in characters.
 const MAX_LEN: usize = 32;
 

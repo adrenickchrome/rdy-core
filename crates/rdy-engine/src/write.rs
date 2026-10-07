@@ -1135,9 +1135,15 @@ fn build_ops(
                     block.fields.insert("name".into(), FieldValue::Str(n));
                 }
                 let sets_key = fields.contains_key("key");
+                let sets_auto = fields.contains_key(rdy_model::key::AUTO_FIELD);
                 block.fields.extend(res.fields(fields)?);
                 for k in unset {
                     block.fields.remove(&k);
+                }
+                // K1: a key the agent changes is the agent's, not rdy's; no key, no marker
+                let key_now = block.field_str("key");
+                if (key_now != cur.field_str("key") && !sets_auto) || key_now.is_none() {
+                    block.fields.remove(rdy_model::key::AUTO_FIELD);
                 }
                 if let Some(body) = body {
                     block.body = res.text(&body, RefMode::for_body(&block.block_type))?;
@@ -1453,6 +1459,9 @@ fn build_ops(
         block
             .fields
             .insert("key".into(), FieldValue::Str(k.clone()));
+        block
+            .fields
+            .insert(rdy_model::key::AUTO_FIELD.into(), FieldValue::Bool(true));
         res.note_key(&block.id, Some(block));
         ov.set(block.id.clone(), Some(block.clone()));
         assigned.insert(block.id.to_string(), k);

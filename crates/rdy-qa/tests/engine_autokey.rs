@@ -244,6 +244,10 @@ fn akey1_a_key_two_blocks_hold_in_a_view_is_refused_not_resolved_to_the_first() 
         keyed(&a, "onboarding.overview"),
         keyed(&b, "onboarding.overview"),
     );
+    write(&mut r, "c", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "intro", "title": "I", "doc_type": "overview", "key": "onboarding.overview"}}
+    ]))
+    .unwrap();
     land(&mut r, "a").unwrap();
     let vb = Scope::View("b".into());
     let e = r.read().resolve_id(&vb, "onboarding.overview").unwrap_err();
@@ -273,28 +277,33 @@ fn akey1_a_key_two_blocks_hold_in_a_view_is_refused_not_resolved_to_the_first() 
         {"op": "create", "type": "claim", "parent": "$s", "body": format!("See {{{{{db}}}}}.")}
     ]))
     .unwrap();
-    // pending a plan ruling, the proposal is refused until b's doc gets another key
-    let e = r.propose(&writer(), "b", "b").unwrap_err();
-    assert_eq!(e.code, "E_VALIDATION", "{e}");
-    assert!(
-        e.issues.iter().any(|i| i.code == "E_KEY_CLASH"
-            && i.block.as_ref().map(|b| b.to_string()) == Some(db.clone())),
-        "{:?}",
-        e.issues
+    // K1: the key rdy gave b's doc is re-derived when b is proposed, and the result lists it
+    let p = r.propose(&writer(), "b", "b").unwrap();
+    assert_eq!(p.keys.len(), 1, "{:?}", p.keys);
+    assert_eq!(p.keys[&db], "onboarding.overview-2");
+    assert_eq!(key(&r, "b", &db).as_deref(), Some("onboarding.overview-2"));
+    assert_eq!(
+        r.read()
+            .resolve_id(&vb, "onboarding.overview")
+            .unwrap()
+            .to_string(),
+        da
     );
-    write(
-        &mut r,
-        "b",
-        json!([{"op": "update", "id": db, "fields": {"key": "product.onboarding"}}]),
-    )
-    .unwrap();
-    land(&mut r, "b").unwrap();
+    r.land(&approver(), &p.id).unwrap();
     assert_eq!(
         r.read()
             .resolve_id(&Scope::Canon, "onboarding.overview")
             .unwrap()
             .to_string(),
         da
+    );
+    // a key an agent set is still refused: view c gave its doc the key before a landed
+    let e = r.propose(&writer(), "c", "c").unwrap_err();
+    assert_eq!(e.code, "E_VALIDATION", "{e}");
+    assert!(
+        e.issues.iter().any(|i| i.code == "E_KEY_CLASH"),
+        "{:?}",
+        e.issues
     );
 }
 
@@ -396,4 +405,250 @@ fn akey1_import_counts_a_top_level_path_as_taken() {
             .to_string(),
         "d-AAAAA"
     );
+}
+
+/// Whether `id` in `view` carries the marker of a key rdy derived (`fields.key_auto: true`).
+fn key_auto(r: &Rdy, view: &str, id: &str) -> bool {
+    r.read()
+        .block(&Scope::View(view.into()), &BlockId::parse(id).unwrap())
+        .unwrap()
+        .fields
+        .get("key_auto")
+        == Some(&rdy_model::FieldValue::Bool(true))
+}
+
+#[test]
+fn rkey1_two_views_that_derive_the_same_key_both_land() {
+    // P4: each view's doc derives onboarding.overview; the second proposal re-derives its key
+    let (_d, mut r) = project();
+    let a = r
+        .new_doc(
+            &writer(),
+            "a",
+            "engineering-handbook/onboarding/overview",
+            None,
+            Some("O"),
+        )
+        .unwrap();
+    let b = r
+        .new_doc(
+            &writer(),
+            "b",
+            "product-handbook/onboarding/overview",
+            None,
+            Some("O"),
+        )
+        .unwrap();
+    let (da, db) = (
+        keyed(&a, "onboarding.overview"),
+        keyed(&b, "onboarding.overview"),
+    );
+    assert!(key_auto(&r, "a", &da) && key_auto(&r, "b", &db));
+    let pa = r.propose(&writer(), "a", "a").unwrap();
+    assert!(pa.keys.is_empty(), "{:?}", pa.keys);
+    r.land(&approver(), &pa.id).unwrap();
+    let pb = r.propose(&writer(), "b", "b").unwrap();
+    assert_eq!(pb.keys.len(), 1, "{:?}", pb.keys);
+    assert_eq!(pb.keys[&db], "onboarding.overview-2");
+    let l = r.land_report(&approver(), &pb.id).unwrap();
+    assert!(
+        l.keys.is_empty(),
+        "nothing clashed since the proposal: {:?}",
+        l.keys
+    );
+    assert_eq!(key(&r, "b", &da).as_deref(), Some("onboarding.overview"));
+    assert_eq!(key(&r, "b", &db).as_deref(), Some("onboarding.overview-2"));
+    assert!(key_auto(&r, "b", &db), "a re-derived key is still rdy's");
+    let c = Scope::Canon;
+    assert_eq!(
+        r.read()
+            .resolve_id(&c, "onboarding.overview-2")
+            .unwrap()
+            .to_string(),
+        db
+    );
+}
+
+#[test]
+fn rkey1_two_top_level_spec_docs_land_once_one_is_renamed() {
+    // P5: both views create a top-level doc "spec"; the name clash is the agent's to fix, the
+    // key clash is not, and renaming the doc is enough
+    let (_d, mut r) = project();
+    let doc = json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "spec", "title": "Spec", "doc_type": "overview"}}
+    ]);
+    let da = write(&mut r, "a", doc.clone()).unwrap().created["$d"].clone();
+    let db = write(&mut r, "b", doc).unwrap().created["$d"].clone();
+    land(&mut r, "a").unwrap();
+    let e = r.propose(&writer(), "b", "b").unwrap_err();
+    assert_eq!(e.code, "E_VALIDATION", "{e}");
+    assert!(
+        e.issues.iter().any(|i| i.code == "E_PATH_CLASH"),
+        "{:?}",
+        e.issues
+    );
+    assert!(
+        !e.issues.iter().any(|i| i.code == "E_KEY_CLASH"),
+        "no agent set the key: {:?}",
+        e.issues
+    );
+    assert_eq!(
+        key(&r, "b", &db).as_deref(),
+        Some("spec"),
+        "a refused proposal writes nothing"
+    );
+    write(
+        &mut r,
+        "b",
+        json!([{"op": "update", "id": db, "fields": {"name": "spec-b"}}]),
+    )
+    .unwrap();
+    let p = r.propose(&writer(), "b", "b").unwrap();
+    assert_eq!(p.keys.len(), 1, "{:?}", p.keys);
+    assert_eq!(p.keys[&db], "spec-b", "re-derived from the doc's path now");
+    r.land(&approver(), &p.id).unwrap();
+    let c = Scope::Canon;
+    assert_eq!(r.read().resolve_id(&c, "spec").unwrap().to_string(), da);
+    assert_eq!(key(&r, "b", &db).as_deref(), Some("spec-b"));
+}
+
+#[test]
+fn rkey1_a_clash_that_appears_after_the_proposal_is_re_derived_at_landing() {
+    let (_d, mut r) = project();
+    let doc = json!([
+        {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "a-long-folder-name-for-team-b-docs", "title": "B"}},
+        {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "guide", "title": "G", "doc_type": "overview"}}
+    ]);
+    write(&mut r, "a", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "guide", "title": "G", "doc_type": "overview"}}
+    ]))
+    .unwrap();
+    let w = write(&mut r, "b", doc).unwrap();
+    let db = w.created["$d"].clone();
+    assert_eq!(w.keys[&db], "guide");
+    let pa = r.propose(&writer(), "a", "a").unwrap();
+    let pb = r.propose(&writer(), "b", "b").unwrap();
+    assert!(
+        pb.keys.is_empty(),
+        "no clash when b is proposed: {:?}",
+        pb.keys
+    );
+    r.land(&approver(), &pa.id).unwrap();
+    let l = r.land_report(&approver(), &pb.id).unwrap();
+    assert_eq!(l.keys.len(), 1, "{:?}", l.keys);
+    assert_eq!(l.keys[&db], "guide-2");
+    let c = Scope::Canon;
+    assert_eq!(r.read().resolve_id(&c, "guide-2").unwrap().to_string(), db);
+}
+
+#[test]
+fn rkey1_an_explicit_key_still_refuses_and_setting_a_key_makes_it_explicit() {
+    let (_d, mut r) = project();
+    let da = write(&mut r, "a", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "guide", "title": "G", "doc_type": "overview"}}
+    ]))
+    .unwrap()
+    .created["$d"]
+    .clone();
+    // given on create
+    let db = write(&mut r, "b", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "other", "title": "O", "doc_type": "overview", "key": "guide"}}
+    ]))
+    .unwrap()
+    .created["$d"]
+    .clone();
+    assert!(!key_auto(&r, "b", &db), "an explicit key is not rdy's");
+    // set later on a doc that had a derived key
+    let dc = write(&mut r, "c", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "third", "title": "T", "doc_type": "overview"}}
+    ]))
+    .unwrap()
+    .created["$d"]
+    .clone();
+    assert!(key_auto(&r, "c", &dc));
+    write(
+        &mut r,
+        "c",
+        json!([{"op": "update", "id": dc, "fields": {"key": "GUIDE"}}]),
+    )
+    .unwrap();
+    assert!(!key_auto(&r, "c", &dc), "a key the agent sets is explicit");
+    land(&mut r, "a").unwrap();
+    for (view, id) in [("b", &db), ("c", &dc)] {
+        let e = r.propose(&writer(), view, view).unwrap_err();
+        assert_eq!(e.code, "E_VALIDATION", "{view}: {e}");
+        assert!(
+            e.issues.iter().any(|i| i.code == "E_KEY_CLASH"
+                && i.block.as_ref().map(|b| b.to_string()).as_deref() == Some(id.as_str())),
+            "{view}: {:?}",
+            e.issues
+        );
+    }
+    assert_eq!(
+        r.read()
+            .resolve_id(&Scope::Canon, "guide")
+            .unwrap()
+            .to_string(),
+        da
+    );
+}
+
+#[test]
+fn kamb1_a_key_that_is_another_docs_path_names_both_blocks_and_the_fix() {
+    // P2: notes is renamed old-notes and keeps its key; a new doc named notes takes notes-2
+    let (_d, mut r) = project();
+    let old = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}}
+    ]))
+    .unwrap()
+    .created["$d"]
+    .clone();
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": old, "fields": {"name": "old-notes"}}]),
+    )
+    .unwrap();
+    let new = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "notes", "title": "Notes", "doc_type": "overview"}}
+    ]))
+    .unwrap()
+    .created["$d"]
+    .clone();
+    assert_eq!(key(&r, "work", &new).as_deref(), Some("notes-2"));
+    let check = |e: &rdy_engine::RdyError| {
+        assert_eq!(e.code, "E_BAD_INPUT", "{e}");
+        assert!(
+            e.message.contains(&format!("key of {old} (old-notes)"))
+                && e.message.contains(&format!("path of {new}")),
+            "{e}"
+        );
+        assert_eq!(
+            e.fix,
+            format!(
+                "address it by id ({old} holds the key, {new} the path), or rename one: change the key of {old} or the name of {new}"
+            )
+        );
+    };
+    let work = Scope::View("work".into());
+    check(&r.read().resolve_id(&work, "notes").unwrap_err());
+    check(
+        &write(
+            &mut r,
+            "work",
+            json!([
+                {"op": "create", "type": "section", "parent": "notes", "fields": {"title": "S"}}
+            ]),
+        )
+        .unwrap_err(),
+    );
+    // the ids still work
+    write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "section", "parent": new, "fields": {"title": "S"}}
+        ]),
+    )
+    .unwrap();
 }

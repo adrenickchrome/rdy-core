@@ -361,6 +361,9 @@ fn assign_import_keys(blocks: &mut [Block], existing: &Materialized) -> BTreeMap
         blocks[i]
             .fields
             .insert("key".into(), FieldValue::Str(k.clone()));
+        blocks[i]
+            .fields
+            .insert(rdy_model::key::AUTO_FIELD.into(), FieldValue::Bool(true));
         out.insert(id.to_string(), k);
     }
     out
