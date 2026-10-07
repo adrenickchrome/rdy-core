@@ -63,14 +63,12 @@ fn schema_hostile_packs_are_refused() {
         .expect_err("section onto doc's prefix");
     assert!(e.to_string().contains("used by both"), "{e}");
 
-    // a large pack resolves in bounded time
+    // a large pack resolves (how fast: the perf tier's `pack_resolve_2000_types`)
     let mut big = String::from("name: big\nversion: \"1\"\nblock_types:\n");
     for i in 0..2000 {
         big.push_str(&format!("  t{i}: {{ prefix: {} }}\n", prefix(i)));
     }
-    let t = std::time::Instant::now();
     let r = outcome(&big);
-    assert!(t.elapsed() < std::time::Duration::from_secs(2));
     match r {
         Ok(p) => assert!(p.block_types.len() >= 2000),
         Err(e) => assert!(e.to_string().contains("prefix"), "{e}"),

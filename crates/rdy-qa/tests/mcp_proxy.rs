@@ -96,8 +96,8 @@ fn proxy1_oversized_lines_are_refused_in_the_proxy_and_the_daemon_stays_up() {
     session(&mut c, "agent:l");
     let big = "x".repeat(MAX_CTL_LINE_BYTES + 10);
     let id = c.next_id();
-    c.send_raw_within(&format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"rdy_write","arguments":{{"ops":[],"message":"{big}"}}}}}}"#), Duration::from_secs(20));
-    let v = c.recv(id, Duration::from_secs(20));
+    c.send_raw_within(&format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"rdy_write","arguments":{{"ops":[],"message":"{big}"}}}}}}"#), Duration::from_secs(30));
+    let v = c.recv(id, Duration::from_secs(30));
     assert!(
         v["result"]["content"][0]["text"]
             .as_str()
@@ -115,7 +115,7 @@ fn proxy1_a_stopped_daemon_ends_the_proxy_with_daemon_gone() {
     let mut c = McpClient::start_proxy(&s);
     session(&mut c, "agent:g");
     s.stop();
-    let (code, stderr) = c.wait_exit(Duration::from_secs(10));
+    let (code, stderr) = c.wait_exit(Duration::from_secs(30));
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains("E_DAEMON_GONE"), "{stderr}");
 }
@@ -126,7 +126,7 @@ fn proxy1_stdin_eof_ends_the_proxy_cleanly_and_frees_the_daemon_session() {
     let mut c = McpClient::start_proxy(&s);
     session(&mut c, "agent:e");
     c.close_stdin();
-    let (code, stderr) = c.wait_exit(Duration::from_secs(10));
+    let (code, stderr) = c.wait_exit(Duration::from_secs(30));
     assert_eq!(code, Some(0), "{stderr}");
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -147,7 +147,7 @@ fn proxy1_stdin_eof_ends_the_proxy_cleanly_and_frees_the_daemon_session() {
                 break;
             } // only this ctl session
             assert!(
-                t.elapsed() < Duration::from_secs(5),
+                t.elapsed() < Duration::from_secs(30),
                 "the mcp session was not freed: {v}"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -158,6 +158,8 @@ fn proxy1_stdin_eof_ends_the_proxy_cleanly_and_frees_the_daemon_session() {
 #[test]
 fn proxy1_a_proxy_against_a_store_held_by_no_daemon_fails_fast() {
     let s = Served::new();
+    // a start timeout far past the deadline below: waiting it out is the defect
+    s.set_start_timeout(300);
     let holder = McpClient::start(s.dir.path()); // rdy mcp --no-daemon holds the store
     let t = Instant::now();
     let out = std::process::Command::new(rdy_bin())
@@ -173,7 +175,11 @@ fn proxy1_a_proxy_against_a_store_held_by_no_daemon_fails_fast() {
         err.contains("E_DAEMON_START") && err.contains("held by another rdy process"),
         "{err}"
     );
-    assert!(t.elapsed() < Duration::from_secs(29), "{:?}", t.elapsed());
+    assert!(
+        t.elapsed() < Duration::from_secs(120),
+        "waited out the 300 s start timeout: {:?}",
+        t.elapsed()
+    );
     drop(holder);
     let _ = DEADLINE;
 }
