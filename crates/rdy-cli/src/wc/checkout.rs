@@ -20,6 +20,9 @@ pub(super) fn run(
         mut state,
     } = open(env, false)?;
     let (_pack, wt) = tree(env, &place)?;
+    if !force {
+        state.require_settled()?;
+    }
     if state.bound.is_some() && !force {
         let dirty = dirty_paths(&place, &state, &wt);
         if !dirty.is_empty() {

@@ -4,10 +4,13 @@ use crate::error::*;
 use crate::now_ms;
 use crate::wc::layout::{FileKind, WcTree};
 use crate::wc::project::Projection;
-use crate::wc::state::{Base, BaseBlock, Bound, Place, Stage, WcState, stage_paths};
+use crate::wc::state::{
+    Base, BaseBlock, Bound, CheckoutMark, Place, Stage, WcState, new_nonce, stage_paths,
+};
 use rdy_model::BlockId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 /// What a checkout did.
@@ -58,21 +61,26 @@ fn regular_bytes(path: &Path) -> Option<Vec<u8>> {
     fs::read(path).ok()
 }
 
-/// The paths with edits a checkout would discard, sorted: a tracked file missing or whose bytes
-/// differ from its `base/files` copy, a member file not in `base.files`, every staged path.
+/// The paths with edits a checkout would discard, sorted: a tracked file missing, reached
+/// through a directory that is a link or a file (never read through it), or whose bytes differ
+/// from its `base/files` copy; a member file not in `base.files`; every staged path. While a
+/// checkout is interrupted, every tracked and every member file.
 pub fn dirty_paths(place: &Place, st: &WcState, tree: &WcTree) -> Vec<String> {
     let mut out: BTreeSet<String> = BTreeSet::new();
     for rel in st.base.files.keys() {
-        let disk = regular_bytes(&place.root.join(rel));
+        let disk = match inside(rel) {
+            Ok(p) if !behind_link(&place.root, p) => regular_bytes(&place.root.join(p)),
+            _ => None,
+        };
         let base = regular_bytes(&place.base_file(rel));
-        if disk.is_none() || disk != base {
+        if disk.is_none() || disk != base || st.checkout.is_some() {
             out.insert(rel.clone());
         }
     }
     out.extend(
         tree.files
             .keys()
-            .filter(|rel| !st.base.files.contains_key(*rel))
+            .filter(|rel| st.checkout.is_some() || !st.base.files.contains_key(*rel))
             .cloned(),
     );
     out.extend(stage_paths(place));
@@ -113,16 +121,84 @@ fn ancestors(root: &Path, rel: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Whether writing `rel` would overwrite something checkout does not track: the path exists and
-/// is not tracked, or one of its directories exists as something other than a directory.
-fn occupied(root: &Path, rel: &str, tracked: &BTreeMap<String, BlockId>) -> Result<bool, RdyError> {
+/// Whether one of the directories between the root and `rel`'s file exists as something other
+/// than a directory (a link, a file): what is under it is not the working tree's, so it is never
+/// read, written or deleted through it.
+fn behind_link(root: &Path, rel: &Path) -> bool {
+    ancestors(root, rel)
+        .iter()
+        .any(|d| fs::symlink_metadata(d).is_ok_and(|m| !m.file_type().is_dir()))
+}
+
+/// The file's identity on disk (device and inode), for a regular file not behind a link.
+fn identity(root: &Path, rel: &str) -> Option<(u64, u64)> {
+    let p = inside(rel).ok()?;
+    if behind_link(root, p) {
+        return None;
+    }
+    let m = fs::symlink_metadata(root.join(p)).ok()?;
+    m.file_type().is_file().then(|| (m.dev(), m.ino()))
+}
+
+/// Whether writing `rel` would overwrite something checkout does not track: one of its
+/// directories exists as something other than a directory, or the path exists, is not tracked,
+/// and is not the same file as a tracked file the checkout drops (`dropped`: on a
+/// case-insensitive filesystem `Notes.yaml` is the tracked `notes.yaml`).
+fn occupied(
+    root: &Path,
+    rel: &str,
+    tracked: &BTreeMap<String, BlockId>,
+    dropped: &BTreeSet<(u64, u64)>,
+) -> Result<bool, RdyError> {
     let p = inside(rel)?;
-    if fs::symlink_metadata(root.join(p)).is_ok() && !tracked.contains_key(rel) {
+    if behind_link(root, p) {
         return Ok(true);
     }
-    Ok(ancestors(root, p)
-        .iter()
-        .any(|d| fs::symlink_metadata(d).is_ok_and(|m| !m.file_type().is_dir())))
+    Ok(match fs::symlink_metadata(root.join(p)) {
+        Err(_) => false,
+        Ok(_) if tracked.contains_key(rel) => false,
+        Ok(m) => !(m.file_type().is_file() && dropped.contains(&(m.dev(), m.ino()))),
+    })
+}
+
+/// Gives the existing directory `dir` the spelling its path asks for. On a case-insensitive
+/// filesystem `Guides` opens the directory stored as `guides`; it is renamed through a temporary
+/// name, never deleted and recreated, so what else it holds stays in it.
+fn fix_case(dir: &Path) -> Result<(), RdyError> {
+    let (Some(parent), Some(want)) = (dir.parent(), dir.file_name()) else {
+        return Ok(());
+    };
+    let Ok(meta) = fs::symlink_metadata(dir) else {
+        return Ok(());
+    };
+    let Ok(listing) = fs::read_dir(parent) else {
+        return Ok(());
+    };
+    let lower = want.to_string_lossy().to_lowercase();
+    let mut stored = None;
+    for e in listing.flatten() {
+        let name = e.file_name();
+        if name == want {
+            return Ok(());
+        }
+        if name.to_string_lossy().to_lowercase() == lower
+            && e.metadata()
+                .is_ok_and(|m| m.dev() == meta.dev() && m.ino() == meta.ino())
+        {
+            stored = Some(name);
+        }
+    }
+    let Some(stored) = stored else {
+        return Ok(());
+    };
+    let from = parent.join(stored);
+    let tmp = parent.join(format!(".rdy-case-{}", new_nonce()));
+    fs::rename(&from, &tmp).map_err(|e| io_err(&from, "rename", e))?;
+    if let Err(e) = fs::rename(&tmp, dir) {
+        let _ = fs::rename(&tmp, &from);
+        return Err(io_err(dir, "rename", e));
+    }
+    Ok(())
 }
 
 fn remove_file(path: &Path) -> Result<(), RdyError> {
@@ -143,12 +219,24 @@ fn remove_tree(path: &Path) -> Result<(), RdyError> {
 
 /// Writes `text` at `rel` under `root`. What stands in the way and is not a directory (a file or
 /// a link, checked by the caller or discarded with `--force`) is removed first, so a link is
-/// replaced, never written through.
-fn write_at(root: &Path, rel: &str, text: &str) -> Result<(), RdyError> {
+/// replaced, never written through. With `cases`, each existing directory on the way is given
+/// its path's spelling once (`fix_case`); `cases` holds the directories already done.
+fn write_at(
+    root: &Path,
+    rel: &str,
+    text: &str,
+    mut cases: Option<&mut BTreeSet<PathBuf>>,
+) -> Result<(), RdyError> {
     let p = inside(rel)?;
     for d in ancestors(root, p) {
         match fs::symlink_metadata(&d) {
-            Ok(m) if m.file_type().is_dir() => {}
+            Ok(m) if m.file_type().is_dir() => {
+                if let Some(done) = cases.as_deref_mut()
+                    && done.insert(d.clone())
+                {
+                    fix_case(&d)?;
+                }
+            }
             Ok(_) => {
                 remove_file(&d)?;
                 fs::create_dir(&d).map_err(|e| io_err(&d, "create", e))?;
@@ -165,9 +253,11 @@ fn write_at(root: &Path, rel: &str, text: &str) -> Result<(), RdyError> {
 
 /// Checks out `proj` into the working copy (wcco1, exact order): refuses with `E_WC_OCCUPIED`
 /// before writing anything when a projected path holds a file checkout does not track (unless
-/// `force`); deletes the tracked files the projection lacks and the folder directories that
-/// leaves empty; writes every projected file; replaces `base` and its file copies; clears the
-/// stage, the conflicts and the briefings; binds to the projection's view and head; saves.
+/// `force`); writes the checkout marker (`CheckoutMark`) durably; deletes the tracked files the
+/// projection lacks and the folder directories that leaves empty (never through a link: what is
+/// behind one is kept); writes every projected file, giving existing directories the projected
+/// spelling; replaces `base` and its file copies; clears the stage, the conflicts and the
+/// briefings; binds to the projection's view and head; saves, which removes the marker last.
 /// `_tree` is the working tree as read before the checkout; the occupied check reads the disk
 /// itself, so ignored files count too.
 pub fn checkout(
@@ -178,9 +268,17 @@ pub fn checkout(
     force: bool,
 ) -> Result<CheckoutSummary, RdyError> {
     let root = &place.root;
+    let projected: BTreeSet<&str> = proj.files.iter().map(|f| f.path.as_str()).collect();
+    let dropped: BTreeSet<(u64, u64)> = st
+        .base
+        .files
+        .keys()
+        .filter(|rel| !projected.contains(rel.as_str()))
+        .filter_map(|rel| identity(root, rel))
+        .collect();
     let mut taken = vec![];
     for f in &proj.files {
-        if occupied(root, &f.path, &st.base.files)? {
+        if occupied(root, &f.path, &st.base.files, &dropped)? {
             taken.push(f.path.clone());
         }
     }
@@ -200,7 +298,14 @@ pub fn checkout(
             "move them, or pass --force",
         ));
     }
-    let projected: BTreeSet<&str> = proj.files.iter().map(|f| f.path.as_str()).collect();
+    st.mark_checkout(
+        place,
+        CheckoutMark {
+            view: proj.view.clone(),
+            head: proj.head.clone(),
+            at_ms: now_ms(),
+        },
+    )?;
     let mut summary = CheckoutSummary {
         blobs: proj.blobs.len(),
         ..CheckoutSummary::default()
@@ -212,6 +317,9 @@ pub fn checkout(
             continue;
         }
         let Ok(p) = inside(rel) else { continue };
+        if behind_link(root, p) {
+            continue; // not the working tree's: kept
+        }
         let path = root.join(p);
         if fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_dir()) {
             remove_file(&path)?;
@@ -224,8 +332,9 @@ pub fn checkout(
     for d in deepest {
         let _ = fs::remove_dir(&d); // fails, and stays, while it holds anything
     }
+    let mut cases = BTreeSet::new();
     for f in &proj.files {
-        write_at(root, &f.path, &f.text)?;
+        write_at(root, &f.path, &f.text, Some(&mut cases))?;
         summary.written.push(f.path.clone());
         match f.kind {
             FileKind::Doc => summary.docs += 1,
@@ -236,7 +345,7 @@ pub fn checkout(
     remove_tree(&base_dir)?;
     fs::create_dir_all(&base_dir).map_err(|e| io_err(&base_dir, "create", e))?;
     for f in &proj.files {
-        write_at(&base_dir, &f.path, &f.text)?;
+        write_at(&base_dir, &f.path, &f.text, None)?;
     }
     st.base = base_from(proj);
     remove_tree(&place.state.join("stage/files"))?;
@@ -249,6 +358,7 @@ pub fn checkout(
         head: proj.head.clone(),
         at_ms: now_ms(),
     });
+    st.checkout = None;
     st.save(place)?;
     Ok(summary)
 }

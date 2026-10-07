@@ -35,6 +35,12 @@ pub fn name_problem(name: &str) -> Option<String> {
     if lower.ends_with(".yaml") || lower.ends_with(".yml") {
         return Some("a name cannot end in .yaml or .yml".into());
     }
+    if lower.ends_with(".theirs") {
+        return Some(
+            "a name cannot end in .theirs (a working copy reads <name>.theirs.yaml as a conflict file)"
+                .into(),
+        );
+    }
     if lower == "index" {
         return Some("index is reserved for folder pages".into());
     }

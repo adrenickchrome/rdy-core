@@ -21,6 +21,8 @@ pub const POINTER_FILE: &str = ".rdy-worktree";
 pub const LOCK_WAIT: Duration = Duration::from_secs(10);
 /// How often a waiting command tries the lock again.
 pub const LOCK_POLL: Duration = Duration::from_millis(20);
+/// The marker of a checkout in flight, in the state directory.
+pub const CHECKOUT_FILE: &str = "checkout.yaml";
 /// The most briefing records kept.
 pub const MAX_BRIEFS: usize = 64;
 
@@ -166,6 +168,16 @@ pub struct Pending {
     pub at_ms: i64,
 }
 
+/// A checkout in flight: written durably before checkout changes any file, removed by the save
+/// that finishes it. While it exists the files, the base copies and the state may disagree, so
+/// every command that needs the binding refuses, and only `rdy checkout <view> --force` clears it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckoutMark {
+    pub view: String,
+    pub head: String,
+    pub at_ms: i64,
+}
+
 /// A briefing recorded for a later commit.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BriefEntry {
@@ -183,6 +195,8 @@ pub struct WcState {
     pub conflicts: Vec<ConflictEntry>,
     pub pending: Option<Pending>,
     pub briefs: Vec<BriefEntry>,
+    /// An interrupted checkout (`checkout.yaml`); `None` when none is in flight.
+    pub checkout: Option<CheckoutMark>,
 }
 
 fn io_err(path: &Path, what: &str, e: impl std::fmt::Display) -> RdyError {
@@ -246,6 +260,7 @@ impl WcState {
             conflicts: load_yaml(&s.join("conflicts.yaml"))?.unwrap_or_default(),
             pending: load_yaml(&s.join("pending.yaml"))?,
             briefs: load_yaml(&s.join("briefs.yaml"))?.unwrap_or_default(),
+            checkout: load_yaml(&s.join(CHECKOUT_FILE))?,
         })
     }
 
@@ -254,7 +269,9 @@ impl WcState {
         load_yaml(&place.state.join("bound.yaml"))
     }
 
-    /// Writes every file with `write_durable`. An empty `pending` or `bound` deletes its file.
+    /// Writes every file with `write_durable`. An empty `pending`, `bound` or `checkout` deletes
+    /// its file. The checkout marker is written or removed last, so a save that fails part way
+    /// leaves the marker of the checkout it was finishing.
     pub fn save(&self, place: &Place) -> Result<(), RdyError> {
         let s = &place.state;
         match &self.bound {
@@ -270,11 +287,43 @@ impl WcState {
             Some(p) => put_yaml(&s.join("pending.yaml"), p)?,
             None => remove(&s.join("pending.yaml"))?,
         }
-        put_yaml(&s.join("briefs.yaml"), &self.briefs)
+        put_yaml(&s.join("briefs.yaml"), &self.briefs)?;
+        self.save_checkout_mark(place)
     }
 
-    /// The binding, or `E_WC_NOT_BOUND`.
+    /// Sets the checkout marker and writes only its file, durably.
+    pub fn mark_checkout(&mut self, place: &Place, mark: CheckoutMark) -> Result<(), RdyError> {
+        self.checkout = Some(mark);
+        self.save_checkout_mark(place)
+    }
+
+    fn save_checkout_mark(&self, place: &Place) -> Result<(), RdyError> {
+        let path = place.state.join(CHECKOUT_FILE);
+        match &self.checkout {
+            Some(m) => put_yaml(&path, m),
+            None => remove(&path),
+        }
+    }
+
+    /// `E_WC_DIRTY` while an interrupted checkout's marker exists.
+    pub fn require_settled(&self) -> Result<(), RdyError> {
+        match &self.checkout {
+            None => Ok(()),
+            Some(m) => Err(RdyError::new(
+                E_WC_DIRTY,
+                format!(
+                    "a checkout of {} was interrupted: the files and the working copy's state may disagree",
+                    m.view
+                ),
+                format!("rdy checkout {} --force", m.view),
+            )),
+        }
+    }
+
+    /// The binding; `E_WC_DIRTY` while a checkout is interrupted (`require_settled`), else
+    /// `E_WC_NOT_BOUND` when nothing is checked out.
     pub fn require_bound(&self) -> Result<&Bound, RdyError> {
+        self.require_settled()?;
         self.bound.as_ref().ok_or_else(|| {
             RdyError::new(
                 E_WC_NOT_BOUND,
