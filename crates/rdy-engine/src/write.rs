@@ -1004,6 +1004,15 @@ fn retype(pack: &Pack, ov: &Overlay, block: &mut Block, t: String) -> Result<(),
             ),
         ));
     }
+    // the briefing rules skip a presentational block, so none becomes one or stops being one
+    if pack.is_presentational(cur) != pack.is_presentational(&t) {
+        return Err(bad(
+            format!(
+                "{id} is a {cur} and cannot become a {t}: presentational types keep their type"
+            ),
+            format!("create a new {t} and move the content into it"),
+        ));
+    }
     let kids: Vec<BlockId> = ov.with_sibs(Some(id), |s| {
         s.order.iter().map(|(_, k)| k.clone()).collect()
     });

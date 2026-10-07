@@ -1,6 +1,7 @@
 //! rtyp1: a content block changes its type in place and keeps its id (FW-F5); docs, folders and
-//! supporting types keep theirs; E_PREFIX is a create-time check only. wcmv1: an update moves its
-//! block in the same op.
+//! supporting types keep theirs, and no type change adds or drops the presentational trait. A write
+//! checks E_PREFIX when it creates a block; import and `rdy check` refuse a prefix the block could
+//! not have been retyped from. wcmv1: an update moves its block in the same op.
 use rdy_engine::*;
 use rdy_model::{BlockId, Op};
 use rdy_qa::fixtures::*;
@@ -266,4 +267,162 @@ fn wcmv1_a_move_only_update_keeps_its_pins() {
         b.pins[&cid], pinned,
         "a move keeps the pins, as a move op does"
     );
+}
+
+/// A project whose own pack has a presentational `aside` type (a section may hold one).
+fn presentational_project() -> (tempfile::TempDir, Rdy) {
+    let dir = tempfile::tempdir().unwrap();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    std::fs::write(
+        dir.path().join(".rdy/packs/p.yaml"),
+        rdy_qa::golden::PRESENTATIONAL_PACK,
+    )
+    .unwrap();
+    std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: p\n").unwrap();
+    let r = Rdy::open(dir.path()).unwrap();
+    (dir, r)
+}
+
+/// A doc named `name` with a section and an aside in it; returns (section, aside).
+fn doc_with_aside(r: &mut Rdy, name: &str, lifecycle: &str) -> (String, String) {
+    let w = write(r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "Spec", "doc_type": "page", "lifecycle": lifecycle}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+        {"op": "create", "type": "aside", "id": "$a", "parent": "$s", "body": "Decorative."}
+    ]))
+    .unwrap();
+    (w.created["$s"].clone(), w.created["$a"].clone())
+}
+
+#[test]
+fn rtyp1_a_retype_keeps_the_presentational_trait() {
+    let (_d, mut r) = presentational_project();
+    let (stable_section, aside) = doc_with_aside(&mut r, "spec", "stable");
+    land(&mut r, "work").unwrap();
+    // the control: normative content in stable content needs a briefing
+    let e = write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "claim", "parent": stable_section, "body": "The system must hold."}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, E_BRIEF_REQUIRED, "{e}");
+    // an aside does not become a claim in place, so it cannot skip the briefing
+    let e = write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": aside, "type": "claim", "body": "The system must hold."}]),
+    )
+    .unwrap_err();
+    assert!(e.code == E_BRIEF_REQUIRED || e.code == E_BAD_INPUT, "{e}");
+    assert_eq!(block(&r, &aside).block_type, "aside");
+    // nor in a draft doc, moved into stable content in the same op
+    let (draft_section, draft_aside) = doc_with_aside(&mut r, "draft", "draft");
+    let e = write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": draft_aside, "type": "requirement", "body": "The system must hold.",
+                "move_to": {"parent": stable_section}}]),
+    )
+    .unwrap_err();
+    assert!(e.code == E_BRIEF_REQUIRED || e.code == E_BAD_INPUT, "{e}");
+    assert_eq!(block(&r, &draft_aside).block_type, "aside");
+    // the other way: a claim does not become presentational
+    let w = write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "claim", "id": "$c", "parent": draft_section, "body": "x"}]),
+    )
+    .unwrap();
+    let e = write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": w.created["$c"], "type": "aside"}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT, "{e}");
+    assert!(
+        e.message.contains("presentational types keep their type"),
+        "{e}"
+    );
+}
+
+/// An export of one glossary doc `d-AAAAA` with section `s-AAAAA` and `entry` after it.
+fn export_with(entry: &str) -> tempfile::TempDir {
+    let t = tempfile::tempdir().unwrap();
+    std::fs::write(
+        t.path().join("rdy-export.yaml"),
+        "format: 2\npack: rdy-standard\nscope: canon\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(t.path().join("docs")).unwrap();
+    let doc = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: glossary\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
+    std::fs::write(t.path().join("docs/t.yaml"), format!("{doc}{entry}")).unwrap();
+    t
+}
+
+fn prefix_issue(e: &RdyError, id: &str) -> bool {
+    e.issues
+        .iter()
+        .any(|i| i.code == "E_PREFIX" && i.block.as_ref().is_some_and(|b| b.to_string() == id))
+}
+
+#[test]
+fn rtyp1_import_and_check_refuse_a_prefix_of_a_type_it_could_not_be_retyped_from() {
+    let pack = rdy_schema::PackSet::with_builtin()
+        .resolve("rdy-standard")
+        .unwrap();
+    // a claim's id on a supporting type, and a decision's id on a claim
+    for (id, entry) in [
+        (
+            "c-AAAAA",
+            "- id: c-AAAAA\n  type: rationale\n  parent: s-AAAAA\n  order: a2\n  body: Why.\n",
+        ),
+        (
+            "D-AAAAA",
+            "- id: D-AAAAA\n  type: claim\n  parent: s-AAAAA\n  order: a2\n  body: Holds.\n",
+        ),
+    ] {
+        let t = export_with(entry);
+        let (_d, mut r) = project();
+        let e = r.import(&approver(), "work", t.path()).unwrap_err();
+        assert_eq!(e.code, E_VALIDATION, "{e}");
+        assert!(prefix_issue(&e, id), "{id}: {e:?}");
+        let diags = check_path(&pack, None, t.path()).unwrap();
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "E_PREFIX" && d.line == 13 && d.message.contains(id)),
+            "{id}: {diags:?}"
+        );
+    }
+    // a claim retyped to a requirement keeps its id and imports
+    let t = export_with(
+        "- id: c-AAAAA\n  type: requirement\n  parent: s-AAAAA\n  order: a2\n  fields:\n    priority: must\n  body: Holds.\n",
+    );
+    let (_d, mut r) = project();
+    r.import(&approver(), "work", t.path()).unwrap();
+    assert_eq!(block(&r, "c-AAAAA").block_type, "requirement");
+    assert!(
+        check_path(&pack, None, t.path())
+            .unwrap()
+            .iter()
+            .all(|d| d.code != "E_PREFIX")
+    );
+}
+
+#[test]
+fn rtyp1_import_refuses_a_presentational_prefix_on_a_normative_type() {
+    let t = export_with(
+        "- id: as-AAAAA\n  type: claim\n  parent: s-AAAAA\n  order: a2\n  body: Holds.\n",
+    );
+    std::fs::write(
+        t.path().join("rdy-export.yaml"),
+        "format: 2\npack: p\nscope: canon\n",
+    )
+    .unwrap();
+    let (_d, mut r) = presentational_project();
+    let e = r.import(&approver(), "work", t.path()).unwrap_err();
+    assert_eq!(e.code, E_VALIDATION, "{e}");
+    assert!(prefix_issue(&e, "as-AAAAA"), "{e:?}");
 }

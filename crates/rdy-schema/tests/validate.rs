@@ -37,6 +37,50 @@ fn valid_claim_passes() {
 }
 
 #[test]
+fn rtyp1_validate_prefix_allows_only_a_prefix_the_block_could_have_been_retyped_from() {
+    let p = pack();
+    let prefix = |id: &str, ty: &str| validate_prefix(&p, &b(id, ty, None, "x")).map(|i| i.code);
+    assert_eq!(prefix("c-AAAAA", "claim"), None);
+    assert_eq!(
+        prefix("c-AAAAA", "requirement"),
+        None,
+        "a claim retyped in place"
+    );
+    assert_eq!(prefix("t-AAAAA", "claim"), None, "a term retyped in place");
+    assert_eq!(
+        prefix("c-AAAAA", "rationale"),
+        Some("E_PREFIX"),
+        "supporting"
+    );
+    assert_eq!(
+        prefix("c-AAAAA", "decision"),
+        Some("E_PREFIX"),
+        "supporting"
+    );
+    assert_eq!(
+        prefix("D-AAAAA", "claim"),
+        Some("E_PREFIX"),
+        "a decision's id"
+    );
+    assert_eq!(prefix("d-AAAAA", "claim"), Some("E_PREFIX"), "a doc's id");
+    assert_eq!(
+        prefix("c-AAAAA", "section"),
+        None,
+        "a section is content too"
+    );
+    assert_eq!(
+        prefix("zz-AAAAA", "claim"),
+        Some("E_PREFIX"),
+        "no type has it"
+    );
+    assert_eq!(
+        prefix("c-AAAAA", "gizmo"),
+        None,
+        "E_UNKNOWN_TYPE reports it"
+    );
+}
+
+#[test]
 fn type_prefix_and_fields() {
     let p = pack();
     assert_eq!(

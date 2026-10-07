@@ -8,4 +8,5 @@ pub use pack::*;
 pub use resolve::{PROPOSAL_PREFIX, PackSet, STANDARD_YAML, SchemaError};
 pub use validate::{
     Issue, MAX_REFLECTS_GLOBS, REFLECTS_FIELD, Severity, has_errors, skeleton_gaps, validate_block,
+    validate_prefix,
 };

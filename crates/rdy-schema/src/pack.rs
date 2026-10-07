@@ -261,6 +261,18 @@ impl Pack {
             .unwrap_or_default()
     }
 
+    /// rtyp1: whether a block of type `from` may become a `to` in place, keeping its id. Both
+    /// are known content types of the doc-asset class with the same presentational trait; docs,
+    /// folders and supporting types keep their type.
+    pub fn may_retype(&self, from: &str, to: &str) -> bool {
+        let content = |t: &str| {
+            self.block_types.contains_key(t)
+                && !rdy_model::tree::is_tree_type(t)
+                && self.class_of(t) == TypeClass::DocAsset
+        };
+        content(from) && content(to) && self.is_presentational(from) == self.is_presentational(to)
+    }
+
     /// The class of the type whose `prefix` is `prefix`; `None` when no type has it.
     pub fn class_of_prefix(&self, prefix: &str) -> Option<TypeClass> {
         self.block_types

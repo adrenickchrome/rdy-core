@@ -6,7 +6,7 @@ use crate::tree_io::{self, FOLDER_FILE};
 use crate::write::{LinkInput, OpInput, WriteRequest, WriteResult};
 use crate::{Rdy, ReadState, Scope, Session};
 use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Link, Op, tree};
-use rdy_schema::{has_errors, skeleton_gaps, validate_block};
+use rdy_schema::{has_errors, skeleton_gaps, validate_block, validate_prefix};
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -820,6 +820,7 @@ impl Rdy {
                 .parent
                 .as_ref()
                 .and_then(|p| incoming.get(p).copied().or_else(|| existing.get(p)));
+            issues.extend(validate_prefix(&self.pack, b));
             issues.extend(validate_block(&self.pack, b, parent));
         }
         if has_errors(&issues) {

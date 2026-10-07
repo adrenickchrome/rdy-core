@@ -95,6 +95,34 @@ fn check_reflects(block: &Block, v: &FieldValue, out: &mut Vec<Issue>) {
     }
 }
 
+/// E_PREFIX for a block read from files (import, `rdy check`): its id's prefix belongs to no
+/// type, or to a type it could not have been retyped from (rtyp1), so `D-` stays a decision and
+/// `c-` never names a supporting type. A write checks the exact prefix when it creates a block.
+pub fn validate_prefix(pack: &Pack, block: &Block) -> Option<Issue> {
+    let def = pack.block_types.get(&block.block_type)?;
+    let prefix = block.id.prefix();
+    if prefix == def.prefix
+        || pack
+            .block_types
+            .iter()
+            .any(|(from, d)| d.prefix == prefix && pack.may_retype(from, &block.block_type))
+    {
+        return None;
+    }
+    Some(err(
+        block,
+        "E_PREFIX",
+        format!(
+            "id {} has prefix {:?} but type {} uses {:?}",
+            block.id, prefix, block.block_type, def.prefix
+        ),
+        format!(
+            "omit the id to let rdy generate one, or use the prefix {:?}",
+            def.prefix
+        ),
+    ))
+}
+
 pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec<Issue> {
     let mut out = vec![];
     let Some(def) = pack.block_types.get(&block.block_type) else {

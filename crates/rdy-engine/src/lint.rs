@@ -4,7 +4,7 @@ use crate::error::*;
 use crate::keys::{Keys, key_of};
 use crate::tree_io::{Diagnostic, Loaded, read_file, read_tree};
 use rdy_model::{Block, BlockId, FieldValue, RefMode, key, ref_spans};
-use rdy_schema::{Pack, Severity, skeleton_gaps, validate_block};
+use rdy_schema::{Pack, Severity, skeleton_gaps, validate_block, validate_prefix};
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -25,6 +25,7 @@ fn issue_at(l: &Loaded, code: &str, message: &str) -> (usize, usize) {
     let key = |k: &str| l.keys.get(k).copied();
     let found = match code {
         "E_UNKNOWN_TYPE" => key("type"),
+        "E_PREFIX" => key("id"),
         "E_BODY_REQUIRED" | "E_BODY_FORBIDDEN" => key("body"),
         "E_LINK_TYPE" => key("links"),
         "E_CHILD_TYPE" | "E_ORPHAN" | "E_MISSING_PARENT" => key("parent"),
@@ -150,7 +151,10 @@ pub fn check_path(
             }
         }
         let parent = b.parent.as_ref().and_then(lookup);
-        for i in validate_block(pack, b, parent) {
+        for i in validate_prefix(pack, b)
+            .into_iter()
+            .chain(validate_block(pack, b, parent))
+        {
             let at = issue_at(l, i.code, &i.message);
             diags.push(Diagnostic {
                 file: l.file.clone(),
