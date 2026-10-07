@@ -278,3 +278,65 @@ fn bsrch1_patterns_are_bounded() {
     assert_eq!(run("q*", true).unwrap().total, 0);
     assert_eq!(run("a*!", true).unwrap().total, 1);
 }
+
+/// Fix round 1: a pattern that matches empty text makes each line's walk restart after every empty
+/// match, and a restart can scan to the line's end. A long line must not cost its length squared:
+/// the search stops with `E_LIMIT`. Pinned by outcome, not by time.
+#[test]
+fn bsrch1_a_pattern_that_matches_empty_text_on_a_long_line_is_bounded() {
+    let (_d, mut r) = project();
+    write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "long", "title": "Long", "doc_type": "overview"}},
+        {"op": "create", "type": "prose", "parent": "$d", "body": "x".repeat(200_000)}
+    ]))
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let run = |text: &str, regex: bool| {
+        r.read()
+            .search(&Scope::Canon, &q(text, regex, false), None, None)
+    };
+    for pattern in ["(?:x[^z]*z)?", "(?:.*TODO)?"] {
+        let e = run(pattern, true).unwrap_err();
+        assert_eq!(e.code, E_LIMIT, "{pattern}: {e}");
+        assert_eq!(
+            (e.message.as_str(), e.fix.as_str()),
+            (
+                "the pattern matches empty text too often; searching past those matches costs too much",
+                "make the pattern match at least one character, e.g. x+ rather than x*"
+            ),
+            "{pattern}"
+        );
+    }
+    // a pattern that matches empty text once per line, and plain text, still search this line
+    assert_eq!(run("^", true).unwrap().total, 0);
+    assert_eq!(run("x", false).unwrap().total, 1);
+}
+
+/// Fix round 1: short patterns with large counted repeats over about 1 MB of paragraph-length
+/// lines return a correct result (the lazy DFA has room for their states). Pinned by outcome.
+#[test]
+fn bsrch1_counted_repeats_over_paragraph_lines_return_a_result() {
+    let (_d, mut r) = project();
+    let sentence =
+        "the quick brown fox jumps over the lazy dog and then some more words follow here ";
+    let line: String = sentence.chars().cycle().take(968).collect();
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "prose", "title": "Prose", "doc_type": "overview"}}
+    ]))
+    .unwrap();
+    let d = w.created["$d"].clone();
+    let ops: Vec<Value> = (0..1000)
+        .map(|_| json!({"op": "create", "type": "prose", "parent": d, "body": line}))
+        .collect();
+    write(&mut r, "work", Value::Array(ops)).unwrap();
+    land(&mut r, "work").unwrap();
+    let run = |text: &str| {
+        r.read()
+            .search(&Scope::Canon, &q(text, true, false), None, None)
+            .unwrap()
+            .total
+    };
+    assert_eq!(run("fox"), 1000);
+    assert_eq!(run("(?:[a-z ]{0,20}){1,40}\\d"), 0);
+    assert_eq!(run("(?:[a-z ]?){1,1000}\\d"), 0);
+}

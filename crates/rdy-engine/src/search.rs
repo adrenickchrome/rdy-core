@@ -9,8 +9,12 @@ use serde::{Deserialize, Serialize};
 
 /// The longest query, in bytes, before a literal is escaped.
 pub const MAX_PATTERN_BYTES: usize = 1024;
-/// The compiled program and lazy-DFA cache limit, in bytes.
+/// The compiled program limit, in bytes.
 pub const REGEX_SIZE_LIMIT: usize = 1 << 20;
+/// The lazy-DFA cache limit of one search, in bytes. A short pattern with large counted repeats
+/// needs many DFA states; with too small a cache the regex crate falls back to a much slower
+/// engine on long lines.
+pub const REGEX_DFA_LIMIT: usize = 16 << 20;
 /// The deepest nesting of groups and repeats a pattern may have.
 pub const REGEX_NEST_LIMIT: u32 = 64;
 /// Matching lines shown per block; the rest are counted in `more_lines`.
@@ -23,6 +27,11 @@ pub const DEFAULT_SEARCH_TOKENS: usize = 4000;
 /// Characters shown before the first match of a windowed line.
 const LEAD_CHARS: usize = 80;
 const TOKEN_DOMAIN: &[u8] = b"rdy-search-1\0";
+/// The bytes one search may rescan after empty matches. After an empty match the regex search
+/// starts again one character on, and it can scan to the end of the line, so a pattern that
+/// matches empty text costs a line's length squared. The first restart on a line is free (it costs
+/// at most one more pass, as the first search does); each later one is charged the rest of the line.
+const EMPTY_RESCAN_LIMIT: usize = 32 << 20;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct SearchQuery {
@@ -97,9 +106,10 @@ impl ReadState {
         token.push(u8::from(q.ignore_case));
         // reading order: depth-first from the top level; a parent loop cannot spin
         let mut stack: Vec<&Block> = m.children(None).into_iter().rev().collect();
+        let mut rescan = 0;
         for _ in 0..m.len() {
             let Some(b) = stack.pop() else { break };
-            if let Some((lines, more)) = match_block(&re, b) {
+            if let Some((lines, more)) = match_block(&re, b, &mut rescan)? {
                 let version = m.version_of(&b.id).unwrap_or_else(|| b.version_hash());
                 token.extend_from_slice(b.id.as_str().as_bytes());
                 token.push(0);
@@ -184,7 +194,7 @@ fn compile(q: &SearchQuery) -> Result<Regex, RdyError> {
     RegexBuilder::new(&pattern)
         .case_insensitive(q.ignore_case)
         .size_limit(REGEX_SIZE_LIMIT)
-        .dfa_size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_DFA_LIMIT)
         .nest_limit(REGEX_NEST_LIMIT)
         .build()
         .map_err(|e| match e {
@@ -231,20 +241,34 @@ fn bad_page() -> RdyError {
 }
 
 /// The block's matching lines (at most `LINES_PER_MATCH`) and how many more matched, or `None`
-/// when no line holds a non-empty match. Sources: the body, then fields by name.
-fn match_block(re: &Regex, b: &Block) -> Option<(Vec<SearchLine>, usize)> {
+/// when no line holds a non-empty match. Sources: the body, then fields by name. `rescan` carries
+/// the search's empty-match charge from block to block.
+fn match_block(
+    re: &Regex,
+    b: &Block,
+    rescan: &mut usize,
+) -> Result<Option<(Vec<SearchLine>, usize)>, RdyError> {
     let mut lines = vec![];
     let mut more = 0;
+    let mut failed = None;
     let mut hit = |field: &str, text: &str| {
         for (i, line) in text.lines().enumerate() {
-            let Some(at) = re.find_iter(line).find(|m| !m.is_empty()) else {
-                continue;
+            if failed.is_some() {
+                return;
+            }
+            let at = match first_match(re, line, rescan) {
+                Ok(Some(at)) => at,
+                Ok(None) => continue,
+                Err(e) => {
+                    failed = Some(e);
+                    return;
+                }
             };
             if lines.len() < LINES_PER_MATCH {
                 lines.push(SearchLine {
                     field: field.to_string(),
                     line: i + 1,
-                    text: window(line, at.start()),
+                    text: window(line, at),
                 });
             } else {
                 more += 1;
@@ -255,7 +279,33 @@ fn match_block(re: &Regex, b: &Block) -> Option<(Vec<SearchLine>, usize)> {
     for (name, value) in &b.fields {
         strings(name.clone(), value, &mut hit);
     }
-    (!lines.is_empty()).then_some((lines, more))
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    Ok((!lines.is_empty()).then_some((lines, more)))
+}
+
+/// The byte offset of the first non-empty match in `line`. Each restart after an empty match,
+/// except the line's first, adds the rest of the line to `rescan`; past `EMPTY_RESCAN_LIMIT` the
+/// search is `E_LIMIT`.
+fn first_match(re: &Regex, line: &str, rescan: &mut usize) -> Result<Option<usize>, RdyError> {
+    let mut restarted = false;
+    for m in re.find_iter(line) {
+        if !m.is_empty() {
+            return Ok(Some(m.start()));
+        }
+        if std::mem::replace(&mut restarted, true) {
+            *rescan += line.len() - m.end();
+            if *rescan > EMPTY_RESCAN_LIMIT {
+                return Err(RdyError::new(
+                    E_LIMIT,
+                    "the pattern matches empty text too often; searching past those matches costs too much",
+                    "make the pattern match at least one character, e.g. x+ rather than x*",
+                ));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Every `Str` leaf of `value`, labelled `name`, `name[i]` or `name.key`.
