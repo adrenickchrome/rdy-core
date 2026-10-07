@@ -16,6 +16,7 @@ mod paths;
 pub mod proposal_show;
 mod query;
 mod read_state;
+pub mod search;
 mod session;
 pub mod testkit;
 mod tree_io;
@@ -48,6 +49,7 @@ pub use query::{
 };
 pub use rdy_store::Relay;
 pub use read_state::{Delta, ReadState};
+pub use search::{SearchQuery, SearchResult};
 pub use session::{
     HUMAN_RUN, PinnedClock, Scope, Session, SessionKind, classify, human_actor,
     human_actor_from_env, now_ms, pin_clock, rfc3339, rfc3339_now,
