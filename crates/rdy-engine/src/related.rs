@@ -1,10 +1,10 @@
 //! Related decisions (FW-EN5, FW-EN5a).
-use crate::lexicon::Lexicon;
+use crate::lexicon::{Lexicon, tied};
 use crate::query::summary_in;
 use crate::{Materialized, RdyError, ReadState, Scope};
 use rdy_graph::{DerivedStatus, EdgeKind, Graph};
+use rdy_model::BlockId;
 use rdy_model::decision::{DECISION, REFINES, REVOKES, SUPERSEDES};
-use rdy_model::{BlockId, decision};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -39,21 +39,12 @@ const NEIGHBOURS: [(&str, &str, &str); 3] = [
 ];
 const SAME_ENTITY: &str = "same_entity";
 
-/// Whether an edge of this kind ties its source to its target.
-fn is_tie(kind: &EdgeKind) -> bool {
-    match kind {
-        EdgeKind::References => true,
-        EdgeKind::Link(n) => n == decision::DESCRIBES || n == decision::AFFECTS,
-        EdgeKind::Contains => false,
-    }
-}
-
 /// The entities `id` is tied to: existing blocks of an entity type that `id` references or
 /// links with `describes` or `affects`.
 fn entities_of(g: &Graph, lex: &Lexicon, m: &Materialized, id: &BlockId) -> BTreeSet<BlockId> {
     g.outgoing(id)
         .iter()
-        .filter(|e| is_tie(&e.kind))
+        .filter(|e| tied(g, id, &e.to))
         .filter(|e| {
             m.get(&e.to)
                 .is_some_and(|b| lex.is_entity_type(&b.block_type))
@@ -129,7 +120,7 @@ impl ReadState {
             for ent in &mine {
                 for e in g.incoming(ent) {
                     if e.from != *x
-                        && is_tie(&e.kind)
+                        && tied(&g, &e.from, ent)
                         && matches!(
                             g.status(&e.from),
                             Some(
