@@ -796,3 +796,39 @@ is refused when the scope has one line over about 8 KiB, even though it is cheap
 No laptop figures are recorded here: the first timing of these ops is the Linux bench's.
 
 Linux bench rows: (bench: the orchestrator fills these rows from two cargo qa --only perf --deep runs on the isolated Linux bench)
+
+## Entities and fact sheets (2026-10-06)
+
+The `qa-perf` typical tier gained four ops in `tier_entities`. It runs after `tier_views` and
+before the project is closed, on a fresh view `ve`. `ve` holds the fixture's canon plus 50
+entities (each with a name, one alias and a kind) and 200 claims. Each claim names two entities
+and one of ten shared code literals. The ops carry no `write` prefix on purpose: `spec_target`
+gives every op that starts with `write` the write budget, and `fsync_bound` widens its margin.
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `lexicon_build` | `lexicon(ve)` after the engine caches are dropped (outside the timer): the materialization, the graph and one pass over the text of the scope | `runs.read` | no spec target: a cold build of the entity lexicon over a 10k view (recorded for FW-EN1) |
+| `entity_search` | `search(ve, "Entity 7", first page, 4000 tokens)` with the lexicon and graph warm: the entity resolves, its fact sheet is built and the match list is filtered | `runs.read` | < 5 ms p99 (a read, spec 11): an entity search with its fact sheet, first page |
+| `suggestions_after_write` | `suggestions(ve, change)` for the change of a one-claim write. The write is outside the timer. The write carries the lexicon over its own blocks | `runs.write` | no spec target: the suggestions of a one-claim write over a carried lexicon (recorded for FW-EN3; they ride on every write response) |
+| `coverage_all` | `graph_coverage(ve, None)` after the engine caches are dropped (outside the timer): the materialization, the graph, the lexicon and one pass over every block | `runs.read` | no spec target: cold graph coverage over a 10k view (recorded for FW-EN4 and FW-EN1a; rdy status and rdy_overview) |
+
+What each cost grows with:
+
+- `lexicon_build` grows with the total text of the scope. It is built once per scope, then
+  carried across each commit and landing in time proportional to the text of the written blocks.
+  Every publish now carries it once it is built.
+- `entity_search` grows with the number of entities that match the query (at most 8 sheets) and
+  with the edges of each. The match scan is the same as `search_literal`.
+- `suggestions_after_write` grows with the text of the written blocks and with the holders of
+  each code literal they contain. It does not grow with the project. Every write response
+  computes it, so it adds to the write path (`write_and_report`) but not to the durable flush.
+- `coverage_all` grows with the number of blocks: it checks every block for ties and every
+  linkable block for mentions. It runs for `rdy status` and for `rdy_overview`, not on a write.
+
+No laptop figures are recorded here: the first timing of these ops is the Linux bench's.
+
+Baseline: `qa-baseline.json` is not changed here.
+
+Linux bench rows: (bench: the orchestrator fills these rows from two cargo qa --only perf --deep runs on the isolated Linux bench)
+
+Deep gate (bench): <orchestrator fills in>
