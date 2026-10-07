@@ -270,6 +270,9 @@ fn force(pack: &mut Pack, name: &str, prefix: &str, tr: Trait, core: BTreeMap<St
     def.fields.extend(core);
 }
 
+/// The block-type prefix that proposal refs (`P-<id>@<n>`) use; no pack type may take it.
+pub const PROPOSAL_PREFIX: &str = "P";
+
 fn check(pack: &Pack) -> Result<(), SchemaError> {
     let mut prefixes = BTreeMap::new();
     for (name, t) in &pack.block_types {
@@ -278,6 +281,11 @@ fn check(pack: &Pack) -> Result<(), SchemaError> {
             return Err(SchemaError::Invalid(format!(
                 "type {name:?} has invalid prefix {:?}",
                 t.prefix
+            )));
+        }
+        if t.prefix == PROPOSAL_PREFIX {
+            return Err(SchemaError::Invalid(format!(
+                "type {name:?} has prefix \"P\", which is reserved for proposal refs (P-<id>@<n>)"
             )));
         }
         if let Some(other) = prefixes.insert(t.prefix.clone(), name.clone()) {

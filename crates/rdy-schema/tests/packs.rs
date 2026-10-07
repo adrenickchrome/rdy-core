@@ -283,3 +283,16 @@ fn rec1_a_doc_type_may_set_nav_false_and_it_defaults_to_true() {
             .is_err()
     );
 }
+
+#[test]
+fn ppfx1_a_pack_type_with_prefix_p_is_refused() {
+    let mut set = PackSet::with_builtin();
+    let name = set
+        .add_yaml("name: team\nversion: \"1\"\nextends: rdy-standard\nblock_types:\n  plan:\n    prefix: P\n    traits: [informative]\n")
+        .unwrap();
+    let e = set.resolve(&name).unwrap_err().to_string();
+    assert!(
+        e.contains("prefix \"P\"") && e.contains("reserved for proposal refs"),
+        "{e}"
+    );
+}
