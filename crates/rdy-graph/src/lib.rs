@@ -162,7 +162,7 @@ pub const IMPACT_LINKS: [&str; 6] = [
 ];
 /// imp2: link kinds impact lists at depth 1 (decisions that refine or supersede the queried
 /// block) without following them.
-const IMPACT_SHOWN: [&str; 2] = [decision::REFINES, decision::SUPERSEDES];
+pub const IMPACT_SHOWN: [&str; 2] = [decision::REFINES, decision::SUPERSEDES];
 
 /// The block whose own content makes `e`: the child for `Contains`, `from` otherwise.
 fn generator(e: &Edge) -> &BlockId {

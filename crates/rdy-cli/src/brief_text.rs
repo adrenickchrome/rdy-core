@@ -80,6 +80,20 @@ pub fn header(briefing: &Value) -> String {
     );
     section(
         &mut out,
+        "Lineage",
+        list("lineage").map(|l| {
+            format!(
+                "{} ({} {} {}) {}",
+                s(l, "block"),
+                s(l, "direction"),
+                s(l, "kind"),
+                s(l, "on"),
+                s(l, "summary")
+            )
+        }),
+    );
+    section(
+        &mut out,
         "will go stale if this changes",
         list("will_go_stale").map(|w| {
             format!(
@@ -278,6 +292,7 @@ mod tests {
             "covers": 1,
             "governs": [{"decision": "D-1", "status": "live", "statement": "Keep A", "blocks": ["c-A"]}],
             "dependents": [{"block": "c-B", "kind": "references", "on": "c-A", "summary": "B builds on A."}],
+            "lineage": [{"block": "D-2", "kind": "refines", "direction": "in", "on": "c-A", "summary": "D2 refines A."}],
             "will_go_stale": [{"block": "c-B", "via": "references", "on": "c-A", "follow_up": "confirm"}],
             "suspects": [],
             "base": {"token": "0123456789abcdef0123", "blocks": [{"id": "c-A", "version": "ff"}], "depends": 1}
@@ -291,6 +306,8 @@ mod tests {
             "#   D-1 [live] Keep A",
             "# depends on this:",
             "#   c-B (references c-A) B builds on A.",
+            "# Lineage:",
+            "#   D-2 (in refines c-A) D2 refines A.",
             "# will go stale if this changes:",
             "#   c-B via references on c-A: confirm",
             "# open suspects:",
@@ -350,7 +367,7 @@ mod tests {
         });
         assert_eq!(
             plain(&b),
-            "rdy briefing for c-A (token 0123456789ab)\ngoverns:\n  D-1 [live] Keep A\ndepends on this:\n  (none)\nwill go stale if this changes:\n  (none)\nopen suspects:\n  (none)\n"
+            "rdy briefing for c-A (token 0123456789ab)\ngoverns:\n  D-1 [live] Keep A\ndepends on this:\n  (none)\nLineage:\n  (none)\nwill go stale if this changes:\n  (none)\nopen suspects:\n  (none)\n"
         );
     }
 

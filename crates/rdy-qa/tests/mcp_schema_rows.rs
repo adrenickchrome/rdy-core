@@ -62,6 +62,7 @@ fn erow1_the_edit_loop_doc_and_instructions_carry_the_m2c3_lines() {
         "inflight",
         "page",
         "already_written",
+        "lineage",
         "conflict entries",
         "rdy_propose",
     ] {

@@ -9,8 +9,8 @@ use crate::keys;
 use crate::query::summary_in;
 use crate::write::OpInput;
 use crate::{Materialized, ReadState, Scope};
-use rdy_graph::{DerivedStatus, EdgeKind, IMPACT_LINKS, SUSPECT_LINKS, Suspect};
-use rdy_model::{Block, BlockId, FieldValue, Hash};
+use rdy_graph::{DerivedStatus, EdgeKind, IMPACT_LINKS, IMPACT_SHOWN, SUSPECT_LINKS, Suspect};
+use rdy_model::{Block, BlockId, FieldValue, Hash, decision};
 use rdy_schema::{Issue, Pack, Severity, Trait};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -199,9 +199,10 @@ impl BriefRegistry {
 
 /// The paged sections of a briefing, in cursor order: a cursor holds one offset per section, how
 /// many of its entries earlier pages showed.
-pub const PAGE_SECTIONS: [&str; 7] = [
+pub const PAGE_SECTIONS: [&str; 8] = [
     "governs",
     "dependents",
+    "lineage",
     "will_go_stale",
     "suspects",
     "inflight.views",
@@ -304,6 +305,17 @@ pub struct Dependent {
     pub summary: String,
 }
 
+/// A refines, supersedes or revokes edge of a covered block (`on`) to a block outside the
+/// briefing. `direction` is `in` when `block` points at `on`, `out` when `on` points at `block`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Lineage {
+    pub block: String,
+    pub kind: String,
+    pub direction: String,
+    pub on: String,
+    pub summary: String,
+}
+
 /// An uncovered block that pins a covered one (`on`) and goes suspect when it changes.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct WillGoStale {
@@ -335,6 +347,8 @@ pub struct Briefing {
     pub covers: usize,
     pub governs: Vec<Governs>,
     pub dependents: Vec<Dependent>,
+    /// The refines, supersedes and revokes edges of the covered blocks, in both directions.
+    pub lineage: Vec<Lineage>,
     pub will_go_stale: Vec<WillGoStale>,
     pub suspects: Vec<Suspect>,
     /// Other views and open proposals that change a covered block (not part of the token).
@@ -352,7 +366,7 @@ pub struct Briefing {
     pub docs: Vec<DocCounts>,
     /// How many entries of each `PAGE_SECTIONS` section this page and the pages before it showed.
     #[serde(skip)]
-    pub offsets: [usize; 7],
+    pub offsets: [usize; PAGE_SECTIONS.len()],
     /// A digest of every paged section of the whole, uncut briefing: what a cursor vouches for
     /// beyond the token (which covers only the covered blocks and their outgoing suspect-link
     /// targets, not dependents, governs or inflight).
@@ -382,10 +396,11 @@ impl Briefing {
     }
 
     /// The length of each `PAGE_SECTIONS` section.
-    fn lens(&self) -> [usize; 7] {
+    fn lens(&self) -> [usize; PAGE_SECTIONS.len()] {
         [
             self.governs.len(),
             self.dependents.len(),
+            self.lineage.len(),
             self.will_go_stale.len(),
             self.suspects.len(),
             self.inflight.views.len(),
@@ -395,24 +410,30 @@ impl Briefing {
     }
 
     /// Drops the first `skip[i]` entries of section `i` (each at most its length).
-    fn drop_first(&mut self, skip: &[usize; 7]) {
+    fn drop_first(&mut self, skip: &[usize; PAGE_SECTIONS.len()]) {
         fn drop<T>(v: &mut Vec<T>, n: usize) {
             v.drain(..n.min(v.len()));
         }
         drop(&mut self.governs, skip[0]);
         drop(&mut self.dependents, skip[1]);
-        drop(&mut self.will_go_stale, skip[2]);
-        drop(&mut self.suspects, skip[3]);
-        drop(&mut self.inflight.views, skip[4]);
-        drop(&mut self.inflight.proposals, skip[5]);
-        drop(&mut self.base.blocks, skip[6]);
+        drop(&mut self.lineage, skip[2]);
+        drop(&mut self.will_go_stale, skip[3]);
+        drop(&mut self.suspects, skip[4]);
+        drop(&mut self.inflight.views, skip[5]);
+        drop(&mut self.inflight.proposals, skip[6]);
+        drop(&mut self.base.blocks, skip[7]);
     }
 
     /// Shows the entries after the first `skip[i]` of each section, cut to `max` tokens, and
     /// sets `next`, `truncated` and `docs`. With `floor`, the cut keeps at least one entry (a
     /// page always moves on). `Err` (`E_PAGE_STALE`) when an offset is past the end of its
     /// section: the sections are no longer the ones the cursor counted in.
-    fn page(&mut self, skip: [usize; 7], max: usize, floor: bool) -> Result<(), RdyError> {
+    fn page(
+        &mut self,
+        skip: [usize; PAGE_SECTIONS.len()],
+        max: usize,
+        floor: bool,
+    ) -> Result<(), RdyError> {
         let totals = self.lens();
         if skip.iter().zip(totals).any(|(s, t)| *s > t) {
             return Err(e_page_moved());
@@ -420,7 +441,7 @@ impl Briefing {
         self.drop_first(&skip);
         self.cut(max, floor);
         let shown = self.lens();
-        let after: [usize; 7] = std::array::from_fn(|i| skip[i] + shown[i]);
+        let after: [usize; PAGE_SECTIONS.len()] = std::array::from_fn(|i| skip[i] + shown[i]);
         self.offsets = after;
         if after != totals {
             let offsets: Vec<String> = after.iter().map(ToString::to_string).collect();
@@ -459,10 +480,11 @@ impl Briefing {
             match at {
                 0 => self.governs.truncate(keep),
                 1 => self.dependents.truncate(keep),
-                2 => self.will_go_stale.truncate(keep),
-                3 => self.suspects.truncate(keep),
-                4 => self.inflight.views.truncate(keep),
-                5 => self.inflight.proposals.truncate(keep),
+                2 => self.lineage.truncate(keep),
+                3 => self.will_go_stale.truncate(keep),
+                4 => self.suspects.truncate(keep),
+                5 => self.inflight.views.truncate(keep),
+                6 => self.inflight.proposals.truncate(keep),
                 _ => self.base.blocks.truncate(keep),
             }
             *self
@@ -504,7 +526,7 @@ fn e_page_moved() -> RdyError {
 /// How many hex digits of a briefing's digest a cursor carries (64 bits).
 const DIGEST_HEX: usize = 16;
 
-/// A cursor `<token>:<o1>,…,<o7>:<digest>` split at its first colon: the token (64 lowercase
+/// A cursor `<token>:<o1>,…,<o8>:<digest>` split at its first colon: the token (64 lowercase
 /// hex) and the rest. The rest is read by `parse_tail` once the token is known.
 fn parse_cursor(cursor: &str) -> Result<(&str, &str), RdyError> {
     let (token, rest) = cursor.split_once(':').ok_or_else(bad_cursor)?;
@@ -518,8 +540,8 @@ fn is_lower_hex(b: u8) -> bool {
     matches!(b, b'0'..=b'9' | b'a'..=b'f')
 }
 
-/// The 7 offsets and the digest of a cursor's rest.
-fn parse_tail(rest: &str) -> Result<([usize; 7], &str), RdyError> {
+/// The offsets and the digest of a cursor's rest.
+fn parse_tail(rest: &str) -> Result<([usize; PAGE_SECTIONS.len()], &str), RdyError> {
     let (offsets, digest) = rest.split_once(':').ok_or_else(bad_cursor)?;
     if digest.len() != DIGEST_HEX || !digest.bytes().all(is_lower_hex) {
         return Err(bad_cursor());
@@ -528,7 +550,7 @@ fn parse_tail(rest: &str) -> Result<([usize; 7], &str), RdyError> {
         .split(',')
         .map(|n| n.parse().map_err(|_| bad_cursor()))
         .collect::<Result<_, _>>()?;
-    let offsets: [usize; 7] = offsets.try_into().map_err(|_| bad_cursor())?;
+    let offsets: [usize; PAGE_SECTIONS.len()] = offsets.try_into().map_err(|_| bad_cursor())?;
     Ok((offsets, digest))
 }
 
@@ -548,6 +570,15 @@ fn edge_in(kind: &EdgeKind, names: &[&str]) -> bool {
         EdgeKind::Link(n) => names.contains(&n.as_str()),
         EdgeKind::Contains => false,
     }
+}
+
+/// The link kinds a briefing lists as lineage: how a decision refines, supersedes or revokes
+/// another. `dependents` keeps the ones `rdy impact` shows at depth 1 (`IMPACT_SHOWN`).
+const LINEAGE_LINKS: [&str; 3] = [decision::REFINES, decision::SUPERSEDES, decision::REVOKES];
+
+/// A link (not a reference) named in `names`.
+fn link_in(kind: &EdgeKind, names: &[&str]) -> bool {
+    matches!(kind, EdgeKind::Link(n) if names.contains(&n.as_str()))
 }
 
 impl ReadState {
@@ -631,7 +662,11 @@ impl ReadState {
         max_tokens: Option<usize>,
     ) -> Result<Briefing, RdyError> {
         let mut briefing = self.assemble(scope, ids)?;
-        briefing.page([0; 7], max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS), false)?;
+        briefing.page(
+            [0; PAGE_SECTIONS.len()],
+            max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS),
+            false,
+        )?;
         Ok(briefing)
     }
 
@@ -725,7 +760,7 @@ impl ReadState {
                     continue;
                 }
                 let key = (id.clone(), e.from.clone(), e.kind.name());
-                if edge_in(&e.kind, &IMPACT_LINKS) {
+                if edge_in(&e.kind, &IMPACT_LINKS) || link_in(&e.kind, &IMPACT_SHOWN) {
                     dependents.insert(key.clone(), ());
                 }
                 if edge_in(&e.kind, &SUSPECT_LINKS)
@@ -738,6 +773,30 @@ impl ReadState {
                 }
             }
         }
+        // keyed by (on, direction, block, kind): deduplicated, and in before out
+        let mut lineage: BTreeMap<(BlockId, &'static str, BlockId, String), ()> = BTreeMap::new();
+        for id in ids {
+            for e in g.incoming(id) {
+                if !ids.contains(&e.from) && link_in(&e.kind, &LINEAGE_LINKS) {
+                    lineage.insert((id.clone(), "in", e.from.clone(), e.kind.name()), ());
+                }
+            }
+            for e in g.outgoing(id) {
+                if !ids.contains(&e.to) && link_in(&e.kind, &LINEAGE_LINKS) {
+                    lineage.insert((id.clone(), "out", e.to.clone(), e.kind.name()), ());
+                }
+            }
+        }
+        let lineage: Vec<Lineage> = lineage
+            .into_keys()
+            .map(|(on, direction, block, kind)| Lineage {
+                summary: summary_of(&block),
+                block: block.to_string(),
+                kind,
+                direction: direction.to_string(),
+                on: on.to_string(),
+            })
+            .collect();
         let dependents: Vec<Dependent> = dependents
             .into_keys()
             .map(|(on, block, kind)| Dependent {
@@ -784,6 +843,7 @@ impl ReadState {
             &serde_json::to_vec(&(
                 &governs,
                 &dependents,
+                &lineage,
                 &will_go_stale,
                 &suspects,
                 &inflight,
@@ -795,6 +855,7 @@ impl ReadState {
             covers: ids.len(),
             governs,
             dependents,
+            lineage,
             will_go_stale,
             suspects,
             inflight,
@@ -803,7 +864,7 @@ impl ReadState {
             omitted: BTreeMap::new(),
             next: None,
             docs,
-            offsets: [0; 7],
+            offsets: [0; PAGE_SECTIONS.len()],
             digest,
             record: Arc::new(BriefRecord {
                 token,
