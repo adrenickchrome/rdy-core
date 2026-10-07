@@ -104,6 +104,52 @@ fn sbrf1_each_page_briefs_only_its_own_hits() {
 }
 
 #[test]
+fn sbrf1_a_cut_search_briefing_pages_through_rdy_brief() {
+    let (dir, mut r) = project();
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "hub", "title": "Hub", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}},
+        {"op": "create", "type": "claim", "id": "$h", "parent": "$s", "body": "The needle holds."}
+    ]))
+    .unwrap();
+    let (s, h) = (w.created["$s"].clone(), w.created["$h"].clone());
+    let ops: Vec<Value> = (0..60)
+        .map(|i| json!({"op": "create", "type": "claim", "parent": s, "body": format!("Claim {i} cites {{{{{h}}}}}.")}))
+        .collect();
+    write(&mut r, "work", Value::Array(ops)).unwrap();
+    land(&mut r, "work").unwrap();
+    drop(r);
+    let mut c = McpClient::start(dir.path());
+    agent(&mut c, "s3");
+    let v = c
+        .call(
+            "rdy_search",
+            json!({"query": "needle", "scope": "canon", "brief": true, "max_tokens": 800}),
+        )
+        .ok();
+    let b = &v["briefing"];
+    assert!(b["inflight"].is_object() && b["lineage"].is_array(), "{b}");
+    assert_eq!(b["truncated"], true, "{b}");
+    let token = b["base"]["token"].clone();
+    let mut deps = b["dependents"].as_array().unwrap().len();
+    let mut next = b["next"].clone();
+    assert!(next.is_string(), "{b}");
+    while next.is_string() {
+        let p = c
+            .call(
+                "rdy_brief",
+                json!({"page": next, "scope": "canon", "max_tokens": 400}),
+            )
+            .ok();
+        assert_eq!(p["base"]["token"], token);
+        deps += p["dependents"].as_array().unwrap().len();
+        next = p["next"].clone();
+    }
+    assert_eq!(deps, 60);
+    c.alive();
+}
+
+#[test]
 fn mflt1_rdy_search_takes_filters_and_starts_with_totals() {
     let (dir, mut r) = project();
     write(&mut r, "work", json!([
