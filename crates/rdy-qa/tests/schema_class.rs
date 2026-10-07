@@ -58,6 +58,18 @@ fn tcls1_a_child_pack_keeps_or_sets_the_class_and_engine_types_stay_supporting()
         TypeClass::Supporting,
         "the engine forces it"
     );
+    set.add_yaml(
+        "name: child2\nversion: \"1\"\nextends: rdy-standard\nblock_types:\n  doc: { prefix: d, class: supporting }\n  folder: { prefix: fd, class: supporting }\n",
+    )
+    .unwrap();
+    let p2 = set.resolve("child2").unwrap();
+    for t in ["doc", "folder"] {
+        assert_eq!(
+            p2.class_of(t),
+            TypeClass::DocAsset,
+            "{t}: the engine forces it, a pack cannot class it supporting"
+        );
+    }
     let e = set.add_yaml(
         "name: bad\nversion: \"1\"\nextends: rdy-standard\nblock_types:\n  memo: { prefix: mo, class: maybe }\n",
     );

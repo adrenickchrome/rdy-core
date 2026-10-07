@@ -305,9 +305,7 @@ fn force(
             class: None,
         });
     def.prefix = prefix.to_string();
-    if class.is_some() {
-        def.class = class;
-    }
+    def.class = class;
     def.traits.insert(tr);
     def.fields.extend(core);
 }
