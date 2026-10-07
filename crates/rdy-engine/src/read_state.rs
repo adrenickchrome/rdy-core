@@ -6,7 +6,7 @@ use crate::paths::TreeNode;
 use crate::version::VposCache;
 use crate::{AS_OF_CACHE_ENTRIES, Materialized, Scope};
 use rdy_graph::Graph;
-use rdy_model::{Block, BlockId, Change, Hash, Op, Tag};
+use rdy_model::{AltSet, AltStatus, Block, BlockId, Change, Hash, Op, Tag};
 use rdy_schema::{AreaMatcher, Pack};
 use rdy_store::segment::Location;
 use rdy_store::{Conflict, Merged, StoreReader, ViewHead};
@@ -146,11 +146,56 @@ pub struct InflightSet {
 }
 
 /// The coordination refs as a state was published: each intent's and each alternative set's
-/// stable id mapped to its latest version.
+/// stable id mapped to its latest version, and an index of the open sets, so that a write reads
+/// its view's set without reading every set ever made.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CoordHeads {
     pub intents: BTreeMap<Hash, Hash>,
     pub alt_sets: BTreeMap<Hash, Hash>,
+    /// Each open alternative set: stable id to its latest version and that version.
+    pub open_alts: BTreeMap<Hash, (Hash, AltSet)>,
+    /// Each member view of an open set, mapped to that set's stable id.
+    pub alt_members: BTreeMap<String, Hash>,
+}
+
+impl CoordHeads {
+    /// The heads `intents` and `alt_sets` as the store holds them now, with the open-set index.
+    /// A set whose latest version equals its version in `prev` keeps `prev`'s entry (a version
+    /// is a content hash, so its status and members are the same); only a new or moved set is
+    /// read. A publish therefore reads the sets it changed, not every set ever made.
+    pub(crate) fn read(
+        reader: &StoreReader,
+        prev: &CoordHeads,
+        intents: BTreeMap<Hash, Hash>,
+        alt_sets: BTreeMap<Hash, Hash>,
+    ) -> Result<CoordHeads, RdyError> {
+        let mut open_alts = BTreeMap::new();
+        for (stable, version) in &alt_sets {
+            if prev.alt_sets.get(stable) == Some(version) {
+                if let Some(entry) = prev.open_alts.get(stable) {
+                    open_alts.insert(*stable, entry.clone());
+                }
+                continue;
+            }
+            let set = reader.alt_set(version)?;
+            if set.status == AltStatus::Open {
+                open_alts.insert(*stable, (*version, set));
+            }
+        }
+        let mut alt_members = BTreeMap::new();
+        for (stable, (_, set)) in &open_alts {
+            for m in &set.members {
+                // a view is in at most one open set; were it in two, the first by id wins
+                alt_members.entry(m.view.clone()).or_insert(*stable);
+            }
+        }
+        Ok(CoordHeads {
+            intents,
+            alt_sets,
+            open_alts,
+            alt_members,
+        })
+    }
 }
 
 /// For each block an in-flight change writes, the last such change in the merge's order.

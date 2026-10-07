@@ -5,6 +5,7 @@
 use crate::error::*;
 use crate::session::rfc3339;
 use crate::views::OwnerInfo;
+use crate::write::not_humans_view;
 use crate::{Compare, Delta, Rdy, ReadState, Scope, Session};
 use rdy_model::{AltMember, AltSet, AltStatus, BlockId, Hash, Provenance};
 use rdy_store::coord::abandoned_reason;
@@ -191,24 +192,28 @@ impl ReadState {
     }
 
     /// The open set view `view` is a member of, if any: its stable id, latest version and that
-    /// version.
+    /// version. One lookup in the published open-set index (`CoordHeads::alt_members`): no
+    /// store read, however many sets were ever made.
     pub fn alt_of_view(&self, view: &str) -> Result<Option<(Hash, Hash, AltSet)>, RdyError> {
-        for (stable, version) in &self.coord_heads.alt_sets {
-            let set = self.reader().alt_set(version)?;
-            if set.status == AltStatus::Open && set.members.iter().any(|m| m.view == view) {
-                return Ok(Some((*stable, *version, set)));
-            }
-        }
-        Ok(None)
+        let heads = &self.coord_heads;
+        Ok(heads
+            .alt_members
+            .get(view)
+            .and_then(|stable| heads.open_alts.get(stable).map(|(v, set)| (stable, v, set)))
+            .map(|(stable, version, set)| (*stable, *version, set.clone())))
     }
 
     /// The open sets, or every set when `all`, by title then id.
     pub fn alt_sets(&self, all: bool) -> Result<Vec<AltSetInfo>, RdyError> {
         let mut out = vec![];
-        for (stable, version) in &self.coord_heads.alt_sets {
-            let set = self.reader().alt_set(version)?;
-            if all || set.status == AltStatus::Open {
+        if all {
+            for (stable, version) in &self.coord_heads.alt_sets {
+                let set = self.reader().alt_set(version)?;
                 out.push(self.alt_info(*stable, *version, &set)?);
+            }
+        } else {
+            for (stable, (version, set)) in &self.coord_heads.open_alts {
+                out.push(self.alt_info(*stable, *version, set)?);
             }
         }
         out.sort_by(|a, b| (&a.title, &a.id).cmp(&(&b.title, &b.id)));
@@ -305,8 +310,10 @@ impl ReadState {
         ))
     }
 
-    /// View `view` may join a set: it is an open view in no open set other than `own`.
-    fn may_join(&self, view: &str, own: Option<&Hash>) -> Result<(), RdyError> {
+    /// View `view` may join a set: an agent session never enrols the human's `work` view
+    /// (`E_VIEW_OWNER`), and it is an open view in no open set other than `own`.
+    fn may_join(&self, s: &Session, view: &str, own: Option<&Hash>) -> Result<(), RdyError> {
+        not_humans_view(view, s)?;
         let Some(head) = self.view_head(view) else {
             return Err(RdyError::new(
                 E_ALT_MEMBER,
@@ -395,7 +402,7 @@ impl Rdy {
         distinct(&members)?;
         let st = self.read();
         for m in &members {
-            st.may_join(&m.view, None)?;
+            st.may_join(s, &m.view, None)?;
         }
         let question = question.map(|q| st.alt_question(s, q)).transpose()?;
         drop(st);
@@ -432,7 +439,7 @@ impl Rdy {
             view: m.view.clone(),
         });
         distinct(&members)?;
-        st.may_join(&m.view, Some(&stable))?;
+        st.may_join(s, &m.view, Some(&stable))?;
         drop(st);
         self.next_alt_version(s, stable, version, cur, members)
     }
@@ -478,7 +485,8 @@ impl Rdy {
     }
 
     /// Abandons open set `set` for `reason` and closes every open member view in the same
-    /// batch. Returns the set and the views it closed, in member order.
+    /// batch. Returns the set and the views it closed, in member order. An agent session may
+    /// not abandon a set that holds the human's `work` view (`E_VIEW_OWNER`): it would close it.
     pub fn alt_abandon(
         &mut self,
         s: &Session,
@@ -497,8 +505,10 @@ impl Rdy {
         need_open(&stable, &cur)?;
         st.may_change_alt(s, &stable)?;
         drop(st);
-        let by = s.provenance();
         let views: Vec<String> = cur.members.iter().map(|m| m.view.clone()).collect();
+        // abandon closes every member view: an agent never closes the human's `work` view
+        views.iter().try_for_each(|v| not_humans_view(v, s))?;
+        let by = s.provenance();
         let next = AltSet {
             stable: Some(stable),
             prev: Some(version),

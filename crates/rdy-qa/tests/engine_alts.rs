@@ -306,3 +306,163 @@ fn alts1_question_permission_and_lookup_rules() {
     let s3 = r.alt_remove(&o2, &s.id, "q").unwrap();
     assert_eq!(s3.members.len(), 2);
 }
+
+/// Fix round 1: the open-set index (view to set) that member writes read follows every publish
+/// that moves a set: create, add, remove, abandon, a landing and a full re-read.
+#[test]
+fn alts1_the_open_set_index_follows_every_set_change() {
+    let (_d, mut r) = project();
+    two_members(&mut r);
+    r.view_create(&writer(), "c", None, false).unwrap();
+    let o = agent("agent:o", Some("o"));
+    let members = |r: &Rdy| -> Vec<(String, String)> {
+        r.read()
+            .coord_heads()
+            .alt_members
+            .iter()
+            .map(|(v, s)| (v.clone(), s.to_string()))
+            .collect()
+    };
+    // sets that were abandoned are in the heads but not in the index
+    for i in 0..5 {
+        r.view_create(&writer(), &format!("p{i}"), None, false)
+            .unwrap();
+        r.view_create(&writer(), &format!("q{i}"), None, false)
+            .unwrap();
+        let s = r
+            .alt_create(
+                &o,
+                "old",
+                None,
+                &[m("p", &format!("p{i}")), m("q", &format!("q{i}"))],
+            )
+            .unwrap();
+        r.alt_abandon(&o, &s.id, "no").unwrap();
+    }
+    assert!(members(&r).is_empty());
+    assert!(r.read().coord_heads().open_alts.is_empty());
+    assert_eq!(r.read().coord_heads().alt_sets.len(), 5);
+    let s = r
+        .alt_create(&o, "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap();
+    let set = |views: &[&str]| -> Vec<(String, String)> {
+        views
+            .iter()
+            .map(|v| (v.to_string(), s.set.clone()))
+            .collect()
+    };
+    assert_eq!(members(&r), set(&["a", "b"]));
+    let open = r.read().coord_heads().open_alts.clone();
+    assert_eq!(open.len(), 1);
+    let (version, latest) = open.values().next().unwrap();
+    assert_eq!(version.to_string(), s.version);
+    assert_eq!(latest.title, "T");
+    r.alt_add(&o, &s.id, &m("z", "c")).unwrap();
+    assert_eq!(members(&r), set(&["a", "b", "c"]));
+    let after_remove = r.alt_remove(&o, &s.id, "z").unwrap();
+    assert_eq!(members(&r), set(&["a", "b"]));
+    assert_eq!(
+        r.read()
+            .coord_heads()
+            .open_alts
+            .values()
+            .next()
+            .unwrap()
+            .0
+            .to_string(),
+        after_remove.version
+    );
+    // a full re-read and a landing rebuild the same index
+    r.invalidate();
+    assert_eq!(members(&r), set(&["a", "b"]));
+    let claim = seed_claim(&r);
+    let v = version_of(&r, &Scope::Canon, &claim);
+    write(
+        &mut r,
+        "seed",
+        json!([{"op": "update", "id": claim, "base": v, "body": "two"}]),
+    )
+    .unwrap();
+    land(&mut r, "seed").unwrap();
+    assert_eq!(members(&r), set(&["a", "b"]));
+    assert!(r.read().alt_of_view("a").unwrap().is_some());
+    r.alt_abandon(&o, &s.id, "neither").unwrap();
+    assert!(members(&r).is_empty());
+    assert!(r.read().alt_of_view("a").unwrap().is_none());
+    assert_eq!(r.read().coord_heads().alt_sets.len(), 6);
+}
+
+/// The one claim of canon's seed doc.
+fn seed_claim(r: &Rdy) -> String {
+    let st = r.read();
+    let m = st.materialized(&Scope::Canon).unwrap();
+    m.iter()
+        .find(|b| b.block_type == "claim")
+        .map(|b| b.id.to_string())
+        .expect("a claim in canon")
+}
+
+/// Fix round 1: an agent never enrols the human's `work` view in a set (create or add), and
+/// never abandons a set that holds it (abandon would close `work`). A human may do all three.
+#[test]
+fn alts1_an_agent_never_enrols_or_closes_the_humans_work_view() {
+    let (_d, mut r) = project();
+    let claim = two_members(&mut r);
+    let v = version_of(&r, &Scope::Canon, &claim);
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": claim, "base": v, "body": "H"}]),
+    )
+    .unwrap();
+    let o = agent("agent:o", Some("o"));
+    let before = r.read().seq();
+    let e = r
+        .alt_create(&o, "T", None, &[m("h", "work"), m("b", "b")])
+        .unwrap_err();
+    assert_eq!(e.code, E_VIEW_OWNER, "{e:?}");
+    assert!(e.message.contains("work"), "{}", e.message);
+    assert_eq!(r.read().seq(), before, "a refusal writes nothing");
+    let s = r
+        .alt_create(&o, "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap();
+    let before = r.read().seq();
+    let e = r.alt_add(&o, &s.id, &m("h", "work")).unwrap_err();
+    assert_eq!(e.code, E_VIEW_OWNER, "{e:?}");
+    assert_eq!(r.read().seq(), before, "a refusal writes nothing");
+    assert!(r.read().alt_of_view("work").unwrap().is_none());
+    // a human may enrol work in the agent's set; the agent then may not abandon it
+    let s2 = r.alt_add(&writer(), &s.id, &m("h", "work")).unwrap();
+    assert_eq!(s2.members.len(), 3);
+    let e = r.alt_abandon(&o, &s.id, "no").unwrap_err();
+    assert_eq!(e.code, E_VIEW_OWNER, "{e:?}");
+    assert!(!r.read().view_head("work").unwrap().closed);
+    // the agent may still remove work from its set
+    r.alt_remove(&o, &s.id, "h").unwrap();
+    assert!(r.read().alt_of_view("work").unwrap().is_none());
+    // a human's create that names work is accepted, and the human's writes there carry the link
+    let h = r
+        .alt_create(&writer(), "H", None, &[m("h", "work"), m("c", "c0")])
+        .unwrap_err();
+    assert_eq!(h.code, E_ALT_MEMBER, "c0 is not a view yet");
+    r.view_create(&writer(), "c0", None, false).unwrap();
+    let hs = r
+        .alt_create(&writer(), "H", None, &[m("h", "work"), m("c", "c0")])
+        .unwrap();
+    assert_eq!(hs.members[0].view, "work");
+    let v = version_of(&r, &Scope::View("work".into()), &claim);
+    let w = write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": claim, "base": v, "body": "H2"}]),
+    )
+    .unwrap();
+    let ch = r
+        .read()
+        .reader()
+        .change(&w.change.parse().unwrap())
+        .unwrap();
+    assert_eq!(ch.links.alternative.unwrap().member, "work");
+    let (_, closed) = r.alt_abandon(&writer(), &hs.id, "neither").unwrap();
+    assert_eq!(closed, vec!["work".to_string(), "c0".to_string()]);
+}

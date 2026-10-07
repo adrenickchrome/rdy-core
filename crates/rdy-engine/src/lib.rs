@@ -685,7 +685,7 @@ impl Rdy {
         // the coordination refs: re-read by a publish that may have moved them, else carried
         let coord_heads = match &delta {
             Delta::Full | Delta::Coord { .. } | Delta::Landed { .. } => {
-                Arc::new(self.coord_heads()?)
+                Arc::new(self.coord_heads(&prev.coord_heads)?)
             }
             _ => Arc::clone(&prev.coord_heads),
         };
@@ -865,13 +865,16 @@ impl Rdy {
         Ok(())
     }
 
-    /// The coordination refs as the store holds them now.
-    fn coord_heads(&self) -> Result<CoordHeads, RdyError> {
+    /// The coordination refs as the store holds them now, with the open-set index carried from
+    /// `prev` for every set that did not move (`CoordHeads::read`).
+    fn coord_heads(&self, prev: &CoordHeads) -> Result<CoordHeads, RdyError> {
         let reader = self.store.reader();
-        Ok(CoordHeads {
-            intents: reader.intent_heads()?.into_iter().collect(),
-            alt_sets: reader.alt_heads()?.into_iter().collect(),
-        })
+        CoordHeads::read(
+            &reader,
+            prev,
+            reader.intent_heads()?.into_iter().collect(),
+            reader.alt_heads()?.into_iter().collect(),
+        )
     }
 
     /// insc1: the in-flight cell after `change` (with `ops`) was committed to `view`. When the
