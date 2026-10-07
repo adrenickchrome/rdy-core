@@ -9,7 +9,8 @@ use rdy_engine::consequence::write_and_report;
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::{
     E_BAD_INPUT, E_LIMIT, E_PERMISSION, HISTORY_MAX, LandOptions, RdyError, ReadState, Relay,
-    Scope, Session, block_from_yaml, block_to_yaml, check_path, resolve_pack, view_api,
+    Scope, SearchQuery, Session, block_from_yaml, block_to_yaml, check_path, resolve_pack,
+    view_api,
 };
 use rdy_mcp::tools::MAX_TOKENS_LIMIT;
 use rdy_model::{ActorRun, RelayEvidence, Role};
@@ -37,6 +38,7 @@ pub const OPS: &[&str] = &[
     "tags",
     "block",
     "brief",
+    "search",
     "render",
     "export",
     "check",
@@ -120,6 +122,17 @@ struct BriefArgs {
     /// canon.
     view: Option<String>,
     max_tokens: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchArgs {
+    query: String,
+    regex: Option<bool>,
+    ignore_case: Option<bool>,
+    scope: Option<String>,
+    max_tokens: Option<usize>,
+    page: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -382,6 +395,14 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{ids?, path?, code_path?, scope?, view?, max_tokens?}",
             )?,
         ),
+        "search" => search(
+            cx,
+            parse(
+                op,
+                args,
+                "{query, regex?, ignore_case?, scope?, max_tokens?, page?}",
+            )?,
+        ),
         "render" => render(cx, parse(op, args, "{out, scope?}")?),
         "export" => export(cx, parse(op, args, "{out, scope?}")?),
         "check" => check(cx, parse(op, args, "{path, pack?}")?),
@@ -593,6 +614,25 @@ fn brief(cx: &OpContext, a: BriefArgs) -> Result<Value, RdyError> {
     )?;
     b.register(&cx.engine.briefs());
     Ok(to_json(&b))
+}
+
+/// msrch1: the blocks whose text matches, in canon unless a scope is named.
+fn search(cx: &OpContext, a: SearchArgs) -> Result<Value, RdyError> {
+    check_max_tokens(a.max_tokens)?;
+    let st = cx.engine.read();
+    let scope = scope_of(&st, cx, a.scope.as_deref())?;
+    let r = st.search(
+        &scope,
+        &SearchQuery {
+            text: a.query,
+            regex: a.regex.unwrap_or(false),
+            ignore_case: a.ignore_case.unwrap_or(false),
+            ..Default::default()
+        },
+        a.page.as_deref(),
+        a.max_tokens,
+    )?;
+    Ok(to_json(&r))
 }
 
 fn render(cx: &OpContext, a: OutArgs) -> Result<Value, RdyError> {

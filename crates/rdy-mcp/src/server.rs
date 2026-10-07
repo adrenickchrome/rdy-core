@@ -1,5 +1,6 @@
 use crate::order::{Order, Ordered, Stamped};
 use crate::params::Parameters;
+use crate::search_tools::{self, SearchParams};
 use crate::tools::{self, *};
 use crate::view_tools;
 use rdy_engine::engine::{Engine, Local};
@@ -157,6 +158,13 @@ impl RdyServer {
     )]
     async fn rdy_brief(&self, Parameters(p): Parameters<BriefParams>) -> CallToolResult {
         self.run("rdy_brief", p, tools::rdy_brief).await
+    }
+
+    #[tool(
+        description = "Find text in blocks: a literal (or, with regex: true, a pattern) in every block's body and string fields, code included, within scope (default: your session's view). Each match gives the block's id, type, path and matching lines (field, line number, text), in reading order. Deterministic, no model. A cut result carries next: pass it as page with the same query to continue. References are stored as ids, so search a block's id to find text that references it."
+    )]
+    async fn rdy_search(&self, Parameters(p): Parameters<SearchParams>) -> CallToolResult {
+        self.run("rdy_search", p, search_tools::rdy_search).await
     }
 
     #[tool(

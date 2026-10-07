@@ -94,6 +94,26 @@ enum Cmd {
         #[arg(long = "max-tokens")]
         max_tokens: Option<usize>,
     },
+    /// Find text in blocks: a literal (or, with --regex, a pattern) in every block's body and string fields.
+    Search {
+        /// The text to find (a pattern with --regex).
+        query: String,
+        /// Treat the query as a regular expression.
+        #[arg(long)]
+        regex: bool,
+        /// Match regardless of case.
+        #[arg(short = 'i', long)]
+        ignore_case: bool,
+        /// canon (the default), an existing view's name, tag:<version>, landing:<id> or view:<name>.
+        #[arg(long)]
+        scope: Option<String>,
+        /// The budget for this page of matches.
+        #[arg(long = "max-tokens")]
+        max_tokens: Option<usize>,
+        /// Continue a cut search: the cursor its last page printed.
+        #[arg(long)]
+        page: Option<String>,
+    },
     /// List the suspects in a scope (default canon), as rdy_suspects does.
     Suspects {
         /// canon (the default), an existing view's name, tag:<version>, landing:<id> or view:<name>.
@@ -672,6 +692,31 @@ fn impact_text(v: &Value) -> String {
         .join("\n")
 }
 
+/// csrch1: the matching blocks, one header per block and its matching lines under it.
+fn search_text(v: &Value) -> String {
+    let mut out = vec![format!("{} matching blocks", num(&v["total"]))];
+    for m in v["matches"].as_array().into_iter().flatten() {
+        let path = m["path"].as_str().unwrap_or("-");
+        out.push(format!("{path}  {} ({})", text(&m["id"]), text(&m["type"])));
+        for l in m["lines"].as_array().into_iter().flatten() {
+            out.push(format!(
+                "  {}:{}: {}",
+                text(&l["field"]),
+                num(&l["line"]),
+                text(&l["text"])
+            ));
+        }
+        let more = num(&m["more_lines"]);
+        if more > 0 {
+            out.push(format!("  … +{more} more lines"));
+        }
+    }
+    if let Some(next) = v["next"].as_str() {
+        out.push(format!("next page: --page {next}"));
+    }
+    out.join("\n")
+}
+
 fn suspects_text(v: &Value) -> String {
     let items = v["items"].as_array().cloned().unwrap_or_default();
     if items.is_empty() {
@@ -917,6 +962,22 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                 json!({"code_path": code, "scope": scope, "max_tokens": max_tokens}),
             )?;
             let t = format!("{}{}", brief_text::code_text(&v), brief_text::plain(&v));
+            Ok((v, t))
+        }
+        Cmd::Search {
+            query,
+            regex,
+            ignore_case,
+            scope,
+            max_tokens,
+            page,
+        } => {
+            let v = call(
+                env,
+                "search",
+                json!({"query": query, "regex": regex, "ignore_case": ignore_case, "scope": scope, "max_tokens": max_tokens, "page": page}),
+            )?;
+            let t = search_text(&v);
             Ok((v, t))
         }
         Cmd::Suspects { scope } => {
