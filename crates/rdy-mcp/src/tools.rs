@@ -116,7 +116,7 @@ pub struct ReadParams {
     pub scope: Option<String>,
     /// compact (default), markdown or yaml.
     pub format: Option<String>,
-    /// Only the blocks whose text matches: a substring (any case), or /regex/. A code block shows only its matching lines. The result's matched counts the blocks kept.
+    /// Only the blocks whose text matches: a substring (any case), or /regex/. A code block shows only its matching lines; in compact format, a block matched only past its compact line (a prose body, table rows, diagram source) shows that line alone. The result's matched counts the blocks kept.
     pub pattern: Option<String>,
     /// Continue a cut read: its next cursor. Alone (scope and max_tokens allowed).
     pub page: Option<String>,
@@ -371,8 +371,8 @@ pub(crate) fn session(st: &McpState) -> Result<Session, RdyError> {
 }
 
 /// The scope a tool reads, resolved on the state the tool reads (`read`), so that a view created
-/// by a later publish is never accepted here and then read on a state without it.
-/// The scope `s` names for a session whose view is `view` (the session's view when `s` is none).
+/// by a later publish is never accepted here and then read on a state without it. `view` is the
+/// session view `s` resolves against, and the scope when `s` is none.
 fn scope_of(view: &str, read: &ReadState, s: &Option<String>) -> Result<Scope, RdyError> {
     match s {
         // scope1: an unknown view is not found, unless it is this session's own view
@@ -1051,6 +1051,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
                 "E_BRIEF_STALE": {"when": "the cited briefing is unknown, or a block it recorded moved in the write's view", "fix": "read what moved, then retry with the token of the briefing the error carries"},
                 "W_BRIEF_STALE": {"when": "a write to drafts cited a stale or unknown briefing (it went ahead)", "fix": "brief again before the next write if the moved blocks matter"},
                 "E_PAGE_STALE": {"when": "a page cursor's read moved since its first page, or this session does not know the cursor", "fix": PAGE_STALE_FIX},
+                "W_SKELETON_MISSING": {"when": "a doc lacks a required section of its doc_type; reported once per doc per session, and later writes count the repeats in warnings_repeated", "fix": "add the section, or give the doc a doc_type without it (page)"},
             },
             "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
             "text": TEXT_RULES,

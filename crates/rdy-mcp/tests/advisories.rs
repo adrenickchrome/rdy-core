@@ -106,3 +106,17 @@ fn dtype1_a_doc_warns_only_for_its_own_types_skeleton() {
         "only glossary's own section, never overview's: {glossary}"
     );
 }
+
+#[test]
+fn adv1_rdy_schema_names_the_skeleton_warning_and_its_repeat_count() {
+    let (_d, mut st) = state();
+    let s = rdy_schema(&mut st, SchemaParams::default()).unwrap();
+    let row = &s["errors"]["W_SKELETON_MISSING"];
+    assert!(
+        row["when"].as_str().is_some_and(
+            |w| w.contains("once per doc per session") && w.contains("warnings_repeated")
+        ),
+        "{row}"
+    );
+    assert!(row["fix"].is_string(), "{row}");
+}
