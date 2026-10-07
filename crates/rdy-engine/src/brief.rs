@@ -240,7 +240,9 @@ pub enum FollowUp {
 
 /// The follow-up a dependent block owes when a block it depends on changed. `status` is the
 /// dependent's derived decision status (`None` for a block that is not a decision);
-/// `target_deleted` says the changed block no longer exists. `None` means no follow-up at all.
+/// `target_deleted` says the changed block no longer exists; `value_reference` says the dependent
+/// reaches the changed block through a reference and that block is a value. `None` means no
+/// follow-up at all.
 ///
 /// Exact, in order:
 /// 1. a decision that asserts nothing live (rejected, revoked or fully superseded): `None`;
@@ -248,13 +250,16 @@ pub enum FollowUp {
 /// 3. a proposed decision (mutable): `Update`;
 /// 4. any other block while the target is deleted (a repin cannot pin to a block that is gone):
 ///    `Update`;
-/// 5. a `normative` or `defines` type, or a `table` marked `normative: true`: `Update`;
-/// 6. anything else (informative, structural, no classifying trait, asset): `Confirm`.
+/// 5. a reference to a changed value (`value_reference`): `Confirm`, since the reference's text
+///    updates by itself and only the advice around it may need a look (FW-EN2);
+/// 6. a `normative` or `defines` type, or a `table` marked `normative: true`: `Update`;
+/// 7. anything else (informative, structural, no classifying trait, asset): `Confirm`.
 pub fn follow_up(
     pack: &Pack,
     dependent: &Block,
     status: Option<&DerivedStatus>,
     target_deleted: bool,
+    value_reference: bool,
 ) -> Option<FollowUp> {
     match status {
         Some(
@@ -270,6 +275,9 @@ pub fn follow_up(
     }
     if target_deleted {
         return Some(FollowUp::Update);
+    }
+    if value_reference {
+        return Some(FollowUp::Confirm);
     }
     let classifying = pack
         .block_types
@@ -835,8 +843,15 @@ impl ReadState {
                 if edge_in(&e.kind, &SUSPECT_LINKS)
                     && e.pin.is_some()
                     && let Some(from) = m.get(&e.from)
-                    && let Some(f) =
-                        follow_up(pack, from, g.status(&e.from).as_ref(), m.get(id).is_none())
+                    && let Some(f) = follow_up(
+                        pack,
+                        from,
+                        g.status(&e.from).as_ref(),
+                        m.get(id).is_none(),
+                        matches!(e.kind, EdgeKind::References)
+                            && m.get(id)
+                                .is_some_and(|b| b.block_type == rdy_model::entity::VALUE),
+                    )
                 {
                     stale.insert(key, f);
                 }

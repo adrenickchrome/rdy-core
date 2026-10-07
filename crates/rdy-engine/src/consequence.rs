@@ -377,8 +377,16 @@ impl ReadState {
             let Some(src) = m.get(&block) else { continue };
             let deleted = m.get(&cause.changed).is_none();
             // no entry for a decision that asserts nothing live
-            let Some(follow) = follow_up(self.pack(), src, g.status(&block).as_ref(), deleted)
-            else {
+            let value_reference = cause.edge == "references"
+                && m.get(&cause.changed)
+                    .is_some_and(|b| b.block_type == rdy_model::entity::VALUE);
+            let Some(follow) = follow_up(
+                self.pack(),
+                src,
+                g.status(&block).as_ref(),
+                deleted,
+                value_reference,
+            ) else {
                 continue;
             };
             let kind = if cause.suspect {
