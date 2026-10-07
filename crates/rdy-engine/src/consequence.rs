@@ -510,7 +510,51 @@ pub fn write_and_report<T: Serialize + 'static>(
         },
         None => v["suggestions"] = serde_json::json!([]),
     }
+    if let Some(h) = change {
+        attach_related(&mut v, engine, view, &h);
+    }
     Ok(v)
+}
+
+/// FW-EN5: when the change creates decisions, `related_decisions` lists the decisions related
+/// to them (with `related_decisions_omitted` when a cap dropped some), or `[]` and
+/// `related_decisions_error` when they could not be read; the write stands. A change that
+/// creates no decision adds no key.
+fn attach_related(v: &mut serde_json::Value, engine: &dyn Engine, view: &str, change: &Hash) {
+    let st = engine.read();
+    let ids: Result<Vec<BlockId>, RdyError> = st
+        .reader()
+        .change(change)
+        .map_err(RdyError::from)
+        .map(|ch| {
+            ch.ops
+                .iter()
+                .filter_map(|o| match o {
+                    Op::Create { block } if block.block_type == DECISION => Some(block.id.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+    match ids {
+        Ok(ids) if ids.is_empty() => {}
+        Ok(ids) => match st.related_decisions(&Scope::View(view.into()), &ids) {
+            Ok((rel, n)) => {
+                v["related_decisions"] =
+                    serde_json::to_value(&rel).expect("related decisions serialize: strings only");
+                if n > 0 {
+                    v["related_decisions_omitted"] = n.into();
+                }
+            }
+            Err(e) => {
+                v["related_decisions"] = serde_json::json!([]);
+                v["related_decisions_error"] = format!("{}: {}", e.code, e.message).into();
+            }
+        },
+        Err(e) => {
+            v["related_decisions"] = serde_json::json!([]);
+            v["related_decisions_error"] = format!("{}: {}", e.code, e.message).into();
+        }
+    }
 }
 
 /// What a view op did, for its consequences: the op (`batch`), the changes it put in or took

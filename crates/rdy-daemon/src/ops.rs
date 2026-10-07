@@ -486,6 +486,7 @@ fn status(cx: &OpContext) -> Result<Value, RdyError> {
         "pack": st.pack().name,
         "landings": landings,
         "suspects": suspects,
+        "coverage": st.graph_coverage(&Scope::Canon, None)?,
         "version_position": canon,
         "views": views,
         "warnings": warnings,
