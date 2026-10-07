@@ -1192,9 +1192,11 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         }
         Cmd::Edit { id, view } => {
             let v = edit(env, &id, view.as_deref())?;
+            // F4 (FW-PR3b): a rename or a top-level name re-derives keys rdy assigned
             let t = format!(
-                "change {}{}",
+                "change {}{}{}",
                 hash_short(text(&v["change"])),
+                keys_lines(&v, ""),
                 brief_text::consequences_text(&v)
             );
             Ok((v, t))
@@ -1535,12 +1537,14 @@ fn main() -> ExitCode {
 
 /// One line per key rdy re-derived on propose or approve (`keys`: block id → new key, K1).
 fn new_keys_text(v: &Value) -> String {
+    keys_lines(v, " (another block holds the key rdy derived)")
+}
+
+/// One `new key <id>: <key><why>` line per entry of `keys` (block id → new key).
+fn keys_lines(v: &Value, why: &str) -> String {
     let mut t = String::new();
     for (id, k) in v["keys"].as_object().into_iter().flatten() {
-        t.push_str(&format!(
-            "\nnew key {id}: {} (another block holds the key rdy derived)",
-            text(k)
-        ));
+        t.push_str(&format!("\nnew key {id}: {}{why}", text(k)));
     }
     t
 }

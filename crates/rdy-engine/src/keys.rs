@@ -354,9 +354,10 @@ pub(crate) fn resolve_with(
     };
     let by_path = crate::paths::resolve_in(m, text);
     match (by_key, by_path) {
-        // K2: a doc renamed away keeps an explicit key (a key rdy assigned follows the path,
-        // FW-PR3a), so a new doc can take the old path; the error names both blocks so the
-        // agent can pick one by id
+        // K2: a doc renamed away keeps an explicit key (a key rdy assigned follows the path of
+        // the block a write renames or moves, FW-PR3a, and yields to a top-level name, FW-PR3b),
+        // so a new doc can take the old path; the error names both blocks so the agent can pick
+        // one by id
         (Some(k), Ok(p)) if k != p => {
             let at = m
                 .path_of(&k)

@@ -161,8 +161,9 @@ pub struct WriteResult {
     /// Names rdy assigned to created docs and folders, by block id.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub names: BTreeMap<String, String>,
-    /// Keys rdy assigned, by block id: to created docs and folders (FW-PR3), and to docs and
-    /// folders whose key followed a move or rename (FW-PR3a).
+    /// Keys rdy assigned, by block id: to created docs and folders (FW-PR3), to docs and
+    /// folders whose key followed their own move or rename (FW-PR3a), and to those whose key
+    /// yielded to a new top-level name (FW-PR3b).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub keys: BTreeMap<String, String>,
     /// sup1: links rdy_supersede copied from the old decision, by kind.
@@ -1487,7 +1488,8 @@ fn build_ops(
     // is another block's path would make that path unreachable); it runs before the second
     // pass, so pins and validation see the key
     let mut assigned = BTreeMap::new();
-    // kfol1 runs first, so a key a renamed block leaves is free for a block created here
+    // kfol1 runs first (the yield to new top-level names, then the renamed and moved blocks), so
+    // a key a renamed block leaves or a yielded key frees is free for a block created here
     let followed = follow_keys(
         &mut ov,
         &mut res,
@@ -1630,20 +1632,30 @@ fn build_ops(
         e.issues = issues;
         return Err(e);
     }
-    // a block whose only change is a key that followed its path is not one the caller edited
+    // a block whose only change is a key that yielded to a top-level name is not one the caller
+    // edited
     let touched: BTreeSet<BlockId> = touched.difference(&followed).cloned().collect();
     Ok((ops, created, touched, names, assigned))
 }
 
-/// kfol1 (FW-PR3a): on a move or rename, a key rdy assigned (`key_auto`) follows the new path.
-/// The roots are the docs and folders an op of this write updated whose path changed; each root
-/// and every doc and folder under it whose derived key changes with the path is re-derived, in
-/// (new path, id) order, with the first free numeric suffix. All of them give up their old keys
-/// first, so one can take a key another left. Taken, as on create: every key the view and this
-/// write's ops hold, and the name of every other top-level doc or folder. An explicit key (no
-/// marker) stays. A block under a moved folder that this write does not edit gets an update op of
-/// its own, keeping its pins; one with a recorded conflict keeps its key (an edit of it must name
-/// a version). Each new key goes into `assigned`; returns the blocks that only this pass changed.
+/// kfol1 (FW-PR3a, FW-PR3b): on a move or rename, a key rdy assigned (`key_auto`) follows the
+/// new path, for the block the write itself renames or moves only: the docs and folders under a
+/// moved or renamed folder keep their keys, so a folder move changes no block under it (no
+/// suspects, no review marks, no conflicts). A doc or folder that a write edits without renaming
+/// or moving it keeps its key, even if its path changed with a folder's. A conflicted block is
+/// never re-keyed here unless the write edits it, as it is never one an op did not name.
+///
+/// First the yield (FW-PR3b): a new or renamed top-level doc or folder name equal (ignoring
+/// case) to a key rdy assigned to another block makes that key yield. It is re-derived from
+/// its holder's path with the suffix rule, and the holder gets an update op of its own, keeping
+/// its pins, when this write does not edit it. An explicit key does not yield (K2 refuses the
+/// ambiguous text and names both ids). Then the roots: the docs and folders whose name or
+/// parent an op changed, re-derived in (new path, id) order, after all of them give up their old
+/// keys, so one can take a key another left.
+///
+/// Taken, as on create: every key the view and this write's ops hold, and the name of every
+/// other top-level doc or folder. Each new key goes into `assigned`; returns the blocks that only
+/// this pass changed.
 fn follow_keys(
     ov: &mut Overlay,
     res: &mut Resolver,
@@ -1654,83 +1666,121 @@ fn follow_keys(
     assigned: &mut BTreeMap<String, String>,
 ) -> BTreeSet<BlockId> {
     let base = ov.base;
-    let mut stack: Vec<BlockId> = ops
+    let is_auto =
+        |b: &Block| b.fields.get(rdy_model::key::AUTO_FIELD) == Some(&FieldValue::Bool(true));
+    let mut only = BTreeSet::new();
+
+    // the yield: new top-level names, in order
+    let mut names: Vec<(String, BlockId)> = ops
         .iter()
         .filter_map(|op| match op {
-            Op::Update { block, .. } if tree::is_tree_type(&block.block_type) => {
+            Op::Create { block } | Op::Update { block, .. }
+                if tree::is_tree_type(&block.block_type) && block.parent.is_none() =>
+            {
                 let now = tree_path(ov, &block.id)?;
-                (Some(now) != base.path_of(&block.id)).then(|| block.id.clone())
+                (Some(&now) != base.path_of(&block.id).as_ref()).then(|| (now, block.id.clone()))
             }
             _ => None,
         })
         .collect();
-    let mut seen = BTreeSet::new();
-    let mut follow: Vec<(String, BlockId)> = vec![];
-    while let Some(id) = stack.pop() {
-        if !seen.insert(id.clone()) {
-            continue;
-        }
-        let kids: Vec<BlockId> = ov.with_sibs(Some(&id), |s| {
-            s.order.iter().map(|(_, k)| k.clone()).collect()
-        });
-        stack.extend(
-            kids.into_iter()
-                .filter(|k| ov.get(k).is_some_and(|b| tree::is_tree_type(&b.block_type))),
-        );
-        let Some(b) = ov.get(&id) else { continue };
-        let auto = b.fields.get(rdy_model::key::AUTO_FIELD) == Some(&FieldValue::Bool(true));
-        if !auto || keys::key_of(b).is_none() {
-            continue;
-        }
-        if !touched.contains(&id) && conflicts.iter().any(|c| c.block == id) {
-            continue;
-        }
-        let (Some(now), Some(was)) = (tree_path(ov, &id), base.path_of(&id)) else {
+    names.sort();
+    for (name, by) in names {
+        let Some((_, h)) = res.key_holder(&name) else {
             continue;
         };
-        let from = |p: &str| rdy_model::key::from_path(p, &b.block_type);
-        if from(&now) != from(&was) {
-            follow.push((now, id));
+        if h == by || (!touched.contains(&h) && conflicts.iter().any(|c| c.block == h)) {
+            continue;
+        }
+        if !ov.get(&h).is_some_and(is_auto) {
+            continue; // an explicit key wins
+        }
+        let Some(path) = tree_path(ov, &h) else {
+            continue;
+        };
+        res.note_key(&h, None);
+        if rekey(ov, res, ops, prior, &h, &path, assigned) {
+            only.insert(h);
         }
     }
+
+    // the roots: blocks this write renames or moves
+    let mut follow: Vec<(String, BlockId)> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Update { block, .. }
+                if tree::is_tree_type(&block.block_type)
+                    && is_auto(block)
+                    && keys::key_of(block).is_some() =>
+            {
+                let now = tree_path(ov, &block.id)?;
+                let was = base.path_of(&block.id)?;
+                let leaf = |p: &str| p.rsplit('/').next().map(str::to_string);
+                let moved = base.get(&block.id).map(|b| &b.parent) != Some(&block.parent);
+                let renamed = leaf(&now) != leaf(&was);
+                let from = |p: &str| rdy_model::key::from_path(p, &block.block_type);
+                ((moved || renamed) && from(&now) != from(&was)).then(|| (now, block.id.clone()))
+            }
+            _ => None,
+        })
+        .collect();
     follow.sort();
     for (_, id) in &follow {
         res.note_key(id, None);
     }
-    let mut only = BTreeSet::new();
     for (path, id) in follow {
-        let cur = ov.get(&id).expect("a followed block is in the view");
-        let was = cur.version_hash();
-        let mut block = cur.clone();
-        let k = keys::auto_key(&path, &block.block_type, &|c| {
-            res.key_holder(c).is_some()
-                || ov.with_sibs(None, |s| {
-                    s.holder(&rdy_model::key::fold(c), Some(&id)).is_some()
-                })
-        });
-        block
-            .fields
-            .insert("key".into(), FieldValue::Str(k.clone()));
-        res.note_key(&id, Some(&block));
-        let in_write = ops.iter_mut().find_map(|op| match op {
-            Op::Update { block: b, .. } if b.id == id => Some(b),
-            _ => None,
-        });
-        match in_write {
-            Some(b) => *b = block.clone(),
-            None => {
-                prior.push((true, block.pins.clone()));
-                ops.push(Op::Update {
-                    base: was,
-                    block: block.clone(),
-                });
-                only.insert(id.clone());
-            }
+        if rekey(ov, res, ops, prior, &id, &path, assigned) {
+            only.insert(id);
         }
-        ov.set(id.clone(), Some(block));
-        assigned.insert(id.to_string(), k);
     }
     only
+}
+
+/// Re-derives the key rdy assigned to `id` from `path` (whose old key `res` no longer counts),
+/// in the op this write has for it or, if none, in an update op of its own that keeps its pins.
+/// Returns whether the op is new.
+fn rekey(
+    ov: &mut Overlay,
+    res: &mut Resolver,
+    ops: &mut Vec<Op>,
+    prior: &mut Vec<Prior>,
+    id: &BlockId,
+    path: &str,
+    assigned: &mut BTreeMap<String, String>,
+) -> bool {
+    let cur = ov.get(id).expect("a re-keyed block is in the view");
+    let was = cur.version_hash();
+    let mut block = cur.clone();
+    let k = keys::auto_key(path, &block.block_type, &|c| {
+        res.key_holder(c).is_some()
+            || ov.with_sibs(None, |s| {
+                s.holder(&rdy_model::key::fold(c), Some(id)).is_some()
+            })
+    });
+    block
+        .fields
+        .insert("key".into(), FieldValue::Str(k.clone()));
+    res.note_key(id, Some(&block));
+    let in_write = ops.iter_mut().find_map(|op| match op {
+        Op::Create { block: b } | Op::Update { block: b, .. } if b.id == *id => Some(b),
+        _ => None,
+    });
+    let new = match in_write {
+        Some(b) => {
+            *b = block.clone();
+            false
+        }
+        None => {
+            prior.push((true, block.pins.clone()));
+            ops.push(Op::Update {
+                base: was,
+                block: block.clone(),
+            });
+            true
+        }
+    };
+    ov.set(id.clone(), Some(block));
+    assigned.insert(id.to_string(), k);
+    new
 }
 
 impl Rdy {
