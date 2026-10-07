@@ -88,6 +88,19 @@ fn spec_target(op: &str) -> Option<String> {
         "view_ls_50" => {
             "no spec target: view_list(all) over 50 open views plus the closed ones, cold (recorded for M2c)"
         }
+        "context_inflight_1k" | "impact_inflight_1k" | "context_view_1k" | "impact_view_1k" => {
+            "< 5 ms p99 with 1k in-flight changes (spec 15.1; the overlays must not regress them)"
+        }
+        "inflight_build_1k" | "coord_build_1k" => {
+            "no spec target: the in-flight state's (coordination graph's) cold build, once per published state (recorded for M2d1)"
+        }
+        "inflight_carry" => "< 1 ms incremental (spec 15.1, view materialization)",
+        "mcp_params_9mib" => {
+            "no spec target: parse_params::<WriteParams> alone on one ~9 MiB rdy_write call (recorded; the comparator for mcp_write_9mib)"
+        }
+        "mcp_write_9mib" => {
+            "no spec target: one rdy_write of 2,002 ops (~9 MiB) through the MCP parameter path, consequences included (recorded; intake: the &Value parse and the deep clone of ops cost about +30 ms per 9 MiB)"
+        }
         "render" => "< 2 s full render at 100k (spec 11)",
         "cold_open" => "< 2 s at 100k (spec 11)",
         "cold_open_lagging" => "< 2 s at 100k, index catch-up included (M2 spec 15.1)",
@@ -122,6 +135,7 @@ fn fsync_bound(op: &str) -> bool {
         || op.starts_with("include_")
         || op.starts_with("exclude_")
         || op.starts_with("land_rebase")
+        || op.starts_with("mcp_write")
 }
 
 pub fn compare(baseline: Option<&Baseline>, measured: &[Measure]) -> Vec<Verdict> {
@@ -787,6 +801,227 @@ fn tier_views(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs
     ));
 }
 
+/// Changes in flight for the `_1k` ops.
+const INFLIGHT_N: usize = 1000;
+
+/// Views the in-flight fixture spreads its changes over: `inf0` … `inf19`.
+const INFLIGHT_VIEWS: usize = 20;
+
+/// `n` single-op changes, round-robin across the views `inf0` … `inf19`, each an update of a
+/// distinct claim of canon (the first `n` claim ids by id, skipping the fixture's claim); `inf0`
+/// also updates the fixture's claim, so its impact crosses in-flight edits. Asserts the in-flight
+/// set holds at least `n` changes.
+fn inflight_views(r: &mut Rdy, fx: &Fixture, n: usize) {
+    let mut ids: Vec<BlockId> = {
+        let canon = r.read().materialized(&Scope::Canon).expect("canon");
+        canon
+            .iter()
+            .filter(|b| b.block_type == "claim" && b.id != fx.claim)
+            .map(|b| b.id.clone())
+            .collect()
+    };
+    ids.sort();
+    ids.truncate(n);
+    assert_eq!(
+        ids.len(),
+        n,
+        "canon has {n} claims to edit besides the fixture's"
+    );
+    write(
+        r,
+        "inf0",
+        json!([{"op": "update", "id": fx.claim.to_string(), "body": "in flight claim"}]),
+    )
+    .expect("update the fixture claim in inf0");
+    for (i, id) in ids.iter().enumerate() {
+        write(
+            r,
+            &format!("inf{}", i % INFLIGHT_VIEWS),
+            json!([{"op": "update", "id": id.to_string(), "body": format!("in flight {i}")}]),
+        )
+        .expect("in-flight write");
+    }
+    let held = r.read().inflight_set().expect("inflight set").changes.len();
+    assert!(held >= n, "{held} changes in flight, wanted {n}");
+}
+
+/// The in-flight ops (M2d1): the cold build of the in-flight state, the carry of one clean commit,
+/// the warm reads of `context` and `impact` in the `inflight` scope and in a view that holds
+/// in-flight edits, and the coordination graph's cold build, with `n` changes in flight (the op
+/// names say `1k`, as `tier_views` keeps `_200` on a small tree). The reads time a warm state: the
+/// graph is built once per published state, and the cold build has its own op. Run after
+/// `tier_views`, on the same project.
+fn tier_inflight(
+    out: &mut Vec<Measure>,
+    r: &mut Rdy,
+    fx: &Fixture,
+    sfx: &str,
+    runs: &Runs,
+    n: usize,
+) {
+    // the views the earlier tiers left open hold conflicts (the landing views edit claims a landing
+    // changed), and a conflicted in-flight build is never carried: close them, so the in-flight
+    // state is the `inf*` views' and the carry is the one a clean state gets
+    let open: Vec<String> = {
+        let st = r.read();
+        st.view_names()
+            .into_iter()
+            .filter(|v| st.view_head(v).is_some_and(|h| !h.closed))
+            .collect()
+    };
+    r.view_close(
+        &writer(),
+        &open,
+        "perf: the in-flight ops measure their own views",
+    )
+    .expect("close the views left open");
+    inflight_views(r, fx, n);
+    let inflight = Scope::Inflight;
+    out.push(measure_timed(
+        &format!("inflight_build_1k{sfx}"),
+        runs.materialize_cold,
+        |_| cold(r, |r| r.read().graph(&inflight).expect("inflight graph")).1,
+    ));
+    // the carry: the state is built (outside the timer), one clean commit into an in-flight view
+    // seeds the next state, and the timed part is the read of it
+    let section = fx.section.to_string();
+    out.push(measure_timed(
+        &format!("inflight_carry{sfx}"),
+        runs.incremental,
+        |i| {
+            r.read().materialized(&inflight).expect("warm inflight");
+            write(
+                r,
+                "inf1",
+                json!([{"op": "create", "type": "claim", "parent": section, "body": format!("Carried {i}.")}]),
+            )
+            .expect("carried write");
+            assert!(
+                r.read().is_built(&inflight).0,
+                "the commit did not carry the in-flight build"
+            );
+            let s = Instant::now();
+            let built = r.read().materialized(&inflight).expect("inflight");
+            let took = s.elapsed();
+            assert!(!built.is_empty());
+            took
+        },
+    ));
+    // warm reads: the state and its graph are built once, before the runs
+    let st = r.read();
+    st.graph(&inflight).expect("inflight graph");
+    out.push(measure_timed(
+        &format!("context_inflight_1k{sfx}"),
+        runs.read,
+        |_| {
+            let s = Instant::now();
+            let c = st.context(&inflight, &fx.claim).expect("context");
+            let took = s.elapsed();
+            assert!(
+                !c.inflight.is_empty(),
+                "the fixture claim is edited in flight"
+            );
+            took
+        },
+    ));
+    out.push(measure_timed(
+        &format!("impact_inflight_1k{sfx}"),
+        runs.read,
+        |_| {
+            let s = Instant::now();
+            st.impact(&inflight, &fx.claim, 3).expect("impact");
+            s.elapsed()
+        },
+    ));
+    let inf0 = Scope::View("inf0".into());
+    st.graph(&inf0).expect("inf0's graph");
+    out.push(measure_timed(
+        &format!("context_view_1k{sfx}"),
+        runs.read,
+        |_| {
+            let s = Instant::now();
+            st.context(&inf0, &fx.claim).expect("context");
+            s.elapsed()
+        },
+    ));
+    out.push(measure_timed(
+        &format!("impact_view_1k{sfx}"),
+        runs.read,
+        |_| {
+            let s = Instant::now();
+            st.impact(&inf0, &fx.claim, 3).expect("impact");
+            s.elapsed()
+        },
+    ));
+    drop(st);
+    out.push(measure_timed(
+        &format!("coord_build_1k{sfx}"),
+        runs.materialize_cold,
+        |_| cold(r, |r| r.read().coord().expect("coord")).1,
+    ));
+}
+
+/// Ops in one `mcp_write_args` call: a doc, its section and 2,000 claims.
+const MCP_CLAIMS: usize = 2000;
+
+/// The arguments of one large `rdy_write` (about 9.2 MiB serialized): a doc `mw-<i>`, a section
+/// and [`MCP_CLAIMS`] claims of 4,700 ASCII characters each, in view `mw`.
+fn mcp_write_args(i: usize) -> serde_json::Map<String, serde_json::Value> {
+    let body = "lorem ipsum dolor sit amet ".repeat(4700 / 27 + 1)[..4700].to_string();
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": format!("mw-{i}"), "title": "MW", "doc_type": "glossary"}}),
+        json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}),
+    ];
+    ops.extend(
+        (0..MCP_CLAIMS)
+            .map(|_| json!({"op": "create", "type": "claim", "parent": "$s", "body": body})),
+    );
+    match json!({"view": "mw", "ops": ops}) {
+        serde_json::Value::Object(m) => m,
+        _ => unreachable!("an object literal"),
+    }
+}
+
+/// The MCP parameter path on one ~9 MiB `rdy_write` (the intake follow-up: parameters
+/// deserialize from a `&Value`, and `rdy_write` clones every op): `parse_params` alone, then
+/// parse plus the write, consequences included. Opens the project on its own handle; run last,
+/// because its 6,000 blocks would move the ops before it.
+fn tier_mcp(out: &mut Vec<Measure>, proj: &std::path::Path) {
+    use rdy_mcp::params::parse_params;
+    use rdy_mcp::tools::{McpState, WriteParams, rdy_session, rdy_write};
+    let r = Rdy::open(proj).expect("open");
+    let mut st = McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
+    rdy_session(
+        &mut st,
+        serde_json::from_value(json!({"actor": "agent:perf", "run": "mw", "role": "writer"}))
+            .expect("session params"),
+    )
+    .expect("session");
+    let size = serde_json::to_vec(&mcp_write_args(0))
+        .expect("serialize")
+        .len();
+    assert!(size >= 9 * 1024 * 1024, "{size} bytes is not ~9 MiB");
+    assert!(
+        size < rdy_mcp::tools::MAX_REQUEST_BYTES,
+        "{size} bytes is over the request limit"
+    );
+    out.push(measure_timed("mcp_params_9mib", 3, |i| {
+        let args = mcp_write_args(i);
+        let s = Instant::now();
+        let p = parse_params::<WriteParams>("rdy_write", args).expect("parse");
+        let took = s.elapsed();
+        assert_eq!(p.ops.len(), MCP_CLAIMS + 2);
+        took
+    }));
+    out.push(measure_timed("mcp_write_9mib", 3, |i| {
+        let args = mcp_write_args(i);
+        let s = Instant::now();
+        let p = parse_params::<WriteParams>("rdy_write", args).expect("parse");
+        rdy_write(&mut st, p).expect("rdy_write");
+        s.elapsed()
+    }));
+}
+
 /// The edit loop: a briefing over a doc, a write that cites a briefing (the check on, a hit) and a
 /// write followed by its consequences. Run in a fresh view `eb` where the fixture's section is
 /// `stable`, so every write there is checked against the registry. `sfx` as for [`tier_reads`].
@@ -1082,7 +1317,10 @@ pub fn run_workload() -> Vec<Measure> {
     // the view ops last: the views and landings they leave behind would move the ops above
     let mut r = Rdy::open(&proj).expect("open");
     tier_views(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
+    tier_inflight(&mut out, &mut r, &fx, "", &TYPICAL_RUNS, INFLIGHT_N);
     drop(r);
+    // the large `rdy_write` last, on a reopened project: its 6,000 blocks move nothing above
+    tier_mcp(&mut out, &proj);
     if crate::fixtures::deep() {
         out.extend(run_large_tier(dir.path()));
     }
@@ -1201,6 +1439,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     let mut r = Rdy::open(&proj).expect("open");
     prepare_rebased_view(&mut r, &fx, &LARGE_RUNS);
     tier_views(&mut out, &mut r, &fx, sfx, &LARGE_RUNS);
+    tier_inflight(&mut out, &mut r, &fx, sfx, &LARGE_RUNS, INFLIGHT_N);
     out
 }
 
@@ -1440,6 +1679,140 @@ mod tests {
         );
         for m in &out {
             assert!(m.median_ms > 0.0 || m.op == "view_incremental", "{m:?}");
+        }
+    }
+
+    /// The in-flight ops run end to end on a small tree (n scaled down to the tree's claims).
+    #[test]
+    fn d1perf1_the_inflight_ops_run_on_a_small_tree() {
+        rdy_model::seed_ids_for_tests(0x7064_6566);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let fx = fixture(&r, &docs);
+        let runs = Runs {
+            write: 1,
+            read: 2,
+            tree: 1,
+            materialize_cold: 2,
+            incremental: 2,
+            view_ops: 2,
+            landing: 2,
+            view_changes: 12,
+            landing_views: 8,
+        };
+        let mut out = vec![];
+        tier_inflight(&mut out, &mut r, &fx, "", &runs, 40);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "inflight_build_1k",
+                "inflight_carry",
+                "context_inflight_1k",
+                "impact_inflight_1k",
+                "context_view_1k",
+                "impact_view_1k",
+                "coord_build_1k"
+            ]
+        );
+    }
+
+    /// After the view ops (which leave conflicted views open), the carry still carries: the tier
+    /// closes what the earlier tiers left open.
+    #[test]
+    fn d1perf1_the_inflight_ops_carry_after_the_view_ops() {
+        rdy_model::seed_ids_for_tests(0x7064_6566);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let fx = fixture(&r, &docs);
+        let runs = Runs {
+            write: 1,
+            read: 2,
+            tree: 1,
+            materialize_cold: 2,
+            incremental: 2,
+            view_ops: 2,
+            landing: 2,
+            view_changes: 12,
+            landing_views: 8,
+        };
+        prepare_rebased_view(&mut r, &fx, &runs);
+        tier_views(&mut vec![], &mut r, &fx, "", &runs);
+        assert!(
+            !r.read()
+                .conflicts(&Scope::Inflight)
+                .expect("conflicts")
+                .is_empty(),
+            "the view ops leave a conflicted in-flight state"
+        );
+        let mut out = vec![];
+        tier_inflight(&mut out, &mut r, &fx, "", &runs, 40);
+        rdy_model::unseed_ids_for_tests();
+        assert_eq!(out.len(), 7);
+        assert!(
+            r.read()
+                .conflicts(&Scope::Inflight)
+                .expect("conflicts")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn d1perf1_the_m2d1_ops_state_their_targets() {
+        for op in [
+            "context_inflight_1k",
+            "impact_inflight_1k",
+            "context_view_1k",
+            "impact_view_1k",
+            "context_inflight_1k_50k",
+        ] {
+            assert!(spec_target(op).unwrap().contains("< 5 ms p99"), "{op}");
+        }
+        for op in [
+            "inflight_build_1k",
+            "coord_build_1k",
+            "mcp_params_9mib",
+            "mcp_write_9mib",
+        ] {
+            assert!(spec_target(op).unwrap().contains("no spec target"), "{op}");
+        }
+        assert!(spec_target("inflight_carry").unwrap().contains("< 1 ms"));
+        assert!(fsync_bound("mcp_write_9mib") && !fsync_bound("mcp_params_9mib"));
+    }
+
+    #[test]
+    #[ignore = "runs the typical perf workload; cargo test -p rdy-qa --release --lib -- --ignored d1perf1"]
+    fn d1perf1_the_m2d1_ops_have_spec_targets_and_run() {
+        let ops = [
+            "inflight_build_1k",
+            "inflight_carry",
+            "context_inflight_1k",
+            "impact_inflight_1k",
+            "context_view_1k",
+            "impact_view_1k",
+            "coord_build_1k",
+            "mcp_params_9mib",
+            "mcp_write_9mib",
+        ];
+        for op in ops {
+            assert!(spec_target(op).is_some(), "{op} has no target");
+        }
+        let ms = run_workload();
+        for op in ops {
+            let m = ms
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            assert!(m.median_ms > 0.0);
         }
     }
 
