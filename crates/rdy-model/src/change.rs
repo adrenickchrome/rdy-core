@@ -35,7 +35,7 @@ pub enum EditorialClass {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Justification {
-    Implements(BlockId),
+    Implements(Vec<BlockId>),
     Editorial {
         class: EditorialClass,
         reason: String,

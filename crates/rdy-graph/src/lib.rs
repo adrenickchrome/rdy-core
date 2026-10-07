@@ -95,7 +95,7 @@ pub struct Suspect {
     pub reason: String,
 }
 
-/// The edges, versions and decision statuses of one state. Its maps are persistent, so a clone is
+/// The edges, content hashes and decision statuses of one state. Its maps are persistent, so a clone is
 /// O(1) and [`Graph::with_changes`] carries a graph across a write in O(changed edges × log n).
 /// Every edge list is ordered by (generator id, index within the generator's edges), where an
 /// edge's generator is the block whose own content makes it (see `Graph::edges_of`).
@@ -104,21 +104,15 @@ pub struct Graph {
     out: OrdMap<BlockId, Vec<Edge>>,
     inc: OrdMap<BlockId, Vec<Edge>>,
     decision_status: OrdMap<BlockId, DecisionStatus>,
-    versions: OrdMap<BlockId, Hash>,
+    /// lpin1: each block's [`Block::content_hash`], which a pin is checked against.
+    contents: OrdMap<BlockId, Hash>,
 }
 
 const EMPTY: &[Edge] = &[];
 
+/// Whether `a` and `b` differ only in their pins and derived fields.
 pub fn same_content(a: &Block, b: &Block) -> bool {
-    let strip = |x: &Block| {
-        let mut x = x.clone();
-        x.pins.clear();
-        for f in ["status", "decided_at", "lifecycle"] {
-            x.fields.remove(f);
-        }
-        x
-    };
-    strip(a) == strip(b)
+    a.content_hash() == b.content_hash()
 }
 
 /// How strong a suspect's reason is: revoked, then superseded, then deleted, then changed.
@@ -168,18 +162,7 @@ pub const IMPACT_LINKS: [&str; 6] = [
 ];
 /// imp2: link kinds impact lists at depth 1 (decisions that refine or supersede the queried
 /// block) without following them.
-const IMPACT_SHOWN: [&str; 2] = [decision::REFINES, decision::SUPERSEDES];
-
-/// Where the graph reads a block's current content when it checks a pin.
-pub trait BlockLookup {
-    fn block(&self, id: &BlockId) -> Option<&Block>;
-}
-
-impl BlockLookup for BTreeMap<BlockId, Block> {
-    fn block(&self, id: &BlockId) -> Option<&Block> {
-        self.get(id)
-    }
-}
+pub const IMPACT_SHOWN: [&str; 2] = [decision::REFINES, decision::SUPERSEDES];
 
 /// The block whose own content makes `e`: the child for `Contains`, `from` otherwise.
 fn generator(e: &Edge) -> &BlockId {
@@ -216,7 +199,7 @@ impl Graph {
     pub fn build_from<'a>(blocks: impl IntoIterator<Item = &'a Block>) -> Graph {
         let mut g = Graph::default();
         for b in blocks {
-            g.versions.insert(b.id.clone(), b.version_hash());
+            g.contents.insert(b.id.clone(), b.content_hash());
             if let Some(s) = decision::status(b) {
                 g.decision_status.insert(b.id.clone(), s);
             }
@@ -267,7 +250,7 @@ impl Graph {
         edges
     }
 
-    /// gcar1: `self` with every edge, version and status the `old` blocks generate removed and
+    /// gcar1: `self` with every edge, content hash and status the `old` blocks generate removed and
     /// those of the `new` blocks added. With `old` the previous versions of a write's blocks and
     /// `new` their current versions, the result equals a rebuild of the new state.
     pub fn with_changes<'a>(
@@ -277,7 +260,7 @@ impl Graph {
     ) -> Graph {
         let mut g = self.clone();
         for b in old {
-            g.versions.remove(&b.id);
+            g.contents.remove(&b.id);
             g.decision_status.remove(&b.id);
             for e in Graph::edges_of(b) {
                 unlist(&mut g.out, &e.from, &e);
@@ -285,7 +268,7 @@ impl Graph {
             }
         }
         for b in new {
-            g.versions.insert(b.id.clone(), b.version_hash());
+            g.contents.insert(b.id.clone(), b.content_hash());
             if let Some(s) = decision::status(b) {
                 g.decision_status.insert(b.id.clone(), s);
             }
@@ -432,40 +415,29 @@ impl Graph {
         out
     }
 
-    pub fn suspects(
-        &self,
-        blocks: &dyn BlockLookup,
-        old: &dyn Fn(&Hash) -> Option<Block>,
-    ) -> Vec<Suspect> {
+    pub fn suspects(&self) -> Vec<Suspect> {
         unique(
             self.out
                 .values()
                 .flatten()
-                .filter_map(|e| self.edge_suspect(e, blocks, old)),
+                .filter_map(|e| self.edge_suspect(e)),
         )
     }
 
     /// The suspects whose `block` is `id`: checks only that block's own outgoing edges.
-    pub fn suspects_of(
-        &self,
-        id: &BlockId,
-        blocks: &dyn BlockLookup,
-        old: &dyn Fn(&Hash) -> Option<Block>,
-    ) -> Vec<Suspect> {
+    pub fn suspects_of(&self, id: &BlockId) -> Vec<Suspect> {
         unique(
             self.outgoing(id)
                 .iter()
-                .filter_map(|e| self.edge_suspect(e, blocks, old)),
+                .filter_map(|e| self.edge_suspect(e)),
         )
     }
 
-    fn edge_suspect(
-        &self,
-        e: &Edge,
-        blocks: &dyn BlockLookup,
-        old: &dyn Fn(&Hash) -> Option<Block>,
-    ) -> Option<Suspect> {
-        if e.kind == EdgeKind::Contains {
+    /// lpin1: a pinned premise edge is `deleted` when its target is gone and `changed` when the
+    /// pin differs from the target's content hash. A block is never a suspect of itself: a
+    /// write never pins a block to its own id, and a stray self-pin is ignored here.
+    fn edge_suspect(&self, e: &Edge) -> Option<Suspect> {
+        if e.kind == EdgeKind::Contains || e.from == e.to {
             return None;
         }
         // a superseding or revoking decision's own link is the cause, not a suspect
@@ -491,18 +463,9 @@ impl Graph {
                 if !premise {
                     return None;
                 }
-                match (e.pin, self.versions.get(&e.to)) {
+                match (e.pin, self.contents.get(&e.to)) {
                     (Some(_), None) => "deleted",
-                    (Some(pin), Some(cur)) if pin != *cur => {
-                        let same = match (old(&pin), blocks.block(&e.to)) {
-                            (Some(a), Some(b)) => same_content(&a, b),
-                            _ => false,
-                        };
-                        if same {
-                            return None;
-                        }
-                        "changed"
-                    }
+                    (Some(pin), Some(cur)) if pin != *cur => "changed",
                     _ => return None,
                 }
             }

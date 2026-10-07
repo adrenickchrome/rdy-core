@@ -75,13 +75,14 @@ fn canonical_encoding_is_frozen() {
         change(None).id().to_string(),
         "28f9ecd6025c8aa5263814e2e20f299b72d7cdc73955de2df3ad8d8e3517e604"
     );
+    // M2c3 llst1: Justification::Implements holds a list; the hash was recomputed
     assert_eq!(
-        change(Some(Justification::Implements(
+        change(Some(Justification::Implements(vec![
             BlockId::parse("D-W2HXR").unwrap()
-        )))
+        ])))
         .id()
         .to_string(),
-        "abf5f9e885d140c62af8f9b47a862804e9e5ac8c4adf1b7a5b0c357256197289"
+        "75a4e97bb2ba0c16466f8c0d3125ad8fbd37f84347b8fecff2a5d8f229d6db53"
     );
     assert_eq!(
         change(Some(Justification::Editorial {

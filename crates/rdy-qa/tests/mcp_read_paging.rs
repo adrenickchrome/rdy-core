@@ -101,11 +101,17 @@ fn rpag1_a_page_of_a_read_that_moved_is_stale() {
     let e = read(&mut st, json!({"page": next})).unwrap_err();
     assert_eq!(e.code, "E_PAGE_STALE", "{e}");
     assert!(e.message.contains("moved since its first page"), "{e}");
-    assert_eq!(e.fix, "the read moved on; start again without a cursor");
+    assert_eq!(
+        e.fix,
+        "the read or briefing moved; start again without a cursor"
+    );
     let e = read(&mut st, json!({"page": format!("{}:5", foreign_token())})).unwrap_err();
     assert_eq!(e.code, "E_PAGE_STALE", "{e}");
     assert!(e.message.contains("unknown"), "{e}");
-    assert_eq!(e.fix, "the read moved on; start again without a cursor");
+    assert_eq!(
+        e.fix,
+        "the read or briefing moved; start again without a cursor"
+    );
 }
 
 #[test]

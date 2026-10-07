@@ -55,9 +55,7 @@ fn priv1_the_graph_builds_from_an_iterator_and_looks_blocks_up_through_the_looku
         .unwrap()
         .clone();
     let g = rdy_graph::Graph::build_from(m.iter());
-    let lookup: &dyn rdy_graph::BlockLookup = &*m;
-    let none = |_: &rdy_model::Hash| None;
-    assert!(g.suspects(lookup, &none).is_empty());
+    assert!(g.suspects().is_empty());
     let doc = m.iter().find(|b| b.block_type == "doc").unwrap();
     assert!(
         !g.outgoing(&doc.id).is_empty(),

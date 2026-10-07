@@ -4,12 +4,13 @@
 //! closure on the writer. Relative paths in args resolve against the session's working
 //! directory.
 use rdy_engine::brief::Coverage;
+use rdy_engine::brief::e_page_alone;
 use rdy_engine::code_brief::e_code_path_alone;
-use rdy_engine::consequence::write_and_report;
+use rdy_engine::consequence::{land_and_report, propose_and_report, write_and_report};
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::{
     E_BAD_INPUT, E_LIMIT, E_PERMISSION, HISTORY_MAX, LandOptions, RdyError, ReadState, Relay,
-    Scope, Session, block_from_yaml, block_to_yaml, check_path, resolve_pack, view_api,
+    Scope, Session, block_to_yaml, check_path, resolve_pack, view_api,
 };
 use rdy_mcp::tools::MAX_TOKENS_LIMIT;
 use rdy_model::{ActorRun, RelayEvidence, Role};
@@ -114,6 +115,8 @@ struct BriefArgs {
     ids: Option<Vec<String>>,
     path: Option<String>,
     code_path: Option<String>,
+    /// Continue a cut briefing: its `next` cursor. Alone (scope and max_tokens allowed).
+    page: Option<String>,
     scope: Option<String>,
     /// A write target, resolved as `edit_block` writes it: this view when it has a head, else
     /// canon.
@@ -165,6 +168,8 @@ struct EditBlockArgs {
 struct ProposeArgs {
     title: String,
     view: Option<String>,
+    summary: Option<String>,
+    max_tokens: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -372,7 +377,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             parse(
                 op,
                 args,
-                "{ids?, path?, code_path?, scope?, view?, max_tokens?}",
+                "{ids?, path?, code_path?, page?, scope?, view?, max_tokens?}",
             )?,
         ),
         "render" => render(cx, parse(op, args, "{out, scope?}")?),
@@ -381,7 +386,10 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "new_folder" => new_folder(cx, parse(op, args, "{path, view?}")?),
         "new_doc" => new_doc(cx, parse(op, args, "{path, view?, doc_type?, title?}")?),
         "edit_block" => edit_block(cx, parse(op, args, "{yaml, view?, brief?, max_tokens?}")?),
-        "propose" => propose(cx, parse(op, args, "{title, view?}")?),
+        "propose" => propose(
+            cx,
+            parse(op, args, "{title, view?, summary?, max_tokens?}")?,
+        ),
         "approve" => approve(
             cx,
             parse(
@@ -404,7 +412,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             parse(
                 op,
                 args,
-                "{op, name?, from?, base?, pin?, view?, views?, changes?, cascade?, a?, b?, all?, stale?, reason?, owner?, none?, target?}",
+                "{op, name?, from?, base?, pin?, view?, views?, changes?, cascade?, a?, b?, all?, stale?, reason?, owner?, none?, target?, max_tokens?}",
             )?,
         ),
         _ => Err(RdyError::new(
@@ -567,6 +575,13 @@ fn brief(cx: &OpContext, a: BriefArgs) -> Result<Value, RdyError> {
             }
         }
     };
+    if let Some(cursor) = &a.page {
+        if a.ids.is_some() || a.path.is_some() || a.code_path.is_some() {
+            return Err(e_page_alone());
+        }
+        let b = st.brief_page(&scope, &cx.engine.briefs(), cursor, a.max_tokens)?;
+        return Ok(to_json(&b));
+    }
     if let Some(cp) = &a.code_path {
         if a.ids.is_some() || a.path.is_some() {
             return Err(e_code_path_alone());
@@ -646,17 +661,19 @@ fn edit_block(cx: &OpContext, a: EditBlockArgs) -> Result<Value, RdyError> {
     check_max_tokens(a.max_tokens)?;
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
-    let block = block_from_yaml(&a.yaml)?;
-    let (brief, max_tokens, v) = (a.brief, a.max_tokens, view.clone());
+    let (yaml, brief, max_tokens, v) = (a.yaml, a.brief, a.max_tokens, view.clone());
     write_and_report(cx.engine, &v, max_tokens, move |r| {
-        r.edit_block(&s, &view, block, brief)
+        r.edit_yaml(&s, &view, &yaml, brief)
     })
 }
 
 fn propose(cx: &OpContext, a: ProposeArgs) -> Result<Value, RdyError> {
+    check_max_tokens(a.max_tokens)?;
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
-    write_typed(cx.engine, move |r| r.propose(&s, &view, &a.title))
+    propose_and_report(cx.engine, a.max_tokens, move |r| {
+        r.propose_subset(&s, &view, &a.title, None, a.summary.as_deref())
+    })
 }
 
 fn approve(cx: &OpContext, a: ApproveArgs) -> Result<Value, RdyError> {
@@ -704,7 +721,7 @@ fn approve(cx: &OpContext, a: ApproveArgs) -> Result<Value, RdyError> {
         relay,
         evidence: None,
     };
-    write_typed(cx.engine, move |r| r.land_with(&s, &a.proposal, opts))
+    land_and_report(cx.engine, move |r| r.land_with(&s, &a.proposal, opts))
 }
 
 fn tag(cx: &OpContext, a: TagArgs) -> Result<Value, RdyError> {

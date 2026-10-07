@@ -1,7 +1,8 @@
 use base64::Engine as _;
+use rdy_engine::brief::e_page_alone;
 use rdy_engine::code_brief::e_code_path_alone;
-use rdy_engine::consequence::write_and_report;
-use rdy_engine::engine::{Engine, open_report_json, write_typed};
+use rdy_engine::consequence::{propose_and_report, write_and_report};
+use rdy_engine::engine::{Engine, open_report_json};
 use rdy_engine::*;
 use rdy_model::{BlockId, EditorialClass, Justification, Role};
 use rdy_schema::{BodyRule, Trait};
@@ -136,6 +137,14 @@ pub struct EditorialParams {
     pub reason: String,
 }
 
+/// llst1: one text, or a list of them.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WriteParams {
     pub view: Option<String>,
@@ -146,13 +155,13 @@ pub struct WriteParams {
     /// {"op":"delete","id":<id or path>,"base":<version>?}
     /// {"op":"rebalance","parent":<id or path>?}
     /// {"op":"repin","id":<id or path>,"base":<version>?,"targets":[<id or path>]?}
-    /// links: {"<kind>": [{"target": "<id or path>", "part": "<optional words>"}]}, e.g. {"decided_by": [{"target": "D-W2HXR"}]}. An update replaces only the link kinds it names; "<kind>": [] removes that kind.
+    /// links: {"<kind>": <target> | [<target>, …] | [{"target": "<id, key or path>", "part": "<optional words>"}]}, e.g. {"decided_by": [{"target": "D-W2HXR"}]}. An update replaces only the link kinds it names; "<kind>": [] removes that kind.
     /// after puts a block behind a sibling and before ahead of one (before the first child makes it first); give one, or neither to append.
     /// repin re-pins a block's references and links (all, or the targets named) to their current versions, after you've checked them: it clears "changed" suspects.
     /// Ids, parents, afters, befores and link targets also take paths (wallets/transactions); a move without parent goes to the top level (docs and folders); rebalance re-keys a parent's children (frozen decisions stay put; in one write it must come before any other op on those children, and a child it re-keys can't be edited again in the same write).
     pub ops: Vec<Value>,
-    /// The decision this change carries out.
-    pub implements: Option<String>,
+    /// The decisions this change carries out: an id, key or path, or a list of them.
+    pub implements: Option<OneOrMany>,
     pub editorial: Option<EditorialParams>,
     pub message: Option<String>,
     /// The briefing token from rdy_brief. Required when the write touches stable content.
@@ -217,6 +226,8 @@ pub struct BriefParams {
     pub path: Option<String>,
     /// A file in a linked code repo (relative to its top folder): brief on the design blocks its commits implement (Implements: trailers) and the blocks whose reflects globs match it. Not with ids or path.
     pub code_path: Option<String>,
+    /// Continue a cut briefing: its next cursor. Alone (scope and max_tokens allowed); the scope must be the first page's.
+    pub page: Option<String>,
     /// The view to brief in; defaults to the session's view.
     pub scope: Option<String>,
     /// The budget for the briefing; the longest lists are cut to fit.
@@ -229,6 +240,10 @@ pub struct ProposeParams {
     pub title: String,
     /// Propose only these changes (ids from rdy_view show). The set must be closed under dependencies, or it is E_DEPS_MISSING. Omit to propose all the view's changes. A new version of an open proposal replaces the old one.
     pub changes: Option<Vec<String>>,
+    /// Your plain-words summary of the proposal, for the person who approves it. Stored with the version; a new version without it keeps the last one.
+    pub summary: Option<String>,
+    /// The budget for the consequences in the result.
+    pub max_tokens: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -404,11 +419,6 @@ fn read_target(
     Ok((scope, bid))
 }
 
-fn id_of(s: &str) -> Result<BlockId, RdyError> {
-    BlockId::parse(s)
-        .map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "ids look like b-7KQ2M"))
-}
-
 const NAME_RULES: &str = "names: 1-64 characters from A-Z a-z 0-9 . _ -; not starting with . or _; not ending .yaml or .yml; not index; not shaped like a block id; not a Windows device name (con, prn, aux, nul, com1-9, lpt1-9); unique among siblings ignoring case. Omit name on create to have one assigned from the title.";
 
 /// Every write op and its JSON shape (`?` marks optional keys). rdy_schema lists them under
@@ -438,7 +448,7 @@ pub const WRITE_OPS: &[(&str, &str)] = &[
 ];
 
 /// doc1: the shape of a block's `links`.
-pub const LINK_SHAPE: &str = r#"links: {"<kind>": [{"target": "<id or path>", "part": "<optional: the words of the target this link is about>"}]}"#;
+pub const LINK_SHAPE: &str = r#"links: {"<kind>": "<id, key or path>" | ["<target>", …] | [{"target": "<id, key or path>", "part": "<optional: the words of the target this link is about>"}]}"#;
 pub const LINK_EXAMPLE: &str =
     r#"{"decided_by": [{"target": "D-W2HXR"}], "describes": [{"target": "wallets/transactions"}]}"#;
 
@@ -449,16 +459,14 @@ fn link_example() -> Value {
     serde_json::from_str(LINK_EXAMPLE).expect("LINK_EXAMPLE is JSON")
 }
 
-/// Whether `v` has the shape {"<kind>": [{"target": "<id or path>", ...}]}.
+/// Whether `v` has the shape of `LINK_SHAPE`: each kind is a string, or a list of strings and
+/// `{"target": <string>, ...}` objects.
 fn links_shape_ok(v: &Value) -> bool {
+    let entry = |x: &Value| x.is_string() || x.get("target").is_some_and(Value::is_string);
     v.as_object().is_some_and(|kinds| {
-        kinds.values().all(|l| {
-            l.as_array().is_some_and(|items| {
-                items
-                    .iter()
-                    .all(|x| x.get("target").is_some_and(Value::is_string))
-            })
-        })
+        kinds
+            .values()
+            .all(|l| l.is_string() || l.as_array().is_some_and(|items| items.iter().all(entry)))
     })
 }
 
@@ -588,9 +596,6 @@ pub fn rdy_tags(st: &mut McpState, _p: TagsParams) -> Result<Value, RdyError> {
     let current = versions.last().map(|v| v.name.clone());
     Ok(json!({"versions": versions, "current": current}))
 }
-
-/// The fix of `E_PAGE_STALE`: the read a cursor pages on is gone or has moved.
-const PAGE_STALE_FIX: &str = "the read moved on; start again without a cursor";
 
 /// A read's blocks, one entry each in reading order (rpag1), after any pattern (rpat1).
 struct ReadEntries {
@@ -982,7 +987,101 @@ pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
 const TEXT_RULES: &str = "Bodies and text fields: **bold**, *italic*, `code`, [link](https://… or a relative path), and in bodies - bullets and 1. numbered lists (indent two spaces to nest). No raw HTML. {{id}} or {{id|words}} references a block; \\{{ is a literal {{ and a leading @ in words is written \\@. fields.key: optional short human id, unique per project ignoring case, letters/digits/-_. , not shaped like a block id. fields.reflects: optional list of code path globs (e.g. crates/*/src/error.rs) this block follows; rdy_brief {code_path} lists the blocks whose globs match a file.";
 
 /// How to edit with briefings, in `rdy_schema`.
-pub const EDIT_LOOP_DOC: &str = "Brief before editing: rdy_brief {ids or path} returns governs, dependents, will_go_stale, suspects and base (each covered block's version and the briefing token). Pass brief: <token> on rdy_write, rdy_decide, rdy_supersede (inside decision) and rdy_revoke. A write that touches stable content (a block whose own or inherited lifecycle is stable before or after the op; for a create, its parent's) needs a current briefing that covers it: brief the block, or its parent to create under it. A briefing is current while no block it recorded has moved in the write's view. Drafts need none; a stale one there only warns (W_BRIEF_STALE). E_BRIEF_REQUIRED and E_BRIEF_STALE carry a fresh briefing for exactly the blocks the write touches: retry with its base.token. Every write response lists consequences: {id, block, kind (suspect or dependent), because {edge, changed}, follow_up (update, confirm, reaffirm or resolve)}; max_tokens bounds them.";
+pub const EDIT_LOOP_DOC: &str = "Brief before editing: rdy_brief {ids or path} returns governs, dependents, lineage (the refines, supersedes and revokes edges of the covered blocks, in both directions: {block, kind, direction (in or out), on, summary}; the incoming refines and supersedes are dependents too), will_go_stale, suspects, inflight (other views and open proposals that change the blocks) and base (each covered block's version and the briefing token). Pass brief: <token> on rdy_write, rdy_decide, rdy_supersede (inside decision) and rdy_revoke. A write that touches stable content (a block whose own or inherited lifecycle is stable before or after the op; for a create, its parent's) needs a current briefing that covers it: brief the block, or its parent to create under it. A briefing is current while no block it recorded has moved in the write's view. Drafts need none; a stale one there only warns (W_BRIEF_STALE). E_BRIEF_REQUIRED and E_BRIEF_STALE carry a fresh briefing for exactly the blocks the write touches: retry with its base.token. Every write response lists consequences: {id, block, kind (conflict, suspect or dependent; tension arrives with tensions), because {edge, changed}, follow_up (update, confirm, reaffirm or resolve)}; max_tokens bounds them. A cut briefing carries next and per-doc counts (docs): pass page: <next> alone, in the scope of the first page, to read the rest. Every page of a cut briefing has truncated: true and docs; the last page has no next. A page is stale (E_PAGE_STALE) when a paged entry other than inflight came, went or changed; inflight is advice and may shift between pages. rdy_view include, exclude and undo return consequences too, with conflict entries (follow_up resolve) for conflicts the op exposed; rdy_propose returns the consequences for canon of landing it (advice). An entry with already_written: true is a block your view already rewrote: confirm it (repin) unless its meaning changed.";
+
+/// `rdy_schema`'s error rows: `(code, when, fix)`.
+pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
+    (
+        "E_VIEW_OWNER",
+        "an agent session commits, includes, excludes, undoes, closes or proposes in a view another session owns, or acts in work, the human's view; a view with no owner takes a commit, which claims it, and refuses the rest",
+        "fork the view, or include its changes into your own view; an agent with no view writes to work-<actor>, never to the human's work",
+    ),
+    (
+        "E_VIEW_EXISTS",
+        "a view of that name exists",
+        "pick a free name, or fork the view under another name",
+    ),
+    (
+        "E_VIEW_CLOSED",
+        "the view is closed and takes no write, include or exclude",
+        "reopen it with rdy_view {op: \"undo\", view, target: <the close op>}, or fork it",
+    ),
+    (
+        "E_HAS_DEPENDENTS",
+        "changes in the view depend on a change you exclude (each is an issue)",
+        "exclude them too, or pass cascade: true",
+    ),
+    (
+        "E_DEPS_MISSING",
+        "a proposal subset leaves out changes its members depend on (each is an issue)",
+        "add the missing changes to rdy_propose's changes",
+    ),
+    (
+        "E_CONFLICT_UNRESOLVED",
+        "the proposal version carries a conflict it does not resolve (each is an issue)",
+        "write the block from the version you want, then propose again",
+    ),
+    (
+        "E_PROPOSAL_MOVED",
+        "a newer version exists, or a landing since the version changed blocks it writes, or the project requires proposals on the current canon",
+        "propose again; a human approves the latest P-x@n",
+    ),
+    (
+        "E_UNDO_BLOCKED",
+        "an undo would leave the view inconsistent (each blocking op is an issue)",
+        "undo with cascade: true, or undo the dependent ops first",
+    ),
+    (
+        "E_UNDO_LANDING",
+        "an undo would bring back or remove work that has landed",
+        "a landing is undone by a revoking decision (rdy_revoke)",
+    ),
+    (
+        "E_NOTHING_TO_UNDO",
+        "you have no undoable op of your own on the view",
+        "name an op with target (rdy_view show lists them)",
+    ),
+    (
+        "E_DAEMON_START",
+        "the daemon couldn't be started or reached",
+        "read the last lines of .rdy/run/daemon.log it cites; run rdy serve in the foreground to see why",
+    ),
+    (
+        "E_DAEMON_VERSION",
+        "another binary version's daemon has clients",
+        "close them, or rdy serve --stop",
+    ),
+    (
+        "E_DAEMON_GONE",
+        "the daemon closed mid-request",
+        "check rdy_overview or rdy status; a write may or may not have committed; it is not retried",
+    ),
+    (
+        "E_BRIEF_REQUIRED",
+        "a write touches stable content and cites no briefing, or one that does not cover the block",
+        "retry with the token of the briefing the error carries",
+    ),
+    (
+        "E_BRIEF_STALE",
+        "the cited briefing is unknown, or a block it recorded moved in the write's view",
+        "read what moved, then retry with the token of the briefing the error carries",
+    ),
+    (
+        "W_BRIEF_STALE",
+        "a write to drafts cited a stale or unknown briefing (it went ahead)",
+        "brief again before the next write if the moved blocks matter",
+    ),
+    (
+        "E_PAGE_STALE",
+        "a page cursor (the next of a cut rdy_brief or rdy_read) is unknown to this session, or what it pages (a briefing or a read) moved since its first page",
+        PAGE_STALE_FIX,
+    ),
+    (
+        "W_SKELETON_MISSING",
+        "a doc lacks a required section of its doc_type; reported once per doc per session, and later writes count the repeats in warnings_repeated",
+        "add the section, or give the doc a doc_type without it (page)",
+    ),
+];
 
 pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError> {
     let st_ = st.engine.read();
@@ -1033,26 +1132,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             "ops": WRITE_OPS.iter().map(|(n, s)| (n.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
             "views": view_tools::SCHEMA_DOC,
             "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT, "socket_line_bytes": MAX_REQUEST_BYTES, "transport": TRANSPORT_NOTE},
-            "errors": {
-                "E_VIEW_OWNER": {"when": "a non-human session commits into a view it doesn't own", "fix": "write to your own view, fork it, or include its changes into your own view"},
-                "E_VIEW_EXISTS": {"when": "a view of that name exists", "fix": "pick a free name, or fork the view under another name"},
-                "E_VIEW_CLOSED": {"when": "the view is closed and takes no write, include or exclude", "fix": "reopen it with rdy_view {op: \"undo\", view, target: <the close op>}, or fork it"},
-                "E_HAS_DEPENDENTS": {"when": "changes in the view depend on a change you exclude (each is an issue)", "fix": "exclude them too, or pass cascade: true"},
-                "E_DEPS_MISSING": {"when": "a proposal subset leaves out changes its members depend on (each is an issue)", "fix": "add the missing changes to rdy_propose's changes"},
-                "E_CONFLICT_UNRESOLVED": {"when": "the proposal version carries a conflict it does not resolve (each is an issue)", "fix": "write the block from the version you want, then propose again"},
-                "E_PROPOSAL_MOVED": {"when": "a newer version exists, or a landing since the version changed blocks it writes, or the project requires proposals on the current canon", "fix": "propose again; a human approves the latest P-x@n"},
-                "E_UNDO_BLOCKED": {"when": "an undo would leave the view inconsistent (each blocking op is an issue)", "fix": "undo with cascade: true, or undo the dependent ops first"},
-                "E_UNDO_LANDING": {"when": "an undo would bring back or remove work that has landed", "fix": "a landing is undone by a revoking decision (rdy_revoke)"},
-                "E_NOTHING_TO_UNDO": {"when": "you have no undoable op of your own on the view", "fix": "name an op with target (rdy_view show lists them)"},
-                "E_DAEMON_START": {"when": "the daemon couldn't be started or reached", "fix": "read the last lines of .rdy/run/daemon.log it cites; run rdy serve in the foreground to see why"},
-                "E_DAEMON_VERSION": {"when": "another binary version's daemon has clients", "fix": "close them, or rdy serve --stop"},
-                "E_DAEMON_GONE": {"when": "the daemon closed mid-request", "fix": "check rdy_overview or rdy status; a write may or may not have committed; it is not retried"},
-                "E_BRIEF_REQUIRED": {"when": "a write touches stable content and cites no briefing, or one that does not cover the block", "fix": "retry with the token of the briefing the error carries"},
-                "E_BRIEF_STALE": {"when": "the cited briefing is unknown, or a block it recorded moved in the write's view", "fix": "read what moved, then retry with the token of the briefing the error carries"},
-                "W_BRIEF_STALE": {"when": "a write to drafts cited a stale or unknown briefing (it went ahead)", "fix": "brief again before the next write if the moved blocks matter"},
-                "E_PAGE_STALE": {"when": "a page cursor's read moved since its first page, or this session does not know the cursor", "fix": PAGE_STALE_FIX},
-                "W_SKELETON_MISSING": {"when": "a doc lacks a required section of its doc_type; reported once per doc per session, and later writes count the repeats in warnings_repeated", "fix": "add the section, or give the doc a doc_type without it (page)"},
-            },
+            "errors": ERROR_ROWS.iter().map(|(c, w, f)| (c.to_string(), json!({"when": w, "fix": f}))).collect::<serde_json::Map<_, _>>(),
             "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
             "text": TEXT_RULES,
             "edit_loop": EDIT_LOOP_DOC,
@@ -1065,6 +1145,13 @@ pub fn rdy_brief(st: &mut McpState, p: BriefParams) -> Result<Value, RdyError> {
     session(st)?;
     let st_ = st.engine.read();
     let scope = scope_of(&st.view, &st_, &p.scope)?;
+    if let Some(cursor) = &p.page {
+        if p.ids.is_some() || p.path.is_some() || p.code_path.is_some() {
+            return Err(e_page_alone());
+        }
+        let b = st_.brief_page(&scope, &st.engine.briefs(), cursor, p.max_tokens)?;
+        return serialize_briefing(&b);
+    }
     if let Some(cp) = &p.code_path {
         if p.ids.is_some() || p.path.is_some() {
             return Err(e_code_path_alone());
@@ -1131,7 +1218,29 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
                 "implements for decision-backed changes, editorial for typo/restructure/clarify",
             ));
         }
-        (Some(d), None) => Some(Justification::Implements(id_of(&d)?)),
+        (Some(d), None) => {
+            let texts = match d {
+                OneOrMany::One(t) => vec![t],
+                OneOrMany::Many(v) => v,
+            };
+            if texts.is_empty() {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    "implements is empty",
+                    "name the decision this change carries out, or leave implements out",
+                ));
+            }
+            let scope = Scope::View(p.view.clone().unwrap_or_else(|| st.view.clone()));
+            let read = st.engine.read();
+            let mut ids: Vec<BlockId> = vec![];
+            for t in &texts {
+                let id = read.resolve_id(&scope, t)?;
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            Some(Justification::Implements(ids))
+        }
         (None, Some(e)) => Some(Justification::Editorial {
             class: match e.class.as_str() {
                 "typo" => EditorialClass::Typo,
@@ -1239,14 +1348,21 @@ pub fn rdy_revoke(st: &mut McpState, p: RevokeParams) -> Result<Value, RdyError>
 }
 
 pub fn rdy_propose(st: &mut McpState, p: ProposeParams) -> Result<Value, RdyError> {
+    check_tokens(p.max_tokens)?;
     let s = session(st)?;
     let view = p
         .view
         .map(|v| v.strip_prefix("view:").map(String::from).unwrap_or(v))
         .unwrap_or_else(|| st.view.clone());
     let changes = p.changes.clone();
-    write_typed(&*st.engine, move |r| {
-        r.propose_subset(&s, &view, &p.title, changes.as_deref())
+    propose_and_report(&*st.engine, p.max_tokens, move |r| {
+        r.propose_subset(
+            &s,
+            &view,
+            &p.title,
+            changes.as_deref(),
+            p.summary.as_deref(),
+        )
     })
 }
 

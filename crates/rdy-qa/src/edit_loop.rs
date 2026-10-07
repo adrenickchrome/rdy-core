@@ -8,8 +8,9 @@ use rdy_model::BlockId;
 use serde_json::Value;
 use serde_json::json;
 
-/// Doc `spec` (canon): section `Rules` with claims A ("A holds."), B (references A, pinned) and
-/// C ("C stands alone."), and decision D ("Keep A") under the section, accepted; A is decided_by D.
+/// Doc `spec` (canon): section `Rules` with claims A ("A holds."), B (references A, pinned to
+/// A's final content: canon has no suspect) and C ("C stands alone."), and decision D ("Keep A")
+/// under the section, accepted; A is decided_by D.
 #[derive(Clone, Debug)]
 pub struct Spec {
     pub doc: BlockId,
@@ -55,6 +56,13 @@ pub fn spec_doc(r: &mut Rdy) -> Spec {
         "links": {"decided_by": [{"target": decision.to_string()}]}}]),
     )
     .expect("A decided_by D");
+    // B is re-pinned to A as linked, so the spec lands with no suspect
+    write(
+        r,
+        "work",
+        json!([{"op": "repin", "id": b.to_string(), "targets": [a.to_string()]}]),
+    )
+    .expect("B re-pinned to A");
     land(r, "work").expect("land the spec");
     Spec {
         doc,

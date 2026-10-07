@@ -106,6 +106,9 @@ enum Cmd {
         /// The view to propose (default: the session's, `work` for the human).
         #[arg(long)]
         view: Option<String>,
+        /// Your plain-words summary for the approver.
+        #[arg(long)]
+        summary: Option<String>,
     },
     /// Approve a proposal version: P-<id>@<n>, P-<id> (its latest version) or a version hash.
     Approve {
@@ -894,16 +897,28 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             let t = suspects_text(&v);
             Ok((v, t))
         }
-        Cmd::Propose { title, view } => {
-            let v = call(env, "propose", json!({"title": title, "view": view}))?;
+        Cmd::Propose {
+            title,
+            view,
+            summary,
+        } => {
+            let v = call(
+                env,
+                "propose",
+                json!({"title": title, "view": view, "summary": summary}),
+            )?;
             let pref = text(&v["ref"]);
             let mut t = format!("proposal {pref} ({} changes)", num(&v["changes"]));
+            if let Some(s) = v["summary"].as_str() {
+                t.push_str(&format!("\nsummary: {s}"));
+            }
             let blocking = v["blocking"].as_array().map_or(0, Vec::len);
             if blocking > 0 {
                 t.push_str(&format!(
                     "\nblocking: {blocking} conflict(s) on blocks this proposal writes"
                 ));
             }
+            t.push_str(&brief_text::consequences_text(&v));
             t.push_str(&format!("\napprove with: rdy approve {pref}"));
             Ok((v, t))
         }
@@ -929,14 +944,21 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             )?;
             let approved = text(&v["approved"]);
             let mut t = format!(
-                "approving {approved}: {} ({} change(s))\nlanded {} ({approved})",
+                "approving {approved}: {} ({} change(s))",
                 text(&v["title"]),
                 num(&v["changes"]),
-                hash_short(text(&v["landing"]))
             );
+            if let Some(s) = v["summary"].as_str() {
+                t.push_str(&format!("\nsummary: {s}"));
+            }
+            t.push_str(&format!(
+                "\nlanded {} ({approved})",
+                hash_short(text(&v["landing"]))
+            ));
             if let Some(by) = relayed_by {
                 t.push_str(&format!(", relayed by {by}"));
             }
+            t.push_str(&brief_text::consequences_text(&v));
             for r in v["rebased"].as_array().into_iter().flatten() {
                 if num(&r["conflicts"]) > 0 {
                     t.push_str(&format!(
@@ -956,10 +978,8 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             Ok((v, t))
         }
         Cmd::View { cmd } => {
-            let args = view_cmd::args_of(&cmd);
-            let op = text(&args["op"]).to_string();
-            let v = call(env, "view", args)?;
-            let t = view_cmd::render(&op, &v);
+            let v = call(env, "view", view_cmd::args_of(&cmd))?;
+            let t = view_cmd::render_view(&cmd, &v);
             Ok((v, t))
         }
         Cmd::Undo { view, op, cascade } => {

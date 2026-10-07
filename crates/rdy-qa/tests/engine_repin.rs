@@ -43,7 +43,7 @@ fn sus3_repin_clears_a_changed_suspect_as_a_recorded_change() {
     );
     assert_eq!(
         r.read().block(&scope, &cid).unwrap().pins[&tid],
-        r.read().block(&scope, &tid).unwrap().version_hash()
+        r.read().block(&scope, &tid).unwrap().content_hash()
     );
     check(&r, &scope).unwrap();
 }

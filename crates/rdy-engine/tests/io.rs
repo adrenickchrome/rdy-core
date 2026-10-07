@@ -272,23 +272,7 @@ fn import_rejects_duplicate_id() {
     assert_import_fails(out.path(), "E_ALREADY_EXISTS");
 }
 
-/// A format-1 export holding one doc file with `text`.
-fn format_1(text: &str) -> tempfile::TempDir {
-    let out = tempfile::tempdir().unwrap();
-    std::fs::write(
-        out.path().join("rdy-export.yaml"),
-        "format: 1\npack: rdy-standard\nscope: canon\n",
-    )
-    .unwrap();
-    std::fs::create_dir_all(out.path().join("docs")).unwrap();
-    std::fs::write(out.path().join("docs/d-AAAAB.yaml"), text).unwrap();
-    out
-}
-
-const F1_DOC: &str = "- id: d-AAAAB\n  type: doc\n  order: V\n  fields:\n    title: Old Notes\n    doc_type: glossary\n";
-
-// in format 2 a doc file's blocks must lead to its doc (E_FILE_FORMAT); format 1 has no such
-// rule, so the import's own parent checks are exercised with it
+// a doc file's blocks must lead to its doc, so a bad parent is refused as E_FILE_FORMAT
 #[test]
 fn import_rejects_dangling_parent() {
     let (_d, out, _a) = setup();
@@ -296,10 +280,6 @@ fn import_rejects_dangling_parent() {
         find(l, "section")["parent"] = "d-ZZZZZ".into()
     });
     assert_import_fails(out.path(), "E_FILE_FORMAT");
-    let out = format_1(&format!(
-        "{F1_DOC}- id: s-AAAAB\n  type: section\n  parent: d-ZZZZZ\n  order: V\n  fields:\n    title: Terms\n"
-    ));
-    assert_import_fails(out.path(), "E_UNKNOWN_BLOCK");
 }
 
 #[test]
@@ -310,10 +290,6 @@ fn import_rejects_parent_cycle() {
         find(l, "section")["parent"] = t.into();
     });
     assert_import_fails(out.path(), "E_FILE_FORMAT");
-    let out = format_1(&format!(
-        "{F1_DOC}- id: s-AAAAB\n  type: section\n  parent: s-AAAAC\n  order: V\n  fields:\n    title: A\n- id: s-AAAAC\n  type: section\n  parent: s-AAAAB\n  order: V\n  fields:\n    title: B\n"
-    ));
-    assert_import_fails(out.path(), "E_BAD_INPUT");
 }
 
 #[test]
@@ -324,10 +300,6 @@ fn import_rejects_self_parent() {
         find(l, "section")["parent"] = s.into();
     });
     assert_import_fails(out.path(), "E_FILE_FORMAT");
-    let out = format_1(&format!(
-        "{F1_DOC}- id: s-AAAAB\n  type: section\n  parent: s-AAAAB\n  order: V\n  fields:\n    title: A\n"
-    ));
-    assert_import_fails(out.path(), "E_BAD_INPUT");
 }
 
 #[test]
@@ -347,7 +319,7 @@ fn import_rejects_unsupported_or_missing_manifest() {
     let (_d, out, _a) = setup();
     std::fs::write(
         out.path().join("rdy-export.yaml"),
-        "format: 3\npack: rdy-standard\nscope: canon\n",
+        "format: 4\npack: rdy-standard\nscope: canon\n",
     )
     .unwrap();
     assert_import_fails(out.path(), "E_BAD_INPUT");
@@ -619,7 +591,7 @@ fn import_rejects_an_export_from_an_unrelated_pack() {
     let (_d, out, _a) = setup();
     std::fs::write(
         out.path().join("rdy-export.yaml"),
-        "format: 1\npack: other-pack\nscope: canon\n",
+        "format: 3\npack: other-pack\nscope: canon\n",
     )
     .unwrap();
     assert_import_fails(out.path(), "E_BAD_INPUT");
@@ -701,7 +673,7 @@ fn export_writes_the_folder_tree() {
             f.keys().collect::<Vec<_>>()
         );
     }
-    assert!(String::from_utf8_lossy(&f["rdy-export.yaml"]).contains("format: 2"));
+    assert!(String::from_utf8_lossy(&f["rdy-export.yaml"]).contains("format: 3"));
     let folder = String::from_utf8_lossy(&f["docs/design/_folder.yaml"]).to_string();
     assert!(
         folder.contains("type: folder") && folder.contains("title: Design"),
@@ -805,29 +777,6 @@ fn a_nameless_m1_doc_exports_with_a_warning_and_imports_named() {
 }
 
 #[test]
-fn format_1_exports_still_import_and_get_names() {
-    let out = tempfile::tempdir().unwrap();
-    std::fs::write(
-        out.path().join("rdy-export.yaml"),
-        "format: 1\npack: rdy-standard\nscope: canon\n",
-    )
-    .unwrap();
-    std::fs::create_dir_all(out.path().join("docs")).unwrap();
-    std::fs::write(out.path().join("docs/d-AAAAB.yaml"), "- id: d-AAAAB\n  type: doc\n  order: V\n  fields:\n    title: Old Notes\n    doc_type: glossary\n- id: s-AAAAB\n  type: section\n  parent: d-AAAAB\n  order: V\n  fields:\n    title: Terms\n").unwrap();
-    let b_dir = tempfile::tempdir().unwrap();
-    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
-    b.import(&founder(), "import", out.path()).unwrap();
-    let doc = b
-        .read()
-        .block(
-            &Scope::View("import".into()),
-            &BlockId::parse("d-AAAAB").unwrap(),
-        )
-        .unwrap();
-    assert_eq!(doc.field_str("name"), Some("old-notes"));
-}
-
-#[test]
 fn name_or_parent_on_a_folder_or_doc_entry_is_refused_with_its_position() {
     let a_dir = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
@@ -915,21 +864,6 @@ fn import_refuses_names_that_clash_with_the_view_or_each_other() {
         e.message.contains("d-AAAAA") && e.message.contains("d-BBBBB"),
         "{e}"
     );
-    // two clashing docs inside one import (format 1 files carry their names)
-    let o3 = tempfile::tempdir().unwrap();
-    std::fs::write(
-        o3.path().join("rdy-export.yaml"),
-        "format: 1\npack: rdy-standard\nscope: canon\n",
-    )
-    .unwrap();
-    std::fs::create_dir_all(o3.path().join("docs")).unwrap();
-    for (id, name) in [("d-CCCCC", "x"), ("d-DDDDD", "X")] {
-        std::fs::write(o3.path().join(format!("docs/{id}.yaml")), format!("- id: {id}\n  type: doc\n  order: V\n  fields:\n    title: T\n    name: {name}\n    doc_type: glossary\n")).unwrap();
-    }
-    let c_dir = tempfile::tempdir().unwrap();
-    let mut c = Rdy::init(c_dir.path(), "rdy-standard").unwrap();
-    let e = c.import(&founder(), "imp", o3.path()).unwrap_err();
-    assert_eq!(e.code, "E_PATH_CLASH", "{e}");
 }
 
 #[test]
@@ -1007,8 +941,15 @@ fn import_refuses_folders_nested_more_than_32_deep() {
 
 #[test]
 fn a_duplicated_doc_is_reported_as_a_duplicate_id_not_a_name_clash() {
-    let doc = "- id: d-AAAAB\n  type: doc\n  order: V\n  fields:\n    name: notes\n    title: Notes\n    doc_type: glossary\n";
-    let out = format_1(doc);
+    let doc = "- id: d-AAAAB\n  type: doc\n  order: V\n  fields:\n    title: Notes\n    doc_type: glossary\n";
+    let out = tempfile::tempdir().unwrap();
+    std::fs::write(
+        out.path().join("rdy-export.yaml"),
+        "format: 3\npack: rdy-standard\nscope: canon\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(out.path().join("docs")).unwrap();
+    std::fs::write(out.path().join("docs/notes.yaml"), doc).unwrap();
     std::fs::write(out.path().join("docs/copy.yaml"), doc).unwrap();
     assert_import_fails(out.path(), "E_ALREADY_EXISTS");
 }

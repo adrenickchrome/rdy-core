@@ -1,6 +1,7 @@
 //! vapi1: the one view request dispatcher behind MCP's `rdy_view` and the ctl `view` op. Writes
-//! go through `write_typed` (they run on the engine's writer); reads use one `engine.read()`
-//! snapshot.
+//! go through `write_typed` (they run on the engine's writer), include, exclude and undo through
+//! `view_op_and_report` (with their consequences); reads use one `engine.read()` snapshot.
+use crate::consequence::{op_effect, undo_effect, view_op_and_report};
 use crate::engine::{Engine, write_typed};
 use crate::error::*;
 use crate::{Session, now_ms};
@@ -28,6 +29,8 @@ pub struct ViewRequest {
     pub owner: Option<String>,
     pub none: Option<bool>,
     pub target: Option<String>,
+    /// include, exclude and undo: cut the consequences to about this many tokens.
+    pub max_tokens: Option<usize>,
 }
 
 fn needs(message: &str, fix: &str) -> RdyError {
@@ -83,7 +86,10 @@ pub fn run_view(
                 )
             })?;
             let view = view();
-            write_typed(engine, move |r| r.view_include(&s, &view, &changes))
+            let v = view.clone();
+            view_op_and_report(engine, &v, req.max_tokens, op_effect, move |r| {
+                r.view_include(&s, &view, &changes)
+            })
         }
         "exclude" => {
             let changes = req.changes.clone().ok_or_else(|| {
@@ -93,7 +99,8 @@ pub fn run_view(
                 )
             })?;
             let (view, cascade) = (view(), req.cascade.unwrap_or(false));
-            write_typed(engine, move |r| {
+            let v = view.clone();
+            view_op_and_report(engine, &v, req.max_tokens, op_effect, move |r| {
                 r.view_exclude(&s, &view, &changes, cascade)
             })
         }
@@ -161,7 +168,8 @@ pub fn run_view(
         "undo" => {
             let (view, target, cascade) =
                 (view(), req.target.clone(), req.cascade.unwrap_or(false));
-            write_typed(engine, move |r| {
+            let v = view.clone();
+            view_op_and_report(engine, &v, req.max_tokens, undo_effect, move |r| {
                 r.undo(&s, &view, target.as_deref(), cascade)
             })
         }

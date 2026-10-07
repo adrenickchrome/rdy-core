@@ -84,6 +84,8 @@ pub(crate) struct Entry {
     /// How many blocks the entry's merge records a conflict on, when counted without a build
     /// (`ReadState::view_list`); an entry carried over by a publish keeps it.
     pub(crate) conflict_count: OnceLock<usize>,
+    /// The block ids the included changes write, memoised (`ReadState::view_touched`).
+    pub(crate) touched: OnceLock<Arc<BTreeSet<BlockId>>>,
 }
 
 impl Entry {
@@ -101,6 +103,7 @@ impl Entry {
             included,
             cell: OnceLock::new(),
             conflict_count: OnceLock::new(),
+            touched: OnceLock::new(),
         }
     }
 
@@ -212,6 +215,8 @@ pub struct ReadState {
     pub(crate) as_of: Arc<AsOfCache>,
     /// The version-position cache, shared like `as_of` (read by the state's version reads).
     pub(crate) vpos: Arc<Mutex<VposCache>>,
+    /// The blocks each open proposal version writes, shared like `vpos` (read by `inflight`).
+    pub(crate) proposal_touched: crate::inflight::ProposalTouched,
     /// A `Full` publish that failed to read the heads: every read of this state returns it.
     pub(crate) error: Option<RdyError>,
 }

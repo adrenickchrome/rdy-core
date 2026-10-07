@@ -9,8 +9,8 @@ use std::path::Path;
 
 /// The store format this binary reads and writes. 4 (plan M2c): `ViewOpKind::Rebase.conflicts`,
 /// `ViewOpKind::Fork.owner`, `RelayEvidence.question`, `LandingRecord.evidence` and
-/// `Proposal.canon_at`.
-pub const STORE_FORMAT: u32 = 4;
+/// `Proposal.canon_at`. 5 (plan M2c3): pins hold content hashes (FW-LP1); Justification::Implements holds a list; Proposal.summary (FW-G7c).
+pub const STORE_FORMAT: u32 = 5;
 /// The mirror file in the store directory.
 pub const FORMAT_FILE: &str = "FORMAT";
 /// The log ref holding `store_format`, in ASCII decimal.

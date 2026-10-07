@@ -1,6 +1,6 @@
 //! The format-2 docs tree (addendum B §3), read with positions: shared by import and `rdy check`.
 use crate::error::*;
-use crate::io::{BlockYaml, from_yaml_struct};
+use crate::io::{BlockYaml, KeyedLink, from_yaml_struct};
 use crate::yaml_pos::{Positions, Seg, positions};
 use rdy_model::{Block, BlockId, FieldValue, tree};
 use rdy_schema::Severity;
@@ -63,6 +63,8 @@ pub(crate) struct Loaded {
     pub file: String,
     pub at: (usize, usize),
     pub keys: BTreeMap<String, (usize, usize)>,
+    /// lkey1: link targets written as keys, resolved by import and check.
+    pub keyed: Vec<KeyedLink>,
 }
 
 #[derive(Default)]
@@ -314,11 +316,12 @@ impl Reader {
             }
         };
         match from_yaml_struct(y) {
-            Ok(block) => Some(Loaded {
+            Ok((block, keyed)) => Some(Loaded {
                 block,
                 file: shown.into(),
                 at: here,
                 keys,
+                keyed,
             }),
             Err(e) => {
                 self.diags.push(Diagnostic::error(

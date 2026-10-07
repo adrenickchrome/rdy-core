@@ -124,5 +124,5 @@ fn pin1_pins_print_as_hex_in_json() {
         .read()
         .block(&scope, &BlockId::parse(&res.created["$t"]).unwrap())
         .unwrap();
-    assert_eq!(pin, t.version_hash().to_string());
+    assert_eq!(pin, t.content_hash().to_string());
 }
