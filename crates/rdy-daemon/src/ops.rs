@@ -442,6 +442,9 @@ fn status(cx: &OpContext) -> Result<Value, RdyError> {
             json!({"name": name, "changes": changes, "owner": owner, "version_position": pos}),
         );
     }
+    for w in rdy_engine::config_levels::config_warnings_for_env(&cx.engine.root()) {
+        warnings.push(format!("{}: {}; {}", w.code, w.message, w.fix));
+    }
     let suspects = st.suspects(&Scope::Canon)?.len();
     Ok(json!({
         "pack": st.pack().name,

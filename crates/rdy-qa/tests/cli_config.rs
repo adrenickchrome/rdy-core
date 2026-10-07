@@ -157,3 +157,53 @@ fn cfgl1_a_wrong_typed_value_names_the_file_it_is_in() {
         "{e}"
     );
 }
+
+#[test]
+fn cfgw1_a_typo_warns_in_config_show_origin_status_and_every_command() {
+    let s = Served::new();
+    append(s.dir.path(), PROJECT_FILE, "decision:\n  home: docs\n");
+    let text = String::from_utf8_lossy(&s.rdy(&["config", "--show-origin"]).stdout).into_owned();
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("warning W_CONFIG_UNKNOWN: ")
+                && l.contains("decision.home")
+                && l.contains("decisions.home")),
+        "{text}"
+    );
+    let o = s.rdy(&["status"]);
+    let out = String::from_utf8_lossy(&o.stdout).into_owned();
+    assert!(
+        out.contains("warning: W_CONFIG_UNKNOWN") && out.contains("decision.home"),
+        "{out}"
+    );
+    // another command prints it once on stderr and keeps stdout clean for --json
+    let o = s.rdy(&["--json", "tags"]);
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert_eq!(err.matches("W_CONFIG_UNKNOWN").count(), 1, "{err}");
+    serde_json::from_slice::<serde_json::Value>(&o.stdout).expect("stdout is still JSON");
+    // a project with only known keys prints none
+    let s = Served::new();
+    let o = s.rdy(&["--json", "tags"]);
+    assert!(!String::from_utf8_lossy(&o.stderr).contains("W_CONFIG_UNKNOWN"));
+}
+
+#[test]
+fn cfgw1_rdy_session_carries_the_warning() {
+    use rdy_qa::mcp::McpClient;
+    let s = Served::new();
+    append(s.dir.path(), PROJECT_FILE, "decision:\n  home: docs\n");
+    let mut c = McpClient::start_proxy(&s);
+    let r = c
+        .call(
+            "rdy_session",
+            serde_json::json!({"actor": "agent:m", "role": "writer"}),
+        )
+        .ok();
+    let w = &r["warnings"][0];
+    assert_eq!(w["code"], "W_CONFIG_UNKNOWN", "{r}");
+    assert!(
+        w["message"].as_str().unwrap().contains("decision.home"),
+        "{r}"
+    );
+    assert!(w["fix"].as_str().unwrap().contains("decisions.home"), "{r}");
+}

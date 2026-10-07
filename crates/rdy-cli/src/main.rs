@@ -1352,8 +1352,20 @@ fn main() -> ExitCode {
         } => return run_serve(&env, *detach, *stop, *spawned, as_json),
         _ => {}
     }
+    // the config warnings print once per process on stderr; `rdy config --show-origin` and
+    // `rdy status` carry them in their own output
+    let own_warnings = match &cli.cmd {
+        Cmd::Status | Cmd::Mcp => true,
+        Cmd::Config { show_origin } => *show_origin && !as_json,
+        _ => false,
+    };
     match run(cli, &env) {
         Ok((v, text)) => {
+            if !own_warnings {
+                for w in rdy_engine::config_levels::config_warnings_for_env(&env.project) {
+                    eprintln!("warning {}: {}; {}", w.code, w.message, w.fix);
+                }
+            }
             if v.is_null() {
             } else if as_json {
                 println!("{v}");

@@ -2,9 +2,11 @@
 //! the project config (`.rdy/config.yaml` until M2f-b), the user config and the defaults. The
 //! most specific level that sets a key wins. Each key of [`KEY_LEVELS`] names the levels that may
 //! set it (R-P6); a key in a file of another level is `E_CONFIG` naming the right file. Keys
-//! outside the table are kept as they are and never shown.
+//! outside the table are kept as they are and never shown; each one is a `W_CONFIG_UNKNOWN`
+//! warning naming the key, the file and the level (R-P6).
 
 use crate::{E_CONFIG, E_IO, E_NO_PROJECT, RdyError};
+use rdy_schema::{Issue, Severity};
 use serde::Serialize;
 use serde_yaml_ng::{Mapping, Value};
 use std::path::{Path, PathBuf};
@@ -159,6 +161,8 @@ pub struct Effective {
     /// What `Config` is read from: the project file's keys as they are, each key of the table
     /// replaced by its winning value (a default is not written in; the accessors have it).
     pub merged: Mapping,
+    /// One `W_CONFIG_UNKNOWN` per key outside the table, in file precedence order.
+    pub warnings: Vec<Issue>,
 }
 
 fn flow(v: &Value) -> String {
@@ -324,7 +328,100 @@ pub fn effective_lenient(project: &Path, user_file: Option<&Path>) -> Effective 
     build(project, user_file, true).unwrap_or_else(|_| Effective {
         origins: Vec::new(),
         merged: Mapping::new(),
+        warnings: Vec::new(),
     })
+}
+
+/// The `W_CONFIG_UNKNOWN` warnings of the project at `project`; never fails (a file that does not
+/// read adds none).
+pub fn config_warnings(project: &Path, user_file: Option<&Path>) -> Vec<Issue> {
+    effective_lenient(project, user_file).warnings
+}
+
+/// `config_warnings` over the environment's user config.
+pub fn config_warnings_for_env(project: &Path) -> Vec<Issue> {
+    config_warnings(project, user_file_from_env().as_deref())
+}
+
+fn level_name(level: Level) -> &'static str {
+    match level {
+        Level::Local => "local",
+        Level::Project => "project",
+        Level::User => "user",
+        Level::Default => "default",
+    }
+}
+
+/// The dotted paths in `map` that are neither a key of the table nor a section on the way to one.
+/// An unknown section is named by its leaves (`decision.home`), so a typo in a section's name
+/// still gets the nearest key.
+fn unknown_paths(map: &Mapping, prefix: &str, out: &mut Vec<String>) {
+    for (k, v) in map {
+        let Some(k) = k.as_str() else { continue };
+        let path = format!("{prefix}{k}");
+        if KEY_LEVELS.iter().any(|r| r.key == path) {
+            continue;
+        }
+        let dotted = format!("{path}.");
+        if KEY_LEVELS.iter().any(|r| r.key.starts_with(&dotted)) {
+            if let Value::Mapping(inner) = v {
+                unknown_paths(inner, &dotted, out);
+            }
+            continue;
+        }
+        match v {
+            Value::Mapping(inner) if !inner.is_empty() => unknown_paths(inner, &dotted, out),
+            _ => out.push(path),
+        }
+    }
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
+/// The key of the table `level` allows that is nearest to `path`, if it is within 2 edits.
+fn nearest_key(path: &str, level: Level) -> Option<&'static str> {
+    KEY_LEVELS
+        .iter()
+        .filter(|r| r.levels.contains(&level))
+        .map(|r| (edit_distance(path, r.key), r.key))
+        .filter(|(d, _)| *d <= 2)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, k)| k)
+}
+
+fn unknown_warnings(level: Level, map: &Mapping, user_file: Option<&Path>) -> Vec<Issue> {
+    let mut paths = Vec::new();
+    unknown_paths(map, "", &mut paths);
+    let file = file_name(level, user_file);
+    paths
+        .into_iter()
+        .map(|path| Issue {
+            severity: Severity::Warning,
+            code: "W_CONFIG_UNKNOWN",
+            block: None,
+            message: format!(
+                "unknown key {path} in {file} ({} level); rdy ignores it",
+                level_name(level)
+            ),
+            fix: match nearest_key(&path, level) {
+                Some(k) => format!("did you mean {k}? rename {path} in {file}"),
+                None => format!("remove {path} from {file}, or check its spelling"),
+            },
+        })
+        .collect()
 }
 
 /// Why the value `rule.key` has in `map` is of the wrong type, or `None` when it has the type or
@@ -372,6 +469,10 @@ fn build(project: &Path, user_file: Option<&Path>, lenient: bool) -> Result<Effe
             Err(e) => return Err(e),
         }
     }
+    let warnings: Vec<Issue> = files
+        .iter()
+        .flat_map(|(level, map)| unknown_warnings(*level, map, user_file))
+        .collect();
     for (level, map) in &mut files {
         for rule in KEY_LEVELS {
             if rule.levels.contains(level) || get_path(map, rule.key).is_none() {
@@ -453,7 +554,11 @@ fn build(project: &Path, user_file: Option<&Path>, lenient: bool) -> Result<Effe
             });
         }
     }
-    Ok(Effective { origins, merged })
+    Ok(Effective {
+        origins,
+        merged,
+        warnings,
+    })
 }
 
 /// The `actor` a file names: a non-empty string, else nothing (a file that does not read or
@@ -584,6 +689,82 @@ mod tests {
             get_path(&e.merged, "views.idle_days"),
             Some(&Value::from(3u64))
         );
+    }
+
+    #[test]
+    fn cfgw1_an_unknown_key_at_project_level_warns_and_names_it() {
+        let d = project("pack: p\nlater: 1\n", None);
+        let e = effective(d.path(), None).unwrap();
+        assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
+        let w = &e.warnings[0];
+        assert_eq!(w.code, "W_CONFIG_UNKNOWN");
+        assert_eq!(w.severity, rdy_schema::Severity::Warning);
+        assert!(
+            w.message.contains("later")
+                && w.message.contains(".rdy/config.yaml")
+                && w.message.contains("project"),
+            "{}",
+            w.message
+        );
+        assert!(!w.fix.contains("did you mean"), "{}", w.fix);
+        // the lenient read carries it too, and a nested unknown key is named by its path
+        let d = project("pack: p\nserve:\n  idle_timout: 5\n", None);
+        let e = effective_lenient(d.path(), None);
+        assert!(e.warnings[0].message.contains("serve.idle_timout"));
+        assert!(
+            e.warnings[0].fix.contains("serve.idle_timeout"),
+            "{}",
+            e.warnings[0].fix
+        );
+    }
+
+    #[test]
+    fn cfgw1_decision_home_suggests_decisions_home() {
+        let d = project("pack: p\ndecision:\n  home: docs\n", None);
+        let e = effective(d.path(), None).unwrap();
+        assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
+        assert!(e.warnings[0].message.contains("decision.home"));
+        assert!(
+            e.warnings[0].fix.contains("decisions.home"),
+            "{}",
+            e.warnings[0].fix
+        );
+    }
+
+    #[test]
+    fn cfgw1_a_known_key_at_the_wrong_level_is_still_e_config() {
+        let d = project("pack: p\n", Some("pack: x\n"));
+        let e = effective(d.path(), None).unwrap_err();
+        assert_eq!(e.code, E_CONFIG);
+        let d = project("pack: p\n", Some("decisions:\n  home: x\n"));
+        assert_eq!(effective(d.path(), None).unwrap_err().code, E_CONFIG);
+    }
+
+    #[test]
+    fn cfgw1_known_keys_give_no_warning() {
+        let d = project(
+            "pack: p\nname: n\ndecisions:\n  home: [a, b]\ncode_repos:\n  x: y\nserve:\n  idle_timeout: 5\n",
+            Some("actor: human:a\nviews:\n  idle_days: 3\n"),
+        );
+        let e = effective(d.path(), None).unwrap();
+        assert!(e.warnings.is_empty(), "{:?}", e.warnings);
+        assert!(config_warnings(d.path(), None).is_empty());
+    }
+
+    #[test]
+    fn cfgw1_an_unknown_key_in_the_user_file_names_the_user_level() {
+        let d = project("pack: p\n", None);
+        let u = tempfile::tempdir().unwrap();
+        let uf = u.path().join("config.yaml");
+        std::fs::write(&uf, "actr: human:x\n").unwrap();
+        let w = config_warnings(d.path(), Some(&uf));
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(
+            w[0].message.contains("actr") && w[0].message.contains("user"),
+            "{}",
+            w[0].message
+        );
+        assert!(w[0].fix.contains("did you mean actor"), "{}", w[0].fix);
     }
 
     #[test]

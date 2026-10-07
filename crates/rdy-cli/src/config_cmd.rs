@@ -18,6 +18,11 @@ pub fn run(project: &Path, show_origin: bool) -> Result<(Value, String), ErrorRe
         }
         lines.push(line);
     }
+    if show_origin {
+        for w in &eff.warnings {
+            lines.push(format!("warning {}: {}; {}", w.code, w.message, w.fix));
+        }
+    }
     let rows: Vec<Value> = eff
         .origins
         .iter()

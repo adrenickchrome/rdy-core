@@ -554,7 +554,13 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
     st.view = view;
     st.session = Some(session);
     st.reported.clear();
-    Ok(json!({ "view": st.view, "role": p.role }))
+    let mut out = json!({ "view": st.view, "role": p.role });
+    // R-P6: a config key rdy does not know is a warning, never silence
+    let warnings = rdy_engine::config_levels::config_warnings_for_env(&st.engine.root());
+    if !warnings.is_empty() {
+        out["warnings"] = json!(warnings);
+    }
+    Ok(out)
 }
 
 pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError> {
@@ -1075,6 +1081,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "E_PAGE_STALE",
         "a page cursor (the next of a cut rdy_brief or rdy_read) is unknown to this session, or what it pages (a briefing or a read) moved since its first page",
         PAGE_STALE_FIX,
+    ),
+    (
+        "W_CONFIG_UNKNOWN",
+        "a config file (.rdy/local.yaml, the project config or the user config) holds a key rdy does not know, such as a typo; rdy ignores the key; reported by rdy config --show-origin, rdy status, every CLI command and rdy_session",
+        "fix the key's spelling (the fix names the nearest known key), or remove it",
     ),
     (
         "W_SKELETON_MISSING",
