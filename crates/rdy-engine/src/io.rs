@@ -665,7 +665,8 @@ impl Rdy {
             }
         }
         let (mut blocks, keyed): (Vec<Block>, Vec<Vec<KeyedLink>>) = {
-            let (loaded, diags) = tree_io::read_tree(&dir.join("docs"), "docs");
+            let ignore = crate::wc::ignore::Ignore::load(dir)?;
+            let (loaded, diags) = tree_io::read_tree_with(&dir.join("docs"), "docs", Some(&ignore));
             if let Some(d) = diags
                 .iter()
                 .find(|d| d.severity == rdy_schema::Severity::Error)

@@ -1,11 +1,15 @@
 //! The format-2 docs tree (addendum B §3), read with positions: shared by import and `rdy check`.
+//! Working-copy mode (`read_wc`) reads a working tree: membership, untracked paths, and entries
+//! that leave out `id`, `order` and `parent`.
 use crate::error::*;
 use crate::io::{BlockYaml, KeyedLink, from_yaml_struct};
+use crate::wc::ignore::Ignore;
+use crate::wc::layout::{BLOBS_DIR, FileKind, MAX_MEMBER_BYTES, THEIRS_SUFFIX, Untracked, WcFile};
 use crate::yaml_pos::{Positions, Seg, positions};
-use rdy_model::{Block, BlockId, FieldValue, tree};
-use rdy_schema::Severity;
+use rdy_model::{Block, BlockId, FieldValue, Hash, tree};
+use rdy_schema::{Pack, Severity};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub const FOLDER_FILE: &str = "_folder.yaml";
@@ -66,22 +70,133 @@ pub(crate) struct Loaded {
     pub keys: BTreeMap<String, (usize, usize)>,
     /// lkey1: link targets written as keys, resolved by import and check.
     pub keyed: Vec<KeyedLink>,
+    /// Working-copy mode: the entry gave no id, and the reader assigned a fresh one.
+    pub new: bool,
+    /// Working-copy mode: the entry gave an `order` (else `block.order` is empty).
+    pub order_given: bool,
+    /// The entry's index in its file.
+    pub seq: usize,
 }
 
 #[derive(Default)]
-struct Reader {
+struct Reader<'a> {
     loaded: Vec<Loaded>,
     diags: Vec<Diagnostic>,
     /// The text of the file being read: `order` is quoted back from it (ord4).
     text: String,
+    /// Paths to skip, relative to the root read.
+    ignore: Option<&'a Ignore>,
+    /// How the root appears in messages: `ignore` matches what follows it.
+    base: String,
+    /// Working-copy mode: the pack whose prefixes give new entries their ids.
+    wc: Option<&'a Pack>,
+    /// Working-copy mode: ids in use, which a fresh id avoids.
+    taken: BTreeSet<BlockId>,
+    files: BTreeMap<String, WcFile>,
+    untracked: Vec<Untracked>,
+    theirs: Vec<String>,
+    blobs: Vec<String>,
 }
 
 /// Reads the tree under `root`; `shown` is how `root` appears in messages (e.g. "docs").
 pub(crate) fn read_tree(root: &Path, shown: &str) -> (Vec<Loaded>, Vec<Diagnostic>) {
-    let mut r = Reader::default();
+    read_tree_with(root, shown, None)
+}
+
+/// `read_tree`, skipping the paths `ignore` matches relative to `root` (R-P5).
+pub(crate) fn read_tree_with(
+    root: &Path,
+    shown: &str,
+    ignore: Option<&Ignore>,
+) -> (Vec<Loaded>, Vec<Diagnostic>) {
+    let mut r = Reader {
+        ignore,
+        base: shown.to_string(),
+        ..Reader::default()
+    };
     r.dir(root, shown, None);
     (r.loaded, r.diags)
 }
+
+/// What the working-copy reader found: the blocks of the member files, the members, and the
+/// paths it does not read. Paths are relative to the root.
+pub(crate) struct WcRead {
+    pub loaded: Vec<Loaded>,
+    pub files: BTreeMap<String, WcFile>,
+    pub untracked: Vec<Untracked>,
+    pub theirs: Vec<String>,
+    pub blobs: Vec<String>,
+    pub diags: Vec<Diagnostic>,
+}
+
+/// How many times the working-copy reader reads the tree again when a fresh id it drew turns
+/// out to be written in a later file.
+const WC_READ_TRIES: usize = 3;
+
+/// Reads the working tree under `root` (spec §12.1, `D-7BKK5`), in working-copy mode.
+pub(crate) fn read_wc(root: &Path, ignore: &Ignore, pack: &Pack) -> WcRead {
+    let mut reserved = BTreeSet::new();
+    let mut tries = 0;
+    loop {
+        let mut r = Reader {
+            ignore: Some(ignore),
+            wc: Some(pack),
+            taken: reserved.clone(),
+            ..Reader::default()
+        };
+        r.wc_dir(root, "", None, 0);
+        tries += 1;
+        // a fresh id is never one the tree holds: one drawn before a later file named it is
+        // drawn again on a second read, which avoids every id the first one saw
+        let given: BTreeSet<BlockId> = r
+            .loaded
+            .iter()
+            .filter(|l| !l.new)
+            .map(|l| l.block.id.clone())
+            .collect();
+        let clash = r
+            .loaded
+            .iter()
+            .any(|l| l.new && given.contains(&l.block.id));
+        if !clash || tries == WC_READ_TRIES {
+            return WcRead {
+                loaded: r.loaded,
+                files: r.files,
+                untracked: r.untracked,
+                theirs: r.theirs,
+                blobs: r.blobs,
+                diags: r.diags,
+            };
+        }
+        reserved.extend(given);
+    }
+}
+
+/// `rel` under `dir` (the root is "").
+fn join(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+/// Why a file the scan met is not read as a member, from its metadata (never opened).
+fn member_problem(meta: &std::fs::Metadata) -> Option<&'static str> {
+    let ft = meta.file_type();
+    if ft.is_symlink() {
+        Some(SYMLINK_REASON)
+    } else if !ft.is_file() && !ft.is_dir() {
+        Some(NOT_REGULAR)
+    } else {
+        None
+    }
+}
+
+const SYMLINK_REASON: &str = "symbolic link: rdy does not follow links";
+const NOT_REGULAR: &str = "not a regular file";
+const NOT_UTF8: &str = "the name is not UTF-8";
+const NOT_DOC: &str = "not a doc file: the first entry is not type: doc";
 
 /// Reads one doc file or `_folder.yaml` as if it were at the top level.
 pub(crate) fn read_file(path: &Path, shown: &str) -> (Vec<Loaded>, Vec<Diagnostic>) {
@@ -145,7 +260,7 @@ pub(crate) fn link_diag(shown: &str) -> Diagnostic {
     )
 }
 
-impl Reader {
+impl Reader<'_> {
     fn dir(&mut self, dir: &Path, shown: &str, parent: Option<&BlockId>) {
         let mut entries: Vec<_> = match std::fs::read_dir(dir) {
             Ok(rd) => rd.filter_map(Result::ok).map(|e| e.path()).collect(),
@@ -182,6 +297,16 @@ impl Reader {
                 continue;
             }
             let here = format!("{shown}/{fname}");
+            if let Some(ig) = self.ignore {
+                let rel = here
+                    .strip_prefix(self.base.as_str())
+                    .unwrap_or(&here)
+                    .trim_start_matches('/');
+                let is_dir = std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir());
+                if ig.is_ignored(rel, is_dir) {
+                    continue;
+                }
+            }
             if is_symlink(&path) {
                 self.diags.push(link_diag(&here));
                 continue;
@@ -296,10 +421,11 @@ impl Reader {
         }
     }
 
-    /// One block entry at node path `at` in a file.
+    /// One block entry at node path `at` in a file. In working-copy mode an entry with no `id`
+    /// gets a fresh one with its type's prefix, and one with no `order` an empty order.
     fn entry(
         &mut self,
-        value: serde_yaml_ng::Value,
+        mut value: serde_yaml_ng::Value,
         pos: &Positions,
         at: Vec<Seg>,
         shown: &str,
@@ -323,6 +449,41 @@ impl Reader {
         if !self.check_keys(&value, &keys, here, shown) {
             return None;
         }
+        let (mut new, mut order_given) = (false, true);
+        if let Some(pack) = self.wc
+            && let serde_yaml_ng::Value::Mapping(m) = &mut value
+        {
+            if !m.contains_key("id") {
+                let t = m
+                    .get("type")
+                    .and_then(serde_yaml_ng::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let prefix = pack
+                    .block_types
+                    .get(&t)
+                    .map(|d| d.prefix.as_str())
+                    .filter(|p| BlockId::parse(&format!("{p}-00000")).is_ok());
+                let Some(prefix) = prefix else {
+                    let at = keys.get("type").copied().unwrap_or(here);
+                    self.diags.push(Diagnostic::error(
+                        shown,
+                        at,
+                        E_VALIDATION,
+                        format!("unknown block type \"{t}\""),
+                        "use a block type the project's pack defines",
+                    ));
+                    return None;
+                };
+                let id = self.fresh_id(prefix);
+                m.insert("id".into(), id.to_string().into());
+                new = true;
+            }
+            if !m.contains_key("order") {
+                m.insert("order".into(), String::new().into());
+                order_given = false;
+            }
+        }
         let y: BlockYaml = match serde_yaml_ng::from_value(value) {
             Ok(y) => y,
             Err(e) => {
@@ -337,13 +498,21 @@ impl Reader {
             }
         };
         match from_yaml_struct(y) {
-            Ok((block, keyed)) => Some(Loaded {
-                block,
-                file: shown.into(),
-                at: here,
-                keys,
-                keyed,
-            }),
+            Ok((block, keyed)) => {
+                if self.wc.is_some() && !new {
+                    self.taken.insert(block.id.clone());
+                }
+                Some(Loaded {
+                    block,
+                    file: shown.into(),
+                    at: here,
+                    keys,
+                    keyed,
+                    new,
+                    order_given,
+                    seq: 0,
+                })
+            }
             Err(e) => {
                 self.diags.push(Diagnostic::error(
                     shown,
@@ -444,7 +613,16 @@ impl Reader {
                 ));
             }
         }
-        for k in ["id", "type", "order"] {
+        // a working-copy entry may leave out id and order: the reader assigns them
+        let (required, fix): (&[&str], &str) = if self.wc.is_some() {
+            (&["type"], "each entry needs a type")
+        } else {
+            (
+                &["id", "type", "order"],
+                "each entry needs id, type and order, as rdy export writes them",
+            )
+        };
+        for k in required {
             if !entries.iter().any(|(n, _)| n == k) {
                 ok = false;
                 self.diags.push(Diagnostic::error(
@@ -452,11 +630,21 @@ impl Reader {
                     here,
                     E_FILE_FORMAT,
                     format!("the entry has no \"{k}\""),
-                    "each entry needs id, type and order, as rdy export writes them",
+                    fix,
                 ));
             }
         }
         ok
+    }
+
+    /// A fresh id with `prefix` that no block read so far holds.
+    fn fresh_id(&mut self, prefix: &str) -> BlockId {
+        loop {
+            let id = BlockId::new(prefix);
+            if self.taken.insert(id.clone()) {
+                return id;
+            }
+        }
     }
 
     /// The text of an `order` value as written: from its column to the end of its line, without a
@@ -581,12 +769,28 @@ impl Reader {
             ));
             return;
         }
+        self.doc_items(items, &pos, shown, name, parent);
+    }
+
+    /// The entries of a doc file, the doc first. Returns the doc's id when its entry loaded.
+    fn doc_items(
+        &mut self,
+        items: Vec<serde_yaml_ng::Value>,
+        pos: &Positions,
+        shown: &str,
+        name: &str,
+        parent: Option<&BlockId>,
+    ) -> Option<BlockId> {
         let mut head: Option<BlockId> = None;
         let mut inner: Vec<Loaded> = vec![];
         for (i, v) in items.into_iter().enumerate() {
-            let Some(mut l) = self.entry(v, &pos, vec![Seg::Index(i)], shown) else {
+            if i > 0 && head.is_none() && self.wc.is_some() {
+                return None; // the doc's entry did not load: its diagnostics say why
+            }
+            let Some(mut l) = self.entry(v, pos, vec![Seg::Index(i)], shown) else {
                 continue;
             };
+            l.seq = i;
             if i == 0 {
                 if l.block.block_type != tree::DOC {
                     let at = l.keys.get("type").copied().unwrap_or(l.at);
@@ -597,10 +801,10 @@ impl Reader {
                         "the first entry of a doc file must be the doc (type: doc)",
                         "put the doc's entry first",
                     ));
-                    return;
+                    return None;
                 }
                 if !self.forbid_fs_fields(&l, "doc") {
-                    return;
+                    return None;
                 }
                 l.block.parent = parent.cloned();
                 l.block
@@ -609,6 +813,10 @@ impl Reader {
                 head = Some(l.block.id.clone());
                 self.loaded.push(l);
                 continue;
+            }
+            // a new entry with no parent sits under the file's doc
+            if self.wc.is_some() && l.block.parent.is_none() {
+                l.block.parent = head.clone();
             }
             if tree::is_tree_type(&l.block.block_type) {
                 let at = l.keys.get("type").copied().unwrap_or(l.at);
@@ -627,7 +835,7 @@ impl Reader {
             inner.push(l);
         }
         // every block after the doc sits inside it: its parents stay in this file and end at the doc
-        if let Some(head) = head {
+        if let Some(head) = &head {
             let parents: BTreeMap<&BlockId, Option<&BlockId>> = inner
                 .iter()
                 .map(|l| (&l.block.id, l.block.parent.as_ref()))
@@ -640,7 +848,7 @@ impl Reader {
                 let mut inside = false;
                 for _ in 0..=parents.len() {
                     match cur {
-                        Some(c) if *c == head => {
+                        Some(c) if c == head => {
                             inside = true;
                             break;
                         }
@@ -664,5 +872,276 @@ impl Reader {
             }
         }
         self.loaded.extend(inner);
+        head
+    }
+
+    // ---- working-copy mode (spec §12.1, D-7BKK5) ----
+
+    fn untrack(&mut self, path: String, reason: impl Into<String>) {
+        self.untracked.push(Untracked {
+            path,
+            reason: reason.into(),
+        });
+    }
+
+    fn ignored(&self, rel: &str, is_dir: bool) -> bool {
+        self.ignore.is_some_and(|i| i.is_ignored(rel, is_dir))
+    }
+
+    /// The entries of `dir`, sorted by name; a directory that cannot be read is a diagnostic.
+    fn listing(&mut self, dir: &Path, rel: &str) -> Option<Vec<std::path::PathBuf>> {
+        match std::fs::read_dir(dir) {
+            Ok(rd) => {
+                let mut entries: Vec<_> = rd.filter_map(Result::ok).map(|e| e.path()).collect();
+                entries.sort();
+                Some(entries)
+            }
+            Err(e) => {
+                let shown = if rel.is_empty() { "." } else { rel };
+                self.diags.push(Diagnostic::error(
+                    shown,
+                    (1, 1),
+                    E_FILE_FORMAT,
+                    format!("cannot read the directory: {e}"),
+                    "check the directory's permissions",
+                ));
+                None
+            }
+        }
+    }
+
+    /// One directory of the working tree: the root (`rel` empty, `depth` 0) or a folder's.
+    /// Checks run in the spec's order, and every type check uses `symlink_metadata` before any
+    /// open, so a link is never followed and a FIFO never blocks the scan.
+    fn wc_dir(&mut self, dir: &Path, rel: &str, parent: Option<&BlockId>, depth: usize) {
+        let Some(entries) = self.listing(dir, rel) else {
+            return;
+        };
+        let mut seen: BTreeMap<String, String> = BTreeMap::new();
+        for path in entries {
+            let Some(raw) = path.file_name() else {
+                continue;
+            };
+            let lossy = raw.to_string_lossy();
+            if hidden(&lossy) {
+                continue;
+            }
+            let here = join(rel, &lossy);
+            let meta = match std::fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(e) => {
+                    self.untrack(here, format!("cannot read: {e}"));
+                    continue;
+                }
+            };
+            if self.ignored(&here, meta.is_dir()) {
+                continue;
+            }
+            if let Some(why) = member_problem(&meta) {
+                self.untrack(here, why);
+                continue;
+            }
+            let Some(fname) = raw.to_str() else {
+                self.untrack(here, NOT_UTF8);
+                continue;
+            };
+            if meta.is_dir() {
+                if rel.is_empty() && fname == BLOBS_DIR {
+                    self.wc_blobs(&path, &here);
+                } else {
+                    self.wc_folder(&path, &here, fname, parent, depth + 1, &mut seen);
+                }
+            } else if fname.ends_with(THEIRS_SUFFIX) {
+                self.theirs.push(here);
+            } else if fname == FOLDER_FILE {
+                continue; // read with its directory
+            } else if let Some(stem) = fname.strip_suffix(".yaml") {
+                self.wc_doc_file(&path, &here, stem, parent, meta.len(), &mut seen);
+            }
+            // other files (README.md, code) are not part of the working tree
+        }
+    }
+
+    /// `_blobs/` at the root: its regular files are figures, never docs.
+    fn wc_blobs(&mut self, dir: &Path, rel: &str) {
+        let Some(entries) = self.listing(dir, rel) else {
+            return;
+        };
+        for path in entries {
+            let Some(raw) = path.file_name() else {
+                continue;
+            };
+            let lossy = raw.to_string_lossy();
+            if hidden(&lossy) {
+                continue;
+            }
+            let here = join(rel, &lossy);
+            let meta = match std::fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(e) => {
+                    self.untrack(here, format!("cannot read: {e}"));
+                    continue;
+                }
+            };
+            if self.ignored(&here, meta.is_dir()) || meta.is_dir() {
+                continue;
+            }
+            if let Some(why) = member_problem(&meta) {
+                self.untrack(here, why);
+            } else if raw.to_str().is_none() {
+                self.untrack(here, NOT_UTF8);
+            } else {
+                self.blobs.push(here);
+            }
+        }
+    }
+
+    /// A case-insensitive clash with a name already read in this directory is `E_PATH_CLASH`.
+    fn claim(&mut self, seen: &mut BTreeMap<String, String>, name: &str, here: &str) -> bool {
+        if let Some(other) = seen.insert(name.to_ascii_lowercase(), here.to_string()) {
+            self.diags.push(Diagnostic::error(
+                here,
+                (1, 1),
+                E_PATH_CLASH,
+                format!("{here} and {other} have the same name ignoring case"),
+                "rename one of them",
+            ));
+            return false;
+        }
+        true
+    }
+
+    /// A directory: a folder when it holds a `_folder.yaml` that is one folder entry; skipped
+    /// with its contents when it holds none; untracked when that file is not one.
+    fn wc_folder(
+        &mut self,
+        dir: &Path,
+        here: &str,
+        name: &str,
+        parent: Option<&BlockId>,
+        depth: usize,
+        seen: &mut BTreeMap<String, String>,
+    ) {
+        let ff = dir.join(FOLDER_FILE);
+        let ff_rel = format!("{here}/{FOLDER_FILE}");
+        let Ok(meta) = std::fs::symlink_metadata(&ff) else {
+            return; // no _folder.yaml: not a folder, and nothing under it is read
+        };
+        if self.ignored(&ff_rel, meta.is_dir()) {
+            return;
+        }
+        if depth > tree::MAX_FOLDER_DEPTH {
+            self.untrack(
+                here.to_string(),
+                format!(
+                    "too deep: at most {} nested folders",
+                    tree::MAX_FOLDER_DEPTH
+                ),
+            );
+            return;
+        }
+        if let Some(why) = member_problem(&meta) {
+            self.untrack(ff_rel, why);
+            return;
+        }
+        if !meta.is_file() {
+            self.untrack(ff_rel, NOT_REGULAR);
+            return;
+        }
+        if meta.len() > MAX_MEMBER_BYTES as u64 {
+            self.untrack(ff_rel, "over 16 MiB");
+            return;
+        }
+        if !self.claim(seen, name, here) {
+            return;
+        }
+        self.check_name(name, here);
+        let before = self.diags.len();
+        match self.folder_file(&ff, &ff_rel, name, parent) {
+            Some(id) => {
+                let new_head = self.loaded.last().is_some_and(|l| l.new);
+                let hash = Hash::of(self.text.as_bytes());
+                self.files.insert(
+                    ff_rel,
+                    WcFile {
+                        kind: FileKind::Folder,
+                        head: id.clone(),
+                        new_head,
+                        hash,
+                    },
+                );
+                self.wc_dir(dir, here, Some(&id), depth);
+            }
+            None => {
+                let reason = self
+                    .diags
+                    .get(before)
+                    .map(|d| d.message.clone())
+                    .unwrap_or_else(|| "not a folder entry".into());
+                self.diags.truncate(before);
+                self.untrack(ff_rel, reason);
+            }
+        }
+    }
+
+    /// A `*.yaml` file: a doc member when it is a YAML list whose first entry has `type: doc`;
+    /// else untracked. Problems in later entries are diagnostics.
+    fn wc_doc_file(
+        &mut self,
+        path: &Path,
+        here: &str,
+        stem: &str,
+        parent: Option<&BlockId>,
+        len: u64,
+        seen: &mut BTreeMap<String, String>,
+    ) {
+        if len > MAX_MEMBER_BYTES as u64 {
+            self.untrack(here.to_string(), "over 16 MiB");
+            return;
+        }
+        let before = self.diags.len();
+        let Some((value, pos)) = self.parse(path, here) else {
+            let reason = self
+                .diags
+                .get(before)
+                .map(|d| d.message.clone())
+                .unwrap_or_else(|| "cannot read the file".into());
+            self.diags.truncate(before);
+            self.untrack(here.to_string(), reason);
+            return;
+        };
+        let items = match value {
+            serde_yaml_ng::Value::Sequence(items)
+                if items
+                    .first()
+                    .and_then(|e| e.get("type"))
+                    .and_then(serde_yaml_ng::Value::as_str)
+                    == Some(tree::DOC) =>
+            {
+                items
+            }
+            _ => {
+                self.untrack(here.to_string(), NOT_DOC);
+                return;
+            }
+        };
+        if !self.claim(seen, stem, here) {
+            return;
+        }
+        self.check_name(stem, here);
+        let hash = Hash::of(self.text.as_bytes());
+        let start = self.loaded.len();
+        if let Some(head) = self.doc_items(items, &pos, here, stem, parent) {
+            let new_head = self.loaded.get(start).is_some_and(|l| l.new);
+            self.files.insert(
+                here.to_string(),
+                WcFile {
+                    kind: FileKind::Doc,
+                    head,
+                    new_head,
+                    hash,
+                },
+            );
+        }
     }
 }
