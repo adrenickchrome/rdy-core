@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 mod brief_text;
 mod history_text;
+mod intent_cmd;
 mod view_cmd;
 
 /// This binary's version: the hello's `version`, so a client only talks to a daemon of its own.
@@ -133,6 +134,11 @@ enum Cmd {
     View {
         #[command(subcommand)]
         cmd: view_cmd::ViewCmd,
+    },
+    /// Post, renew, withdraw and list intents: advisory notes on what you mean to change.
+    Intent {
+        #[command(subcommand)]
+        cmd: intent_cmd::IntentCmd,
     },
     /// Undo the newest op of this session on a view, or the named op.
     Undo {
@@ -1000,6 +1006,11 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::View { cmd } => {
             let v = call(env, "view", view_cmd::args_of(&cmd))?;
             let t = view_cmd::render_view(&cmd, &v);
+            Ok((v, t))
+        }
+        Cmd::Intent { cmd } => {
+            let v = call(env, "intent", intent_cmd::args_of(&cmd))?;
+            let t = intent_cmd::render(&cmd, &v);
             Ok((v, t))
         }
         Cmd::Undo { view, op, cascade } => {

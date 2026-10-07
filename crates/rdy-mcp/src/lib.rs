@@ -1,3 +1,4 @@
+pub mod intent_tools;
 pub mod markdown;
 pub mod order;
 pub mod params;

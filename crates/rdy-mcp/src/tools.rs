@@ -168,6 +168,8 @@ pub struct WriteParams {
     pub brief: Option<String>,
     /// The budget for the response's consequences.
     pub max_tokens: Option<usize>,
+    /// The intent (rdy_intent, in-<hex>) this change is made under: recorded on the change.
+    pub intent: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -195,6 +197,8 @@ pub struct DecideParams {
     pub brief: Option<String>,
     /// The budget for the response's consequences.
     pub max_tokens: Option<usize>,
+    /// The intent (rdy_intent, in-<hex>) this change is made under: recorded on the change.
+    pub intent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -204,6 +208,8 @@ pub struct SupersedeParams {
     pub part: Option<String>,
     /// The new decision. It inherits the old decision's affects, depends_on, conditional_on and refines unless you give that kind; an empty list drops it.
     pub decision: DecideParams,
+    /// The intent (rdy_intent, in-<hex>) this change is made under; used when decision has none.
+    pub intent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -216,6 +222,8 @@ pub struct RevokeParams {
     pub brief: Option<String>,
     /// The budget for the response's consequences.
     pub max_tokens: Option<usize>,
+    /// The intent (rdy_intent, in-<hex>) this change is made under: recorded on the change.
+    pub intent: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -1050,6 +1058,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "name an op with target (rdy_view show lists them)",
     ),
     (
+        "E_INTENT_EXPIRED",
+        "renewing or withdrawing an expired intent",
+        "post a new one",
+    ),
+    (
         "E_DAEMON_START",
         "the daemon couldn't be started or reached",
         "read the last lines of .rdy/run/daemon.log it cites; run rdy serve in the foreground to see why",
@@ -1140,6 +1153,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             "link_shape": {"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE},
             "ops": WRITE_OPS.iter().map(|(n, s)| (n.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
             "views": view_tools::SCHEMA_DOC,
+            "intents": crate::intent_tools::INTENT_DOC,
             "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT, "socket_line_bytes": MAX_REQUEST_BYTES, "transport": TRANSPORT_NOTE},
             "errors": ERROR_ROWS.iter().map(|(c, w, f)| (c.to_string(), json!({"when": w, "fix": f}))).collect::<serde_json::Map<_, _>>(),
             "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
@@ -1274,9 +1288,9 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
         justification,
         message: p.message.unwrap_or_default(),
     };
-    let (brief, max_tokens, view) = (p.brief, p.max_tokens, req.view.clone());
+    let (brief, max_tokens, view, intent) = (p.brief, p.max_tokens, req.view.clone(), p.intent);
     write_and_report(&*st.engine, &view, max_tokens, move |r| {
-        r.write_briefed(&s, req, brief)
+        r.write_with_intent(&s, req, brief, intent.as_deref())
     })
     .map(|v| report_once(st, v))
 }
@@ -1315,7 +1329,7 @@ fn decision_input(p: DecideParams) -> DecisionInput {
             .fields
             .map(|m| m.into_iter().collect())
             .unwrap_or_default(),
-        intent: None,
+        intent: p.intent,
     }
 }
 
@@ -1337,7 +1351,9 @@ pub fn rdy_supersede(st: &mut McpState, p: SupersedeParams) -> Result<Value, Rdy
     let s = session(st)?;
     let view = p.decision.view.clone().unwrap_or_else(|| st.view.clone());
     let max_tokens = p.decision.max_tokens;
-    let (old, part, input) = (p.old, p.part, decision_input(p.decision));
+    let mut input = decision_input(p.decision);
+    input.intent = input.intent.or(p.intent);
+    let (old, part) = (p.old, p.part);
     let v = view.clone();
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
         r.supersede(&s, &view, &old, part, input)
@@ -1349,10 +1365,10 @@ pub fn rdy_revoke(st: &mut McpState, p: RevokeParams) -> Result<Value, RdyError>
     check_tokens(p.max_tokens)?;
     let s = session(st)?;
     let view = p.view.unwrap_or_else(|| st.view.clone());
-    let (brief, max_tokens) = (p.brief, p.max_tokens);
+    let (brief, max_tokens, intent) = (p.brief, p.max_tokens, p.intent);
     let v = view.clone();
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
-        r.revoke(&s, &view, &p.target, &p.reason, &p.parent, brief)
+        r.revoke_with_intent(&s, &view, &p.target, &p.reason, &p.parent, brief, intent)
     })
     .map(|v| report_once(st, v))
 }

@@ -10,7 +10,7 @@ use rdy_engine::consequence::{land_and_report, propose_and_report, write_and_rep
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::{
     E_BAD_INPUT, E_LIMIT, E_PERMISSION, HISTORY_MAX, LandOptions, RdyError, ReadState, Relay,
-    Scope, Session, block_to_yaml, check_path, resolve_pack, view_api,
+    Scope, Session, block_to_yaml, check_path, intent, resolve_pack, view_api,
 };
 use rdy_mcp::tools::MAX_TOKENS_LIMIT;
 use rdy_model::{ActorRun, RelayEvidence, Role};
@@ -51,6 +51,7 @@ pub const OPS: &[&str] = &[
     "reindex",
     "fsck",
     "view",
+    "intent",
 ];
 
 #[derive(Deserialize)]
@@ -413,6 +414,15 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 op,
                 args,
                 "{op, name?, from?, base?, pin?, view?, views?, changes?, cascade?, a?, b?, all?, stale?, reason?, owner?, none?, target?, max_tokens?}",
+            )?,
+        ),
+        "intent" => intent::run_intent(
+            cx.engine,
+            cx.session,
+            parse(
+                op,
+                args,
+                "{op, view?, area?, blocks?, angle?, ttl?, intent?, block?, actor?, include_expired?}",
             )?,
         ),
         _ => Err(RdyError::new(

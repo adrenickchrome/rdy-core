@@ -1,12 +1,13 @@
 //! Intents (plan M2d1 Task 6; intn1, iwr1). An intent says, for a while, that a session means to
 //! work on an area or on some blocks, in a view. It is advisory: it refuses no write. Each change
 //! to it (renew, withdraw) is a new version; expiry is computed when it is read, never written.
+use crate::engine::{Engine, write_typed};
 use crate::error::*;
 use crate::views::clip;
 use crate::write::{WriteRequest, WriteResult};
 use crate::{Delta, Rdy, ReadState, Scope, Session, now_ms, rfc3339};
 use rdy_model::{BlockId, ChangeLinks, Hash, Intent, IntentStatus};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub use crate::coord_graph::intent_label;
@@ -554,6 +555,124 @@ impl Rdy {
             None => ChangeLinks::default(),
         };
         self.write_linked(s, req, links, brief.as_deref())
+    }
+}
+
+/// One intent request: `op` and the fields that op takes (mint1). The one dispatcher behind MCP's
+/// `rdy_intent` and the ctl `intent` op.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntentRequest {
+    /// post, renew, withdraw or list.
+    pub op: String,
+    /// post: the view the intent is about (default: the session's own); list: only that view's.
+    pub view: Option<String>,
+    /// post: the area (one of the pack's); list: only intents on that area.
+    pub area: Option<String>,
+    /// post: block ids, keys or paths.
+    pub blocks: Option<Vec<String>>,
+    /// post: what the session means to do, in a few words.
+    pub angle: Option<String>,
+    /// post and renew: how long, like 30m, 2h or 7d (default 2h, at most 7d).
+    pub ttl: Option<String>,
+    /// renew and withdraw: the intent id (`in-<hex>` or a unique prefix).
+    pub intent: Option<String>,
+    /// list: only intents covering this block (id, key or path, read in canon).
+    pub block: Option<String>,
+    /// list: only this actor's intents.
+    pub actor: Option<String>,
+    /// list: also expired and withdrawn intents.
+    pub include_expired: Option<bool>,
+}
+
+fn needs(message: &str, fix: &str) -> RdyError {
+    RdyError::new(E_BAD_INPUT, message, fix)
+}
+
+fn to_json<T: Serialize>(v: T) -> Result<serde_json::Value, RdyError> {
+    serde_json::to_value(v).map_err(|e| {
+        RdyError::new(
+            E_INTERNAL,
+            format!("an intent did not serialize: {e}"),
+            "report this as a bug in rdy",
+        )
+    })
+}
+
+/// Runs `req` for session `s`: post, renew and withdraw return `{intent}`, list returns
+/// `{intents}`. Writes go through `write_typed` (the engine's writer); list reads one snapshot
+/// at the current time. Any other op is `E_BAD_INPUT`.
+pub fn run_intent(
+    engine: &dyn Engine,
+    s: &Session,
+    req: IntentRequest,
+) -> Result<serde_json::Value, RdyError> {
+    let s = s.clone();
+    let wanted = |req: &IntentRequest| {
+        req.intent.clone().ok_or_else(|| {
+            needs(
+                &format!("{} needs intent", req.op),
+                "pass intent: the intent id from list (in-<hex>)",
+            )
+        })
+    };
+    let ttl = |req: &IntentRequest| req.ttl.as_deref().map(parse_ttl).transpose();
+    match req.op.as_str() {
+        "post" => {
+            let angle = req.angle.clone().ok_or_else(|| {
+                needs(
+                    "post needs angle",
+                    "pass angle: what you mean to do, in a few words",
+                )
+            })?;
+            let ttl_ms = ttl(&req)?;
+            let (view, area, blocks) = (
+                req.view.clone(),
+                req.area.clone(),
+                req.blocks.clone().unwrap_or_default(),
+            );
+            let it = write_typed(engine, move |r| {
+                r.intent_post(
+                    &s,
+                    view.as_deref(),
+                    area.as_deref(),
+                    &blocks,
+                    &angle,
+                    ttl_ms,
+                )
+            })?;
+            Ok(serde_json::json!({ "intent": it }))
+        }
+        "renew" => {
+            let (id, ttl_ms) = (wanted(&req)?, ttl(&req)?);
+            let it = write_typed(engine, move |r| r.intent_renew(&s, &id, ttl_ms))?;
+            Ok(serde_json::json!({ "intent": it }))
+        }
+        "withdraw" => {
+            let id = wanted(&req)?;
+            let it = write_typed(engine, move |r| r.intent_withdraw(&s, &id))?;
+            Ok(serde_json::json!({ "intent": it }))
+        }
+        "list" => {
+            let st = engine.read();
+            let block = req
+                .block
+                .as_deref()
+                .map(|b| st.resolve_id(&Scope::Canon, b))
+                .transpose()?;
+            let f = IntentFilter {
+                area: req.area.clone(),
+                block,
+                actor: req.actor.clone(),
+                view: req.view.clone(),
+                include_expired: req.include_expired.unwrap_or(false),
+            };
+            Ok(serde_json::json!({ "intents": to_json(st.intents(&f, now_ms())?)? }))
+        }
+        other => Err(needs(
+            &format!("unknown op {other}"),
+            "rdy_intent ops: post, renew, withdraw, list",
+        )),
     }
 }
 

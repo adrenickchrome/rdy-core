@@ -295,11 +295,27 @@ impl Rdy {
         parent: &str,
         brief: Option<String>,
     ) -> Result<WriteResult, RdyError> {
+        self.revoke_with_intent(s, view, target, reason, parent, brief, None)
+    }
+
+    /// [`Rdy::revoke`] under `intent` (mint1): recorded on the revoking change.
+    #[allow(clippy::too_many_arguments)]
+    pub fn revoke_with_intent(
+        &mut self,
+        s: &Session,
+        view: &str,
+        target: &str,
+        reason: &str,
+        parent: &str,
+        brief: Option<String>,
+        intent: Option<String>,
+    ) -> Result<WriteResult, RdyError> {
         let tid = self.require_decision(view, target)?;
         let d = DecisionInput {
             parent: parent.into(),
             statement: format!("Revoke {tid}: {reason}"),
             brief,
+            intent,
             ..Default::default()
         };
         self.write_decision(

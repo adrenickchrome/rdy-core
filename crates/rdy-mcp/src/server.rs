@@ -1,3 +1,4 @@
+use crate::intent_tools;
 use crate::order::{Order, Ordered, Stamped};
 use crate::params::Parameters;
 use crate::tools::{self, *};
@@ -223,6 +224,16 @@ impl RdyServer {
     }
 
     #[tool(
+        description = "Post, renew, withdraw or list intents: advisory notes on the blocks or area you are about to change, with an expiry (default 2h, at most 7d). An intent never locks anything."
+    )]
+    async fn rdy_intent(
+        &self,
+        Parameters(p): Parameters<intent_tools::IntentParams>,
+    ) -> CallToolResult {
+        self.run("rdy_intent", p, intent_tools::rdy_intent).await
+    }
+
+    #[tool(
         description = "Canon's landings, newest first: who approved which proposal version, how (assurance, relay, evidence), and the tags on each. Each row names the proposer (proposed_by) and the approver. limit and since page it."
     )]
     async fn rdy_log(&self, Parameters(p): Parameters<view_tools::LogParams>) -> CallToolResult {
@@ -258,7 +269,7 @@ impl ServerHandler for RdyServer {
 }
 
 /// What the server tells a host about rdy.
-pub const INSTRUCTIONS: &str = "rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Read and write through rdy's tools, not the working-copy files. Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>). Write with rdy_write; propose with rdy_propose. Work in your own view; include others' changes, never write into their views. Conflicts are recorded, not errors: resolve one by writing the block. When a block comes back as a consequence a second time in a session, do not rewrite it again: confirm it (repin) or ask the person, and show what remains as a change plan. Before editing a block, read it with format markdown or yaml: compact lines are a summary. When a change retires only some of a decision's rules, supersede that part (rdy_supersede with part), not the whole decision.";
+pub const INSTRUCTIONS: &str = "rdy: version control for design docs and decisions. Call rdy_session first, then rdy_overview. Read and write through rdy's tools, not the working-copy files. Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>). Write with rdy_write; propose with rdy_propose. Work in your own view; include others' changes, never write into their views. Conflicts are recorded, not errors: resolve one by writing the block. When a block comes back as a consequence a second time in a session, do not rewrite it again: confirm it (repin) or ask the person, and show what remains as a change plan. Before editing a block, read it with format markdown or yaml: compact lines are a summary. When a change retires only some of a decision's rules, supersede that part (rdy_supersede with part), not the whole decision. Before a larger change, post an intent (rdy_intent) on its area or blocks; write responses name other sessions' intents on what you wrote, and nothing is ever locked.";
 
 /// The longest id value [`IdScanner`] will capture; a longer one counts as no id.
 const MAX_ID_BYTES: usize = 1024;
