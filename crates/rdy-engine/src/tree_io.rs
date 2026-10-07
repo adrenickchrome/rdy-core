@@ -44,6 +44,7 @@ impl Diagnostic {
         let code: &'static str = match self.code.as_str() {
             "E_BAD_NAME" => E_BAD_NAME,
             "E_PATH_CLASH" => E_PATH_CLASH,
+            "E_ORDER_KEY" => "E_ORDER_KEY",
             _ => E_FILE_FORMAT,
         };
         RdyError::new(
@@ -71,6 +72,8 @@ pub(crate) struct Loaded {
 struct Reader {
     loaded: Vec<Loaded>,
     diags: Vec<Diagnostic>,
+    /// The text of the file being read: `order` is quoted back from it (ord4).
+    text: String,
 }
 
 /// Reads the tree under `root`; `shown` is how `root` appears in messages (e.g. "docs").
@@ -108,6 +111,19 @@ pub(crate) fn read_file(path: &Path, shown: &str) -> (Vec<Loaded>, Vec<Diagnosti
         ));
     }
     (r.loaded, r.diags)
+}
+
+/// How YAML read a value, for a message: `a number`, `a boolean`, `null`, `a list`, `a mapping` or `a string`.
+fn yaml_kind(v: &serde_yaml_ng::Value) -> &'static str {
+    use serde_yaml_ng::Value;
+    match v {
+        Value::Number(_) => "a number",
+        Value::Bool(_) => "a boolean",
+        Value::Null => "null",
+        Value::Sequence(_) => "a list",
+        Value::String(_) => "a string",
+        Value::Mapping(_) | Value::Tagged(_) => "a mapping",
+    }
 }
 
 fn hidden(name: &str) -> bool {
@@ -259,7 +275,9 @@ impl Reader {
                 return None;
             }
         };
-        match serde_yaml_ng::from_str(&text) {
+        let parsed = serde_yaml_ng::from_str(&text);
+        self.text = text;
+        match parsed {
             Ok(v) => Some((v, pos)),
             Err(e) => {
                 let at = e
@@ -302,6 +320,9 @@ impl Reader {
                 _ => {}
             }
         }
+        if !self.check_keys(&value, &keys, here, shown) {
+            return None;
+        }
         let y: BlockYaml = match serde_yaml_ng::from_value(value) {
             Ok(y) => y,
             Err(e) => {
@@ -333,6 +354,142 @@ impl Reader {
                 ));
                 None
             }
+        }
+    }
+
+    /// ykey1, ord4: names the key at fault in an entry mapping, in the order the checks run. Each
+    /// failure is a diagnostic at that key; false when any was raised (the entry is skipped).
+    fn check_keys(
+        &mut self,
+        value: &serde_yaml_ng::Value,
+        keys: &BTreeMap<String, (usize, usize)>,
+        here: (usize, usize),
+        shown: &str,
+    ) -> bool {
+        use serde_yaml_ng::Value;
+        const KNOWN: [&str; 8] = [
+            "id", "type", "parent", "order", "fields", "body", "links", "pins",
+        ];
+        let Value::Mapping(m) = value else {
+            return true; // not a mapping: from_value says so
+        };
+        let entries: Vec<(String, &Value)> = m
+            .iter()
+            .map(|(k, v)| {
+                let name = match k {
+                    Value::String(s) => s.clone(),
+                    other => serde_yaml_ng::to_string(other)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string(),
+                };
+                (name, v)
+            })
+            .collect();
+        let at = |k: &str| keys.get(k).copied().unwrap_or(here);
+        let mut ok = true;
+        for (k, _) in &entries {
+            if !KNOWN.contains(&k.as_str()) {
+                ok = false;
+                self.diags.push(Diagnostic::error(
+                    shown,
+                    at(k),
+                    E_FILE_FORMAT,
+                    format!("unknown key \"{k}\" in a block entry"),
+                    "use id, type, parent, order, fields, body and links",
+                ));
+            }
+        }
+        for (k, v) in &entries {
+            if ["id", "type", "parent", "body"].contains(&k.as_str())
+                && !matches!(v, Value::String(_))
+            {
+                ok = false;
+                self.diags.push(Diagnostic::error(
+                    shown,
+                    at(k),
+                    E_FILE_FORMAT,
+                    format!("\"{k}\" must be a string, not {}", yaml_kind(v)),
+                    "quote the value",
+                ));
+            }
+        }
+        for (k, v) in &entries {
+            if k == "order" && !matches!(v, Value::String(_)) {
+                ok = false;
+                let key_at = at(k);
+                let raw = self.order_raw(key_at, v);
+                self.diags.push(Diagnostic::error(
+                    shown,
+                    key_at,
+                    "E_ORDER_KEY",
+                    format!(
+                        "order {raw} is not a string: YAML reads it as {}",
+                        yaml_kind(v)
+                    ),
+                    format!("quote it: order: '{raw}'"),
+                ));
+            }
+        }
+        for (k, v) in &entries {
+            if ["fields", "links", "pins"].contains(&k.as_str()) && !matches!(v, Value::Mapping(_))
+            {
+                ok = false;
+                self.diags.push(Diagnostic::error(
+                    shown,
+                    at(k),
+                    E_FILE_FORMAT,
+                    format!("\"{k}\" must be a mapping, not {}", yaml_kind(v)),
+                    format!("write {k} as key: value lines"),
+                ));
+            }
+        }
+        for k in ["id", "type", "order"] {
+            if !entries.iter().any(|(n, _)| n == k) {
+                ok = false;
+                self.diags.push(Diagnostic::error(
+                    shown,
+                    here,
+                    E_FILE_FORMAT,
+                    format!("the entry has no \"{k}\""),
+                    "each entry needs id, type and order, as rdy export writes them",
+                ));
+            }
+        }
+        ok
+    }
+
+    /// The text of an `order` value as written: from its column to the end of its line, without a
+    /// trailing ` #…` comment. `key_at` is where the key `order` starts. Falls back to the value's
+    /// own reading when the line is not the usual `order: value`.
+    fn order_raw(&self, key_at: (usize, usize), v: &serde_yaml_ng::Value) -> String {
+        let fallback = || {
+            serde_yaml_ng::to_string(v)
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        let Some(line) = self.text.lines().nth(key_at.0.saturating_sub(1)) else {
+            return fallback();
+        };
+        let rest: String = line.chars().skip(key_at.1.saturating_sub(1)).collect();
+        let rest = rest.trim_start_matches(['"', '\'']);
+        let Some(rest) = rest.strip_prefix("order") else {
+            return fallback();
+        };
+        let rest = rest.trim_start_matches(['"', '\'']).trim_start();
+        let Some(rest) = rest.strip_prefix(':') else {
+            return fallback();
+        };
+        let value = match rest.find(" #") {
+            Some(i) => &rest[..i],
+            None => rest,
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            fallback()
+        } else {
+            value.to_string()
         }
     }
 

@@ -63,7 +63,7 @@ where
 
 /// lkey1: a link target written as a key, held until the keys of the import or the view can
 /// resolve it. `at` is its position in the kind's list.
-pub(crate) struct KeyedLink {
+pub struct KeyedLink {
     kind: String,
     at: usize,
     text: String,
@@ -74,6 +74,24 @@ impl KeyedLink {
     /// The text a keyed target was written as.
     pub(crate) fn text(&self) -> &str {
         &self.text
+    }
+
+    /// The link kind it was written under.
+    #[allow(dead_code)] // read by the working-copy layer
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    /// Its position in the kind's list.
+    #[allow(dead_code)] // read by the working-copy layer
+    pub fn at(&self) -> usize {
+        self.at
+    }
+
+    /// The part it names, if any.
+    #[allow(dead_code)] // read by the working-copy layer
+    pub fn part(&self) -> Option<&str> {
+        self.part.as_deref()
     }
 }
 
@@ -757,7 +775,10 @@ impl Rdy {
                                 "{} references {{{{{t}}}}}, which is not in the import",
                                 b.id
                             ),
-                            "export the whole project, or remove the reference",
+                            format!(
+                                "export the whole project, or remove the reference; {}",
+                                crate::keys::literal_hint(&t)
+                            ),
                         ));
                     }
                 }

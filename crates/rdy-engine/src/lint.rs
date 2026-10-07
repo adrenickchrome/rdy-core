@@ -195,15 +195,31 @@ pub fn check_path(
         for (key, tok) in refs {
             if unknown(&tok) {
                 let at = l.keys.get(&key).copied().unwrap_or(l.at);
+                // a {{token}} in a body or a string field says how to write it literally; a link
+                // target keeps its text
+                let (shown_tok, fix) = if key == "links" {
+                    (
+                        tok.clone(),
+                        "fix the id, or check the files that define it together".to_string(),
+                    )
+                } else {
+                    (
+                        format!("{{{{{tok}}}}}"),
+                        format!(
+                            "fix the id, or check the files that define it together; {}",
+                            crate::keys::literal_hint(&tok)
+                        ),
+                    )
+                };
                 diags.push(Diagnostic::error(
                     &l.file,
                     at,
                     E_UNKNOWN_REF,
                     format!(
-                        "{} references {tok}, which is in neither the checked files nor canon",
+                        "{} references {shown_tok}, which is in neither the checked files nor canon",
                         b.id
                     ),
-                    "fix the id, or check the files that define it together",
+                    fix,
                 ));
             }
         }

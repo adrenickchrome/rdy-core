@@ -1430,17 +1430,23 @@ fn build_ops(
                         "{{{{{tok}}}}} in {} is neither a block id nor a key in this view",
                         block.id
                     ),
-                    "reference blocks as {{id}} or {{KEY}}, e.g. {{t-MEDGR}}; find ids and keys with rdy_read",
+                    format!(
+                        "reference blocks as {{{{id}}}} or {{{{KEY}}}}, e.g. {{{{t-MEDGR}}}}; find ids and keys with rdy_read; {}",
+                        crate::keys::literal_hint(&tok)
+                    ),
                 )
             })?;
             let t = ov.get(&target).ok_or_else(|| {
                 RdyError::new(
                     E_UNKNOWN_REF,
                     format!(
-                        "{} references {target}, which does not exist in this view",
+                        "{} references {{{{{target}}}}}, which does not exist in this view",
                         block.id
                     ),
-                    "fix the id, or create the target in the same write",
+                    format!(
+                        "fix the id, or create the target in the same write; {}",
+                        crate::keys::literal_hint(&tok)
+                    ),
                 )
             })?;
             targets.push((target, t.content_hash()));

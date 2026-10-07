@@ -184,3 +184,8 @@ pub(crate) fn rewrite_block(b: &mut Block, lookup: &dyn Fn(&str) -> Option<Block
     b.body = rewrite(&b.body, RefMode::for_body(&b.block_type), lookup);
     b.fields.values_mut().for_each(|v| value(v, lookup));
 }
+
+/// lbr1: the fix text that says how to write a `{{token}}` that names nothing as literal text.
+pub(crate) fn literal_hint(token: &str) -> String {
+    format!("or, if \"{{{{{token}}}}}\" is literal text, write it as \\{{{{{token}}}}}")
+}
