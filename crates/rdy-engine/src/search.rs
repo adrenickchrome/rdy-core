@@ -1,11 +1,17 @@
 //! FW-PR1: deterministic search over block text. A literal or a regex, matched line by line in
 //! each block's body and string fields, in reading order, with lines windowed and capped per
 //! block, pages cut by a token budget and a stateless cursor that a changed match set stales.
-use crate::error::{E_BAD_INPUT, E_LIMIT, E_PAGE_STALE, RdyError};
+use crate::error::{E_BAD_INPUT, E_LIMIT, E_PAGE_STALE, E_UNKNOWN_BLOCK, RdyError};
+use crate::materialize::Materialized;
 use crate::{ReadState, Scope};
-use rdy_model::{Block, FieldValue, Hash};
+use rdy_graph::EdgeKind;
+use rdy_model::decision::{AFFECTS, DECIDED_BY, DECISION, DESCRIBES, IMPLEMENTS};
+use rdy_model::{Block, BlockId, FieldValue, Hash};
+use rdy_schema::Trait;
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
 /// The longest query, in bytes, before a literal is escaped.
 pub const MAX_PATTERN_BYTES: usize = 1024;
@@ -40,6 +46,45 @@ pub struct SearchQuery {
     pub regex: bool,
     #[serde(default)]
     pub ignore_case: bool,
+    /// Every given filter must hold (AND). A block that fails one is not text-matched at all.
+    #[serde(default)]
+    pub filters: SearchFilters,
+}
+
+/// sflt1 (FW-PR1a, FW-SR4): which blocks a search looks at. Within `types` and within `traits`
+/// any listed value matches; every other filter given must also hold.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SearchFilters {
+    /// The block's type is one of these (keys of the pack's block types).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub types: Vec<String>,
+    /// The block's type holds at least one of these traits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub traits: Vec<String>,
+    /// The block sits in this doc or folder (whole path segments, case-sensitive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// `draft`, `stable` or `deprecated`: the block's own or nearest ancestor's lifecycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<String>,
+    /// A version, `tag:<version>` or `landing:<id>`: the block changed since that landing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_since: Option<String>,
+    /// Drop matches inside a superseded, rejected or revoked decision.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exclude_history: bool,
+    /// A decision (id or key): blocks it governs (decided_by, implements, affects).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governed_by: Option<String>,
+    /// A block (id, key or path): blocks that `describes`-link to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub describes: Option<String>,
+    /// A block (id, key or path): blocks it links or references, or that link or reference it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_to: Option<String>,
+    /// Only blocks with an open suspect.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub suspect: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -70,6 +115,9 @@ pub struct SearchMatch {
     /// Matching lines past `LINES_PER_MATCH`.
     #[serde(skip_serializing_if = "is_zero")]
     pub more_lines: usize,
+    /// The block sits in a superseded, rejected or revoked decision.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub history: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -95,28 +143,66 @@ impl ReadState {
         max_tokens: Option<usize>,
     ) -> Result<SearchResult, RdyError> {
         let re = compile(q)?;
-        let cursor = page.map(parse_page).transpose()?;
         let m = self.materialized(scope)?;
+        let plan = self.filter_plan(scope, &m, &q.filters)?;
+        let cursor = page.map(parse_page).transpose()?;
+        let graph = self.graph(scope)?;
+        let history_of = |b: &Block| -> bool {
+            let mut cur = Some(b);
+            for _ in 0..m.len() {
+                let Some(c) = cur else { break };
+                if c.block_type == DECISION
+                    && graph
+                        .status(&c.id)
+                        .is_some_and(|s| matches!(s.tag(), "superseded" | "rejected" | "revoked"))
+                {
+                    return true;
+                }
+                cur = c.parent.as_ref().and_then(|p| m.get(p));
+            }
+            false
+        };
 
-        let mut found: Vec<(&Block, Vec<SearchLine>, usize)> = vec![];
+        let mut found: Vec<(&Block, Vec<SearchLine>, usize, bool)> = vec![];
         let mut token = TOKEN_DOMAIN.to_vec();
         token.extend_from_slice(q.text.as_bytes());
         token.push(0);
         token.push(u8::from(q.regex));
         token.push(u8::from(q.ignore_case));
-        // reading order: depth-first from the top level; a parent loop cannot spin
-        let mut stack: Vec<&Block> = m.children(None).into_iter().rev().collect();
+        token.extend(serde_json::to_vec(&q.filters).unwrap_or_default());
+        token.push(0);
+        // reading order: depth-first from the top level; a parent loop cannot spin. Each entry
+        // carries the lifecycle its parent passes down.
+        let mut stack: Vec<(&Block, Option<&str>)> = m
+            .children(None)
+            .into_iter()
+            .rev()
+            .map(|b| (b, None))
+            .collect();
         let mut rescan = 0;
         for _ in 0..m.len() {
-            let Some(b) = stack.pop() else { break };
-            if let Some((lines, more)) = match_block(&re, b, &mut rescan)? {
-                let version = m.version_of(&b.id).unwrap_or_else(|| b.version_hash());
-                token.extend_from_slice(b.id.as_str().as_bytes());
-                token.push(0);
-                token.extend_from_slice(&version.0);
-                found.push((b, lines, more));
+            let Some((b, inherited)) = stack.pop() else {
+                break;
+            };
+            let own = match b.fields.get("lifecycle") {
+                Some(FieldValue::Str(l)) => Some(l.as_str()),
+                _ => inherited,
+            };
+            if plan.passes(&m, b, own) {
+                // history is cheap to know before the text pass, so exclusion skips the match
+                let early = q.filters.exclude_history.then(|| history_of(b));
+                if early != Some(true)
+                    && let Some((lines, more)) = match_block(&re, b, &mut rescan)?
+                {
+                    let history = early.unwrap_or_else(|| history_of(b));
+                    let version = m.version_of(&b.id).unwrap_or_else(|| b.version_hash());
+                    token.extend_from_slice(b.id.as_str().as_bytes());
+                    token.push(0);
+                    token.extend_from_slice(&version.0);
+                    found.push((b, lines, more, history));
+                }
             }
-            stack.extend(m.children(Some(&b.id)).into_iter().rev());
+            stack.extend(m.children(Some(&b.id)).into_iter().rev().map(|c| (c, own)));
         }
         let token = Hash::of(&token).to_string();
 
@@ -137,13 +223,14 @@ impl ReadState {
         let budget = max_tokens.unwrap_or(DEFAULT_SEARCH_TOKENS);
         let mut used = 0;
         let mut matches = vec![];
-        for (b, lines, more_lines) in found.into_iter().skip(offset) {
+        for (b, lines, more_lines, history) in found.into_iter().skip(offset) {
             let hit = SearchMatch {
                 id: b.id.to_string(),
                 block_type: b.block_type.clone(),
                 path: m.path_of(&b.id),
                 lines,
                 more_lines,
+                history,
             };
             let cost = serde_json::to_string(&hit).map_or(0, |s| s.len()) / 4 + 1;
             if !matches.is_empty() && used + cost > budget {
@@ -165,6 +252,232 @@ impl ReadState {
             next: (omitted > 0).then(|| format!("{token}:{end}")),
         })
     }
+}
+
+/// The filters of one search, checked and resolved against its scope.
+struct FilterPlan {
+    types: Vec<String>,
+    traits: Vec<Trait>,
+    path: Option<String>,
+    lifecycle: Option<String>,
+    /// canon as of the `changed_since` landing
+    since: Option<Arc<Materialized>>,
+    /// the blocks each graph filter keeps, intersected
+    allowed: Vec<BTreeSet<BlockId>>,
+    pack_traits: Vec<(String, Vec<Trait>)>,
+}
+
+impl FilterPlan {
+    /// Whether `b` holds every filter. `lifecycle` is the block's own or inherited lifecycle.
+    fn passes(&self, m: &Materialized, b: &Block, lifecycle: Option<&str>) -> bool {
+        if !self.types.is_empty() && !self.types.contains(&b.block_type) {
+            return false;
+        }
+        if !self.traits.is_empty() {
+            let held = self
+                .pack_traits
+                .iter()
+                .find(|(t, _)| *t == b.block_type)
+                .is_some_and(|(_, held)| self.traits.iter().any(|t| held.contains(t)));
+            if !held {
+                return false;
+            }
+        }
+        if let Some(prefix) = &self.path {
+            let hit = m.path_of(&b.id).is_some_and(|p| {
+                p == *prefix
+                    || p.strip_prefix(prefix.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+            });
+            if !hit {
+                return false;
+            }
+        }
+        if let Some(want) = &self.lifecycle
+            && lifecycle.unwrap_or("draft") != want
+        {
+            return false;
+        }
+        if let Some(old) = &self.since
+            && m.version_of(&b.id) == old.version_of(&b.id)
+        {
+            return false;
+        }
+        self.allowed.iter().all(|set| set.contains(&b.id))
+    }
+}
+
+const TRAIT_NAMES: [(&str, Trait); 6] = [
+    ("normative", Trait::Normative),
+    ("informative", Trait::Informative),
+    ("defines", Trait::Defines),
+    ("describes", Trait::Describes),
+    ("asset", Trait::Asset),
+    ("structural", Trait::Structural),
+];
+
+impl ReadState {
+    /// Checks the filters in their declared order and resolves what a block test needs.
+    fn filter_plan(
+        &self,
+        scope: &Scope,
+        m: &Materialized,
+        f: &SearchFilters,
+    ) -> Result<FilterPlan, RdyError> {
+        let pack = self.pack();
+        for t in &f.types {
+            if !pack.block_types.contains_key(t) {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    format!("types: no block type {t:?} in pack {}", pack.name),
+                    "rdy_schema lists the block types",
+                ));
+            }
+        }
+        let mut traits = vec![];
+        for t in &f.traits {
+            let Some((_, held)) = TRAIT_NAMES.iter().find(|(n, _)| n == t) else {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    format!("traits: {t:?} is not a trait"),
+                    "use normative, informative, defines, describes, asset or structural",
+                ));
+            };
+            traits.push(*held);
+        }
+        let path = match &f.path {
+            None => None,
+            Some(p) => {
+                let p = p.trim_end_matches('/');
+                if p.is_empty() {
+                    return Err(RdyError::new(
+                        E_BAD_INPUT,
+                        "path is empty",
+                        "pass a doc or folder path, e.g. guides",
+                    ));
+                }
+                Some(p.to_string())
+            }
+        };
+        if let Some(l) = &f.lifecycle
+            && !matches!(l.as_str(), "draft" | "stable" | "deprecated")
+        {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("lifecycle: {l:?} is not draft, stable or deprecated"),
+                "pass draft, stable or deprecated",
+            ));
+        }
+        let since = match &f.changed_since {
+            None => None,
+            Some(t) => Some(self.materialized(&self.since_scope(t)?)?),
+        };
+        let g = self.graph(scope)?;
+        let mut allowed = vec![];
+        if let Some(text) = &f.governed_by {
+            let id = self.resolve_id(scope, text)?;
+            let d = block_of(m, &id)?;
+            if d.block_type != DECISION {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    format!("governed_by {text:?} is a {}, not a decision", d.block_type),
+                    "pass a decision's id or key",
+                ));
+            }
+            let mut set: BTreeSet<BlockId> = g
+                .incoming(&id)
+                .iter()
+                .filter(
+                    |e| matches!(&e.kind, EdgeKind::Link(n) if n == DECIDED_BY || n == IMPLEMENTS),
+                )
+                .map(|e| e.from.clone())
+                .collect();
+            set.extend(
+                g.outgoing(&id)
+                    .iter()
+                    .filter(|e| matches!(&e.kind, EdgeKind::Link(n) if n == AFFECTS))
+                    .map(|e| e.to.clone()),
+            );
+            allowed.push(set);
+        }
+        if let Some(text) = &f.describes {
+            let id = self.resolve_id(scope, text)?;
+            block_of(m, &id)?;
+            allowed.push(
+                g.incoming(&id)
+                    .iter()
+                    .filter(|e| matches!(&e.kind, EdgeKind::Link(n) if n == DESCRIBES))
+                    .map(|e| e.from.clone())
+                    .collect(),
+            );
+        }
+        if let Some(text) = &f.linked_to {
+            let id = self.resolve_id(scope, text)?;
+            block_of(m, &id)?;
+            let mut set: BTreeSet<BlockId> = g
+                .incoming(&id)
+                .iter()
+                .filter(|e| e.kind != EdgeKind::Contains)
+                .map(|e| e.from.clone())
+                .collect();
+            set.extend(
+                g.outgoing(&id)
+                    .iter()
+                    .filter(|e| e.kind != EdgeKind::Contains)
+                    .map(|e| e.to.clone()),
+            );
+            set.remove(&id);
+            allowed.push(set);
+        }
+        if f.suspect {
+            allowed.push(self.suspects(scope)?.into_iter().map(|s| s.block).collect());
+        }
+        let pack_traits = pack
+            .block_types
+            .iter()
+            .map(|(n, d)| (n.clone(), d.traits.iter().copied().collect()))
+            .collect();
+        Ok(FilterPlan {
+            types: f.types.clone(),
+            traits,
+            path,
+            lifecycle: f.lifecycle.clone(),
+            since,
+            allowed,
+            pack_traits,
+        })
+    }
+
+    /// The canon scope a `changed_since` text names: `tag:` or `landing:` as given, else a bare
+    /// version (a tag), else a bare landing id.
+    fn since_scope(&self, t: &str) -> Result<Scope, RdyError> {
+        let prefixed = t.starts_with("tag:") || t.starts_with("landing:");
+        let tries = if prefixed {
+            vec![t.to_string()]
+        } else {
+            vec![format!("tag:{t}"), format!("landing:{t}")]
+        };
+        for text in tries {
+            if let Ok(at @ Scope::At(_)) = self.resolve_scope(&text) {
+                return Ok(at);
+            }
+        }
+        Err(RdyError::new(
+            E_BAD_INPUT,
+            format!("changed_since {t:?} names no version, tag or landing"),
+            "pass a version (rdy tags lists them), tag:<version> or landing:<id>",
+        ))
+    }
+}
+
+fn block_of<'a>(m: &'a Materialized, id: &BlockId) -> Result<&'a Block, RdyError> {
+    m.get(id).ok_or_else(|| {
+        RdyError::new(
+            E_UNKNOWN_BLOCK,
+            format!("no block {id}"),
+            "check the id with rdy_read",
+        )
+    })
 }
 
 /// The query as a bounded regex; a literal is escaped first.
