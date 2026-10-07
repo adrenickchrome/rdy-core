@@ -236,6 +236,8 @@ pub struct Rdy {
     /// version_position results, keyed by scope and valid for one (canon head, tag count);
     /// shared with every published state.
     vpos: Arc<Mutex<version::VposCache>>,
+    /// The blocks each proposal version writes; shared with every published state.
+    proposal_touched: inflight::ProposalTouched,
     /// The in-process event bus (evt1); `publish` feeds it.
     events: Events,
     /// The end of the last batch whose events were published to `events` (or whose events could
@@ -369,6 +371,7 @@ impl Rdy {
         let pack = Arc::new(pack);
         let as_of = Arc::new(AsOfCache::default());
         let vpos: Arc<Mutex<version::VposCache>> = Default::default();
+        let proposal_touched = inflight::ProposalTouched::default();
         let (name, description) = site_identity(project, Some(&cfg));
         let require_up_to_date = Config::require_up_to_date(Some(&cfg));
         let idle_days = Config::idle_days(Some(&cfg));
@@ -388,6 +391,7 @@ impl Rdy {
             reader: store.reader(),
             as_of: Arc::clone(&as_of),
             vpos: Arc::clone(&vpos),
+            proposal_touched: Arc::clone(&proposal_touched),
             error: None,
         });
         let mut r = Rdy {
@@ -395,6 +399,7 @@ impl Rdy {
             state,
             as_of,
             vpos,
+            proposal_touched,
             events: Events::new(),
             last_emitted: store.log_end(),
             emit_error: None,
@@ -551,6 +556,7 @@ impl Rdy {
                     reader: self.store.reader(),
                     as_of: Arc::clone(&self.as_of),
                     vpos: Arc::clone(&self.vpos),
+                    proposal_touched: Arc::clone(&self.proposal_touched),
                     error: Some(e.clone()),
                 }));
                 Err(e)
@@ -765,6 +771,7 @@ impl Rdy {
             reader: self.store.reader(),
             as_of: Arc::clone(&self.as_of),
             vpos: Arc::clone(&self.vpos),
+            proposal_touched: Arc::clone(&self.proposal_touched),
             error: None,
         })
     }

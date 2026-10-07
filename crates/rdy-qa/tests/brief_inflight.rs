@@ -142,3 +142,25 @@ fn infl1_a_cut_shortens_inflight_and_keeps_coverage() {
         "a cut never changes coverage"
     );
 }
+
+#[test]
+fn infl1_an_open_proposals_written_blocks_are_read_once_per_version() {
+    // a proposal version never changes, so the blocks it writes are memoised across briefings
+    // and published states; a new version is read once more
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    write(&mut r, "pa", upd(&s.a, "A in pa.")).unwrap();
+    r.propose(&writer(), "pa", "Change A").unwrap();
+    assert_eq!(r.read().proposal_touched_cache_len(), 0);
+    let first = brief_of(&r, &Scope::Canon, &[&s.a]);
+    assert_eq!(r.read().proposal_touched_cache_len(), 1);
+    write(&mut r, "other", upd(&s.c, "C in other.")).unwrap();
+    let again = brief_of(&r, &Scope::Canon, &[&s.a, &s.b]);
+    assert_eq!(again.inflight.proposals, first.inflight.proposals);
+    assert_eq!(r.read().proposal_touched_cache_len(), 1, "read once");
+    write(&mut r, "pa", upd(&s.c, "C in pa.")).unwrap();
+    r.propose(&writer(), "pa", "Change A and C").unwrap();
+    let b = brief_of(&r, &Scope::Canon, &[&s.a]);
+    assert_eq!(b.inflight.proposals.len(), 1);
+    assert_eq!(r.read().proposal_touched_cache_len(), 2);
+}

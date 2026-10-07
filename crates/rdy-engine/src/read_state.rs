@@ -215,6 +215,8 @@ pub struct ReadState {
     pub(crate) as_of: Arc<AsOfCache>,
     /// The version-position cache, shared like `as_of` (read by the state's version reads).
     pub(crate) vpos: Arc<Mutex<VposCache>>,
+    /// The blocks each open proposal version writes, shared like `vpos` (read by `inflight`).
+    pub(crate) proposal_touched: crate::inflight::ProposalTouched,
     /// A `Full` publish that failed to read the heads: every read of this state returns it.
     pub(crate) error: Option<RdyError>,
 }

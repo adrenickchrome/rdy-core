@@ -174,6 +174,12 @@ fn bpag1_rdy_brief_pages_over_mcp_and_page_stands_alone() {
     assert_eq!(p["base"]["token"], b["base"]["token"]);
     let e = c.call("rdy_brief", json!({"page": cursor, "ids": [h.to_string()]}));
     assert_eq!(e.code(), Some("E_BAD_INPUT"));
+    let tools = c.tools();
+    let d = tools.iter().find(|t| t["name"] == "rdy_brief").unwrap()["description"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(d.contains("page: <next>"), "{d}");
     drop(c);
     s.stop();
 }
@@ -284,5 +290,149 @@ fn bfit1_a_cut_briefing_with_its_cursor_fits_every_budget() {
             shown(&p),
             p.next
         );
+    }
+}
+
+/// A canon briefing of H (60 dependents) cut to 400 tokens and registered, with view `other`'s
+/// unlanded write to H listed in its `inflight.views`.
+fn listed_other(r: &mut Rdy, h: &BlockId) -> Briefing {
+    write(
+        r,
+        "other",
+        json!([{"op": "update", "id": h.to_string(), "body": "H, in other."}]),
+    )
+    .unwrap();
+    let first = r.read().brief(&Scope::Canon, &cov(h), Some(400)).unwrap();
+    first.register(&r.briefs());
+    assert!(first.next.is_some(), "60 dependents do not fit 400 tokens");
+    assert_eq!(
+        first
+            .inflight
+            .views
+            .iter()
+            .map(|v| v.view.as_str())
+            .collect::<Vec<_>>(),
+        vec!["other"]
+    );
+    first
+}
+
+/// Pages from `cursor` to the end; every page is served.
+fn page_to_end(r: &Rdy, scope: &Scope, cursor: String) -> usize {
+    let (mut next, mut pages) = (Some(cursor), 0);
+    while let Some(c) = next {
+        let p = r
+            .read()
+            .brief_page(scope, &r.briefs(), &c, Some(400))
+            .unwrap_or_else(|e| panic!("page {pages}: {e}"));
+        next = p.next.clone();
+        pages += 1;
+        assert!(pages < 100, "paging does not end");
+    }
+    pages
+}
+
+#[test]
+fn bpag1_a_listed_views_write_to_an_uncovered_block_keeps_the_cursor_valid() {
+    // inflight is advice: a write by a view it lists moves that view's last_write, which must
+    // not refuse a page of a briefing whose covered blocks, dependents and the rest did not move
+    let (_d, mut r) = project();
+    let (hub_doc, h) = hub(&mut r, 60);
+    let first = listed_other(&mut r, &h);
+    let before = r.read().view_head("other").unwrap().last_write_ms;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // writes until the view's last write moved (one write may land in the same millisecond)
+    while r.read().view_head("other").unwrap().last_write_ms == before {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "last_write never moved"
+        );
+        write(
+            &mut r,
+            "other",
+            json!([{"op": "update", "id": hub_doc.to_string(), "fields": {"title": "Hub, in other."}}]),
+        )
+        .unwrap();
+    }
+    let again = r.read().brief(&Scope::Canon, &cov(&h), Some(400)).unwrap();
+    assert_ne!(
+        again.inflight.views[0].last_write_ms,
+        first.inflight.views[0].last_write_ms
+    );
+    assert!(page_to_end(&r, &Scope::Canon, first.next.clone().unwrap()) > 1);
+}
+
+#[test]
+fn bpag1_a_view_that_starts_changing_a_covered_block_keeps_the_cursor_valid() {
+    // an unlanded write to H in another view changes no canon entry: the page is served, and
+    // the new inflight entry may shift an advisory page
+    let (_d, mut r) = project();
+    let (_hub_doc, h) = hub(&mut r, 60);
+    let first = r.read().brief(&Scope::Canon, &cov(&h), Some(400)).unwrap();
+    first.register(&r.briefs());
+    assert!(first.inflight.views.is_empty());
+    write(
+        &mut r,
+        "late",
+        json!([{"op": "update", "id": h.to_string(), "body": "H, in late."}]),
+    )
+    .unwrap();
+    assert!(page_to_end(&r, &Scope::Canon, first.next.clone().unwrap()) > 1);
+}
+
+#[test]
+fn bpag1_an_inflight_list_that_shrank_is_clamped_not_stale() {
+    let (_d, mut r) = project();
+    let (_hub_doc, h) = hub(&mut r, 60);
+    let first = listed_other(&mut r, &h);
+    // the first page showed the one inflight view: its cursor's inflight.views offset is 1
+    let (_token, rest) = first.next.as_deref().unwrap().split_once(':').unwrap();
+    let offsets: Vec<&str> = rest.split(':').next().unwrap().split(',').collect();
+    assert_eq!(offsets[5], "1", "{rest}");
+    r.view_close(&writer(), &["other".to_string()], "done")
+        .unwrap();
+    assert!(page_to_end(&r, &Scope::Canon, first.next.clone().unwrap()) > 1);
+}
+
+#[test]
+fn bpag1_a_page_in_another_scope_is_bad_input_naming_both() {
+    let (_d, mut r) = project();
+    let (_hub_doc, h) = hub(&mut r, 60);
+    // view other changed H, so its briefing of H differs from canon's
+    let first = listed_other(&mut r, &h);
+    let e = r
+        .read()
+        .brief_page(
+            &Scope::View("other".into()),
+            &r.briefs(),
+            first.next.as_deref().unwrap(),
+            Some(400),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT, "{e}");
+    assert!(
+        e.message.contains("canon") && e.message.contains("view:other"),
+        "{e}"
+    );
+    assert!(e.fix.contains("canon"), "{e}");
+    // the same cursor in its own scope is served
+    assert!(page_to_end(&r, &Scope::Canon, first.next.clone().unwrap()) > 1);
+}
+
+#[test]
+fn bpag1_a_briefing_is_cut_only_when_the_whole_does_not_fit() {
+    // per-doc counts belong to a cut briefing: they never make a briefing that fits whole cut
+    let (_d, mut r) = project();
+    let (_hub_doc, h) = hub(&mut r, 3);
+    let full = r
+        .read()
+        .brief(&Scope::Canon, &cov(&h), Some(100_000))
+        .unwrap();
+    assert!(!full.truncated && full.docs.is_empty());
+    let whole = json_tokens(&full);
+    for max in 1..=whole + 300 {
+        let b = r.read().brief(&Scope::Canon, &cov(&h), Some(max)).unwrap();
+        assert_eq!(b.truncated, whole > max, "at {max} (whole {whole})");
+        assert_eq!(!b.docs.is_empty(), b.truncated, "at {max}");
     }
 }

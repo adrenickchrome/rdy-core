@@ -367,11 +367,14 @@ pub struct Briefing {
     /// How many entries of each `PAGE_SECTIONS` section this page and the pages before it showed.
     #[serde(skip)]
     pub offsets: [usize; PAGE_SECTIONS.len()],
-    /// A digest of every paged section of the whole, uncut briefing: what a cursor vouches for
-    /// beyond the token (which covers only the covered blocks and their outgoing suspect-link
-    /// targets, not dependents, governs or inflight).
+    /// A digest of every paged section of the whole, uncut briefing except the advisory
+    /// `inflight` ones: what a cursor vouches for beyond the token (which covers only the covered
+    /// blocks and their outgoing suspect-link targets, not dependents, governs or lineage).
     #[serde(skip)]
     pub digest: Hash,
+    /// The scope the briefing was made in, as scope text (`cursor_scope`); a cursor carries it.
+    #[serde(skip)]
+    pub scope: String,
     #[serde(skip)]
     pub record: Arc<BriefRecord>,
 }
@@ -425,26 +428,38 @@ impl Briefing {
     }
 
     /// Shows the entries after the first `skip[i]` of each section, cut to `max` tokens, and
-    /// sets `next`, `truncated` and `docs`. With `floor`, the cut keeps at least one entry (a
-    /// page always moves on). `Err` (`E_PAGE_STALE`) when an offset is past the end of its
-    /// section: the sections are no longer the ones the cursor counted in.
+    /// sets `next`, `truncated` and `docs`. A briefing is cut when it is a later page or its
+    /// whole does not fit `max`; only then does `docs` compute the per-doc counts (over the
+    /// whole briefing, before the earlier pages' entries are dropped). With `floor`, the cut
+    /// keeps at least one entry (a page always moves on). An offset past the end of an advisory
+    /// section (`inflight`, which may shrink between pages) counts as all of it shown. `Err`
+    /// (`E_PAGE_STALE`) when an offset is past the end of any other section: the sections are no
+    /// longer the ones the cursor counted in.
     fn page(
         &mut self,
-        skip: [usize; PAGE_SECTIONS.len()],
+        mut skip: [usize; PAGE_SECTIONS.len()],
         max: usize,
         floor: bool,
+        docs: impl FnOnce(&Briefing) -> Vec<DocCounts>,
     ) -> Result<(), RdyError> {
         let totals = self.lens();
-        if skip.iter().zip(totals).any(|(s, t)| *s > t) {
-            return Err(e_page_moved());
+        for (i, s) in skip.iter_mut().enumerate() {
+            if is_advisory(i) {
+                *s = (*s).min(totals[i]);
+            } else if *s > totals[i] {
+                return Err(e_page_moved());
+            }
+        }
+        let cut = skip.iter().any(|s| *s > 0) || self.tokens() > max;
+        if cut {
+            self.docs = docs(self);
         }
         self.drop_first(&skip);
         self.settle(&skip, &totals);
-        while self.tokens() > max && self.halve(floor) {
-            self.settle(&skip, &totals);
-        }
-        if !self.truncated {
-            self.docs.clear();
+        if cut {
+            while self.tokens() > max && self.halve(floor) {
+                self.settle(&skip, &totals);
+            }
         }
         Ok(())
     }
@@ -462,10 +477,11 @@ impl Briefing {
         self.next = (after != *totals).then(|| {
             let offsets: Vec<String> = after.iter().map(ToString::to_string).collect();
             format!(
-                "{}:{}:{}",
+                "{}:{}:{}:{}",
                 self.record.token_hex(),
                 offsets.join(","),
-                self.digest_hex()
+                self.digest_hex(),
+                self.scope
             )
         });
         self.truncated |= self.next.is_some() || skip.iter().any(|s| *s > 0);
@@ -534,11 +550,36 @@ fn e_page_moved() -> RdyError {
     )
 }
 
+/// A page of a briefing made in another scope than this call's.
+fn e_page_scope(cursor: &str, given: &str) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("page continues a briefing in scope {cursor}, not in {given}"),
+        format!("pass scope {cursor:?} with page, or brief again without page to brief in {given}"),
+    )
+}
+
+/// Whether `PAGE_SECTIONS[i]` is advisory: an `inflight` list, which a cursor does not vouch
+/// for (it is not in the digest), so a page may show it shifted.
+fn is_advisory(i: usize) -> bool {
+    PAGE_SECTIONS[i].starts_with("inflight.")
+}
+
+/// A scope as a cursor carries it, in the scope text `resolve_scope` reads: `canon`,
+/// `view:<name>` or `landing:<id>`.
+fn cursor_scope(scope: &Scope) -> String {
+    match scope {
+        Scope::Canon => "canon".to_string(),
+        Scope::View(v) => format!("view:{v}"),
+        Scope::At(h) => format!("landing:{h}"),
+    }
+}
+
 /// How many hex digits of a briefing's digest a cursor carries (64 bits).
 const DIGEST_HEX: usize = 16;
 
-/// A cursor `<token>:<o1>,…,<o8>:<digest>` split at its first colon: the token (64 lowercase
-/// hex) and the rest. The rest is read by `parse_tail` once the token is known.
+/// A cursor `<token>:<o1>,…,<o8>:<digest>:<scope>` split at its first colon: the token (64
+/// lowercase hex) and the rest. The rest is read by `parse_tail` once the token is known.
 fn parse_cursor(cursor: &str) -> Result<(&str, &str), RdyError> {
     let (token, rest) = cursor.split_once(':').ok_or_else(bad_cursor)?;
     if token.len() != 64 || !token.bytes().all(is_lower_hex) {
@@ -551,10 +592,12 @@ fn is_lower_hex(b: u8) -> bool {
     matches!(b, b'0'..=b'9' | b'a'..=b'f')
 }
 
-/// The offsets and the digest of a cursor's rest.
-fn parse_tail(rest: &str) -> Result<([usize; PAGE_SECTIONS.len()], &str), RdyError> {
-    let (offsets, digest) = rest.split_once(':').ok_or_else(bad_cursor)?;
-    if digest.len() != DIGEST_HEX || !digest.bytes().all(is_lower_hex) {
+/// The offsets, the digest and the scope of a cursor's rest. The scope is last: everything
+/// after the digest's colon (a view name may hold a colon).
+fn parse_tail(rest: &str) -> Result<([usize; PAGE_SECTIONS.len()], &str, &str), RdyError> {
+    let (offsets, tail) = rest.split_once(':').ok_or_else(bad_cursor)?;
+    let (digest, scope) = tail.split_once(':').ok_or_else(bad_cursor)?;
+    if digest.len() != DIGEST_HEX || !digest.bytes().all(is_lower_hex) || scope.is_empty() {
         return Err(bad_cursor());
     }
     let offsets: Vec<usize> = offsets
@@ -562,7 +605,7 @@ fn parse_tail(rest: &str) -> Result<([usize; PAGE_SECTIONS.len()], &str), RdyErr
         .map(|n| n.parse().map_err(|_| bad_cursor()))
         .collect::<Result<_, _>>()?;
     let offsets: [usize; PAGE_SECTIONS.len()] = offsets.try_into().map_err(|_| bad_cursor())?;
-    Ok((offsets, digest))
+    Ok((offsets, digest, scope))
 }
 
 /// How a scope is named in a briefing's errors.
@@ -673,10 +716,12 @@ impl ReadState {
         max_tokens: Option<usize>,
     ) -> Result<Briefing, RdyError> {
         let mut briefing = self.assemble(scope, ids)?;
+        let m = self.materialized(scope)?;
         briefing.page(
             [0; PAGE_SECTIONS.len()],
             max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS),
             false,
+            |b| doc_counts(&m, b),
         )?;
         Ok(briefing)
     }
@@ -684,7 +729,8 @@ impl ReadState {
     /// The page of a cut briefing that `cursor` (a `next`) names: the briefing registered under
     /// its token is made again in `scope` and must still have that token; the entries earlier
     /// pages showed are dropped and the rest cut to `max_tokens`. A page shows at least one
-    /// entry, so paging ends. `E_PAGE_STALE` when the token or any paged entry of the whole
+    /// entry, so paging ends. `E_BAD_INPUT` when `scope` is not the scope the cursor's briefing
+    /// was made in. `E_PAGE_STALE` when the token or any non-advisory paged entry of the whole
     /// briefing differs from what the cursor counted (its digest), or an offset is out of range.
     pub fn brief_page(
         &self,
@@ -701,18 +747,30 @@ impl ReadState {
                 "brief again without page, then page from the new next",
             ));
         };
-        let (skip, digest) = parse_tail(rest)?;
+        let (skip, digest, made_in) = parse_tail(rest)?;
+        let given = cursor_scope(scope);
+        if made_in != given {
+            return Err(e_page_scope(made_in, &given));
+        }
         let mut briefing = self.assemble(scope, &rec.covers)?;
-        // the token covers the covered blocks only; the digest covers every paged entry, so a
-        // dependent, a governing decision or an inflight change that came or went is caught too
+        // the token covers the covered blocks only; the digest covers every non-advisory paged
+        // entry, so a dependent, a governing decision or a lineage edge that came or went is
+        // caught too. inflight is advice: another view's write does not refuse the page.
         if briefing.record.token != rec.token || briefing.digest_hex() != digest {
             return Err(e_page_moved());
         }
-        briefing.page(skip, max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS), true)?;
+        let m = self.materialized(scope)?;
+        briefing.page(
+            skip,
+            max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS),
+            true,
+            |b| doc_counts(&m, b),
+        )?;
         Ok(briefing)
     }
 
-    /// The whole briefing of `ids` in `scope`, uncut, with its per-doc counts.
+    /// The whole briefing of `ids` in `scope`, uncut, without its per-doc counts (`page`
+    /// computes them for a cut briefing only).
     fn assemble(&self, scope: &Scope, ids: &BTreeSet<BlockId>) -> Result<Briefing, RdyError> {
         let g = self.graph(scope)?;
         let m = self.materialized(scope)?;
@@ -849,7 +907,8 @@ impl ReadState {
                 .collect(),
             depends: recorded.len() - ids.len(),
         };
-        let docs = doc_counts(&m, ids, &governs, &dependents, &will_go_stale, &suspects);
+        // inflight is advice and not vouched for: a listed view's next write moves its
+        // last_write, and a page must not go stale over that
         let digest = Hash::of(
             &serde_json::to_vec(&(
                 &governs,
@@ -857,7 +916,6 @@ impl ReadState {
                 &lineage,
                 &will_go_stale,
                 &suspects,
-                &inflight,
                 &base.blocks,
             ))
             .expect("a briefing's sections serialize: strings, numbers and string-keyed maps only"),
@@ -874,9 +932,10 @@ impl ReadState {
             truncated: false,
             omitted: BTreeMap::new(),
             next: None,
-            docs,
+            docs: vec![],
             offsets: [0; PAGE_SECTIONS.len()],
             digest,
+            scope: cursor_scope(scope),
             record: Arc::new(BriefRecord {
                 token,
                 covers: ids.clone(),
@@ -886,16 +945,16 @@ impl ReadState {
     }
 }
 
-/// The per-doc counts of a whole briefing, by doc id. A covered block outside any doc (a
-/// folder) counts nowhere.
-fn doc_counts(
-    m: &Materialized,
-    ids: &BTreeSet<BlockId>,
-    governs: &[Governs],
-    dependents: &[Dependent],
-    will_go_stale: &[WillGoStale],
-    suspects: &[Suspect],
-) -> Vec<DocCounts> {
+/// The per-doc counts of a whole briefing `b` (before any entry is dropped), by doc id. A
+/// covered block outside any doc (a folder) counts nowhere.
+fn doc_counts(m: &Materialized, b: &Briefing) -> Vec<DocCounts> {
+    let (ids, governs, dependents, will_go_stale, suspects) = (
+        &b.record.covers,
+        &b.governs,
+        &b.dependents,
+        &b.will_go_stale,
+        &b.suspects,
+    );
     let mut by_doc: BTreeMap<BlockId, DocCounts> = BTreeMap::new();
     let mut bump = |id: &BlockId, add: fn(&mut DocCounts)| {
         if let Some(d) = m.doc_of(id) {

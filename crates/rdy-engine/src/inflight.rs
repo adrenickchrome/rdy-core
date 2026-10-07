@@ -8,8 +8,15 @@ use crate::views::OwnerInfo;
 use crate::{ReadState, Scope};
 use rdy_model::{BlockId, Hash, Op};
 use serde::Serialize;
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
+
+/// How many proposal versions `ProposalTouched` holds before it starts again.
+const PROPOSAL_TOUCHED_ENTRIES: usize = 1024;
+
+/// The block ids each proposal version's changes write, by version hash. A version never
+/// changes, so an entry never goes stale; shared by every published state, cleared when full.
+pub(crate) type ProposalTouched = Arc<Mutex<HashMap<Hash, Arc<BTreeSet<BlockId>>>>>;
 
 /// The work in flight on a briefing's covered blocks.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -84,6 +91,40 @@ impl ReadState {
         Ok(Arc::clone(entry.touched.get_or_init(|| ids)))
     }
 
+    /// The block ids that proposal version `version` (whose changes are `changes`) writes,
+    /// memoised in the cache every state shares.
+    fn proposal_writes(
+        &self,
+        version: &Hash,
+        changes: &[Hash],
+    ) -> Result<Arc<BTreeSet<BlockId>>, RdyError> {
+        let lock = || {
+            self.proposal_touched
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+        };
+        if let Some(hit) = lock().get(version) {
+            return Ok(Arc::clone(hit));
+        }
+        let ids = Arc::new(self.ids_written(changes)?);
+        let mut cache = lock();
+        if cache.len() >= PROPOSAL_TOUCHED_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(*version, Arc::clone(&ids));
+        Ok(ids)
+    }
+
+    /// Test hook: how many proposal versions' written blocks are memoised (the cache is shared
+    /// by every state).
+    #[doc(hidden)]
+    pub fn proposal_touched_cache_len(&self) -> usize {
+        self.proposal_touched
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+    }
+
     /// The work in flight on `ids`, briefed in `scope`: every open view other than the scope's
     /// own that includes changes writing one of them, and every open proposal whose latest
     /// version writes one of them.
@@ -118,7 +159,8 @@ impl ReadState {
         }
         let mut proposals = vec![];
         for (pref, p) in open_proposals(self)? {
-            let blocks = common(ids, &self.ids_written(&p.changes)?);
+            let touched = self.proposal_writes(&pref.version, &p.changes)?;
+            let blocks = common(ids, &touched);
             if blocks.is_empty() {
                 continue;
             }

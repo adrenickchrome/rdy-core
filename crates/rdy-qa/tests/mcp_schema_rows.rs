@@ -74,3 +74,24 @@ fn erow1_the_edit_loop_doc_and_instructions_carry_the_m2c3_lines() {
         "{i}"
     );
 }
+
+#[test]
+fn erow1_the_views_doc_names_codes_but_defines_none() {
+    // the errors table is the one source of each code's when and fix
+    let doc = rdy_mcp::view_tools::SCHEMA_DOC;
+    for (code, _, _) in ERROR_ROWS {
+        assert!(
+            !doc.contains(&format!("{code}:")),
+            "{code} is defined in the views doc: {doc}"
+        );
+    }
+    assert!(doc.contains("E_VIEW_OWNER"), "{doc}");
+}
+
+#[test]
+fn erow1_the_edit_loop_doc_says_every_page_of_a_cut_briefing_is_truncated() {
+    assert!(
+        EDIT_LOOP_DOC.contains("Every page of a cut briefing has truncated: true and docs"),
+        "{EDIT_LOOP_DOC}"
+    );
+}
