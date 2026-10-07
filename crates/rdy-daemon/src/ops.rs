@@ -450,6 +450,17 @@ fn status(cx: &OpContext) -> Result<Value, RdyError> {
 
 fn show(cx: &OpContext, a: ShowArgs) -> Result<Value, RdyError> {
     let st = cx.engine.read();
+    // pshow1: `P-<id>@<n>` is a proposal version, never a block; scope does not apply to it
+    if rdy_engine::is_proposal_ref(&a.id) {
+        if a.blame {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "blame applies to blocks, not proposals",
+                "drop --blame to read the proposal version, or pass a block id",
+            ));
+        }
+        return Ok(json!({"proposal": to_json(&st.proposal_show(&a.id)?)}));
+    }
     // refv1: `id@version` or a ref line reads under that version; a clashing scope is refused
     let target = rdy_model::reference::parse_target(&a.id)
         .map_err(|m| RdyError::new(E_BAD_INPUT, m, rdy_model::reference::BAD_REF_FIX))?;

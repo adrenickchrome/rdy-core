@@ -521,6 +521,9 @@ pub fn rdy_tags(st: &mut McpState, _p: TagsParams) -> Result<Value, RdyError> {
 pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
+    if is_proposal_ref(&p.id) {
+        return read_proposal(st, &p);
+    }
     let st_ = st.engine.read();
     let (scope, id) = read_target(st, &st_, &p.id, &p.scope)?;
     let suspects: std::collections::BTreeSet<BlockId> =
@@ -628,6 +631,31 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
         out["warnings"] = json!(warnings);
     }
     Ok(budget(out, p.max_tokens))
+}
+
+/// pshow1: a proposal version reads as its own compact text and the structured `proposal`.
+fn read_proposal(st: &mut McpState, p: &IdParams) -> Result<Value, RdyError> {
+    if let Some(f) = p.format.as_deref()
+        && f != "compact"
+    {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            format!("a proposal version reads as compact only, not {f:?}"),
+            "omit format, or pass \"compact\"",
+        ));
+    }
+    let show = st.engine.read().proposal_show(&p.id)?;
+    let v = serde_json::to_value(&show).map_err(|e| {
+        RdyError::new(
+            E_INTERNAL,
+            format!("a proposal did not serialize: {e}"),
+            "report this as a bug in rdy",
+        )
+    })?;
+    Ok(budget(
+        json!({"id": show.r#ref, "format": "compact", "text": proposal_text(&v), "proposal": v}),
+        p.max_tokens,
+    ))
 }
 
 pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
