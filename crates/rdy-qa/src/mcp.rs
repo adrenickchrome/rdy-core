@@ -10,7 +10,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const DEADLINE: Duration = Duration::from_secs(2);
+/// How long a request waits for its reply before the server counts as hung: a deadline, not a
+/// speed claim (the perf tier measures speed), so it is generous for a loaded machine.
+pub const DEADLINE: Duration = Duration::from_secs(30);
 /// The `protocolVersion` the client sends in its `initialize`.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -158,7 +160,7 @@ impl McpClient {
         let id = c.next_id();
         c.send(&json!({"jsonrpc": "2.0", "id": id, "method": "initialize",
             "params": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "rdy-qa", "version": "0"}}}));
-        c.recv(id, Duration::from_secs(10));
+        c.recv(id, DEADLINE);
         c.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
         c
     }

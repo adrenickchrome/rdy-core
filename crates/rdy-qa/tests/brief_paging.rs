@@ -341,7 +341,7 @@ fn bpag1_a_listed_views_write_to_an_uncovered_block_keeps_the_cursor_valid() {
     let (hub_doc, h) = hub(&mut r, 60);
     let first = listed_other(&mut r, &h);
     let before = r.read().view_head("other").unwrap().last_write_ms;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     // writes until the view's last write moved (one write may land in the same millisecond)
     while r.read().view_head("other").unwrap().last_write_ms == before {
         assert!(

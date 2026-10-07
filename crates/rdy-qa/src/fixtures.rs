@@ -179,18 +179,19 @@ pub fn cases(fast: u32) -> u32 {
     if deep() { fast * 10 } else { fast }
 }
 
-/// The `rdy` binary: `$RDY_BIN`, else `target/release/rdy` next to this test binary.
+/// The `rdy` binary: `$RDY_BIN`, else the `rdy` of the profile this binary was built in: a test
+/// runs from `target/<profile>/deps/`, a qa binary (`qa-perf`) from `target/<profile>/`.
 pub fn rdy_bin() -> PathBuf {
     if let Ok(p) = std::env::var("RDY_BIN") {
         return PathBuf::from(p);
     }
     let exe = std::env::current_exe().expect("current exe");
-    // target/release/deps/<test> → target/release/rdy
-    let bin = exe
-        .parent()
-        .and_then(|d| d.parent())
-        .map(|d| d.join("rdy"))
-        .expect("target dir");
+    let dir = exe.parent().expect("the binary's directory");
+    let bin = if dir.file_name().is_some_and(|n| n == "deps") {
+        dir.parent().expect("target dir").join("rdy")
+    } else {
+        dir.join("rdy")
+    };
     assert!(
         bin.exists(),
         "{} not found: run `cargo build --release -p rdy-cli` first (cargo qa does this) or set RDY_BIN",

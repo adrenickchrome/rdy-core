@@ -202,7 +202,7 @@ fn serve1_mcp_runs_over_the_socket_and_a_session_end_frees_its_slot() {
         drop(r);
         let t = std::time::Instant::now();
         while !h.run.as_ref().unwrap().handle().sessions().is_empty() {
-            assert!(t.elapsed() < Duration::from_secs(5), "the mcp session was not removed");
+            assert!(t.elapsed() < Duration::from_secs(30), "the mcp session was not removed");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     });
@@ -236,7 +236,7 @@ fn serve1_hellos_during_warm_up_see_starting_then_ready() {
             rdy_daemon::Attempt::Starting(p) => {
                 let c = p
                     .wait(
-                        std::time::Instant::now() + Duration::from_secs(10),
+                        std::time::Instant::now() + Duration::from_secs(30),
                         &mut |_| {},
                     )
                     .await
@@ -294,7 +294,7 @@ fn assert_ready(rt: &tokio::runtime::Runtime, project: &std::path::Path, version
             rdy_daemon::Attempt::Starting(p) => {
                 let c = p
                     .wait(
-                        std::time::Instant::now() + Duration::from_secs(10),
+                        std::time::Instant::now() + Duration::from_secs(30),
                         &mut |_| {},
                     )
                     .await
@@ -348,7 +348,7 @@ fn serve1_a_successor_started_as_soon_as_a_stopped_daemons_socket_is_gone_comes_
     let t = std::time::Instant::now();
     while socket.exists() {
         assert!(
-            t.elapsed() < Duration::from_secs(5),
+            t.elapsed() < Duration::from_secs(30),
             "the socket was not removed"
         );
         std::thread::sleep(Duration::from_millis(1));

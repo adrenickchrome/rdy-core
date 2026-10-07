@@ -4,7 +4,6 @@ use rdy_engine::check_path;
 use rdy_qa::fixtures::*;
 use std::os::unix::fs::symlink;
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: glossary\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
 const FOLDER: &str = "id: fd-AAAAA\ntype: folder\norder: a1\n";
@@ -26,12 +25,11 @@ fn pack() -> rdy_schema::Pack {
         .unwrap()
 }
 
-/// Import and rdy check both refuse `dir`, naming a symbolic link at line 1, quickly.
+/// Import and rdy check both refuse `dir`, naming a symbolic link at line 1 (how fast is the
+/// perf tier's `refuse_import_symlink`).
 fn refuses_the_link(dir: &Path) {
     let (_d, mut r) = project();
-    let t = Instant::now();
     let e = r.import(&approver(), "import", dir).unwrap_err();
-    assert!(t.elapsed() < Duration::from_secs(5));
     assert_eq!(e.code, "E_FILE_FORMAT", "{e}");
     assert!(e.message.contains("symbolic link"), "{e}");
     let diags = check_path(&pack(), None, dir).unwrap();
@@ -64,7 +62,7 @@ fn sym1_a_symlinked_folder_is_refused_not_followed() {
 }
 
 #[test]
-fn sym1_a_symlink_loop_is_refused_quickly() {
+fn sym1_a_symlink_loop_is_refused() {
     let t = export_dir();
     symlink(t.path().join("docs"), t.path().join("docs/loop")).unwrap();
     refuses_the_link(t.path());

@@ -164,39 +164,120 @@ pub fn serve_config(project: &Path) -> ServeConfig {
     .resolve()
 }
 
+/// What one `stat` of a file says, for telling whether its bytes may have changed: length,
+/// modification time, inode number and status-change time (`ctime`), all at full precision.
+/// `ctime` is set by the kernel on every write, rename into place and `utimes`, and no tool can
+/// set it back or ahead, so it is what "changed since" is judged by. On a non-unix target there
+/// is no `ino` or `ctime`: `ino` is 0 and `ctime` is the mtime (a tool can set it: the weaker
+/// rule).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileStamp {
+    pub len: u64,
+    pub mtime: std::time::SystemTime,
+    pub ino: u64,
+    pub ctime: std::time::SystemTime,
+}
+
+impl FileStamp {
+    pub fn of(meta: &std::fs::Metadata) -> FileStamp {
+        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        #[cfg(unix)]
+        let (ino, ctime) = {
+            use std::os::unix::fs::MetadataExt;
+            let ctime = u64::try_from(meta.ctime()).map_or(std::time::UNIX_EPOCH, |s| {
+                std::time::UNIX_EPOCH + std::time::Duration::new(s, meta.ctime_nsec() as u32)
+            });
+            (meta.ino(), ctime)
+        };
+        #[cfg(not(unix))]
+        let (ino, ctime) = (0, mtime);
+        FileStamp {
+            len: meta.len(),
+            mtime,
+            ino,
+            ctime,
+        }
+    }
+}
+
 /// What the pack-defining files looked like at one moment: `.rdy/config.yaml` and every
-/// `.rdy/packs/*.yaml` (and `.yml`), sorted by path, each as `(path, length, mtime in unix ms)`;
-/// `hash` is BLAKE3 over each file's path bytes, a NUL, its contents and a NUL, in that order.
-/// Equal hashes mean equal bytes whatever the mtimes say.
+/// `.rdy/packs/*.yaml` (and `.yml`), sorted by path, each with the [`FileStamp`] taken just before
+/// its bytes were read; `hash` is BLAKE3 over each file's path bytes, a NUL, its contents and a
+/// NUL, in that order. Equal hashes mean equal bytes whatever the stamps say. `at` is this
+/// machine's wall clock read before the first stat: a file whose `ctime` is not safely before
+/// `at` can change again without a new stamp (it is "racily clean").
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackFingerprint {
-    pub files: Vec<(PathBuf, u64, i64)>,
+    pub files: Vec<(PathBuf, FileStamp)>,
     pub hash: rdy_model::Hash,
+    pub at: std::time::SystemTime,
 }
 
 pub fn pack_fingerprint(project: &Path) -> Result<PackFingerprint, RdyError> {
-    let mut paths = vec![project.join(".rdy/config.yaml")];
+    read_sources(project).map(|s| s.fingerprint)
+}
+
+static SOURCE_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Test hook: how many times this process has read the pack-defining files (open, reload and
+/// the daemon's watch each read them through one function), whatever the project.
+#[doc(hidden)]
+pub fn pack_source_reads() -> usize {
+    SOURCE_READS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The pack-defining files read once: their fingerprint and the very bytes it hashed, so what is
+/// loaded is exactly what is fingerprinted (an edit landing between two reads cannot split them).
+struct Sources {
+    fingerprint: PackFingerprint,
+    config: Vec<u8>,
+    /// Each `.rdy/packs` file and its bytes, in fingerprint order.
+    packs: Vec<(PathBuf, Vec<u8>)>,
+}
+
+/// Reads `.rdy/config.yaml` and the pack files, each stat'ed just before its bytes are read.
+/// No config file is `E_NO_PROJECT`; any other failure is an I/O error.
+fn read_sources(project: &Path) -> Result<Sources, RdyError> {
+    SOURCE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let at = std::time::SystemTime::now();
+    let cfg_path = project.join(".rdy/config.yaml");
+    if !cfg_path.exists() {
+        return Err(no_project(project));
+    }
+    let mut paths = vec![cfg_path];
     paths.extend(pack_files(&project.join(".rdy/packs"))?);
     let mut files = Vec::with_capacity(paths.len());
+    let mut contents = Vec::with_capacity(paths.len());
     let mut buf = Vec::new();
     for path in paths {
         let meta = std::fs::metadata(&path).map_err(io)?;
         let bytes = std::fs::read(&path).map_err(io)?;
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_millis() as i64);
         buf.extend_from_slice(path.as_os_str().as_encoded_bytes());
         buf.push(0);
         buf.extend_from_slice(&bytes);
         buf.push(0);
-        files.push((path, meta.len(), mtime));
+        files.push((path.clone(), FileStamp::of(&meta)));
+        contents.push((path, bytes));
     }
-    Ok(PackFingerprint {
-        files,
-        hash: rdy_model::Hash::of(&buf),
+    let mut contents = contents.into_iter();
+    let (_, config) = contents.next().expect("the config is always first");
+    Ok(Sources {
+        fingerprint: PackFingerprint {
+            files,
+            hash: rdy_model::Hash::of(&buf),
+            at,
+        },
+        config,
+        packs: contents.collect(),
     })
+}
+
+fn no_project(root: &Path) -> RdyError {
+    RdyError::new(
+        E_NO_PROJECT,
+        format!("{} is not an rdy project", root.display()),
+        "run rdy init in the project directory",
+    )
 }
 
 /// What `Rdy::reload_pack` did.
@@ -327,22 +408,38 @@ fn pack_files(dir: &Path) -> Result<Vec<PathBuf>, RdyError> {
 fn read_config(root: &Path) -> Result<Config, RdyError> {
     let cfg_path = root.join(".rdy/config.yaml");
     if !cfg_path.exists() {
-        return Err(RdyError::new(
-            E_NO_PROJECT,
-            format!("{} is not an rdy project", root.display()),
-            "run rdy init in the project directory",
-        ));
+        return Err(no_project(root));
     }
-    let text = std::fs::read_to_string(&cfg_path).map_err(io)?;
-    serde_yaml_ng::from_str(&text)
+    parse_config(&std::fs::read(&cfg_path).map_err(io)?)
+}
+
+fn parse_config(bytes: &[u8]) -> Result<Config, RdyError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|e| io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+    serde_yaml_ng::from_str(text)
         .map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "fix .rdy/config.yaml"))
 }
 
 fn load_pack(root: &Path, name: &str) -> Result<(Pack, Vec<String>), RdyError> {
-    let mut set = PackSet::with_builtin();
+    let mut packs = vec![];
     for f in pack_files(&root.join(".rdy/packs"))? {
-        let text = std::fs::read_to_string(&f).map_err(io)?;
-        set.add_yaml_from(&text, &f.display().to_string())
+        let bytes = std::fs::read(&f).map_err(io)?;
+        packs.push((f, bytes));
+    }
+    load_pack_from(&packs, name)
+}
+
+/// The named pack resolved from `packs` (each `.rdy/packs` file and its bytes) plus the
+/// built-ins, and its lineage.
+fn load_pack_from(
+    packs: &[(PathBuf, Vec<u8>)],
+    name: &str,
+) -> Result<(Pack, Vec<String>), RdyError> {
+    let mut set = PackSet::with_builtin();
+    for (f, bytes) in packs {
+        let text = std::str::from_utf8(bytes)
+            .map_err(|e| io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+        set.add_yaml_from(text, &f.display().to_string())
             .map_err(|e| match e {
                 rdy_schema::SchemaError::Duplicate { .. } => RdyError::new(
                     E_CONFIG,
@@ -398,15 +495,20 @@ impl Rdy {
     }
 
     pub fn open(project: &Path) -> Result<Rdy, RdyError> {
-        // the fingerprint before the config and pack are read: a file edited between the reads
-        // is then loaded new and fingerprinted old, so the watch's next `changed()` reloads it
-        // (never the other way, which would mark unloaded bytes as seen). The config's own
-        // error comes first (not a project, a bad config); an unreadable pack file fails the
-        // open before the store is locked.
-        let fingerprint = pack_fingerprint(project);
-        let cfg = read_config(project)?;
-        let fingerprint = fingerprint?;
-        let (pack, lineage) = load_pack(project, &cfg.pack)?;
+        // each file read once: the config and pack are loaded from the bytes the fingerprint
+        // hashed, so the watch's fingerprint is exactly what is loaded. The config's own error
+        // comes first (not a project, a bad config); an unreadable pack file fails the open
+        // before the store is locked.
+        let sources = match read_sources(project) {
+            Ok(s) => s,
+            Err(e) => {
+                read_config(project)?;
+                return Err(e);
+            }
+        };
+        let cfg = parse_config(&sources.config)?;
+        let fingerprint = sources.fingerprint;
+        let (pack, lineage) = load_pack_from(&sources.packs, &cfg.pack)?;
         let mut store = layout::open_project_store(&project.join(".rdy"))?;
         // trk1: the freeze checks and every content hash use the pack's tracking fields
         store.set_tracking(pack.tracking());
@@ -497,12 +599,14 @@ impl Rdy {
     /// state is republished with the new pack. `Err` is only an I/O error reading the
     /// fingerprint (or a failed republish).
     pub fn reload_pack(&mut self) -> Result<ReloadOutcome, RdyError> {
-        let fp = pack_fingerprint(&self.root)?;
+        let sources = read_sources(&self.root)?;
+        let fp = sources.fingerprint;
         if fp.hash == self.fingerprint.hash {
             return Ok(ReloadOutcome::Unchanged);
         }
-        let loaded = read_config(&self.root)
-            .and_then(|cfg| load_pack(&self.root, &cfg.pack).map(|(p, l)| (cfg, p, l)));
+        // parsed from the bytes `fp` hashed: what is loaded (or found invalid) is what is seen
+        let loaded = parse_config(&sources.config)
+            .and_then(|cfg| load_pack_from(&sources.packs, &cfg.pack).map(|(p, l)| (cfg, p, l)));
         let (cfg, pack, lineage) = match loaded {
             Ok(v) => v,
             Err(error) => {

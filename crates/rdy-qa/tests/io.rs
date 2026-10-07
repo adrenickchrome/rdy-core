@@ -4,7 +4,6 @@ use rdy_engine::*;
 use rdy_qa::fixtures::*;
 use serde_json::json;
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 fn files(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
     fn walk(root: &Path, d: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
@@ -92,24 +91,18 @@ proptest! {
     }
 }
 
-/// Each hostile export directory is refused, stores nothing and is fast.
+/// Each hostile export directory is refused and stores nothing. How fast is a perf-tier question
+/// (`refuse_import_20mb_scalar`, `refuse_check_20mb_scalar`).
 fn refused(dir: &Path) {
     refused_import(dir);
     refused_check(dir);
 }
 
-/// Import refuses the tree, quickly, and stores nothing.
+/// Import refuses the tree and stores nothing.
 fn refused_import(dir: &Path) {
     let (_d, mut r) = project();
     let before = r.store().view_state("import").unwrap();
-    let t = Instant::now();
     let e = r.import(&approver(), "import", dir).unwrap_err();
-    assert!(
-        t.elapsed() < Duration::from_secs(5),
-        "{}: took {:?}",
-        dir.display(),
-        t.elapsed()
-    );
     r.invalidate();
     assert_eq!(
         r.store().view_state("import").unwrap(),
@@ -124,9 +117,7 @@ fn refused_check(dir: &Path) {
     let pack = rdy_schema::PackSet::with_builtin()
         .resolve("rdy-standard")
         .unwrap();
-    let t = Instant::now();
     let diags = check_path(&pack, None, dir).unwrap();
-    assert!(t.elapsed() < Duration::from_secs(5));
     assert!(
         diags
             .iter()
@@ -155,7 +146,7 @@ fn export_dir(docs: &[(&str, &str)]) -> tempfile::TempDir {
 const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: glossary\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
 
 #[test]
-fn io_hostile_trees_are_refused_quickly_and_store_nothing() {
+fn io_hostile_trees_are_refused_and_store_nothing() {
     let deep = format!("{}1{}", "[".repeat(200), "]".repeat(200));
     let wide = format!(
         "[{}]",

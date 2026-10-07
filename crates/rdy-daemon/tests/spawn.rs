@@ -187,7 +187,7 @@ fn spawn1_a_spawned_serve_child_detaches_into_a_session_of_its_own() {
             break l.to_string();
         }
         assert!(
-            t0.elapsed() < std::time::Duration::from_secs(20),
+            t0.elapsed() < std::time::Duration::from_secs(60),
             "no probe line: {text}"
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -277,8 +277,9 @@ fn spawn1_a_spawned_child_is_reaped_and_reports_its_code_after_the_spawned_is_dr
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
     // a deadline, not an expected time: the child exits in well under a second, but a fork and
     // exec stalled past 5 s while other tracks built and tested on the same machine (M2c t15/t16
-    // integration); the other child-launch waits in this file allow 15-20 s for the same reason
-    let wait = std::time::Duration::from_secs(20);
+    // integration), and macOS can hold the first exec of a freshly written script for 20 s or
+    // more while it assesses it; the child-launch waits in this file allow 60 s for that reason
+    let wait = std::time::Duration::from_secs(60);
     // the exit code is still reported
     let mut spawned = spawn_serve(&mut serve_command(&fake, dir.path(), &run).unwrap()).unwrap();
     let t0 = std::time::Instant::now();
