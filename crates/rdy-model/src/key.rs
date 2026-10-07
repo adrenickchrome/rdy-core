@@ -49,3 +49,79 @@ pub fn problem(text: &str) -> Option<&'static str> {
 pub fn fold(text: &str) -> String {
     text.to_ascii_lowercase()
 }
+
+/// True for the characters a key uses between its parts.
+fn is_sep(c: char) -> bool {
+    matches!(c, '-' | '_' | '.')
+}
+
+/// `text` with every run of two or more separators replaced by its first one.
+fn collapse_runs(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut prev_sep = false;
+    for c in text.chars() {
+        let sep = is_sep(c);
+        if !(sep && prev_sep) {
+            out.push(c);
+        }
+        prev_sep = sep;
+    }
+    out
+}
+
+/// `text` cut to at most `max` characters, with trailing separators trimmed.
+fn cut(text: &str, max: usize) -> String {
+    let cut: String = text.chars().take(max).collect();
+    cut.trim_end_matches(is_sep).to_string()
+}
+
+/// The key a doc or folder at `path` gets when it is created without one (FW-PR3).
+///
+/// The rule, in order: split `path` on `/`, drop empty segments and lowercase each; while the
+/// segments joined with `.` are longer than 32 characters and more than one remains, drop the
+/// first (the leaf is the most telling part, and cutting the front avoids the parent folder's
+/// own key); join with `.`, collapse each run of separators to its first one and trim trailing
+/// ones; if the result is empty, does not start with a letter or starts with `p-`, prefix
+/// `"{block_type}."`; cut to 32 characters and trim trailing separators. If the result is still
+/// not a valid key, it is `block_type`. The result is lowercase, so it is never a block id.
+pub fn from_path(path: &str, block_type: &str) -> String {
+    let mut segments: Vec<String> = path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(fold)
+        .collect();
+    while segments.len() > 1 && segments.join(".").chars().count() > MAX_LEN {
+        segments.remove(0);
+    }
+    let mut k = collapse_runs(&segments.join("."))
+        .trim_end_matches(is_sep)
+        .to_string();
+    if !k.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) || k.starts_with("p-") {
+        k = collapse_runs(&format!("{block_type}.{k}"))
+            .trim_end_matches(is_sep)
+            .to_string();
+    }
+    let k = cut(&k, MAX_LEN);
+    if problem(&k).is_some() {
+        return block_type.to_string();
+    }
+    k
+}
+
+/// `base` if `taken` does not hold it, else the first of `base-2`, `base-3`, … that `taken` does
+/// not hold. Each candidate fits 32 characters: `base` is cut to make room for the suffix, and
+/// trailing separators are trimmed from the cut. `taken` is asked with the candidates as built
+/// (lowercase for a key from `from_path`); callers compare keys folded.
+pub fn unique(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(base) {
+        return base.to_string();
+    }
+    (2u64..)
+        .map(|n| {
+            let suffix = format!("-{n}");
+            let stem = cut(base, MAX_LEN.saturating_sub(suffix.len()));
+            format!("{stem}{suffix}")
+        })
+        .find(|c| !taken(c))
+        .expect("an unbounded range always finds a free candidate")
+}

@@ -266,6 +266,73 @@ fn resolve_import_keys(blocks: &mut [Block], existing: &Materialized) -> Result<
     Ok(())
 }
 
+/// akey1 (FW-PR3): gives each incoming doc and folder without a key the key derived from its
+/// path, in (path, id) order, and returns them by block id. A path walks parents through the
+/// incoming blocks, then the view. Taken: every incoming key, every key in the view held by a
+/// block the import does not bring, and the keys assigned so far (all compared folded).
+fn assign_import_keys(blocks: &mut [Block], existing: &Materialized) -> BTreeMap<String, String> {
+    let wanted: Vec<usize> = (0..blocks.len())
+        .filter(|&i| {
+            tree::is_tree_type(&blocks[i].block_type) && !blocks[i].fields.contains_key("key")
+        })
+        .collect();
+    if wanted.is_empty() {
+        return BTreeMap::new();
+    }
+    let incoming: BTreeMap<&BlockId, &Block> = blocks.iter().map(|b| (&b.id, b)).collect();
+    // each name on the chain, leaf first; None for a nameless doc or folder, a missing parent or
+    // a chain too long to be a valid tree (the depth check refuses that import)
+    let path_of = |id: &BlockId| -> Option<String> {
+        let mut parts = vec![];
+        let mut cur = Some(id.clone());
+        for _ in 0..tree::MAX_FOLDER_DEPTH + 2 {
+            let Some(c) = cur else {
+                parts.reverse();
+                return Some(parts.join("/"));
+            };
+            match incoming.get(&c) {
+                Some(b) => {
+                    if tree::is_tree_type(&b.block_type) {
+                        parts.push(b.field_str("name")?.to_string());
+                    }
+                    cur = b.parent.clone();
+                }
+                None => {
+                    let b = existing.get(&c)?;
+                    if tree::is_tree_type(&b.block_type) {
+                        parts.push(existing.name_of(&c)?);
+                    }
+                    cur = b.parent.clone();
+                }
+            }
+        }
+        None
+    };
+    let mut order: Vec<(String, BlockId, usize)> = wanted
+        .into_iter()
+        .filter_map(|i| Some((path_of(&blocks[i].id)?, blocks[i].id.clone(), i)))
+        .collect();
+    order.sort();
+    let incoming_keys = Keys::of(blocks.iter());
+    let ids: BTreeSet<BlockId> = blocks.iter().map(|b| b.id.clone()).collect();
+    let view_keys = Keys::of(existing.iter());
+    let mut assigned: BTreeSet<String> = BTreeSet::new();
+    let mut out = BTreeMap::new();
+    for (path, id, i) in order {
+        let k = crate::keys::auto_key(&path, &blocks[i].block_type, &|c| {
+            incoming_keys.get(c).is_some()
+                || view_keys.holders(c).iter().any(|(_, h)| !ids.contains(h))
+                || assigned.contains(&rdy_model::key::fold(c))
+        });
+        assigned.insert(rdy_model::key::fold(&k));
+        blocks[i]
+            .fields
+            .insert("key".into(), FieldValue::Str(k.clone()));
+        out.insert(id.to_string(), k);
+    }
+    out
+}
+
 /// skel1: the required sections each imported doc lacks among the imported sections under it.
 fn import_skeleton_gaps(pack: &rdy_schema::Pack, blocks: &[Block]) -> Vec<rdy_schema::Issue> {
     let titles = crate::keys::section_titles(blocks);
@@ -612,6 +679,7 @@ impl Rdy {
         assign_missing_names(&mut blocks, &existing);
         check_import_names(&blocks, &existing)?;
         resolve_import_keys(&mut blocks, &existing)?;
+        let keys = assign_import_keys(&mut blocks, &existing);
         let incoming: BTreeMap<BlockId, &Block> =
             blocks.iter().map(|b| (b.id.clone(), b)).collect();
         let parent_of = |id: &BlockId| -> Option<Option<BlockId>> {
@@ -781,6 +849,7 @@ impl Rdy {
             change: id.to_string(),
             created,
             names: BTreeMap::new(),
+            keys,
             inherited: BTreeMap::new(),
             warnings,
         })

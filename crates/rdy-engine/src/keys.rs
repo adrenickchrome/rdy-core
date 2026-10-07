@@ -10,6 +10,13 @@ pub(crate) fn key_of(b: &Block) -> Option<&str> {
     b.field_str("key")
 }
 
+/// The key a doc or folder at `path` gets when it is created without one (FW-PR3): the key
+/// derived from its path (`key::from_path`), with the first free numeric suffix when `taken`
+/// holds it. `taken` is asked with lowercase candidates and compares keys folded.
+pub(crate) fn auto_key(path: &str, block_type: &str, taken: &dyn Fn(&str) -> bool) -> String {
+    key::unique(&key::from_path(path, block_type), taken)
+}
+
 /// Folded key → its holders (key as written, id), in the order the blocks were given.
 #[derive(Default)]
 pub(crate) struct Keys {

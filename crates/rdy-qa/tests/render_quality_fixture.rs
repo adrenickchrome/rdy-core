@@ -244,8 +244,12 @@ fn gold1_the_fixture_has_direct_content_keys_and_the_dx2_shapes() {
             ids.opening_note.clone()
         ]
     );
-    let keyed: std::collections::BTreeSet<&str> =
-        m.iter().filter_map(|b| b.field_str("key")).collect();
+    // content keys only: docs and folders carry the key rdy derives from their path (akey1)
+    let keyed: std::collections::BTreeSet<&str> = m
+        .iter()
+        .filter(|b| !tree::is_tree_type(&b.block_type))
+        .filter_map(|b| b.field_str("key"))
+        .collect();
     assert_eq!(keyed, golden::KEYS.into_iter().collect());
     for b in m.iter() {
         for k in golden::KEYS {

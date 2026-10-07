@@ -103,6 +103,9 @@ pub struct WriteResult {
     /// Names rdy assigned to created docs and folders, by block id.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub names: BTreeMap<String, String>,
+    /// Keys rdy assigned to created docs and folders, by block id (FW-PR3).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub keys: BTreeMap<String, String>,
     /// sup1: links rdy_supersede copied from the old decision, by kind.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub inherited: BTreeMap<String, Vec<String>>,
@@ -702,12 +705,36 @@ fn check_not_frozen(id: &BlockId, cur: &Block) -> Result<(), RdyError> {
     Ok(())
 }
 
+/// What `build_ops` makes: the ops, created placeholders → ids, the blocks touched, the names
+/// rdy assigned and the keys rdy assigned (both by block id).
 type Built = (
     Vec<Op>,
     BTreeMap<String, String>,
     BTreeSet<BlockId>,
     BTreeMap<String, String>,
+    BTreeMap<String, String>,
 );
+
+/// The path of `id` in the overlay: each tree ancestor's name, itself included, joined with `/`.
+/// `None` when a doc or folder on the chain has no name, a parent is missing, or the chain is
+/// longer than `tree::MAX_FOLDER_DEPTH + 2` (a damaged store's parent loop cannot spin).
+fn tree_path(ov: &Overlay, id: &BlockId) -> Option<String> {
+    let mut parts = vec![];
+    let mut b = ov.get(id)?;
+    for _ in 0..tree::MAX_FOLDER_DEPTH + 2 {
+        if tree::is_tree_type(&b.block_type) {
+            parts.push(ov.name(b)?);
+        }
+        match &b.parent {
+            None => {
+                parts.reverse();
+                return Some(parts.join("/"));
+            }
+            Some(p) => b = ov.get(p)?,
+        }
+    }
+    None
+}
 
 type Prior = (bool, BTreeMap<BlockId, Hash>);
 
@@ -1378,6 +1405,28 @@ fn build_ops(
             }
         }
     }
+    // akey1 (FW-PR3): a doc or folder created without a key gets one from its path, once every
+    // op has applied, so the keys of the view, of earlier ops and every explicit key anywhere in
+    // the batch are taken; it runs before the second pass, so pins and validation see the key
+    let mut assigned = BTreeMap::new();
+    for op in &mut ops {
+        let Op::Create { block } = op else { continue };
+        if !tree::is_tree_type(&block.block_type) || block.fields.contains_key("key") {
+            continue;
+        }
+        // a chain past the folder depth limit gets no key: the depth check reports the damage
+        let Some(path) = tree_path(&ov, &block.id) else {
+            continue;
+        };
+        let k = keys::auto_key(&path, &block.block_type, &|c| res.key_holder(c).is_some());
+        block
+            .fields
+            .insert("key".into(), FieldValue::Str(k.clone()));
+        res.note_key(&block.id, Some(block));
+        ov.set(block.id.clone(), Some(block.clone()));
+        assigned.insert(block.id.to_string(), k);
+    }
+
     // only rebalances that changed nothing: refuse rather than commit an empty change
     if ops.is_empty() && !noop_rebalances.is_empty() {
         return Err(bad(
@@ -1518,7 +1567,7 @@ fn build_ops(
         e.issues = issues;
         return Err(e);
     }
-    Ok((ops, created, touched, names))
+    Ok((ops, created, touched, names, assigned))
 }
 
 impl Rdy {
@@ -1569,7 +1618,7 @@ impl Rdy {
         let conflicts = st.conflicts(&scope)?;
         let m = st.materialized(&scope)?;
         let brief_warnings = crate::brief::check(&self.pack, &self.briefs, &m, &req.ops, brief)?;
-        let (ops, created, touched, names) =
+        let (ops, created, touched, names, keys) =
             build_ops(&self.pack, &self.store, &m, session, req.ops, &conflicts)?;
         let change = Change {
             view: req.view.clone(),
@@ -1615,6 +1664,7 @@ impl Rdy {
             change: id.to_string(),
             created,
             names,
+            keys,
             inherited: BTreeMap::new(),
             warnings,
         })
