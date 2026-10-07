@@ -279,8 +279,13 @@ fn tokens_of(v: &Value) -> usize {
 }
 
 /// Cuts the string at `k` until `obj` fits `max` tokens (or the string is empty), and marks it
-/// `truncated`; with `count_bytes`, `omitted` says how many bytes were cut.
-fn cut_text(obj: &mut serde_json::Map<String, Value>, k: &str, max: usize, count_bytes: bool) {
+/// `truncated`; `mark` records how many bytes were cut (it runs before each fit check).
+fn cut_text(
+    obj: &mut serde_json::Map<String, Value>,
+    k: &str,
+    max: usize,
+    mark: impl Fn(&mut serde_json::Map<String, Value>, usize),
+) {
     let text = obj[k].as_str().unwrap_or_default().to_string();
     let mut keep = (max * 4).saturating_sub(200).min(text.len());
     loop {
@@ -290,9 +295,7 @@ fn cut_text(obj: &mut serde_json::Map<String, Value>, k: &str, max: usize, count
             .unwrap_or(0);
         obj.insert(k.to_string(), json!(text[..cut]));
         obj.insert("truncated".into(), json!(true));
-        if count_bytes {
-            obj.insert("omitted".into(), json!(text.len() - cut));
-        }
+        mark(obj, text.len() - cut);
         if tokens_of(&Value::Object(obj.clone())) <= max || cut == 0 {
             break;
         }
@@ -332,7 +335,9 @@ pub fn budget(v: Value, max_tokens: Option<usize>) -> Value {
             .max()
             .map(|(_, k)| k);
         if let Some(k) = longest {
-            cut_text(obj, &k, max, true);
+            cut_text(obj, &k, max, |o, n| {
+                o.insert("omitted".into(), json!(n));
+            });
         }
         return v;
     };
@@ -591,6 +596,8 @@ struct ReadEntries {
     root: BlockId,
     format: String,
     entries: Vec<String>,
+    /// The block of each entry.
+    ids: Vec<BlockId>,
     sep: &'static str,
     conflict: Option<Value>,
     warnings: Vec<Value>,
@@ -708,19 +715,22 @@ fn read_page_of(
     if let Some(n) = read.matched {
         out["matched"] = json!(n);
     }
-    let cut = end < read.entries.len();
-    if cut {
+    if end < read.entries.len() {
         out["truncated"] = json!(true);
         out["omitted"] = json!(read.entries.len() - end);
         out["next"] = json!(format!("{token}:{end}"));
         st.reads.register(token, q);
     }
-    // one block larger than the whole budget is shown alone and cut as budget cuts text
+    // one block larger than the whole budget is shown alone and cut as budget cuts text; cut
+    // names the block and the bytes it lost (omitted always counts entries)
     if end == from + 1
         && tokens_of(&out) > max
         && let Some(obj) = out.as_object_mut()
     {
-        cut_text(obj, "text", max, !cut);
+        let id = read.ids[from].to_string();
+        cut_text(obj, "text", max, |o, n| {
+            o.insert("cut".into(), json!({"id": id, "omitted_bytes": n}));
+        });
     }
     out
 }
@@ -801,7 +811,7 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
         Default::default()
     };
     let keeps = |line: &str| pattern.as_ref().is_none_or(|p| p.matches(line));
-    let mut entries = vec![];
+    let (mut entries, mut ids) = (vec![], vec![]);
     let mut stack = vec![(root, 0usize)];
     while let Some((b, depth)) = stack.pop() {
         let status = g.status(&b.id).map(|s| {
@@ -810,17 +820,20 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
                 .and_then(|v| v["status"].as_str().map(String::from))
                 .unwrap_or_default()
         });
+        let markdown = || {
+            crate::markdown::block_markdown(
+                b,
+                &m,
+                crate::markdown::doc_depth(&m, b),
+                status.as_deref(),
+            )
+        };
         let entry = match format {
             "yaml" | "markdown" => {
                 let text = if format == "yaml" {
                     block_to_yaml(b)
                 } else {
-                    crate::markdown::block_markdown(
-                        b,
-                        &m,
-                        crate::markdown::doc_depth(&m, b),
-                        status.as_deref(),
-                    )
+                    markdown()
                 };
                 (pattern.is_none() || text.lines().any(keeps)).then_some(text)
             }
@@ -839,12 +852,16 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
                 if let Some(j) = justified.get(&b.id) {
                     head.push_str(&format!(" [{j}]"));
                 }
-                // a pattern matches a code line's own text; a kept code block shows only the
-                // lines that match
+                // a pattern matches the head line, a code line's own text, or any line of the
+                // block's whole text (as markdown gives it: a prose body past its first sentence,
+                // table rows, diagram source); a kept code block shows only the lines that match
                 let body = code_lines(b);
                 let matching: Vec<&String> = body.iter().filter(|l| keeps(l)).collect();
-                let head_hit = keeps(&head);
-                (head_hit || !matching.is_empty()).then(|| {
+                let hit = pattern.is_none()
+                    || keeps(&head)
+                    || !matching.is_empty()
+                    || markdown().lines().any(keeps);
+                hit.then(|| {
                     let shown: Vec<&String> = if pattern.is_some() {
                         matching
                     } else {
@@ -862,7 +879,10 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
                 })
             }
         };
-        entries.extend(entry);
+        if let Some(e) = entry {
+            entries.push(e);
+            ids.push(b.id.clone());
+        }
         for c in m.children(Some(&b.id)).into_iter().rev() {
             stack.push((c, depth + 1));
         }
@@ -878,6 +898,7 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
         format: format.to_string(),
         matched: pattern.as_ref().map(|_| entries.len()),
         entries,
+        ids,
         sep,
         warnings,
     })

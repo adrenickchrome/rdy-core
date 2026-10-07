@@ -231,3 +231,31 @@ fn rpat1_bad_patterns_are_refused() {
     let ok = read(&mut st, json!({"id": c["$d"], "pattern": "x".repeat(1024)})).unwrap();
     assert_eq!(ok["matched"], 0);
 }
+
+#[test]
+fn rpat1_compact_matches_a_blocks_whole_text_as_markdown_does() {
+    let (_d, mut st, c) = st_with(json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Guide", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Goals"}},
+        {"op": "create", "type": "claim", "id": "$p", "parent": "$s", "body": "First goal. The service listens on port 7007."},
+        {"op": "create", "type": "table", "id": "$t", "parent": "$s", "fields": {"columns": ["Host", "Port"], "rows": [["alpha", "80"], ["beta", "8443"]]}},
+        {"op": "create", "type": "diagram", "id": "$g", "parent": "$s", "fields": {"lang": "mermaid", "alt": "Flow"}, "body": "graph TD\n  A-->B\n  B-->Gamma"},
+        {"op": "create", "type": "claim", "id": "$x", "parent": "$s", "body": "Unrelated."}
+    ]));
+    for (pat, block) in [("7007", "$p"), ("8443", "$t"), ("gamma", "$g")] {
+        let v = read(&mut st, json!({"id": c["$d"], "pattern": pat})).unwrap();
+        assert_eq!(v["matched"], 1, "{pat}: {v}");
+        let lines: Vec<&str> = v["text"].as_str().unwrap().lines().map(str::trim).collect();
+        assert_eq!(lines.len(), 1, "{pat}: the head line alone: {v}");
+        assert!(lines[0].starts_with(c[block].as_str()), "{pat}: {v}");
+        let md = read(
+            &mut st,
+            json!({"id": c["$d"], "pattern": pat, "format": "markdown"}),
+        )
+        .unwrap();
+        assert_eq!(
+            md["matched"], v["matched"],
+            "{pat}: compact and markdown keep the same blocks"
+        );
+    }
+}

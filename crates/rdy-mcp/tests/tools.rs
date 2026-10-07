@@ -676,3 +676,73 @@ fn rpag1_a_block_larger_than_the_budget_is_shown_alone_and_cut() {
         "{texts:?}"
     );
 }
+
+#[test]
+fn rpag1_a_cut_block_names_itself_and_the_bytes_cut() {
+    let (_d, mut st) = state();
+    start(&mut st);
+    let big: String = (0..1_200)
+        .map(|i| format!("key_{i} = \"value {i}\"\n"))
+        .collect();
+    let res = rdy_write(&mut st, serde_json::from_value(json!({"ops": [
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Big", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Body"}},
+        {"op": "create", "type": "code", "id": "$k", "parent": "$s", "fields": {"lang": "toml"}, "body": big},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "After the big block."},
+        {"op": "create", "type": "doc", "id": "$tail", "fields": {"title": "Tail", "doc_type": "page"}},
+        {"op": "create", "type": "code", "id": "$k2", "parent": "$tail", "fields": {"lang": "toml"}, "body": big}
+    ]})).unwrap()).unwrap();
+    let id = |k: &str| res["created"][k].as_str().unwrap().to_string();
+    let read = |st: &mut McpState, args: Value| rdy_read(st, serde_json::from_value(args).unwrap());
+    // the bytes of block `k`'s entry in the uncut read of `doc`, which ends where `after` begins
+    let entry_len = |st: &mut McpState, doc: &str, k: &str, after: Option<&str>| {
+        let full = read(st, json!({"id": id(doc), "max_tokens": 100_000})).unwrap();
+        assert!(
+            full.get("cut").is_none() && full.get("truncated").is_none(),
+            "{full}"
+        );
+        let text = full["text"].as_str().unwrap();
+        let line_start = |head: String| text[..text.find(&head).unwrap()].rfind('\n').unwrap();
+        let start = line_start(format!("{} code", id(k))) + 1;
+        let end = after.map_or(text.len(), |a| line_start(format!("{} claim", id(a))));
+        end - start
+    };
+    let shown = |v: &Value| v["text"].as_str().unwrap().len();
+    // a cut block before the last page: next and omitted (entries) as usual, and cut names it
+    let whole = entry_len(&mut st, "$doc", "$k", Some("$c"));
+    let mut v = read(&mut st, json!({"id": id("$doc")})).unwrap();
+    while !v["text"].as_str().unwrap().contains(&id("$k")) {
+        v = read(&mut st, json!({"page": v["next"]})).unwrap();
+    }
+    assert!(serde_json::to_string(&v).unwrap().len() / 4 <= 4000, "{v}");
+    assert_eq!(v["cut"]["id"], id("$k"), "{v}");
+    assert_eq!(
+        v["cut"]["omitted_bytes"].as_u64().unwrap() as usize,
+        whole - shown(&v),
+        "{v}"
+    );
+    assert_eq!(
+        (v["truncated"].as_bool(), v["omitted"].as_u64()),
+        (Some(true), Some(1)),
+        "{v}"
+    );
+    let last = read(&mut st, json!({"page": v["next"]})).unwrap();
+    assert!(
+        last.get("cut").is_none() && last.get("truncated").is_none(),
+        "{last}"
+    );
+    // a cut block on the last page: no next, and omitted never counts bytes
+    let whole = entry_len(&mut st, "$tail", "$k2", None);
+    let mut v = read(&mut st, json!({"id": id("$tail")})).unwrap();
+    while let Some(next) = v["next"].as_str().map(String::from) {
+        v = read(&mut st, json!({"page": next})).unwrap();
+    }
+    assert_eq!(v["cut"]["id"], id("$k2"), "{v}");
+    assert_eq!(
+        v["cut"]["omitted_bytes"].as_u64().unwrap() as usize,
+        whole - shown(&v),
+        "{v}"
+    );
+    assert_eq!(v["truncated"], true, "{v}");
+    assert!(v.get("omitted").is_none(), "{v}");
+}
