@@ -199,7 +199,7 @@ impl BriefRegistry {
 
 /// The paged sections of a briefing, in cursor order: a cursor holds one offset per section, how
 /// many of its entries earlier pages showed.
-pub const PAGE_SECTIONS: [&str; 8] = [
+pub const PAGE_SECTIONS: [&str; 9] = [
     "governs",
     "dependents",
     "lineage",
@@ -207,6 +207,7 @@ pub const PAGE_SECTIONS: [&str; 8] = [
     "suspects",
     "inflight.views",
     "inflight.proposals",
+    "inflight.intents",
     "base.blocks",
 ];
 
@@ -408,6 +409,7 @@ impl Briefing {
             self.suspects.len(),
             self.inflight.views.len(),
             self.inflight.proposals.len(),
+            self.inflight.intents.len(),
             self.base.blocks.len(),
         ]
     }
@@ -424,7 +426,8 @@ impl Briefing {
         drop(&mut self.suspects, skip[4]);
         drop(&mut self.inflight.views, skip[5]);
         drop(&mut self.inflight.proposals, skip[6]);
-        drop(&mut self.base.blocks, skip[7]);
+        drop(&mut self.inflight.intents, skip[7]);
+        drop(&mut self.base.blocks, skip[8]);
     }
 
     /// Shows the entries after the first `skip[i]` of each section, cut to `max` tokens, and
@@ -512,6 +515,7 @@ impl Briefing {
             4 => self.suspects.truncate(keep),
             5 => self.inflight.views.truncate(keep),
             6 => self.inflight.proposals.truncate(keep),
+            7 => self.inflight.intents.truncate(keep),
             _ => self.base.blocks.truncate(keep),
         }
         *self
@@ -591,7 +595,7 @@ pub(crate) fn refuse_inflight(scope: &Scope) -> Result<(), RdyError> {
 /// How many hex digits of a briefing's digest a cursor carries (64 bits).
 const DIGEST_HEX: usize = 16;
 
-/// A cursor `<token>:<o1>,…,<o8>:<digest>:<scope>` split at its first colon: the token (64
+/// A cursor `<token>:<o1>,…,<o9>:<digest>:<scope>` split at its first colon: the token (64
 /// lowercase hex) and the rest. The rest is read by `parse_tail` once the token is known.
 fn parse_cursor(cursor: &str) -> Result<(&str, &str), RdyError> {
     let (token, rest) = cursor.split_once(':').ok_or_else(bad_cursor)?;

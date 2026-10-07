@@ -1,9 +1,11 @@
 //! infl1: work in flight on a briefing's blocks (FW-E1): the other open views whose included
-//! changes write a covered block, and the open proposals whose latest version does. What is in
-//! flight is advice for the writer; it is not part of the briefing's token.
+//! changes write a covered block, the open proposals whose latest version does, and (ibrf1) the
+//! open intents of other views on a covered block or its area. What is in flight is advice for the writer; it is not part of the briefing's token.
+use crate::coord_graph::intent_label;
 use crate::error::*;
 use crate::gate::open_proposals;
-use crate::session::rfc3339;
+use crate::intent::status_open_at;
+use crate::session::{now_ms, rfc3339};
 use crate::views::OwnerInfo;
 use crate::{ReadState, Scope};
 use rdy_model::{BlockId, Hash, Op};
@@ -25,6 +27,8 @@ pub struct Inflight {
     pub views: Vec<InflightView>,
     /// Open proposals whose latest version changes a covered block, by ref.
     pub proposals: Vec<InflightProposal>,
+    /// Open, unexpired intents of other views on a covered block or its area, by id.
+    pub intents: Vec<InflightIntent>,
 }
 
 /// An open view that changes covered blocks.
@@ -48,6 +52,22 @@ pub struct InflightProposal {
     pub title: String,
     /// The covered blocks the version's changes write, in id order.
     pub blocks: Vec<String>,
+}
+
+/// An open intent that covers covered blocks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct InflightIntent {
+    /// `in-<stable short>`.
+    pub id: String,
+    pub actor: String,
+    pub run: Option<String>,
+    pub view: String,
+    pub angle: String,
+    pub area: Option<String>,
+    /// The covered blocks the intent covers (named, or in its area), in id order.
+    pub blocks: Vec<String>,
+    /// RFC 3339 UTC.
+    pub expires_at: String,
 }
 
 /// The ids in both sets, in id order, walking the smaller set.
@@ -171,6 +191,50 @@ impl ReadState {
                 blocks,
             });
         }
-        Ok(Inflight { views, proposals })
+        let intents = self.inflight_intents(scope, own, ids)?;
+        Ok(Inflight {
+            views,
+            proposals,
+            intents,
+        })
+    }
+
+    /// The open intents (as of now) of views other than `own` that cover any of `ids` in
+    /// `scope`, each with the ids it covers; by id.
+    fn inflight_intents(
+        &self,
+        scope: &Scope,
+        own: Option<&str>,
+        ids: &BTreeSet<BlockId>,
+    ) -> Result<Vec<InflightIntent>, RdyError> {
+        let now = now_ms();
+        let mut out = vec![];
+        for (&stable, &latest) in &self.coord_heads.intents {
+            let it = self.reader.intent(&latest)?;
+            if !status_open_at(&it, now) || own == Some(it.view.as_str()) {
+                continue;
+            }
+            let mut blocks = vec![];
+            for id in ids {
+                if self.intent_covers(scope, &it, id)? {
+                    blocks.push(id.to_string());
+                }
+            }
+            if blocks.is_empty() {
+                continue;
+            }
+            out.push(InflightIntent {
+                id: intent_label(&stable),
+                actor: it.actor,
+                run: it.run,
+                view: it.view,
+                angle: it.angle,
+                area: it.area,
+                blocks,
+                expires_at: rfc3339(it.expires_at_ms),
+            });
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
     }
 }

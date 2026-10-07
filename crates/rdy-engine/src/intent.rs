@@ -135,6 +135,11 @@ fn status_at(it: &Intent, now: i64) -> &'static str {
     }
 }
 
+/// Whether intent version `it` is open (not withdrawn, not expired) at `now`.
+pub(crate) fn status_open_at(it: &Intent, now: i64) -> bool {
+    status_at(it, now) == "open"
+}
+
 fn info(stable: Hash, version: Hash, it: &Intent, posted_at_ms: i64, now: i64) -> IntentInfo {
     IntentInfo {
         id: intent_label(&stable),
