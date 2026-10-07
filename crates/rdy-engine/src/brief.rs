@@ -439,60 +439,71 @@ impl Briefing {
             return Err(e_page_moved());
         }
         self.drop_first(&skip);
-        self.cut(max, floor);
-        let shown = self.lens();
-        let after: [usize; PAGE_SECTIONS.len()] = std::array::from_fn(|i| skip[i] + shown[i]);
-        self.offsets = after;
-        if after != totals {
-            let offsets: Vec<String> = after.iter().map(ToString::to_string).collect();
-            self.next = Some(format!(
-                "{}:{}:{}",
-                self.record.token_hex(),
-                offsets.join(","),
-                self.digest_hex()
-            ));
+        self.settle(&skip, &totals);
+        while self.tokens() > max && self.halve(floor) {
+            self.settle(&skip, &totals);
         }
-        self.truncated |= self.next.is_some() || skip.iter().any(|s| *s > 0);
         if !self.truncated {
             self.docs.clear();
         }
         Ok(())
     }
 
-    /// Halves the longest detail list (ties: `PAGE_SECTIONS` order) until the briefing fits `max`
-    /// tokens or every list is empty (with `floor`: or one entry is left). Coverage, the token
+    /// Sets `offsets`, `next` and `truncated` from what this page shows now, so that the cut
+    /// measures the briefing with its cursor: the cursor counts against the budget.
+    fn settle(
+        &mut self,
+        skip: &[usize; PAGE_SECTIONS.len()],
+        totals: &[usize; PAGE_SECTIONS.len()],
+    ) {
+        let shown = self.lens();
+        let after: [usize; PAGE_SECTIONS.len()] = std::array::from_fn(|i| skip[i] + shown[i]);
+        self.offsets = after;
+        self.next = (after != *totals).then(|| {
+            let offsets: Vec<String> = after.iter().map(ToString::to_string).collect();
+            format!(
+                "{}:{}:{}",
+                self.record.token_hex(),
+                offsets.join(","),
+                self.digest_hex()
+            )
+        });
+        self.truncated |= self.next.is_some() || skip.iter().any(|s| *s > 0);
+    }
+
+    /// Halves the longest detail list (ties: `PAGE_SECTIONS` order). `false` when nothing is
+    /// left to cut: every list is empty (with `floor`: one entry is left). Coverage, the token
     /// and the record are never cut.
-    fn cut(&mut self, max: usize, floor: bool) {
-        while self.tokens() > max {
-            let lens = self.lens();
-            if floor && lens.iter().sum::<usize>() <= 1 {
-                break;
-            }
-            let longest = lens.iter().copied().max().unwrap_or(0);
-            if longest == 0 {
-                break;
-            }
-            let at = lens
-                .iter()
-                .position(|&n| n == longest)
-                .expect("the max is in the list");
-            let keep = longest / 2;
-            match at {
-                0 => self.governs.truncate(keep),
-                1 => self.dependents.truncate(keep),
-                2 => self.lineage.truncate(keep),
-                3 => self.will_go_stale.truncate(keep),
-                4 => self.suspects.truncate(keep),
-                5 => self.inflight.views.truncate(keep),
-                6 => self.inflight.proposals.truncate(keep),
-                _ => self.base.blocks.truncate(keep),
-            }
-            *self
-                .omitted
-                .entry(PAGE_SECTIONS[at].to_string())
-                .or_default() += longest - keep;
-            self.truncated = true;
+    fn halve(&mut self, floor: bool) -> bool {
+        let lens = self.lens();
+        if floor && lens.iter().sum::<usize>() <= 1 {
+            return false;
         }
+        let longest = lens.iter().copied().max().unwrap_or(0);
+        if longest == 0 {
+            return false;
+        }
+        let at = lens
+            .iter()
+            .position(|&n| n == longest)
+            .expect("the max is in the list");
+        let keep = longest / 2;
+        match at {
+            0 => self.governs.truncate(keep),
+            1 => self.dependents.truncate(keep),
+            2 => self.lineage.truncate(keep),
+            3 => self.will_go_stale.truncate(keep),
+            4 => self.suspects.truncate(keep),
+            5 => self.inflight.views.truncate(keep),
+            6 => self.inflight.proposals.truncate(keep),
+            _ => self.base.blocks.truncate(keep),
+        }
+        *self
+            .omitted
+            .entry(PAGE_SECTIONS[at].to_string())
+            .or_default() += longest - keep;
+        self.truncated = true;
+        true
     }
 }
 

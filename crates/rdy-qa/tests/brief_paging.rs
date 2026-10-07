@@ -237,3 +237,52 @@ fn bpag1_an_offset_past_the_end_of_its_section_is_stale_not_malformed() {
         .unwrap_err();
     assert_eq!(e.code, E_BAD_INPUT, "{e}");
 }
+
+/// How many detail entries a briefing shows, over every paged section.
+fn shown(b: &Briefing) -> usize {
+    b.governs.len()
+        + b.dependents.len()
+        + b.lineage.len()
+        + b.will_go_stale.len()
+        + b.suspects.len()
+        + b.inflight.views.len()
+        + b.inflight.proposals.len()
+        + b.base.blocks.len()
+}
+
+fn json_tokens(b: &Briefing) -> usize {
+    serde_json::to_string(b).unwrap().len() / 4
+}
+
+#[test]
+fn bfit1_a_cut_briefing_with_its_cursor_fits_every_budget() {
+    let (_d, mut r) = project();
+    let (_hub_doc, h) = hub(&mut r, 60);
+    let wide = r.read().brief(&Scope::Canon, &cov(&h), Some(400)).unwrap();
+    wide.register(&r.briefs());
+    let cursor = wide
+        .next
+        .clone()
+        .expect("60 dependents do not fit 400 tokens");
+    for max in 1..=1500 {
+        let b = r.read().brief(&Scope::Canon, &cov(&h), Some(max)).unwrap();
+        assert!(
+            json_tokens(&b) <= max || shown(&b) == 0,
+            "brief at {max}: {} tokens with {} entries shown, next {:?}",
+            json_tokens(&b),
+            shown(&b),
+            b.next
+        );
+        let p = r
+            .read()
+            .brief_page(&Scope::Canon, &r.briefs(), &cursor, Some(max))
+            .unwrap();
+        assert!(
+            json_tokens(&p) <= max || shown(&p) <= 1,
+            "page at {max}: {} tokens with {} entries shown, next {:?}",
+            json_tokens(&p),
+            shown(&p),
+            p.next
+        );
+    }
+}
