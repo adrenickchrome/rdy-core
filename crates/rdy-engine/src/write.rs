@@ -3,8 +3,8 @@ use crate::keys::{self, Keys};
 use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, SessionKind, views};
 use rdy_model::tree;
 use rdy_model::{
-    Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Justification, Link, Op, RefMode,
-    decision, order_between, ref_spans,
+    AltChoice, Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Justification, Link, Op,
+    RefMode, decision, order_between, ref_spans,
 };
 use rdy_schema::{Issue, Pack, has_errors, skeleton_gaps, validate_block};
 use rdy_store::Conflict;
@@ -1516,7 +1516,8 @@ impl Rdy {
 
     /// `write`, with `links` (intent, alternative, client nonce) recorded on the change and the
     /// briefing `brief` cited (`write_briefed`). MCP and the CLI don't use it yet: M2d1 adds
-    /// intents, and M2f the nonce.
+    /// intents, and M2f the nonce. A write to a member view of an open alternative set with no
+    /// `alternative` link gets one naming that set and the view (alts1).
     ///
     /// The change is checked against the view as the published state holds it, which is the
     /// view's present state only if every store write made outside the engine was followed by
@@ -1526,7 +1527,7 @@ impl Rdy {
         &mut self,
         session: &Session,
         req: WriteRequest,
-        links: ChangeLinks,
+        mut links: ChangeLinks,
         brief: Option<&str>,
     ) -> Result<WriteResult, RdyError> {
         if !session.role.can_write() {
@@ -1543,6 +1544,15 @@ impl Rdy {
         let st = self.read();
         check_view_access(&st, &req.view, session, views::Action::Commit)?;
         let claim = views::commit_claim(&st, session, &req.view)?;
+        // alts1: a change written in a member view of an open set records the set
+        if links.alternative.is_none()
+            && let Some((set, _, _)) = st.alt_of_view(&req.view)?
+        {
+            links.alternative = Some(AltChoice {
+                set,
+                member: req.view.clone(),
+            });
+        }
         let conflicts = st.conflicts(&scope)?;
         let m = st.materialized(&scope)?;
         let brief_warnings = crate::brief::check(&self.pack, &self.briefs, &m, &req.ops, brief)?;
