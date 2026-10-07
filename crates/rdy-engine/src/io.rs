@@ -81,11 +81,11 @@ impl KeyedLink {
 pub(crate) fn place_keyed(
     b: &mut Block,
     mut keyed: Vec<KeyedLink>,
-    lookup: &dyn Fn(&str) -> Option<BlockId>,
+    lookup: &dyn Fn(&str) -> Result<Option<BlockId>, RdyError>,
 ) -> Result<(), RdyError> {
     keyed.sort_by(|x, y| (&x.kind, x.at).cmp(&(&y.kind, y.at)));
     for k in keyed {
-        let Some(target) = lookup(&k.text) else {
+        let Some(target) = lookup(&k.text)? else {
             return Err(RdyError::new(
                 E_UNKNOWN_REF,
                 format!(
@@ -285,17 +285,120 @@ fn resolve_import_keys(
             return Err(crate::keys::clash_error(k, &b.id, other));
         }
     }
-    let lookup = |t: &str| {
-        incoming
-            .get(t)
-            .or_else(|| view_keys().get(t))
-            .map(|(_, id)| id.clone())
+    // a key the view holds twice (a floating view after another view landed it) is refused; a
+    // view block the import replaces holds the key it brings, so its view key does not count
+    let ids: BTreeSet<BlockId> = blocks.iter().map(|b| b.id.clone()).collect();
+    let lookup = |t: &str| match incoming.get(t) {
+        Some((_, id)) => Ok(Some(id.clone())),
+        None => crate::keys::sole_holder(
+            t,
+            view_keys()
+                .holders(t)
+                .iter()
+                .map(|(_, id)| id)
+                .filter(|id| !ids.contains(*id)),
+        ),
     };
     for (b, keyed) in blocks.iter_mut().zip(keyed) {
         place_keyed(b, keyed, &lookup)?;
-        crate::keys::rewrite_block(b, &lookup);
+        crate::keys::rewrite_block(b, &lookup)?;
     }
     Ok(())
+}
+
+/// akey1 (FW-PR3): gives each incoming doc and folder without a key the key derived from its
+/// path, in (path, id) order, and returns them by block id. A path walks parents through the
+/// incoming blocks, then the view. Taken: every incoming key, every key in the view held by a
+/// block the import does not bring, the keys assigned so far, and the name of every other
+/// top-level doc or folder after the import (a key that is another block's path would make that
+/// path unreachable); all compared folded.
+fn assign_import_keys(blocks: &mut [Block], existing: &Materialized) -> BTreeMap<String, String> {
+    let wanted: Vec<usize> = (0..blocks.len())
+        .filter(|&i| {
+            tree::is_tree_type(&blocks[i].block_type) && !blocks[i].fields.contains_key("key")
+        })
+        .collect();
+    if wanted.is_empty() {
+        return BTreeMap::new();
+    }
+    let incoming: BTreeMap<&BlockId, &Block> = blocks.iter().map(|b| (&b.id, b)).collect();
+    // each name on the chain, leaf first; None for a nameless doc or folder, a missing parent or
+    // a chain too long to be a valid tree (the depth check refuses that import)
+    let path_of = |id: &BlockId| -> Option<String> {
+        let mut parts = vec![];
+        let mut cur = Some(id.clone());
+        for _ in 0..tree::MAX_FOLDER_DEPTH + 2 {
+            let Some(c) = cur else {
+                parts.reverse();
+                return Some(parts.join("/"));
+            };
+            match incoming.get(&c) {
+                Some(b) => {
+                    if tree::is_tree_type(&b.block_type) {
+                        parts.push(b.field_str("name")?.to_string());
+                    }
+                    cur = b.parent.clone();
+                }
+                None => {
+                    let b = existing.get(&c)?;
+                    if tree::is_tree_type(&b.block_type) {
+                        parts.push(existing.name_of(&c)?);
+                    }
+                    cur = b.parent.clone();
+                }
+            }
+        }
+        None
+    };
+    let mut order: Vec<(String, BlockId, usize)> = wanted
+        .into_iter()
+        .filter_map(|i| Some((path_of(&blocks[i].id)?, blocks[i].id.clone(), i)))
+        .collect();
+    order.sort();
+    let incoming_keys = Keys::of(blocks.iter());
+    let ids: BTreeSet<BlockId> = blocks.iter().map(|b| b.id.clone()).collect();
+    let view_keys = Keys::of(existing.iter());
+    // folded top-level name → the docs and folders using it, as the view holds them after import
+    let mut top: BTreeMap<String, BTreeSet<BlockId>> = BTreeMap::new();
+    for b in blocks.iter().filter(|b| b.parent.is_none()) {
+        if tree::is_tree_type(&b.block_type)
+            && let Some(n) = b.field_str("name")
+        {
+            top.entry(rdy_model::key::fold(n))
+                .or_default()
+                .insert(b.id.clone());
+        }
+    }
+    for b in existing.children(None) {
+        if !ids.contains(&b.id)
+            && let Some(n) = existing.name_of(&b.id)
+        {
+            top.entry(rdy_model::key::fold(&n))
+                .or_default()
+                .insert(b.id.clone());
+        }
+    }
+    let mut assigned: BTreeSet<String> = BTreeSet::new();
+    let mut out = BTreeMap::new();
+    for (path, id, i) in order {
+        let k = crate::keys::auto_key(&path, &blocks[i].block_type, &|c| {
+            incoming_keys.get(c).is_some()
+                || view_keys.holders(c).iter().any(|(_, h)| !ids.contains(h))
+                || assigned.contains(&rdy_model::key::fold(c))
+                || top
+                    .get(&rdy_model::key::fold(c))
+                    .is_some_and(|holders| holders.iter().any(|h| h != &id))
+        });
+        assigned.insert(rdy_model::key::fold(&k));
+        blocks[i]
+            .fields
+            .insert("key".into(), FieldValue::Str(k.clone()));
+        blocks[i]
+            .fields
+            .insert(rdy_model::key::AUTO_FIELD.into(), FieldValue::Bool(true));
+        out.insert(id.to_string(), k);
+    }
+    out
 }
 
 /// skel1: the required sections each imported doc lacks among the imported sections under it.
@@ -679,6 +782,7 @@ impl Rdy {
         assign_missing_names(&mut blocks, &existing);
         check_import_names(&blocks, &existing)?;
         resolve_import_keys(&mut blocks, keyed, &existing)?;
+        let keys = assign_import_keys(&mut blocks, &existing);
         let incoming: BTreeMap<BlockId, &Block> =
             blocks.iter().map(|b| (b.id.clone(), b)).collect();
         let parent_of = |id: &BlockId| -> Option<Option<BlockId>> {
@@ -874,6 +978,7 @@ impl Rdy {
             change: id.to_string(),
             created,
             names: BTreeMap::new(),
+            keys,
             inherited: BTreeMap::new(),
             warnings,
         })
@@ -892,8 +997,9 @@ impl Rdy {
         if !keyed.is_empty() {
             let m = self.read().materialized(&Scope::View(view.to_string()))?;
             let keys = Keys::of(m.iter());
+            // a key two blocks of the view hold is refused, as in a write
             place_keyed(&mut edited, keyed, &|t| {
-                keys.get(t).map(|(_, id)| id.clone())
+                crate::keys::sole_holder(t, keys.holders(t).iter().map(|(_, id)| id))
             })?;
         }
         self.edit_block(s, view, edited, brief)
