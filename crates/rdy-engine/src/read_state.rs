@@ -347,20 +347,7 @@ impl ReadState {
     /// Whether `scope`'s lexicon is built in this state. Never builds, and never marks an as-of
     /// scope used.
     pub fn lexicon_built(&self, scope: &Scope) -> bool {
-        // as `is_built` reads the entry; a scope without an entry here has no lexicon
-        let entry = if let Scope::View(v) = scope {
-            match self.views.get(v) {
-                Some(e) if e.floats() => Some(Arc::clone(&self.canon)),
-                e => e.cloned(),
-            }
-        } else if let Scope::At(h) = scope {
-            self.as_of.peek(h)
-        } else if matches!(scope, Scope::Canon) {
-            Some(Arc::clone(&self.canon))
-        } else {
-            None
-        };
-        entry
+        self.peek_entry(scope)
             .as_deref()
             .and_then(Entry::built_ok)
             .is_some_and(|b| b.lexicon.get().is_some())
@@ -385,18 +372,22 @@ impl ReadState {
     /// builds, and never marks an as-of scope used.
     #[doc(hidden)]
     pub fn is_built(&self, scope: &Scope) -> (bool, bool) {
-        let entry = match scope {
+        match self.peek_entry(scope).as_deref().and_then(Entry::built_ok) {
+            Some(b) => (true, b.graph.get().is_some()),
+            None => (false, false),
+        }
+    }
+
+    /// The entry `scope` reads in this state, if there is one. Never builds, and never marks an
+    /// as-of scope used. A floating view reads canon's entry, as `built` does.
+    fn peek_entry(&self, scope: &Scope) -> Option<Arc<Entry>> {
+        match scope {
             Scope::Canon => Some(Arc::clone(&self.canon)),
-            // a floating view reads canon's entry
             Scope::View(v) => match self.views.get(v) {
                 Some(e) if e.floats() => Some(Arc::clone(&self.canon)),
                 e => e.cloned(),
             },
             Scope::At(h) => self.as_of.peek(h),
-        };
-        match entry.as_deref().and_then(Entry::built_ok) {
-            Some(b) => (true, b.graph.get().is_some()),
-            None => (false, false),
         }
     }
 
