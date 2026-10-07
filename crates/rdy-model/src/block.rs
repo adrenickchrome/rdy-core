@@ -8,6 +8,25 @@ pub fn hash_of<T: Serialize>(t: &T) -> Hash {
     )
 }
 
+/// The domain prefix of [`Block::content_hash`], so a content hash never equals a version hash.
+pub const CONTENT_DOMAIN: &[u8] = b"rdy-content-1\0";
+
+/// Fields rdy derives from other state (a decision's status and date, a section's lifecycle).
+/// They are not part of a block's content, so a pin does not see them change.
+pub const DERIVED_FIELDS: [&str; 3] = ["status", "decided_at", "lifecycle"];
+
+/// The part of a block a pin records (FW-LP1): everything except its pins and derived fields.
+#[derive(Serialize)]
+struct Content<'a> {
+    id: &'a BlockId,
+    block_type: &'a String,
+    parent: &'a Option<BlockId>,
+    order: &'a String,
+    fields: Vec<(&'a String, &'a FieldValue)>,
+    body: &'a String,
+    links: &'a BTreeMap<String, Vec<Link>>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Link {
     pub target: BlockId,
@@ -29,6 +48,31 @@ pub struct Block {
 impl Block {
     pub fn version_hash(&self) -> Hash {
         hash_of(self)
+    }
+
+    /// lpin1 (FW-LP1): the hash a pin records. It covers the block's id, type, parent, order,
+    /// fields except [`DERIVED_FIELDS`], body and links, so a change to the block's pins or
+    /// derived fields only leaves it unchanged. Domain-separated by [`CONTENT_DOMAIN`].
+    pub fn content_hash(&self) -> Hash {
+        let content = Content {
+            id: &self.id,
+            block_type: &self.block_type,
+            parent: &self.parent,
+            order: &self.order,
+            fields: self
+                .fields
+                .iter()
+                .filter(|(k, _)| !DERIVED_FIELDS.contains(&k.as_str()))
+                .collect(),
+            body: &self.body,
+            links: &self.links,
+        };
+        let mut bytes = CONTENT_DOMAIN.to_vec();
+        bytes.extend(
+            postcard::to_allocvec(&content)
+                .expect("postcard encoding of an in-memory value cannot fail"),
+        );
+        Hash::of(&bytes)
     }
 
     pub fn field_str(&self, name: &str) -> Option<&str> {

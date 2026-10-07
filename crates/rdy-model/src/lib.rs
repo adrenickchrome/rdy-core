@@ -1,4 +1,4 @@
-mod block;
+pub mod block;
 mod canon;
 mod change;
 pub mod decision;

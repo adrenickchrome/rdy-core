@@ -568,7 +568,7 @@ impl ReadState {
 
         let mut suspects = vec![];
         for id in ids {
-            let mut found = g.suspects_of(id, &*m, &|h| self.reader().get_block(h).ok());
+            let mut found = g.suspects_of(id);
             found.retain(|s| !self.is_presentational_source(&m, s));
             suspects.extend(found);
         }

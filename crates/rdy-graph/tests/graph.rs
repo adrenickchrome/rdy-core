@@ -138,36 +138,24 @@ fn suspects_ignore_status_only_changes() {
     claim.body = "Per {{D-AAAAA}}.".into();
     claim
         .pins
-        .insert(proposed.id.clone(), proposed.version_hash());
-    let old = proposed.clone();
-    let lookup = move |h: &Hash| {
-        if *h == old.version_hash() {
-            Some(old.clone())
-        } else {
-            None
-        }
-    };
+        .insert(proposed.id.clone(), proposed.content_hash());
 
     let blocks = map(vec![accepted.clone(), claim.clone()]);
-    assert!(
-        Graph::build_from(blocks.values())
-            .suspects(&blocks, &lookup)
-            .is_empty()
-    );
+    assert!(Graph::build_from(blocks.values()).suspects().is_empty());
 
     let mut edited = accepted.clone();
     edited
         .fields
         .insert("statement".into(), FieldValue::Str("different".into()));
     let blocks = map(vec![edited, claim.clone()]);
-    let s = Graph::build_from(blocks.values()).suspects(&blocks, &lookup);
+    let s = Graph::build_from(blocks.values()).suspects();
     assert_eq!(s.len(), 1);
     assert_eq!(s[0].reason, "changed");
 
     let mut sup = dec("D-BBBBB", "accepted");
     link(&mut sup, "supersedes", "D-AAAAA", None);
     let blocks = map(vec![accepted, claim, sup]);
-    let s = Graph::build_from(blocks.values()).suspects(&blocks, &lookup);
+    let s = Graph::build_from(blocks.values()).suspects();
     assert!(
         s.iter()
             .any(|x| x.reason == "superseded" && x.block.as_str() == "c-CHAMP")
@@ -177,12 +165,8 @@ fn suspects_ignore_status_only_changes() {
 fn claim_pinned(id: &str, target: &Block) -> Block {
     let mut c = b(id, "claim", Some("s-SSSSS"));
     c.body = format!("Per {{{{{}}}}}.", target.id);
-    c.pins.insert(target.id.clone(), target.version_hash());
+    c.pins.insert(target.id.clone(), target.content_hash());
     c
-}
-
-fn no_old(_: &Hash) -> Option<Block> {
-    None
 }
 
 #[test]
@@ -197,7 +181,7 @@ fn accepted_revoker_makes_referrers_suspect_proposed_does_not() {
         g.status(&target.id),
         Some(DerivedStatus::Revoked { .. })
     ));
-    let s = g.suspects(&blocks, &no_old);
+    let s = g.suspects();
     assert!(
         s.iter()
             .any(|x| x.reason == "revoked" && x.block == claim.id)
@@ -207,7 +191,7 @@ fn accepted_revoker_makes_referrers_suspect_proposed_does_not() {
     link(&mut proposed, "revokes", "D-AAAAA", None);
     let blocks = map(vec![target, claim, proposed]);
     let g = Graph::build_from(blocks.values());
-    assert!(g.suspects(&blocks, &no_old).is_empty());
+    assert!(g.suspects().is_empty());
 }
 
 #[test]
@@ -215,7 +199,7 @@ fn pinned_target_absent_is_deleted() {
     let gone = dec("D-AAAAA", "accepted");
     let claim = claim_pinned("c-CHAMP", &gone);
     let blocks = map(vec![claim]);
-    let s = Graph::build_from(blocks.values()).suspects(&blocks, &no_old);
+    let s = Graph::build_from(blocks.values()).suspects();
     assert_eq!(s.len(), 1);
     assert_eq!(s[0].reason, "deleted");
 }
@@ -232,12 +216,12 @@ fn partial_supersede_is_not_suspect_and_superseder_is_not_suspect() {
         g.status(&target.id),
         Some(DerivedStatus::PartiallySuperseded { .. })
     ));
-    assert!(g.suspects(&blocks, &no_old).is_empty());
+    assert!(g.suspects().is_empty());
 
     let mut whole = dec("D-BBBBB", "accepted");
     link(&mut whole, "supersedes", "D-AAAAA", None);
     let blocks = map(vec![target, whole.clone()]);
-    let s = Graph::build_from(blocks.values()).suspects(&blocks, &no_old);
+    let s = Graph::build_from(blocks.values()).suspects();
     assert!(s.iter().all(|x| x.block != whole.id));
 }
 
@@ -250,7 +234,7 @@ fn decision_naming_the_old_id_it_supersedes_is_not_suspect() {
         FieldValue::Str("replaces {{D-AAAAA}}".into()),
     );
     link(&mut sup, "supersedes", "D-AAAAA", None);
-    sup.pins.insert(target.id.clone(), target.version_hash());
+    sup.pins.insert(target.id.clone(), target.content_hash());
     let blocks = map(vec![target, sup.clone()]);
     let g = Graph::build_from(blocks.values());
     assert!(
@@ -259,11 +243,7 @@ fn decision_naming_the_old_id_it_supersedes_is_not_suspect() {
             .any(|e| e.kind == EdgeKind::References),
         "the reference edge exists"
     );
-    assert!(
-        g.suspects(&blocks, &no_old)
-            .iter()
-            .all(|x| x.block != sup.id)
-    );
+    assert!(g.suspects().iter().all(|x| x.block != sup.id));
 }
 
 #[test]
@@ -309,12 +289,12 @@ fn suspects_of_matches_the_whole_scope_suspects_filtered_to_one_block() {
     let g = Graph::build_from(blocks.values());
     for b in blocks.values() {
         let expect: Vec<_> = g
-            .suspects(&blocks, &no_old)
+            .suspects()
             .into_iter()
             .filter(|s| s.block == b.id)
             .collect();
-        assert_eq!(g.suspects_of(&b.id, &blocks, &no_old), expect, "{}", b.id);
+        assert_eq!(g.suspects_of(&b.id), expect, "{}", b.id);
     }
-    assert_eq!(g.suspects_of(&claim.id, &blocks, &no_old).len(), 1);
-    assert!(g.suspects_of(&revoker.id, &blocks, &no_old).is_empty());
+    assert_eq!(g.suspects_of(&claim.id).len(), 1);
+    assert!(g.suspects_of(&revoker.id).is_empty());
 }

@@ -130,53 +130,8 @@ fn export_level(
     Ok(())
 }
 
-/// The M1 flat layout: `docs/*.yaml`, one list of blocks per doc.
-fn read_format_1(dir: &Path) -> Result<Vec<Block>, RdyError> {
-    let mut files: Vec<_> = std::fs::read_dir(dir.join("docs"))
-        .map_err(io_err)?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| !is_hidden(p) && p.extension().is_some_and(|x| x == "yaml"))
-        .collect();
-    files.sort();
-    // A format-1 export is flat: a directory under docs/ is a format-2 tree, and reading it as
-    // format 1 would silently import nothing.
-    if let Some(d) = std::fs::read_dir(dir.join("docs"))
-        .map_err(io_err)?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.is_dir() && !is_hidden(p))
-        .min()
-    {
-        return Err(RdyError::new(
-            E_FILE_FORMAT,
-            format!(
-                "{}: a format-1 export is flat, but docs/ holds a directory (a format-2 tree?)",
-                d.display()
-            ),
-            "set `format: 2` in rdy-export.yaml, or re-export",
-        ));
-    }
-    let mut blocks: Vec<Block> = vec![];
-    for f in files {
-        refuse_symlink(&f)?;
-        let text = std::fs::read_to_string(&f).map_err(io_err)?;
-        let list: Vec<BlockYaml> = serde_yaml_ng::from_str(&text).map_err(|e| {
-            RdyError::new(
-                E_BAD_INPUT,
-                format!("{}: {e}", f.display()),
-                "fix or re-export the file",
-            )
-        })?;
-        for y in list {
-            blocks.push(from_yaml_struct(y)?);
-        }
-    }
-    Ok(blocks)
-}
-
-/// A format-1 export from M1 has docs without a name: give each the name readers already use,
-/// de-duplicated against names under the same parent in the import and in the view.
+/// A doc imported without a name gets the name readers already use, de-duplicated against names
+/// under the same parent in the import and in the view.
 fn assign_missing_names(blocks: &mut [Block], existing: &Materialized) {
     let mut taken: BTreeMap<Option<BlockId>, BTreeSet<String>> = BTreeMap::new();
     for b in blocks.iter().filter(|b| tree::is_tree_type(&b.block_type)) {
@@ -486,7 +441,7 @@ impl ReadState {
             Scope::At(h) => format!("landing:{h}"),
         };
         let manifest = Manifest {
-            format: 2,
+            format: 3,
             pack: self.pack().name.clone(),
             scope: scope_name,
         };
@@ -528,11 +483,13 @@ impl Rdy {
                 "re-export the project",
             )
         })?;
-        if !(1..=2).contains(&manifest.format) {
+        // lpin1: format 3 pins hold content hashes; import recomputes every pin, so a format-2
+        // tree reads the same way
+        if !(2..=3).contains(&manifest.format) {
             return Err(RdyError::new(
                 E_BAD_INPUT,
                 format!("unsupported export format {}", manifest.format),
-                "this rdy reads export formats 1 and 2",
+                "this rdy reads export formats 2 and 3; re-export with this rdy",
             ));
         }
         if !self.lineage.contains(&manifest.pack) {
@@ -575,19 +532,15 @@ impl Rdy {
                 blob_bytes.push(bytes);
             }
         }
-        let mut blocks: Vec<Block> = match manifest.format {
-            1 => read_format_1(dir)?,
-            2 => {
-                let (loaded, diags) = tree_io::read_tree(&dir.join("docs"), "docs");
-                if let Some(d) = diags
-                    .iter()
-                    .find(|d| d.severity == rdy_schema::Severity::Error)
-                {
-                    return Err(d.to_error());
-                }
-                loaded.into_iter().map(|l| l.block).collect()
+        let mut blocks: Vec<Block> = {
+            let (loaded, diags) = tree_io::read_tree(&dir.join("docs"), "docs");
+            if let Some(d) = diags
+                .iter()
+                .find(|d| d.severity == rdy_schema::Severity::Error)
+            {
+                return Err(d.to_error());
             }
-            _ => unreachable!("format checked above"),
+            loaded.into_iter().map(|l| l.block).collect()
         };
         let scope = Scope::View(view.to_string());
         // an import is a commit: it claims an unowned view and checks against the view's
@@ -742,6 +695,30 @@ impl Rdy {
             );
             e.issues = issues;
             return Err(e);
+        }
+        // lpin1: every pin is recomputed from the imported content, as a write's create pins
+        // it: each cited target (reference or link) to its content hash, the incoming block
+        // with that id first, else the view's. Pins in the files are ignored.
+        let content = |id: &BlockId| {
+            incoming
+                .get(id)
+                .copied()
+                .or_else(|| existing.get(id))
+                .map(Block::content_hash)
+        };
+        let pins: Vec<BTreeMap<BlockId, Hash>> = blocks
+            .iter()
+            .map(|b| {
+                let refs = b.ref_tokens();
+                let refs = refs.iter().filter_map(|t| BlockId::parse(t).ok());
+                let links = b.links.values().flatten().map(|l| l.target.clone());
+                refs.chain(links)
+                    .filter_map(|t| content(&t).map(|h| (t, h)))
+                    .collect()
+            })
+            .collect();
+        for (b, p) in blocks.iter_mut().zip(pins) {
+            b.pins = p;
         }
         // blobs go in only once the import is known to be valid, so a refused import stores nothing
         for bytes in &blob_bytes {

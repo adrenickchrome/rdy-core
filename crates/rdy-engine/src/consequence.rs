@@ -133,7 +133,6 @@ impl ReadState {
 
         let g = self.graph(scope)?;
         let m = self.materialized(scope)?;
-        let old = |h: &Hash| self.reader().get_block(h).ok();
         let mut suspects_of: BTreeMap<BlockId, Vec<Suspect>> = BTreeMap::new();
         let mut causes: BTreeMap<BlockId, Cause> = BTreeMap::new();
         for x in &changed {
@@ -149,7 +148,7 @@ impl ReadState {
                 }
                 edges.sort_by_key(|e| e.kind.name());
                 let found = suspects_of.entry(from.clone()).or_insert_with(|| {
-                    let mut s = g.suspects_of(from, &*m, &old);
+                    let mut s = g.suspects_of(from);
                     s.retain(|s| !self.is_presentational_source(&m, s));
                     s
                 });

@@ -1,5 +1,4 @@
 use imbl::{OrdMap, OrdSet};
-use rdy_graph::BlockLookup;
 use rdy_model::{Block, BlockId, Hash, Op, StateSnapshot, tree};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -376,11 +375,5 @@ impl Materialized {
             children: self.names_under(None).into_values().collect(),
             ambiguous: vec![],
         })
-    }
-}
-
-impl BlockLookup for Materialized {
-    fn block(&self, id: &BlockId) -> Option<&Block> {
-        self.get(id)
     }
 }
