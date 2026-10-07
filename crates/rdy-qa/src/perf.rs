@@ -61,6 +61,9 @@ fn spec_target(op: &str) -> Option<String> {
         "tree_full_memo" => {
             "< 5 ms p99 at 1k folders / 10k docs, memoised per canon head (M2 spec 15.1)"
         }
+        "search_literal" => {
+            "no spec target: a full scan of block text, first page (recorded for FW-PR1; semantic search is M5)"
+        }
         "view_materialize_cold" => "< 50 ms cold (M2 spec 15.1)",
         "view_materialize_incremental" => "< 1 ms incremental (M2 spec 15.1)",
         "view_materialize_after_rebase" => {
@@ -471,6 +474,16 @@ fn tier_reads(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs
     r.read().tree_full(&Scope::Canon).expect("warm the memo");
     out.push(measure(&format!("tree_full_memo{sfx}"), runs.tree, |_| {
         r.read().tree_full(&Scope::Canon).expect("tree_full");
+    }));
+    // FW-PR1: a full scan of block text (a literal every generated claim holds), first page only
+    let needle = rdy_engine::SearchQuery {
+        text: "Claim".into(),
+        ..Default::default()
+    };
+    out.push(measure(&format!("search_literal{sfx}"), runs.read, |_| {
+        r.read()
+            .search(&Scope::Canon, &needle, None, Some(4000))
+            .expect("search");
     }));
     // a view's first materialization after a write invalidated the state
     out.push(measure_timed(
@@ -2056,6 +2069,18 @@ mod tests {
                 .unwrap_or_else(|| panic!("{op} missing"));
             assert!(m.median_ms > 0.0);
         }
+    }
+
+    #[test]
+    #[ignore = "runs the typical perf workload; cargo test -p rdy-qa --release --lib -- --ignored ae2perf1"]
+    fn ae2perf1_search_has_a_target_and_runs() {
+        assert!(spec_target("search_literal").is_some());
+        let ms = run_workload();
+        let m = ms
+            .iter()
+            .find(|m| m.op == "search_literal")
+            .expect("search_literal missing");
+        assert!(m.median_ms > 0.0);
     }
 
     #[test]

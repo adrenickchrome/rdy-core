@@ -369,3 +369,27 @@ fn trk1_rdy_edit_moves_a_tracking_field_with_a_reason() {
         "{shown}"
     );
 }
+
+/// kroot1 (FW-PR3b, F4): `rdy edit` prints a `new key <id>: <key>` line for each key rdy
+/// re-derived, here the doc's own key following a rename.
+#[test]
+fn kroot1_rdy_edit_prints_each_new_key() {
+    let s = Served::new();
+    let id = new_doc(&s);
+    let ed = script(
+        &s,
+        "rename.sh",
+        "sed -i.bak -E 's/^( *)name: d$/\\1name: renamed/' \"$1\"\n",
+    );
+    let out = edit(&s, &ed, &id, false);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.lines().any(|l| l == format!("new key {id}: renamed")),
+        "{text}"
+    );
+}

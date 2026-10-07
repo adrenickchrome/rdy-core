@@ -160,6 +160,28 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
             }
             continue;
         }
+        if name == rdy_model::key::AUTO_FIELD {
+            // `key_auto` is an engine field on docs and folders: their key came from the path
+            if !tree::is_tree_type(&block.block_type) {
+                out.push(err(
+                    block,
+                    "E_FIELD_UNKNOWN",
+                    format!(
+                        "type {} cannot carry {name:?}: only a doc's or folder's key is derived from its path",
+                        block.block_type
+                    ),
+                    format!("remove {name}"),
+                ));
+            } else if v != &FieldValue::Bool(true) || !block.fields.contains_key("key") {
+                out.push(err(
+                    block,
+                    "E_FIELD_KIND",
+                    format!("field {name:?} must be true, next to a key"),
+                    format!("remove {name}; rdy sets it when it derives a key from the path"),
+                ));
+            }
+            continue;
+        }
         if name == REFLECTS_FIELD {
             // `reflects` is an engine field on content types, never listed per type.
             if REFLECTS_EXCLUDED_TYPES.contains(&block.block_type.as_str()) {

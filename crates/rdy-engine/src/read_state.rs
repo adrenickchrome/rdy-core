@@ -460,6 +460,8 @@ pub struct ReadState {
     pub(crate) require_up_to_date: bool,
     /// `views.idle_days` in `.rdy/config.yaml` (default 14), read by a full publish.
     pub(crate) idle_days: u32,
+    /// `decisions.home` in `.rdy/config.yaml`, read by a full publish (FW-PR2).
+    pub(crate) decisions_home: Option<Arc<str>>,
     pub(crate) reader: StoreReader,
     pub(crate) as_of: Arc<AsOfCache>,
     /// The version-position cache, shared like `as_of` (read by the state's version reads).
@@ -540,6 +542,12 @@ impl ReadState {
     /// read when this state was published.
     pub fn idle_days(&self) -> u32 {
         self.idle_days
+    }
+
+    /// The doc a decision given no parent is recorded in (`decisions.home`: a path, key or id),
+    /// as the config read when this state was published.
+    pub fn decisions_home(&self) -> Option<&str> {
+        self.decisions_home.as_deref()
     }
 
     /// The landing view `name` reads on: canon's head for a view with no ref or one that floats

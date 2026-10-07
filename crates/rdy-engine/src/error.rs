@@ -63,8 +63,8 @@ pub const E_ALT_UNCHOSEN: &str = "E_ALT_UNCHOSEN";
 pub const E_ALT_MEMBER: &str = "E_ALT_MEMBER";
 /// The intent has expired: it takes no renewal and no withdrawal (plan M2d1).
 pub const E_INTENT_EXPIRED: &str = "E_INTENT_EXPIRED";
-/// The fix of every `E_PAGE_STALE`, for a briefing cursor and a read cursor alike.
-pub const PAGE_STALE_FIX: &str = "the read or briefing moved; start again without a cursor";
+/// The fix of every `E_PAGE_STALE`, for a briefing, read and search cursor alike.
+pub const PAGE_STALE_FIX: &str = "the read, briefing or search moved; start again without a cursor";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RdyError {

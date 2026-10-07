@@ -175,7 +175,8 @@ pub struct WriteParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct DecideParams {
     pub view: Option<String>,
-    pub parent: String,
+    /// The doc or section to record the decision in (id, key or path). Omit to record it in the project's decision home (decisions.home).
+    pub parent: Option<String>,
     pub statement: String,
     pub options: Option<Vec<String>>,
     pub authority_basis: Option<String>,
@@ -217,7 +218,8 @@ pub struct RevokeParams {
     pub view: Option<String>,
     pub target: String,
     pub reason: String,
-    pub parent: String,
+    /// The doc or section to record the revoking decision in (id, key or path). Omit to record it in the project's decision home (decisions.home).
+    pub parent: Option<String>,
     /// The briefing token from rdy_brief. Required when the write touches stable content.
     pub brief: Option<String>,
     /// The budget for the response's consequences.
@@ -398,7 +400,11 @@ pub(crate) fn session(st: &McpState) -> Result<Session, RdyError> {
 /// The scope a tool reads, resolved on the state the tool reads (`read`), so that a view created
 /// by a later publish is never accepted here and then read on a state without it. `view` is the
 /// session view `s` resolves against, and the scope when `s` is none.
-fn scope_of(view: &str, read: &ReadState, s: &Option<String>) -> Result<Scope, RdyError> {
+pub(crate) fn scope_of(
+    view: &str,
+    read: &ReadState,
+    s: &Option<String>,
+) -> Result<Scope, RdyError> {
     match s {
         // scope1: an unknown view is not found, unless it is this session's own view
         Some(text) => read.resolve_read_scope(text, Some(view)),
@@ -1013,7 +1019,10 @@ pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
 }
 
 /// What bodies and text fields accept (md1, dtext1, key1).
-const TEXT_RULES: &str = "Bodies and text fields: **bold**, *italic*, `code`, [link](https://… or a relative path), and in bodies - bullets and 1. numbered lists (indent two spaces to nest). No raw HTML. {{id}} or {{id|words}} references a block; \\{{ is a literal {{ and a leading @ in words is written \\@. fields.key: optional short human id, unique per project ignoring case, letters/digits/-_. , not shaped like a block id. fields.reflects: optional list of code path globs (e.g. crates/*/src/error.rs) this block follows; rdy_brief {code_path} lists the blocks whose globs match a file.";
+const TEXT_RULES: &str = "Bodies and text fields: **bold**, *italic*, `code`, [link](https://… or a relative path), and in bodies - bullets and 1. numbered lists (indent two spaces to nest). No raw HTML. {{id}} or {{id|words}} references a block; \\{{ is a literal {{ and a leading @ in words is written \\@. fields.key: optional short human id, unique per project ignoring case, letters/digits/-_. , not shaped like a block id; a doc or folder created without one gets one from its path and fields.key_auto: true (rdy sets key_auto; a write that sends it is refused, and a key you write is yours). If another block holds a key rdy derived when the doc is proposed or landed, rdy gives it a new one (rdy_propose and the landing list it under keys); when a doc or folder is renamed or moved, a key rdy derived for it follows its new path (the docs and folders under it keep their keys); a key rdy derived yields to a new or renamed top-level doc or folder name equal to it and gets a suffix (the write lists both under keys); a key you set is never changed, and a clash on it is E_KEY_CLASH. fields.reflects: optional list of code path globs (e.g. crates/*/src/error.rs) this block follows; rdy_brief {code_path} lists the blocks whose globs match a file.";
+
+/// The decision home's rule, in `rdy_schema` (FW-PR2).
+pub const DECISIONS_RULE: &str = "Record new decisions in the decision home (rdy_decide without parent records there) and link the content they govern to them with decided_by; don't put decisions inside content docs. With no home configured, pass parent, or set decisions.home in .rdy/config.yaml.";
 
 /// How to edit with briefings, in `rdy_schema`.
 pub const EDIT_LOOP_DOC: &str = "Brief before editing: rdy_brief {ids or path} returns governs, dependents, lineage (the refines, supersedes and revokes edges of the covered blocks, in both directions: {block, kind, direction (in or out), on, summary}; the incoming refines and supersedes are dependents too), will_go_stale, suspects, inflight (other views and open proposals that change the blocks) and base (each covered block's version and the briefing token). Pass brief: <token> on rdy_write, rdy_decide, rdy_supersede (inside decision) and rdy_revoke. A write that touches stable content (a block whose own or inherited lifecycle is stable before or after the op; for a create, its parent's) needs a current briefing that covers it: brief the block, or its parent to create under it. A briefing is current while no block it recorded has moved in the write's view. Drafts need none; a stale one there only warns (W_BRIEF_STALE). E_BRIEF_REQUIRED and E_BRIEF_STALE carry a fresh briefing for exactly the blocks the write touches: retry with its base.token. Every write response lists consequences: {id, block, kind (conflict, suspect or dependent; tension arrives with tensions), because {edge, changed}, follow_up (update, confirm, reaffirm or resolve)}; max_tokens bounds them. A cut briefing carries next and per-doc counts (docs): pass page: <next> alone, in the scope of the first page, to read the rest. Every page of a cut briefing has truncated: true and docs; the last page has no next. A page is stale (E_PAGE_STALE) when a paged entry other than inflight came, went or changed; inflight is advice and may shift between pages. rdy_view include, exclude and undo return consequences too, with conflict entries (follow_up resolve) for conflicts the op exposed; rdy_propose returns the consequences for canon of landing it (advice). An entry with already_written: true is a block your view already rewrote: confirm it (repin) unless its meaning changed.";
@@ -1117,7 +1126,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_PAGE_STALE",
-        "a page cursor (the next of a cut rdy_brief or rdy_read) is unknown to this session, or what it pages (a briefing or a read) moved since its first page",
+        "a page cursor (the next of a cut rdy_brief, rdy_read or rdy_search) is unknown to this session, or what it pages (a briefing, a read or a search) moved since its first page, or the search query differs",
         PAGE_STALE_FIX,
     ),
     (
@@ -1188,6 +1197,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             "views": view_tools::SCHEMA_DOC,
             "intents": crate::intent_tools::INTENT_DOC,
             "alternatives": crate::alt_tools::ALT_DOC,
+            "decisions": {"home": st_.decisions_home(), "rule": DECISIONS_RULE},
             "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT, "socket_line_bytes": MAX_REQUEST_BYTES, "transport": TRANSPORT_NOTE},
             "errors": ERROR_ROWS.iter().map(|(c, w, f)| (c.to_string(), json!({"when": w, "fix": f}))).collect::<serde_json::Map<_, _>>(),
             "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
@@ -1229,7 +1239,7 @@ pub fn rdy_brief(st: &mut McpState, p: BriefParams) -> Result<Value, RdyError> {
     serialize_briefing(&b)
 }
 
-fn serialize_briefing<T: serde::Serialize>(b: &T) -> Result<Value, RdyError> {
+pub(crate) fn serialize_briefing<T: serde::Serialize>(b: &T) -> Result<Value, RdyError> {
     serde_json::to_value(b).map_err(|e| {
         RdyError::new(
             E_INTERNAL,
@@ -1342,7 +1352,8 @@ fn decision_input(p: DecideParams) -> DecisionInput {
     .map(|(k, _)| k.to_string())
     .collect();
     DecisionInput {
-        parent: p.parent,
+        // a placeholder: the tools overwrite it with the resolved parent (given, or the home)
+        parent: p.parent.unwrap_or_default(),
         statement: p.statement,
         options: p.options.unwrap_or_default(),
         authority_basis: p.authority_basis,
@@ -1372,9 +1383,11 @@ pub fn rdy_decide(st: &mut McpState, p: DecideParams) -> Result<Value, RdyError>
     let s = session(st)?;
     let view = p.view.clone().unwrap_or_else(|| st.view.clone());
     let max_tokens = p.max_tokens;
-    let input = decision_input(p);
+    let parent = p.parent.clone();
+    let mut input = decision_input(p);
     let v = view.clone();
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
+        input.parent = r.decision_parent(&view, parent.as_deref())?;
         r.decide(&s, &view, input)
     })
     .map(|v| report_once(st, v))
@@ -1385,11 +1398,13 @@ pub fn rdy_supersede(st: &mut McpState, p: SupersedeParams) -> Result<Value, Rdy
     let s = session(st)?;
     let view = p.decision.view.clone().unwrap_or_else(|| st.view.clone());
     let max_tokens = p.decision.max_tokens;
+    let parent = p.decision.parent.clone();
     let mut input = decision_input(p.decision);
     input.intent = input.intent.or(p.intent);
     let (old, part) = (p.old, p.part);
     let v = view.clone();
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
+        input.parent = r.decision_parent(&view, parent.as_deref())?;
         r.supersede(&s, &view, &old, part, input)
     })
     .map(|v| report_once(st, v))
@@ -1399,10 +1414,11 @@ pub fn rdy_revoke(st: &mut McpState, p: RevokeParams) -> Result<Value, RdyError>
     check_tokens(p.max_tokens)?;
     let s = session(st)?;
     let view = p.view.unwrap_or_else(|| st.view.clone());
-    let (brief, max_tokens, intent) = (p.brief, p.max_tokens, p.intent);
+    let (brief, max_tokens, intent, parent) = (p.brief, p.max_tokens, p.intent, p.parent.clone());
     let v = view.clone();
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
-        r.revoke_with_intent(&s, &view, &p.target, &p.reason, &p.parent, brief, intent)
+        let pid = r.decision_parent(&view, parent.as_deref())?;
+        r.revoke_with_intent(&s, &view, &p.target, &p.reason, &pid, brief, intent)
     })
     .map(|v| report_once(st, v))
 }

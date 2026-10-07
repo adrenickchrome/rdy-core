@@ -124,8 +124,8 @@ fn mparm1_shapes_read_like_the_schema() {
             refusal::<WriteParams>("rdy_write", json!({"ops": "x"})),
         ),
         (
-            "parent".into(),
-            refusal::<DecideParams>("rdy_decide", json!({"parent": null, "statement": "x"})),
+            "statement".into(),
+            refusal::<DecideParams>("rdy_decide", json!({"statement": null})),
         ),
     ];
     let messages: Vec<&str> = cases.iter().map(|(_, (_, m, _))| m.as_str()).collect();
@@ -137,7 +137,7 @@ fn mparm1_shapes_read_like_the_schema() {
             "rdy_write: parameter \"editorial\" must be an object, not a string",
             "rdy_view: parameter \"pin\" must be a boolean, not a string",
             "rdy_write: parameter \"ops\" must be a list, not a string",
-            "rdy_decide: parameter \"parent\" must be a string, not null",
+            "rdy_decide: parameter \"statement\" must be a string, not null",
         ]
     );
     for (param, (code, _, fix)) in &cases {
@@ -169,8 +169,8 @@ fn mparm1_valid_parameters_still_parse() {
     )
     .unwrap();
     assert_eq!(
-        (p.parent.as_str(), p.kind, p.options.map(|o| o.len())),
-        ("s-1", None, Some(2))
+        (p.parent.as_deref(), p.kind, p.options.map(|o| o.len())),
+        (Some("s-1"), None, Some(2))
     );
     assert!(parse_params::<TagsParams>("rdy_tags", serde_json::Map::new()).is_ok());
 }

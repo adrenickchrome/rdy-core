@@ -21,6 +21,7 @@ mod paths;
 pub mod proposal_show;
 mod query;
 mod read_state;
+pub mod search;
 mod session;
 pub mod testkit;
 mod tree_io;
@@ -54,6 +55,7 @@ pub use query::{
 };
 pub use rdy_store::Relay;
 pub use read_state::{CoordHeads, Delta, InflightSet, OpenIntent, ReadState};
+pub use search::{SearchQuery, SearchResult};
 pub use session::{
     HUMAN_RUN, INFLIGHT_SCOPE, PinnedClock, Scope, Session, SessionKind, classify, human_actor,
     human_actor_from_env, now_ms, pin_clock, rfc3339, rfc3339_now,
@@ -93,6 +95,9 @@ struct Config {
     /// How views are listed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     views: Option<ViewsConfig>,
+    /// Where decisions are recorded (FW-PR2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    decisions: Option<DecisionsConfig>,
     #[serde(default, skip_serializing_if = "ServeSection::is_empty")]
     serve: ServeSection,
 }
@@ -217,6 +222,13 @@ struct ViewsConfig {
     idle_days: u32,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DecisionsConfig {
+    /// The doc (path, key or id) a decision given no parent is recorded in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    home: Option<String>,
+}
+
 /// `views.idle_days` when the config does not set it.
 const DEFAULT_IDLE_DAYS: u32 = 14;
 
@@ -236,6 +248,15 @@ impl Config {
     fn idle_days(cfg: Option<&Config>) -> u32 {
         cfg.and_then(|c| c.views.as_ref())
             .map_or(DEFAULT_IDLE_DAYS, |v| v.idle_days)
+    }
+
+    /// `decisions.home`, trimmed; an empty text counts as unset.
+    fn decisions_home(cfg: Option<&Config>) -> Option<Arc<str>> {
+        cfg.and_then(|c| c.decisions.as_ref())
+            .and_then(|d| d.home.as_deref())
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .map(Arc::from)
     }
 }
 
@@ -368,6 +389,7 @@ impl Rdy {
             description: None,
             reviews: None,
             views: None,
+            decisions: None,
             serve: ServeSection::default(),
         })
         .expect("config yaml");
@@ -396,6 +418,7 @@ impl Rdy {
         let (name, description) = site_identity(project, Some(&cfg));
         let require_up_to_date = Config::require_up_to_date(Some(&cfg));
         let idle_days = Config::idle_days(Some(&cfg));
+        let decisions_home = Config::decisions_home(Some(&cfg));
         // a placeholder until the first publish below, which replaces all of it
         let state = ArcSwap::from_pointee(ReadState {
             seq: store.log_end(),
@@ -410,6 +433,7 @@ impl Rdy {
             description,
             require_up_to_date,
             idle_days,
+            decisions_home,
             reader: store.reader(),
             as_of: Arc::clone(&as_of),
             vpos: Arc::clone(&vpos),
@@ -582,6 +606,7 @@ impl Rdy {
                     description: prev.description.clone(),
                     require_up_to_date: prev.require_up_to_date,
                     idle_days: prev.idle_days,
+                    decisions_home: prev.decisions_home.clone(),
                     reader: self.store.reader(),
                     as_of: Arc::clone(&self.as_of),
                     vpos: Arc::clone(&self.vpos),
@@ -667,7 +692,7 @@ impl Rdy {
         let canon_head = self.store.canon_head()?;
         // the config is re-read only by a full publish (open, invalidate, reindex); every other
         // publish carries the previous state's name, description and review rules
-        let (name, description, require_up_to_date, idle_days) = match delta {
+        let (name, description, require_up_to_date, idle_days, decisions_home) = match delta {
             Delta::Full => {
                 let cfg = read_config_lenient(&prev.root);
                 let (name, description) = site_identity(&prev.root, cfg.as_ref());
@@ -676,6 +701,7 @@ impl Rdy {
                     description,
                     Config::require_up_to_date(cfg.as_ref()),
                     Config::idle_days(cfg.as_ref()),
+                    Config::decisions_home(cfg.as_ref()),
                 )
             }
             _ => (
@@ -683,6 +709,7 @@ impl Rdy {
                 prev.description.clone(),
                 prev.require_up_to_date,
                 prev.idle_days,
+                prev.decisions_home.clone(),
             ),
         };
         // the coordination refs: re-read by a publish that may have moved them, else carried. A
@@ -844,6 +871,7 @@ impl Rdy {
             description,
             require_up_to_date,
             idle_days,
+            decisions_home,
             reader: self.store.reader(),
             as_of: Arc::clone(&self.as_of),
             vpos: Arc::clone(&self.vpos),

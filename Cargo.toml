@@ -40,3 +40,8 @@ libc = "0.2.190"
 regex = "1.13.1"
 imbl = "7"
 arc-swap = "1"
+
+[profile.dev]
+# Line tables keep backtraces with file:line but drop full debug info: test binaries link
+# much faster (an outside review measured a one-line-edit rebuild going from 3m13s to 1m08s).
+debug = "line-tables-only"
