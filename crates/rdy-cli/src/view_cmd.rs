@@ -175,7 +175,7 @@ fn age(ms: i64) -> String {
     }
 }
 
-fn compare_text(v: &Value) -> String {
+pub fn compare_text(v: &Value) -> String {
     let mut lines = vec![format!("{} vs {}", text(&v["a"]), text(&v["b"]))];
     let entries = |key: &str, f: &dyn Fn(&Value) -> String, lines: &mut Vec<String>| {
         for e in v[key].as_array().into_iter().flatten() {

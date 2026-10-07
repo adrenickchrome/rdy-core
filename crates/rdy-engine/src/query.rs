@@ -30,6 +30,10 @@ pub struct Context {
     /// absent in every other scope and when none does.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inflight: Vec<crate::coord_graph::InflightChange>,
+    /// malt1: in a view that is a member of an open alternative set, the other members that also
+    /// write the block; absent in every other scope and when none does.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<crate::alt::AltPeer>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -246,6 +250,10 @@ impl ReadState {
             areas: self.areas_of(scope, id)?,
             inflight: match scope {
                 Scope::Inflight => self.inflight_changes(id)?,
+                _ => Vec::new(),
+            },
+            alternatives: match scope {
+                Scope::View(v) => self.alt_peers(v, id)?,
                 _ => Vec::new(),
             },
         })

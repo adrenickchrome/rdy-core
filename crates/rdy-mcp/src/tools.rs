@@ -252,6 +252,8 @@ pub struct ProposeParams {
     pub summary: Option<String>,
     /// The budget for the consequences in the result.
     pub max_tokens: Option<usize>,
+    /// A proposal from a member view of an alternative set (rdy_alternatives) names the set and the view's own member: {set, chosen}. Landing it chooses that member and closes the others.
+    pub alternatives: Option<crate::alt_tools::AltPickParams>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -582,16 +584,27 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
         })
         .collect();
     let landings = st_.landings()?.len();
-    Ok(budget(
-        json!({
-            "pack": st_.pack().name, "session": {"actor": s.actor, "view": st.view},
-            "project": {"name": st_.project_name(), "description": st_.project_description()},
-            "canon": {"landings": landings},
-            "open_report": open_report_json(&st.engine.open_report()),
-            "views": views, "tree": tree, "version_position": position,
-        }),
-        p.max_tokens,
-    ))
+    let mut out = json!({
+        "pack": st_.pack().name, "session": {"actor": s.actor, "view": st.view},
+        "project": {"name": st_.project_name(), "description": st_.project_description()},
+        "canon": {"landings": landings},
+        "open_report": open_report_json(&st.engine.open_report()),
+        "views": views, "tree": tree, "version_position": position,
+    });
+    // malt1: a session in a member view of an open set sees the set and its other members
+    if let Some((stable, version, set)) = st_.alt_of_view(&st.view)? {
+        let info = st_.alt_info(stable, version, &set)?;
+        out["alternatives"] = json!({
+            "set": info.id,
+            "title": info.title,
+            "question": info.question,
+            "members": info.members.iter().map(|m| json!({
+                "label": m.label, "view": m.view, "owner": m.owner,
+                "changes": m.changes, "mine": m.view == st.view,
+            })).collect::<Vec<_>>(),
+        });
+    }
+    Ok(budget(out, p.max_tokens))
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -1063,6 +1076,16 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "post a new one",
     ),
     (
+        "E_ALT_UNCHOSEN",
+        "a member view proposed without naming its set and member",
+        "pass alternatives: {set, chosen} with your own member",
+    ),
+    (
+        "E_ALT_MEMBER",
+        "a view in two open sets, a member that is not an open view, a chosen member that is not the proposing view's, or a set that is no longer open",
+        "propose from the chosen member's view",
+    ),
+    (
         "E_DAEMON_START",
         "the daemon couldn't be started or reached",
         "read the last lines of .rdy/run/daemon.log it cites; run rdy serve in the foreground to see why",
@@ -1154,6 +1177,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             "ops": WRITE_OPS.iter().map(|(n, s)| (n.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
             "views": view_tools::SCHEMA_DOC,
             "intents": crate::intent_tools::INTENT_DOC,
+            "alternatives": crate::alt_tools::ALT_DOC,
             "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT, "socket_line_bytes": MAX_REQUEST_BYTES, "transport": TRANSPORT_NOTE},
             "errors": ERROR_ROWS.iter().map(|(c, w, f)| (c.to_string(), json!({"when": w, "fix": f}))).collect::<serde_json::Map<_, _>>(),
             "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
@@ -1381,13 +1405,15 @@ pub fn rdy_propose(st: &mut McpState, p: ProposeParams) -> Result<Value, RdyErro
         .map(|v| v.strip_prefix("view:").map(String::from).unwrap_or(v))
         .unwrap_or_else(|| st.view.clone());
     let changes = p.changes.clone();
+    let alternatives = p.alternatives.map(rdy_engine::alt::AltPick::from);
     propose_and_report(&*st.engine, p.max_tokens, move |r| {
-        r.propose_subset(
+        r.propose_with(
             &s,
             &view,
             &p.title,
             changes.as_deref(),
             p.summary.as_deref(),
+            alternatives.as_ref(),
         )
     })
 }

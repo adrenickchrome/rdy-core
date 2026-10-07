@@ -1,3 +1,4 @@
+use crate::alt_tools;
 use crate::intent_tools;
 use crate::order::{Order, Ordered, Stamped};
 use crate::params::Parameters;
@@ -231,6 +232,17 @@ impl RdyServer {
         Parameters(p): Parameters<intent_tools::IntentParams>,
     ) -> CallToolResult {
         self.run("rdy_intent", p, intent_tools::rdy_intent).await
+    }
+
+    #[tool(
+        description = "Create, change, list, compare or abandon an alternative set: member views that answer one question. A proposal from a member view names its set and its own member."
+    )]
+    async fn rdy_alternatives(
+        &self,
+        Parameters(p): Parameters<alt_tools::AltParams>,
+    ) -> CallToolResult {
+        self.run("rdy_alternatives", p, alt_tools::rdy_alternatives)
+            .await
     }
 
     #[tool(

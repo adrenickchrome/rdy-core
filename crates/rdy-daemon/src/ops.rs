@@ -10,7 +10,7 @@ use rdy_engine::consequence::{land_and_report, propose_and_report, write_and_rep
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::{
     E_BAD_INPUT, E_LIMIT, E_PERMISSION, HISTORY_MAX, LandOptions, RdyError, ReadState, Relay,
-    Scope, Session, block_to_yaml, check_path, intent, resolve_pack, view_api,
+    Scope, Session, alt, block_to_yaml, check_path, intent, resolve_pack, view_api,
 };
 use rdy_mcp::tools::MAX_TOKENS_LIMIT;
 use rdy_model::{ActorRun, RelayEvidence, Role};
@@ -52,6 +52,7 @@ pub const OPS: &[&str] = &[
     "fsck",
     "view",
     "intent",
+    "alt",
 ];
 
 #[derive(Deserialize)]
@@ -171,6 +172,7 @@ struct ProposeArgs {
     view: Option<String>,
     summary: Option<String>,
     max_tokens: Option<usize>,
+    alternatives: Option<alt::AltPick>,
 }
 
 #[derive(Deserialize)]
@@ -423,6 +425,15 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 op,
                 args,
                 "{op, view?, area?, blocks?, angle?, ttl?, intent?, block?, actor?, include_expired?}",
+            )?,
+        ),
+        "alt" => alt::run_alt(
+            cx.engine,
+            cx.session,
+            parse(
+                op,
+                args,
+                "{op, title?, question?, members?, set?, label?, view?, member?, reason?, all?}",
             )?,
         ),
         _ => Err(RdyError::new(
@@ -693,7 +704,14 @@ fn propose(cx: &OpContext, a: ProposeArgs) -> Result<Value, RdyError> {
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
     propose_and_report(cx.engine, a.max_tokens, move |r| {
-        r.propose_subset(&s, &view, &a.title, None, a.summary.as_deref())
+        r.propose_with(
+            &s,
+            &view,
+            &a.title,
+            None,
+            a.summary.as_deref(),
+            a.alternatives.as_ref(),
+        )
     })
 }
 

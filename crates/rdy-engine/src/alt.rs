@@ -2,6 +2,7 @@
 //! answer one question; a view is a member of at most one open set. Create, add, remove and
 //! abandon each write a new version of the set; abandon also closes every open member view in
 //! the same batch. Changes written in a member view record the set (`write_linked`).
+use crate::engine::{Engine, write_typed};
 use crate::error::*;
 use crate::session::rfc3339;
 use crate::views::OwnerInfo;
@@ -79,6 +80,16 @@ pub struct AltCompareRow {
 pub struct AltCompare {
     pub set: AltSetInfo,
     pub members: Vec<AltCompareRow>,
+}
+
+/// Another member of a view's open set that also writes a block: what a session in one member
+/// view sees of the others (malt1).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AltPeer {
+    /// The set's display id (`as-<12 hex>`).
+    pub set: String,
+    pub label: String,
+    pub view: String,
 }
 
 /// A proposal's pick: the set and the chosen member.
@@ -233,6 +244,25 @@ impl ReadState {
         Ok(out)
     }
 
+    /// The other members of `view`'s open set whose view writes block `id` (its included changes
+    /// touch it), in member order. Empty when `view` is in no open set.
+    pub fn alt_peers(&self, view: &str, id: &BlockId) -> Result<Vec<AltPeer>, RdyError> {
+        let Some((stable, _, set)) = self.alt_of_view(view)? else {
+            return Ok(vec![]);
+        };
+        let mut out = vec![];
+        for m in set.members.iter().filter(|m| m.view != view) {
+            if self.view_touched(&m.view)?.contains(id) {
+                out.push(AltPeer {
+                    set: alt_label(&stable),
+                    label: m.label.clone(),
+                    view: m.view.clone(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
     /// Set `set`'s members, each against canon.
     pub fn alt_compare(&self, set: &str) -> Result<AltCompare, RdyError> {
         let (stable, version, s) = self.resolve_alt(set)?;
@@ -254,7 +284,7 @@ impl ReadState {
     }
 
     /// Set version `set` (the latest, `version`, of set `stable`) as reads show it.
-    pub(crate) fn alt_info(
+    pub fn alt_info(
         &self,
         stable: Hash,
         version: Hash,
@@ -560,5 +590,130 @@ impl Rdy {
         let v = self.store.put_alt_set(&next)?;
         self.publish(Delta::Coord { closed: vec![] })?;
         self.read().alt_info(stable, v, &next)
+    }
+}
+
+/// One alternatives request: `op` and the fields that op takes (malt1). The one dispatcher behind
+/// MCP's `rdy_alternatives` and the ctl `alt` op.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AltRequest {
+    /// create, add, remove, list, compare or abandon.
+    pub op: String,
+    /// create: the set's title.
+    pub title: Option<String>,
+    /// create: the question block the members answer (id, key or path).
+    pub question: Option<String>,
+    /// create: two or more members, each a label and an open view.
+    pub members: Option<Vec<AltMemberInput>>,
+    /// add, remove, compare and abandon: the set id (`as-<hex>` or a unique prefix).
+    pub set: Option<String>,
+    /// add: the new member's label.
+    pub label: Option<String>,
+    /// add: the new member's view.
+    pub view: Option<String>,
+    /// remove: the member's label (else its view).
+    pub member: Option<String>,
+    /// abandon: why no member is chosen.
+    pub reason: Option<String>,
+    /// list: every set, not only the open ones.
+    pub all: Option<bool>,
+}
+
+fn needs(req: &AltRequest, field: &str, what: &str) -> RdyError {
+    bad(
+        format!("{} needs {field}", req.op),
+        &format!("pass {field}: {what}"),
+    )
+}
+
+fn to_json<T: Serialize>(v: T) -> Result<serde_json::Value, RdyError> {
+    serde_json::to_value(v).map_err(|e| {
+        RdyError::new(
+            E_INTERNAL,
+            format!("an alternative set did not serialize: {e}"),
+            "report this as a bug in rdy",
+        )
+    })
+}
+
+/// Runs `req` for session `s`: create, add and remove return `{set}`, abandon `{set, closed}`,
+/// list `{sets}`, compare the set with each member against canon. Writes go through
+/// `write_typed` (the engine's writer); list and compare read one snapshot. Any other op is
+/// `E_BAD_INPUT`.
+pub fn run_alt(
+    engine: &dyn Engine,
+    s: &Session,
+    req: AltRequest,
+) -> Result<serde_json::Value, RdyError> {
+    let s = s.clone();
+    let set = |req: &AltRequest| {
+        req.set
+            .clone()
+            .ok_or_else(|| needs(req, "set", "the set id from list (as-<hex>)"))
+    };
+    match req.op.as_str() {
+        "create" => {
+            let title = req
+                .title
+                .clone()
+                .ok_or_else(|| needs(&req, "title", "the question the members answer"))?;
+            let members = req
+                .members
+                .clone()
+                .ok_or_else(|| needs(&req, "members", "[{label, view}, ...] (two or more)"))?;
+            let question = req.question.clone();
+            let info = write_typed(engine, move |r| {
+                r.alt_create(&s, &title, question.as_deref(), &members)
+            })?;
+            Ok(serde_json::json!({ "set": info }))
+        }
+        "add" => {
+            let id = set(&req)?;
+            let label = req
+                .label
+                .clone()
+                .ok_or_else(|| needs(&req, "label", "a name for the member"))?;
+            let view = req
+                .view
+                .clone()
+                .ok_or_else(|| needs(&req, "view", "the open view that holds the alternative"))?;
+            let info = write_typed(engine, move |r| {
+                r.alt_add(&s, &id, &AltMemberInput { label, view })
+            })?;
+            Ok(serde_json::json!({ "set": info }))
+        }
+        "remove" => {
+            let id = set(&req)?;
+            let member = req
+                .member
+                .clone()
+                .ok_or_else(|| needs(&req, "member", "the member's label"))?;
+            let info = write_typed(engine, move |r| r.alt_remove(&s, &id, &member))?;
+            Ok(serde_json::json!({ "set": info }))
+        }
+        "abandon" => {
+            let id = set(&req)?;
+            let reason = req
+                .reason
+                .clone()
+                .ok_or_else(|| needs(&req, "reason", "why no member is chosen"))?;
+            write_typed(engine, move |r| {
+                let (info, closed) = r.alt_abandon(&s, &id, &reason)?;
+                Ok(serde_json::json!({ "set": info, "closed": closed }))
+            })
+        }
+        "list" => {
+            let st = engine.read();
+            Ok(serde_json::json!({ "sets": to_json(st.alt_sets(req.all.unwrap_or(false))?)? }))
+        }
+        "compare" => {
+            let id = set(&req)?;
+            to_json(engine.read().alt_compare(&id)?)
+        }
+        other => Err(bad(
+            format!("unknown op {other}"),
+            "rdy_alternatives ops: create, add, remove, list, compare, abandon",
+        )),
     }
 }

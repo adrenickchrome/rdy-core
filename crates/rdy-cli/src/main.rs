@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+mod alt_cmd;
 mod brief_text;
 mod history_text;
 mod intent_cmd;
@@ -110,6 +111,12 @@ enum Cmd {
         /// Your plain-words summary for the approver.
         #[arg(long)]
         summary: Option<String>,
+        /// The alternative set (as-<id>) the view is a member of; goes with --chosen.
+        #[arg(long)]
+        alt: Option<String>,
+        /// The view's own member of that set (its label); goes with --alt.
+        #[arg(long)]
+        chosen: Option<String>,
     },
     /// Approve a proposal version: P-<id>@<n>, P-<id> (its latest version) or a version hash.
     Approve {
@@ -134,6 +141,11 @@ enum Cmd {
     View {
         #[command(subcommand)]
         cmd: view_cmd::ViewCmd,
+    },
+    /// Create, change, list, compare and abandon alternative sets: views that answer one question.
+    Alt {
+        #[command(subcommand)]
+        cmd: alt_cmd::AltCmd,
     },
     /// Post, renew, withdraw and list intents: advisory notes on what you mean to change.
     Intent {
@@ -927,16 +939,35 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             title,
             view,
             summary,
+            alt,
+            chosen,
         } => {
+            let alternatives = match (alt, chosen) {
+                (Some(set), Some(chosen)) => Some(json!({"set": set, "chosen": chosen})),
+                (None, None) => None,
+                _ => {
+                    return Err(ErrorReply::new(
+                        E_BAD_INPUT,
+                        "--alt and --chosen go together",
+                        "pass both: --alt <set> --chosen <member>, or neither",
+                    ));
+                }
+            };
             let v = call(
                 env,
                 "propose",
-                json!({"title": title, "view": view, "summary": summary}),
+                json!({"title": title, "view": view, "summary": summary, "alternatives": alternatives}),
             )?;
             let pref = text(&v["ref"]);
             let mut t = format!("proposal {pref} ({} changes)", num(&v["changes"]));
             if let Some(s) = v["summary"].as_str() {
                 t.push_str(&format!("\nsummary: {s}"));
+            }
+            if let Some(member) = v["alternative"]["member"].as_str() {
+                t.push_str(&format!(
+                    "\nchooses {member} of {}",
+                    text(&v["alternative"]["set"])
+                ));
             }
             let blocking = v["blocking"].as_array().map_or(0, Vec::len);
             if blocking > 0 {
@@ -984,6 +1015,21 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             if let Some(by) = relayed_by {
                 t.push_str(&format!(", relayed by {by}"));
             }
+            if let Some(member) = v["chosen"]["member"].as_str() {
+                t.push_str(&format!(
+                    "\nchose {member} of {}",
+                    text(&v["chosen"]["set"])
+                ));
+                let closed: Vec<&str> = v["closed"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                if !closed.is_empty() {
+                    t.push_str(&format!("; closed {}", closed.join(", ")));
+                }
+            }
             t.push_str(&brief_text::consequences_text(&v));
             for r in v["rebased"].as_array().into_iter().flatten() {
                 if num(&r["conflicts"]) > 0 {
@@ -1006,6 +1052,11 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::View { cmd } => {
             let v = call(env, "view", view_cmd::args_of(&cmd))?;
             let t = view_cmd::render_view(&cmd, &v);
+            Ok((v, t))
+        }
+        Cmd::Alt { cmd } => {
+            let v = call(env, "alt", alt_cmd::args_of(&cmd)?)?;
+            let t = alt_cmd::render(&cmd, &v);
             Ok((v, t))
         }
         Cmd::Intent { cmd } => {
