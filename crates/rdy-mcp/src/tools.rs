@@ -612,6 +612,14 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
                     line.push_str(&format!(" [{j}]"));
                 }
                 lines.push(line);
+                for body in code_lines(b) {
+                    let pad = "  ".repeat(depth);
+                    lines.push(if body.is_empty() {
+                        format!("{pad}  |")
+                    } else {
+                        format!("{pad}  | {body}")
+                    });
+                }
             }
         }
         for c in m.children(Some(&b.id)).into_iter().rev() {
