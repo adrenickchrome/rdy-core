@@ -27,6 +27,7 @@ fn erow1_every_view_brief_and_daemon_code_has_a_row() {
         E_BRIEF_REQUIRED,
         E_BRIEF_STALE,
         W_BRIEF_STALE,
+        E_PAGE_STALE,
         "E_DAEMON_START",
         "E_DAEMON_VERSION",
         "E_DAEMON_GONE",

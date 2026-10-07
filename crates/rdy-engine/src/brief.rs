@@ -197,6 +197,35 @@ impl BriefRegistry {
     }
 }
 
+/// The paged sections of a briefing, in cursor order: a cursor holds one offset per section, how
+/// many of its entries earlier pages showed.
+pub const PAGE_SECTIONS: [&str; 7] = [
+    "governs",
+    "dependents",
+    "will_go_stale",
+    "suspects",
+    "inflight.views",
+    "inflight.proposals",
+    "base.blocks",
+];
+
+/// What a briefing holds for one doc: how many covered blocks are in it, and how many entries of
+/// each list the whole briefing (not the cut one) has there.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DocCounts {
+    pub doc: String,
+    pub title: String,
+    pub blocks: usize,
+    /// Per decision entry, once for each doc of the blocks it governs.
+    pub governs: usize,
+    /// By the doc of `on`.
+    pub dependents: usize,
+    /// By the doc of `on`.
+    pub will_go_stale: usize,
+    /// By the doc of `block`.
+    pub suspects: usize,
+}
+
 /// What a dependent should do when the block it depends on changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -315,6 +344,15 @@ pub struct Briefing {
     pub truncated: bool,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub omitted: BTreeMap<String, usize>,
+    /// Pass this as `page` to see the entries after this page; absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+    /// Per-doc counts over the whole briefing, on a truncated briefing only; never cut.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub docs: Vec<DocCounts>,
+    /// How many entries of each `PAGE_SECTIONS` section this page and the pages before it showed.
+    #[serde(skip)]
+    pub offsets: [usize; 7],
     #[serde(skip)]
     pub record: Arc<BriefRecord>,
 }
@@ -333,20 +371,66 @@ impl Briefing {
             / 4
     }
 
-    /// Halves the longest detail list (ties: governs, dependents, will_go_stale, suspects,
-    /// inflight.views, inflight.proposals, base.blocks) until the briefing fits `max` tokens or
-    /// every list is empty. Coverage, the token and the record are never cut.
-    fn cut(&mut self, max: usize) {
+    /// The length of each `PAGE_SECTIONS` section.
+    fn lens(&self) -> [usize; 7] {
+        [
+            self.governs.len(),
+            self.dependents.len(),
+            self.will_go_stale.len(),
+            self.suspects.len(),
+            self.inflight.views.len(),
+            self.inflight.proposals.len(),
+            self.base.blocks.len(),
+        ]
+    }
+
+    /// Drops the first `skip[i]` entries of section `i` (each at most its length).
+    fn drop_first(&mut self, skip: &[usize; 7]) {
+        fn drop<T>(v: &mut Vec<T>, n: usize) {
+            v.drain(..n.min(v.len()));
+        }
+        drop(&mut self.governs, skip[0]);
+        drop(&mut self.dependents, skip[1]);
+        drop(&mut self.will_go_stale, skip[2]);
+        drop(&mut self.suspects, skip[3]);
+        drop(&mut self.inflight.views, skip[4]);
+        drop(&mut self.inflight.proposals, skip[5]);
+        drop(&mut self.base.blocks, skip[6]);
+    }
+
+    /// Shows the entries after the first `skip[i]` of each section, cut to `max` tokens, and
+    /// sets `next`, `truncated` and `docs`. With `floor`, the cut keeps at least one entry (a
+    /// page always moves on). `Err` when an offset is past the end of its section.
+    fn page(&mut self, skip: [usize; 7], max: usize, floor: bool) -> Result<(), RdyError> {
+        let totals = self.lens();
+        if skip.iter().zip(totals).any(|(s, t)| *s > t) {
+            return Err(bad_cursor());
+        }
+        self.drop_first(&skip);
+        self.cut(max, floor);
+        let shown = self.lens();
+        let after: [usize; 7] = std::array::from_fn(|i| skip[i] + shown[i]);
+        self.offsets = after;
+        if after != totals {
+            let offsets: Vec<String> = after.iter().map(ToString::to_string).collect();
+            self.next = Some(format!("{}:{}", self.record.token_hex(), offsets.join(",")));
+        }
+        self.truncated |= self.next.is_some() || skip.iter().any(|s| *s > 0);
+        if !self.truncated {
+            self.docs.clear();
+        }
+        Ok(())
+    }
+
+    /// Halves the longest detail list (ties: `PAGE_SECTIONS` order) until the briefing fits `max`
+    /// tokens or every list is empty (with `floor`: or one entry is left). Coverage, the token
+    /// and the record are never cut.
+    fn cut(&mut self, max: usize, floor: bool) {
         while self.tokens() > max {
-            let lens = [
-                self.governs.len(),
-                self.dependents.len(),
-                self.will_go_stale.len(),
-                self.suspects.len(),
-                self.inflight.views.len(),
-                self.inflight.proposals.len(),
-                self.base.blocks.len(),
-            ];
+            let lens = self.lens();
+            if floor && lens.iter().sum::<usize>() <= 1 {
+                break;
+            }
             let longest = lens.iter().copied().max().unwrap_or(0);
             if longest == 0 {
                 break;
@@ -356,40 +440,58 @@ impl Briefing {
                 .position(|&n| n == longest)
                 .expect("the max is in the list");
             let keep = longest / 2;
-            let name = match at {
-                0 => {
-                    self.governs.truncate(keep);
-                    "governs"
-                }
-                1 => {
-                    self.dependents.truncate(keep);
-                    "dependents"
-                }
-                2 => {
-                    self.will_go_stale.truncate(keep);
-                    "will_go_stale"
-                }
-                3 => {
-                    self.suspects.truncate(keep);
-                    "suspects"
-                }
-                4 => {
-                    self.inflight.views.truncate(keep);
-                    "inflight.views"
-                }
-                5 => {
-                    self.inflight.proposals.truncate(keep);
-                    "inflight.proposals"
-                }
-                _ => {
-                    self.base.blocks.truncate(keep);
-                    "base.blocks"
-                }
-            };
-            *self.omitted.entry(name.to_string()).or_default() += longest - keep;
+            match at {
+                0 => self.governs.truncate(keep),
+                1 => self.dependents.truncate(keep),
+                2 => self.will_go_stale.truncate(keep),
+                3 => self.suspects.truncate(keep),
+                4 => self.inflight.views.truncate(keep),
+                5 => self.inflight.proposals.truncate(keep),
+                _ => self.base.blocks.truncate(keep),
+            }
+            *self
+                .omitted
+                .entry(PAGE_SECTIONS[at].to_string())
+                .or_default() += longest - keep;
             self.truncated = true;
         }
     }
+}
+
+/// `page` given with `ids`, `path` or `code_path`.
+pub fn e_page_alone() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "page continues a briefing: pass it alone",
+        "call rdy_brief with page (and scope or max_tokens) only, or without page to brief again",
+    )
+}
+
+/// A page that is not a cursor `rdy_brief` gave.
+fn bad_cursor() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "page is not a cursor from rdy_brief's next",
+        "pass the next of a cut rdy_brief, alone",
+    )
+}
+
+/// The cursor `<64 lowercase hex token>:<7 offsets>` as its token and offsets.
+fn parse_cursor(cursor: &str) -> Result<(&str, [usize; 7]), RdyError> {
+    let (token, rest) = cursor.split_once(':').ok_or_else(bad_cursor)?;
+    if token.len() != 64
+        || !token
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(bad_cursor());
+    }
+    let offsets: Vec<usize> = rest
+        .split(',')
+        .map(|n| n.parse().map_err(|_| bad_cursor()))
+        .collect::<Result<_, _>>()?;
+    let offsets: [usize; 7] = offsets.try_into().map_err(|_| bad_cursor())?;
+    Ok((token, offsets))
 }
 
 /// How a scope is named in a briefing's errors.
@@ -490,6 +592,44 @@ impl ReadState {
         ids: &BTreeSet<BlockId>,
         max_tokens: Option<usize>,
     ) -> Result<Briefing, RdyError> {
+        let mut briefing = self.assemble(scope, ids)?;
+        briefing.page([0; 7], max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS), false)?;
+        Ok(briefing)
+    }
+
+    /// The page of a cut briefing that `cursor` (a `next`) names: the briefing registered under
+    /// its token is made again in `scope` and must still have that token; the entries earlier
+    /// pages showed are dropped and the rest cut to `max_tokens`. A page shows at least one
+    /// entry, so paging ends.
+    pub fn brief_page(
+        &self,
+        scope: &Scope,
+        reg: &BriefRegistry,
+        cursor: &str,
+        max_tokens: Option<usize>,
+    ) -> Result<Briefing, RdyError> {
+        let (token, skip) = parse_cursor(cursor)?;
+        let Some(rec) = reg.get(token) else {
+            return Err(RdyError::new(
+                E_PAGE_STALE,
+                "the briefing behind this page is unknown (the daemon restarted, or it was evicted): brief again",
+                "brief again without page, then page from the new next",
+            ));
+        };
+        let mut briefing = self.assemble(scope, &rec.covers)?;
+        if briefing.record.token != rec.token {
+            return Err(RdyError::new(
+                E_PAGE_STALE,
+                "the briefing moved since its first page: brief again",
+                "brief again without page, then page from the new next",
+            ));
+        }
+        briefing.page(skip, max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS), true)?;
+        Ok(briefing)
+    }
+
+    /// The whole briefing of `ids` in `scope`, uncut, with its per-doc counts.
+    fn assemble(&self, scope: &Scope, ids: &BTreeSet<BlockId>) -> Result<Briefing, RdyError> {
         let g = self.graph(scope)?;
         let m = self.materialized(scope)?;
         let pack = self.pack();
@@ -512,7 +652,7 @@ impl ReadState {
                 governed.entry(d).or_default().push(id.to_string());
             }
         }
-        let governs = governed
+        let governs: Vec<Governs> = governed
             .into_iter()
             .map(|(d, blocks)| {
                 let statement = m
@@ -560,7 +700,7 @@ impl ReadState {
                 }
             }
         }
-        let dependents = dependents
+        let dependents: Vec<Dependent> = dependents
             .into_keys()
             .map(|(on, block, kind)| Dependent {
                 summary: summary_of(&block),
@@ -569,7 +709,7 @@ impl ReadState {
                 on: on.to_string(),
             })
             .collect();
-        let will_go_stale = stale
+        let will_go_stale: Vec<WillGoStale> = stale
             .into_iter()
             .map(|((on, block, via), follow_up)| WillGoStale {
                 block: block.to_string(),
@@ -601,7 +741,8 @@ impl ReadState {
                 .collect(),
             depends: recorded.len() - ids.len(),
         };
-        let mut briefing = Briefing {
+        let docs = doc_counts(&m, ids, &governs, &dependents, &will_go_stale, &suspects);
+        Ok(Briefing {
             covers: ids.len(),
             governs,
             dependents,
@@ -611,15 +752,75 @@ impl ReadState {
             base,
             truncated: false,
             omitted: BTreeMap::new(),
+            next: None,
+            docs,
+            offsets: [0; 7],
             record: Arc::new(BriefRecord {
                 token,
                 covers: ids.clone(),
                 recorded,
             }),
-        };
-        briefing.cut(max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS));
-        Ok(briefing)
+        })
     }
+}
+
+/// The per-doc counts of a whole briefing, by doc id. A covered block outside any doc (a
+/// folder) counts nowhere.
+fn doc_counts(
+    m: &Materialized,
+    ids: &BTreeSet<BlockId>,
+    governs: &[Governs],
+    dependents: &[Dependent],
+    will_go_stale: &[WillGoStale],
+    suspects: &[Suspect],
+) -> Vec<DocCounts> {
+    let mut by_doc: BTreeMap<BlockId, DocCounts> = BTreeMap::new();
+    let mut bump = |id: &BlockId, add: fn(&mut DocCounts)| {
+        if let Some(d) = m.doc_of(id) {
+            add(by_doc.entry(d.id.clone()).or_insert_with(|| DocCounts {
+                doc: d.id.to_string(),
+                title: d
+                    .field_str("title")
+                    .or_else(|| d.field_str("name"))
+                    .unwrap_or_default()
+                    .to_string(),
+                blocks: 0,
+                governs: 0,
+                dependents: 0,
+                will_go_stale: 0,
+                suspects: 0,
+            }));
+        }
+    };
+    let of = |text: &str| BlockId::parse(text).ok();
+    for id in ids {
+        bump(id, |c| c.blocks += 1);
+    }
+    for g in governs {
+        let docs: BTreeSet<BlockId> = g
+            .blocks
+            .iter()
+            .filter_map(|b| of(b))
+            .filter_map(|b| m.doc_of(&b).map(|d| d.id.clone()))
+            .collect();
+        for d in docs {
+            bump(&d, |c| c.governs += 1);
+        }
+    }
+    for d in dependents {
+        if let Some(on) = of(&d.on) {
+            bump(&on, |c| c.dependents += 1);
+        }
+    }
+    for w in will_go_stale {
+        if let Some(on) = of(&w.on) {
+            bump(&on, |c| c.will_go_stale += 1);
+        }
+    }
+    for s in suspects {
+        bump(&s.block, |c| c.suspects += 1);
+    }
+    by_doc.into_values().collect()
 }
 
 // ---- bwr1: briefings on the write path ----

@@ -1,4 +1,5 @@
 use base64::Engine as _;
+use rdy_engine::brief::e_page_alone;
 use rdy_engine::code_brief::e_code_path_alone;
 use rdy_engine::consequence::{propose_and_report, write_and_report};
 use rdy_engine::engine::{Engine, open_report_json};
@@ -200,6 +201,8 @@ pub struct BriefParams {
     pub path: Option<String>,
     /// A file in a linked code repo (relative to its top folder): brief on the design blocks its commits implement (Implements: trailers) and the blocks whose reflects globs match it. Not with ids or path.
     pub code_path: Option<String>,
+    /// Continue a cut briefing: its next cursor. Alone (scope and max_tokens allowed).
+    pub page: Option<String>,
     /// The view to brief in; defaults to the session's view.
     pub scope: Option<String>,
     /// The budget for the briefing; the longest lists are cut to fit.
@@ -759,6 +762,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "a write to drafts cited a stale or unknown briefing (it went ahead)",
         "brief again before the next write if the moved blocks matter",
     ),
+    (
+        "E_PAGE_STALE",
+        "a page cursor (the next of a cut rdy_brief or rdy_read) is unknown, or what it pages moved since its first page",
+        "start again without page, then page from the new next",
+    ),
 ];
 
 pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError> {
@@ -823,6 +831,13 @@ pub fn rdy_brief(st: &mut McpState, p: BriefParams) -> Result<Value, RdyError> {
     session(st)?;
     let st_ = st.engine.read();
     let scope = scope_of(st, &st_, &p.scope)?;
+    if let Some(cursor) = &p.page {
+        if p.ids.is_some() || p.path.is_some() || p.code_path.is_some() {
+            return Err(e_page_alone());
+        }
+        let b = st_.brief_page(&scope, &st.engine.briefs(), cursor, p.max_tokens)?;
+        return serialize_briefing(&b);
+    }
     if let Some(cp) = &p.code_path {
         if p.ids.is_some() || p.path.is_some() {
             return Err(e_code_path_alone());
