@@ -119,11 +119,7 @@ pub fn human_actor(
     home: Option<&Path>,
     user: Option<&str>,
 ) -> String {
-    let file = match (xdg_config_home, home) {
-        (Some(x), _) => Some(x.join("rdy/config.yaml")),
-        (None, Some(h)) => Some(h.join(".config/rdy/config.yaml")),
-        (None, None) => None,
-    };
+    let file = crate::config_levels::user_file_of(xdg_config_home, home);
     let named = file
         .and_then(|f| std::fs::read_to_string(f).ok())
         .and_then(|t| serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&t).ok())
@@ -132,17 +128,8 @@ pub fn human_actor(
     named.unwrap_or_else(|| format!("human:{}", user.unwrap_or("unknown")))
 }
 
-/// `human_actor` over `XDG_CONFIG_HOME`, `HOME` and `USER`: the one place product code reads them.
-pub fn human_actor_from_env() -> String {
-    let xdg = std::env::var_os("XDG_CONFIG_HOME");
-    let home = std::env::var_os("HOME");
-    let user = std::env::var("USER").ok();
-    human_actor(
-        xdg.as_deref().map(Path::new),
-        home.as_deref().map(Path::new),
-        user.as_deref(),
-    )
-}
+/// The human of a project: its `.rdy/local.yaml` actor first, then the user config's.
+pub use crate::config_levels::{human_actor_for, human_actor_for_env};
 
 /// The session for a client that sent `actor` and `run`: the human if it sent no actor or the
 /// human's own (its run is `cli`, whatever it sent), else an agent.

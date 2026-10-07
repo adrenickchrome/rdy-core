@@ -1,6 +1,7 @@
 pub mod brief;
 pub mod code_brief;
 pub mod code_index;
+pub mod config_levels;
 pub mod consequence;
 mod decide;
 pub mod engine;
@@ -51,8 +52,8 @@ pub use query::{
 pub use rdy_store::Relay;
 pub use read_state::{Delta, ReadState};
 pub use session::{
-    HUMAN_RUN, PinnedClock, Scope, Session, SessionKind, classify, human_actor,
-    human_actor_from_env, now_ms, pin_clock, rfc3339, rfc3339_now,
+    HUMAN_RUN, PinnedClock, Scope, Session, SessionKind, classify, human_actor, human_actor_for,
+    human_actor_for_env, now_ms, pin_clock, rfc3339, rfc3339_now,
 };
 pub use tree_io::Diagnostic;
 pub use version::{
@@ -138,13 +139,12 @@ impl ServeConfig {
 /// client must be able to start a daemon on a project whose config is broken, and the daemon
 /// then reports the config error.
 pub fn serve_config(project: &Path) -> ServeConfig {
-    let section = std::fs::read_to_string(project.join(".rdy/config.yaml"))
-        .ok()
-        .and_then(|t| serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&t).ok())
-        .and_then(|v| v.get("serve").cloned());
+    let merged =
+        config_levels::effective_lenient(project, config_levels::user_file_from_env().as_deref())
+            .merged;
+    let section = merged.get("serve");
     let secs = |key: &str| {
         section
-            .as_ref()
             .and_then(|s| s.get(key))
             .and_then(serde_yaml_ng::Value::as_u64)
     };
@@ -155,8 +155,8 @@ pub fn serve_config(project: &Path) -> ServeConfig {
     .resolve()
 }
 
-/// What the pack-defining files looked like at one moment: `.rdy/config.yaml` and every
-/// `.rdy/packs/*.yaml` (and `.yml`), sorted by path, each as `(path, length, mtime in unix ms)`;
+/// What the pack-defining files looked like at one moment: `.rdy/config.yaml`, then
+/// `.rdy/local.yaml` when it exists, and every `.rdy/packs/*.yaml` (and `.yml`), sorted by path, each as `(path, length, mtime in unix ms)`;
 /// `hash` is BLAKE3 over each file's path bytes, a NUL, its contents and a NUL, in that order.
 /// Equal hashes mean equal bytes whatever the mtimes say.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,7 +166,11 @@ pub struct PackFingerprint {
 }
 
 pub fn pack_fingerprint(project: &Path) -> Result<PackFingerprint, RdyError> {
-    let mut paths = vec![project.join(".rdy/config.yaml")];
+    let mut paths = vec![project.join(config_levels::PROJECT_FILE)];
+    let local = project.join(config_levels::LOCAL_FILE);
+    if local.exists() {
+        paths.push(local);
+    }
     paths.extend(pack_files(&project.join(".rdy/packs"))?);
     let mut files = Vec::with_capacity(paths.len());
     let mut buf = Vec::new();
@@ -298,17 +302,14 @@ fn pack_files(dir: &Path) -> Result<Vec<PathBuf>, RdyError> {
 }
 
 fn read_config(root: &Path) -> Result<Config, RdyError> {
-    let cfg_path = root.join(".rdy/config.yaml");
-    if !cfg_path.exists() {
-        return Err(RdyError::new(
-            E_NO_PROJECT,
-            format!("{} is not an rdy project", root.display()),
-            "run rdy init in the project directory",
-        ));
-    }
-    let text = std::fs::read_to_string(&cfg_path).map_err(io)?;
-    serde_yaml_ng::from_str(&text)
-        .map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "fix .rdy/config.yaml"))
+    let effective = config_levels::effective(root, config_levels::user_file_from_env().as_deref())?;
+    serde_yaml_ng::from_value(serde_yaml_ng::Value::Mapping(effective.merged)).map_err(|e| {
+        RdyError::new(
+            E_CONFIG,
+            e.to_string(),
+            format!("fix {}", config_levels::PROJECT_FILE),
+        )
+    })
 }
 
 fn load_pack(root: &Path, name: &str) -> Result<(Pack, Vec<String>), RdyError> {
@@ -845,8 +846,10 @@ impl Rdy {
 
 /// The config at `root` as it is on disk; any read or parse error reads as no config.
 fn read_config_lenient(root: &Path) -> Option<Config> {
-    let text = std::fs::read_to_string(root.join(".rdy/config.yaml")).ok()?;
-    serde_yaml_ng::from_str(&text).ok()
+    let merged =
+        config_levels::effective_lenient(root, config_levels::user_file_from_env().as_deref())
+            .merged;
+    serde_yaml_ng::from_value(serde_yaml_ng::Value::Mapping(merged)).ok()
 }
 
 /// The project's name and description as a site shows them, parsed once when a state is

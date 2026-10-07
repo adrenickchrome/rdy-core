@@ -7,7 +7,7 @@ use rdy_daemon::{
 use rdy_engine::engine::Local;
 use rdy_engine::{
     E_BAD_INPUT, E_CONFIG, E_IO, E_NO_PROJECT, Rdy, RdyError, Session, check_path, classify,
-    human_actor_from_env, project_pack, serve_config,
+    human_actor_for_env, project_pack, serve_config,
 };
 use rdy_model::Role;
 use serde_json::{Value, json};
@@ -17,6 +17,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 mod brief_text;
+mod config_cmd;
 mod history_text;
 mod view_cmd;
 
@@ -227,6 +228,12 @@ enum Cmd {
         #[arg(long, hide = true, requires = "detach")]
         spawned: bool,
     },
+    /// Show the settings in effect, one row per key (no daemon is started).
+    Config {
+        /// Also name the file each value comes from, or `default`.
+        #[arg(long)]
+        show_origin: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -376,7 +383,7 @@ impl Conn {
         if env.no_daemon {
             let local = Local::open(&env.project)?;
             match classify(
-                &human_actor_from_env(),
+                &human_actor_for_env(&env.project),
                 actor.as_deref(),
                 run.as_deref(),
                 Role::Writer,
@@ -768,6 +775,7 @@ fn edit(env: &Env, id: &str, view: Option<&str>) -> Result<Value, ErrorReply> {
 
 fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
     match cli.cmd {
+        Cmd::Config { show_origin } => config_cmd::run(&env.project, show_origin),
         Cmd::Init { dir, pack } => {
             let dir = dir.or(cli.project).unwrap_or_else(|| env.cwd.clone());
             Rdy::init(&dir, &pack)?;
