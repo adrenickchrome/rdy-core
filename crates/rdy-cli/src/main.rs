@@ -113,6 +113,36 @@ enum Cmd {
         /// Continue a cut search: the cursor its last page printed.
         #[arg(long)]
         page: Option<String>,
+        /// Keep this block type (repeat for more).
+        #[arg(long = "type")]
+        types: Vec<String>,
+        /// Keep blocks with this trait (repeat for more).
+        #[arg(long = "trait")]
+        traits: Vec<String>,
+        /// Keep blocks under this doc or folder path.
+        #[arg(long)]
+        path: Option<String>,
+        /// draft, stable or deprecated, as inherited.
+        #[arg(long)]
+        lifecycle: Option<String>,
+        /// A version, tag:<version> or landing:<id>: keep blocks changed since.
+        #[arg(long = "changed-since")]
+        changed_since: Option<String>,
+        /// Leave out matches inside superseded, rejected or revoked decisions.
+        #[arg(long = "exclude-history")]
+        exclude_history: bool,
+        /// Keep blocks this decision governs.
+        #[arg(long = "governed-by")]
+        governed_by: Option<String>,
+        /// Keep blocks that describe this block.
+        #[arg(long)]
+        describes: Option<String>,
+        /// Keep blocks linked to or from this block.
+        #[arg(long = "linked-to")]
+        linked_to: Option<String>,
+        /// Keep only blocks with an open suspect.
+        #[arg(long)]
+        suspect: bool,
     },
     /// List the suspects in a scope (default canon), as rdy_suspects does.
     Suspects {
@@ -695,9 +725,41 @@ fn impact_text(v: &Value) -> String {
 /// csrch1: the matching blocks, one header per block and its matching lines under it.
 fn search_text(v: &Value) -> String {
     let mut out = vec![format!("{} matching blocks", num(&v["total"]))];
+    let docs = v["totals"]["docs"].as_array().cloned().unwrap_or_default();
+    if !docs.is_empty() {
+        let mut line = format!(
+            "by doc: {}",
+            docs.iter()
+                .map(|d| format!("{} {}", d["path"].as_str().unwrap_or("-"), num(&d["hits"])))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let more = num(&v["totals"]["more_docs"]);
+        if more > 0 {
+            line.push_str(&format!(", … +{more} more docs"));
+        }
+        out.push(line);
+    }
+    if let Some(types) = v["totals"]["types"].as_object().filter(|t| !t.is_empty()) {
+        out.push(format!(
+            "by type: {}",
+            types
+                .iter()
+                .map(|(t, n)| format!("{t} {}", num(n)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     for m in v["matches"].as_array().into_iter().flatten() {
         let path = m["path"].as_str().unwrap_or("-");
-        out.push(format!("{path}  {} ({})", text(&m["id"]), text(&m["type"])));
+        let mut head = format!("{path}  {} ({})", text(&m["id"]), text(&m["type"]));
+        if m["all_words"].as_bool() == Some(true) {
+            head.push_str(" [all words]");
+        }
+        if m["history"].as_bool() == Some(true) {
+            head.push_str(" [history]");
+        }
+        out.push(head);
         for l in m["lines"].as_array().into_iter().flatten() {
             out.push(format!(
                 "  {}:{}: {}",
@@ -709,6 +771,16 @@ fn search_text(v: &Value) -> String {
         let more = num(&m["more_lines"]);
         if more > 0 {
             out.push(format!("  … +{more} more lines"));
+        }
+        let also = m["also"].as_array().cloned().unwrap_or_default();
+        if !also.is_empty() {
+            out.push(format!(
+                "  also: {}",
+                also.iter()
+                    .map(|a| format!("{} {}", a["path"].as_str().unwrap_or("-"), text(&a["id"])))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
     }
     if let Some(next) = v["next"].as_str() {
@@ -971,11 +1043,27 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             scope,
             max_tokens,
             page,
+            types,
+            traits,
+            path,
+            lifecycle,
+            changed_since,
+            exclude_history,
+            governed_by,
+            describes,
+            linked_to,
+            suspect,
         } => {
+            // Empty lists and false flags are sent as absent.
+            let list = |v: Vec<String>| (!v.is_empty()).then_some(v);
+            let flag = |b: bool| b.then_some(true);
             let v = call(
                 env,
                 "search",
-                json!({"query": query, "regex": regex, "ignore_case": ignore_case, "scope": scope, "max_tokens": max_tokens, "page": page}),
+                json!({"query": query, "regex": regex, "ignore_case": ignore_case, "scope": scope, "max_tokens": max_tokens, "page": page,
+                    "types": list(types), "traits": list(traits), "path": path, "lifecycle": lifecycle, "changed_since": changed_since,
+                    "exclude_history": flag(exclude_history), "governed_by": governed_by, "describes": describes, "linked_to": linked_to,
+                    "suspect": flag(suspect)}),
             )?;
             let t = search_text(&v);
             Ok((v, t))

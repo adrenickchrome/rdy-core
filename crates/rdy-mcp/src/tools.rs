@@ -1095,7 +1095,7 @@ pub fn rdy_brief(st: &mut McpState, p: BriefParams) -> Result<Value, RdyError> {
     serialize_briefing(&b)
 }
 
-fn serialize_briefing<T: serde::Serialize>(b: &T) -> Result<Value, RdyError> {
+pub(crate) fn serialize_briefing<T: serde::Serialize>(b: &T) -> Result<Value, RdyError> {
     serde_json::to_value(b).map_err(|e| {
         RdyError::new(
             E_INTERNAL,

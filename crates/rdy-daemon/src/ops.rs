@@ -7,6 +7,7 @@ use rdy_engine::brief::Coverage;
 use rdy_engine::code_brief::e_code_path_alone;
 use rdy_engine::consequence::write_and_report;
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
+use rdy_engine::search::SearchFilters;
 use rdy_engine::{
     E_BAD_INPUT, E_LIMIT, E_PERMISSION, HISTORY_MAX, LandOptions, RdyError, ReadState, Relay,
     Scope, SearchQuery, Session, block_from_yaml, block_to_yaml, check_path, resolve_pack,
@@ -133,6 +134,16 @@ struct SearchArgs {
     scope: Option<String>,
     max_tokens: Option<usize>,
     page: Option<String>,
+    types: Option<Vec<String>>,
+    traits: Option<Vec<String>>,
+    path: Option<String>,
+    lifecycle: Option<String>,
+    changed_since: Option<String>,
+    exclude_history: Option<bool>,
+    governed_by: Option<String>,
+    describes: Option<String>,
+    linked_to: Option<String>,
+    suspect: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -400,7 +411,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             parse(
                 op,
                 args,
-                "{query, regex?, ignore_case?, scope?, max_tokens?, page?}",
+                "{query, regex?, ignore_case?, scope?, max_tokens?, page?, types?, traits?, path?, lifecycle?, changed_since?, exclude_history?, governed_by?, describes?, linked_to?, suspect?}",
             )?,
         ),
         "render" => render(cx, parse(op, args, "{out, scope?}")?),
@@ -627,7 +638,18 @@ fn search(cx: &OpContext, a: SearchArgs) -> Result<Value, RdyError> {
             text: a.query,
             regex: a.regex.unwrap_or(false),
             ignore_case: a.ignore_case.unwrap_or(false),
-            ..Default::default()
+            filters: SearchFilters {
+                types: a.types.unwrap_or_default(),
+                traits: a.traits.unwrap_or_default(),
+                path: a.path,
+                lifecycle: a.lifecycle,
+                changed_since: a.changed_since,
+                exclude_history: a.exclude_history.unwrap_or(false),
+                governed_by: a.governed_by,
+                describes: a.describes,
+                linked_to: a.linked_to,
+                suspect: a.suspect.unwrap_or(false),
+            },
         },
         a.page.as_deref(),
         a.max_tokens,

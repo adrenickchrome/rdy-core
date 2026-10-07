@@ -161,7 +161,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Find text in blocks: a literal (or, with regex: true, a pattern) in every block's body and string fields, code included, within scope (default: your session's view). Each match gives the block's id, type, path and matching lines (field, line number, text), in reading order. Deterministic, no model. A cut result carries next: pass it as page with the same query to continue. References are stored as ids, so search a block's id to find text that references it."
+        description = "Find text in blocks: a literal (or, with regex: true, a pattern) in every block's body and string fields, code included, within scope (default: your session's view). The result starts with totals (hits per doc path and per block type). Each entry gives the block's id, type, path and matching lines (field, line number, text); blocks with identical matching lines collapse into one entry whose also lists the others. A literal of several words finds the exact phrase first, then blocks holding all the words (all_words: true), each in reading order. Filters combine with AND: types, traits, path, lifecycle, changed_since, exclude_history, governed_by, describes, linked_to, suspect. A match inside a superseded, rejected or revoked decision carries history: true. brief: true adds a registered briefing over the page's hits: cite its base.token to write them. Deterministic, no model. A cut result carries next: pass it as page with the same query and filters to continue. References are stored as ids, so search a block's id to find text that references it."
     )]
     async fn rdy_search(&self, Parameters(p): Parameters<SearchParams>) -> CallToolResult {
         self.run("rdy_search", p, search_tools::rdy_search).await
