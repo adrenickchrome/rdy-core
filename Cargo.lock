@@ -1308,6 +1308,7 @@ dependencies = [
  "rdy-graph",
  "rdy-model",
  "rdy-schema",
+ "regex",
  "rmcp",
  "schemars",
  "serde",

@@ -55,6 +55,8 @@ pub const E_UNDO_BLOCKED: &str = "E_UNDO_BLOCKED";
 pub const E_UNDO_LANDING: &str = "E_UNDO_LANDING";
 /// The session has no op of its own on the view that can be undone.
 pub const E_NOTHING_TO_UNDO: &str = "E_NOTHING_TO_UNDO";
+/// A page cursor whose read or search moved since its first page, or that the server does not know.
+pub const E_PAGE_STALE: &str = "E_PAGE_STALE";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RdyError {

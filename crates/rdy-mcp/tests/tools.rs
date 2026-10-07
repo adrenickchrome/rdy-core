@@ -643,3 +643,36 @@ fn schema1_the_transport_note_says_the_socket_has_the_stdio_line_limit() {
     assert!(note.contains("stdio"), "{note}");
     assert!(note.contains("16 MiB"), "{note}");
 }
+
+#[test]
+fn rpag1_a_block_larger_than_the_budget_is_shown_alone_and_cut() {
+    let (_d, mut st) = state();
+    start(&mut st);
+    let big = "word ".repeat(2_000);
+    let res = rdy_write(&mut st, serde_json::from_value(json!({"ops": [
+        {"op": "create", "type": "doc", "id": "$doc", "fields": {"title": "Big", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$doc", "fields": {"title": "Body"}},
+        {"op": "create", "type": "code", "id": "$k", "parent": "$s", "fields": {"lang": "text"}, "body": big},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "After the big block."}
+    ]})).unwrap()).unwrap();
+    let doc = res["created"]["$doc"].as_str().unwrap().to_string();
+    let k = res["created"]["$k"].as_str().unwrap().to_string();
+    let read = |st: &mut McpState, args: Value| rdy_read(st, serde_json::from_value(args).unwrap());
+    let mut v = read(&mut st, json!({"id": doc, "max_tokens": 500})).unwrap();
+    let mut texts = vec![];
+    while let Some(next) = v["next"].as_str().map(String::from) {
+        assert!(serde_json::to_string(&v).unwrap().len() / 4 <= 500, "{v}");
+        texts.push(v["text"].as_str().unwrap().to_string());
+        v = read(&mut st, json!({"page": next, "max_tokens": 500})).unwrap();
+    }
+    texts.push(v["text"].as_str().unwrap().to_string());
+    let cut = texts.iter().find(|t| t.contains(&k)).unwrap();
+    assert!(
+        cut.trim_start().starts_with(&k) && cut.len() < big.len(),
+        "{cut}"
+    );
+    assert!(
+        texts.last().unwrap().contains("After the big block."),
+        "{texts:?}"
+    );
+}
