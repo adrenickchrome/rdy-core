@@ -46,6 +46,9 @@ pub struct DecisionInput {
     /// Pack-defined fields (e.g. key, or a pack's own decision fields), validated against the pack by the write.
     #[serde(default)]
     pub fields: BTreeMap<String, Value>,
+    /// iwr1: the intent this decision's write is made under (recorded on its change).
+    #[serde(default)]
+    pub intent: Option<String>,
 }
 
 /// The decision fields that rdy_decide sets itself (from its own parameters, or rdy); `fields` may not carry them.
@@ -134,6 +137,7 @@ impl Rdy {
             ));
         }
         let brief = d.brief.clone();
+        let intent = d.intent.clone();
         let mut links = links_of(&d);
         for (name, l) in extra {
             links.entry(name).or_default().push(l);
@@ -148,7 +152,7 @@ impl Rdy {
             body: d.body.clone(),
             links,
         };
-        self.write_briefed(
+        self.write_with_intent(
             s,
             WriteRequest {
                 view: view.into(),
@@ -157,6 +161,7 @@ impl Rdy {
                 message,
             },
             brief,
+            intent.as_deref(),
         )
     }
 

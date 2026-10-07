@@ -5,8 +5,9 @@ use crate::brief::{BRIEF_DEFAULT_TOKENS, FollowUp, expand_error, follow_up};
 use crate::engine::{Engine, write_typed};
 use crate::error::RdyError;
 use crate::gate::{LandInfo, ProposalInfo, applied_ops, changes_of, landed_as};
+use crate::intent::IntentNote;
 use crate::views::{UndoResult, ViewOpResult};
-use crate::{Materialized, Rdy, ReadState, Scope};
+use crate::{Materialized, Rdy, ReadState, Scope, now_ms};
 use rdy_graph::{Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, Suspect};
 use rdy_model::decision::{DECISION, REVOKES, SUPERSEDES};
 use rdy_model::{BlockId, Hash, Op};
@@ -452,7 +453,8 @@ pub(crate) fn attach(v: &mut serde_json::Value, c: Result<Consequences, RdyError
 
 /// `write_typed`, then the write's consequences read from the state it published: on success
 /// `consequences` is always present (with `consequences_omitted` when a cut dropped some, or
-/// `consequences_error` when they could not be read; the write stands); on a briefing refusal
+/// `consequences_error` when they could not be read; the write stands), then `intents` when other
+/// sessions' open intents cover blocks the change wrote (iwr1); on a briefing refusal
 /// the error carries a fresh briefing for exactly the blocks the write touches.
 pub fn write_and_report<T: Serialize + 'static>(
     engine: &dyn Engine,
@@ -478,14 +480,37 @@ pub fn write_and_report<T: Serialize + 'static>(
         .and_then(|c| c.parse::<Hash>().ok());
     match change {
         Some(h) => {
-            let c = engine
-                .read()
-                .consequences(&Scope::View(view.into()), &h, max_tokens);
+            let st = engine.read();
+            let c = st.consequences(&Scope::View(view.into()), &h, max_tokens);
             attach(&mut v, c);
+            if let Some(notes) = intent_notes_of(&st, view, &h)
+                && !notes.is_empty()
+            {
+                v["intents"] = serde_json::to_value(&notes).expect("intent notes serialize");
+            }
         }
         None => v["consequences"] = serde_json::json!([]),
     }
     Ok(v)
+}
+
+/// iwr1: other sessions' open intents on the blocks change `h` wrote, in `view`; `None` when they
+/// cannot be read (the write stands and the reply has no `intents`).
+fn intent_notes_of(st: &ReadState, view: &str, h: &Hash) -> Option<Vec<IntentNote>> {
+    if st.coord_heads().intents.is_empty() {
+        return Some(vec![]);
+    }
+    let change = st.reader().change(h).ok()?;
+    let touched: BTreeSet<BlockId> = change.ops.iter().map(|o| o.block_id().clone()).collect();
+    let prov = &change.provenance;
+    st.intent_notes(
+        &Scope::View(view.into()),
+        &prov.actor,
+        prov.run.as_deref(),
+        &touched,
+        now_ms(),
+    )
+    .ok()
 }
 
 /// What a view op did, for its consequences: the op (`batch`), the changes it put in or took

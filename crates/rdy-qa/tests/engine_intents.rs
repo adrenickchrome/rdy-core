@@ -1,0 +1,340 @@
+//! intn1: intents are advisory, versioned and expire at read time; iwr1: writes record an
+//! intent and are told about other sessions' intents on what they wrote.
+use rdy_engine::intent::*;
+use rdy_engine::*;
+use rdy_model::BlockId;
+use rdy_qa::fixtures::*;
+use rdy_qa::packs::qa_project;
+use serde_json::json;
+
+fn id(s: &str) -> BlockId {
+    BlockId::parse(s).unwrap()
+}
+
+#[test]
+fn intn1_ttl_text() {
+    assert_eq!(parse_ttl("30m").unwrap(), 1_800_000);
+    assert_eq!(parse_ttl("2h").unwrap(), TTL_DEFAULT_MS);
+    assert_eq!(parse_ttl("7d").unwrap(), TTL_MAX_MS);
+    for bad in ["8d", "0h", "1s", "h", "2 h", "-1h", ""] {
+        assert_eq!(parse_ttl(bad).unwrap_err().code, E_BAD_INPUT, "{bad}");
+    }
+}
+
+#[test]
+fn intn1_post_list_renew_withdraw() {
+    let (_d, mut r) = qa_project();
+    let (_doc, _s, claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = agent("agent:a", Some("ra"));
+    let _clock = pin_clock(1_000_000);
+    let i = r
+        .intent_post(
+            &a,
+            None,
+            Some("payments"),
+            std::slice::from_ref(&claim),
+            "rework fees",
+            None,
+        )
+        .unwrap();
+    assert!(i.id.starts_with("in-") && i.id.len() == 15);
+    assert_eq!(i.view, "ra", "the session's view by default");
+    assert_eq!(i.status, "open");
+    assert_eq!(i.expires_at_ms - i.posted_at_ms, TTL_DEFAULT_MS);
+    let listed = r
+        .read()
+        .intents(&IntentFilter::default(), i.posted_at_ms + 1)
+        .unwrap();
+    assert_eq!(listed, vec![i.clone()]);
+    let by_block = IntentFilter {
+        block: Some(id(&claim)),
+        ..Default::default()
+    };
+    assert_eq!(
+        r.read()
+            .intents(&by_block, i.posted_at_ms + 1)
+            .unwrap()
+            .len(),
+        1
+    );
+    let by_actor = IntentFilter {
+        actor: Some("agent:b".into()),
+        ..Default::default()
+    };
+    assert!(
+        r.read()
+            .intents(&by_actor, i.posted_at_ms + 1)
+            .unwrap()
+            .is_empty()
+    );
+    // renewing by a prefix writes a new version and keeps the id
+    let prefix = &i.intent[..8];
+    let renewed = r
+        .intent_renew(
+            &agent("agent:a", Some("other-run")),
+            prefix,
+            Some(parse_ttl("1d").unwrap()),
+        )
+        .unwrap();
+    assert_eq!(renewed.id, i.id);
+    assert_eq!(renewed.prev.as_deref(), Some(i.version.as_str()));
+    assert_eq!(
+        renewed.posted_at_ms, i.posted_at_ms,
+        "posted_at is the first version's"
+    );
+    let e = r
+        .intent_renew(&agent("agent:b", Some("rb")), &i.id, None)
+        .unwrap_err();
+    assert_eq!(e.code, E_PERMISSION);
+    let w = r.intent_withdraw(&writer(), &i.id).unwrap();
+    assert_eq!(w.status, "withdrawn");
+    let now = w.posted_at_ms + 2;
+    assert!(
+        r.read()
+            .intents(&IntentFilter::default(), now)
+            .unwrap()
+            .is_empty()
+    );
+    let all = IntentFilter {
+        include_expired: true,
+        ..Default::default()
+    };
+    assert_eq!(r.read().intents(&all, now).unwrap()[0].status, "withdrawn");
+    assert_eq!(
+        r.intent_renew(&a, &i.id, None).unwrap_err().code,
+        E_BAD_INPUT
+    );
+}
+
+#[test]
+fn intn1_post_is_validated() {
+    let (_d, mut r) = qa_project();
+    let (_doc, _s, claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = agent("agent:a", Some("ra"));
+    let e = r.intent_post(&a, None, None, &[], "x", None).unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT);
+    assert!(e.fix.contains("payments"), "{}", e.fix);
+    assert_eq!(
+        r.intent_post(&a, None, Some("nowhere"), &[], "x", None)
+            .unwrap_err()
+            .code,
+        E_BAD_INPUT
+    );
+    assert_eq!(
+        r.intent_post(&a, None, Some("payments"), &[], "", None)
+            .unwrap_err()
+            .code,
+        E_BAD_INPUT
+    );
+    assert_eq!(
+        r.intent_post(&a, None, Some("payments"), &[], &"x".repeat(501), None)
+            .unwrap_err()
+            .code,
+        E_BAD_INPUT
+    );
+    let many: Vec<String> = (0..1001).map(|_| claim.clone()).collect();
+    assert_eq!(
+        r.intent_post(&a, None, None, &many, "x", None)
+            .unwrap_err()
+            .code,
+        E_LIMIT
+    );
+    assert_eq!(
+        r.intent_post(&a, Some("work"), None, &["c-ZZZZZ".into()], "x", None)
+            .unwrap_err()
+            .code,
+        E_UNKNOWN_BLOCK
+    );
+    assert_eq!(
+        r.intent_post(&reader(), None, Some("payments"), &[], "x", None)
+            .unwrap_err()
+            .code,
+        E_PERMISSION
+    );
+}
+
+#[test]
+fn intn1_expiry_is_read_time_and_inclusive_of_the_bound() {
+    let (_d, mut r) = qa_project();
+    let a = agent("agent:a", Some("ra"));
+    let i = {
+        let _clock = pin_clock(5_000_000);
+        r.intent_post(&a, None, Some("payments"), &[], "x", Some(TTL_MIN_MS))
+            .unwrap()
+    };
+    let st = r.read();
+    let f = IntentFilter::default();
+    assert_eq!(st.intents(&f, i.expires_at_ms - 1).unwrap().len(), 1);
+    assert!(
+        st.intents(&f, i.expires_at_ms).unwrap().is_empty(),
+        "expired at expires_at_ms"
+    );
+    let all = IntentFilter {
+        include_expired: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        st.intents(&all, i.expires_at_ms).unwrap()[0].status,
+        "expired"
+    );
+    drop(st);
+    let before = r.read().seq();
+    let _clock = pin_clock(i.expires_at_ms);
+    let e = r.intent_renew(&a, &i.id, None).unwrap_err();
+    assert_eq!(e.code, E_INTENT_EXPIRED);
+    assert_eq!(
+        r.intent_withdraw(&a, &i.id).unwrap_err().code,
+        E_INTENT_EXPIRED
+    );
+    assert_eq!(
+        r.read().seq(),
+        before,
+        "a refusal writes nothing; expiry writes nothing"
+    );
+}
+
+#[test]
+fn iwr1_a_write_records_its_intent_and_hears_of_other_sessions_intents() {
+    let (_d, mut r) = qa_project();
+    r.new_doc(
+        &writer(),
+        "seed",
+        "payments/fees",
+        Some("glossary"),
+        Some("Fees"),
+    )
+    .unwrap();
+    let doc = r
+        .read()
+        .resolve_path(&Scope::View("seed".into()), "payments/fees")
+        .unwrap()
+        .to_string();
+    let res = write(&mut r, "seed", json!([
+        {"op": "create", "type": "section", "id": "$s", "parent": doc, "fields": {"title": "S"}},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "fee"}
+    ])).unwrap();
+    land(&mut r, "seed").unwrap();
+    let claim = res.created["$c"].clone();
+    let a = agent("agent:a", Some("ra"));
+    let b = agent("agent:b", Some("rb"));
+    let ia = r
+        .intent_post(&a, None, Some("payments"), &[], "rework fees", None)
+        .unwrap();
+    let ib = r
+        .intent_post(
+            &b,
+            None,
+            None,
+            std::slice::from_ref(&claim),
+            "b's angle",
+            None,
+        )
+        .unwrap();
+    // b writes the claim under its own intent: the change links it
+    let v = version_of(&r, &Scope::Canon, &claim);
+    let req = WriteRequest {
+        view: "rb".into(),
+        ops: serde_json::from_value(json!([{"op": "update", "id": claim, "base": v, "body": "b"}]))
+            .unwrap(),
+        justification: None,
+        message: String::new(),
+    };
+    let w = r.write_with_intent(&b, req, None, Some(&ib.id)).unwrap();
+    let ch = r
+        .read()
+        .reader()
+        .change(&w.change.parse().unwrap())
+        .unwrap();
+    assert_eq!(
+        ch.links.intent.map(|h| h.to_string()),
+        Some(ib.intent.clone())
+    );
+    // the notes b's write gets: a's intent (area), never b's own
+    let st = r.read();
+    let touched = [id(&claim)].into_iter().collect();
+    let notes = st
+        .intent_notes(
+            &Scope::View("rb".into()),
+            "agent:b",
+            Some("rb"),
+            &touched,
+            now_ms(),
+        )
+        .unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].id, ia.id);
+    assert_eq!(notes[0].blocks, vec![claim.clone()]);
+    // an unknown intent refuses the write and writes nothing
+    let req = WriteRequest {
+        view: "rb".into(),
+        ops: serde_json::from_value(json!([{"op": "update", "id": claim, "base": version_of(&r, &Scope::View("rb".into()), &claim), "body": "c"}])).unwrap(),
+        justification: None,
+        message: String::new(),
+    };
+    assert_eq!(
+        r.write_with_intent(&b, req, None, Some("in-ffffffffffff"))
+            .unwrap_err()
+            .code,
+        E_NOT_FOUND
+    );
+}
+
+#[test]
+fn iwr1_write_and_report_carries_intents_only_when_there_are_some() {
+    use rdy_engine::consequence::write_and_report;
+    use rdy_engine::engine::{Engine, Local};
+    let (_d, mut r) = qa_project();
+    let (_doc, section, claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    r.intent_post(
+        &agent("agent:a", Some("ra")),
+        None,
+        None,
+        std::slice::from_ref(&claim),
+        "mine",
+        None,
+    )
+    .unwrap();
+    let v = version_of(&r, &Scope::Canon, &claim);
+    let engine = Local::new(r);
+    let b = agent("agent:b", Some("rb"));
+    let ops: Vec<OpInput> =
+        serde_json::from_value(json!([{"op": "update", "id": claim, "base": v, "body": "b"}]))
+            .unwrap();
+    let out = write_and_report(&engine, "rb", None, move |r| {
+        r.write(
+            &b,
+            WriteRequest {
+                view: "rb".into(),
+                ops,
+                justification: None,
+                message: String::new(),
+            },
+        )
+    })
+    .unwrap();
+    assert_eq!(out["intents"].as_array().unwrap().len(), 1, "{out}");
+    assert_eq!(out["intents"][0]["actor"], "agent:a");
+    // a write that touches nothing an intent covers has no intents key
+    let a = agent("agent:a", Some("ra"));
+    let ops: Vec<OpInput> = serde_json::from_value(
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "other"}]),
+    )
+    .unwrap();
+    let out = write_and_report(&engine, "ra", None, move |r| {
+        r.write(
+            &a,
+            WriteRequest {
+                view: "ra".into(),
+                ops,
+                justification: None,
+                message: String::new(),
+            },
+        )
+    })
+    .unwrap();
+    assert!(out.get("intents").is_none(), "{out}");
+    let _ = engine.read();
+}

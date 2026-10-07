@@ -1315,6 +1315,7 @@ fn decision_input(p: DecideParams) -> DecisionInput {
             .fields
             .map(|m| m.into_iter().collect())
             .unwrap_or_default(),
+        intent: None,
     }
 }
 
