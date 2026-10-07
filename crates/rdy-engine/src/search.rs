@@ -251,13 +251,17 @@ impl ReadState {
         token.push(0);
         let words_from = phrase.len();
         let hits: Vec<Hit> = phrase.into_iter().chain(all_words).collect();
-        for h in &hits {
+        // every collapse-key input the version does not cover goes in too: `history` comes from
+        // other decisions, so a supersede can regroup the entries without moving any version
+        for (i, h) in hits.iter().enumerate() {
             let version = m
                 .version_of(&h.block.id)
                 .unwrap_or_else(|| h.block.version_hash());
             token.extend_from_slice(h.block.id.as_str().as_bytes());
             token.push(0);
             token.extend_from_slice(&version.0);
+            token.push(u8::from(h.history));
+            token.push(u8::from(i >= words_from));
         }
         let token = Hash::of(&token).to_string();
 

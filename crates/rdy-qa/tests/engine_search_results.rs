@@ -219,3 +219,105 @@ fn stot1_the_doc_list_is_capped_and_says_how_many_it_left_out() {
     );
     assert_eq!(res.totals.types["prose"], 60);
 }
+
+/// Doc a / section s holding decisions d1 and d2 (statement `port = 8080`, written as proposed)
+/// and prose x (`port = 8080`); landed. Returns the ids by placeholder.
+fn twins(r: &mut Rdy) -> std::collections::BTreeMap<String, String> {
+    let w = rdy_qa::golden::write_as(&approver(), r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$a", "fields": {"name": "a", "title": "A", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$a", "fields": {"title": "S"}},
+        {"op": "create", "type": "decision", "id": "$d1", "parent": "$s",
+         "fields": {"statement": "port = 8080", "status": "proposed"}},
+        {"op": "create", "type": "decision", "id": "$d2", "parent": "$s",
+         "fields": {"statement": "port = 8080", "status": "proposed"}},
+        {"op": "create", "type": "prose", "id": "$x", "parent": "$s", "body": "port = 8080"}
+    ]))
+    .unwrap();
+    land(r, "work").unwrap();
+    w.created
+}
+
+/// Fix round 1: collapse groups hits by their history flag, and a decision's history comes from
+/// other decisions, not from the hit's own version. So the page token covers the flag: a
+/// supersede between pages that regroups the entries makes the cursor stale, and no entry is
+/// shown twice (here d2 would be).
+#[test]
+fn scol1_a_history_change_between_pages_makes_the_cursor_stale() {
+    let (_d, mut r) = project();
+    let c = twins(&mut r);
+    let query = q("port = 8080", false, false);
+    let first = r
+        .read()
+        .search(&Scope::Canon, &query, None, Some(1))
+        .unwrap();
+    assert_eq!(ids(&first), vec![c["$d1"].clone()]);
+    let also: Vec<String> = first.matches[0].also.iter().map(|a| a.id.clone()).collect();
+    assert_eq!(also, vec![c["$d2"].clone()]);
+    let cursor = first.next.clone().expect("two entries, one per page");
+    // nothing changed: the cursor still reads the next entry
+    let second = r
+        .read()
+        .search(&Scope::Canon, &query, Some(&cursor), Some(1))
+        .unwrap();
+    assert_eq!(ids(&second), vec![c["$x"].clone()]);
+    // no matching block's text moves, but d1 now carries history and leaves d2's entry
+    r.supersede(
+        &writer(),
+        "work",
+        &c["$d1"],
+        None,
+        DecisionInput {
+            parent: c["$s"].clone(),
+            statement: "use 9090".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let now = search(&r, &query);
+    assert_eq!(
+        ids(&now),
+        vec![c["$d1"].clone(), c["$d2"].clone(), c["$x"].clone()],
+        "the entries regrouped"
+    );
+    assert!(now.matches[0].history && !now.matches[1].history);
+    let e = r
+        .read()
+        .search(&Scope::Canon, &query, Some(&cursor), Some(1))
+        .unwrap_err();
+    assert_eq!(e.code, E_PAGE_STALE, "{e}");
+}
+
+/// Fix round 1: the reverse in a view. Undoing the supersede joins d1 and d2 again; without the
+/// stale cursor, the next page would skip d2.
+#[test]
+fn scol1_an_undo_that_regroups_entries_makes_the_cursor_stale() {
+    let (_d, mut r) = project();
+    let c = twins(&mut r);
+    // an accepted d3 that supersedes d1, written in v2 and not landed
+    rdy_qa::golden::write_as(&approver(), &mut r, "v2", json!([
+        {"op": "create", "type": "decision", "parent": c["$s"],
+         "fields": {"statement": "use 9090", "status": "accepted",
+                    "decided_at": "2021-01-10T09:00:00Z", "recorded_at": "2021-01-10T09:00:00Z", "options": ["yes", "no"]},
+         "links": {"supersedes": [{"target": c["$d1"]}]}}
+    ]))
+    .unwrap();
+    let view = Scope::View("v2".into());
+    let query = q("port = 8080", false, false);
+    let first = r.read().search(&view, &query, None, Some(1)).unwrap();
+    assert_eq!(ids(&first), vec![c["$d1"].clone()]);
+    assert!(first.matches[0].history && first.matches[0].also.is_empty());
+    let cursor = first.next.clone().expect("three entries, one per page");
+    r.undo(&approver(), "v2", None, false).unwrap();
+    let now = r.read().search(&view, &query, None, Some(100_000)).unwrap();
+    assert_eq!(
+        ids(&now),
+        vec![c["$d1"].clone(), c["$x"].clone()],
+        "the entries regrouped"
+    );
+    let e = r
+        .read()
+        .search(&view, &query, Some(&cursor), Some(1))
+        .unwrap_err();
+    assert_eq!(e.code, E_PAGE_STALE, "{e}");
+}
