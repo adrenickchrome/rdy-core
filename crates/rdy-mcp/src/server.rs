@@ -1,11 +1,12 @@
 use crate::order::{Order, Ordered, Stamped};
+use crate::params::Parameters;
 use crate::tools::{self, *};
 use crate::view_tools;
 use rdy_engine::engine::{Engine, Local};
 use rdy_engine::{E_INTERNAL, E_LIMIT, RdyError};
 use rmcp::{
     ServerHandler, ServiceExt,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::router::tool::ToolRouter,
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
         ServerCapabilities, ServerConfig,
@@ -47,16 +48,21 @@ impl RdyServer {
 
     /// Runs one tool on the blocking pool, so no tool blocks the executor. A panic inside it
     /// becomes an `E_INTERNAL` reply (so the request is still answered) and republishes a clean
-    /// state, which the panic may have left half-updated.
+    /// state, which the panic may have left half-updated. Parameters that did not parse
+    /// (`Err`, see [`crate::params`]) are answered at once, as an ordinary tool error.
     ///
     /// Order is not kept here: a session served through [`serve`] runs one stamped call at a
     /// time, in arrival order, and writes the replies in that order (see [`crate::order`]).
     pub(crate) async fn run<P: Send + 'static>(
         &self,
         tool: &'static str,
-        p: P,
+        p: Result<P, RdyError>,
         f: fn(&mut McpState, P) -> Result<serde_json::Value, RdyError>,
     ) -> CallToolResult {
+        let p = match p {
+            Ok(p) => p,
+            Err(e) => return result(Err(e)),
+        };
         let state = Arc::clone(&self.state);
         let joined = tokio::task::spawn_blocking(move || {
             let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
@@ -914,7 +920,7 @@ mod mcp1_id_tests {
             role: "writer".into(),
             view: None,
         };
-        let out = serde_json::to_value(server.run("rdy_session", p, tools::rdy_session).await)
+        let out = serde_json::to_value(server.run("rdy_session", Ok(p), tools::rdy_session).await)
             .unwrap()
             .to_string();
         assert!(
@@ -928,8 +934,8 @@ mod mcp1_id_tests {
             role: "writer".into(),
             view: None,
         };
-        let out =
-            serde_json::to_value(server.run("rdy_session", p, tools::rdy_session).await).unwrap();
+        let out = serde_json::to_value(server.run("rdy_session", Ok(p), tools::rdy_session).await)
+            .unwrap();
         assert_ne!(out["isError"], true, "{out}");
     }
 
@@ -948,9 +954,10 @@ mod mcp1_id_tests {
             role: "writer".into(),
             view: None,
         };
-        let out = serde_json::to_value(server.run("rdy_session", bad, tools::rdy_session).await)
-            .unwrap()
-            .to_string();
+        let out =
+            serde_json::to_value(server.run("rdy_session", Ok(bad), tools::rdy_session).await)
+                .unwrap()
+                .to_string();
         assert!(
             out.contains("E_INTERNAL") && out.contains("deliberate panic"),
             "{out}"
@@ -961,14 +968,18 @@ mod mcp1_id_tests {
             role: "writer".into(),
             view: None,
         };
-        let out =
-            serde_json::to_value(server.run("rdy_session", ok, tools::rdy_session).await).unwrap();
+        let out = serde_json::to_value(server.run("rdy_session", Ok(ok), tools::rdy_session).await)
+            .unwrap();
         assert_ne!(out["isError"], true, "{out}");
         for _ in 0..3 {
             let t = std::time::Instant::now();
             let o = serde_json::to_value(
                 server
-                    .run("rdy_overview", ScopeParams::default(), tools::rdy_overview)
+                    .run(
+                        "rdy_overview",
+                        Ok(ScopeParams::default()),
+                        tools::rdy_overview,
+                    )
                     .await,
             )
             .unwrap();
