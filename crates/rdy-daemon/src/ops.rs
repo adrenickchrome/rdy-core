@@ -163,6 +163,8 @@ struct EditBlockArgs {
     view: Option<String>,
     brief: Option<String>,
     max_tokens: Option<usize>,
+    /// The edit's editorial reason (`rdy edit --reason`).
+    reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -388,7 +390,10 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "check" => check(cx, parse(op, args, "{path, pack?}")?),
         "new_folder" => new_folder(cx, parse(op, args, "{path, view?}")?),
         "new_doc" => new_doc(cx, parse(op, args, "{path, view?, doc_type?, title?}")?),
-        "edit_block" => edit_block(cx, parse(op, args, "{yaml, view?, brief?, max_tokens?}")?),
+        "edit_block" => edit_block(
+            cx,
+            parse(op, args, "{yaml, view?, brief?, max_tokens?, reason?}")?,
+        ),
         "propose" => propose(
             cx,
             parse(op, args, "{title, view?, summary?, max_tokens?}")?,
@@ -694,8 +699,9 @@ fn edit_block(cx: &OpContext, a: EditBlockArgs) -> Result<Value, RdyError> {
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
     let (yaml, brief, max_tokens, v) = (a.yaml, a.brief, a.max_tokens, view.clone());
+    let reason = a.reason;
     write_and_report(cx.engine, &v, max_tokens, move |r| {
-        r.edit_yaml(&s, &view, &yaml, brief)
+        r.edit_yaml(&s, &view, &yaml, brief, reason.as_deref())
     })
 }
 

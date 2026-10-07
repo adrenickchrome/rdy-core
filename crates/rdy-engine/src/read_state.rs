@@ -6,7 +6,7 @@ use crate::paths::TreeNode;
 use crate::version::VposCache;
 use crate::{AS_OF_CACHE_ENTRIES, Materialized, Scope};
 use rdy_graph::Graph;
-use rdy_model::{AltSet, AltStatus, Block, BlockId, Change, Hash, Op, Tag};
+use rdy_model::{AltSet, AltStatus, Block, BlockId, Change, Hash, Intent, IntentStatus, Op, Tag};
 use rdy_schema::{AreaMatcher, Pack};
 use rdy_store::segment::Location;
 use rdy_store::{Conflict, Merged, StoreReader, ViewHead};
@@ -147,14 +147,27 @@ pub struct InflightSet {
     pub views_of: BTreeMap<Hash, Vec<String>>,
 }
 
+/// An intent whose latest version is open (withdrawn ones are left out; an expired one stays,
+/// since expiry is read-time): that version, decoded, and when the intent was first posted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenIntent {
+    pub version: Hash,
+    pub intent: Intent,
+    /// The first version's `at_ms`.
+    pub posted_at_ms: i64,
+}
+
 /// The coordination refs as a state was published: each intent's and each alternative set's
-/// stable id mapped to its latest version, and indexes of the open and the settled sets, so that
-/// a write reads its view's set, and the gate a member view's settled set, without reading every
-/// set ever made.
+/// stable id mapped to its latest version, and indexes of the open intents and of the open and
+/// the settled sets, so that a write reads its view's set and the intents on what it wrote, a
+/// briefing the intents on what it covers, and the gate a member view's settled set, without
+/// reading every intent or set ever made.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CoordHeads {
     pub intents: BTreeMap<Hash, Hash>,
     pub alt_sets: BTreeMap<Hash, Hash>,
+    /// Each intent whose latest version is open, by stable id. Readers filter expiry by `now`.
+    pub open_intents: BTreeMap<Hash, OpenIntent>,
     /// Each open alternative set: stable id to its latest version and that version.
     pub open_alts: BTreeMap<Hash, (Hash, AltSet)>,
     /// Each member view of an open set, mapped to that set's stable id.
@@ -168,16 +181,46 @@ pub struct CoordHeads {
 }
 
 impl CoordHeads {
-    /// The heads `intents` and `alt_sets` as the store holds them now, with the open-set index.
-    /// A set whose latest version equals its version in `prev` keeps `prev`'s entry (a version
-    /// is a content hash, so its status and members are the same); only a new or moved set is
-    /// read. A publish therefore reads the sets it changed, not every set ever made.
+    /// The heads `intents` and `alt_sets` as the store holds them now, with the open-intent and
+    /// the open-set indexes. An intent or a set whose latest version equals its version in `prev`
+    /// keeps `prev`'s entry (a version is a content hash, so its status and fields are the same);
+    /// only a new or moved one is read. A publish therefore reads the intents and sets it
+    /// changed, not every one ever made.
     pub(crate) fn read(
         reader: &StoreReader,
         prev: &CoordHeads,
         intents: BTreeMap<Hash, Hash>,
         alt_sets: BTreeMap<Hash, Hash>,
     ) -> Result<CoordHeads, RdyError> {
+        let mut open_intents = BTreeMap::new();
+        for (stable, version) in &intents {
+            if prev.intents.get(stable) == Some(version) {
+                if let Some(entry) = prev.open_intents.get(stable) {
+                    open_intents.insert(*stable, entry.clone());
+                }
+                continue;
+            }
+            let intent = reader.intent(version)?;
+            if intent.status != IntentStatus::Open {
+                continue;
+            }
+            // the first post's time: the version itself, the moved entry's, or the first version
+            let posted_at_ms = if stable == version {
+                intent.at_ms
+            } else if let Some(entry) = prev.open_intents.get(stable) {
+                entry.posted_at_ms
+            } else {
+                reader.intent(stable)?.at_ms
+            };
+            open_intents.insert(
+                *stable,
+                OpenIntent {
+                    version: *version,
+                    intent,
+                    posted_at_ms,
+                },
+            );
+        }
         let mut open_alts = BTreeMap::new();
         let mut settled_alts = BTreeMap::new();
         for (stable, version) in &alt_sets {
@@ -223,6 +266,7 @@ impl CoordHeads {
         Ok(CoordHeads {
             intents,
             alt_sets,
+            open_intents,
             open_alts,
             alt_members,
             settled_alts,

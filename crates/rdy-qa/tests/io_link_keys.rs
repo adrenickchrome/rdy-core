@@ -118,7 +118,7 @@ fn lkey1_edit_yaml_resolves_a_key_link_target() {
     y.truncate(at);
     y.push_str("links:\n  describes:\n  - target: REQ-1\n");
     y.push_str(&pins);
-    r.edit_yaml(&writer(), "work", &y, None).unwrap();
+    r.edit_yaml(&writer(), "work", &y, None, None).unwrap();
     let c = r
         .read()
         .block(

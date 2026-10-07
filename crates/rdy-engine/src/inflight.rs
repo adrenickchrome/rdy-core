@@ -209,14 +209,14 @@ impl ReadState {
     ) -> Result<Vec<InflightIntent>, RdyError> {
         let now = now_ms();
         let mut out = vec![];
-        for (&stable, &latest) in &self.coord_heads.intents {
-            let it = self.reader.intent(&latest)?;
-            if !status_open_at(&it, now) || own == Some(it.view.as_str()) {
+        for (&stable, open) in &self.coord_heads.open_intents {
+            let it = &open.intent;
+            if !status_open_at(it, now) || own == Some(it.view.as_str()) {
                 continue;
             }
             let mut blocks = vec![];
             for id in ids {
-                if self.intent_covers(scope, &it, id)? {
+                if self.intent_covers(scope, it, id)? {
                     blocks.push(id.to_string());
                 }
             }
@@ -225,11 +225,11 @@ impl ReadState {
             }
             out.push(InflightIntent {
                 id: intent_label(&stable),
-                actor: it.actor,
-                run: it.run,
-                view: it.view,
-                angle: it.angle,
-                area: it.area,
+                actor: it.actor.clone(),
+                run: it.run.clone(),
+                view: it.view.clone(),
+                angle: it.angle.clone(),
+                area: it.area.clone(),
                 blocks,
                 expires_at: rfc3339(it.expires_at_ms),
             });

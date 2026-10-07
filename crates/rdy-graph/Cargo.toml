@@ -8,6 +8,3 @@ version.workspace = true
 imbl.workspace = true
 rdy-model.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true

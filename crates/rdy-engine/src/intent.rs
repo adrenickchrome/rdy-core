@@ -193,30 +193,44 @@ impl ReadState {
     }
 
     /// The intents `f` selects, as of `now_ms`: newest first by the time each was first posted,
-    /// then by id.
+    /// then by id. Open intents come from the published index; only `include_expired` reads the
+    /// withdrawn ones from the store.
     pub fn intents(&self, f: &IntentFilter, now_ms: i64) -> Result<Vec<IntentInfo>, RdyError> {
         if let Some(e) = &self.error {
             return Err(e.clone());
         }
+        let heads = &self.coord_heads;
         let mut out = vec![];
-        for (&stable, &latest) in &self.coord_heads.intents {
-            let it = self.reader().intent(&latest)?;
-            if !f.include_expired && status_at(&it, now_ms) != "open" {
-                continue;
+        let mut keep = |stable: Hash, latest: Hash, it: &Intent, posted: i64| {
+            if !f.include_expired && status_at(it, now_ms) != "open" {
+                return Ok(());
             }
             if f.area.as_ref().is_some_and(|a| it.area.as_ref() != Some(a))
                 || f.actor.as_ref().is_some_and(|a| *a != it.actor)
                 || f.view.as_ref().is_some_and(|v| *v != it.view)
             {
-                continue;
+                return Ok(());
             }
             if let Some(b) = &f.block
-                && !self.intent_covers(&Scope::Canon, &it, b)?
+                && !self.intent_covers(&Scope::Canon, it, b)?
             {
-                continue;
+                return Ok(());
             }
-            let posted = self.intent_posted_at(stable, latest, &it)?;
-            out.push(info(stable, latest, &it, posted, now_ms));
+            out.push(info(stable, latest, it, posted, now_ms));
+            Ok::<(), RdyError>(())
+        };
+        for (&stable, o) in &heads.open_intents {
+            keep(stable, o.version, &o.intent, o.posted_at_ms)?;
+        }
+        if f.include_expired {
+            for (&stable, &latest) in &heads.intents {
+                if heads.open_intents.contains_key(&stable) {
+                    continue;
+                }
+                let it = self.reader().intent(&latest)?;
+                let posted = self.intent_posted_at(stable, latest, &it)?;
+                keep(stable, latest, &it, posted)?;
+            }
         }
         out.sort_by(|a, b| {
             b.posted_at_ms
@@ -335,16 +349,16 @@ impl ReadState {
         touched: &BTreeSet<BlockId>,
         now_ms: i64,
     ) -> Result<Vec<IntentNote>, RdyError> {
-        if self.coord_heads.intents.is_empty() || touched.is_empty() {
+        if self.coord_heads.open_intents.is_empty() || touched.is_empty() {
             return Ok(vec![]);
         }
         // each touched block's areas (here, and `before` when given), read once, when an area
         // intent first needs them
         let mut areas: BTreeMap<&BlockId, Vec<String>> = BTreeMap::new();
         let mut out = vec![];
-        for (&stable, latest) in &self.coord_heads.intents {
-            let it = self.reader().intent(latest)?;
-            if status_at(&it, now_ms) != "open"
+        for (&stable, open) in &self.coord_heads.open_intents {
+            let it = &open.intent;
+            if status_at(it, now_ms) != "open"
                 || (it.actor.as_str(), it.run.as_deref()) == (actor, run)
             {
                 continue;
@@ -372,10 +386,10 @@ impl ReadState {
             if !blocks.is_empty() {
                 out.push(IntentNote {
                     id: intent_label(&stable),
-                    actor: it.actor,
-                    run: it.run,
-                    view: it.view,
-                    angle: it.angle,
+                    actor: it.actor.clone(),
+                    run: it.run.clone(),
+                    view: it.view.clone(),
+                    angle: it.angle.clone(),
                     expires_at: rfc3339(it.expires_at_ms),
                     blocks,
                 });

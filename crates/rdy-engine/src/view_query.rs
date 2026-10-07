@@ -34,6 +34,9 @@ pub struct ViewSummary {
     pub last_write_ms: i64,
     /// Open, and nothing written for more than `views.idle_days`.
     pub idle: bool,
+    /// Why a closed view was closed: the reason of its latest close op.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub close_reason: Option<String>,
 }
 
 /// A change a view includes, with the blocks its ops touch.
@@ -63,6 +66,9 @@ pub struct OpSummary {
     pub at_ms: i64,
     /// A later, live `Undo` on the chain reverses this op.
     pub undone: bool,
+    /// Why the view was closed, on a `close` op.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// `rdy view show`: a view's head, its changes, its conflicts and the chain since its latest
@@ -201,10 +207,13 @@ impl ReadState {
                 .iter()
                 .flat_map(|c| c.ops.iter().map(|op| op.block_id().clone()))
                 .collect();
-            let conflicts = if head.closed {
-                0
+            let (conflicts, close_reason) = if head.closed {
+                (0, self.close_reason(head.head)?)
             } else {
-                self.conflict_count(&name, &changes, &blocks, &mut bases)?
+                (
+                    self.conflict_count(&name, &changes, &blocks, &mut bases)?,
+                    None,
+                )
             };
             out.push(ViewSummary {
                 owner: head.owner.as_ref().map(OwnerInfo::from),
@@ -217,10 +226,25 @@ impl ReadState {
                 conflicts,
                 last_write_ms: head.last_write_ms,
                 idle: !head.closed && now_ms.saturating_sub(head.last_write_ms) > window,
+                close_reason,
                 name,
             });
         }
         Ok(out)
+    }
+
+    /// The reason of the latest close op on the chain from `head` back to its latest checkpoint.
+    fn close_reason(&self, head: Hash) -> Result<Option<String>, RdyError> {
+        let reader = self.reader();
+        let mut cur = Some(head);
+        while let Some(h) = cur {
+            let op = reader.view_op(&h)?;
+            if let ViewOpKind::Close { reason } = op.op {
+                return Ok(Some(reason));
+            }
+            cur = if is_checkpoint(&op.op) { None } else { op.prev };
+        }
+        Ok(None)
     }
 
     /// How many blocks view `name`'s merge records a conflict on, without building the view:
@@ -321,6 +345,10 @@ impl ReadState {
                 run: op.run.clone(),
                 at_ms: op.at_ms,
                 undone: undone.contains_key(h),
+                reason: match &op.op {
+                    ViewOpKind::Close { reason } => Some(reason.clone()),
+                    _ => None,
+                },
             })
             .collect();
         Ok(ViewDetail {

@@ -1296,7 +1296,6 @@ dependencies = [
  "imbl",
  "rdy-model",
  "serde",
- "serde_json",
 ]
 
 [[package]]

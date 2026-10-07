@@ -755,6 +755,10 @@ fn frozen_in_conflict(
     ))
 }
 
+/// The refusal of a tracking edit with no editorial reason (`rdy edit` gives its own fix).
+pub(crate) const TRACKING_NEEDS_REASON: &str =
+    "a tracking field of an accepted or rejected decision changes only with an editorial reason";
+
 /// trk1 (D-DZC1J): an update of a frozen decision passes only when it changes tracking fields
 /// and nothing else, and then only with an editorial justification that gives a reason. Returns
 /// whether `new` is such a tracking edit.
@@ -774,7 +778,7 @@ fn check_tracking_edit(
     match justification {
         Some(Justification::Editorial { reason, .. }) if !reason.trim().is_empty() => Ok(true),
         _ => Err(bad(
-            "a tracking field of an accepted or rejected decision changes only with an editorial reason",
+            TRACKING_NEEDS_REASON,
             "pass editorial: {class: \"clarify\", reason: \"<why>\"} with the write",
         )),
     }

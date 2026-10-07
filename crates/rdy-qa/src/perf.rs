@@ -51,6 +51,9 @@ fn spec_target(op: &str) -> Option<String> {
             "< 5 ms p99 on Linux NVMe; one durable flush + < 1 ms on macOS (spec 11, restated per hardware class)"
         }
         "brief_doc" => "< 5 ms p99 at 10k with the view's graph carried (the read budget, spec 11)",
+        "brief_expired_intents_1k" => {
+            "< 5 ms p99 (the read budget, spec 11): a briefing with 1,000 expired intents and 5 open ones in the project"
+        }
         "context" | "impact" | "version_position" | "resolve_path" | "tree_full" => {
             "< 5 ms p99 (spec 11)"
         }
@@ -961,6 +964,145 @@ fn tier_inflight(
     ));
 }
 
+/// Intents and alternative sets ever made in the coordination ops' projects: none is ever
+/// deleted (an intent expires at read time; a set is settled, not removed), so a swarm's count
+/// grows for the project's lifetime.
+const COORD_N: usize = 1000;
+
+/// Open intents of another session on the written claim, beside the expired ones.
+const COORD_OPEN_INTENTS: usize = 5;
+
+/// A fresh small project (2 folders x 3 docs x 12 claims), landed, in `parent/<name>`.
+fn coord_project(parent: &std::path::Path, name: &str) -> (std::path::PathBuf, Rdy, Fixture) {
+    let proj = parent.join(name);
+    std::fs::create_dir_all(&proj).expect("mkdir");
+    let docs = testkit::generate_tree(&proj, 2, 3, 12);
+    let mut r = Rdy::open(&proj).expect("open");
+    land(&mut r, "work").expect("land work");
+    let fx = fixture(&r, &docs);
+    (proj, r, fx)
+}
+
+/// One `write_and_report` (the MCP and CLI write: consequences and intent notes included) of an
+/// update of `claim` in view `view` by `s`.
+fn reported_write(
+    engine: &rdy_engine::engine::Local,
+    s: &rdy_engine::Session,
+    view: &str,
+    claim: &BlockId,
+    body: String,
+) -> serde_json::Value {
+    let (s, v) = (s.clone(), view.to_string());
+    let ops =
+        serde_json::from_value(json!([{"op": "update", "id": claim.to_string(), "body": body}]))
+            .expect("ops");
+    rdy_engine::consequence::write_and_report(engine, view, None, move |r| {
+        r.write(
+            &s,
+            rdy_engine::WriteRequest {
+                view: v,
+                ops,
+                justification: None,
+                message: String::new(),
+            },
+        )
+    })
+    .expect("reported write")
+}
+
+/// The coordination records at scale (final-review fix round 1): a write (consequences and
+/// intent notes) and a briefing in a project where `n` intents have expired and
+/// [`COORD_OPEN_INTENTS`] are open, and a write in a project with `n` abandoned alternative sets.
+/// Each runs on a fresh small project, so only the records it adds differ from a plain write or
+/// briefing. Spec targets: the write and the read budgets.
+fn tier_coord(out: &mut Vec<Measure>, parent: &std::path::Path, sfx: &str, runs: &Runs, n: usize) {
+    let (_proj, mut r, fx) = coord_project(parent, "coord-intents");
+    let a = crate::fixtures::agent("agent:a", Some("ra"));
+    let claim = [fx.claim.to_string()];
+    {
+        // posted long ago with the shortest ttl: every one has expired at any real `now`
+        let _clock = rdy_engine::pin_clock(1_000_000);
+        for i in 0..n {
+            r.intent_post(&a, None, None, &claim, &format!("old {i}"), Some(60_000))
+                .expect("an intent that expires");
+        }
+    }
+    for i in 0..COORD_OPEN_INTENTS {
+        r.intent_post(&a, None, None, &claim, &format!("open {i}"), None)
+            .expect("an open intent");
+    }
+    let engine = rdy_engine::engine::Local::new(r);
+    let b = crate::fixtures::agent("agent:b", Some("rb"));
+    out.push(measure_timed(
+        &format!("write_expired_intents_1k{sfx}"),
+        runs.write,
+        |i| {
+            let s = Instant::now();
+            let v = reported_write(&engine, &b, "rb", &fx.claim, format!("Noted {i}."));
+            let took = s.elapsed();
+            assert_eq!(
+                v["intents"].as_array().map(Vec::len),
+                Some(COORD_OPEN_INTENTS),
+                "the open intents only: {v}"
+            );
+            took
+        },
+    ));
+    let st = rdy_engine::engine::Engine::read(&engine);
+    let rb = Scope::View("rb".into());
+    let cov = Coverage {
+        ids: vec![fx.claim.to_string()],
+        path: None,
+    };
+    st.brief(&rb, &cov, None).expect("warm the briefing");
+    out.push(measure_timed(
+        &format!("brief_expired_intents_1k{sfx}"),
+        runs.read,
+        |_| {
+            let s = Instant::now();
+            let brief = st.brief(&rb, &cov, None).expect("brief");
+            let took = s.elapsed();
+            assert_eq!(brief.inflight.intents.len(), COORD_OPEN_INTENTS);
+            took
+        },
+    ));
+    drop(st);
+    drop(engine);
+
+    let (_proj, mut r, fx) = coord_project(parent, "coord-alts");
+    let o = crate::fixtures::agent("agent:o", Some("o"));
+    for i in 0..n {
+        let (p, q) = (format!("p{i}"), format!("q{i}"));
+        for v in [&p, &q] {
+            r.view_create(&writer(), v, None, false)
+                .expect("a member view");
+        }
+        let members = [
+            rdy_engine::alt::AltMemberInput {
+                label: "p".into(),
+                view: p,
+            },
+            rdy_engine::alt::AltMemberInput {
+                label: "q".into(),
+                view: q,
+            },
+        ];
+        let set = r
+            .alt_create(&o, &format!("old {i}"), None, &members)
+            .expect("a set");
+        r.alt_abandon(&o, &set.id, "superseded").expect("abandon");
+    }
+    assert!(r.read().coord_heads().open_alts.is_empty());
+    let engine = rdy_engine::engine::Local::new(r);
+    out.push(measure(
+        &format!("write_settled_alts_1k{sfx}"),
+        runs.write,
+        |i| {
+            reported_write(&engine, &b, "rb", &fx.claim, format!("Settled {i}."));
+        },
+    ));
+}
+
 /// Ops in one `mcp_write_args` call: a doc, its section and 2,000 claims.
 const MCP_CLAIMS: usize = 2000;
 
@@ -1319,6 +1461,8 @@ pub fn run_workload() -> Vec<Measure> {
     tier_views(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
     tier_inflight(&mut out, &mut r, &fx, "", &TYPICAL_RUNS, INFLIGHT_N);
     drop(r);
+    // on projects of their own: the records they add move nothing above
+    tier_coord(&mut out, dir.path(), "", &TYPICAL_RUNS, COORD_N);
     // the large `rdy_write` last, on a reopened project: its 6,000 blocks move nothing above
     tier_mcp(&mut out, &proj);
     if crate::fixtures::deep() {
@@ -1789,6 +1933,44 @@ mod tests {
         assert!(fsync_bound("mcp_write_9mib") && !fsync_bound("mcp_params_9mib"));
     }
 
+    /// Final-review fix round 1: the coordination ops run end to end on small projects (n
+    /// scaled down) and state their targets.
+    #[test]
+    fn d1perf1_the_coord_ops_run_and_state_their_targets() {
+        rdy_model::seed_ids_for_tests(0x7064_6566);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runs = Runs {
+            write: 2,
+            read: 2,
+            tree: 1,
+            materialize_cold: 1,
+            incremental: 1,
+            view_ops: 1,
+            landing: 1,
+            view_changes: 1,
+            landing_views: 1,
+        };
+        let mut out = vec![];
+        tier_coord(&mut out, dir.path(), "", &runs, 20);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "write_expired_intents_1k",
+                "brief_expired_intents_1k",
+                "write_settled_alts_1k"
+            ]
+        );
+        for op in names {
+            let target = spec_target(op).unwrap_or_else(|| panic!("{op} has no target"));
+            assert!(target.contains("< 5 ms p99"), "{op}: {target}");
+        }
+        assert!(
+            fsync_bound("write_expired_intents_1k") && !fsync_bound("brief_expired_intents_1k")
+        );
+    }
+
     #[test]
     #[ignore = "runs the typical perf workload; cargo test -p rdy-qa --release --lib -- --ignored d1perf1"]
     fn d1perf1_the_m2d1_ops_have_spec_targets_and_run() {
@@ -1802,6 +1984,9 @@ mod tests {
             "coord_build_1k",
             "mcp_params_9mib",
             "mcp_write_9mib",
+            "write_expired_intents_1k",
+            "brief_expired_intents_1k",
+            "write_settled_alts_1k",
         ];
         for op in ops {
             assert!(spec_target(op).is_some(), "{op} has no target");

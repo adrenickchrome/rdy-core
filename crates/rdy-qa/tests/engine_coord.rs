@@ -303,3 +303,39 @@ fn cgr1_show_in_the_inflight_scope_lists_the_in_flight_changes() {
     .unwrap_err();
     assert_eq!(err.code, E_BAD_INPUT, "{err:?}");
 }
+
+/// Final-review fix round 1: a coordination edge serializes as every other surface does: the kind
+/// and the node tag in snake case, and a hash as 64 hex digits, not as 32 numbers (moved here
+/// from rdy-graph, which has no JSON dependency).
+#[test]
+fn cgr1_coord_nodes_serialize_their_hashes_as_hex() {
+    use rdy_graph::coord::{Coord, CoordEdge};
+    let b = Node::Block(id("c-AAAAA"));
+    let h = Hash([0xab; 32]);
+    let mut g = Coord::default();
+    g.add(b.clone(), CoordKind::AuthoredIn, Node::Change(h));
+    let v = serde_json::to_value(&g.outgoing(&b)[0]).unwrap();
+    assert_eq!(v["kind"], "authored_in");
+    assert_eq!(v["from"], json!({"node": "block", "id": "c-AAAAA"}));
+    assert_eq!(v["to"], json!({"node": "change", "id": h.to_string()}));
+    for (n, tag) in [
+        (Node::Change(h), "change"),
+        (Node::Proposal(h), "proposal"),
+        (Node::AltSet(h), "alt_set"),
+        (Node::Intent(h), "intent"),
+    ] {
+        assert_eq!(
+            serde_json::to_value(&n).unwrap(),
+            json!({"node": tag, "id": h.to_string()})
+        );
+    }
+    let e = CoordEdge {
+        from: Node::Run("agent:a".into(), "r".into()),
+        kind: CoordKind::RunOf,
+        to: Node::Actor("agent:a".into()),
+    };
+    assert_eq!(
+        serde_json::to_value(&e).unwrap(),
+        json!({"from": {"node": "run", "id": ["agent:a", "r"]}, "kind": "run_of", "to": {"node": "actor", "id": "agent:a"}})
+    );
+}

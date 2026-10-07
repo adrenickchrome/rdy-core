@@ -3,9 +3,12 @@ use crate::error::*;
 use crate::keys::Keys;
 use crate::query::field_json;
 use crate::tree_io::{self, FOLDER_FILE};
-use crate::write::{LinkInput, OpInput, WriteRequest, WriteResult};
+use crate::write::{LinkInput, OpInput, TRACKING_NEEDS_REASON, WriteRequest, WriteResult};
 use crate::{Rdy, ReadState, Scope, Session};
-use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Link, Op, tree};
+use rdy_model::{
+    Block, BlockId, Change, ChangeLinks, EditorialClass, FieldValue, Hash, Justification, Link, Op,
+    tree,
+};
 use rdy_schema::{has_errors, skeleton_gaps, validate_block};
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
@@ -895,14 +898,15 @@ impl Rdy {
         })
     }
 
-    /// lkey1: `edit_block` for a block written as YAML, a key as a link target resolved with the
-    /// keys of the view.
+    /// lkey1: `edit_block_with` for a block written as YAML, a key as a link target resolved
+    /// with the keys of the view. `reason` is the edit's editorial reason (`rdy edit --reason`).
     pub fn edit_yaml(
         &mut self,
         s: &Session,
         view: &str,
         yaml: &str,
         brief: Option<String>,
+        reason: Option<&str>,
     ) -> Result<WriteResult, RdyError> {
         let (mut edited, keyed) = parse_yaml(yaml)?;
         if !keyed.is_empty() {
@@ -912,15 +916,31 @@ impl Rdy {
                 keys.get(t).map(|(_, id)| id.clone())
             })?;
         }
-        self.edit_block(s, view, edited, brief)
+        self.edit_block_with(s, view, edited, brief, reason)
     }
 
+    /// [`Rdy::edit_block_with`] with no reason.
     pub fn edit_block(
         &mut self,
         s: &Session,
         view: &str,
         edited: Block,
         brief: Option<String>,
+    ) -> Result<WriteResult, RdyError> {
+        self.edit_block_with(s, view, edited, brief, None)
+    }
+
+    /// Writes `edited` over its current version in `view`: fields, body and links. A non-blank
+    /// `reason` goes with the write as an editorial `clarify` justification, which a tracking
+    /// edit of an accepted or rejected decision needs (trk1); refused without one, the fix names
+    /// `rdy edit --reason`.
+    pub fn edit_block_with(
+        &mut self,
+        s: &Session,
+        view: &str,
+        edited: Block,
+        brief: Option<String>,
+        reason: Option<&str>,
     ) -> Result<WriteResult, RdyError> {
         let scope = Scope::View(view.to_string());
         let cur = self.read().block(&scope, &edited.id)?;
@@ -992,15 +1012,29 @@ impl Rdy {
             body: (cur.body != edited.body).then(|| edited.body.clone()),
             links,
         };
+        let reason = reason.filter(|r| !r.trim().is_empty());
+        let justification = reason.map(|r| Justification::Editorial {
+            class: EditorialClass::Clarify,
+            reason: r.to_string(),
+        });
         self.write_briefed(
             s,
             WriteRequest {
                 view: view.into(),
                 ops: vec![op],
-                justification: None,
+                justification,
                 message: format!("edit {}", edited.id),
             },
             brief,
         )
+        .map_err(|mut e| {
+            if e.code == E_BAD_INPUT && e.message == TRACKING_NEEDS_REASON {
+                e.fix = format!(
+                    "give the edit a reason: rdy edit {} --reason \"<why>\"",
+                    edited.id
+                );
+            }
+            e
+        })
     }
 }

@@ -538,14 +538,18 @@ fn member_label<'a>(set: &'a AltSet, view: &'a str) -> &'a str {
         .map_or(view, |m| m.label.as_str())
 }
 
-/// altg1, the member rule at propose: a member view of an open set names its own member, and a
-/// pick names an open set the view is a member of, and the view's own member (by label or view
-/// name). Returns the choice the version stores.
+/// altg1, the member rule at propose: a view a settled set did not choose proposes nothing, with
+/// or without a pick; a member view of an open set names its own member, and a pick names an open
+/// set the view is a member of, and the view's own member (by label or view name). Returns the
+/// choice the version stores.
 fn proposed_alt(
     st: &ReadState,
     view: &str,
     alternative: Option<&AltPick>,
 ) -> Result<Option<AltChoice>, RdyError> {
+    not_lost(st, view, |label| {
+        format!("view {view} is its member {label}, and its work can no longer land")
+    })?;
     let Some(pick) = alternative else {
         return match st.alt_of_view(view)? {
             Some((stable, _, set)) => {
@@ -562,10 +566,7 @@ fn proposed_alt(
                     ),
                 ))
             }
-            None => not_lost(st, view, |label| {
-                format!("view {view} is its member {label}, and its work can no longer land")
-            })
-            .map(|()| None),
+            None => Ok(None),
         };
     };
     let (stable, _, set) = st.resolve_alt(&pick.set)?;
@@ -605,11 +606,15 @@ fn proposed_alt(
     }))
 }
 
-/// altg1, the gate rule at land: the set the version chose must still be open with the
-/// proposing view a member, and a version that chose nothing must not come from a member view
-/// (the view joined a set after it was proposed). Returns what the landing records and closes:
-/// the set's latest version, and every other member view.
+/// altg1, the gate rule at land: a view a settled set did not choose lands nothing; the set the
+/// version chose must still be open with the proposing view a member, and a version that chose
+/// nothing must not come from a member view (the view joined a set after it was proposed).
+/// Returns what the landing records and closes: the set's latest version, and every other member
+/// view.
 fn landing_alt(st: &ReadState, p: &Proposal) -> Result<Option<AltLanding>, RdyError> {
+    not_lost(st, &p.view, |_| {
+        "this proposal can no longer land".to_string()
+    })?;
     let Some(a) = &p.alternative else {
         return match st.alt_of_view(&p.view)? {
             Some((stable, _, set)) => Err(RdyError::new(
@@ -622,10 +627,7 @@ fn landing_alt(st: &ReadState, p: &Proposal) -> Result<Option<AltLanding>, RdyEr
                 ),
                 "propose again with alternatives",
             )),
-            None => not_lost(st, &p.view, |_| {
-                "this proposal can no longer land".to_string()
-            })
-            .map(|()| None),
+            None => Ok(None),
         };
     };
     let (stable, version, set) = st.resolve_alt(&a.set.to_string())?;

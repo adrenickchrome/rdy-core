@@ -330,7 +330,9 @@ fn cgr1_coord_edges_are_kept_once_and_indexed_both_ways() {
     assert_eq!(g.incoming(&c)[0].from, b);
     assert_eq!(g.outgoing(&c)[0].kind, CoordKind::MadeBy);
     assert!(g.incoming(&Node::Area("x".into())).is_empty());
-    let v = serde_json::to_value(&g.outgoing(&b)[0]).unwrap();
-    assert_eq!(v["kind"], "authored_in");
-    assert_eq!(v["from"]["node"], "block");
+    // the edge as stored (its JSON form is pinned in rdy-qa's engine_coord, final-review fix
+    // round 1: rdy-graph has no JSON dependency)
+    assert_eq!(g.outgoing(&b)[0].kind, CoordKind::AuthoredIn);
+    assert_eq!(g.outgoing(&b)[0].from, b);
+    assert_eq!(g.outgoing(&b)[0].to, c);
 }

@@ -80,8 +80,17 @@ fn vpos1_a_cached_position_costs_under_10_us_p99() {
 #[test]
 fn clink1_links_are_stored_on_the_change_and_part_of_its_id() {
     let (_d, mut r) = project();
+    // a real intent to link: on a doc written first
+    let w = write(&mut r, "work", doc("Target")).unwrap();
+    let target = w.created.values().next().unwrap().clone();
+    let intent: Hash = r
+        .intent_post(&writer(), Some("work"), None, &[target], "link me", None)
+        .unwrap()
+        .intent
+        .parse()
+        .unwrap();
     let links = ChangeLinks {
-        intent: Some(Hash::of(b"intent")),
+        intent: Some(intent),
         alternative: None,
         client_nonce: Some("nonce-7".into()),
     };
@@ -101,4 +110,6 @@ fn clink1_links_are_stored_on_the_change_and_part_of_its_id() {
         r.store().change(&b.change.parse().unwrap()).unwrap().links,
         ChangeLinks::default()
     );
+    // a link names a record that exists (cfmt1's fsck checks it)
+    r.fsck().unwrap();
 }

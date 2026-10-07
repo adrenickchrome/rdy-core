@@ -53,7 +53,7 @@ pub use query::{
     Context, ImpactItem, ImpactVia, code_lines, compact_summary, field_json, summary, summary_in,
 };
 pub use rdy_store::Relay;
-pub use read_state::{CoordHeads, Delta, InflightSet, ReadState};
+pub use read_state::{CoordHeads, Delta, InflightSet, OpenIntent, ReadState};
 pub use session::{
     HUMAN_RUN, INFLIGHT_SCOPE, PinnedClock, Scope, Session, SessionKind, classify, human_actor,
     human_actor_from_env, now_ms, pin_clock, rfc3339, rfc3339_now,

@@ -513,7 +513,7 @@ fn intent_notes_of(
     view: &str,
     h: &Hash,
 ) -> Option<Vec<IntentNote>> {
-    if st.coord_heads().intents.is_empty() {
+    if st.coord_heads().open_intents.is_empty() {
         return Some(vec![]);
     }
     let change = st.reader().change(h).ok()?;

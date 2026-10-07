@@ -317,3 +317,87 @@ fn altg1_a_reopened_member_view_the_set_did_not_choose_cannot_propose() {
     );
     assert!(e.fix.contains("outside the set"), "{}", e.fix);
 }
+
+/// Final-review fix round 1: why a view was closed is readable where the view is: the close op of
+/// `rdy view show` and the closed row of `rdy view ls --all` carry the reason (a landing's, or one
+/// given by hand); other ops and open rows carry none.
+#[test]
+fn altg1_a_close_reason_shows_in_view_show_and_view_ls() {
+    let (_d, mut r) = project();
+    let set = setup(&mut r);
+    r.view_close(&writer(), &["c".into()], "by hand").unwrap();
+    let p = r
+        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .unwrap();
+    r.land(&approver(), &p.id).unwrap();
+    let st = r.read();
+    let b = st.view_show("b").unwrap();
+    assert_eq!(b.ops[0].kind, "close");
+    let reason = b.ops[0].reason.clone().expect("the close op's reason");
+    assert!(
+        reason.starts_with(&format!("alternative chosen: {set} chose ")),
+        "{reason}"
+    );
+    assert!(b.ops[1..].iter().all(|o| o.reason.is_none()), "{:?}", b.ops);
+    let v = serde_json::to_value(&b).unwrap();
+    assert_eq!(v["ops"][0]["reason"], json!(reason));
+    assert!(v["ops"][1].get("reason").is_none(), "{v}");
+    let rows = st.view_list(true, 30, now_ms()).unwrap();
+    let row = |name: &str| rows.iter().find(|x| x.name == name).unwrap().clone();
+    assert_eq!(row("b").close_reason.as_deref(), Some(reason.as_str()));
+    assert_eq!(row("c").close_reason.as_deref(), Some("by hand"));
+    assert_eq!(row("a").close_reason, None);
+    let a = serde_json::to_value(row("a")).unwrap();
+    assert!(a.get("close_reason").is_none(), "{a}");
+}
+
+/// Final-review fix round 1: the lost-member rule holds with a pick too. A view a settled set did
+/// not choose cannot propose as a member of a later open set, and a pick on the settled set
+/// itself names the real fix (a view outside the set) in one hop.
+#[test]
+fn altg1_a_lost_member_cannot_propose_under_a_later_set_or_a_pick() {
+    let (_d, mut r) = project();
+    let section = two_claims(&mut r);
+    let set = r
+        .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap()
+        .id;
+    let pa = r
+        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .unwrap();
+    r.land(&approver(), &pa.id).unwrap();
+    assert!(r.undo(&writer(), "b", None, false).unwrap().reopened);
+    // a pick on the chosen set: the fix is the outside view, not "propose without alternatives"
+    let e = r
+        .propose_with(&writer(), "b", "y", None, None, Some(&pick(&set, "y")))
+        .unwrap_err();
+    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
+    assert!(e.fix.contains("outside the set"), "{}", e.fix);
+    // b joins a later open set, and its pick there is refused too
+    write(
+        &mut r,
+        "d",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "alt D"}]),
+    )
+    .unwrap();
+    let later = r
+        .alt_create(&writer(), "U", None, &[m("p", "b"), m("q", "d")])
+        .unwrap()
+        .id;
+    let e = r
+        .propose_with(&writer(), "b", "p", None, None, Some(&pick(&later, "p")))
+        .unwrap_err();
+    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
+    assert!(
+        e.message.contains("view b is its member y"),
+        "{}",
+        e.message
+    );
+    assert!(e.fix.contains("outside the set"), "{}", e.fix);
+    // the later set's other member still proposes and lands
+    let pd = r
+        .propose_with(&writer(), "d", "q", None, None, Some(&pick(&later, "q")))
+        .unwrap();
+    r.land(&approver(), &pd.id).unwrap();
+    assert!(canon_bodies(&r).iter().any(|b| b == "alt D"));
+}

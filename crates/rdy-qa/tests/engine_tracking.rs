@@ -239,3 +239,47 @@ fn trk1_tracking_fields_show_in_rdy_schema_and_show() {
         .unwrap();
     assert_eq!(d["tracking"], json!(["disposition", "trigger"]));
 }
+
+/// Final-review fix round 1: `rdy edit`'s write (`edit_block_with`, which `edit_yaml` calls)
+/// carries a reason as an editorial `clarify` justification, so a person can move a tracking
+/// field from the CLI; without one, the refusal names `rdy edit --reason`.
+#[test]
+fn trk1_an_edit_with_a_reason_moves_a_tracking_field() {
+    let (_d, mut r) = trk_project();
+    let (dec, _claim) = accepted(&mut r);
+    let mut edited = r.read().block(&Scope::Canon, &id(&dec)).unwrap();
+    edited.fields.insert(
+        "disposition".into(),
+        rdy_model::FieldValue::Str("M2d2".into()),
+    );
+    let e = r
+        .edit_block_with(&writer(), "reg", edited.clone(), None, None)
+        .unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT);
+    assert!(e.message.contains("editorial reason"), "{}", e.message);
+    assert!(
+        e.fix.contains("rdy edit") && e.fix.contains("--reason"),
+        "{}",
+        e.fix
+    );
+    // a blank reason is no reason
+    assert_eq!(
+        r.edit_block_with(&writer(), "reg", edited.clone(), None, Some("  "))
+            .unwrap_err()
+            .code,
+        E_BAD_INPUT
+    );
+    r.edit_block_with(&writer(), "reg", edited, None, Some("re-sliced into M2d2"))
+        .unwrap();
+    land(&mut r, "reg").unwrap();
+    let b = r.read().block(&Scope::Canon, &id(&dec)).unwrap();
+    assert_eq!(b.field_str("disposition"), Some("M2d2"));
+    let h = r.read().history(&Scope::Canon, &id(&dec), 10).unwrap();
+    assert_eq!(
+        h.entries[0].justification,
+        Some(JustificationInfo::Editorial {
+            class: "clarify".into(),
+            reason: "re-sliced into M2d2".into()
+        })
+    );
+}

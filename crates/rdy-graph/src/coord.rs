@@ -5,18 +5,23 @@ use imbl::OrdMap;
 use rdy_model::{BlockId, Hash};
 use serde::Serialize;
 
-/// A node of the coordination graph.
+/// A hash as its 64 hex digits, as every surface shows one.
+fn hex<S: serde::Serializer>(h: &Hash, s: S) -> Result<S::Ok, S::Error> {
+    s.collect_str(h)
+}
+
+/// A node of the coordination graph. Hashes serialize as hex.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(tag = "node", content = "id", rename_all = "snake_case")]
 pub enum Node {
     Block(BlockId),
-    Change(Hash),
+    Change(#[serde(serialize_with = "hex")] Hash),
     /// A proposal version.
-    Proposal(Hash),
+    Proposal(#[serde(serialize_with = "hex")] Hash),
     /// An alternative set, by its stable id.
-    AltSet(Hash),
+    AltSet(#[serde(serialize_with = "hex")] Hash),
     /// An intent, by its stable id.
-    Intent(Hash),
+    Intent(#[serde(serialize_with = "hex")] Hash),
     Actor(String),
     /// An actor's run: (actor, run).
     Run(String, String),

@@ -418,3 +418,104 @@ fn iwr1_a_delete_or_a_move_out_of_an_area_still_hears_of_the_area_intent() {
     assert_eq!(out["intents"][0]["id"], ia.id.as_str());
     assert_eq!(out["intents"][0]["blocks"], json!([section]));
 }
+
+/// Final-review fix round 1: the open-intent index that writes, briefings, the list and the
+/// coordination graph read follows every intent change (post, renew, withdraw, a landing and a
+/// full re-read). It holds each intent whose latest version is open, expired ones included
+/// (expiry is read-time), with its latest version, that version and when it was first posted.
+#[test]
+fn intn1_the_open_intent_index_follows_every_intent_change() {
+    let (_d, mut r) = qa_project();
+    let (_doc, _s, claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = agent("agent:a", Some("ra"));
+    let index = |r: &Rdy| -> Vec<(String, String, String, i64)> {
+        r.read()
+            .coord_heads()
+            .open_intents
+            .iter()
+            .map(|(stable, o)| {
+                (
+                    stable.to_string(),
+                    o.version.to_string(),
+                    o.intent.angle.clone(),
+                    o.posted_at_ms,
+                )
+            })
+            .collect()
+    };
+    let (i1, i2) = {
+        let _clock = pin_clock(1_000_000);
+        let i1 = r
+            .intent_post(&a, None, None, std::slice::from_ref(&claim), "one", None)
+            .unwrap();
+        let i2 = r
+            .intent_post(&a, None, Some("payments"), &[], "two", Some(60_000))
+            .unwrap();
+        (i1, i2)
+    };
+    let row = |i: &IntentInfo| {
+        (
+            i.intent.clone(),
+            i.version.clone(),
+            i.angle.clone(),
+            i.posted_at_ms,
+        )
+    };
+    let mut want = vec![row(&i1), row(&i2)];
+    want.sort();
+    assert_eq!(index(&r), want);
+    // a renew moves the version and keeps the time of the first post
+    let renewed = {
+        let _clock = pin_clock(2_000_000);
+        r.intent_renew(&a, &i1.id, None).unwrap()
+    };
+    assert_ne!(renewed.version, i1.version);
+    assert_eq!(renewed.posted_at_ms, 1_000_000);
+    let mut want = vec![row(&renewed), row(&i2)];
+    want.sort();
+    assert_eq!(index(&r), want);
+    // i2 has expired by now: still in the index (expiry is read-time), not in the list
+    assert!(
+        r.read()
+            .intents(&IntentFilter::default(), 3_000_000)
+            .unwrap()
+            .iter()
+            .all(|i| i.id != i2.id)
+    );
+    // a withdrawn intent leaves the index, and stays in the heads
+    {
+        let _clock = pin_clock(3_000_000);
+        r.intent_withdraw(&a, &renewed.id).unwrap();
+    }
+    assert_eq!(index(&r), vec![row(&i2)]);
+    assert_eq!(r.read().coord_heads().intents.len(), 2);
+    let listed = r
+        .read()
+        .intents(
+            &IntentFilter {
+                include_expired: true,
+                ..Default::default()
+            },
+            3_000_000,
+        )
+        .unwrap();
+    let mut statuses: Vec<(&str, &str)> = listed
+        .iter()
+        .map(|i| (i.angle.as_str(), i.status.as_str()))
+        .collect();
+    statuses.sort();
+    assert_eq!(statuses, [("one", "withdrawn"), ("two", "expired")]);
+    // a full re-read and a landing keep the same index
+    r.invalidate();
+    assert_eq!(index(&r), vec![row(&i2)]);
+    let v = version_of(&r, &Scope::Canon, &claim);
+    write(
+        &mut r,
+        "seed",
+        json!([{"op": "update", "id": claim, "base": v, "body": "two"}]),
+    )
+    .unwrap();
+    land(&mut r, "seed").unwrap();
+    assert_eq!(index(&r), vec![row(&i2)]);
+}

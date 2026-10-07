@@ -6,7 +6,7 @@ use crate::gate::{ProposalRef, open_proposals};
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::coord::{Coord, CoordKind, Node};
 use rdy_model::decision::DECISION;
-use rdy_model::{BlockId, Hash, IntentStatus, Op, Provenance};
+use rdy_model::{BlockId, Hash, Op, Provenance};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -141,11 +141,8 @@ impl ReadState {
             ix.proposals.insert(pref.version, pref);
         }
         // open intents whatever their expiry: readers filter by `now`
-        for (stable, latest) in &self.coord_heads().intents {
-            let intent = reader.intent(latest)?;
-            if intent.status != IntentStatus::Open {
-                continue;
-            }
+        for (stable, open) in &self.coord_heads().open_intents {
+            let intent = &open.intent;
             let n = Node::Intent(*stable);
             for b in &intent.blocks {
                 ix.graph

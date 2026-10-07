@@ -790,6 +790,9 @@ warm reads, because the graph is built once per published state. The cold build 
 | `coord_build_1k` | cold: `invalidate`, then `coord()` (the coordination graph of the in-flight state) | `runs.materialize_cold` | no spec target: the coordination graph's cold build, once per published state (recorded for M2d1) |
 | `mcp_params_9mib` (typical tier only) | `parse_params::<WriteParams>` alone on one `rdy_write` call of 2,002 ops, about 9.2 MiB. The arguments are built outside the timer | 3 | no spec target: the comparator for `mcp_write_9mib` |
 | `mcp_write_9mib` (typical tier only) | `parse_params` and `rdy_write`, consequences included, with a fresh doc name each run. Ends in a durable flush, so it takes the wider margin | 3 | no spec target: recorded (intake: the `&Value` parse and the deep clone of each op cost about +30 ms per 9 MiB) |
+| `write_expired_intents_1k` (typical tier only) | `write_and_report` (the MCP and CLI write, consequences and intent notes included) of an update of the fixture claim by `agent:b`, in a fresh small project (2 folders x 3 docs x 12 claims) where 1,000 intents on that claim have expired and 5 are open. Asserts the reply names the 5 open intents only. Ends in a durable flush | `runs.write` | the write target (spec 11): the intents must not cost a store read each |
+| `brief_expired_intents_1k` (typical tier only) | a warm `brief` of the fixture claim in view `rb`, same project. Asserts 5 in-flight intents | `runs.read` | < 5 ms p99 (the read budget, spec 11) |
+| `write_settled_alts_1k` (typical tier only) | the same write in another fresh small project with 1,000 abandoned alternative sets (2,000 closed member views) | `runs.write` | the write target (spec 11): the sets must not cost a store read each |
 
 What each cost grows with:
 
@@ -801,6 +804,11 @@ What each cost grows with:
 - The warm reads cost what a read of any built scope costs: a lookup in the graph.
 - `mcp_params_9mib` grows with the size of the request. `mcp_write_9mib` adds the deep clone of
   every op and the write itself.
+- The coordination ops (final-review fix round 1) do no store read per intent or set. No intent
+  or set is ever deleted: an intent expires at read time and a set is settled. So
+  the published state indexes the intents whose latest version is open (`open_intents`) and the
+  open and the settled sets, and a publish reads only the intents and sets that moved. A write
+  and a briefing filter the index by `now` in memory: an expired intent costs one comparison.
 
 The `mcp_*` ops run last, on a reopened project: their 6,000 blocks move nothing above them.
 
