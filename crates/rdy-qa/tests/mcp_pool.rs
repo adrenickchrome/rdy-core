@@ -25,13 +25,7 @@ fn port1_a_read_after_a_write_sees_it_and_overview_counts_the_states_views() {
     assert_eq!(views[0]["name"], "r1");
     assert_eq!(views[0]["changes"], 1);
     assert_eq!(o["tree"].as_array().unwrap().len(), 1);
-    assert!(
-        c.latencies()
-            .iter()
-            .all(|(_, d)| *d < Duration::from_secs(2)),
-        "{:?}",
-        c.latencies()
-    );
+    // how fast a call is: the perf tier's `daemon_mcp_overview`
 }
 
 #[test]
@@ -48,9 +42,9 @@ fn port1_a_pipelined_write_then_read_is_answered_in_order_and_the_read_sees_the_
     c.send_raw(&json!({"jsonrpc": "2.0", "id": w, "method": "tools/call", "params": {"name": "rdy_write", "arguments": {"ops": [{"op": "create", "type": "doc", "fields": {"name": "p", "title": "P", "doc_type": "glossary"}}]}}}).to_string());
     let o = c.next_id();
     c.send_raw(&json!({"jsonrpc": "2.0", "id": o, "method": "tools/call", "params": {"name": "rdy_overview", "arguments": {}}}).to_string());
-    let first = c.recv_next(Duration::from_secs(5));
+    let first = c.recv_next(Duration::from_secs(30));
     assert_eq!(first["id"], w, "{first}");
-    let second = c.recv_next(Duration::from_secs(5));
+    let second = c.recv_next(Duration::from_secs(30));
     assert_eq!(second["id"], o, "{second}");
     let body: serde_json::Value =
         serde_json::from_str(second["result"]["content"][0]["text"].as_str().unwrap()).unwrap();

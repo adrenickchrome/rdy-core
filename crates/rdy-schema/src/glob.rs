@@ -96,7 +96,7 @@ impl Glob {
 
     /// Whole-path match.
     pub fn matches(&self, path: &str) -> bool {
-        match self.prefix_matches(path) {
+        match self.prefix_matches(path, &mut 0) {
             Some(row) => row.last().copied().unwrap_or(false),
             None => false,
         }
@@ -104,15 +104,25 @@ impl Glob {
 
     /// Whole-path match, or a match of a proper prefix of the path ending at a `/`.
     pub fn covers(&self, path: &str) -> bool {
-        match self.prefix_matches(path) {
+        self.covers_counting(path).0
+    }
+
+    /// [`Glob::covers`], and the matcher's step count: one per table cell and one per scan of a
+    /// name character. It stays within `(pattern bytes + segments + 1) x (path bytes + segments
+    /// + 1)` whatever the stars: the test hook that pins the matcher as polynomial.
+    #[doc(hidden)]
+    pub fn covers_counting(&self, path: &str) -> (bool, u64) {
+        let mut steps = 0;
+        let covered = match self.prefix_matches(path, &mut steps) {
             Some(row) => row.iter().skip(1).any(|&m| m),
             None => false,
-        }
+        };
+        (covered, steps)
     }
 
     /// `row[k]` is whether the pattern matches the first `k` segments of `path`. `None` for a path
     /// that is empty, has an empty segment, or has more than `MAX_PATH_SEGMENTS` segments.
-    fn prefix_matches(&self, path: &str) -> Option<Vec<bool>> {
+    fn prefix_matches(&self, path: &str, steps: &mut u64) -> Option<Vec<bool>> {
         if path.is_empty() {
             return None;
         }
@@ -129,12 +139,14 @@ impl Glob {
             match seg {
                 Segment::Any => {
                     for j in 0..=n {
+                        *steps += 1;
                         next[j] = prev[j] || (j > 0 && next[j - 1]);
                     }
                 }
                 Segment::Pat(toks) => {
                     for j in 1..=n {
-                        next[j] = prev[j - 1] && segment_matches(toks, segs[j - 1]);
+                        *steps += 1;
+                        next[j] = prev[j - 1] && segment_matches(toks, segs[j - 1], steps);
                     }
                 }
             }
@@ -146,19 +158,20 @@ impl Glob {
 
 /// `*`/`?` matching of one segment: the standard single-backtrack-point scan, O(pattern x name).
 /// `?` is one character. Tree names are ASCII, so the common case scans bytes without allocating.
-fn segment_matches(toks: &[Tok], name: &str) -> bool {
+fn segment_matches(toks: &[Tok], name: &str, steps: &mut u64) -> bool {
     if name.is_ascii() {
-        scan(toks, name.as_bytes(), |lit, b| lit == *b)
+        scan(toks, name.as_bytes(), |lit, b| lit == *b, steps)
     } else {
         let chars: Vec<char> = name.chars().collect();
-        scan(toks, &chars, |lit, c| char::from(lit) == *c)
+        scan(toks, &chars, |lit, c| char::from(lit) == *c, steps)
     }
 }
 
-fn scan<T>(toks: &[Tok], name: &[T], lit_eq: impl Fn(u8, &T) -> bool) -> bool {
+fn scan<T>(toks: &[Tok], name: &[T], lit_eq: impl Fn(u8, &T) -> bool, steps: &mut u64) -> bool {
     let (mut t, mut s) = (0usize, 0usize);
     let mut backtrack: Option<(usize, usize)> = None;
     while s < name.len() {
+        *steps += 1;
         match toks.get(t) {
             Some(Tok::Star) => {
                 backtrack = Some((t, s));
