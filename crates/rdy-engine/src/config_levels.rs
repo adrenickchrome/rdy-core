@@ -33,7 +33,36 @@ const FILE_LEVELS: [Level; 3] = [Level::Local, Level::Project, Level::User];
 pub struct KeyRule {
     pub key: &'static str,
     pub levels: &'static [Level],
+    /// The type of the value, as `Config` reads it.
+    pub ty: Ty,
     pub default: Option<&'static str>,
+}
+
+/// The type a key's value must have. `Opt*` also allows an empty value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ty {
+    Str,
+    OptStr,
+    Bool,
+    U32,
+    OptU64,
+    /// Not read by `Config` yet: any value.
+    Any,
+}
+
+impl Ty {
+    /// `Ok` when `v` has this type, else the message of the deserializer.
+    fn check(self, v: &Value) -> Result<(), String> {
+        let r = match self {
+            Ty::Any => return Ok(()),
+            Ty::Str => serde_yaml_ng::from_value::<String>(v.clone()).map(drop),
+            Ty::OptStr => serde_yaml_ng::from_value::<Option<String>>(v.clone()).map(drop),
+            Ty::Bool => serde_yaml_ng::from_value::<bool>(v.clone()).map(drop),
+            Ty::U32 => serde_yaml_ng::from_value::<u32>(v.clone()).map(drop),
+            Ty::OptU64 => serde_yaml_ng::from_value::<Option<u64>>(v.clone()).map(drop),
+        };
+        r.map_err(|e| e.to_string())
+    }
 }
 
 const PROJECT_ONLY: &[Level] = &[Level::Project];
@@ -45,52 +74,62 @@ pub const KEY_LEVELS: &[KeyRule] = &[
     KeyRule {
         key: "pack",
         levels: PROJECT_ONLY,
+        ty: Ty::Str,
         default: None,
     },
     KeyRule {
         key: "name",
         levels: PROJECT_ONLY,
+        ty: Ty::OptStr,
         default: None,
     },
     KeyRule {
         key: "description",
         levels: PROJECT_ONLY,
+        ty: Ty::OptStr,
         default: None,
     },
     KeyRule {
         key: "reviews.require_up_to_date",
         levels: PROJECT_ONLY,
+        ty: Ty::Bool,
         default: Some("false"),
     },
     KeyRule {
         key: "decisions.home",
         levels: PROJECT_ONLY,
+        ty: Ty::Any,
         default: None,
     },
     KeyRule {
         key: "code_repos",
         levels: PROJECT_ONLY,
+        ty: Ty::Any,
         default: None,
     },
     KeyRule {
         key: "views.idle_days",
         levels: ANY,
+        ty: Ty::U32,
         default: Some("14"),
     },
     KeyRule {
         key: "serve.start_timeout",
         levels: ANY,
+        ty: Ty::OptU64,
         default: Some("30"),
     },
     KeyRule {
         key: "serve.idle_timeout",
         levels: ANY,
+        ty: Ty::OptU64,
         default: Some("600"),
     },
     // the default is `human:$USER`, taken from the environment in `effective`
     KeyRule {
         key: "actor",
         levels: PERSON,
+        ty: Ty::OptStr,
         default: None,
     },
 ];
@@ -288,6 +327,30 @@ pub fn effective_lenient(project: &Path, user_file: Option<&Path>) -> Effective 
     })
 }
 
+/// Why the value `rule.key` has in `map` is of the wrong type, or `None` when it has the type or
+/// is not set. A parent section that is not a mapping is the wrong type too.
+fn wrong_type(map: &Mapping, rule: &KeyRule) -> Option<String> {
+    let mut cur = map;
+    let mut parts = rule.key.split('.').peekable();
+    while let Some(part) = parts.next() {
+        let v = cur.get(part)?;
+        if parts.peek().is_none() {
+            return rule.ty.check(v).err();
+        }
+        match v {
+            Value::Mapping(inner) => cur = inner,
+            Value::Null => return None,
+            other => {
+                return Some(format!(
+                    "{part} must be a mapping of settings, not {}",
+                    flow(other)
+                ));
+            }
+        }
+    }
+    None
+}
+
 fn build(project: &Path, user_file: Option<&Path>, lenient: bool) -> Result<Effective, RdyError> {
     if !lenient && !project.join(PROJECT_FILE).exists() {
         return Err(RdyError::new(
@@ -331,6 +394,27 @@ fn build(project: &Path, user_file: Option<&Path>, lenient: bool) -> Result<Effe
                 ));
             }
             remove_path(map, rule.key);
+        }
+    }
+    for (level, map) in &mut files {
+        for rule in KEY_LEVELS {
+            let Some(why) = wrong_type(map, rule) else {
+                continue;
+            };
+            if !lenient {
+                let shown = file_name(*level, user_file);
+                return Err(RdyError::new(
+                    E_CONFIG,
+                    format!("{} in {shown}: {why}", rule.key),
+                    format!("fix {} in {shown}", rule.key),
+                ));
+            }
+            remove_path(map, rule.key);
+            if let Some((head, _)) = rule.key.split_once('.')
+                && map.get(head).is_some_and(|v| !v.is_mapping())
+            {
+                map.remove(head);
+            }
         }
     }
     let mut merged = files
@@ -444,6 +528,62 @@ mod tests {
         let e = effective(d.path(), None).unwrap();
         assert_eq!(e.merged.get("later"), Some(&Value::from(1u64)));
         assert!(e.origins.iter().all(|o| o.key != "later"));
+    }
+
+    #[test]
+    fn cfgl1_a_wrong_typed_value_is_e_config_naming_its_file_and_key() {
+        let d = project("pack: p\n", Some("serve:\n  idle_timeout: soon\n"));
+        let e = effective(d.path(), None).unwrap_err();
+        assert_eq!(e.code, E_CONFIG);
+        assert!(
+            e.message
+                .starts_with("serve.idle_timeout in .rdy/local.yaml: ")
+                && e.message.contains("soon"),
+            "{e}"
+        );
+        assert_eq!(e.fix, "fix serve.idle_timeout in .rdy/local.yaml");
+        // the user config, the project config and a section that is not a mapping
+        let u = tempfile::tempdir().unwrap();
+        let uf = u.path().join("config.yaml");
+        std::fs::write(&uf, "views:\n  idle_days: many\n").unwrap();
+        let e = effective(project("pack: p\n", None).path(), Some(&uf)).unwrap_err();
+        assert!(
+            e.message
+                .starts_with(&format!("views.idle_days in {}: ", uf.display())),
+            "{e}"
+        );
+        assert!(e.fix.contains(&uf.display().to_string()), "{e}");
+        let d = project("pack: p\nreviews:\n  require_up_to_date: maybe\n", None);
+        let e = effective(d.path(), None).unwrap_err();
+        assert!(
+            e.message
+                .starts_with("reviews.require_up_to_date in .rdy/config.yaml: "),
+            "{e}"
+        );
+        let d = project("pack: p\nserve: 5\n", None);
+        let e = effective(d.path(), None).unwrap_err();
+        assert!(
+            e.message
+                .starts_with("serve.start_timeout in .rdy/config.yaml: "),
+            "{e}"
+        );
+        // an empty optional value and an empty section are fine
+        let d = project("pack: p\nname:\nserve:\n  idle_timeout:\n", None);
+        assert!(effective(d.path(), None).is_ok());
+    }
+
+    #[test]
+    fn cfgl1_lenient_drops_a_wrong_typed_value_and_a_bad_section() {
+        let d = project(
+            "pack: p\nserve: 5\nviews:\n  idle_days: 3\n",
+            Some("serve:\n  idle_timeout: soon\n"),
+        );
+        let e = effective_lenient(d.path(), None);
+        assert!(e.merged.get("serve").is_none());
+        assert_eq!(
+            get_path(&e.merged, "views.idle_days"),
+            Some(&Value::from(3u64))
+        );
     }
 
     #[test]

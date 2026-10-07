@@ -135,3 +135,25 @@ fn cfgl1_a_local_actor_makes_that_actor_the_human_here() {
         "the user-level actor is no longer the human in this project"
     );
 }
+
+#[test]
+fn cfgl1_a_wrong_typed_value_names_the_file_it_is_in() {
+    let (_d, p) = proj();
+    append(&p, LOCAL_FILE, "serve:\n  idle_timeout: soon\n");
+    let e = effective(&p, None).unwrap_err();
+    assert_eq!(e.code, E_CONFIG);
+    assert!(
+        e.message.contains("serve.idle_timeout") && e.message.contains(".rdy/local.yaml"),
+        "{e}"
+    );
+    assert!(
+        e.fix.contains(".rdy/local.yaml") && !e.fix.contains("config.yaml"),
+        "{e}"
+    );
+    let e = Rdy::open(&p).err().expect("open refuses it");
+    assert_eq!(e.code, E_CONFIG);
+    assert!(
+        e.message.contains(".rdy/local.yaml") && e.fix.contains(".rdy/local.yaml"),
+        "{e}"
+    );
+}
