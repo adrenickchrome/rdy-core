@@ -155,6 +155,8 @@ pub struct DecideParams {
     pub conditional_on: Option<Vec<String>>,
     pub refines: Option<Vec<String>>,
     pub answers: Option<Vec<String>>,
+    /// Pack-defined decision fields, e.g. {"key": "FW-E3", "disposition": "built in M2c3"}: rdy_schema decision lists them; validated against the pack as rdy_write validates fields. Not statement, options or the other fields with their own parameter, nor status, decided_at or recorded_at.
+    pub fields: Option<serde_json::Map<String, Value>>,
     /// When the decision takes effect (RFC 3339); defaults to when it is recorded.
     pub effective_from: Option<String>,
     /// The briefing token from rdy_brief. Required when the write touches stable content.
@@ -878,6 +880,10 @@ fn decision_input(p: DecideParams) -> DecisionInput {
         answers: p.answers.unwrap_or_default(),
         no_inherit,
         brief: p.brief,
+        fields: p
+            .fields
+            .map(|m| m.into_iter().collect())
+            .unwrap_or_default(),
     }
 }
 
