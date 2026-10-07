@@ -1562,6 +1562,23 @@ fn print_error(e: &ErrorReply, as_json: bool) {
             );
         }
     }
+    for d in e
+        .extra
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        eprintln!(
+            "{}:{}:{}: {} {} (fix: {})",
+            text(&d["file"]),
+            num(&d["line"]),
+            num(&d["column"]),
+            text(&d["code"]),
+            text(&d["message"]),
+            text(&d["fix"])
+        );
+    }
 }
 
 fn main() -> ExitCode {

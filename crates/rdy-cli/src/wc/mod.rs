@@ -37,12 +37,36 @@ pub enum WcCmd {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
     },
+    /// Record the staged files as one change in the bound view and write them back.
+    Commit {
+        /// The change's message.
+        #[arg(short = 'm', long)]
+        message: String,
+        /// A decision this change carries out (id, key or path); repeat for more.
+        #[arg(long)]
+        implements: Vec<String>,
+        /// An editorial change: its class (typo, restructure or clarify) and the reason.
+        #[arg(long, num_args = 2, value_names = ["CLASS", "REASON"], conflicts_with = "implements")]
+        editorial: Vec<String>,
+    },
 }
 
 pub fn run(cmd: WcCmd, env: &Env) -> Result<(Value, String), ErrorReply> {
     match cmd {
         WcCmd::Checkout { view, force } => checkout::run(env, view, force),
         WcCmd::Add { paths } => add::run(env, paths),
+        WcCmd::Commit {
+            message,
+            implements,
+            editorial,
+        } => commit::run(
+            env,
+            message,
+            commit::Justify {
+                implements,
+                editorial,
+            },
+        ),
     }
 }
 
@@ -56,7 +80,8 @@ pub(crate) struct Open {
 }
 
 /// The working copy the command runs in: its place, the lock (waiting up to `LOCK_WAIT`) and its
-/// state; `E_WC_NOT_BOUND` when `require_bound` and nothing is checked out.
+/// state, with an interrupted commit finished or dropped first (`commit::recover`);
+/// `E_WC_NOT_BOUND` when `require_bound` and nothing is checked out.
 pub(crate) fn open(env: &Env, require_bound: bool) -> Result<Open, ErrorReply> {
     let place = env.place.clone().ok_or_else(|| {
         ErrorReply::new(
@@ -66,7 +91,8 @@ pub(crate) fn open(env: &Env, require_bound: bool) -> Result<Open, ErrorReply> {
         )
     })?;
     let lock = WcLock::take(&place.state, LOCK_WAIT)?;
-    let state = WcState::load(&place)?;
+    let mut state = WcState::load(&place)?;
+    commit::recover(env, &place, &mut state)?;
     if require_bound {
         state.require_bound()?;
     }

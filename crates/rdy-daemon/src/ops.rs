@@ -10,12 +10,12 @@ use rdy_engine::consequence::{land_and_report, propose_and_report, write_and_rep
 use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::search::SearchFilters;
 use rdy_engine::{
-    E_BAD_INPUT, E_IO, E_LIMIT, E_NOT_FOUND, E_PERMISSION, HISTORY_MAX, LandOptions, RdyError,
-    ReadState, Relay, Scope, SearchQuery, Session, block_to_yaml, check_path, resolve_pack,
-    view_api,
+    E_BAD_INPUT, E_IO, E_LIMIT, E_NOT_FOUND, E_PERMISSION, HISTORY_MAX, LandOptions, OpInput,
+    RdyError, ReadState, Relay, Scope, SearchQuery, Session, WriteRequest, block_to_yaml,
+    check_path, resolve_pack, view_api,
 };
 use rdy_mcp::tools::MAX_TOKENS_LIMIT;
-use rdy_model::{ActorRun, RelayEvidence, Role};
+use rdy_model::{ActorRun, ChangeLinks, EditorialClass, Justification, RelayEvidence, Role};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -56,6 +56,8 @@ pub const OPS: &[&str] = &[
     "fsck",
     "view",
     "wc_view",
+    "wc_commit",
+    "wc_nonce",
 ];
 
 #[derive(Deserialize)]
@@ -229,6 +231,35 @@ struct WcViewArgs {
     view: Option<String>,
     ids: Option<Vec<String>>,
     blobs_dir: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WcCommitArgs {
+    view: String,
+    ops: Vec<Value>,
+    nonce: String,
+    rewrite: Vec<String>,
+    message: Option<String>,
+    implements: Option<Vec<String>>,
+    editorial: Option<EditorialArg>,
+    brief: Option<String>,
+    max_tokens: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditorialArg {
+    class: String,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WcNonceArgs {
+    view: String,
+    nonce: String,
+    rewrite: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -465,6 +496,15 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             )?,
         ),
         "wc_view" => wc_view(cx, parse(op, args, "{view?, ids?, blobs_dir?}")?),
+        "wc_commit" => wc_commit(
+            cx,
+            parse(
+                op,
+                args,
+                "{view, ops, nonce, rewrite, message?, implements?, editorial?, brief?, max_tokens?}",
+            )?,
+        ),
+        "wc_nonce" => wc_nonce(cx, parse(op, args, "{view, nonce, rewrite}")?),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),
@@ -945,4 +985,158 @@ fn wc_view(cx: &OpContext, a: WcViewArgs) -> Result<Value, RdyError> {
         }
     }
     Ok(to_json(&proj))
+}
+
+/// The most changes `wc_nonce` reads before it answers that no change carries the nonce (R-I6).
+const NONCE_SCAN_LIMIT: usize = 10_000;
+
+/// The scope a working copy of `view` reads: the view when it has a head, else canon.
+fn wc_scope(st: &ReadState, view: &str) -> Scope {
+    if st.view_head(view).is_some() {
+        Scope::View(view.to_string())
+    } else {
+        Scope::Canon
+    }
+}
+
+/// The projection of the files of `rewrite` (ids as text) in `view`, as reply keys: `files`,
+/// `blocks`, `blobs`, `missing` and `head`. An id that does not parse, or that the scope does
+/// not hold, is listed in `missing`.
+fn wc_rewrite(st: &ReadState, view: &str, rewrite: &[String]) -> Result<Value, RdyError> {
+    let scope = wc_scope(st, view);
+    let mut ids = vec![];
+    let mut unparsed = vec![];
+    for t in rewrite {
+        match rdy_model::BlockId::parse(t) {
+            Ok(id) => ids.push(id),
+            Err(_) => unparsed.push(t.clone()),
+        }
+    }
+    let mut proj = st.wc_project(&scope, Some(&ids))?;
+    proj.missing.extend(unparsed);
+    Ok(json!({
+        "files": proj.files,
+        "blocks": proj.blocks,
+        "blobs": proj.blobs,
+        "missing": proj.missing,
+        "head": proj.head,
+    }))
+}
+
+/// Merges the keys of the object `extra` into the object `v`.
+fn merge_into(v: &mut Value, extra: Value) {
+    if let (Some(o), Value::Object(e)) = (v.as_object_mut(), extra) {
+        o.extend(e);
+    }
+}
+
+/// wccm1: a working-copy commit. One write of `ops` into `view` that records `nonce` on the
+/// change, justified as `rdy_write` justifies it; the reply gains the projection of the files
+/// of `rewrite` as the write left them.
+fn wc_commit(cx: &OpContext, a: WcCommitArgs) -> Result<Value, RdyError> {
+    check_max_tokens(a.max_tokens)?;
+    if !cx.session.role.can_write() {
+        return Err(RdyError::new(
+            E_PERMISSION,
+            format!("role {:?} cannot write", cx.session.role),
+            "start the session as a writer",
+        ));
+    }
+    let view = view_of(cx.session, Some(a.view));
+    let justification = match (a.implements, a.editorial) {
+        (Some(_), Some(_)) => {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "give either implements or editorial, not both",
+                "implements for decision-backed changes, editorial for typo/restructure/clarify",
+            ));
+        }
+        (Some(texts), None) => {
+            if texts.is_empty() {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    "implements is empty",
+                    "name the decision this change carries out, or leave implements out",
+                ));
+            }
+            let st = cx.engine.read();
+            let scope = Scope::View(view.clone());
+            let mut ids: Vec<rdy_model::BlockId> = vec![];
+            for t in &texts {
+                let id = st.resolve_id(&scope, t)?;
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            Some(Justification::Implements(ids))
+        }
+        (None, Some(e)) => Some(Justification::Editorial {
+            class: match e.class.as_str() {
+                "typo" => EditorialClass::Typo,
+                "restructure" => EditorialClass::Restructure,
+                "clarify" => EditorialClass::Clarify,
+                other => {
+                    return Err(RdyError::new(
+                        E_BAD_INPUT,
+                        format!("unknown editorial class {other:?}"),
+                        "use typo, restructure or clarify",
+                    ));
+                }
+            },
+            reason: e.reason,
+        }),
+        (None, None) => None,
+    };
+    let ops: Vec<OpInput> = a
+        .ops
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| {
+            serde_json::from_value(v).map_err(|e| {
+                RdyError::new(
+                    E_BAD_INPUT,
+                    format!("op {i}: {e}"),
+                    "each op needs \"op\" (rdy_schema lists them under \"ops\"); create needs \"type\"",
+                )
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    let req = WriteRequest {
+        view: view.clone(),
+        ops,
+        justification,
+        message: a.message.unwrap_or_default(),
+    };
+    let s = cx.session.clone();
+    let (nonce, brief) = (a.nonce, a.brief);
+    let mut out = write_and_report(cx.engine, &view, a.max_tokens, move |r| {
+        r.write_linked(
+            &s,
+            req,
+            ChangeLinks {
+                client_nonce: Some(nonce),
+                ..Default::default()
+            },
+            brief.as_deref(),
+        )
+    })?;
+    let proj = wc_rewrite(&cx.engine.read(), &view, &a.rewrite)?;
+    merge_into(&mut out, proj);
+    Ok(out)
+}
+
+/// wccm1, R-I6: the change a working-copy commit with `nonce` recorded, when the store has it,
+/// and then the projection of the files of `rewrite` (as `wc_commit` adds it); else
+/// `{change: null}`.
+fn wc_nonce(cx: &OpContext, a: WcNonceArgs) -> Result<Value, RdyError> {
+    let st = cx.engine.read();
+    let view = view_of(cx.session, Some(a.view));
+    match st.change_by_nonce(&view, &a.nonce, NONCE_SCAN_LIMIT)? {
+        None => Ok(json!({"change": null})),
+        Some(h) => {
+            let mut out = json!({"change": h.to_string()});
+            merge_into(&mut out, wc_rewrite(&st, &view, &a.rewrite)?);
+            Ok(out)
+        }
+    }
 }

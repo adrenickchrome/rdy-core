@@ -362,3 +362,134 @@ pub fn checkout(
     st.save(place)?;
     Ok(summary)
 }
+
+/// What a write-back did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WriteBack {
+    /// The paths written, in the projection's order.
+    pub written: Vec<String>,
+    /// The tracked paths deleted, sorted.
+    pub removed: Vec<String>,
+}
+
+/// Deletes the tracked file at `rel` (never through a link) and its base copy; returns whether
+/// `rel` was a plain path.
+fn drop_tracked(place: &Place, rel: &str) -> Result<bool, RdyError> {
+    let Ok(p) = inside(rel) else {
+        return Ok(false);
+    };
+    if !behind_link(&place.root, p) {
+        let path = place.root.join(p);
+        if fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_dir()) {
+            remove_file(&path)?;
+        }
+    }
+    let base = place.base_file(rel);
+    if fs::symlink_metadata(&base).is_ok_and(|m| !m.file_type().is_dir()) {
+        remove_file(&base)?;
+    }
+    Ok(true)
+}
+
+/// Removes the directories between `top` and `rel`'s file that are left empty, deepest first;
+/// nothing when one of them is a link (what is behind it is not the working tree's).
+fn prune_dirs(top: &Path, rel: &str) {
+    let Ok(p) = inside(rel) else { return };
+    if behind_link(top, p) {
+        return;
+    }
+    let mut dirs = ancestors(top, p);
+    dirs.reverse();
+    for d in dirs {
+        if fs::remove_dir(&d).is_err() {
+            break; // it holds something (or is not a directory): it and those above stay
+        }
+    }
+}
+
+/// Writes a commit's projection back into the working copy (wccm1, exact): each projected file
+/// at its path and in `base/files`, deleting its head's old path when it moved; the old file of
+/// each `rewrite` id the projection lists as missing; each path of `removed_files` still tracked.
+/// A path the projection writes is never deleted. Then `base.blocks` is rebuilt for the rewritten
+/// files (an entry in a rewritten or deleted file is replaced by the projection's; an id no
+/// longer in any file is dropped), `base.files` is updated, the folder directories left empty
+/// are removed, and each `committed` path leaves the stage (its copy or its deletion). The state
+/// is not saved here.
+pub fn apply_writeback(
+    place: &Place,
+    st: &mut WcState,
+    proj: &Projection,
+    rewrite: &BTreeSet<BlockId>,
+    removed_files: &BTreeSet<String>,
+    committed: &BTreeSet<String>,
+) -> Result<WriteBack, RdyError> {
+    let root = &place.root;
+    let base_dir = place.state.join("base/files");
+    let written: BTreeSet<&str> = proj.files.iter().map(|f| f.path.as_str()).collect();
+    let mut out = WriteBack::default();
+    let mut gone: BTreeSet<String> = BTreeSet::new();
+    let old_path = |files: &BTreeMap<String, BlockId>, id: &str| -> Vec<String> {
+        files
+            .iter()
+            .filter(|(_, h)| h.as_str() == id)
+            .map(|(p, _)| p.clone())
+            .collect()
+    };
+    for f in &proj.files {
+        write_at(root, &f.path, &f.text, None)?;
+        write_at(&base_dir, &f.path, &f.text, None)?;
+        out.written.push(f.path.clone());
+        for old in old_path(&st.base.files, &f.id) {
+            if old != f.path && !written.contains(old.as_str()) && drop_tracked(place, &old)? {
+                gone.insert(old);
+            }
+        }
+    }
+    for id in rewrite {
+        if !proj.missing.iter().any(|m| m == id.as_str()) {
+            continue;
+        }
+        for old in old_path(&st.base.files, id.as_str()) {
+            if !written.contains(old.as_str()) && drop_tracked(place, &old)? {
+                gone.insert(old);
+            }
+        }
+    }
+    for rel in removed_files {
+        if st.base.files.contains_key(rel)
+            && !written.contains(rel.as_str())
+            && drop_tracked(place, rel)?
+        {
+            gone.insert(rel.clone());
+        }
+    }
+    // base.blocks: what the rewritten and deleted files held is replaced by the projection's
+    let touched: BTreeSet<&str> = written
+        .iter()
+        .copied()
+        .chain(gone.iter().map(String::as_str))
+        .collect();
+    st.base
+        .blocks
+        .retain(|_, b| !touched.contains(b.file.as_str()));
+    let fresh = base_from(proj);
+    st.base.blocks.extend(fresh.blocks);
+    // base.files: a deleted path and a projected head's old path go; the projection's come in
+    let heads: BTreeSet<&BlockId> = fresh.files.values().collect();
+    st.base
+        .files
+        .retain(|p, h| !gone.contains(p) && !heads.contains(h));
+    st.base.files.extend(fresh.files);
+    for rel in &gone {
+        prune_dirs(root, rel);
+        prune_dirs(&base_dir, rel);
+    }
+    for rel in committed {
+        if inside(rel).is_ok() {
+            crate::wc::state::stage_clear(place, rel)?;
+        }
+        st.stage.deleted.remove(rel);
+    }
+    out.removed = gone.into_iter().collect();
+    Ok(out)
+}
