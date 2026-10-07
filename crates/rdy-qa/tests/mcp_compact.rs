@@ -113,7 +113,7 @@ fn read1_a_code_block_reads_as_its_first_line_capped() {
         codes.iter().any(|c| *c == "code: let n = a. b;"),
         "{codes:?}"
     );
-    assert!(!lines.iter().any(|l| l.contains("let m")), "{lines:?}");
+    assert!(lines.iter().any(|l| l == "| let m = 2;"), "{lines:?}");
     let capped = codes.iter().find(|c| c.contains("xxx")).unwrap();
     let body = capped.strip_prefix("code: ").unwrap();
     assert!(body.chars().count() <= 200, "{}", body.chars().count());
@@ -128,4 +128,27 @@ fn read1_prose_without_a_terminator_shows_only_its_first_line() {
     ]));
     let c = by_id.iter().find(|(k, _)| k.starts_with("c-")).unwrap().1;
     assert_eq!(c, "claim: Refunds go through the ledger", "{lines:?}");
+}
+
+/// cbody1: a code block's whole body follows its head line, one `| ` line per body line, so a
+/// value deep in a code sample needs no rdy_context call.
+#[test]
+fn cbody1_a_code_block_reads_in_full() {
+    let (lines, _by_id) = compact_lines(json!([
+        {"op": "create", "type": "code", "id": "$c", "body": "[server]\nhost = \"0.0.0.0\"\n\nport = 7007   ", "fields": {"lang": "toml"}},
+        {"op": "create", "type": "claim", "id": "$a", "body": "After the code."}
+    ]));
+    let at = lines
+        .iter()
+        .position(|l| l.contains(" code: [server]"))
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    assert_eq!(
+        lines[at + 1..at + 5].to_vec(),
+        vec!["| [server]", "| host = \"0.0.0.0\"", "|", "| port = 7007"],
+        "{lines:?}"
+    );
+    assert!(
+        lines[at + 5].contains(" claim: After the code."),
+        "the next block follows the body: {lines:?}"
+    );
 }

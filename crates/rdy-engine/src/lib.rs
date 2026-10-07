@@ -13,6 +13,7 @@ mod keys;
 mod lint;
 mod materialize;
 mod paths;
+pub mod proposal_show;
 mod query;
 mod read_state;
 mod session;
@@ -31,13 +32,20 @@ pub use brief::{
 pub use decide::DecisionInput;
 pub use error::*;
 pub use events::{Event, EventKind, Events};
-pub use gate::{LandInfo, LandOptions, LandingRow, ProposalInfo, ProposalRef, RebasedInfo};
+pub use gate::{
+    LandInfo, LandOptions, LandingRow, ProposalInfo, ProposalRef, RebasedInfo, RelayedByRow,
+};
 pub use history::{Author, HISTORY_MAX, History, HistoryEntry, JustificationInfo, LandingRef};
 pub use io::{ExportSummary, block_from_yaml, block_to_yaml};
 pub use lint::check_path;
 pub use materialize::{Materialized, PathMiss};
 pub use paths::TreeNode;
-pub use query::{Context, ImpactItem, ImpactVia, compact_summary, field_json, summary, summary_in};
+pub use proposal_show::{
+    ProposalChangeRow, ProposalShow, ProposalVersionRow, is_proposal_ref, proposal_text,
+};
+pub use query::{
+    Context, ImpactItem, ImpactVia, code_lines, compact_summary, field_json, summary, summary_in,
+};
 pub use rdy_store::Relay;
 pub use read_state::{Delta, ReadState};
 pub use session::{

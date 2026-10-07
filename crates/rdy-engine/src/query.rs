@@ -142,6 +142,21 @@ pub fn compact_summary(b: &Block) -> String {
     }
 }
 
+/// cbody1: a `code` block's whole body, one entry per line (each `trim_end`ed), references shown
+/// as bare ids. Any other block type gives no lines. This reads the body itself, never a
+/// `statement`, `name` or `title` field a pack may set on `code`.
+pub fn code_lines(b: &Block) -> Vec<String> {
+    if b.block_type != "code" {
+        return Vec::new();
+    }
+    render_refs(&b.body, RefMode::for_body(&b.block_type), &|tok| {
+        tok.to_string()
+    })
+    .lines()
+    .map(|l| l.trim_end().to_string())
+    .collect()
+}
+
 /// Up to and including the first `.`, `?` or `!` followed by a space or the end of `text`.
 fn first_sentence(text: &str) -> Option<&str> {
     let bytes = text.as_bytes();

@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-use crate::view_tools;
+use crate::{read_page, view_tools};
 
 pub const E_NO_SESSION: &str = "E_NO_SESSION";
 
@@ -44,6 +44,9 @@ pub(crate) fn check_tokens(max_tokens: Option<usize>) -> Result<(), RdyError> {
     }
 }
 
+/// Warning codes that are advisory: reported once per doc per MCP session (adv1).
+pub const ADVISORY_ONCE: [&str; 1] = ["W_SKELETON_MISSING"];
+
 pub struct McpState {
     /// The one door to the project: reads from the published state, writes on the writer.
     pub engine: Arc<dyn Engine>,
@@ -53,6 +56,11 @@ pub struct McpState {
     pub sid: Option<u64>,
     /// The pack generation this session has heard of (its `pack_changed` notice).
     pub seen_gen: u64,
+    /// The advisories this session has reported, as `(code, block or "", message)` (adv1).
+    /// Cleared by a successful `rdy_session`.
+    pub reported: std::collections::BTreeSet<(String, String, String)>,
+    /// The cut reads this session can page on, by token (rpag1). In memory only.
+    pub reads: read_page::ReadRegistry,
 }
 
 impl McpState {
@@ -64,6 +72,8 @@ impl McpState {
             view: "work".into(),
             sid: None,
             seen_gen,
+            reported: Default::default(),
+            reads: Default::default(),
         }
     }
 }
@@ -89,14 +99,27 @@ pub struct ScopeParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct IdParams {
-    /// A block id or a path. rdy_read and rdy_context also take `id@version` or a whole ref line `[id@version] …`, and read under that version.
+    /// A block id or a path. rdy_context also takes `id@version` or a whole ref line `[id@version] …`, and reads under that version.
     pub id: String,
     /// "canon", a view name (an existing view, or your session's), "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
     pub scope: Option<String>,
-    /// rdy_read only: compact (default), markdown or yaml.
-    pub format: Option<String>,
     /// rdy_impact only: traversal depth (default 3).
     pub depth: Option<u32>,
+    pub max_tokens: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ReadParams {
+    /// A block id, key or path (wallets/transactions); <doc>#<heading-slug> reads one section of a doc; id@version or a ref line [id@version] … reads under that version; P-<id>@<n> reads a proposal version. Required unless page is given.
+    pub id: Option<String>,
+    /// "canon", a view name (an existing view, or your session's), "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
+    pub scope: Option<String>,
+    /// compact (default), markdown or yaml.
+    pub format: Option<String>,
+    /// Only the blocks whose text matches: a substring (any case), or /regex/. A code block shows only its matching lines; in compact format, a block matched only past its compact line (a prose body, table rows, diagram source) shows that line alone. The result's matched counts the blocks kept.
+    pub pattern: Option<String>,
+    /// Continue a cut read: its next cursor. Alone (scope and max_tokens allowed).
+    pub page: Option<String>,
     pub max_tokens: Option<usize>,
 }
 
@@ -155,6 +178,8 @@ pub struct DecideParams {
     pub conditional_on: Option<Vec<String>>,
     pub refines: Option<Vec<String>>,
     pub answers: Option<Vec<String>>,
+    /// Pack-defined decision fields, e.g. {"key": "FW-E3", "disposition": "built in M2c3"}: rdy_schema decision lists them; validated against the pack as rdy_write validates fields. Not statement, options or the other fields with their own parameter, nor status, decided_at or recorded_at.
+    pub fields: Option<serde_json::Map<String, Value>>,
     /// When the decision takes effect (RFC 3339); defaults to when it is recorded.
     pub effective_from: Option<String>,
     /// The briefing token from rdy_brief. Required when the write touches stable content.
@@ -216,13 +241,71 @@ pub fn error_json(e: &RdyError) -> Value {
         .unwrap_or_else(|_| json!({"code": e.code, "message": e.message, "fix": e.fix}))
 }
 
+/// adv1: drop the advisory warnings (`ADVISORY_ONCE`) this session already reported and count
+/// them in `warnings_repeated`. The `warnings` array stays, possibly empty.
+fn report_once(st: &mut McpState, mut v: Value) -> Value {
+    let Some(warnings) = v.get_mut("warnings").and_then(Value::as_array_mut) else {
+        return v;
+    };
+    let mut dropped = 0u64;
+    warnings.retain(|w| {
+        let code = w["code"].as_str().unwrap_or("");
+        if !ADVISORY_ONCE.contains(&code) {
+            return true;
+        }
+        let key = (
+            code.to_string(),
+            w["block"].as_str().unwrap_or("").to_string(),
+            w["message"].as_str().unwrap_or("").to_string(),
+        );
+        let fresh = st.reported.insert(key);
+        if !fresh {
+            dropped += 1;
+        }
+        fresh
+    });
+    if dropped > 0 {
+        v["warnings_repeated"] = json!(dropped);
+    }
+    v
+}
+
 /// How many versions `rdy_context` carries of a block's history.
 pub const CONTEXT_HISTORY: usize = 20;
 
+/// The tokens `v` costs as JSON (4 bytes a token).
+fn tokens_of(v: &Value) -> usize {
+    serde_json::to_string(v).map(|s| s.len() / 4).unwrap_or(0)
+}
+
+/// Cuts the string at `k` until `obj` fits `max` tokens (or the string is empty), and marks it
+/// `truncated`; `mark` records how many bytes were cut (it runs before each fit check).
+fn cut_text(
+    obj: &mut serde_json::Map<String, Value>,
+    k: &str,
+    max: usize,
+    mark: impl Fn(&mut serde_json::Map<String, Value>, usize),
+) {
+    let text = obj[k].as_str().unwrap_or_default().to_string();
+    let mut keep = (max * 4).saturating_sub(200).min(text.len());
+    loop {
+        let cut = (0..=keep)
+            .rev()
+            .find(|i| text.is_char_boundary(*i))
+            .unwrap_or(0);
+        obj.insert(k.to_string(), json!(text[..cut]));
+        obj.insert("truncated".into(), json!(true));
+        mark(obj, text.len() - cut);
+        if tokens_of(&Value::Object(obj.clone())) <= max || cut == 0 {
+            break;
+        }
+        keep = cut.saturating_sub((cut / 8).max(1));
+    }
+}
+
 pub fn budget(v: Value, max_tokens: Option<usize>) -> Value {
     let max = max_tokens.unwrap_or(4000);
-    let size = |v: &Value| serde_json::to_string(v).map(|s| s.len() / 4).unwrap_or(0);
-    if size(&v) <= max {
+    if tokens_of(&v) <= max {
         return v;
     }
     let mut v = match v {
@@ -252,21 +335,9 @@ pub fn budget(v: Value, max_tokens: Option<usize>) -> Value {
             .max()
             .map(|(_, k)| k);
         if let Some(k) = longest {
-            let text = obj[&k].as_str().unwrap_or_default().to_string();
-            let mut keep = (max * 4).saturating_sub(200).min(text.len());
-            loop {
-                let cut = (0..=keep)
-                    .rev()
-                    .find(|i| text.is_char_boundary(*i))
-                    .unwrap_or(0);
-                obj.insert(k.clone(), json!(text[..cut]));
-                obj.insert("truncated".into(), json!(true));
-                obj.insert("omitted".into(), json!(text.len() - cut));
-                if size(&Value::Object(obj.clone())) <= max || cut == 0 {
-                    break;
-                }
-                keep = cut.saturating_sub((cut / 8).max(1));
-            }
+            cut_text(obj, &k, max, |o, n| {
+                o.insert("omitted".into(), json!(n));
+            });
         }
         return v;
     };
@@ -277,7 +348,7 @@ pub fn budget(v: Value, max_tokens: Option<usize>) -> Value {
         obj.insert(key.clone(), Value::Array(full[..mid].to_vec()));
         obj.insert("truncated".into(), json!(true));
         obj.insert("omitted".into(), json!(full.len() - mid));
-        if size(&Value::Object(obj.clone())) <= max {
+        if tokens_of(&Value::Object(obj.clone())) <= max {
             lo = mid
         } else {
             hi = mid - 1
@@ -300,21 +371,22 @@ pub(crate) fn session(st: &McpState) -> Result<Session, RdyError> {
 }
 
 /// The scope a tool reads, resolved on the state the tool reads (`read`), so that a view created
-/// by a later publish is never accepted here and then read on a state without it.
-fn scope_of(st: &McpState, read: &ReadState, s: &Option<String>) -> Result<Scope, RdyError> {
+/// by a later publish is never accepted here and then read on a state without it. `view` is the
+/// session view `s` resolves against, and the scope when `s` is none.
+fn scope_of(view: &str, read: &ReadState, s: &Option<String>) -> Result<Scope, RdyError> {
     match s {
         // scope1: an unknown view is not found, unless it is this session's own view
-        Some(text) => read.resolve_read_scope(text, Some(&st.view)),
+        Some(text) => read.resolve_read_scope(text, Some(view)),
         // ses1: a reader session whose view is canon reads canon by default
-        None if st.view == "canon" => Ok(Scope::Canon),
-        None => Ok(Scope::View(st.view.clone())),
+        None if view == "canon" => Ok(Scope::Canon),
+        None => Ok(Scope::View(view.to_string())),
     }
 }
 
 /// refv1: the scope and the block id of a read call whose `id` may be `id@version` or a ref line.
 /// A pinned version reads under `tag:<version>`; an explicit scope that differs is refused.
 fn read_target(
-    st: &McpState,
+    view: &str,
     read: &ReadState,
     id: &str,
     scope: &Option<String>,
@@ -325,8 +397,8 @@ fn read_target(
         .scope_text(scope.as_deref())
         .map_err(|m| RdyError::new(E_BAD_INPUT, m, rdy_model::reference::PIN_CLASH_FIX))?;
     let scope = match pinned {
-        Some(text) => read.resolve_read_scope(&text, Some(&st.view))?,
-        None => scope_of(st, read, scope)?,
+        Some(text) => read.resolve_read_scope(&text, Some(view))?,
+        None => scope_of(view, read, scope)?,
     };
     let bid = read.resolve_id(&scope, &t.id)?;
     Ok((scope, bid))
@@ -473,6 +545,7 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
     }
     st.view = view;
     st.session = Some(session);
+    st.reported.clear();
     Ok(json!({ "view": st.view, "role": p.role }))
 }
 
@@ -480,7 +553,7 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     check_tokens(p.max_tokens)?;
     let s = session(st)?;
     let st_ = st.engine.read();
-    let scope = scope_of(st, &st_, &p.scope)?;
+    let scope = scope_of(&st.view, &st_, &p.scope)?;
     let position = st_.version_position(&scope)?;
     let max = p.max_tokens.unwrap_or(4000);
     let tree = fit_tree(st_.tree(&scope, None, None)?, max.saturating_sub(300));
@@ -516,11 +589,184 @@ pub fn rdy_tags(st: &mut McpState, _p: TagsParams) -> Result<Value, RdyError> {
     Ok(json!({"versions": versions, "current": current}))
 }
 
-pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
+/// The fix of `E_PAGE_STALE`: the read a cursor pages on is gone or has moved.
+const PAGE_STALE_FIX: &str = "the read moved on; start again without a cursor";
+
+/// A read's blocks, one entry each in reading order (rpag1), after any pattern (rpat1).
+struct ReadEntries {
+    root: BlockId,
+    format: String,
+    entries: Vec<String>,
+    /// The block of each entry.
+    ids: Vec<BlockId>,
+    sep: &'static str,
+    conflict: Option<Value>,
+    warnings: Vec<Value>,
+    /// The entries kept, when a pattern is given.
+    matched: Option<usize>,
+}
+
+impl ReadEntries {
+    /// The page token: the whole hash of the query and of every entry.
+    fn token(&self, q: &read_page::ReadQuery) -> String {
+        let mut bytes = b"rdy-read-1\0".to_vec();
+        bytes.extend(serde_json::to_vec(q).unwrap_or_default());
+        bytes.push(0);
+        bytes.extend(self.entries.join("\n\x1e").into_bytes());
+        rdy_model::Hash::of(&bytes).to_string()
+    }
+}
+
+pub fn rdy_read(st: &mut McpState, p: ReadParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
+    if let Some(cursor) = &p.page {
+        if p.id.is_some() || p.format.is_some() || p.pattern.is_some() {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "page continues a read: pass it alone",
+                "pass only page, with scope or max_tokens if you like",
+            ));
+        }
+        let bad_cursor = || {
+            RdyError::new(
+                E_BAD_INPUT,
+                "page is not a cursor from rdy_read's next",
+                "pass the next value of a cut rdy_read unchanged",
+            )
+        };
+        let (token, from) = read_page::parse_cursor(cursor).ok_or_else(bad_cursor)?;
+        let q = st.reads.get(&token).ok_or_else(|| {
+            RdyError::new(
+                E_PAGE_STALE,
+                "the read behind this page is unknown (the session restarted, or it was evicted): read again",
+                PAGE_STALE_FIX,
+            )
+        })?;
+        let read = read_entries(st, &q)?;
+        if read.token(&q) != token {
+            return Err(RdyError::new(
+                E_PAGE_STALE,
+                "the read moved since its first page: read again",
+                PAGE_STALE_FIX,
+            ));
+        }
+        // a cursor rdy issued always points inside its read
+        if from >= read.entries.len() {
+            return Err(bad_cursor());
+        }
+        return Ok(read_page_of(st, q, read, &token, from, p.max_tokens));
+    }
+    let Some(id) = p.id.as_deref() else {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "pass id, or page to continue a read",
+            "id is a block id, key, path, <doc>#<heading-slug> or P-<id>@<n>",
+        ));
+    };
+    if is_proposal_ref(id) {
+        if p.pattern.is_some() {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "pattern filters block reads, not a proposal version",
+                "omit pattern",
+            ));
+        }
+        return read_proposal(st, id, &p);
+    }
+    let q = read_page::ReadQuery {
+        id: id.to_string(),
+        scope: p.scope.clone(),
+        view: st.view.clone(),
+        format: p.format.clone().unwrap_or_else(|| "compact".into()),
+        pattern: p.pattern.clone(),
+    };
+    let read = read_entries(st, &q)?;
+    let token = read.token(&q);
+    Ok(read_page_of(st, q, read, &token, 0, p.max_tokens))
+}
+
+/// One page of a read, from entry `from`: the whole blocks that fit `max_tokens`. A cut read
+/// carries `next` and is registered so that a page call can continue it.
+fn read_page_of(
+    st: &mut McpState,
+    q: read_page::ReadQuery,
+    read: ReadEntries,
+    token: &str,
+    from: usize,
+    max_tokens: Option<usize>,
+) -> Value {
+    let max = max_tokens.unwrap_or(4000);
+    let mut out = json!({
+        "id": read.root.to_string(),
+        "format": read.format,
+        "text": "",
+    });
+    if let Some(c) = read.conflict {
+        out["conflict"] = c;
+    }
+    if !read.warnings.is_empty() {
+        out["warnings"] = json!(read.warnings);
+    }
+    if let Some(n) = read.matched {
+        out["matched"] = json!(n);
+    }
+    // the page's text gets what the envelope leaves: measured with the longest next, truncated
+    // and omitted a page of this read can carry, so the whole page fits max_tokens
+    let all = read.entries.len();
+    let mut envelope = out.clone();
+    envelope["truncated"] = json!(true);
+    envelope["omitted"] = json!(all);
+    envelope["next"] = json!(format!("{token}:{all}"));
+    let envelope_bytes = serde_json::to_string(&envelope).map_or(0, |e| e.len());
+    let end = read_page::page_entries(
+        &read.entries,
+        from,
+        read.sep,
+        (max * 4).saturating_sub(envelope_bytes).max(1),
+    );
+    out["text"] = json!(read.entries[from..end].join(read.sep));
+    if end < read.entries.len() {
+        out["truncated"] = json!(true);
+        out["omitted"] = json!(read.entries.len() - end);
+        out["next"] = json!(format!("{token}:{end}"));
+        st.reads.register(token, q);
+    }
+    // one block larger than the whole budget is shown alone and cut as budget cuts text; cut
+    // names the block and the bytes it lost (omitted always counts entries)
+    if end == from + 1
+        && tokens_of(&out) > max
+        && let Some(obj) = out.as_object_mut()
+    {
+        let id = read.ids[from].to_string();
+        cut_text(obj, "text", max, |o, n| {
+            o.insert("cut".into(), json!({"id": id, "omitted_bytes": n}));
+        });
+    }
+    out
+}
+
+/// The entries of a read as `q` gives it, on the state the engine publishes now.
+fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, RdyError> {
+    let pattern = q
+        .pattern
+        .as_deref()
+        .map(read_page::Pattern::parse)
+        .transpose()?;
+    // a ref line's trailing words may hold a #; ids, keys, paths, versions and slugs never do
+    let (target, slug) = match q.id.split_once('#') {
+        Some((t, s)) if !q.id.trim_start().starts_with('[') => (t, Some(s)),
+        _ => (q.id.as_str(), None),
+    };
+    if slug == Some("") {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "a # needs a heading slug after it",
+            "write <doc>#<heading-slug>, e.g. guide#set-up",
+        ));
+    }
     let st_ = st.engine.read();
-    let (scope, id) = read_target(st, &st_, &p.id, &p.scope)?;
+    let (scope, id) = read_target(&q.view, &st_, target, &q.scope)?;
     let suspects: std::collections::BTreeSet<BlockId> =
         st_.suspects(&scope)?.into_iter().map(|s| s.block).collect();
     // the scope's recorded conflicts by block, for the marker on each conflicted block's line
@@ -531,14 +777,20 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
         .collect();
     let m = st_.materialized(&scope)?;
     let g = st_.graph(&scope)?;
-    let root = m.get(&id).ok_or_else(|| {
+    let mut root = m.get(&id).ok_or_else(|| {
         RdyError::new(
             E_UNKNOWN_BLOCK,
             format!("no block {id}"),
             "list docs with rdy_overview",
         )
     })?;
-    let format = p.format.as_deref().unwrap_or("compact");
+    if let Some(slug) = slug {
+        let section = read_page::section_by_slug(&m, root, slug)?;
+        root = m
+            .get(&section)
+            .expect("section_by_slug returns a block of m");
+    }
+    let format = q.format.as_str();
     if !["compact", "markdown", "yaml"].contains(&format) {
         return Err(RdyError::new(
             E_BAD_INPUT,
@@ -569,7 +821,8 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     } else {
         Default::default()
     };
-    let mut lines = vec![];
+    let keeps = |line: &str| pattern.as_ref().is_none_or(|p| p.matches(line));
+    let (mut entries, mut ids) = (vec![], vec![]);
     let mut stack = vec![(root, 0usize)];
     while let Some((b, depth)) = stack.pop() {
         let status = g.status(&b.id).map(|s| {
@@ -578,36 +831,68 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
                 .and_then(|v| v["status"].as_str().map(String::from))
                 .unwrap_or_default()
         });
-        match format {
-            "yaml" => lines.push(block_to_yaml(b)),
-            "markdown" => lines.push(crate::markdown::block_markdown(
+        let markdown = || {
+            crate::markdown::block_markdown(
                 b,
                 &m,
                 crate::markdown::doc_depth(&m, b),
                 status.as_deref(),
-            )),
+            )
+        };
+        let entry = match format {
+            "yaml" | "markdown" => {
+                let text = if format == "yaml" {
+                    block_to_yaml(b)
+                } else {
+                    markdown()
+                };
+                (pattern.is_none() || text.lines().any(keeps)).then_some(text)
+            }
             _ => {
-                let mut line = format!(
-                    "{}{} {}: {}",
-                    "  ".repeat(depth),
-                    b.id,
-                    b.block_type,
-                    compact_summary(b)
-                );
+                let pad = "  ".repeat(depth);
+                let mut head = format!("{pad}{} {}: {}", b.id, b.block_type, compact_summary(b));
                 if suspects.contains(&b.id) {
-                    line.push_str(" [suspect]");
+                    head.push_str(" [suspect]");
                 }
                 if let Some(c) = conflicts.get(&b.id) {
-                    line.push_str(&format!(" [conflict {c}]"));
+                    head.push_str(&format!(" [conflict {c}]"));
                 }
                 if let Some(s) = &status {
-                    line.push_str(&format!(" [{s}]"));
+                    head.push_str(&format!(" [{s}]"));
                 }
                 if let Some(j) = justified.get(&b.id) {
-                    line.push_str(&format!(" [{j}]"));
+                    head.push_str(&format!(" [{j}]"));
                 }
-                lines.push(line);
+                // a pattern matches the head line, a code line's own text, or any line of the
+                // block's whole text (as markdown gives it: a prose body past its first sentence,
+                // table rows, diagram source); a kept code block shows only the lines that match
+                let body = code_lines(b);
+                let matching: Vec<&String> = body.iter().filter(|l| keeps(l)).collect();
+                let hit = pattern.is_none()
+                    || keeps(&head)
+                    || !matching.is_empty()
+                    || markdown().lines().any(keeps);
+                hit.then(|| {
+                    let shown: Vec<&String> = if pattern.is_some() {
+                        matching
+                    } else {
+                        body.iter().collect()
+                    };
+                    let mut lines = vec![head];
+                    for l in shown {
+                        lines.push(if l.is_empty() {
+                            format!("{pad}  |")
+                        } else {
+                            format!("{pad}  | {l}")
+                        });
+                    }
+                    lines.join("\n")
+                })
             }
+        };
+        if let Some(e) = entry {
+            entries.push(e);
+            ids.push(b.id.clone());
         }
         for c in m.children(Some(&b.id)).into_iter().rev() {
             stack.push((c, depth + 1));
@@ -618,21 +903,48 @@ pub fn rdy_read(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
         "markdown" => "\n\n",
         _ => "\n",
     };
-    let mut out = json!({"id": id.to_string(), "format": format, "text": lines.join(sep)});
-    if let Some(c) = st_.conflict_info(&scope, &id)? {
-        out["conflict"] = json!(c);
+    Ok(ReadEntries {
+        conflict: st_.conflict_info(&scope, &root.id)?.map(|c| json!(c)),
+        root: root.id.clone(),
+        format: format.to_string(),
+        matched: pattern.as_ref().map(|_| entries.len()),
+        entries,
+        ids,
+        sep,
+        warnings,
+    })
+}
+
+/// pshow1: a proposal version reads as its own compact text and the structured `proposal`.
+fn read_proposal(st: &mut McpState, id: &str, p: &ReadParams) -> Result<Value, RdyError> {
+    if let Some(f) = p.format.as_deref()
+        && f != "compact"
+    {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            format!("a proposal version reads as compact only, not {f:?}"),
+            "omit format, or pass \"compact\"",
+        ));
     }
-    if !warnings.is_empty() {
-        out["warnings"] = json!(warnings);
-    }
-    Ok(budget(out, p.max_tokens))
+    let show = st.engine.read().proposal_show(id)?;
+    let v = serde_json::to_value(&show).map_err(|e| {
+        RdyError::new(
+            E_INTERNAL,
+            format!("a proposal did not serialize: {e}"),
+            "report this as a bug in rdy",
+        )
+    })?;
+    Ok(budget(
+        json!({"id": show.r#ref, "format": "compact", "text": proposal_text(&v), "proposal": v}),
+        p.max_tokens,
+    ))
 }
 
 pub fn rdy_context(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.engine.read();
-    let (scope, id) = read_target(st, &st_, &p.id, &p.scope)?;
+    let (scope, id) = read_target(&st.view, &st_, &p.id, &p.scope)?;
     let ctx = st_.context(&scope, &id)?;
     let mut v = serde_json::to_value(ctx).expect("context json");
     if let Some(c) = st_.conflict_info(&scope, &id)? {
@@ -649,7 +961,7 @@ pub fn rdy_impact(st: &mut McpState, p: IdParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.engine.read();
-    let scope = scope_of(st, &st_, &p.scope)?;
+    let scope = scope_of(&st.view, &st_, &p.scope)?;
     let id = st_.resolve_id(&scope, &p.id)?;
     let items = st_.impact(&scope, &id, p.depth.unwrap_or(3))?;
     Ok(budget(json!({"items": items}), p.max_tokens))
@@ -659,7 +971,7 @@ pub fn rdy_suspects(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.engine.read();
-    let scope = scope_of(st, &st_, &p.scope)?;
+    let scope = scope_of(&st.view, &st_, &p.scope)?;
     Ok(budget(
         json!({"items": st_.suspects(&scope)?}),
         p.max_tokens,
@@ -738,6 +1050,8 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
                 "E_BRIEF_REQUIRED": {"when": "a write touches stable content and cites no briefing, or one that does not cover the block", "fix": "retry with the token of the briefing the error carries"},
                 "E_BRIEF_STALE": {"when": "the cited briefing is unknown, or a block it recorded moved in the write's view", "fix": "read what moved, then retry with the token of the briefing the error carries"},
                 "W_BRIEF_STALE": {"when": "a write to drafts cited a stale or unknown briefing (it went ahead)", "fix": "brief again before the next write if the moved blocks matter"},
+                "E_PAGE_STALE": {"when": "a page cursor's read moved since its first page, or this session does not know the cursor", "fix": PAGE_STALE_FIX},
+                "W_SKELETON_MISSING": {"when": "a doc lacks a required section of its doc_type; reported once per doc per session, and later writes count the repeats in warnings_repeated", "fix": "add the section, or give the doc a doc_type without it (page)"},
             },
             "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
             "text": TEXT_RULES,
@@ -750,7 +1064,7 @@ pub fn rdy_brief(st: &mut McpState, p: BriefParams) -> Result<Value, RdyError> {
     check_tokens(p.max_tokens)?;
     session(st)?;
     let st_ = st.engine.read();
-    let scope = scope_of(st, &st_, &p.scope)?;
+    let scope = scope_of(&st.view, &st_, &p.scope)?;
     if let Some(cp) = &p.code_path {
         if p.ids.is_some() || p.path.is_some() {
             return Err(e_code_path_alone());
@@ -846,6 +1160,7 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
     write_and_report(&*st.engine, &view, max_tokens, move |r| {
         r.write_briefed(&s, req, brief)
     })
+    .map(|v| report_once(st, v))
 }
 
 fn decision_input(p: DecideParams) -> DecisionInput {
@@ -878,6 +1193,10 @@ fn decision_input(p: DecideParams) -> DecisionInput {
         answers: p.answers.unwrap_or_default(),
         no_inherit,
         brief: p.brief,
+        fields: p
+            .fields
+            .map(|m| m.into_iter().collect())
+            .unwrap_or_default(),
     }
 }
 
@@ -891,6 +1210,7 @@ pub fn rdy_decide(st: &mut McpState, p: DecideParams) -> Result<Value, RdyError>
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
         r.decide(&s, &view, input)
     })
+    .map(|v| report_once(st, v))
 }
 
 pub fn rdy_supersede(st: &mut McpState, p: SupersedeParams) -> Result<Value, RdyError> {
@@ -903,6 +1223,7 @@ pub fn rdy_supersede(st: &mut McpState, p: SupersedeParams) -> Result<Value, Rdy
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
         r.supersede(&s, &view, &old, part, input)
     })
+    .map(|v| report_once(st, v))
 }
 
 pub fn rdy_revoke(st: &mut McpState, p: RevokeParams) -> Result<Value, RdyError> {
@@ -914,6 +1235,7 @@ pub fn rdy_revoke(st: &mut McpState, p: RevokeParams) -> Result<Value, RdyError>
     write_and_report(&*st.engine, &v, max_tokens, move |r| {
         r.revoke(&s, &view, &p.target, &p.reason, &p.parent, brief)
     })
+    .map(|v| report_once(st, v))
 }
 
 pub fn rdy_propose(st: &mut McpState, p: ProposeParams) -> Result<Value, RdyError> {

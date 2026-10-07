@@ -43,7 +43,25 @@ pub struct DecisionInput {
     /// bwr1: the briefing this decision's write cites (needed under a stable parent).
     #[serde(default)]
     pub brief: Option<String>,
+    /// Pack-defined fields (e.g. key, or a pack's own decision fields), validated against the pack by the write.
+    #[serde(default)]
+    pub fields: BTreeMap<String, Value>,
 }
+
+/// The decision fields that rdy_decide sets itself (from its own parameters, or rdy); `fields` may not carry them.
+pub const DECISION_OWN_FIELDS: [&str; 11] = [
+    "statement",
+    "status",
+    "options",
+    "authority_basis",
+    "attested_by",
+    "reversibility",
+    "kind",
+    "review_by",
+    "effective_from",
+    "decided_at",
+    "recorded_at",
+];
 
 fn links_of(d: &DecisionInput) -> BTreeMap<String, Vec<LinkInput>> {
     let mut links = BTreeMap::new();
@@ -89,6 +107,9 @@ fn fields_of(d: &DecisionInput) -> BTreeMap<String, Value> {
             f.insert(k.into(), json!(v));
         }
     }
+    for (k, v) in &d.fields {
+        f.insert(k.clone(), v.clone());
+    }
     f
 }
 
@@ -101,6 +122,17 @@ impl Rdy {
         extra: Vec<(String, LinkInput)>,
         message: String,
     ) -> Result<WriteResult, RdyError> {
+        if let Some(name) = d
+            .fields
+            .keys()
+            .find(|k| DECISION_OWN_FIELDS.contains(&k.as_str()))
+        {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("fields.{name} is set by rdy_decide, not through fields"),
+                "pass statement, options, authority_basis, attested_by, reversibility, kind, review_by and effective_from as their own parameters; rdy sets status, decided_at and recorded_at",
+            ));
+        }
         let brief = d.brief.clone();
         let mut links = links_of(&d);
         for (name, l) in extra {

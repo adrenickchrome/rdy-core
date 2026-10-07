@@ -86,6 +86,8 @@ block_types:
       lang: { kind: str }
 
 doc_types:
+  # a doc that follows no template: no required sections (importers and converters use it)
+  page:           { skeleton: [] }
   overview:
     skeleton:
       - { title: Summary, required: true }

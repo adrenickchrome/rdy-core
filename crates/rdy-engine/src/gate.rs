@@ -152,7 +152,7 @@ fn ref_hash(bytes: &[u8], what: &str) -> Result<Hash, RdyError> {
 }
 
 /// The latest version of the proposal whose stable id is `stable` (its `proposal/` ref).
-fn latest_version(st: &ReadState, stable: &Hash) -> Result<Hash, RdyError> {
+pub(crate) fn latest_version(st: &ReadState, stable: &Hash) -> Result<Hash, RdyError> {
     match st.reader().get_ref(&format!("proposal/{stable}"))? {
         Some(b) => ref_hash(&b, "a proposal ref"),
         None => Err(rdy_store::StoreError::Decode(format!(
@@ -163,7 +163,7 @@ fn latest_version(st: &ReadState, stable: &Hash) -> Result<Hash, RdyError> {
 }
 
 /// Version `h`'s number: 1 plus the length of its `prev` chain.
-fn version_number(st: &ReadState, h: &Hash) -> Result<u32, RdyError> {
+pub(crate) fn version_number(st: &ReadState, h: &Hash) -> Result<u32, RdyError> {
     let mut n = 1;
     let mut cur = st.reader().proposal(h)?.prev;
     while let Some(p) = cur {
@@ -272,7 +272,7 @@ fn version_ref(st: &ReadState, h: &Hash) -> Result<ProposalRef, RdyError> {
 
 /// Resolves a proposal reference on `st`: a version hash, `P-<prefix>` (the latest version) or
 /// `P-<prefix>@<n>`.
-fn resolve_in(st: &ReadState, text: &str) -> Result<ProposalRef, RdyError> {
+pub(crate) fn resolve_in(st: &ReadState, text: &str) -> Result<ProposalRef, RdyError> {
     let reader = st.reader();
     if let Ok(h) = text.parse::<Hash>() {
         if !reader.has_kind(rdy_store::kinds::PROPOSAL, &h)? {
@@ -381,7 +381,7 @@ fn targets(b: &Block) -> BTreeSet<BlockId> {
         .collect()
 }
 
-fn changes_of(st: &ReadState, ids: &[Hash]) -> Result<Vec<Change>, RdyError> {
+pub(crate) fn changes_of(st: &ReadState, ids: &[Hash]) -> Result<Vec<Change>, RdyError> {
     ids.iter()
         .map(|h| st.reader().change(h).map_err(RdyError::from))
         .collect()
@@ -389,13 +389,47 @@ fn changes_of(st: &ReadState, ids: &[Hash]) -> Result<Vec<Change>, RdyError> {
 
 /// The landing that already carried any of `p`'s changes into canon: one index lookup per
 /// change (lidx1).
-fn landed_as(st: &ReadState, p: &Proposal) -> Result<Option<Hash>, RdyError> {
+pub(crate) fn landed_as(st: &ReadState, p: &Proposal) -> Result<Option<Hash>, RdyError> {
     for c in &p.changes {
         if let Some(l) = st.reader().landing_of(c)? {
             return Ok(Some(l));
         }
     }
     Ok(None)
+}
+
+/// The conflicts the changes `changes` of view `view` carry on the blocks they write: their
+/// merge onto the view's effective base, on those blocks only. For the view's whole set these
+/// are the view's conflicts on the blocks it writes; a subset leaves out conflicts it does
+/// not carry; a set without the view's later resolution still has the conflict.
+pub(crate) fn blocking_conflicts(
+    st: &ReadState,
+    view: &str,
+    changes: &[Hash],
+) -> Result<Vec<Conflict>, RdyError> {
+    let reader = st.reader();
+    let state = reader.state_of(st.effective_base(view))?;
+    let cs = changes_of(st, changes)?;
+    let touched: BTreeSet<BlockId> = cs
+        .iter()
+        .flat_map(|c| c.ops.iter().map(|op| op.block_id().clone()))
+        .collect();
+    let input: Vec<MergeChange<'_>> = cs
+        .iter()
+        .zip(changes)
+        .map(|(c, id)| MergeChange {
+            id: *id,
+            deps: &c.deps,
+            ops: &c.ops,
+        })
+        .collect();
+    Ok(merge_on_blocks(
+        &state,
+        &input,
+        &|v| reader.producer(v).ok().flatten(),
+        &touched,
+    )
+    .conflicts)
 }
 
 /// `E_CONFLICT_UNRESOLVED` for the conflicts a version carries on the blocks it writes: one
@@ -711,41 +745,6 @@ impl Rdy {
         self.propose_subset(s, view, title, None)
     }
 
-    /// The conflicts the changes `changes` of view `view` carry on the blocks they write: their
-    /// merge onto the view's effective base, on those blocks only. For the view's whole set these
-    /// are the view's conflicts on the blocks it writes; a subset leaves out conflicts it does
-    /// not carry; a set without the view's later resolution still has the conflict.
-    fn blocking_conflicts(
-        &self,
-        st: &ReadState,
-        view: &str,
-        changes: &[Hash],
-    ) -> Result<Vec<Conflict>, RdyError> {
-        let reader = st.reader();
-        let state = reader.state_of(st.effective_base(view))?;
-        let cs = changes_of(st, changes)?;
-        let touched: BTreeSet<BlockId> = cs
-            .iter()
-            .flat_map(|c| c.ops.iter().map(|op| op.block_id().clone()))
-            .collect();
-        let input: Vec<MergeChange<'_>> = cs
-            .iter()
-            .zip(changes)
-            .map(|(c, id)| MergeChange {
-                id: *id,
-                deps: &c.deps,
-                ops: &c.ops,
-            })
-            .collect();
-        Ok(merge_on_blocks(
-            &state,
-            &input,
-            &|v| reader.producer(v).ok().flatten(),
-            &touched,
-        )
-        .conflicts)
-    }
-
     /// Proposes `changes` of view `view` (its whole included set when `None`): a new version of
     /// the view's open proposal, or a new proposal. A subset must be closed under dependencies
     /// (each dep in the subset or landed in the view's base). Never refuses for a conflict:
@@ -902,7 +901,7 @@ impl Rdy {
             return Err(e);
         }
         let conflicts = conflict_infos(&st, &st.conflicts(&Scope::View(view.to_string()))?)?;
-        let blocking = conflict_infos(&st, &self.blocking_conflicts(&st, view, &ids)?)?;
+        let blocking = conflict_infos(&st, &blocking_conflicts(&st, view, &ids)?)?;
         // a version with a blocking conflict cannot land until it is resolved, and its merge onto
         // canon would refuse at the first conflict: the gate validates it at landing (RF10)
         let mut issues = vec![];
@@ -1123,7 +1122,7 @@ impl Rdy {
         self.check_base_moved(&st, &pref, &p, &changes, &opts)?;
         // gconf1: the version's own changes (not the view's current set) must carry no conflict
         // on the blocks they write
-        let blocking = self.blocking_conflicts(&st, &p.view, &p.changes)?;
+        let blocking = blocking_conflicts(&st, &p.view, &p.changes)?;
         if !blocking.is_empty() {
             return Err(unresolved(&st, &p.view, &blocking)?);
         }
