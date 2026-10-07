@@ -348,6 +348,8 @@ pub struct ReadState {
     pub(crate) inflight_cell: Arc<InflightCell>,
     /// The coordination refs as this state was published.
     pub(crate) coord_heads: Arc<CoordHeads>,
+    /// cgr1: the coordination graph, built on first read; never carried to the next state.
+    pub(crate) coord: OnceLock<Result<Arc<crate::coord_graph::CoordIndex>, RdyError>>,
     /// A `Full` publish that failed to read the heads: every read of this state returns it.
     pub(crate) error: Option<RdyError>,
 }

@@ -1,6 +1,7 @@
 //! Views as a reader sees them (vls1, cmp1): the list of views with their counts and idle flags,
 //! one view's changes, conflicts and op chain, and a block-level compare of two scopes. Every
 //! answer is compact: ids, versions and field names, never block bodies.
+use crate::coord_graph::{AltRef, alt_label, intent_label};
 use crate::error::*;
 use crate::read_state::ReadState;
 use crate::views::{
@@ -44,6 +45,12 @@ pub struct ChangeSummary {
     pub at_ms: i64,
     pub message: String,
     pub blocks: Vec<String>,
+    /// The intent the change was written under (`in-<short>`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
+    /// The alternative set and member the change was written as.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alternative: Option<AltRef>,
 }
 
 /// One op of a view's chain.
@@ -286,6 +293,11 @@ impl ReadState {
                 at_ms: change.provenance.at_ms,
                 message: change.message.clone(),
                 blocks: blocks.iter().map(|b| b.to_string()).collect(),
+                intent: change.links.intent.as_ref().map(intent_label),
+                alternative: change.links.alternative.map(|a| AltRef {
+                    set: alt_label(&a.set),
+                    member: a.member,
+                }),
             });
         }
         let head: Hash = info

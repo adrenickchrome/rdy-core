@@ -75,7 +75,7 @@ use rdy_store::segment::Location;
 use rdy_store::{Store, kinds, layout};
 use read_state::{AsOfCache, Entry, InflightCell};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -414,6 +414,7 @@ impl Rdy {
             proposal_touched: Arc::clone(&proposal_touched),
             inflight_cell: Arc::default(),
             coord_heads: Arc::default(),
+            coord: OnceLock::new(),
             error: None,
         });
         let mut r = Rdy {
@@ -584,6 +585,7 @@ impl Rdy {
                     proposal_touched: Arc::clone(&self.proposal_touched),
                     inflight_cell: Arc::clone(&prev.inflight_cell),
                     coord_heads: Arc::clone(&prev.coord_heads),
+                    coord: OnceLock::new(),
                     error: Some(e.clone()),
                 }));
                 Err(e)
@@ -831,6 +833,7 @@ impl Rdy {
             proposal_touched: Arc::clone(&self.proposal_touched),
             inflight_cell,
             coord_heads,
+            coord: OnceLock::new(),
             error: None,
         })
     }

@@ -26,6 +26,10 @@ pub struct Context {
     /// The pack areas the block is in (arn1); absent when it is in none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub areas: Vec<String>,
+    /// cgr1: in the `inflight` scope, the in-flight changes that write the block, by change;
+    /// absent in every other scope and when none does.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inflight: Vec<crate::coord_graph::InflightChange>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -240,6 +244,10 @@ impl ReadState {
             suspects,
             effective_from: rdy_model::decision::effective_from(&block).map(str::to_string),
             areas: self.areas_of(scope, id)?,
+            inflight: match scope {
+                Scope::Inflight => self.inflight_changes(id)?,
+                _ => Vec::new(),
+            },
         })
     }
 

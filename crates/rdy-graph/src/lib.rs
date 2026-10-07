@@ -1,3 +1,5 @@
+pub mod coord;
+
 use imbl::OrdMap;
 use rdy_model::decision::{self, DecisionStatus};
 use rdy_model::{Block, BlockId, Hash};

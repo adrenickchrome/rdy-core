@@ -310,3 +310,27 @@ fn a_self_pin_is_never_a_suspect() {
     assert!(g.suspects().is_empty(), "{:?}", g.suspects());
     assert!(g.suspects_of(&c.id).is_empty());
 }
+
+#[test]
+fn cgr1_coord_edges_are_kept_once_and_indexed_both_ways() {
+    use rdy_graph::coord::{Coord, CoordKind, Node};
+    use rdy_model::{BlockId, Hash};
+    let b = Node::Block(BlockId::parse("c-AAAAA").unwrap());
+    let c = Node::Change(Hash([1; 32]));
+    let mut g = Coord::default();
+    g.add(b.clone(), CoordKind::AuthoredIn, c.clone());
+    g.add(b.clone(), CoordKind::AuthoredIn, c.clone());
+    g.add(
+        c.clone(),
+        CoordKind::MadeBy,
+        Node::Run("agent:a".into(), "r".into()),
+    );
+    assert_eq!(g.edge_count(), 2);
+    assert_eq!(g.outgoing(&b).len(), 1);
+    assert_eq!(g.incoming(&c)[0].from, b);
+    assert_eq!(g.outgoing(&c)[0].kind, CoordKind::MadeBy);
+    assert!(g.incoming(&Node::Area("x".into())).is_empty());
+    let v = serde_json::to_value(&g.outgoing(&b)[0]).unwrap();
+    assert_eq!(v["kind"], "authored_in");
+    assert_eq!(v["from"]["node"], "block");
+}
