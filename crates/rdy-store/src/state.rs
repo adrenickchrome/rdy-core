@@ -48,22 +48,25 @@ pub fn apply_op(store: &StoreReader, state: &mut StateSnapshot, op: &Op) -> Resu
             state.blocks.insert(block.id.clone(), block.version_hash());
         }
         Op::Update { base, block } => {
-            check_base(store, state, &block.id, *base)?;
+            check_base(store, state, &block.id, *base, Some(block))?;
             state.blocks.insert(block.id.clone(), block.version_hash());
         }
         Op::Delete { base, id } => {
-            check_base(store, state, id, *base)?;
+            check_base(store, state, id, *base, None)?;
             state.blocks.remove(id);
         }
     }
     Ok(())
 }
 
+/// The op's base is the state's version of `id`, and not a frozen decision, unless the op is an
+/// update to `new` that changes only tracking fields of it (trk1).
 fn check_base(
     store: &StoreReader,
     state: &StateSnapshot,
     id: &BlockId,
     base: Hash,
+    new: Option<&Block>,
 ) -> Result<(), StoreError> {
     let actual = state.blocks.get(id).copied();
     if actual != Some(base) {
@@ -73,10 +76,17 @@ fn check_base(
             actual,
         });
     }
-    if decision::is_frozen(&store.get_block(&base)?) {
+    if frozen_for(store, &store.get_block(&base)?, new) {
         return Err(StoreError::Frozen(id.clone()));
     }
     Ok(())
+}
+
+/// Whether an op on `base` (an update to `new`, or a delete when `None`) is refused because
+/// `base` is a frozen decision: an update that changes only `store`'s tracking fields passes.
+fn frozen_for(store: &StoreReader, base: &Block, new: Option<&Block>) -> bool {
+    decision::is_frozen(base)
+        && !new.is_some_and(|n| decision::only_tracking_changed(base, n, store.tracking()))
 }
 
 impl StoreReader {
@@ -181,8 +191,12 @@ impl StoreReader {
         }
         for &i in &at {
             for op in &changes[i].ops {
+                let new = match op {
+                    Op::Update { block, .. } => Some(block),
+                    _ => None,
+                };
                 if let Some(base) = op.base()
-                    && decision::is_frozen(&self.get_block(&base)?)
+                    && frozen_for(self, &self.get_block(&base)?, new)
                 {
                     return Err(StoreError::Frozen(op.block_id().clone()));
                 }

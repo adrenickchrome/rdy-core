@@ -10,7 +10,7 @@ mod order;
 pub mod tree;
 mod value;
 
-pub use block::{Block, Link, RefMode, RefSpan, hash_of, ref_spans};
+pub use block::{Block, Link, RefMode, RefSpan, Tracking, hash_of, ref_spans};
 pub use canon::{
     ActorRun, ApprovalEvidence, Assurance, EvidenceKind, LandingRecord, Proposal, RelayEvidence,
     StateSnapshot, Tag,

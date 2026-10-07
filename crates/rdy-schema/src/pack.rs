@@ -60,6 +60,10 @@ pub struct BlockTypeDef {
     pub children: Vec<String>,
     #[serde(default)]
     pub body: BodyRule,
+    /// trk1 (D-DZC1J): fields that stay writable on an accepted or rejected decision and are
+    /// left out of the content hash. A child pack's set adds to its parent's.
+    #[serde(default)]
+    pub tracking: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -220,6 +224,16 @@ impl fmt::Display for TensionSeverity {
 }
 
 impl Pack {
+    /// trk1: the tracking fields of every block type that has any.
+    pub fn tracking(&self) -> rdy_model::Tracking {
+        rdy_model::Tracking::new(
+            self.block_types
+                .iter()
+                .map(|(name, t)| (name.clone(), t.tracking.clone()))
+                .collect(),
+        )
+    }
+
     pub fn type_for_prefix(&self, prefix: &str) -> Option<&str> {
         self.block_types
             .iter()

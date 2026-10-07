@@ -606,6 +606,11 @@ fn show_text(v: &Value) -> String {
     if let Some(from) = v["effective_from"].as_str() {
         out.push_str(&format!("effective from: {from}\n"));
     }
+    // trk1: the type's tracking fields, which stay writable once the decision is decided
+    if let Some(names) = v["tracking"].as_array().filter(|a| !a.is_empty()) {
+        let names: Vec<&str> = names.iter().filter_map(Value::as_str).collect();
+        out.push_str(&format!("tracking: {}\n", names.join(", ")));
+    }
     out.push_str(&format!(
         "{}\n{}",
         serde_json::to_string_pretty(&fields).unwrap_or_default(),

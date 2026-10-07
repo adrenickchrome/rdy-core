@@ -523,7 +523,10 @@ impl ReadState {
     pub fn graph(&self, scope: &Scope) -> Result<Arc<Graph>, RdyError> {
         let built = self.built(scope)?;
         Ok(Arc::clone(built.graph.get_or_init(|| {
-            Arc::new(Graph::build_from(built.m.iter()))
+            Arc::new(Graph::build_with(
+                built.m.iter(),
+                Arc::clone(self.reader.tracking()),
+            ))
         })))
     }
 

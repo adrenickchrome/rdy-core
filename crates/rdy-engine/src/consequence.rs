@@ -297,10 +297,12 @@ impl ReadState {
             let next = self
                 .built(&Scope::Canon)?
                 .after(&applied_ops(&changes, &applied));
-            let g = Arc::clone(
-                next.graph
-                    .get_or_init(|| Arc::new(Graph::build_from(next.m.iter()))),
-            );
+            let g = Arc::clone(next.graph.get_or_init(|| {
+                Arc::new(Graph::build_with(
+                    next.m.iter(),
+                    Arc::clone(reader.tracking()),
+                ))
+            }));
             (Arc::clone(&next.m), g)
         };
         Ok(self.consequences_in(

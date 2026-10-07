@@ -173,6 +173,9 @@ impl PackSet {
                 let mut fields = parent_def.fields.clone();
                 fields.extend(tdef.fields);
                 tdef.fields = fields;
+                let mut tracking = parent_def.tracking.clone();
+                tracking.extend(tdef.tracking);
+                tdef.tracking = tracking;
             }
             out.block_types.insert(tname, tdef);
         }
@@ -326,6 +329,7 @@ fn force(pack: &mut Pack, name: &str, prefix: &str, tr: Trait, core: BTreeMap<St
             fields: BTreeMap::new(),
             children: vec![],
             body: BodyRule::Optional,
+            tracking: BTreeSet::new(),
         });
     def.prefix = prefix.to_string();
     def.traits.insert(tr);
@@ -373,6 +377,7 @@ fn check(pack: &Pack) -> Result<(), SchemaError> {
                 "type {name}: field reflects is reserved for the engine on content types"
             )));
         }
+        check_tracking(name, t)?;
         for (fname, fd) in &t.fields {
             if fd.kind == FieldKind::Enum && fd.values.is_empty() {
                 return Err(SchemaError::Invalid(format!(
@@ -396,6 +401,29 @@ fn check(pack: &Pack) -> Result<(), SchemaError> {
         )));
     }
     check_areas(pack)?;
+    Ok(())
+}
+
+/// trk1: each tracking field of `t` is a field of the type, and neither part of a decision's
+/// ruling nor derived or reserved by the engine.
+fn check_tracking(name: &str, t: &BlockTypeDef) -> Result<(), SchemaError> {
+    for f in &t.tracking {
+        let why = if name == d::DECISION && d::RULING_FIELDS.contains(&f.as_str()) {
+            "is part of the ruling"
+        } else if rdy_model::block::DERIVED_FIELDS.contains(&f.as_str())
+            || f == "key"
+            || f == crate::validate::REFLECTS_FIELD
+        {
+            "is derived or reserved by the engine"
+        } else if !t.fields.contains_key(f) {
+            "is not a field of the type"
+        } else {
+            continue;
+        };
+        return Err(SchemaError::Invalid(format!(
+            "type {name}: tracking field {f} {why}"
+        )));
+    }
     Ok(())
 }
 

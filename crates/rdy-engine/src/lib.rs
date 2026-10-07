@@ -385,7 +385,9 @@ impl Rdy {
         let cfg = read_config(project)?;
         let fingerprint = fingerprint?;
         let (pack, lineage) = load_pack(project, &cfg.pack)?;
-        let store = layout::open_project_store(&project.join(".rdy"))?;
+        let mut store = layout::open_project_store(&project.join(".rdy"))?;
+        // trk1: the freeze checks and every content hash use the pack's tracking fields
+        store.set_tracking(pack.tracking());
         let areas = Arc::new(pack.area_matcher());
         let pack = Arc::new(pack);
         let as_of = Arc::new(AsOfCache::default());
@@ -487,6 +489,7 @@ impl Rdy {
             }
         };
         self.areas = Arc::new(pack.area_matcher());
+        self.store.set_tracking(pack.tracking());
         self.pack = Arc::new(pack);
         self.lineage = lineage;
         self.serve = cfg.serve.resolve();

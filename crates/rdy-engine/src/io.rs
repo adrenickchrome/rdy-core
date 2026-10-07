@@ -828,12 +828,13 @@ impl Rdy {
         // it: each cited target (reference or link) to its content hash, the incoming block
         // with that id first, else the view's. A block is never pinned to itself. Pins in the
         // files are ignored.
+        let tracking = self.store.tracking();
         let content = |id: &BlockId| {
             incoming
                 .get(id)
                 .copied()
                 .or_else(|| existing.get(id))
-                .map(Block::content_hash)
+                .map(|t| t.content_hash_with(tracking))
         };
         let pins: Vec<BTreeMap<BlockId, Hash>> = blocks
             .iter()

@@ -6,7 +6,7 @@ use crate::kinds::{self, BlobManifest, RefUpdate};
 use crate::merge::Conflict;
 use crate::segment::{CrashPoint, Location, SegmentLog, SegmentReader, find_gap, seg_path};
 use crate::view::ViewOp;
-use rdy_model::{Block, Change, Hash, LandingRecord, Op, Proposal};
+use rdy_model::{Block, Change, Hash, LandingRecord, Op, Proposal, Tracking};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -53,6 +53,9 @@ pub struct OpenReport {
 pub struct StoreReader {
     index: Arc<Index>,
     shared: Arc<ReaderShared>,
+    /// trk1: the project pack's tracking fields, which the freeze checks let change on a frozen
+    /// decision. Empty until the engine calls [`Store::set_tracking`].
+    tracking: Arc<Tracking>,
 }
 
 /// What every reader of one store shares, whatever index it holds.
@@ -446,6 +449,7 @@ impl Store {
                 sets: Mutex::new(HashMap::new()),
                 frames_read: AtomicU64::new(0),
             }),
+            tracking: Arc::default(),
         };
         let mut store = Store {
             dir: dir.to_path_buf(),
@@ -585,19 +589,36 @@ impl Store {
 
     /// Drops the store's own reader, and with it the store's `Arc` of the index, keeping what
     /// readers share. The database closes now unless a cloned reader still holds it.
-    fn drop_index(&mut self) -> Option<Arc<ReaderShared>> {
-        self.reader.take().map(|StoreReader { index, shared }| {
-            drop(index);
-            shared
-        })
+    fn drop_index(&mut self) -> Option<(Arc<ReaderShared>, Arc<Tracking>)> {
+        self.reader.take().map(
+            |StoreReader {
+                 index,
+                 shared,
+                 tracking,
+             }| {
+                drop(index);
+                (shared, tracking)
+            },
+        )
     }
 
     /// Makes `index` the store's index, in a new reader that shares everything else with the old.
-    fn set_index(&mut self, shared: Arc<ReaderShared>, index: Index) {
+    fn set_index(&mut self, (shared, tracking): (Arc<ReaderShared>, Arc<Tracking>), index: Index) {
         self.reader = Some(StoreReader {
             index: Arc::new(index),
             shared,
+            tracking,
         });
+    }
+
+    /// trk1: the tracking fields the freeze checks of later commits and landings let change on
+    /// an accepted or rejected decision (the engine passes its pack's). Readers taken before
+    /// keep the fields they were taken with.
+    pub fn set_tracking(&mut self, t: Tracking) {
+        self.reader
+            .as_mut()
+            .expect("the store is open until close")
+            .tracking = Arc::new(t);
     }
 
     /// Replays the frames past the index's `indexed_upto` into it, streaming the log and applying
@@ -703,13 +724,13 @@ impl Store {
         let tmp = self.dir.join("index.redb.tmp");
         // drop the store's old database before deleting its file
         let scratch = Index::open(&tmp)?;
-        let shared = Arc::clone(&self.shared);
-        self.set_index(Arc::clone(&shared), scratch);
+        let keep = (Arc::clone(&self.shared), Arc::clone(&self.tracking));
+        self.set_index(keep.clone(), scratch);
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
         let fresh = Index::open(&path)?;
-        self.set_index(shared, fresh);
+        self.set_index(keep, fresh);
         let _ = std::fs::remove_file(&tmp);
         self.catch_up().map(|_| ())
     }
@@ -991,6 +1012,11 @@ impl Store {
 impl StoreReader {
     pub fn dir(&self) -> &Path {
         &self.shared.dir
+    }
+
+    /// trk1: the tracking fields this reader's freeze checks use (see [`Store::set_tracking`]).
+    pub fn tracking(&self) -> &Arc<Tracking> {
+        &self.tracking
     }
 
     pub(crate) fn index(&self) -> &Index {

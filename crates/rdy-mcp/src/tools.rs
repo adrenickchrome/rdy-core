@@ -1166,11 +1166,21 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
                 out["example"]["parent"] = json!("<folder id or path; omit for the top level>");
                 out["name_rules"] = json!(NAME_RULES);
             }
+            // trk1: fields that stay writable on an accepted or rejected decision
+            if !def.tracking.is_empty() {
+                out["tracking"] = json!(def.tracking);
+            }
             Ok(out)
         }
         None => Ok(json!({
             "pack": pack.name,
-            "types": pack.block_types.iter().map(|(n, d)| json!({"type": n, "prefix": d.prefix, "traits": traits(&d.traits)})).collect::<Vec<_>>(),
+            "types": pack.block_types.iter().map(|(n, d)| {
+                let mut row = json!({"type": n, "prefix": d.prefix, "traits": traits(&d.traits)});
+                if !d.tracking.is_empty() {
+                    row["tracking"] = json!(d.tracking);
+                }
+                row
+            }).collect::<Vec<_>>(),
             "link_types": pack.link_types,
             "areas": pack.areas.iter().map(|(n, a)| json!({"name": n, "description": a.description, "paths": a.paths})).collect::<Vec<_>>(),
             "link_shape": {"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE},

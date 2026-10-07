@@ -34,6 +34,9 @@ pub struct Context {
     /// write the block; absent in every other scope and when none does.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub alternatives: Vec<crate::alt::AltPeer>,
+    /// trk1: the block type's tracking fields, ascending; absent when it has none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tracking: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -256,6 +259,12 @@ impl ReadState {
                 Scope::View(v) => self.alt_peers(v, id)?,
                 _ => Vec::new(),
             },
+            tracking: self
+                .pack()
+                .block_types
+                .get(&block.block_type)
+                .map(|t| t.tracking.iter().cloned().collect())
+                .unwrap_or_default(),
         })
     }
 
