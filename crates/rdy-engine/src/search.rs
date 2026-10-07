@@ -10,7 +10,7 @@ use rdy_model::{Block, BlockId, FieldValue, Hash};
 use rdy_schema::Trait;
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// The longest query, in bytes, before a literal is escaped.
@@ -29,6 +29,8 @@ pub const LINES_PER_MATCH: usize = 10;
 pub const LINE_CHARS: usize = 240;
 /// The token budget of a page when the caller names none.
 pub const DEFAULT_SEARCH_TOKENS: usize = 4000;
+/// Doc paths listed in a result's totals; the rest are counted in `more_docs`.
+pub const TOTALS_DOCS: usize = 50;
 
 /// Characters shown before the first match of a windowed line.
 const LEAD_CHARS: usize = 80;
@@ -94,10 +96,13 @@ pub struct SearchResult {
     pub ignore_case: bool,
     /// Matching blocks over the whole search, every page.
     pub total: usize,
+    /// stot1 (FW-SR3): hits per doc path and per block type over the whole search, every page.
+    pub totals: SearchTotals,
+    /// One page of entries; identical hits share an entry (`also`).
     pub matches: Vec<SearchMatch>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
-    /// Matches after this page.
+    /// Entries after this page.
     #[serde(skip_serializing_if = "is_zero")]
     pub omitted: usize,
     /// The cursor of the next page, when there is one.
@@ -118,9 +123,40 @@ pub struct SearchMatch {
     /// The block sits in a superseded, rejected or revoked decision.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub history: bool,
+    /// sord1 (FW-SR1): no line holds the phrase; the block holds every word of it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub all_words: bool,
+    /// scol1 (FW-SR3): later hits with the same type, lines, `more_lines`, `all_words` and
+    /// `history`, in result order. Never cut.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub also: Vec<SearchAlso>,
+}
+
+/// A hit folded into an earlier entry.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SearchAlso {
+    pub id: String,
+    pub path: Option<String>,
+}
+
+/// Hits over the whole search: per doc path (most hits first, at most `TOTALS_DOCS`) and per
+/// block type.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct SearchTotals {
+    pub docs: Vec<DocHits>,
+    pub types: BTreeMap<String, usize>,
+    /// Doc paths left out of `docs`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub more_docs: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DocHits {
+    pub path: Option<String>,
+    pub hits: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct SearchLine {
     /// `body`, or a field name with `[i]` for a list item and `.key` for a map entry.
     pub field: String,
@@ -142,7 +178,7 @@ impl ReadState {
         page: Option<&str>,
         max_tokens: Option<usize>,
     ) -> Result<SearchResult, RdyError> {
-        let re = compile(q)?;
+        let (re, words) = compile(q)?;
         let m = self.materialized(scope)?;
         let plan = self.filter_plan(scope, &m, &q.filters)?;
         let cursor = page.map(parse_page).transpose()?;
@@ -163,14 +199,9 @@ impl ReadState {
             false
         };
 
-        let mut found: Vec<(&Block, Vec<SearchLine>, usize, bool)> = vec![];
-        let mut token = TOKEN_DOMAIN.to_vec();
-        token.extend_from_slice(q.text.as_bytes());
-        token.push(0);
-        token.push(u8::from(q.regex));
-        token.push(u8::from(q.ignore_case));
-        token.extend(serde_json::to_vec(&q.filters).unwrap_or_default());
-        token.push(0);
+        // phrase hits, then all-words hits, each in reading order
+        let mut phrase: Vec<Hit> = vec![];
+        let mut all_words: Vec<Hit> = vec![];
         // reading order: depth-first from the top level; a parent loop cannot spin. Each entry
         // carries the lifecycle its parent passes down.
         let mut stack: Vec<(&Block, Option<&str>)> = m
@@ -192,21 +223,83 @@ impl ReadState {
                 // history is cheap to know before the text pass, so exclusion skips the match
                 let early = q.filters.exclude_history.then(|| history_of(b));
                 if early != Some(true)
-                    && let Some((lines, more)) = match_block(&re, b, &mut rescan)?
+                    && let Some((lines, more_lines, words)) =
+                        match_block(&re, &words, b, &mut rescan)?
                 {
-                    let history = early.unwrap_or_else(|| history_of(b));
-                    let version = m.version_of(&b.id).unwrap_or_else(|| b.version_hash());
-                    token.extend_from_slice(b.id.as_str().as_bytes());
-                    token.push(0);
-                    token.extend_from_slice(&version.0);
-                    found.push((b, lines, more, history));
+                    let hit = Hit {
+                        block: b,
+                        lines,
+                        more_lines,
+                        history: early.unwrap_or_else(|| history_of(b)),
+                    };
+                    if words {
+                        all_words.push(hit);
+                    } else {
+                        phrase.push(hit);
+                    }
                 }
             }
             stack.extend(m.children(Some(&b.id)).into_iter().rev().map(|c| (c, own)));
         }
+
+        let mut token = TOKEN_DOMAIN.to_vec();
+        token.extend_from_slice(q.text.as_bytes());
+        token.push(0);
+        token.push(u8::from(q.regex));
+        token.push(u8::from(q.ignore_case));
+        token.extend(serde_json::to_vec(&q.filters).unwrap_or_default());
+        token.push(0);
+        let words_from = phrase.len();
+        let hits: Vec<Hit> = phrase.into_iter().chain(all_words).collect();
+        for h in &hits {
+            let version = m
+                .version_of(&h.block.id)
+                .unwrap_or_else(|| h.block.version_hash());
+            token.extend_from_slice(h.block.id.as_str().as_bytes());
+            token.push(0);
+            token.extend_from_slice(&version.0);
+        }
         let token = Hash::of(&token).to_string();
 
-        let total = found.len();
+        // scol1: a hit identical to an earlier entry joins it; entries keep their first position
+        let total = hits.len();
+        let mut entries: Vec<SearchMatch> = vec![];
+        let mut seen: HashMap<EntryKey, usize> = HashMap::new();
+        let mut types: BTreeMap<String, usize> = BTreeMap::new();
+        let mut docs: HashMap<Option<String>, usize> = HashMap::new();
+        for (i, h) in hits.into_iter().enumerate() {
+            let path = m.path_of(&h.block.id);
+            *types.entry(h.block.block_type.clone()).or_default() += 1;
+            *docs.entry(path.clone()).or_default() += 1;
+            let key = EntryKey {
+                block_type: h.block.block_type.clone(),
+                lines: h.lines,
+                more_lines: h.more_lines,
+                all_words: i >= words_from,
+                history: h.history,
+            };
+            if let Some(&at) = seen.get(&key) {
+                entries[at].also.push(SearchAlso {
+                    id: h.block.id.to_string(),
+                    path,
+                });
+                continue;
+            }
+            entries.push(SearchMatch {
+                id: h.block.id.to_string(),
+                block_type: key.block_type.clone(),
+                path,
+                lines: key.lines.clone(),
+                more_lines: key.more_lines,
+                history: key.history,
+                all_words: key.all_words,
+                also: vec![],
+            });
+            seen.insert(key, entries.len() - 1);
+        }
+        let totals = totals_of(types, docs);
+
+        let count = entries.len();
         let offset = match cursor {
             None => 0,
             Some((t, _)) if t != token => {
@@ -216,41 +309,83 @@ impl ReadState {
                     "search again without page",
                 ));
             }
-            Some((_, offset)) if offset >= total => return Err(bad_page()),
+            Some((_, offset)) if offset >= count => return Err(bad_page()),
             Some((_, offset)) => offset,
         };
 
-        let budget = max_tokens.unwrap_or(DEFAULT_SEARCH_TOKENS);
+        // the totals come first, so they take their share of the budget
+        let budget = max_tokens
+            .unwrap_or(DEFAULT_SEARCH_TOKENS)
+            .saturating_sub(tokens_of(&totals));
         let mut used = 0;
         let mut matches = vec![];
-        for (b, lines, more_lines, history) in found.into_iter().skip(offset) {
-            let hit = SearchMatch {
-                id: b.id.to_string(),
-                block_type: b.block_type.clone(),
-                path: m.path_of(&b.id),
-                lines,
-                more_lines,
-                history,
-            };
-            let cost = serde_json::to_string(&hit).map_or(0, |s| s.len()) / 4 + 1;
+        for entry in entries.into_iter().skip(offset) {
+            let cost = tokens_of(&entry);
             if !matches.is_empty() && used + cost > budget {
                 break;
             }
             used += cost;
-            matches.push(hit);
+            matches.push(entry);
         }
         let end = offset + matches.len();
-        let omitted = total - end;
+        let omitted = count - end;
         Ok(SearchResult {
             query: q.text.clone(),
             regex: q.regex,
             ignore_case: q.ignore_case,
             total,
+            totals,
             matches,
             truncated: omitted > 0,
             omitted,
             next: (omitted > 0).then(|| format!("{token}:{end}")),
         })
+    }
+}
+
+/// One matching block before collapse.
+struct Hit<'a> {
+    block: &'a Block,
+    lines: Vec<SearchLine>,
+    more_lines: usize,
+    history: bool,
+}
+
+/// What two hits share to share an entry.
+#[derive(PartialEq, Eq, Hash)]
+struct EntryKey {
+    block_type: String,
+    lines: Vec<SearchLine>,
+    more_lines: usize,
+    all_words: bool,
+    history: bool,
+}
+
+/// A page's measure of a value: its JSON length / 4, plus 1.
+fn tokens_of(value: &impl Serialize) -> usize {
+    serde_json::to_string(value).map_or(0, |s| s.len()) / 4 + 1
+}
+
+/// stot1: docs by hits descending, then path ascending with no path last; at most `TOTALS_DOCS`.
+fn totals_of(types: BTreeMap<String, usize>, docs: HashMap<Option<String>, usize>) -> SearchTotals {
+    let mut docs: Vec<DocHits> = docs
+        .into_iter()
+        .map(|(path, hits)| DocHits { path, hits })
+        .collect();
+    docs.sort_by(|a, b| {
+        b.hits.cmp(&a.hits).then_with(|| match (&a.path, &b.path) {
+            (Some(x), Some(y)) => x.cmp(y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        })
+    });
+    let more_docs = docs.len().saturating_sub(TOTALS_DOCS);
+    docs.truncate(TOTALS_DOCS);
+    SearchTotals {
+        docs,
+        types,
+        more_docs,
     }
 }
 
@@ -480,8 +615,9 @@ fn block_of<'a>(m: &'a Materialized, id: &BlockId) -> Result<&'a Block, RdyError
     })
 }
 
-/// The query as a bounded regex; a literal is escaped first.
-fn compile(q: &SearchQuery) -> Result<Regex, RdyError> {
+/// The query as a bounded regex, and, for a literal of two or more distinct words, each word as
+/// one (sord1). A literal is escaped first.
+fn compile(q: &SearchQuery) -> Result<(Regex, Vec<Regex>), RdyError> {
     if q.text.is_empty() {
         return Err(RdyError::new(
             E_BAD_INPUT,
@@ -504,8 +640,30 @@ fn compile(q: &SearchQuery) -> Result<Regex, RdyError> {
     } else {
         regex::escape(&q.text)
     };
-    RegexBuilder::new(&pattern)
-        .case_insensitive(q.ignore_case)
+    let phrase = build(&pattern, q.ignore_case)?;
+    let mut distinct: Vec<&str> = vec![];
+    if !q.regex {
+        for w in q.text.split_whitespace() {
+            if !distinct.contains(&w) {
+                distinct.push(w);
+            }
+        }
+    }
+    let words = if distinct.len() >= 2 {
+        distinct
+            .into_iter()
+            .map(|w| build(&regex::escape(w), q.ignore_case))
+            .collect::<Result<_, _>>()?
+    } else {
+        vec![]
+    };
+    Ok((phrase, words))
+}
+
+/// One bounded regex; its errors as rdy errors.
+fn build(pattern: &str, ignore_case: bool) -> Result<Regex, RdyError> {
+    RegexBuilder::new(pattern)
+        .case_insensitive(ignore_case)
         .size_limit(REGEX_SIZE_LIMIT)
         .dfa_size_limit(REGEX_DFA_LIMIT)
         .nest_limit(REGEX_NEST_LIMIT)
@@ -553,49 +711,109 @@ fn bad_page() -> RdyError {
     )
 }
 
-/// The block's matching lines (at most `LINES_PER_MATCH`) and how many more matched, or `None`
-/// when no line holds a non-empty match. Sources: the body, then fields by name. `rescan` carries
+/// The block's matching lines (at most `LINES_PER_MATCH`), how many more matched, and whether it
+/// is an all-words hit; `None` when it is no hit. A phrase hit has a line with a non-empty match of
+/// `re`. Else, with `words`, an all-words hit has a match of every word somewhere in its text and
+/// shows the lines that hold any word. Sources: the body, then fields by name. `rescan` carries
 /// the search's empty-match charge from block to block.
 fn match_block(
     re: &Regex,
+    words: &[Regex],
     b: &Block,
     rescan: &mut usize,
-) -> Result<Option<(Vec<SearchLine>, usize)>, RdyError> {
+) -> Result<Option<(Vec<SearchLine>, usize, bool)>, RdyError> {
     let mut lines = vec![];
     let mut more = 0;
-    let mut failed = None;
-    let mut hit = |field: &str, text: &str| {
-        for (i, line) in text.lines().enumerate() {
-            if failed.is_some() {
-                return;
+    each_line(b, &mut |field, i, line| {
+        if let Some(at) = first_match(re, line, rescan)? {
+            keep(&mut lines, &mut more, field, i, line, at);
+        }
+        Ok(())
+    })?;
+    if !lines.is_empty() {
+        return Ok(Some((lines, more, false)));
+    }
+    // a word holds no line break, so a source matches it exactly when one of its lines does; most
+    // blocks lack a word, and this check leaves them after one pass per word at most
+    if words.is_empty() || !words.iter().all(|w| any_source(b, |text| w.is_match(text))) {
+        return Ok(None);
+    }
+    let mut held = vec![false; words.len()];
+    each_line(b, &mut |field, i, line| {
+        let mut first: Option<usize> = None;
+        for (w, re) in words.iter().enumerate() {
+            // a word is a non-empty literal, so every match is non-empty
+            if let Some(m) = re.find(line) {
+                held[w] = true;
+                first = Some(first.map_or(m.start(), |f| f.min(m.start())));
             }
-            let at = match first_match(re, line, rescan) {
-                Ok(Some(at)) => at,
-                Ok(None) => continue,
-                Err(e) => {
-                    failed = Some(e);
-                    return;
-                }
-            };
-            if lines.len() < LINES_PER_MATCH {
-                lines.push(SearchLine {
-                    field: field.to_string(),
-                    line: i + 1,
-                    text: window(line, at),
-                });
-            } else {
-                more += 1;
+        }
+        if let Some(at) = first {
+            keep(&mut lines, &mut more, field, i, line, at);
+        }
+        Ok(())
+    })?;
+    Ok(held.iter().all(|h| *h).then_some((lines, more, true)))
+}
+
+/// Shows `line` (number `i`, 0-based) windowed at byte `at`, or counts it past the cap.
+fn keep(
+    lines: &mut Vec<SearchLine>,
+    more: &mut usize,
+    field: &str,
+    i: usize,
+    line: &str,
+    at: usize,
+) {
+    if lines.len() < LINES_PER_MATCH {
+        lines.push(SearchLine {
+            field: field.to_string(),
+            line: i + 1,
+            text: window(line, at),
+        });
+    } else {
+        *more += 1;
+    }
+}
+
+/// Whether `f` holds for one source of the block's text (the body, then fields by name).
+fn any_source(b: &Block, f: impl Fn(&str) -> bool) -> bool {
+    if f(&b.body) {
+        return true;
+    }
+    let mut found = false;
+    for (name, value) in &b.fields {
+        strings(name.clone(), value, &mut |_, text| found = found || f(text));
+        if found {
+            return true;
+        }
+    }
+    false
+}
+
+/// Calls `f` with each line of the block's text (source label, 0-based line number, line): the
+/// body, then fields by name. Stops at the first error.
+fn each_line(
+    b: &Block,
+    f: &mut impl FnMut(&str, usize, &str) -> Result<(), RdyError>,
+) -> Result<(), RdyError> {
+    let mut failed = None;
+    let mut source = |field: &str, text: &str| {
+        if failed.is_some() {
+            return;
+        }
+        for (i, line) in text.lines().enumerate() {
+            if let Err(e) = f(field, i, line) {
+                failed = Some(e);
+                return;
             }
         }
     };
-    hit("body", &b.body);
+    source("body", &b.body);
     for (name, value) in &b.fields {
-        strings(name.clone(), value, &mut hit);
+        strings(name.clone(), value, &mut source);
     }
-    if let Some(e) = failed {
-        return Err(e);
-    }
-    Ok((!lines.is_empty()).then_some((lines, more)))
+    failed.map_or(Ok(()), Err)
 }
 
 /// The byte offset of the first non-empty match in `line`. Each restart after an empty match,
