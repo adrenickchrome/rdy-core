@@ -353,6 +353,11 @@ pub struct Briefing {
     /// How many entries of each `PAGE_SECTIONS` section this page and the pages before it showed.
     #[serde(skip)]
     pub offsets: [usize; 7],
+    /// A digest of every paged section of the whole, uncut briefing: what a cursor vouches for
+    /// beyond the token (which covers only the covered blocks and their outgoing suspect-link
+    /// targets, not dependents, governs or inflight).
+    #[serde(skip)]
+    pub digest: Hash,
     #[serde(skip)]
     pub record: Arc<BriefRecord>,
 }
@@ -369,6 +374,11 @@ impl Briefing {
             .expect("a briefing serializes: strings, numbers and string-keyed maps only")
             .len()
             / 4
+    }
+
+    /// The first `DIGEST_HEX` hex digits of `digest`, as a cursor carries them.
+    fn digest_hex(&self) -> String {
+        self.digest.to_string()[..DIGEST_HEX].to_string()
     }
 
     /// The length of each `PAGE_SECTIONS` section.
@@ -400,11 +410,12 @@ impl Briefing {
 
     /// Shows the entries after the first `skip[i]` of each section, cut to `max` tokens, and
     /// sets `next`, `truncated` and `docs`. With `floor`, the cut keeps at least one entry (a
-    /// page always moves on). `Err` when an offset is past the end of its section.
+    /// page always moves on). `Err` (`E_PAGE_STALE`) when an offset is past the end of its
+    /// section: the sections are no longer the ones the cursor counted in.
     fn page(&mut self, skip: [usize; 7], max: usize, floor: bool) -> Result<(), RdyError> {
         let totals = self.lens();
         if skip.iter().zip(totals).any(|(s, t)| *s > t) {
-            return Err(bad_cursor());
+            return Err(e_page_moved());
         }
         self.drop_first(&skip);
         self.cut(max, floor);
@@ -413,7 +424,12 @@ impl Briefing {
         self.offsets = after;
         if after != totals {
             let offsets: Vec<String> = after.iter().map(ToString::to_string).collect();
-            self.next = Some(format!("{}:{}", self.record.token_hex(), offsets.join(",")));
+            self.next = Some(format!(
+                "{}:{}:{}",
+                self.record.token_hex(),
+                offsets.join(","),
+                self.digest_hex()
+            ));
         }
         self.truncated |= self.next.is_some() || skip.iter().any(|s| *s > 0);
         if !self.truncated {
@@ -476,22 +492,44 @@ fn bad_cursor() -> RdyError {
     )
 }
 
-/// The cursor `<64 lowercase hex token>:<7 offsets>` as its token and offsets.
-fn parse_cursor(cursor: &str) -> Result<(&str, [usize; 7]), RdyError> {
+/// A page whose briefing is not the one its cursor counted in.
+fn e_page_moved() -> RdyError {
+    RdyError::new(
+        E_PAGE_STALE,
+        "the briefing moved since its first page: brief again",
+        "brief again without page, then page from the new next",
+    )
+}
+
+/// How many hex digits of a briefing's digest a cursor carries (64 bits).
+const DIGEST_HEX: usize = 16;
+
+/// A cursor `<token>:<o1>,…,<o7>:<digest>` split at its first colon: the token (64 lowercase
+/// hex) and the rest. The rest is read by `parse_tail` once the token is known.
+fn parse_cursor(cursor: &str) -> Result<(&str, &str), RdyError> {
     let (token, rest) = cursor.split_once(':').ok_or_else(bad_cursor)?;
-    if token.len() != 64
-        || !token
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    {
+    if token.len() != 64 || !token.bytes().all(is_lower_hex) {
         return Err(bad_cursor());
     }
-    let offsets: Vec<usize> = rest
+    Ok((token, rest))
+}
+
+fn is_lower_hex(b: u8) -> bool {
+    matches!(b, b'0'..=b'9' | b'a'..=b'f')
+}
+
+/// The 7 offsets and the digest of a cursor's rest.
+fn parse_tail(rest: &str) -> Result<([usize; 7], &str), RdyError> {
+    let (offsets, digest) = rest.split_once(':').ok_or_else(bad_cursor)?;
+    if digest.len() != DIGEST_HEX || !digest.bytes().all(is_lower_hex) {
+        return Err(bad_cursor());
+    }
+    let offsets: Vec<usize> = offsets
         .split(',')
         .map(|n| n.parse().map_err(|_| bad_cursor()))
         .collect::<Result<_, _>>()?;
     let offsets: [usize; 7] = offsets.try_into().map_err(|_| bad_cursor())?;
-    Ok((token, offsets))
+    Ok((offsets, digest))
 }
 
 /// How a scope is named in a briefing's errors.
@@ -600,7 +638,8 @@ impl ReadState {
     /// The page of a cut briefing that `cursor` (a `next`) names: the briefing registered under
     /// its token is made again in `scope` and must still have that token; the entries earlier
     /// pages showed are dropped and the rest cut to `max_tokens`. A page shows at least one
-    /// entry, so paging ends.
+    /// entry, so paging ends. `E_PAGE_STALE` when the token or any paged entry of the whole
+    /// briefing differs from what the cursor counted (its digest), or an offset is out of range.
     pub fn brief_page(
         &self,
         scope: &Scope,
@@ -608,7 +647,7 @@ impl ReadState {
         cursor: &str,
         max_tokens: Option<usize>,
     ) -> Result<Briefing, RdyError> {
-        let (token, skip) = parse_cursor(cursor)?;
+        let (token, rest) = parse_cursor(cursor)?;
         let Some(rec) = reg.get(token) else {
             return Err(RdyError::new(
                 E_PAGE_STALE,
@@ -616,13 +655,12 @@ impl ReadState {
                 "brief again without page, then page from the new next",
             ));
         };
+        let (skip, digest) = parse_tail(rest)?;
         let mut briefing = self.assemble(scope, &rec.covers)?;
-        if briefing.record.token != rec.token {
-            return Err(RdyError::new(
-                E_PAGE_STALE,
-                "the briefing moved since its first page: brief again",
-                "brief again without page, then page from the new next",
-            ));
+        // the token covers the covered blocks only; the digest covers every paged entry, so a
+        // dependent, a governing decision or an inflight change that came or went is caught too
+        if briefing.record.token != rec.token || briefing.digest_hex() != digest {
+            return Err(e_page_moved());
         }
         briefing.page(skip, max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS), true)?;
         Ok(briefing)
@@ -742,6 +780,17 @@ impl ReadState {
             depends: recorded.len() - ids.len(),
         };
         let docs = doc_counts(&m, ids, &governs, &dependents, &will_go_stale, &suspects);
+        let digest = Hash::of(
+            &serde_json::to_vec(&(
+                &governs,
+                &dependents,
+                &will_go_stale,
+                &suspects,
+                &inflight,
+                &base.blocks,
+            ))
+            .expect("a briefing's sections serialize: strings, numbers and string-keyed maps only"),
+        );
         Ok(Briefing {
             covers: ids.len(),
             governs,
@@ -755,6 +804,7 @@ impl ReadState {
             next: None,
             docs,
             offsets: [0; 7],
+            digest,
             record: Arc::new(BriefRecord {
                 token,
                 covers: ids.clone(),

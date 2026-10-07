@@ -177,3 +177,63 @@ fn bpag1_rdy_brief_pages_over_mcp_and_page_stands_alone() {
     drop(c);
     s.stop();
 }
+
+#[test]
+fn bpag1_a_page_after_a_new_dependent_landed_is_stale() {
+    // the token covers only the covered blocks and their outgoing suspect-link targets, so a new
+    // dependent of H leaves it as it was; the entries it sorts among still shifted
+    let (_d, mut r) = project();
+    let (_hub_doc, h) = hub(&mut r, 60);
+    let first = r.read().brief(&Scope::Canon, &cov(&h), Some(400)).unwrap();
+    first.register(&r.briefs());
+    let cursor = first.next.clone().unwrap();
+    write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$e", "fields": {"name": "extra", "title": "Extra", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$es", "parent": "$e", "fields": {"title": "S"}},
+            {"op": "create", "type": "claim", "parent": "$es", "body": format!("A late claim cites {{{{{h}}}}}.")}
+        ]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let again = r.read().brief(&Scope::Canon, &cov(&h), Some(400)).unwrap();
+    assert_eq!(again.base.token, first.base.token, "the token did not move");
+    let e = r
+        .read()
+        .brief_page(&Scope::Canon, &r.briefs(), &cursor, Some(400))
+        .unwrap_err();
+    assert_eq!(e.code, E_PAGE_STALE, "{e}");
+}
+
+#[test]
+fn bpag1_an_offset_past_the_end_of_its_section_is_stale_not_malformed() {
+    let (_d, mut r) = project();
+    let (_hub_doc, h) = hub(&mut r, 60);
+    let first = r.read().brief(&Scope::Canon, &cov(&h), Some(400)).unwrap();
+    first.register(&r.briefs());
+    let cursor = first.next.clone().unwrap();
+    // the same cursor, digest kept, with the dependents offset far past the 60 entries there are
+    let (token, rest) = cursor.split_once(':').unwrap();
+    let (offsets, digest) = rest.split_once(':').unwrap();
+    let mut parts: Vec<String> = offsets.split(',').map(str::to_string).collect();
+    parts[1] = "100000".to_string();
+    let forged = format!("{token}:{}:{digest}", parts.join(","));
+    let e = r
+        .read()
+        .brief_page(&Scope::Canon, &r.briefs(), &forged, Some(400))
+        .unwrap_err();
+    assert_eq!(e.code, E_PAGE_STALE, "{e}");
+    // a cursor without its digest is malformed, not stale
+    let e = r
+        .read()
+        .brief_page(
+            &Scope::Canon,
+            &r.briefs(),
+            &format!("{token}:{offsets}"),
+            Some(400),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT, "{e}");
+}
