@@ -143,6 +143,25 @@ fn sug1_a_literal_that_recurs_with_no_entity_behind_it_suggests_one() {
     );
 }
 
+/// Fix round 1 guard: a literal with no words (`->`) has an empty phrase. No entity can carry
+/// that name, so the suggestion could never clear: it is not made.
+#[test]
+fn sug1_a_literal_with_no_words_never_suggests_an_entity() {
+    let (_d, mut r) = project();
+    let (s, _e) = books(&mut r);
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "claim", "parent": s, "body": "Read `->` as maps to."},
+        {"op": "create", "type": "claim", "parent": s, "body": "The arrow `->` joins two steps."},
+        {"op": "create", "type": "claim", "parent": s, "body": "Each `->` is one hop."}
+    ]))
+    .unwrap();
+    let got = sugg(&r, &w).0;
+    assert!(
+        got.iter().all(|x| !matches!(x, Suggestion::Entity { .. })),
+        "{got:?}"
+    );
+}
+
 #[test]
 fn sug1_every_write_response_carries_suggestions_and_they_never_gate() {
     let (_d, mut r) = project();

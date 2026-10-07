@@ -64,8 +64,8 @@ pub struct MentionedBy {
 impl ReadState {
     /// The suggestions for `change` in this state (the one the write published): for each
     /// written block that can link, a link to each entity its text names that it is not tied
-    /// to; then, for each code literal of the written blocks that at least [`RECUR_MIN`] blocks
-    /// hold and that names no entity, a new entity. Links by (block, target), then entities by
+    /// to; then, for each code literal of the written blocks that has words, that at least
+    /// [`RECUR_MIN`] blocks hold and that names no entity, a new entity. Links by (block, target), then entities by
     /// literal, cut to [`MAX_SUGGESTIONS`]; the count the cut dropped is returned.
     pub fn suggestions(
         &self,
@@ -85,10 +85,13 @@ impl ReadState {
             .iter()
             .filter_map(|b| link_kind_for(self.pack(), b).map(|k| (*b, k)))
             .collect();
+        // a literal with no words (`->`) has an empty phrase: no entity can carry it as a name,
+        // so a suggestion for it could never clear
         let literals: BTreeSet<String> = written
             .iter()
             .flat_map(|b| text_sources(b))
             .flat_map(|(_, text)| code_literals(&text))
+            .filter(|l| !phrase(l).is_empty())
             .collect();
         // nothing to name and nothing to count: no lexicon to read
         if linking.is_empty() && literals.is_empty() {
