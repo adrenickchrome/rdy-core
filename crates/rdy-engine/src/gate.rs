@@ -1263,7 +1263,7 @@ impl Rdy {
             proposal: pid,
             accept,
             approver: s.provenance(),
-            chosen: None,
+            alt: None,
             relay: opts.relay,
             evidence,
         }) {

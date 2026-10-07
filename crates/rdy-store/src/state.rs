@@ -562,7 +562,7 @@ impl Store {
                 proposal: *proposal,
                 accept: None,
                 approver,
-                chosen: None,
+                alt: None,
                 relay: None,
                 evidence: None,
             })?

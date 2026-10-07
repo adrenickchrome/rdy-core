@@ -4,14 +4,33 @@
 //! its `prev`.
 use crate::error::StoreError;
 use crate::index::hash_from;
+use crate::state::view_ref;
 use crate::store::encode;
 use crate::{Store, StoreReader, kinds};
-use rdy_model::{AltSet, Hash, Intent};
+use rdy_model::{AltSet, Hash, Intent, Provenance};
 
 /// The ref prefix of intents: `intent/<stable>` names an intent's latest version.
 pub const INTENT_REF: &str = "intent/";
 /// The ref prefix of alternative sets: `alt/<stable>` names a set's latest version.
 pub const ALT_REF: &str = "alt/";
+
+/// What `Store::alt_set_write` wrote: the set's new version and the views it closed, in the
+/// order asked (an already-closed view is not listed).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AltWrite {
+    pub version: Hash,
+    pub closed: Vec<String>,
+}
+
+/// The close reason of a member view that lost when `member` was chosen from set `set`.
+pub fn chosen_reason(set: &Hash, member: &str) -> String {
+    format!("alternative chosen: as-{} chose {member}", set.short())
+}
+
+/// The close reason of a member view of set `set`, abandoned for `reason`.
+pub fn abandoned_reason(set: &Hash, reason: &str) -> String {
+    format!("alternative set abandoned: as-{}: {reason}", set.short())
+}
 
 fn bad(m: String) -> StoreError {
     StoreError::Decode(m)
@@ -53,8 +72,44 @@ impl Store {
         )
     }
 
-    /// The chain rule: a first version has neither `stable` nor `prev` and its ref must not
-    /// name another version yet; a later one has both, and `prev` is the ref's current value.
+    /// Writes alternative set version `next` and closes, in `close` order, each named view that
+    /// is still open (a `Close { reason }` op by `by` and its closed head), all in one batch
+    /// (altw1). The version follows the chain rule of `put_alt_set`. A name with no view is
+    /// `UnknownView` and nothing is written; an already-closed view is skipped.
+    pub fn alt_set_write(
+        &mut self,
+        next: &AltSet,
+        close: &[String],
+        reason: &str,
+        by: &Provenance,
+    ) -> Result<AltWrite, StoreError> {
+        let bytes = encode(next);
+        let id = Hash::of(&bytes);
+        let name = self.chain_check(ALT_REF, "alternative set", next.stable, next.prev, id)?;
+        let mut items = vec![(kinds::ALT_SET, bytes)];
+        let mut refs = vec![(name, id.0.to_vec())];
+        let mut closed: Vec<String> = vec![];
+        for view in close {
+            let head = self
+                .view_head(view)?
+                .ok_or_else(|| StoreError::UnknownView(view.clone()))?;
+            if head.closed || closed.contains(view) {
+                continue;
+            }
+            let (op, _, new_head) = self.close_part(view, &head, reason, by);
+            items.push((kinds::VIEW_OP, op));
+            refs.push((view_ref(view), encode(&new_head)));
+            closed.push(view.clone());
+        }
+        items.extend(self.ref_items_pub(refs));
+        self.write(items)?;
+        Ok(AltWrite {
+            version: id,
+            closed,
+        })
+    }
+
+    /// Writes a version (`bytes`, of `kind`) and moves `<prefix><stable>` to it, in one batch.
     fn put_versioned(
         &mut self,
         kind: u8,
@@ -65,6 +120,24 @@ impl Store {
         bytes: Vec<u8>,
     ) -> Result<Hash, StoreError> {
         let id = Hash::of(&bytes);
+        let name = self.chain_check(prefix, what, stable, prev, id)?;
+        let mut items = vec![(kind, bytes)];
+        items.extend(self.ref_items_pub(vec![(name, id.0.to_vec())]));
+        self.write(items)?;
+        Ok(id)
+    }
+
+    /// The chain rule for version `id`: a first version has neither `stable` nor `prev` and its
+    /// ref must not name another version yet; a later one has both, and `prev` is the ref's
+    /// current value. Returns the ref's name. Writes nothing.
+    fn chain_check(
+        &self,
+        prefix: &str,
+        what: &str,
+        stable: Option<Hash>,
+        prev: Option<Hash>,
+        id: Hash,
+    ) -> Result<String, StoreError> {
         let (stable, expected) = match (stable, prev) {
             (None, None) => (id, None),
             (Some(s), Some(p)) => (s, Some(p)),
@@ -94,10 +167,7 @@ impl Store {
                 return Err(bad(format!("{what} {stable} does not exist")));
             }
         }
-        let mut items = vec![(kind, bytes)];
-        items.extend(self.ref_items_pub(vec![(name, id.0.to_vec())]));
-        self.write(items)?;
-        Ok(id)
+        Ok(name)
     }
 }
 

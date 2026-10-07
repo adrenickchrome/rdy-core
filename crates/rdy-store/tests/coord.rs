@@ -174,3 +174,204 @@ fn cfmt1_fsck_counts_and_checks_coordination_objects() {
         other => panic!("{other:?}"),
     }
 }
+
+use rdy_store::coord::{abandoned_reason, chosen_reason};
+use rdy_store::view::ViewOpKind;
+use rdy_store::{AltLanding, LandRequest};
+
+fn claim(id: &str, body: &str) -> Block {
+    Block {
+        id: BlockId::parse(id).unwrap(),
+        block_type: "claim".into(),
+        parent: None,
+        order: "V".into(),
+        fields: Default::default(),
+        body: body.into(),
+        links: Default::default(),
+        pins: Default::default(),
+    }
+}
+fn commit_create(s: &mut Store, view: &str, id: &str) -> Hash {
+    s.commit_to_view(
+        view,
+        Change {
+            view: view.into(),
+            ops: vec![Op::Create {
+                block: claim(id, view),
+            }],
+            deps: vec![],
+            provenance: prov("agent:a"),
+            justification: None,
+            message: String::new(),
+            links: ChangeLinks::default(),
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn altw1_abandon_closes_open_members_only_in_one_batch() {
+    let (_d, mut s) = store();
+    for v in ["a", "b", "c", "other"] {
+        s.view_create(v, None, None, false, &prov("agent:a"))
+            .unwrap();
+    }
+    s.view_append(
+        "c",
+        vec![ViewOpKind::Close {
+            reason: "by hand".into(),
+        }],
+        &prov("agent:a"),
+    )
+    .unwrap();
+    let first = s.put_alt_set(&set(&["a", "b", "c"])).unwrap();
+    let next = AltSet {
+        stable: Some(first),
+        prev: Some(first),
+        status: AltStatus::Abandoned {
+            reason: "both wrong".into(),
+        },
+        ..set(&["a", "b", "c"])
+    };
+    let before = s.write_count();
+    let reason = abandoned_reason(&first, "both wrong");
+    let out = s
+        .alt_set_write(
+            &next,
+            &["a".into(), "b".into(), "c".into()],
+            &reason,
+            &prov("agent:a"),
+        )
+        .unwrap();
+    assert_eq!(s.write_count(), before + 1, "one batch");
+    assert_eq!(
+        out.closed,
+        vec!["a".to_string(), "b".to_string()],
+        "c was already closed"
+    );
+    assert_eq!(s.alt_heads().unwrap(), vec![(first, out.version)]);
+    for v in ["a", "b"] {
+        let h = s.view_head(v).unwrap().unwrap();
+        assert!(h.closed);
+        match s.view_op(&h.head).unwrap().op {
+            ViewOpKind::Close { reason: r } => assert_eq!(r, reason),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(
+        !s.view_head("other").unwrap().unwrap().closed,
+        "a view outside the set is untouched"
+    );
+    assert_eq!(
+        reason,
+        format!(
+            "alternative set abandoned: as-{}: both wrong",
+            first.short()
+        )
+    );
+    s.check_objects().unwrap();
+}
+
+#[test]
+fn altw1_landing_a_member_chooses_it_and_closes_the_others() {
+    let (_d, mut s) = store();
+    for v in ["a", "b"] {
+        s.view_create(v, None, None, false, &prov("agent:a"))
+            .unwrap();
+    }
+    let ca = commit_create(&mut s, "a", "c-AAAAA");
+    commit_create(&mut s, "b", "c-BBBBB");
+    let first = s.put_alt_set(&set(&["a", "b"])).unwrap();
+    let p = s
+        .propose_changes("a", "pick a", None, prov("agent:a"), vec![ca])
+        .unwrap();
+    let out = s
+        .land_atomic(LandRequest {
+            proposal: p,
+            accept: None,
+            approver: Provenance {
+                role: Role::Approver,
+                ..prov("human:qa")
+            },
+            alt: Some(AltLanding {
+                set: first,
+                prev: first,
+                member: "a".into(),
+                close: vec!["b".into()],
+            }),
+            relay: None,
+            evidence: None,
+        })
+        .unwrap();
+    assert_eq!(out.closed, vec!["b".to_string()]);
+    let rec = s.landing(&out.landing).unwrap();
+    assert_eq!(
+        rec.chosen,
+        Some(AltChoice {
+            set: first,
+            member: "a".into()
+        })
+    );
+    let v = out.alt_version.unwrap();
+    assert_eq!(s.alt_heads().unwrap(), vec![(first, v)]);
+    assert_eq!(
+        s.alt_set(&v).unwrap().status,
+        AltStatus::Chosen {
+            member: "a".into(),
+            landing: out.landing
+        }
+    );
+    let b = s.view_head("b").unwrap().unwrap();
+    assert!(b.closed, "the other member is closed, not rebased");
+    match s.view_op(&b.head).unwrap().op {
+        ViewOpKind::Close { reason } => assert_eq!(reason, chosen_reason(&first, "a")),
+        other => panic!("{other:?}"),
+    }
+    assert!(out.rebased.iter().all(|r| r.view != "b"));
+    assert!(!s.view_head("a").unwrap().unwrap().closed);
+    s.check_objects().unwrap();
+}
+
+#[test]
+fn altw1_a_set_that_moved_refuses_the_landing_and_writes_nothing() {
+    let (_d, mut s) = store();
+    s.view_create("a", None, None, false, &prov("agent:a"))
+        .unwrap();
+    s.view_create("b", None, None, false, &prov("agent:a"))
+        .unwrap();
+    let ca = commit_create(&mut s, "a", "c-AAAAA");
+    let first = s.put_alt_set(&set(&["a", "b"])).unwrap();
+    let moved = s
+        .put_alt_set(&AltSet {
+            stable: Some(first),
+            prev: Some(first),
+            title: "renamed".into(),
+            ..set(&["a", "b"])
+        })
+        .unwrap();
+    let p = s
+        .propose_changes("a", "pick a", None, prov("agent:a"), vec![ca])
+        .unwrap();
+    let before = s.write_count();
+    let e = s
+        .land_atomic(LandRequest {
+            proposal: p,
+            accept: None,
+            approver: Provenance {
+                role: Role::Approver,
+                ..prov("human:qa")
+            },
+            alt: Some(AltLanding {
+                set: first,
+                prev: first,
+                member: "a".into(),
+                close: vec!["b".into()],
+            }),
+            relay: None,
+            evidence: None,
+        })
+        .unwrap_err();
+    assert!(e.to_string().contains("moved or is no longer open"), "{e}");
+    assert_eq!(s.write_count(), before);
+    assert_eq!(s.alt_heads().unwrap(), vec![(first, moved)]);
+}

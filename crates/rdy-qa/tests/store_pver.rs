@@ -141,7 +141,7 @@ fn pver1_landing_an_older_version_is_proposal_moved_and_writes_nothing() {
             proposal: p1,
             accept: None,
             approver: prov("human:h"),
-            chosen: None,
+            alt: None,
             relay: None,
             evidence: None,
         })
@@ -156,7 +156,7 @@ fn pver1_landing_an_older_version_is_proposal_moved_and_writes_nothing() {
             proposal: p2,
             accept: None,
             approver: prov("human:h"),
-            chosen: None,
+            alt: None,
             relay: None,
             evidence: None,
         })
@@ -201,7 +201,7 @@ fn pver1_a_relayed_landing_records_the_relay_and_assurance_relayed() {
             proposal: p,
             accept: None,
             approver: prov("human:h"),
-            chosen: None,
+            alt: None,
             relay: Some(relay.clone()),
             evidence: Some(ApprovalEvidence {
                 kind: EvidenceKind::Text,
@@ -247,7 +247,7 @@ fn evk1_an_elicited_approval_is_local_and_a_relay_needs_a_relay_kind() {
         proposal: p,
         accept: None,
         approver: prov("human:h"),
-        chosen: None,
+        alt: None,
         relay,
         evidence,
     };
