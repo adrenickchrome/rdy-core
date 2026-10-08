@@ -1,5 +1,6 @@
 //! malt1: `rdy alt *`. The commands build one `AltRequest` JSON for the ctl `alt` op; the
 //! renderer turns the op's reply into text. `--json` prints the reply as it is.
+use crate::conn::{Env, call};
 use clap::Subcommand;
 use rdy_daemon::ErrorReply;
 use rdy_engine::E_BAD_INPUT;
@@ -136,4 +137,10 @@ pub fn render(cmd: &AltCmd, v: &Value) -> String {
         }
         _ => set_line(&v["set"]),
     }
+}
+
+pub(crate) fn alt(env: &Env, cmd: AltCmd) -> Result<(Value, String), ErrorReply> {
+    let v = call(env, "alt", args_of(&cmd)?)?;
+    let t = render(&cmd, &v);
+    Ok((v, t))
 }
