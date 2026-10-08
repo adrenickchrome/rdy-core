@@ -128,6 +128,7 @@ fn io_at(what: &str, path: &Path, e: std::io::Error) -> RdyError {
 /// symbolic link is never followed. When `out` cannot be swapped by rename (its parent is not
 /// writable, or it is a mount point), its contents are replaced in place instead.
 pub fn render_site(rdy: &ReadState, scope: &Scope, out: &Path) -> Result<RenderSummary, RdyError> {
+    rdy_engine::refuse_inflight_export(scope)?;
     let refuse = |what: String| {
         RdyError::new(
             rdy_engine::E_BAD_INPUT,

@@ -1,6 +1,7 @@
 //! Views as a reader sees them (vls1, cmp1): the list of views with their counts and idle flags,
 //! one view's changes, conflicts and op chain, and a block-level compare of two scopes. Every
 //! answer is compact: ids, versions and field names, never block bodies.
+use crate::coord_graph::{AltRef, alt_label, intent_label};
 use crate::error::*;
 use crate::read_state::ReadState;
 use crate::views::{
@@ -33,6 +34,9 @@ pub struct ViewSummary {
     pub last_write_ms: i64,
     /// Open, and nothing written for more than `views.idle_days`.
     pub idle: bool,
+    /// Why a closed view was closed: the reason of its latest close op.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub close_reason: Option<String>,
 }
 
 /// A change a view includes, with the blocks its ops touch.
@@ -47,6 +51,12 @@ pub struct ChangeSummary {
     /// The nonce of the working-copy commit that wrote the change (wccm1).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_nonce: Option<String>,
+    /// The intent the change was written under (`in-<short>`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent: Option<String>,
+    /// The alternative set and member the change was written as.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alternative: Option<AltRef>,
 }
 
 /// One op of a view's chain.
@@ -59,6 +69,9 @@ pub struct OpSummary {
     pub at_ms: i64,
     /// A later, live `Undo` on the chain reverses this op.
     pub undone: bool,
+    /// Why the view was closed, on a `close` op.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// `rdy view show`: a view's head, its changes, its conflicts and the chain since its latest
@@ -110,6 +123,7 @@ fn scope_text(s: &Scope) -> String {
         Scope::Canon => "canon".to_string(),
         Scope::View(v) => v.clone(),
         Scope::At(h) => format!("landing:{}", h.short()),
+        Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
     }
 }
 
@@ -196,10 +210,13 @@ impl ReadState {
                 .iter()
                 .flat_map(|c| c.ops.iter().map(|op| op.block_id().clone()))
                 .collect();
-            let conflicts = if head.closed {
-                0
+            let (conflicts, close_reason) = if head.closed {
+                (0, self.close_reason(head.head)?)
             } else {
-                self.conflict_count(&name, &changes, &blocks, &mut bases)?
+                (
+                    self.conflict_count(&name, &changes, &blocks, &mut bases)?,
+                    None,
+                )
             };
             out.push(ViewSummary {
                 owner: head.owner.as_ref().map(OwnerInfo::from),
@@ -212,10 +229,25 @@ impl ReadState {
                 conflicts,
                 last_write_ms: head.last_write_ms,
                 idle: !head.closed && now_ms.saturating_sub(head.last_write_ms) > window,
+                close_reason,
                 name,
             });
         }
         Ok(out)
+    }
+
+    /// The reason of the latest close op on the chain from `head` back to its latest checkpoint.
+    fn close_reason(&self, head: Hash) -> Result<Option<String>, RdyError> {
+        let reader = self.reader();
+        let mut cur = Some(head);
+        while let Some(h) = cur {
+            let op = reader.view_op(&h)?;
+            if let ViewOpKind::Close { reason } = op.op {
+                return Ok(Some(reason));
+            }
+            cur = if is_checkpoint(&op.op) { None } else { op.prev };
+        }
+        Ok(None)
     }
 
     /// How many blocks view `name`'s merge records a conflict on, without building the view:
@@ -333,6 +365,11 @@ impl ReadState {
                 message: change.message.clone(),
                 blocks: blocks.iter().map(|b| b.to_string()).collect(),
                 client_nonce: change.links.client_nonce.clone(),
+                intent: change.links.intent.as_ref().map(intent_label),
+                alternative: change.links.alternative.map(|a| AltRef {
+                    set: alt_label(&a.set),
+                    member: a.member,
+                }),
             });
         }
         let head: Hash = info
@@ -356,6 +393,10 @@ impl ReadState {
                 run: op.run.clone(),
                 at_ms: op.at_ms,
                 undone: undone.contains_key(h),
+                reason: match &op.op {
+                    ViewOpKind::Close { reason } => Some(reason.clone()),
+                    _ => None,
+                },
             })
             .collect();
         Ok(ViewDetail {
@@ -369,7 +410,8 @@ impl ReadState {
     }
 
     /// What differs from `b` to `a`, block by block, sorted by id. `conflicted` lists the blocks
-    /// `a`'s merge (and `b`'s, when it is a view) records a conflict on.
+    /// `a`'s merge (and `b`'s, when `b` is a view or `inflight`) records a conflict on. Canon
+    /// and an as-of scope have no conflicts.
     pub fn compare(&self, a: &Scope, b: &Scope) -> Result<Compare, RdyError> {
         let (ma, mb) = (self.materialized(a)?, self.materialized(b)?);
         let ids: BTreeSet<&BlockId> = ma.ids().chain(mb.ids()).collect();
@@ -406,7 +448,7 @@ impl ReadState {
             }
         }
         let mut conflicts = (*self.conflicts(a)?).clone();
-        if matches!(b, Scope::View(_)) {
+        if !matches!(b, Scope::Canon | Scope::At(_)) {
             conflicts.extend(self.conflicts(b)?.iter().cloned());
         }
         let mut by_block: BTreeMap<BlockId, String> = BTreeMap::new();

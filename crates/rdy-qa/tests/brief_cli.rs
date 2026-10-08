@@ -275,6 +275,101 @@ fn cbrf1_the_brief_op_answers_for_a_path_and_edit_block_cites_its_token() {
     });
 }
 
+/// A pack whose decisions track `disposition` (trk1).
+const TRK_PACK: &str = "\
+name: trk
+version: \"1\"
+extends: rdy-standard
+block_types:
+  decision:
+    prefix: D
+    traits: [normative]
+    fields:
+      disposition: { kind: str }
+    tracking: [disposition]
+";
+
+/// Final-review fix round 1: the human moves a tracking field of an accepted decision with
+/// `rdy edit --reason`; without a reason the refusal says to pass one, and the edit is kept.
+#[test]
+fn trk1_rdy_edit_moves_a_tracking_field_with_a_reason() {
+    use rdy_qa::fixtures::{land, seed_doc, writer};
+    let s = Served::new();
+    std::fs::write(s.dir.path().join(".rdy/packs/trk.yaml"), TRK_PACK).unwrap();
+    std::fs::write(s.dir.path().join(".rdy/config.yaml"), "pack: trk\n").unwrap();
+    s.stop();
+    let dec = {
+        let mut r = Rdy::open(s.dir.path()).unwrap();
+        let (_doc, section, _c) = seed_doc(&mut r, "seed");
+        let d = r
+            .decide(
+                &writer(),
+                "seed",
+                rdy_engine::DecisionInput {
+                    parent: section,
+                    statement: "Ship weekly".into(),
+                    fields: [("disposition".to_string(), serde_json::json!("M2d1"))]
+                        .into_iter()
+                        .collect(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        land(&mut r, "seed").unwrap();
+        r.close().unwrap();
+        d.created["$decision"].clone()
+    };
+    let ed = script(
+        &s,
+        "disposition.sh",
+        "sed -i.bak 's/disposition: M2d1/disposition: M2d2/' \"$1\"\n",
+    );
+    let out = edit(&s, &ed, &dec, true);
+    assert!(!out.status.success());
+    let e: Value = serde_json::from_str(
+        String::from_utf8_lossy(&out.stderr)
+            .trim()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
+    assert!(
+        e["fix"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("rdy edit {dec} --reason")),
+        "{e}"
+    );
+    assert!(e["saved_edit"].is_string(), "the edit is kept: {e}");
+    let out = std::process::Command::new(rdy_bin())
+        .arg("--project")
+        .arg(s.dir.path())
+        .args(["--json", "edit", &dec, "--reason", "re-sliced into M2d2"])
+        .env("EDITOR", &ed)
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .env_remove("RDY_NO_DAEMON")
+        .envs(s.env_pairs())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (ok, shown) = s.json(&["--json", "show", &dec, "--scope", "work", "--blame"]);
+    assert!(ok, "{shown}");
+    assert_eq!(shown["fields"]["disposition"], "M2d2");
+    assert_eq!(shown["fields"]["status"], "accepted", "{shown}");
+    assert_eq!(
+        shown["history"][0]["justification"],
+        serde_json::json!({"editorial": {"class": "clarify", "reason": "re-sliced into M2d2"}}),
+        "{shown}"
+    );
+}
+
 /// kroot1 (FW-PR3b, F4): `rdy edit` prints a `new key <id>: <key>` line for each key rdy
 /// re-derived, here the doc's own key following a rename.
 #[test]

@@ -106,6 +106,8 @@ fn evt1_a_landing_batch_gives_commit_proposed_landed_and_rebased() {
             EventKind::ViewRebased { .. } => "view_rebased",
             EventKind::ViewClosed { .. } => "view_closed",
             EventKind::ViewOp { .. } => "view_op",
+            EventKind::IntentPosted { .. } => "intent_posted",
+            EventKind::AltSetChanged { .. } => "alt_set_changed",
         })
         .collect();
     // the acceptance change, the final proposal version, the landing, the proposing view's rebase

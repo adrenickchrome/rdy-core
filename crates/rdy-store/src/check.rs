@@ -1,11 +1,16 @@
 //! Structural checks of the typed objects (fsck2, fsck3): view chains and heads, the view-op
 //! index, canon's landings against the change -> landing index, the relay and evidence rules of
-//! a landing, recorded conflicts, undo chains, the dependency DAG and closed included sets.
+//! a landing, recorded conflicts, undo chains, the dependency DAG and closed included sets, and
+//! the version chains of intents and alternative sets and the links that name them (cfmt1).
 use crate::StoreReader;
+use crate::coord::{ALT_REF, INTENT_REF, key_hash};
 use crate::error::StoreError;
 use crate::kinds;
 use crate::view::{ViewHead, ViewOpKind, resolve};
-use rdy_model::{Assurance, Change, EvidenceKind, Hash, LandingRecord};
+use rdy_model::{
+    AltChoice, AltSet, AltStatus, Assurance, Change, EvidenceKind, Hash, Intent, LandingRecord,
+};
+use serde::de::DeserializeOwned;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -21,6 +26,10 @@ pub struct StoreCheck {
     pub relayed: usize,
     /// The conflicts recorded by the `Rebase` ops of every view's chain.
     pub conflicts_recorded: usize,
+    /// The `intent/` refs, each with its version chain checked.
+    pub intents: usize,
+    /// The `alt/` refs, each with its version chain checked.
+    pub alt_sets: usize,
 }
 
 /// What `check_view` found out about one view.
@@ -28,6 +37,12 @@ struct ViewCheck {
     ops: usize,
     conflicts: usize,
     included: Arc<Vec<Hash>>,
+}
+
+/// The stable ids of the coordination objects, which the links of changes must name.
+struct CoordKeys {
+    intents: BTreeSet<Hash>,
+    alt_sets: BTreeSet<Hash>,
 }
 
 fn bad(m: String) -> StoreError {
@@ -50,8 +65,9 @@ fn variant(k: &ViewOpKind) -> &'static str {
 
 impl StoreReader {
     /// Checks the view chains, their heads and index entries, canon's landings (relay and evidence
-    /// rules included), recorded conflicts, undo chains, the dependency DAG and the closure of
-    /// every view's included set; the first failure found is a `StoreError::Decode`.
+    /// rules included), recorded conflicts, undo chains, the dependency DAG, the closure of every
+    /// view's included set, the version chains of intents and alternative sets, and the links that
+    /// name them; the first failure found is a `StoreError::Decode`.
     pub fn check_objects(&self) -> Result<StoreCheck, StoreError> {
         let mut views = 0;
         let mut view_ops = 0;
@@ -90,14 +106,135 @@ impl StoreReader {
             }
             landed_changes += rec.changes.len();
         }
-        self.check_dag(&landings, &sets)?;
+        let intents = self
+            .check_chains::<Intent>(kinds::INTENT, INTENT_REF, "intent", |i| (i.stable, i.prev))?;
+        let alt_sets =
+            self.check_chains::<AltSet>(kinds::ALT_SET, ALT_REF, "alternative set", |s| {
+                (s.stable, s.prev)
+            })?;
+        self.check_alt_sets(&alt_sets, &sets, &landings)?;
+        let keys = CoordKeys {
+            intents: intents.iter().map(|(k, _)| *k).collect(),
+            alt_sets: alt_sets.iter().map(|(k, _)| *k).collect(),
+        };
+        self.check_dag(&landings, &sets, &keys)?;
         Ok(StoreCheck {
             views,
             view_ops,
             landed_changes,
             relayed,
             conflicts_recorded,
+            intents: intents.len(),
+            alt_sets: alt_sets.len(),
         })
+    }
+
+    /// Every ref under `prefix` names an object of `kind`, and walking `prev` from it reaches a
+    /// first version (no `stable`, no `prev`) whose hash is the ref's key; every version on the way
+    /// has `stable == Some(key)`. Returns (stable id, latest version) per ref, in key order.
+    fn check_chains<T: DeserializeOwned>(
+        &self,
+        kind: u8,
+        prefix: &str,
+        what: &str,
+        chain: impl Fn(&T) -> (Option<Hash>, Option<Hash>),
+    ) -> Result<Vec<(Hash, T)>, StoreError> {
+        let mut out = vec![];
+        for (key, value) in self.refs_with_prefix(prefix)? {
+            let stable = key_hash(&key, prefix, what)?;
+            let latest = crate::index::hash_from(&value, &format!("{what} ref {stable}"))?;
+            let read = |h: &Hash| -> Result<T, StoreError> {
+                match self.get_typed(kind, h) {
+                    Err(StoreError::NotFound(_)) => Err(bad(format!(
+                        "{what} {stable}: version {h} is not a stored {what}"
+                    ))),
+                    r => r,
+                }
+            };
+            let head = read(&latest)?;
+            let mut cur = (latest, chain(&head));
+            loop {
+                let (h, (s, prev)) = cur;
+                match (s, prev) {
+                    (None, None) if h == stable => break,
+                    (None, None) => {
+                        return Err(bad(format!(
+                            "{what} {stable}: its chain starts at {h}, not at its stable id"
+                        )));
+                    }
+                    (Some(s), Some(p)) if s == stable => cur = (p, chain(&read(&p)?)),
+                    _ => {
+                        return Err(bad(format!(
+                            "{what} {stable}: version {h} has stable {s:?} and prev {prev:?}"
+                        )));
+                    }
+                }
+            }
+            out.push((stable, head));
+        }
+        Ok(out)
+    }
+
+    /// The latest version of each set names member views that exist, and a chosen set names a
+    /// landing of canon that records the choice; every landing of canon that records a choice
+    /// names a set whose latest version is chosen by that landing.
+    fn check_alt_sets(
+        &self,
+        sets: &[(Hash, AltSet)],
+        views: &[(String, ViewHead, Arc<Vec<Hash>>)],
+        landings: &[(Hash, LandingRecord)],
+    ) -> Result<(), StoreError> {
+        let names: HashSet<&str> = views.iter().map(|(n, _, _)| n.as_str()).collect();
+        let canon: HashMap<&Hash, &LandingRecord> = landings.iter().map(|(h, r)| (h, r)).collect();
+        for (key, set) in sets {
+            for m in &set.members {
+                if !names.contains(m.view.as_str()) {
+                    return Err(bad(format!(
+                        "alternative set {key}: member view {} does not exist",
+                        m.view
+                    )));
+                }
+            }
+            if let AltStatus::Chosen { member, landing } = &set.status {
+                let want = AltChoice {
+                    set: *key,
+                    member: member.clone(),
+                };
+                match canon.get(landing) {
+                    None => {
+                        return Err(bad(format!(
+                            "alternative set {key}: chosen by landing {landing}, which is not in canon's chain"
+                        )));
+                    }
+                    Some(rec) if rec.chosen.as_ref() != Some(&want) => {
+                        return Err(bad(format!(
+                            "alternative set {key}: landing {landing} does not record choosing {member}"
+                        )));
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        let latest: HashMap<&Hash, &AltSet> = sets.iter().map(|(k, s)| (k, s)).collect();
+        for (l, rec) in landings {
+            let Some(c) = &rec.chosen else { continue };
+            match latest.get(&c.set).map(|s| &s.status) {
+                None => {
+                    return Err(bad(format!(
+                        "landing {l}: chooses from alternative set {}, which does not exist",
+                        c.set
+                    )));
+                }
+                Some(AltStatus::Chosen { landing, .. }) if landing == l => {}
+                Some(_) => {
+                    return Err(bad(format!(
+                        "landing {l}: alternative set {} does not record this landing as its choice",
+                        c.set
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The relay and evidence rules of one landing, and its references to other objects.
@@ -187,12 +324,13 @@ impl StoreReader {
     }
 
     /// Every dep of every change of every view's set and every landing exists; the deps have no
-    /// cycle; and each view's included changes have their deps included or landed at or before the
-    /// view's base.
+    /// cycle; each view's included changes have their deps included or landed at or before the
+    /// view's base; and each of those changes links only to intents and sets that exist.
     fn check_dag(
         &self,
         landings: &[(Hash, LandingRecord)],
         sets: &[(String, ViewHead, Arc<Vec<Hash>>)],
+        keys: &CoordKeys,
     ) -> Result<(), StoreError> {
         let mut cache: HashMap<Hash, Option<Arc<Change>>> = HashMap::new();
         // position in canon's chain, newest = 0, and the landing each landed change is in
@@ -217,6 +355,19 @@ impl StoreReader {
                 if !self.has_kind(kinds::CHANGE, dep)? {
                     return Err(bad(format!("change {c}: dep {dep} is missing")));
                 }
+            }
+            if let Some(h) = &ch.links.intent
+                && !keys.intents.contains(h)
+            {
+                return Err(bad(format!("change {c}: intent {h} does not exist")));
+            }
+            if let Some(a) = &ch.links.alternative
+                && !keys.alt_sets.contains(&a.set)
+            {
+                return Err(bad(format!(
+                    "change {c}: alternative set {} does not exist",
+                    a.set
+                )));
             }
         }
         self.check_acyclic(&d, &mut cache)?;

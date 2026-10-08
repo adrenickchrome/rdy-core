@@ -627,6 +627,29 @@ impl Store {
         Ok(new_head)
     }
 
+    /// A `Close { reason }` op of view `name` after its head `prev_head`, for a caller's batch
+    /// (altw1): the op's bytes, its id and the closed head (everything else kept). Nothing is
+    /// written here.
+    pub(crate) fn close_part(
+        &self,
+        name: &str,
+        prev_head: &ViewHead,
+        reason: &str,
+        by: &Provenance,
+    ) -> (Vec<u8>, Hash, ViewHead) {
+        let close = ViewOpKind::Close {
+            reason: reason.to_string(),
+        };
+        let bytes = encode(&view_op(name, Some(prev_head.head), close, by));
+        let id = Hash::of(&bytes);
+        let head = ViewHead {
+            head: id,
+            closed: true,
+            ..prev_head.clone()
+        };
+        (bytes, id, head)
+    }
+
     /// Whether `ops` hold an op that can add a change to view `name`: an `Include`, or an `Undo`
     /// whose effect is an include.
     fn adds_a_change(&self, name: &str, ops: &[ViewOpKind]) -> Result<bool, StoreError> {

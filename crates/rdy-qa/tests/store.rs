@@ -370,16 +370,19 @@ fn blob1_a_forged_chunk_kind_manifest_is_not_a_blob() {
     ];
     for (what, payload) in forged {
         let h = upload_as_chunk(&mut s, payload);
-        let t = std::time::Instant::now();
+        // how fast the refusal is: the perf tier's `blob_forged_manifest_refuse`
+        let before = s.frames_read();
         assert!(!s.has_blob(&h).unwrap(), "{what}");
+        assert_eq!(s.frames_read(), before, "{what}: has_blob reads no frame");
         assert!(
             matches!(s.get_blob(&h), Err(StoreError::Decode(_))),
             "{what}"
         );
+        // refused by structure: at most the forged object itself is read, never a chunk
         assert!(
-            t.elapsed() < std::time::Duration::from_secs(2),
-            "{what} took {:?}",
-            t.elapsed()
+            s.frames_read() - before <= 1,
+            "{what}: {} frames read",
+            s.frames_read() - before
         );
     }
 }
@@ -429,10 +432,27 @@ fn blob1_a_figure_naming_a_forged_manifest_is_refused_at_write() {
     ];
     for payload in payloads {
         let h = upload_as_chunk(r.store_mut(), payload);
-        let t = std::time::Instant::now();
-        let e = write(&mut r, "work", json!([{"op": "create", "type": "figure", "parent": res.created["$s"], "fields": {"blob": h.to_string(), "media_type": "image/png", "alt": "x"}}])).unwrap_err();
+        // how fast the refusal is: the perf tier's `figure_forged_manifest_refuse`
+        let figure = |blob: String| json!([{"op": "create", "type": "figure", "parent": res.created["$s"], "fields": {"blob": blob, "media_type": "image/png", "alt": "x"}}]);
+        // the control: a figure naming no stored object reads what any refused write reads
+        let before = r.store().frames_read();
+        let e = write(
+            &mut r,
+            "work",
+            figure(rdy_model::Hash::of(b"absent").to_string()),
+        )
+        .unwrap_err();
         assert_eq!(e.code, "E_VALIDATION", "{e}");
-        assert!(t.elapsed() < std::time::Duration::from_secs(2));
+        let control = r.store().frames_read() - before;
+        let before = r.store().frames_read();
+        let e = write(&mut r, "work", figure(h.to_string())).unwrap_err();
+        assert_eq!(e.code, "E_VALIDATION", "{e}");
+        let forged = r.store().frames_read() - before;
+        // refused by structure: no chunk of the 30,000 the manifest names is read
+        assert!(
+            forged <= control + 1,
+            "{forged} frames read for the forged manifest, {control} for an absent blob"
+        );
     }
 }
 

@@ -302,10 +302,27 @@ fn read_file(path: &Path, shown: &str) -> Result<Option<Mapping>, RdyError> {
             ));
         }
     };
+    parse_file(&text, shown).map(Some)
+}
+
+/// A file's bytes, already read, as a mapping of settings (`read_file` without the read).
+fn parse_bytes(bytes: &[u8], shown: &str) -> Result<Mapping, RdyError> {
+    let text = std::str::from_utf8(bytes).map_err(|e| {
+        RdyError::new(
+            E_IO,
+            format!("{shown}: stream did not contain valid UTF-8 ({e})"),
+            "check the file's permissions",
+        )
+    })?;
+    parse_file(text, shown)
+}
+
+/// A file's text as a mapping of settings; an empty file is an empty mapping.
+fn parse_file(text: &str, shown: &str) -> Result<Mapping, RdyError> {
     let fix = format!("fix {shown}");
-    match serde_yaml_ng::from_str::<Value>(&text) {
-        Ok(Value::Null) => Ok(Some(Mapping::new())),
-        Ok(Value::Mapping(m)) => Ok(Some(m)),
+    match serde_yaml_ng::from_str::<Value>(text) {
+        Ok(Value::Null) => Ok(Mapping::new()),
+        Ok(Value::Mapping(m)) => Ok(m),
         Ok(_) => Err(RdyError::new(
             E_CONFIG,
             format!("{shown} must be a mapping of settings"),
@@ -319,13 +336,31 @@ fn read_file(path: &Path, shown: &str) -> Result<Option<Mapping>, RdyError> {
 /// a file of a level that does not allow it, a file that is not a mapping and a project that has
 /// no config.
 pub fn effective(project: &Path, user_file: Option<&Path>) -> Result<Effective, RdyError> {
-    build(project, user_file, false)
+    build(project, user_file, false, None)
+}
+
+/// The bytes of the project config and of `.rdy/local.yaml` (`None` when it does not exist),
+/// already read: `effective_from` parses them instead of reading the files again, so the
+/// settings are exactly the bytes the pack fingerprint hashed.
+pub struct GivenFiles<'a> {
+    pub project: &'a [u8],
+    pub local: Option<&'a [u8]>,
+}
+
+/// `effective` over the project and local files as `given` holds them; the user config is read
+/// from `user_file`.
+pub fn effective_from(
+    project: &Path,
+    user_file: Option<&Path>,
+    given: GivenFiles<'_>,
+) -> Result<Effective, RdyError> {
+    build(project, user_file, false, Some(given))
 }
 
 /// `effective` that never fails: a key at the wrong level, or a file that does not read, is
 /// left out, so a client can still start a daemon that then reports the error.
 pub fn effective_lenient(project: &Path, user_file: Option<&Path>) -> Effective {
-    build(project, user_file, true).unwrap_or_else(|_| Effective {
+    build(project, user_file, true, None).unwrap_or_else(|_| Effective {
         origins: Vec::new(),
         merged: Mapping::new(),
         warnings: Vec::new(),
@@ -448,8 +483,13 @@ fn wrong_type(map: &Mapping, rule: &KeyRule) -> Option<String> {
     None
 }
 
-fn build(project: &Path, user_file: Option<&Path>, lenient: bool) -> Result<Effective, RdyError> {
-    if !lenient && !project.join(PROJECT_FILE).exists() {
+fn build(
+    project: &Path,
+    user_file: Option<&Path>,
+    lenient: bool,
+    given: Option<GivenFiles<'_>>,
+) -> Result<Effective, RdyError> {
+    if !lenient && given.is_none() && !project.join(PROJECT_FILE).exists() {
         return Err(RdyError::new(
             E_NO_PROJECT,
             format!("{} is not an rdy project", project.display()),
@@ -462,7 +502,13 @@ fn build(project: &Path, user_file: Option<&Path>, lenient: bool) -> Result<Effe
         let Some(path) = path_of(project, level, user_file) else {
             continue;
         };
-        match read_file(&path, &file_name(level, user_file)) {
+        let shown = file_name(level, user_file);
+        let read = match (&given, level) {
+            (Some(g), Level::Project) => parse_bytes(g.project, &shown).map(Some),
+            (Some(g), Level::Local) => g.local.map(|b| parse_bytes(b, &shown)).transpose(),
+            _ => read_file(&path, &shown),
+        };
+        match read {
             Ok(Some(m)) => files.push((level, m)),
             Ok(None) => {}
             Err(e) if lenient => drop(e),

@@ -175,7 +175,7 @@ fn age(ms: i64) -> String {
     }
 }
 
-fn compare_text(v: &Value) -> String {
+pub fn compare_text(v: &Value) -> String {
     let mut lines = vec![format!("{} vs {}", text(&v["a"]), text(&v["b"]))];
     let entries = |key: &str, f: &dyn Fn(&Value) -> String, lines: &mut Vec<String>| {
         for e in v[key].as_array().into_iter().flatten() {
@@ -282,7 +282,8 @@ fn ls_text(v: &Value) -> String {
     let widths: Vec<usize> = (0..8)
         .map(|c| rows.iter().map(|r| r[c].chars().count()).max().unwrap_or(0))
         .collect();
-    rows.iter()
+    let mut lines: Vec<String> = rows
+        .iter()
         .map(|r| {
             let cells: Vec<String> = r
                 .iter()
@@ -291,8 +292,14 @@ fn ls_text(v: &Value) -> String {
                 .collect();
             cells.join("  ").trim_end().to_string()
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    // why each closed view was closed (`--all`)
+    for x in v["views"].as_array().into_iter().flatten() {
+        if let Some(reason) = x["close_reason"].as_str() {
+            lines.push(format!("closed {}: {reason}", text(&x["name"])));
+        }
+    }
+    lines.join("\n")
 }
 
 /// How many block ids `rdy view show` prints per change without `--all`.
@@ -347,6 +354,9 @@ fn show_text(v: &Value, all: bool) -> String {
             if o["undone"] == true { " (undone)" } else { "" },
             text(&o["actor"])
         ));
+        if let Some(reason) = o["reason"].as_str() {
+            out.push_str(&format!(": {reason}"));
+        }
     }
     out
 }
@@ -530,5 +540,36 @@ mod tests {
             let t = render(op, &reply);
             assert!(t.ends_with(want), "{op}: {t}");
         }
+    }
+
+    /// Final-review fix round 1: a close op prints its reason, and `view ls --all` prints why
+    /// each closed view was closed, under the table.
+    #[test]
+    fn vshw1_a_close_reason_prints_in_view_show_and_view_ls() {
+        let mut d = detail(1);
+        d["ops"] = json!([
+            {"id": "cd".repeat(32), "kind": "close", "actor": "human:qa", "undone": false,
+             "reason": "alternative chosen: as-0123456789ab chose a"},
+            {"id": "ef".repeat(32), "kind": "commit", "actor": "agent:a", "undone": false}
+        ]);
+        let t = show_text(&d, false);
+        assert!(
+            t.contains(" close human:qa: alternative chosen: as-0123456789ab chose a\n"),
+            "{t}"
+        );
+        assert!(t.trim_end().ends_with("commit agent:a"), "{t}");
+        let ls = json!({"views": [
+            {"name": "a", "owner": null, "base": null, "changes": 1, "blocks": 1, "conflicts": 0,
+             "last_write_ms": 0, "pinned": false, "closed": false, "idle": false},
+            {"name": "b", "owner": null, "base": null, "changes": 1, "blocks": 1, "conflicts": 0,
+             "last_write_ms": 0, "pinned": false, "closed": true, "idle": false,
+             "close_reason": "alternative chosen: as-0123456789ab chose a"}
+        ]});
+        let t = ls_text(&ls);
+        assert!(
+            t.ends_with("\nclosed b: alternative chosen: as-0123456789ab chose a"),
+            "{t}"
+        );
+        assert_eq!(t.lines().count(), 4, "{t}");
     }
 }

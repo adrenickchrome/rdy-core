@@ -6,8 +6,8 @@ use crate::store::encode;
 use crate::view::{Owner, ViewHead, ViewOp, ViewOpKind};
 use crate::{Store, StoreReader};
 use rdy_model::{
-    Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance, StateSnapshot, Tag,
-    decision,
+    AltChoice, Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Provenance,
+    StateSnapshot, Tag, decision,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,22 +48,25 @@ pub fn apply_op(store: &StoreReader, state: &mut StateSnapshot, op: &Op) -> Resu
             state.blocks.insert(block.id.clone(), block.version_hash());
         }
         Op::Update { base, block } => {
-            check_base(store, state, &block.id, *base)?;
+            check_base(store, state, &block.id, *base, Some(block))?;
             state.blocks.insert(block.id.clone(), block.version_hash());
         }
         Op::Delete { base, id } => {
-            check_base(store, state, id, *base)?;
+            check_base(store, state, id, *base, None)?;
             state.blocks.remove(id);
         }
     }
     Ok(())
 }
 
+/// The op's base is the state's version of `id`, and not a frozen decision, unless the op is an
+/// update to `new` that changes only tracking fields of it (trk1).
 fn check_base(
     store: &StoreReader,
     state: &StateSnapshot,
     id: &BlockId,
     base: Hash,
+    new: Option<&Block>,
 ) -> Result<(), StoreError> {
     let actual = state.blocks.get(id).copied();
     if actual != Some(base) {
@@ -73,10 +76,17 @@ fn check_base(
             actual,
         });
     }
-    if decision::is_frozen(&store.get_block(&base)?) {
+    if frozen_for(store, &store.get_block(&base)?, new) {
         return Err(StoreError::Frozen(id.clone()));
     }
     Ok(())
+}
+
+/// Whether an op on `base` (an update to `new`, or a delete when `None`) is refused because
+/// `base` is a frozen decision: an update that changes only `store`'s tracking fields passes.
+fn frozen_for(store: &StoreReader, base: &Block, new: Option<&Block>) -> bool {
+    decision::is_frozen(base)
+        && !new.is_some_and(|n| decision::only_tracking_changed(base, n, store.tracking()))
 }
 
 impl StoreReader {
@@ -181,8 +191,12 @@ impl StoreReader {
         }
         for &i in &at {
             for op in &changes[i].ops {
+                let new = match op {
+                    Op::Update { block, .. } => Some(block),
+                    _ => None,
+                };
                 if let Some(base) = op.base()
-                    && decision::is_frozen(&self.get_block(&base)?)
+                    && frozen_for(self, &self.get_block(&base)?, new)
                 {
                     return Err(StoreError::Frozen(op.block_id().clone()));
                 }
@@ -462,12 +476,13 @@ impl Store {
     /// one write. Returns the proposal's id.
     pub fn propose(&mut self, view: &str, title: &str, by: Provenance) -> Result<Hash, StoreError> {
         let changes = self.included(view)?.as_ref().clone();
-        self.propose_changes(view, title, None, by, changes)
+        self.propose_changes(view, title, None, by, changes, None)
     }
 
     /// `propose` with `changes` (a closed subset of the view's included changes, which the
     /// caller checks) in place of the view's whole set. An empty `changes` is `EmptyProposal`.
-    /// A blank `summary` is `None`.
+    /// A blank `summary` is `None`. `alternative` is the member the version chooses, which the
+    /// caller checks.
     pub fn propose_changes(
         &mut self,
         view: &str,
@@ -475,6 +490,7 @@ impl Store {
         summary: Option<&str>,
         by: Provenance,
         changes: Vec<Hash>,
+        alternative: Option<AltChoice>,
     ) -> Result<Hash, StoreError> {
         let p = Proposal {
             stable: None,
@@ -482,7 +498,7 @@ impl Store {
             title: title.to_string(),
             view: view.to_string(),
             changes,
-            alternative: None,
+            alternative,
             provenance: by,
             canon_at: self.canon_head()?,
             summary: clean_summary(summary),
@@ -500,10 +516,10 @@ impl Store {
         self.next_version(prev, p)
     }
 
-    /// Writes the next version of proposal `prev` with `changes`, `title` and `by` in place of
-    /// its own (the view and the alternative carry over), and moves `proposal/<stable>` to it.
-    /// A non-blank `summary` replaces the previous version's; a blank or `None` one keeps it.
-    /// Returns the new version's id.
+    /// Writes the next version of proposal `prev` with `changes`, `title`, `by` and
+    /// `alternative` in place of its own (the view carries over), and moves `proposal/<stable>`
+    /// to it. A non-blank `summary` replaces the previous version's; a blank or `None` one keeps
+    /// it. Returns the new version's id.
     pub fn propose_next(
         &mut self,
         prev: &Hash,
@@ -511,12 +527,14 @@ impl Store {
         title: &str,
         summary: Option<&str>,
         by: Provenance,
+        alternative: Option<AltChoice>,
     ) -> Result<Hash, StoreError> {
         let before = self.proposal(prev)?;
         let p = Proposal {
             changes,
             title: title.to_string(),
             provenance: by,
+            alternative,
             summary: clean_summary(summary).or_else(|| before.summary.clone()),
             ..before
         };
@@ -562,7 +580,7 @@ impl Store {
                 proposal: *proposal,
                 accept: None,
                 approver,
-                chosen: None,
+                alt: None,
                 relay: None,
                 evidence: None,
             })?

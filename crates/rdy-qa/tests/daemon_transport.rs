@@ -179,10 +179,19 @@ fn race1_version_mismatch_idle_daemon_is_replaced_busy_one_refuses() {
         assert_eq!(e.code, E_DAEMON_VERSION);
         assert_eq!(count_new.load(Ordering::SeqCst), 0);
         old.close();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let mut new = connect_or_start(&run, client(&run, "0.2.0", dir.path(), spawn_new.clone()))
-            .await
-            .unwrap();
+        // the old daemon steps aside once it has dropped `old`'s session; until then a newer
+        // client is refused as before (and spawns nothing): poll, with a generous deadline
+        let t0 = std::time::Instant::now();
+        let mut new = loop {
+            match connect_or_start(&run, client(&run, "0.2.0", dir.path(), spawn_new.clone())).await
+            {
+                Ok(c) => break c,
+                Err(e) if e.code == E_DAEMON_VERSION && t0.elapsed() < Duration::from_secs(30) => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(e) => panic!("the old daemon was not replaced: {e:?}"),
+            }
+        };
         assert_eq!(new.version(), "0.2.0");
         assert_eq!(count_new.load(Ordering::SeqCst), 1);
         new.ctl("stop", json!({})).await.unwrap();
@@ -215,9 +224,17 @@ fn race1_hostile_hellos_and_lines_never_take_the_daemon_down() {
             let v = c.ctl("ping", json!({})).await.unwrap();
             assert_eq!(v["version"], "1", "alive after {:.40?}", String::from_utf8_lossy(&bytes));
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(c.ctl("ping", json!({})).await.unwrap()["sessions"], 1, "no session leaked");
-        assert_eq!(c.ctl("ping", json!({})).await.unwrap()["connections"], 1, "no connection leaked");
+        // the junk connections end on the daemon's side in their own time: poll until only
+        // this one is left, with a generous deadline (a leak never gets there)
+        let t0 = std::time::Instant::now();
+        loop {
+            let v = c.ctl("ping", json!({})).await.unwrap();
+            if v["sessions"] == 1 && v["connections"] == 1 {
+                break;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(30), "a session or connection leaked: {v}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         c.ctl("stop", json!({})).await.unwrap();
     });
     wait_gone(&run);
@@ -341,7 +358,7 @@ fn wait_gone(run: &RunDir) {
     let t0 = std::time::Instant::now();
     while run.socket().exists() {
         assert!(
-            t0.elapsed() < Duration::from_secs(10),
+            t0.elapsed() < Duration::from_secs(30),
             "daemon did not exit"
         );
         std::thread::sleep(Duration::from_millis(50));

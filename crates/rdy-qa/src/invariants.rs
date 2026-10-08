@@ -166,22 +166,28 @@ pub fn check(r: &Rdy, scope: &Scope) -> Result<(), Vec<Violation>> {
     if out.is_empty() { Ok(()) } else { Err(out) }
 }
 
-/// Accepted and rejected decisions never change once landed.
+/// Accepted and rejected decisions never change once landed, except in the pack's tracking
+/// fields (trk1): each later canon version equals the first frozen one, or differs from it only
+/// in tracking fields.
 fn frozen(r: &Rdy) -> Vec<Violation> {
     let mut out = vec![];
     let Ok(mut chain) = r.store().landings() else {
         return vec![v("frozen", None, "cannot read landings")];
     };
     chain.reverse(); // oldest first
-    let mut fixed: BTreeMap<BlockId, rdy_model::Hash> = BTreeMap::new();
+    let tracking = r.store().tracking();
+    let mut fixed: BTreeMap<BlockId, (rdy_model::Hash, Block)> = BTreeMap::new();
     for (_, rec) in chain {
         let rec: LandingRecord = rec;
         let Ok(snap) = r.store().get::<StateSnapshot>(&rec.state) else {
             continue;
         };
-        for (id, h) in &fixed {
+        for (id, (h, first)) in &fixed {
             if let Some(now) = snap.blocks.get(id)
                 && now != h
+                && !r.store().get_block(now).is_ok_and(|b| {
+                    b == *first || decision::only_tracking_changed(first, &b, tracking)
+                })
             {
                 out.push(v(
                     "frozen",
@@ -191,10 +197,13 @@ fn frozen(r: &Rdy) -> Vec<Violation> {
             }
         }
         for (id, h) in &snap.blocks {
+            if fixed.contains_key(id) {
+                continue;
+            }
             if let Ok(b) = r.store().get_block(h)
                 && decision::is_frozen(&b)
             {
-                fixed.entry(id.clone()).or_insert(*h);
+                fixed.insert(id.clone(), (*h, b));
             }
         }
     }

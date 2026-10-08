@@ -10,13 +10,16 @@ pub const BLOB_CHUNK: u8 = 6;
 pub const BLOB_MANIFEST: u8 = 7;
 pub const REF_UPDATE: u8 = 8;
 pub const TAG: u8 = 9;
-// Codes 10-12 and 19 are unassigned. Codes 15-18 are reserved for INTENT, ALT_SET, REVIEW and
-// TENSION (later plans); nothing declares them yet.
+// Codes 10-12 and 19 are unassigned. Codes 17-18 are reserved for REVIEW and TENSION.
 /// One op of a view's chain (`crate::view::ViewOp`).
 pub const VIEW_OP: u8 = 13;
 /// Ends every write batch: names the batch's first frame, its frame count and a digest of the
 /// frame hashes. Neither an object nor an index entry.
 pub const BATCH_COMMIT: u8 = 14;
+/// An intent version (`rdy_model::Intent`); ref `intent/<stable>` names the latest.
+pub const INTENT: u8 = 15;
+/// An alternative set version (`rdy_model::AltSet`); ref `alt/<stable>` names the latest.
+pub const ALT_SET: u8 = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefUpdate {

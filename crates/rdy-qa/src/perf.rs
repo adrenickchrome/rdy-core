@@ -51,6 +51,9 @@ fn spec_target(op: &str) -> Option<String> {
             "< 5 ms p99 on Linux NVMe; one durable flush + < 1 ms on macOS (spec 11, restated per hardware class)"
         }
         "brief_doc" => "< 5 ms p99 at 10k with the view's graph carried (the read budget, spec 11)",
+        "brief_expired_intents_1k" => {
+            "< 5 ms p99 (the read budget, spec 11): a briefing with 1,000 expired intents and 5 open ones in the project"
+        }
         "context" | "impact" | "version_position" | "resolve_path" | "tree_full" => {
             "< 5 ms p99 (spec 11)"
         }
@@ -91,6 +94,19 @@ fn spec_target(op: &str) -> Option<String> {
         "view_ls_50" => {
             "no spec target: view_list(all) over 50 open views plus the closed ones, cold (recorded for M2c)"
         }
+        "context_inflight_1k" | "impact_inflight_1k" | "context_view_1k" | "impact_view_1k" => {
+            "< 5 ms p99 with 1k in-flight changes (spec 15.1; the overlays must not regress them)"
+        }
+        "inflight_build_1k" | "coord_build_1k" => {
+            "no spec target: the in-flight state's (coordination graph's) cold build, once per published state (recorded for M2d1)"
+        }
+        "inflight_carry" => "< 1 ms incremental (spec 15.1, view materialization)",
+        "mcp_params_9mib" => {
+            "no spec target: parse_params::<WriteParams> alone on one ~9 MiB rdy_write call (recorded; the comparator for mcp_write_9mib)"
+        }
+        "mcp_write_9mib" => {
+            "no spec target: one rdy_write of 2,002 ops (~9 MiB) through the MCP parameter path, consequences included (recorded; intake: the &Value parse and the deep clone of ops cost about +30 ms per 9 MiB)"
+        }
         "render" => "< 2 s full render at 100k (spec 11)",
         "cold_open" => "< 2 s at 100k (spec 11)",
         "cold_open_lagging" => "< 2 s at 100k, index catch-up included (M2 spec 15.1)",
@@ -107,6 +123,50 @@ fn spec_target(op: &str) -> Option<String> {
         }
         "history_100" | "last_changes_doc" | "log_page_20" => "< 5 ms p99 (reads, spec 11)",
         "log_full" => "recorded: 2000 landings, no spec target",
+        // bounds the functional tests used to assert by the clock, moved here (a wall-clock bound
+        // in a functional gate fails on a loaded machine, not on a defect); each keeps its figure
+        "refuse_import_20mb_scalar" => {
+            "< 5 s: an export with a 20 MB scalar refused by import (the old io bound)"
+        }
+        "refuse_check_20mb_scalar" => {
+            "< 5 s: the same export reported by rdy check (the old io bound)"
+        }
+        "refuse_import_symlink" => {
+            "< 5 s: an export with a symlink loop refused by import (the old io_tree bound)"
+        }
+        "blob_forged_manifest_refuse" => {
+            "< 2 s: has_blob and get_blob of a forged 30,000-chunk manifest (the old store blob1 bound)"
+        }
+        "figure_forged_manifest_refuse" => {
+            "< 2 s: a figure write naming a forged 30,000-chunk manifest refused (the old store blob1 bound)"
+        }
+        "pack_resolve_1000_areas" => {
+            "< 2 s: 1,000 areas of 100 globs added and resolved (the old qapack1 bound)"
+        }
+        "areas_lookup_100k_globs" => {
+            "< 500 ms: one path against 100k globs (the old qapack1 bound)"
+        }
+        "areas_lookup_pathological" => {
+            "< 500 ms: 100 lookups of a 64-segment path against 60 `**` and 50 `*?` (the old qapack1 bound)"
+        }
+        "pack_resolve_2000_types" => {
+            "< 2 s: a pack of 2,000 block types added and resolved (the old schema bound)"
+        }
+        "daemon_read_during_big_write" => {
+            "< 50 ms: the worst status read on another connection while a write of the most ops one write takes runs (the old conc1 bound)"
+        }
+        "daemon_mcp_overview" => {
+            "< 5 ms p99 (the read budget, spec 11): rdy_overview over an mcp connection to the daemon"
+        }
+        "mcp_stdio_overview" => {
+            "< 2 s per call: rdy_overview over `rdy mcp --no-daemon` (the old mcp and mcp_pool bound)"
+        }
+        "mcp_stdio_write_max_ops" => {
+            "< 5 s: the largest allowed write (5,000 ops) over `rdy mcp --no-daemon` (the old mcp2 bound)"
+        }
+        "mcp_stdio_oversized_line" => {
+            "< 10 s: a 17 MiB request line sent and refused over `rdy mcp --no-daemon` (the old mcp2 bound)"
+        }
         _ => return None,
     };
     Some(if large {
@@ -125,6 +185,7 @@ fn fsync_bound(op: &str) -> bool {
         || op.starts_with("include_")
         || op.starts_with("exclude_")
         || op.starts_with("land_rebase")
+        || op.starts_with("mcp_write")
 }
 
 pub fn compare(baseline: Option<&Baseline>, measured: &[Measure]) -> Vec<Verdict> {
@@ -800,6 +861,366 @@ fn tier_views(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs
     ));
 }
 
+/// Changes in flight for the `_1k` ops.
+const INFLIGHT_N: usize = 1000;
+
+/// Views the in-flight fixture spreads its changes over: `inf0` … `inf19`.
+const INFLIGHT_VIEWS: usize = 20;
+
+/// `n` single-op changes, round-robin across the views `inf0` … `inf19`, each an update of a
+/// distinct claim of canon (the first `n` claim ids by id, skipping the fixture's claim); `inf0`
+/// also updates the fixture's claim, so its impact crosses in-flight edits. Asserts the in-flight
+/// set holds at least `n` changes.
+fn inflight_views(r: &mut Rdy, fx: &Fixture, n: usize) {
+    let mut ids: Vec<BlockId> = {
+        let canon = r.read().materialized(&Scope::Canon).expect("canon");
+        canon
+            .iter()
+            .filter(|b| b.block_type == "claim" && b.id != fx.claim)
+            .map(|b| b.id.clone())
+            .collect()
+    };
+    ids.sort();
+    ids.truncate(n);
+    assert_eq!(
+        ids.len(),
+        n,
+        "canon has {n} claims to edit besides the fixture's"
+    );
+    write(
+        r,
+        "inf0",
+        json!([{"op": "update", "id": fx.claim.to_string(), "body": "in flight claim"}]),
+    )
+    .expect("update the fixture claim in inf0");
+    for (i, id) in ids.iter().enumerate() {
+        write(
+            r,
+            &format!("inf{}", i % INFLIGHT_VIEWS),
+            json!([{"op": "update", "id": id.to_string(), "body": format!("in flight {i}")}]),
+        )
+        .expect("in-flight write");
+    }
+    let held = r.read().inflight_set().expect("inflight set").changes.len();
+    assert!(held >= n, "{held} changes in flight, wanted {n}");
+}
+
+/// The in-flight ops (M2d1): the cold build of the in-flight state, the carry of one clean commit,
+/// the warm reads of `context` and `impact` in the `inflight` scope and in a view that holds
+/// in-flight edits, and the coordination graph's cold build, with `n` changes in flight (the op
+/// names say `1k`, as `tier_views` keeps `_200` on a small tree). The reads time a warm state: the
+/// graph is built once per published state, and the cold build has its own op. Run after
+/// `tier_views`, on the same project.
+fn tier_inflight(
+    out: &mut Vec<Measure>,
+    r: &mut Rdy,
+    fx: &Fixture,
+    sfx: &str,
+    runs: &Runs,
+    n: usize,
+) {
+    // the views the earlier tiers left open hold conflicts (the landing views edit claims a landing
+    // changed), and a conflicted in-flight build is never carried: close them, so the in-flight
+    // state is the `inf*` views' and the carry is the one a clean state gets
+    let open: Vec<String> = {
+        let st = r.read();
+        st.view_names()
+            .into_iter()
+            .filter(|v| st.view_head(v).is_some_and(|h| !h.closed))
+            .collect()
+    };
+    r.view_close(
+        &writer(),
+        &open,
+        "perf: the in-flight ops measure their own views",
+    )
+    .expect("close the views left open");
+    inflight_views(r, fx, n);
+    let inflight = Scope::Inflight;
+    out.push(measure_timed(
+        &format!("inflight_build_1k{sfx}"),
+        runs.materialize_cold,
+        |_| cold(r, |r| r.read().graph(&inflight).expect("inflight graph")).1,
+    ));
+    // the carry: the state is built (outside the timer), one clean commit into an in-flight view
+    // seeds the next state, and the timed part is the read of it
+    let section = fx.section.to_string();
+    out.push(measure_timed(
+        &format!("inflight_carry{sfx}"),
+        runs.incremental,
+        |i| {
+            r.read().materialized(&inflight).expect("warm inflight");
+            write(
+                r,
+                "inf1",
+                json!([{"op": "create", "type": "claim", "parent": section, "body": format!("Carried {i}.")}]),
+            )
+            .expect("carried write");
+            assert!(
+                r.read().is_built(&inflight).0,
+                "the commit did not carry the in-flight build"
+            );
+            let s = Instant::now();
+            let built = r.read().materialized(&inflight).expect("inflight");
+            let took = s.elapsed();
+            assert!(!built.is_empty());
+            took
+        },
+    ));
+    // warm reads: the state and its graph are built once, before the runs
+    let st = r.read();
+    st.graph(&inflight).expect("inflight graph");
+    out.push(measure_timed(
+        &format!("context_inflight_1k{sfx}"),
+        runs.read,
+        |_| {
+            let s = Instant::now();
+            let c = st.context(&inflight, &fx.claim).expect("context");
+            let took = s.elapsed();
+            assert!(
+                !c.inflight.is_empty(),
+                "the fixture claim is edited in flight"
+            );
+            took
+        },
+    ));
+    out.push(measure_timed(
+        &format!("impact_inflight_1k{sfx}"),
+        runs.read,
+        |_| {
+            let s = Instant::now();
+            st.impact(&inflight, &fx.claim, 3).expect("impact");
+            s.elapsed()
+        },
+    ));
+    let inf0 = Scope::View("inf0".into());
+    st.graph(&inf0).expect("inf0's graph");
+    out.push(measure_timed(
+        &format!("context_view_1k{sfx}"),
+        runs.read,
+        |_| {
+            let s = Instant::now();
+            st.context(&inf0, &fx.claim).expect("context");
+            s.elapsed()
+        },
+    ));
+    out.push(measure_timed(
+        &format!("impact_view_1k{sfx}"),
+        runs.read,
+        |_| {
+            let s = Instant::now();
+            st.impact(&inf0, &fx.claim, 3).expect("impact");
+            s.elapsed()
+        },
+    ));
+    drop(st);
+    out.push(measure_timed(
+        &format!("coord_build_1k{sfx}"),
+        runs.materialize_cold,
+        |_| cold(r, |r| r.read().coord().expect("coord")).1,
+    ));
+}
+
+/// Intents and alternative sets ever made in the coordination ops' projects: none is ever
+/// deleted (an intent expires at read time; a set is settled, not removed), so a swarm's count
+/// grows for the project's lifetime.
+const COORD_N: usize = 1000;
+
+/// Open intents of another session on the written claim, beside the expired ones.
+const COORD_OPEN_INTENTS: usize = 5;
+
+/// A fresh small project (2 folders x 3 docs x 12 claims), landed, in `parent/<name>`.
+fn coord_project(parent: &std::path::Path, name: &str) -> (std::path::PathBuf, Rdy, Fixture) {
+    let proj = parent.join(name);
+    std::fs::create_dir_all(&proj).expect("mkdir");
+    let docs = testkit::generate_tree(&proj, 2, 3, 12);
+    let mut r = Rdy::open(&proj).expect("open");
+    land(&mut r, "work").expect("land work");
+    let fx = fixture(&r, &docs);
+    (proj, r, fx)
+}
+
+/// One `write_and_report` (the MCP and CLI write: consequences and intent notes included) of an
+/// update of `claim` in view `view` by `s`.
+fn reported_write(
+    engine: &rdy_engine::engine::Local,
+    s: &rdy_engine::Session,
+    view: &str,
+    claim: &BlockId,
+    body: String,
+) -> serde_json::Value {
+    let (s, v) = (s.clone(), view.to_string());
+    let ops =
+        serde_json::from_value(json!([{"op": "update", "id": claim.to_string(), "body": body}]))
+            .expect("ops");
+    rdy_engine::consequence::write_and_report(engine, view, None, move |r| {
+        r.write(
+            &s,
+            rdy_engine::WriteRequest {
+                view: v,
+                ops,
+                justification: None,
+                message: String::new(),
+            },
+        )
+    })
+    .expect("reported write")
+}
+
+/// The coordination records at scale (final-review fix round 1): a write (consequences and
+/// intent notes) and a briefing in a project where `n` intents have expired and
+/// [`COORD_OPEN_INTENTS`] are open, and a write in a project with `n` abandoned alternative sets.
+/// Each runs on a fresh small project, so only the records it adds differ from a plain write or
+/// briefing. Spec targets: the write and the read budgets.
+fn tier_coord(out: &mut Vec<Measure>, parent: &std::path::Path, sfx: &str, runs: &Runs, n: usize) {
+    let (_proj, mut r, fx) = coord_project(parent, "coord-intents");
+    let a = crate::fixtures::agent("agent:a", Some("ra"));
+    let claim = [fx.claim.to_string()];
+    {
+        // posted long ago with the shortest ttl: every one has expired at any real `now`
+        let _clock = rdy_engine::pin_clock(1_000_000);
+        for i in 0..n {
+            r.intent_post(&a, None, None, &claim, &format!("old {i}"), Some(60_000))
+                .expect("an intent that expires");
+        }
+    }
+    for i in 0..COORD_OPEN_INTENTS {
+        r.intent_post(&a, None, None, &claim, &format!("open {i}"), None)
+            .expect("an open intent");
+    }
+    let engine = rdy_engine::engine::Local::new(r);
+    let b = crate::fixtures::agent("agent:b", Some("rb"));
+    out.push(measure_timed(
+        &format!("write_expired_intents_1k{sfx}"),
+        runs.write,
+        |i| {
+            let s = Instant::now();
+            let v = reported_write(&engine, &b, "rb", &fx.claim, format!("Noted {i}."));
+            let took = s.elapsed();
+            assert_eq!(
+                v["intents"].as_array().map(Vec::len),
+                Some(COORD_OPEN_INTENTS),
+                "the open intents only: {v}"
+            );
+            took
+        },
+    ));
+    let st = rdy_engine::engine::Engine::read(&engine);
+    let rb = Scope::View("rb".into());
+    let cov = Coverage {
+        ids: vec![fx.claim.to_string()],
+        path: None,
+    };
+    st.brief(&rb, &cov, None).expect("warm the briefing");
+    out.push(measure_timed(
+        &format!("brief_expired_intents_1k{sfx}"),
+        runs.read,
+        |_| {
+            let s = Instant::now();
+            let brief = st.brief(&rb, &cov, None).expect("brief");
+            let took = s.elapsed();
+            assert_eq!(brief.inflight.intents.len(), COORD_OPEN_INTENTS);
+            took
+        },
+    ));
+    drop(st);
+    drop(engine);
+
+    let (_proj, mut r, fx) = coord_project(parent, "coord-alts");
+    let o = crate::fixtures::agent("agent:o", Some("o"));
+    for i in 0..n {
+        let (p, q) = (format!("p{i}"), format!("q{i}"));
+        for v in [&p, &q] {
+            r.view_create(&writer(), v, None, false)
+                .expect("a member view");
+        }
+        let members = [
+            rdy_engine::alt::AltMemberInput {
+                label: "p".into(),
+                view: p,
+            },
+            rdy_engine::alt::AltMemberInput {
+                label: "q".into(),
+                view: q,
+            },
+        ];
+        let set = r
+            .alt_create(&o, &format!("old {i}"), None, &members)
+            .expect("a set");
+        r.alt_abandon(&o, &set.id, "superseded").expect("abandon");
+    }
+    assert!(r.read().coord_heads().open_alts.is_empty());
+    let engine = rdy_engine::engine::Local::new(r);
+    out.push(measure(
+        &format!("write_settled_alts_1k{sfx}"),
+        runs.write,
+        |i| {
+            reported_write(&engine, &b, "rb", &fx.claim, format!("Settled {i}."));
+        },
+    ));
+}
+
+/// Ops in one `mcp_write_args` call: a doc, its section and 2,000 claims.
+const MCP_CLAIMS: usize = 2000;
+
+/// The arguments of one large `rdy_write` (about 9.2 MiB serialized): a doc `mw-<i>`, a section
+/// and [`MCP_CLAIMS`] claims of 4,700 ASCII characters each, in view `mw`.
+fn mcp_write_args(i: usize) -> serde_json::Map<String, serde_json::Value> {
+    let body = "lorem ipsum dolor sit amet ".repeat(4700 / 27 + 1)[..4700].to_string();
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": format!("mw-{i}"), "title": "MW", "doc_type": "glossary"}}),
+        json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}),
+    ];
+    ops.extend(
+        (0..MCP_CLAIMS)
+            .map(|_| json!({"op": "create", "type": "claim", "parent": "$s", "body": body})),
+    );
+    match json!({"view": "mw", "ops": ops}) {
+        serde_json::Value::Object(m) => m,
+        _ => unreachable!("an object literal"),
+    }
+}
+
+/// The MCP parameter path on one ~9 MiB `rdy_write` (the intake follow-up: parameters
+/// deserialize from a `&Value`, and `rdy_write` clones every op): `parse_params` alone, then
+/// parse plus the write, consequences included. Opens the project on its own handle; run last,
+/// because its 6,000 blocks would move the ops before it.
+fn tier_mcp(out: &mut Vec<Measure>, proj: &std::path::Path) {
+    use rdy_mcp::params::parse_params;
+    use rdy_mcp::tools::{McpState, WriteParams, rdy_session, rdy_write};
+    let r = Rdy::open(proj).expect("open");
+    let mut st = McpState::new(std::sync::Arc::new(rdy_engine::engine::Local::new(r)));
+    rdy_session(
+        &mut st,
+        serde_json::from_value(json!({"actor": "agent:perf", "run": "mw", "role": "writer"}))
+            .expect("session params"),
+    )
+    .expect("session");
+    let size = serde_json::to_vec(&mcp_write_args(0))
+        .expect("serialize")
+        .len();
+    assert!(size >= 9 * 1024 * 1024, "{size} bytes is not ~9 MiB");
+    assert!(
+        size < rdy_mcp::tools::MAX_REQUEST_BYTES,
+        "{size} bytes is over the request limit"
+    );
+    out.push(measure_timed("mcp_params_9mib", 3, |i| {
+        let args = mcp_write_args(i);
+        let s = Instant::now();
+        let p = parse_params::<WriteParams>("rdy_write", args).expect("parse");
+        let took = s.elapsed();
+        assert_eq!(p.ops.len(), MCP_CLAIMS + 2);
+        took
+    }));
+    out.push(measure_timed("mcp_write_9mib", 3, |i| {
+        let args = mcp_write_args(i);
+        let s = Instant::now();
+        let p = parse_params::<WriteParams>("rdy_write", args).expect("parse");
+        rdy_write(&mut st, p).expect("rdy_write");
+        s.elapsed()
+    }));
+}
+
 /// The edit loop: a briefing over a doc, a write that cites a briefing (the check on, a hit) and a
 /// write followed by its consequences. Run in a fresh view `eb` where the fixture's section is
 /// `stable`, so every write there is checked against the registry. `sfx` as for [`tier_reads`].
@@ -1092,10 +1513,18 @@ pub fn run_workload() -> Vec<Measure> {
     }));
     drop(r);
     out.extend(daemon_ops(&proj, ""));
+    out.extend(daemon_mcp_on_copy(&proj, dir.path()));
+    out.extend(bound_ops(dir.path()));
+    out.extend(stdio_mcp_ops(dir.path()));
     // the view ops last: the views and landings they leave behind would move the ops above
     let mut r = Rdy::open(&proj).expect("open");
     tier_views(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
+    tier_inflight(&mut out, &mut r, &fx, "", &TYPICAL_RUNS, INFLIGHT_N);
     drop(r);
+    // on projects of their own: the records they add move nothing above
+    tier_coord(&mut out, dir.path(), "", &TYPICAL_RUNS, COORD_N);
+    // the large `rdy_write` last, on a reopened project: its 6,000 blocks move nothing above
+    tier_mcp(&mut out, &proj);
     if crate::fixtures::deep() {
         out.extend(run_large_tier(dir.path()));
     }
@@ -1177,6 +1606,398 @@ fn daemon_ops(proj: &std::path::Path, sfx: &str) -> Vec<Measure> {
     out
 }
 
+/// Copies the project at `from` to `to` (no handle may be open on it), leaving out `.rdy/run`.
+fn copy_project(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("mkdir");
+    for e in std::fs::read_dir(from).expect("read_dir") {
+        let p = e.expect("entry").path();
+        let name = p.file_name().expect("a name");
+        if name == "run"
+            && p.parent()
+                .and_then(|d| d.file_name())
+                .is_some_and(|d| d == ".rdy")
+        {
+            continue;
+        }
+        let t = to.join(name);
+        if p.is_dir() {
+            copy_project(&p, &t);
+        } else {
+            std::fs::copy(&p, &t).expect("copy");
+        }
+    }
+}
+
+/// The daemon's mcp ops ([`daemon_mcp_ops`]) on a copy of the typical project under `parent`:
+/// their big writes would otherwise grow the project the later ops (and the cold starts) open.
+fn daemon_mcp_on_copy(proj: &std::path::Path, parent: &std::path::Path) -> Vec<Measure> {
+    let copy = parent.join("p-mcp");
+    copy_project(proj, &copy);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("client runtime");
+    let run = daemon_start(&copy);
+    let mut c = rt.block_on(daemon_ready(&copy));
+    rt.block_on(c.ctl("session", json!({"actor": null, "run": null})))
+        .unwrap_or_else(|e| panic!("the session op failed: {e}"));
+    let out = rt.block_on(daemon_mcp_ops(&copy, &mut c));
+    drop(c);
+    daemon_stop(run);
+    out
+}
+
+/// One JSON-RPC line out, and the reply with `id` back (other lines are skipped).
+async fn mcp_call(
+    w: &mut tokio::net::unix::OwnedWriteHalf,
+    r: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    id: u64,
+    tool: &str,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    mcp_send(w, id, tool, args).await;
+    mcp_reply(r, id).await
+}
+
+async fn mcp_send(
+    w: &mut tokio::net::unix::OwnedWriteHalf,
+    id: u64,
+    tool: &str,
+    args: serde_json::Value,
+) {
+    use tokio::io::AsyncWriteExt;
+    let line = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": tool, "arguments": args}});
+    w.write_all(format!("{line}\n").as_bytes())
+        .await
+        .expect("mcp write");
+}
+
+async fn mcp_reply(
+    r: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    id: u64,
+) -> serde_json::Value {
+    use tokio::io::AsyncBufReadExt;
+    loop {
+        let mut line = String::new();
+        let n = r.read_line(&mut line).await.expect("mcp read");
+        assert!(n > 0, "the daemon closed the mcp connection");
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+        if v["id"] == json!(id) {
+            return v;
+        }
+    }
+}
+
+/// The ops over an `mcp` connection to the daemon at `proj` (typical tier only), with `c` a
+/// `ctl` connection that has a session: `daemon_mcp_overview` (one `rdy_overview` round trip)
+/// and `daemon_read_during_big_write` (a `status` read on `c` while the mcp connection's write
+/// of `MAX_OPS_PER_WRITE` claims runs on the writer; one write per run, its reply read after
+/// the timed read).
+async fn daemon_mcp_ops(proj: &std::path::Path, c: &mut Client) -> Vec<Measure> {
+    use tokio::io::AsyncWriteExt;
+    let hello = Hello {
+        rdy: PROTO_VERSION,
+        version: "perf".into(),
+        proto: Proto::Mcp,
+        cwd: proj.to_path_buf(),
+    };
+    let stream = match rdy_daemon::connect(&RunDir::of_project(proj), &hello).await {
+        Attempt::Ready(c) => c.into_stream(),
+        other => panic!("the daemon did not answer the mcp hello: {other:?}"),
+    };
+    let (r, mut w) = stream.into_split();
+    let mut r = tokio::io::BufReader::new(r);
+    let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": crate::mcp::PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "perf", "version": "0"}}});
+    w.write_all(format!("{init}\n").as_bytes())
+        .await
+        .expect("mcp write");
+    mcp_reply(&mut r, 1).await;
+    w.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+        .await
+        .expect("mcp write");
+    let mut id = 1;
+    let mut next = || {
+        id += 1;
+        id
+    };
+    mcp_call(
+        &mut w,
+        &mut r,
+        next(),
+        "rdy_session",
+        json!({"actor": "agent:perf", "role": "writer"}),
+    )
+    .await;
+    let made = mcp_call(&mut w, &mut r, next(), "rdy_write", json!({"ops": [
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "perf-big", "title": "B", "doc_type": "constraints"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}
+    ]})).await;
+    let text = made["result"]["content"][0]["text"]
+        .as_str()
+        .expect("the write's result");
+    let made: serde_json::Value = serde_json::from_str(text).expect("the write's json");
+    let section = made["created"]["$s"]
+        .as_str()
+        .expect("the section id")
+        .to_string();
+    let mut out = vec![];
+    let mut overview = vec![];
+    for _ in 0..30 {
+        let n = next();
+        let s = Instant::now();
+        mcp_call(&mut w, &mut r, n, "rdy_overview", json!({})).await;
+        overview.push(s.elapsed());
+    }
+    let mut overview = overview.into_iter();
+    out.push(measure_timed("daemon_mcp_overview", 30, |_| {
+        overview.next().expect("a run")
+    }));
+    // per run: the worst of the status reads made until the write's reply arrives (the reply
+    // is awaited on its own task, so every read but possibly the last overlaps the write)
+    let mut during = vec![];
+    let mut reads = 0usize;
+    for run in 0..20 {
+        let ops: Vec<_> = (0..rdy_mcp::tools::MAX_OPS_PER_WRITE)
+            .map(|i| json!({"op": "create", "type": "claim", "parent": section, "body": format!("Big {run} claim {i}.")}))
+            .collect();
+        let n = next();
+        mcp_send(&mut w, n, "rdy_write", json!({"ops": ops})).await;
+        let reply = tokio::spawn(async move {
+            let v = mcp_reply(&mut r, n).await;
+            (r, v)
+        });
+        let mut worst = Duration::ZERO;
+        loop {
+            let s = Instant::now();
+            c.ctl("status", json!({})).await.expect("status");
+            worst = worst.max(s.elapsed());
+            reads += 1;
+            if reply.is_finished() {
+                break;
+            }
+            // a pause between reads, outside the timed region: the reads sample the write
+            // rather than flood the daemon
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let (back, v) = reply.await.expect("the reply task");
+        r = back;
+        assert!(v["result"].is_object(), "the big write: {v}");
+        during.push(worst);
+    }
+    eprintln!("daemon_read_during_big_write: {reads} status reads over 20 big writes");
+    let mut during = during.into_iter();
+    out.push(measure_timed("daemon_read_during_big_write", 20, |_| {
+        during.next().expect("a run")
+    }));
+    out
+}
+
+/// The ops whose bounds the functional tests used to assert by the clock: hostile exports
+/// refused, forged blob manifests refused, big packs resolved and their area lookups. Each on
+/// its own fixture under `parent`, built outside the timed region.
+fn bound_ops(parent: &std::path::Path) -> Vec<Measure> {
+    use rdy_schema::{MAX_PATH_SEGMENTS, PackSet};
+    let mut out = vec![];
+    const DOC: &str = "- id: d-AAAAA\n  type: doc\n  order: a1\n  fields:\n    title: T\n    doc_type: glossary\n- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: Terms\n";
+    let export = |name: &str| {
+        let t = parent.join(name);
+        std::fs::create_dir_all(t.join("docs")).expect("mkdir");
+        std::fs::write(
+            t.join("rdy-export.yaml"),
+            "format: 2\npack: rdy-standard\nscope: canon\n",
+        )
+        .expect("manifest");
+        t
+    };
+    // a 20 MB scalar in a doc file that does not validate
+    let big = export("bound-big");
+    std::fs::write(
+        big.join("docs/big.yaml"),
+        format!(
+            "{DOC}- id: c-AAAAA\n  type: claim\n  parent: s-AAAAA\n  order: a2\n  body: \"{}\"\n  fields:\n    bogus: x\n",
+            "x".repeat(20_000_000)
+        ),
+    )
+    .expect("big doc");
+    // a symlink loop under docs/
+    let link = export("bound-link");
+    std::os::unix::fs::symlink(link.join("docs"), link.join("docs/loop")).expect("symlink");
+    let pack = PackSet::with_builtin()
+        .resolve("rdy-standard")
+        .expect("rdy-standard");
+    for (op, dir) in [
+        ("refuse_import_20mb_scalar", &big),
+        ("refuse_import_symlink", &link),
+    ] {
+        out.push(measure_timed(op, 5, |i| {
+            let proj = parent.join(format!("{op}-{i}"));
+            std::fs::create_dir_all(&proj).expect("mkdir");
+            let mut r = Rdy::init(&proj, "rdy-standard").expect("init");
+            let s = Instant::now();
+            r.import(&approver(), "import", dir)
+                .expect_err("a hostile export is refused");
+            s.elapsed()
+        }));
+    }
+    out.push(measure("refuse_check_20mb_scalar", 5, |_| {
+        rdy_engine::check_path(&pack, None, &big).expect("check runs");
+    }));
+    // forged chunk-kind manifests: 30,000 chunks of 1 MiB named by a manifest an agent uploaded
+    {
+        use rdy_store::kinds::{self, BlobManifest};
+        const MIB: usize = 1024 * 1024;
+        let proj = parent.join("bound-blob");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let mut r = Rdy::init(&proj, "rdy-standard").expect("init");
+        let made = write(&mut r, "work", json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Tx", "doc_type": "glossary"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
+        ]))
+        .expect("doc");
+        let section = made.created["$s"].to_string();
+        let chunk = r
+            .store_mut()
+            .write(vec![(kinds::BLOB_CHUNK, vec![9u8; MIB])])
+            .expect("chunk")[0];
+        let n = 30_000usize;
+        let forged = postcard::to_allocvec(&BlobManifest {
+            len: (n * MIB) as u64,
+            chunks: vec![chunk; n],
+        })
+        .expect("manifest");
+        let h = r
+            .store_mut()
+            .write(vec![(kinds::BLOB_CHUNK, forged)])
+            .expect("forged")[0];
+        out.push(measure("blob_forged_manifest_refuse", 5, |_| {
+            assert!(!r.store().has_blob(&h).expect("has_blob"));
+            r.store().get_blob(&h).expect_err("a forged manifest");
+        }));
+        out.push(measure("figure_forged_manifest_refuse", 5, |_| {
+            let e = write(&mut r, "work", json!([{"op": "create", "type": "figure", "parent": section, "fields": {"blob": h.to_string(), "media_type": "image/png", "alt": "x"}}]))
+                .expect_err("a figure naming a forged manifest");
+            assert_eq!(e.code, "E_VALIDATION", "{e}");
+        }));
+    }
+    // a thousand areas of a hundred globs each
+    let mut areas = String::from("name: big\nversion: \"1\"\nextends: rdy-standard\nareas:\n");
+    for a in 0..1000 {
+        areas.push_str(&format!("  area{a}:\n    paths: ["));
+        for g in 0..100 {
+            areas.push_str(&format!("'f{a}/**/d{g}', "));
+        }
+        areas.push_str("]\n");
+    }
+    let mut resolved = None;
+    out.push(measure("pack_resolve_1000_areas", 5, |_| {
+        let mut set = PackSet::with_builtin();
+        set.add_yaml(&areas).expect("areas yaml");
+        resolved = Some(set.resolve("big").expect("resolve"));
+    }));
+    let p = resolved.expect("resolved at least once");
+    out.push(measure("areas_lookup_100k_globs", 20, |_| {
+        assert_eq!(p.areas_for_path("f999/x/y/d99"), vec!["area999"]);
+    }));
+    let mut set = PackSet::with_builtin();
+    let pat = format!("{}/a", vec!["**"; 60].join("/"));
+    set.add_yaml(&format!(
+        "name: p\nversion: \"1\"\nextends: rdy-standard\nareas:\n  a: {{ paths: ['{pat}', '{}a'] }}\n",
+        "*?".repeat(50)
+    ))
+    .expect("pathological yaml");
+    let p = set.resolve("p").expect("resolve");
+    let path = vec!["b"; MAX_PATH_SEGMENTS].join("/");
+    out.push(measure("areas_lookup_pathological", 5, |_| {
+        for _ in 0..100 {
+            assert!(p.areas_for_path(&path).is_empty());
+        }
+    }));
+    // two thousand block types
+    let letters = b"abcdefghijklmnopqrstuvwxyz";
+    let mut types = String::from("name: big\nversion: \"1\"\nblock_types:\n");
+    for i in 0..2000 {
+        let prefix = format!(
+            "{}{}{}",
+            letters[i % 26] as char,
+            letters[(i / 26) % 26] as char,
+            letters[(i / 676) % 26] as char
+        );
+        types.push_str(&format!("  t{i}: {{ prefix: {prefix} }}\n"));
+    }
+    out.push(measure("pack_resolve_2000_types", 5, |_| {
+        let mut set = PackSet::with_builtin();
+        let n = set.add_yaml(&types).expect("the 2,000-type pack is added");
+        let p = set.resolve(&n).expect("the 2,000-type pack resolves");
+        assert!(p.block_types.len() >= 2000);
+    }));
+    out
+}
+
+/// The ops over `rdy mcp --no-daemon` (the stdio server the mcp and mcp_pool tests drive), on
+/// a fresh project under `parent`: `mcp_stdio_overview` (one `rdy_overview` call),
+/// `mcp_stdio_write_max_ops` (a write of `MAX_OPS_PER_WRITE` claims) and
+/// `mcp_stdio_oversized_line` (a 17 MiB request line, sent and refused). Each run is timed from
+/// the send to the reply.
+fn stdio_mcp_ops(parent: &std::path::Path) -> Vec<Measure> {
+    use crate::mcp::{McpClient, Reply};
+    let budget = Duration::from_secs(120);
+    let proj = parent.join("stdio");
+    std::fs::create_dir_all(&proj).expect("mkdir");
+    drop(Rdy::init(&proj, "rdy-standard").expect("init"));
+    let mut c = McpClient::start(&proj);
+    c.call_within(
+        "rdy_session",
+        json!({"actor": "agent:perf", "role": "writer"}),
+        budget,
+    )
+    .ok();
+    let made = c
+        .call_within("rdy_write", json!({"ops": [
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Big", "doc_type": "glossary"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Terms"}}
+        ]}), budget)
+        .ok();
+    let section = made["created"]["$s"]
+        .as_str()
+        .expect("the section id")
+        .to_string();
+    let mut out = vec![];
+    out.push(measure("mcp_stdio_overview", 30, |_| {
+        assert!(matches!(
+            c.call_within("rdy_overview", json!({}), budget),
+            Reply::Ok(_)
+        ));
+    }));
+    out.push(measure_timed("mcp_stdio_write_max_ops", 5, |run| {
+        let ops: Vec<_> = (0..rdy_mcp::tools::MAX_OPS_PER_WRITE)
+            .map(|i| json!({"op": "create", "type": "claim", "parent": section, "body": format!("Max {run} claim {i}.")}))
+            .collect();
+        let args = json!({"ops": ops});
+        let s = Instant::now();
+        let r = c.call_within("rdy_write", args, budget);
+        let took = s.elapsed();
+        assert!(matches!(r, Reply::Ok(_)), "the largest write: {r:?}");
+        took
+    }));
+    let big = "x".repeat(17 * 1024 * 1024);
+    out.push(measure_timed("mcp_stdio_oversized_line", 3, |_| {
+        let id = c.next_id();
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"rdy_write","arguments":{{"message":"{big}","ops":[]}}}}}}"#
+        );
+        let s = Instant::now();
+        c.send_raw_within(&line, budget);
+        let reply = c.recv(id, budget);
+        let took = s.elapsed();
+        assert!(
+            reply.to_string().contains("rdy_request_too_large"),
+            "{reply}"
+        );
+        took
+    }));
+    out
+}
+
 /// The large tier (`RDY_QA_DEEP=1`): a ~50k-block project, ids seeded as for the typical tier,
 /// landed, with twenty pending writes; the shared ops under the `_50k` names, and the daemon ops
 /// (`daemon_write_single_50k`, `daemon_cold_start_50k`) once every in-process handle is closed. `version_position`
@@ -1214,6 +2035,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     let mut r = Rdy::open(&proj).expect("open");
     prepare_rebased_view(&mut r, &fx, &LARGE_RUNS);
     tier_views(&mut out, &mut r, &fx, sfx, &LARGE_RUNS);
+    tier_inflight(&mut out, &mut r, &fx, sfx, &LARGE_RUNS, INFLIGHT_N);
     out
 }
 
@@ -1456,6 +2278,181 @@ mod tests {
         }
     }
 
+    /// The in-flight ops run end to end on a small tree (n scaled down to the tree's claims).
+    #[test]
+    fn d1perf1_the_inflight_ops_run_on_a_small_tree() {
+        rdy_model::seed_ids_for_tests(0x7064_6566);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let fx = fixture(&r, &docs);
+        let runs = Runs {
+            write: 1,
+            read: 2,
+            tree: 1,
+            materialize_cold: 2,
+            incremental: 2,
+            view_ops: 2,
+            landing: 2,
+            view_changes: 12,
+            landing_views: 8,
+        };
+        let mut out = vec![];
+        tier_inflight(&mut out, &mut r, &fx, "", &runs, 40);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "inflight_build_1k",
+                "inflight_carry",
+                "context_inflight_1k",
+                "impact_inflight_1k",
+                "context_view_1k",
+                "impact_view_1k",
+                "coord_build_1k"
+            ]
+        );
+    }
+
+    /// After the view ops (which leave conflicted views open), the carry still carries: the tier
+    /// closes what the earlier tiers left open.
+    #[test]
+    fn d1perf1_the_inflight_ops_carry_after_the_view_ops() {
+        rdy_model::seed_ids_for_tests(0x7064_6566);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let fx = fixture(&r, &docs);
+        let runs = Runs {
+            write: 1,
+            read: 2,
+            tree: 1,
+            materialize_cold: 2,
+            incremental: 2,
+            view_ops: 2,
+            landing: 2,
+            view_changes: 12,
+            landing_views: 8,
+        };
+        prepare_rebased_view(&mut r, &fx, &runs);
+        tier_views(&mut vec![], &mut r, &fx, "", &runs);
+        assert!(
+            !r.read()
+                .conflicts(&Scope::Inflight)
+                .expect("conflicts")
+                .is_empty(),
+            "the view ops leave a conflicted in-flight state"
+        );
+        let mut out = vec![];
+        tier_inflight(&mut out, &mut r, &fx, "", &runs, 40);
+        rdy_model::unseed_ids_for_tests();
+        assert_eq!(out.len(), 7);
+        assert!(
+            r.read()
+                .conflicts(&Scope::Inflight)
+                .expect("conflicts")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn d1perf1_the_m2d1_ops_state_their_targets() {
+        for op in [
+            "context_inflight_1k",
+            "impact_inflight_1k",
+            "context_view_1k",
+            "impact_view_1k",
+            "context_inflight_1k_50k",
+        ] {
+            assert!(spec_target(op).unwrap().contains("< 5 ms p99"), "{op}");
+        }
+        for op in [
+            "inflight_build_1k",
+            "coord_build_1k",
+            "mcp_params_9mib",
+            "mcp_write_9mib",
+        ] {
+            assert!(spec_target(op).unwrap().contains("no spec target"), "{op}");
+        }
+        assert!(spec_target("inflight_carry").unwrap().contains("< 1 ms"));
+        assert!(fsync_bound("mcp_write_9mib") && !fsync_bound("mcp_params_9mib"));
+    }
+
+    /// Final-review fix round 1: the coordination ops run end to end on small projects (n
+    /// scaled down) and state their targets.
+    #[test]
+    fn d1perf1_the_coord_ops_run_and_state_their_targets() {
+        rdy_model::seed_ids_for_tests(0x7064_6566);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runs = Runs {
+            write: 2,
+            read: 2,
+            tree: 1,
+            materialize_cold: 1,
+            incremental: 1,
+            view_ops: 1,
+            landing: 1,
+            view_changes: 1,
+            landing_views: 1,
+        };
+        let mut out = vec![];
+        tier_coord(&mut out, dir.path(), "", &runs, 20);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "write_expired_intents_1k",
+                "brief_expired_intents_1k",
+                "write_settled_alts_1k"
+            ]
+        );
+        for op in names {
+            let target = spec_target(op).unwrap_or_else(|| panic!("{op} has no target"));
+            assert!(target.contains("< 5 ms p99"), "{op}: {target}");
+        }
+        assert!(
+            fsync_bound("write_expired_intents_1k") && !fsync_bound("brief_expired_intents_1k")
+        );
+    }
+
+    #[test]
+    #[ignore = "runs the typical perf workload; cargo test -p rdy-qa --release --lib -- --ignored d1perf1"]
+    fn d1perf1_the_m2d1_ops_have_spec_targets_and_run() {
+        let ops = [
+            "inflight_build_1k",
+            "inflight_carry",
+            "context_inflight_1k",
+            "impact_inflight_1k",
+            "context_view_1k",
+            "impact_view_1k",
+            "coord_build_1k",
+            "mcp_params_9mib",
+            "mcp_write_9mib",
+            "write_expired_intents_1k",
+            "brief_expired_intents_1k",
+            "write_settled_alts_1k",
+        ];
+        for op in ops {
+            assert!(spec_target(op).is_some(), "{op} has no target");
+        }
+        let ms = run_workload();
+        for op in ops {
+            let m = ms
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            assert!(m.median_ms > 0.0);
+        }
+    }
+
     #[test]
     fn tier1_a_typical_rebaseline_keeps_the_large_tier_and_a_typical_run_ignores_it() {
         let base = Baseline {
@@ -1575,6 +2572,69 @@ mod tests {
         assert_eq!(idx.commits, 30);
         assert_eq!(idx.cited["c-AAAAA"].len(), 30, "every commit cites both");
         assert!(idx.files.contains_key("src/f0.rs"));
+    }
+
+    #[test]
+    fn hf1perf_the_bound_ops_have_targets_and_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let ms = bound_ops(dir.path());
+        for op in [
+            "refuse_import_20mb_scalar",
+            "refuse_check_20mb_scalar",
+            "refuse_import_symlink",
+            "blob_forged_manifest_refuse",
+            "figure_forged_manifest_refuse",
+            "pack_resolve_1000_areas",
+            "areas_lookup_100k_globs",
+            "areas_lookup_pathological",
+            "pack_resolve_2000_types",
+        ] {
+            assert!(spec_target(op).is_some(), "{op}");
+            let m = ms
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            assert!(m.median_ms > 0.0, "{op}: {m:?}");
+        }
+    }
+
+    #[test]
+    fn hf1perf_the_daemon_mcp_ops_have_targets_and_run_on_a_small_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).unwrap();
+        testkit::generate_tree(&proj, 1, 2, 3);
+        let mut r = Rdy::open(&proj).unwrap();
+        land(&mut r, "work").unwrap();
+        r.view_create(&writer(), "va", None, true).unwrap();
+        drop(r);
+        let ms = daemon_mcp_on_copy(&proj, dir.path());
+        for op in ["daemon_mcp_overview", "daemon_read_during_big_write"] {
+            assert!(spec_target(op).is_some(), "{op}");
+            let m = ms
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            assert!(m.median_ms > 0.0, "{op}: {m:?}");
+        }
+    }
+
+    #[test]
+    fn hf1perf_the_stdio_mcp_ops_have_targets_and_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let ms = stdio_mcp_ops(dir.path());
+        for op in [
+            "mcp_stdio_overview",
+            "mcp_stdio_write_max_ops",
+            "mcp_stdio_oversized_line",
+        ] {
+            assert!(spec_target(op).is_some(), "{op}");
+            let m = ms
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            assert!(m.median_ms > 0.0, "{op}: {m:?}");
+        }
     }
 
     #[test]

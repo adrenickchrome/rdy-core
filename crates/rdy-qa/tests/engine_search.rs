@@ -342,3 +342,26 @@ fn bsrch1_counted_repeats_over_paragraph_lines_return_a_result() {
     assert_eq!(run("(?:[a-z ]{0,20}){1,40}\\d"), 0);
     assert_eq!(run("(?:[a-z ]?){1,1000}\\d"), 0);
 }
+
+/// Merge of AE2 into M2d1: search reads the `inflight` scope (canon plus every open view's
+/// changes), as every read does.
+#[test]
+fn bsrch1_search_reads_the_inflight_scope() {
+    let (_d, mut r) = project();
+    let (_s, p, _c, _f) = guide(&mut r);
+    let v = version_of(&r, &Scope::Canon, &p);
+    write(
+        &mut r,
+        "a",
+        json!([{"op": "update", "id": p, "base": v, "body": "Run rdy deploy to ship."}]),
+    )
+    .unwrap();
+    let query = q("rdy deploy", false, false);
+    assert_eq!(search(&r, &Scope::Canon, &query).total, 0);
+    let res = search(&r, &Scope::Inflight, &query);
+    assert_eq!(res.total, 1);
+    assert_eq!(
+        serde_json::to_value(&res).unwrap()["matches"][0]["id"],
+        json!(p)
+    );
+}

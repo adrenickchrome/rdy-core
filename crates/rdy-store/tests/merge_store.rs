@@ -194,7 +194,14 @@ fn merge1_a_change_that_covers_canon_and_its_own_side_lands() {
     // a landing needs the proposal's ref, which propose and propose_next write
     let p0 = s.propose("v", "resolved", prov(Role::Writer)).unwrap();
     let pid = s
-        .propose_next(&p0, vec![c, r_id], "resolved", None, prov(Role::Writer))
+        .propose_next(
+            &p0,
+            vec![c, r_id],
+            "resolved",
+            None,
+            prov(Role::Writer),
+            None,
+        )
         .unwrap();
     s.land(&pid, prov(Role::Approver)).unwrap();
     assert_eq!(

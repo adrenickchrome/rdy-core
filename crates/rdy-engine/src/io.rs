@@ -3,9 +3,12 @@ use crate::error::*;
 use crate::keys::Keys;
 use crate::query::field_json;
 use crate::tree_io::{self, FOLDER_FILE};
-use crate::write::{LinkInput, OpInput, WriteRequest, WriteResult};
+use crate::write::{LinkInput, OpInput, TRACKING_NEEDS_REASON, WriteRequest, WriteResult};
 use crate::{Rdy, ReadState, Scope, Session};
-use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Link, Op, tree};
+use rdy_model::{
+    Block, BlockId, Change, ChangeLinks, EditorialClass, FieldValue, Hash, Justification, Link, Op,
+    tree,
+};
 use rdy_schema::{has_errors, skeleton_gaps, validate_block, validate_prefix};
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
@@ -584,8 +587,21 @@ fn parse_yaml(text: &str) -> Result<(Block, Vec<KeyedLink>), RdyError> {
     from_yaml_struct(y)
 }
 
+/// insc1: an export (or a rendered site) is a state someone can read back, so never `inflight`.
+pub fn refuse_inflight_export(scope: &Scope) -> Result<(), RdyError> {
+    if *scope == Scope::Inflight {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "inflight is an analysis scope: export (render) canon, a view or a version",
+            "export or render canon, a view (view:<name>) or a version (tag:<version>)",
+        ));
+    }
+    Ok(())
+}
+
 impl ReadState {
     pub fn export(&self, scope: &Scope, out: &Path) -> Result<ExportSummary, RdyError> {
+        refuse_inflight_export(scope)?;
         if out.exists() && std::fs::read_dir(out).map_err(io_err)?.next().is_some() {
             return Err(RdyError::new(
                 E_BAD_INPUT,
@@ -674,6 +690,7 @@ impl ReadState {
             Scope::View(v) if v.contains(':') => format!("view:{v}"),
             Scope::View(v) => v.clone(),
             Scope::At(h) => format!("landing:{h}"),
+            Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
         };
         let manifest = Manifest {
             format: 3,
@@ -941,12 +958,13 @@ impl Rdy {
         // it: each cited target (reference or link) to its content hash, the incoming block
         // with that id first, else the view's. A block is never pinned to itself. Pins in the
         // files are ignored.
+        let tracking = self.store.tracking();
         let content = |id: &BlockId| {
             incoming
                 .get(id)
                 .copied()
                 .or_else(|| existing.get(id))
-                .map(Block::content_hash)
+                .map(|t| t.content_hash_with(tracking))
         };
         let pins: Vec<BTreeMap<BlockId, Hash>> = blocks
             .iter()
@@ -990,6 +1008,7 @@ impl Rdy {
         )?;
         self.publish(crate::Delta::Commit {
             view: view.to_string(),
+            change: id,
             ops: ops.clone(),
         })?;
         let created = ops
@@ -1007,14 +1026,15 @@ impl Rdy {
         })
     }
 
-    /// lkey1: `edit_block` for a block written as YAML, a key as a link target resolved with the
-    /// keys of the view.
+    /// lkey1: `edit_block_with` for a block written as YAML, a key as a link target resolved
+    /// with the keys of the view. `reason` is the edit's editorial reason (`rdy edit --reason`).
     pub fn edit_yaml(
         &mut self,
         s: &Session,
         view: &str,
         yaml: &str,
         brief: Option<String>,
+        reason: Option<&str>,
     ) -> Result<WriteResult, RdyError> {
         let (mut edited, keyed) = parse_yaml(yaml)?;
         if !keyed.is_empty() {
@@ -1025,15 +1045,31 @@ impl Rdy {
                 crate::keys::sole_holder(t, keys.holders(t).iter().map(|(_, id)| id))
             })?;
         }
-        self.edit_block(s, view, edited, brief)
+        self.edit_block_with(s, view, edited, brief, reason)
     }
 
+    /// [`Rdy::edit_block_with`] with no reason.
     pub fn edit_block(
         &mut self,
         s: &Session,
         view: &str,
         edited: Block,
         brief: Option<String>,
+    ) -> Result<WriteResult, RdyError> {
+        self.edit_block_with(s, view, edited, brief, None)
+    }
+
+    /// Writes `edited` over its current version in `view`: fields, body and links. A non-blank
+    /// `reason` goes with the write as an editorial `clarify` justification, which a tracking
+    /// edit of an accepted or rejected decision needs (trk1); refused without one, the fix names
+    /// `rdy edit --reason`.
+    pub fn edit_block_with(
+        &mut self,
+        s: &Session,
+        view: &str,
+        edited: Block,
+        brief: Option<String>,
+        reason: Option<&str>,
     ) -> Result<WriteResult, RdyError> {
         let scope = Scope::View(view.to_string());
         let cur = self.read().block(&scope, &edited.id)?;
@@ -1107,15 +1143,29 @@ impl Rdy {
             block_type: None,
             move_to: None,
         };
+        let reason = reason.filter(|r| !r.trim().is_empty());
+        let justification = reason.map(|r| Justification::Editorial {
+            class: EditorialClass::Clarify,
+            reason: r.to_string(),
+        });
         self.write_briefed(
             s,
             WriteRequest {
                 view: view.into(),
                 ops: vec![op],
-                justification: None,
+                justification,
                 message: format!("edit {}", edited.id),
             },
             brief,
         )
+        .map_err(|mut e| {
+            if e.code == E_BAD_INPUT && e.message == TRACKING_NEEDS_REASON {
+                e.fix = format!(
+                    "give the edit a reason: rdy edit {} --reason \"<why>\"",
+                    edited.id
+                );
+            }
+            e
+        })
     }
 }

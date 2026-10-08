@@ -57,6 +57,12 @@ pub const E_UNDO_LANDING: &str = "E_UNDO_LANDING";
 pub const E_NOTHING_TO_UNDO: &str = "E_NOTHING_TO_UNDO";
 /// A page cursor is unknown, or what it pages (a briefing, a read, a search) moved since its first page.
 pub const E_PAGE_STALE: &str = "E_PAGE_STALE";
+/// A proposal from a member of an open alternative set names no chosen member (plan M2d1).
+pub const E_ALT_UNCHOSEN: &str = "E_ALT_UNCHOSEN";
+/// A view is not a member of the alternative set, or a member names another member (plan M2d1).
+pub const E_ALT_MEMBER: &str = "E_ALT_MEMBER";
+/// The intent has expired: it takes no renewal and no withdrawal (plan M2d1).
+pub const E_INTENT_EXPIRED: &str = "E_INTENT_EXPIRED";
 /// The fix of every `E_PAGE_STALE`, for a briefing, read and search cursor alike.
 pub const PAGE_STALE_FIX: &str = "the read, briefing or search moved; start again without a cursor";
 

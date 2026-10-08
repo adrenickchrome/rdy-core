@@ -11,8 +11,8 @@ use rdy_engine::engine::{Engine, open_report_json, write_typed};
 use rdy_engine::search::SearchFilters;
 use rdy_engine::{
     E_BAD_INPUT, E_IO, E_LIMIT, E_NOT_FOUND, E_PERMISSION, HISTORY_MAX, LandOptions, OpInput,
-    RdyError, ReadState, Relay, Scope, SearchQuery, Session, WriteRequest, block_to_yaml,
-    check_path, parse_justification, resolve_pack, view_api,
+    RdyError, ReadState, Relay, Scope, SearchQuery, Session, WriteRequest, alt, block_to_yaml,
+    check_path, intent, parse_justification, resolve_pack, view_api,
 };
 use rdy_mcp::tools::MAX_TOKENS_LIMIT;
 use rdy_model::{ActorRun, ChangeLinks, RelayEvidence, Role};
@@ -61,6 +61,8 @@ pub const OPS: &[&str] = &[
     "wc_view",
     "wc_commit",
     "wc_nonce",
+    "intent",
+    "alt",
 ];
 
 #[derive(Deserialize)]
@@ -198,6 +200,8 @@ struct EditBlockArgs {
     view: Option<String>,
     brief: Option<String>,
     max_tokens: Option<usize>,
+    /// The edit's editorial reason (`rdy edit --reason`).
+    reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -207,6 +211,7 @@ struct ProposeArgs {
     view: Option<String>,
     summary: Option<String>,
     max_tokens: Option<usize>,
+    alternatives: Option<alt::AltPick>,
 }
 
 #[derive(Deserialize)]
@@ -468,7 +473,10 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "new_folder" => new_folder(cx, parse(op, args, "{path, view?}")?),
         "new_doc" => new_doc(cx, parse(op, args, "{path, view?, doc_type?, title?}")?),
         "keys_assign" => keys_assign(cx, parse(op, args, "{view?}")?),
-        "edit_block" => edit_block(cx, parse(op, args, "{yaml, view?, brief?, max_tokens?}")?),
+        "edit_block" => edit_block(
+            cx,
+            parse(op, args, "{yaml, view?, brief?, max_tokens?, reason?}")?,
+        ),
         "propose" => propose(
             cx,
             parse(op, args, "{title, view?, summary?, max_tokens?}")?,
@@ -508,6 +516,24 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             )?,
         ),
         "wc_nonce" => wc_nonce(cx, parse(op, args, "{view, nonce, rewrite}")?),
+        "intent" => intent::run_intent(
+            cx.engine,
+            cx.session,
+            parse(
+                op,
+                args,
+                "{op, view?, area?, blocks?, angle?, ttl?, intent?, block?, actor?, include_expired?}",
+            )?,
+        ),
+        "alt" => alt::run_alt(
+            cx.engine,
+            cx.session,
+            parse(
+                op,
+                args,
+                "{op, title?, question?, members?, set?, label?, view?, member?, reason?, all?}",
+            )?,
+        ),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),
@@ -580,6 +606,11 @@ fn show(cx: &OpContext, a: ShowArgs) -> Result<Value, RdyError> {
     if let Some(conflict) = st.conflict_info(&scope, &bid)? {
         v["conflict"] = to_json(&conflict);
     }
+    // cgr1: inflight is an analysis scope with no history; its context carries `inflight`
+    // instead. `--blame` there still asks history, which names the scopes it reads.
+    if scope == Scope::Inflight && !a.blame {
+        return Ok(v);
+    }
     // blame1: the last change (or, with `blame`, every version) with its author, landing and why
     let h = st.history(&scope, &bid, if a.blame { HISTORY_MAX } else { 1 })?;
     v["justification"] = h
@@ -606,7 +637,13 @@ fn impact(cx: &OpContext, a: ImpactArgs) -> Result<Value, RdyError> {
     let st = cx.engine.read();
     let scope = scope_of(&st, cx, a.scope.as_deref())?;
     let bid = st.resolve_id(&scope, &a.id)?;
-    Ok(to_json(&st.impact(&scope, &bid, a.depth.unwrap_or(3))?))
+    let items = st.impact(&scope, &bid, a.depth.unwrap_or(3))?;
+    let mut v = json!({"items": items});
+    let by_area = rdy_engine::by_area(&items);
+    if !by_area.is_empty() {
+        v["by_area"] = json!(by_area);
+    }
+    Ok(v)
 }
 
 fn suspects(cx: &OpContext, a: ScopeArgs) -> Result<Value, RdyError> {
@@ -797,8 +834,9 @@ fn edit_block(cx: &OpContext, a: EditBlockArgs) -> Result<Value, RdyError> {
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
     let (yaml, brief, max_tokens, v) = (a.yaml, a.brief, a.max_tokens, view.clone());
+    let reason = a.reason;
     write_and_report(cx.engine, &v, max_tokens, move |r| {
-        r.edit_yaml(&s, &view, &yaml, brief)
+        r.edit_yaml(&s, &view, &yaml, brief, reason.as_deref())
     })
 }
 
@@ -807,7 +845,14 @@ fn propose(cx: &OpContext, a: ProposeArgs) -> Result<Value, RdyError> {
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
     propose_and_report(cx.engine, a.max_tokens, move |r| {
-        r.propose_subset(&s, &view, &a.title, None, a.summary.as_deref())
+        r.propose_with(
+            &s,
+            &view,
+            &a.title,
+            None,
+            a.summary.as_deref(),
+            a.alternatives.as_ref(),
+        )
     })
 }
 

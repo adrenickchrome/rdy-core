@@ -93,6 +93,10 @@ pub struct BlockTypeDef {
     /// `None` until the pack resolves: a child keeps its parent's class; the default is a doc asset.
     #[serde(default)]
     pub class: Option<TypeClass>,
+    /// trk1 (D-DZC1J): fields that stay writable on an accepted or rejected decision and are
+    /// left out of the content hash. A child pack's set adds to its parent's.
+    #[serde(default)]
+    pub tracking: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -281,6 +285,16 @@ impl Pack {
             .map(|t| t.class.unwrap_or_default())
     }
 
+    /// trk1: the tracking fields of every block type that has any.
+    pub fn tracking(&self) -> rdy_model::Tracking {
+        rdy_model::Tracking::new(
+            self.block_types
+                .iter()
+                .map(|(name, t)| (name.clone(), t.tracking.clone()))
+                .collect(),
+        )
+    }
+
     pub fn type_for_prefix(&self, prefix: &str) -> Option<&str> {
         self.block_types
             .iter()
@@ -302,6 +316,18 @@ impl Pack {
             })
             .map(|(n, _)| n.as_str())
             .collect()
+    }
+
+    /// arn1: the areas' patterns compiled once, for callers that ask about many paths. Answers
+    /// as [`Pack::areas_for_path`] does.
+    pub fn area_matcher(&self) -> AreaMatcher {
+        AreaMatcher {
+            areas: self
+                .areas
+                .keys()
+                .map(|name| (name.clone(), self.area_globs(name)))
+                .collect(),
+        }
     }
 
     /// The compiled patterns of one area; empty for an unknown area.
@@ -345,5 +371,28 @@ impl Pack {
         self.block_types
             .get(block_type)
             .is_some_and(|t| t.traits.contains(&Trait::Presentational))
+    }
+}
+
+/// arn1: a pack's areas with their path patterns compiled once, in area-name order. A pattern that
+/// does not compile (impossible after `resolve`) covers nothing, as in [`Pack::areas_for_path`].
+#[derive(Clone, Debug, Default)]
+pub struct AreaMatcher {
+    areas: Vec<(String, Vec<Glob>)>,
+}
+
+impl AreaMatcher {
+    /// The names, ascending, of every area with a path pattern that covers `path`.
+    pub fn areas_for_path(&self, path: &str) -> Vec<&str> {
+        self.areas
+            .iter()
+            .filter(|(_, globs)| globs.iter().any(|g| g.covers(path)))
+            .map(|(n, _)| n.as_str())
+            .collect()
+    }
+
+    /// Whether the pack declares no areas.
+    pub fn is_empty(&self) -> bool {
+        self.areas.is_empty()
     }
 }

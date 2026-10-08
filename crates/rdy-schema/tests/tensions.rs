@@ -108,14 +108,14 @@ fn tens1_unknown_kinds_and_values_are_refused() {
         .unwrap_err();
     assert!(matches!(e, SchemaError::Yaml(_)), "{e}");
     assert!(e.to_string().contains("fatal"), "{e}");
-    // serde_yaml_ng accepts a repeated map key silently: the last value wins.
-    set.add_yaml("name: c\nversion: \"1\"\ntensions:\n  fork: blocking\n  fork: advisory\n")
-        .unwrap();
-    let p = set.resolve("c").unwrap();
-    assert_eq!(
-        p.tension_severity(Fork),
-        (Advisory, true),
-        "a repeated kind: the last value wins"
+    // D-QNGEJ carried into M2d1 (pkdup1): a repeated map key is refused at load.
+    let e = set
+        .add_yaml("name: c\nversion: \"1\"\ntensions:\n  fork: blocking\n  fork: advisory\n")
+        .unwrap_err();
+    assert!(matches!(e, SchemaError::Yaml(_)), "{e}");
+    assert!(
+        e.to_string().contains("duplicate entry with key \"fork\""),
+        "{e}"
     );
     let e = set
         .add_yaml("name: d\nversion: \"1\"\ntensions: [fork]\n")

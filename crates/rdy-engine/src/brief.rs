@@ -199,7 +199,7 @@ impl BriefRegistry {
 
 /// The paged sections of a briefing, in cursor order: a cursor holds one offset per section, how
 /// many of its entries earlier pages showed.
-pub const PAGE_SECTIONS: [&str; 8] = [
+pub const PAGE_SECTIONS: [&str; 9] = [
     "governs",
     "dependents",
     "lineage",
@@ -207,6 +207,7 @@ pub const PAGE_SECTIONS: [&str; 8] = [
     "suspects",
     "inflight.views",
     "inflight.proposals",
+    "inflight.intents",
     "base.blocks",
 ];
 
@@ -408,6 +409,7 @@ impl Briefing {
             self.suspects.len(),
             self.inflight.views.len(),
             self.inflight.proposals.len(),
+            self.inflight.intents.len(),
             self.base.blocks.len(),
         ]
     }
@@ -424,7 +426,8 @@ impl Briefing {
         drop(&mut self.suspects, skip[4]);
         drop(&mut self.inflight.views, skip[5]);
         drop(&mut self.inflight.proposals, skip[6]);
-        drop(&mut self.base.blocks, skip[7]);
+        drop(&mut self.inflight.intents, skip[7]);
+        drop(&mut self.base.blocks, skip[8]);
     }
 
     /// Shows the entries after the first `skip[i]` of each section, cut to `max` tokens, and
@@ -512,6 +515,7 @@ impl Briefing {
             4 => self.suspects.truncate(keep),
             5 => self.inflight.views.truncate(keep),
             6 => self.inflight.proposals.truncate(keep),
+            7 => self.inflight.intents.truncate(keep),
             _ => self.base.blocks.truncate(keep),
         }
         *self
@@ -572,13 +576,26 @@ fn cursor_scope(scope: &Scope) -> String {
         Scope::Canon => "canon".to_string(),
         Scope::View(v) => format!("view:{v}"),
         Scope::At(h) => format!("landing:{h}"),
+        Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
     }
+}
+
+/// insc1: a briefing is made in the scope its reader will write in, never in `inflight`.
+pub(crate) fn refuse_inflight(scope: &Scope) -> Result<(), RdyError> {
+    if *scope == Scope::Inflight {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "inflight is an analysis scope: a briefing reads the view you will write in",
+            "brief with the scope of your view (the default)",
+        ));
+    }
+    Ok(())
 }
 
 /// How many hex digits of a briefing's digest a cursor carries (64 bits).
 const DIGEST_HEX: usize = 16;
 
-/// A cursor `<token>:<o1>,…,<o8>:<digest>:<scope>` split at its first colon: the token (64
+/// A cursor `<token>:<o1>,…,<o9>:<digest>:<scope>` split at its first colon: the token (64
 /// lowercase hex) and the rest. The rest is read by `parse_tail` once the token is known.
 fn parse_cursor(cursor: &str) -> Result<(&str, &str), RdyError> {
     let (token, rest) = cursor.split_once(':').ok_or_else(bad_cursor)?;
@@ -614,6 +631,7 @@ fn scope_label(scope: &Scope) -> String {
         Scope::Canon => "canon".to_string(),
         Scope::View(v) => format!("view {v}"),
         Scope::At(h) => format!("landing:{h}"),
+        Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
     }
 }
 
@@ -644,6 +662,7 @@ impl ReadState {
         cov: &Coverage,
         max_tokens: Option<usize>,
     ) -> Result<Briefing, RdyError> {
+        refuse_inflight(scope)?;
         let m = self.materialized(scope)?;
         let known = |text: &str| -> Result<BlockId, RdyError> {
             let id = self.resolve_id(scope, text)?;
@@ -715,6 +734,7 @@ impl ReadState {
         ids: &BTreeSet<BlockId>,
         max_tokens: Option<usize>,
     ) -> Result<Briefing, RdyError> {
+        refuse_inflight(scope)?;
         let mut briefing = self.assemble(scope, ids)?;
         let m = self.materialized(scope)?;
         briefing.page(
@@ -739,6 +759,7 @@ impl ReadState {
         cursor: &str,
         max_tokens: Option<usize>,
     ) -> Result<Briefing, RdyError> {
+        refuse_inflight(scope)?;
         let (token, rest) = parse_cursor(cursor)?;
         let Some(rec) = reg.get(token) else {
             return Err(RdyError::new(

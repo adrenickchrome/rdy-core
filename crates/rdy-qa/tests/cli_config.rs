@@ -61,7 +61,7 @@ fn cfgl1_the_most_specific_level_wins() {
     assert_eq!(human_actor_for(&p, Some(&uf), Some("u")), "human:here");
     let fp = pack_fingerprint(&p).unwrap();
     assert!(
-        fp.files.iter().any(|(f, _, _)| f.ends_with(LOCAL_FILE)),
+        fp.files.iter().any(|(f, _)| f.ends_with(LOCAL_FILE)),
         "a local change reloads like a config change"
     );
 }

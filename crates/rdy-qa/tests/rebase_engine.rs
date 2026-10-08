@@ -301,14 +301,14 @@ fn reb1_pinned_closed_and_empty_views_are_not_rebased_and_the_proposing_views_la
     );
     let events = drain(&rx);
     assert_eq!(rebased_in(&events), vec![("p".to_string(), 0)]);
-    assert!(!events.iter().any(|e| matches!(&e.kind, EventKind::ViewClosed { view, reason } if view == "closed" && reason == "gone")), "the close happened before subscribing");
+    assert!(!events.iter().any(|e| matches!(&e.kind, EventKind::ViewClosed { view, reason, .. } if view == "closed" && reason == "gone")), "the close happened before subscribing");
     let all = r
         .replay_events(rdy_store::segment::Location {
             segment: 0,
             offset: 0,
         })
         .unwrap();
-    assert!(all.iter().any(|e| matches!(&e.kind, EventKind::ViewClosed { view, reason } if view == "closed" && reason == "gone")), "{all:?}");
+    assert!(all.iter().any(|e| matches!(&e.kind, EventKind::ViewClosed { view, reason, .. } if view == "closed" && reason == "gone")), "{all:?}");
     assert!(
         !all.iter()
             .any(|e| matches!(&e.kind, EventKind::ViewOp { kind, .. } if kind == "close"))

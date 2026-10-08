@@ -87,6 +87,9 @@ fn cli2_no_daemon_opens_the_store_directly_and_is_locked_while_a_daemon_runs() {
 #[test]
 fn cli2_a_daemon_cannot_start_while_no_daemon_holds_the_store() {
     let s = Served::new();
+    // a start timeout far past the deadline below: waiting it out is the defect, and a loaded
+    // machine never comes near it
+    s.set_start_timeout(300);
     // hold the store from this process; a ReadState must not outlive this guard
     let holder = Rdy::open(s.dir.path()).unwrap();
     let t = Instant::now();
@@ -95,8 +98,8 @@ fn cli2_a_daemon_cannot_start_while_no_daemon_holds_the_store() {
     assert_eq!(v["code"], E_DAEMON_START, "{v}");
     assert!(v["fix"].as_str().unwrap().contains("--no-daemon"), "{v}");
     assert!(
-        t.elapsed() < Duration::from_secs(29),
-        "the client did not wait out the start timeout: {:?}",
+        t.elapsed() < Duration::from_secs(120),
+        "the client waited out the 300 s start timeout: {:?}",
         t.elapsed()
     );
     drop(holder);
@@ -166,7 +169,7 @@ fn cli2_serve_foreground_detach_and_stop() {
     );
     let t = Instant::now();
     while s.daemon_pid().is_none() {
-        assert!(t.elapsed() < Duration::from_secs(10));
+        assert!(t.elapsed() < Duration::from_secs(30), "no daemon pid");
         std::thread::sleep(Duration::from_millis(50));
     }
     let (ok, _) = s.json(&["--json", "status"]);
@@ -325,17 +328,19 @@ fn cli2_edit_survives_the_daemon_stopping_while_the_editor_runs() {
             stop_out.display()
         ),
     );
-    let t = Instant::now();
     let out = edit_with(&s, &script, &id);
     let stopped = std::fs::read_to_string(&stop_out).unwrap();
     assert!(
         stopped.starts_with("stopped\n") && stopped.ends_with("exit=0\n"),
         "the daemon the edit spawned stopped (it is reaped, not a zombie): {stopped}"
     );
+    // the stop drained every connection rather than waiting out its grace: the daemon logs
+    // when the grace ran out (read from its log, not a clock, so a loaded machine cannot fail it)
+    let log = std::fs::read_to_string(s.run_dir().log_file()).unwrap_or_default();
+    assert!(log.contains("exiting (stopped)"), "the daemon log: {log}");
     assert!(
-        t.elapsed() < Duration::from_secs(6),
-        "the stop did not wait out its grace: {:?}",
-        t.elapsed()
+        !log.contains("still open after"),
+        "the stop waited out its grace: {log}"
     );
     assert!(
         out.status.success(),
@@ -383,7 +388,7 @@ fn cli2_sigint_and_sigterm_stop_a_foreground_serve_cleanly() {
         let t = Instant::now();
         while s.daemon_pid() != Some(child.id()) {
             assert!(
-                t.elapsed() < Duration::from_secs(10),
+                t.elapsed() < Duration::from_secs(30),
                 "{sig}: the foreground daemon did not write its pid"
             );
             std::thread::sleep(Duration::from_millis(20));
@@ -398,9 +403,9 @@ fn cli2_sigint_and_sigterm_stop_a_foreground_serve_cleanly() {
             if let Some(st) = child.try_wait().unwrap() {
                 break st;
             }
-            if t.elapsed() > Duration::from_secs(10) {
+            if t.elapsed() > Duration::from_secs(30) {
                 let _ = child.kill();
-                panic!("{sig}: rdy serve did not exit within 10 s");
+                panic!("{sig}: rdy serve did not exit within 30 s");
             }
             std::thread::sleep(Duration::from_millis(20));
         };
