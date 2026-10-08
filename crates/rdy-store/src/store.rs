@@ -1262,6 +1262,28 @@ impl StoreReader {
     /// `None` when no delete of `block` has landed. A merge names it as the side of a block its
     /// base lacks, so that only a change that depends on the delete resolves that conflict.
     pub fn deleter(&self, block: &BlockId) -> Result<Option<Hash>, StoreError> {
+        self.deleter_upto(block, None)
+    }
+
+    /// `deleter`, of the landings at or before `head` only (none when there is no `head`).
+    pub fn deleter_at(
+        &self,
+        block: &BlockId,
+        head: Option<&Hash>,
+    ) -> Result<Option<Hash>, StoreError> {
+        let Some(head) = head else { return Ok(None) };
+        let bound = self
+            .index()
+            .typed(kinds::LANDING, head)?
+            .ok_or(StoreError::NotFound(*head))?;
+        self.deleter_upto(block, Some(bound))
+    }
+
+    fn deleter_upto(
+        &self,
+        block: &BlockId,
+        bound: Option<Location>,
+    ) -> Result<Option<Hash>, StoreError> {
         let mut last: Option<(Location, Reverse<Hash>)> = None;
         for c in self.index().deleters(block)? {
             if let Some(l) = self.index().landing_of(&c)? {
@@ -1269,6 +1291,9 @@ impl StoreReader {
                     .index()
                     .typed(kinds::LANDING, &l)?
                     .ok_or(StoreError::NotFound(l))?;
+                if bound.is_some_and(|b| loc > b) {
+                    continue;
+                }
                 let key = (loc, Reverse(c));
                 last = Some(last.map_or(key, |k| k.max(key)));
             }
@@ -1375,8 +1400,11 @@ impl StoreReader {
     /// - for each op's base, its producers that `view` includes; when it includes none (the base
     ///   came from canon), or there is no view, `producer(base)`. A version two views wrote
     ///   identically has a producer in each, and a dep must name the writer's own;
-    /// - when committed to `view`, every change `view` includes that deletes an id one of its
-    ///   ops creates (so a delete and a re-create under one id merge in that order).
+    /// - for each id one of its ops creates: when committed to `view`, every change `view`
+    ///   includes that deletes it (so a delete and a re-create under one id merge in that
+    ///   order); and canon's delete of it as of the view's base (canon's head with no view), as
+    ///   the writer saw the id deleted there. A re-create that does not depend on a delete
+    ///   canon landed conflicts with it in the merge.
     pub fn change_deps(
         &self,
         change: &Change,
@@ -1400,13 +1428,22 @@ impl StoreReader {
         for op in &change.ops {
             match op {
                 Op::Create { block } => {
-                    let Some(view) = view else { continue };
                     let deleters = self.index().deleters(&block.id)?;
                     if deleters.is_empty() {
                         continue;
                     }
-                    let included = self.included_set(&mut included, view)?;
-                    deps.extend(deleters.into_iter().filter(|d| included.contains(d)));
+                    let base = match view {
+                        Some(view) => {
+                            let included = self.included_set(&mut included, view)?;
+                            deps.extend(deleters.into_iter().filter(|d| included.contains(d)));
+                            match self.view_head(view)? {
+                                Some(h) => h.base,
+                                None => self.canon_head()?,
+                            }
+                        }
+                        None => self.canon_head()?,
+                    };
+                    deps.extend(self.deleter_at(&block.id, base.as_ref())?);
                 }
                 Op::Update { base, .. } | Op::Delete { base, .. } => {
                     let producers = self.index().producers(base)?;

@@ -4,7 +4,8 @@
 //! and the change that produced it) or conflicted (the failing op's base and the competing
 //! sides). A conflict is data, not an error; a change that depends on every side of a conflict
 //! resolves it. A block the base lacks reads as deleted by the change `deleter` names; when no
-//! change is known for that delete, no change can depend on it, so its side is never resolved.
+//! change is known for that delete, no change can depend on it, so its side is never resolved. A
+//! create of a deleted id that does not depend on the delete conflicts with it.
 use rdy_model::{BlockId, Hash, Op, StateSnapshot};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -185,6 +186,8 @@ pub fn merge_indexed(
         // conflict open; a delete with no known deleter does: only a change that knows about a
         // delete may undo it
         let settled = |s: &Side| covered(s) || (s.change.is_none() && s.version.is_some());
+        // a create of a deleted id re-creates it on purpose only when it depends on the delete
+        let knows = |owner: &Option<Hash>| owner.is_none_or(|o| deps.binary_search(&o).is_ok());
         for op in c.ops {
             let block = op.block_id();
             let slot = slots.entry(block.clone()).or_insert_with(|| {
@@ -207,7 +210,9 @@ pub fn merge_indexed(
                 version: new,
             };
             match slot {
-                Slot::Clean { version, owner } if *version == expected => {
+                Slot::Clean { version, owner }
+                    if *version == expected && (expected.is_some() || knows(owner)) =>
+                {
                     *version = new;
                     *owner = Some(c.id);
                 }

@@ -212,3 +212,65 @@ fn rres1_a_write_that_depends_on_the_delete_re_creates_the_block() {
     assert_eq!(body_of(&r, &Scope::Canon, &t), "kept on purpose");
     r.fsck().unwrap();
 }
+
+/// Triage #297: the view deletes T and re-creates it under the same id before canon's delete of
+/// T lands. Its own delete agrees with canon's, but the re-create does not know about canon's
+/// delete, so landing it would bring T back: it refuses.
+#[test]
+fn rres2_a_delete_and_re_create_written_before_a_canon_delete_refuses() {
+    let (_d, mut r, t, s1, _s2, _doc) = seeded();
+    let late = as_agent("agent:late", "r2");
+    write_as(&mut r, &late, "late", step_ops(Step::Delete, 0, &t, &s1)).unwrap();
+    write_as(&mut r, &late, "late", re_create(&t, &s1, "again")).unwrap();
+    write_as(
+        &mut r,
+        &as_agent("agent:del", "r1"),
+        "del",
+        step_ops(Step::Delete, 0, &t, &s1),
+    )
+    .unwrap();
+    land(&mut r, "del").unwrap();
+    let e = land(&mut r, "late").unwrap_err();
+    assert_eq!(e.code, E_CONFLICT_UNRESOLVED, "{e:?}");
+    let tid = BlockId::parse(&t).unwrap();
+    assert!(
+        r.read().block(&Scope::Canon, &tid).is_err(),
+        "T stays deleted"
+    );
+}
+
+/// A re-create written after canon's delete landed knows about it: it lands.
+#[test]
+fn rres2_a_re_create_written_after_the_canon_delete_lands() {
+    let (_d, mut r, t, s1, _s2, _doc) = seeded();
+    write_as(
+        &mut r,
+        &as_agent("agent:del", "r1"),
+        "del",
+        step_ops(Step::Delete, 0, &t, &s1),
+    )
+    .unwrap();
+    land(&mut r, "del").unwrap();
+    // the deleting view itself, and a fresh view, may each bring T back on purpose
+    for v in ["del", "fresh"] {
+        write_as(
+            &mut r,
+            &as_agent(&format!("agent:{v}"), "r1"),
+            v,
+            re_create(&t, &s1, v),
+        )
+        .unwrap();
+        assert!(
+            r.read()
+                .conflicts(&Scope::View(v.into()))
+                .unwrap()
+                .is_empty()
+        );
+    }
+    land(&mut r, "fresh").unwrap();
+    assert_eq!(body_of(&r, &Scope::Canon, &t), "fresh");
+}
+
+fn re_create(t: &str, parent: &str, body: &str) -> Value {
+    json!([{"op": "create", "type": "term", "id": t, "parent": parent, "fields": {"name": "Tide"}, "body": body}])
+}

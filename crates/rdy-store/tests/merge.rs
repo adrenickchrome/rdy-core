@@ -416,6 +416,54 @@ fn merge1_a_canon_delete_side_names_its_deleter_and_only_a_dependent_resolves_it
     assert_eq!(m.state.blocks[&x0.id], blk(1, "kept").version_hash());
 }
 
+/// Triage #297: the view deleted X and re-created it before canon's delete D of X landed. Its
+/// delete agrees with D, but the re-create does not depend on D, so it conflicts with D; a
+/// re-create that depends on D (written after the view saw it) is clean.
+#[test]
+fn merge1_a_re_create_that_does_not_depend_on_canons_delete_conflicts_with_it() {
+    let x0 = blk(1, "zero");
+    let base = StateSnapshot::default();
+    let d = Hash::of(CANON_DELETE);
+    let del = owned(
+        "delete",
+        vec![Hash::of(CANON)],
+        vec![Op::Delete {
+            base: x0.version_hash(),
+            id: x0.id.clone(),
+        }],
+    );
+    let re = owned(
+        "re-create",
+        vec![del.id],
+        vec![Op::Create {
+            block: blk(1, "again"),
+        }],
+    );
+    let m = merge(
+        &base,
+        &view(&[del.clone(), re.clone()]),
+        &|_| None,
+        &canon_deleter(&base),
+    );
+    assert_eq!(m.conflicts.len(), 1, "{m:?}");
+    assert_eq!(m.conflicts[0].base, None);
+    assert!(m.conflicts[0].sides.contains(&Side {
+        change: Some(d),
+        version: None
+    }));
+    assert!(!m.state.blocks.contains_key(&x0.id), "X stays deleted");
+    let saw = owned(
+        "re-create after seeing D",
+        vec![d],
+        vec![Op::Create {
+            block: blk(1, "again"),
+        }],
+    );
+    let m = merge(&base, &view(&[saw]), &|_| None, &canon_deleter(&base));
+    assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+    assert_eq!(m.state.blocks[&x0.id], blk(1, "again").version_hash());
+}
+
 // ---------- property tests ----------
 
 /// A valid sequential history from a base with blocks 0 and 1: each step writes one op on
@@ -546,7 +594,12 @@ fn reference(
             };
             let covered = |s: &Side| s.change.is_some_and(|x| c.deps.contains(&x));
             let next = match std::mem::replace(slot, Slot::Clean(None, None)) {
-                Slot::Clean(v, _) if v == expected => Slot::Clean(new, Some(c.id)),
+                Slot::Clean(v, o)
+                    if v == expected
+                        && (expected.is_some() || o.is_none_or(|o| c.deps.contains(&o))) =>
+                {
+                    Slot::Clean(new, Some(c.id))
+                }
                 Slot::Clean(v, o) if v == new => Slot::Clean(v, o),
                 Slot::Clean(v, o) => Slot::Conflicted(
                     expected,
