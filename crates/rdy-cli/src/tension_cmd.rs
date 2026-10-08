@@ -31,6 +31,9 @@ pub(crate) struct TensionsArgs {
     /// Also list the dismissal reviews.
     #[arg(long)]
     reviews: bool,
+    /// The budget for the listing; tensions that do not fit are left out from the end.
+    #[arg(long = "max-tokens")]
+    max_tokens: Option<usize>,
 }
 
 #[derive(clap::Args)]
@@ -109,7 +112,7 @@ fn tensions_render(v: &Value) -> String {
         rows.iter().map(tension_text).collect()
     };
     if let Some(n) = v["omitted"].as_u64() {
-        lines.push(format!("{n} more not listed (pass max_tokens for more)"));
+        lines.push(format!("{n} more not listed (pass --max-tokens for more)"));
     }
     for r in v["reviews"].as_array().into_iter().flatten() {
         lines.push(review_text(r));
@@ -134,6 +137,7 @@ pub(crate) fn tensions(env: &Env, a: TensionsArgs) -> Result<(Value, String), Er
         area,
         involving,
         reviews,
+        max_tokens,
     } = a;
     let v = call(
         env,
@@ -147,6 +151,7 @@ pub(crate) fn tensions(env: &Env, a: TensionsArgs) -> Result<(Value, String), Er
             "area": area,
             "involving": involving,
             "reviews": reviews.then_some(true),
+            "max_tokens": max_tokens,
         }),
     )?;
     let t = tensions_render(&v);

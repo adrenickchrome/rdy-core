@@ -22,6 +22,29 @@ fn cten1_rdy_tensions_and_rdy_resolve_from_the_command_line() {
         "{text}"
     );
     assert!(text.contains("sides:"), "{text}");
+    // A cut listing names the real flag, and a larger --max-tokens lists the omitted tension.
+    let out = s.rdy(&["tensions", "--max-tokens", "1"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cut = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(!cut.contains(&tn), "{cut}");
+    assert!(
+        cut.contains("1 more not listed (pass --max-tokens for more)"),
+        "{cut}"
+    );
+    let (ok, v) = s.json(&["tensions", "--max-tokens", "1", "--json"]);
+    assert!(ok, "{v}");
+    assert_eq!(v["tensions"], serde_json::json!([]));
+    assert_eq!(v["omitted"], 1);
+    let out = s.rdy(&["tensions", "--max-tokens", "2000"]);
+    let more = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        more.contains(&tn) && !more.contains("more not listed"),
+        "{more}"
+    );
     let out = s.rdy(&["propose", "--title", "b", "--view", "b"]);
     let text = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(
