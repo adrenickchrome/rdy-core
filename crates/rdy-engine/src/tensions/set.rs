@@ -1,7 +1,7 @@
 //! The tension set of a published state: the canon part (memoised per canon build for the
 //! state's own detectors) and the in-flight part, built on first read.
 use super::index::{DetectCx, Writes, canon_index_of};
-use super::{DetectScope, Detector, SideRef, Tension, tension_from, tension_label};
+use super::{DetectScope, Detector, SideRef, Tension, TensionStatus, tension_from, tension_label};
 use crate::error::*;
 use crate::gate::applied_ops;
 use crate::views::clip;
@@ -542,6 +542,23 @@ impl ReadState {
             return Err(e.clone());
         }
         canon_part(self, self.detectors)
+    }
+
+    /// Every block involved in an open tension: the event-derived set (all-canon tensions
+    /// included) and the read-time area overlaps at `now_ms`, leaving out the dismissed.
+    pub fn open_tension_blocks(&self, now_ms: i64) -> Result<BTreeSet<BlockId>, RdyError> {
+        let mut out = BTreeSet::new();
+        for t in self.tensions()?.iter() {
+            if self.tension_status(t) == TensionStatus::Open {
+                out.extend(t.blocks());
+            }
+        }
+        for t in self.intent_tensions(now_ms)? {
+            if self.tension_status(&t) == TensionStatus::Open {
+                out.extend(t.blocks());
+            }
+        }
+        Ok(out)
     }
 
     /// Test hook: whether this state's tension set is built. Never builds.

@@ -6,7 +6,7 @@ use crate::factsheet::{FactSheet, MAX_RESOLVED};
 use crate::lexicon::{link_kind_for, tied};
 use crate::materialize::Materialized;
 use crate::suggest::{Suggestion, suggestion_id};
-use crate::{ReadState, Scope};
+use crate::{ReadState, Scope, now_ms};
 use rdy_graph::EdgeKind;
 use rdy_model::decision::{AFFECTS, DECIDED_BY, DECISION, DESCRIBES, IMPLEMENTS};
 use rdy_model::{Block, BlockId, FieldValue, Hash};
@@ -93,6 +93,9 @@ pub struct SearchFilters {
     /// Only blocks with an open suspect.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub suspect: bool,
+    /// Only blocks involved in an open tension (rdy_tensions lists them).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tension: bool,
     /// linked or unlinked: blocks that name an entity (by name or alias, whole words) and are tied to it (linked), or that name one they are not tied to yet (unlinked). Only blocks that can link to an entity count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mentions: Option<String>,
@@ -703,6 +706,9 @@ impl ReadState {
         }
         if f.suspect {
             allowed.push(self.suspects(scope)?.into_iter().map(|s| s.block).collect());
+        }
+        if f.tension {
+            allowed.push(self.open_tension_blocks(now_ms())?);
         }
         if let Some(want) = &f.mentions {
             if !matches!(want.as_str(), "linked" | "unlinked") {
