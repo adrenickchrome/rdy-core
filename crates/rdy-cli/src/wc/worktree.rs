@@ -144,7 +144,9 @@ fn add(env: &Env, dir: &Path, view: String) -> Result<(Value, String), ErrorRepl
     };
     let setup = (|| -> Result<(), ErrorReply> {
         fs::create_dir_all(&dir).map_err(|e| io_err(&dir, "create", e))?;
-        let ptr = format!("project: {}\nname: {name}\n", pointer_path(&project)?);
+        // the name is always quoted: a bare `-` (a sanitized one-character name) is not a YAML string
+        let name_q = serde_json::to_string(&name).map_err(|e| io_err(&dir, "encode", e))?;
+        let ptr = format!("project: {}\nname: {name_q}\n", pointer_path(&project)?);
         fs::write(dir.join(POINTER_FILE), ptr)
             .map_err(|e| io_err(&dir.join(POINTER_FILE), "write", e))?;
         fs::write(state.join(WORKTREE_DIR_FILE), &dir_text)

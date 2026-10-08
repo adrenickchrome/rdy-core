@@ -116,4 +116,10 @@ fn wcwt1_names_are_sanitized_and_numbered() {
     ok(&s, &["worktree", "rm", one.to_str().unwrap()]);
     ok(&s, &["worktree", "rm", two.to_str().unwrap()]);
     assert!(!one.exists() && !two.exists(), "empty directories go too");
+    // a one-character name that sanitizes to `-` must still read back from its pointer
+    let odd = side.path().join("three").join("@");
+    let (okk, v) = json(&s, &["worktree", "add", odd.to_str().unwrap(), "side"]);
+    assert!(okk && v["name"] == "-", "{v}");
+    ok(&s, &["worktree", "rm", odd.to_str().unwrap()]);
+    assert!(!odd.exists(), "the odd-named worktree is removable");
 }
