@@ -7,5 +7,6 @@ mod tensions_deprecated;
 mod tensions_dismiss;
 mod tensions_duplicate;
 mod tensions_fork;
+mod tensions_overlap;
 mod tensions_premise;
 mod tensions_unjustified;
