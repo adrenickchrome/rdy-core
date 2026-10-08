@@ -115,14 +115,7 @@ impl Detector for AreaOverlap {
                     };
                     out.push(Found {
                         kind: TensionKind::AreaOverlap,
-                        involved: [xw, yw]
-                            .into_iter()
-                            .map(|w| Involved {
-                                side: SideRef::Change(w.change),
-                                block: w.block.clone(),
-                                version: w.version,
-                            })
-                            .collect(),
+                        involved: [xw, yw].into_iter().map(|w| cx.of_write(w)).collect(),
                         summary: format!(
                             "{} and {} both affect area {area} and touch {shared}",
                             xw.block, yw.block
@@ -176,11 +169,16 @@ impl ReadState {
                         },
                         block: w.block.clone(),
                         version: Some(o.version),
+                        content: Some(o.version),
                     },
                     Involved {
                         side: SideRef::Change(w.change),
                         block: w.block.clone(),
                         version: w.version,
+                        content: w
+                            .new
+                            .as_deref()
+                            .map(|b| b.content_hash_with(self.reader().tracking())),
                     },
                 ];
                 let found = Found {

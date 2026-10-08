@@ -2,7 +2,7 @@
 //!
 //! The trigger is the change itself, so there is no canon form (FW-CH6a): an unjustified change
 //! must never become permanent, and the landing of the change resolves the tension.
-use super::{DetectCx, DetectScope, Detector, Found, Involved, SideRef, TensionKind};
+use super::{DetectCx, DetectScope, Detector, Found, Involved, TensionKind};
 use crate::RdyError;
 use rdy_model::{BlockId, Hash};
 use std::collections::BTreeSet;
@@ -22,11 +22,7 @@ impl UnjustifiedChange {
                 (None, None) => false,
             };
             if normative && (cx.stable(&w.block)? || cx.stable_before(&w.block)?) {
-                items.push(Involved {
-                    side: SideRef::Change(*c),
-                    block: w.block.clone(),
-                    version: w.version,
-                });
+                items.push(cx.of_write(&w));
             }
         }
         Ok(items)

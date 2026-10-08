@@ -7,7 +7,7 @@
 //! standing condition, so two duplicates that both land keep their vkey until one is renamed or
 //! removed.
 use super::{
-    DetectCx, DetectScope, Detector, Found, Involved, SideRef, TensionKind, Write, normalize_name,
+    DetectCx, DetectScope, Detector, Found, SideRef, TensionKind, Write, normalize_name,
     normalize_text,
 };
 use crate::RdyError;
@@ -176,12 +176,8 @@ impl Detector for DuplicateDefinition {
                         stable: cx.stable(&x.block)? || cx.stable(&y.block)?,
                         involved: [x, y]
                             .into_iter()
-                            .map(|m| Involved {
-                                side: m.side.clone(),
-                                block: m.block.clone(),
-                                version: m.version,
-                            })
-                            .collect(),
+                            .map(|m| cx.involved(m.side.clone(), &m.block, m.version))
+                            .collect::<Result<_, _>>()?,
                     });
                 }
             }

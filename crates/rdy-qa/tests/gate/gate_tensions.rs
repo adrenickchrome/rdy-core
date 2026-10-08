@@ -222,11 +222,7 @@ impl Detector for CanonOnlyFork {
         if let Some((side, v)) = cx.canon_side(&self.0)? {
             out.push(Found {
                 kind: self.kind(),
-                involved: vec![Involved {
-                    side,
-                    block: self.0.clone(),
-                    version: Some(v),
-                }],
+                involved: vec![cx.involved(side, &self.0, Some(v))?],
                 summary: "canon only".into(),
                 stable: true,
             });

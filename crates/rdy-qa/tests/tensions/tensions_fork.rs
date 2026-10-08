@@ -42,9 +42,11 @@ fn tfrk1_after_one_lands_the_other_forks_against_canon_until_it_supersedes_the_n
     let s = spec_doc(&mut r);
     let wa = sup(&mut r, "a", &s.decision, None, &s.section);
     let wb = sup(&mut r, "b", &s.decision, None, &s.section);
+    let before = one(&r, TensionKind::Fork);
     land(&mut r, "a").unwrap();
     let t = one(&r, TensionKind::Fork);
     assert!(has_canon(&t));
+    assert_eq!(t.vkey, before.vkey, "re-keyed with the same vkey (FW-CH6a)");
     let (da, db) = (created(&wa, "$decision"), created(&wb, "$decision"));
     // b now supersedes a's decision instead (if the write path refuses this links edit on a
     // proposed decision, supersede `da` from b with a new decision and exclude `wb`'s change,

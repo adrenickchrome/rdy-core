@@ -32,8 +32,9 @@ fn snap1_a_landing_seeds_canon_from_the_previous_canon_and_shares_untouched_bloc
     let s = r.read();
     assert_eq!(
         s.is_built(&Scope::Canon),
-        (true, false),
-        "seeded by the landing"
+        (true, true),
+        "seeded by the landing; the gate's tension check (tgat1) read the graph before it, so \
+         the graph is carried too"
     );
     let after = s.materialized(&Scope::Canon).unwrap();
     assert_eq!(after.len(), 4);

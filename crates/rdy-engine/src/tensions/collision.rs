@@ -16,7 +16,7 @@
 //! block (the merge reads that as the resolution of the delete). A single write with canon's
 //! outcome is its own first write, so equal outcomes never collide. No canon-scope form
 //! (FW-CH6a): canon holds one version per block, and the trigger needs in-flight work.
-use super::{DetectCx, DetectScope, Detector, Found, Involved, SideRef, TensionKind, Write};
+use super::{DetectCx, DetectScope, Detector, Found, SideRef, TensionKind, Write};
 use crate::RdyError;
 use rdy_model::{BlockId, Hash};
 use std::collections::{BTreeMap, BTreeSet};
@@ -78,18 +78,7 @@ impl Detector for EditCollision {
                         continue;
                     }
                     found.push((
-                        vec![
-                            Involved {
-                                side: SideRef::Change(w1.change),
-                                block: b.clone(),
-                                version: w1.version,
-                            },
-                            Involved {
-                                side: SideRef::Change(w2.change),
-                                block: b.clone(),
-                                version: w2.version,
-                            },
-                        ],
+                        vec![cx.of_write(w1), cx.of_write(w2)],
                         format!("two changes edit {b} from one base"),
                     ));
                 }
@@ -108,8 +97,8 @@ impl Detector for EditCollision {
                     None => None,
                 };
                 let canon_side = match cx.canon_side(&b)? {
-                    Some((side, v)) => (side, Some(v)),
-                    None => (SideRef::Canon { landing: None }, None),
+                    Some((side, v)) => cx.involved(side, &b, Some(v))?,
+                    None => cx.involved(SideRef::Canon { landing: None }, &b, None)?,
                 };
                 for (w, ch) in against {
                     let built_on = match (cv, producer) {
@@ -126,18 +115,7 @@ impl Detector for EditCollision {
                         continue;
                     }
                     found.push((
-                        vec![
-                            Involved {
-                                side: SideRef::Change(w.change),
-                                block: b.clone(),
-                                version: w.version,
-                            },
-                            Involved {
-                                side: canon_side.0.clone(),
-                                block: b.clone(),
-                                version: canon_side.1,
-                            },
-                        ],
+                        vec![cx.of_write(w), canon_side.clone()],
                         format!(
                             "{b} changed in canon since change {} edited it",
                             w.change.short()

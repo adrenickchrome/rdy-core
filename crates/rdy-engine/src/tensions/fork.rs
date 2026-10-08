@@ -4,7 +4,7 @@
 //! canon decision with no in-flight write. In canon (FW-CH6): two live canon decisions that
 //! supersede the same target. A fork of canon stays until one of its decisions stops
 //! superseding the target, so a fork whose last in-flight side lands keeps its vkey.
-use super::{DetectCx, DetectScope, Detector, Found, Involved, SideRef, TensionKind};
+use super::{DetectCx, DetectScope, Detector, Found, SideRef, TensionKind};
 use crate::RdyError;
 use rdy_model::decision::{self, DecisionStatus};
 use rdy_model::{Block, BlockId, Hash};
@@ -138,12 +138,8 @@ impl Detector for Fork {
                         kind: TensionKind::Fork,
                         involved: [x, y]
                             .into_iter()
-                            .map(|c| Involved {
-                                side: c.side.clone(),
-                                block: c.block.clone(),
-                                version: c.version,
-                            })
-                            .collect(),
+                            .map(|c| cx.involved(c.side.clone(), &c.block, c.version))
+                            .collect::<Result<_, _>>()?,
                         summary: format!("{} and {} both supersede {t}{part}", x.block, y.block),
                         stable: true,
                     });

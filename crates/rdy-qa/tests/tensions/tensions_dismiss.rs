@@ -26,11 +26,7 @@ impl Detector for OnWrite {
             }
             out.push(Found {
                 kind: self.0,
-                involved: vec![Involved {
-                    side: SideRef::Change(w.change),
-                    block: w.block.clone(),
-                    version: w.version,
-                }],
+                involved: vec![cx.of_write(w)],
                 summary: "written".into(),
                 stable: true,
             });
@@ -44,8 +40,9 @@ static DETS: [&dyn Detector; 2] = [&BLOCKING, &ADVISORY];
 
 fn setup(who: &Session, view: &str) -> (tempfile::TempDir, Rdy, Hash) {
     let (d, mut r) = project();
-    r.set_detectors_for_tests(&DETS);
+    // the spec lands under the shipped detectors: the test one would block its landing (tgat1)
     let s = spec_doc(&mut r);
+    r.set_detectors_for_tests(&DETS);
     let w = write_as(&mut r, who, view, upd(&s.c, "C one.")).unwrap();
     (d, r, change_of(&w))
 }
@@ -219,11 +216,7 @@ impl Detector for CanonPaired {
         let mut involved = vec![];
         for b in m.iter().filter(|b| b.body.contains("paired")) {
             if let Some((side, v)) = cx.canon_side(&b.id)? {
-                involved.push(Involved {
-                    side,
-                    block: b.id.clone(),
-                    version: Some(v),
-                });
+                involved.push(cx.involved(side, &b.id, Some(v))?);
             }
         }
         if !involved.is_empty() {
@@ -263,16 +256,8 @@ impl Detector for GoneInCanon {
             out.push(Found {
                 kind: TensionKind::EditCollision,
                 involved: vec![
-                    Involved {
-                        side: SideRef::Change(w.change),
-                        block: w.block.clone(),
-                        version: w.version,
-                    },
-                    Involved {
-                        side: SideRef::Canon { landing: None },
-                        block: w.block.clone(),
-                        version: None,
-                    },
+                    cx.of_write(w),
+                    cx.involved(SideRef::Canon { landing: None }, &w.block, None)?,
                 ],
                 summary: "gone in canon".into(),
                 stable: true,
@@ -300,11 +285,7 @@ impl Detector for Softens {
         for w in cx.writes.live() {
             out.push(Found {
                 kind: TensionKind::DuplicateDefinition,
-                involved: vec![Involved {
-                    side: SideRef::Change(w.change),
-                    block: w.block.clone(),
-                    version: w.version,
-                }],
+                involved: vec![cx.of_write(w)],
                 summary: "softens".into(),
                 stable: cx.stable(&w.block)?,
             });
@@ -354,8 +335,8 @@ fn tdis1_every_producer_on_a_canon_side_is_an_author() {
 #[test]
 fn tdis1_the_actor_who_deleted_a_canon_block_is_an_author_of_its_absent_side() {
     let (_d, mut r) = project();
-    r.set_detectors_for_tests(&GONE_DETS);
     let s = spec_doc(&mut r);
+    r.set_detectors_for_tests(&GONE_DETS);
     put(&mut r, "a", upd(&s.c, "C one."));
     write(
         &mut r,
@@ -394,8 +375,8 @@ fn tdis1_the_actor_who_deleted_a_canon_block_is_an_author_of_its_absent_side() {
 #[test]
 fn tdis1_an_advisory_time_dismissal_does_not_hold_once_the_tension_is_blocking() {
     let (_d, mut r) = project();
-    r.set_detectors_for_tests(&SOFTENS_DETS);
     let s = spec_doc(&mut r);
+    r.set_detectors_for_tests(&SOFTENS_DETS);
     put(&mut r, "a", upd(&s.c, "C one."));
     let t = pick(&r, TensionKind::DuplicateDefinition);
     assert_eq!(t.severity, TensionSeverity::Advisory, "C is draft");
@@ -413,7 +394,10 @@ fn tdis1_an_advisory_time_dismissal_does_not_hold_once_the_tension_is_blocking()
         Some(&token),
     )
     .unwrap();
+    // landed under the shipped detectors: the test one reports st's own write, now blocking
+    r.set_detectors_for_tests(&DETECTORS);
     land(&mut r, "st").unwrap();
+    r.set_detectors_for_tests(&SOFTENS_DETS);
     let t2 = pick(&r, TensionKind::DuplicateDefinition);
     assert_eq!(t2.id, t.id, "the same blocks at the same versions");
     assert_ne!(t2.vkey, t.vkey, "the vkey covers the severity");
@@ -431,6 +415,107 @@ fn tdis1_an_advisory_time_dismissal_does_not_hold_once_the_tension_is_blocking()
     );
     r.dismiss_tension(&reviewer("agent:r", "rr"), &tn, "ok")
         .unwrap();
+    assert!(matches!(
+        r.read().tension_status(&t2),
+        TensionStatus::Dismissed(_)
+    ));
+}
+
+/// A pack whose decisions carry the tracking fields `disposition` and `trigger` (trk1).
+const TRK_PACK: &str = "\
+name: trk
+version: \"1\"
+extends: rdy-standard
+block_types:
+  decision:
+    prefix: D
+    traits: [normative]
+    fields:
+      disposition: { kind: str }
+      trigger: { kind: str }
+    tracking: [disposition, trigger]
+";
+
+#[test]
+fn tdis1_a_repin_or_tracking_edit_keeps_a_dismissal() {
+    // FW-CH7: a dismissal lapses when a side's content changes; a repin changes only pins.
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    r.set_detectors_for_tests(&DETS);
+    let y = created(&put(&mut r, "b", cite(&s.section, &s.a)), "$y");
+    let t = pick(&r, TensionKind::EditCollision);
+    r.dismiss_tension(&reviewer("agent:r", "rr"), &tension_label(&t.id), "ok")
+        .unwrap();
+    // A moves in canon (landed under the shipped detectors: the test one would block it), so
+    // y's pin is stale; the repin changes only y's pins
+    r.set_detectors_for_tests(&DETECTORS);
+    put(&mut r, "x", upd(&s.a, "A changed."));
+    land(&mut r, "x").unwrap();
+    r.set_detectors_for_tests(&DETS);
+    put(
+        &mut r,
+        "b",
+        serde_json::json!([{"op": "repin", "id": y.to_string()}]),
+    );
+    let t2 = one_involving(&r, TensionKind::EditCollision, &y);
+    assert_ne!(t2.id, t.id, "the repin is a new version");
+    assert_eq!(t2.vkey, t.vkey, "but not new content");
+    assert!(matches!(
+        r.read().tension_status(&t2),
+        TensionStatus::Dismissed(_)
+    ));
+
+    // a tracking-only edit of an accepted decision
+    let dir = tempfile::tempdir().unwrap();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), TRK_PACK).unwrap();
+    std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: trk\n").unwrap();
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    let dec = r
+        .decide(
+            &writer(),
+            "seed",
+            rdy_engine::DecisionInput {
+                parent: section,
+                statement: "Ship weekly".into(),
+                fields: [("disposition".to_string(), serde_json::json!("M2d1"))]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"]
+        .clone();
+    land(&mut r, "seed").unwrap();
+    r.set_detectors_for_tests(&DETS);
+    let track = |r: &mut Rdy, v: &str| {
+        r.write(
+            &writer(),
+            rdy_engine::WriteRequest {
+                view: "u".into(),
+                ops: serde_json::from_value(
+                    serde_json::json!([{"op": "update", "id": dec, "fields": {"disposition": v}}]),
+                )
+                .unwrap(),
+                justification: Some(rdy_model::Justification::Editorial {
+                    class: rdy_model::EditorialClass::Clarify,
+                    reason: "re-sliced".into(),
+                }),
+                message: String::new(),
+            },
+        )
+        .unwrap();
+    };
+    track(&mut r, "M2d2");
+    let t = pick(&r, TensionKind::EditCollision);
+    r.dismiss_tension(&reviewer("agent:r", "rr"), &tension_label(&t.id), "ok")
+        .unwrap();
+    track(&mut r, "M2d3");
+    let t2 = pick(&r, TensionKind::EditCollision);
+    assert_ne!(t2.id, t.id, "the tracking edit is a new version");
+    assert_eq!(t2.vkey, t.vkey, "but not new content");
     assert!(matches!(
         r.read().tension_status(&t2),
         TensionStatus::Dismissed(_)

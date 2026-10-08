@@ -29,11 +29,7 @@ impl Detector for EveryWrite {
             }
             out.push(Found {
                 kind: self.kind,
-                involved: vec![Involved {
-                    side: SideRef::Change(w.change),
-                    block: w.block.clone(),
-                    version: w.version,
-                }],
+                involved: vec![cx.of_write(w)],
                 summary: format!("{} written", w.block),
                 stable: self.stable,
             });
@@ -58,11 +54,7 @@ impl Detector for CanonOnly {
             if let Some((side, v)) = cx.canon_side(&w.block)? {
                 out.push(Found {
                     kind: self.kind(),
-                    involved: vec![Involved {
-                        side,
-                        block: w.block.clone(),
-                        version: Some(v),
-                    }],
+                    involved: vec![cx.involved(side, &w.block, Some(v))?],
                     summary: "canon only".into(),
                     stable: false,
                 });
@@ -93,21 +85,13 @@ impl Detector for CanonPair {
         };
         out.push(Found {
             kind: self.kind(),
-            involved: vec![Involved {
-                side,
-                block: self.0.clone(),
-                version: Some(v),
-            }],
+            involved: vec![cx.involved(side, &self.0, Some(v))?],
             summary: "canon only".into(),
             stable: true,
         });
         out.push(Found {
             kind: self.kind(),
-            involved: vec![Involved {
-                side: SideRef::Change(Hash([7; 32])),
-                block: self.0.clone(),
-                version: Some(v),
-            }],
+            involved: vec![cx.involved(SideRef::Change(Hash([7; 32])), &self.0, Some(v))?],
             summary: "not canon".into(),
             stable: true,
         });
@@ -132,11 +116,13 @@ fn tset1_ids_cover_sides_and_versions_and_the_vkey_ignores_side_labels() {
         side: c.clone(),
         block: b.clone(),
         version: Some(Hash([1; 32])),
+        content: Some(Hash([5; 32])),
     };
     let y = Involved {
         side: canon.clone(),
         block: BlockId::parse("c-BBBBB").unwrap(),
         version: Some(Hash([4; 32])),
+        content: Some(Hash([6; 32])),
     };
     let k = TensionKind::PremiseShift;
     assert_eq!(
@@ -167,8 +153,19 @@ fn tset1_ids_cover_sides_and_versions_and_the_vkey_ignores_side_labels() {
         tension_vkey(k, TensionSeverity::Advisory, &[x.clone(), y.clone()]),
         "a severity change gives a new vkey"
     );
+    // a new version with the same content (an accept at landing, a repin, a tracking edit)
+    // keeps the vkey (FW-CH7); a content change does not
+    let repinned = Involved {
+        version: Some(Hash([8; 32])),
+        ..x.clone()
+    };
+    assert_eq!(
+        tension_vkey(k, TensionSeverity::Blocking, &[x.clone(), y.clone()]),
+        tension_vkey(k, TensionSeverity::Blocking, &[repinned, y.clone()])
+    );
     let moved = Involved {
         version: Some(Hash([9; 32])),
+        content: Some(Hash([9; 32])),
         ..x.clone()
     };
     assert_ne!(
@@ -392,4 +389,44 @@ fn tset1_no_code_outside_the_detectors_names_a_kind() {
             f.display()
         );
     }
+}
+
+#[test]
+fn tset1_accepting_a_decision_at_landing_keeps_the_vkey() {
+    // FW-CH6a, FW-CH7: landing accepts a proposed decision (status, decided_at), which changes
+    // its version and not its content, so a fork with that side re-keys with the same vkey.
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let mut created = vec![];
+    for who in ["a", "b"] {
+        let w = r
+            .supersede(
+                &ag(who),
+                who,
+                &s.decision.to_string(),
+                None,
+                rdy_engine::DecisionInput {
+                    parent: s.section.to_string(),
+                    statement: format!("{who} replaces it"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        created.push(created_of(&w));
+    }
+    let before = one(&r, TensionKind::Fork);
+    let da = created[0].clone();
+    let proposed = r.read().block(&Scope::Inflight, &da).unwrap();
+    rdy_qa::fixtures::land(&mut r, "a").unwrap();
+    let accepted = r.read().block(&Scope::Canon, &da).unwrap();
+    assert_eq!(accepted.field_str("status"), Some("accepted"));
+    assert_ne!(accepted.version_hash(), proposed.version_hash());
+    let after = one(&r, TensionKind::Fork);
+    assert!(has_canon(&after));
+    assert_ne!(after.id, before.id, "re-keyed");
+    assert_eq!(after.vkey, before.vkey, "accepting is not a content change");
+}
+
+fn created_of(w: &rdy_engine::WriteResult) -> BlockId {
+    created(w, "$decision")
 }

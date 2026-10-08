@@ -73,12 +73,16 @@ impl SideRef {
 }
 
 /// One block a tension involves, on one side, at one version (`None`: deleted or absent; for an
-/// intent side, the intent's version).
+/// intent side, the intent's version), and that version's content hash
+/// ([`rdy_model::Block::content_hash_with`] the pack's tracking fields; `None` when the version
+/// is; for an intent side, the intent's version). The id hashes the version; the vkey hashes the
+/// content.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Involved {
     pub side: SideRef,
     pub block: BlockId,
     pub version: Option<Hash>,
+    pub content: Option<Hash>,
 }
 
 /// What a detector reports: the core turns it into a [`Tension`] (or drops it).
@@ -92,8 +96,8 @@ pub struct Found {
     pub stable: bool,
 }
 
-/// A tension: its id (kind and involved items), its vkey (the same without side labels and with
-/// the severity, which a dismissal binds to), its severity, its distinct sides, sorted, and what
+/// A tension: its id (kind and involved items), its vkey (the same without side labels, with
+/// content hashes for versions and with the severity, which a dismissal binds to), its severity, its distinct sides, sorted, and what
 /// it involves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tension {
@@ -118,7 +122,7 @@ impl Tension {
     }
 }
 
-/// The version part of an involved item as hashed: its hex, or `-` when absent.
+/// The version or content part of an involved item as hashed: its hex, or `-` when absent.
 fn version_text(v: &Option<Hash>) -> String {
     v.map_or_else(|| "-".to_string(), |h| h.to_string())
 }
@@ -144,21 +148,25 @@ pub fn tension_id(kind: TensionKind, involved: &[Involved]) -> Hash {
     Hash::of(&bytes)
 }
 
-/// A tension's vkey: [`tension_id`] without the side labels (items sorted by block, then
-/// version), and with the severity after the kind. A landing, which changes a side's label and
-/// not its content, keeps it. A change of severity (a lifecycle or pack change) gives a new one,
-/// so a dismissal made under one severity does not hold under another.
+/// A tension's vkey (FW-CH7): the kind, the severity, and each involved item's block and
+/// content hash (items sorted by block, then content; `-` for a deleted or absent block). It
+/// leaves out the side labels and the full versions, so only a change of a side's content gives
+/// a new one. A landing, which changes a side's label and accepts a proposed decision
+/// (`status`, `decided_at`), keeps it; so do a repin and a tracking-field edit, which
+/// [`rdy_model::Block::content_hash_with`] leaves out. A change of severity (a lifecycle or
+/// pack change) gives a new one, so a dismissal made under one severity does not hold under
+/// another.
 pub fn tension_vkey(kind: TensionKind, severity: TensionSeverity, involved: &[Involved]) -> Hash {
     let mut items: Vec<(&BlockId, &Option<Hash>)> =
-        involved.iter().map(|i| (&i.block, &i.version)).collect();
+        involved.iter().map(|i| (&i.block, &i.content)).collect();
     items.sort();
-    let mut bytes = b"rdy-tension-vkey-1\0".to_vec();
+    let mut bytes = b"rdy-tension-vkey-2\0".to_vec();
     for part in [kind.name().to_string(), severity.to_string()] {
         bytes.extend_from_slice(part.as_bytes());
         bytes.push(0);
     }
-    for (block, version) in items {
-        for part in [block.to_string(), version_text(version)] {
+    for (block, content) in items {
+        for part in [block.to_string(), version_text(content)] {
             bytes.extend_from_slice(part.as_bytes());
             bytes.push(0);
         }

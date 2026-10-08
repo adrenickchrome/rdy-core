@@ -69,11 +69,7 @@ impl Detector for PremiseShift {
                         .as_deref()
                         .is_none_or(|b| b.content_hash_with(&tracking) != pin);
                 if differs {
-                    shifted.push(Involved {
-                        side: SideRef::Change(a.change),
-                        block: a.block.clone(),
-                        version: a.version,
-                    });
+                    shifted.push(cx.of_write(&a));
                 }
             }
             let canon_content = canon_m.get(&x).map(|b| b.content_hash_with(&tracking));
@@ -86,18 +82,12 @@ impl Detector for PremiseShift {
                     side,
                     block: x.clone(),
                     version,
+                    content: canon_content,
                 });
             }
             for a in shifted {
                 let label = a.side.short();
-                let involved = vec![
-                    a,
-                    Involved {
-                        side: SideRef::Change(w.change),
-                        block: w.block.clone(),
-                        version: w.version,
-                    },
-                ];
+                let involved = vec![a, cx.of_write(&w)];
                 if seeds.is_some_and(|s| !involved.iter().any(|i| s.contains(&i.block))) {
                     continue;
                 }

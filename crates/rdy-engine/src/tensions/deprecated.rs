@@ -4,9 +4,7 @@
 //! (FW-CH6a): live canon content that references deprecated canon content is a standing
 //! condition, so a reference that lands keeps its vkey (it is re-keyed to canon). Deprecated
 //! content that references deprecated content raises nothing in canon.
-use super::{
-    DetectCx, DetectScope, Detector, Found, Involved, SideRef, TensionKind, pointing_edge,
-};
+use super::{DetectCx, DetectScope, Detector, Found, Involved, TensionKind, pointing_edge};
 use crate::RdyError;
 use rdy_graph::{Edge, edges_of};
 use rdy_model::{Block, BlockId, Hash};
@@ -82,16 +80,8 @@ impl DeprecatedReference {
             // same target must not hide a new one
             seen.insert(key);
             out.push(found(
-                Involved {
-                    side: SideRef::Change(w.change),
-                    block: w.block.clone(),
-                    version: w.version,
-                },
-                Involved {
-                    side,
-                    block: e.to.clone(),
-                    version,
-                },
+                cx.of_write(&w),
+                cx.involved(side, &e.to, version)?,
                 &format!("change {}", w.change.short()),
             ));
         }
@@ -137,16 +127,8 @@ impl DeprecatedReference {
                         (cx.canon_side(&y)?, cx.canon_side(&e.to)?)
                     {
                         out.push(found(
-                            Involved {
-                                side: ys,
-                                block: y.clone(),
-                                version: Some(yv),
-                            },
-                            Involved {
-                                side: xs,
-                                block: e.to.clone(),
-                                version: Some(xv),
-                            },
+                            cx.involved(ys, &y, Some(yv))?,
+                            cx.involved(xs, &e.to, Some(xv))?,
                             "canon",
                         ));
                     }

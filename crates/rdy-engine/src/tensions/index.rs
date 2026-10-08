@@ -1,7 +1,7 @@
 //! The shared index the detectors read: the in-flight writes (with their liveness and their name,
 //! text, supersede and reference indexes), a canon index memoised per canon build, and the
 //! detection context that joins them to the published state.
-use super::{DetectScope, SideRef};
+use super::{DetectScope, Involved, SideRef};
 use crate::brief::{effective_lifecycle, effective_stable};
 use crate::{InflightSet, Materialized, RdyError, ReadState, Scope};
 use imbl::OrdMap;
@@ -614,6 +614,74 @@ impl<'a> DetectCx<'a> {
             DetectScope::Inflight => Scope::Inflight,
             DetectScope::Canon => Scope::Canon,
         }
+    }
+
+    /// The content hash of `b` as a vkey hashes it: [`Block::content_hash_with`] the tracking
+    /// fields, so derived fields (a decision's `status`, `decided_at`), pins and tracking fields
+    /// are left out.
+    pub fn content_of(&self, b: &Block) -> Hash {
+        b.content_hash_with(self.st.reader().tracking())
+    }
+
+    /// The involved item for write `w`: its change's side, the version it writes and that
+    /// block's content.
+    pub fn of_write(&self, w: &Write) -> Involved {
+        Involved {
+            side: SideRef::Change(w.change),
+            block: w.block.clone(),
+            version: w.version,
+            content: w.new.as_deref().map(|b| self.content_of(b)),
+        }
+    }
+
+    /// The involved item for `block` at `version` on `side`, with that version's content: from
+    /// the side's write when the side is a change, else from the materialized scope that holds
+    /// that version, else read from the store. An intent side's content is its version; an
+    /// absent version has none.
+    pub fn involved(
+        &self,
+        side: SideRef,
+        block: &BlockId,
+        version: Option<Hash>,
+    ) -> Result<Involved, RdyError> {
+        let content = match (&side, version) {
+            (_, None) => None,
+            (SideRef::Intent { .. }, v) => v,
+            (_, Some(v)) => Some(self.content_at(&side, block, &v)?),
+        };
+        Ok(Involved {
+            side,
+            block: block.clone(),
+            version,
+            content,
+        })
+    }
+
+    /// The content of `block`'s version `v` (see [`DetectCx::involved`]).
+    fn content_at(&self, side: &SideRef, block: &BlockId, v: &Hash) -> Result<Hash, RdyError> {
+        if let SideRef::Change(c) = side
+            && let Some(b) = self
+                .writes
+                .of_change(c)
+                .iter()
+                .find(|w| &w.block == block && w.version.as_ref() == Some(v))
+                .and_then(|w| w.new.clone())
+        {
+            return Ok(self.content_of(&b));
+        }
+        let mut scopes = vec![Scope::Canon];
+        if self.scope == DetectScope::Inflight {
+            scopes.push(Scope::Inflight);
+        }
+        for scope in scopes {
+            let m = self.st.materialized(&scope)?;
+            if m.version_of(block).as_ref() == Some(v)
+                && let Some(b) = m.get(block)
+            {
+                return Ok(self.content_of(b));
+            }
+        }
+        Ok(self.content_of(&self.st.reader().get_block(v)?))
     }
 
     /// Canon's side of `b` and its canon version: the landing that carried that version (of
