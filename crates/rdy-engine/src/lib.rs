@@ -439,7 +439,7 @@ pub fn check_wc(
             severity: rdy_schema::Severity::Warning,
         });
     }
-    if let Some(under) = path.and_then(|p| relative_to(root, p)) {
+    if let Some(under) = path.map(|p| relative_to(root, p)).transpose()?.flatten() {
         let prefix = format!("{under}/");
         diags.retain(|d| d.file == under || d.file.starts_with(&prefix));
     }
@@ -447,18 +447,55 @@ pub fn check_wc(
     Ok(diags)
 }
 
-/// `path` as a `/`-separated path under `root`; `None` for the root itself.
-fn relative_to(root: &Path, path: &Path) -> Option<String> {
+/// `path` with `.` and `..` resolved by the words alone. `None` for a relative path whose `..`
+/// climbs above its start. On an absolute path, `..` at the filesystem root stays there.
+pub fn lexical_path(path: &Path) -> Option<PathBuf> {
     use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let climbs = matches!(out.components().next_back(), Some(Component::Normal(_)));
+                if climbs {
+                    out.pop();
+                } else if !out.has_root() {
+                    return None;
+                }
+            }
+            c => out.push(c.as_os_str()),
+        }
+    }
+    Some(out)
+}
+
+/// `path` as a `/`-separated path under `root`; `Ok(None)` for the root itself. `..` is resolved
+/// first (`Path::starts_with` compares components, so `/root/../x` would start with `/root`); a
+/// path that is not under `root` is `E_BAD_INPUT`, never a path read as if it were.
+fn relative_to(root: &Path, path: &Path) -> Result<Option<String>, RdyError> {
+    use std::path::Component;
+    let outside = || {
+        RdyError::new(
+            E_BAD_INPUT,
+            format!("{} is not under {}", path.display(), root.display()),
+            "pass a path inside the working tree",
+        )
+    };
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let rel = if path.is_absolute() {
-        let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-        path.strip_prefix(root)
+        let flat = lexical_path(path).ok_or_else(outside)?;
+        let (root_flat, root_canon) = (
+            lexical_path(root).unwrap_or_else(|| root.to_path_buf()),
+            canon(root),
+        );
+        let real = canon(&flat);
+        flat.strip_prefix(&root_flat)
+            .or_else(|_| flat.strip_prefix(&root_canon))
+            .or_else(|_| real.strip_prefix(&root_canon))
             .map(Path::to_path_buf)
-            .or_else(|_| path.strip_prefix(canon(root)).map(Path::to_path_buf))
-            .or_else(|_| canon(path).strip_prefix(canon(root)).map(Path::to_path_buf))
-            .unwrap_or_else(|_| path.to_path_buf())
+            .map_err(|_| outside())?
     } else {
-        path.to_path_buf()
+        lexical_path(path).ok_or_else(outside)?
     };
     let parts: Vec<String> = rel
         .components()
@@ -467,7 +504,7 @@ fn relative_to(root: &Path, path: &Path) -> Option<String> {
             _ => None,
         })
         .collect();
-    (!parts.is_empty()).then(|| parts.join("/"))
+    Ok((!parts.is_empty()).then(|| parts.join("/")))
 }
 
 /// The `.yaml` and `.yml` files of a packs directory, sorted; none if it does not exist.
@@ -1342,5 +1379,41 @@ impl ReadState {
     /// The config's `description`, when it had a non-empty one when this state was published.
     pub fn project_description(&self) -> Option<String> {
         self.description.as_deref().map(str::to_string)
+    }
+}
+
+#[cfg(test)]
+mod relative_to_tests {
+    use super::{E_BAD_INPUT, lexical_path, relative_to};
+    use std::path::Path;
+
+    /// Fix round 1 (wcck1): `..` is resolved, and a path that leaves the root is an error, not
+    /// a path with its `..` dropped.
+    #[test]
+    fn wcck1_relative_to_resolves_dotdot_and_refuses_a_path_outside() {
+        let root = Path::new("/nonexistent-root/tree");
+        let rel = |p: &str| relative_to(root, Path::new(p));
+        assert_eq!(rel("/nonexistent-root/tree").unwrap(), None);
+        assert_eq!(
+            rel("/nonexistent-root/tree/a/../b/c.yaml")
+                .unwrap()
+                .as_deref(),
+            Some("b/c.yaml")
+        );
+        assert_eq!(rel("a/./b.yaml").unwrap().as_deref(), Some("a/b.yaml"));
+        for outside in [
+            "/nonexistent-root/tree/../elsewhere/x.yaml",
+            "/nonexistent-root/elsewhere",
+            "../elsewhere",
+            "a/../../elsewhere",
+        ] {
+            let e = rel(outside).unwrap_err();
+            assert_eq!(e.code, E_BAD_INPUT, "{outside}");
+        }
+        assert_eq!(
+            lexical_path(Path::new("/a/../..")).as_deref(),
+            Some(Path::new("/"))
+        );
+        assert_eq!(lexical_path(Path::new("../a")), None);
     }
 }

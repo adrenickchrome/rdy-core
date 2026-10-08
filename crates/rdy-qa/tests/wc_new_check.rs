@@ -105,3 +105,34 @@ fn wcck1_outside_a_checkout_a_path_is_required() {
     let (okk, v) = check(&s, &[]);
     assert!(!okk && v["code"] == E_BAD_INPUT, "{v}");
 }
+
+/// A directory outside the checkout, with a bad file in it, named through the checkout root and
+/// `..`: `Path::starts_with` is lexical, so it must not count as under the root.
+#[test]
+fn wcck1_a_dotdot_path_out_of_the_checkout_is_checked_where_it_is() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    let outside = rdy_qa::daemon::short_tempdir();
+    std::fs::write(outside.path().join("bad.yaml"), "just: a map\n").unwrap();
+    let name = outside
+        .path()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let root = s.dir.path().canonicalize().unwrap();
+    let via_root = format!("{}/../{name}", root.display());
+    let (okk, v) = check(&s, &[&via_root]);
+    assert!(
+        v.as_array().is_some_and(|a| a
+            .iter()
+            .any(|d| d["file"].as_str().is_some_and(|f| f.ends_with("bad.yaml")))),
+        "the outside directory is the one checked: {v}"
+    );
+    assert!(!okk, "its bad file fails the check: {v}");
+    // a `..` that stays inside the tree is still the working copy
+    let inside = format!("{}/guides/../notes.yaml", root.display());
+    let (okk, v) = check(&s, &[&inside]);
+    assert!(okk, "{v}");
+}

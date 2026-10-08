@@ -8,7 +8,7 @@ use rdy_engine::engine::Local;
 use rdy_engine::wc::state::{Place, WcState, pointer_project};
 use rdy_engine::{
     E_BAD_INPUT, E_CONFIG, E_IO, E_NO_PROJECT, Rdy, RdyError, Session, check_path, classify,
-    human_actor_for_env, project_pack, serve_config,
+    human_actor_for_env, lexical_path, project_pack, serve_config,
 };
 use rdy_model::Role;
 use serde_json::{Value, json};
@@ -380,7 +380,9 @@ fn find_project(start: &Path) -> PathBuf {
     start.to_path_buf()
 }
 
-/// Whether `path` (relative to `cwd`) is the working-tree `root` or under it.
+/// Whether `path` (relative to `cwd`) is the working-tree `root` or under it. `..` never counts
+/// toward "under": a path that exists is compared by its real location, and one that does not
+/// by its words with `.` and `..` resolved (`/root/../x` is not under `/root`).
 fn in_tree(root: &Path, cwd: &Path, path: &Path) -> bool {
     let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let abs = if path.is_absolute() {
@@ -388,7 +390,11 @@ fn in_tree(root: &Path, cwd: &Path, path: &Path) -> bool {
     } else {
         cwd.join(path)
     };
-    abs.starts_with(root) || canon(&abs).starts_with(canon(root))
+    let canon_root = canon(root);
+    if let Ok(real) = abs.canonicalize() {
+        return real.starts_with(&canon_root);
+    }
+    lexical_path(&abs).is_some_and(|flat| flat.starts_with(root) || flat.starts_with(&canon_root))
 }
 
 fn is_project(dir: &Path) -> bool {
@@ -2015,8 +2021,42 @@ fn keys_lines(v: &Value, why: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{log_text, notices, show_text};
+    use super::{in_tree, log_text, notices, show_text};
     use serde_json::json;
+    use std::path::Path;
+
+    /// Fix round 1 (wcck1): `..` is resolved before the tree test, for paths that exist and
+    /// for paths that do not.
+    #[test]
+    fn wcck1_in_tree_resolves_dotdot() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("tree/sub")).unwrap();
+        std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+        let tree = root.join("tree");
+        let cwd = tree.join("sub");
+        assert!(in_tree(&tree, &cwd, Path::new("..")), "the root through ..");
+        assert!(in_tree(&tree, &cwd, Path::new("../sub")));
+        assert!(
+            !in_tree(&tree, &tree, Path::new("../elsewhere")),
+            "exists, outside"
+        );
+        assert!(!in_tree(&tree, &tree, &tree.join("../elsewhere")));
+        assert!(
+            !in_tree(&tree, &tree, Path::new("../nothing")),
+            "missing, outside"
+        );
+        assert!(!in_tree(
+            &tree,
+            &tree,
+            &tree.join("a/../../elsewhere/x.yaml")
+        ));
+        assert!(
+            in_tree(&tree, &tree, &tree.join("a/../b.yaml")),
+            "missing, inside"
+        );
+        assert!(in_tree(&tree, &tree, Path::new("new.yaml")));
+    }
 
     /// Final-review fix round 1: `rdy log` prints the alternative a landing chose, as `rdy
     /// approve` does.
