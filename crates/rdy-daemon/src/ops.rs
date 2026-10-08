@@ -14,7 +14,7 @@ use rdy_engine::{
     RdyError, ReadState, Relay, Scope, SearchQuery, Session, WriteRequest, alt, block_to_yaml,
     check_path, intent, parse_justification, resolve_pack, view_api,
 };
-use rdy_mcp::tools::MAX_TOKENS_LIMIT;
+use rdy_mcp::tools::{MAX_ASSET_BYTES, MAX_TOKENS_LIMIT};
 use rdy_model::{ActorRun, ChangeLinks, RelayEvidence, Role};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -63,6 +63,7 @@ pub const OPS: &[&str] = &[
     "wc_nonce",
     "intent",
     "alt",
+    "wc_put_blob",
 ];
 
 #[derive(Deserialize)]
@@ -268,6 +269,12 @@ struct WcNonceArgs {
     view: String,
     nonce: String,
     rewrite: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WcPutBlobArgs {
+    path: String,
 }
 
 #[derive(Deserialize)]
@@ -534,6 +541,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{op, title?, question?, members?, set?, label?, view?, member?, reason?, all?}",
             )?,
         ),
+        "wc_put_blob" => wc_put_blob(cx, parse(op, args, "{path}")?),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),
@@ -1033,6 +1041,65 @@ fn wc_view(cx: &OpContext, a: WcViewArgs) -> Result<Value, RdyError> {
         }
     }
     Ok(to_json(&proj))
+}
+
+/// wcfg1: stores the file at `path` (resolved against the session's directory) as a blob and
+/// returns its hash. A regular file of at most `MAX_ASSET_BYTES`, as `rdy_asset` limits it.
+fn wc_put_blob(cx: &OpContext, a: WcPutBlobArgs) -> Result<Value, RdyError> {
+    if !cx.session.role.can_write() {
+        return Err(RdyError::new(
+            E_PERMISSION,
+            format!("role {:?} cannot write", cx.session.role),
+            "start the session as a writer",
+        ));
+    }
+    let path = resolve_path(cx.cwd, &a.path);
+    let io = |e: std::io::Error| {
+        RdyError::new(
+            E_IO,
+            format!("cannot read {}: {e}", path.display()),
+            "check that the file exists and can be read",
+        )
+    };
+    let too_big = || {
+        RdyError::new(
+            E_LIMIT,
+            format!(
+                "{} is over the limit of {MAX_ASSET_BYTES} bytes",
+                path.display()
+            ),
+            format!("use an image of at most {MAX_ASSET_BYTES} bytes"),
+        )
+    };
+    let meta = std::fs::metadata(&path).map_err(io)?;
+    if !meta.is_file() {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            format!("{} is not a regular file", path.display()),
+            "name an image file",
+        ));
+    }
+    if meta.len() > MAX_ASSET_BYTES as u64 {
+        return Err(too_big());
+    }
+    // read at most one byte over the limit, so a file that grew since the check is still refused
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(
+            std::fs::File::open(&path).map_err(io)?,
+            MAX_ASSET_BYTES as u64 + 1,
+        ),
+        &mut bytes,
+    )
+    .map_err(io)?;
+    if bytes.len() > MAX_ASSET_BYTES {
+        return Err(too_big());
+    }
+    let n = bytes.len();
+    let hash = cx.engine.write(Box::new(move |r| {
+        Ok(json!(r.store_mut().put_blob(&bytes)?.to_string()))
+    }))?;
+    Ok(json!({"hash": hash, "bytes": n}))
 }
 
 /// The most changes `wc_nonce` reads before it answers that no change carries the nonce (R-I6).

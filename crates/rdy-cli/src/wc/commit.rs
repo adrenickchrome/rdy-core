@@ -9,12 +9,14 @@ use crate::brief_text::plain;
 use crate::{Conn, Env, call, hash_short, human_session};
 use rdy_daemon::{E_DAEMON_GONE, ErrorReply};
 use rdy_engine::wc::files::{apply_writeback, changed_since_staged};
-use rdy_engine::wc::plan::{CommitPlan, plan_commit};
+use rdy_engine::wc::layout::BLOBS_DIR;
+use rdy_engine::wc::plan::{CommitPlan, UPLOAD_PREFIX, plan_commit};
+use rdy_engine::wc::project::blob_name;
 use rdy_engine::wc::state::{ConflictKind, Pending, Place, WcState, new_nonce, stage_clear};
 use rdy_engine::{
-    Diagnostic, E_BAD_INPUT, E_BAD_NAME, E_HAS_CHILDREN, E_KEY_CLASH, E_PATH_CLASH, E_STALE_BASE,
-    E_UNKNOWN_REF, E_VALIDATION, E_WC_CONFLICT, E_WC_DIRTY, E_WC_INVALID, E_WC_LOCKED, E_WC_STALE,
-    Projection, RdyError, editorial_class, now_ms, project_pack,
+    Diagnostic, E_BAD_INPUT, E_BAD_NAME, E_HAS_CHILDREN, E_IO, E_KEY_CLASH, E_PATH_CLASH,
+    E_STALE_BASE, E_UNKNOWN_REF, E_VALIDATION, E_WC_CONFLICT, E_WC_DIRTY, E_WC_INVALID,
+    E_WC_LOCKED, E_WC_STALE, Projection, RdyError, editorial_class, now_ms, project_pack,
 };
 use rdy_model::BlockId;
 use rdy_schema::Severity;
@@ -81,7 +83,7 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
     }
     let view = state.require_bound()?.view.clone();
     let pack = project_pack(&env.project)?;
-    let plan = plan_commit(&place, &state, &pack).map_err(|w| invalid(w.diags))?;
+    let mut plan = plan_commit(&place, &state, &pack).map_err(|w| invalid(w.diags))?;
     if plan.ops.is_empty() {
         if plan.committed.is_empty() {
             return Err(RdyError::new(
@@ -140,6 +142,10 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
             return Err(e);
         }
     };
+    if let Err(e) = upload_figures(&place, &mut conn, &mut plan) {
+        conn.close();
+        return Err(e);
+    }
     let nonce = new_nonce();
     state.pending = Some(Pending {
         nonce: nonce.clone(),
@@ -235,6 +241,46 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
         }
     }
     Ok((out, text))
+}
+
+/// The figure pass (wcfg1): stores each upload's image as a blob, puts the hash in the ops where
+/// the planner left `"$upload:<n>"`, and copies the image to `_blobs/<hash>.<ext>` unless the
+/// file is there. Before the journal: a failed commit leaves the stored blobs, which are content
+/// addressed and harmless.
+fn upload_figures(place: &Place, conn: &mut Conn, plan: &mut CommitPlan) -> Result<(), ErrorReply> {
+    for (n, up) in plan.uploads.iter().enumerate() {
+        let reply = conn.op(
+            "wc_put_blob",
+            json!({"path": up.file.display().to_string()}),
+        )?;
+        let hash = reply["hash"].as_str().ok_or_else(|| {
+            ErrorReply::new(
+                E_BAD_INPUT,
+                "the daemon did not return a blob hash",
+                "run rdy serve --stop, then commit again, with the same rdy binary",
+            )
+        })?;
+        let placeholder = format!("{UPLOAD_PREFIX}{n}");
+        for op in &mut plan.ops {
+            if op["fields"]["blob"].as_str() == Some(placeholder.as_str()) {
+                op["fields"]["blob"] = json!(hash);
+            }
+        }
+        let dir = place.root.join(BLOBS_DIR);
+        let to = dir.join(blob_name(hash, up.media_type.as_deref()));
+        if std::fs::symlink_metadata(&to).is_err() {
+            let io = |e: std::io::Error| {
+                ErrorReply::from(RdyError::new(
+                    E_IO,
+                    format!("cannot write {}: {e}", to.display()),
+                    "check the directory and its permissions",
+                ))
+            };
+            std::fs::create_dir_all(&dir).map_err(io)?;
+            std::fs::copy(&up.file, &to).map_err(io)?;
+        }
+    }
+    Ok(())
 }
 
 /// One line per path the write-back left as it was.

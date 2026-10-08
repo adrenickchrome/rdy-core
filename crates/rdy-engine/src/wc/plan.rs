@@ -5,17 +5,18 @@
 //! is one `move_to`; a link kind is named only when the file changed it, and then with the links
 //! the file never shows.
 
-use crate::error::{E_IO, E_PATH_CLASH, E_WC_INVALID, W_WC_UNSTAGED_MOVE};
+use crate::error::{E_FILE_FORMAT, E_IO, E_PATH_CLASH, E_WC_INVALID, W_WC_UNSTAGED_MOVE};
 use crate::query::field_json;
 use crate::tree_io::{Diagnostic, FOLDER_FILE};
 use crate::wc::ignore::Ignore;
 use crate::wc::layout::{WcBlock, WcTree, read_tree};
 use crate::wc::lint::lint_tree;
 use crate::wc::state::{Place, WcState, stage_paths};
-use rdy_model::{BlockId, tree};
+use rdy_model::{BlockId, FieldValue, tree};
 use rdy_schema::{Pack, STORE_ONLY_FIELDS, STORE_ONLY_LINK_KINDS, Severity, TypeClass};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -34,7 +35,8 @@ pub struct CommitPlan {
     pub removed_files: BTreeSet<String>,
     /// The staged paths (copies and deletions) this plan consumes.
     pub committed: BTreeSet<String>,
-    /// Figures to upload before the write (Task 12).
+    /// Figures to upload before the write: the op for `block` carries `"$upload:<n>"` (its
+    /// index here) as its `blob` until the client has the hash.
     pub uploads: Vec<Upload>,
     /// Each block's file, line and column in the commit tree.
     pub positions: BTreeMap<BlockId, (String, usize, usize)>,
@@ -55,6 +57,125 @@ pub struct WcInvalid {
     pub diags: Vec<Diagnostic>,
 }
 
+/// The prefix of the placeholder an upload's op carries in place of the blob hash.
+pub const UPLOAD_PREFIX: &str = "$upload:";
+
+/// Whether a figure's `blob` is a blob hash (64 hex characters) rather than a path.
+fn is_hash(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The media type of an image or PDF file name, from its extension.
+fn media_type_of(path: &str) -> Option<&'static str> {
+    let ext = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        _ => return None,
+    })
+}
+
+/// The path a figure entry names as its image: a `figure` whose `blob` is a string that is not a
+/// hash.
+fn figure_path(b: &WcBlock) -> Option<&str> {
+    if b.block.block_type != "figure" {
+        return None;
+    }
+    b.block
+        .fields
+        .get("blob")
+        .and_then(FieldValue::as_str)
+        .filter(|s| !is_hash(s))
+}
+
+/// Why a figure's image was refused.
+enum Refused {
+    Outside,
+    Missing,
+}
+
+/// The file a figure in `file` names by `rel` (R-P13): relative to the doc file's directory,
+/// resolved lexically (`..` only while it stays inside `root`), then through the file system, so
+/// a link out of the working tree does not escape. Returns the absolute path of a regular file.
+fn figure_file(root: &Path, file: &str, rel: &str) -> Result<PathBuf, Refused> {
+    let mut parts: Vec<&OsStr> = Path::new(file)
+        .parent()
+        .into_iter()
+        .flat_map(Path::components)
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    for c in Path::new(rel).components() {
+        match c {
+            Component::Normal(s) => parts.push(s),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop().ok_or(Refused::Outside)?;
+            }
+            Component::RootDir | Component::Prefix(_) => return Err(Refused::Outside),
+        }
+    }
+    let joined = parts.iter().fold(root.to_path_buf(), |p, s| p.join(s));
+    let real = fs::canonicalize(&joined).map_err(|_| Refused::Missing)?;
+    let base = fs::canonicalize(root).map_err(|_| Refused::Missing)?;
+    if !real.starts_with(&base) {
+        return Err(Refused::Outside);
+    }
+    if !fs::metadata(&real).is_ok_and(|m| m.is_file()) {
+        return Err(Refused::Missing);
+    }
+    Ok(real)
+}
+
+/// The figure rule (wcfg1), run before the entries are validated: every figure whose `blob` is a
+/// path gets its `media_type` from the file extension when the entry gives none, and is refused
+/// when the image is outside the working copy, missing, or of a type rdy cannot name.
+pub fn resolve_figures(tree: &mut WcTree, root: &Path) -> Vec<Diagnostic> {
+    let mut out = vec![];
+    for b in &mut tree.blocks {
+        let Some(path) = figure_path(b).map(str::to_string) else {
+            continue;
+        };
+        let id = b.block.id.clone();
+        let diag = |message: String, fix: &str| {
+            Diagnostic::error(&b.file, b.at, E_FILE_FORMAT, message, fix)
+        };
+        let given = b.block.fields.contains_key("media_type");
+        let inferred = media_type_of(&path);
+        match figure_file(root, &b.file, &path) {
+            Ok(_) => {}
+            Err(Refused::Outside) => out.push(diag(
+                format!("figure {id}: {path} is outside the working copy"),
+                "keep the image inside the working copy, next to the doc or below it",
+            )),
+            Err(Refused::Missing) => out.push(diag(
+                format!("figure {id}: no image at {path}"),
+                "put the image at that path, relative to the doc file's directory",
+            )),
+        }
+        if !given {
+            match inferred {
+                Some(m) => {
+                    b.block
+                        .fields
+                        .insert("media_type".into(), FieldValue::Str(m.into()));
+                }
+                None => out.push(diag(
+                    format!("figure {id}: set media_type for {path}"),
+                    "add media_type, e.g. image/png, to the figure's fields",
+                )),
+            }
+        }
+    }
+    out
+}
+
 /// Where the commit tree is built, under the state directory.
 const TMP_DIR: &str = "tmp";
 const COMMIT_DIR: &str = "commit";
@@ -70,7 +191,8 @@ pub fn plan_commit(place: &Place, st: &WcState, pack: &Pack) -> Result<CommitPla
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir(&tmp); // only when nothing else is in it
     let commit = commit.map_err(|diags| WcInvalid { diags })?;
-    let mut diags = lint_tree(&commit, pack, None);
+    let mut commit = commit;
+    let mut diags = lint_tree(&mut commit, pack, None, Some(&place.root));
     diags.extend(unread(&commit, st, &staged));
     diags.sort_by(|a, b| (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column)));
     if diags.iter().any(|d| d.severity == Severity::Error) {
@@ -539,6 +661,7 @@ impl<'a> Diff<'a> {
                     Some(self.create(b, placed.get(id)))
                 }
             };
+            let op = op.map(|op| self.upload(b, op, plan));
             if let Some(op) = op {
                 plan.touched.insert(id.clone());
                 plan.ops.push(op);
@@ -546,6 +669,37 @@ impl<'a> Diff<'a> {
         }
         let gone = self.deletes(plan);
         self.files(plan, &gone);
+    }
+
+    /// A figure whose `blob` is a path: its image becomes an upload, and the op carries the
+    /// placeholder for the hash in its `blob` field.
+    fn upload(&self, b: &WcBlock, mut op: Value, plan: &mut CommitPlan) -> Value {
+        let Some(path) = figure_path(b) else {
+            return op;
+        };
+        // the lint refused every path this cannot resolve
+        let Ok(file) = figure_file(&self.place.root, &b.file, path) else {
+            return op;
+        };
+        let media_type = b
+            .block
+            .fields
+            .get("media_type")
+            .and_then(FieldValue::as_str)
+            .map(str::to_string);
+        let placeholder = format!("{UPLOAD_PREFIX}{}", plan.uploads.len());
+        if let Some(m) = op.as_object_mut() {
+            let fields = m.entry("fields").or_insert_with(|| json!({}));
+            if let Some(f) = fields.as_object_mut() {
+                f.insert("blob".into(), placeholder.into());
+            }
+        }
+        plan.uploads.push(Upload {
+            block: b.block.id.clone(),
+            file,
+            media_type,
+        });
+        op
     }
 
     /// Where each placed block goes (R-P4): per parent, the content children the commit tree

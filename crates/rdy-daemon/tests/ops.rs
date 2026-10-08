@@ -35,7 +35,7 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 30);
+    assert_eq!(OPS.len(), 31);
     assert_eq!(OPS[0], "session");
     let (d, e) = project();
     let s = human();
@@ -512,4 +512,51 @@ fn wccm1_wc_nonce_waits_for_a_commit_still_in_flight() {
     assert_eq!(found["change"], committed["change"], "{found}");
     assert!(!rdy_daemon::wc_in_flight(nonce));
     shared.shutdown().unwrap();
+}
+
+#[test]
+fn wcfg1_wc_put_blob_stores_a_file_and_refuses_a_reader_a_directory_and_a_missing_file() {
+    let (d, e) = project();
+    std::fs::write(d.path().join("chart.png"), b"\x89PNG chart").unwrap();
+    let s = human();
+    let v = dispatch(
+        &cx(&e, &s, d.path()),
+        "wc_put_blob",
+        json!({"path": "chart.png"}),
+    )
+    .unwrap();
+    assert_eq!(v["bytes"], 10, "{v}");
+    let hash = v["hash"].as_str().unwrap().to_string();
+    assert_eq!(hash.len(), 64, "{v}");
+    let again = dispatch(
+        &cx(&e, &s, d.path()),
+        "wc_put_blob",
+        json!({"path": "chart.png"}),
+    )
+    .unwrap();
+    assert_eq!(again["hash"], hash.as_str(), "content addressed");
+    let reader = Session::human("human:r".into(), Role::Reader);
+    let err = dispatch(
+        &cx(&e, &reader, d.path()),
+        "wc_put_blob",
+        json!({"path": "chart.png"}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, rdy_engine::E_PERMISSION);
+    let err = dispatch(&cx(&e, &s, d.path()), "wc_put_blob", json!({"path": "."})).unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    let err = dispatch(
+        &cx(&e, &s, d.path()),
+        "wc_put_blob",
+        json!({"path": "none.png"}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, rdy_engine::E_IO, "{err}");
+    let err = dispatch(
+        &cx(&e, &s, d.path()),
+        "wc_put_blob",
+        json!({"path": "chart.png", "x": 1}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
 }

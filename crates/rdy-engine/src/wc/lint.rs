@@ -7,17 +7,30 @@ use crate::error::{E_WC_STORE_ONLY, E_WC_SUPPORTING};
 use crate::lint::{LintItem, lint_blocks};
 use crate::tree_io::Diagnostic;
 use crate::wc::layout::{WcBlock, WcTree};
+use crate::wc::plan::resolve_figures;
 use rdy_model::BlockId;
 use rdy_schema::{
     Pack, STORE_ONLY_FIELDS, STORE_ONLY_LINK_KINDS, STORE_ONLY_TARGET_TYPES, TypeClass,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
-/// Lints a working tree: every tree diagnostic, then the per-entry lint (references are checked
-/// only against a `view`; an entry that left out `order` is not checked for it), then the split
-/// rules. Sorted by file, line and column.
-pub fn lint_tree(tree: &WcTree, pack: &Pack, view: Option<&Materialized>) -> Vec<Diagnostic> {
+/// Lints a working tree: every tree diagnostic, then the figure rule (with a `root`: a figure's
+/// image path is checked and its `media_type` inferred in the tree, before the entries are
+/// validated), then the per-entry lint (references are checked only against a `view`; an entry
+/// that left out `order` is not checked for it), then the split rules. Sorted by file, line and
+/// column.
+pub fn lint_tree(
+    tree: &mut WcTree,
+    pack: &Pack,
+    view: Option<&Materialized>,
+    root: Option<&Path>,
+) -> Vec<Diagnostic> {
     let mut diags = tree.diags.clone();
+    if let Some(root) = root {
+        diags.extend(resolve_figures(tree, root));
+    }
+    let tree = &*tree;
     let items: Vec<LintItem<'_>> = tree
         .blocks
         .iter()
