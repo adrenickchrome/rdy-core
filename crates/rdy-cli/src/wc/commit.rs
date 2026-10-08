@@ -2,9 +2,11 @@
 //! bound view, through a journal written before the request, and writes the changed files back in
 //! canonical form. `recover` finishes (or drops) a commit whose acknowledgement was lost.
 
+use super::brief::{for_commit, record_refusal};
 use super::{Open, open};
 use crate::brief_text::consequences_text;
-use crate::{Conn, Env, call, hash_short};
+use crate::brief_text::plain;
+use crate::{Conn, Env, call, hash_short, human_session};
 use rdy_daemon::{E_DAEMON_GONE, ErrorReply};
 use rdy_engine::wc::files::{apply_writeback, changed_since_staged};
 use rdy_engine::wc::plan::{CommitPlan, plan_commit};
@@ -41,6 +43,16 @@ pub(super) struct Justify {
 }
 
 pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, String), ErrorReply> {
+    if env.no_daemon && !human_session(env) {
+        // R-I7: the briefing registry lives in one process, so no recorded token would be known
+        // to the next command
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "agent commits need the daemon",
+            "drop --no-daemon, or use the MCP tools",
+        )
+        .into());
+    }
     let Open {
         place,
         lock,
@@ -119,6 +131,15 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
         )
         .into());
     }
+    // the commit's one connection: it briefs the touched blocks (human), then records the change
+    let mut conn = Conn::open(env)?;
+    let cited = match for_commit(env, &mut conn, &state, &view, &plan) {
+        Ok(c) => c,
+        Err(e) => {
+            conn.close();
+            return Err(e);
+        }
+    };
     let nonce = new_nonce();
     state.pending = Some(Pending {
         nonce: nonce.clone(),
@@ -128,7 +149,10 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
         files: plan.committed.iter().cloned().collect(),
         at_ms: now_ms(),
     });
-    state.save(&place)?;
+    if let Err(e) = state.save(&place) {
+        conn.close();
+        return Err(e.into());
+    }
     let mut args = json!({
         "view": view,
         "ops": plan.ops,
@@ -142,11 +166,11 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
     if let [class, reason] = j.editorial.as_slice() {
         args["editorial"] = json!({"class": class, "reason": reason});
     }
-    let reply = Conn::open(env).and_then(|mut c| {
-        let out = c.op("wc_commit", args);
-        c.close();
-        out
-    });
+    if let Some(token) = &cited.token {
+        args["brief"] = json!(token);
+    }
+    let reply = conn.op("wc_commit", args);
+    conn.close();
     let reply = match reply {
         Ok(v) => v,
         Err(mut e) if e.code == E_DAEMON_GONE => {
@@ -156,6 +180,8 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
         }
         Err(e) => {
             state.pending = None;
+            // a refused briefing is replaced by the fresh one the refusal carries
+            record_refusal(&mut state, &e, &view);
             state.save(&place)?;
             return Err(map_error(e, &plan, &state, &view));
         }
@@ -173,12 +199,17 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
     state.save(&place)?;
     drop(lock);
     let change = reply["change"].as_str().unwrap_or("");
-    let mut text = format!(
+    let mut text = String::new();
+    if let Some(b) = &cited.briefing {
+        text.push_str("briefing (cited by this commit):\n");
+        text.push_str(&plain(b));
+    }
+    text.push_str(&format!(
         "committed {} to {view}: {} op(s), {} file(s) rewritten",
         hash_short(change),
         plan.ops.len(),
         wb.written.len()
-    );
+    ));
     for w in reply["warnings"].as_array().into_iter().flatten() {
         text.push_str(&format!(
             "\nwarning {}: {}",
@@ -196,6 +227,9 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
         }
         o.insert("view".into(), json!(view));
         o.insert("files".into(), json!(wb.written));
+        if let Some(b) = cited.briefing {
+            o.insert("briefing".into(), b);
+        }
         if !wb.kept.is_empty() {
             o.insert("kept".into(), json!(wb.kept));
         }

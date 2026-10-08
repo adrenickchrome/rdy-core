@@ -13,7 +13,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 mod add;
-mod brief;
+pub(crate) mod brief;
 mod checkout;
 mod commit;
 mod new_files;

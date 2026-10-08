@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 use rdy_daemon::{
     Attempt, Client, E_DAEMON_GONE, ErrorReply, Hello, OpContext, PROTO_VERSION, Proto, RunDir,
     STOP_GRACE, ServeError, ServeOptions, StartOptions, connect, connect_or_start, dispatch,
@@ -87,13 +87,16 @@ enum Cmd {
         #[arg(long, default_value = "canon")]
         scope: String,
     },
-    /// Brief on a file in a linked code repo: the design blocks its commits implement and the blocks whose reflects globs match it.
+    /// Brief on a file, a directory or a block of the working copy (and record the briefing for the next commit), or on a file in a linked code repo with --code.
+    #[command(group(ArgGroup::new("what").required(true).multiple(false).args(["target", "code"])))]
     Brief {
+        /// A doc file, a folder or a directory of the working copy, or a block id or key. Outside a working copy, a target with a `/` is a path.
+        target: Option<String>,
         /// A file in a linked code repo: relative to the repo's top folder, or a path from here.
         #[arg(long = "code")]
-        code: String,
-        /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
-        #[arg(long)]
+        code: Option<String>,
+        /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name> (with --code).
+        #[arg(long, requires = "code")]
         scope: Option<String>,
         /// The budget for the briefing; the longest lists are cut to fit.
         #[arg(long = "max-tokens")]
@@ -1196,10 +1199,14 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             Ok((v, t))
         }
         Cmd::Brief {
+            target,
             code,
             scope,
             max_tokens,
         } => {
+            if let Some(target) = target {
+                return wc::brief::run(env, target, max_tokens);
+            }
             let v = call(
                 env,
                 "brief",
