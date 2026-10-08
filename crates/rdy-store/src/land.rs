@@ -164,7 +164,8 @@ impl Store {
             .map(|c| self.change(c))
             .collect::<Result<Vec<_>, _>>()?;
         changes.extend(accept_change.iter().cloned());
-        let state = self.merge_checked(&self.canon_state()?, &changes)?.0.state;
+        let (prev_head, prev_state) = (self.canon_head()?, self.canon_state()?);
+        let state = self.merge_checked(&prev_state, &changes)?.0.state;
         let sid = state.id();
         items.push((kinds::SNAPSHOT, encode(&state)));
         // 6. the landing
@@ -261,6 +262,35 @@ impl Store {
                 .flatten()
                 .or_else(|| accepted.get(v).copied())
         };
+        // The delete that removed each block this landing touches and the new canon lacks, as
+        // `deleters_at` will answer after this write: for a block canon held until now, this
+        // landing's delete of it (smallest hash first, as `deleters_at` breaks ties within a
+        // landing); otherwise the one that removed it as of the previous head.
+        let mut rows = self.index().deleter_rows(
+            touched_l
+                .iter()
+                .copied()
+                .filter(|b| !state.blocks.contains_key(*b)),
+        )?;
+        let mut removed: HashMap<BlockId, Hash> = HashMap::new();
+        rows.retain(|b, deletes| {
+            if !prev_state.blocks.contains_key(b) {
+                return true;
+            }
+            if let Some(d) = deletes
+                .iter()
+                .map(|(d, _)| d)
+                .filter(|d| landed.contains(d))
+                .min()
+            {
+                removed.insert(b.clone(), *d);
+            }
+            false
+        });
+        if let Some(h) = &prev_head {
+            removed.extend(self.removers(rows, h)?);
+        }
+        let deleter = |b: &BlockId| removed.get(b).copied();
         let mut rebased = vec![];
         let mut closed = vec![];
         let mut view_refs = vec![];
@@ -294,7 +324,8 @@ impl Store {
             };
             let (dropped, remaining): (Vec<Hash>, Vec<Hash>) =
                 vincluded.into_iter().partition(|c| landed.contains(c));
-            let conflicts = self.rebase_conflicts(&state, &remaining, &touched_l, &producer)?;
+            let conflicts =
+                self.rebase_conflicts(&state, &remaining, &touched_l, &producer, &deleter)?;
             let rebase = encode(&ViewOp {
                 view: name.clone(),
                 prev: Some(if proposing { tip } else { vhead.head }),
@@ -385,6 +416,7 @@ impl Store {
         remaining: &[Hash],
         touched_l: &BTreeSet<&BlockId>,
         producer: &dyn Fn(&Hash) -> Option<Hash>,
+        deleter: &dyn Fn(&BlockId) -> Option<Hash>,
     ) -> Result<Vec<Conflict>, StoreError> {
         if remaining.is_empty() {
             return Ok(vec![]);
@@ -411,7 +443,7 @@ impl Store {
                 ops: &c.ops,
             })
             .collect();
-        Ok(merge_on_blocks(state, &input, producer, &isect).conflicts)
+        Ok(merge_on_blocks(state, &input, producer, deleter, &isect).conflicts)
     }
 }
 

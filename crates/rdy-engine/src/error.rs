@@ -151,6 +151,15 @@ impl From<StoreError> for RdyError {
                 ),
                 format!("{id} was deleted since you read it; recreate it or drop this op"),
             ),
+            StoreError::DeletedSince(id) => RdyError::new(
+                E_STALE_BASE,
+                format!(
+                    "{id} was deleted in canon after the base this view reads, so this write would bring it back without having seen that delete"
+                ),
+                format!(
+                    "to keep {id}, re-create it from a view that reads canon (a new view, or one with nothing to land); otherwise drop the change that creates it"
+                ),
+            ),
             StoreError::Frozen(id) => RdyError::new(
                 E_FROZEN,
                 format!("{id} is an accepted or rejected decision and cannot change"),

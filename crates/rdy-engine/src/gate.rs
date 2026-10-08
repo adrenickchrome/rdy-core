@@ -463,7 +463,8 @@ pub(crate) fn blocking_conflicts(
     changes: &[Hash],
 ) -> Result<Vec<Conflict>, RdyError> {
     let reader = st.reader();
-    let state = reader.state_of(st.effective_base(view))?;
+    let base = st.effective_base(view);
+    let state = reader.state_of(base)?;
     let cs = changes_of(st, changes)?;
     let touched: BTreeSet<BlockId> = cs
         .iter()
@@ -478,10 +479,12 @@ pub(crate) fn blocking_conflicts(
             ops: &c.ops,
         })
         .collect();
+    let deleters = reader.merge_deleters(base.as_ref(), &state, &touched)?;
     Ok(merge_on_blocks(
         &state,
         &input,
         &|v| reader.producer(v).ok().flatten(),
+        &|b| deleters.get(b).copied(),
         &touched,
     )
     .conflicts)

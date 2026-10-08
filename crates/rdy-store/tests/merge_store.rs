@@ -188,7 +188,9 @@ fn merge1_a_change_that_covers_canon_and_its_own_side_lands() {
     items.push((kinds::CHANGE, postcard::to_allocvec(&r).unwrap()));
     let r_id = s.write(items).unwrap()[1];
     let changes = [s.change(&c).unwrap(), s.change(&r_id).unwrap()];
-    let m = s.merge_onto(&s.canon_state().unwrap(), &changes).unwrap();
+    let m = s
+        .merge_onto(s.canon_head().unwrap(), &s.canon_state().unwrap(), &changes)
+        .unwrap();
     assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
     // a version carrying the view's change and the resolution (written raw, so not in the view);
     // a landing needs the proposal's ref, which propose and propose_next write

@@ -43,6 +43,10 @@ pub enum StoreError {
     Conflict { id: BlockId },
     #[error("block {0} is a frozen decision and cannot change")]
     Frozen(BlockId),
+    /// A create of an id canon removed after the base the writer read: the write never saw that
+    /// delete, so it does not undo it.
+    #[error("block {0} was deleted in canon after the base this write read")]
+    DeletedSince(BlockId),
     #[error("acknowledged writes are missing from the log ({}): {detail}", .segment.display())]
     MissingFrames { segment: PathBuf, detail: String },
     /// The store's format is not one this rdy can open (written by a newer rdy, or its FORMAT

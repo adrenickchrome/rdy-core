@@ -290,10 +290,14 @@ impl ReadState {
                 ops: &c.ops,
             })
             .collect();
+        let deleters =
+            self.reader()
+                .merge_deleters(entry.base.as_ref(), &bases[&entry.base], blocks)?;
         let n = merge_on_blocks(
             &bases[&entry.base],
             &input,
             &|v| self.reader().producer(v).ok().flatten(),
+            &|b| deleters.get(b).copied(),
             blocks,
         )
         .conflicts

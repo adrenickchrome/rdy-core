@@ -3,7 +3,9 @@
 //! Changes apply in "deps first, then change id" order. Each block is either clean (a version
 //! and the change that produced it) or conflicted (the failing op's base and the competing
 //! sides). A conflict is data, not an error; a change that depends on every side of a conflict
-//! resolves it.
+//! resolves it. A block the base lacks reads as deleted by the change `deleter` names; when no
+//! change is known for that delete, no change can depend on it, so its side is never resolved. A
+//! create of a deleted id that does not depend on the delete conflicts with it.
 use rdy_model::{BlockId, Hash, Op, StateSnapshot};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -22,7 +24,7 @@ pub struct MergeChange<'a> {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Side {
     /// The change whose op produced this side; `None` when the side comes from the base snapshot
-    /// and its version has no known producer.
+    /// and its version has no known producer (or, for a deleted side, no known deleter).
     pub change: Option<Hash>,
     /// `None` means deleted.
     pub version: Option<Hash>,
@@ -115,14 +117,16 @@ fn order(changes: &[MergeChange<'_>]) -> Vec<usize> {
     out
 }
 
-/// Merges `changes` onto `base`. `producer` names the change that produced a base version, so
-/// that a side from the base can be depended on.
+/// Merges `changes` onto `base`. `producer` names the change that produced a base version, and
+/// `deleter` the change that deleted a block the base lacks, so that a side from the base can be
+/// depended on.
 pub fn merge(
     base: &StateSnapshot,
     changes: &[MergeChange<'_>],
     producer: &dyn Fn(&Hash) -> Option<Hash>,
+    deleter: &dyn Fn(&BlockId) -> Option<Hash>,
 ) -> Merged {
-    merge_indexed(base, changes, producer).0
+    merge_indexed(base, changes, producer, deleter).0
 }
 
 /// `merge` restricted to `blocks`: the base holds only those blocks and each change only its ops
@@ -132,6 +136,7 @@ pub fn merge_on_blocks(
     base: &StateSnapshot,
     changes: &[MergeChange<'_>],
     producer: &dyn Fn(&Hash) -> Option<Hash>,
+    deleter: &dyn Fn(&BlockId) -> Option<Hash>,
     blocks: &BTreeSet<BlockId>,
 ) -> Merged {
     let base = StateSnapshot {
@@ -159,7 +164,7 @@ pub fn merge_on_blocks(
             ops,
         })
         .collect();
-    merge(&base, &changes, producer)
+    merge(&base, &changes, producer, deleter)
 }
 
 /// `merge`, with each entry of `Merged::order` also given as its position in `changes` (its
@@ -169,6 +174,7 @@ pub fn merge_indexed(
     base: &StateSnapshot,
     changes: &[MergeChange<'_>],
     producer: &dyn Fn(&Hash) -> Option<Hash>,
+    deleter: &dyn Fn(&BlockId) -> Option<Hash>,
 ) -> (Merged, Vec<usize>) {
     let ordered = order(changes);
     let mut slots: BTreeMap<BlockId, Slot> = BTreeMap::new();
@@ -176,13 +182,22 @@ pub fn merge_indexed(
         let mut deps = c.deps.to_vec();
         deps.sort_unstable();
         let covered = |s: &Side| s.change.is_some_and(|x| deps.binary_search(&x).is_ok());
+        // a base version with no known producer cannot be depended on, so it does not hold a
+        // conflict open; a delete with no known deleter does: only a change that knows about a
+        // delete may undo it
+        let settled = |s: &Side| covered(s) || (s.change.is_none() && s.version.is_some());
+        // a create of a deleted id re-creates it on purpose only when it depends on the delete
+        let knows = |owner: &Option<Hash>| owner.is_none_or(|o| deps.binary_search(&o).is_ok());
         for op in c.ops {
             let block = op.block_id();
             let slot = slots.entry(block.clone()).or_insert_with(|| {
                 let version = base.blocks.get(block).copied();
                 Slot::Clean {
                     version,
-                    owner: version.and_then(|v| producer(&v)),
+                    owner: match version {
+                        Some(v) => producer(&v),
+                        None => deleter(block),
+                    },
                 }
             });
             let expected = op.base();
@@ -195,7 +210,9 @@ pub fn merge_indexed(
                 version: new,
             };
             match slot {
-                Slot::Clean { version, owner } if *version == expected => {
+                Slot::Clean { version, owner }
+                    if *version == expected && (expected.is_some() || knows(owner)) =>
+                {
                     *version = new;
                     *owner = Some(c.id);
                 }
@@ -210,9 +227,7 @@ pub fn merge_indexed(
                         sides: vec![theirs, mine],
                     };
                 }
-                Slot::Conflicted { sides, .. }
-                    if sides.iter().all(|s| s.change.is_none() || covered(s)) =>
-                {
+                Slot::Conflicted { sides, .. } if sides.iter().all(settled) => {
                     *slot = Slot::Clean {
                         version: new,
                         owner: Some(c.id),
