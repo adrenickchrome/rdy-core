@@ -14,6 +14,7 @@
 //! Coverage and confidence adds value disagreement and restatement drift), and does so when
 //! `cx.scope()` is `DetectScope::Canon`. An index a new kind adds to `DetectCx` is lazy (a
 //! `OnceLock`), so the kinds that do not read it pay nothing.
+pub mod api;
 pub mod collision;
 pub mod delta;
 pub mod deprecated;

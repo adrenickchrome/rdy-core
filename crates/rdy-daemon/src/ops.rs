@@ -4,6 +4,7 @@
 //! closure on the writer. Relative paths in args resolve against the session's working
 //! directory.
 use rdy_engine::engine::Engine;
+use rdy_engine::tensions::api::{TensionsRequest, run_resolve, run_tensions};
 use rdy_engine::{
     E_BAD_INPUT, E_LIMIT, E_PERMISSION, RdyError, ReadState, Scope, Session, alt, intent, view_api,
 };
@@ -73,6 +74,8 @@ pub const OPS: &[&str] = &[
     "wc_nonce",
     "intent",
     "alt",
+    "tensions",
+    "resolve",
     "wc_put_blob",
 ];
 
@@ -257,6 +260,20 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 args,
                 "{op, title?, question?, members?, set?, label?, view?, member?, reason?, all?}",
             )?,
+        ),
+        "tensions" => {
+            let req: TensionsRequest = parse(
+                op,
+                args,
+                "{scope?, kind?, severity?, status?, view?, area?, involving?, reviews?, max_tokens?}",
+            )?;
+            check_max_tokens(req.max_tokens)?;
+            run_tensions(cx.engine, cx.session, req)
+        }
+        "resolve" => run_resolve(
+            cx.engine,
+            cx.session,
+            parse(op, args, "{tension, dismiss?}")?,
         ),
         "wc_put_blob" => wc_put_blob(cx, parse(op, args, "{path}")?),
         _ => Err(RdyError::new(

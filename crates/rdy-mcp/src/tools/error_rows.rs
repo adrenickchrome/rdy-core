@@ -35,6 +35,16 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "write the block from the version you want, then propose again",
     ),
     (
+        "E_BLOCKING_TENSION",
+        "a landing would put a blocking tension into canon: a side of the tension is in the proposal, every side would be in canon after it, and the tension is not dismissed (each is an issue)",
+        "resolve each with a change (edit or repin a side), or dismiss it with rdy_resolve {tension, dismiss: {reason}} (a reviewer of another actor, or a human); rdy_tensions {involving: <change>} lists them",
+    ),
+    (
+        "E_SELF_REVIEW",
+        "rdy_resolve dismisses a blocking tension, and the session's actor wrote a side of it (another run of the same actor is not independent)",
+        "a reviewer of another actor, or a human, dismisses it",
+    ),
+    (
         "E_PROPOSAL_MOVED",
         "a newer version exists, or a landing since the version changed blocks it writes, or the project requires proposals on the current canon",
         "propose again; a human approves the latest P-x@n",
