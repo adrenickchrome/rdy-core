@@ -192,7 +192,25 @@ pub fn header(briefing: &Value) -> String {
                 s(i, "expires_at")
             )
         });
-        section(&mut out, "in flight", views.chain(proposals).chain(intents));
+        let tensions = at("tensions").map(|t| {
+            let dismissed = if t["status"].as_str() == Some("dismissed") {
+                " (dismissed)"
+            } else {
+                ""
+            };
+            format!(
+                "tension {} {} {}: {}{dismissed}",
+                s(t, "id"),
+                s(t, "severity"),
+                s(t, "kind"),
+                s(t, "summary")
+            )
+        });
+        section(
+            &mut out,
+            "in flight",
+            views.chain(proposals).chain(intents).chain(tensions),
+        );
     }
     let related = list("related_decisions")
         .map(related_line)
@@ -538,6 +556,33 @@ mod tests {
             ]
         );
         assert_eq!(lines[at + 4], "#");
+    }
+
+    #[test]
+    fn tbrf1_the_edit_header_lists_tensions() {
+        let b = json!({
+            "governs": [], "dependents": [], "will_go_stale": [], "suspects": [],
+            "inflight": {
+                "views": [], "proposals": [], "intents": [],
+                "tensions": [
+                    {"id": "tn-0123456789ab", "kind": "fork", "severity": "blocking", "status": "dismissed", "summary": "D-1 and D-2 both supersede D-0"},
+                    {"id": "tn-abcdef012345", "kind": "area_overlap", "severity": "advisory", "status": "open", "summary": "two intents\nshare an area"}
+                ]
+            },
+            "base": {"token": "0123456789abcdef0123", "blocks": [{"id": "c-A", "version": "ff"}], "depends": 0}
+        });
+        let h = header(&b);
+        assert!(h.lines().all(|l| l.starts_with('#')), "{h}");
+        assert!(
+            h.contains("  tension tn-0123456789ab blocking fork: D-1 and D-2 both supersede D-0 (dismissed)\n"),
+            "{h}"
+        );
+        assert!(
+            h.contains(
+                "  tension tn-abcdef012345 advisory area_overlap: two intents share an area\n"
+            ),
+            "{h}"
+        );
     }
 
     #[test]

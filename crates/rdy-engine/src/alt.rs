@@ -5,12 +5,14 @@
 use crate::engine::{Engine, write_typed};
 use crate::error::*;
 use crate::session::rfc3339;
+use crate::tensions::info::TensionInfo;
 use crate::views::OwnerInfo;
 use crate::write::not_humans_view;
 use crate::{Compare, Delta, Rdy, ReadState, Scope, Session};
 use rdy_model::{AltMember, AltSet, AltStatus, BlockId, Hash, Provenance};
 use rdy_store::coord::abandoned_reason;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub use crate::coord_graph::alt_label;
 
@@ -73,6 +75,8 @@ pub struct AltCompareRow {
     pub label: String,
     pub view: String,
     pub compare: Compare,
+    /// The event-derived tensions with a change side in the member view, by id.
+    pub tensions: Vec<TensionInfo>,
 }
 
 /// Each member of a set against canon, in member order.
@@ -274,6 +278,7 @@ impl ReadState {
                     label: m.label.clone(),
                     view: m.view.clone(),
                     compare: self.compare(&Scope::View(m.view.clone()), &Scope::Canon)?,
+                    tensions: self.view_tensions(&m.view)?,
                 })
             })
             .collect::<Result<Vec<_>, RdyError>>()?;
@@ -281,6 +286,19 @@ impl ReadState {
             set: self.alt_info(stable, version, &s)?,
             members,
         })
+    }
+
+    /// The event-derived tensions with a change side among the changes view `view` includes,
+    /// by id.
+    fn view_tensions(&self, view: &str) -> Result<Vec<TensionInfo>, RdyError> {
+        let set = self.tensions()?;
+        let mut found = BTreeMap::new();
+        for c in self.included(view).iter() {
+            for t in set.involving_change(c) {
+                found.entry(t.id).or_insert_with(|| self.tension_info(&t));
+            }
+        }
+        Ok(found.into_values().collect())
     }
 
     /// Set version `set` (the latest, `version`, of set `stable`) as reads show it.

@@ -6,11 +6,12 @@ use crate::error::*;
 use crate::gate::open_proposals;
 use crate::intent::status_open_at;
 use crate::session::{now_ms, rfc3339};
+use crate::tensions::info::TensionInfo;
 use crate::views::OwnerInfo;
 use crate::{ReadState, Scope};
 use rdy_model::{BlockId, Hash, Op};
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 /// How many proposal versions `ProposalTouched` holds before it starts again.
@@ -29,6 +30,9 @@ pub struct Inflight {
     pub proposals: Vec<InflightProposal>,
     /// Open, unexpired intents of other views on a covered block or its area, by id.
     pub intents: Vec<InflightIntent>,
+    /// Tensions that involve a covered block, open or dismissed, by id: the event-derived set
+    /// (all-canon tensions included) and the read-time overlaps.
+    pub tensions: Vec<TensionInfo>,
 }
 
 /// An open view that changes covered blocks.
@@ -192,11 +196,31 @@ impl ReadState {
             });
         }
         let intents = self.inflight_intents(scope, own, ids)?;
+        let tensions = self.inflight_tensions(ids)?;
         Ok(Inflight {
             views,
             proposals,
             intents,
+            tensions,
         })
+    }
+
+    /// The tensions that involve any of `ids`, open or dismissed: the event-derived set and the
+    /// read-time overlaps as of now, each once, by id.
+    fn inflight_tensions(&self, ids: &BTreeSet<BlockId>) -> Result<Vec<TensionInfo>, RdyError> {
+        let set = self.tensions()?;
+        let mut found: BTreeMap<Hash, TensionInfo> = BTreeMap::new();
+        for id in ids {
+            for t in set.involving_block(id) {
+                found.entry(t.id).or_insert_with(|| self.tension_info(&t));
+            }
+        }
+        for t in self.intent_tensions(now_ms())? {
+            if t.blocks().iter().any(|b| ids.contains(b)) {
+                found.entry(t.id).or_insert_with(|| self.tension_info(&t));
+            }
+        }
+        Ok(found.into_values().collect())
     }
 
     /// The open intents (as of now) of views other than `own` that cover any of `ids` in

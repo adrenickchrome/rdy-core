@@ -202,7 +202,7 @@ impl BriefRegistry {
 
 /// The paged sections of a briefing, in cursor order: a cursor holds one offset per section, how
 /// many of its entries earlier pages showed.
-pub const PAGE_SECTIONS: [&str; 9] = [
+pub const PAGE_SECTIONS: [&str; 10] = [
     "governs",
     "dependents",
     "lineage",
@@ -211,6 +211,7 @@ pub const PAGE_SECTIONS: [&str; 9] = [
     "inflight.views",
     "inflight.proposals",
     "inflight.intents",
+    "inflight.tensions",
     "base.blocks",
 ];
 
@@ -438,6 +439,7 @@ impl Briefing {
             self.inflight.views.len(),
             self.inflight.proposals.len(),
             self.inflight.intents.len(),
+            self.inflight.tensions.len(),
             self.base.blocks.len(),
         ]
     }
@@ -455,7 +457,8 @@ impl Briefing {
         drop(&mut self.inflight.views, skip[5]);
         drop(&mut self.inflight.proposals, skip[6]);
         drop(&mut self.inflight.intents, skip[7]);
-        drop(&mut self.base.blocks, skip[8]);
+        drop(&mut self.inflight.tensions, skip[8]);
+        drop(&mut self.base.blocks, skip[9]);
     }
 
     /// Shows the entries after the first `skip[i]` of each section, cut to `max` tokens, and
@@ -544,6 +547,7 @@ impl Briefing {
             5 => self.inflight.views.truncate(keep),
             6 => self.inflight.proposals.truncate(keep),
             7 => self.inflight.intents.truncate(keep),
+            8 => self.inflight.tensions.truncate(keep),
             _ => self.base.blocks.truncate(keep),
         }
         *self
