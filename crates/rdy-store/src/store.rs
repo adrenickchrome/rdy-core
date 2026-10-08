@@ -4,7 +4,9 @@ use crate::fsutil;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
 use crate::merge::Conflict;
-use crate::segment::{CrashPoint, Location, SegmentLog, SegmentReader, find_gap, seg_path};
+use crate::segment::{
+    CrashPoint, Location, SegmentLog, SegmentReader, find_gap, find_unsealed, seg_path,
+};
 use crate::view::ViewOp;
 use rdy_model::{Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Tracking};
 use serde::{Serialize, de::DeserializeOwned};
@@ -415,6 +417,17 @@ impl Store {
                     "{} exists but {} does not",
                     seg_path(&segments, later).display(),
                     seg_path(&segments, missing).display()
+                ),
+            });
+        }
+        // seg1: so does a sealed segment that does not end at a batch marker
+        if let Some(seg) = find_unsealed(&segments)? {
+            return Err(StoreError::MissingFrames {
+                segment: seg_path(&segments, seg),
+                detail: format!(
+                    "{} does not end at a batch marker, but {} exists",
+                    seg_path(&segments, seg).display(),
+                    seg_path(&segments, seg + 1).display()
                 ),
             });
         }

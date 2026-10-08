@@ -21,7 +21,7 @@ fn rolls_to_a_new_segment_when_full() {
     let mut log = SegmentLog::open(dir.path(), 128).unwrap();
     let mut locs = vec![];
     for i in 0..10u8 {
-        locs.push(log.append(2, &[i; 60]).unwrap().0);
+        locs.push(log.append_batch(&[(2, vec![i; 60])]).unwrap()[0].0);
     }
     log.sync().unwrap();
     assert!(log.end().segment >= 4);
@@ -30,13 +30,17 @@ fn rolls_to_a_new_segment_when_full() {
     }
     drop(log);
     let log = SegmentLog::open(dir.path(), 128).unwrap();
-    assert_eq!(
-        log.scan_from(Location {
+    let frames = log
+        .scan_from(Location {
             segment: 0,
-            offset: 0
+            offset: 0,
         })
-        .unwrap()
-        .len(),
+        .unwrap();
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|(_, k, _)| *k != kinds::BATCH_COMMIT)
+            .count(),
         10
     );
 }
@@ -844,4 +848,107 @@ fn mark1_a_marker_record_inside_a_batch_naming_its_start_does_not_hide_that_batc
     assert_eq!(e.kind(), std::io::ErrorKind::InvalidData, "{e}");
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     assert!(torn_files(dir.path()).is_empty());
+}
+
+/// Two sealed batches in segment 0 and one batch in segment 1; returns the end of segment 0's
+/// first batch (a frame boundary inside the log, before the second batch).
+fn sealed_then_one(dir: &Path) -> u64 {
+    let mut log = SegmentLog::open(dir, 600).unwrap();
+    log.append_batch(&batch(2, 20)).unwrap();
+    let first_end = log.end().offset;
+    log.append_batch(&batch(2, 20)).unwrap();
+    log.append_batch(&batch(2, 100)).unwrap();
+    assert_eq!(log.end().segment, 1, "the third batch rolled");
+    log.sync().unwrap();
+    first_end
+}
+
+/// The frame boundaries inside segment 0's second batch: after its first frame, and after its
+/// second (only the marker is lost). A cut right after the first batch's marker leaves a
+/// well-formed sealed segment: the format has no seal record, so that cut is not detectable here.
+fn sealed_cuts(dir: &Path, first_end: u64) -> Vec<u64> {
+    let len = std::fs::metadata(seg_file(dir, 0)).unwrap().len();
+    let frame = 37 + 20;
+    let cuts = vec![first_end + frame, first_end + 2 * frame];
+    assert!(cuts.iter().all(|c| *c < len));
+    cuts
+}
+
+fn truncate_seg(dir: &Path, n: u32, to: u64) {
+    OpenOptions::new()
+        .write(true)
+        .open(seg_file(dir, n))
+        .unwrap()
+        .set_len(to)
+        .unwrap();
+}
+
+/// Triage #1235: a sealed segment cut at a frame boundary inside its last batch no longer ends
+/// at a batch marker. `find_unsealed` (the store's open) names it, and verify and both frame
+/// walks report it instead of silently reading fewer frames.
+#[test]
+fn seal1_a_sealed_segment_cut_at_a_frame_boundary_is_damage() {
+    for cut in [0usize, 1] {
+        let dir = tempfile::tempdir().unwrap();
+        let first_end = sealed_then_one(dir.path());
+        let at = sealed_cuts(dir.path(), first_end)[cut];
+        truncate_seg(dir.path(), 0, at);
+        assert_eq!(
+            rdy_store::segment::find_unsealed(dir.path()).unwrap(),
+            Some(0),
+            "the store's open refuses it (seal1 in the qa store area)"
+        );
+        // the log itself still opens (its tail is intact): verify and the walks must catch it
+        let log = SegmentLog::open(dir.path(), 600).unwrap();
+        let e = log.verify_frames().unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData, "{e}");
+        assert!(
+            e.to_string().contains("does not end at a batch marker"),
+            "{e}"
+        );
+        let start = Location {
+            segment: 0,
+            offset: 0,
+        };
+        let e = log.scan_from(start).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData, "{e}");
+        let reader = rdy_store::segment::SegmentReader::open(dir.path());
+        let e = reader
+            .for_each_from(start, log.end(), |_, _, _, _, _| -> std::io::Result<()> {
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData, "{e}");
+    }
+}
+
+/// The intact log passes all four checks, and a walk that starts at the end of a sealed segment
+/// reads on into the next one.
+#[test]
+fn seal1_an_intact_sealed_segment_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    sealed_then_one(dir.path());
+    assert_eq!(rdy_store::segment::find_unsealed(dir.path()).unwrap(), None);
+    let (log, q) = SegmentLog::open_marked(dir.path(), 600, None).unwrap();
+    assert!(q.is_empty());
+    assert_eq!(log.verify_frames().unwrap(), 6);
+    let start = Location {
+        segment: 0,
+        offset: 0,
+    };
+    assert_eq!(log.scan_from(start).unwrap().len(), 9);
+    let seg0_end = Location {
+        segment: 0,
+        offset: std::fs::metadata(seg_file(dir.path(), 0)).unwrap().len(),
+    };
+    assert_eq!(log.scan_from(seg0_end).unwrap().len(), 3);
+    let reader = rdy_store::segment::SegmentReader::open(dir.path());
+    let mut n = 0;
+    reader
+        .for_each_from(start, log.end(), |_, _, _, _, _| -> std::io::Result<()> {
+            n += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(n, 9);
 }

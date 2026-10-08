@@ -702,6 +702,44 @@ fn cat1_an_index_point_past_the_end_of_a_sealed_segment_refuses_and_keeps_the_in
     assert_eq!(s.get_blob(&blob).unwrap(), b"in segment one");
 }
 
+/// Triage #1235: a sealed segment cut at a frame boundary inside its last batch (its marker lost)
+/// has lost acknowledged frames even though every frame left is whole. The open refuses with
+/// `MissingFrames` and keeps the index, rather than catching up past the loss.
+#[test]
+fn seal1_a_sealed_segment_cut_before_its_last_marker_refuses_and_keeps_the_index() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let mut s = Store::create(&dir).unwrap();
+    s.set_segment_max(4096);
+    s.set_checkpoint_frames(u64::MAX);
+    s.set_refs(vec![("r".into(), b"v1".to_vec())]).unwrap();
+    s.checkpoint().unwrap(); // the durable index point is in segment 0
+    let mut i = 0u32;
+    while s.log_end().segment < 3 {
+        s.put_blob(&vec![i as u8; 1000]).unwrap();
+        i += 1;
+    }
+    let copy = base.path().join("copy");
+    copy_store(&dir, &copy);
+    drop(s);
+    let bytes = std::fs::read(seg(&copy, 1)).unwrap();
+    let (marker_at, kind, _) = frames(&bytes).pop().unwrap();
+    assert_eq!(
+        kind,
+        kinds::BATCH_COMMIT,
+        "a sealed segment ends at a marker"
+    );
+    std::fs::write(seg(&copy, 1), &bytes[..marker_at as usize]).unwrap();
+    let e = Store::create(&copy)
+        .err()
+        .expect("open must refuse, not catch up past the loss");
+    assert!(matches!(&e, StoreError::MissingFrames { .. }), "{e}");
+    assert!(e.to_string().contains("seg-000001.log"), "{e}");
+    assert_eq!(damaged_files(&copy), 0, "the index was not set aside");
+    std::fs::copy(seg(&dir, 1), seg(&copy, 1)).unwrap();
+    Store::create(&copy).unwrap();
+}
+
 /// Segments roll only between batches: with a tiny segment limit, every sealed segment ends at a
 /// batch marker and a store reopens and reads every blob back.
 #[test]
