@@ -1,7 +1,7 @@
 //! The event stream (evt1): what a write batch did, derived from the batch's own frames, and the
 //! in-process bus that fans the events out to subscribers.
 use crate::RdyError;
-use rdy_model::Hash;
+use rdy_model::{AltSet, AltStatus, Hash};
 use rdy_store::segment::Location;
 use rdy_store::view::ViewOpKind;
 use rdy_store::{StoreReader, kinds};
@@ -17,10 +17,12 @@ pub struct Event {
     pub kind: EventKind,
 }
 
+/// An event's JSON names every hash in lowercase hex, as every other rdy surface does.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum EventKind {
     ChangeCommitted {
+        #[serde(serialize_with = "hex::one")]
         change: Hash,
         view: String,
         actor: String,
@@ -30,6 +32,7 @@ pub enum EventKind {
     /// `include`, `exclude`, `undo` or `own`.
     ViewOp {
         view: String,
+        #[serde(serialize_with = "hex::one")]
         op: Hash,
         kind: String,
     },
@@ -37,23 +40,75 @@ pub enum EventKind {
     /// recorded, in op order.
     ViewRebased {
         view: String,
+        #[serde(serialize_with = "hex::one")]
         landing: Hash,
+        #[serde(serialize_with = "hex::many")]
         conflicts: Vec<Hash>,
     },
-    /// A `Close` op on `view`.
+    /// A `Close` op on `view`; `set` is the alternative set whose version the same batch wrote
+    /// (a choice or an abandon closing its members), by stable id.
     ViewClosed {
         view: String,
         reason: String,
+        #[serde(skip_serializing_if = "Option::is_none", serialize_with = "hex::opt")]
+        set: Option<Hash>,
     },
     Proposed {
+        #[serde(serialize_with = "hex::one")]
         proposal: Hash,
         view: String,
     },
     Landed {
+        #[serde(serialize_with = "hex::one")]
         landing: Hash,
+        #[serde(serialize_with = "hex::one")]
         proposal: Hash,
         view: String,
     },
+    /// An intent's first version (cevt1); a renewal or a withdrawal emits nothing.
+    IntentPosted {
+        #[serde(serialize_with = "hex::one")]
+        intent: Hash,
+        #[serde(serialize_with = "hex::one")]
+        version: Hash,
+        actor: String,
+        run: Option<String>,
+        view: String,
+        area: Option<String>,
+        blocks: Vec<String>,
+    },
+    /// A version of alternative set `set` (by stable id). `change` is `created`, `chosen`,
+    /// `abandoned`, `member_added`, `member_removed` or `updated`; `members` are the member
+    /// views, in order.
+    AltSetChanged {
+        #[serde(serialize_with = "hex::one")]
+        set: Hash,
+        #[serde(serialize_with = "hex::one")]
+        version: Hash,
+        change: String,
+        members: Vec<String>,
+    },
+}
+
+/// Hashes in an event's JSON as lowercase hex strings.
+mod hex {
+    use rdy_model::Hash;
+    use serde::Serializer;
+
+    pub(super) fn one<S: Serializer>(h: &Hash, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(h)
+    }
+
+    pub(super) fn opt<S: Serializer>(h: &Option<Hash>, s: S) -> Result<S::Ok, S::Error> {
+        match h {
+            Some(h) => s.collect_str(h),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub(super) fn many<S: Serializer>(hs: &[Hash], s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(hs.iter().map(ToString::to_string))
+    }
 }
 
 /// The events of one batch, in frame order. A frame whose object cannot be read is an error.
@@ -63,6 +118,11 @@ pub fn events_for_batch(
     frames: &[(u8, Hash)],
 ) -> Result<Vec<Event>, RdyError> {
     let mut out = Vec::new();
+    // the set a close in this batch belongs to: the batch's alternative set version, if any
+    let set = match frames.iter().find(|(k, _)| *k == kinds::ALT_SET) {
+        Some((_, h)) => Some(reader.alt_set(h)?.stable_id(*h)),
+        None => None,
+    };
     for &(kind, hash) in frames {
         match kind {
             kinds::VIEW_OP => {
@@ -85,6 +145,7 @@ pub fn events_for_batch(
                     ViewOpKind::Close { reason } => EventKind::ViewClosed {
                         view: op.view,
                         reason,
+                        set,
                     },
                     other => EventKind::ViewOp {
                         view: op.view,
@@ -122,10 +183,64 @@ pub fn events_for_batch(
                     },
                 });
             }
+            kinds::INTENT => {
+                let i = reader.intent(&hash)?;
+                if i.prev.is_none() {
+                    out.push(Event {
+                        seq,
+                        at_ms: i.at_ms,
+                        kind: EventKind::IntentPosted {
+                            intent: i.stable_id(hash),
+                            version: hash,
+                            actor: i.actor,
+                            run: i.run,
+                            view: i.view,
+                            area: i.area,
+                            blocks: i.blocks.iter().map(ToString::to_string).collect(),
+                        },
+                    });
+                }
+            }
+            kinds::ALT_SET => {
+                let a = reader.alt_set(&hash)?;
+                let before = match a.prev {
+                    Some(p) => Some(reader.alt_set(&p)?),
+                    None => None,
+                };
+                out.push(Event {
+                    seq,
+                    at_ms: a.provenance.at_ms,
+                    kind: EventKind::AltSetChanged {
+                        set: a.stable_id(hash),
+                        version: hash,
+                        change: alt_change(before.as_ref(), &a).to_string(),
+                        members: a.members.iter().map(|m| m.view.clone()).collect(),
+                    },
+                });
+            }
             _ => {}
         }
     }
     Ok(out)
+}
+
+/// What a set version changed from `before`, its `prev` (None for a first version).
+fn alt_change(before: Option<&AltSet>, now: &AltSet) -> &'static str {
+    let Some(before) = before else {
+        return "created";
+    };
+    match (&before.status, &now.status) {
+        (AltStatus::Chosen { .. }, AltStatus::Chosen { .. })
+        | (AltStatus::Abandoned { .. }, AltStatus::Abandoned { .. }) => {}
+        (_, AltStatus::Chosen { .. }) => return "chosen",
+        (_, AltStatus::Abandoned { .. }) => return "abandoned",
+        _ => {}
+    }
+    match now.members.len().cmp(&before.members.len()) {
+        std::cmp::Ordering::Greater => "member_added",
+        std::cmp::Ordering::Less => "member_removed",
+        std::cmp::Ordering::Equal => "updated",
+    }
 }
 
 fn op_name(k: &ViewOpKind) -> &'static str {

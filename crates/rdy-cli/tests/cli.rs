@@ -419,7 +419,7 @@ fn new_ls_and_paths_end_to_end() {
         &["show", "--scope", "tag:v0.1.0", "wallets/transactions"],
     );
     assert_eq!(old["id"], show["id"]);
-    assert!(json(dir.path(), &["impact", "wallets/transactions"]).is_array());
+    assert!(json(dir.path(), &["impact", "wallets/transactions"])["items"].is_array());
 }
 
 /// Review Focus 6: `rdy --json log` names each landing's assurance; the text is unchanged.

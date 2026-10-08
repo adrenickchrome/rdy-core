@@ -284,6 +284,7 @@ impl ReadState {
         cwd: Option<&Path>,
         max_tokens: Option<usize>,
     ) -> Result<CodeBriefing, RdyError> {
+        crate::brief::refuse_inflight(scope)?;
         let repos = code_repos(self.root())?;
         let (which, path) = normalise(&repos, code_path, cwd)?;
         let consulted: Vec<&CodeRepo> = match which {
@@ -408,6 +409,7 @@ fn scope_label(scope: &Scope) -> String {
         Scope::Canon => "canon".to_string(),
         Scope::View(v) => format!("view {v}"),
         Scope::At(h) => format!("landing:{h}"),
+        Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
     }
 }
 

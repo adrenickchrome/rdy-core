@@ -43,6 +43,8 @@ fn evt1_live_events_equal_the_replay_and_each_write_emits_after_its_state() {
             EventKind::Landed { .. } => "landed",
             EventKind::ViewRebased { .. } => "view_rebased",
             EventKind::ViewClosed { .. } => "view_closed",
+            EventKind::IntentPosted { .. } => "intent_posted",
+            EventKind::AltSetChanged { .. } => "alt_set_changed",
         })
         .collect();
     assert_eq!(

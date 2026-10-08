@@ -310,3 +310,29 @@ fn a_self_pin_is_never_a_suspect() {
     assert!(g.suspects().is_empty(), "{:?}", g.suspects());
     assert!(g.suspects_of(&c.id).is_empty());
 }
+
+#[test]
+fn cgr1_coord_edges_are_kept_once_and_indexed_both_ways() {
+    use rdy_graph::coord::{Coord, CoordKind, Node};
+    use rdy_model::{BlockId, Hash};
+    let b = Node::Block(BlockId::parse("c-AAAAA").unwrap());
+    let c = Node::Change(Hash([1; 32]));
+    let mut g = Coord::default();
+    g.add(b.clone(), CoordKind::AuthoredIn, c.clone());
+    g.add(b.clone(), CoordKind::AuthoredIn, c.clone());
+    g.add(
+        c.clone(),
+        CoordKind::MadeBy,
+        Node::Run("agent:a".into(), "r".into()),
+    );
+    assert_eq!(g.edge_count(), 2);
+    assert_eq!(g.outgoing(&b).len(), 1);
+    assert_eq!(g.incoming(&c)[0].from, b);
+    assert_eq!(g.outgoing(&c)[0].kind, CoordKind::MadeBy);
+    assert!(g.incoming(&Node::Area("x".into())).is_empty());
+    // the edge as stored (its JSON form is pinned in rdy-qa's engine_coord, final-review fix
+    // round 1: rdy-graph has no JSON dependency)
+    assert_eq!(g.outgoing(&b)[0].kind, CoordKind::AuthoredIn);
+    assert_eq!(g.outgoing(&b)[0].from, b);
+    assert_eq!(g.outgoing(&b)[0].to, c);
+}

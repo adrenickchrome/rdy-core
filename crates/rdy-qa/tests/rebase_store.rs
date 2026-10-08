@@ -75,7 +75,7 @@ fn land(s: &mut Store, view: &str) -> rdy_store::LandOutcome {
         proposal: p,
         accept: None,
         approver: prov("human:h"),
-        chosen: None,
+        alt: None,
         relay: None,
         evidence: None,
     })
@@ -369,7 +369,7 @@ fn reb1_an_index_failure_during_a_landing_with_rebases_writes_nothing() {
             proposal: p,
             accept: None,
             approver: prov("human:h"),
-            chosen: None,
+            alt: None,
             relay: None,
             evidence: None,
         })
@@ -468,7 +468,7 @@ fn reb1_canon_side_names_the_acceptance_change_when_another_view_wrote_the_same_
                 &prov("human:h"),
             )),
             approver: prov("human:h"),
-            chosen: None,
+            alt: None,
             relay: None,
             evidence: None,
         })

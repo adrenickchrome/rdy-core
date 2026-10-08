@@ -295,7 +295,7 @@ fn undo1_close_marks_views_closed_emits_view_closed_and_checks_every_name_first(
     assert!(r.read().view_head("a").unwrap().closed && r.read().view_head("a2").unwrap().closed);
     let mut closed = vec![];
     while let Ok(ev) = rx.try_recv() {
-        if let rdy_engine::events::EventKind::ViewClosed { view, reason } = &ev.kind {
+        if let rdy_engine::events::EventKind::ViewClosed { view, reason, .. } = &ev.kind {
             closed.push((view.clone(), reason.clone()));
         }
     }

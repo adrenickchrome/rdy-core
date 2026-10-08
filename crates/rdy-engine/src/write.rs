@@ -3,8 +3,8 @@ use crate::keys::{self, Keys};
 use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, SessionKind, views};
 use rdy_model::tree;
 use rdy_model::{
-    Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Justification, Link, Op, RefMode,
-    decision, order_between, ref_spans,
+    AltChoice, Block, BlockId, Change, ChangeLinks, FieldValue, Hash, Justification, Link, Op,
+    RefMode, decision, order_between, ref_spans,
 };
 use rdy_schema::{Issue, Pack, has_errors, skeleton_gaps, validate_block};
 use rdy_store::Conflict;
@@ -626,6 +626,9 @@ fn place(
 /// name the version it was made from: the conflict's base or one of its sides' versions. The
 /// edit then starts from that version and, through the store, depends on every side, so it
 /// resolves the conflict. A clean block keeps M1's strict check against its current version.
+///
+/// A frozen decision is refused, except that with `update` a clean one is returned: the update
+/// path refuses it once it has built the new block, unless only tracking fields changed (trk1).
 fn current_for_edit<'b>(
     ov: &'b Overlay,
     id: &BlockId,
@@ -633,6 +636,7 @@ fn current_for_edit<'b>(
     touched: &BTreeSet<BlockId>,
     conflicts: &[Conflict],
     store: &rdy_store::Store,
+    update: bool,
 ) -> Result<(Hash, Cow<'b, Block>), RdyError> {
     if touched.contains(id) {
         return Err(bad(
@@ -666,7 +670,9 @@ fn current_for_edit<'b>(
             format!("re-read {id} (rdy_context) and retry with base={cur_hash}"),
         ));
     }
-    check_not_frozen(id, cur)?;
+    if !update {
+        check_not_frozen(id, cur)?;
+    }
     Ok((cur_hash, Cow::Borrowed(cur)))
 }
 
@@ -775,6 +781,35 @@ fn frozen_in_conflict(
         ),
         format!("{exclude}, or write a new decision that supersedes or revokes {id}"),
     ))
+}
+
+/// The refusal of a tracking edit with no editorial reason (`rdy edit` gives its own fix).
+pub(crate) const TRACKING_NEEDS_REASON: &str =
+    "a tracking field of an accepted or rejected decision changes only with an editorial reason";
+
+/// trk1 (D-DZC1J): an update of a frozen decision passes only when it changes tracking fields
+/// and nothing else, and then only with an editorial justification that gives a reason. Returns
+/// whether `new` is such a tracking edit.
+fn check_tracking_edit(
+    id: &BlockId,
+    cur: &Block,
+    new: &Block,
+    tracking: &rdy_model::Tracking,
+    justification: Option<&Justification>,
+) -> Result<bool, RdyError> {
+    if !decision::is_frozen(cur) {
+        return Ok(false);
+    }
+    if !decision::only_tracking_changed(cur, new, tracking) {
+        check_not_frozen(id, cur)?;
+    }
+    match justification {
+        Some(Justification::Editorial { reason, .. }) if !reason.trim().is_empty() => Ok(true),
+        _ => Err(bad(
+            TRACKING_NEEDS_REASON,
+            "pass editorial: {class: \"clarify\", reason: \"<why>\"} with the write",
+        )),
+    }
 }
 
 fn check_not_frozen(id: &BlockId, cur: &Block) -> Result<(), RdyError> {
@@ -1015,6 +1050,7 @@ fn refuse_key_auto(fields: &BTreeMap<String, serde_json::Value>, at: &str) -> Re
 /// Builds the ops of `inputs` against `base`. `rdy_keys` names the blocks whose key an update
 /// in `inputs` sets on rdy's behalf (`rdy keys assign`): those keys get `key_auto`; any other
 /// key an update sets is the caller's.
+#[allow(clippy::too_many_arguments)]
 fn build_ops(
     pack: &Pack,
     store: &rdy_store::Store,
@@ -1022,6 +1058,7 @@ fn build_ops(
     session: &Session,
     inputs: Vec<OpInput>,
     conflicts: &[Conflict],
+    justification: Option<&Justification>,
     rdy_keys: &BTreeSet<BlockId>,
 ) -> Result<Built, RdyError> {
     let mut ov = Overlay::new(base);
@@ -1033,6 +1070,8 @@ fn build_ops(
     let mut prior: Vec<Prior> = vec![];
     let mut noop_rebalances: Vec<String> = vec![];
     let mut repinned: Vec<BlockId> = vec![];
+    // trk1: frozen decisions this write changes only in tracking fields
+    let mut tracking_edits: BTreeSet<BlockId> = BTreeSet::new();
 
     for (i, input) in inputs.into_iter().enumerate() {
         match input {
@@ -1162,7 +1201,8 @@ fn build_ops(
             } => {
                 let id = res.id(&id)?;
                 refuse_key_auto(&fields, id.as_str())?;
-                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched, conflicts, store)?;
+                let (base_hash, cur) =
+                    current_for_edit(&ov, &id, &b, &touched, conflicts, store, true)?;
                 let cur: &Block = &cur;
                 let mut block = cur.clone();
                 // a doc from M1 stores the name readers already use for it on its first write
@@ -1199,6 +1239,9 @@ fn build_ops(
                         }
                     }
                 }
+                if check_tracking_edit(&id, cur, &block, store.tracking(), justification)? {
+                    tracking_edits.insert(id.clone());
+                }
                 check_decided_at(session, &block, Some(cur))?;
                 prior.push((false, cur.pins.clone()));
                 // names and keys against what the view held, not the side an edit starts from
@@ -1231,7 +1274,8 @@ fn build_ops(
                         "name another sibling as before, or omit it",
                     ));
                 }
-                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched, conflicts, store)?;
+                let (base_hash, cur) =
+                    current_for_edit(&ov, &id, &b, &touched, conflicts, store, false)?;
                 let cur: &Block = &cur;
                 let mut block = cur.clone();
                 if block.block_type == tree::DOC
@@ -1278,7 +1322,8 @@ fn build_ops(
             }
             OpInput::Delete { id, base: b } => {
                 let id = res.id(&id)?;
-                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched, conflicts, store)?;
+                let (base_hash, cur) =
+                    current_for_edit(&ov, &id, &b, &touched, conflicts, store, false)?;
                 let cur: &Block = &cur;
                 if cur.block_type == decision::QUESTION {
                     return Err(bad(
@@ -1375,7 +1420,7 @@ fn build_ops(
                         continue;
                     }
                     let (base_hash, cur) =
-                        current_for_edit(&ov, &b.id, &None, &touched, conflicts, store)?;
+                        current_for_edit(&ov, &b.id, &None, &touched, conflicts, store, false)?;
                     let cur: &Block = &cur;
                     let mut block = cur.clone();
                     // like a move, a doc from M1 stores the name readers already use for it
@@ -1404,7 +1449,8 @@ fn build_ops(
                 targets,
             } => {
                 let id = res.id(&id)?;
-                let (base_hash, cur) = current_for_edit(&ov, &id, &b, &touched, conflicts, store)?;
+                let (base_hash, cur) =
+                    current_for_edit(&ov, &id, &b, &touched, conflicts, store, false)?;
                 let cur: &Block = &cur;
                 let cited: BTreeSet<BlockId> = cur
                     .ref_tokens()
@@ -1445,7 +1491,9 @@ fn build_ops(
                             ),
                         )
                     })?;
-                    block.pins.insert(t.clone(), target.content_hash());
+                    block
+                        .pins
+                        .insert(t.clone(), target.content_hash_with(store.tracking()));
                 }
                 // like a no-op rebalance, a repin that changes no pin is refused, per op
                 if block.pins == cur.pins {
@@ -1580,7 +1628,7 @@ fn build_ops(
                     "fix the id, or create the target in the same write",
                 )
             })?;
-            targets.push((target, t.content_hash()));
+            targets.push((target, t.content_hash_with(store.tracking())));
         }
         for link in block.links.values().flatten() {
             let t = ov.get(&link.target).ok_or_else(|| {
@@ -1593,11 +1641,13 @@ fn build_ops(
                     "fix the link target id",
                 )
             })?;
-            targets.push((link.target.clone(), t.content_hash()));
+            targets.push((link.target.clone(), t.content_hash_with(store.tracking())));
         }
+        // a tracking edit keeps the status the decision already has (trk1)
         if block.block_type == decision::DECISION
             && block.field_str("status") != Some("proposed")
             && !session.role.can_land()
+            && !tracking_edits.contains(&block.id)
         {
             return Err(RdyError::new(
                 E_PERMISSION,
@@ -1801,7 +1851,8 @@ impl Rdy {
 
     /// `write`, with `links` (intent, alternative, client nonce) recorded on the change and the
     /// briefing `brief` cited (`write_briefed`). MCP and the CLI don't use it yet: M2d1 adds
-    /// intents, and M2f the nonce.
+    /// intents, and M2f the nonce. A write to a member view of an open alternative set with no
+    /// `alternative` link gets one naming that set and the view (alts1).
     ///
     /// The change is checked against the view as the published state holds it, which is the
     /// view's present state only if every store write made outside the engine was followed by
@@ -1823,7 +1874,7 @@ impl Rdy {
         &mut self,
         session: &Session,
         req: WriteRequest,
-        links: ChangeLinks,
+        mut links: ChangeLinks,
         brief: Option<&str>,
         rdy_keys: &BTreeSet<BlockId>,
     ) -> Result<WriteResult, RdyError> {
@@ -1841,6 +1892,15 @@ impl Rdy {
         let st = self.read();
         check_view_access(&st, &req.view, session, views::Action::Commit)?;
         let claim = views::commit_claim(&st, session, &req.view)?;
+        // alts1: a change written in a member view of an open set records the set
+        if links.alternative.is_none()
+            && let Some((set, _, _)) = st.alt_of_view(&req.view)?
+        {
+            links.alternative = Some(AltChoice {
+                set,
+                member: req.view.clone(),
+            });
+        }
         let conflicts = st.conflicts(&scope)?;
         let m = st.materialized(&scope)?;
         let brief_warnings = crate::brief::check(&self.pack, &self.briefs, &m, &req.ops, brief)?;
@@ -1851,6 +1911,7 @@ impl Rdy {
             session,
             req.ops,
             &conflicts,
+            req.justification.as_ref(),
             rdy_keys,
         )?;
         let change = Change {
@@ -1871,6 +1932,7 @@ impl Rdy {
         )?;
         self.publish(Delta::Commit {
             view: req.view.clone(),
+            change: id,
             ops,
         })?;
 
@@ -1995,6 +2057,13 @@ pub(crate) fn writable_view(name: &str) -> Result<(), RdyError> {
             E_RESERVED_VIEW,
             "canon cannot be written directly",
             "write to a view and land it with rdy_propose",
+        ));
+    }
+    if name == crate::session::INFLIGHT_SCOPE {
+        return Err(RdyError::new(
+            E_RESERVED_VIEW,
+            "inflight is a read scope (canon plus every live view's changes), not a view",
+            "write to a view under another name",
         ));
     }
     if name.contains(':') {

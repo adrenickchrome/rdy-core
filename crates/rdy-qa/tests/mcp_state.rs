@@ -53,6 +53,7 @@ fn mcp4_a_write_through_the_door_is_visible_to_the_next_read() {
             message: None,
             brief: None,
             max_tokens: None,
+            intent: None,
         },
     )
     .unwrap();
@@ -102,6 +103,7 @@ fn mcp4_an_agent_write_into_the_humans_view_is_e_view_owner() {
             message: None,
             brief: None,
             max_tokens: None,
+            intent: None,
         },
     )
     .unwrap_err();

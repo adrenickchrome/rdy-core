@@ -1,4 +1,5 @@
 mod check;
+pub mod coord;
 pub mod error;
 pub mod format;
 pub mod fsutil;
@@ -15,7 +16,7 @@ pub use check::StoreCheck;
 pub use error::StoreError;
 #[doc(hidden)]
 pub use index::IndexDump;
-pub use land::{LandOutcome, LandRequest, RebasedView, Relay};
+pub use land::{AltLanding, LandOutcome, LandRequest, RebasedView, Relay};
 pub use merge::{Conflict, MergeChange, Merged, Side, conflict_id, merge, merge_on_blocks};
 pub use segment::SegmentReader;
 pub use store::{

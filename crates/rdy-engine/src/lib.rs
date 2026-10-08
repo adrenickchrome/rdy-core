@@ -1,7 +1,10 @@
+pub mod alt;
+mod areas;
 pub mod brief;
 pub mod code_brief;
 pub mod code_index;
 pub mod consequence;
+pub mod coord_graph;
 mod decide;
 pub mod engine;
 mod error;
@@ -9,6 +12,7 @@ pub mod events;
 mod gate;
 mod history;
 pub mod inflight;
+pub mod intent;
 mod io;
 mod keys;
 mod lint;
@@ -28,6 +32,7 @@ pub mod views;
 mod write;
 mod yaml_pos;
 
+pub use areas::by_area;
 pub use brief::{
     BriefRegistry, Briefing, Coverage, E_BRIEF_REQUIRED, E_BRIEF_STALE, W_BRIEF_STALE,
 };
@@ -38,7 +43,7 @@ pub use gate::{
     LandInfo, LandOptions, LandingRow, ProposalInfo, ProposalRef, RebasedInfo, RelayedByRow,
 };
 pub use history::{Author, HISTORY_MAX, History, HistoryEntry, JustificationInfo, LandingRef};
-pub use io::{ExportSummary, block_from_yaml, block_to_yaml};
+pub use io::{ExportSummary, block_from_yaml, block_to_yaml, refuse_inflight_export};
 pub use lint::check_path;
 pub use materialize::{Materialized, PathMiss};
 pub use paths::TreeNode;
@@ -49,10 +54,10 @@ pub use query::{
     Context, ImpactItem, ImpactVia, code_lines, compact_summary, field_json, summary, summary_in,
 };
 pub use rdy_store::Relay;
-pub use read_state::{Delta, ReadState};
+pub use read_state::{CoordHeads, Delta, InflightSet, OpenIntent, ReadState};
 pub use search::{SearchQuery, SearchResult};
 pub use session::{
-    HUMAN_RUN, PinnedClock, Scope, Session, SessionKind, classify, human_actor,
+    HUMAN_RUN, INFLIGHT_SCOPE, PinnedClock, Scope, Session, SessionKind, classify, human_actor,
     human_actor_from_env, now_ms, pin_clock, rfc3339, rfc3339_now,
 };
 pub use tree_io::Diagnostic;
@@ -67,12 +72,12 @@ pub use engine::{Engine, Local, WriteFn};
 pub use rdy_store::OpenReport;
 
 use arc_swap::ArcSwap;
-use rdy_schema::{Pack, PackSet};
+use rdy_schema::{AreaMatcher, Pack, PackSet};
 use rdy_store::segment::Location;
 use rdy_store::{Store, kinds, layout};
-use read_state::{AsOfCache, Entry};
+use read_state::{AsOfCache, Entry, InflightCell};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -357,6 +362,8 @@ pub struct Rdy {
     emit_error: Option<RdyError>,
     store: Store,
     pack: Arc<Pack>,
+    /// `pack`'s areas, compiled once (arn1).
+    areas: Arc<AreaMatcher>,
     /// The project's pack followed by every pack it extends, nearest first.
     lineage: Vec<String>,
     /// The pack files as they were when `pack` was last loaded.
@@ -442,12 +449,15 @@ fn load_pack_from(
                 e => RdyError::new(E_CONFIG, format!("{}: {e}", f.display()), "fix the pack file"),
             })?;
     }
-    let config = |e: rdy_schema::SchemaError| {
-        RdyError::new(
+    // pkfix1: only an unknown pack name is fixed in the config; a pack that exists but does not
+    // resolve (an invalid area, a cycle) is fixed in its file.
+    let config = |e: rdy_schema::SchemaError| match e {
+        rdy_schema::SchemaError::UnknownPack(_) => RdyError::new(
             E_CONFIG,
             e.to_string(),
             "set `pack:` in .rdy/config.yaml to an available pack (rdy-standard is built in)",
-        )
+        ),
+        e => RdyError::new(E_CONFIG, e.to_string(), "fix the pack file"),
     };
     let pack = set.resolve(name).map_err(config)?;
     let lineage = set.lineage(name).map_err(config)?;
@@ -499,7 +509,10 @@ impl Rdy {
         let cfg = parse_config(&sources.config)?;
         let fingerprint = sources.fingerprint;
         let (pack, lineage) = load_pack_from(&sources.packs, &cfg.pack)?;
-        let store = layout::open_project_store(&project.join(".rdy"))?;
+        let mut store = layout::open_project_store(&project.join(".rdy"))?;
+        // trk1: the freeze checks and every content hash use the pack's tracking fields
+        store.set_tracking(pack.tracking());
+        let areas = Arc::new(pack.area_matcher());
         let pack = Arc::new(pack);
         let as_of = Arc::new(AsOfCache::default());
         let vpos: Arc<Mutex<version::VposCache>> = Default::default();
@@ -516,6 +529,7 @@ impl Rdy {
             views: imbl::HashMap::new(),
             tags: Arc::new(vec![]),
             pack: Arc::clone(&pack),
+            areas: Arc::clone(&areas),
             root: Arc::from(project),
             name,
             description,
@@ -526,6 +540,9 @@ impl Rdy {
             as_of: Arc::clone(&as_of),
             vpos: Arc::clone(&vpos),
             proposal_touched: Arc::clone(&proposal_touched),
+            inflight_cell: Arc::default(),
+            coord_heads: Arc::default(),
+            coord: OnceLock::new(),
             error: None,
         });
         let mut r = Rdy {
@@ -539,6 +556,7 @@ impl Rdy {
             emit_error: None,
             store,
             pack,
+            areas,
             lineage,
             fingerprint,
             serve: cfg.serve.resolve(),
@@ -598,6 +616,8 @@ impl Rdy {
                 });
             }
         };
+        self.areas = Arc::new(pack.area_matcher());
+        self.store.set_tracking(pack.tracking());
         self.pack = Arc::new(pack);
         self.lineage = lineage;
         self.serve = cfg.serve.resolve();
@@ -684,6 +704,7 @@ impl Rdy {
                     views: prev.views.clone(),
                     tags: Arc::clone(&prev.tags),
                     pack: Arc::clone(&self.pack),
+                    areas: Arc::clone(&self.areas),
                     root: Arc::clone(&prev.root),
                     name: Arc::clone(&prev.name),
                     description: prev.description.clone(),
@@ -694,6 +715,9 @@ impl Rdy {
                     as_of: Arc::clone(&self.as_of),
                     vpos: Arc::clone(&self.vpos),
                     proposal_touched: Arc::clone(&self.proposal_touched),
+                    inflight_cell: Arc::clone(&prev.inflight_cell),
+                    coord_heads: Arc::clone(&prev.coord_heads),
+                    coord: OnceLock::new(),
                     error: Some(e.clone()),
                 }));
                 Err(e)
@@ -792,7 +816,22 @@ impl Rdy {
                 prev.decisions_home.clone(),
             ),
         };
-        let (canon, views, tags) = match delta {
+        // the coordination refs: re-read by a publish that may have moved them, else carried. A
+        // landing moves them only when it closed members of a set or chose an alternative (its
+        // record says so; altg1)
+        let coord_moved = match &delta {
+            Delta::Full | Delta::Coord { .. } => true,
+            Delta::Landed {
+                landing, closed, ..
+            } => !closed.is_empty() || self.store.landing(landing)?.chosen.is_some(),
+            _ => false,
+        };
+        let coord_heads = if coord_moved {
+            Arc::new(self.coord_heads(&prev.coord_heads)?)
+        } else {
+            Arc::clone(&prev.coord_heads)
+        };
+        let (canon, views, tags, inflight_cell) = match delta {
             Delta::Full => {
                 let mut views = imbl::HashMap::new();
                 for (name, _) in self.store.refs_with_prefix("view/")? {
@@ -802,9 +841,14 @@ impl Rdy {
                     }
                 }
                 let canon = Entry::new(None, canon_head, None, Arc::new(vec![]));
-                (Arc::new(canon), views, Arc::new(self.version_tags()?))
+                (
+                    Arc::new(canon),
+                    views,
+                    Arc::new(self.version_tags()?),
+                    Arc::default(),
+                )
             }
-            Delta::Commit { view, ops } => {
+            Delta::Commit { view, change, ops } => {
                 let mut views = prev.views.clone();
                 match self.view_entry(&view)? {
                     Some(mut next) => {
@@ -825,19 +869,27 @@ impl Rdy {
                         if let Some(b) = pred.filter(|b| b.conflicts.is_empty()) {
                             next.seed(b.after(&ops));
                         }
-                        views.insert(view, Arc::new(next));
+                        views.insert(view.clone(), Arc::new(next));
                     }
                     None => {
                         views.remove(&view);
                     }
                 }
-                (Arc::clone(&prev.canon), views, Arc::clone(&prev.tags))
+                let inflight =
+                    self.inflight_after_commit(prev, &views, &view, change, &ops, canon_head);
+                (
+                    Arc::clone(&prev.canon),
+                    views,
+                    Arc::clone(&prev.tags),
+                    inflight,
+                )
             }
             Delta::Landed {
                 landing,
                 view,
                 ops,
                 rebased,
+                closed,
             } => {
                 let mut canon = Entry::new(None, Some(landing), None, Arc::new(vec![]));
                 if let Some(b) = prev.canon.built_ok() {
@@ -861,38 +913,53 @@ impl Rdy {
                         }
                     }
                 }
-                (Arc::new(canon), views, Arc::clone(&prev.tags))
+                // the members the landing closed (not rebased): their heads re-read, their
+                // builds kept
+                for name in closed {
+                    self.reread_view(prev, &mut views, name)?;
+                }
+                (
+                    Arc::new(canon),
+                    views,
+                    Arc::clone(&prev.tags),
+                    Arc::default(),
+                )
             }
             Delta::View { view } => {
                 let mut views = prev.views.clone();
-                match self.view_entry(&view)? {
-                    Some(mut next) => {
-                        // view ops that left the base and the set as they were (a close, an
-                        // own) keep the build; any other change starts unbuilt
-                        if let Some(e) = prev.views.get(&view)
-                            && e.base == next.base
-                            && e.included == next.included
-                            && let Some(b) = e.built_ok()
-                        {
-                            next.seed_shared(Arc::clone(b));
-                        }
-                        views.insert(view, Arc::new(next));
-                    }
-                    None => {
-                        views.remove(&view);
-                    }
+                self.reread_view(prev, &mut views, view)?;
+                let inflight = self.inflight_after_views(prev, &views, canon_head)?;
+                (
+                    Arc::clone(&prev.canon),
+                    views,
+                    Arc::clone(&prev.tags),
+                    inflight,
+                )
+            }
+            Delta::Coord { closed } => {
+                let mut views = prev.views.clone();
+                for view in closed {
+                    self.reread_view(prev, &mut views, view)?;
                 }
-                (Arc::clone(&prev.canon), views, Arc::clone(&prev.tags))
+                let inflight = self.inflight_after_views(prev, &views, canon_head)?;
+                (
+                    Arc::clone(&prev.canon),
+                    views,
+                    Arc::clone(&prev.tags),
+                    inflight,
+                )
             }
             Delta::Tags => (
                 Arc::clone(&prev.canon),
                 prev.views.clone(),
                 Arc::new(self.version_tags()?),
+                Arc::clone(&prev.inflight_cell),
             ),
             Delta::Seq => (
                 Arc::clone(&prev.canon),
                 prev.views.clone(),
                 Arc::clone(&prev.tags),
+                Arc::clone(&prev.inflight_cell),
             ),
         };
         Ok(ReadState {
@@ -902,6 +969,7 @@ impl Rdy {
             views,
             tags,
             pack: Arc::clone(&self.pack),
+            areas: Arc::clone(&self.areas),
             root: Arc::clone(&prev.root),
             name,
             description,
@@ -912,8 +980,156 @@ impl Rdy {
             as_of: Arc::clone(&self.as_of),
             vpos: Arc::clone(&self.vpos),
             proposal_touched: Arc::clone(&self.proposal_touched),
+            inflight_cell,
+            coord_heads,
+            coord: OnceLock::new(),
             error: None,
         })
+    }
+
+    /// Re-reads view `view`'s entry into `views` (`Delta::View`, and each view `Delta::Coord`
+    /// closed). View ops that left the base and the set as they were (a close, an own) keep the
+    /// build; any other change starts unbuilt.
+    fn reread_view(
+        &self,
+        prev: &ReadState,
+        views: &mut imbl::HashMap<String, Arc<Entry>>,
+        view: String,
+    ) -> Result<(), RdyError> {
+        match self.view_entry(&view)? {
+            Some(mut next) => {
+                if let Some(e) = prev.views.get(&view)
+                    && e.base == next.base
+                    && e.included == next.included
+                    && let Some(b) = e.built_ok()
+                {
+                    next.seed_shared(Arc::clone(b));
+                }
+                views.insert(view, Arc::new(next));
+            }
+            None => {
+                views.remove(&view);
+            }
+        }
+        Ok(())
+    }
+
+    /// The coordination refs as the store holds them now, with the open-set index carried from
+    /// `prev` for every set that did not move (`CoordHeads::read`).
+    fn coord_heads(&self, prev: &CoordHeads) -> Result<CoordHeads, RdyError> {
+        let reader = self.store.reader();
+        CoordHeads::read(
+            &reader,
+            prev,
+            reader.intent_heads()?.into_iter().collect(),
+            reader.alt_heads()?.into_iter().collect(),
+        )
+    }
+
+    /// insc1: the in-flight cell after `change` (with `ops`) was committed to `view`. When the
+    /// previous set was computed and `view` is open, the set is the previous one plus `change`
+    /// (held by `view` alone). The previous build is carried, with `ops` applied, when it is
+    /// computed and has no conflicts, every op applies cleanly to its materialization, and the
+    /// change depends on the last writer (in the merge's order) of every block it writes: a new
+    /// change is depended on by none, so it then merges after every writer of its blocks and a
+    /// rebuild equals the carry. Anything else starts unbuilt.
+    fn inflight_after_commit(
+        &self,
+        prev: &ReadState,
+        views: &imbl::HashMap<String, Arc<Entry>>,
+        view: &str,
+        change: rdy_model::Hash,
+        ops: &[rdy_model::Op],
+        canon_head: Option<rdy_model::Hash>,
+    ) -> Arc<InflightCell> {
+        let Some(before) = prev.inflight_cell.set_ok() else {
+            return Arc::default();
+        };
+        let open = views
+            .get(view)
+            .and_then(|e| e.head.as_ref())
+            .is_some_and(|h| !h.closed);
+        if !open || prev.canon_head != canon_head || before.views_of.contains_key(&change) {
+            return Arc::default();
+        }
+        let mut set = before.as_ref().clone();
+        let at = set.changes.partition_point(|c| *c < change);
+        set.changes.insert(at, change);
+        set.views_of.insert(change, vec![view.to_string()]);
+        let cell = InflightCell::with_set(Arc::new(set));
+        let carry = match (prev.inflight_cell.built_ok(), prev.inflight_cell.last.get()) {
+            (Some(b), Some(last))
+                if b.conflicts.is_empty() && read_state::applies_cleanly(&b.m, ops) =>
+            {
+                self.merges_last(change, ops, last).then_some((b, last))
+            }
+            _ => None,
+        };
+        if let Some((b, last)) = carry {
+            let set = cell.set_ok().expect("set above");
+            let mut entry = read_state::inflight_entry(canon_head, set);
+            entry.seed(b.after(ops));
+            let _ = cell.entry.set(Ok(Arc::new(entry)));
+            let mut last = last.as_ref().clone();
+            for op in ops {
+                last.insert(op.block_id().clone(), change);
+            }
+            let _ = cell.last.set(Arc::new(last));
+        }
+        Arc::new(cell)
+    }
+
+    /// Whether `change` depends on the last in-flight writer of every block `ops` write; an
+    /// unreadable change never carries.
+    fn merges_last(
+        &self,
+        change: rdy_model::Hash,
+        ops: &[rdy_model::Op],
+        last: &read_state::LastWriters,
+    ) -> bool {
+        let writers: Vec<&rdy_model::Hash> = ops
+            .iter()
+            .filter_map(|op| last.get(op.block_id()))
+            .collect();
+        if writers.is_empty() {
+            return true;
+        }
+        let Ok(c) = self.store.reader().change(&change) else {
+            return false;
+        };
+        writers.iter().all(|w| c.deps.contains(w))
+    }
+
+    /// insc1: the in-flight cell after view ops (`Delta::View`, `Delta::Coord`). When the
+    /// previous set was computed, the set is recomputed from `views`: an equal set keeps the
+    /// previous cell, the same changes held by other views keep its build, anything else starts
+    /// unbuilt. A previous set never computed leaves the new cell to compute on first read.
+    fn inflight_after_views(
+        &self,
+        prev: &ReadState,
+        views: &imbl::HashMap<String, Arc<Entry>>,
+        canon_head: Option<rdy_model::Hash>,
+    ) -> Result<Arc<InflightCell>, RdyError> {
+        let Some(before) = prev.inflight_cell.set_ok() else {
+            return Ok(Arc::default());
+        };
+        let set = read_state::inflight_set_of(&self.store.reader(), views)?;
+        let same_base = prev.canon_head == canon_head;
+        let entry_ok = !matches!(prev.inflight_cell.entry.get(), Some(Err(_)));
+        if same_base && entry_ok && **before == set {
+            return Ok(Arc::clone(&prev.inflight_cell));
+        }
+        let same_changes = same_base && before.changes == set.changes;
+        let cell = InflightCell::with_set(Arc::new(set));
+        if same_changes && let Some(Ok(entry)) = prev.inflight_cell.entry.get() {
+            let _ = cell.entry.set(Ok(Arc::clone(entry)));
+            // the shared entry may finish building through the previous state, which then
+            // records `last` there only: this cell then lacks it and never carries the build
+            if let Some(last) = prev.inflight_cell.last.get() {
+                let _ = cell.last.set(Arc::clone(last));
+            }
+        }
+        Ok(Arc::new(cell))
     }
 
     /// An unbuilt entry for view `name` as the store holds it now (head and set read together);
@@ -952,6 +1168,10 @@ pub struct FsckReport {
     pub versions: usize,
     pub views: usize,
     pub landed_changes: usize,
+    /// The intents, each with its version chain checked.
+    pub intents: usize,
+    /// The alternative sets, each with its version chain checked.
+    pub alt_sets: usize,
 }
 
 impl Rdy {
@@ -970,6 +1190,8 @@ impl Rdy {
             versions,
             views: objects.views,
             landed_changes: objects.landed_changes,
+            intents: objects.intents,
+            alt_sets: objects.alt_sets,
         })
     }
 }
