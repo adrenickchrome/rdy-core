@@ -12,3 +12,12 @@ pub mod perf;
 pub mod report;
 pub mod site;
 pub mod wc;
+
+/// The libtest name of the test fn `$f` in the calling file (see `fixtures::libtest_name`):
+/// pass it to `--exact` when a test re-runs its own binary.
+#[macro_export]
+macro_rules! test_name {
+    ($f:expr) => {
+        $crate::fixtures::libtest_name(module_path!(), $f)
+    };
+}

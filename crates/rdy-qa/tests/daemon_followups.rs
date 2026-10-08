@@ -177,8 +177,9 @@ fn dfu1_a_store_held_while_a_daemon_pid_is_live_is_not_refused() {
 fn dfu1_a_store_held_by_a_predecessor_that_is_exiting_is_waited_for() {
     let dir = rdy_qa::daemon::short_tempdir();
     let run = RunDir::of_project(dir.path());
-    let (spawn_old, _) = spawn_child_daemon("dfu1_child", &run, "0.1.0", &[]);
-    let (spawn_new, count_new) = spawn_child_daemon("dfu1_child", &run, "0.2.0", &[]);
+    let (spawn_old, _) = spawn_child_daemon(&rdy_qa::test_name!("dfu1_child"), &run, "0.1.0", &[]);
+    let (spawn_new, count_new) =
+        spawn_child_daemon(&rdy_qa::test_name!("dfu1_child"), &run, "0.2.0", &[]);
     let rt = Hosted::rt();
     rt.block_on(async {
         let old = connect_or_start(&run, client_opts(&run, "0.1.0", dir.path(), spawn_old))

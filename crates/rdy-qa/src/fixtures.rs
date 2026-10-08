@@ -199,3 +199,51 @@ pub fn rdy_bin() -> PathBuf {
     );
     bin
 }
+
+/// The libtest name of `test_fn` in the test file whose `module_path!()` is `module_path`:
+/// `<file>::<fn>` inside an area binary, `<fn>` at a crate root.
+pub fn libtest_name(module_path: &str, test_fn: &str) -> String {
+    match module_path.split_once("::") {
+        Some((_crate, rest)) => format!("{rest}::{test_fn}"),
+        None => test_fn.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tname_tests {
+    use super::libtest_name;
+
+    #[test]
+    fn tname1_a_crate_root_keeps_the_bare_name() {
+        assert_eq!(
+            libtest_name("store_crash", "store_crash_child"),
+            "store_crash_child"
+        );
+    }
+
+    #[test]
+    fn tname1_a_module_path_drops_only_the_crate() {
+        assert_eq!(
+            libtest_name("store::store_crash", "store_crash_child"),
+            "store_crash::store_crash_child"
+        );
+        assert_eq!(
+            libtest_name("store::store_crash::inner", "f"),
+            "store_crash::inner::f"
+        );
+    }
+
+    /// Runs inside a module, as every test in an area binary does: `--exact` with the name
+    /// must select this one test and nothing else.
+    #[test]
+    fn tname1_a_reexec_by_the_name_selects_exactly_this_test() {
+        let name = crate::test_name!("tname1_a_reexec_by_the_name_selects_exactly_this_test");
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--list", "--exact", &name])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let listed: Vec<&str> = text.lines().filter(|l| l.ends_with(": test")).collect();
+        assert_eq!(listed, vec![format!("{name}: test").as_str()], "{text}");
+    }
+}

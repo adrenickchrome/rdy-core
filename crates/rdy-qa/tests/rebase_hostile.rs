@@ -307,7 +307,12 @@ fn include_outcome(point: CrashPoint) -> Included {
 
 fn child(dir: &Path, mode: &str, point: CrashPoint, arg: &str) -> std::process::ExitStatus {
     std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            &rdy_qa::test_name!(NAME),
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env("RDY_VH_DIR", dir)
         .env("RDY_VH_MODE", mode)
         .env("RDY_VH_POINT", point.name())
