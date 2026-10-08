@@ -81,3 +81,32 @@ fn rvw1_fsck_counts_reviews_and_checks_the_ref_names_its_own_tension() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn rvw1_a_second_dismissal_of_one_vkey_is_refused() {
+    let (_d, mut s) = store();
+    let k = Hash([6; 32]);
+    let h1 = s.put_dismissal(&review(k, "first")).unwrap();
+    match s.put_dismissal(&review(k, "second, by someone else")) {
+        Err(StoreError::Decode(m)) => {
+            assert!(m.contains("already dismissed"), "{m}");
+            assert!(m.contains(&h1.to_string()), "{m}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let bytes = s.get_ref(&format!("{DISMISS_REF}{k}")).unwrap().unwrap();
+    assert_eq!(bytes, h1.0.to_vec(), "the ref still names the first review");
+    assert_eq!(s.dismissals().unwrap(), vec![(k, h1)]);
+    assert_eq!(s.check_objects().unwrap().reviews, 1);
+}
+
+#[test]
+fn rvw1_the_same_dismissal_again_is_an_idempotent_retry_that_writes_nothing() {
+    let (_d, mut s) = store();
+    let k = Hash([7; 32]);
+    let h = s.put_dismissal(&review(k, "fine")).unwrap();
+    let writes = s.write_count();
+    assert_eq!(s.put_dismissal(&review(k, "fine")).unwrap(), h);
+    assert_eq!(s.write_count(), writes, "a retry writes nothing");
+    assert_eq!(s.dismissals().unwrap(), vec![(k, h)]);
+}

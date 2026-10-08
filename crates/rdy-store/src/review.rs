@@ -14,7 +14,9 @@ pub const DISMISS_REF: &str = "dismiss/";
 
 impl Store {
     /// Writes a dismissal: the review and the ref `dismiss/<vkey>` to it, in one batch. Refuses a
-    /// review whose verdict is not `Dismiss` or whose subject has no vkey.
+    /// review whose verdict is not `Dismiss` or whose subject has no vkey. Refuses a vkey that
+    /// another review already dismissed (FW-CH7: the ref is never rewritten). The same review again
+    /// is an idempotent retry: it returns the id and writes nothing.
     pub fn put_dismissal(&mut self, r: &Review) -> Result<Hash, StoreError> {
         let vkey = match (r.verdict, r.vkey()) {
             (Verdict::Dismiss, Some(k)) => k,
@@ -26,8 +28,18 @@ impl Store {
         };
         let bytes = encode(r);
         let id = Hash::of(&bytes);
+        let name = format!("{DISMISS_REF}{vkey}");
+        if let Some(held) = self.get_ref(&name)? {
+            let held = hash_from(&held, "dismissal ref")?;
+            if held == id {
+                return Ok(id);
+            }
+            return Err(StoreError::Decode(format!(
+                "tension vkey {vkey} is already dismissed by review {held}"
+            )));
+        }
         let mut items = vec![(kinds::REVIEW, bytes)];
-        items.extend(self.ref_items_pub(vec![(format!("{DISMISS_REF}{vkey}"), id.0.to_vec())]));
+        items.extend(self.ref_items_pub(vec![(name, id.0.to_vec())]));
         self.write(items)?;
         Ok(id)
     }
