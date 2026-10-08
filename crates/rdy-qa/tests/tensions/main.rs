@@ -3,7 +3,7 @@
 //! (`tlay1_` checks). Keep the list sorted.
 mod tensions_collision;
 mod tensions_core;
-mod tensions_premise;
 mod tensions_deprecated;
-mod tensions_fork;
 mod tensions_dismiss;
+mod tensions_fork;
+mod tensions_premise;
