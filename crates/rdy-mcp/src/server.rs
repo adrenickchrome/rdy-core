@@ -56,21 +56,31 @@ impl RdyServer {
         st.sid = sid;
         RdyServer {
             state: Arc::new(Mutex::new(st)),
-            tool_router: Self::session_router()
-                + Self::read_router()
-                + Self::graph_router()
-                + Self::schema_router()
-                + Self::brief_router()
-                + Self::search_router()
-                + Self::write_router()
-                + Self::decide_router()
-                + Self::propose_router()
-                + Self::asset_router()
-                + Self::views_router()
-                + Self::entity_router()
-                + Self::intent_router()
-                + Self::alt_router(),
+            tool_router: Self::family_routers()
+                .into_iter()
+                .fold(ToolRouter::new(), |a, b| a + b),
         }
+    }
+
+    /// The tool router of each family (`server/<family>.rs`), once. `new` registers their sum;
+    /// a new family adds one line here.
+    fn family_routers() -> [ToolRouter<Self>; 14] {
+        [
+            Self::session_router(),
+            Self::read_router(),
+            Self::graph_router(),
+            Self::schema_router(),
+            Self::brief_router(),
+            Self::search_router(),
+            Self::write_router(),
+            Self::decide_router(),
+            Self::propose_router(),
+            Self::asset_router(),
+            Self::views_router(),
+            Self::entity_router(),
+            Self::intent_router(),
+            Self::alt_router(),
+        ]
     }
 
     /// Runs one tool on the blocking pool, so no tool blocks the executor. A panic inside it
@@ -576,22 +586,7 @@ mod tests {
 
     #[test]
     fn mrt1_every_tool_is_in_exactly_one_family_router() {
-        let families = [
-            RdyServer::session_router(),
-            RdyServer::read_router(),
-            RdyServer::graph_router(),
-            RdyServer::schema_router(),
-            RdyServer::brief_router(),
-            RdyServer::search_router(),
-            RdyServer::write_router(),
-            RdyServer::decide_router(),
-            RdyServer::propose_router(),
-            RdyServer::asset_router(),
-            RdyServer::views_router(),
-            RdyServer::entity_router(),
-            RdyServer::intent_router(),
-            RdyServer::alt_router(),
-        ];
+        let families = RdyServer::family_routers();
         let mut names: Vec<String> = families
             .iter()
             .flat_map(|r| r.list_all().into_iter().map(|t| t.name.to_string()))
@@ -605,6 +600,18 @@ mod tests {
             |a, b| a + b,
         );
         assert_eq!(combined.list_all().len(), all);
+        // The server registers every tool of every family: a family left out of `new` would
+        // leave its tools silently unregistered.
+        let dir = tempfile::tempdir().unwrap();
+        let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let server = RdyServer::new(Arc::new(Local::new(rdy)), None);
+        let registered: Vec<String> = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert_eq!(registered, names);
     }
 
     async fn pump(input: &str, max: usize) -> String {

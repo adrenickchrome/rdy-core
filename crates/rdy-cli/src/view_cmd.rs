@@ -477,6 +477,31 @@ pub fn conflict_text(block: &Value) -> String {
     )
 }
 
+#[derive(clap::Args)]
+pub(crate) struct UndoArgs {
+    /// The view (default: the session's own).
+    #[arg(long)]
+    view: Option<String>,
+    /// The view op to undo (default: this session's newest undoable op).
+    op: Option<String>,
+    /// Also exclude the included changes that depend on the ones the undo excludes.
+    #[arg(long)]
+    cascade: bool,
+}
+
+pub(crate) fn undo(env: &Env, a: UndoArgs) -> Result<(Value, String), ErrorReply> {
+    let UndoArgs { view, op, cascade } = a;
+    let v = call(env, "view", undo_args(view, op, cascade))?;
+    let t = render("undo", &v);
+    Ok((v, t))
+}
+
+pub(crate) fn view(env: &Env, cmd: ViewCmd) -> Result<(Value, String), ErrorReply> {
+    let v = call(env, "view", args_of(&cmd))?;
+    let t = render_view(&cmd, &v);
+    Ok((v, t))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,29 +599,4 @@ mod tests {
         );
         assert_eq!(t.lines().count(), 4, "{t}");
     }
-}
-
-#[derive(clap::Args)]
-pub(crate) struct UndoArgs {
-    /// The view (default: the session's own).
-    #[arg(long)]
-    view: Option<String>,
-    /// The view op to undo (default: this session's newest undoable op).
-    op: Option<String>,
-    /// Also exclude the included changes that depend on the ones the undo excludes.
-    #[arg(long)]
-    cascade: bool,
-}
-
-pub(crate) fn undo(env: &Env, a: UndoArgs) -> Result<(Value, String), ErrorReply> {
-    let UndoArgs { view, op, cascade } = a;
-    let v = call(env, "view", undo_args(view, op, cascade))?;
-    let t = render("undo", &v);
-    Ok((v, t))
-}
-
-pub(crate) fn view(env: &Env, cmd: ViewCmd) -> Result<(Value, String), ErrorReply> {
-    let v = call(env, "view", args_of(&cmd))?;
-    let t = render_view(&cmd, &v);
-    Ok((v, t))
 }

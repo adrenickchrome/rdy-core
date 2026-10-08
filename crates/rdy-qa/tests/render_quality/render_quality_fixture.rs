@@ -188,7 +188,7 @@ fn gold1_edge_content_is_present() {
 
 /// Prints the store's hash of every file under the fixture's `blobs/` directory, which is
 /// what each file must be named (`rdy import` checks the name). Run it after changing a blob:
-/// `cargo test -p rdy-qa --release --test render_quality_fixture -- --ignored --nocapture`
+/// `cargo test -p rdy-qa --release --test render_quality render_quality_fixture:: -- --ignored --nocapture`
 #[test]
 #[ignore = "helper: regenerates the blob file names"]
 fn gold1_print_blob_hashes() {

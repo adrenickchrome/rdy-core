@@ -44,8 +44,9 @@ pub fn parse_cargo_test(output: &str) -> TestRun {
 }
 
 /// The pinned-defect ids (`ord1`, `blob1`, ...) of `cargo test -- --list` output, per area.
-/// The area is the `<area>` of a `Running tests/<area>/main.rs (...)` header; any other header
-/// (the `Running unittests ...` ones) sets no area.
+/// The area is `area_of(<binary>)` for a `Running tests/<binary>/main.rs (...)` header, so the
+/// two engine binaries are the one `engine` area; any other header (the `Running unittests ...`
+/// ones) sets no area.
 pub fn guarded_ids(list_output: &str) -> BTreeMap<String, BTreeSet<String>> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut area: Option<String> = None;
@@ -57,7 +58,7 @@ pub fn guarded_ids(list_output: &str) -> BTreeMap<String, BTreeSet<String>> {
                 .find_map(|w| w.strip_prefix("tests/"))
                 .and_then(|f| f.strip_suffix("/main.rs"))
                 .filter(|a| !a.is_empty() && !a.contains('/'))
-                .map(str::to_string);
+                .map(|a| area_of(a).to_string());
             continue;
         }
         let (Some(area), Some(name)) = (&area, t.strip_suffix(": test")) else {
@@ -88,10 +89,10 @@ pub struct Plan {
     pub guarded: bool,
 }
 
-/// The plan for `--only <area>` (or a full run), given the `rdy-qa` areas.
+/// The plan for `--only <area>` (or a full run), given the `rdy-qa` test binaries.
 /// - no `--only`: everything (perf unless `--skip-perf`);
 /// - `--only perf`: the build and the perf tier only;
-/// - `--only <area>`: fmt, clippy, the workspace tests, that area's `rdy-qa` test binary, the
+/// - `--only <area>`: fmt, clippy, the workspace tests, that area's `rdy-qa` test binaries, the
 ///   `rdy-qa` unit tests and the perf tier (unless `--skip-perf`).
 pub fn plan(only: Option<&str>, files: &[String], skip_perf: bool) -> Result<Plan, String> {
     match only {
@@ -174,8 +175,9 @@ fn holds_rs(dir: &Path) -> bool {
         .any(|p| is_rs_file(p) || (p.is_dir() && holds_rs(p)))
 }
 
-/// The `rdy-qa` test areas: the sorted names of the directories directly under `tests_dir`
-/// that hold a `main.rs`, one test binary each.
+/// The `rdy-qa` test binaries: the sorted names of the directories directly under `tests_dir`
+/// that hold a `main.rs`, one test binary each. An area (`area_of`) may be more than one
+/// binary: `engine` and `engine_read` are the `engine` area.
 pub fn test_areas(tests_dir: &Path) -> Vec<String> {
     let mut v: Vec<String> = dir_paths(tests_dir)
         .iter()
@@ -262,6 +264,29 @@ pub struct Area {
     /// (a compile error, a crash).
     pub ok: bool,
     pub failures: Vec<String>,
+}
+
+/// Adds one `rdy-qa` test binary's run to the report's area rows, under `area_of(binary)`: an
+/// area of more than one binary (`engine`, `engine_read`) is one row with their sums.
+pub fn add_run(areas: &mut Vec<Area>, binary: &str, ok: bool, run: TestRun) {
+    let name = area_of(binary).to_string();
+    match areas.iter_mut().find(|a| a.name == name) {
+        Some(a) => {
+            a.passed += run.passed;
+            a.failed += run.failed;
+            a.ignored += run.ignored;
+            a.ok &= ok;
+            a.failures.extend(run.failures);
+        }
+        None => areas.push(Area {
+            name,
+            passed: run.passed,
+            failed: run.failed,
+            ignored: run.ignored,
+            ok,
+            failures: run.failures,
+        }),
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -511,9 +536,10 @@ mod tests {
 
     #[test]
     fn collects_guarded_ids_per_area() {
-        let list = "     Running tests/engine/main.rs (target/release/deps/engine-abc)\nengine_write::ord1_append_after_a_tie: test\nengine::plain_test: test\n     Running tests/render_quality/main.rs (target/release/deps/render_quality-def)\nrender_quality_pages::rq1_x: test\n     Running unittests src/lib.rs (target/release/deps/rdy_qa-0)\nreport::tests::tlay1_x: test\n";
+        let list = "     Running tests/engine/main.rs (target/release/deps/engine-abc)\nengine_write::ord1_append_after_a_tie: test\nengine::plain_test: test\n     Running tests/engine_read/main.rs (target/release/deps/engine_read-abd)\nengine_search::xr1_x: test\n     Running tests/render_quality/main.rs (target/release/deps/render_quality-def)\nrender_quality_pages::rq1_x: test\n     Running unittests src/lib.rs (target/release/deps/rdy_qa-0)\nreport::tests::tlay1_x: test\n";
         let g = guarded_ids(list);
-        assert_eq!(g["engine"], ["ord1".to_string()].into());
+        // Both engine binaries are the one `engine` area.
+        assert_eq!(g["engine"], ["ord1".to_string(), "xr1".to_string()].into());
         assert_eq!(g["render_quality"], ["rq1".to_string()].into());
         assert_eq!(g.len(), 2, "unit tests are not an area: {g:?}");
     }
@@ -544,6 +570,49 @@ mod tests {
         let areas = test_areas(&tests);
         let engine = plan(Some("engine"), &areas, true).unwrap();
         assert_eq!(engine.files, vec!["engine", "engine_read"]);
+        // The report has one `engine` row with both binaries' counts (R-2: the report's areas).
+        let mut rows = vec![];
+        let run = |passed, failed, ignored, failures: &[&str]| TestRun {
+            passed,
+            failed,
+            ignored,
+            failures: failures.iter().map(|f| f.to_string()).collect(),
+        };
+        add_run(&mut rows, "engine", true, run(134, 0, 0, &[]));
+        add_run(
+            &mut rows,
+            "engine_read",
+            false,
+            run(147, 1, 1, &["engine_search::x"]),
+        );
+        add_run(&mut rows, "lib", true, run(47, 0, 9, &[]));
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|a| {
+                (
+                    a.name.as_str(),
+                    a.passed,
+                    a.failed,
+                    a.ignored,
+                    a.ok,
+                    a.failures.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "engine",
+                    281,
+                    1,
+                    1,
+                    false,
+                    vec!["engine_search::x".to_string()]
+                ),
+                ("lib", 47, 0, 9, true, vec![]),
+            ]
+        );
     }
 
     #[test]

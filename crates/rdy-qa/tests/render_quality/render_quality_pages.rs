@@ -1,6 +1,6 @@
 //! The visible-text goldens of the review set's nine pages (gold1). Each golden is the page's
 //! runs, one per line: `zone`, `L` for a label or `-`, then the text, tab-separated. Write them
-//! with `RDY_QA_BLESS=1 cargo test -p rdy-qa --release --test render_quality_pages`.
+//! with `RDY_QA_BLESS=1 cargo test -p rdy-qa --release --test render_quality render_quality_pages::`.
 use rdy_qa::{golden, site::*};
 use std::path::{Path, PathBuf};
 

@@ -289,26 +289,20 @@ fn main() {
         );
     }
 
-    // The hardening suite, one test binary at a time so each area reports on its own.
-    for area in &plan.files {
-        let mut c = cargo(&["test", "-p", "rdy-qa", "--release", "--test", area]);
+    // The hardening suite, one test binary at a time; each area reports as one row (an area
+    // of two binaries, `engine` and `engine_read`, sums them).
+    for binary in &plan.files {
+        let mut c = cargo(&["test", "-p", "rdy-qa", "--release", "--test", binary]);
         if args.deep {
             c.env("RDY_QA_DEEP", "1");
         }
-        let (ok, out) = step(&format!("rdy-qa {area}"), c);
+        let (ok, out) = step(&format!("rdy-qa {binary}"), c);
         let run = report::parse_cargo_test(&out);
         seeds.extend(report::failing_seeds(&out));
         if !ok && run.failures.is_empty() {
             eprintln!("{out}");
         }
-        areas.push(Area {
-            name: area.clone(),
-            passed: run.passed,
-            failed: run.failed,
-            ignored: run.ignored,
-            ok,
-            failures: run.failures,
-        });
+        report::add_run(&mut areas, binary, ok, run);
     }
 
     if plan.lib {
