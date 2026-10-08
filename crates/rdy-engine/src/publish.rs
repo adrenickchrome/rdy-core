@@ -369,10 +369,9 @@ impl Rdy {
         })
     }
 
-    /// Whether a commit of `ops` may carry the tension set: no op writes a structural block (a
-    /// delete's type read from its id's prefix), and no update or delete moves a block or
-    /// changes its `lifecycle` against its base (which every descendant's effective lifecycle
-    /// reads). An unreadable base never carries.
+    /// Whether a commit of `ops` may carry the tension set: no op is a delete, no op writes a
+    /// structural block, and no update moves a block or changes its `lifecycle` against its base
+    /// (which every descendant's effective lifecycle reads). An unreadable base never carries.
     fn carries_tensions(&self, ops: &[rdy_model::Op]) -> bool {
         use rdy_model::Op;
         let structural = |ty: Option<&str>| {
@@ -394,12 +393,9 @@ impl Rdy {
                         old.parent == block.parent && lifecycle(&old) == lifecycle(block)
                     })
             }
-            Op::Delete { base, id } => {
-                !structural(self.pack.type_for_prefix(id.prefix()))
-                    && reader
-                        .get_block(base)
-                        .is_ok_and(|old| lifecycle(&old).is_none())
-            }
+            // a delete takes a block out of other blocks' reads that the seeds do not cover (an
+            // `affects` target's path gives its deciders their areas), so it never carries
+            Op::Delete { .. } => false,
         })
     }
 

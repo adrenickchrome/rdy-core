@@ -5,6 +5,7 @@ use super::{DetectScope, Detector, SideRef, Tension, tension_from, tension_label
 use crate::error::*;
 use crate::views::clip;
 use crate::{RdyError, ReadState};
+use imbl::ordmap::DiffItem;
 use imbl::{OrdMap, OrdSet};
 use rdy_model::{Block, BlockId, Hash, Op, decision};
 use std::collections::BTreeSet;
@@ -62,6 +63,33 @@ impl TensionSet {
         true
     }
 
+    /// Removes tension `id` and its index entries; true if it was in the set.
+    fn remove(&mut self, id: &Hash) -> bool {
+        let Some(t) = self.tensions.remove(id) else {
+            return false;
+        };
+        for b in t.blocks() {
+            if let Some(ids) = self.by_block.get_mut(&b) {
+                ids.remove(id);
+                if ids.is_empty() {
+                    self.by_block.remove(&b);
+                }
+            }
+        }
+        for side in &t.sides {
+            if let SideRef::Change(c) = side
+                && let Some(ids) = self.by_change.get_mut(c)
+            {
+                ids.remove(id);
+                if ids.is_empty() {
+                    self.by_change.remove(c);
+                }
+            }
+        }
+        self.canon.remove(id);
+        true
+    }
+
     pub fn len(&self) -> usize {
         self.tensions.len()
     }
@@ -113,18 +141,18 @@ impl TensionSet {
     }
 
     /// The tensions `newer` has that this set has not (opened), and those this set has that
-    /// `newer` has not (resolved), each by id.
+    /// `newer` has not (resolved), each by id. The structure a carry shares with the set it
+    /// started from is skipped, so the cost follows what changed, not the size of the sets.
     pub fn diff(&self, newer: &TensionSet) -> (Vec<Arc<Tension>>, Vec<Arc<Tension>>) {
-        let opened = newer
-            .iter()
-            .filter(|t| !self.tensions.contains_key(&t.id))
-            .cloned()
-            .collect();
-        let resolved = self
-            .iter()
-            .filter(|t| !newer.tensions.contains_key(&t.id))
-            .cloned()
-            .collect();
+        let (mut opened, mut resolved) = (vec![], vec![]);
+        for item in self.tensions.diff(&newer.tensions) {
+            match item {
+                DiffItem::Add(_, t) => opened.push(Arc::clone(t)),
+                DiffItem::Remove(_, t) => resolved.push(Arc::clone(t)),
+                // one id is one tension: same kind, sides and involved items
+                DiffItem::Update { .. } => {}
+            }
+        }
         (opened, resolved)
     }
 }
@@ -226,7 +254,9 @@ fn seeds_of(st: &ReadState, change: &Hash) -> Result<BTreeSet<BlockId>, RdyError
 
 /// The carry (tcar1): `prev`'s canon part (canon did not move); its in-flight part less every
 /// tension that involves a seed; and what the state's detectors find in flight around the seeds
-/// that involves one. `None` when the state's in-flight set is not `prev`'s plus `change`.
+/// that involves one. `None` when the state's in-flight set is not `prev`'s plus `change`. It
+/// starts from a clone of `prev` (structure shared), so its cost follows the seeds' tensions, not
+/// the size of the set.
 fn carry(
     st: &ReadState,
     prev: &TensionSet,
@@ -242,30 +272,32 @@ fn carry(
     }
     let writes = Arc::new(prev.writes.with_change(st, change, view)?);
     let seeds = seeds_of(st, &change)?;
+    let mut next = TensionSet {
+        writes: Arc::clone(&writes),
+        ..prev.clone()
+    };
+    for seed in &seeds {
+        for id in prev.by_block.get(seed).into_iter().flatten() {
+            // a canon-part tension stays: canon did not move
+            if !prev.from_canon(id) {
+                next.remove(id);
+            }
+        }
+    }
     let involves_seed = |t: &Tension| t.involved.iter().any(|i| seeds.contains(&i.block));
-    let canon: Vec<Arc<Tension>> = prev
-        .iter()
-        .filter(|t| prev.from_canon(&t.id))
-        .cloned()
-        .collect();
-    let mut inflight: Vec<Arc<Tension>> = prev
-        .iter()
-        .filter(|t| !prev.from_canon(&t.id) && !involves_seed(t))
-        .cloned()
-        .collect();
     let cx = DetectCx::new(st, &writes, canon_index_of(st)?, DetectScope::Inflight);
     for d in st.detectors {
         let mut found = vec![];
         d.detect(&cx, Some(&seeds), &mut found)?;
-        inflight.extend(
-            found
-                .into_iter()
-                .filter_map(|f| tension_from(st.pack(), f, false, DetectScope::Inflight))
-                .filter(|t| involves_seed(t))
-                .map(Arc::new),
-        );
+        for t in found
+            .into_iter()
+            .filter_map(|f| tension_from(st.pack(), f, false, DetectScope::Inflight))
+            .filter(|t| involves_seed(t))
+        {
+            next.insert(Arc::new(t));
+        }
     }
-    Ok(Some(TensionSet::of(&canon, inflight, writes)))
+    Ok(Some(next))
 }
 
 /// The canon part for `detectors`: each run in the canon scope, kept when every side is canon,

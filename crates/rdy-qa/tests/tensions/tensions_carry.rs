@@ -1,8 +1,11 @@
 //! tcar1: the tension set carried across a commit equals a full rebuild; reindex reproduces it.
 use proptest::prelude::*;
-use rdy_engine::DecisionInput;
+use rdy_engine::tensions::TensionKind;
+use rdy_engine::{DecisionInput, Rdy, Scope};
+use rdy_model::BlockId;
 use rdy_qa::edit_loop::spec_doc;
 use rdy_qa::fixtures::*;
+use rdy_qa::packs::qa_project;
 use rdy_qa::tensions::*;
 use serde_json::json;
 
@@ -83,4 +86,60 @@ fn tcar1_reindex_reproduces_the_tension_ids() {
     r.reindex().unwrap();
     let after: Vec<_> = open(&r).iter().map(|t| t.id).collect();
     assert_eq!(before, after);
+}
+
+/// A landed doc at `path` with one section, and (when `claim`) one claim under it: the section
+/// and the claim.
+fn landed_doc(r: &mut Rdy, path: &str, claim: bool) -> (BlockId, Option<BlockId>) {
+    r.new_doc(&writer(), "seed", path, Some("glossary"), Some("Doc"))
+        .unwrap();
+    let doc = r
+        .read()
+        .resolve_path(&Scope::View("seed".into()), path)
+        .unwrap();
+    let mut ops = vec![
+        json!({"op": "create", "type": "section", "id": "$s", "parent": doc.to_string(), "fields": {"title": "S"}}),
+    ];
+    if claim {
+        ops.push(json!({"op": "create", "type": "claim", "id": "$x", "parent": "$s", "body": "Fees are monthly."}));
+    }
+    let w = write(r, "seed", json!(ops)).unwrap();
+    land(r, "seed").unwrap();
+    (created(&w, "$s"), claim.then(|| created(&w, "$x")))
+}
+
+#[test]
+fn tcar1_deleting_an_affects_target_carries_the_same_set_as_a_rebuild() {
+    // two decisions outside any area are in area payments only through their `affects` target
+    // X; deleting X takes the area away, so their overlap goes (the overlap involves only them)
+    let (_d, mut r) = qa_project();
+    let (_fees, x) = landed_doc(&mut r, "payments/fees", true);
+    let x = x.unwrap();
+    let (n, _) = landed_doc(&mut r, "notes/misc", false);
+    for who in ["a", "b"] {
+        r.decide(
+            &ag(who),
+            who,
+            DecisionInput {
+                parent: n.to_string(),
+                statement: format!("{who} decides"),
+                affects: vec![x.to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(of_kind(&r, TensionKind::AreaOverlap).len(), 1);
+    put(&mut r, "c", json!([{"op": "delete", "id": x.to_string()}]));
+    let st = r.read();
+    let carried: Vec<_> = st.tensions().unwrap().iter().map(|t| t.id).collect();
+    let rebuilt: Vec<_> = st
+        .tensions_rebuilt()
+        .unwrap()
+        .iter()
+        .map(|t| t.id)
+        .collect();
+    assert!(rebuilt.is_empty(), "{rebuilt:?}");
+    assert_eq!(carried, rebuilt);
+    assert_eq!(st.tensions_carried(), Some(false), "a delete rebuilds");
 }

@@ -181,18 +181,28 @@ impl Writer {
         }
     }
 
-    /// Settles the tension set after a write (tevt1). A failure never fails the write: it is
-    /// logged once, until a settle succeeds again.
+    /// Settles the tension set after a write (tevt1). A failure never fails the write, and a
+    /// panic never ends the writer: the caches may be half-updated, so a clean state is
+    /// republished. Either is logged once, until a settle succeeds again.
     fn settle(&mut self, rdy: &mut Rdy) {
-        match rdy.settle_tensions() {
-            Err(e) if !self.settle_failing => {
+        let failed = match catch_unwind(AssertUnwindSafe(|| rdy.settle_tensions())) {
+            Ok(Ok(_)) => None,
+            Ok(Err(e)) => Some(e.to_string()),
+            Err(p) => {
+                rdy.invalidate();
+                self.publish(rdy);
+                Some(format!("internal error: {}", panic_text(&*p)))
+            }
+        };
+        match failed {
+            Some(e) if !self.settle_failing => {
                 self.settle_failing = true;
                 log(&format!(
                     "settling the tension set failed ({e}); no tension events are sent until it succeeds, and it is retried after every write"
                 ));
             }
-            Err(_) => {}
-            Ok(_) => self.settle_failing = false,
+            Some(_) => {}
+            None => self.settle_failing = false,
         }
     }
 
