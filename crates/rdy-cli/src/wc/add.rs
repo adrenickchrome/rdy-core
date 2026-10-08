@@ -27,7 +27,7 @@ fn refuse(code: &'static str, message: String, fix: impl Into<String>) -> ErrorR
 
 /// `p` (as typed, relative to `cwd`) as a path under `root`, without `.`/`..`: `""` is the root.
 /// `None` when it leaves the root.
-fn under_root(root: &Path, cwd: &Path, p: &Path) -> Option<String> {
+pub(super) fn under_root(root: &Path, cwd: &Path, p: &Path) -> Option<String> {
     fn lexical(p: &Path) -> Option<PathBuf> {
         let mut out = PathBuf::new();
         for c in p.components() {

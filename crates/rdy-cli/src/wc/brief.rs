@@ -3,17 +3,18 @@
 //! blocks it touches: a human session briefs itself (`for_commit`), an agent session must have
 //! recorded one first.
 
+use super::add::under_root;
 use super::{Open, open};
 use crate::brief_text::plain;
 use crate::{Conn, Env, bound_view, call, human_session};
 use rdy_daemon::ErrorReply;
 use rdy_engine::wc::plan::CommitPlan;
-use rdy_engine::wc::state::{BriefEntry, MAX_BRIEFS, WcState};
+use rdy_engine::wc::state::{BriefEntry, WcState};
 use rdy_engine::{E_BAD_INPUT, E_BRIEF_REQUIRED, E_BRIEF_STALE, RdyError, now_ms};
 use rdy_model::BlockId;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 const BAD_TARGET: &str = "brief a file, a directory or a block";
 
@@ -42,7 +43,7 @@ pub(crate) fn run(
         let recorded = match entry_of(&briefing, &view) {
             Some(entry) => {
                 let n = entry.ids.len();
-                record_brief(&mut state, entry);
+                keep(&mut state, entry);
                 state.save(&place)?;
                 Some(n)
             }
@@ -81,7 +82,7 @@ fn tree_path(root: &Path, cwd: &Path, target: &str) -> Result<Option<String>, Er
     let Ok(meta) = std::fs::symlink_metadata(&full) else {
         return Ok(None);
     };
-    let Some(rel) = relative(root, &full) else {
+    let Some(rel) = under_root(root, cwd, Path::new(target)) else {
         return Ok(None);
     };
     let bad = || -> ErrorReply {
@@ -120,44 +121,6 @@ fn tree_path(root: &Path, cwd: &Path, target: &str) -> Result<Option<String>, Er
     Ok(Some(path))
 }
 
-/// `full` below `root` as `a/b`, without `.` and `..`; `""` for the root; `None` when it lies
-/// outside or is not UTF-8.
-fn relative(root: &Path, full: &Path) -> Option<String> {
-    fn lexical(p: &Path) -> Option<PathBuf> {
-        let mut out = PathBuf::new();
-        for c in p.components() {
-            match c {
-                Component::CurDir => {}
-                Component::ParentDir => {
-                    if !out.pop() {
-                        return None;
-                    }
-                }
-                other => out.push(other),
-            }
-        }
-        Some(out)
-    }
-    let full = lexical(full)?;
-    let rel = match full.strip_prefix(lexical(root)?) {
-        Ok(r) => r.to_path_buf(),
-        Err(_) => {
-            // the same place spelled through a link (/tmp and /private/tmp)
-            let croot = root.canonicalize().ok()?;
-            let cfull = full.parent()?.canonicalize().ok()?.join(full.file_name()?);
-            cfull.strip_prefix(croot).ok()?.to_path_buf()
-        }
-    };
-    let parts: Option<Vec<&str>> = rel
-        .components()
-        .map(|c| match c {
-            Component::Normal(n) => n.to_str(),
-            _ => None,
-        })
-        .collect();
-    Some(parts?.join("/"))
-}
-
 /// The entry a briefing records: its token, the blocks it covers and the view it is for;
 /// `None` when it carries no token.
 fn entry_of(briefing: &Value, view: &str) -> Option<BriefEntry> {
@@ -176,13 +139,11 @@ fn entry_of(briefing: &Value, view: &str) -> Option<BriefEntry> {
     })
 }
 
-/// Keeps `entry` (newest last), dropping an older entry with its token and the oldest entries
-/// beyond `MAX_BRIEFS`.
-pub(super) fn record_brief(state: &mut WcState, entry: BriefEntry) {
+/// Records `entry` (newest last), dropping an older entry with its token first; the engine
+/// keeps the newest `MAX_BRIEFS`.
+fn keep(state: &mut WcState, entry: BriefEntry) {
     state.briefs.retain(|b| b.token != entry.token);
-    state.briefs.push(entry);
-    let extra = state.briefs.len().saturating_sub(MAX_BRIEFS);
-    state.briefs.drain(..extra);
+    state.record_brief(entry);
 }
 
 /// Records the fresh briefing a refused commit carries (`E_BRIEF_REQUIRED`, `E_BRIEF_STALE`), so
@@ -193,7 +154,7 @@ pub(super) fn record_refusal(state: &mut WcState, e: &ErrorReply, view: &str) ->
     }
     match e.extra.get("briefing").and_then(|b| entry_of(b, view)) {
         Some(entry) => {
-            record_brief(state, entry);
+            keep(state, entry);
             true
         }
         None => false,
