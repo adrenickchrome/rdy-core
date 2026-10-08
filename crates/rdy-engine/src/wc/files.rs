@@ -3,7 +3,7 @@
 use crate::error::*;
 use crate::now_ms;
 use crate::tree_io::Diagnostic;
-use crate::wc::layout::{FileKind, WcTree};
+use crate::wc::layout::{BLOBS_DIR, FileKind, WcTree};
 use crate::wc::project::Projection;
 use crate::wc::state::{
     Base, BaseBlock, Bound, CheckoutMark, ConflictEntry, ConflictKind, Place, Stage, UPDATE_FILE,
@@ -89,6 +89,34 @@ pub fn dirty_paths(place: &Place, st: &WcState, tree: &WcTree) -> Vec<String> {
     out.extend(stage_paths(place));
     out.extend(st.stage.deleted.iter().cloned());
     out.into_iter().collect()
+}
+
+/// Deletes a worktree's tracked files (every path in `base.files`, never through a link) and the
+/// directories that leaves empty, then the `_blobs` directory if it is empty. Returns the paths
+/// removed. Untracked files stay.
+pub fn remove_tracked(place: &Place, st: &WcState) -> Result<Vec<String>, RdyError> {
+    let root = &place.root;
+    let mut removed = vec![];
+    let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
+    for rel in st.base.files.keys() {
+        let Ok(p) = inside(rel) else { continue };
+        if behind_link(root, p) {
+            continue;
+        }
+        let path = root.join(p);
+        if fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_dir()) {
+            remove_file(&path)?;
+            removed.push(rel.clone());
+        }
+        dirs.extend(ancestors(root, p));
+    }
+    let mut deepest: Vec<PathBuf> = dirs.into_iter().collect();
+    deepest.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+    for d in deepest {
+        let _ = fs::remove_dir(&d); // fails, and stays, while it holds anything
+    }
+    let _ = fs::remove_dir(root.join(BLOBS_DIR));
+    Ok(removed)
 }
 
 fn io_err(path: &Path, what: &str, e: impl std::fmt::Display) -> RdyError {

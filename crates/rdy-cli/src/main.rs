@@ -5,7 +5,7 @@ use rdy_daemon::{
     process_alive, serve, serve_command, spawn_serve,
 };
 use rdy_engine::engine::Local;
-use rdy_engine::wc::state::{Place, WcState};
+use rdy_engine::wc::state::{Place, WcState, pointer_project};
 use rdy_engine::{
     E_BAD_INPUT, E_CONFIG, E_IO, E_NO_PROJECT, Rdy, RdyError, Session, check_path, classify,
     human_actor_for_env, project_pack, serve_config,
@@ -359,6 +359,11 @@ enum PackCmd {
 fn find_project(start: &Path) -> PathBuf {
     let mut cur = Some(start);
     while let Some(dir) = cur {
+        // a worktree's pointer file names its project; it is checked before the config file at
+        // each level
+        if let Some(project) = pointer_project(dir) {
+            return project;
+        }
         if dir.join(".rdy/config.yaml").exists() {
             return dir.to_path_buf();
         }

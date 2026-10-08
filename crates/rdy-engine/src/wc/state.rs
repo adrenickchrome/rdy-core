@@ -74,7 +74,9 @@ impl Place {
         None
     }
 
-    fn from_pointer(dir: &Path) -> Option<Place> {
+    /// The worktree place `dir`'s pointer file names (`dir` holds the pointer itself; nothing is
+    /// walked); `None` when the file is missing, does not parse or names an unsafe name.
+    pub fn from_pointer(dir: &Path) -> Option<Place> {
         let text = fs::read_to_string(dir.join(POINTER_FILE)).ok()?;
         let ptr: Pointer = serde_yaml_ng::from_str(&text).ok()?;
         let mut parts = Path::new(&ptr.name).components();
@@ -103,6 +105,57 @@ impl Place {
     pub fn conflict_file(&self, rel: &str) -> PathBuf {
         self.state.join("conflicts").join(rel)
     }
+}
+
+/// The project the pointer file directly in `dir` names: for a directory that holds a regular
+/// file `.rdy-worktree` that parses, else `None`.
+pub fn pointer_project(dir: &Path) -> Option<PathBuf> {
+    let m = fs::symlink_metadata(dir.join(POINTER_FILE)).ok()?;
+    if !m.is_file() {
+        return None;
+    }
+    Place::from_pointer(dir).map(|p| p.project)
+}
+
+/// One human worktree, as `rdy worktree ls` shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeInfo {
+    pub name: String,
+    /// The worktree's directory (`dir.txt` in its state directory); empty when that is missing.
+    pub dir: String,
+    /// The view it is bound to; `None` while unbound.
+    pub view: Option<String>,
+    pub head: Option<String>,
+}
+
+/// The file in a worktree's state directory that holds the worktree's directory.
+pub const WORKTREE_DIR_FILE: &str = "dir.txt";
+
+/// Every state directory under the project's `.rdy/worktrees/`, sorted by name.
+pub fn worktrees(project: &Path) -> Vec<WorktreeInfo> {
+    let Ok(rd) = fs::read_dir(project.join(WORKTREES_DIR)) else {
+        return vec![];
+    };
+    let mut out: Vec<WorktreeInfo> = rd
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            let state = e.path();
+            let dir = fs::read_to_string(state.join(WORKTREE_DIR_FILE))
+                .map(|t| t.trim_end_matches('\n').to_string())
+                .unwrap_or_default();
+            let bound: Option<Bound> = load_yaml(&state.join("bound.yaml")).ok().flatten();
+            Some(WorktreeInfo {
+                name,
+                dir,
+                view: bound.as_ref().map(|b| b.view.clone()),
+                head: bound.map(|b| b.head),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 /// What the working copy is bound to.

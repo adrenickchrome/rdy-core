@@ -1,11 +1,12 @@
 //! `rdy checkout [<view>] [--force]` (wcco1): writes the view as files and binds the working copy
 //! to it.
 
-use super::{Open, open, tree};
+use super::{Open, open, open_at, tree};
 use crate::{Env, call, hash_short, path_arg};
 use rdy_daemon::ErrorReply;
 use rdy_engine::wc::files::{checkout, dirty_paths};
 use rdy_engine::wc::layout::BLOBS_DIR;
+use rdy_engine::wc::state::Place;
 use rdy_engine::{E_BAD_INPUT, E_WC_DIRTY, Projection, RdyError};
 use serde_json::{Value, json};
 
@@ -14,11 +15,33 @@ pub(super) fn run(
     view: Option<String>,
     force: bool,
 ) -> Result<(Value, String), ErrorReply> {
+    let open = open(env, false)?;
+    checkout_in(env, open, view, force)
+}
+
+/// The checkout of `view` into the working copy `open` holds; `rdy worktree add` runs it with
+/// the new worktree's place.
+pub(super) fn checkout_place(
+    env: &Env,
+    place: Place,
+    view: Option<String>,
+    force: bool,
+) -> Result<(Value, String), ErrorReply> {
+    let open = open_at(env, place, false)?;
+    checkout_in(env, open, view, force)
+}
+
+fn checkout_in(
+    env: &Env,
+    open: Open,
+    view: Option<String>,
+    force: bool,
+) -> Result<(Value, String), ErrorReply> {
     let Open {
         place,
         lock,
         mut state,
-    } = open(env, false)?;
+    } = open;
     let (_pack, wt) = tree(env, &place)?;
     if !force {
         state.require_settled()?;

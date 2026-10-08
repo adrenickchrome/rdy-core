@@ -19,7 +19,7 @@ mod commit;
 mod new_files;
 pub(crate) mod status;
 mod update;
-mod worktree;
+pub(crate) mod worktree;
 
 #[derive(Subcommand)]
 pub enum WcCmd {
@@ -52,6 +52,11 @@ pub enum WcCmd {
     /// Bring the bound view's changes made elsewhere into the files, keeping local edits; what
     /// changed on both sides is written beside the file as .theirs.yaml.
     Update,
+    /// Extra checkouts of this project, each bound to its own view.
+    Worktree {
+        #[command(subcommand)]
+        cmd: worktree::WorktreeCmd,
+    },
 }
 
 pub fn run(cmd: WcCmd, env: &Env) -> Result<(Value, String), ErrorReply> {
@@ -71,6 +76,7 @@ pub fn run(cmd: WcCmd, env: &Env) -> Result<(Value, String), ErrorReply> {
             },
         ),
         WcCmd::Update => update::run(env),
+        WcCmd::Worktree { cmd } => worktree::run(env, cmd),
     }
 }
 
@@ -94,6 +100,11 @@ pub(crate) fn open(env: &Env, require_bound: bool) -> Result<Open, ErrorReply> {
             "run the command inside an rdy project",
         )
     })?;
+    open_at(env, place, require_bound)
+}
+
+/// `open` for the working copy at `place` (a worktree the command names, not the one it runs in).
+pub(crate) fn open_at(env: &Env, place: Place, require_bound: bool) -> Result<Open, ErrorReply> {
     let lock = WcLock::take(&place.state, LOCK_WAIT)?;
     let mut state = WcState::load(&place)?;
     commit::recover(env, &place, &mut state)?;
