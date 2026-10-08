@@ -303,6 +303,16 @@ pub fn compute(place: &Place, st: &WcState, tree: &WcTree) -> WcStatus {
                     c.path,
                     c.path.strip_suffix(".yaml").unwrap_or(&c.path),
                 ),
+                ConflictKind::Kept => match c.store_name.as_deref() {
+                    Some(to) if to != c.path => format!(
+                        "{}: committed, but not written back to {to} (a file is in the way); move {to} aside, then run rdy checkout --force",
+                        c.path
+                    ),
+                    _ => format!(
+                        "{}: committed, but not written back (it holds edits the commit did not record); copy it aside, then run rdy checkout --force",
+                        c.path
+                    ),
+                },
                 ConflictKind::DocRename | ConflictKind::FolderRename => {
                     let what = if c.kind == ConflictKind::DocRename {
                         "doc"

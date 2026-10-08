@@ -455,15 +455,17 @@ fn wccm1_the_write_back_keeps_an_untracked_file_where_a_renamed_doc_would_go() {
     );
     assert_eq!(v["kept"][0]["file"], "memo.yaml", "{v}");
     assert!(
-        v["kept"][0]["fix"].as_str().unwrap().contains("rdy update"),
+        v["kept"][0]["fix"]
+            .as_str()
+            .unwrap()
+            .contains("rdy checkout --force"),
         "{v}"
     );
     assert_eq!(store_block(&s, "work", &seed.note).body, "Mine.");
-    let o = s.rdy(&["commit", "-m", "y"]);
+    let (okk, v) = json(&s, &["commit", "-m", "y"]);
     assert!(
-        String::from_utf8_lossy(&o.stderr).contains("nothing staged"),
-        "{}",
-        String::from_utf8_lossy(&o.stderr)
+        !okk && v["code"] == E_WC_CONFLICT,
+        "the kept file refuses commits: {v}"
     );
 }
 
@@ -545,4 +547,158 @@ fn wccm1_the_write_back_keeps_an_untracked_file_where_a_projected_directory_woul
     );
     assert!(v["kept"].as_array().is_some_and(|k| !k.is_empty()), "{v}");
     assert_eq!(store_block(&s, "work", &seed.prose).body, "Mine.");
+}
+
+/// How many entries of `rel` hold `body`.
+fn with_body(s: &Served, rel: &str, body: &str) -> usize {
+    entries(s, rel)
+        .iter()
+        .filter(|e| e["body"].as_str() == Some(body))
+        .count()
+}
+
+#[test]
+fn wccm1_a_file_kept_by_recovery_is_a_conflict_and_is_never_recorded_twice() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let orig = read(&s, "notes.yaml");
+    put(
+        &s,
+        "notes.yaml",
+        &format!("{orig}- type: prose\n  body: Added once.\n"),
+    );
+    ok(&s, &["add", "notes.yaml"]);
+    // a lost acknowledgement of the create
+    let nonce = journal(&s, &seed.notes, "notes.yaml");
+    s.stop();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    let ops = serde_json::from_value(json!([
+        {"op": "create", "type": "prose", "parent": seed.notes, "after": seed.note, "body": "Added once."}
+    ]))
+    .unwrap();
+    r.write_linked(
+        &rdy_qa::fixtures::writer(),
+        WriteRequest {
+            view: "work".into(),
+            ops,
+            justification: None,
+            message: "lost".into(),
+        },
+        ChangeLinks {
+            client_nonce: Some(nonce),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    r.close().unwrap();
+    // the person edits the file again before the next command: the write-back keeps it
+    let mut text = read(&s, "notes.yaml");
+    text.push_str("# a later comment\n");
+    put(&s, "notes.yaml", &text);
+    let o = s.rdy(&["status"]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(o.status.success() && err.contains("W_WC_KEPT"), "{err}");
+    assert!(
+        err.contains("rdy checkout --force") && !err.contains("rdy update"),
+        "the fix names a command that exists: {err}"
+    );
+    let (_, st) = json(&s, &["status"]);
+    assert_eq!(
+        st["working_copy"]["conflicts"][0]["path"], "notes.yaml",
+        "{st}"
+    );
+    assert_eq!(st["working_copy"]["conflicts"][0]["kind"], "kept", "{st}");
+    ok(&s, &["add", "notes.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "again"]);
+    assert!(
+        !okk && v["code"] == E_WC_CONFLICT,
+        "never recorded twice: {v}"
+    );
+    assert!(
+        v["fix"].as_str().unwrap().contains("rdy checkout --force"),
+        "{v}"
+    );
+    assert!(!at(&s, ".rdy/wc/pending.yaml").exists());
+    // the way out the fix names: the store's version, holding the block once
+    ok(&s, &["checkout", "--force"]);
+    assert_eq!(
+        with_body(&s, "notes.yaml", "Added once."),
+        1,
+        "{}",
+        read(&s, "notes.yaml")
+    );
+    let (_, st) = json(&s, &["status"]);
+    assert!(
+        st["working_copy"]["conflicts"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{st}"
+    );
+    assert!(
+        st["working_copy"]["unstaged"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{st}"
+    );
+}
+
+#[test]
+fn wccm1_a_renamed_doc_kept_by_the_write_back_is_a_conflict_and_is_never_recorded_twice() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let memo = "my own memo, never tracked\n";
+    put(&s, "memo.yaml", memo);
+    store_write(
+        &s,
+        "work",
+        json!([{"op": "update", "id": seed.notes, "fields": {"name": "memo"}}]),
+    );
+    let orig = read(&s, "notes.yaml");
+    put(
+        &s,
+        "notes.yaml",
+        &format!("{orig}- type: prose\n  body: Added once.\n"),
+    );
+    ok(&s, &["add", "notes.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "x"]);
+    assert!(okk, "{v}");
+    assert_eq!(v["kept"][0]["file"], "memo.yaml", "{v}");
+    let fix = v["kept"][0]["fix"].as_str().unwrap();
+    assert!(
+        fix.contains("rdy checkout --force") && !fix.contains("rdy update"),
+        "{v}"
+    );
+    let (_, st) = json(&s, &["status"]);
+    assert_eq!(
+        st["working_copy"]["conflicts"][0]["path"], "notes.yaml",
+        "{st}"
+    );
+    assert_eq!(st["working_copy"]["conflicts"][0]["kind"], "kept", "{st}");
+    assert!(
+        st["working_copy"]["conflicts"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("memo.yaml"),
+        "{st}"
+    );
+    ok(&s, &["add", "notes.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "again"]);
+    assert!(
+        !okk && v["code"] == E_WC_CONFLICT,
+        "never recorded twice: {v}"
+    );
+    // the way out the fix names: move the untracked file aside, then check out again
+    std::fs::rename(at(&s, "memo.yaml"), at(&s, "memo.txt")).unwrap();
+    ok(&s, &["checkout", "--force"]);
+    assert_eq!(read(&s, "memo.txt"), memo);
+    assert!(!at(&s, "notes.yaml").exists());
+    assert_eq!(
+        with_body(&s, "memo.yaml", "Added once."),
+        1,
+        "{}",
+        read(&s, "memo.yaml")
+    );
 }

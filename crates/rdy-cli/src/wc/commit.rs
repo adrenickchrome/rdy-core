@@ -8,7 +8,7 @@ use crate::{Conn, Env, call, hash_short};
 use rdy_daemon::{E_DAEMON_GONE, ErrorReply};
 use rdy_engine::wc::files::{apply_writeback, changed_since_staged};
 use rdy_engine::wc::plan::{CommitPlan, plan_commit};
-use rdy_engine::wc::state::{Pending, Place, WcState, new_nonce, stage_clear};
+use rdy_engine::wc::state::{ConflictKind, Pending, Place, WcState, new_nonce, stage_clear};
 use rdy_engine::{
     Diagnostic, E_BAD_INPUT, E_BAD_NAME, E_HAS_CHILDREN, E_KEY_CLASH, E_PATH_CLASH, E_STALE_BASE,
     E_UNKNOWN_REF, E_VALIDATION, E_WC_CONFLICT, E_WC_DIRTY, E_WC_INVALID, E_WC_LOCKED, E_WC_STALE,
@@ -55,7 +55,11 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
                 paths.len(),
                 paths.join(", ")
             ),
-            "edit the doc, delete its .theirs.yaml, run rdy add, then commit",
+            if state.conflicts.iter().any(|c| c.kind == ConflictKind::Kept) {
+                "copy the files named aside, then run rdy checkout --force (it discards uncommitted edits) and make your edits again"
+            } else {
+                "edit the doc, delete its .theirs.yaml, run rdy add, then commit"
+            },
         )
         .into());
     }

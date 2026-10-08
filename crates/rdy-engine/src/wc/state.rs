@@ -144,6 +144,12 @@ pub enum ConflictKind {
     Blocks,
     DocRename,
     FolderRename,
+    /// A commit was recorded, but its write-back left this doc's file alone (it held edits the
+    /// commit did not record, or a file was in the way). Its base is still the old one, so an
+    /// entry the commit created would be created again: every commit is refused until a checkout
+    /// replaces the files. `path` is where the doc's file stays, `store_name` the path the store's
+    /// version goes to, and `blocks` and `theirs_versions` the store's blocks of that file.
+    Kept,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

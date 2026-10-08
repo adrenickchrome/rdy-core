@@ -6,7 +6,8 @@ use crate::tree_io::Diagnostic;
 use crate::wc::layout::{FileKind, WcTree};
 use crate::wc::project::Projection;
 use crate::wc::state::{
-    Base, BaseBlock, Bound, CheckoutMark, Place, Stage, WcState, new_nonce, stage_paths,
+    Base, BaseBlock, Bound, CheckoutMark, ConflictEntry, ConflictKind, Place, Stage, WcState,
+    new_nonce, stage_paths,
 };
 use rdy_model::BlockId;
 use rdy_schema::Severity;
@@ -533,7 +534,9 @@ fn prune_dirs(top: &Path, rel: &str) {
 /// The write-back never destroys what the commit did not record. A projected path that holds
 /// something other than its staged or base copy (a file rdy does not track, a person's later
 /// edits, a directory or link on the way) is not written: that file's head keeps its old path,
-/// base copy and base entries, and a `W_WC_KEPT` warning names it. A path to delete that holds
+/// base copy and base entries, a `W_WC_KEPT` warning names it, and a `ConflictKind::Kept` entry
+/// refuses every later commit until a checkout replaces the files (the old base would let the
+/// next commit create the commit's new blocks a second time). A path to delete that holds
 /// later edits stays on disk, untracked, with a warning. An old path that is the same file as a
 /// written path (a case-only rename on a case-insensitive filesystem) is not deleted.
 pub fn apply_writeback(
@@ -557,6 +560,7 @@ pub fn apply_writeback(
     };
     // which projected files may be written, decided before anything is written
     let mut blocked: BTreeSet<&str> = BTreeSet::new();
+    let mut conflicts: Vec<ConflictEntry> = vec![];
     for f in &proj.files {
         if !replaceable(place, st, &f.path, Some(&f.text)) {
             blocked.insert(f.path.as_str());
@@ -570,7 +574,10 @@ pub fn apply_writeback(
                         "{} is not written back: it holds edits the commit did not record",
                         f.path
                     ),
-                    format!("run rdy update, then rdy add {} and rdy commit", f.path),
+                    format!(
+                        "copy {} aside, then run rdy checkout --force (it discards uncommitted edits); commit is refused until then",
+                        f.path
+                    ),
                 )
             } else if olds.is_empty() {
                 (
@@ -578,7 +585,10 @@ pub fn apply_writeback(
                         "{} is not written back: a file rdy does not track is in the way",
                         f.path
                     ),
-                    format!("move {} aside, then run rdy update", f.path),
+                    format!(
+                        "move {} aside, then run rdy checkout --force (it discards uncommitted edits); commit is refused until then",
+                        f.path
+                    ),
                 )
             } else {
                 (
@@ -587,11 +597,34 @@ pub fn apply_writeback(
                         f.path,
                         olds.join(", ")
                     ),
-                    format!("move {} aside, then run rdy update", f.path),
+                    format!(
+                        "move {} aside, then run rdy checkout --force (it discards uncommitted edits); commit is refused until then",
+                        f.path
+                    ),
                 )
             };
             out.kept.push(kept(&f.path, message, fix));
+            // the base stays old, so the file must not be committed again before a checkout
+            let theirs: BTreeMap<BlockId, String> = proj
+                .blocks
+                .iter()
+                .filter(|(_, b)| b.file == f.path)
+                .filter_map(|(id, b)| Some((BlockId::parse(id).ok()?, b.version.clone())))
+                .collect();
+            conflicts.push(ConflictEntry {
+                path: olds.first().cloned().unwrap_or_else(|| f.path.clone()),
+                kind: ConflictKind::Kept,
+                blocks: theirs.keys().cloned().collect(),
+                theirs_versions: theirs,
+                local_name: None,
+                store_name: Some(f.path.clone()),
+                store_parent: None,
+            });
         }
+    }
+    for c in conflicts {
+        st.conflicts.retain(|o| o.path != c.path);
+        st.conflicts.push(c);
     }
     let blocked_heads: BTreeSet<&str> = proj
         .files
