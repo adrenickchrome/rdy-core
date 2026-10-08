@@ -159,9 +159,11 @@ impl TensionSet {
 
     /// The same opened and resolved lists as `diff`, found from what a step can touch: the
     /// tensions with one of `changes` as a side and those that involve one of `blocks`, in
-    /// either set, each checked against the other. Exact when every tension the step opened or
-    /// resolved involves one of them (a carry only ever adds or removes tensions around its
-    /// seeds), and its cost follows those tensions, not the size of the sets.
+    /// either set, each checked against the other. Exact only when every tension the step
+    /// opened or resolved involves one of them: `newer` is this set carried across the one
+    /// change in `changes`, and `blocks` are its seeds (a carry only adds or removes tensions
+    /// around its seeds). `tension_delta` checks that before it calls this. Its cost follows
+    /// those tensions, not the size of the sets.
     pub fn diff_scoped(
         &self,
         newer: &TensionSet,
@@ -202,28 +204,33 @@ pub struct TensionDelta {
     pub examined: usize,
 }
 
-/// What the step from `before` to `after` did to the tension set. With `changes` (the changes
-/// the step added or removed), only the tensions around them and their blocks are read; with
-/// `None` (a rebase, or a moved base) the two sets are diffed whole.
+/// What the step from `before` to `after` did to the tension set. `changes` are the changes
+/// the step added or removed (`None` for a rebase or a moved base). Only when `after`'s set was
+/// carried from `before`'s across the one change in `changes` are just the tensions around it
+/// and its seeds read (`diff_scoped`). Every other step diffs the two sets whole: a commit that
+/// does not carry (a delete, a structural write, a move, a lifecycle change) and a view op
+/// (its state builds the set again) can open or resolve tensions away from the change and its
+/// blocks, for example an area overlap that a deleted `affects` target gave.
 pub fn tension_delta(
     before: &ReadState,
     after: &ReadState,
     changes: Option<&[Hash]>,
 ) -> Result<TensionDelta, RdyError> {
     let (old, new) = (before.tensions()?, after.tensions()?);
-    let Some(changes) = changes else {
-        let (opened, resolved) = old.diff(&new);
-        return Ok(TensionDelta {
-            opened,
-            resolved,
-            examined: old.len() + new.len(),
-        });
-    };
-    let mut blocks = BTreeSet::new();
-    for c in changes {
-        blocks.extend(seeds_of(after, c)?);
+    match changes {
+        Some([change]) if after.tensions_carried_from(&old, change) => {
+            let blocks = seeds_of(after, change)?;
+            Ok(old.diff_scoped(&new, &[*change], &blocks))
+        }
+        _ => {
+            let (opened, resolved) = old.diff(&new);
+            Ok(TensionDelta {
+                opened,
+                resolved,
+                examined: old.len() + new.len(),
+            })
+        }
     }
-    Ok(old.diff_scoped(&new, changes, &blocks))
 }
 
 /// The one tension of `tensions` that `text` names: `tn-` and a hex prefix, or the prefix alone
@@ -541,6 +548,13 @@ impl ReadState {
     #[doc(hidden)]
     pub fn tensions_built(&self) -> bool {
         self.tensions.set.get().is_some()
+    }
+
+    /// Whether this state's tension set was carried from exactly `prev` across `change` (and
+    /// nothing else). Never builds.
+    pub(crate) fn tensions_carried_from(&self, prev: &Arc<TensionSet>, change: &Hash) -> bool {
+        self.tensions_carried() == Some(true)
+            && matches!(&self.tensions.carry, Some((p, c, _)) if Arc::ptr_eq(p, prev) && c == change)
     }
 
     /// Test hook: whether this state's tension set was carried from the state before (`None`

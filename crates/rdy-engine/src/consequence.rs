@@ -768,7 +768,8 @@ pub fn view_op_and_report<T: Serialize + 'static>(
     };
     let full = e.full || before.effective_base(view) != after.effective_base(view);
     let changes = (!full).then_some(&e.changes[..]);
-    // one delta for both: the consequences' tension entries and `on_change`
+    // one delta for both: the consequences' tension entries and `on_change` (a view op's state
+    // builds its tension set again, so `tension_delta` diffs the two sets whole)
     match tension_delta(&before, &after, changes) {
         Ok(d) => {
             let c = after.view_consequences(&before, view, &e.batch, changes, &d, max_tokens);

@@ -273,3 +273,228 @@ proptest! {
         }
     }
 }
+
+/// A landed doc at `path` with one section, and (when `claim`) one claim under it: the section
+/// and the claim.
+fn landed_doc(r: &mut rdy_engine::Rdy, path: &str, claim: bool) -> (BlockId, Option<BlockId>) {
+    r.new_doc(&writer(), "seed", path, Some("glossary"), Some("Doc"))
+        .unwrap();
+    let doc = r
+        .read()
+        .resolve_path(&rdy_engine::Scope::View("seed".into()), path)
+        .unwrap();
+    let mut ops = vec![
+        json!({"op": "create", "type": "section", "id": "$s", "parent": doc.to_string(), "fields": {"title": "S"}}),
+    ];
+    if claim {
+        ops.push(json!({"op": "create", "type": "claim", "id": "$x", "parent": "$s", "body": "Fees are monthly."}));
+    }
+    let w = write(r, "seed", json!(ops)).unwrap();
+    land(r, "seed").unwrap();
+    (created(&w, "$s"), claim.then(|| created(&w, "$x")))
+}
+
+/// The QA pack with the spec doc, a landed claim X in area payments and a landed section N in
+/// no area; decisions in views a and b under N both affect X, so they overlap in payments only
+/// through X (the overlap involves neither X nor any block a delete of X writes).
+struct Overlap {
+    _d: tempfile::TempDir,
+    e: Local,
+    s: Spec,
+    fees: BlockId,
+    x: BlockId,
+    n: BlockId,
+    overlap: Hash,
+}
+
+fn overlap() -> Overlap {
+    let (d, mut r) = rdy_qa::packs::qa_project();
+    let s = spec_doc(&mut r);
+    let (fees, x) = landed_doc(&mut r, "payments/fees", true);
+    let x = x.unwrap();
+    let (n, _) = landed_doc(&mut r, "notes/misc", false);
+    for who in ["a", "b"] {
+        r.decide(
+            &ag(who),
+            who,
+            rdy_engine::DecisionInput {
+                parent: n.to_string(),
+                statement: format!("{who} decides"),
+                affects: vec![x.to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let overlap = one(&r, rdy_engine::tensions::TensionKind::AreaOverlap).id;
+    Overlap {
+        _d: d,
+        e: Local::new(r),
+        s,
+        fees,
+        x,
+        n,
+        overlap,
+    }
+}
+
+#[test]
+fn tonc1_a_delete_that_resolves_a_tension_away_from_its_seeds_reports_it() {
+    let o = overlap();
+    let before = o.e.read();
+    let v = w(&o.e, "a", json!([{"op": "delete", "id": o.x.to_string()}]));
+    let after = o.e.read();
+    let full = full_delta(&before, &after);
+    assert_eq!(
+        ids(&full.resolved),
+        vec![o.overlap],
+        "the delete resolves the overlap"
+    );
+    let change: Hash = v["change"].as_str().unwrap().parse().unwrap();
+    let d = tension_delta(&before, &after, Some(&[change])).unwrap();
+    assert_eq!(ids(&d.opened), ids(&full.opened));
+    assert_eq!(ids(&d.resolved), ids(&full.resolved));
+    let resolved = v["on_change"]["resolved"].as_array().unwrap();
+    assert_eq!(resolved.len(), 1, "{v}");
+    assert_eq!(resolved[0]["kind"], "area_overlap");
+    check_step(&o.e, "a", &before, &v);
+}
+
+#[test]
+fn tonc1_an_exclude_of_that_delete_reports_the_reopened_tension() {
+    let o = overlap();
+    let v = w(&o.e, "a", json!([{"op": "delete", "id": o.x.to_string()}]));
+    let before = o.e.read();
+    let reply = run_view(
+        &o.e,
+        &ag("a"),
+        "a",
+        ViewRequest {
+            op: "exclude".into(),
+            view: Some("a".into()),
+            changes: Some(vec![v["change"].as_str().unwrap().to_string()]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let after = o.e.read();
+    let full = full_delta(&before, &after);
+    assert_eq!(
+        ids(&full.opened),
+        vec![o.overlap],
+        "the exclude reopens the overlap"
+    );
+    let opened = reply["on_change"]["tensions"].as_array().unwrap();
+    assert_eq!(opened.len(), 1, "{reply}");
+    assert_eq!(opened[0]["kind"], "area_overlap");
+    check_step(&o.e, "a", &before, &reply);
+}
+
+/// One random step of the wide property: ops that carry and ops that do not.
+fn wide_ops(
+    o: &Overlap,
+    kind: u8,
+    pick: usize,
+    n: usize,
+    known: &[BlockId],
+    sections: &[BlockId],
+) -> Value {
+    let target = &known[pick % known.len()];
+    let section = &sections[pick % sections.len()];
+    let parent = if pick.is_multiple_of(2) {
+        &o.s.doc
+    } else {
+        &o.fees
+    };
+    let lifecycle = ["draft", "stable", "deprecated"][pick % 3];
+    match kind {
+        0 => cite(&o.s.section, target),
+        1 => upd(target, &format!("Edit {n}.")),
+        2 => term(&o.s.section, ["standing 0", "Fee", "fee", "cost"][pick % 4]),
+        // a delete (never carries)
+        3 => json!([{"op": "delete", "id": target.to_string()}]),
+        // a move (never carries)
+        4 => json!([{"op": "move", "id": target.to_string(), "parent": section.to_string()}]),
+        // structural writes: a section create, a section delete, a doc create
+        5 => json!([{"op": "create", "type": "section", "id": "$s",
+            "parent": parent.to_string(), "fields": {"title": format!("New {n}")}}]),
+        // a section delete: of an empty one this run created, when there is one
+        6 => {
+            let made = &sections[2.min(sections.len() - 1)..];
+            json!([{"op": "delete", "id": made[pick % made.len()].to_string()}])
+        }
+        7 => json!([{"op": "create", "type": "doc", "id": "$d",
+            "fields": {"name": format!("extra{n}"), "title": "Extra", "doc_type": "overview"}}]),
+        // a lifecycle change
+        _ => json!([{"op": "update", "id": section.to_string(),
+            "fields": {"lifecycle": lifecycle}}]),
+    }
+}
+
+proptest! {
+    #![proptest_config(Config { cases: 48, rng_seed: RngSeed::Fixed(12), ..Config::default() })]
+    #[test]
+    fn tonc1_the_scoped_delta_equals_the_full_diff_for_every_kind_of_step(
+        steps in proptest::collection::vec((0u8..13, 0u8..16), 1..10)
+    ) {
+        let o = overlap();
+        let e = &o.e;
+        let mut known = vec![o.s.a.clone(), o.s.c.clone(), o.s.section.clone(), o.x.clone(), o.n.clone(), o.s.decision.clone()];
+        let mut sections = vec![o.s.section.clone(), o.n.clone()];
+        let mut mine: Vec<(&str, Hash)> = vec![];
+        for (n, (kind, pick)) in steps.into_iter().enumerate() {
+            let pick = pick as usize;
+            let view = if pick.is_multiple_of(2) { "a" } else { "b" };
+            let other = if view == "a" { "b" } else { "a" };
+            let before = e.read();
+            let r = match kind {
+                0..=8 => {
+                    let ops = wide_ops(&o, kind, pick / 2, n, &known, &sections);
+                    let v2 = view.to_string();
+                    write_and_report(e, view, None, move |r| try_put(r, &v2, ops))
+                }
+                // a decision with `affects`
+                9 => {
+                    let (target, parent) = (known[pick % known.len()].to_string(), o.n.to_string());
+                    let v2 = view.to_string();
+                    write_and_report(e, view, None, move |r| r.decide(&ag(&v2), &v2, rdy_engine::DecisionInput {
+                        parent,
+                        statement: format!("Decision {n}"),
+                        affects: vec![target],
+                        ..Default::default()
+                    }))
+                }
+                _ => {
+                    // a view op: include another view's change, exclude one of this view's, or undo
+                    let req = match kind {
+                        10 | 11 => {
+                            let (op, from) = if kind == 10 { ("include", other) } else { ("exclude", view) };
+                            let Some((_, c)) = mine.iter().rev().find(|(v, _)| *v == from) else { continue };
+                            ViewRequest { op: op.into(), view: Some(view.into()),
+                                changes: Some(vec![c.to_string()]), ..Default::default() }
+                        }
+                        _ => ViewRequest { op: "undo".into(), view: Some(view.into()), ..Default::default() },
+                    };
+                    let Ok(reply) = run_view(e, &ag(view), view, req) else { continue };
+                    check_step(e, view, &before, &reply);
+                    continue;
+                }
+            };
+            let Ok(r) = r else { continue };
+            for y in r["created"].as_object().into_iter().flat_map(|m| m.values()) {
+                if let Some(id) = y.as_str().and_then(|y| BlockId::parse(y).ok()) {
+                    if kind == 5 { sections.push(id.clone()); }
+                    known.push(id);
+                }
+            }
+            let change: Hash = r["change"].as_str().unwrap().parse().unwrap();
+            mine.push((view, change));
+            let after = e.read();
+            let d = tension_delta(&before, &after, Some(&[change])).unwrap();
+            let f = full_delta(&before, &after);
+            prop_assert_eq!(ids(&d.opened), ids(&f.opened), "step {}", n);
+            prop_assert_eq!(ids(&d.resolved), ids(&f.resolved), "step {}", n);
+            check_step(e, view, &before, &r);
+        }
+    }
+}
