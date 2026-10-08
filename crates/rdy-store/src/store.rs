@@ -6,7 +6,7 @@ use crate::kinds::{self, BlobManifest, RefUpdate};
 use crate::merge::Conflict;
 use crate::segment::{CrashPoint, Location, SegmentLog, SegmentReader, find_gap, seg_path};
 use crate::view::ViewOp;
-use rdy_model::{Block, Change, Hash, LandingRecord, Op, Proposal, Tracking};
+use rdy_model::{Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Tracking};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -1317,6 +1317,11 @@ impl StoreReader {
     /// The changes with an op that produces `version`, ascending.
     pub fn producers(&self, version: &Hash) -> Result<Vec<Hash>, StoreError> {
         self.index().producers(version)
+    }
+
+    /// The changes with an op that deletes `block`, ascending.
+    pub fn deleters(&self, block: &BlockId) -> Result<Vec<Hash>, StoreError> {
+        self.index().deleters(block)
     }
 }
 

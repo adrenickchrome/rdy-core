@@ -158,17 +158,22 @@ fn tset1_ids_cover_sides_and_versions_and_the_vkey_ignores_side_labels() {
         "a re-key changes the id"
     );
     assert_eq!(
-        tension_vkey(k, &[x.clone(), y.clone()]),
-        tension_vkey(k, &[landed, y.clone()]),
+        tension_vkey(k, TensionSeverity::Blocking, &[x.clone(), y.clone()]),
+        tension_vkey(k, TensionSeverity::Blocking, &[landed, y.clone()]),
         "but not the vkey"
+    );
+    assert_ne!(
+        tension_vkey(k, TensionSeverity::Blocking, &[x.clone(), y.clone()]),
+        tension_vkey(k, TensionSeverity::Advisory, &[x.clone(), y.clone()]),
+        "a severity change gives a new vkey"
     );
     let moved = Involved {
         version: Some(Hash([9; 32])),
         ..x.clone()
     };
     assert_ne!(
-        tension_vkey(k, &[x, y.clone()]),
-        tension_vkey(k, &[moved, y])
+        tension_vkey(k, TensionSeverity::Blocking, &[x, y.clone()]),
+        tension_vkey(k, TensionSeverity::Blocking, &[moved, y])
     );
     assert_eq!(tension_label(&Hash([0xab; 32])), "tn-abababababab");
     assert_eq!(c.label(), Hash([2; 32]).to_string());

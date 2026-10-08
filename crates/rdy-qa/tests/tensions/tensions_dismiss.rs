@@ -2,7 +2,7 @@
 use rdy_engine::tensions::*;
 use rdy_engine::{EventKind, Rdy, RdyError, Session};
 use rdy_model::{BlockId, Hash, Role, Verdict};
-use rdy_qa::edit_loop::spec_doc;
+use rdy_qa::edit_loop::{brief_of, spec_doc, write_cited};
 use rdy_qa::fixtures::*;
 use rdy_qa::tensions::*;
 use std::collections::BTreeSet;
@@ -197,4 +197,242 @@ fn tdis1_a_dismissal_emits_tension_dismissed() {
         ),
         "{ev:?}"
     );
+}
+
+/// Canon scope only: one tension over every canon block whose body says "paired", each on its
+/// canon side (one landing carries them all: one side, several producers).
+struct CanonPaired;
+impl Detector for CanonPaired {
+    fn kind(&self) -> TensionKind {
+        TensionKind::EditCollision
+    }
+    fn detect(
+        &self,
+        cx: &DetectCx<'_>,
+        _seeds: Option<&BTreeSet<BlockId>>,
+        out: &mut Vec<Found>,
+    ) -> Result<(), RdyError> {
+        if cx.scope() != DetectScope::Canon {
+            return Ok(());
+        }
+        let m = cx.canon_m()?;
+        let mut involved = vec![];
+        for b in m.iter().filter(|b| b.body.contains("paired")) {
+            if let Some((side, v)) = cx.canon_side(&b.id)? {
+                involved.push(Involved {
+                    side,
+                    block: b.id.clone(),
+                    version: Some(v),
+                });
+            }
+        }
+        if !involved.is_empty() {
+            out.push(Found {
+                kind: TensionKind::EditCollision,
+                involved,
+                summary: "paired".into(),
+                stable: true,
+            });
+        }
+        Ok(())
+    }
+}
+static CANON_PAIRED: CanonPaired = CanonPaired;
+static CANON_DETS: [&dyn Detector; 1] = [&CANON_PAIRED];
+
+/// In flight: a live write on a block canon no longer has, against canon's absent side.
+struct GoneInCanon;
+impl Detector for GoneInCanon {
+    fn kind(&self) -> TensionKind {
+        TensionKind::EditCollision
+    }
+    fn detect(
+        &self,
+        cx: &DetectCx<'_>,
+        _seeds: Option<&BTreeSet<BlockId>>,
+        out: &mut Vec<Found>,
+    ) -> Result<(), RdyError> {
+        if cx.scope() != DetectScope::Inflight {
+            return Ok(());
+        }
+        let canon = cx.canon_m()?;
+        for w in cx.writes.live() {
+            if canon.get(&w.block).is_some() {
+                continue;
+            }
+            out.push(Found {
+                kind: TensionKind::EditCollision,
+                involved: vec![
+                    Involved {
+                        side: SideRef::Change(w.change),
+                        block: w.block.clone(),
+                        version: w.version,
+                    },
+                    Involved {
+                        side: SideRef::Canon { landing: None },
+                        block: w.block.clone(),
+                        version: None,
+                    },
+                ],
+                summary: "gone in canon".into(),
+                stable: true,
+            });
+        }
+        Ok(())
+    }
+}
+static GONE: GoneInCanon = GoneInCanon;
+static GONE_DETS: [&dyn Detector; 1] = [&GONE];
+
+/// A duplicate definition per live write: it softens in draft, so its severity follows the
+/// block's effective lifecycle.
+struct Softens;
+impl Detector for Softens {
+    fn kind(&self) -> TensionKind {
+        TensionKind::DuplicateDefinition
+    }
+    fn detect(
+        &self,
+        cx: &DetectCx<'_>,
+        _seeds: Option<&BTreeSet<BlockId>>,
+        out: &mut Vec<Found>,
+    ) -> Result<(), RdyError> {
+        for w in cx.writes.live() {
+            out.push(Found {
+                kind: TensionKind::DuplicateDefinition,
+                involved: vec![Involved {
+                    side: SideRef::Change(w.change),
+                    block: w.block.clone(),
+                    version: w.version,
+                }],
+                summary: "softens".into(),
+                stable: cx.stable(&w.block)?,
+            });
+        }
+        Ok(())
+    }
+}
+static SOFTENS: Softens = Softens;
+static SOFTENS_DETS: [&dyn Detector; 1] = [&SOFTENS];
+
+#[test]
+fn tdis1_every_producer_on_a_canon_side_is_an_author() {
+    let (_d, mut r) = project();
+    r.set_detectors_for_tests(&CANON_DETS);
+    let s = spec_doc(&mut r);
+    let other = Session::human("human:other".into(), Role::Writer);
+    write_as(&mut r, &writer(), "work", upd(&s.c, "C paired.")).unwrap();
+    write_as(
+        &mut r,
+        &other,
+        "work",
+        serde_json::json!([{"op": "create", "type": "claim", "id": "$e",
+            "parent": s.section.to_string(), "body": "E paired."}]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let t = pick(&r, TensionKind::EditCollision);
+    assert_eq!(t.sides.len(), 1, "one landing carried both: {t:#?}");
+    assert!(has_canon(&t));
+    assert_eq!(t.involved.len(), 2);
+    let tn = tension_label(&t.id);
+    for who in [
+        approver(),
+        Session::human("human:other".into(), Role::Approver),
+    ] {
+        assert_eq!(
+            r.dismiss_tension(&who, &tn, "x").unwrap_err().code,
+            rdy_engine::E_SELF_REVIEW,
+            "{} wrote a block on the canon side",
+            who.actor
+        );
+    }
+    r.dismiss_tension(&reviewer("agent:r", "rr"), &tn, "ok")
+        .unwrap();
+}
+
+#[test]
+fn tdis1_the_actor_who_deleted_a_canon_block_is_an_author_of_its_absent_side() {
+    let (_d, mut r) = project();
+    r.set_detectors_for_tests(&GONE_DETS);
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.c, "C one."));
+    write(
+        &mut r,
+        "work",
+        serde_json::json!([{"op": "delete", "id": s.c.to_string()}]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let t = pick(&r, TensionKind::EditCollision);
+    assert!(
+        t.involved
+            .iter()
+            .any(|i| matches!(i.side, SideRef::Canon { .. }) && i.version.is_none()),
+        "{t:#?}"
+    );
+    let tn = tension_label(&t.id);
+    assert_eq!(
+        r.dismiss_tension(&approver(), &tn, "x").unwrap_err().code,
+        rdy_engine::E_SELF_REVIEW,
+        "human:qa deleted C in canon"
+    );
+    assert_eq!(
+        r.dismiss_tension(&reviewer("agent:a", "ra"), &tn, "x")
+            .unwrap_err()
+            .code,
+        rdy_engine::E_SELF_REVIEW
+    );
+    r.dismiss_tension(
+        &Session::human("human:other".into(), Role::Writer),
+        &tn,
+        "ok",
+    )
+    .unwrap();
+}
+
+#[test]
+fn tdis1_an_advisory_time_dismissal_does_not_hold_once_the_tension_is_blocking() {
+    let (_d, mut r) = project();
+    r.set_detectors_for_tests(&SOFTENS_DETS);
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.c, "C one."));
+    let t = pick(&r, TensionKind::DuplicateDefinition);
+    assert_eq!(t.severity, TensionSeverity::Advisory, "C is draft");
+    r.dismiss_tension(&ag("a"), &tension_label(&t.id), "fine in draft")
+        .unwrap();
+    // a human makes the parent section stable in canon (the write cites a briefing of it)
+    let token = brief_of(&r, &rdy_engine::Scope::Canon, &[&s.section])
+        .base
+        .token;
+    write_cited(
+        &mut r,
+        "st",
+        serde_json::json!([{"op": "update", "id": s.section.to_string(),
+            "fields": {"lifecycle": "stable"}}]),
+        Some(&token),
+    )
+    .unwrap();
+    land(&mut r, "st").unwrap();
+    let t2 = pick(&r, TensionKind::DuplicateDefinition);
+    assert_eq!(t2.id, t.id, "the same blocks at the same versions");
+    assert_ne!(t2.vkey, t.vkey, "the vkey covers the severity");
+    assert_eq!(t2.severity, TensionSeverity::Blocking, "C is stable now");
+    assert_eq!(
+        r.read().tension_status(&t2),
+        TensionStatus::Open,
+        "a dismissal made while advisory does not waive it once blocking"
+    );
+    assert_eq!(r.read().tension_info(&t2).status, "open");
+    let tn = tension_label(&t2.id);
+    assert_eq!(
+        r.dismiss_tension(&ag("a"), &tn, "again").unwrap_err().code,
+        rdy_engine::E_PERMISSION
+    );
+    r.dismiss_tension(&reviewer("agent:r", "rr"), &tn, "ok")
+        .unwrap();
+    assert!(matches!(
+        r.read().tension_status(&t2),
+        TensionStatus::Dismissed(_)
+    ));
 }

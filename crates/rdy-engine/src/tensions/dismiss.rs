@@ -5,9 +5,14 @@
 //!
 //! Who may dismiss: any writer-role session may dismiss an advisory tension, its authors
 //! included. A blocking tension needs the reviewer role or a human session, of an actor that
-//! wrote none of its sides (another run of the same actor is not independent).
+//! wrote none of its items (another run of the same actor is not independent). On a canon side
+//! every item counts: one landing can carry blocks several actors wrote, and the actor whose
+//! landed change deleted a block is an author of that block's absent canon item.
+//!
+//! A dismissal binds to the vkey, which covers the severity: one made while a tension was
+//! advisory does not hold once it is blocking, and the blocking tension needs its own review.
 use super::set::resolve_among;
-use super::{Tension, TensionKind, TensionSeverity, TensionStatus, tension_label};
+use super::{SideRef, Tension, TensionKind, TensionSeverity, TensionStatus, tension_label};
 use crate::error::*;
 use crate::session::now_ms;
 use crate::{Delta, Rdy, RdyError, ReadState, Session};
@@ -42,6 +47,51 @@ impl ReadState {
             .collect();
         resolve_among(set.iter().chain(read_time.iter()), text)
     }
+
+    /// Every actor who wrote an item of `t`, with the side of the item, in item order: a change
+    /// side's change; for each canon item, the change that produced its version, or, for a block
+    /// canon does not hold, every landed change that deleted it (none when canon never held
+    /// it); an intent side's intent. A canon side groups the items one landing carried, which
+    /// several actors can have written, so every item counts, not one per side. An author that
+    /// cannot be read fails closed: a store error is returned, and a canon version with no
+    /// producer is refused with `E_SELF_REVIEW`.
+    fn authors(&self, t: &Tension, label: &str) -> Result<Vec<(SideRef, String)>, RdyError> {
+        let reader = self.reader();
+        let mut out: Vec<(SideRef, String)> = vec![];
+        let mut add = |side: &SideRef, actor: String| {
+            if !out.iter().any(|(s, a)| s == side && *a == actor) {
+                out.push((side.clone(), actor));
+            }
+        };
+        for i in &t.involved {
+            match (&i.side, i.version) {
+                (SideRef::Change(c), _) => add(&i.side, reader.change(c)?.provenance.actor),
+                (SideRef::Canon { .. }, Some(v)) => {
+                    let Some(c) = reader.producer(&v)? else {
+                        return Err(RdyError::new(
+                            E_SELF_REVIEW,
+                            format!(
+                                "the author of block {} on side {} of {label} cannot be read, so no session is shown independent of it",
+                                i.block,
+                                i.side.short()
+                            ),
+                            "run rdy fsck; the store has a version that no change produced",
+                        ));
+                    };
+                    add(&i.side, reader.change(&c)?.provenance.actor);
+                }
+                (SideRef::Canon { .. }, None) => {
+                    for d in reader.deleters(&i.block)? {
+                        if reader.landing_of(&d)?.is_some() {
+                            add(&i.side, reader.change(&d)?.provenance.actor);
+                        }
+                    }
+                }
+                (SideRef::Intent { version, .. }, _) => add(&i.side, reader.intent(version)?.actor),
+            }
+        }
+        Ok(out)
+    }
 }
 
 impl Rdy {
@@ -49,7 +99,7 @@ impl Rdy {
     /// and publishes the dismissal. Checks, in order: the session may write; the reason is 1 to
     /// [`MAX_REASON`] characters after trimming; the tension resolves; it is not dismissed yet;
     /// a blocking tension needs the reviewer role or a human session, of an actor that wrote
-    /// none of its sides.
+    /// none of its items (see `authors`).
     pub fn dismiss_tension(
         &mut self,
         s: &Session,
@@ -93,9 +143,8 @@ impl Rdy {
                     "start a session with role reviewer, or ask a human",
                 ));
             }
-            let info = st.tension_info(&t);
-            for (side, si) in t.sides.iter().zip(&info.sides) {
-                if si.actor.as_deref() == Some(s.actor.as_str()) {
+            for (side, actor) in st.authors(&t, &label)? {
+                if actor == s.actor {
                     return Err(RdyError::new(
                         E_SELF_REVIEW,
                         format!(

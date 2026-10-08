@@ -92,8 +92,9 @@ pub struct Found {
     pub stable: bool,
 }
 
-/// A tension: its id (kind and involved items), its vkey (the same without side labels, which a
-/// dismissal binds to), its severity, its distinct sides, sorted, and what it involves.
+/// A tension: its id (kind and involved items), its vkey (the same without side labels and with
+/// the severity, which a dismissal binds to), its severity, its distinct sides, sorted, and what
+/// it involves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tension {
     pub id: Hash,
@@ -144,14 +145,18 @@ pub fn tension_id(kind: TensionKind, involved: &[Involved]) -> Hash {
 }
 
 /// A tension's vkey: [`tension_id`] without the side labels (items sorted by block, then
-/// version), so a landing, which changes a side's label and not its content, keeps it.
-pub fn tension_vkey(kind: TensionKind, involved: &[Involved]) -> Hash {
+/// version), and with the severity after the kind. A landing, which changes a side's label and
+/// not its content, keeps it. A change of severity (a lifecycle or pack change) gives a new one,
+/// so a dismissal made under one severity does not hold under another.
+pub fn tension_vkey(kind: TensionKind, severity: TensionSeverity, involved: &[Involved]) -> Hash {
     let mut items: Vec<(&BlockId, &Option<Hash>)> =
         involved.iter().map(|i| (&i.block, &i.version)).collect();
     items.sort();
     let mut bytes = b"rdy-tension-vkey-1\0".to_vec();
-    bytes.extend_from_slice(kind.name().as_bytes());
-    bytes.push(0);
+    for part in [kind.name().to_string(), severity.to_string()] {
+        bytes.extend_from_slice(part.as_bytes());
+        bytes.push(0);
+    }
     for (block, version) in items {
         for part in [block.to_string(), version_text(version)] {
             bytes.extend_from_slice(part.as_bytes());
@@ -215,7 +220,7 @@ pub(crate) fn tension_from(
     let sides: BTreeSet<SideRef> = involved.iter().map(|i| i.side.clone()).collect();
     Some(Tension {
         id: tension_id(f.kind, &involved),
-        vkey: tension_vkey(f.kind, &involved),
+        vkey: tension_vkey(f.kind, severity, &involved),
         kind: f.kind,
         severity,
         overridden,

@@ -78,7 +78,9 @@ pub struct DismissalInfo {
 }
 
 impl ReadState {
-    /// Whether `t` is open or dismissed in this state (a dismissal binds to the vkey).
+    /// Whether `t` is open or dismissed in this state. A dismissal binds to the vkey, which
+    /// covers the content and the severity: a dismissal made while `t` was advisory does not
+    /// hold once it is blocking.
     pub fn tension_status(&self, t: &Tension) -> TensionStatus {
         match self.dismissals.get(&t.vkey) {
             Some(review) => TensionStatus::Dismissed(*review),
@@ -88,8 +90,9 @@ impl ReadState {
 
     /// `t` as the surfaces list it. A change side's views are the open views that hold it and
     /// its actor and run the change's; a canon side's actor and run are those of the change that
-    /// produced its involved version; an intent side's are the intent's. A dismissed tension
-    /// carries its review. What cannot be read is left out.
+    /// produced its first involved version (the dismissal rules read every item's); an intent
+    /// side's are the intent's. A dismissed tension carries its review. What cannot be read is
+    /// left out.
     pub fn tension_info(&self, t: &Tension) -> TensionInfo {
         let (status, dismissal) = match self.tension_status(t) {
             TensionStatus::Open => ("open", None),
