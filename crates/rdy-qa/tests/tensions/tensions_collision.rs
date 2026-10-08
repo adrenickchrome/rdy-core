@@ -3,22 +3,47 @@ use proptest::prelude::*;
 use rdy_engine::Scope;
 use rdy_engine::alt::AltMemberInput;
 use rdy_engine::tensions::*;
+use rdy_model::BlockId;
 use rdy_qa::edit_loop::spec_doc;
 use rdy_qa::fixtures::*;
 use rdy_qa::tensions::*;
 use serde_json::{Value, json};
 
-/// One update op resolving the conflict on `id` in `view`: it names the conflict's base, the
-/// version the view edited (a write on a conflicted block must name it).
-fn resolve(r: &rdy_engine::Rdy, view: &str, id: &rdy_model::BlockId, body: &str) -> Value {
-    let base = r
-        .read()
+/// The base of the conflict on `id` in `view`: the version the view edited (a write on a
+/// conflicted block must name it).
+fn conflict_base(r: &rdy_engine::Rdy, view: &str, id: &BlockId) -> String {
+    r.read()
         .conflict_on(&Scope::View(view.into()), id)
         .unwrap()
         .expect("conflicted before resolving")
         .base
-        .expect("a conflict on an update has a base");
-    json!([{"op": "update", "id": id.to_string(), "base": base.to_string(), "body": body}])
+        .expect("a conflict on an update has a base")
+        .to_string()
+}
+
+/// One update op resolving the conflict on `id` in `view`: it names the conflict's base.
+fn resolve(r: &rdy_engine::Rdy, view: &str, id: &BlockId, body: &str) -> Value {
+    let base = conflict_base(r, view, id);
+    json!([{"op": "update", "id": id.to_string(), "base": base, "body": body}])
+}
+
+/// One delete op resolving the conflict on `id` in `view`: it names the conflict's base.
+fn resolve_by_delete(r: &rdy_engine::Rdy, view: &str, id: &BlockId) -> Value {
+    let base = conflict_base(r, view, id);
+    json!([{"op": "delete", "id": id.to_string(), "base": base}])
+}
+
+/// One delete op of `id`.
+fn del(id: &BlockId) -> Value {
+    json!([{"op": "delete", "id": id.to_string()}])
+}
+
+/// Whether `view` has a recorded conflict on `id`.
+fn conflicted(r: &rdy_engine::Rdy, view: &str, id: &BlockId) -> bool {
+    r.read()
+        .conflict_on(&Scope::View(view.into()), id)
+        .unwrap()
+        .is_some()
 }
 
 #[test]
@@ -123,6 +148,130 @@ fn tcol1_members_of_one_alternative_set_do_not_collide() {
         ts.iter()
             .all(|t| change_sides(t).len() == 2 && change_sides(t).contains(&cc))
     );
+}
+
+#[test]
+fn tcol1_a_member_that_includes_an_outsiders_change_still_collides_with_it() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.a, "A by a."));
+    put(&mut r, "b", upd(&s.a, "A by b."));
+    let m = |label: &str, view: &str| AltMemberInput {
+        label: label.into(),
+        view: view.into(),
+    };
+    r.alt_create(&ag("o"), "A's wording", None, &[m("x", "a"), m("y", "b")])
+        .unwrap();
+    let cc = change_of(&put(&mut r, "c", upd(&s.a, "A by c.")));
+    assert_eq!(of_kind(&r, TensionKind::EditCollision).len(), 2);
+    // member b takes the outsider's change: c's change is now in a member view and in c
+    r.view_include(&ag("b"), "b", &[cc.to_string()]).unwrap();
+    assert!(conflicted(&r, "b", &s.a));
+    let ts = of_kind(&r, TensionKind::EditCollision);
+    assert_eq!(
+        ts.len(),
+        2,
+        "the outsider still collides with each member: {ts:#?}"
+    );
+    assert!(
+        ts.iter()
+            .all(|t| change_sides(t).len() == 2 && change_sides(t).contains(&cc))
+    );
+}
+
+#[test]
+fn tcol1_a_view_that_writes_a_block_twice_still_collides() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let ca = change_of(&put(&mut r, "a", upd(&s.a, "A by a.")));
+    put(&mut r, "b", upd(&s.a, "A by b."));
+    let cb = change_of(&put(&mut r, "b", upd(&s.a, "A by b, again.")));
+    let before = one(&r, TensionKind::EditCollision);
+    let mut want = vec![ca, cb];
+    want.sort();
+    assert_eq!(
+        change_sides(&before),
+        want,
+        "b's second write edits A from b's first base"
+    );
+    land(&mut r, "a").unwrap();
+    let t = one(&r, TensionKind::EditCollision);
+    assert_eq!(change_sides(&t), vec![cb]);
+    assert!(has_canon(&t));
+    assert_eq!(t.vkey, before.vkey, "a re-key keeps the vkey");
+    assert!(
+        conflicted(&r, "b", &s.a),
+        "the recorded conflict is the tension's continuation"
+    );
+    let ops = resolve(&r, "b", &s.a, "A merged.");
+    put(&mut r, "b", ops);
+    assert!(!conflicted(&r, "b", &s.a));
+    assert!(of_kind(&r, TensionKind::EditCollision).is_empty());
+}
+
+#[test]
+fn tcol1_an_update_against_a_canon_delete_clears_when_resolved_by_an_update() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", del(&s.c));
+    let cb = change_of(&put(&mut r, "b", upd(&s.c, "C by b.")));
+    one(&r, TensionKind::EditCollision);
+    land(&mut r, "a").unwrap();
+    let t = one(&r, TensionKind::EditCollision);
+    assert_eq!(change_sides(&t), vec![cb]);
+    assert!(has_canon(&t));
+    assert!(conflicted(&r, "b", &s.c));
+    let ops = resolve(&r, "b", &s.c, "C kept by b.");
+    put(&mut r, "b", ops);
+    assert!(!conflicted(&r, "b", &s.c));
+    assert!(
+        of_kind(&r, TensionKind::EditCollision).is_empty(),
+        "the resolution is not a new collision with canon's delete"
+    );
+}
+
+#[test]
+fn tcol1_an_update_against_a_canon_delete_clears_when_resolved_by_a_delete() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", del(&s.c));
+    put(&mut r, "b", upd(&s.c, "C by b."));
+    land(&mut r, "a").unwrap();
+    one(&r, TensionKind::EditCollision);
+    let ops = resolve_by_delete(&r, "b", &s.c);
+    put(&mut r, "b", ops);
+    assert!(!conflicted(&r, "b", &s.c));
+    assert!(
+        of_kind(&r, TensionKind::EditCollision).is_empty(),
+        "taking canon's side is not a collision"
+    );
+}
+
+#[test]
+fn tcol1_an_identical_edit_is_not_a_collision_before_or_after_a_landing() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.a, "A same."));
+    put(&mut r, "b", upd(&s.a, "A same."));
+    assert!(
+        of_kind(&r, TensionKind::EditCollision).is_empty(),
+        "the merge reads one outcome as clean"
+    );
+    land(&mut r, "a").unwrap();
+    assert!(!conflicted(&r, "b", &s.a));
+    assert!(of_kind(&r, TensionKind::EditCollision).is_empty());
+}
+
+#[test]
+fn tcol1_a_double_delete_is_not_a_collision_before_or_after_a_landing() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", del(&s.c));
+    put(&mut r, "b", del(&s.c));
+    assert!(of_kind(&r, TensionKind::EditCollision).is_empty());
+    land(&mut r, "a").unwrap();
+    assert!(!conflicted(&r, "b", &s.c));
+    assert!(of_kind(&r, TensionKind::EditCollision).is_empty());
 }
 
 proptest! {

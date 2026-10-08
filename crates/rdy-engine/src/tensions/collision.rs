@@ -1,19 +1,34 @@
 //! Edit collision: two in-flight changes edit one block from one base, or an in-flight edit
 //! against a canon version it did not build on.
 //!
-//! (a) Every pair of live writes on one block from distinct changes with equal bases, where
-//! neither change lists the other in its deps and the two are not members of one open
-//! alternative set (FW-CH6a: the set's own rules govern them). (b) A live write whose base is
-//! stale against canon, is the version of no in-flight write on the block, and whose change does
-//! not depend on the producer of canon's version. No canon-scope form (FW-CH6a): canon holds one
-//! version per block, and the trigger needs in-flight work.
-use super::{DetectCx, DetectScope, Detector, Found, Involved, SideRef, TensionKind};
+//! Each live write is judged with its chain: the in-flight writes of the block it builds on (a
+//! write whose base is the version of an in-flight write its change lists in its deps), back to
+//! the chain's root base. A view that writes a block twice edits it from its first base.
+//!
+//! (a) Every pair of live writes on one block from distinct changes with equal root bases and
+//! different outcomes, where neither chain lists the other change in its deps and the two are not
+//! a member pair of one open alternative set (FW-CH6a: the set's own rules govern them). (b) A
+//! live write whose outcome differs from canon's, whose root base is stale against canon, and
+//! whose chain does not depend on canon's version: on the producer of canon's version, or, when
+//! canon has no version of the block, on an in-flight write of the block (the merge reads that
+//! as the resolution of the delete). Equal outcomes are clean in the merge, so they never
+//! collide. No canon-scope form (FW-CH6a): canon holds one version per block, and the trigger
+//! needs in-flight work.
+use super::{DetectCx, DetectScope, Detector, Found, Involved, SideRef, TensionKind, Write};
 use crate::RdyError;
 use rdy_model::{BlockId, Hash};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// This kind's detector.
 pub struct EditCollision;
+
+/// A live write's chain on its block: the root base and the changes on the chain, the write's
+/// own change among them.
+struct Chain {
+    root: Option<Hash>,
+    changes: BTreeSet<Hash>,
+}
 
 impl Detector for EditCollision {
     fn kind(&self) -> TensionKind {
@@ -44,14 +59,17 @@ impl Detector for EditCollision {
             if live.is_empty() {
                 continue;
             }
+            let all = cx.writes.all_on(&b);
+            let chains: Vec<Chain> = live.iter().map(|w| chain(cx, &all, w)).collect();
             let mut found = vec![];
-            // (a) pairs from one base, in change-id order
-            for (i, w1) in live.iter().enumerate() {
-                for w2 in &live[i + 1..] {
+            // (a) pairs from one root base, in change-id order
+            for (i, (w1, ch1)) in live.iter().zip(&chains).enumerate() {
+                for (w2, ch2) in live[i + 1..].iter().zip(&chains[i + 1..]) {
                     if w1.change == w2.change
-                        || w1.base != w2.base
-                        || depends(cx, &w1.change, &w2.change)
-                        || depends(cx, &w2.change, &w1.change)
+                        || w1.version == w2.version
+                        || ch1.root != ch2.root
+                        || chain_depends(cx, ch1, &w2.change)
+                        || chain_depends(cx, ch2, &w1.change)
                         || member_pair(cx, members, &w1.change, &w2.change)
                     {
                         continue;
@@ -75,12 +93,19 @@ impl Detector for EditCollision {
             }
             // (b) a live write against a canon version it did not build on
             let cv = canon.version_of(&b);
-            let stale = |base: &Option<Hash>| match base {
-                None => cv.is_some(),
-                Some(_) => cv != *base,
+            let stale = |w: &Write, ch: &Chain| {
+                w.version != cv
+                    && match ch.root {
+                        None => cv.is_some(),
+                        Some(_) => cv != ch.root,
+                    }
             };
-            if live.iter().any(|w| stale(&w.base)) {
-                let all = cx.writes.all_on(&b);
+            let against: Vec<(&Arc<Write>, &Chain)> = live
+                .iter()
+                .zip(&chains)
+                .filter(|(w, ch)| stale(w, ch))
+                .collect();
+            if !against.is_empty() {
                 let producer = match cv {
                     Some(v) => cx.st.reader().producer(&v)?,
                     None => None,
@@ -89,11 +114,18 @@ impl Detector for EditCollision {
                     Some((side, v)) => (side, Some(v)),
                     None => (SideRef::Canon { landing: None }, None),
                 };
-                for w in &live {
-                    if !stale(&w.base)
-                        || all.iter().any(|x| x.version == w.base)
-                        || producer.is_some_and(|p| depends(cx, &w.change, &p))
-                    {
+                for (w, ch) in against {
+                    let built_on = match (cv, producer) {
+                        (Some(_), Some(p)) => chain_depends(cx, ch, &p),
+                        (Some(_), None) => false,
+                        // canon deleted b: a side with no change counts as covered in the merge,
+                        // so a chain that depends on an in-flight write of b resolves the delete
+                        (None, _) => ch.changes.iter().any(|c| {
+                            all.iter()
+                                .any(|y| y.change != *c && depends(cx, c, &y.change))
+                        }),
+                    };
+                    if built_on {
                         continue;
                     }
                     found.push((
@@ -131,25 +163,43 @@ impl Detector for EditCollision {
     }
 }
 
+/// Live write `w`'s chain among `all`, the writes on its block: walk back while the current base
+/// is the version of an in-flight write whose change the current change lists in its deps.
+fn chain(cx: &DetectCx<'_>, all: &[Arc<Write>], w: &Write) -> Chain {
+    let mut changes = BTreeSet::from([w.change]);
+    let (mut root, mut at) = (w.base, w.change);
+    while let Some(x) = all
+        .iter()
+        .find(|x| !changes.contains(&x.change) && x.version == root && depends(cx, &at, &x.change))
+    {
+        changes.insert(x.change);
+        root = x.base;
+        at = x.change;
+    }
+    Chain { root, changes }
+}
+
 /// Whether in-flight change `c` lists `d` in its deps.
 fn depends(cx: &DetectCx<'_>, c: &Hash, d: &Hash) -> bool {
     cx.writes.change(c).is_some_and(|f| f.deps.contains(d))
 }
 
-/// Whether changes `c1` and `c2` are a member pair: some view of each is a member view of one
-/// open alternative set.
+/// Whether some change on chain `ch` lists `d` in its deps.
+fn chain_depends(cx: &DetectCx<'_>, ch: &Chain, d: &Hash) -> bool {
+    ch.changes.iter().any(|c| depends(cx, c, d))
+}
+
+/// Whether changes `c1` and `c2` are a member pair: every open view of each is a member view of
+/// one open alternative set, the same for both. A change that a non-member view also holds is
+/// not a member's change alone, so it still collides with the members.
 fn member_pair(cx: &DetectCx<'_>, members: &BTreeMap<String, Hash>, c1: &Hash, c2: &Hash) -> bool {
-    let sets = |c: &Hash| -> BTreeSet<Hash> {
-        cx.writes
-            .change(c)
-            .map(|f| {
-                f.views
-                    .iter()
-                    .filter_map(|v| members.get(v).copied())
-                    .collect()
-            })
-            .unwrap_or_default()
+    let set = |c: &Hash| -> Option<Hash> {
+        let views = &cx.writes.change(c)?.views;
+        let s = *members.get(views.first()?)?;
+        views
+            .iter()
+            .all(|v| members.get(v) == Some(&s))
+            .then_some(s)
     };
-    let s1 = sets(c1);
-    !s1.is_empty() && !s1.is_disjoint(&sets(c2))
+    set(c1).is_some_and(|s| set(c2) == Some(s))
 }
