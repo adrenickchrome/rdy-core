@@ -4,20 +4,35 @@
 use super::{Open, open, tree};
 use crate::Env;
 use rdy_daemon::ErrorReply;
-use rdy_engine::wc::state::WcState;
+use rdy_engine::wc::state::{CHECKOUT_FILE, WcState};
 use rdy_engine::wc::status::{compute, status_text};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// Adds the working copy's status to the store's: its JSON under `working_copy` and its text
-/// after one blank line. Does nothing when nothing is checked out here.
+/// after one blank line. Does nothing when nothing is checked out here. While a checkout or an
+/// update is interrupted, the part is the refusal every other command gives (`interrupted`:
+/// code, message and fix), so the store status still shows.
 pub(crate) fn attach(env: &Env, v: &mut Value, t: &mut String) -> Result<(), ErrorReply> {
     let Some(place) = env.place.as_ref() else {
         return Ok(());
     };
-    if WcState::load_bound(place)?.is_none() {
+    let marked = std::fs::symlink_metadata(place.state.join(CHECKOUT_FILE)).is_ok();
+    if WcState::load_bound(place)?.is_none() && !marked {
         return Ok(());
     }
-    let Open { place, lock, state } = open(env, true)?;
+    let Open { place, lock, state } = open(env, false)?;
+    if let Err(e) = state.require_settled() {
+        drop(lock);
+        v["working_copy"] = json!({
+            "interrupted": {"code": e.code, "message": e.message, "fix": e.fix},
+        });
+        t.push_str(&format!(
+            "\n\nworking copy: {}\n  fix: {}",
+            e.message, e.fix
+        ));
+        return Ok(());
+    }
+    state.require_bound()?;
     let (_pack, wt) = tree(env, &place)?;
     let s = compute(&place, &state, &wt);
     drop(lock);

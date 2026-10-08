@@ -119,7 +119,7 @@ fn plan_one(
             {
                 Err(refuse(
                     E_WC_INVALID,
-                    format!("{typed} is not a doc file: {}", u.reason),
+                    format!("{typed}: {}", u.reason),
                     format!("rdy check {typed}"),
                 ))
             } else {
@@ -157,7 +157,7 @@ fn resolves(
         || fs::symlink_metadata(place.root.join(rel)).is_ok_and(|m| m.file_type().is_dir());
     for (i, c) in st.conflicts.iter().enumerate() {
         if c.kind == ConflictKind::Kept {
-            continue; // only rdy checkout --force clears a kept file
+            continue; // rdy update (or rdy checkout --force) clears a kept file
         }
         let hit = if is_dir {
             is_under(&c.path, rel)

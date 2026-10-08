@@ -612,12 +612,21 @@ fn wcup1_an_interrupted_update_is_finished_by_rdy_update() {
         Some("Theirs claim."),
         "the update got part way"
     );
+    // status still shows the store, and the interrupted update under the working copy
     let (okk, v) = json(&s, &["status"]);
+    let i = &v["working_copy"]["interrupted"];
     assert!(
-        !okk && v["code"] == E_WC_DIRTY
-            && v["message"].as_str().unwrap().contains("update")
-            && v["fix"].as_str().unwrap().starts_with("rdy update"),
+        okk && v["views"].is_array()
+            && i["code"] == E_WC_DIRTY
+            && i["message"].as_str().unwrap().contains("update")
+            && i["fix"].as_str().unwrap().starts_with("rdy update"),
         "{v}"
+    );
+    let text = ok(&s, &["status"]);
+    assert!(
+        text.contains("working copy: an update of work was interrupted")
+            && text.contains("fix: rdy update"),
+        "{text}"
     );
     let (okk, v) = json(&s, &["update"]);
     assert!(okk, "{v}");
@@ -714,4 +723,152 @@ fn wcup1_a_case_only_rename_in_the_store_takes_its_spelling_on_disk() {
         v["staged"].as_array().unwrap().is_empty() && v["deleted"].as_array().unwrap().is_empty(),
         "the update leaves nothing to commit, so the store's rename is not reverted: {v}"
     );
+}
+
+/// How many entries of `rel` hold `body`.
+fn with_body(s: &rdy_qa::daemon::Served, rel: &str, body: &str) -> usize {
+    entries(s, rel)
+        .iter()
+        .filter(|e| e["body"].as_str() == Some(body))
+        .count()
+}
+
+/// A kept file (committed, but not written back) is turned by rdy update into a conflict: the
+/// store's side beside it, the base moved to the store's, so no edit discards the others and the
+/// block the commit created is never recorded twice.
+#[test]
+fn wcup1_update_turns_a_kept_file_into_a_conflict_beside_it() {
+    use rdy_engine::wc::state::*;
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let orig = read(&s, "notes.yaml");
+    put(
+        &s,
+        "notes.yaml",
+        &format!("{orig}- type: prose\n  body: Added once.\n"),
+    );
+    ok(&s, &["add", "notes.yaml"]);
+    // a lost acknowledgement of the create
+    let place = Place::locate(s.dir.path()).unwrap();
+    let mut st = WcState::load(&place).unwrap();
+    let nonce = new_nonce();
+    st.pending = Some(Pending {
+        nonce: nonce.clone(),
+        view: "work".into(),
+        assigned: vec![],
+        rewrite: vec![rdy_model::BlockId::parse(&seed.notes).unwrap()],
+        files: vec!["notes.yaml".into()],
+        at_ms: 1,
+    });
+    st.save(&place).unwrap();
+    s.stop();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    let ops = serde_json::from_value(json!([
+        {"op": "create", "type": "prose", "parent": seed.notes, "after": seed.note, "body": "Added once."}
+    ]))
+    .unwrap();
+    r.write_linked(
+        &rdy_qa::fixtures::writer(),
+        WriteRequest {
+            view: "work".into(),
+            ops,
+            justification: None,
+            message: "lost".into(),
+        },
+        rdy_model::ChangeLinks {
+            client_nonce: Some(nonce),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    r.close().unwrap();
+    // a later edit, so recovery keeps the file
+    let mut text = read(&s, "notes.yaml");
+    text.push_str("# a later comment\n");
+    put(&s, "notes.yaml", &text);
+    // an edit elsewhere that the way out must not discard
+    set_body(&s, "guides/intro.yaml", &seed.prose, "Mine, elsewhere.");
+    let (_, st) = json(&s, &["status"]);
+    assert_eq!(st["working_copy"]["conflicts"][0]["kind"], "kept", "{st}");
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk, "{v}");
+    assert_eq!(v["conflicts"][0]["path"], "notes.yaml", "{v}");
+    assert_eq!(v["conflicts"][0]["kind"], "blocks", "{v}");
+    assert_eq!(
+        read(&s, "notes.yaml"),
+        text,
+        "the local file stays as it is"
+    );
+    assert_eq!(with_body(&s, "notes.theirs.yaml", "Added once."), 1);
+    assert_eq!(
+        entry(&s, "guides/intro.yaml", &seed.prose)["body"],
+        "Mine, elsewhere.",
+        "the other edit stays"
+    );
+    // resolved by taking the store's side
+    put(&s, "notes.yaml", &read(&s, "notes.theirs.yaml"));
+    std::fs::remove_file(at(&s, "notes.theirs.yaml")).unwrap();
+    ok(&s, &["add", "notes.yaml", "guides/intro.yaml"]);
+    ok(&s, &["commit", "-m", "resolved"]);
+    assert_eq!(
+        with_body(&s, "notes.yaml", "Added once."),
+        1,
+        "{}",
+        read(&s, "notes.yaml")
+    );
+    assert_eq!(
+        store_block(&s, "work", &seed.prose).body,
+        "Mine, elsewhere."
+    );
+    let (_, st) = json(&s, &["status"]);
+    for k in ["conflicts", "staged", "unstaged"] {
+        assert!(st["working_copy"][k].as_array().unwrap().is_empty(), "{st}");
+    }
+}
+
+/// A kept rename (the store's path held an untracked file): update asks for the file in the way
+/// first, then moves the doc to the store's path with the store's side beside it.
+#[test]
+fn wcup1_update_of_a_kept_rename_asks_for_the_file_in_the_way_first() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let memo = "my own memo, never tracked\n";
+    put(&s, "memo.yaml", memo);
+    store_write(
+        &s,
+        "work",
+        json!([{"op": "update", "id": seed.notes, "fields": {"name": "memo"}}]),
+    );
+    let orig = read(&s, "notes.yaml");
+    put(
+        &s,
+        "notes.yaml",
+        &format!("{orig}- type: prose\n  body: Added once.\n"),
+    );
+    ok(&s, &["add", "notes.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "x"]);
+    assert!(okk && v["kept"][0]["file"] == "memo.yaml", "{v}");
+    let (okk, v) = json(&s, &["update"]);
+    assert!(
+        !okk && v["code"] == E_WC_OCCUPIED && v["message"].as_str().unwrap().contains("memo.yaml"),
+        "{v}"
+    );
+    assert_eq!(read(&s, "memo.yaml"), memo);
+    std::fs::rename(at(&s, "memo.yaml"), at(&s, "memo.txt")).unwrap();
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk, "{v}");
+    assert_eq!(v["conflicts"][0]["path"], "memo.yaml", "{v}");
+    assert!(!at(&s, "notes.yaml").exists());
+    assert_eq!(with_body(&s, "memo.theirs.yaml", "Added once."), 1);
+    put(&s, "memo.yaml", &read(&s, "memo.theirs.yaml"));
+    std::fs::remove_file(at(&s, "memo.theirs.yaml")).unwrap();
+    // the file now equals its base: adding it resolves the conflict and stages nothing
+    ok(&s, &["add", "memo.yaml"]);
+    assert_eq!(with_body(&s, "memo.yaml", "Added once."), 1);
+    assert_eq!(read(&s, "memo.txt"), memo);
+    let (_, st) = json(&s, &["status"]);
+    for k in ["conflicts", "staged", "unstaged"] {
+        assert!(st["working_copy"][k].as_array().unwrap().is_empty(), "{st}");
+    }
 }

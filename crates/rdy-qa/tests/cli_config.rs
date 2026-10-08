@@ -207,3 +207,18 @@ fn cfgw1_rdy_session_carries_the_warning() {
     );
     assert!(w["fix"].as_str().unwrap().contains("decisions.home"), "{r}");
 }
+
+/// Guard: the user config is validated like the project's. One that does not parse, or is not a
+/// mapping, is E_CONFIG naming it, for every project, never skipped (a skipped file would change
+/// who the human is without a word).
+#[test]
+fn cfgl1_a_user_config_that_does_not_parse_is_e_config_naming_it() {
+    let (_d, p) = proj();
+    for text in ["actor: [human:me\n", "- actor\n"] {
+        let (_u, uf) = user(text);
+        let e = effective(&p, Some(&uf)).unwrap_err();
+        assert_eq!(e.code, E_CONFIG, "{e}");
+        let shown = uf.display().to_string();
+        assert!(e.message.contains(&shown) || e.fix.contains(&shown), "{e}");
+    }
+}

@@ -169,6 +169,28 @@ pub(super) struct Cited {
     pub briefing: Option<Value>,
 }
 
+/// Whether a briefing names anything: a governing decision, a dependent, lineage, a block that
+/// would go stale, an open suspect, work in flight, a related decision, a mention, or something a
+/// cut left out. A briefing of drafts that names nothing is not printed in full on commit.
+pub(super) fn says_something(b: &Value) -> bool {
+    let any = |v: &Value| v.as_array().is_some_and(|a| !a.is_empty());
+    [
+        "governs",
+        "dependents",
+        "lineage",
+        "will_go_stale",
+        "suspects",
+        "related_decisions",
+        "mentioned_by",
+    ]
+    .iter()
+    .any(|k| any(&b[*k]))
+        || ["views", "proposals", "intents"]
+            .iter()
+            .any(|k| any(&b["inflight"][*k]))
+        || b["omitted"].as_object().is_some_and(|m| !m.is_empty())
+}
+
 /// The blocks a commit touches: the plan's touched ids that exist in the base, and the parent of
 /// every create whose parent the plan does not create.
 fn touched(plan: &CommitPlan, state: &WcState) -> BTreeSet<BlockId> {

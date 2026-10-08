@@ -7,9 +7,8 @@ use crate::{Env, call, hash_short, path_arg};
 use rdy_daemon::ErrorReply;
 use rdy_engine::wc::layout::BLOBS_DIR;
 use rdy_engine::wc::merge::{UpdatePlan, apply_update, plan_update, resume_update};
-use rdy_engine::wc::state::ConflictKind;
 use rdy_engine::wc::status::conflict_message;
-use rdy_engine::{E_BAD_INPUT, E_WC_CONFLICT, Projection, RdyError};
+use rdy_engine::{E_BAD_INPUT, Projection};
 use serde_json::{Value, json};
 
 pub(super) fn run(env: &Env) -> Result<(Value, String), ErrorReply> {
@@ -24,29 +23,12 @@ pub(super) fn run(env: &Env) -> Result<(Value, String), ErrorReply> {
         drop(lock);
         return Ok(report(&j.view, &j.head, &j.plan, true));
     }
-    state.require_bound()?;
-    // a kept file's base is older than the store: a merge against it would record its new
-    // blocks a second time
-    let kept: Vec<&str> = state
-        .conflicts
-        .iter()
-        .filter(|c| c.kind == ConflictKind::Kept)
-        .map(|c| c.path.as_str())
-        .collect();
-    if !kept.is_empty() {
-        return Err(RdyError::new(
-            E_WC_CONFLICT,
-            format!(
-                "{} file(s) were committed but not written back: {}",
-                kept.len(),
-                kept.join(", ")
-            ),
-            "copy the files named aside, then run rdy checkout --force (it discards uncommitted edits)",
-        )
-        .into());
-    }
+    // a kept file (committed, not written back) becomes a conflict with the store's side beside
+    // it (`plan_update`)
     let view = state.require_bound()?.view.clone();
     let (pack, wt) = tree(env, &place)?;
+    // as checkout: the blobs are written before `plan_update` can refuse (named by hash, so a
+    // refused update's blobs are never wrong)
     let blobs_dir = path_arg(&place.root.join(BLOBS_DIR))?;
     let v = call(
         env,

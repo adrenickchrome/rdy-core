@@ -2,13 +2,13 @@
 //! bound view, through a journal written before the request, and writes the changed files back in
 //! canonical form. `recover` finishes (or drops) a commit whose acknowledgement was lost.
 
-use super::brief::{for_commit, record_refusal};
+use super::brief::{for_commit, record_refusal, says_something};
 use super::{Open, open};
 use crate::brief_text::consequences_text;
 use crate::brief_text::plain;
 use crate::{Conn, Env, call, hash_short, human_session};
 use rdy_daemon::{E_DAEMON_GONE, ErrorReply};
-use rdy_engine::wc::files::{apply_writeback, changed_since_staged};
+use rdy_engine::wc::files::{apply_writeback, changed_since_staged, restore_unrecorded};
 use rdy_engine::wc::layout::BLOBS_DIR;
 use rdy_engine::wc::plan::{CommitPlan, UPLOAD_PREFIX, plan_commit};
 use rdy_engine::wc::project::blob_name;
@@ -16,7 +16,8 @@ use rdy_engine::wc::state::{ConflictKind, Pending, Place, WcState, new_nonce, st
 use rdy_engine::{
     Diagnostic, E_BAD_INPUT, E_BAD_NAME, E_HAS_CHILDREN, E_IO, E_KEY_CLASH, E_PATH_CLASH,
     E_STALE_BASE, E_UNKNOWN_REF, E_VALIDATION, E_WC_CONFLICT, E_WC_DIRTY, E_WC_INVALID,
-    E_WC_LOCKED, E_WC_STALE, Projection, RdyError, editorial_class, now_ms, project_pack,
+    E_WC_LOCKED, E_WC_STALE, Projection, RdyError, W_WC_UNSTAGED_MOVE, editorial_class, now_ms,
+    project_pack,
 };
 use rdy_model::BlockId;
 use rdy_schema::Severity;
@@ -70,7 +71,7 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
                 paths.join(", ")
             ),
             if state.conflicts.iter().any(|c| c.kind == ConflictKind::Kept) {
-                "copy the files named aside, then run rdy checkout --force (it discards uncommitted edits) and make your edits again"
+                "run rdy update: it writes the store's version beside each kept file, to resolve as any conflict"
             } else {
                 "edit the doc, delete its .theirs.yaml, run rdy add, then commit"
             },
@@ -93,7 +94,23 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
             )
             .into());
         }
-        // the staged files change no block: their entries are consumed, the store is not written
+        // R-P11: the only change is a block moved into a file that is not staged; recording
+        // nothing would drop the stage the retry needs
+        if let Some(w) = plan.warnings.iter().find(|w| w.code == W_WC_UNSTAGED_MOVE) {
+            let mut e = ErrorReply::new(
+                E_WC_INVALID,
+                format!("nothing to record: {}; the stage is kept", w.message),
+                format!("{}, then commit again", w.fix),
+            );
+            e.extra.insert(
+                "diagnostics".into(),
+                serde_json::to_value(&plan.warnings).unwrap_or(Value::Null),
+            );
+            return Err(e);
+        }
+        // the staged files change no block (an edit R-P4 ignores, a comment): the files go back
+        // to their checked-out text, their entries are consumed, the store is not written
+        let restored = restore_unrecorded(&place, &state, &plan.committed)?;
         for rel in &plan.committed {
             stage_clear(&place, rel)?;
             state.stage.deleted.remove(rel);
@@ -109,11 +126,18 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
                 "ies"
             }
         );
+        if !restored.is_empty() {
+            text.push_str(&format!(
+                "; {} file(s) put back as checked out: {}",
+                restored.len(),
+                restored.join(", ")
+            ));
+        }
         text.push_str(&plan_warnings_text(&plan));
         let out = json!({
             "view": view,
             "change": null,
-            "files": [],
+            "files": restored,
             "cleared": plan.committed,
             "warnings": plan.warnings,
         });
@@ -207,8 +231,19 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
     let change = reply["change"].as_str().unwrap_or("");
     let mut text = String::new();
     if let Some(b) = &cited.briefing {
-        text.push_str("briefing (cited by this commit):\n");
-        text.push_str(&plain(b));
+        // in full when it touches stable content or names anything; else one line
+        if plan.stable || says_something(b) {
+            text.push_str("briefing (cited by this commit):\n");
+            text.push_str(&plain(b));
+        } else {
+            let token: String = b["base"]["token"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(12)
+                .collect();
+            text.push_str(&format!("briefing cited (token {token})\n"));
+        }
     }
     text.push_str(&format!(
         "committed {} to {view}: {} op(s), {} file(s) rewritten",

@@ -41,6 +41,10 @@ pub struct CommitPlan {
     /// Each block's file, line and column in the commit tree.
     pub positions: BTreeMap<BlockId, (String, usize, usize)>,
     pub warnings: Vec<Diagnostic>,
+    /// The plan touches stable content: a block an op names, or the parent a create sits under,
+    /// is stable (its own `lifecycle`, else its nearest ancestor's) in the base or in the commit
+    /// tree.
+    pub stable: bool,
 }
 
 /// A figure file to upload as its block's blob.
@@ -536,6 +540,25 @@ impl<'a> Indexed<'a> {
     }
 
     /// How many ancestors `id` has in the tree.
+    /// `id`'s own `lifecycle`, else its nearest ancestor's, is `stable` (a null value counts as
+    /// none), as the engine's briefing check reads it.
+    fn stable(&self, id: &BlockId) -> bool {
+        let mut cur = self.by_id.get(id);
+        let mut steps = 0;
+        while let Some(b) = cur {
+            match b.block.fields.get("lifecycle") {
+                Some(FieldValue::Null) | None => {}
+                Some(v) => return v.as_str() == Some("stable"),
+            }
+            steps += 1;
+            if steps > self.by_id.len() {
+                break;
+            }
+            cur = b.block.parent.as_ref().and_then(|p| self.by_id.get(p));
+        }
+        false
+    }
+
     fn depth(&self, id: &BlockId) -> usize {
         let mut n = 0;
         let mut cur = self.by_id.get(id).and_then(|b| b.block.parent.as_ref());
@@ -669,6 +692,25 @@ impl<'a> Diff<'a> {
         }
         let gone = self.deletes(plan);
         self.files(plan, &gone);
+        let parents = plan
+            .ops
+            .iter()
+            .filter(|o| o["op"] == "create")
+            .filter_map(|o| {
+                BlockId::parse(o["parent"].as_str()?)
+                    .ok()
+                    .filter(|p| !plan.created.contains(p))
+            });
+        let subjects: Vec<BlockId> = plan
+            .touched
+            .iter()
+            .filter(|id| !plan.created.contains(*id))
+            .cloned()
+            .chain(parents)
+            .collect();
+        plan.stable = subjects
+            .iter()
+            .any(|id| self.base.stable(id) || self.commit.stable(id));
     }
 
     /// A figure whose `blob` is a path: its image becomes an upload, and the op carries the

@@ -136,3 +136,76 @@ fn wcck1_a_dotdot_path_out_of_the_checkout_is_checked_where_it_is() {
     let (okk, v) = check(&s, &[&inside]);
     assert!(okk, "{v}");
 }
+
+#[test]
+fn wcck1_an_untracked_file_names_its_reason_once() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    put(&s, "scratch.yaml", "just: a map\n");
+    let (okk, v) = check(&s, &[]);
+    assert!(okk, "{v}");
+    let d = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "W_WC_UNTRACKED")
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(
+        d["message"], "scratch.yaml: not a doc file: the first entry is not type: doc",
+        "{d}"
+    );
+    let o = s.rdy(&["add", "scratch.yaml"]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success(), "{err}");
+    assert_eq!(err.matches("not a doc file").count(), 1, "{err}");
+}
+
+/// A link whose target is written as a question's key is a store-only link like one written as
+/// its id (amendment §5.2): rdy check names it, and commit refuses it.
+#[test]
+fn wcck1_a_link_to_a_question_by_its_key_is_store_only() {
+    let (s, seed) = seeded();
+    store_write(
+        &s,
+        "work",
+        serde_json::json!([{"op": "create", "type": "question", "parent": seed.section,
+            "fields": {"prompt": "Keep it?", "key": "keep-it"}}]),
+    );
+    ok(&s, &["checkout"]);
+    edit(&s, "notes.yaml", |l| {
+        let n = l
+            .iter_mut()
+            .find(|e| e["id"].as_str() == Some(seed.note.as_str()))
+            .unwrap();
+        n.as_mapping_mut().unwrap().insert(
+            "links".into(),
+            serde_yaml_ng::from_str("describes:\n- keep-it\n").unwrap(),
+        );
+    });
+    let (okk, v) = check(&s, &[]);
+    assert!(!okk, "{v}");
+    assert!(
+        v.as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "E_WC_STORE_ONLY"
+                && d["file"] == "notes.yaml"
+                && d["message"].as_str().unwrap().contains("keep-it")),
+        "{v}"
+    );
+    ok(&s, &["add", "notes.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "keyed"]);
+    assert!(!okk && v["code"] == E_WC_INVALID, "{v}");
+    assert!(
+        v["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "E_WC_STORE_ONLY" && d["file"] == "notes.yaml"),
+        "{v}"
+    );
+    assert!(
+        store_block(&s, "work", &seed.note).links.is_empty(),
+        "nothing recorded"
+    );
+}

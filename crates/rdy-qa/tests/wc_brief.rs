@@ -141,3 +141,39 @@ fn wcbr1_an_agent_commit_without_the_daemon_is_refused_up_front() {
     );
     assert!(v["fix"].as_str().unwrap().contains("--no-daemon"), "{v}");
 }
+
+#[test]
+fn wcbr1_a_human_commit_of_drafts_prints_the_briefing_only_when_it_says_something() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    // a draft doc nothing governs: one line names the cited token
+    set_body(&s, "notes.yaml", &seed.note, "Draft edit.");
+    ok(&s, &["add", "notes.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "draft"]);
+    assert!(okk, "{v}");
+    assert!(
+        v["briefing"]["base"]["token"].is_string(),
+        "the JSON keeps it: {v}"
+    );
+    set_body(&s, "notes.yaml", &seed.note, "Draft again.");
+    ok(&s, &["add", "notes.yaml"]);
+    let text = ok(&s, &["commit", "-m", "draft again"]);
+    assert!(
+        !text.contains("briefing (cited by this commit):")
+            && text.starts_with("briefing cited (token "),
+        "{text}"
+    );
+    assert_eq!(
+        text.lines().filter(|l| l.contains("briefing")).count(),
+        1,
+        "{text}"
+    );
+    // a draft block a decision governs: the briefing has something to say
+    set_body(&s, "guides/intro.yaml", &seed.claim, "Claims still hold.");
+    ok(&s, &["add", "guides/intro.yaml"]);
+    let text = ok(&s, &["commit", "-m", "governed"]);
+    assert!(
+        text.starts_with("briefing (cited by this commit):") && text.contains(&seed.decision),
+        "{text}"
+    );
+}

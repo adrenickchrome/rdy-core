@@ -1233,12 +1233,18 @@ fn wc_commit(cx: &OpContext, a: WcCommitArgs) -> Result<Value, RdyError> {
         ));
     }
     let view = view_of(cx.session, Some(a.view));
-    let justification = parse_justification(
-        &cx.engine.read(),
-        &Scope::View(view.clone()),
-        a.implements,
-        a.editorial.map(|e| (e.class, e.reason)),
-    )?;
+    let justification = {
+        let st = cx.engine.read();
+        // the client's lint sees no view: a link target written as a key is checked here
+        let m = st.materialized(&wc_scope(&st, &view))?;
+        rdy_engine::wc::lint::check_keyed_targets(&m, &a.ops)?;
+        parse_justification(
+            &st,
+            &Scope::View(view.clone()),
+            a.implements,
+            a.editorial.map(|e| (e.class, e.reason)),
+        )?
+    };
     let ops: Vec<OpInput> = a
         .ops
         .into_iter()

@@ -666,7 +666,9 @@ fn clash(a: &BlockId, b: &BlockId, at: &str, base: &Side, local: &Side, their: &
 /// when a path to write holds a file rdy does not track; resolves every doc's and folder's place
 /// (a folder or doc moved on both sides to different places keeps the local one and records a
 /// rename conflict), then merges each one's content three ways (rules 1 to 3). A folder the store
-/// deleted that still holds a doc or folder kept here is kept, in conflict. Two docs or folders
+/// deleted that still holds a doc or folder kept here is kept, in conflict. A doc a commit's
+/// write-back kept (`ConflictKind::Kept`) is a conflict as it stands: its file stays, the store's
+/// side goes beside it, and `apply_update` drops the kept entry. Two docs or folders
 /// that would end up at one path (ignoring case) give `E_WC_CONFLICT` naming both. Reads only.
 pub fn plan_update(
     place: &Place,
@@ -785,6 +787,20 @@ pub fn plan_update(
         places.placed.insert(h.clone(), resolved);
     }
 
+    // a doc whose file a commit's write-back kept (`ConflictKind::Kept`): its base is older than
+    // the store, so a merge against it would add the blocks the commit created next to the
+    // file's own copies. It is a conflict instead: the file stays, the store's side goes beside
+    // it, and the base becomes theirs like every other.
+    let kept: BTreeMap<BlockId, Vec<BlockId>> = st
+        .conflicts
+        .iter()
+        .filter(|c| c.kind == ConflictKind::Kept)
+        .filter_map(|c| {
+            let h = st.base.files.get(&c.path)?;
+            (kind_of(&c.path) == FileKind::Doc).then(|| (h.clone(), c.blocks.clone()))
+        })
+        .collect();
+
     // contents, per head (rules 1 to 3)
     let mut decided: Vec<Decided> = vec![];
     for h in &heads {
@@ -803,7 +819,14 @@ pub fn plan_update(
             (b.is_none() && t.is_none()) || (b.is_some() && tt.is_some() && tt == bt) || lt == tt;
         // new in the store; rule 1: local equals the base
         let take_theirs = (b.is_none() && l.is_none()) || (b.is_some() && lt.is_some() && lt == bt);
-        let outcome = if b.is_none() && t.is_none() {
+        let outcome = if let (Some(ids), Some(lt)) = (kept.get(h), lt)
+            && tt != Some(lt)
+        {
+            Outcome::Conflict {
+                ids: ids.clone(),
+                text: Some(lt.to_string()),
+            }
+        } else if b.is_none() && t.is_none() {
             Outcome::Text(lt.map(String::from))
         } else if take_theirs {
             Outcome::Text(tt.map(String::from))
@@ -1327,8 +1350,10 @@ fn finish_update(place: &Place, st: &mut WcState, journal: &UpdateJournal) -> Re
         stage_put(place, p, text.as_bytes())?;
     }
     st.stage.deleted.extend(plan.stage_deleted.iter().cloned());
+    // a kept file's base is theirs now: what it held is a conflict of this plan, or gone
     let paths: BTreeSet<&str> = plan.conflicts.iter().map(|c| c.path.as_str()).collect();
-    st.conflicts.retain(|c| !paths.contains(c.path.as_str()));
+    st.conflicts
+        .retain(|c| c.kind != ConflictKind::Kept && !paths.contains(c.path.as_str()));
     st.conflicts.extend(plan.conflicts.iter().cloned());
     st.bound = Some(Bound {
         view: journal.view.clone(),

@@ -753,3 +753,25 @@ fn wcdf1_a_case_only_rename_with_the_old_path_deleted_is_a_rename() {
     assert_eq!(p.ops.len(), 1, "{:?}", p.ops);
     assert_eq!(op(&p, "update", &seed.notes)["fields"]["name"], "Notes");
 }
+
+/// A file that retypes a block to a supporting type is told to record it with its tool, not to
+/// write another id prefix: E_WC_SUPPORTING comes first and E_PREFIX is not raised.
+#[test]
+fn wcdf1_a_retype_to_a_supporting_type_leads_with_e_wc_supporting() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    edit(&s, "guides/intro.yaml", |l| {
+        find(l, &seed.claim)
+            .as_mapping_mut()
+            .unwrap()
+            .insert("type".into(), "decision".into());
+    });
+    stage(&s, &["guides/intro.yaml"]);
+    let e = plan(&s).unwrap_err();
+    assert_eq!(e.diags[0].code, "E_WC_SUPPORTING", "{:?}", e.diags);
+    assert!(
+        e.diags.iter().all(|d| d.code != "E_PREFIX"),
+        "{:?}",
+        e.diags
+    );
+}

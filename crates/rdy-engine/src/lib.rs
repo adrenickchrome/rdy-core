@@ -434,7 +434,7 @@ pub fn check_wc(
             line: 1,
             column: 1,
             code: W_WC_UNTRACKED.into(),
-            message: format!("{} is not a doc file: {}", u.path, u.reason),
+            message: format!("{}: {}", u.path, u.reason),
             fix: format!("rdy check {}", u.path),
             severity: rdy_schema::Severity::Warning,
         });

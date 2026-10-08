@@ -455,10 +455,7 @@ fn wccm1_the_write_back_keeps_an_untracked_file_where_a_renamed_doc_would_go() {
     );
     assert_eq!(v["kept"][0]["file"], "memo.yaml", "{v}");
     assert!(
-        v["kept"][0]["fix"]
-            .as_str()
-            .unwrap()
-            .contains("rdy checkout --force"),
+        v["kept"][0]["fix"].as_str().unwrap().contains("rdy update"),
         "{v}"
     );
     assert_eq!(store_block(&s, "work", &seed.note).body, "Mine.");
@@ -600,8 +597,8 @@ fn wccm1_a_file_kept_by_recovery_is_a_conflict_and_is_never_recorded_twice() {
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(o.status.success() && err.contains("W_WC_KEPT"), "{err}");
     assert!(
-        err.contains("rdy checkout --force") && !err.contains("rdy update"),
-        "the fix names a command that exists: {err}"
+        err.contains("rdy update"),
+        "the fix names the update that resolves it: {err}"
     );
     let (_, st) = json(&s, &["status"]);
     assert_eq!(
@@ -615,12 +612,9 @@ fn wccm1_a_file_kept_by_recovery_is_a_conflict_and_is_never_recorded_twice() {
         !okk && v["code"] == E_WC_CONFLICT,
         "never recorded twice: {v}"
     );
-    assert!(
-        v["fix"].as_str().unwrap().contains("rdy checkout --force"),
-        "{v}"
-    );
+    assert!(v["fix"].as_str().unwrap().contains("rdy update"), "{v}");
     assert!(!at(&s, ".rdy/wc/pending.yaml").exists());
-    // the way out the fix names: the store's version, holding the block once
+    // the other way out: the store's version, holding the block once
     ok(&s, &["checkout", "--force"]);
     assert_eq!(
         with_body(&s, "notes.yaml", "Added once."),
@@ -667,10 +661,7 @@ fn wccm1_a_renamed_doc_kept_by_the_write_back_is_a_conflict_and_is_never_recorde
     assert!(okk, "{v}");
     assert_eq!(v["kept"][0]["file"], "memo.yaml", "{v}");
     let fix = v["kept"][0]["fix"].as_str().unwrap();
-    assert!(
-        fix.contains("rdy checkout --force") && !fix.contains("rdy update"),
-        "{v}"
-    );
+    assert!(fix.contains("rdy update"), "{v}");
     let (_, st) = json(&s, &["status"]);
     assert_eq!(
         st["working_copy"]["conflicts"][0]["path"], "notes.yaml",
@@ -690,7 +681,7 @@ fn wccm1_a_renamed_doc_kept_by_the_write_back_is_a_conflict_and_is_never_recorde
         !okk && v["code"] == E_WC_CONFLICT,
         "never recorded twice: {v}"
     );
-    // the way out the fix names: move the untracked file aside, then check out again
+    // the other way out: move the untracked file aside, then check out again
     std::fs::rename(at(&s, "memo.yaml"), at(&s, "memo.txt")).unwrap();
     ok(&s, &["checkout", "--force"]);
     assert_eq!(read(&s, "memo.txt"), memo);
@@ -701,4 +692,73 @@ fn wccm1_a_renamed_doc_kept_by_the_write_back_is_a_conflict_and_is_never_recorde
         "{}",
         read(&s, "memo.yaml")
     );
+}
+
+/// A commit whose only change is a block moved into a file that is not staged records nothing:
+/// it is refused and the stage stays, so staging the other file is all a retry needs (R-P11).
+#[test]
+fn wccm1_a_move_into_an_unstaged_file_keeps_the_stage() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let mut moved = None;
+    edit(&s, "guides/intro.yaml", |l| {
+        let i = l
+            .iter()
+            .position(|e| e["id"].as_str() == Some(seed.prose.as_str()))
+            .unwrap();
+        moved = Some(l.remove(i));
+    });
+    let mut p = moved.unwrap();
+    p.as_mapping_mut()
+        .unwrap()
+        .insert("parent".into(), seed.notes.clone().into());
+    edit(&s, "notes.yaml", |l| l.push(p));
+    ok(&s, &["add", "guides/intro.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "move"]);
+    assert!(!okk, "{v}");
+    assert!(
+        v["message"].as_str().unwrap().contains("notes.yaml")
+            && v["fix"].as_str().unwrap().contains("rdy add notes.yaml"),
+        "{v}"
+    );
+    assert!(
+        at(&s, ".rdy/wc/stage/files/guides/intro.yaml").exists(),
+        "the stage stays"
+    );
+    ok(&s, &["add", "notes.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "move"]);
+    assert!(okk, "{v}");
+    assert_eq!(
+        store_block(&s, "work", &seed.prose)
+            .parent
+            .unwrap()
+            .to_string(),
+        seed.notes
+    );
+}
+
+/// An edit R-P4 ignores (a hand-edited `order`) records nothing; the file goes back to its base
+/// text, so status is clean.
+#[test]
+fn wccm1_an_order_only_edit_leaves_the_file_clean() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let before = read(&s, "notes.yaml");
+    edit(&s, "notes.yaml", |l| {
+        let n = l
+            .iter_mut()
+            .find(|e| e["id"].as_str() == Some(seed.note.as_str()))
+            .unwrap();
+        n.as_mapping_mut()
+            .unwrap()
+            .insert("order".into(), "zz".into());
+    });
+    ok(&s, &["add", "notes.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "order"]);
+    assert!(okk && v["change"].is_null(), "{v}");
+    assert_eq!(read(&s, "notes.yaml"), before);
+    let (_, st) = json(&s, &["status"]);
+    for k in ["staged", "unstaged"] {
+        assert!(st["working_copy"][k].as_array().unwrap().is_empty(), "{st}");
+    }
 }

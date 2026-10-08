@@ -66,6 +66,8 @@ fn checkout_in(
             .into());
         }
     }
+    // the view's blobs reach _blobs/ before the occupied check: a refused checkout may leave
+    // some there, named by their hash, so never wrong, and the next checkout uses them
     let blobs_dir = path_arg(&place.root.join(BLOBS_DIR))?;
     let v = call(
         env,

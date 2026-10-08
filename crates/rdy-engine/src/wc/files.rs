@@ -518,6 +518,39 @@ pub fn changed_since_staged(
         .collect()
 }
 
+/// Puts back the base copy of each `committed` path a commit recorded nothing for (wccm1): a
+/// staged copy (not a deletion) of a base path whose working file still holds the staged bytes
+/// gets the base copy's canonical text, so the working copy is clean again. A path with later
+/// edits, behind a link or not in the base is left as it is. Call it before the stage entries
+/// go. Returns the paths written.
+pub fn restore_unrecorded(
+    place: &Place,
+    st: &WcState,
+    committed: &BTreeSet<String>,
+) -> Result<Vec<String>, RdyError> {
+    let dirty: BTreeSet<String> = changed_since_staged(place, st, committed)
+        .into_iter()
+        .collect();
+    let mut out = vec![];
+    for rel in committed {
+        if st.stage.deleted.contains(rel) || dirty.contains(rel) || !st.base.files.contains_key(rel)
+        {
+            continue;
+        }
+        let Some(text) =
+            regular_bytes(&place.base_file(rel)).and_then(|b| String::from_utf8(b).ok())
+        else {
+            continue;
+        };
+        if regular_bytes(&place.root.join(inside(rel)?)).is_some_and(|b| b == text.as_bytes()) {
+            continue;
+        }
+        replace_at(&place.root, rel, &text, None)?;
+        out.push(rel.clone());
+    }
+    Ok(out)
+}
+
 /// Whether the write-back may replace or delete what is at `rel`: nothing, or a regular file
 /// (not behind a link) whose bytes are `text`, the staged copy or the base copy of `rel`, or the
 /// staged or base copy of a tracked path that is the same file (a case-only rename). Anything
@@ -641,8 +674,9 @@ pub(crate) fn prune_dirs(top: &Path, rel: &str) {
 /// something other than its staged or base copy (a file rdy does not track, a person's later
 /// edits, a directory or link on the way) is not written: that file's head keeps its old path,
 /// base copy and base entries, a `W_WC_KEPT` warning names it, and a `ConflictKind::Kept` entry
-/// refuses every later commit until a checkout replaces the files (the old base would let the
-/// next commit create the commit's new blocks a second time). A path to delete that holds
+/// refuses every later commit until `rdy update` turns it into a conflict (or a checkout replaces
+/// the files): the old base would let the next commit create the commit's new blocks a second
+/// time. A path to delete that holds
 /// later edits stays on disk, untracked, with a warning. An old path that is the same file as a
 /// written path (a case-only rename on a case-insensitive filesystem) is not deleted.
 pub fn apply_writeback(
@@ -681,7 +715,7 @@ pub fn apply_writeback(
                         f.path
                     ),
                     format!(
-                        "copy {} aside, then run rdy checkout --force (it discards uncommitted edits); commit is refused until then",
+                        "run rdy update: it writes the store's version beside {} as a conflict; commit is refused until then",
                         f.path
                     ),
                 )
@@ -692,7 +726,7 @@ pub fn apply_writeback(
                         f.path
                     ),
                     format!(
-                        "move {} aside, then run rdy checkout --force (it discards uncommitted edits); commit is refused until then",
+                        "move {} aside, then run rdy update: it writes the store's version there with your file as a conflict; commit is refused until then",
                         f.path
                     ),
                 )
@@ -704,7 +738,7 @@ pub fn apply_writeback(
                         olds.join(", ")
                     ),
                     format!(
-                        "move {} aside, then run rdy checkout --force (it discards uncommitted edits); commit is refused until then",
+                        "move {} aside, then run rdy update: it writes the store's version there with your file as a conflict; commit is refused until then",
                         f.path
                     ),
                 )

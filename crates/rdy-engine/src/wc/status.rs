@@ -324,11 +324,11 @@ pub fn conflict_message(c: &ConflictEntry) -> String {
         ),
         ConflictKind::Kept => match c.store_name.as_deref() {
             Some(to) if to != c.path => format!(
-                "{}: committed, but not written back to {to} (a file is in the way); move {to} aside, then run rdy checkout --force",
+                "{}: committed, but not written back to {to} (a file is in the way); move {to} aside, then run rdy update",
                 c.path
             ),
             _ => format!(
-                "{}: committed, but not written back (it holds edits the commit did not record); copy it aside, then run rdy checkout --force",
+                "{}: committed, but not written back (it holds edits the commit did not record); run rdy update to resolve it as a conflict",
                 c.path
             ),
         },
