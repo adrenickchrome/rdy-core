@@ -1,0 +1,109 @@
+//! tdup1: duplicate definition: two blocks define one name, or two normative blocks share text.
+use rdy_engine::Scope;
+use rdy_engine::tensions::*;
+use rdy_qa::edit_loop::{brief_of, spec_doc, stable_spec, write_cited_as};
+use rdy_qa::fixtures::*;
+use rdy_qa::tensions::*;
+use serde_json::json;
+
+#[test]
+fn tdup1_two_terms_defining_one_name_in_draft_are_advisory_until_one_is_renamed() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", term(&s.section, "Fee"));
+    let wb = put(&mut r, "b", term(&s.section, "  fee "));
+    let t = one(&r, TensionKind::DuplicateDefinition);
+    assert_eq!(change_sides(&t).len(), 2);
+    assert_eq!(t.severity, TensionSeverity::Advisory);
+    assert!(t.summary.contains("\"fee\""), "{}", t.summary);
+    put(
+        &mut r,
+        "b",
+        json!([{"op": "update", "id": created(&wb, "$t").to_string(),
+        "fields": {"name": "Charge"}}]),
+    );
+    assert!(of_kind(&r, TensionKind::DuplicateDefinition).is_empty());
+}
+
+#[test]
+fn tdup1_in_stable_content_a_duplicate_blocks() {
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    let tok = brief_of(&r, &Scope::Canon, &[&s.section]).base.token;
+    write_cited_as(&mut r, &ag("a"), "a", term(&s.section, "Fee"), Some(&tok)).unwrap();
+    write_cited_as(&mut r, &ag("b"), "b", term(&s.section, "FEE"), Some(&tok)).unwrap();
+    assert_eq!(
+        one(&r, TensionKind::DuplicateDefinition).severity,
+        TensionSeverity::Blocking
+    );
+}
+
+#[test]
+fn tdup1_a_term_matching_a_canon_term_is_a_duplicate_with_canon() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    write(&mut r, "work", term(&s.section, "Fee")).unwrap();
+    land(&mut r, "work").unwrap();
+    let cb = change_of(&put(&mut r, "b", term(&s.section, "FEE")));
+    let t = one(&r, TensionKind::DuplicateDefinition);
+    assert_eq!(change_sides(&t), vec![cb]);
+    assert!(has_canon(&t));
+}
+
+#[test]
+fn tdup1_two_normative_blocks_with_the_same_text_are_duplicates_and_prose_is_not() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let claim = |body: &str| {
+        json!([{"op": "create", "type": "claim",
+        "parent": s.section.to_string(), "body": body}])
+    };
+    put(&mut r, "a", claim("Fees are charged monthly."));
+    put(&mut r, "b", claim("fees are   charged MONTHLY."));
+    put(
+        &mut r,
+        "c",
+        json!([{"op": "create", "type": "prose",
+        "parent": s.section.to_string(), "body": "Fees are charged monthly."}]),
+    );
+    let t = one(&r, TensionKind::DuplicateDefinition);
+    assert!(t.summary.contains("same text"), "{}", t.summary);
+}
+
+#[test]
+fn tdup1_texts_under_three_words_are_not_duplicates() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let claim = |body: &str| {
+        json!([{"op": "create", "type": "claim",
+        "parent": s.section.to_string(), "body": body}])
+    };
+    put(&mut r, "a", claim("Fees apply."));
+    put(&mut r, "b", claim("fees  APPLY."));
+    assert!(
+        of_kind(&r, TensionKind::DuplicateDefinition).is_empty(),
+        "two words"
+    );
+    put(&mut r, "a", claim("Fees apply monthly."));
+    put(&mut r, "b", claim("fees apply MONTHLY."));
+    let t = one(&r, TensionKind::DuplicateDefinition);
+    assert!(t.summary.contains("same text"), "{}", t.summary);
+}
+
+#[test]
+fn tdup1_two_landed_duplicate_terms_stay_a_duplicate_in_canon() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", term(&s.section, "Fee"));
+    put(&mut r, "b", term(&s.section, "fee"));
+    let before = one(&r, TensionKind::DuplicateDefinition);
+    land(&mut r, "a").unwrap();
+    land(&mut r, "b").unwrap();
+    let t = one(&r, TensionKind::DuplicateDefinition);
+    assert!(
+        change_sides(&t).is_empty() && has_canon(&t),
+        "every side is canon: {t:#?}"
+    );
+    assert_eq!(t.vkey, before.vkey, "re-keyed, not resolved");
+    assert_eq!(t.severity, TensionSeverity::Advisory, "draft content");
+}

@@ -5,5 +5,7 @@ mod tensions_collision;
 mod tensions_core;
 mod tensions_deprecated;
 mod tensions_dismiss;
+mod tensions_duplicate;
 mod tensions_fork;
 mod tensions_premise;
+mod tensions_unjustified;
