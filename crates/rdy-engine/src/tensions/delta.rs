@@ -1,5 +1,6 @@
 //! What one write or view op did to the tension set: the tensions it opened and those it
 //! resolved, among those with a change side in the view (`on_change`).
+use super::set::TensionDelta;
 use super::{SideRef, Tension, TensionInfo, TensionKind, TensionSeverity, tension_label};
 use crate::ReadState;
 use crate::brief::BRIEF_DEFAULT_TOKENS;
@@ -53,8 +54,9 @@ pub fn on_change(
     after: &ReadState,
     view: &str,
     max_tokens: Option<usize>,
+    delta: &TensionDelta,
 ) -> Result<OnChange, RdyError> {
-    let (opened, resolved) = before.tensions()?.diff(&*after.tensions()?);
+    let (opened, resolved) = (&delta.opened, &delta.resolved);
     let now: BTreeSet<Hash> = after.included(view).iter().copied().collect();
     let was: BTreeSet<Hash> = before.included(view).iter().copied().collect();
     let mut out = OnChange {

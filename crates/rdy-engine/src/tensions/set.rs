@@ -156,6 +156,74 @@ impl TensionSet {
         }
         (opened, resolved)
     }
+
+    /// The same opened and resolved lists as `diff`, found from what a step can touch: the
+    /// tensions with one of `changes` as a side and those that involve one of `blocks`, in
+    /// either set, each checked against the other. Exact when every tension the step opened or
+    /// resolved involves one of them (a carry only ever adds or removes tensions around its
+    /// seeds), and its cost follows those tensions, not the size of the sets.
+    pub fn diff_scoped(
+        &self,
+        newer: &TensionSet,
+        changes: &[Hash],
+        blocks: &BTreeSet<BlockId>,
+    ) -> TensionDelta {
+        let mut candidates: BTreeSet<Hash> = BTreeSet::new();
+        for set in [self, newer] {
+            for c in changes {
+                candidates.extend(set.by_change.get(c).into_iter().flatten().copied());
+            }
+            for b in blocks {
+                candidates.extend(set.by_block.get(b).into_iter().flatten().copied());
+            }
+        }
+        let mut delta = TensionDelta {
+            examined: candidates.len(),
+            ..TensionDelta::default()
+        };
+        for id in &candidates {
+            match (self.tensions.get(id), newer.tensions.get(id)) {
+                (None, Some(t)) => delta.opened.push(Arc::clone(t)),
+                (Some(t), None) => delta.resolved.push(Arc::clone(t)),
+                _ => {}
+            }
+        }
+        delta
+    }
+}
+
+/// What a step did to the tension set: the tensions it opened and those it resolved, by id.
+#[derive(Clone, Debug, Default)]
+pub struct TensionDelta {
+    pub opened: Vec<Arc<Tension>>,
+    pub resolved: Vec<Arc<Tension>>,
+    /// How many tensions were looked at to find them (every tension of both sets, for a full
+    /// diff).
+    pub examined: usize,
+}
+
+/// What the step from `before` to `after` did to the tension set. With `changes` (the changes
+/// the step added or removed), only the tensions around them and their blocks are read; with
+/// `None` (a rebase, or a moved base) the two sets are diffed whole.
+pub fn tension_delta(
+    before: &ReadState,
+    after: &ReadState,
+    changes: Option<&[Hash]>,
+) -> Result<TensionDelta, RdyError> {
+    let (old, new) = (before.tensions()?, after.tensions()?);
+    let Some(changes) = changes else {
+        let (opened, resolved) = old.diff(&new);
+        return Ok(TensionDelta {
+            opened,
+            resolved,
+            examined: old.len() + new.len(),
+        });
+    };
+    let mut blocks = BTreeSet::new();
+    for c in changes {
+        blocks.extend(seeds_of(after, c)?);
+    }
+    Ok(old.diff_scoped(&new, changes, &blocks))
 }
 
 /// The one tension of `tensions` that `text` names: `tn-` and a hex prefix, or the prefix alone
@@ -227,7 +295,7 @@ impl TensionCell {
 
 /// The blocks a carry re-detects around for `change`: the blocks it writes, and the
 /// `supersedes` and `revokes` targets of the decisions it writes (as written, and as they were).
-fn seeds_of(st: &ReadState, change: &Hash) -> Result<BTreeSet<BlockId>, RdyError> {
+pub(crate) fn seeds_of(st: &ReadState, change: &Hash) -> Result<BTreeSet<BlockId>, RdyError> {
     let mut seeds = BTreeSet::new();
     seeds_into(st, &st.reader().change(change)?, &mut seeds)?;
     Ok(seeds)

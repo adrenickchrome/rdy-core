@@ -8,6 +8,7 @@ use crate::gate::{LandInfo, ProposalInfo, applied_ops, changes_of, landed_as};
 use crate::intent::IntentNote;
 use crate::tensions::delta::on_change;
 use crate::tensions::{SideRef, Tension, tension_label};
+use crate::tensions::{TensionDelta, tension_delta};
 use crate::views::{UndoResult, ViewOpResult};
 use crate::{Materialized, Rdy, ReadState, Scope, now_ms};
 use rdy_graph::{Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, Suspect};
@@ -214,6 +215,7 @@ impl ReadState {
         view: &str,
         batch: &Hash,
         changes: Option<&[Hash]>,
+        delta: &TensionDelta,
         max_tokens: Option<usize>,
     ) -> Result<Consequences, RdyError> {
         let scope = Scope::View(view.to_string());
@@ -278,10 +280,8 @@ impl ReadState {
             None => self.included(view).iter().copied().collect(),
         };
         let mine = |s: &SideRef| matches!(s, SideRef::Change(c) if ours.contains(c));
-        let tensions: Vec<Consequence> = before
-            .tensions()?
-            .diff(&*self.tensions()?)
-            .0
+        let tensions: Vec<Consequence> = delta
+            .opened
             .iter()
             .filter(|t| t.sides.iter().any(mine))
             .map(|t| tension_entry(batch, t, &mine))
@@ -609,7 +609,9 @@ pub fn write_and_report<T: Serialize + 'static>(
                 v["intents"] = serde_json::to_value(&notes).expect("intent notes serialize");
             }
             if let Some((b, a)) = &states {
-                attach_on_change(&mut v, on_change(b, a, view, max_tokens));
+                let r = tension_delta(b, a, Some(&[h]))
+                    .and_then(|d| on_change(b, a, view, max_tokens, &d));
+                attach_on_change(&mut v, r);
             }
         }
         None => v["consequences"] = serde_json::json!([]),
@@ -766,9 +768,18 @@ pub fn view_op_and_report<T: Serialize + 'static>(
     };
     let full = e.full || before.effective_base(view) != after.effective_base(view);
     let changes = (!full).then_some(&e.changes[..]);
-    let c = after.view_consequences(&before, view, &e.batch, changes, max_tokens);
-    attach(&mut v, c);
-    attach_on_change(&mut v, on_change(&before, &after, view, max_tokens));
+    // one delta for both: the consequences' tension entries and `on_change`
+    match tension_delta(&before, &after, changes) {
+        Ok(d) => {
+            let c = after.view_consequences(&before, view, &e.batch, changes, &d, max_tokens);
+            attach(&mut v, c);
+            attach_on_change(&mut v, on_change(&before, &after, view, max_tokens, &d));
+        }
+        Err(err) => {
+            attach(&mut v, Err(err.clone()));
+            attach_on_change(&mut v, Err(err));
+        }
+    }
     Ok(v)
 }
 

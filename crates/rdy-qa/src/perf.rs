@@ -905,8 +905,10 @@ fn tier_views(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs
                 .map(|h| h.parse().expect("change"))
                 .collect();
             let s = Instant::now();
+            let delta = rdy_engine::tensions::tension_delta(&before, &after, Some(&changes))
+                .expect("tension delta");
             after
-                .view_consequences(&before, &name, &head, Some(&changes), None)
+                .view_consequences(&before, &name, &head, Some(&changes), &delta, None)
                 .expect("view consequences");
             s.elapsed()
         },

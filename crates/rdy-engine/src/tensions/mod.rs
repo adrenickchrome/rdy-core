@@ -34,7 +34,7 @@ pub use index::{
 };
 pub use info::{DismissalInfo, SideBlock, SideInfo, TensionInfo, TensionStatus};
 pub use rdy_schema::{TensionKind, TensionSeverity};
-pub use set::TensionSet;
+pub use set::{TensionDelta, TensionSet, tension_delta};
 
 use crate::RdyError;
 use rdy_model::{BlockId, Hash};
