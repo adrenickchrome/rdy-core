@@ -537,6 +537,16 @@ mod tests {
     }
 
     #[test]
+    fn tlay1_only_engine_runs_both_engine_binaries() {
+        // The engine area is two binaries so that one test edit rebuilds half of it.
+        // `--only engine` still means all of it (R-2).
+        let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+        let areas = test_areas(&tests);
+        let engine = plan(Some("engine"), &areas, true).unwrap();
+        assert_eq!(engine.files, vec!["engine", "engine_read"]);
+    }
+
+    #[test]
     fn tlay1_a_file_without_its_mod_line_is_named() {
         let d = tree(&[
             ("engine/main.rs", "//! doc\nmod engine_a;\n"),
