@@ -4,7 +4,7 @@ use rdy_engine::code_brief::e_code_path_alone;
 use rdy_engine::consequence::{propose_and_report, write_and_report};
 use rdy_engine::engine::{Engine, open_report_json};
 use rdy_engine::*;
-use rdy_model::{BlockId, EditorialClass, Justification, Role};
+use rdy_model::{BlockId, Role};
 use rdy_schema::{BodyRule, Trait};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -1231,54 +1231,16 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
             })
         })
         .collect::<Result<_, _>>()?;
-    let justification = match (p.implements, p.editorial) {
-        (Some(_), Some(_)) => {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                "give either implements or editorial, not both",
-                "implements for decision-backed changes, editorial for typo/restructure/clarify",
-            ));
-        }
-        (Some(d), None) => {
-            let texts = match d {
-                OneOrMany::One(t) => vec![t],
-                OneOrMany::Many(v) => v,
-            };
-            if texts.is_empty() {
-                return Err(RdyError::new(
-                    E_BAD_INPUT,
-                    "implements is empty",
-                    "name the decision this change carries out, or leave implements out",
-                ));
-            }
-            let scope = Scope::View(p.view.clone().unwrap_or_else(|| st.view.clone()));
-            let read = st.engine.read();
-            let mut ids: Vec<BlockId> = vec![];
-            for t in &texts {
-                let id = read.resolve_id(&scope, t)?;
-                if !ids.contains(&id) {
-                    ids.push(id);
-                }
-            }
-            Some(Justification::Implements(ids))
-        }
-        (None, Some(e)) => Some(Justification::Editorial {
-            class: match e.class.as_str() {
-                "typo" => EditorialClass::Typo,
-                "restructure" => EditorialClass::Restructure,
-                "clarify" => EditorialClass::Clarify,
-                other => {
-                    return Err(RdyError::new(
-                        E_BAD_INPUT,
-                        format!("unknown editorial class {other:?}"),
-                        "use typo, restructure or clarify",
-                    ));
-                }
-            },
-            reason: e.reason,
+    let scope = Scope::View(p.view.clone().unwrap_or_else(|| st.view.clone()));
+    let justification = parse_justification(
+        &st.engine.read(),
+        &scope,
+        p.implements.map(|d| match d {
+            OneOrMany::One(t) => vec![t],
+            OneOrMany::Many(v) => v,
         }),
-        (None, None) => None,
-    };
+        p.editorial.map(|e| (e.class, e.reason)),
+    )?;
     let view = p.view.unwrap_or_else(|| st.view.clone());
     let req = WriteRequest {
         view,

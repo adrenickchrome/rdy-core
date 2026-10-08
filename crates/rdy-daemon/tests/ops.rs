@@ -424,3 +424,89 @@ fn qclean1_clean_quarantine_removes_regular_quarantine_files_and_nothing_else() 
         "no store, nothing to do"
     );
 }
+
+#[test]
+fn wccm1_wc_nonce_waits_for_a_commit_still_in_flight() {
+    // a client sends wc_commit and dies; the next command's wc_nonce must not answer "not
+    // found" while that write is queued behind another, or the journal is dropped and the stage
+    // is committed a second time
+    let d = tempfile::tempdir().unwrap();
+    let shared = rdy_daemon::Shared::new(Rdy::init(d.path(), "rdy-standard").unwrap());
+    let e = shared.engine();
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let blocker = {
+        let e = std::sync::Arc::clone(&e);
+        std::thread::spawn(move || {
+            e.write(Box::new(move |_r| {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(Value::Null)
+            }))
+            .unwrap();
+        })
+    };
+    started_rx.recv().unwrap();
+    let nonce = "wccm1-in-flight-nonce";
+    let commit = {
+        let (e, root) = (std::sync::Arc::clone(&e), d.path().to_path_buf());
+        std::thread::spawn(move || {
+            let s = human();
+            let c = OpContext {
+                engine: &*e,
+                session: &s,
+                cwd: &root,
+            };
+            dispatch(
+                &c,
+                "wc_commit",
+                json!({
+                    "view": "work",
+                    "ops": [{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "a", "title": "A", "doc_type": "glossary"}}],
+                    "nonce": nonce,
+                    "rewrite": [],
+                    "message": "in flight",
+                }),
+            )
+            .unwrap()
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !rdy_daemon::wc_in_flight(nonce) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "wc_commit never started"
+        );
+        std::thread::yield_now();
+    }
+    let lookup = {
+        let (e, root) = (std::sync::Arc::clone(&e), d.path().to_path_buf());
+        std::thread::spawn(move || {
+            let s = human();
+            let c = OpContext {
+                engine: &*e,
+                session: &s,
+                cwd: &root,
+            };
+            dispatch(
+                &c,
+                "wc_nonce",
+                json!({"view": "work", "nonce": nonce, "rewrite": []}),
+            )
+            .unwrap()
+        })
+    };
+    // the lookup gets the time it needs to answer early; it must still be waiting
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while !lookup.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    release_tx.send(()).unwrap();
+    blocker.join().unwrap();
+    let committed = commit.join().unwrap();
+    let found = lookup.join().unwrap();
+    assert!(committed["change"].is_string(), "{committed}");
+    assert_eq!(found["change"], committed["change"], "{found}");
+    assert!(!rdy_daemon::wc_in_flight(nonce));
+    shared.shutdown().unwrap();
+}

@@ -344,3 +344,205 @@ fn wccm1_link_targets_as_a_string_a_key_or_objects_all_commit() {
         "written back as an id: {c:?}"
     );
 }
+
+#[test]
+fn wccm1_a_later_edit_to_a_staged_file_is_refused_not_overwritten() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    set_body(&s, "notes.yaml", &seed.note, "Staged.");
+    ok(&s, &["add", "notes.yaml"]);
+    set_body(&s, "notes.yaml", &seed.note, "Unstaged later edit.");
+    let (okk, v) = json(&s, &["commit", "-m", "x"]);
+    assert!(!okk && v["code"] == E_WC_DIRTY, "{v}");
+    assert!(v["message"].as_str().unwrap().contains("notes.yaml"), "{v}");
+    assert!(v["fix"].as_str().unwrap().contains("rdy add"), "{v}");
+    assert_eq!(
+        entry(&s, "notes.yaml", &seed.note)["body"],
+        "Unstaged later edit."
+    );
+    assert!(
+        !at(&s, ".rdy/wc/pending.yaml").exists(),
+        "refused before the journal"
+    );
+    assert_eq!(store_block(&s, "work", &seed.note).body, "Note.");
+    ok(&s, &["add", "notes.yaml"]);
+    ok(&s, &["commit", "-m", "both edits"]);
+    assert_eq!(
+        store_block(&s, "work", &seed.note).body,
+        "Unstaged later edit."
+    );
+}
+
+#[test]
+fn wccm1_a_file_written_after_a_staged_deletion_is_refused_not_deleted() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::remove_file(at(&s, "notes.yaml")).unwrap();
+    ok(&s, &["add", "notes.yaml"]);
+    let mine = "- type: prose\n  body: New text, never staged.\n";
+    put(&s, "notes.yaml", mine);
+    let (okk, v) = json(&s, &["commit", "-m", "x"]);
+    assert!(!okk && v["code"] == E_WC_DIRTY, "{v}");
+    assert!(v["message"].as_str().unwrap().contains("notes.yaml"), "{v}");
+    assert_eq!(read(&s, "notes.yaml"), mine);
+    assert_eq!(store_block(&s, "work", &seed.note).body, "Note.");
+}
+
+#[test]
+fn wccm1_recovery_keeps_an_edit_made_after_the_lost_reply() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    set_body(&s, "notes.yaml", &seed.note, "Mine.");
+    ok(&s, &["add", "notes.yaml"]);
+    let nonce = journal(&s, &seed.notes, "notes.yaml");
+    s.stop();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    let ops = serde_json::from_value(json!([{"op": "update", "id": seed.note, "body": "Mine."}]))
+        .unwrap();
+    r.write_linked(
+        &rdy_qa::fixtures::writer(),
+        WriteRequest {
+            view: "work".into(),
+            ops,
+            justification: None,
+            message: "lost".into(),
+        },
+        ChangeLinks {
+            client_nonce: Some(nonce),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    r.close().unwrap();
+    // the person edits the file again before the next command
+    set_body(&s, "notes.yaml", &seed.note, "Later.");
+    let o = s.rdy(&["status"]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(o.status.success(), "{err}");
+    assert!(
+        err.contains("recovered commit") && err.contains("notes.yaml"),
+        "{err}"
+    );
+    assert!(!at(&s, ".rdy/wc/pending.yaml").exists());
+    assert_eq!(
+        entry(&s, "notes.yaml", &seed.note)["body"],
+        "Later.",
+        "the later edit survives"
+    );
+}
+
+#[test]
+fn wccm1_the_write_back_keeps_an_untracked_file_where_a_renamed_doc_would_go() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let memo = "my own memo, never tracked\n";
+    put(&s, "memo.yaml", memo);
+    store_write(
+        &s,
+        "work",
+        json!([{"op": "update", "id": seed.notes, "fields": {"name": "memo"}}]),
+    );
+    set_body(&s, "notes.yaml", &seed.note, "Mine.");
+    ok(&s, &["add", "notes.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "x"]);
+    assert!(okk, "{v}");
+    assert_eq!(read(&s, "memo.yaml"), memo, "the untracked file is kept");
+    assert_eq!(
+        entry(&s, "notes.yaml", &seed.note)["body"],
+        "Mine.",
+        "the old path stays"
+    );
+    assert_eq!(v["kept"][0]["file"], "memo.yaml", "{v}");
+    assert!(
+        v["kept"][0]["fix"].as_str().unwrap().contains("rdy update"),
+        "{v}"
+    );
+    assert_eq!(store_block(&s, "work", &seed.note).body, "Mine.");
+    let o = s.rdy(&["commit", "-m", "y"]);
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("nothing staged"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
+/// Whether the project's filesystem treats names that differ only in case as one name.
+fn case_insensitive(s: &Served) -> bool {
+    let probe = at(s, "CaseProbe");
+    std::fs::write(&probe, "x").unwrap();
+    let same = at(s, "caseprobe").exists();
+    std::fs::remove_file(probe).unwrap();
+    same
+}
+
+#[test]
+fn wccm1_a_case_only_rename_from_the_store_survives_the_write_back() {
+    let (s, seed) = seeded();
+    if !case_insensitive(&s) {
+        eprintln!("skipped: the filesystem is case-sensitive");
+        return;
+    }
+    ok(&s, &["checkout"]);
+    store_write(
+        &s,
+        "work",
+        json!([{"op": "update", "id": seed.notes, "fields": {"name": "Notes"}}]),
+    );
+    set_body(&s, "notes.yaml", &seed.note, "Mine.");
+    ok(&s, &["add", "notes.yaml"]);
+    ok(&s, &["commit", "-m", "x"]);
+    let top: Vec<String> = std::fs::read_dir(s.dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        top.contains(&"Notes.yaml".to_string()) && !top.contains(&"notes.yaml".to_string()),
+        "{top:?}"
+    );
+    assert_eq!(entry(&s, "Notes.yaml", &seed.note)["body"], "Mine.");
+    assert!(
+        at(&s, ".rdy/wc/base/files/Notes.yaml").exists(),
+        "the base copy stays"
+    );
+    let (_, st) = json(&s, &["status"]);
+    assert!(
+        st["working_copy"]["staged"].as_array().unwrap().is_empty(),
+        "{st}"
+    );
+    assert!(
+        st["working_copy"]["unstaged"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{st}"
+    );
+}
+
+#[test]
+fn wccm1_the_write_back_keeps_an_untracked_file_where_a_projected_directory_would_go() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    put(&s, "manual", "my own file, never tracked\n");
+    store_write(
+        &s,
+        "work",
+        json!([{"op": "update", "id": seed.folder, "fields": {"name": "manual"}}]),
+    );
+    set_body(&s, "guides/intro.yaml", &seed.prose, "Mine.");
+    ok(&s, &["add", "guides/intro.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "x"]);
+    assert!(okk, "{v}");
+    assert_eq!(
+        read(&s, "manual"),
+        "my own file, never tracked\n",
+        "the untracked file is kept"
+    );
+    assert_eq!(
+        entry(&s, "guides/intro.yaml", &seed.prose)["body"],
+        "Mine.",
+        "the old path stays"
+    );
+    assert!(v["kept"].as_array().is_some_and(|k| !k.is_empty()), "{v}");
+    assert_eq!(store_block(&s, "work", &seed.prose).body, "Mine.");
+}

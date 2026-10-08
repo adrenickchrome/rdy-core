@@ -6,13 +6,13 @@ use super::{Open, open};
 use crate::brief_text::consequences_text;
 use crate::{Conn, Env, call, hash_short};
 use rdy_daemon::{E_DAEMON_GONE, ErrorReply};
-use rdy_engine::wc::files::apply_writeback;
+use rdy_engine::wc::files::{apply_writeback, changed_since_staged};
 use rdy_engine::wc::plan::{CommitPlan, plan_commit};
 use rdy_engine::wc::state::{Pending, Place, WcState, new_nonce, stage_clear};
 use rdy_engine::{
     Diagnostic, E_BAD_INPUT, E_BAD_NAME, E_HAS_CHILDREN, E_KEY_CLASH, E_PATH_CLASH, E_STALE_BASE,
-    E_UNKNOWN_REF, E_VALIDATION, E_WC_CONFLICT, E_WC_INVALID, E_WC_STALE, Projection, RdyError,
-    now_ms, project_pack,
+    E_UNKNOWN_REF, E_VALIDATION, E_WC_CONFLICT, E_WC_DIRTY, E_WC_INVALID, E_WC_LOCKED, E_WC_STALE,
+    Projection, RdyError, editorial_class, now_ms, project_pack,
 };
 use rdy_model::BlockId;
 use rdy_schema::Severity;
@@ -33,9 +33,6 @@ const FILE_CODES: &[&str] = &[
     E_BAD_INPUT,
     "E_CHILD_TYPE",
 ];
-
-/// The editorial classes a change may name (as `rdy_write` takes them).
-const EDITORIAL_CLASSES: &[&str] = &["typo", "restructure", "clarify"];
 
 /// How the commit is justified: the decisions it carries out, or an editorial class and reason.
 pub(super) struct Justify {
@@ -62,15 +59,9 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
         )
         .into());
     }
-    if let [class, _] = j.editorial.as_slice()
-        && !EDITORIAL_CLASSES.contains(&class.as_str())
-    {
-        return Err(RdyError::new(
-            E_BAD_INPUT,
-            format!("unknown editorial class {class:?}"),
-            "use typo, restructure or clarify",
-        )
-        .into());
+    if let [class, _] = j.editorial.as_slice() {
+        // checked before the journal: the daemon's refusal would read as a problem in a file
+        editorial_class(class)?;
     }
     let view = state.require_bound()?.view.clone();
     let pack = project_pack(&env.project)?;
@@ -109,6 +100,20 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
             "warnings": plan.warnings,
         });
         return Ok((out, text));
+    }
+    // the write-back writes the committed files as staged: a later edit would be lost
+    let dirty = changed_since_staged(&place, &state, &plan.committed);
+    if !dirty.is_empty() {
+        return Err(RdyError::new(
+            E_WC_DIRTY,
+            format!(
+                "{} staged file(s) changed after rdy add: {}",
+                dirty.len(),
+                dirty.join(", ")
+            ),
+            "rdy add <path> to commit your later edits too, or restore the staged version",
+        )
+        .into());
     }
     let nonce = new_nonce();
     state.pending = Some(Pending {
@@ -178,6 +183,7 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
         ));
     }
     text.push_str(&plan_warnings_text(&plan));
+    text.push_str(&kept_text(&wb.kept));
     text.push_str(&consequences_text(&reply));
     let mut out = reply;
     if let Some(o) = out.as_object_mut() {
@@ -186,8 +192,18 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
         }
         o.insert("view".into(), json!(view));
         o.insert("files".into(), json!(wb.written));
+        if !wb.kept.is_empty() {
+            o.insert("kept".into(), json!(wb.kept));
+        }
     }
     Ok((out, text))
+}
+
+/// One line per path the write-back left as it was.
+fn kept_text(kept: &[Diagnostic]) -> String {
+    kept.iter()
+        .map(|d| format!("\nwarning {}: {} (fix: {})", d.code, d.message, d.fix))
+        .collect()
 }
 
 fn plan_warnings_text(plan: &CommitPlan) -> String {
@@ -232,6 +248,15 @@ pub(super) fn recover(env: &Env, place: &Place, st: &mut WcState) -> Result<(), 
         e.message = format!("cannot finish an interrupted commit: {}", e.message);
         e
     })?;
+    if v["pending"] == true {
+        // the daemon still runs the commit: the journal stays, and nothing may commit meanwhile
+        return Err(RdyError::new(
+            E_WC_LOCKED,
+            "the interrupted commit is still being recorded by the daemon",
+            "run the command again in a moment",
+        )
+        .into());
+    }
     match v["change"].as_str() {
         None => {
             st.pending = None;
@@ -250,13 +275,16 @@ pub(super) fn recover(env: &Env, place: &Place, st: &mut WcState) -> Result<(), 
                 .filter(|f| st.stage.deleted.contains(*f))
                 .cloned()
                 .collect();
-            apply_writeback(place, st, &proj, &rewrite, &removed, &committed)?;
+            let wb = apply_writeback(place, st, &proj, &rewrite, &removed, &committed)?;
             st.pending = None;
             st.save(place)?;
             eprintln!(
                 "notice: recovered commit {}: its files are written back",
                 hash_short(change)
             );
+            for line in kept_text(&wb.kept).lines().filter(|l| !l.is_empty()) {
+                eprintln!("{line}");
+            }
         }
     }
     Ok(())

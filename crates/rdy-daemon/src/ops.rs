@@ -12,13 +12,16 @@ use rdy_engine::search::SearchFilters;
 use rdy_engine::{
     E_BAD_INPUT, E_IO, E_LIMIT, E_NOT_FOUND, E_PERMISSION, HISTORY_MAX, LandOptions, OpInput,
     RdyError, ReadState, Relay, Scope, SearchQuery, Session, WriteRequest, block_to_yaml,
-    check_path, resolve_pack, view_api,
+    check_path, parse_justification, resolve_pack, view_api,
 };
 use rdy_mcp::tools::MAX_TOKENS_LIMIT;
-use rdy_model::{ActorRun, ChangeLinks, EditorialClass, Justification, RelayEvidence, Role};
+use rdy_model::{ActorRun, ChangeLinks, RelayEvidence, Role};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 /// What an op runs against: the engine, the calling session and its working directory.
 pub struct OpContext<'a> {
@@ -990,6 +993,59 @@ fn wc_view(cx: &OpContext, a: WcViewArgs) -> Result<Value, RdyError> {
 /// The most changes `wc_nonce` reads before it answers that no change carries the nonce (R-I6).
 const NONCE_SCAN_LIMIT: usize = 10_000;
 
+/// How long `wc_nonce` waits for a `wc_commit` with its nonce that is still running before it
+/// answers `pending`.
+const NONCE_WAIT: Duration = Duration::from_secs(60);
+
+/// The nonces of the `wc_commit` requests this daemon is running: from dispatch until their
+/// write has returned (and its state is published). A client that dies after it sends one
+/// leaves the request running; the next command's `wc_nonce` waits for it.
+static IN_FLIGHT: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+static IN_FLIGHT_DONE: Condvar = Condvar::new();
+
+fn in_flight() -> MutexGuard<'static, BTreeSet<String>> {
+    IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether a `wc_commit` with `nonce` is running in this process.
+pub fn wc_in_flight(nonce: &str) -> bool {
+    in_flight().contains(nonce)
+}
+
+/// A `wc_commit`'s nonce, in flight while this lives.
+struct InFlight(String);
+
+impl InFlight {
+    fn start(nonce: &str) -> InFlight {
+        in_flight().insert(nonce.to_string());
+        InFlight(nonce.to_string())
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        in_flight().remove(&self.0);
+        IN_FLIGHT_DONE.notify_all();
+    }
+}
+
+/// Waits until no `wc_commit` with `nonce` runs, up to `NONCE_WAIT`; false when one still runs.
+fn wait_not_in_flight(nonce: &str) -> bool {
+    let deadline = Instant::now() + NONCE_WAIT;
+    let mut set = in_flight();
+    while set.contains(nonce) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        set = IN_FLIGHT_DONE
+            .wait_timeout(set, left)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+    true
+}
+
 /// The scope a working copy of `view` reads: the view when it has a head, else canon.
 fn wc_scope(st: &ReadState, view: &str) -> Scope {
     if st.view_head(view).is_some() {
@@ -1034,6 +1090,8 @@ fn merge_into(v: &mut Value, extra: Value) {
 /// change, justified as `rdy_write` justifies it; the reply gains the projection of the files
 /// of `rewrite` as the write left them.
 fn wc_commit(cx: &OpContext, a: WcCommitArgs) -> Result<Value, RdyError> {
+    // in flight from dispatch until the write has returned, before anything can fail or queue
+    let _in_flight = InFlight::start(&a.nonce);
     check_max_tokens(a.max_tokens)?;
     if !cx.session.role.can_write() {
         return Err(RdyError::new(
@@ -1043,50 +1101,12 @@ fn wc_commit(cx: &OpContext, a: WcCommitArgs) -> Result<Value, RdyError> {
         ));
     }
     let view = view_of(cx.session, Some(a.view));
-    let justification = match (a.implements, a.editorial) {
-        (Some(_), Some(_)) => {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                "give either implements or editorial, not both",
-                "implements for decision-backed changes, editorial for typo/restructure/clarify",
-            ));
-        }
-        (Some(texts), None) => {
-            if texts.is_empty() {
-                return Err(RdyError::new(
-                    E_BAD_INPUT,
-                    "implements is empty",
-                    "name the decision this change carries out, or leave implements out",
-                ));
-            }
-            let st = cx.engine.read();
-            let scope = Scope::View(view.clone());
-            let mut ids: Vec<rdy_model::BlockId> = vec![];
-            for t in &texts {
-                let id = st.resolve_id(&scope, t)?;
-                if !ids.contains(&id) {
-                    ids.push(id);
-                }
-            }
-            Some(Justification::Implements(ids))
-        }
-        (None, Some(e)) => Some(Justification::Editorial {
-            class: match e.class.as_str() {
-                "typo" => EditorialClass::Typo,
-                "restructure" => EditorialClass::Restructure,
-                "clarify" => EditorialClass::Clarify,
-                other => {
-                    return Err(RdyError::new(
-                        E_BAD_INPUT,
-                        format!("unknown editorial class {other:?}"),
-                        "use typo, restructure or clarify",
-                    ));
-                }
-            },
-            reason: e.reason,
-        }),
-        (None, None) => None,
-    };
+    let justification = parse_justification(
+        &cx.engine.read(),
+        &Scope::View(view.clone()),
+        a.implements,
+        a.editorial.map(|e| (e.class, e.reason)),
+    )?;
     let ops: Vec<OpInput> = a
         .ops
         .into_iter()
@@ -1127,16 +1147,24 @@ fn wc_commit(cx: &OpContext, a: WcCommitArgs) -> Result<Value, RdyError> {
 
 /// wccm1, R-I6: the change a working-copy commit with `nonce` recorded, when the store has it,
 /// and then the projection of the files of `rewrite` (as `wc_commit` adds it); else
-/// `{change: null}`.
+/// `{change: null}`. The answer is conclusive: it first waits while a `wc_commit` with the nonce
+/// runs in this daemon (`{change: null, pending: true}` when it still runs after `NONCE_WAIT`),
+/// then reads on the writer, after every write queued before it.
 fn wc_nonce(cx: &OpContext, a: WcNonceArgs) -> Result<Value, RdyError> {
-    let st = cx.engine.read();
-    let view = view_of(cx.session, Some(a.view));
-    match st.change_by_nonce(&view, &a.nonce, NONCE_SCAN_LIMIT)? {
-        None => Ok(json!({"change": null})),
-        Some(h) => {
-            let mut out = json!({"change": h.to_string()});
-            merge_into(&mut out, wc_rewrite(&st, &view, &a.rewrite)?);
-            Ok(out)
-        }
+    if !wait_not_in_flight(&a.nonce) {
+        return Ok(json!({"change": null, "pending": true}));
     }
+    let view = view_of(cx.session, Some(a.view));
+    let (nonce, rewrite) = (a.nonce, a.rewrite);
+    cx.engine.write(Box::new(move |r| {
+        let st = r.read();
+        match st.change_by_nonce(&view, &nonce, NONCE_SCAN_LIMIT)? {
+            None => Ok(json!({"change": null})),
+            Some(h) => {
+                let mut out = json!({"change": h.to_string()});
+                merge_into(&mut out, wc_rewrite(&st, &view, &rewrite)?);
+                Ok(out)
+            }
+        }
+    }))
 }

@@ -251,3 +251,6 @@ pub const E_WC_STORE_ONLY: &str = "E_WC_STORE_ONLY";
 pub const W_WC_UNTRACKED: &str = "W_WC_UNTRACKED";
 /// Diagnostic: a block moved into a file that is not staged.
 pub const W_WC_UNSTAGED_MOVE: &str = "W_WC_UNSTAGED_MOVE";
+/// Diagnostic: the commit's write-back left a path as it was, because it holds what the commit
+/// did not record (a file rdy does not track, or later edits).
+pub const W_WC_KEPT: &str = "W_WC_KEPT";

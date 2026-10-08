@@ -2154,3 +2154,58 @@ pub(crate) fn writable_view(name: &str) -> Result<(), RdyError> {
     }
     Ok(())
 }
+
+/// The editorial class named `name`; `E_BAD_INPUT` for any other name.
+pub fn editorial_class(name: &str) -> Result<rdy_model::EditorialClass, RdyError> {
+    use rdy_model::EditorialClass;
+    match name {
+        "typo" => Ok(EditorialClass::Typo),
+        "restructure" => Ok(EditorialClass::Restructure),
+        "clarify" => Ok(EditorialClass::Clarify),
+        other => Err(RdyError::new(
+            E_BAD_INPUT,
+            format!("unknown editorial class {other:?}"),
+            "use typo, restructure or clarify",
+        )),
+    }
+}
+
+/// A write's justification from its caller's `implements` (decision ids, keys or paths, each
+/// resolved in `scope`, deduplicated in order) or `editorial` (class and reason); both given, or
+/// `implements` empty, is `E_BAD_INPUT`. The one rule `rdy_write` and the ctl `wc_commit` share.
+pub fn parse_justification(
+    read: &ReadState,
+    scope: &Scope,
+    implements: Option<Vec<String>>,
+    editorial: Option<(String, String)>,
+) -> Result<Option<Justification>, RdyError> {
+    match (implements, editorial) {
+        (Some(_), Some(_)) => Err(RdyError::new(
+            E_BAD_INPUT,
+            "give either implements or editorial, not both",
+            "implements for decision-backed changes, editorial for typo/restructure/clarify",
+        )),
+        (Some(texts), None) => {
+            if texts.is_empty() {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    "implements is empty",
+                    "name the decision this change carries out, or leave implements out",
+                ));
+            }
+            let mut ids: Vec<BlockId> = vec![];
+            for t in &texts {
+                let id = read.resolve_id(scope, t)?;
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            Ok(Some(Justification::Implements(ids)))
+        }
+        (None, Some((class, reason))) => Ok(Some(Justification::Editorial {
+            class: editorial_class(&class)?,
+            reason,
+        })),
+        (None, None) => Ok(None),
+    }
+}

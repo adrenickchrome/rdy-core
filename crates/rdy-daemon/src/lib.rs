@@ -40,7 +40,7 @@ pub use shared::{DaemonEngine, Shared};
 pub use writer::{CHECKPOINT_TICK, Writer, WriterHandle};
 pub mod ops;
 
-pub use ops::{Cleaned, OPS, OpContext, clean_quarantine, dispatch, quarantine};
+pub use ops::{Cleaned, OPS, OpContext, clean_quarantine, dispatch, quarantine, wc_in_flight};
 pub mod serve;
 
 pub use serve::{CtlSession, ServeError, ServeHandler, ServeOptions, ServeRun, serve, start};

@@ -64,7 +64,10 @@ pub use version::{
 pub use view_query::{ChangeSummary, Compare, CompareEntry, OpSummary, ViewDetail, ViewSummary};
 pub use views::{ConflictInfo, ConflictSide, OwnerInfo, ViewHeadInfo, ViewOpResult};
 pub use wc::project::Projection;
-pub use write::{LinkInput, OpInput, WriteRequest, WriteResult, json_to_field};
+pub use write::{
+    LinkInput, OpInput, WriteRequest, WriteResult, editorial_class, json_to_field,
+    parse_justification,
+};
 
 pub use engine::{Engine, Local, WriteFn};
 pub use rdy_store::OpenReport;
