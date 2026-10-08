@@ -564,6 +564,9 @@ pub struct DetectCx<'a> {
     pub writes: &'a Writes,
     canon: Arc<CanonIndex>,
     scope: DetectScope,
+    /// A landing's run (tgat1): the canon its landing set would give, read where the in-flight
+    /// scope is read otherwise.
+    landing: Option<(Arc<Materialized>, Arc<Graph>)>,
 }
 
 impl<'a> DetectCx<'a> {
@@ -578,6 +581,22 @@ impl<'a> DetectCx<'a> {
             writes,
             canon,
             scope,
+            landing: None,
+        }
+    }
+
+    /// An in-flight run over a landing set (tgat1): `writes` are that set's writes, and `m` and
+    /// `g` the canon its landing would give, read in place of the in-flight scope.
+    pub(crate) fn landing(
+        st: &'a ReadState,
+        writes: &'a Writes,
+        canon: Arc<CanonIndex>,
+        m: Arc<Materialized>,
+        g: Arc<Graph>,
+    ) -> DetectCx<'a> {
+        DetectCx {
+            landing: Some((m, g)),
+            ..DetectCx::new(st, writes, canon, DetectScope::Inflight)
         }
     }
 
@@ -595,24 +614,40 @@ impl<'a> DetectCx<'a> {
         self.st.materialized(&Scope::Canon)
     }
 
+    /// The in-flight materialization (a landing's run: the canon its landing would give).
     pub fn inflight_m(&self) -> Result<Arc<Materialized>, RdyError> {
-        self.st.materialized(&Scope::Inflight)
+        match &self.landing {
+            Some((m, _)) => Ok(Arc::clone(m)),
+            None => self.st.materialized(&Scope::Inflight),
+        }
     }
 
     pub fn canon_graph(&self) -> Result<Arc<Graph>, RdyError> {
         self.st.graph(&Scope::Canon)
     }
 
+    /// The in-flight graph (a landing's run: the graph of the canon its landing would give).
     pub fn inflight_graph(&self) -> Result<Arc<Graph>, RdyError> {
-        self.st.graph(&Scope::Inflight)
+        match &self.landing {
+            Some((_, g)) => Ok(Arc::clone(g)),
+            None => self.st.graph(&Scope::Inflight),
+        }
     }
 
-    /// The scope `stable`, `deprecated` and `side_at` read: the in-flight one, or canon in the
-    /// canon scope.
-    fn current(&self) -> Scope {
+    /// The materialization `stable`, `deprecated` and `areas_of` read: the in-flight one, or
+    /// canon's in the canon scope.
+    fn current_m(&self) -> Result<Arc<Materialized>, RdyError> {
         match self.scope {
-            DetectScope::Inflight => Scope::Inflight,
-            DetectScope::Canon => Scope::Canon,
+            DetectScope::Inflight => self.inflight_m(),
+            DetectScope::Canon => self.canon_m(),
+        }
+    }
+
+    /// The graph of [`DetectCx::current_m`].
+    fn current_graph(&self) -> Result<Arc<Graph>, RdyError> {
+        match self.scope {
+            DetectScope::Inflight => self.inflight_graph(),
+            DetectScope::Canon => self.canon_graph(),
         }
     }
 
@@ -669,12 +704,11 @@ impl<'a> DetectCx<'a> {
         {
             return Ok(self.content_of(&b));
         }
-        let mut scopes = vec![Scope::Canon];
+        let mut scopes = vec![self.canon_m()?];
         if self.scope == DetectScope::Inflight {
-            scopes.push(Scope::Inflight);
+            scopes.push(self.inflight_m()?);
         }
-        for scope in scopes {
-            let m = self.st.materialized(&scope)?;
+        for m in scopes {
             if m.version_of(block).as_ref() == Some(v)
                 && let Some(b) = m.get(block)
             {
@@ -707,12 +741,16 @@ impl<'a> DetectCx<'a> {
             return Ok(self.canon_side(b)?.map(|(s, v)| (s, Some(v))));
         }
         let v = self.inflight_m()?.version_of(b);
-        let last = self
-            .st
-            .inflight_cell
-            .last
-            .get()
-            .and_then(|l| l.get(b).copied());
+        // the merge's last writer is the published in-flight scope's (none for a landing's run)
+        let last = match self.landing {
+            Some(_) => None,
+            None => self
+                .st
+                .inflight_cell
+                .last
+                .get()
+                .and_then(|l| l.get(b).copied()),
+        };
         let live = self.writes.live_on(b);
         let matching: Vec<&Arc<Write>> = live.iter().filter(|w| w.version == v).collect();
         if let Some(w) = matching
@@ -737,7 +775,7 @@ impl<'a> DetectCx<'a> {
     /// Whether `b`'s effective lifecycle is `stable` (in flight, falling back to canon's when
     /// `b` is absent there; canon's in the canon scope).
     pub fn stable(&self, b: &BlockId) -> Result<bool, RdyError> {
-        let m = self.st.materialized(&self.current())?;
+        let m = self.current_m()?;
         if m.get(b).is_some() {
             return Ok(effective_stable(&m, Some(b)));
         }
@@ -753,13 +791,12 @@ impl<'a> DetectCx<'a> {
     /// wholly superseded or revoked (a partial supersede does not count). Read in flight, or in
     /// canon in the canon scope.
     pub fn deprecated(&self, b: &BlockId) -> Result<bool, RdyError> {
-        let scope = self.current();
-        let m = self.st.materialized(&scope)?;
+        let m = self.current_m()?;
         if effective_lifecycle(&m, Some(b)).as_deref() == Some("deprecated") {
             return Ok(true);
         }
         Ok(matches!(
-            self.st.graph(&scope)?.status(b),
+            self.current_graph()?.status(b),
             Some(DerivedStatus::Superseded { .. } | DerivedStatus::Revoked { .. })
         ))
     }
@@ -776,7 +813,19 @@ impl<'a> DetectCx<'a> {
 
     /// The pack areas of `b` (in flight, or in canon in the canon scope).
     pub fn areas_of(&self, b: &BlockId) -> Result<Vec<String>, RdyError> {
-        self.st.areas_of(&self.current(), b)
+        if self.landing.is_none() {
+            let scope = match self.scope {
+                DetectScope::Inflight => Scope::Inflight,
+                DetectScope::Canon => Scope::Canon,
+            };
+            return self.st.areas_of(&scope, b);
+        }
+        let m = self.current_m()?;
+        match m.get(b) {
+            Some(block) => Ok(self.st.areas_in(&m, block)),
+            // the landing deletes b: canon's areas, or E_UNKNOWN_BLOCK
+            None => self.st.areas_of(&Scope::Canon, b),
+        }
     }
 }
 

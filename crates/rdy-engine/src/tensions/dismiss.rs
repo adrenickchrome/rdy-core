@@ -1,7 +1,8 @@
 //! Dismissal (FW-CH7): a review with verdict `Dismiss` of one tension, named by the tension's
 //! vkey. A dismissal is state on a still-computed tension: nothing removes the tension from the
 //! set, and a change to a side's content gives a new vkey, which no dismissal names. A dismissal
-//! is never withdrawn.
+//! is never withdrawn. The vkey hashes content, not versions, so a write that gives a side the
+//! same content again (a new version with identical content) keeps the dismissal.
 //!
 //! Who may dismiss: any writer-role session may dismiss an advisory tension, its authors
 //! included. A blocking tension needs the reviewer role or a human session, of an actor that

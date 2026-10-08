@@ -1,7 +1,8 @@
 //! tgat1: the gate refuses a blocking tension only when every side would be in canon.
+use proptest::prelude::*;
 use rdy_engine::tensions::*;
 use rdy_engine::*;
-use rdy_model::BlockId;
+use rdy_model::{BlockId, Hash};
 use rdy_model::{EditorialClass, Justification, Role};
 use rdy_qa::edit_loop::{brief_of, spec_doc, stable_spec, write_cited_as};
 use rdy_qa::fixtures::*;
@@ -288,4 +289,172 @@ fn tgat1_a_dismissed_fork_lands_and_stays_open_in_canon() {
         r.read().tension_status(&t2),
         TensionStatus::Dismissed(_)
     ));
+}
+
+/// F1 (adversarial review, fix round 2): a change that another view also includes stays live
+/// there, but what view `b` lands is its resolution, so no collision with canon lands.
+#[test]
+fn tgat1_a_change_included_in_another_view_lands_with_its_views_resolution() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let cb = change_of(&put(&mut r, "b", upd(&s.a, "A by b.")));
+    // a colleague's view o includes b's change
+    put(&mut r, "o", upd(&s.b, "B by o."));
+    r.view_include(&ag("o"), "o", &[cb.to_string()]).unwrap();
+    put(&mut r, "a", upd(&s.a, "A by a."));
+    let pa = propose(&mut r, "a");
+    approve(&mut r, &pa).unwrap();
+    let base = r
+        .read()
+        .conflict_on(&Scope::View("b".into()), &s.a)
+        .unwrap()
+        .unwrap()
+        .base
+        .unwrap();
+    put(
+        &mut r,
+        "b",
+        json!([{"op": "update", "id": s.a.to_string(), "base": base.to_string(), "body": "A merged."}]),
+    );
+    let pb = propose(&mut r, "b");
+    assert!(pb.blocking.is_empty(), "{:?}", pb.blocking);
+    assert!(
+        pb.tensions.iter().all(|t| t.refuses == Some(false)),
+        "{:?}",
+        pb.tensions
+    );
+    approve(&mut r, &pb).unwrap();
+}
+
+/// F3 (adversarial review, fix round 2): a subset that leaves out the repin lands the stale pin,
+/// so the gate refuses it although the view as a whole has no tension.
+#[test]
+fn tgat1_a_subset_that_leaves_out_the_repin_refuses() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let w1 = put(&mut r, "b", cite(&s.section, &s.a));
+    let y = created(&w1, "$y");
+    let c1 = change_of(&w1);
+    put(&mut r, "a", upd(&s.a, "A changed."));
+    let pa = propose(&mut r, "a");
+    approve(&mut r, &pa).unwrap();
+    put(&mut r, "b", json!([{"op": "repin", "id": y.to_string()}]));
+    let whole = propose(&mut r, "b");
+    assert!(
+        whole.tensions.iter().all(|t| t.refuses == Some(false)),
+        "the whole view repins: {:?}",
+        whole.tensions
+    );
+    let p = r
+        .propose_subset(&writer(), "b", "b", Some(&[c1.to_string()]), None)
+        .unwrap();
+    assert!(
+        p.tensions
+            .iter()
+            .any(|t| t.kind == TensionKind::PremiseShift && t.refuses == Some(true)),
+        "{:?}",
+        p.tensions
+    );
+    let e = approve(&mut r, &p).unwrap_err();
+    assert_eq!(e.code, E_BLOCKING_TENSION, "{e:?}");
+}
+
+/// One step of a gate scenario: (kind, view, target, subset size). Kinds: 0–1 edit a claim,
+/// 2–3 cite one, 4 repin the view's last citer, 5 supersede the decision, 6 include another
+/// view's change, 7–8 propose (the whole view, or its first changes) and land.
+type Step = (u8, u8, u8, u8);
+
+/// Runs `steps` on a spec project; at each propose step, `propose` reports a refusing tension
+/// exactly when `land` refuses with `E_BLOCKING_TENSION`.
+fn propose_agrees_with_land(steps: Vec<Step>) -> Result<(), TestCaseError> {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let names = ["a", "b", "o"];
+    let claims = [s.a.clone(), s.b.clone(), s.c.clone()];
+    // the citing claims each view created, newest last
+    let mut citers: Vec<Vec<BlockId>> = vec![vec![]; 3];
+    for (i, (kind, v, k, n)) in steps.into_iter().enumerate() {
+        let vn = names[v as usize];
+        let target = &claims[k as usize % 3];
+        match kind {
+            0 | 1 => {
+                let _ = try_put(&mut r, vn, upd(target, &format!("{vn} {i}")));
+            }
+            2 | 3 => {
+                if let Ok(w) = try_put(&mut r, vn, cite(&s.section, target)) {
+                    citers[v as usize].push(created(&w, "$y"));
+                }
+            }
+            4 => {
+                if let Some(y) = citers[v as usize].last() {
+                    let _ = try_put(&mut r, vn, json!([{"op": "repin", "id": y.to_string()}]));
+                }
+            }
+            5 => {
+                let _ = r.supersede(
+                    &ag(vn),
+                    vn,
+                    &s.decision.to_string(),
+                    None,
+                    DecisionInput {
+                        parent: s.section.to_string(),
+                        statement: format!("s{i}"),
+                        ..Default::default()
+                    },
+                );
+            }
+            6 => {
+                let from = names[k as usize % 3];
+                let inc = r.read().included(from);
+                if let Some(c) = inc.get(n as usize % inc.len().max(1)) {
+                    let _ = r.view_include(&ag(vn), vn, &[c.to_string()]);
+                }
+            }
+            _ => {
+                let inc = r.read().included(vn);
+                if inc.is_empty() {
+                    continue;
+                }
+                // n == 0: the whole view; else its first n changes (a subset that can be
+                // refused as not closed, which proposes nothing)
+                let p = if n == 0 {
+                    r.propose(&writer(), vn, vn)
+                } else {
+                    let ids: Vec<String> = inc
+                        .iter()
+                        .take(n as usize)
+                        .map(|h: &Hash| h.to_string())
+                        .collect();
+                    r.propose_subset(&writer(), vn, vn, Some(&ids), None)
+                };
+                let Ok(p) = p else { continue };
+                let refuses = p.tensions.iter().any(|t| t.refuses == Some(true));
+                let landed = r.land(&approver(), &p.id);
+                let gate = matches!(&landed, Err(e) if e.code == E_BLOCKING_TENSION);
+                if !p.blocking.is_empty() {
+                    prop_assert!(!gate, "a blocking conflict refuses first: {landed:?}");
+                    continue;
+                }
+                prop_assert_eq!(
+                    refuses,
+                    gate,
+                    "step {}: propose {:?}, land {:?}",
+                    i,
+                    p.tensions,
+                    landed.as_ref().map_err(|e| (e.code, e.message.clone()))
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: cases(24), ..ProptestConfig::default() })]
+    #[test]
+    fn tgat1_propose_reports_a_refusal_iff_land_refuses_with_a_blocking_tension(
+        steps in proptest::collection::vec((0u8..9, 0u8..3, 0u8..3, 0u8..3), 4..16)
+    ) {
+        propose_agrees_with_land(steps)?;
+    }
 }

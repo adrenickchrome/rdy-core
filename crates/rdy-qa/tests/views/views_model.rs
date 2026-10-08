@@ -610,10 +610,6 @@ impl<'a> Driver<'a> {
         .expect("seed");
         let seed: Hash = res.change.parse().unwrap();
         let landing: Hash = land(&mut r, "seed").expect("seed lands").parse().unwrap();
-        // the model predicts views, conflicts and the landing order, not tensions: with no
-        // detectors the tension gate (tgat1, covered in the gate area) refuses nothing, so a
-        // landing that overwrites a newer canon version is the model's to predict
-        r.set_detectors_for_tests(&[]);
         let blocks: Vec<BlockId> = (0..BLOCKS)
             .map(|i| BlockId::parse(&res.created[&format!("$b{i}")]).unwrap())
             .collect();

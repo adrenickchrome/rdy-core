@@ -3,12 +3,13 @@
 use super::index::{DetectCx, Writes, canon_index_of};
 use super::{DetectScope, Detector, SideRef, Tension, tension_from, tension_label};
 use crate::error::*;
+use crate::gate::applied_ops;
 use crate::views::clip;
-use crate::{RdyError, ReadState};
+use crate::{InflightSet, RdyError, ReadState, Scope};
 use imbl::ordmap::DiffItem;
 use imbl::{OrdMap, OrdSet};
-use rdy_model::{Block, BlockId, Hash, Op, decision};
-use std::collections::BTreeSet;
+use rdy_model::{Block, BlockId, Change, Hash, Op, decision};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
 
 /// The event-derived tensions of one state, by id, with indexes by block and by change.
@@ -227,8 +228,13 @@ impl TensionCell {
 /// The blocks a carry re-detects around for `change`: the blocks it writes, and the
 /// `supersedes` and `revokes` targets of the decisions it writes (as written, and as they were).
 fn seeds_of(st: &ReadState, change: &Hash) -> Result<BTreeSet<BlockId>, RdyError> {
-    let c = st.reader().change(change)?;
     let mut seeds = BTreeSet::new();
+    seeds_into(st, &st.reader().change(change)?, &mut seeds)?;
+    Ok(seeds)
+}
+
+/// Adds to `seeds` the blocks [`seeds_of`] names for change `c`.
+fn seeds_into(st: &ReadState, c: &Change, seeds: &mut BTreeSet<BlockId>) -> Result<(), RdyError> {
     let mut targets = |b: &Block| {
         if b.block_type == decision::DECISION {
             for name in [decision::SUPERSEDES, decision::REVOKES] {
@@ -249,7 +255,7 @@ fn seeds_of(st: &ReadState, change: &Hash) -> Result<BTreeSet<BlockId>, RdyError
     for op in &c.ops {
         seeds.insert(op.block_id().clone());
     }
-    Ok(seeds)
+    Ok(())
 }
 
 /// The carry (tcar1): `prev`'s canon part (canon did not move); its in-flight part less every
@@ -351,6 +357,75 @@ fn build(st: &ReadState, detectors: &[&dyn Detector], memo: bool) -> Result<Tens
 }
 
 impl ReadState {
+    /// tgat1 (the gate judges what lands): the tensions around what landing `changes` (one
+    /// version's changes, proposed from view `view`) would write. The state's detectors run
+    /// seeded with the blocks the changes write (and the targets their decisions supersede or
+    /// revoke), in the in-flight scope, over a context whose in-flight writes are exactly these
+    /// changes, as one view (`view`) merges them, and whose in-flight state is the canon their
+    /// landing would give; canon is as is. Each tension involves a seed and has a change side; a
+    /// change in flight elsewhere, or a later change of the view, is not a side. By id. The cost
+    /// follows the proposal, not the in-flight set.
+    pub fn landing_tensions(
+        &self,
+        view: &str,
+        changes: &[Hash],
+    ) -> Result<Vec<Arc<Tension>>, RdyError> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        let reader = self.reader();
+        let read: Vec<Change> = changes
+            .iter()
+            .map(|c| reader.change(c))
+            .collect::<Result<_, _>>()?;
+        // the canon the landing would give: the ops in the order the merge applies the changes
+        // (list order when the merge refuses: the gate reports that refusal itself)
+        let applied = reader
+            .state_of(self.canon_head())
+            .and_then(|canon| reader.merge_checked(&canon, &read))
+            .map_or_else(|_| (0..read.len()).collect(), |(_, at)| at);
+        let ops = applied_ops(&read, &applied);
+        let canon_m = self.materialized(&Scope::Canon)?;
+        let m = canon_m.with(&ops);
+        let touched: BTreeSet<&BlockId> = ops.iter().map(Op::block_id).collect();
+        let g = self.graph(&Scope::Canon)?.with_changes(
+            touched.iter().filter_map(|b| canon_m.get(b)),
+            touched.iter().filter_map(|b| m.get(b)),
+        );
+        let set = InflightSet {
+            changes: changes.to_vec(),
+            views_of: changes
+                .iter()
+                .map(|c| (*c, vec![view.to_string()]))
+                .collect(),
+        };
+        let writes = Writes::build(self, &set)?;
+        let mut seeds = BTreeSet::new();
+        for c in &read {
+            seeds_into(self, c, &mut seeds)?;
+        }
+        let cx = DetectCx::landing(
+            self,
+            &writes,
+            canon_index_of(self)?,
+            Arc::new(m),
+            Arc::new(g),
+        );
+        let mut out = BTreeMap::new();
+        for d in self.detectors {
+            let mut found = vec![];
+            d.detect(&cx, Some(&seeds), &mut found)?;
+            for t in found
+                .into_iter()
+                .filter_map(|f| tension_from(self.pack(), f, false, DetectScope::Inflight))
+                .filter(|t| t.involved.iter().any(|i| seeds.contains(&i.block)))
+            {
+                out.entry(t.id).or_insert_with(|| Arc::new(t));
+            }
+        }
+        Ok(out.into_values().collect())
+    }
+
     /// The event-derived tensions of this state (the state's detectors over canon and every
     /// in-flight change), built on first read.
     pub fn tensions(&self) -> Result<Arc<TensionSet>, RdyError> {

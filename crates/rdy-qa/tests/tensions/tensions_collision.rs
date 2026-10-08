@@ -262,6 +262,36 @@ fn tcol1_an_identical_edit_is_not_a_collision_before_or_after_a_landing() {
     assert!(of_kind(&r, TensionKind::EditCollision).is_empty());
 }
 
+/// Fix round 2 of Task 10 (found by vmodel1 with the shipped detectors): the merge drops canon's
+/// side when an included change that builds on canon's version is applied, so a resolution that
+/// depends on that change (and not on canon's producer itself) is built on canon's version.
+#[test]
+fn tcol1_a_resolution_that_covers_canon_through_an_included_change_is_not_a_collision() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "b", upd(&s.a, "A by b."));
+    put(&mut r, "a", upd(&s.a, "A by a."));
+    land(&mut r, "a").unwrap();
+    // o edits canon's version; b includes that edit
+    let co = change_of(&put(&mut r, "o", upd(&s.a, "A by o.")));
+    r.view_include(&ag("b"), "b", &[co.to_string()]).unwrap();
+    assert!(conflicted(&r, "b", &s.a), "b's edit against o's");
+    let ops = resolve(&r, "b", &s.a, "A merged.");
+    put(&mut r, "b", ops);
+    assert!(!conflicted(&r, "b", &s.a), "the merge reads b as resolved");
+    let canon: Vec<_> = of_kind(&r, TensionKind::EditCollision)
+        .into_iter()
+        .filter(|t| has_canon(t))
+        .collect();
+    assert!(
+        canon.is_empty(),
+        "b builds on canon's version through o's change: {canon:#?}"
+    );
+    let p = r.propose(&writer(), "b", "b").unwrap();
+    assert!(p.blocking.is_empty(), "{:?}", p.blocking);
+    r.land(&approver(), &p.id).unwrap();
+}
+
 #[test]
 fn tcol1_a_chain_through_canons_version_is_not_a_collision_after_a_landing() {
     let (_d, mut r) = project();

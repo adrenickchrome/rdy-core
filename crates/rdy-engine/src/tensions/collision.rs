@@ -12,7 +12,7 @@
 //! neither the root base nor the version of the chain's first write: the merge reads the first
 //! write as clean only then, and a later chain write does not cover canon's side of the conflict
 //! the first write records), and whose chain does not depend on canon's version: on the producer
-//! of canon's version, or, when canon has no version of the block, on an in-flight write of the
+//! of canon's version (directly, or through in-flight changes that write the block), or, when canon has no version of the block, on an in-flight write of the
 //! block (the merge reads that as the resolution of the delete). A single write with canon's
 //! outcome is its own first write, so equal outcomes never collide. No canon-scope form
 //! (FW-CH6a): canon holds one version per block, and the trigger needs in-flight work.
@@ -102,7 +102,7 @@ impl Detector for EditCollision {
                 };
                 for (w, ch) in against {
                     let built_on = match (cv, producer) {
-                        (Some(_), Some(p)) => chain_depends(cx, ch, &p),
+                        (Some(_), Some(p)) => chain_reaches(cx, ch, &all, &p),
                         (Some(_), None) => false,
                         // canon deleted b: a side with no change counts as covered in the merge,
                         // so a chain that depends on an in-flight write of b resolves the delete
@@ -167,6 +167,30 @@ fn depends(cx: &DetectCx<'_>, c: &Hash, d: &Hash) -> bool {
 /// Whether some change on chain `ch` lists `d` in its deps.
 fn chain_depends(cx: &DetectCx<'_>, ch: &Chain, d: &Hash) -> bool {
     ch.changes.iter().any(|c| depends(cx, c, d))
+}
+
+/// Whether a change on chain `ch` reaches `p` through deps, walking only the changes of `all`
+/// (the in-flight writes of the block): the merge drops a side once a change that lists it in
+/// its deps is applied to the block, so a chain that depends on such a change is built on that
+/// side, as when it lists it itself.
+fn chain_reaches(cx: &DetectCx<'_>, ch: &Chain, all: &[Arc<Write>], p: &Hash) -> bool {
+    let writers: BTreeSet<Hash> = all.iter().map(|w| w.change).collect();
+    let mut todo: Vec<Hash> = ch.changes.iter().copied().collect();
+    let mut seen: BTreeSet<Hash> = todo.iter().copied().collect();
+    while let Some(c) = todo.pop() {
+        let Some(f) = cx.writes.change(&c) else {
+            continue;
+        };
+        for d in &f.deps {
+            if d == p {
+                return true;
+            }
+            if writers.contains(d) && seen.insert(*d) {
+                todo.push(*d);
+            }
+        }
+    }
+    false
 }
 
 /// Whether changes `c1` and `c2` are a member pair: every open view of each is a member view of
