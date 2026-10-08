@@ -10,7 +10,7 @@ use serde_json::Value;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AcceptParams {
-    /// Suggestions to accept, unchanged from a write or search response (each an object with kind "link" or "entity"). An entity suggestion may add name, type (default entity), entity_kind, value, unit and parent.
+    /// Suggestions to accept, unchanged from a write or search response (each an object with kind "link" or "entity"). An entity suggestion may add name, type (any entity type; default entity), entity_kind, value, unit, body (a term needs one) and parent. A link suggestion's target must be an entity.
     pub suggestions: Vec<Value>,
     /// Where new entities go (a doc or section: id, key or path), unless a suggestion names its own.
     pub parent: Option<String>,

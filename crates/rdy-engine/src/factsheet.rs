@@ -1,6 +1,7 @@
 //! An entity's fact sheet (FW-EN1, FW-EN1a).
 use crate::error::{E_BAD_INPUT, E_UNKNOWN_BLOCK, RdyError};
 use crate::lexicon::{NameKind, is_content, is_fact};
+use crate::query::body_in;
 use crate::{ReadState, Scope, summary_in};
 use rdy_graph::{EdgeKind, Graph};
 use rdy_model::decision::{AFFECTS, DECIDED_BY, DECISION, DESCRIBES, IMPLEMENTS};
@@ -32,6 +33,7 @@ pub struct FactSheet {
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// The entity's body, each reference read as the summaries read it (a value as its value).
     pub definition: String,
     pub path: Option<String>,
     /// Normative facts tied to the entity (claims, requirements, constraints, flows).
@@ -291,7 +293,7 @@ impl ReadState {
                 .filter(|k| !k.is_empty())
                 .map(str::to_string),
             value: value_text(e),
-            definition: e.body.trim().to_string(),
+            definition: body_in(e, &m).trim().to_string(),
             path,
             facts,
             also_described_in,

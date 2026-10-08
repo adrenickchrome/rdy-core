@@ -23,6 +23,24 @@ pub const MAX_ALIASES: usize = 64;
 pub const LITERAL_MIN_CHARS: usize = 2;
 /// A code literal has at most this many characters.
 pub const LITERAL_MAX_CHARS: usize = 64;
+/// Fields that hold metadata, not text: a mention scan never reads them (the key, a decision's
+/// kind, status, ruling basis, attestation and dates, a code or diagram block's `lang`, a doc's
+/// type and lifecycle). The engine also skips every field of kind `enum` in the pack.
+pub const METADATA_FIELDS: &[&str] = &[
+    "key",
+    "kind",
+    "lang",
+    "doc_type",
+    "lifecycle",
+    "status",
+    "authority_basis",
+    "reversibility",
+    "attested_by",
+    "decided_at",
+    "recorded_at",
+    "effective_from",
+    "review_by",
+];
 
 /// One word of a text: its byte range and its case-folded form.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,17 +223,22 @@ fn leaves(name: &str, v: &FieldValue, out: &mut Vec<(String, String)>) {
 
 /// The text a mention scan reads in `b`, as (field name, text) pairs: the body first (unless
 /// its mode is not strict: code and diagram bodies are skipped), then every string leaf of the
-/// fields except `key`, a list item as `name[i]` and a map entry as `name.key`. References are
-/// blanked, so one is never read as a mention.
+/// fields except the [`METADATA_FIELDS`], a list item as `name[i]` and a map entry as
+/// `name.key`. References are blanked, so one is never read as a mention.
 pub fn text_sources(b: &Block) -> Vec<(String, String)> {
     let mut out = vec![];
     if RefMode::for_body(&b.block_type) == RefMode::Strict && !b.body.is_empty() {
         out.push(("body".to_string(), blank_refs(&b.body, RefMode::Strict)));
     }
     for (name, v) in &b.fields {
-        if name != "key" {
+        if !METADATA_FIELDS.contains(&name.as_str()) {
             leaves(name, v, &mut out);
         }
     }
     out
+}
+
+/// The field a text source's name comes from: `steps[0]` and `cells.a` are `steps` and `cells`.
+pub fn source_field(name: &str) -> &str {
+    name.find(['[', '.']).map_or(name, |i| &name[..i])
 }

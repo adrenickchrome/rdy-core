@@ -131,9 +131,55 @@ fn ent1_text_sources_skip_code_bodies_and_keys_and_blank_references() {
             ("steps[0]".to_string(), "see Ledger".to_string()),
         ]
     );
+    // final review fix round 1: `lang` is metadata, not text
     let code = block("code", &[("lang", s("sh"))], "ledger start");
-    assert_eq!(
-        text_sources(&code),
-        vec![("lang".to_string(), "sh".to_string())]
+    assert_eq!(text_sources(&code), vec![]);
+}
+
+/// Final review fix round 1: metadata fields (a decision's `kind`, `status`, `attested_by` and
+/// dates, a code block's `lang`, a doc's `doc_type` and `lifecycle`) are never read as text.
+#[test]
+fn ent1_text_sources_skip_metadata_fields() {
+    let d = block(
+        "decision",
+        &[
+            ("statement", s("Use the Ledger")),
+            ("kind", s("product")),
+            ("status", s("proposed")),
+            ("attested_by", s("founder")),
+            ("decided_at", s("2026-10-07")),
+            ("recorded_at", s("2026-10-07")),
+            ("effective_from", s("2026-10-08")),
+            ("review_by", s("2027-01-01")),
+            ("authority_basis", s("direct_ruling")),
+            ("reversibility", s("two_way")),
+            ("options", FieldValue::List(vec![s("Ledger"), s("Journal")])),
+        ],
+        "",
     );
+    assert_eq!(
+        text_sources(&d),
+        vec![
+            ("options[0]".to_string(), "Ledger".to_string()),
+            ("options[1]".to_string(), "Journal".to_string()),
+            ("statement".to_string(), "Use the Ledger".to_string()),
+        ]
+    );
+    let doc = block(
+        "doc",
+        &[
+            ("title", s("Ops")),
+            ("doc_type", s("overview")),
+            ("lifecycle", s("stable")),
+        ],
+        "",
+    );
+    assert_eq!(
+        text_sources(&doc),
+        vec![("title".to_string(), "Ops".to_string())]
+    );
+    for f in METADATA_FIELDS {
+        let b = block("note", &[(f, s("Ledger"))], "");
+        assert_eq!(text_sources(&b), vec![], "{f}");
+    }
 }

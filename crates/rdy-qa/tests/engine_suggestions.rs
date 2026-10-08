@@ -143,6 +143,62 @@ fn sug1_a_literal_that_recurs_with_no_entity_behind_it_suggests_one() {
     );
 }
 
+/// Final review fix round 1: metadata fields are not text. A code block's `lang`, a decision's
+/// `kind` and `attested_by`, and an enum field (`priority`) never mention an entity, coverage
+/// does not count them, and a literal in them is not counted.
+#[test]
+fn sug1_metadata_fields_never_mention_an_entity() {
+    let (_d, mut r) = project();
+    let (s, _e) = books(&mut r);
+    write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "entity", "parent": s, "fields": {"name": "Rust"}},
+            {"op": "create", "type": "entity", "parent": s, "fields": {"name": "Product"}},
+            {"op": "create", "type": "entity", "parent": s, "fields": {"name": "Founder"}},
+            {"op": "create", "type": "entity", "parent": s, "fields": {"name": "Should"}}
+        ]),
+    )
+    .unwrap();
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "code", "parent": s, "body": "fn main() {}", "fields": {"lang": "rust"}},
+        {"op": "create", "type": "requirement", "parent": s, "body": "Close at night.", "fields": {"priority": "should"}}
+    ]))
+    .unwrap();
+    assert_eq!(
+        sugg(&r, &w).0,
+        vec![],
+        "a code block's lang, a requirement's priority"
+    );
+    for i in 0..3 {
+        let w = r
+            .decide(
+                &writer(),
+                "work",
+                DecisionInput {
+                    parent: s.clone(),
+                    statement: format!("Ship weekly {i}"),
+                    kind: Some("product".into()),
+                    attested_by: Some("Founder via `ops_bot`".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(sugg(&r, &w).0, vec![], "a decision's kind and attested_by");
+    }
+    let rs = r.read();
+    let scope = Scope::View("work".into());
+    assert_eq!(
+        rs.lexicon(&scope).unwrap().literal_blocks("ops_bot"),
+        vec![]
+    );
+    assert_eq!(
+        rs.graph_coverage(&scope, None).unwrap().grounded.mentions,
+        0
+    );
+}
+
 /// Fix round 1 guard: a literal with no words (`->`) has an empty phrase. No entity can carry
 /// that name, so the suggestion could never clear: it is not made.
 #[test]

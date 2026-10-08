@@ -239,3 +239,65 @@ fn acc1_rdy_accept_is_a_tool_over_stdio() {
     );
     c.alive();
 }
+
+/// Final review fix round 1: an entity item may carry a body, so a term (body required) can be
+/// created; without one the write refuses it as before.
+#[test]
+fn acc1_an_entity_item_can_create_a_term_with_its_body() {
+    let (_d, mut st, s, _e) = books();
+    let v = claim(&mut st, &s, "Set `max_conn` low.");
+    let c = v["created"]["$c"].as_str().unwrap().to_string();
+    let item = json!({"kind": "entity", "literal": "max_conn", "blocks": [c], "type": "term", "body": "The most pool connections."});
+    let a = rdy_accept(&mut st, p(json!({"suggestions": [item], "parent": s}))).unwrap();
+    assert_eq!(a["accepted"], json!({"links": 1, "entities": 1}), "{a}");
+    let new = a["created"]["$en0"].as_str().unwrap().to_string();
+    {
+        let rs = st.engine.read();
+        let b = rs
+            .block(
+                &Scope::View(st.view.clone()),
+                &BlockId::parse(&new).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            (b.block_type.as_str(), b.field_str("name"), b.body.as_str()),
+            ("term", Some("max_conn"), "The most pool connections.")
+        );
+    }
+    assert_eq!(links(&st, &c, "describes"), vec![new]);
+}
+
+/// Final review fix round 1: a link item must target an entity.
+#[test]
+fn acc1_a_link_must_target_an_entity() {
+    let (_d, mut st, s, _e) = books();
+    let v = claim(&mut st, &s, "Nothing named here.");
+    let c = v["created"]["$c"].as_str().unwrap().to_string();
+    let bad = json!({"kind": "link", "block": c, "link": "describes", "target": s});
+    let e = rdy_accept(&mut st, p(json!({"suggestions": [bad]}))).unwrap_err();
+    assert_eq!(
+        (e.code, e.message),
+        (
+            "E_BAD_INPUT",
+            format!("suggestion 0: {s} is a section, not an entity")
+        )
+    );
+    assert!(links(&st, &c, "describes").is_empty());
+}
+
+/// Final review fix round 1: a deleted block in an entity item is skipped as missing, not as a
+/// block that cannot link.
+#[test]
+fn acc1_a_deleted_block_in_an_entity_item_is_skipped_as_missing() {
+    let (_d, mut st, s, _e) = books();
+    let v = claim(&mut st, &s, "Set `max_conn` low.");
+    let c = v["created"]["$c"].as_str().unwrap().to_string();
+    rdy_write(&mut st, p(json!({"ops": [{"op": "delete", "id": c}]}))).unwrap();
+    let item = json!({"kind": "entity", "literal": "max_conn", "blocks": [c]});
+    let a = rdy_accept(&mut st, p(json!({"suggestions": [item], "parent": s}))).unwrap();
+    assert_eq!(a["accepted"], json!({"links": 0, "entities": 1}), "{a}");
+    assert_eq!(
+        a["skipped"],
+        json!([{"index": 0, "reason": format!("no block {c} in view {}", st.view)}])
+    );
+}

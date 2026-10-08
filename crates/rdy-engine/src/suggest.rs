@@ -1,8 +1,8 @@
 //! Suggestions (FW-EN3): links to the entities written text names, and new entities for literals that recur.
 use crate::error::RdyError;
-use crate::lexicon::{Mention, link_kind_for, linked_from_outside, tied};
+use crate::lexicon::{Mention, link_kind_for, linked_from_outside, text_in, tied};
 use crate::{ReadState, Scope};
-use rdy_model::entity::{MIN_MENTION_CHARS, code_literals, find_phrases, phrase, text_sources};
+use rdy_model::entity::{MIN_MENTION_CHARS, code_literals, find_phrases, phrase};
 use rdy_model::tree::DOC;
 use rdy_model::{Block, BlockId, Hash, Op};
 use serde::Serialize;
@@ -89,7 +89,7 @@ impl ReadState {
         // so a suggestion for it could never clear
         let literals: BTreeSet<String> = written
             .iter()
-            .flat_map(|b| text_sources(b))
+            .flat_map(|b| text_in(self.pack(), b))
             .flat_map(|(_, text)| code_literals(&text))
             .filter(|l| !phrase(l).is_empty())
             .collect();
@@ -199,7 +199,7 @@ impl ReadState {
             let Some(own) = m.doc_of(&b.id).map(|d| d.id.clone()) else {
                 continue;
             };
-            for (field, text) in text_sources(b) {
+            for (field, text) in text_in(self.pack(), b) {
                 for (p, range) in find_phrases(&text, &known) {
                     for doc in phrases.get(&p).into_iter().flatten() {
                         if *doc == own || found.contains_key(&(doc.clone(), b.id.clone())) {

@@ -162,3 +162,34 @@ fn gcov1_an_empty_project_has_no_shares() {
         (Some(0), Value::Null, Value::Null, Value::Null)
     );
 }
+
+/// Final review fix round 1 guard: whole-scope coverage is memoised per build; a write gives a
+/// new build, so the next reading counts it.
+#[test]
+fn gcov1_whole_scope_coverage_follows_each_write() {
+    let (_d, mut r) = project();
+    let c = world(&mut r);
+    let scope = Scope::View("work".into());
+    let before = coverage_in(&r, &scope, None);
+    assert_eq!(
+        before,
+        coverage_in(&r, &scope, None),
+        "a second reading is the same"
+    );
+    write(&mut r, "work", json!([
+        {"op": "create", "type": "claim", "parent": c["$s"], "body": "Billing closes at night.", "links": {"describes": [{"target": c["$f"]}]}}
+    ]))
+    .unwrap();
+    let after = coverage_in(&r, &scope, None);
+    assert_eq!(
+        (
+            after["grounded"]["facts"].as_u64(),
+            after["grounded"]["facts_tied"].as_u64()
+        ),
+        (
+            before["grounded"]["facts"].as_u64().map(|n| n + 1),
+            before["grounded"]["facts_tied"].as_u64().map(|n| n + 1)
+        ),
+        "{after}"
+    );
+}

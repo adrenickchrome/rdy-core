@@ -202,6 +202,19 @@ impl ReadState {
         max_tokens: Option<usize>,
     ) -> Result<SearchResult, RdyError> {
         let (re, words) = compile(q)?;
+        // 3b (esrch1): a literal that names entities starts from them, and reads text the way
+        // resolution does (any case, any spacing), so every unlinked mention is a match
+        let resolved = if q.regex {
+            vec![]
+        } else {
+            self.resolve_entities(scope, &q.text)?
+        };
+        let ignore_case = q.ignore_case || !resolved.is_empty();
+        let (re, words) = if resolved.is_empty() {
+            (re, words)
+        } else {
+            compile_as(q, true, true)?
+        };
         let m = self.materialized(scope)?;
         let plan = self.filter_plan(scope, &m, &q.filters)?;
         let cursor = page.map(parse_page).transpose()?;
@@ -266,14 +279,8 @@ impl ReadState {
             stack.extend(m.children(Some(&b.id)).into_iter().rev().map(|c| (c, own)));
         }
 
-        // 3b (esrch1): a literal that names entities starts from them. The first page shows the
-        // sheets of the first `MAX_RESOLVED`; every page builds them, so every page drops the
-        // same hits.
-        let resolved = if q.regex {
-            vec![]
-        } else {
-            self.resolve_entities(scope, &q.text)?
-        };
+        // 3b (esrch1): the first page shows the sheets of the first `MAX_RESOLVED` resolved
+        // entities; every page builds them, so every page drops the same hits.
         let sheets: Vec<FactSheet> = resolved
             .iter()
             .take(MAX_RESOLVED)
@@ -457,7 +464,7 @@ impl ReadState {
         Ok(SearchResult {
             query: q.text.clone(),
             regex: q.regex,
-            ignore_case: q.ignore_case,
+            ignore_case,
             entities,
             entities_omitted,
             total,
@@ -772,6 +779,16 @@ fn block_of<'a>(m: &'a Materialized, id: &BlockId) -> Result<&'a Block, RdyError
 /// The query as a bounded regex, and, for a literal of two or more distinct words, each word as
 /// one (sord1). A literal is escaped first.
 fn compile(q: &SearchQuery) -> Result<(Regex, Vec<Regex>), RdyError> {
+    compile_as(q, q.ignore_case, false)
+}
+
+/// [`compile`] with `ignore_case` given; with `names` (a literal that names an entity), the
+/// literal's words match with any spacing between them.
+fn compile_as(
+    q: &SearchQuery,
+    ignore_case: bool,
+    names: bool,
+) -> Result<(Regex, Vec<Regex>), RdyError> {
     if q.text.is_empty() {
         return Err(RdyError::new(
             E_BAD_INPUT,
@@ -791,10 +808,16 @@ fn compile(q: &SearchQuery) -> Result<(Regex, Vec<Regex>), RdyError> {
     }
     let pattern = if q.regex {
         q.text.clone()
+    } else if names {
+        q.text
+            .split_whitespace()
+            .map(regex::escape)
+            .collect::<Vec<_>>()
+            .join(r"\s+")
     } else {
         regex::escape(&q.text)
     };
-    let phrase = build(&pattern, q.ignore_case)?;
+    let phrase = build(&pattern, ignore_case)?;
     let mut distinct: Vec<&str> = vec![];
     if !q.regex {
         for w in q.text.split_whitespace() {
@@ -806,7 +829,7 @@ fn compile(q: &SearchQuery) -> Result<(Regex, Vec<Regex>), RdyError> {
     let words = if distinct.len() >= 2 {
         distinct
             .into_iter()
-            .map(|w| build(&regex::escape(w), q.ignore_case))
+            .map(|w| build(&regex::escape(w), ignore_case))
             .collect::<Result<_, _>>()?
     } else {
         vec![]

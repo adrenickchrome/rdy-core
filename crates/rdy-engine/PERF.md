@@ -854,7 +854,9 @@ Linux bench rows: (bench: the orchestrator fills these rows from two cargo qa --
 ## Entities and fact sheets (2026-10-06)
 
 The `qa-perf` typical tier gained four ops in `tier_entities`. It runs after `tier_views` and
-before the project is closed, on a fresh view `ve`. `ve` holds the fixture's canon plus 50
+before `tier_inflight` (which closes every open view, `ve` too, and adds 1k in-flight changes, so
+the entity ops run on a clean state and the in-flight ops after them as before), on a fresh view
+`ve`. `ve` holds the fixture's canon plus 50
 entities (each with a name, one alias and a kind) and 200 claims. Each claim names two entities
 and one of ten shared code literals. The ops carry no `write` prefix on purpose: `spec_target`
 gives every op that starts with `write` the write budget, and `fsync_bound` widens its margin.
@@ -872,12 +874,15 @@ What each cost grows with:
   carried across each commit and landing in time proportional to the text of the written blocks.
   Every publish now carries it once it is built.
 - `entity_search` grows with the number of entities that match the query (at most 8 sheets) and
-  with the edges of each. The match scan is the same as `search_literal`.
+  with the edges of each. The match scan is `search_literal`'s, read in any case and spacing (a
+  literal that names an entity matches every unlinked mention).
 - `suggestions_after_write` grows with the text of the written blocks and with the holders of
   each code literal they contain. It does not grow with the project. Every write response
   computes it, so it adds to the write path (`write_and_report`) but not to the durable flush.
 - `coverage_all` grows with the number of blocks: it checks every block for ties and every
   linkable block for mentions. It runs for `rdy status` and for `rdy_overview`, not on a write.
+  The whole scope's coverage is memoised in the scope's build, so a warm `rdy_overview` or
+  `rdy status` pays it once per build (a write gives a new build); the op times the cold pass.
 
 No laptop figures are recorded here: the first timing of these ops is the Linux bench's.
 

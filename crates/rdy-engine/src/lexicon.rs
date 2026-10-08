@@ -1,11 +1,11 @@
 //! The entity lexicon (FW-EN1, FW-EN3): entity keys, names and aliases by phrase, and the blocks that hold each code literal. Built on first use per scope and carried across writes like the graph.
 use crate::Materialized;
 use rdy_graph::{EdgeKind, Graph};
-use rdy_model::entity::{aliases, code_literals, find_phrases, phrase, text_sources};
+use rdy_model::entity::{aliases, code_literals, find_phrases, phrase, source_field, text_sources};
 use rdy_model::{Block, BlockId, decision};
-use rdy_schema::{Pack, Trait};
+use rdy_schema::{FieldKind, Pack, Trait};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// How a phrase names an entity. Declaration order is the match order: a key beats a name, a
@@ -33,6 +33,8 @@ pub struct Mention {
 pub struct Lexicon {
     /// The pack's entity types: every type with `defines`.
     entity_types: Arc<BTreeSet<String>>,
+    /// The pack's `enum` fields by type: never read as text.
+    enum_fields: Arc<BTreeMap<String, BTreeSet<String>>>,
     /// What each entity contributed: its key, name and alias phrases.
     names: imbl::OrdMap<BlockId, Vec<(NameKind, String)>>,
     /// Each phrase and the entities it names, with how.
@@ -52,6 +54,7 @@ impl Lexicon {
             .collect();
         let mut l = Lexicon {
             entity_types: Arc::new(entity_types),
+            enum_fields: Arc::new(enum_fields(pack)),
             names: imbl::OrdMap::new(),
             phrases: imbl::OrdMap::new(),
             literals: imbl::OrdMap::new(),
@@ -110,7 +113,7 @@ impl Lexicon {
     }
 
     /// The entities `b`'s text names by name or alias (never by key), one mention per entity,
-    /// the first found, reading `text_sources` in order. An entity never mentions itself.
+    /// the first found, reading `text_in` in order. An entity never mentions itself.
     pub fn mentions(&self, b: &Block) -> Vec<Mention> {
         let known = |p: &str| {
             self.phrases
@@ -119,7 +122,7 @@ impl Lexicon {
         };
         let mut seen: BTreeSet<BlockId> = BTreeSet::new();
         let mut out = vec![];
-        for (field, text) in text_sources(b) {
+        for (field, text) in self.sources(b) {
             for (p, range) in find_phrases(&text, &known) {
                 let Some(set) = self.phrases.get(&p) else {
                     continue;
@@ -170,9 +173,15 @@ impl Lexicon {
         out
     }
 
+    /// The text `b` holds under this lexicon's pack: [`text_in`].
+    fn sources(&self, b: &Block) -> Vec<(String, String)> {
+        let enums = self.enum_fields.get(&b.block_type);
+        without(text_sources(b), |f| enums.is_some_and(|e| e.contains(f)))
+    }
+
     /// The distinct code literals of `b`'s text sources.
-    fn literals_of(b: &Block) -> BTreeSet<String> {
-        text_sources(b)
+    fn literals_of(&self, b: &Block) -> BTreeSet<String> {
+        self.sources(b)
             .iter()
             .flat_map(|(_, text)| code_literals(text))
             .collect()
@@ -189,7 +198,7 @@ impl Lexicon {
             }
             self.names.insert(b.id.clone(), names);
         }
-        for lit in Lexicon::literals_of(b) {
+        for lit in self.literals_of(b) {
             self.literals.entry(lit).or_default().insert(b.id.clone());
         }
     }
@@ -205,7 +214,7 @@ impl Lexicon {
                 }
             }
         }
-        for lit in Lexicon::literals_of(b) {
+        for lit in self.literals_of(b) {
             if let Some(set) = self.literals.get_mut(&lit) {
                 set.remove(&b.id);
                 if set.is_empty() {
@@ -214,6 +223,42 @@ impl Lexicon {
             }
         }
     }
+}
+
+/// Each type's fields of kind `enum` in `pack`.
+fn enum_fields(pack: &Pack) -> BTreeMap<String, BTreeSet<String>> {
+    pack.block_types
+        .iter()
+        .map(|(t, def)| {
+            let enums = def
+                .fields
+                .iter()
+                .filter(|(_, fd)| fd.kind == FieldKind::Enum)
+                .map(|(f, _)| f.clone())
+                .collect::<BTreeSet<_>>();
+            (t.clone(), enums)
+        })
+        .filter(|(_, enums)| !enums.is_empty())
+        .collect()
+}
+
+/// `sources` without those whose field `skip` names.
+fn without(sources: Vec<(String, String)>, skip: impl Fn(&str) -> bool) -> Vec<(String, String)> {
+    sources
+        .into_iter()
+        .filter(|(name, _)| !skip(source_field(name)))
+        .collect()
+}
+
+/// The text a mention or literal scan reads in `b` under `pack`: [`text_sources`] (which skips
+/// the metadata fields) without the fields the pack gives kind `enum`, whose values are a fixed
+/// list, never prose.
+pub fn text_in(pack: &Pack, b: &Block) -> Vec<(String, String)> {
+    let def = pack.block_types.get(&b.block_type);
+    without(text_sources(b), |f| {
+        def.and_then(|d| d.fields.get(f))
+            .is_some_and(|fd| fd.kind == FieldKind::Enum)
+    })
 }
 
 /// The link a block of `b`'s type makes to an entity: none for an unknown type and for a type
@@ -255,14 +300,19 @@ pub fn is_content(pack: &Pack, b: &Block) -> bool {
 
 /// Whether `from` has an outgoing reference, `describes` link or `affects` link to `to`.
 pub fn tied(g: &Graph, from: &BlockId, to: &BlockId) -> bool {
-    g.outgoing(from).iter().any(|e| {
-        e.to == *to
-            && match &e.kind {
-                EdgeKind::References => true,
-                EdgeKind::Link(n) => n == decision::DESCRIBES || n == decision::AFFECTS,
-                EdgeKind::Contains => false,
-            }
-    })
+    g.outgoing(from)
+        .iter()
+        .any(|e| e.to == *to && is_tie(&e.kind))
+}
+
+/// Whether an edge of `kind` ties its source to its target: a reference, a `describes` link or
+/// an `affects` link.
+pub(crate) fn is_tie(kind: &EdgeKind) -> bool {
+    match kind {
+        EdgeKind::References => true,
+        EdgeKind::Link(n) => n == decision::DESCRIBES || n == decision::AFFECTS,
+        EdgeKind::Contains => false,
+    }
 }
 
 /// Whether a block outside `doc`'s subtree points into it: any incoming edge other than

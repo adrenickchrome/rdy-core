@@ -648,7 +648,8 @@ fn prepare_rebased_view(r: &mut Rdy, fx: &Fixture, runs: &Runs) {
 
 /// FW-EN1, FW-EN3, FW-EN4: the entity ops on view `ve`: the fixture's canon plus 50 entities and
 /// 200 claims that name them and share ten code literals. Run after `tier_views`: the view it
-/// leaves behind would change the numbers of the ops before it.
+/// leaves behind would change the numbers of the ops before it. Run before `tier_inflight`,
+/// which closes every open view (`ve` too) and adds 1k in-flight changes.
 fn tier_entities(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs: &Runs) {
     let ve = Scope::View("ve".into());
     let section = fx.section.to_string();

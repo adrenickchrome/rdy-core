@@ -1,6 +1,7 @@
 //! Published read states (snap1): what a reader holds is an immutable `ReadState`, built lazily
 //! and shared. The writer publishes a new one after every write, before the write returns, and
 //! seeds the cells it can fill in O(ops) (the written view after a commit, canon after a landing).
+use crate::coverage::GraphCoverage;
 use crate::error::*;
 use crate::lexicon::Lexicon;
 use crate::paths::TreeNode;
@@ -56,6 +57,8 @@ pub(crate) struct Built {
     pub(crate) tree: OnceLock<Arc<Vec<TreeNode>>>,
     /// The entity lexicon (FW-EN1), memoised; carried across a write like the graph.
     pub(crate) lexicon: OnceLock<Arc<Lexicon>>,
+    /// The whole scope's graph coverage (FW-EN4), memoised; never carried.
+    pub(crate) coverage: OnceLock<Arc<GraphCoverage>>,
 }
 
 impl Built {
@@ -66,13 +69,14 @@ impl Built {
             graph: OnceLock::new(),
             tree: OnceLock::new(),
             lexicon: OnceLock::new(),
+            coverage: OnceLock::new(),
         }
     }
 
     /// gcar1: this state with `ops` applied: the same conflicts and, only if this state's graph is
     /// built, that graph carried across the ops (their blocks' old edges out, their new ones in),
     /// which equals a rebuild. The lexicon is carried the same way when it is built (lex1). The
-    /// tree is not carried.
+    /// tree and the coverage are not carried.
     pub(crate) fn after(&self, ops: &[Op]) -> Built {
         let m = Arc::new(self.m.with(ops));
         let next = Built::new(Arc::clone(&m), Arc::clone(&self.conflicts));

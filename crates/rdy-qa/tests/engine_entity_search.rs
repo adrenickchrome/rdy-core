@@ -691,3 +691,49 @@ fn esrch1_a_suggestion_needs_the_name_as_whole_words() {
         "guard: a whole-word mention keeps its suggestion"
     );
 }
+
+/// Final review fix round 1: a literal that names an entity reads text the way resolution does,
+/// in any case and spacing, so every unlinked mention comes back with its suggestion.
+#[test]
+fn esrch1_a_name_query_lists_every_unlinked_mention_in_any_case() {
+    let (_d, mut r) = project();
+    let o = ops(&mut r);
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "prose", "id": "$p", "parent": o.s, "body": "The ledger service is restarted nightly."}
+    ]))
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let p = w.created["$p"].clone();
+    for q in ["Ledger service", "  LEDGER   SERVICE "] {
+        let res = find(&r, q, false, None, 100_000);
+        assert_eq!(res.entities.len(), 1, "{q}");
+        let m = res.matches.iter().find(|m| m.id == p).unwrap_or_else(|| {
+            panic!("{q:?}: the lowercase mention is a match: {:?}", res.matches)
+        });
+        assert!(!m.all_words, "{q:?}: a phrase hit");
+        assert_eq!(link_targets(m), vec![o.e.clone()], "{q:?}");
+        assert!(
+            res.ignore_case,
+            "{q:?}: the result says the text pass ignored case"
+        );
+    }
+    // a query that names no entity keeps its case
+    let res = find(&r, "Restarted", false, None, 100_000);
+    assert!(res.matches.is_empty() && !res.ignore_case);
+}
+
+/// Final review fix round 1: a sheet's definition reads references the way its summaries do.
+#[test]
+fn fsh1_the_definition_reads_references_as_their_summaries() {
+    let (_d, mut r) = project();
+    let o = ops(&mut r);
+    write(&mut r, "work", json!([
+        {"op": "update", "id": o.e, "body": format!("Keeps the books.\nAnswers within {{{{{}}}}}.", o.v)}
+    ]))
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    assert_eq!(
+        sheets(&r, "ledger service")[0].definition,
+        "Keeps the books.\nAnswers within 5 ms."
+    );
+}

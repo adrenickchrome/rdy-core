@@ -1,11 +1,12 @@
 //! Graph coverage (FW-EN4, FW-EN1a): the entity measures that Coverage and confidence (FW-CV1) wraps as its Grounded and Connected dimensions.
-use crate::lexicon::{is_content, is_fact, link_kind_for, linked_from_outside, tied};
+use crate::lexicon::{is_content, is_fact, is_tie, link_kind_for, linked_from_outside, tied};
 use crate::{Materialized, RdyError, ReadState, Scope};
 use rdy_graph::Graph;
 use rdy_model::entity::{ENTITY, KIND};
 use rdy_model::{Block, BlockId, tree};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// The most unlinked docs a coverage reading lists; the rest are counted.
 pub const UNLINKED_DOCS_CAP: usize = 20;
@@ -83,7 +84,8 @@ fn normal_kind(kind: &str) -> String {
     n
 }
 
-/// Whether `from` is tied to a block that exists and is an entity.
+/// Whether `from` is tied to a block that exists and is an entity: one pass over its outgoing
+/// edges, each a reference, a `describes` link or an `affects` link to an entity.
 fn tied_to_entity(
     g: &Graph,
     m: &Materialized,
@@ -92,13 +94,30 @@ fn tied_to_entity(
 ) -> bool {
     g.outgoing(from)
         .iter()
-        .any(|e| m.get(&e.to).is_some_and(|t| is_entity(&t.block_type)) && tied(g, from, &e.to))
+        .any(|e| is_tie(&e.kind) && m.get(&e.to).is_some_and(|t| is_entity(&t.block_type)))
 }
 
 impl ReadState {
     /// Graph coverage (FW-EN4, FW-EN1a) of every block of `scope`, or of the `covered` ids when
-    /// given (what a briefing covers).
+    /// given (what a briefing covers). The whole scope's is a function of its build, so it is
+    /// memoised there (a write gives a new build).
     pub fn graph_coverage(
+        &self,
+        scope: &Scope,
+        covered: Option<&BTreeSet<BlockId>>,
+    ) -> Result<GraphCoverage, RdyError> {
+        if covered.is_some() {
+            return self.coverage_of(scope, covered);
+        }
+        let built = self.built(scope)?;
+        if let Some(c) = built.coverage.get() {
+            return Ok(GraphCoverage::clone(c));
+        }
+        let c = Arc::new(self.coverage_of(scope, None)?);
+        Ok(GraphCoverage::clone(built.coverage.get_or_init(|| c)))
+    }
+
+    fn coverage_of(
         &self,
         scope: &Scope,
         covered: Option<&BTreeSet<BlockId>>,

@@ -36,6 +36,9 @@ pub enum AcceptItem {
         unit: Option<String>,
         #[serde(default)]
         parent: Option<String>,
+        /// The new entity's body (a term needs one).
+        #[serde(default)]
+        body: Option<String>,
     },
 }
 
@@ -98,8 +101,13 @@ impl Rdy {
         let total = items.len();
         let st = self.read();
         let scope = Scope::View(view.to_string());
-        let lex = st.lexicon(&scope)?;
         let m = st.materialized(&scope)?;
+        let is_entity_type = |t: &str| {
+            self.pack
+                .block_types
+                .get(t)
+                .is_some_and(|d| d.traits.contains(&Trait::Defines))
+        };
         let mut creates: Vec<OpInput> = vec![];
         // the targets to add, by (block, kind), in the order they were accepted
         let mut pending: BTreeMap<(BlockId, &'static str), Vec<String>> = BTreeMap::new();
@@ -154,6 +162,22 @@ impl Rdy {
                     };
                     let block = st.resolve_id(&scope, &block)?;
                     let target = st.resolve_id(&scope, &target)?;
+                    let t = m.get(&target).ok_or_else(|| {
+                        RdyError::new(
+                            E_UNKNOWN_BLOCK,
+                            format!("no block {target} in view {view}"),
+                            "check the id with rdy_read",
+                        )
+                    })?;
+                    if !is_entity_type(&t.block_type) {
+                        return Err(bad(
+                            format!(
+                                "suggestion {i}: {target} is a {}, not an entity",
+                                t.block_type
+                            ),
+                            "link to an entity: a block of a type that defines one (rdy_schema entities.types)",
+                        ));
+                    }
                     add(
                         &mut pending,
                         &mut skipped,
@@ -172,9 +196,10 @@ impl Rdy {
                     value,
                     unit,
                     parent: own_parent,
+                    body,
                 } => {
                     let t = block_type.unwrap_or_else(|| "entity".to_string());
-                    if !lex.is_entity_type(&t) {
+                    if !is_entity_type(&t) {
                         let types: Vec<&str> = self
                             .pack
                             .block_types
@@ -214,13 +239,19 @@ impl Rdy {
                         after: None,
                         before: None,
                         fields,
-                        body: String::new(),
+                        body: body.unwrap_or_default(),
                         links: BTreeMap::new(),
                     });
                     for b in blocks {
                         let id = st.resolve_id(&scope, &b)?;
-                        let kind = m.get(&id).and_then(|blk| link_kind_for(&self.pack, blk));
-                        match kind {
+                        let Some(blk) = m.get(&id) else {
+                            skipped.push(Skipped {
+                                index: i,
+                                reason: format!("no block {id} in view {view}"),
+                            });
+                            continue;
+                        };
+                        match link_kind_for(&self.pack, blk) {
                             Some(k) => add(&mut pending, &mut skipped, i, id, k, temp.clone())?,
                             None => skipped.push(Skipped {
                                 index: i,
