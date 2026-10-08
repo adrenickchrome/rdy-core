@@ -64,7 +64,8 @@ impl DeprecatedReference {
             if !pointing_edge(&e) || e.to == w.block {
                 continue;
             }
-            if !seen.insert((w.change, w.block.clone(), e.to.clone())) {
+            let key = (w.change, w.block.clone(), e.to.clone());
+            if seen.contains(&key) {
                 continue;
             }
             let base = match w.base {
@@ -77,6 +78,9 @@ impl DeprecatedReference {
             let Some((side, version)) = cx.side_at(&e.to)? else {
                 continue;
             };
+            // mark the pair only once a tension is raised: an old edge of another kind to the
+            // same target must not hide a new one
+            seen.insert(key);
             out.push(found(
                 Involved {
                     side: SideRef::Change(w.change),

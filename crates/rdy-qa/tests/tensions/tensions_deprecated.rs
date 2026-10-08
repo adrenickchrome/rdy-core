@@ -44,6 +44,24 @@ fn tdep1_a_reference_that_was_already_there_is_not_new() {
 }
 
 #[test]
+fn tdep1_an_existing_reference_plus_a_new_impact_link_to_the_same_target_raises() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    deprecate_section(&mut r, &s);
+    // B already references A in its body; the write adds a link of another kind to A
+    let cb = change_of(&put(
+        &mut r,
+        "b",
+        json!([{"op": "update", "id": s.b.to_string(),
+        "body": format!("B builds on {{{{{}}}}} firmly.", s.a),
+        "links": {"depends_on": [{"target": s.a.to_string()}]}}]),
+    ));
+    let t = one_involving(&r, TensionKind::DeprecatedReference, &s.b);
+    assert_eq!(change_sides(&t), vec![cb]);
+    assert!(t.involved.iter().any(|i| i.block == s.a));
+}
+
+#[test]
 fn tdep1_a_superseded_decision_is_deprecated() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
