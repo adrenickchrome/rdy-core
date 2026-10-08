@@ -2,12 +2,17 @@
 //! cites with a pin.
 //!
 //! A *changer* of `X` is a live write on `X` that updates or deletes it (involved: `X` at the
-//! write's version), or a live decision write that supersedes or revokes `X` (involved: the
-//! decision at its version). A *citer* is a live write on `Y` whose block has a premise edge
-//! ([`premise_edge`]) to `X` with a pin. A changer and a citer from two changes that share no
-//! view make a premise shift when the changer deletes, supersedes or revokes `X`, or writes
-//! content other than the pin. The canon form is a citer whose pin is neither canon's content of
-//! `X` nor the content of any in-flight write of `X` (involved: canon's side of `X`, and `Y`).
+//! write's version), or a live decision write whose supersedes or revokes link to `X` is new in
+//! flight (involved: the decision at its version). A decision that canon already shows
+//! superseding or revoking `X` is not a changer of `X`: an edit of it (a tracking edit, say)
+//! changes nothing about `X`, and a premise superseded in canon is a deprecated reference. A
+//! *citer* is a live write on `Y` whose block has a premise edge ([`premise_edge`]) to `X` with a
+//! pin. A changer and a citer from two changes that share no view make a premise shift when the
+//! changer deletes, supersedes or revokes `X`, or writes content other than the pin. The canon
+//! form is a citer whose pin is neither canon's content of `X` nor the content of an in-flight
+//! write of `X` by the citer's change or a change that shares a view with it (involved: canon's
+//! side of `X`, and `Y`). A citer can pin only content its own view sees, so a write in an
+//! unrelated view never hides a stale pin.
 //!
 //! No all-canon form (FW-CH6a): in the canon scope this detector reports nothing. A canon block
 //! with a stale pin is a suspect, and the suspect covers it.
@@ -15,9 +20,9 @@ use super::{
     DetectCx, DetectScope, Detector, Found, Involved, SideRef, TensionKind, Write, Writes,
     premise_edge,
 };
-use crate::RdyError;
+use crate::{Materialized, RdyError};
 use rdy_graph::{Edge, edges_of};
-use rdy_model::{BlockId, Hash, Tracking, decision};
+use rdy_model::{Block, BlockId, Hash, Tracking, decision};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -55,7 +60,7 @@ impl Detector for PremiseShift {
         let tracking = Arc::clone(cx.canon_graph()?.tracking());
         for (w, x, pin) in citations {
             let mut shifted = vec![];
-            for (a, retires) in changers(writes, &retiring, &x) {
+            for (a, retires) in changers(writes, &retiring, &canon_m, &x) {
                 if a.change == w.change || writes.common_view(&a.change, &w.change) {
                     continue;
                 }
@@ -72,7 +77,7 @@ impl Detector for PremiseShift {
                 }
             }
             let canon_content = canon_m.get(&x).map(|b| b.content_hash_with(&tracking));
-            if canon_content != Some(pin) && !in_flight_content(writes, &x, pin, &tracking) {
+            if canon_content != Some(pin) && !in_flight_content(writes, &w, &x, pin, &tracking) {
                 let (side, version) = match cx.canon_side(&x)? {
                     Some((side, v)) => (side, Some(v)),
                     None => (SideRef::Canon { landing: None }, None),
@@ -165,13 +170,14 @@ fn own_edges(w: &Arc<Write>) -> Vec<(Arc<Write>, Edge)> {
 
 /// The blocks that write `w`'s decision supersedes or revokes (none for another block type).
 fn retired_by(w: &Write) -> Vec<BlockId> {
-    let Some(b) = w
-        .new
-        .as_deref()
-        .filter(|b| b.block_type == decision::DECISION)
-    else {
+    w.new.as_deref().map(retires).unwrap_or_default()
+}
+
+/// The blocks that decision `b` supersedes or revokes (none for another block type).
+fn retires(b: &Block) -> Vec<BlockId> {
+    if b.block_type != decision::DECISION {
         return vec![];
-    };
+    }
     [decision::SUPERSEDES, decision::REVOKES]
         .into_iter()
         .flat_map(|k| b.links.get(k).into_iter().flatten())
@@ -194,8 +200,14 @@ fn retiring(writes: &Writes) -> Retiring {
 }
 
 /// The changers of `x`: its live updates and deletes (`false`), and the live decision writes
-/// that supersede or revoke it (`true`: a shift whatever the pin).
-fn changers(writes: &Writes, retiring: &Retiring, x: &BlockId) -> Vec<(Arc<Write>, bool)> {
+/// that supersede or revoke it (`true`: a shift whatever the pin), less those whose canon block
+/// already supersedes or revokes `x` (their link to `x` is not new in flight).
+fn changers(
+    writes: &Writes,
+    retiring: &Retiring,
+    canon_m: &Materialized,
+    x: &BlockId,
+) -> Vec<(Arc<Write>, bool)> {
     let mut out: Vec<(Arc<Write>, bool)> = writes
         .live_on(x)
         .into_iter()
@@ -207,15 +219,27 @@ fn changers(writes: &Writes, retiring: &Retiring, x: &BlockId) -> Vec<(Arc<Write
             .get(x)
             .into_iter()
             .flatten()
+            .filter(|d| {
+                !canon_m
+                    .get(&d.block)
+                    .is_some_and(|b| retires(b).contains(x))
+            })
             .map(|d| (Arc::clone(d), true)),
     );
     out
 }
 
-/// Whether an in-flight write of `x` (live or not) has content `pin`.
-fn in_flight_content(writes: &Writes, x: &BlockId, pin: Hash, tracking: &Tracking) -> bool {
-    writes
-        .all_on(x)
-        .iter()
-        .any(|w| w.new.as_deref().map(|b| b.content_hash_with(tracking)) == Some(pin))
+/// Whether an in-flight write of `x` (live or not) that citer `w` can see has content `pin`: a
+/// write by `w`'s change, or by a change that shares a view with it.
+fn in_flight_content(
+    writes: &Writes,
+    w: &Write,
+    x: &BlockId,
+    pin: Hash,
+    tracking: &Tracking,
+) -> bool {
+    writes.all_on(x).iter().any(|w2| {
+        (w2.change == w.change || writes.common_view(&w2.change, &w.change))
+            && w2.new.as_deref().map(|b| b.content_hash_with(tracking)) == Some(pin)
+    })
 }
