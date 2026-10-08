@@ -58,6 +58,9 @@ impl Rdy {
                     inflight_cell: Arc::clone(&prev.inflight_cell),
                     coord_heads: Arc::clone(&prev.coord_heads),
                     coord: OnceLock::new(),
+                    tensions: Arc::default(),
+                    dismissals: Arc::clone(&prev.dismissals),
+                    detectors: self.detectors,
                     error: Some(e.clone()),
                 }));
                 Err(e)
@@ -170,6 +173,17 @@ impl Rdy {
             Arc::new(self.coord_heads(&prev.coord_heads)?)
         } else {
             Arc::clone(&prev.coord_heads)
+        };
+        // the tension set reads canon, the in-flight changes and the open alternative sets
+        // (edit collision skips members of one set): a publish that moves none keeps it
+        let tensions = match &delta {
+            Delta::Seq | Delta::Tags => Arc::clone(&prev.tensions),
+            Delta::Coord { closed }
+                if closed.is_empty() && coord_heads.alt_members == prev.coord_heads.alt_members =>
+            {
+                Arc::clone(&prev.tensions)
+            }
+            _ => Arc::default(),
         };
         let (canon, views, tags, inflight_cell) = match delta {
             Delta::Full => {
@@ -323,6 +337,9 @@ impl Rdy {
             inflight_cell,
             coord_heads,
             coord: OnceLock::new(),
+            tensions,
+            dismissals: Arc::clone(&prev.dismissals),
+            detectors: self.detectors,
             error: None,
         })
     }

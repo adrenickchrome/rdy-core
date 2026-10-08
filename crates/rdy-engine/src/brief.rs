@@ -1108,13 +1108,20 @@ fn own_lifecycle(b: &Block) -> Option<&FieldValue> {
 }
 
 /// The `lifecycle` of `id` or of its nearest ancestor that has one is `stable`.
-fn effective_stable(m: &Materialized, id: Option<&BlockId>) -> bool {
+pub(crate) fn effective_stable(m: &Materialized, id: Option<&BlockId>) -> bool {
+    effective_lifecycle(m, id).as_deref() == Some(STABLE)
+}
+
+/// The effective lifecycle of `id`: its own `lifecycle`, else that of its nearest ancestor that
+/// has one. `None` when no block on the way has one, `id` is absent, or the nearest value is not
+/// a string.
+pub(crate) fn effective_lifecycle(m: &Materialized, id: Option<&BlockId>) -> Option<String> {
     let mut cur = id.and_then(|i| m.get(i));
     // a damaged store may loop: never walk more steps than there are blocks
     let mut steps = 0;
     while let Some(b) = cur {
         if let Some(l) = own_lifecycle(b) {
-            return l.as_str() == Some(STABLE);
+            return l.as_str().map(str::to_string);
         }
         steps += 1;
         if steps > m.len() {
@@ -1122,7 +1129,7 @@ fn effective_stable(m: &Materialized, id: Option<&BlockId>) -> bool {
         }
         cur = b.parent.as_ref().and_then(|p| m.get(p));
     }
-    false
+    None
 }
 
 /// The subjects of `ops` against `m` (the target view before the write), in op order. Ops whose

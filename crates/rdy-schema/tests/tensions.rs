@@ -125,3 +125,29 @@ fn tens1_unknown_kinds_and_values_are_refused() {
         "a list is not a map: {e}"
     );
 }
+
+#[test]
+fn tset1_only_duplicate_definition_softens_in_draft() {
+    for k in TensionKind::ALL {
+        assert_eq!(k.softens_in_draft(), k == DuplicateDefinition, "{k}");
+    }
+}
+
+#[test]
+fn tset1_duplicate_text_needs_three_words_unless_a_pack_says_otherwise() {
+    let p = PackSet::with_builtin().resolve("rdy-standard").unwrap();
+    assert_eq!(p.duplicate_text_min_words(), 3);
+    let mut set = PackSet::with_builtin();
+    set.add_yaml(
+        "name: base\nversion: \"1\"\nextends: rdy-standard\nduplicate_text_min_words: 5\n",
+    )
+    .unwrap();
+    set.add_yaml("name: child\nversion: \"1\"\nextends: base\n")
+        .unwrap();
+    assert_eq!(set.resolve("base").unwrap().duplicate_text_min_words(), 5);
+    assert_eq!(
+        set.resolve("child").unwrap().duplicate_text_min_words(),
+        5,
+        "kept from the parent"
+    );
+}

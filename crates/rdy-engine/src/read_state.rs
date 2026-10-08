@@ -6,6 +6,9 @@ use crate::error::*;
 use crate::lexicon::Lexicon;
 use crate::paths::TreeNode;
 use crate::suggest::MentionScan;
+use crate::tensions::index::CanonIndex;
+use crate::tensions::set::TensionCell;
+use crate::tensions::{Detector, Tension};
 use crate::version::VposCache;
 use crate::{AS_OF_CACHE_ENTRIES, Materialized, Scope};
 use rdy_graph::Graph;
@@ -62,6 +65,11 @@ pub(crate) struct Built {
     pub(crate) coverage: OnceLock<Arc<GraphCoverage>>,
     /// The mention scans briefings made (FW-EN3), most recent first; carried across a write.
     pub(crate) mentions: Mutex<Vec<MentionScan>>,
+    /// Canon's tension index (names, texts, supersedes), memoised; never carried.
+    pub(crate) tension_index: OnceLock<Arc<CanonIndex>>,
+    /// The canon part of the tension set for the state's detectors (FW-CH6), memoised; never
+    /// carried.
+    pub(crate) tension_canon: OnceLock<Result<Arc<Vec<Arc<Tension>>>, RdyError>>,
 }
 
 impl Built {
@@ -74,14 +82,16 @@ impl Built {
             lexicon: OnceLock::new(),
             coverage: OnceLock::new(),
             mentions: Mutex::new(vec![]),
+            tension_index: OnceLock::new(),
+            tension_canon: OnceLock::new(),
         }
     }
 
     /// gcar1: this state with `ops` applied: the same conflicts and, only if this state's graph is
     /// built, that graph carried across the ops (their blocks' old edges out, their new ones in),
     /// which equals a rebuild. The lexicon is carried the same way when it is built (lex1), and
-    /// so are the mention scans (`MentionScan::carried`). The tree and the coverage are not
-    /// carried.
+    /// so are the mention scans (`MentionScan::carried`). The tree, the coverage and the tension
+    /// index and canon part are not carried.
     pub(crate) fn after(&self, ops: &[Op]) -> Built {
         let m = Arc::new(self.m.with(ops));
         let next = Built::new(Arc::clone(&m), Arc::clone(&self.conflicts));
@@ -502,6 +512,13 @@ pub struct ReadState {
     pub(crate) coord_heads: Arc<CoordHeads>,
     /// cgr1: the coordination graph, built on first read; never carried to the next state.
     pub(crate) coord: OnceLock<Result<Arc<crate::coord_graph::CoordIndex>, RdyError>>,
+    /// The event-derived tension set, built on first read; a publish that changes nothing it
+    /// reads keeps it.
+    pub(crate) tensions: Arc<TensionCell>,
+    /// Each dismissed tension's vkey, mapped to the review that dismissed it.
+    pub(crate) dismissals: Arc<imbl::OrdMap<Hash, Hash>>,
+    /// The tension detectors: the registry, unless a test set others.
+    pub(crate) detectors: &'static [&'static dyn Detector],
     /// A `Full` publish that failed to read the heads: every read of this state returns it.
     pub(crate) error: Option<RdyError>,
 }

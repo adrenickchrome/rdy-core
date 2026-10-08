@@ -187,6 +187,9 @@ impl PackSet {
         }
         out.doc_types.extend(child.doc_types);
         out.tensions.extend(child.tensions);
+        if child.duplicate_text_min_words.is_some() {
+            out.duplicate_text_min_words = child.duplicate_text_min_words;
+        }
         out.areas.extend(child.areas);
         Ok(out)
     }

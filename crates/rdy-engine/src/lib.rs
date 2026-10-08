@@ -35,6 +35,7 @@ pub mod related;
 pub mod search;
 mod session;
 pub mod suggest;
+pub mod tensions;
 pub mod testkit;
 mod tree_io;
 mod version;
@@ -134,4 +135,6 @@ pub struct Rdy {
     serve: ServeConfig,
     /// The registered briefings (in memory; one registry per open project).
     briefs: Arc<brief::BriefRegistry>,
+    /// The tension detectors every published state runs: the registry, unless a test set others.
+    detectors: &'static [&'static dyn tensions::Detector],
 }
