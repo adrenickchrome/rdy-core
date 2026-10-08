@@ -12,7 +12,7 @@ use rdy_engine::search::SearchFilters;
 use rdy_engine::{
     E_BAD_INPUT, E_IO, E_LIMIT, E_NOT_FOUND, E_PERMISSION, HISTORY_MAX, LandOptions, OpInput,
     RdyError, ReadState, Relay, Scope, SearchQuery, Session, WriteRequest, alt, block_to_yaml,
-    check_path, intent, parse_justification, resolve_pack, view_api,
+    check_path, check_wc, intent, parse_justification, resolve_pack, view_api,
 };
 use rdy_mcp::tools::{MAX_ASSET_BYTES, MAX_TOKENS_LIMIT};
 use rdy_model::{ActorRun, ChangeLinks, RelayEvidence, Role};
@@ -171,6 +171,9 @@ struct OutArgs {
 struct CheckArgs {
     path: String,
     pack: Option<String>,
+    /// Lint the working copy that holds `path` against `view`, not a path against canon.
+    wc: Option<bool>,
+    view: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -477,7 +480,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         ),
         "render" => render(cx, parse(op, args, "{out, scope?}")?),
         "export" => export(cx, parse(op, args, "{out, scope?}")?),
-        "check" => check(cx, parse(op, args, "{path, pack?}")?),
+        "check" => check(cx, parse(op, args, "{path, pack?, wc?, view?}")?),
         "new_folder" => new_folder(cx, parse(op, args, "{path, view?}")?),
         "new_doc" => new_doc(cx, parse(op, args, "{path, view?, doc_type?, title?}")?),
         "keys_assign" => keys_assign(cx, parse(op, args, "{view?}")?),
@@ -799,28 +802,40 @@ fn check(cx: &OpContext, a: CheckArgs) -> Result<Value, RdyError> {
         }
         None => st.pack(),
     };
+    let path = resolve_path(cx.cwd, &a.path);
+    if a.wc == Some(true) {
+        // the working copy that holds the path (a worktree has its own root), against the view
+        let view = view_of(cx.session, a.view);
+        let scope = if st.view_head(&view).is_some() {
+            Scope::View(view)
+        } else {
+            Scope::Canon
+        };
+        let root = rdy_engine::wc::state::Place::locate(&path)
+            .map_or_else(|| cx.engine.root(), |p| p.root);
+        let mat = st.materialized(&scope)?;
+        return Ok(to_json(&check_wc(pack, &mat, &root, Some(&path))?));
+    }
     let canon = st.materialized(&Scope::Canon)?;
-    Ok(to_json(&check_path(
-        pack,
-        Some(&*canon),
-        &resolve_path(cx.cwd, &a.path),
-    )?))
+    Ok(to_json(&check_path(pack, Some(&*canon), &path)?))
 }
 
 fn new_folder(cx: &OpContext, a: NewFolderArgs) -> Result<Value, RdyError> {
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
-    let v = view.clone();
-    write_and_report(cx.engine, &v, None, move |r| {
+    let (v, name) = (view.clone(), view.clone());
+    let mut out = write_and_report(cx.engine, &v, None, move |r| {
         r.new_folder(&s, &view, &a.path)
-    })
+    })?;
+    out["view"] = json!(name);
+    Ok(out)
 }
 
 fn new_doc(cx: &OpContext, a: NewDocArgs) -> Result<Value, RdyError> {
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
-    let v = view.clone();
-    write_and_report(cx.engine, &v, None, move |r| {
+    let (v, name) = (view.clone(), view.clone());
+    let mut out = write_and_report(cx.engine, &v, None, move |r| {
         r.new_doc(
             &s,
             &view,
@@ -828,7 +843,9 @@ fn new_doc(cx: &OpContext, a: NewDocArgs) -> Result<Value, RdyError> {
             a.doc_type.as_deref(),
             a.title.as_deref(),
         )
-    })
+    })?;
+    out["view"] = json!(name);
+    Ok(out)
 }
 
 fn keys_assign(cx: &OpContext, a: KeysAssignArgs) -> Result<Value, RdyError> {

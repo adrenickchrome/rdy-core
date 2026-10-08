@@ -414,6 +414,62 @@ pub fn project_pack(project: &Path) -> Result<Pack, RdyError> {
     resolve_pack(project, &cfg.pack)
 }
 
+/// Lints the working tree under `root` against `view` (the bound view's materialization): the
+/// tree read with the project's `.rdyignore`, then `lint_tree` with references resolved in the
+/// view, then one `W_WC_UNTRACKED` warning for each file the scan does not read as a doc file.
+/// With `path` (absolute, or relative to `root`), only the diagnostics in files under it.
+pub fn check_wc(
+    pack: &Pack,
+    view: &Materialized,
+    root: &Path,
+    path: Option<&Path>,
+) -> Result<Vec<Diagnostic>, RdyError> {
+    use wc::layout::read_tree;
+    let ignore = wc::ignore::Ignore::load(root)?;
+    let mut tree = read_tree(root, &ignore, pack);
+    let mut diags = wc::lint::lint_tree(&mut tree, pack, Some(view), Some(root));
+    for u in &tree.untracked {
+        diags.push(Diagnostic {
+            file: u.path.clone(),
+            line: 1,
+            column: 1,
+            code: W_WC_UNTRACKED.into(),
+            message: format!("{} is not a doc file: {}", u.path, u.reason),
+            fix: format!("rdy check {}", u.path),
+            severity: rdy_schema::Severity::Warning,
+        });
+    }
+    if let Some(under) = path.and_then(|p| relative_to(root, p)) {
+        let prefix = format!("{under}/");
+        diags.retain(|d| d.file == under || d.file.starts_with(&prefix));
+    }
+    diags.sort_by(|a, b| (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column)));
+    Ok(diags)
+}
+
+/// `path` as a `/`-separated path under `root`; `None` for the root itself.
+fn relative_to(root: &Path, path: &Path) -> Option<String> {
+    use std::path::Component;
+    let rel = if path.is_absolute() {
+        let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        path.strip_prefix(root)
+            .map(Path::to_path_buf)
+            .or_else(|_| path.strip_prefix(canon(root)).map(Path::to_path_buf))
+            .or_else(|_| canon(path).strip_prefix(canon(root)).map(Path::to_path_buf))
+            .unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    let parts: Vec<String> = rel
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
 /// The `.yaml` and `.yml` files of a packs directory, sorted; none if it does not exist.
 fn pack_files(dir: &Path) -> Result<Vec<PathBuf>, RdyError> {
     if !dir.exists() {

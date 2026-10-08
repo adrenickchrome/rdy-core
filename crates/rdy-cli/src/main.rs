@@ -285,9 +285,14 @@ enum Cmd {
     },
     /// Run the MCP server over stdio.
     Mcp,
-    /// Lint export-format-2 files (a doc file, a _folder.yaml or a directory) without touching the store.
+    /// Lint export-format-2 files (a doc file, a _folder.yaml or a directory) without touching the
+    /// store. Inside a checkout, with no path or a path in the working tree, it lints the
+    /// working copy against the bound view: a new entry needs no id, and a file rdy does not
+    /// read is a warning. Commit rewrites the committed files in canonical form and drops their
+    /// YAML comments.
     Check {
-        path: PathBuf,
+        /// The file or directory (required outside a checkout; default: the working tree).
+        path: Option<PathBuf>,
         /// Check against this pack (required outside a project).
         #[arg(long)]
         pack: Option<String>,
@@ -373,6 +378,17 @@ fn find_project(start: &Path) -> PathBuf {
         cur = dir.parent();
     }
     start.to_path_buf()
+}
+
+/// Whether `path` (relative to `cwd`) is the working-tree `root` or under it.
+fn in_tree(root: &Path, cwd: &Path, path: &Path) -> bool {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    abs.starts_with(root) || canon(&abs).starts_with(canon(root))
 }
 
 fn is_project(dir: &Path) -> bool {
@@ -1304,18 +1320,46 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                 }
             };
             let prefix = if kind == "doc" { "d-" } else { "fd-" };
-            let last = v["created"]
+            let created: Vec<String> = v["created"]
                 .as_object()
                 .into_iter()
                 .flat_map(|m| m.values())
                 .filter_map(Value::as_str)
+                .map(String::from)
+                .collect();
+            let last = created
+                .iter()
                 .rfind(|id| id.starts_with(prefix))
-                .unwrap_or_default()
-                .to_string();
-            let t = format!(
+                .cloned()
+                .unwrap_or_default();
+            let mut t = format!(
                 "created {kind} {path} ({last}){}",
                 brief_text::consequences_text(&v)
             );
+            let mut v = v;
+            // the new docs and folders also become files in a working copy bound to this view
+            let ids: Vec<String> = created
+                .into_iter()
+                .filter(|id| id.starts_with("d-") || id.starts_with("fd-"))
+                .collect();
+            // the write is done: a working copy that cannot take the files is a warning, not a
+            // failed `rdy new` (a retry would meet E_ALREADY_EXISTS)
+            match wc::new_files::write_new(env, text(&v["view"]), &ids) {
+                Ok(wrote) => {
+                    t.push_str(&wrote.text());
+                    if !wrote.wrote.is_empty() || !wrote.skipped.is_empty() {
+                        v["files"] = json!(wrote.wrote);
+                        v["skipped"] = json!(wrote.skipped);
+                    }
+                }
+                Err(e) => {
+                    t.push_str(&format!(
+                        "\nwarning: not written: {}: {} ({})",
+                        e.code, e.message, e.fix
+                    ));
+                    v["files_error"] = json!(format!("{}: {}", e.code, e.message));
+                }
+            }
             Ok((v, t))
         }
         Cmd::Ls { path, scope, depth } => {
@@ -1652,11 +1696,26 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
 
 /// `rdy check`: inside a project through the `check` op (the pack and canon come from the
 /// project's state); outside one, against a built-in pack, with no store.
-fn run_check(env: &Env, path: &Path, pack: Option<&str>, as_json: bool) -> ExitCode {
+fn run_check(env: &Env, path: Option<&Path>, pack: Option<&str>, as_json: bool) -> ExitCode {
     let result = (|| -> Result<Value, ErrorReply> {
+        let missing = || ErrorReply::new(E_BAD_INPUT, "no path to check", "pass a path to check");
         if is_project(&env.project) {
+            // inside a bound checkout, no path or a path in the working tree lints the working copy
+            if let Some(view) = bound_view(env)
+                && let Some(place) = &env.place
+                && path.is_none_or(|p| in_tree(&place.root, &env.cwd, p))
+            {
+                let target = path.unwrap_or(&place.root);
+                return call(
+                    env,
+                    "check",
+                    json!({"path": path_arg(target)?, "pack": pack, "wc": true, "view": view}),
+                );
+            }
+            let path = path.ok_or_else(missing)?;
             call(env, "check", json!({"path": path_arg(path)?, "pack": pack}))
         } else {
+            let path = path.ok_or_else(missing)?;
             let name = pack.ok_or_else(|| {
                 ErrorReply::new(
                     E_NO_PROJECT,
@@ -1901,7 +1960,9 @@ fn main() -> ExitCode {
         place: Some(place),
     };
     match &cli.cmd {
-        Cmd::Check { path, pack } => return run_check(&env, path, pack.as_deref(), as_json),
+        Cmd::Check { path, pack } => {
+            return run_check(&env, path.as_deref(), pack.as_deref(), as_json);
+        }
         Cmd::Serve {
             detach,
             stop,

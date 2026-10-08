@@ -429,6 +429,49 @@ pub fn checkout(
     Ok(summary)
 }
 
+/// What `add_projected` did: the paths written, and those it left because the path holds
+/// something the working copy does not track.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Added {
+    pub written: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+/// Adds the files of `proj` (the doc and folder files a write just created) to a bound working
+/// copy: a path that holds something not in `base.files` (a file, a directory, or a link or file
+/// on the way) is skipped, never overwritten; any other is written, its base copy written, and
+/// its blocks and file added to `base`. The state is not saved here.
+pub fn add_projected(
+    place: &Place,
+    st: &mut WcState,
+    proj: &Projection,
+) -> Result<Added, RdyError> {
+    let root = &place.root;
+    let base_dir = place.state.join("base/files");
+    let mut out = Added::default();
+    for f in &proj.files {
+        if occupied(root, &f.path, &st.base.files, &BTreeSet::new())? {
+            out.skipped.push(f.path.clone());
+            continue;
+        }
+        write_at(root, &f.path, &f.text, None)?;
+        write_at(&base_dir, &f.path, &f.text, None)?;
+        out.written.push(f.path.clone());
+    }
+    let base = base_from(proj);
+    for (id, b) in base.blocks {
+        if out.written.contains(&b.file) {
+            st.base.blocks.insert(id, b);
+        }
+    }
+    for (path, id) in base.files {
+        if out.written.contains(&path) {
+            st.base.files.insert(path, id);
+        }
+    }
+    Ok(out)
+}
+
 /// What a write-back did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WriteBack {

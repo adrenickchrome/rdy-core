@@ -16,7 +16,7 @@ mod add;
 pub(crate) mod brief;
 mod checkout;
 mod commit;
-mod new_files;
+pub(crate) mod new_files;
 pub(crate) mod status;
 mod update;
 pub(crate) mod worktree;
