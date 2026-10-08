@@ -7,6 +7,8 @@ pub const E_LOCKED: &str = "E_LOCKED";
 pub const E_NO_PROJECT: &str = "E_NO_PROJECT";
 pub const E_CONFIG: &str = "E_CONFIG";
 pub const E_PERMISSION: &str = "E_PERMISSION";
+/// A dismissal of a blocking tension by the actor who wrote one of its sides (plan M2d2).
+pub const E_SELF_REVIEW: &str = "E_SELF_REVIEW";
 /// An agent session wrote into a view another session owns.
 pub const E_VIEW_OWNER: &str = "E_VIEW_OWNER";
 pub const E_BAD_INPUT: &str = "E_BAD_INPUT";

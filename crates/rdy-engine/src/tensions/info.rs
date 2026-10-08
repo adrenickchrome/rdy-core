@@ -3,6 +3,8 @@
 use super::{SideRef, Tension, TensionKind, TensionSeverity, tension_label};
 use crate::ReadState;
 use crate::coord_graph::intent_label;
+use crate::history::role_str;
+use crate::session::rfc3339;
 use rdy_model::Hash;
 use serde::Serialize;
 
@@ -86,12 +88,12 @@ impl ReadState {
 
     /// `t` as the surfaces list it. A change side's views are the open views that hold it and
     /// its actor and run the change's; a canon side's actor and run are those of the change that
-    /// produced its involved version; an intent side's are the intent's. What cannot be read is
-    /// left out.
+    /// produced its involved version; an intent side's are the intent's. A dismissed tension
+    /// carries its review. What cannot be read is left out.
     pub fn tension_info(&self, t: &Tension) -> TensionInfo {
-        let status = match self.tension_status(t) {
-            TensionStatus::Open => "open",
-            TensionStatus::Dismissed(_) => "dismissed",
+        let (status, dismissal) = match self.tension_status(t) {
+            TensionStatus::Open => ("open", None),
+            TensionStatus::Dismissed(review) => ("dismissed", self.dismissal_info(&review)),
         };
         TensionInfo {
             id: tension_label(&t.id),
@@ -103,10 +105,25 @@ impl ReadState {
             summary: t.summary.clone(),
             sides: t.sides.iter().map(|s| self.side_info(t, s)).collect(),
             blocks: t.blocks().iter().map(ToString::to_string).collect(),
-            dismissal: None,
+            dismissal,
             refuses: None,
             read_time: t.read_time,
         }
+    }
+
+    /// The dismissal review `review` as the surfaces show it, if it can be read.
+    fn dismissal_info(&self, review: &Hash) -> Option<DismissalInfo> {
+        let r = self.reader().review(review).ok()?;
+        let p = r.provenance;
+        Some(DismissalInfo {
+            review: review.to_string(),
+            actor: p.actor,
+            run: p.run,
+            role: role_str(p.role).to_string(),
+            at: rfc3339(p.at_ms),
+            at_ms: p.at_ms,
+            reason: r.reason,
+        })
     }
 
     fn side_info(&self, t: &Tension, side: &SideRef) -> SideInfo {

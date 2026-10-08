@@ -1,7 +1,7 @@
 //! The event stream (evt1): what a write batch did, derived from the batch's own frames, and the
 //! in-process bus that fans the events out to subscribers.
 use crate::RdyError;
-use rdy_model::{AltSet, AltStatus, Hash};
+use rdy_model::{AltSet, AltStatus, Hash, ReviewSubject};
 use rdy_store::segment::Location;
 use rdy_store::view::ViewOpKind;
 use rdy_store::{StoreReader, kinds};
@@ -87,6 +87,18 @@ pub enum EventKind {
         version: Hash,
         change: String,
         members: Vec<String>,
+    },
+    /// A review dismissed tension `tension` (its id when dismissed); the dismissal binds to
+    /// `vkey` (FW-CH7).
+    TensionDismissed {
+        #[serde(serialize_with = "hex::one")]
+        tension: Hash,
+        #[serde(serialize_with = "hex::one")]
+        vkey: Hash,
+        #[serde(serialize_with = "hex::one")]
+        review: Hash,
+        actor: String,
+        run: Option<String>,
     },
 }
 
@@ -215,6 +227,21 @@ pub fn events_for_batch(
                         version: hash,
                         change: alt_change(before.as_ref(), &a).to_string(),
                         members: a.members.iter().map(|m| m.view.clone()).collect(),
+                    },
+                });
+            }
+            kinds::REVIEW => {
+                let r = reader.review(&hash)?;
+                let ReviewSubject::Tension { id, vkey, .. } = r.subject;
+                out.push(Event {
+                    seq,
+                    at_ms: r.provenance.at_ms,
+                    kind: EventKind::TensionDismissed {
+                        tension: id,
+                        vkey,
+                        review: hash,
+                        actor: r.provenance.actor,
+                        run: r.provenance.run,
                     },
                 });
             }

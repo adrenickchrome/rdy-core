@@ -108,46 +108,7 @@ impl TensionSet {
     /// The tension `text` names: `tn-` and a hex prefix, or the prefix alone (at least 6 hex
     /// digits), matching exactly one tension.
     pub fn resolve(&self, text: &str) -> Result<Arc<Tension>, RdyError> {
-        let hex = text
-            .strip_prefix("tn-")
-            .unwrap_or(text)
-            .to_ascii_lowercase();
-        let not_found = || {
-            RdyError::new(
-                E_NOT_FOUND,
-                format!("no tension {}", clip(text)),
-                "rdy_tensions lists them; a tension whose side changed has a new id",
-            )
-        };
-        if !(6..=64).contains(&hex.len()) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(not_found());
-        }
-        let found: Vec<&Arc<Tension>> = self
-            .tensions
-            .iter()
-            .filter(|(id, _)| id.to_string().starts_with(&hex))
-            .map(|(_, t)| t)
-            .collect();
-        match found.as_slice() {
-            [] => Err(not_found()),
-            [t] => Ok(Arc::clone(t)),
-            many => Err(RdyError::new(
-                E_NOT_FOUND,
-                format!(
-                    "tension {} is ambiguous ({} tensions)",
-                    clip(text),
-                    many.len()
-                ),
-                format!(
-                    "use more characters: it matches {}",
-                    many.iter()
-                        .take(5)
-                        .map(|t| tension_label(&t.id))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            )),
-        }
+        resolve_among(self.tensions.values(), text)
     }
 
     /// The tensions `newer` has that this set has not (opened), and those this set has that
@@ -164,6 +125,52 @@ impl TensionSet {
             .cloned()
             .collect();
         (opened, resolved)
+    }
+}
+
+/// The one tension of `tensions` that `text` names: `tn-` and a hex prefix, or the prefix alone
+/// (at least 6 hex digits).
+pub(crate) fn resolve_among<'a>(
+    tensions: impl IntoIterator<Item = &'a Arc<Tension>>,
+    text: &str,
+) -> Result<Arc<Tension>, RdyError> {
+    let hex = text
+        .strip_prefix("tn-")
+        .unwrap_or(text)
+        .to_ascii_lowercase();
+    let not_found = || {
+        RdyError::new(
+            E_NOT_FOUND,
+            format!("no tension {}", clip(text)),
+            "rdy_tensions lists them; a tension whose side changed has a new id",
+        )
+    };
+    if !(6..=64).contains(&hex.len()) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(not_found());
+    }
+    let found: Vec<&Arc<Tension>> = tensions
+        .into_iter()
+        .filter(|t| t.id.to_string().starts_with(&hex))
+        .collect();
+    match found.as_slice() {
+        [] => Err(not_found()),
+        [t] => Ok(Arc::clone(t)),
+        many => Err(RdyError::new(
+            E_NOT_FOUND,
+            format!(
+                "tension {} is ambiguous ({} tensions)",
+                clip(text),
+                many.len()
+            ),
+            format!(
+                "use more characters: it matches {}",
+                many.iter()
+                    .take(5)
+                    .map(|t| tension_label(&t.id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )),
     }
 }
 

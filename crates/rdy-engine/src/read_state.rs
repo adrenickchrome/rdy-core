@@ -47,6 +47,9 @@ pub enum Delta {
     Coord { closed: Vec<String> },
     /// A tag was written.
     Tags,
+    /// Review `review` dismissed the tensions of vkey `vkey`: every cell is carried, and the
+    /// tension set too (a dismissal is state on a still-computed tension, FW-CH7).
+    Dismissed { vkey: Hash, review: Hash },
     /// Only the log moved (a proposal): no view content changed.
     Seq,
 }

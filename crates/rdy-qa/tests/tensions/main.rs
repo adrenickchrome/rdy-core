@@ -6,3 +6,4 @@ mod tensions_core;
 mod tensions_premise;
 mod tensions_deprecated;
 mod tensions_fork;
+mod tensions_dismiss;

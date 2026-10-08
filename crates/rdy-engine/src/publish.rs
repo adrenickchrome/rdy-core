@@ -177,13 +177,19 @@ impl Rdy {
         // the tension set reads canon, the in-flight changes and the open alternative sets
         // (edit collision skips members of one set): a publish that moves none keeps it
         let tensions = match &delta {
-            Delta::Seq | Delta::Tags => Arc::clone(&prev.tensions),
+            Delta::Seq | Delta::Tags | Delta::Dismissed { .. } => Arc::clone(&prev.tensions),
             Delta::Coord { closed }
                 if closed.is_empty() && coord_heads.alt_members == prev.coord_heads.alt_members =>
             {
                 Arc::clone(&prev.tensions)
             }
             _ => Arc::default(),
+        };
+        // the dismissals: re-read by a full publish, one added by a dismissal, else carried
+        let dismissals = match &delta {
+            Delta::Full => Arc::new(self.store.dismissals()?.into_iter().collect()),
+            Delta::Dismissed { vkey, review } => Arc::new(prev.dismissals.update(*vkey, *review)),
+            _ => Arc::clone(&prev.dismissals),
         };
         let (canon, views, tags, inflight_cell) = match delta {
             Delta::Full => {
@@ -309,7 +315,7 @@ impl Rdy {
                 Arc::new(self.version_tags()?),
                 Arc::clone(&prev.inflight_cell),
             ),
-            Delta::Seq => (
+            Delta::Seq | Delta::Dismissed { .. } => (
                 Arc::clone(&prev.canon),
                 prev.views.clone(),
                 Arc::clone(&prev.tags),
@@ -338,7 +344,7 @@ impl Rdy {
             coord_heads,
             coord: OnceLock::new(),
             tensions,
-            dismissals: Arc::clone(&prev.dismissals),
+            dismissals,
             detectors: self.detectors,
             error: None,
         })

@@ -16,6 +16,7 @@
 //! `OnceLock`), so the kinds that do not read it pay nothing.
 pub mod collision;
 pub mod deprecated;
+pub mod dismiss;
 pub mod duplicate;
 pub mod fork;
 pub mod index;
@@ -25,6 +26,7 @@ pub mod premise;
 pub mod set;
 pub mod unjustified;
 
+pub use dismiss::{DismissInfo, MAX_REASON};
 pub use index::{
     CanonIndex, ChangeFacts, DetectCx, Write, Writes, normalize_name, normalize_text,
     pointing_edge, premise_edge,
