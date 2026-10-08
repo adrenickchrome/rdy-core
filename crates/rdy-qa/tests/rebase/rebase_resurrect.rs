@@ -449,3 +449,78 @@ fn rres3_a_pinned_view_re_create_is_clean_on_its_base_and_refuses_on_canon_with_
     assert_eq!(body_of(&r, &Scope::Canon, &t), "pinned");
     r.fsck().unwrap();
 }
+
+/// Delete versus one update (M2d2 review): view b updates T from canon's version; view a deletes
+/// T and lands. b's one update never saw the delete: its landing refuses with the conflict and T
+/// stays deleted.
+#[test]
+fn rres4_one_update_written_before_a_canon_delete_refuses() {
+    assert_refused(&[Step::Edit]);
+    let (_d, mut r, t, s1, _s2, _doc) = seeded();
+    write_as(
+        &mut r,
+        &as_agent("agent:b", "r2"),
+        "b",
+        step_ops(Step::Edit, 0, &t, &s1),
+    )
+    .unwrap();
+    write_as(
+        &mut r,
+        &as_agent("agent:a", "r1"),
+        "a",
+        step_ops(Step::Delete, 0, &t, &s1),
+    )
+    .unwrap();
+    land(&mut r, "a").unwrap();
+    assert_eq!(published_and_fresh(&mut r, "b").len(), 1);
+    let e = land(&mut r, "b").unwrap_err();
+    assert_eq!(e.code, E_CONFLICT_UNRESOLVED, "{e:?}");
+    let tid = BlockId::parse(&t).unwrap();
+    assert!(
+        r.read().block(&Scope::Canon, &tid).is_err(),
+        "T stays deleted"
+    );
+}
+
+/// The update written after a's delete landed, by a view still on the base before it: pinned
+/// there, its update applies on that base, and its landing refuses as stale (T is gone from
+/// canon); floating, it reads canon, so the write itself refuses. T stays deleted either way.
+#[test]
+fn rres4_one_update_written_after_the_canon_delete_from_a_pinned_or_floating_view_refuses() {
+    let (_d, mut r, t, s1, s2, _doc) = seeded();
+    let b = as_agent("agent:b", "r2");
+    r.view_create(&b, "pinned", None, true).unwrap();
+    // "floating" landed a change earlier, so it is empty on the seed's landing
+    write_as(
+        &mut r,
+        &b,
+        "floating",
+        json!([{"op": "update", "id": s2, "fields": {"title": "Two!"}}]),
+    )
+    .unwrap();
+    land(&mut r, "floating").unwrap();
+    write_as(
+        &mut r,
+        &as_agent("agent:a", "r1"),
+        "a",
+        step_ops(Step::Delete, 0, &t, &s1),
+    )
+    .unwrap();
+    land(&mut r, "a").unwrap();
+    let tid = BlockId::parse(&t).unwrap();
+    // pinned: the view still reads T
+    write_as(&mut r, &b, "pinned", step_ops(Step::Edit, 0, &t, &s1)).unwrap();
+    assert!(published_and_fresh(&mut r, "pinned").is_empty());
+    let e = land(&mut r, "pinned").unwrap_err();
+    assert_eq!(e.code, E_STALE_BASE, "{e:?}");
+    assert!(
+        r.read().block(&Scope::Canon, &tid).is_err(),
+        "T stays deleted"
+    );
+    // floating: the view reads canon, where T is gone
+    assert!(write_as(&mut r, &b, "floating", step_ops(Step::Edit, 1, &t, &s1)).is_err());
+    assert!(
+        r.read().block(&Scope::Canon, &tid).is_err(),
+        "T stays deleted"
+    );
+}
