@@ -69,6 +69,15 @@ fn members(
     Ok(out)
 }
 
+/// Whether a group can hold two distinct blocks: an upper bound on `members`, from the index
+/// alone. Most canon keys are singletons; `members` reads the store for every canon block, so a
+/// group that cannot form a pair must not reach it.
+fn can_pair(canon: &[BlockId], writes: &[Arc<Write>]) -> bool {
+    let mut blocks: BTreeSet<&BlockId> = canon.iter().collect();
+    blocks.extend(writes.iter().map(|w| &w.block));
+    blocks.len() >= 2
+}
+
 /// The keys to examine: every key of the scope, or with `seeds` those of the seeds' blocks (their
 /// live writes in flight, canon's version in the canon scope).
 fn keys(cx: &DetectCx<'_>, seeds: Option<&BTreeSet<BlockId>>) -> Result<BTreeSet<Key>, RdyError> {
@@ -149,7 +158,11 @@ impl Detector for DuplicateDefinition {
                     "have the same text".to_string(),
                 ),
             };
-            let group = members(cx, canon.map_or(&[], Vec::as_slice), writes)?;
+            let canon = canon.map_or(&[][..], Vec::as_slice);
+            if !can_pair(canon, &writes) {
+                continue;
+            }
+            let group = members(cx, canon, writes)?;
             for (i, x) in group.iter().enumerate() {
                 for y in &group[i + 1..] {
                     let anchored = cx.scope() == DetectScope::Canon
@@ -174,5 +187,45 @@ impl Detector for DuplicateDefinition {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(change: &[u8], block: &BlockId) -> Arc<Write> {
+        Arc::new(Write {
+            change: Hash::of(change),
+            block: block.clone(),
+            base: None,
+            version: None,
+            new: None,
+            live: true,
+        })
+    }
+
+    #[test]
+    fn can_pair_needs_two_distinct_blocks_before_any_store_read() {
+        let (a, b) = (BlockId::new("blk"), BlockId::new("blk"));
+        assert!(!can_pair(&[], &[]), "empty group");
+        assert!(!can_pair(std::slice::from_ref(&a), &[]), "one canon block");
+        assert!(!can_pair(&[], &[write(b"1", &a)]), "one written block");
+        assert!(
+            !can_pair(
+                std::slice::from_ref(&a),
+                &[write(b"1", &a), write(b"2", &a)]
+            ),
+            "one block, however many writes and canon entries"
+        );
+        assert!(can_pair(&[a.clone(), b.clone()], &[]), "two canon blocks");
+        assert!(
+            can_pair(std::slice::from_ref(&a), &[write(b"1", &b)]),
+            "canon and a write"
+        );
+        assert!(
+            can_pair(&[], &[write(b"1", &a), write(b"2", &b)]),
+            "two writes"
+        );
     }
 }
