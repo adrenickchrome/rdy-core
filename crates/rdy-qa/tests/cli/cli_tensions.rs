@@ -31,6 +31,7 @@ fn cten1_rdy_tensions_and_rdy_resolve_from_the_command_line() {
     );
     let cut = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(!cut.contains(&tn), "{cut}");
+    assert!(!cut.contains("no tensions"), "{cut}");
     assert!(
         cut.contains("1 more not listed (pass --max-tokens for more)"),
         "{cut}"
@@ -65,5 +66,21 @@ fn cten1_rdy_tensions_and_rdy_resolve_from_the_command_line() {
     assert_eq!(v["code"], "E_NOT_FOUND");
     let (_, v) = s.json(&["tensions", "--status", "dismissed", "--json"]);
     assert_eq!(v["counts"]["dismissed"], 1);
+    // A cut review list says it is partial.
+    let out = s.rdy(&["tensions", "--reviews", "--max-tokens", "1"]);
+    let cut = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        cut.contains("1 reviews not listed (pass --max-tokens for more)"),
+        "{cut}"
+    );
+    let (ok, v) = s.json(&["tensions", "--reviews", "--max-tokens", "1", "--json"]);
+    assert!(ok, "{v}");
+    assert_eq!(v["reviews_omitted"], 1);
+    let out = s.rdy(&["tensions", "--reviews", "--max-tokens", "2000"]);
+    let all = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        all.contains("holds") && !all.contains("reviews not listed"),
+        "{all}"
+    );
     s.stop();
 }

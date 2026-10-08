@@ -106,16 +106,24 @@ fn review_text(r: &Value) -> String {
 /// The text of a `tensions` reply: one entry per tension, the reviews, then the counts.
 fn tensions_render(v: &Value) -> String {
     let rows = v["tensions"].as_array().map_or(&[][..], Vec::as_slice);
-    let mut lines: Vec<String> = if rows.is_empty() {
+    let omitted = v["omitted"].as_u64().unwrap_or(0);
+    let mut lines: Vec<String> = if rows.is_empty() && omitted == 0 {
         vec!["no tensions".to_string()]
     } else {
         rows.iter().map(tension_text).collect()
     };
-    if let Some(n) = v["omitted"].as_u64() {
-        lines.push(format!("{n} more not listed (pass --max-tokens for more)"));
+    if omitted > 0 {
+        lines.push(format!(
+            "{omitted} more not listed (pass --max-tokens for more)"
+        ));
     }
     for r in v["reviews"].as_array().into_iter().flatten() {
         lines.push(review_text(r));
+    }
+    if let Some(n) = v["reviews_omitted"].as_u64().filter(|n| *n > 0) {
+        lines.push(format!(
+            "{n} reviews not listed (pass --max-tokens for more)"
+        ));
     }
     let c = &v["counts"];
     lines.push(format!(
