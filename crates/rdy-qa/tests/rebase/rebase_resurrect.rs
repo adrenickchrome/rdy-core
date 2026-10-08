@@ -524,3 +524,68 @@ fn rres4_one_update_written_after_the_canon_delete_from_a_pinned_or_floating_vie
         "T stays deleted"
     );
 }
+
+/// The in-flight scope's conflict count and whether it holds T.
+fn inflight_view(r: &Rdy, t: &str) -> (usize, bool) {
+    let st = r.read();
+    let c = st.conflicts(&Scope::Inflight).unwrap().len();
+    let tid = BlockId::parse(t).unwrap();
+    (c, st.block(&Scope::Inflight, &tid).is_ok())
+}
+
+/// Fix round 2: a pinned view (where T is deleted by x) re-creates T after canon re-created and
+/// deleted T again, while another open view keeps the in-flight set built. The in-flight scope
+/// published after the commit must equal a fresh build: the carried build may not assume the
+/// re-create merges clean.
+#[test]
+fn rres3_the_inflight_scope_after_a_pinned_re_create_equals_a_fresh_build() {
+    let (_d, mut r, t, s1, s2, _doc) = seeded();
+    write_as(
+        &mut r,
+        &as_agent("agent:x", "r1"),
+        "x",
+        step_ops(Step::Delete, 0, &t, &s1),
+    )
+    .unwrap();
+    land(&mut r, "x").unwrap();
+    let p = as_agent("agent:p", "rp");
+    r.view_create(&p, "pin", None, true).unwrap();
+    write_as(
+        &mut r,
+        &as_agent("agent:y", "r2"),
+        "y",
+        re_create(&t, &s1, "y"),
+    )
+    .unwrap();
+    land(&mut r, "y").unwrap();
+    write_as(
+        &mut r,
+        &as_agent("agent:z", "r3"),
+        "z",
+        step_ops(Step::Delete, 0, &t, &s1),
+    )
+    .unwrap();
+    land(&mut r, "z").unwrap();
+    // an unrelated open view, so the in-flight set is computed and built before the commit
+    write_as(
+        &mut r,
+        &as_agent("agent:o", "r4"),
+        "o",
+        json!([{"op": "update", "id": s2, "fields": {"title": "Two?"}}]),
+    )
+    .unwrap();
+    inflight_view(&r, &t);
+    write_as(&mut r, &p, "pin", re_create(&t, &s1, "pinned")).unwrap();
+    let carried = inflight_view(&r, &t);
+    r.invalidate();
+    let fresh = inflight_view(&r, &t);
+    assert_eq!(
+        carried, fresh,
+        "carried in-flight build differs from a fresh build"
+    );
+    assert_eq!(
+        fresh,
+        (1, false),
+        "the re-create conflicts with z's delete in flight"
+    );
+}
