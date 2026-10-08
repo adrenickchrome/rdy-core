@@ -4,6 +4,7 @@ use crate::perf::{Baseline, Measure, Verdict};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 
 /// Totals from one or more `test result:` lines of cargo-test output.
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
@@ -43,7 +44,8 @@ pub fn parse_cargo_test(output: &str) -> TestRun {
 }
 
 /// The pinned-defect ids (`ord1`, `blob1`, ...) of `cargo test -- --list` output, per area.
-/// The area is the part of the test file's stem before the first `_`.
+/// The area is the `<area>` of a `Running tests/<area>/main.rs (...)` header; any other header
+/// (the `Running unittests ...` ones) sets no area.
 pub fn guarded_ids(list_output: &str) -> BTreeMap<String, BTreeSet<String>> {
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut area: Option<String> = None;
@@ -53,8 +55,9 @@ pub fn guarded_ids(list_output: &str) -> BTreeMap<String, BTreeSet<String>> {
             area = rest
                 .split_whitespace()
                 .find_map(|w| w.strip_prefix("tests/"))
-                .and_then(|f| f.strip_suffix(".rs"))
-                .map(|stem| area_of(stem).to_string());
+                .and_then(|f| f.strip_suffix("/main.rs"))
+                .filter(|a| !a.is_empty() && !a.contains('/'))
+                .map(str::to_string);
             continue;
         }
         let (Some(area), Some(name)) = (&area, t.strip_suffix(": test")) else {
@@ -75,7 +78,7 @@ pub const PERF_AREA: &str = "perf";
 pub struct Plan {
     /// fmt, clippy and the workspace tests (outside `rdy-qa`).
     pub checks: bool,
-    /// The `rdy-qa` test files (stems) to run.
+    /// The `rdy-qa` area test binaries (`tests/<area>/main.rs`) to run.
     pub files: Vec<String>,
     /// The `rdy-qa` unit tests.
     pub lib: bool,
@@ -85,10 +88,10 @@ pub struct Plan {
     pub guarded: bool,
 }
 
-/// The plan for `--only <area>` (or a full run), given the `rdy-qa` test file stems.
+/// The plan for `--only <area>` (or a full run), given the `rdy-qa` areas.
 /// - no `--only`: everything (perf unless `--skip-perf`);
 /// - `--only perf`: the build and the perf tier only;
-/// - `--only <area>`: fmt, clippy, the workspace tests, that area's `rdy-qa` test files, the
+/// - `--only <area>`: fmt, clippy, the workspace tests, that area's `rdy-qa` test binary, the
 ///   `rdy-qa` unit tests and the perf tier (unless `--skip-perf`).
 pub fn plan(only: Option<&str>, files: &[String], skip_perf: bool) -> Result<Plan, String> {
     match only {
@@ -143,6 +146,100 @@ fn guard_id(name: &str) -> Option<String> {
     let digits = id.len() - letters;
     (letters > 0 && digits > 0 && id[letters..].chars().all(|c| c.is_ascii_digit()))
         .then(|| id.to_string())
+}
+
+/// The paths directly under `dir`, sorted; none when it cannot be read.
+fn dir_paths(dir: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+fn name_of(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn is_rs_file(p: &Path) -> bool {
+    p.is_file() && p.extension().is_some_and(|e| e == "rs")
+}
+
+/// True when `dir` holds a `.rs` file at any depth (a directory without one is data).
+fn holds_rs(dir: &Path) -> bool {
+    dir_paths(dir)
+        .iter()
+        .any(|p| is_rs_file(p) || (p.is_dir() && holds_rs(p)))
+}
+
+/// The `rdy-qa` test areas: the sorted names of the directories directly under `tests_dir`
+/// that hold a `main.rs`, one test binary each.
+pub fn test_areas(tests_dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = dir_paths(tests_dir)
+        .iter()
+        .filter(|p| p.join("main.rs").is_file())
+        .map(|p| name_of(p))
+        .collect();
+    v.sort();
+    v
+}
+
+/// What is wrong with the test layout (one test binary per area, `tests/<area>/main.rs`
+/// with one `mod <stem>;` line per test file), one message per problem, sorted. Empty when
+/// the layout is right. A test file without its `mod` line compiles and never runs.
+pub fn layout_problems(tests_dir: &Path) -> Vec<String> {
+    let mut out = vec![];
+    for p in dir_paths(tests_dir) {
+        let name = name_of(&p);
+        if is_rs_file(&p) {
+            out.push(format!(
+                "tests/{name} is not in an area: run rdy-split-tests.py"
+            ));
+            continue;
+        }
+        if !p.is_dir() || !holds_rs(&p) {
+            continue;
+        }
+        let main = p.join("main.rs");
+        if !main.is_file() {
+            out.push(format!("tests/{name}/ has test files but no main.rs"));
+            continue;
+        }
+        let text = std::fs::read_to_string(&main).unwrap_or_default();
+        let mut mods: BTreeMap<String, usize> = BTreeMap::new();
+        for line in text.lines() {
+            if let Some(stem) = line
+                .trim()
+                .strip_prefix("mod ")
+                .and_then(|r| r.strip_suffix(';'))
+            {
+                *mods.entry(stem.trim().to_string()).or_default() += 1;
+            }
+        }
+        for (stem, n) in &mods {
+            if *n > 1 {
+                out.push(format!("tests/{name}/main.rs: mod {stem} twice"));
+            }
+            if !p.join(format!("{stem}.rs")).is_file() && !p.join(stem).join("mod.rs").is_file() {
+                out.push(format!("tests/{name}/main.rs: mod {stem} has no file"));
+            }
+        }
+        for f in dir_paths(&p).iter().filter(|f| is_rs_file(f)) {
+            let stem = f
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if stem != "main" && !mods.contains_key(&stem) {
+                out.push(format!(
+                    "tests/{name}/{stem}.rs has no mod line in tests/{name}/main.rs: it never runs"
+                ));
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// One build/lint/test gate step.
@@ -414,10 +511,83 @@ mod tests {
 
     #[test]
     fn collects_guarded_ids_per_area() {
-        let list = "     Running tests/engine.rs (target/release/deps/engine-abc)\nord1_append_after_a_tie: test\nplain_test: test\n     Running tests/store.rs (target/release/deps/store-def)\nblob1_x: test\nblob1_y: test\n";
+        let list = "     Running tests/engine/main.rs (target/release/deps/engine-abc)\nengine_write::ord1_append_after_a_tie: test\nengine::plain_test: test\n     Running tests/render_quality/main.rs (target/release/deps/render_quality-def)\nrender_quality_pages::rq1_x: test\n     Running unittests src/lib.rs (target/release/deps/rdy_qa-0)\nreport::tests::tlay1_x: test\n";
         let g = guarded_ids(list);
         assert_eq!(g["engine"], ["ord1".to_string()].into());
-        assert_eq!(g["store"], ["blob1".to_string()].into());
+        assert_eq!(g["render_quality"], ["rq1".to_string()].into());
+        assert_eq!(g.len(), 2, "unit tests are not an area: {g:?}");
+    }
+
+    fn tree(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        for (path, text) in files {
+            let p = d.path().join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        d
+    }
+
+    #[test]
+    fn tlay1_the_real_tree_has_no_layout_problem() {
+        let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+        assert_eq!(layout_problems(&tests), Vec::<String>::new());
+        assert!(test_areas(&tests).contains(&"engine".to_string()));
+        assert!(test_areas(&tests).contains(&"render_quality".to_string()));
+    }
+
+    #[test]
+    fn tlay1_a_file_without_its_mod_line_is_named() {
+        let d = tree(&[
+            ("engine/main.rs", "//! doc\nmod engine_a;\n"),
+            ("engine/engine_a.rs", ""),
+            ("engine/engine_b.rs", ""),
+        ]);
+        let p = layout_problems(d.path());
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].contains("engine/engine_b.rs"), "{p:?}");
+    }
+
+    #[test]
+    fn tlay1_a_mod_line_without_its_file_is_named() {
+        let d = tree(&[
+            ("engine/main.rs", "mod engine_a;\nmod engine_gone;\n"),
+            ("engine/engine_a.rs", ""),
+        ]);
+        let p = layout_problems(d.path());
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].contains("engine_gone"), "{p:?}");
+    }
+
+    #[test]
+    fn tlay1_a_file_listed_twice_is_named() {
+        let d = tree(&[
+            ("engine/main.rs", "mod engine_a;\nmod engine_a;\n"),
+            ("engine/engine_a.rs", ""),
+        ]);
+        let p = layout_problems(d.path());
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].contains("engine_a"), "{p:?}");
+    }
+
+    #[test]
+    fn tlay1_a_top_level_test_file_and_an_area_without_main_are_named() {
+        let d = tree(&[("wc_new.rs", ""), ("gate/gate_alts.rs", "")]);
+        let p = layout_problems(d.path());
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert!(p.iter().any(|x| x.contains("wc_new.rs")), "{p:?}");
+        assert!(p.iter().any(|x| x.contains("gate/")), "{p:?}");
+    }
+
+    #[test]
+    fn tlay1_a_data_directory_is_not_an_area() {
+        let d = tree(&[
+            ("golden/site/index.html", "<html>"),
+            ("model/main.rs", "mod model;\n"),
+            ("model/model.rs", ""),
+        ]);
+        assert_eq!(layout_problems(d.path()), Vec::<String>::new());
+        assert_eq!(test_areas(d.path()), vec!["model".to_string()]);
     }
 
     fn area(ok: bool, passed: usize, failed: usize) -> Area {

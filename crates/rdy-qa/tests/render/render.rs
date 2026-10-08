@@ -4,7 +4,7 @@ use rdy_qa::site::{attrs, unescape};
 use std::path::Path;
 
 /// The inline script that sets the theme before the first paint, as the theme ships it.
-const INIT_JS: &str = include_str!("../../rdy-render/theme/rdy-standard/js/init.js");
+const INIT_JS: &str = include_str!("../../../rdy-render/theme/rdy-standard/js/init.js");
 
 fn hostile_site() -> (tempfile::TempDir, tempfile::TempDir) {
     let (d, r) = golden::hostile();

@@ -1,0 +1,2 @@
+# Each area test binary lists its test files; two branches that add tests merge both lines.
+crates/rdy-qa/tests/*/main.rs merge=union

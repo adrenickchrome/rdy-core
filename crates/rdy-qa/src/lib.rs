@@ -1,5 +1,6 @@
 //! rdy's QA gate: fixtures, the invariant checker, an MCP client with deadlines, the perf
-//! workload and the gate report. The tests live in `tests/`, one file per area.
+//! workload and the gate report. The tests live in `tests/`, one test binary per area,
+//! `tests/<area>/main.rs`.
 pub mod daemon;
 pub mod edit_loop;
 pub mod fixtures;
