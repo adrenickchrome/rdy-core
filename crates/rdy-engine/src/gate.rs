@@ -595,10 +595,11 @@ impl ReadState {
         let set = self.tensions()?;
         let mut seen = BTreeSet::new();
         let mut out = vec![];
-        let listed = changes
-            .iter()
-            .flat_map(|c| set.involving_change(c))
-            .chain(refusing);
+        // a refusing tension is listed in its landing form; an in-flight form with another id
+        // (another severity, sides or versions) is listed beside it as information
+        let listed = refusing
+            .into_iter()
+            .chain(changes.iter().flat_map(|c| set.involving_change(c)));
         for t in listed {
             if !seen.insert(t.id) {
                 continue;

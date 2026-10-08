@@ -359,38 +359,63 @@ fn tgat1_a_subset_that_leaves_out_the_repin_refuses() {
     assert_eq!(e.code, E_BLOCKING_TENSION, "{e:?}");
 }
 
-/// One step of a gate scenario: (kind, view, target, subset size). Kinds: 0–1 edit a claim,
-/// 2–3 cite one, 4 repin the view's last citer, 5 supersede the decision, 6 include another
-/// view's change, 7–8 propose (the whole view, or its first changes) and land.
+/// One step of a gate scenario: (kind, view, target, n). Kinds: 0 edit a claim, 1 cite one,
+/// 2 repin the view's last citer, 3 supersede the decision, 4 include another view's change,
+/// 5–6 set the section's lifecycle (draft or stable), 7–8 define a term, 9 dismiss a tension as
+/// the view's own agent, 10 dismiss one as a reviewer, 11–13 propose (the whole view, or its
+/// first n changes) and land.
 type Step = (u8, u8, u8, u8);
 
-/// Runs `steps` on a spec project; at each propose step, `propose` reports a refusing tension
-/// exactly when `land` refuses with `E_BLOCKING_TENSION`.
+/// A write as view `vn`'s agent, citing a fresh briefing of canon's spec section and claims (so
+/// a write in a stable section is accepted).
+fn wr(
+    r: &mut Rdy,
+    s: &rdy_qa::edit_loop::Spec,
+    vn: &str,
+    ops: serde_json::Value,
+) -> Result<rdy_engine::WriteResult, RdyError> {
+    let tok = brief_of(r, &Scope::Canon, &[&s.section, &s.a, &s.b, &s.c])
+        .base
+        .token;
+    write_cited_as(r, &ag(vn), vn, ops, Some(&tok))
+}
+
+/// Runs `steps` on a stable spec project (so lifecycles mix: canon stable, a view's draft). At each propose step: `propose` reports a refusing tension
+/// exactly when `land` refuses with `E_BLOCKING_TENSION`; every refusing entry is listed in the
+/// form that refuses (open and blocking); and a reviewer (an actor that wrote no side) can
+/// dismiss each one, after which it no longer refuses.
 fn propose_agrees_with_land(steps: Vec<Step>) -> Result<(), TestCaseError> {
     let (_d, mut r) = project();
-    let s = spec_doc(&mut r);
+    let s = stable_spec(&mut r);
     let names = ["a", "b", "o"];
     let claims = [s.a.clone(), s.b.clone(), s.c.clone()];
     // the citing claims each view created, newest last
     let mut citers: Vec<Vec<BlockId>> = vec![vec![]; 3];
+    // the ids of refusing tensions seen at a propose, newest last
+    let mut refused: Vec<String> = vec![];
     for (i, (kind, v, k, n)) in steps.into_iter().enumerate() {
         let vn = names[v as usize];
         let target = &claims[k as usize % 3];
         match kind {
-            0 | 1 => {
-                let _ = try_put(&mut r, vn, upd(target, &format!("{vn} {i}")));
+            0 => {
+                let _ = wr(&mut r, &s, vn, upd(target, &format!("{vn} {i}")));
             }
-            2 | 3 => {
-                if let Ok(w) = try_put(&mut r, vn, cite(&s.section, target)) {
+            1 => {
+                if let Ok(w) = wr(&mut r, &s, vn, cite(&s.section, target)) {
                     citers[v as usize].push(created(&w, "$y"));
                 }
             }
-            4 => {
-                if let Some(y) = citers[v as usize].last() {
-                    let _ = try_put(&mut r, vn, json!([{"op": "repin", "id": y.to_string()}]));
+            2 => {
+                if let Some(y) = citers[v as usize].last().cloned() {
+                    let _ = wr(
+                        &mut r,
+                        &s,
+                        vn,
+                        json!([{"op": "repin", "id": y.to_string()}]),
+                    );
                 }
             }
-            5 => {
+            3 => {
                 let _ = r.supersede(
                     &ag(vn),
                     vn,
@@ -403,12 +428,40 @@ fn propose_agrees_with_land(steps: Vec<Step>) -> Result<(), TestCaseError> {
                     },
                 );
             }
-            6 => {
+            4 => {
                 let from = names[k as usize % 3];
                 let inc = r.read().included(from);
                 if let Some(c) = inc.get(n as usize % inc.len().max(1)) {
                     let _ = r.view_include(&ag(vn), vn, &[c.to_string()]);
                 }
+            }
+            5 | 6 => {
+                let lifecycle = if k % 2 == 0 { "draft" } else { "stable" };
+                let _ = wr(
+                    &mut r,
+                    &s,
+                    vn,
+                    json!([{"op": "update", "id": s.section.to_string(), "fields": {"lifecycle": lifecycle}}]),
+                );
+            }
+            7 | 8 => {
+                let _ = wr(
+                    &mut r,
+                    &s,
+                    vn,
+                    term(&s.section, ["Fee", "fee", "Charge"][k as usize % 3]),
+                );
+            }
+            9 | 10 => {
+                // a tension of the in-flight set, or one a propose refused with
+                let mut ids: Vec<String> = open(&r).iter().map(|t| tension_label(&t.id)).collect();
+                ids.extend(refused.iter().cloned());
+                if ids.is_empty() {
+                    continue;
+                }
+                let id = ids[(n as usize + k as usize) % ids.len()].clone();
+                let who = if kind == 9 { ag(vn) } else { reviewer() };
+                let _ = r.dismiss_tension(&who, &id, "fine");
             }
             _ => {
                 let inc = r.read().included(vn);
@@ -417,18 +470,33 @@ fn propose_agrees_with_land(steps: Vec<Step>) -> Result<(), TestCaseError> {
                 }
                 // n == 0: the whole view; else its first n changes (a subset that can be
                 // refused as not closed, which proposes nothing)
-                let p = if n == 0 {
-                    r.propose(&writer(), vn, vn)
-                } else {
-                    let ids: Vec<String> = inc
-                        .iter()
-                        .take(n as usize)
-                        .map(|h: &Hash| h.to_string())
-                        .collect();
-                    r.propose_subset(&writer(), vn, vn, Some(&ids), None)
+                let propose = |r: &mut Rdy| {
+                    if n == 0 {
+                        r.propose(&writer(), vn, vn)
+                    } else {
+                        let ids: Vec<String> = inc
+                            .iter()
+                            .take(n as usize)
+                            .map(|h: &Hash| h.to_string())
+                            .collect();
+                        r.propose_subset(&writer(), vn, vn, Some(&ids), None)
+                    }
                 };
-                let Ok(p) = p else { continue };
-                let refuses = p.tensions.iter().any(|t| t.refuses == Some(true));
+                let Ok(p) = propose(&mut r) else { continue };
+                let refusing: Vec<&TensionInfo> = p
+                    .tensions
+                    .iter()
+                    .filter(|t| t.refuses == Some(true))
+                    .collect();
+                for t in &refusing {
+                    prop_assert!(
+                        t.status == "open" && t.severity == TensionSeverity::Blocking,
+                        "step {}: a refusing entry in another form: {:?}",
+                        i,
+                        t
+                    );
+                }
+                refused.extend(refusing.iter().map(|t| t.id.clone()));
                 let landed = r.land(&approver(), &p.id);
                 let gate = matches!(&landed, Err(e) if e.code == E_BLOCKING_TENSION);
                 if !p.blocking.is_empty() {
@@ -436,13 +504,38 @@ fn propose_agrees_with_land(steps: Vec<Step>) -> Result<(), TestCaseError> {
                     continue;
                 }
                 prop_assert_eq!(
-                    refuses,
+                    !refusing.is_empty(),
                     gate,
                     "step {}: propose {:?}, land {:?}",
                     i,
                     p.tensions,
                     landed.as_ref().map_err(|e| (e.code, e.message.clone()))
                 );
+                if gate {
+                    // a refusal is always clearable by a reviewer of another actor
+                    for t in &refusing {
+                        let d = r.dismiss_tension(&reviewer(), &t.id, "both fine");
+                        prop_assert!(
+                            d.is_ok(),
+                            "step {}: dismiss {}: {:?}",
+                            i,
+                            t.id,
+                            d.map_err(|e| (e.code, e.message))
+                        );
+                    }
+                    let Ok(p2) = propose(&mut r) else { continue };
+                    for t in &refusing {
+                        prop_assert!(
+                            !p2.tensions
+                                .iter()
+                                .any(|x| x.id == t.id && x.refuses == Some(true)),
+                            "step {}: {} still refuses after its dismissal: {:?}",
+                            i,
+                            t.id,
+                            p2.tensions
+                        );
+                    }
+                }
             }
         }
     }
@@ -450,11 +543,155 @@ fn propose_agrees_with_land(steps: Vec<Step>) -> Result<(), TestCaseError> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: cases(24), ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: cases(32), ..ProptestConfig::default() })]
     #[test]
     fn tgat1_propose_reports_a_refusal_iff_land_refuses_with_a_blocking_tension(
-        steps in proptest::collection::vec((0u8..9, 0u8..3, 0u8..3, 0u8..3), 4..16)
+        steps in proptest::collection::vec((0u8..14, 0u8..3, 0u8..3, 0u8..3), 4..20)
     ) {
         propose_agrees_with_land(steps)?;
     }
+}
+
+/// N1 (re-review, fix round 3): the in-flight form of a duplicate definition is advisory (view
+/// o makes the section draft in flight), but the landing form is blocking (b lands into canon's
+/// stable section). The landing form is listed as itself, b's own dismissal of the advisory
+/// form does not clear it, and a reviewer's dismissal of it lets b land.
+#[test]
+fn tgat1_a_landing_form_with_its_own_severity_is_listed_and_dismissable() {
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    let tok = |r: &Rdy| brief_of(r, &Scope::Canon, &[&s.section]).base.token;
+    let t0 = tok(&r);
+    write_cited_as(&mut r, &ag("a"), "a", term(&s.section, "Fee"), Some(&t0)).unwrap();
+    let pa = propose(&mut r, "a");
+    approve(&mut r, &pa).unwrap();
+    let t1 = tok(&r);
+    write_cited_as(
+        &mut r,
+        &ag("o"),
+        "o",
+        json!([{"op": "update", "id": s.section.to_string(), "fields": {"lifecycle": "draft"}}]),
+        Some(&t1),
+    )
+    .unwrap();
+    let t2 = tok(&r);
+    write_cited_as(&mut r, &ag("b"), "b", term(&s.section, "fee"), Some(&t2)).unwrap();
+    let inflight = one(&r, TensionKind::DuplicateDefinition);
+    assert_eq!(inflight.severity, TensionSeverity::Advisory);
+    r.dismiss_tension(&ag("b"), &tension_label(&inflight.id), "fine")
+        .unwrap();
+    let pb = propose(&mut r, "b");
+    let refusing: Vec<&TensionInfo> = pb
+        .tensions
+        .iter()
+        .filter(|t| t.refuses == Some(true))
+        .collect();
+    assert_eq!(refusing.len(), 1, "{:?}", pb.tensions);
+    let landing = refusing[0];
+    assert_eq!(landing.kind, TensionKind::DuplicateDefinition);
+    assert_eq!(landing.severity, TensionSeverity::Blocking);
+    assert_eq!(landing.status, "open");
+    assert_ne!(landing.id, tension_label(&inflight.id), "its own form");
+    assert!(
+        pb.tensions
+            .iter()
+            .any(|t| t.id == tension_label(&inflight.id)
+                && t.refuses == Some(false)
+                && t.status == "dismissed"),
+        "the in-flight form is listed as information: {:?}",
+        pb.tensions
+    );
+    assert_eq!(approve(&mut r, &pb).unwrap_err().code, E_BLOCKING_TENSION);
+    // b's own session cannot clear a blocking form
+    assert!(r.dismiss_tension(&ag("b"), &landing.id, "fine").is_err());
+    r.dismiss_tension(&reviewer(), &landing.id, "both fine")
+        .unwrap();
+    let pb = propose(&mut r, "b");
+    assert!(
+        pb.tensions.iter().all(|t| t.refuses == Some(false)),
+        "{:?}",
+        pb.tensions
+    );
+    approve(&mut r, &pb).unwrap();
+}
+
+/// A pack whose decisions carry the tracking field `disposition` (trk1).
+const TRK_PACK: &str = "\
+name: trk
+version: \"1\"
+extends: rdy-standard
+block_types:
+  decision:
+    prefix: D
+    traits: [normative]
+    fields:
+      disposition: { kind: str }
+    tracking: [disposition]
+";
+
+/// N2 (re-review, fix round 3): a fork that exists only in its landing form (view o makes a
+/// tracking edit of the canon decision in flight, so the in-flight fork is against o's version)
+/// is listed, and a reviewer dismisses it by the id the refusal names.
+#[test]
+fn tgat1_a_landing_only_fork_is_dismissable_by_its_id() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), TRK_PACK).unwrap();
+    std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: trk\n").unwrap();
+    let mut r = Rdy::open(dir.path()).unwrap();
+    let s = spec_doc(&mut r);
+    let supersede = |r: &mut Rdy, who: &str| {
+        r.supersede(
+            &ag(who),
+            who,
+            &s.decision.to_string(),
+            None,
+            DecisionInput {
+                parent: s.section.to_string(),
+                statement: format!("{who} replaces it"),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let da = supersede(&mut r, "a").created["$decision"].clone();
+    let pa = propose(&mut r, "a");
+    approve(&mut r, &pa).unwrap();
+    // o makes a tracking edit of a's landed decision in flight
+    r.write(
+        &ag("o"),
+        WriteRequest {
+            view: "o".into(),
+            ops: serde_json::from_value(
+                json!([{"op": "update", "id": da, "fields": {"disposition": "M3"}}]),
+            )
+            .unwrap(),
+            justification: Some(Justification::Editorial {
+                class: EditorialClass::Clarify,
+                reason: "re-sliced".into(),
+            }),
+            message: String::new(),
+        },
+    )
+    .unwrap();
+    supersede(&mut r, "b");
+    let pb = propose(&mut r, "b");
+    let refusing: Vec<&TensionInfo> = pb
+        .tensions
+        .iter()
+        .filter(|t| t.refuses == Some(true))
+        .collect();
+    assert_eq!(refusing.len(), 1, "{:?}", pb.tensions);
+    assert_eq!(refusing[0].kind, TensionKind::Fork);
+    assert!(
+        open(&r)
+            .iter()
+            .all(|t| tension_label(&t.id) != refusing[0].id),
+        "a landing-only form"
+    );
+    let id = refusing[0].id.clone();
+    assert_eq!(approve(&mut r, &pb).unwrap_err().code, E_BLOCKING_TENSION);
+    r.dismiss_tension(&reviewer(), &id, "both stand").unwrap();
+    let pb = propose(&mut r, "b");
+    approve(&mut r, &pb).unwrap();
 }

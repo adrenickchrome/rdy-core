@@ -15,10 +15,13 @@
 use super::set::resolve_among;
 use super::{SideRef, Tension, TensionKind, TensionSeverity, TensionStatus, tension_label};
 use crate::error::*;
+use crate::gate::open_proposals;
 use crate::session::now_ms;
 use crate::{Delta, Rdy, RdyError, ReadState, Session};
+use rdy_model::Hash;
 use rdy_model::{Review, ReviewSubject, Role, Verdict};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// The longest reason a dismissal takes, in characters (after trimming).
@@ -38,15 +41,24 @@ pub struct DismissInfo {
 
 impl ReadState {
     /// The tension `text` names (`tn-` and a hex prefix, or the prefix alone): among the
-    /// event-derived set, then the read-time ones at `now_ms`.
+    /// event-derived set, the read-time ones at `now_ms`, and the landing tensions of every
+    /// open proposal (tgat1: a form the gate refuses with is a tension of its own, so a refusal
+    /// can always be dismissed by the id it names). One id is one tension, wherever it is found.
     pub fn resolve_tension(&self, text: &str, now_ms: i64) -> Result<Arc<Tension>, RdyError> {
-        let set = self.tensions()?;
-        let read_time: Vec<Arc<Tension>> = self
-            .intent_tensions(now_ms)?
-            .into_iter()
-            .map(Arc::new)
+        let mut all: BTreeMap<Hash, Arc<Tension>> = self
+            .tensions()?
+            .iter()
+            .map(|t| (t.id, Arc::clone(t)))
             .collect();
-        resolve_among(set.iter().chain(read_time.iter()), text)
+        for t in self.intent_tensions(now_ms)? {
+            all.entry(t.id).or_insert_with(|| Arc::new(t));
+        }
+        for (_, p) in open_proposals(self)? {
+            for t in self.landing_tensions(&p.view, &p.changes)? {
+                all.entry(t.id).or_insert(t);
+            }
+        }
+        resolve_among(all.values(), text)
     }
 
     /// Every actor who wrote an item of `t`, with the side of the item, in item order: a change

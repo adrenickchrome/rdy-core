@@ -127,14 +127,19 @@ fn version_text(v: &Option<Hash>) -> String {
     v.map_or_else(|| "-".to_string(), |h| h.to_string())
 }
 
-/// A tension's id: the hash of the kind and its involved items (side label, block, version),
-/// sorted, so the order a detector reports them in does not matter.
-pub fn tension_id(kind: TensionKind, involved: &[Involved]) -> Hash {
+/// A tension's id: the hash of the kind, the severity and its involved items (side label,
+/// block, version), sorted, so the order a detector reports them in does not matter. The
+/// severity is in it as in the vkey, so id and vkey stay one-to-one: two forms of one condition
+/// that differ in severity (the in-flight form and a landing's form, read under different
+/// lifecycles) are two tensions, each with its own id, status and dismissal.
+pub fn tension_id(kind: TensionKind, severity: TensionSeverity, involved: &[Involved]) -> Hash {
     let mut items: Vec<&Involved> = involved.iter().collect();
     items.sort();
-    let mut bytes = b"rdy-tension-1\0".to_vec();
-    bytes.extend_from_slice(kind.name().as_bytes());
-    bytes.push(0);
+    let mut bytes = b"rdy-tension-2\0".to_vec();
+    for part in [kind.name().to_string(), severity.to_string()] {
+        bytes.extend_from_slice(part.as_bytes());
+        bytes.push(0);
+    }
     for i in items {
         for part in [
             i.side.label(),
@@ -227,7 +232,7 @@ pub(crate) fn tension_from(
     involved.dedup();
     let sides: BTreeSet<SideRef> = involved.iter().map(|i| i.side.clone()).collect();
     Some(Tension {
-        id: tension_id(f.kind, &involved),
+        id: tension_id(f.kind, severity, &involved),
         vkey: tension_vkey(f.kind, severity, &involved),
         kind: f.kind,
         severity,

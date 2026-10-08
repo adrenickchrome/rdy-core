@@ -126,21 +126,30 @@ fn tset1_ids_cover_sides_and_versions_and_the_vkey_ignores_side_labels() {
     };
     let k = TensionKind::PremiseShift;
     assert_eq!(
-        tension_id(k, &[x.clone(), y.clone()]),
-        tension_id(k, &[y.clone(), x.clone()]),
+        tension_id(k, TensionSeverity::Blocking, &[x.clone(), y.clone()]),
+        tension_id(k, TensionSeverity::Blocking, &[y.clone(), x.clone()]),
         "order-independent"
     );
     assert_ne!(
-        tension_id(k, &[x.clone(), y.clone()]),
-        tension_id(TensionKind::Fork, &[x.clone(), y.clone()])
+        tension_id(k, TensionSeverity::Blocking, &[x.clone(), y.clone()]),
+        tension_id(
+            TensionKind::Fork,
+            TensionSeverity::Blocking,
+            &[x.clone(), y.clone()]
+        )
+    );
+    assert_ne!(
+        tension_id(k, TensionSeverity::Blocking, &[x.clone(), y.clone()]),
+        tension_id(k, TensionSeverity::Advisory, &[x.clone(), y.clone()]),
+        "the severity is in the id, as in the vkey"
     );
     let landed = Involved {
         side: canon.clone(),
         ..x.clone()
     };
     assert_ne!(
-        tension_id(k, &[x.clone(), y.clone()]),
-        tension_id(k, &[landed.clone(), y.clone()]),
+        tension_id(k, TensionSeverity::Blocking, &[x.clone(), y.clone()]),
+        tension_id(k, TensionSeverity::Blocking, &[landed.clone(), y.clone()]),
         "a re-key changes the id"
     );
     assert_eq!(

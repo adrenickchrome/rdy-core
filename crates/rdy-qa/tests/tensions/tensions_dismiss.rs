@@ -399,7 +399,10 @@ fn tdis1_an_advisory_time_dismissal_does_not_hold_once_the_tension_is_blocking()
     land(&mut r, "st").unwrap();
     r.set_detectors_for_tests(&SOFTENS_DETS);
     let t2 = pick(&r, TensionKind::DuplicateDefinition);
-    assert_eq!(t2.id, t.id, "the same blocks at the same versions");
+    // fix round 3 of Task 10 (ruling N1/N2): the id hashes the severity too, so id and vkey
+    // stay one-to-one; the same blocks at the same versions under another severity are a new id
+    assert_ne!(t2.id, t.id, "the id covers the severity");
+    assert_eq!(t2.blocks(), t.blocks(), "the same blocks");
     assert_ne!(t2.vkey, t.vkey, "the vkey covers the severity");
     assert_eq!(t2.severity, TensionSeverity::Blocking, "C is stable now");
     assert_eq!(
