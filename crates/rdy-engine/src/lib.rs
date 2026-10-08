@@ -55,7 +55,8 @@ pub use decide::DecisionInput;
 pub use error::*;
 pub use events::{Event, EventKind, Events};
 pub use gate::{
-    LandInfo, LandOptions, LandingRow, ProposalInfo, ProposalRef, RebasedInfo, RelayedByRow,
+    LandInfo, LandOptions, LandingRow, PROPOSAL_TENSIONS_MAX, ProposalInfo, ProposalRef,
+    RebasedInfo, RelayedByRow,
 };
 pub use history::{Author, HISTORY_MAX, History, HistoryEntry, JustificationInfo, LandingRef};
 pub use io::{ExportSummary, block_from_yaml, block_to_yaml, refuse_inflight_export};

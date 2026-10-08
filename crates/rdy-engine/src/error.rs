@@ -51,6 +51,8 @@ pub const E_HAS_DEPENDENTS: &str = "E_HAS_DEPENDENTS";
 pub const E_DEPS_MISSING: &str = "E_DEPS_MISSING";
 /// The version being landed carries conflicts it has not resolved (each one is an issue).
 pub const E_CONFLICT_UNRESOLVED: &str = "E_CONFLICT_UNRESOLVED";
+/// The landing would put blocking, undismissed tensions into canon (each one is an issue).
+pub const E_BLOCKING_TENSION: &str = "E_BLOCKING_TENSION";
 /// An undo would leave the view inconsistent (each blocking op is an issue).
 pub const E_UNDO_BLOCKED: &str = "E_UNDO_BLOCKED";
 /// An undo would bring back or remove work that has landed.

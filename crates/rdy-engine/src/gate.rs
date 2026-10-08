@@ -2,6 +2,7 @@ use crate::alt::{AltPick, alt_label};
 use crate::coord_graph::AltRef;
 use crate::error::*;
 use crate::session::rfc3339;
+use crate::tensions::{SideRef, TensionInfo, TensionSeverity, TensionStatus};
 use crate::views::{
     Action, BaseBlocks, ConflictInfo, conflict_infos, creators, landings_through, missing_parents,
     parse_change,
@@ -51,6 +52,14 @@ pub struct ProposalInfo {
     /// The conflicts this version carries on the blocks it writes: they refuse its landing
     /// (`E_CONFLICT_UNRESOLVED`) until resolved in the view and proposed again.
     pub blocking: Vec<ConflictInfo>,
+    /// The tensions that involve one of the version's changes, each with `refuses`: the
+    /// refusing ones first (they refuse its landing, `E_BLOCKING_TENSION`), then by id; at most
+    /// `PROPOSAL_TENSIONS_MAX`. A tension whose blocks all carry a blocking conflict is left
+    /// out: the conflict reports it.
+    pub tensions: Vec<TensionInfo>,
+    /// The tensions left out past `PROPOSAL_TENSIONS_MAX`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub tensions_omitted: usize,
     /// Canon's head when the version was written (FW-HB1).
     pub canon_at: Option<String>,
     /// The alternative set the version chooses its own view's member of (altg1).
@@ -527,6 +536,90 @@ fn unresolved(st: &ReadState, view: &str, blocking: &[Conflict]) -> Result<RdyEr
         });
     }
     Ok(e)
+}
+
+/// The most tensions a proposal lists; the rest are counted in `tensions_omitted`.
+pub const PROPOSAL_TENSIONS_MAX: usize = 50;
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+impl ReadState {
+    /// The event-derived tensions that involve one of `changes` (a version's changes), each
+    /// with `refuses`: true when the tension is blocking, not dismissed, and every side is canon
+    /// or one of `changes`, so that landing them would put it into canon. The refusing ones come
+    /// first, then by id. A tension whose involved blocks all carry one of the version's
+    /// blocking conflicts (`conflicted`) is left out: the conflict reports it.
+    ///
+    /// The gate rule (FW-CH6, D-CRTJG): only a tension with a side among `changes` is listed, so
+    /// a tension whose sides are all canon (a fork, duplicate definition or deprecated reference
+    /// standing in canon) is never listed and never refuses a landing.
+    pub fn proposal_tensions(
+        &self,
+        changes: &[Hash],
+        conflicted: &BTreeSet<BlockId>,
+    ) -> Result<Vec<TensionInfo>, RdyError> {
+        let set = self.tensions()?;
+        let mine: BTreeSet<&Hash> = changes.iter().collect();
+        let mut seen = BTreeSet::new();
+        let mut out = vec![];
+        for c in changes {
+            for t in set.involving_change(c) {
+                if !seen.insert(t.id) {
+                    continue;
+                }
+                if !conflicted.is_empty() && t.blocks().iter().all(|b| conflicted.contains(b)) {
+                    continue;
+                }
+                let in_canon = t.sides.iter().all(|s| match s {
+                    SideRef::Canon { .. } => true,
+                    SideRef::Change(h) => mine.contains(h),
+                    SideRef::Intent { .. } => false,
+                });
+                let refuses = in_canon
+                    && t.severity == TensionSeverity::Blocking
+                    && self.tension_status(&t) == TensionStatus::Open;
+                let mut info = self.tension_info(&t);
+                info.refuses = Some(refuses);
+                out.push(info);
+            }
+        }
+        out.sort_by(|a, b| {
+            b.refuses
+                .cmp(&a.refuses)
+                .then_with(|| a.tension.cmp(&b.tension))
+        });
+        Ok(out)
+    }
+}
+
+/// `E_BLOCKING_TENSION` for the refusing tensions of version `pref`: one issue per tension.
+fn blocking_tensions(pref: &ProposalRef, refusing: &[TensionInfo]) -> RdyError {
+    let mut e = RdyError::new(
+        E_BLOCKING_TENSION,
+        format!(
+            "landing {pref} would put {} blocking tension(s) into canon",
+            refusing.len()
+        ),
+        "resolve each with a change, repin the citation, or dismiss it (rdy resolve <tn-…> --dismiss <reason>; a reviewer of another actor or a human); rdy tensions --involving <change> lists them",
+    );
+    e.issues = refusing
+        .iter()
+        .map(|t| Issue {
+            severity: Severity::Error,
+            code: E_BLOCKING_TENSION,
+            // the first involved block: sides are sorted, and each side's blocks in order
+            block: t
+                .sides
+                .first()
+                .and_then(|side| side.blocks.first())
+                .and_then(|b| BlockId::parse(&b.block).ok()),
+            message: format!("{} {}: {}", t.id, t.kind, t.summary),
+            fix: format!("resolve, repin or dismiss {}", t.id),
+        })
+        .collect();
+    e
 }
 
 /// `open`, `chosen` or `abandoned`.
@@ -1277,7 +1370,10 @@ impl Rdy {
             return Err(e);
         }
         let conflicts = conflict_infos(&st, &st.conflicts(&Scope::View(view.to_string()))?)?;
-        let blocking = conflict_infos(&st, &blocking_conflicts(&st, view, &ids)?)?;
+        let blocking_raw = blocking_conflicts(&st, view, &ids)?;
+        // tgat1: a tension on blocks that all carry a blocking conflict is reported as the conflict
+        let conflicted: BTreeSet<BlockId> = blocking_raw.iter().map(|c| c.block.clone()).collect();
+        let blocking = conflict_infos(&st, &blocking_raw)?;
         // a version with a blocking conflict cannot land until it is resolved, and its merge onto
         // canon would refuse at the first conflict: the gate validates it at landing (RF10)
         let mut issues = vec![];
@@ -1374,6 +1470,12 @@ impl Rdy {
         let stored = self.store.proposal(&id)?;
         let canon_at = stored.canon_at;
         self.publish(Delta::Seq)?;
+        // tgat1: the version's tensions, read after a re-key change (if any) was committed
+        let mut tensions = self
+            .read()
+            .proposal_tensions(&stored.changes, &conflicted)?;
+        let tensions_omitted = tensions.len().saturating_sub(PROPOSAL_TENSIONS_MAX);
+        tensions.truncate(PROPOSAL_TENSIONS_MAX);
         let pref = ProposalRef {
             version: id,
             stable,
@@ -1390,6 +1492,8 @@ impl Rdy {
             warnings: issues,
             conflicts,
             blocking,
+            tensions,
+            tensions_omitted,
             canon_at: canon_at.map(|h| h.to_string()),
             alternative: chosen,
             keys,
@@ -1565,6 +1669,16 @@ impl Rdy {
         let blocking = blocking_conflicts(&st, &p.view, &p.changes)?;
         if !blocking.is_empty() {
             return Err(unresolved(&st, &p.view, &blocking)?);
+        }
+        // tgat1: a blocking, undismissed tension every side of which would be in canon after
+        // the landing refuses it
+        let refusing: Vec<TensionInfo> = st
+            .proposal_tensions(&p.changes, &BTreeSet::new())?
+            .into_iter()
+            .filter(|t| t.refuses == Some(true))
+            .collect();
+        if !refusing.is_empty() {
+            return Err(blocking_tensions(&pref, &refusing));
         }
 
         // 1. prospective canon: canon + the proposal's own changes

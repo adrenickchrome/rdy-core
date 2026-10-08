@@ -394,6 +394,25 @@ fn land_refuses_orphans_and_dangling_refs_when_canon_moved_after_propose() {
     let p1 = r.propose(&agent(), "run-1", "remove").unwrap();
     r.land(&founder(), &p1.id).unwrap();
     let head = r.store().canon_head().unwrap();
+    // tgat1: the claim still cites the deleted term, a blocking tension that refuses first;
+    // once a human dismisses it, the gate's validation refuses the orphan
+    assert_eq!(
+        r.land(&founder(), &p2.id).unwrap_err().code,
+        "E_BLOCKING_TENSION"
+    );
+    let blocking: Vec<String> = r
+        .read()
+        .tensions()
+        .unwrap()
+        .iter()
+        .filter(|t| t.severity == tensions::TensionSeverity::Blocking)
+        .map(|t| tensions::tension_label(&t.id))
+        .collect();
+    assert!(!blocking.is_empty());
+    for t in blocking {
+        r.dismiss_tension(&founder(), &t, "the validation is under test")
+            .unwrap();
+    }
     let e = r.land(&founder(), &p2.id).unwrap_err();
     assert_eq!(e.code, "E_VALIDATION");
     assert!(
