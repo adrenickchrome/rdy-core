@@ -332,7 +332,12 @@ fn kill2_a_kill_in_the_checkpoint_window_is_catch_up_not_reindex() {
             if n == 1_050 {
                 s.kill9();
             }
-            assert!(t.elapsed() < Duration::from_secs(120));
+            // a hang guard, not a speed check: since the daemon tests share one binary, 1,300
+            // fsync'd writes beside the other daemon tests took over 120 s on the bench (2026-10-08)
+            assert!(
+                t.elapsed() < Duration::from_secs(600),
+                "the write loop hung"
+            );
         }
         n
     });
