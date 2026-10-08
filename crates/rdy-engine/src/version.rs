@@ -411,6 +411,11 @@ impl ReadState {
         if text == "canon" {
             return Ok(Scope::Canon);
         }
+        // insc1: exactly `inflight` is the in-flight scope (`view:inflight` is a view name,
+        // which writes refuse)
+        if text == crate::session::INFLIGHT_SCOPE {
+            return Ok(Scope::Inflight);
+        }
         if let Some(name) = text.strip_prefix("tag:") {
             let want = parse_version(name)?;
             return self
@@ -448,6 +453,8 @@ impl ReadState {
             return Err(e.clone());
         }
         let (key, head) = match scope {
+            // the in-flight state stands where canon stands
+            Scope::Inflight => return self.version_position(&Scope::Canon),
             Scope::Canon => (VposScope::Canon, None),
             Scope::At(h) => (VposScope::At(*h), None),
             Scope::View(name) => {
@@ -489,7 +496,7 @@ impl ReadState {
     ) -> Result<VersionPosition, RdyError> {
         let canon = self.canon_head;
         let (base, view) = match scope {
-            Scope::Canon => (canon, None),
+            Scope::Canon | Scope::Inflight => (canon, None),
             Scope::At(h) => (Some(*h), None),
             Scope::View(name) => {
                 let pos = ViewPosition {

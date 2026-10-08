@@ -1,4 +1,4 @@
-use crate::Block;
+use crate::{Block, Tracking};
 
 pub const DECISION: &str = "decision";
 pub const QUESTION: &str = "question";
@@ -34,6 +34,33 @@ pub fn status(b: &Block) -> Option<DecisionStatus> {
         "rejected" => Some(DecisionStatus::Rejected),
         _ => None,
     }
+}
+
+/// The fields of a decision that make up its ruling (with its links): never tracking fields.
+pub const RULING_FIELDS: [&str; 3] = ["statement", "options", "status"];
+
+/// trk1 (D-DZC1J): `new` differs from `old` in at least one tracking field of `old`'s type and in
+/// nothing else: the same id, type, parent, order, body and links, and every non-tracking field
+/// equal. Pins are not compared.
+pub fn only_tracking_changed(old: &Block, new: &Block, t: &Tracking) -> bool {
+    let Some(tracking) = t.fields(&old.block_type) else {
+        return false;
+    };
+    if old.id != new.id
+        || old.block_type != new.block_type
+        || old.parent != new.parent
+        || old.order != new.order
+        || old.body != new.body
+        || old.links != new.links
+    {
+        return false;
+    }
+    let untracked = |(k, _): &(&String, _)| !tracking.contains(k.as_str());
+    let old_rest = old.fields.iter().filter(untracked);
+    old_rest.eq(new.fields.iter().filter(untracked))
+        && tracking
+            .iter()
+            .any(|f| old.fields.get(f) != new.fields.get(f))
 }
 
 pub fn is_frozen(b: &Block) -> bool {

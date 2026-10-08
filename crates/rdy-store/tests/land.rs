@@ -78,7 +78,7 @@ fn atom1_a_landing_with_an_acceptance_is_one_write_and_its_records_agree() {
             proposal: p,
             accept: Some(accept),
             approver: a,
-            chosen: None,
+            alt: None,
             relay: None,
             evidence: None,
         })

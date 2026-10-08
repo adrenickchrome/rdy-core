@@ -35,7 +35,7 @@ fn cx<'a>(e: &'a Local, s: &'a Session, cwd: &'a std::path::Path) -> OpContext<'
 
 #[test]
 fn ctl2_ops_are_named_and_an_unknown_op_names_them() {
-    assert_eq!(OPS.len(), 25);
+    assert_eq!(OPS.len(), 27);
     assert_eq!(OPS[0], "session");
     let (d, e) = project();
     let s = human();
@@ -100,7 +100,10 @@ fn ctl2_show_ls_impact_tags_log_read_canon_by_default_and_a_view_on_request() {
     let v = dispatch(&c, "ls", json!({})).unwrap();
     assert_eq!(v.as_array().unwrap().len(), 0, "canon is empty");
     let v = dispatch(&c, "impact", json!({"id": id, "scope": "work"})).unwrap();
-    assert!(v.is_array());
+    assert!(
+        v["items"].is_array(),
+        "impact is {{items, by_area?}} like rdy_impact"
+    );
     let v = dispatch(&c, "tags", json!({})).unwrap();
     assert_eq!(v["versions"], json!([]));
     let v = dispatch(&c, "log", json!({})).unwrap();

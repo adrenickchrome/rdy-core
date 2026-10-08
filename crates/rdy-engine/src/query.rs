@@ -23,6 +23,20 @@ pub struct Context {
     /// every other block.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effective_from: Option<String>,
+    /// The pack areas the block is in (arn1); absent when it is in none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub areas: Vec<String>,
+    /// cgr1: in the `inflight` scope, the in-flight changes that write the block, by change;
+    /// absent in every other scope and when none does.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inflight: Vec<crate::coord_graph::InflightChange>,
+    /// malt1: in a view that is a member of an open alternative set, the other members that also
+    /// write the block; absent in every other scope and when none does.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<crate::alt::AltPeer>,
+    /// trk1: the block type's tracking fields, ascending; absent when it has none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tracking: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -32,6 +46,9 @@ pub struct ImpactItem {
     pub block_type: String,
     pub summary: String,
     pub via: ImpactVia,
+    /// The pack areas the item is in (arn1); absent when it is in none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub areas: Vec<String>,
 }
 
 /// The edge that first reached an impact item: the item depends on `from` through `kind`.
@@ -234,6 +251,21 @@ impl ReadState {
             governing: g.governing(id).iter().map(|d| d.to_string()).collect(),
             suspects,
             effective_from: rdy_model::decision::effective_from(&block).map(str::to_string),
+            areas: self.areas_of(scope, id)?,
+            inflight: match scope {
+                Scope::Inflight => self.inflight_changes(id)?,
+                _ => Vec::new(),
+            },
+            alternatives: match scope {
+                Scope::View(v) => self.alt_peers(v, id)?,
+                _ => Vec::new(),
+            },
+            tracking: self
+                .pack()
+                .block_types
+                .get(&block.block_type)
+                .map(|t| t.tracking.iter().cloned().collect())
+                .unwrap_or_default(),
         })
     }
 
@@ -258,6 +290,7 @@ impl ReadState {
                         from: h.via.from.to_string(),
                         kind: h.via.kind,
                     },
+                    areas: self.areas_in(&m, b),
                 })
             })
             .collect())

@@ -15,6 +15,37 @@ pub const CONTENT_DOMAIN: &[u8] = b"rdy-content-1\0";
 /// They are not part of a block's content, so a pin does not see them change.
 pub const DERIVED_FIELDS: [&str; 3] = ["status", "decided_at", "lifecycle"];
 
+/// trk1 (FW-TR1, D-DZC1J): the tracking fields a pack marks, per block type. A tracking field
+/// stays writable on an accepted or rejected decision and is left out of the content hash.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tracking {
+    by_type: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Tracking {
+    /// The tracking fields of each block type; a type with an empty set is dropped.
+    pub fn new(map: BTreeMap<String, BTreeSet<String>>) -> Tracking {
+        Tracking {
+            by_type: map.into_iter().filter(|(_, f)| !f.is_empty()).collect(),
+        }
+    }
+
+    /// The tracking fields of `block_type`, if it has any.
+    pub fn fields(&self, block_type: &str) -> Option<&BTreeSet<String>> {
+        self.by_type.get(block_type)
+    }
+
+    pub fn is_tracking(&self, block_type: &str, field: &str) -> bool {
+        self.by_type
+            .get(block_type)
+            .is_some_and(|f| f.contains(field))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_type.is_empty()
+    }
+}
+
 /// The part of a block a pin records (FW-LP1): everything except its pins and derived fields.
 #[derive(Serialize)]
 struct Content<'a> {
@@ -53,7 +84,16 @@ impl Block {
     /// lpin1 (FW-LP1): the hash a pin records. It covers the block's id, type, parent, order,
     /// fields except [`DERIVED_FIELDS`], body and links, so a change to the block's pins or
     /// derived fields only leaves it unchanged. Domain-separated by [`CONTENT_DOMAIN`].
+    /// Equal to [`Block::content_hash_with`] with an empty [`Tracking`].
     pub fn content_hash(&self) -> Hash {
+        self.content_hash_with(&Tracking::default())
+    }
+
+    /// trk1: [`Block::content_hash`] that also leaves out the tracking fields of the block's
+    /// type, so a change to a tracking field makes no pin stale. With an empty [`Tracking`] it
+    /// equals [`Block::content_hash`] byte for byte.
+    pub fn content_hash_with(&self, t: &Tracking) -> Hash {
+        let tracking = t.fields(&self.block_type);
         let content = Content {
             id: &self.id,
             block_type: &self.block_type,
@@ -63,6 +103,7 @@ impl Block {
                 .fields
                 .iter()
                 .filter(|(k, _)| !DERIVED_FIELDS.contains(&k.as_str()))
+                .filter(|(k, _)| !tracking.is_some_and(|f| f.contains(k.as_str())))
                 .collect(),
             body: &self.body,
             links: &self.links,

@@ -1,8 +1,11 @@
+pub mod coord;
+
 use imbl::OrdMap;
 use rdy_model::decision::{self, DecisionStatus};
-use rdy_model::{Block, BlockId, Hash};
+use rdy_model::{Block, BlockId, Hash, Tracking};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum EdgeKind {
@@ -104,8 +107,11 @@ pub struct Graph {
     out: OrdMap<BlockId, Vec<Edge>>,
     inc: OrdMap<BlockId, Vec<Edge>>,
     decision_status: OrdMap<BlockId, DecisionStatus>,
-    /// lpin1: each block's [`Block::content_hash`], which a pin is checked against.
+    /// lpin1: each block's [`Block::content_hash_with`] the graph's tracking fields, which a pin
+    /// is checked against.
     contents: OrdMap<BlockId, Hash>,
+    /// trk1: the project pack's tracking fields, left out of every content hash.
+    tracking: Arc<Tracking>,
 }
 
 const EMPTY: &[Edge] = &[];
@@ -195,11 +201,24 @@ fn enlist(map: &mut OrdMap<BlockId, Vec<Edge>>, key: BlockId, e: Edge) {
 }
 
 impl Graph {
-    /// The graph of `blocks`, which are visited in the order given (id order, for a state).
+    /// The graph of `blocks`, which are visited in the order given (id order, for a state), with
+    /// no tracking fields.
     pub fn build_from<'a>(blocks: impl IntoIterator<Item = &'a Block>) -> Graph {
-        let mut g = Graph::default();
+        Graph::build_with(blocks, Arc::default())
+    }
+
+    /// trk1: the graph of `blocks` whose content hashes leave out `tracking`'s fields.
+    pub fn build_with<'a>(
+        blocks: impl IntoIterator<Item = &'a Block>,
+        tracking: Arc<Tracking>,
+    ) -> Graph {
+        let mut g = Graph {
+            tracking,
+            ..Graph::default()
+        };
         for b in blocks {
-            g.contents.insert(b.id.clone(), b.content_hash());
+            g.contents
+                .insert(b.id.clone(), b.content_hash_with(&g.tracking));
             if let Some(s) = decision::status(b) {
                 g.decision_status.insert(b.id.clone(), s);
             }
@@ -268,7 +287,8 @@ impl Graph {
             }
         }
         for b in new {
-            g.contents.insert(b.id.clone(), b.content_hash());
+            g.contents
+                .insert(b.id.clone(), b.content_hash_with(&g.tracking));
             if let Some(s) = decision::status(b) {
                 g.decision_status.insert(b.id.clone(), s);
             }
@@ -278,6 +298,11 @@ impl Graph {
             }
         }
         g
+    }
+
+    /// trk1: the tracking fields this graph's content hashes leave out.
+    pub fn tracking(&self) -> &Arc<Tracking> {
+        &self.tracking
     }
 
     pub fn outgoing(&self, id: &BlockId) -> &[Edge] {

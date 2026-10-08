@@ -178,7 +178,21 @@ pub fn header(briefing: &Value) -> String {
                 blocks(p)
             )
         });
-        section(&mut out, "in flight", views.chain(proposals));
+        let intents = at("intents").map(|i| {
+            let by = match i["run"].as_str() {
+                Some(run) => format!("{}/{run}", s(i, "actor")),
+                None => s(i, "actor").to_string(),
+            };
+            let n = i["blocks"].as_array().map_or(0, Vec::len);
+            format!(
+                "intent {} by {by} in {}: {} (until {}) on {n} block(s)",
+                s(i, "id"),
+                s(i, "view"),
+                s(i, "angle"),
+                s(i, "expires_at")
+            )
+        });
+        section(&mut out, "in flight", views.chain(proposals).chain(intents));
     }
     let related = list("related_decisions")
         .map(related_line)

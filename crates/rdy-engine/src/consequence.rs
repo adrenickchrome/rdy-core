@@ -5,8 +5,9 @@ use crate::brief::{BRIEF_DEFAULT_TOKENS, FollowUp, expand_error, follow_up};
 use crate::engine::{Engine, write_typed};
 use crate::error::RdyError;
 use crate::gate::{LandInfo, ProposalInfo, applied_ops, changes_of, landed_as};
+use crate::intent::IntentNote;
 use crate::views::{UndoResult, ViewOpResult};
-use crate::{Materialized, Rdy, ReadState, Scope};
+use crate::{Materialized, Rdy, ReadState, Scope, now_ms};
 use rdy_graph::{Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, Suspect};
 use rdy_model::decision::{DECISION, REVOKES, SUPERSEDES};
 use rdy_model::{BlockId, Hash, Op};
@@ -160,7 +161,7 @@ impl ReadState {
         let m = self.materialized(scope)?;
         let view = match scope {
             Scope::View(v) => Some(v.as_str()),
-            Scope::Canon | Scope::At(_) => None,
+            Scope::Canon | Scope::At(_) | Scope::Inflight => None,
         };
         let written = self.written_in(view);
         Ok(self.consequences_in(
@@ -296,10 +297,12 @@ impl ReadState {
             let next = self
                 .built(&Scope::Canon)?
                 .after(&applied_ops(&changes, &applied));
-            let g = Arc::clone(
-                next.graph
-                    .get_or_init(|| Arc::new(Graph::build_from(next.m.iter()))),
-            );
+            let g = Arc::clone(next.graph.get_or_init(|| {
+                Arc::new(Graph::build_with(
+                    next.m.iter(),
+                    Arc::clone(reader.tracking()),
+                ))
+            }));
             (Arc::clone(&next.m), g)
         };
         Ok(self.consequences_in(
@@ -460,8 +463,9 @@ pub(crate) fn attach(v: &mut serde_json::Value, c: Result<Consequences, RdyError
 
 /// `write_typed`, then the write's consequences read from the state it published: on success
 /// `consequences` is always present (with `consequences_omitted` when a cut dropped some, or
-/// `consequences_error` when they could not be read; the write stands), and the write's
-/// suggestions (FW-EN3), which never fail the write; on a briefing refusal
+/// `consequences_error` when they could not be read; the write stands), then `intents` when other
+/// sessions' open intents cover blocks the change wrote (iwr1), and the write's suggestions
+/// (FW-EN3), which never fail the write; on a briefing refusal
 /// the error carries a fresh briefing for exactly the blocks the write touches.
 pub fn write_and_report<T: Serialize + 'static>(
     engine: &dyn Engine,
@@ -469,6 +473,13 @@ pub fn write_and_report<T: Serialize + 'static>(
     max_tokens: Option<usize>,
     f: impl FnOnce(&mut Rdy) -> Result<T, RdyError> + Send + 'static,
 ) -> Result<serde_json::Value, RdyError> {
+    // the state before the write, captured on the writer: a deleted or moved block's old areas
+    let slot: Arc<Mutex<Option<Arc<ReadState>>>> = Arc::default();
+    let inner = Arc::clone(&slot);
+    let f = move |r: &mut Rdy| {
+        *inner.lock().unwrap_or_else(|p| p.into_inner()) = Some(r.read());
+        f(r)
+    };
     let mut v = match write_typed(engine, f) {
         Ok(v) => v,
         Err(e) => {
@@ -481,16 +492,21 @@ pub fn write_and_report<T: Serialize + 'static>(
             ));
         }
     };
+    let before = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
     let change = v
         .get("change")
         .and_then(|c| c.as_str())
         .and_then(|c| c.parse::<Hash>().ok());
     match change {
         Some(h) => {
-            let c = engine
-                .read()
-                .consequences(&Scope::View(view.into()), &h, max_tokens);
+            let st = engine.read();
+            let c = st.consequences(&Scope::View(view.into()), &h, max_tokens);
             attach(&mut v, c);
+            if let Some(notes) = intent_notes_of(&st, before.as_deref(), view, &h)
+                && !notes.is_empty()
+            {
+                v["intents"] = serde_json::to_value(&notes).expect("intent notes serialize");
+            }
         }
         None => v["consequences"] = serde_json::json!([]),
     }
@@ -555,6 +571,30 @@ fn attach_related(v: &mut serde_json::Value, engine: &dyn Engine, view: &str, ch
             v["related_decisions_error"] = format!("{}: {}", e.code, e.message).into();
         }
     }
+}
+
+/// iwr1: other sessions' open intents on the blocks change `h` wrote, in `view`, with each block's
+/// areas taken after the write and, when given, `before` it; `None` when they cannot be read (the
+/// write stands and the reply has no `intents`).
+fn intent_notes_of(
+    st: &ReadState,
+    before: Option<&ReadState>,
+    view: &str,
+    h: &Hash,
+) -> Option<Vec<IntentNote>> {
+    if st.coord_heads().open_intents.is_empty() {
+        return Some(vec![]);
+    }
+    let change = st.reader().change(h).ok()?;
+    let touched: BTreeSet<BlockId> = change.ops.iter().map(|o| o.block_id().clone()).collect();
+    let prov = &change.provenance;
+    let scope = Scope::View(view.into());
+    let (actor, run, now) = (&prov.actor, prov.run.as_deref(), now_ms());
+    match before {
+        Some(b) => st.intent_notes_since(b, &scope, actor, run, &touched, now),
+        None => st.intent_notes(&scope, actor, run, &touched, now),
+    }
+    .ok()
 }
 
 /// What a view op did, for its consequences: the op (`batch`), the changes it put in or took

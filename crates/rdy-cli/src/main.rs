@@ -16,8 +16,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+mod alt_cmd;
 mod brief_text;
 mod history_text;
+mod intent_cmd;
 mod view_cmd;
 
 /// This binary's version: the hello's `version`, so a client only talks to a daemon of its own.
@@ -162,6 +164,12 @@ enum Cmd {
         /// Your plain-words summary for the approver.
         #[arg(long)]
         summary: Option<String>,
+        /// The alternative set (as-<id>) the view is a member of; goes with --chosen.
+        #[arg(long)]
+        alt: Option<String>,
+        /// The view's own member of that set (its label); goes with --alt.
+        #[arg(long)]
+        chosen: Option<String>,
     },
     /// Approve a proposal version: P-<id>@<n>, P-<id> (its latest version) or a version hash.
     Approve {
@@ -186,6 +194,16 @@ enum Cmd {
     View {
         #[command(subcommand)]
         cmd: view_cmd::ViewCmd,
+    },
+    /// Create, change, list, compare and abandon alternative sets: views that answer one question.
+    Alt {
+        #[command(subcommand)]
+        cmd: alt_cmd::AltCmd,
+    },
+    /// Post, renew, withdraw and list intents: advisory notes on what you mean to change.
+    Intent {
+        #[command(subcommand)]
+        cmd: intent_cmd::IntentCmd,
     },
     /// Undo the newest op of this session on a view, or the named op.
     Undo {
@@ -228,6 +246,10 @@ enum Cmd {
         /// The view to edit in (default: the session's, `work` for the human).
         #[arg(long)]
         view: Option<String>,
+        /// Why the edit is made (an editorial clarify). A tracking field of an accepted or
+        /// rejected decision changes only with one.
+        #[arg(long)]
+        reason: Option<String>,
     },
     Render {
         /// Output directory: new, empty, or a site rdy rendered before (replaced as a whole).
@@ -704,6 +726,11 @@ fn show_text(v: &Value) -> String {
     if let Some(from) = v["effective_from"].as_str() {
         out.push_str(&format!("effective from: {from}\n"));
     }
+    // trk1: the type's tracking fields, which stay writable once the decision is decided
+    if let Some(names) = v["tracking"].as_array().filter(|a| !a.is_empty()) {
+        let names: Vec<&str> = names.iter().filter_map(Value::as_str).collect();
+        out.push_str(&format!("tracking: {}\n", names.join(", ")));
+    }
     out.push_str(&format!(
         "{}\n{}",
         serde_json::to_string_pretty(&fields).unwrap_or_default(),
@@ -712,6 +739,47 @@ fn show_text(v: &Value) -> String {
     if v["conflict"].is_object() {
         out.push('\n');
         out.push_str(&view_cmd::conflict_text(v));
+    }
+    // cgr1: in the inflight scope, the in-flight changes that write the block
+    if let Some(rows) = v["inflight"].as_array().filter(|a| !a.is_empty()) {
+        out.push_str("\nin flight:");
+        for c in rows {
+            let who = match c["run"].as_str() {
+                Some(run) => format!("{}/{run}", text(&c["actor"])),
+                None => text(&c["actor"]).to_string(),
+            };
+            let views: Vec<&str> = c["views"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            let mut line = format!(
+                "\n  {} {who} in {}",
+                hash_short(text(&c["change"])),
+                views.join(", ")
+            );
+            if let Some(i) = c["intent"].as_str() {
+                line.push_str(&format!("; intent {i}"));
+            }
+            if c["alternative"].is_object() {
+                line.push_str(&format!(
+                    "; alternative {} of {}",
+                    text(&c["alternative"]["member"]),
+                    text(&c["alternative"]["set"])
+                ));
+            }
+            let proposals: Vec<&str> = c["proposals"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            if !proposals.is_empty() {
+                line.push_str(&format!("; proposed in {}", proposals.join(", ")));
+            }
+            out.push_str(&line);
+        }
     }
     out
 }
@@ -725,6 +793,13 @@ fn log_text(v: &Value) -> String {
     for row in rows {
         out.push_str(&history_text::log_head_line(row));
         out.push('\n');
+        // malt1: the alternative the landing chose
+        if let Some(member) = row["chosen"]["member"].as_str() {
+            out.push_str(&format!(
+                "    chose {member} of {}\n",
+                text(&row["chosen"]["set"])
+            ));
+        }
         let (ev, relay) = (&row["evidence"], &row["relay_evidence"]);
         if ev.is_object() || relay.is_object() {
             let mut line = format!("    evidence ({})", text(&ev["kind"]));
@@ -758,7 +833,8 @@ fn log_text(v: &Value) -> String {
 }
 
 fn impact_text(v: &Value) -> String {
-    v.as_array()
+    let mut lines: Vec<String> = v["items"]
+        .as_array()
         .into_iter()
         .flatten()
         .map(|i| {
@@ -772,8 +848,15 @@ fn impact_text(v: &Value) -> String {
                 text(&i["via"]["from"])
             )
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    if let Some(areas) = v["by_area"].as_object().filter(|a| !a.is_empty()) {
+        let parts: Vec<String> = areas
+            .iter()
+            .map(|(n, c)| format!("{n} ({})", num(c)))
+            .collect();
+        lines.push(format!("areas: {}", parts.join(", ")));
+    }
+    lines.join("\n")
 }
 
 /// csrch1: the matching blocks, one header per block and its matching lines under it.
@@ -974,12 +1057,17 @@ fn tags_text(v: &Value) -> String {
 
 /// `rdy edit`: the block as YAML from the `block` op, its briefing from the `brief` op shown as
 /// `#` lines above the YAML, `$EDITOR` on a temp file, then the `edit_block` op citing the
-/// briefing's token (a briefing that moved while the editor was open is `E_BRIEF_STALE`, and the
+/// briefing's token, with `reason` as the edit's editorial reason (a briefing that moved while the editor was open is `E_BRIEF_STALE`, and the
 /// edit is kept). Each op runs on a session of its own: the editor may stay open for long, and
 /// the daemon may stop meanwhile (`rdy serve --stop` after a rebuild), so the write connects
 /// afresh (starting a daemon again if need be); it is sent once and never retried. When the write
 /// fails, the edited file is kept and named in the error (`fix`, and `saved_edit` in JSON).
-fn edit(env: &Env, id: &str, view: Option<&str>) -> Result<Value, ErrorReply> {
+fn edit(
+    env: &Env,
+    id: &str,
+    view: Option<&str>,
+    reason: Option<&str>,
+) -> Result<Value, ErrorReply> {
     let block = call(env, "block", json!({"id": id, "view": view}))?;
     // cbrf1 (Q6c): brief the block, show the briefing as `#` lines above the YAML and cite its
     // token
@@ -1021,7 +1109,7 @@ fn edit(env: &Env, id: &str, view: Option<&str>) -> Result<Value, ErrorReply> {
     call(
         env,
         "edit_block",
-        json!({"yaml": yaml, "view": view, "brief": brief}),
+        json!({"yaml": yaml, "view": view, "brief": brief, "reason": reason}),
     )
     .map_err(|mut e| {
         if let Ok(path) = tmp.into_temp_path().keep() {
@@ -1069,9 +1157,21 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             cmd: PackCmd::Check,
         } => {
             let pack = project_pack(&env.project)?;
+            let areas: Vec<Value> = pack
+                .areas
+                .iter()
+                .map(|(n, a)| json!({"name": n, "description": a.description, "paths": a.paths}))
+                .collect();
+            let mut text = format!("pack {} {} ok", pack.name, pack.version);
+            for (name, a) in &pack.areas {
+                text.push_str(&format!("\narea {name}: {}", a.paths.join(", ")));
+                if !a.description.is_empty() {
+                    text.push_str(&format!(" ({})", a.description));
+                }
+            }
             Ok((
-                json!({"pack": pack.name, "version": pack.version, "types": pack.block_types.len()}),
-                format!("pack {} {} ok", pack.name, pack.version),
+                json!({"pack": pack.name, "version": pack.version, "types": pack.block_types.len(), "areas": areas}),
+                text,
             ))
         }
         Cmd::Keys {
@@ -1220,16 +1320,35 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             title,
             view,
             summary,
+            alt,
+            chosen,
         } => {
+            let alternatives = match (alt, chosen) {
+                (Some(set), Some(chosen)) => Some(json!({"set": set, "chosen": chosen})),
+                (None, None) => None,
+                _ => {
+                    return Err(ErrorReply::new(
+                        E_BAD_INPUT,
+                        "--alt and --chosen go together",
+                        "pass both: --alt <set> --chosen <member>, or neither",
+                    ));
+                }
+            };
             let v = call(
                 env,
                 "propose",
-                json!({"title": title, "view": view, "summary": summary}),
+                json!({"title": title, "view": view, "summary": summary, "alternatives": alternatives}),
             )?;
             let pref = text(&v["ref"]);
             let mut t = format!("proposal {pref} ({} changes)", num(&v["changes"]));
             if let Some(s) = v["summary"].as_str() {
                 t.push_str(&format!("\nsummary: {s}"));
+            }
+            if let Some(member) = v["alternative"]["member"].as_str() {
+                t.push_str(&format!(
+                    "\nchooses {member} of {}",
+                    text(&v["alternative"]["set"])
+                ));
             }
             let blocking = v["blocking"].as_array().map_or(0, Vec::len);
             if blocking > 0 {
@@ -1278,6 +1397,21 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             if let Some(by) = relayed_by {
                 t.push_str(&format!(", relayed by {by}"));
             }
+            if let Some(member) = v["chosen"]["member"].as_str() {
+                t.push_str(&format!(
+                    "\nchose {member} of {}",
+                    text(&v["chosen"]["set"])
+                ));
+                let closed: Vec<&str> = v["closed"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                if !closed.is_empty() {
+                    t.push_str(&format!("; closed {}", closed.join(", ")));
+                }
+            }
             t.push_str(&brief_text::consequences_text(&v));
             for r in v["rebased"].as_array().into_iter().flatten() {
                 if num(&r["conflicts"]) > 0 {
@@ -1301,6 +1435,16 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::View { cmd } => {
             let v = call(env, "view", view_cmd::args_of(&cmd))?;
             let t = view_cmd::render_view(&cmd, &v);
+            Ok((v, t))
+        }
+        Cmd::Alt { cmd } => {
+            let v = call(env, "alt", alt_cmd::args_of(&cmd)?)?;
+            let t = alt_cmd::render(&cmd, &v);
+            Ok((v, t))
+        }
+        Cmd::Intent { cmd } => {
+            let v = call(env, "intent", intent_cmd::args_of(&cmd))?;
+            let t = intent_cmd::render(&cmd, &v);
             Ok((v, t))
         }
         Cmd::Undo { view, op, cascade } => {
@@ -1330,8 +1474,8 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             let t = tags_text(&v);
             Ok((v, t))
         }
-        Cmd::Edit { id, view } => {
-            let v = edit(env, &id, view.as_deref())?;
+        Cmd::Edit { id, view, reason } => {
+            let v = edit(env, &id, view.as_deref(), reason.as_deref())?;
             // F4 (FW-PR3b): a rename or a top-level name re-derives keys rdy assigned
             let t = format!(
                 "change {}{}{}",
@@ -1691,7 +1835,45 @@ fn keys_lines(v: &Value, why: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::notices;
+    use super::{log_text, notices, show_text};
+    use serde_json::json;
+
+    /// Final-review fix round 1: `rdy log` prints the alternative a landing chose, as `rdy
+    /// approve` does.
+    #[test]
+    fn malt1_log_text_prints_the_chosen_alternative() {
+        let row = json!({"landing": "ab".repeat(32), "at": "2026-10-07T00:00:00Z", "title": "x",
+            "proposed_by": {"actor": "agent:a"}, "approved_by": "human:qa",
+            "chosen": {"set": "as-0123456789ab", "member": "a"}});
+        let t = log_text(&json!([row]));
+        assert!(t.contains("\n    chose a of as-0123456789ab\n"), "{t}");
+        let mut plain = row.clone();
+        plain.as_object_mut().unwrap().remove("chosen");
+        assert!(!log_text(&json!([plain])).contains("chose"));
+    }
+
+    /// Final-review fix round 1: `rdy show --scope inflight` prints the in-flight changes that
+    /// write the block, as the JSON lists them.
+    #[test]
+    fn cgr1_show_text_prints_the_inflight_changes() {
+        let v = json!({"id": "c-AAAAA", "block_type": "claim", "version": "cd".repeat(32),
+        "fields": {}, "body": "b", "inflight": [
+            {"change": "ab".repeat(32), "views": ["a", "b"], "actor": "agent:a", "run": "ra",
+             "intent": "in-0123456789ab", "alternative": {"set": "as-0123456789ab", "member": "x"},
+             "proposals": ["P-0123456789ab@1"]},
+            {"change": "ef".repeat(32), "views": ["c"], "actor": "human:qa", "run": null,
+             "proposals": []}
+        ]});
+        let t = show_text(&v);
+        assert!(
+            t.ends_with("\nin flight:\n  abababababab agent:a/ra in a, b; intent in-0123456789ab; alternative x of as-0123456789ab; proposed in P-0123456789ab@1\n  efefefefefef human:qa in c"),
+            "{t}"
+        );
+        // absent (another scope, or no in-flight change writes the block): no block
+        let mut none = v.clone();
+        none.as_object_mut().unwrap().remove("inflight");
+        assert!(!show_text(&none).contains("in flight"));
+    }
 
     /// Final review fix round 1 (minor 11): a notice carried on the `session` reply is printed,
     /// once, beside the op's.

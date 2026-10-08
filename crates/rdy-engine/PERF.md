@@ -763,6 +763,60 @@ Linux bench rows: (bench: the orchestrator fills these rows from two cargo qa --
 
 Deep gate (bench): <orchestrator fills in>
 
+## M2d1: graph, areas and coordination (2026-10-06)
+
+The `qa-perf` tier gained `tier_inflight` after `tier_views` in both tiers, and the typical tier
+gained `tier_mcp` last. The fixture writes 1,000 single-op changes across 20 views (`inf0` to
+`inf19`) on the 10k tree (the 50k tree with `--deep`): each is an update of a distinct claim of
+canon (the first 1,000 claim ids by id, not the fixture's claim). `inf0` also updates the
+fixture's claim, so its impact crosses in-flight edits. The tier first closes the views the
+earlier tiers left open: the landing views edit claims a landing changed, so they leave the
+in-flight state with conflicts, and a conflicted in-flight build is never carried. Each large-tier
+twin carries a `_50k` suffix and the typical tier's budget at 50k blocks. The op names keep `1k`
+whatever the fixture's size (the small-tree test runs 40 changes).
+
+The intake found a spec gap: a cold `context` or `impact` costs 31 to 35 ms at 10k. These ops time
+warm reads, because the graph is built once per published state. The cold build has its own ops
+(`inflight_build_1k`, `coord_build_1k`).
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `inflight_build_1k` | cold: `invalidate`, then `graph(Inflight)` (the merge of the 1,000 changes onto canon, the materialization and the graph) | `runs.materialize_cold` | no spec target: the in-flight state's cold build, once per published state (recorded for M2d1) |
+| `inflight_carry` | one clean commit (a new claim) into `inf1` after the state was built, then `materialized(Inflight)`. The write and the first read are outside the timer. Asserts that the build was carried | `runs.incremental` | < 1 ms incremental (spec 15.1, view materialization) |
+| `context_inflight_1k` | `context` of the fixture claim in `Scope::Inflight`, on a built state | `runs.read` | < 5 ms p99 with 1k in-flight changes (spec 15.1; the overlays must not regress them) |
+| `impact_inflight_1k` | `impact(…, 3)` of the fixture claim in `Scope::Inflight`, on a built state | `runs.read` | same |
+| `context_view_1k` | `context` of the fixture claim in `Scope::View("inf0")`, on a built state | `runs.read` | same |
+| `impact_view_1k` | `impact(…, 3)` of the fixture claim in `Scope::View("inf0")`, on a built state | `runs.read` | same |
+| `coord_build_1k` | cold: `invalidate`, then `coord()` (the coordination graph of the in-flight state) | `runs.materialize_cold` | no spec target: the coordination graph's cold build, once per published state (recorded for M2d1) |
+| `mcp_params_9mib` (typical tier only) | `parse_params::<WriteParams>` alone on one `rdy_write` call of 2,002 ops, about 9.2 MiB. The arguments are built outside the timer | 3 | no spec target: the comparator for `mcp_write_9mib` |
+| `mcp_write_9mib` (typical tier only) | `parse_params` and `rdy_write`, consequences included, with a fresh doc name each run. Ends in a durable flush, so it takes the wider margin | 3 | no spec target: recorded (intake: the `&Value` parse and the deep clone of each op cost about +30 ms per 9 MiB) |
+| `write_expired_intents_1k` (typical tier only) | `write_and_report` (the MCP and CLI write, consequences and intent notes included) of an update of the fixture claim by `agent:b`, in a fresh small project (2 folders x 3 docs x 12 claims) where 1,000 intents on that claim have expired and 5 are open. Asserts the reply names the 5 open intents only. Ends in a durable flush | `runs.write` | the write target (spec 11): the intents must not cost a store read each |
+| `brief_expired_intents_1k` (typical tier only) | a warm `brief` of the fixture claim in view `rb`, same project. Asserts 5 in-flight intents | `runs.read` | < 5 ms p99 (the read budget, spec 11) |
+| `write_settled_alts_1k` (typical tier only) | the same write in another fresh small project with 1,000 abandoned alternative sets (2,000 closed member views) | `runs.write` | the write target (spec 11): the sets must not cost a store read each |
+
+What each cost grows with:
+
+- `inflight_build_1k` and `coord_build_1k` grow with the number of in-flight changes and with the
+  tree: the first merges every change onto canon and builds from scratch, as canon is not built
+  after the `invalidate`. A published state pays it once, on its first in-flight read.
+- `inflight_carry` grows with the ops of the one commit. A commit whose change depends on the last
+  in-flight writer of every block it writes, onto a build with no conflicts, seeds the next state.
+- The warm reads cost what a read of any built scope costs: a lookup in the graph.
+- `mcp_params_9mib` grows with the size of the request. `mcp_write_9mib` adds the deep clone of
+  every op and the write itself.
+- The coordination ops (final-review fix round 1) do no store read per intent or set. No intent
+  or set is ever deleted: an intent expires at read time and a set is settled. So
+  the published state indexes the intents whose latest version is open (`open_intents`) and the
+  open and the settled sets, and a publish reads only the intents and sets that moved. A write
+  and a briefing filter the index by `now` in memory: an expired intent costs one comparison.
+
+The `mcp_*` ops run last, on a reopened project: their 6,000 blocks move nothing above them.
+
+Baseline: `qa-baseline.json` is not changed here.
+
+Linux bench rows: (bench: the orchestrator fills these rows from two cargo qa --only perf --deep runs on the isolated Linux bench)
+
+Deep gate (bench): <orchestrator fills in>
 
 ## Agent ergonomics 2: search (2026-10-06)
 

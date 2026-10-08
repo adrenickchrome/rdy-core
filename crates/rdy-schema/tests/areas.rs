@@ -146,3 +146,53 @@ fn area1_a_replacement_pack_without_extends_may_declare_areas() {
     let p = set.resolve("solo").unwrap();
     assert_eq!(p.areas_for_path("x/y"), vec!["all"]);
 }
+
+#[test]
+fn arn1_the_compiled_matcher_answers_as_the_pack_does() {
+    let mut set = rdy_schema::PackSet::with_builtin();
+    set.add_yaml("name: a\nversion: \"1\"\nextends: rdy-standard\nareas:\n  pay:\n    paths: [wallets, 'payments/**']\n  id:\n    paths: ['identity/*']\n").unwrap();
+    let p = set.resolve("a").unwrap();
+    let m = p.area_matcher();
+    for path in [
+        "wallets",
+        "payments/x/y",
+        "identity/login",
+        "identity",
+        "other",
+    ] {
+        assert_eq!(m.areas_for_path(path), p.areas_for_path(path), "{path}");
+    }
+    assert!(
+        rdy_schema::PackSet::with_builtin()
+            .resolve("rdy-standard")
+            .unwrap()
+            .area_matcher()
+            .is_empty()
+    );
+}
+
+#[test]
+fn pkdup1_a_repeated_key_anywhere_in_a_pack_is_refused_with_its_line() {
+    let mut set = rdy_schema::PackSet::with_builtin();
+    let e = set
+        .add_yaml(
+            "name: a\nversion: \"1\"\nareas:\n  pay:\n    paths: [x]\n  pay:\n    paths: [y]\n",
+        )
+        .unwrap_err();
+    assert!(matches!(e, rdy_schema::SchemaError::Yaml(_)), "{e}");
+    let t = e.to_string();
+    assert!(
+        t.contains("duplicate entry with key \"pay\"") && t.contains("line 6"),
+        "{t}"
+    );
+    let e = set
+        .add_yaml("name: b\nversion: \"1\"\nversion: \"2\"\n")
+        .unwrap_err();
+    assert!(
+        e.to_string()
+            .contains("duplicate entry with key \"version\""),
+        "{e}"
+    );
+    set.add_yaml("name: c\nversion: \"1\"\nareas:\n  pay:\n    paths: [x]\n")
+        .unwrap();
+}

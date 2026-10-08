@@ -253,6 +253,7 @@ fn shown(b: &Briefing) -> usize {
         + b.suspects.len()
         + b.inflight.views.len()
         + b.inflight.proposals.len()
+        + b.inflight.intents.len()
         + b.base.blocks.len()
 }
 

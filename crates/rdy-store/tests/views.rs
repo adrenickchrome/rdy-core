@@ -252,3 +252,74 @@ fn commit_with_known_state_checks_against_that_state_without_replaying() {
     assert_eq!(s.view_state("w").unwrap().blocks[&v2.id], v2.version_hash());
     assert_eq!(s.view("w").unwrap().changes.len(), 2);
 }
+
+#[test]
+fn trk1_the_store_lets_only_a_tracking_edit_through_a_frozen_decision() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
+    s.set_tracking(Tracking::new(BTreeMap::from([(
+        decision::DECISION.to_string(),
+        ["disposition".to_string()].into(),
+    )])));
+    let mut d = block("D-W2HXR", decision::DECISION, "");
+    d.fields
+        .insert("status".into(), FieldValue::Str("accepted".into()));
+    d.fields
+        .insert("disposition".into(), FieldValue::Str("M2d1".into()));
+    s.commit_to_view("a", change("a", vec![Op::Create { block: d.clone() }]))
+        .unwrap();
+    let p = s.propose("a", "seed", prov(Role::Writer)).unwrap();
+    s.land(&p, prov(Role::Approver)).unwrap();
+    let update = |view: &str, base: &Block, edited: Block| {
+        change(
+            view,
+            vec![Op::Update {
+                base: base.version_hash(),
+                block: edited,
+            }],
+        )
+    };
+    let mut ruling = d.clone();
+    ruling
+        .fields
+        .insert("statement".into(), FieldValue::Str("changed".into()));
+    ruling
+        .fields
+        .insert("disposition".into(), FieldValue::Str("M2d2".into()));
+    assert!(matches!(
+        s.commit_to_view("r", update("r", &d, ruling)),
+        Err(StoreError::Frozen(_))
+    ));
+    let del = change(
+        "r",
+        vec![Op::Delete {
+            base: d.version_hash(),
+            id: d.id.clone(),
+        }],
+    );
+    assert!(matches!(
+        s.commit_to_view("r", del),
+        Err(StoreError::Frozen(_))
+    ));
+    let mut moved = d.clone();
+    moved
+        .fields
+        .insert("disposition".into(), FieldValue::Str("M2d2".into()));
+    s.commit_to_view("t", update("t", &d, moved.clone()))
+        .unwrap();
+    let pt = s.propose("t", "move", prov(Role::Writer)).unwrap();
+    s.land(&pt, prov(Role::Approver)).unwrap();
+    assert_eq!(s.canon_state().unwrap().blocks[&d.id], moved.version_hash());
+    // the landing check uses the tracking fields the store has now
+    let mut other = moved.clone();
+    other
+        .fields
+        .insert("disposition".into(), FieldValue::Str("M2d3".into()));
+    s.commit_to_view("v", update("v", &moved, other)).unwrap();
+    s.set_tracking(Tracking::default());
+    let pv = s.propose("v", "move again", prov(Role::Writer)).unwrap();
+    assert!(matches!(
+        s.land(&pv, prov(Role::Approver)),
+        Err(StoreError::Frozen(_))
+    ));
+}

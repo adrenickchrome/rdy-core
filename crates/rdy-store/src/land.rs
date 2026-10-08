@@ -1,7 +1,10 @@
 //! Atomic landing (atom1): an optional acceptance change, the proposal's final version, the
 //! snapshot, the landing, a `Rebase` op for every view the landing rebases (reb1) and the refs go
-//! into the log as one batch, so a kill or a failed write leaves either all of them or none.
+//! into the log as one batch, so a kill or a failed write leaves either all of them or none. A
+//! landing that chooses an alternative (altw1) adds the set's chosen version and a `Close` op for
+//! each other open member view to the same batch.
 use crate::Store;
+use crate::coord::{ALT_REF, chosen_reason};
 use crate::error::StoreError;
 use crate::kinds;
 use crate::merge::{Conflict, MergeChange, merge_on_blocks};
@@ -9,8 +12,8 @@ use crate::state::{open_ref, proposal_ref, view_ref};
 use crate::store::encode;
 use crate::view::{ViewHead, ViewOp, ViewOpKind, decode_head};
 use rdy_model::{
-    ActorRun, AltChoice, ApprovalEvidence, Assurance, BlockId, Change, EvidenceKind, Hash,
-    LandingRecord, Op, Proposal, Provenance, RelayEvidence,
+    ActorRun, AltChoice, AltSet, AltStatus, ApprovalEvidence, Assurance, BlockId, Change,
+    EvidenceKind, Hash, LandingRecord, Op, Proposal, Provenance, RelayEvidence,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -21,6 +24,17 @@ pub struct Relay {
     pub evidence: RelayEvidence,
 }
 
+/// The alternative a landing chooses (altw1): the set's stable id, the set version the approver
+/// saw (still its latest and open, or the landing is refused), the chosen member view, and the
+/// other member views to close instead of rebasing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AltLanding {
+    pub set: Hash,
+    pub prev: Hash,
+    pub member: String,
+    pub close: Vec<String>,
+}
+
 /// What to land: the proposal version the approver named, an optional acceptance change to add to
 /// it, the approver, the alternative chosen (if any), the relay that carried the approval (if
 /// any) and how the approval was obtained (if recorded).
@@ -29,7 +43,7 @@ pub struct LandRequest {
     pub proposal: Hash,
     pub accept: Option<Change>,
     pub approver: Provenance,
-    pub chosen: Option<AltChoice>,
+    pub alt: Option<AltLanding>,
     pub relay: Option<Relay>,
     pub evidence: Option<ApprovalEvidence>,
 }
@@ -44,14 +58,17 @@ pub struct RebasedView {
 }
 
 /// What a landing wrote: the landing, the proposal version it landed (the request's when there is
-/// no acceptance change), the acceptance change's id, and every view it rebased, in `view/` ref
-/// order (the proposing view included).
+/// no acceptance change), the acceptance change's id, every view it rebased, in `view/` ref
+/// order (the proposing view included), the alternative set's chosen version (with `alt`), and
+/// the member views it closed, in `view/` ref order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LandOutcome {
     pub landing: Hash,
     pub proposal: Hash,
     pub accept: Option<Hash>,
     pub rebased: Vec<RebasedView>,
+    pub alt_version: Option<Hash>,
+    pub closed: Vec<String>,
 }
 
 impl Store {
@@ -60,7 +77,10 @@ impl Store {
     /// committed to the proposal's view and a final proposal version (the request's changes then
     /// the acceptance) is what lands; `approved_version` stays the version the approver named.
     /// The same batch rebases the proposing view (always, pinned or closed or not) and every other
-    /// view that is open, unpinned and non-empty onto the landing (reb1).
+    /// view that is open, unpinned and non-empty onto the landing (reb1). With `req.alt`, the set
+    /// version named must still be the set's latest and open; the landing records the choice, the
+    /// set's next version is `Chosen` by it, and each member view in `alt.close` other than the
+    /// proposing one is closed (when open, pinned or empty too) instead of rebased (altw1).
     pub fn land_atomic(&mut self, req: LandRequest) -> Result<LandOutcome, StoreError> {
         // 1. the proposal, and the version check: the request names its stable's latest version
         let p = self.proposal(&req.proposal)?;
@@ -78,6 +98,11 @@ impl Store {
         }
         // 1b. the relay and the evidence kind agree (FW-B9)
         check_evidence(req.relay.as_ref(), req.evidence.as_ref())?;
+        // 1c. the alternative set: the version the approver saw is still its latest, and open
+        let alt_prev = match &req.alt {
+            Some(alt) => Some(self.alt_landing_check(alt)?),
+            None => None,
+        };
         // 2. the proposing view's head and included set
         let head = self
             .view_head(&p.view)?
@@ -149,7 +174,10 @@ impl Store {
             state: sid,
             approved_by: req.approver.clone(),
             changes: final_changes.clone(),
-            chosen: req.chosen,
+            chosen: req.alt.as_ref().map(|a| AltChoice {
+                set: a.set,
+                member: a.member.clone(),
+            }),
             checks: vec![],
             assurance: if req.relay.is_some() {
                 Assurance::Relayed
@@ -165,6 +193,27 @@ impl Store {
         let lbytes = encode(&landing);
         let lid = Hash::of(&lbytes);
         items.push((kinds::LANDING, lbytes));
+        // 6b. the set's next version, chosen by this landing
+        let mut alt_ref = None;
+        let alt_version = match (&req.alt, alt_prev) {
+            (Some(alt), Some(prev_version)) => {
+                let next = encode(&AltSet {
+                    stable: Some(alt.set),
+                    prev: Some(alt.prev),
+                    status: AltStatus::Chosen {
+                        member: alt.member.clone(),
+                        landing: lid,
+                    },
+                    provenance: req.approver.clone(),
+                    ..prev_version
+                });
+                let id = Hash::of(&next);
+                items.push((kinds::ALT_SET, next));
+                alt_ref = Some((format!("{ALT_REF}{}", alt.set), id.0.to_vec()));
+                Some(id)
+            }
+            _ => None,
+        };
         // 7. the scope: the proposing view, and every other open, unpinned, non-empty view. Each
         // drops the landed changes and records its conflicts with the new canon on the blocks
         // both it and the landing touch.
@@ -213,6 +262,7 @@ impl Store {
                 .or_else(|| accepted.get(v).copied())
         };
         let mut rebased = vec![];
+        let mut closed = vec![];
         let mut view_refs = vec![];
         for (rname, value) in self.refs_with_prefix("view/")? {
             let name = rname.strip_prefix("view/").unwrap_or(&rname).to_string();
@@ -223,6 +273,19 @@ impl Store {
                 (head.clone(), set)
             } else {
                 let h = decode_head(&name, &value)?;
+                // a member the landing did not choose is closed, not rebased (altw1)
+                if let Some(alt) = &req.alt
+                    && alt.close.contains(&name)
+                {
+                    if !h.closed {
+                        let reason = chosen_reason(&alt.set, &alt.member);
+                        let (op, _, new_head) = self.close_part(&name, &h, &reason, &req.approver);
+                        items.push((kinds::VIEW_OP, op));
+                        view_refs.push((view_ref(&name), encode(&new_head)));
+                        closed.push(name);
+                    }
+                    continue;
+                }
                 if h.closed || h.pinned || h.len == 0 {
                     continue;
                 }
@@ -266,11 +329,13 @@ impl Store {
                 conflicts,
             });
         }
-        // 8. the refs: canon, the stable's latest version (step 4), the rebased heads, and the
-        // view's open proposal closed when it is this one
+        // 8. the refs: canon, the stable's latest version (step 4), the rebased and closed heads,
+        // the alternative set's chosen version, and the view's open proposal closed when it is
+        // this one
         let mut refs = vec![("canon".to_string(), lid.0.to_vec())];
         refs.extend(latest_ref);
         refs.extend(view_refs);
+        refs.extend(alt_ref);
         let open = open_ref(&p.view);
         if self.get_ref(&open)?.as_deref() == Some(&stable.0[..]) {
             refs.push((open, vec![]));
@@ -283,7 +348,32 @@ impl Store {
             proposal: final_id,
             accept: aid,
             rebased,
+            alt_version,
+            closed,
         })
+    }
+
+    /// The set version a landing that chooses `alt` builds on: `alt.prev` must be the latest
+    /// version of `alt/<set>` and open. Writes nothing.
+    fn alt_landing_check(&self, alt: &AltLanding) -> Result<AltSet, StoreError> {
+        let moved = || {
+            StoreError::Decode(format!(
+                "alternative set {} moved or is no longer open; read it again",
+                alt.set
+            ))
+        };
+        let latest = match self.get_ref(&format!("{ALT_REF}{}", alt.set))? {
+            Some(b) => crate::index::hash_from(&b, "alternative set ref")?,
+            None => return Err(moved()),
+        };
+        if latest != alt.prev {
+            return Err(moved());
+        }
+        let version = self.alt_set(&alt.prev)?;
+        if version.status != AltStatus::Open {
+            return Err(moved());
+        }
+        Ok(version)
     }
 
     /// The conflicts a view's `remaining` changes have with canon's new `state`, on the blocks

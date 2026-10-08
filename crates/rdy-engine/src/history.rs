@@ -132,7 +132,7 @@ fn no_writer(version: &Hash, id: &BlockId) -> RdyError {
 }
 
 impl<'a> Memo<'a> {
-    fn new(state: &'a ReadState, scope: &Scope) -> Self {
+    fn new(state: &'a ReadState, scope: &Scope) -> Result<Self, RdyError> {
         let (included, head) = match scope {
             Scope::View(name) => (
                 Some(state.included(name).iter().copied().collect()),
@@ -140,15 +140,20 @@ impl<'a> Memo<'a> {
             ),
             Scope::Canon => (None, state.canon_head()),
             Scope::At(h) => (None, Some(*h)),
+            // the in-flight state is canon with every open view's changes
+            Scope::Inflight => (
+                Some(state.inflight_set()?.changes.iter().copied().collect()),
+                state.canon_head(),
+            ),
         };
-        Memo {
+        Ok(Memo {
             reader: state.reader(),
             included,
             head,
             changes: HashMap::new(),
             landed: HashMap::new(),
             landings: HashMap::new(),
-        }
+        })
     }
 
     /// The change that wrote `version` in this scope, never one in `used` (ruling 4): of the
@@ -323,8 +328,15 @@ impl ReadState {
                 "ask for 1 to 1000 versions",
             ));
         }
+        if *scope == Scope::Inflight {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "inflight is an analysis scope: blame reads canon, a view or a version",
+                "read the history in canon, a view (view:<name>) or a version (tag:<version>)",
+            ));
+        }
         let version = version_in(&*self.materialized(scope)?, id)?;
-        Memo::new(self, scope).walk(version, id, limit)
+        Memo::new(self, scope)?.walk(version, id, limit)
     }
 
     /// For each distinct id, the entry `history(scope, id, 1)` gives, sharing one memo.
@@ -334,7 +346,7 @@ impl ReadState {
         ids: &[BlockId],
     ) -> Result<BTreeMap<BlockId, HistoryEntry>, RdyError> {
         let m = self.materialized(scope)?;
-        let mut memo = Memo::new(self, scope);
+        let mut memo = Memo::new(self, scope)?;
         let mut out = BTreeMap::new();
         for id in ids {
             if out.contains_key(id) {

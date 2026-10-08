@@ -1,6 +1,7 @@
 pub mod block;
 mod canon;
 mod change;
+mod coord;
 pub mod decision;
 pub mod entity;
 mod hash;
@@ -10,7 +11,7 @@ mod order;
 pub mod tree;
 mod value;
 
-pub use block::{Block, Link, RefMode, RefSpan, hash_of, ref_spans};
+pub use block::{Block, Link, RefMode, RefSpan, Tracking, hash_of, ref_spans};
 pub use canon::{
     ActorRun, ApprovalEvidence, Assurance, EvidenceKind, LandingRecord, Proposal, RelayEvidence,
     StateSnapshot, Tag,
@@ -18,6 +19,7 @@ pub use canon::{
 pub use change::{
     AltChoice, Change, ChangeLinks, EditorialClass, Justification, Op, Provenance, Role,
 };
+pub use coord::{AltMember, AltSet, AltStatus, Intent, IntentStatus};
 pub use hash::Hash;
 pub use id::{BlockId, CROCKFORD, IdError};
 #[doc(hidden)]
