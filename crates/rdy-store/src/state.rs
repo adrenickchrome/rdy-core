@@ -146,7 +146,9 @@ impl StoreReader {
                 ops: &c.ops,
             })
             .collect();
-        merge_indexed(base, &input, &|v| self.producer(v).ok().flatten())
+        merge_indexed(base, &input, &|v| self.producer(v).ok().flatten(), &|b| {
+            self.deleter(b).ok().flatten()
+        })
     }
 
     /// View `name`'s included changes merged onto its base (canon's head when it has no head).

@@ -482,6 +482,7 @@ pub(crate) fn blocking_conflicts(
         &state,
         &input,
         &|v| reader.producer(v).ok().flatten(),
+        &|b| reader.deleter(b).ok().flatten(),
         &touched,
     )
     .conflicts)

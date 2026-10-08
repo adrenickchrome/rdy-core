@@ -294,6 +294,7 @@ impl ReadState {
             &bases[&entry.base],
             &input,
             &|v| self.reader().producer(v).ok().flatten(),
+            &|b| self.reader().deleter(b).ok().flatten(),
             blocks,
         )
         .conflicts

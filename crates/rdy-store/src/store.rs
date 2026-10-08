@@ -6,8 +6,9 @@ use crate::kinds::{self, BlobManifest, RefUpdate};
 use crate::merge::Conflict;
 use crate::segment::{CrashPoint, Location, SegmentLog, SegmentReader, find_gap, seg_path};
 use crate::view::ViewOp;
-use rdy_model::{Block, Change, Hash, LandingRecord, Op, Proposal, Tracking};
+use rdy_model::{Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Tracking};
 use serde::{Serialize, de::DeserializeOwned};
+use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::ops::Deref;
@@ -1254,6 +1255,25 @@ impl StoreReader {
             first = Some(first.map_or(key, |k| k.min(key)));
         }
         Ok(first.map(|(_, c)| c))
+    }
+
+    /// The change whose delete of `block` canon landed last: of `block`'s deleters that have
+    /// landed, the one whose landing was written last (of one landing's, the smallest hash).
+    /// `None` when no delete of `block` has landed. A merge names it as the side of a block its
+    /// base lacks, so that only a change that depends on the delete resolves that conflict.
+    pub fn deleter(&self, block: &BlockId) -> Result<Option<Hash>, StoreError> {
+        let mut last: Option<(Location, Reverse<Hash>)> = None;
+        for c in self.index().deleters(block)? {
+            if let Some(l) = self.index().landing_of(&c)? {
+                let loc = self
+                    .index()
+                    .typed(kinds::LANDING, &l)?
+                    .ok_or(StoreError::NotFound(l))?;
+                let key = (loc, Reverse(c));
+                last = Some(last.map_or(key, |k| k.max(key)));
+            }
+        }
+        Ok(last.map(|(_, Reverse(c))| c))
     }
 
     /// Of `changes` (producers of one version), the one that last wrote it as of landing `head`:

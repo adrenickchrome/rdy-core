@@ -54,6 +54,13 @@ fn canon_producer(base: &StateSnapshot) -> impl Fn(&Hash) -> Option<Hash> + '_ {
     }
 }
 
+const CANON_DELETE: &[u8] = b"canon deleter";
+
+/// Every block the base lacks reads as deleted by one canon change.
+fn canon_deleter(base: &StateSnapshot) -> impl Fn(&BlockId) -> Option<Hash> + '_ {
+    move |b| (!base.blocks.contains_key(b)).then(|| Hash::of(CANON_DELETE))
+}
+
 fn base_with(blocks: &[Block]) -> StateSnapshot {
     let mut s = StateSnapshot::default();
     for b in blocks {
@@ -83,8 +90,8 @@ fn merge1_two_edits_from_one_base_are_one_conflict_whatever_the_order() {
         }],
     );
     let p = canon_producer(&base);
-    let ab = merge(&base, &view(&[a.clone(), b.clone()]), &p);
-    let ba = merge(&base, &view(&[b.clone(), a.clone()]), &p);
+    let ab = merge(&base, &view(&[a.clone(), b.clone()]), &p, &|_| None);
+    let ba = merge(&base, &view(&[b.clone(), a.clone()]), &p, &|_| None);
     assert_eq!(ab, ba);
     assert_eq!(ab.conflicts.len(), 1);
     let c = &ab.conflicts[0];
@@ -139,6 +146,7 @@ fn merge1_a_change_depending_on_every_side_resolves_the_conflict() {
         &base,
         &view(std::slice::from_ref(&c)),
         &canon_producer(&base),
+        &|_| None,
     );
     assert_eq!(m.conflicts.len(), 1);
     assert!(
@@ -152,6 +160,7 @@ fn merge1_a_change_depending_on_every_side_resolves_the_conflict() {
         &base,
         &view(&[r.clone(), c.clone()]),
         &canon_producer(&base),
+        &|_| None,
     );
     assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
     assert_eq!(m.state.blocks[&y.id], blk(1, "resolved").version_hash());
@@ -186,7 +195,12 @@ fn merge1_a_change_covering_one_side_replaces_it() {
             block: blk(1, "a2"),
         }],
     );
-    let m = merge(&base, &view(&[a, b.clone(), a2.clone()]), &|_| None);
+    let m = merge(
+        &base,
+        &view(&[a, b.clone(), a2.clone()]),
+        &|_| None,
+        &|_| None,
+    );
     assert_eq!(m.conflicts.len(), 1);
     let mut want = vec![
         Side {
@@ -239,7 +253,7 @@ fn merge1_convergent_edits_and_deletes_are_not_conflicts() {
             id: blk(2, "").id,
         }],
     );
-    let m = merge(&base, &view(&[a, b, d1, d2]), &|_| None);
+    let m = merge(&base, &view(&[a, b, d1, d2]), &|_| None, &|_| None);
     assert!(m.conflicts.is_empty());
     assert_eq!(m.state.blocks[&x0.id], blk(1, "same").version_hash());
     assert!(!m.state.blocks.contains_key(&blk(2, "").id));
@@ -250,7 +264,7 @@ fn merge1_two_creates_of_one_id_conflict_with_no_base() {
     let base = StateSnapshot::default();
     let a = owned("a", vec![], vec![Op::Create { block: blk(3, "a") }]);
     let b = owned("b", vec![], vec![Op::Create { block: blk(3, "b") }]);
-    let m = merge(&base, &view(&[a, b]), &|_| None);
+    let m = merge(&base, &view(&[a, b]), &|_| None, &|_| None);
     assert_eq!(m.conflicts.len(), 1);
     assert_eq!(m.conflicts[0].base, None);
     assert!(
@@ -292,16 +306,114 @@ fn merge1_delete_then_recreate_follows_the_deleter_dep_not_id_order() {
         &base,
         &view(&[re.clone(), del.clone()]),
         &canon_producer(&base),
+        &|_| None,
     );
     assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
     assert_eq!(m.state.blocks[&x0.id], blk(1, "again").version_hash());
     re.deps.clear();
-    let m = merge(&base, &view(&[del, re]), &canon_producer(&base));
+    let m = merge(&base, &view(&[del, re]), &canon_producer(&base), &|_| None);
     assert_eq!(
         m.conflicts.len(),
         1,
         "without the dep, id order applies the create first"
     );
+}
+
+/// Canon deleted X; the view edited X twice before it saw the delete. With no change known for
+/// the delete, nothing depends on it, so the second edit does not resolve the conflict.
+#[test]
+fn merge1_a_canon_delete_with_no_known_deleter_is_never_resolved() {
+    let x0 = blk(1, "zero");
+    let base = StateSnapshot::default();
+    let a = owned(
+        "a",
+        vec![Hash::of(CANON)],
+        vec![Op::Update {
+            base: x0.version_hash(),
+            block: blk(1, "a"),
+        }],
+    );
+    let b = owned(
+        "b",
+        vec![a.id, Hash::of(CANON)],
+        vec![Op::Update {
+            base: blk(1, "a").version_hash(),
+            block: blk(1, "b"),
+        }],
+    );
+    let m = merge(&base, &view(&[a, b.clone()]), &|_| None, &|_| None);
+    assert_eq!(m.conflicts.len(), 1, "{m:?}");
+    assert_eq!(
+        m.conflicts[0].sides,
+        vec![
+            Side {
+                change: None,
+                version: None
+            },
+            Side {
+                change: Some(b.id),
+                version: Some(blk(1, "b").version_hash())
+            },
+        ]
+    );
+    assert_eq!(
+        m.state.blocks[&x0.id],
+        x0.version_hash(),
+        "a conflicted block reads as its conflict base, not as the view's edit"
+    );
+}
+
+/// Canon deleted X in change D; the view edited X twice before it saw the delete. The delete's
+/// side names D, and only a change that depends on D resolves the conflict.
+#[test]
+fn merge1_a_canon_delete_side_names_its_deleter_and_only_a_dependent_resolves_it() {
+    let x0 = blk(1, "zero");
+    let base = StateSnapshot::default();
+    let d = Hash::of(CANON_DELETE);
+    let a = owned(
+        "a",
+        vec![Hash::of(CANON)],
+        vec![Op::Update {
+            base: x0.version_hash(),
+            block: blk(1, "a"),
+        }],
+    );
+    let b = owned(
+        "b",
+        vec![a.id],
+        vec![Op::Update {
+            base: blk(1, "a").version_hash(),
+            block: blk(1, "b"),
+        }],
+    );
+    let m = merge(
+        &base,
+        &view(&[a.clone(), b.clone()]),
+        &|_| None,
+        &canon_deleter(&base),
+    );
+    assert_eq!(m.conflicts.len(), 1, "{m:?}");
+    assert!(m.conflicts[0].sides.contains(&Side {
+        change: Some(d),
+        version: None
+    }));
+    assert_eq!(
+        m.state.blocks[&x0.id],
+        x0.version_hash(),
+        "a conflicted block reads as its conflict base, not as the view's edit"
+    );
+    // a resolution that depends on the delete and on the view's side re-creates X on purpose
+    let r = owned(
+        "r",
+        vec![b.id, d],
+        vec![Op::Update {
+            base: x0.version_hash(),
+            block: blk(1, "kept"),
+        }],
+    );
+    let m = merge(&base, &view(&[a, b, r]), &|_| None, &canon_deleter(&base));
+    assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+    assert_eq!(m.state.blocks[&x0.id], blk(1, "kept").version_hash());
 }
 
 // ---------- property tests ----------
@@ -375,6 +487,7 @@ fn reference(
     base: &StateSnapshot,
     input: &[Owned],
     producer: &dyn Fn(&Hash) -> Option<Hash>,
+    deleter: &dyn Fn(&BlockId) -> Option<Hash>,
 ) -> Merged {
     let mut uniq: Vec<&Owned> = vec![];
     for c in input {
@@ -420,7 +533,11 @@ fn reference(
             let b = op.block_id().clone();
             let slot = slots.entry(b.clone()).or_insert_with(|| {
                 let v = base.blocks.get(&b).copied();
-                Slot::Clean(v, v.and_then(|v| producer(&v)))
+                let owner = match v {
+                    Some(v) => producer(&v),
+                    None => deleter(&b),
+                };
+                Slot::Clean(v, owner)
             });
             let (expected, new) = match op {
                 Op::Create { block } => (None, Some(block.version_hash())),
@@ -445,7 +562,9 @@ fn reference(
                     ],
                 ),
                 Slot::Conflicted(_, sides)
-                    if sides.iter().all(|s| s.change.is_none() || covered(s)) =>
+                    if sides
+                        .iter()
+                        .all(|s| covered(s) || (s.change.is_none() && s.version.is_some())) =>
                 {
                     Slot::Clean(new, Some(c.id))
                 }
@@ -558,7 +677,7 @@ proptest! {
                 (Just(b), Just(cs).prop_shuffle(), Just(end))
             })
     ) {
-        let m = merge(&base, &view(&input), &canon_producer(&base));
+        let m = merge(&base, &view(&input), &canon_producer(&base), &|_| None);
         prop_assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
         prop_assert_eq!(m.state, end);
     }
@@ -567,7 +686,12 @@ proptest! {
     fn merge1_prop_the_merge_matches_the_reference(specs in arb_specs()) {
         let (base, input) = build(&specs);
         let p = canon_producer(&base);
-        prop_assert_eq!(merge(&base, &view(&input), &p), reference(&base, &input, &p));
+        prop_assert_eq!(
+            merge(&base, &view(&input), &p, &|_| None),
+            reference(&base, &input, &p, &|_| None)
+        );
+        let d = canon_deleter(&base);
+        prop_assert_eq!(merge(&base, &view(&input), &p, &d), reference(&base, &input, &p, &d));
     }
 
     #[test]
@@ -578,7 +702,7 @@ proptest! {
         })
     ) {
         let p = canon_producer(&base);
-        prop_assert_eq!(merge(&base, &view(&a), &p), merge(&base, &view(&b), &p));
+        prop_assert_eq!(merge(&base, &view(&a), &p, &|_| None), merge(&base, &view(&b), &p, &|_| None));
     }
 }
 
@@ -602,8 +726,8 @@ fn merge1_seed_7ec9767_a_create_after_a_failed_update_of_an_absent_block_matches
     let (base, input) = build(&specs);
     let p = canon_producer(&base);
     assert_eq!(
-        merge(&base, &view(&input), &p),
-        reference(&base, &input, &p)
+        merge(&base, &view(&input), &p, &|_| None),
+        reference(&base, &input, &p, &|_| None)
     );
 }
 
@@ -631,8 +755,8 @@ fn merge1_merge_indexed_names_each_applied_change_by_its_first_input_position() 
     // b first, a listed twice, c last: a change listed twice counts at its first position
     let input = [b.clone(), a.clone(), c.clone(), a.clone()];
     let p = canon_producer(&base);
-    let (m, at) = merge_indexed(&base, &view(&input), &p);
-    assert_eq!(m, merge(&base, &view(&input), &p));
+    let (m, at) = merge_indexed(&base, &view(&input), &p, &|_| None);
+    assert_eq!(m, merge(&base, &view(&input), &p, &|_| None));
     assert_eq!(at.len(), m.order.len());
     for (k, id) in m.order.iter().enumerate() {
         assert_eq!(input[at[k]].id, *id, "position {k}");
@@ -647,8 +771,8 @@ proptest! {
     fn merge1_prop_merge_indexed_is_merge_with_input_positions(specs in arb_specs()) {
         let (base, input) = build(&specs);
         let p = canon_producer(&base);
-        let (m, at) = merge_indexed(&base, &view(&input), &p);
-        prop_assert_eq!(&m, &merge(&base, &view(&input), &p));
+        let (m, at) = merge_indexed(&base, &view(&input), &p, &|_| None);
+        prop_assert_eq!(&m, &merge(&base, &view(&input), &p, &|_| None));
         prop_assert_eq!(at.len(), m.order.len());
         for (k, id) in m.order.iter().enumerate() {
             prop_assert_eq!(input[at[k]].id, *id);

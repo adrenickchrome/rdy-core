@@ -261,6 +261,17 @@ impl Store {
                 .flatten()
                 .or_else(|| accepted.get(v).copied())
         };
+        // A block's deleter as the index will answer after this write: this landing's deleters
+        // (smallest hash first, as `Store::deleter` breaks ties within a landing) win, as the
+        // landing written last; otherwise the one canon already has.
+        let deleter = |b: &BlockId| {
+            let all = self.index().deleters(b).ok().unwrap_or_default();
+            all.iter()
+                .filter(|c| landed.contains(c))
+                .min()
+                .copied()
+                .or_else(|| self.deleter(b).ok().flatten())
+        };
         let mut rebased = vec![];
         let mut closed = vec![];
         let mut view_refs = vec![];
@@ -294,7 +305,8 @@ impl Store {
             };
             let (dropped, remaining): (Vec<Hash>, Vec<Hash>) =
                 vincluded.into_iter().partition(|c| landed.contains(c));
-            let conflicts = self.rebase_conflicts(&state, &remaining, &touched_l, &producer)?;
+            let conflicts =
+                self.rebase_conflicts(&state, &remaining, &touched_l, &producer, &deleter)?;
             let rebase = encode(&ViewOp {
                 view: name.clone(),
                 prev: Some(if proposing { tip } else { vhead.head }),
@@ -385,6 +397,7 @@ impl Store {
         remaining: &[Hash],
         touched_l: &BTreeSet<&BlockId>,
         producer: &dyn Fn(&Hash) -> Option<Hash>,
+        deleter: &dyn Fn(&BlockId) -> Option<Hash>,
     ) -> Result<Vec<Conflict>, StoreError> {
         if remaining.is_empty() {
             return Ok(vec![]);
@@ -411,7 +424,7 @@ impl Store {
                 ops: &c.ops,
             })
             .collect();
-        Ok(merge_on_blocks(state, &input, producer, &isect).conflicts)
+        Ok(merge_on_blocks(state, &input, producer, deleter, &isect).conflicts)
     }
 }
 
