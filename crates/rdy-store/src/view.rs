@@ -501,7 +501,9 @@ impl Store {
                 .iter()
                 .map(|c| self.change(c))
                 .collect::<Result<Vec<_>, _>>()?;
-            let conflicts = self.merge_onto(&self.state_of(canon)?, &rest)?.conflicts;
+            let conflicts = self
+                .merge_onto(canon, &self.state_of(canon)?, &rest)?
+                .conflicts;
             head.base = canon;
             head.len = remaining.len() as u64;
             let rebase = ViewOpKind::Rebase {

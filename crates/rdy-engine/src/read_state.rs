@@ -780,9 +780,9 @@ impl ReadState {
             .iter()
             .map(|c| self.reader.change(c))
             .collect::<Result<Vec<Change>, _>>()?;
-        let merged = self
-            .reader
-            .merge_onto(&self.reader.state_of(entry.base)?, &list)?;
+        let merged =
+            self.reader
+                .merge_onto(entry.base, &self.reader.state_of(entry.base)?, &list)?;
         let by_id: HashMap<Hash, Change> = entry.included.iter().copied().zip(list).collect();
         let mut last = LastWriters::new();
         for id in &merged.order {
@@ -840,7 +840,7 @@ pub(crate) fn build_entry(
                 .iter()
                 .map(|c| reader.change(c))
                 .collect::<Result<Vec<Change>, _>>()?;
-            let merged = reader.merge_onto(&reader.state_of(entry.base)?, &list)?;
+            let merged = reader.merge_onto(entry.base, &reader.state_of(entry.base)?, &list)?;
             let by_id: HashMap<Hash, Change> = entry.included.iter().copied().zip(list).collect();
             (merged, by_id)
         }

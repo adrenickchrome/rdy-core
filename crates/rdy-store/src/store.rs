@@ -4,11 +4,16 @@ use crate::fsutil;
 use crate::index::{Index, IndexEntry};
 use crate::kinds::{self, BlobManifest, RefUpdate};
 use crate::merge::Conflict;
-use crate::segment::{CrashPoint, Location, SegmentLog, SegmentReader, find_gap, seg_path};
+use crate::segment::{
+    CrashPoint, Location, SegmentLog, SegmentReader, find_gap, find_unsealed, seg_path,
+};
 use crate::view::ViewOp;
-use rdy_model::{Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, Tracking};
+use rdy_model::{
+    Block, BlockId, Change, Hash, LandingRecord, Op, Proposal, StateSnapshot, Tracking,
+};
 use serde::{Serialize, de::DeserializeOwned};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -414,6 +419,17 @@ impl Store {
                     "{} exists but {} does not",
                     seg_path(&segments, later).display(),
                     seg_path(&segments, missing).display()
+                ),
+            });
+        }
+        // seg1: so does a sealed segment that does not end at a batch marker
+        if let Some(seg) = find_unsealed(&segments)? {
+            return Err(StoreError::MissingFrames {
+                segment: seg_path(&segments, seg),
+                detail: format!(
+                    "{} does not end at a batch marker, but {} exists",
+                    seg_path(&segments, seg).display(),
+                    seg_path(&segments, seg + 1).display()
                 ),
             });
         }
@@ -1256,6 +1272,119 @@ impl StoreReader {
         Ok(first.map(|(_, c)| c))
     }
 
+    /// For each of `blocks` that canon removed at or before landing `head`, the change that
+    /// removed it most recently: of the deletes of it that landed by then, those of the latest
+    /// landing whose state lacks the block while the state before it held it (of one landing's,
+    /// the smallest hash). A delete that landed after the block was already gone removed nothing
+    /// and is never the one. None for a block with no such landing, and for all with no `head`.
+    /// A merge onto `head`'s state names it as the side of a block that state lacks, and a
+    /// re-create committed on that base depends on it, so the two agree.
+    pub fn deleters_at<'a>(
+        &self,
+        blocks: impl IntoIterator<Item = &'a BlockId>,
+        head: Option<&Hash>,
+    ) -> Result<HashMap<BlockId, Hash>, StoreError> {
+        let Some(head) = head else {
+            return Ok(HashMap::new());
+        };
+        let rows = self.index().deleter_rows(blocks)?;
+        self.removers(rows, head)
+    }
+
+    /// The `deleter` lookup of a merge onto `base`, the state of landing `at`: `deleters_at(at)`
+    /// for each of `blocks` (the blocks the merged changes write) that `base` lacks. One index
+    /// read when none of them was ever deleted.
+    pub fn merge_deleters<'a>(
+        &self,
+        at: Option<&Hash>,
+        base: &StateSnapshot,
+        blocks: impl IntoIterator<Item = &'a BlockId>,
+    ) -> Result<HashMap<BlockId, Hash>, StoreError> {
+        self.deleters_at(
+            blocks.into_iter().filter(|b| !base.blocks.contains_key(*b)),
+            at,
+        )
+    }
+
+    /// Whether any of `blocks` has a change that deletes it, landed or not: one index read.
+    pub fn ever_deleted<'a>(
+        &self,
+        blocks: impl IntoIterator<Item = &'a BlockId>,
+    ) -> Result<bool, StoreError> {
+        Ok(!self.index().deleter_rows(blocks)?.is_empty())
+    }
+
+    /// `deleters_at` for one block.
+    pub fn deleter_at(
+        &self,
+        block: &BlockId,
+        head: Option<&Hash>,
+    ) -> Result<Option<Hash>, StoreError> {
+        Ok(self.deleters_at([block], head)?.remove(block))
+    }
+
+    /// `deleters_at` over rows already read from the index (`Index::deleter_rows`).
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn removers(
+        &self,
+        rows: BTreeMap<BlockId, Vec<(Hash, Option<(Hash, Location)>)>>,
+        head: &Hash,
+    ) -> Result<HashMap<BlockId, Hash>, StoreError> {
+        let mut out = HashMap::new();
+        if rows.values().all(|r| r.iter().all(|(_, at)| at.is_none())) {
+            return Ok(out);
+        }
+        let bound = self
+            .index()
+            .typed(kinds::LANDING, head)?
+            .ok_or(StoreError::NotFound(*head))?;
+        // the states of the landings read, by landing (None: before any landing)
+        let mut states: HashMap<Option<Hash>, StateSnapshot> = HashMap::new();
+        for (block, rows) in rows {
+            // the landings that carried a delete of `block`, latest first, each with its deletes
+            let mut landings: BTreeMap<Reverse<Location>, (Hash, Vec<Hash>)> = BTreeMap::new();
+            for (c, at) in rows {
+                if let Some((l, loc)) = at
+                    && loc <= bound
+                {
+                    landings
+                        .entry(Reverse(loc))
+                        .or_insert((l, vec![]))
+                        .1
+                        .push(c);
+                }
+            }
+            for (l, deletes) in landings.into_values() {
+                let rec = self.landing(&l)?;
+                let gone = !self
+                    .state_cached(&mut states, Some(l))?
+                    .blocks
+                    .contains_key(&block);
+                if gone
+                    && self
+                        .state_cached(&mut states, rec.prev)?
+                        .blocks
+                        .contains_key(&block)
+                {
+                    out.insert(block, *deletes.iter().min().expect("one delete at least"));
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn state_cached<'s>(
+        &self,
+        states: &'s mut HashMap<Option<Hash>, StateSnapshot>,
+        landing: Option<Hash>,
+    ) -> Result<&'s StateSnapshot, StoreError> {
+        if let std::collections::hash_map::Entry::Vacant(e) = states.entry(landing) {
+            e.insert(self.state_of(landing)?);
+        }
+        Ok(&states[&landing])
+    }
+
     /// Of `changes` (producers of one version), the one that last wrote it as of landing `head`:
     /// the one whose landing was written last at or before `head` (of one landing's, the one
     /// written last), or, when none had landed by then (or there is no `head`), the one written
@@ -1360,8 +1489,12 @@ impl StoreReader {
     /// - for each op's base, its producers that `view` includes; when it includes none (the base
     ///   came from canon), or there is no view, `producer(base)`. A version two views wrote
     ///   identically has a producer in each, and a dep must name the writer's own;
-    /// - when committed to `view`, every change `view` includes that deletes an id one of its
-    ///   ops creates (so a delete and a re-create under one id merge in that order).
+    /// - for each id one of its ops creates: when committed to `view`, every change `view`
+    ///   includes that deletes it (so a delete and a re-create under one id merge in that
+    ///   order); and the delete that removed it from canon as of the landing the writer read
+    ///   (`effective_base`, canon's head with no view; see `deleters_at`), as the writer saw the
+    ///   id deleted there. A re-create that does not depend on the delete that removed the id
+    ///   from its merge base conflicts with it in the merge.
     pub fn change_deps(
         &self,
         change: &Change,
@@ -1384,15 +1517,7 @@ impl StoreReader {
         let mut included: Option<HashSet<Hash>> = None;
         for op in &change.ops {
             match op {
-                Op::Create { block } => {
-                    let Some(view) = view else { continue };
-                    let deleters = self.index().deleters(&block.id)?;
-                    if deleters.is_empty() {
-                        continue;
-                    }
-                    let included = self.included_set(&mut included, view)?;
-                    deps.extend(deleters.into_iter().filter(|d| included.contains(d)));
-                }
+                Op::Create { .. } => {}
                 Op::Update { base, .. } | Op::Delete { base, .. } => {
                     let producers = self.index().producers(base)?;
                     if producers.is_empty() {
@@ -1415,12 +1540,47 @@ impl StoreReader {
                 }
             }
         }
+        // the creates: one index read for all their ids, and more only for an id once deleted
+        let rows = self
+            .index()
+            .deleter_rows(change.ops.iter().filter_map(|op| match op {
+                Op::Create { block } => Some(&block.id),
+                _ => None,
+            }))?;
+        if !rows.is_empty() {
+            let base = match view {
+                Some(view) => {
+                    let included = self.included_set(&mut included, view)?;
+                    deps.extend(
+                        rows.values()
+                            .flatten()
+                            .map(|(d, _)| *d)
+                            .filter(|d| included.contains(d)),
+                    );
+                    self.effective_base(view)?
+                }
+                None => self.canon_head()?,
+            };
+            if let Some(base) = base {
+                deps.extend(self.removers(rows, &base)?.into_values());
+            }
+        }
         for op in &change.ops {
             if let Some(c) = conflicts.iter().find(|c| c.block == *op.block_id()) {
                 deps.extend(c.sides.iter().filter_map(|s| s.change));
             }
         }
         Ok(deps.into_iter().collect())
+    }
+
+    /// The landing view `view` reads from: canon's head for a view with no head or one that
+    /// floats (unpinned, nothing included; its next commit catches it up to canon), else its
+    /// stored base.
+    pub fn effective_base(&self, view: &str) -> Result<Option<Hash>, StoreError> {
+        match self.view_head(view)? {
+            Some(h) if h.pinned || h.len > 0 => Ok(h.base),
+            _ => self.canon_head(),
+        }
     }
 
     fn included_set<'a>(

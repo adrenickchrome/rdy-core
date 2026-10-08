@@ -5,7 +5,7 @@ use crate::read_state::{self, CoordHeads, Entry, InflightCell};
 use crate::tensions::SideRef;
 use crate::tensions::set::TensionCell;
 use crate::{Delta, Event, EventKind, Rdy, RdyError, ReadState, events};
-use rdy_model::Hash;
+use rdy_model::{Hash, Op};
 use rdy_store::kinds;
 use rdy_store::segment::Location;
 use rdy_store::view::ViewOpKind;
@@ -245,7 +245,16 @@ impl Rdy {
                             None if next.base == prev.canon_head => prev.canon.built_ok(),
                             _ => None,
                         };
-                        if let Some(b) = pred.filter(|b| b.conflicts.is_empty()) {
+                        // carrying the build assumes the ops merge clean; a create of an id that was
+                        // ever deleted merges against the delete that removed it, so that view
+                        // is built again instead
+                        let recreates = ops.iter().filter_map(|op| match op {
+                            Op::Create { block } => Some(&block.id),
+                            _ => None,
+                        });
+                        if let Some(b) = pred.filter(|b| b.conflicts.is_empty())
+                            && !self.store.ever_deleted(recreates)?
+                        {
                             next.seed(b.after(&ops));
                         }
                         views.insert(view.clone(), Arc::new(next));
@@ -548,8 +557,8 @@ impl Rdy {
     /// insc1: the in-flight cell after `change` (with `ops`) was committed to `view`. When the
     /// previous set was computed and `view` is open, the set is the previous one plus `change`
     /// (held by `view` alone). The previous build is carried, with `ops` applied, when it is
-    /// computed and has no conflicts, every op applies cleanly to its materialization, and the
-    /// change depends on the last writer (in the merge's order) of every block it writes: a new
+    /// computed and has no conflicts, every op applies cleanly to its materialization, no op
+    /// creates an id that was ever deleted, and the change depends on the last writer (in the merge's order) of every block it writes: a new
     /// change is depended on by none, so it then merges after every writer of its blocks and a
     /// rebuild equals the carry. Anything else starts unbuilt.
     fn inflight_after_commit(
@@ -577,8 +586,18 @@ impl Rdy {
         set.views_of.insert(change, vec![view.to_string()]);
         let cell = InflightCell::with_set(Arc::new(set));
         let carry = match (prev.inflight_cell.built_ok(), prev.inflight_cell.last.get()) {
+            // a create of an id that was ever deleted merges against the delete that removed
+            // it, not cleanly: such a commit (or a failed index read) rebuilds the set
             (Some(b), Some(last))
-                if b.conflicts.is_empty() && read_state::applies_cleanly(&b.m, ops) =>
+                if b.conflicts.is_empty()
+                    && read_state::applies_cleanly(&b.m, ops)
+                    && !self
+                        .store
+                        .ever_deleted(ops.iter().filter_map(|op| match op {
+                            Op::Create { block } => Some(&block.id),
+                            _ => None,
+                        }))
+                        .unwrap_or(true) =>
             {
                 self.merges_last(change, ops, last).then_some((b, last))
             }

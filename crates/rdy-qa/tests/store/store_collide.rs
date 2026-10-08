@@ -179,7 +179,7 @@ fn kind1_an_asset_with_a_future_landings_bytes_does_not_hide_it() {
     let pr = s.proposal(&p).unwrap();
     let changes: Vec<Change> = pr.changes.iter().map(|c| s.change(c).unwrap()).collect();
     let state = s
-        .merge_onto(&s.canon_state().unwrap(), &changes)
+        .merge_onto(s.canon_head().unwrap(), &s.canon_state().unwrap(), &changes)
         .unwrap()
         .state;
     let predicted = LandingRecord {

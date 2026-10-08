@@ -151,6 +151,53 @@ fn read_frame(f: &File, offset: u64, file_len: u64) -> io::Result<Option<(u8, Ha
     Ok(Some((kind, hash, payload)))
 }
 
+/// A sealed segment (one the log has rolled past) that does not end at a batch marker: the log
+/// rolls only between batches, so frames at its end are missing.
+fn unsealed(seg: u32) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "segment {seg} does not end at a batch marker, but a later segment was started: frames are missing; restore it from backup"
+        ),
+    )
+}
+
+/// True if `f` (`file_len` bytes) ends with a hash-valid `BATCH_COMMIT` frame, the shape every
+/// sealed segment has. One read of the file's last `HEADER + MARKER_MAX` bytes: a candidate
+/// frame start is any position whose frame would end exactly at the end of the file.
+fn ends_at_marker(f: &File, file_len: u64) -> io::Result<bool> {
+    let tail = file_len.min(HEADER + MARKER_MAX);
+    let mut buf = vec![0u8; tail as usize];
+    f.read_exact_at(&mut buf, file_len - tail)?;
+    let header = HEADER as usize;
+    for pos in 0..buf.len().saturating_sub(header - 1) {
+        let rest = &buf[pos..];
+        let len = u32::from_le_bytes(rest[0..4].try_into().unwrap()) as usize;
+        if rest[4] != kinds::BATCH_COMMIT || header + len != rest.len() {
+            continue;
+        }
+        if Hash::of(&rest[header..]).0[..] == rest[5..header] {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The first sealed segment in `dir` (one a later segment follows) that does not end at a batch
+/// marker. The log rolls only between batches, so such a segment has lost frames at its end.
+/// One small read per sealed segment; call it after `find_gap`.
+pub fn find_unsealed(dir: &Path) -> io::Result<Option<u32>> {
+    let mut seg = 0;
+    while seg_path(dir, seg + 1).exists() {
+        let f = File::open(seg_path(dir, seg))?;
+        if !ends_at_marker(&f, f.metadata()?.len())? {
+            return Ok(Some(seg));
+        }
+        seg += 1;
+    }
+    Ok(None)
+}
+
 /// The read half of the log (rdr1): positioned reads of frames at locations the caller already
 /// knows are acknowledged (from the index, or bounded by an explicit `upto`). It opens each
 /// segment file read-only on first use and keeps it; it never scans for the end of a segment, so
@@ -209,8 +256,9 @@ impl SegmentReader {
     /// Calls `f(location, kind, hash, payload, next)` for every frame in `[from, upto)`, in order;
     /// `next` is the location just past the frame. A segment before `upto`'s is read to the end of
     /// its file (the writer has rolled past it, so it ends at a marker), then the walk continues
-    /// with the next segment. A frame that crosses `upto`, or a `from` past the end of its
-    /// segment, is `InvalidData`. An error from `f` stops the walk and is returned.
+    /// with the next segment. A frame that crosses `upto`, a `from` past the end of its segment,
+    /// or a segment before `upto`'s that does not end at a marker, is `InvalidData`. An error
+    /// from `f` stops the walk and is returned.
     pub fn for_each_from<E: From<io::Error>>(
         &self,
         from: Location,
@@ -239,6 +287,10 @@ impl SegmentReader {
                 )
                 .into());
             }
+            let sealed = seg < upto.segment;
+            if sealed && offset == 0 && end == 0 {
+                return Err(unsealed(seg).into());
+            }
             while offset < end {
                 let loc = Location {
                     segment: seg,
@@ -252,6 +304,9 @@ impl SegmentReader {
                     segment: seg,
                     offset: next,
                 };
+                if sealed && next.offset == end && kind != kinds::BATCH_COMMIT {
+                    return Err(unsealed(seg).into());
+                }
                 f(loc, kind, hash, &payload, next)?;
                 offset = next.offset;
             }
@@ -977,7 +1032,9 @@ impl SegmentLog {
     /// Calls `f(location, kind, hash, payload, next)` for every frame from `from` to the end of
     /// the log, in order, reading each frame once; `next` is the location just past the frame. A
     /// `from` at the end of its segment continues with the next segment. A torn or corrupt frame
-    /// is `InvalidData`, as is a `from` past the end of its segment. An error from `f` stops the walk and is returned.
+    /// is `InvalidData`, as is a `from` past the end of its segment and a sealed segment (one
+    /// before the current) that does not end at a batch marker. An error from `f` stops the walk
+    /// and is returned.
     pub fn for_each_from<E: From<io::Error>>(
         &self,
         from: Location,
@@ -995,6 +1052,10 @@ impl SegmentLog {
                 )
                 .into());
             }
+            let sealed = seg < self.current();
+            if sealed && offset == 0 && file_len == 0 {
+                return Err(unsealed(seg).into());
+            }
             while let Some((kind, hash, payload)) = read_frame(file, offset, file_len)? {
                 let loc = Location {
                     segment: seg,
@@ -1005,6 +1066,9 @@ impl SegmentLog {
                     segment: seg,
                     offset,
                 };
+                if sealed && offset == file_len && kind != kinds::BATCH_COMMIT {
+                    return Err(unsealed(seg).into());
+                }
                 f(loc, kind, hash, &payload, next)?;
             }
             if offset < file_len {
@@ -1018,8 +1082,9 @@ impl SegmentLog {
         Ok(())
     }
 
-    /// Reads every frame of every segment once and verifies its hash and every batch marker.
-    /// Returns the number of non-marker frames.
+    /// Reads every frame of every segment once and verifies its hash and every batch marker, and
+    /// that every sealed segment (one before the current) ends at a batch marker. Returns the
+    /// number of non-marker frames.
     pub fn verify_frames(&self) -> io::Result<usize> {
         let mut count = 0;
         for seg in 0..=self.current() {
@@ -1053,6 +1118,9 @@ impl SegmentLog {
                     io::ErrorKind::InvalidData,
                     format!("corrupt frame in segment {seg} at offset {offset}"),
                 ));
+            }
+            if seg < self.current() && (file_len == 0 || !since.is_empty()) {
+                return Err(unsealed(seg));
             }
         }
         Ok(count)
