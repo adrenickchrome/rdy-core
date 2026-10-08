@@ -8,8 +8,10 @@
 //! (a) Every pair of live writes on one block from distinct changes with equal root bases and
 //! different outcomes, where neither chain lists the other change in its deps and the two are not
 //! a member pair of one open alternative set (FW-CH6a: the set's own rules govern them). (b) A
-//! live write whose outcome differs from canon's, whose root base is stale against canon, and
-//! whose chain does not depend on canon's version: on the producer of canon's version, or, when
+//! live write whose outcome differs from canon's, whose chain does not pass through canon's
+//! version (canon's version is neither the root base nor the version of a write on the chain: the
+//! merge reads a write whose base is canon's version as clean), and whose chain does not depend on
+//! canon's version: on the producer of canon's version, or, when
 //! canon has no version of the block, on an in-flight write of the block (the merge reads that
 //! as the resolution of the delete). Equal outcomes are clean in the merge, so they never
 //! collide. No canon-scope form (FW-CH6a): canon holds one version per block, and the trigger
@@ -23,10 +25,12 @@ use std::sync::Arc;
 /// This kind's detector.
 pub struct EditCollision;
 
-/// A live write's chain on its block: the root base and the changes on the chain, the write's
-/// own change among them.
+/// A live write's chain on its block: the root base, the versions the chain passes through (the
+/// root base and every chain write's version, so every base and every version on the chain), and
+/// the changes on the chain, the write's own change among them.
 struct Chain {
     root: Option<Hash>,
+    through: BTreeSet<Option<Hash>>,
     changes: BTreeSet<Hash>,
 }
 
@@ -91,15 +95,9 @@ impl Detector for EditCollision {
                     ));
                 }
             }
-            // (b) a live write against a canon version it did not build on
+            // (b) a live write against a canon version its chain does not pass through
             let cv = canon.version_of(&b);
-            let stale = |w: &Write, ch: &Chain| {
-                w.version != cv
-                    && match ch.root {
-                        None => cv.is_some(),
-                        Some(_) => cv != ch.root,
-                    }
-            };
+            let stale = |w: &Write, ch: &Chain| w.version != cv && !ch.through.contains(&cv);
             let against: Vec<(&Arc<Write>, &Chain)> = live
                 .iter()
                 .zip(&chains)
@@ -167,16 +165,22 @@ impl Detector for EditCollision {
 /// is the version of an in-flight write whose change the current change lists in its deps.
 fn chain(cx: &DetectCx<'_>, all: &[Arc<Write>], w: &Write) -> Chain {
     let mut changes = BTreeSet::from([w.change]);
+    let mut through = BTreeSet::from([w.version, w.base]);
     let (mut root, mut at) = (w.base, w.change);
     while let Some(x) = all
         .iter()
         .find(|x| !changes.contains(&x.change) && x.version == root && depends(cx, &at, &x.change))
     {
         changes.insert(x.change);
+        through.insert(x.base);
         root = x.base;
         at = x.change;
     }
-    Chain { root, changes }
+    Chain {
+        root,
+        through,
+        changes,
+    }
 }
 
 /// Whether in-flight change `c` lists `d` in its deps.

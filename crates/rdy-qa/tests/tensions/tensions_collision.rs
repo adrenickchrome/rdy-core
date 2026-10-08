@@ -263,6 +263,25 @@ fn tcol1_an_identical_edit_is_not_a_collision_before_or_after_a_landing() {
 }
 
 #[test]
+fn tcol1_a_chain_through_canons_version_is_not_a_collision_after_a_landing() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.a, "A same."));
+    put(&mut r, "a", upd(&s.a, "A later."));
+    put(&mut r, "b", upd(&s.a, "A same."));
+    one(&r, TensionKind::EditCollision);
+    land(&mut r, "b").unwrap();
+    assert!(
+        !conflicted(&r, "a", &s.a),
+        "the merge reads a's chain as built on canon's version"
+    );
+    assert!(
+        of_kind(&r, TensionKind::EditCollision).is_empty(),
+        "a chain that passes through canon's version is not stale"
+    );
+}
+
+#[test]
 fn tcol1_a_double_delete_is_not_a_collision_before_or_after_a_landing() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
