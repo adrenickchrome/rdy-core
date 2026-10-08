@@ -30,3 +30,10 @@ pub fn run(project: &Path, show_origin: bool) -> Result<(Value, String), ErrorRe
         .collect();
     Ok((Value::Array(rows), lines.join("\n")))
 }
+
+#[derive(clap::Args)]
+pub(crate) struct ConfigArgs {
+    /// Also name the file each value comes from, or `default`.
+    #[arg(long)]
+    pub(crate) show_origin: bool,
+}

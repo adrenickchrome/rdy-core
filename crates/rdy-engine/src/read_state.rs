@@ -862,3 +862,15 @@ fn build_merged(
     };
     Ok(Built::new(m, Arc::new(merged.conflicts)))
 }
+
+impl ReadState {
+    /// The name of the project as a site shows it, as parsed when this state was published.
+    pub fn project_name(&self) -> String {
+        self.name.to_string()
+    }
+
+    /// The config's `description`, when it had a non-empty one when this state was published.
+    pub fn project_description(&self) -> Option<String> {
+        self.description.as_deref().map(str::to_string)
+    }
+}

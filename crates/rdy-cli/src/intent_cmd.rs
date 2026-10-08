@@ -1,6 +1,8 @@
 //! mint1: `rdy intent *`. The commands build one `IntentRequest` JSON for the ctl `intent` op;
 //! the renderer turns the op's reply into text. `--json` prints the reply as it is.
+use crate::conn::{Env, call};
 use clap::Subcommand;
+use rdy_daemon::ErrorReply;
 use serde_json::{Value, json};
 
 #[derive(Subcommand)]
@@ -135,4 +137,10 @@ pub fn render(cmd: &IntentCmd, v: &Value) -> String {
         },
         _ => one_line(&v["intent"]),
     }
+}
+
+pub(crate) fn intent(env: &Env, cmd: IntentCmd) -> Result<(Value, String), ErrorReply> {
+    let v = call(env, "intent", args_of(&cmd))?;
+    let t = render(&cmd, &v);
+    Ok((v, t))
 }

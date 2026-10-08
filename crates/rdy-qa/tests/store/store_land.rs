@@ -9,7 +9,12 @@ use std::path::Path;
 
 fn child(test: &str, dir: &Path, point: &str) -> std::process::ExitStatus {
     std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test, "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            &rdy_qa::test_name!(test),
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env("RDY_A1_CHILD", dir)
         .env("RDY_A1_POINT", point)
         .status()

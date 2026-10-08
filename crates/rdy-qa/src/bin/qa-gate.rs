@@ -15,8 +15,8 @@ struct Args {
     deep: bool,
     /// Narrow the run to one area. `perf`: the release build and the perf tier only. Any other
     /// area (model, store, schema, engine, io, mcp, cli, render, ...): the release build, fmt,
-    /// clippy, the workspace tests, that area's rdy-qa test files, the rdy-qa unit tests and the
-    /// perf tier (unless --skip-perf).
+    /// clippy, the workspace tests, that area's rdy-qa test binary (`tests/<area>/main.rs`), the
+    /// rdy-qa unit tests and the perf tier (unless --skip-perf).
     #[arg(long, value_name = "AREA")]
     only: Option<String>,
     /// Skip the perf-regression tier.
@@ -65,17 +65,9 @@ fn git(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
-fn test_files() -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir(root().join("crates/rdy-qa/tests"))
-        .expect("tests dir")
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let p = e.path();
-            (p.extension()? == "rs").then(|| p.file_stem()?.to_str().map(str::to_string))?
-        })
-        .collect();
-    v.sort();
-    v
+/// The `rdy-qa` test directory: one test binary per area, `tests/<area>/main.rs`.
+fn tests_dir() -> PathBuf {
+    root().join("crates/rdy-qa/tests")
 }
 
 fn baseline_path() -> PathBuf {
@@ -203,7 +195,11 @@ fn main() {
         let _ = std::fs::remove_file(root().join("target/qa").join(f));
     }
     let mut notes: Vec<String> = vec![];
-    let plan = match report::plan(args.only.as_deref(), &test_files(), args.skip_perf) {
+    let plan = match report::plan(
+        args.only.as_deref(),
+        &report::test_areas(&tests_dir()),
+        args.skip_perf,
+    ) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{e}");
@@ -283,36 +279,30 @@ fn main() {
         );
     }
 
-    // The hardening suite, one test binary at a time so each area reports on its own.
-    for stem in &plan.files {
-        let mut c = cargo(&["test", "-p", "rdy-qa", "--release", "--test", stem]);
+    // A test file without its `mod` line in its area's `main.rs` compiles and never runs.
+    if plan.checks || !plan.files.is_empty() {
+        let problems = report::layout_problems(&tests_dir());
+        gate(
+            "rdy-qa test layout",
+            problems.is_empty(),
+            problems.join("\n"),
+        );
+    }
+
+    // The hardening suite, one test binary at a time; each area reports as one row (an area
+    // of two binaries, `engine` and `engine_read`, sums them).
+    for binary in &plan.files {
+        let mut c = cargo(&["test", "-p", "rdy-qa", "--release", "--test", binary]);
         if args.deep {
             c.env("RDY_QA_DEEP", "1");
         }
-        let (ok, out) = step(&format!("rdy-qa {stem}"), c);
+        let (ok, out) = step(&format!("rdy-qa {binary}"), c);
         let run = report::parse_cargo_test(&out);
         seeds.extend(report::failing_seeds(&out));
         if !ok && run.failures.is_empty() {
             eprintln!("{out}");
         }
-        let name = report::area_of(stem).to_string();
-        match areas.iter_mut().find(|a| a.name == name) {
-            Some(a) => {
-                a.passed += run.passed;
-                a.failed += run.failed;
-                a.ignored += run.ignored;
-                a.ok &= ok;
-                a.failures.extend(run.failures);
-            }
-            None => areas.push(Area {
-                name,
-                passed: run.passed,
-                failed: run.failed,
-                ignored: run.ignored,
-                ok,
-                failures: run.failures,
-            }),
-        }
+        report::add_run(&mut areas, binary, ok, run);
     }
 
     if plan.lib {

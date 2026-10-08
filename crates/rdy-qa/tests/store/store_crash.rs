@@ -53,7 +53,7 @@ fn kill1_engine_writes_killed_at_random_keep_every_acknowledged_write() {
         let want = 1 + ((seed >> 33) as usize) % 40;
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
-                "store_crash_child",
+                &rdy_qa::test_name!("store_crash_child"),
                 "--exact",
                 "--ignored",
                 "--nocapture",

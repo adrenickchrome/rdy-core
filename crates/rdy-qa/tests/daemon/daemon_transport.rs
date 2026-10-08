@@ -27,7 +27,7 @@ fn race1_eight_clients_against_a_cold_project_start_one_daemon_and_all_reach_it(
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
     let (spawn, count) = spawn_child_daemon(
-        "race1_child",
+        &rdy_qa::test_name!("race1_child"),
         &run,
         "1",
         &[("RDY_DAEMON_PROGRESS_MS", "300")],
@@ -74,7 +74,7 @@ fn race1_eight_clients_against_a_stale_socket_start_one_daemon() {
     let run = RunDir::of_project(dir.path());
     run.ensure().unwrap();
     drop(std::os::unix::net::UnixListener::bind(run.socket()).unwrap());
-    let (spawn, count) = spawn_child_daemon("race1_child", &run, "1", &[]);
+    let (spawn, count) = spawn_child_daemon(&rdy_qa::test_name!("race1_child"), &run, "1", &[]);
     rt().block_on(async {
         let mut tasks = vec![];
         for _ in 0..8 {
@@ -102,7 +102,7 @@ fn race1_eight_clients_against_a_stale_socket_start_one_daemon() {
 fn race1_a_killed_daemon_is_replaced_on_the_next_client() {
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
-    let (spawn, count) = spawn_child_daemon("race1_child", &run, "1", &[]);
+    let (spawn, count) = spawn_child_daemon(&rdy_qa::test_name!("race1_child"), &run, "1", &[]);
     let pid1 = rt().block_on(async {
         let mut c = connect_or_start(&run, client(&run, "1", dir.path(), spawn.clone()))
             .await
@@ -144,8 +144,12 @@ fn kill9(pid: u64) {
 fn race1_a_detached_daemon_idles_out_and_the_next_client_starts_a_new_one() {
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
-    let (spawn, count) =
-        spawn_child_daemon("race1_child", &run, "1", &[("RDY_DAEMON_IDLE_MS", "500")]);
+    let (spawn, count) = spawn_child_daemon(
+        &rdy_qa::test_name!("race1_child"),
+        &run,
+        "1",
+        &[("RDY_DAEMON_IDLE_MS", "500")],
+    );
     rt().block_on(async {
         let mut c = connect_or_start(&run, client(&run, "1", dir.path(), spawn.clone()))
             .await
@@ -167,8 +171,9 @@ fn race1_a_detached_daemon_idles_out_and_the_next_client_starts_a_new_one() {
 fn race1_version_mismatch_idle_daemon_is_replaced_busy_one_refuses() {
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
-    let (spawn_old, _) = spawn_child_daemon("race1_child", &run, "0.1.0", &[]);
-    let (spawn_new, count_new) = spawn_child_daemon("race1_child", &run, "0.2.0", &[]);
+    let (spawn_old, _) = spawn_child_daemon(&rdy_qa::test_name!("race1_child"), &run, "0.1.0", &[]);
+    let (spawn_new, count_new) =
+        spawn_child_daemon(&rdy_qa::test_name!("race1_child"), &run, "0.2.0", &[]);
     rt().block_on(async {
         let old = connect_or_start(&run, client(&run, "0.1.0", dir.path(), spawn_old.clone()))
             .await
@@ -203,7 +208,7 @@ fn race1_version_mismatch_idle_daemon_is_replaced_busy_one_refuses() {
 fn race1_hostile_hellos_and_lines_never_take_the_daemon_down() {
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
-    let (spawn, _) = spawn_child_daemon("race1_child", &run, "1", &[]);
+    let (spawn, _) = spawn_child_daemon(&rdy_qa::test_name!("race1_child"), &run, "1", &[]);
     rt().block_on(async {
         let mut c = connect_or_start(&run, client(&run, "1", dir.path(), spawn.clone())).await.unwrap();
         let junk: Vec<Vec<u8>> = vec![
@@ -244,7 +249,7 @@ fn race1_hostile_hellos_and_lines_never_take_the_daemon_down() {
 fn race1_two_hundred_pipelined_requests_from_four_clients_all_answer_in_order() {
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
-    let (spawn, _) = spawn_child_daemon("race1_child", &run, "1", &[]);
+    let (spawn, _) = spawn_child_daemon(&rdy_qa::test_name!("race1_child"), &run, "1", &[]);
     rt().block_on(async {
         let mut tasks = vec![];
         for k in 0..4u64 {
@@ -287,7 +292,7 @@ fn race1_children_spawned_by_other_threads_during_the_start_lock_handoff_do_not_
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
     let (spawn, count) = spawn_child_daemon(
-        "race1_child",
+        &rdy_qa::test_name!("race1_child"),
         &run,
         "1",
         &[("RDY_DAEMON_PROGRESS_MS", "200")],
