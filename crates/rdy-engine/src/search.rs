@@ -93,6 +93,9 @@ pub struct SearchFilters {
     /// Only blocks with an open suspect.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub suspect: bool,
+    /// linked or unlinked: blocks that name an entity (by name or alias, whole words) and are tied to it (linked), or that name one they are not tied to yet (unlinked). Only blocks that can link to an entity count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mentions: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -693,6 +696,30 @@ impl ReadState {
         }
         if f.suspect {
             allowed.push(self.suspects(scope)?.into_iter().map(|s| s.block).collect());
+        }
+        if let Some(want) = &f.mentions {
+            if !matches!(want.as_str(), "linked" | "unlinked") {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    format!("mentions: {want:?} is not linked or unlinked"),
+                    "pass linked or unlinked",
+                ));
+            }
+            let linked = want == "linked";
+            let lex = self.lexicon(scope)?;
+            let mut set: BTreeSet<BlockId> = BTreeSet::new();
+            for b in m.iter() {
+                if link_kind_for(pack, b).is_none() {
+                    continue;
+                }
+                let hit = lex.mentions(b).iter().any(|ms| {
+                    BlockId::parse(&ms.entity).is_ok_and(|e| tied(&g, &b.id, &e) == linked)
+                });
+                if hit {
+                    set.insert(b.id.clone());
+                }
+            }
+            allowed.push(set);
         }
         let pack_traits = pack
             .block_types

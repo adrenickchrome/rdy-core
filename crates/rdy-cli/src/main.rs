@@ -140,6 +140,9 @@ enum Cmd {
         /// Keep blocks linked to or from this block.
         #[arg(long = "linked-to")]
         linked_to: Option<String>,
+        /// linked or unlinked: keep blocks that name an entity and are (or are not yet) linked to it.
+        #[arg(long)]
+        mentions: Option<String>,
         /// Keep only blocks with an open suspect.
         #[arg(long)]
         suspect: bool,
@@ -1191,6 +1194,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             governed_by,
             describes,
             linked_to,
+            mentions,
             suspect,
         } => {
             // Empty lists and false flags are sent as absent.
@@ -1202,7 +1206,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                 json!({"query": query, "regex": regex, "ignore_case": ignore_case, "scope": scope, "max_tokens": max_tokens, "page": page,
                     "types": list(types), "traits": list(traits), "path": path, "lifecycle": lifecycle, "changed_since": changed_since,
                     "exclude_history": flag(exclude_history), "governed_by": governed_by, "describes": describes, "linked_to": linked_to,
-                    "suspect": flag(suspect)}),
+                    "mentions": mentions, "suspect": flag(suspect)}),
             )?;
             let t = search_text(&v);
             Ok((v, t))
