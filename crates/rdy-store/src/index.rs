@@ -347,6 +347,57 @@ impl Index {
         hashes_under(&t, block.as_str(), "deleter entry")
     }
 
+    /// For each of `blocks` that has a deleter, its deleters in ascending hash order, each with
+    /// the landing that carried it into canon and that landing's location, if one has: one read
+    /// transaction for all of them, and none when `blocks` is empty.
+    #[allow(clippy::type_complexity)]
+    pub fn deleter_rows<'a>(
+        &self,
+        blocks: impl IntoIterator<Item = &'a BlockId>,
+    ) -> Result<BTreeMap<BlockId, Vec<(Hash, Option<(Hash, Location)>)>>, StoreError> {
+        let mut blocks = blocks.into_iter().peekable();
+        if blocks.peek().is_none() {
+            return Ok(BTreeMap::new());
+        }
+        let r = self.db.begin_read().map_err(db)?;
+        let deleters = r.open_table(DELETERS).map_err(db)?;
+        let mut out = BTreeMap::new();
+        let mut tables = None;
+        for block in blocks {
+            if out.contains_key(block) {
+                continue;
+            }
+            let changes = hashes_under(&deleters, block.as_str(), "deleter entry")?;
+            if changes.is_empty() {
+                continue;
+            }
+            if tables.is_none() {
+                tables = Some((
+                    r.open_table(LANDED).map_err(db)?,
+                    r.open_table(TYPED).map_err(db)?,
+                ));
+            }
+            let (landed, typed) = tables.as_ref().expect("opened above");
+            let mut rows = Vec::with_capacity(changes.len());
+            for c in changes {
+                let at = match landed.get(&c.0[..]).map_err(db)? {
+                    Some(v) => {
+                        let l = hash_from(v.value(), "landed entry")?;
+                        let loc = typed
+                            .get(&typed_key(crate::kinds::LANDING, &l)[..])
+                            .map_err(db)?
+                            .ok_or(StoreError::NotFound(l))?;
+                        Some((l, dec(loc.value())?))
+                    }
+                    None => None,
+                };
+                rows.push((c, at));
+            }
+            out.insert(block.clone(), rows);
+        }
+        Ok(out)
+    }
+
     /// The landing that carried `change` into canon, if one has.
     pub fn landing_of(&self, change: &Hash) -> Result<Option<Hash>, StoreError> {
         let r = self.db.begin_read().map_err(db)?;

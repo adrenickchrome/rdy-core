@@ -164,7 +164,8 @@ impl Store {
             .map(|c| self.change(c))
             .collect::<Result<Vec<_>, _>>()?;
         changes.extend(accept_change.iter().cloned());
-        let state = self.merge_checked(&self.canon_state()?, &changes)?.0.state;
+        let (prev_head, prev_state) = (self.canon_head()?, self.canon_state()?);
+        let state = self.merge_checked(&prev_state, &changes)?.0.state;
         let sid = state.id();
         items.push((kinds::SNAPSHOT, encode(&state)));
         // 6. the landing
@@ -261,17 +262,35 @@ impl Store {
                 .flatten()
                 .or_else(|| accepted.get(v).copied())
         };
-        // A block's deleter as the index will answer after this write: this landing's deleters
-        // (smallest hash first, as `Store::deleter` breaks ties within a landing) win, as the
-        // landing written last; otherwise the one canon already has.
-        let deleter = |b: &BlockId| {
-            let all = self.index().deleters(b).ok().unwrap_or_default();
-            all.iter()
-                .filter(|c| landed.contains(c))
-                .min()
+        // The delete that removed each block this landing touches and the new canon lacks, as
+        // `deleters_at` will answer after this write: for a block canon held until now, this
+        // landing's delete of it (smallest hash first, as `deleters_at` breaks ties within a
+        // landing); otherwise the one that removed it as of the previous head.
+        let mut rows = self.index().deleter_rows(
+            touched_l
+                .iter()
                 .copied()
-                .or_else(|| self.deleter(b).ok().flatten())
-        };
+                .filter(|b| !state.blocks.contains_key(*b)),
+        )?;
+        let mut removed: HashMap<BlockId, Hash> = HashMap::new();
+        rows.retain(|b, deletes| {
+            if !prev_state.blocks.contains_key(b) {
+                return true;
+            }
+            if let Some(d) = deletes
+                .iter()
+                .map(|(d, _)| d)
+                .filter(|d| landed.contains(d))
+                .min()
+            {
+                removed.insert(b.clone(), *d);
+            }
+            false
+        });
+        if let Some(h) = &prev_head {
+            removed.extend(self.removers(rows, h)?);
+        }
+        let deleter = |b: &BlockId| removed.get(b).copied();
         let mut rebased = vec![];
         let mut closed = vec![];
         let mut view_refs = vec![];

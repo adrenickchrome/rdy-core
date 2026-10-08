@@ -127,17 +127,25 @@ impl StoreReader {
         }
     }
 
-    /// Merges `changes` onto `base` (merge1): deps first, then change id, with conflicts as data.
+    /// Merges `changes` onto `base`, the state of landing `at` (merge1): deps first, then change
+    /// id, with conflicts as data. A block `base` lacks reads as removed by the delete that
+    /// removed it as of `at` (`deleters_at`).
     pub fn merge_onto(
         &self,
+        at: Option<Hash>,
         base: &StateSnapshot,
         changes: &[Change],
     ) -> Result<Merged, StoreError> {
-        Ok(self.merge_onto_indexed(base, changes).0)
+        Ok(self.merge_onto_indexed(at, base, changes)?.0)
     }
 
     /// `merge_onto`, with each applied change's position in `changes` (see `merge_indexed`).
-    fn merge_onto_indexed(&self, base: &StateSnapshot, changes: &[Change]) -> (Merged, Vec<usize>) {
+    fn merge_onto_indexed(
+        &self,
+        at: Option<Hash>,
+        base: &StateSnapshot,
+        changes: &[Change],
+    ) -> Result<(Merged, Vec<usize>), StoreError> {
         let input: Vec<MergeChange<'_>> = changes
             .iter()
             .map(|c| MergeChange {
@@ -146,9 +154,19 @@ impl StoreReader {
                 ops: &c.ops,
             })
             .collect();
-        merge_indexed(base, &input, &|v| self.producer(v).ok().flatten(), &|b| {
-            self.deleter(b).ok().flatten()
-        })
+        let deleters = self.merge_deleters(
+            at.as_ref(),
+            base,
+            changes
+                .iter()
+                .flat_map(|c| c.ops.iter().map(|op| op.block_id())),
+        )?;
+        Ok(merge_indexed(
+            base,
+            &input,
+            &|v| self.producer(v).ok().flatten(),
+            &|b| deleters.get(b).copied(),
+        ))
     }
 
     /// View `name`'s included changes merged onto its base (canon's head when it has no head).
@@ -163,7 +181,7 @@ impl StoreReader {
             .iter()
             .map(|c| self.change(c))
             .collect::<Result<Vec<_>, _>>()?;
-        self.merge_onto(&self.state_of(base)?, &changes)
+        self.merge_onto(base, &self.state_of(base)?, &changes)
     }
 
     pub fn view_state(&self, name: &str) -> Result<StateSnapshot, StoreError> {
@@ -171,7 +189,10 @@ impl StoreReader {
     }
 
     /// `merge_onto(canon, changes)` with the landing checks: the first conflict (block order) is
-    /// `StaleBase` naming its base and canon's version, or `AlreadyExists` when its base is none;
+    /// `StaleBase` naming its base and canon's version, `DeletedSince` when its base is none, canon
+    /// lacks the block and a side is a delete (a re-create of an id canon removed after the
+    /// writer's base), or
+    /// `AlreadyExists` when its base is none;
     /// an op whose base is a frozen decision is `Frozen`. The one mapping the store's `land`, the
     /// engine's gate and atomic landings share. With the merge, it returns each applied change's
     /// position in `changes`, in the order applied (see `merge_indexed`).
@@ -180,7 +201,7 @@ impl StoreReader {
         canon: &StateSnapshot,
         changes: &[Change],
     ) -> Result<(Merged, Vec<usize>), StoreError> {
-        let (merged, at) = self.merge_onto_indexed(canon, changes);
+        let (merged, at) = self.merge_onto_indexed(self.canon_head()?, canon, changes)?;
         if let Some(c) = merged.conflicts.first() {
             return Err(match c.base {
                 Some(base) => StoreError::StaleBase {
@@ -188,6 +209,11 @@ impl StoreReader {
                     expected: base,
                     actual: canon.blocks.get(&c.block).copied(),
                 },
+                None if !canon.blocks.contains_key(&c.block)
+                    && c.sides.iter().any(|s| s.version.is_none()) =>
+                {
+                    StoreError::DeletedSince(c.block.clone())
+                }
                 None => StoreError::AlreadyExists(c.block.clone()),
             });
         }

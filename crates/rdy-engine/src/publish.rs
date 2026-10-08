@@ -3,6 +3,7 @@
 use crate::config::{Config, read_config_lenient, site_identity};
 use crate::read_state::{self, CoordHeads, Entry, InflightCell};
 use crate::{Delta, Event, Rdy, RdyError, ReadState, events};
+use rdy_model::Op;
 use rdy_store::kinds;
 use rdy_store::segment::Location;
 use std::sync::{Arc, OnceLock};
@@ -206,7 +207,16 @@ impl Rdy {
                             None if next.base == prev.canon_head => prev.canon.built_ok(),
                             _ => None,
                         };
-                        if let Some(b) = pred.filter(|b| b.conflicts.is_empty()) {
+                        // carrying the build assumes the ops merge clean; a create of an id that was
+                        // ever deleted merges against the delete that removed it, so that view
+                        // is built again instead
+                        let recreates = ops.iter().filter_map(|op| match op {
+                            Op::Create { block } => Some(&block.id),
+                            _ => None,
+                        });
+                        if let Some(b) = pred.filter(|b| b.conflicts.is_empty())
+                            && !self.store.ever_deleted(recreates)?
+                        {
                             next.seed(b.after(&ops));
                         }
                         views.insert(view.clone(), Arc::new(next));

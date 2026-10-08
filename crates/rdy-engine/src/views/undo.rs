@@ -323,7 +323,7 @@ impl Rdy {
                         .iter()
                         .map(|c| reader.change(c))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let merged = reader.merge_onto(&reader.state_of(Some(ch))?, &rest)?;
+                    let merged = reader.merge_onto(Some(ch), &reader.state_of(Some(ch))?, &rest)?;
                     ops.push(ViewOpKind::Rebase {
                         landing: ch,
                         dropped,

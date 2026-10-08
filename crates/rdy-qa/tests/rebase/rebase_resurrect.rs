@@ -274,3 +274,178 @@ fn rres2_a_re_create_written_after_the_canon_delete_lands() {
 fn re_create(t: &str, parent: &str, body: &str) -> Value {
     json!([{"op": "create", "type": "term", "id": t, "parent": parent, "fields": {"name": "Tide"}, "body": body}])
 }
+
+fn conflicts_of(r: &Rdy, v: &str) -> Vec<rdy_store::Conflict> {
+    r.read()
+        .conflicts(&Scope::View(v.into()))
+        .unwrap()
+        .as_ref()
+        .clone()
+}
+
+/// The view's conflicts as published in process, and as a fresh build computes them: the two
+/// must agree (a daemon or MCP server never reopens to see the truth).
+fn published_and_fresh(r: &mut Rdy, v: &str) -> Vec<rdy_store::Conflict> {
+    let published = conflicts_of(r, v);
+    r.invalidate();
+    assert_eq!(
+        published,
+        conflicts_of(r, v),
+        "published build of {v} is stale"
+    );
+    published
+}
+
+/// Review round 1, finding 1: a view that landed earlier and is empty again floats on canon; it
+/// re-creates an id canon deleted after the view's stored base. It read canon, so it saw the
+/// delete: the re-create depends on it and lands, with no conflict in process or after a rebuild.
+#[test]
+fn rres3_a_reused_floating_view_re_creates_an_id_canon_deleted_after_its_base() {
+    let (_d, mut r, t, s1, s2, _doc) = seeded();
+    let a = as_agent("agent:a", "r1");
+    write_as(
+        &mut r,
+        &a,
+        "a",
+        json!([{"op": "update", "id": s2, "fields": {"title": "Two!"}}]),
+    )
+    .unwrap();
+    land(&mut r, "a").unwrap();
+    write_as(
+        &mut r,
+        &as_agent("agent:b", "r2"),
+        "b",
+        step_ops(Step::Delete, 0, &t, &s1),
+    )
+    .unwrap();
+    land(&mut r, "b").unwrap();
+    write_as(&mut r, &a, "a", re_create(&t, &s1, "back")).unwrap();
+    assert!(published_and_fresh(&mut r, "a").is_empty());
+    land(&mut r, "a").unwrap();
+    assert_eq!(body_of(&r, &Scope::Canon, &t), "back");
+}
+
+/// Finding 1, the in-process path: the re-create written before canon's delete refuses; the
+/// published conflict is the real one, and writing T from it resolves it with no reopen.
+#[test]
+fn rres3_a_refused_re_create_resolves_in_process_without_a_reopen() {
+    let (_d, mut r, t, s1, _s2, _doc) = seeded();
+    let late = as_agent("agent:late", "r2");
+    write_as(&mut r, &late, "late", step_ops(Step::Delete, 0, &t, &s1)).unwrap();
+    write_as(&mut r, &late, "late", re_create(&t, &s1, "again")).unwrap();
+    write_as(
+        &mut r,
+        &as_agent("agent:del", "r1"),
+        "del",
+        step_ops(Step::Delete, 0, &t, &s1),
+    )
+    .unwrap();
+    land(&mut r, "del").unwrap();
+    let e = land(&mut r, "late").unwrap_err();
+    assert_eq!(e.code, E_CONFLICT_UNRESOLVED, "{e:?}");
+    let c = published_and_fresh(&mut r, "late");
+    assert_eq!(c.len(), 1, "{c:?}");
+    let side = c[0].sides.iter().find_map(|s| s.version).unwrap();
+    write_as(
+        &mut r,
+        &late,
+        "late",
+        json!([{"op": "update", "id": t, "base": side.to_string(), "body": "kept on purpose"}]),
+    )
+    .unwrap();
+    assert!(published_and_fresh(&mut r, "late").is_empty());
+    land(&mut r, "late").unwrap();
+    assert_eq!(body_of(&r, &Scope::Canon, &t), "kept on purpose");
+}
+
+/// Finding 3: two views delete T; v1's delete lands, v3 re-creates T after seeing it, then v2's
+/// delete lands though it changed nothing. v1's delete is the one that removed T, so v3 stays
+/// clean and lands.
+#[test]
+fn rres3_a_no_op_delete_landing_later_is_not_the_deleter() {
+    let (_d, mut r, t, s1, _s2, _doc) = seeded();
+    write_as(
+        &mut r,
+        &as_agent("agent:v1", "r1"),
+        "v1",
+        step_ops(Step::Delete, 0, &t, &s1),
+    )
+    .unwrap();
+    write_as(
+        &mut r,
+        &as_agent("agent:v2", "r2"),
+        "v2",
+        step_ops(Step::Delete, 0, &t, &s1),
+    )
+    .unwrap();
+    land(&mut r, "v1").unwrap();
+    write_as(
+        &mut r,
+        &as_agent("agent:v3", "r3"),
+        "v3",
+        re_create(&t, &s1, "back"),
+    )
+    .unwrap();
+    assert!(published_and_fresh(&mut r, "v3").is_empty());
+    land(&mut r, "v2").unwrap();
+    assert!(published_and_fresh(&mut r, "v3").is_empty());
+    land(&mut r, "v3").unwrap();
+    assert_eq!(body_of(&r, &Scope::Canon, &t), "back");
+}
+
+/// Finding 2: a view pinned where T is deleted (by x) re-creates T, while canon re-created T and
+/// deleted it again (by z). The view is clean on its own base (it saw x's delete), so it carries
+/// no conflict it cannot resolve. Its landing refuses as a stale base: it never saw z's delete.
+/// The hint is one the writer can follow: re-create T from a view that reads canon.
+#[test]
+fn rres3_a_pinned_view_re_create_is_clean_on_its_base_and_refuses_on_canon_with_a_hint_it_can_follow()
+ {
+    let (d, mut r, t, s1, _s2, _doc) = seeded();
+    write_as(
+        &mut r,
+        &as_agent("agent:x", "r1"),
+        "x",
+        step_ops(Step::Delete, 0, &t, &s1),
+    )
+    .unwrap();
+    land(&mut r, "x").unwrap();
+    let p = as_agent("agent:p", "rp");
+    r.view_create(&p, "pin", None, true).unwrap();
+    write_as(
+        &mut r,
+        &as_agent("agent:y", "r2"),
+        "y",
+        re_create(&t, &s1, "y"),
+    )
+    .unwrap();
+    land(&mut r, "y").unwrap();
+    write_as(
+        &mut r,
+        &as_agent("agent:z", "r3"),
+        "z",
+        step_ops(Step::Delete, 0, &t, &s1),
+    )
+    .unwrap();
+    land(&mut r, "z").unwrap();
+    write_as(&mut r, &p, "pin", re_create(&t, &s1, "pinned")).unwrap();
+    assert!(published_and_fresh(&mut r, "pin").is_empty());
+    drop(r);
+    let mut r = Rdy::open(d.path()).unwrap();
+    assert!(
+        conflicts_of(&r, "pin").is_empty(),
+        "no conflict after a reopen either"
+    );
+    let e = land(&mut r, "pin").unwrap_err();
+    assert_eq!(e.code, E_STALE_BASE, "{e:?}");
+    assert!(e.fix.contains("reads canon"), "{e:?}");
+    let tid = BlockId::parse(&t).unwrap();
+    assert!(
+        r.read().block(&Scope::Canon, &tid).is_err(),
+        "T stays deleted"
+    );
+    // the hint, followed
+    write_as(&mut r, &p, "fresh", re_create(&t, &s1, "pinned")).unwrap();
+    land(&mut r, "fresh").unwrap();
+    assert_eq!(body_of(&r, &Scope::Canon, &t), "pinned");
+    r.fsck().unwrap();
+}

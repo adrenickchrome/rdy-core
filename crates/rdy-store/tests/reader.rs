@@ -258,7 +258,7 @@ fn record_len(r: &StoreReader, rec: &rdy_store::ViewRecord) -> usize {
         .iter()
         .map(|c| r.change(c).unwrap())
         .collect::<Vec<_>>();
-    r.merge_onto(&r.state_of(rec.base).unwrap(), &changes)
+    r.merge_onto(rec.base, &r.state_of(rec.base).unwrap(), &changes)
         .unwrap()
         .state
         .blocks
