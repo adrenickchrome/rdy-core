@@ -818,6 +818,47 @@ Linux bench rows: (bench: the orchestrator fills these rows from two cargo qa --
 
 Deep gate (bench): <orchestrator fills in>
 
+## M2d2: deterministic tensions (2026-10-06)
+
+The `qa-perf` tier gained `tier_tensions`, run right after `tier_inflight` in both tiers, on the same
+project. It reuses the 1,000 changes `tier_inflight` leaves in flight across `inf0` to `inf19` on the
+10k tree (the 50k tree with `--deep`) and adds 50 citing claims written round-robin into those
+views. Each citing claim cites a claim that another view updated, so premise shifts exist (the tier
+asserts at least 50 tensions, untimed). Each large-tier twin carries a `_50k` suffix. The op names
+keep `1k` whatever the fixture's size (the small-tree test runs 40 changes and 10 citing claims).
+
+Six ops:
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `tension_carry_1k` | one update of a fresh canon claim into `inf0` after the state's tension set was built, then `tensions()` of the new state. The write is outside the timer. Asserts that the set was carried | `runs.incremental` | < 10 ms p99 with 1k in-flight changes (M2 spec 15.1: `on_change` and tension detection, included in the write response) |
+| `tension_on_change_1k` | one citing claim into `inf1` between two captured states, then `tension_delta` and `delta::on_change` for view `inf1` (what the write response computes, the second state's set carried included). The write is outside the timer. Asserts the write opened a tension | `runs.incremental` | same |
+| `tension_settle_1k` | one update into `inf0` (outside the timer), then `settle_tensions()`: the diff of the last settled set and the published one, and the events | `runs.incremental` | recorded, no spec target: the writer's post-reply settle; compare with `tension_carry_1k` |
+| `tensions_full_1k` | cold: `invalidate`, then `tensions_rebuilt()` (every detector over canon and every in-flight change) | `runs.materialize_cold` | no spec target: the cold build of every tension at 1k in-flight changes, once per landing or structural write (recorded for M2d2) |
+| `tensions_canon` | cold: `invalidate`, then `canon_tensions_rebuilt()` (the canon scope only; FW-CH6). It runs once per landing: the canon part is memoised on canon's build, so a commit never pays it | `runs.materialize_cold` | no spec target: the canon-scope build of the tensions (FW-CH6), once per landing; recorded for Coverage and confidence |
+| `gate_tensions_1k` | `proposal_tensions` for `inf2` with its changes, on a built set | `runs.read` | recorded: the land message's tension check on a built set (inside the landing budget, M2 spec 15.1) |
+
+What each cost grows with:
+
+- `tension_carry_1k` and `tension_on_change_1k` grow with the tensions around the seed blocks of
+  the one change, not with the number of changes in flight: the carry removes and re-detects only
+  those. A commit that is structural, moves a block or changes its lifecycle does not carry and
+  pays the full build.
+- `tension_settle_1k` runs on the writer after the reply. It grows with the diff of the two sets,
+  by id. If it nears the write budget, the follow-up is to move the settle to a read-pool task
+  (ledger question).
+- `tensions_full_1k` grows with the in-flight changes and the tree; a landing or a structural write
+  pays it once per published state, on its first tension read. It includes the cold build of the
+  in-flight state, as canon is not built after the `invalidate`.
+- `tensions_canon` grows with the tree. It is the canon part of `tensions_full_1k`.
+- `gate_tensions_1k` grows with the changes of the version and the tensions that involve them.
+
+Baseline: `qa-baseline.json` is not changed here.
+
+Linux bench rows: (bench: the orchestrator fills these rows from two cargo qa --only perf --deep runs on the isolated Linux bench)
+
+Deep gate (bench): <orchestrator fills in>
+
 ## Agent ergonomics 2: search (2026-10-06)
 
 The `qa-perf` tier gained one op for block-text search (FW-PR1). It runs in `tier_reads`, after
