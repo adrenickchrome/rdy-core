@@ -137,4 +137,9 @@ pub struct Rdy {
     briefs: Arc<brief::BriefRegistry>,
     /// The tension detectors every published state runs: the registry, unless a test set others.
     detectors: &'static [&'static dyn tensions::Detector],
+    /// The tension set the last `settle_tensions` recorded, and the `seq` of its state.
+    tension_seen: Option<(Arc<tensions::TensionSet>, Location)>,
+    /// The state `publish` held before the first write since open, while nothing is settled:
+    /// the first settle diffs against its set.
+    tension_base: Option<Arc<ReadState>>,
 }

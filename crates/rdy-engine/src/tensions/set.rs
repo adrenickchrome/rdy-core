@@ -6,7 +6,8 @@ use crate::error::*;
 use crate::views::clip;
 use crate::{RdyError, ReadState};
 use imbl::{OrdMap, OrdSet};
-use rdy_model::{BlockId, Hash};
+use rdy_model::{Block, BlockId, Hash, Op, decision};
+use std::collections::BTreeSet;
 use std::sync::{Arc, OnceLock};
 
 /// The event-derived tensions of one state, by id, with indexes by block and by change.
@@ -174,10 +175,97 @@ pub(crate) fn resolve_among<'a>(
     }
 }
 
-/// A state's tension set, built on first read.
+/// A state's tension set, built on first read: carried from the state before when `carry` is
+/// set (a commit), else a full build.
 #[derive(Default)]
 pub(crate) struct TensionCell {
     pub(crate) set: OnceLock<Result<Arc<TensionSet>, RdyError>>,
+    /// The state before's set, the change committed and its view: the first read carries.
+    pub(crate) carry: Option<(Arc<TensionSet>, Hash, String)>,
+    /// Whether the set was carried; set before `set` is.
+    carried: OnceLock<bool>,
+}
+
+impl TensionCell {
+    /// An unbuilt cell whose first read carries `prev` across `change`, committed to `view`.
+    pub(crate) fn carrying(prev: Arc<TensionSet>, change: Hash, view: String) -> TensionCell {
+        TensionCell {
+            carry: Some((prev, change, view)),
+            ..TensionCell::default()
+        }
+    }
+}
+
+/// The blocks a carry re-detects around for `change`: the blocks it writes, and the
+/// `supersedes` and `revokes` targets of the decisions it writes (as written, and as they were).
+fn seeds_of(st: &ReadState, change: &Hash) -> Result<BTreeSet<BlockId>, RdyError> {
+    let c = st.reader().change(change)?;
+    let mut seeds = BTreeSet::new();
+    let mut targets = |b: &Block| {
+        if b.block_type == decision::DECISION {
+            for name in [decision::SUPERSEDES, decision::REVOKES] {
+                for l in b.links.get(name).into_iter().flatten() {
+                    seeds.insert(l.target.clone());
+                }
+            }
+        }
+    };
+    for op in &c.ops {
+        if let Op::Create { block } | Op::Update { block, .. } = op {
+            targets(block);
+        }
+        if let Some(base) = op.base() {
+            targets(&st.reader().get_block(&base)?);
+        }
+    }
+    for op in &c.ops {
+        seeds.insert(op.block_id().clone());
+    }
+    Ok(seeds)
+}
+
+/// The carry (tcar1): `prev`'s canon part (canon did not move); its in-flight part less every
+/// tension that involves a seed; and what the state's detectors find in flight around the seeds
+/// that involves one. `None` when the state's in-flight set is not `prev`'s plus `change`.
+fn carry(
+    st: &ReadState,
+    prev: &TensionSet,
+    change: Hash,
+    view: &str,
+) -> Result<Option<TensionSet>, RdyError> {
+    if let Some(e) = &st.error {
+        return Err(e.clone());
+    }
+    let set = st.inflight_set()?;
+    if !prev.writes.extends_to(&set, &change) {
+        return Ok(None);
+    }
+    let writes = Arc::new(prev.writes.with_change(st, change, view)?);
+    let seeds = seeds_of(st, &change)?;
+    let involves_seed = |t: &Tension| t.involved.iter().any(|i| seeds.contains(&i.block));
+    let canon: Vec<Arc<Tension>> = prev
+        .iter()
+        .filter(|t| prev.from_canon(&t.id))
+        .cloned()
+        .collect();
+    let mut inflight: Vec<Arc<Tension>> = prev
+        .iter()
+        .filter(|t| !prev.from_canon(&t.id) && !involves_seed(t))
+        .cloned()
+        .collect();
+    let cx = DetectCx::new(st, &writes, canon_index_of(st)?, DetectScope::Inflight);
+    for d in st.detectors {
+        let mut found = vec![];
+        d.detect(&cx, Some(&seeds), &mut found)?;
+        inflight.extend(
+            found
+                .into_iter()
+                .filter_map(|f| tension_from(st.pack(), f, false, DetectScope::Inflight))
+                .filter(|t| involves_seed(t))
+                .map(Arc::new),
+        );
+    }
+    Ok(Some(TensionSet::of(&canon, inflight, writes)))
 }
 
 /// The canon part for `detectors`: each run in the canon scope, kept when every side is canon,
@@ -237,9 +325,19 @@ impl ReadState {
         if let Some(e) = &self.error {
             return Err(e.clone());
         }
-        self.tensions
-            .set
-            .get_or_init(|| build(self, self.detectors, true).map(Arc::new))
+        let cell = &self.tensions;
+        cell.set
+            .get_or_init(|| {
+                // a carry that cannot run (another in-flight set) or fails falls back to a build
+                if let Some((prev, change, view)) = &cell.carry
+                    && let Ok(Some(set)) = carry(self, prev, *change, view)
+                {
+                    let _ = cell.carried.set(true);
+                    return Ok(Arc::new(set));
+                }
+                let _ = cell.carried.set(false);
+                build(self, self.detectors, true).map(Arc::new)
+            })
             .clone()
     }
 
@@ -271,9 +369,12 @@ impl ReadState {
     }
 
     /// Test hook: whether this state's tension set was carried from the state before (`None`
-    /// while unbuilt). A full build here.
+    /// while unbuilt).
     #[doc(hidden)]
     pub fn tensions_carried(&self) -> Option<bool> {
-        self.tensions.set.get().map(|_| false)
+        self.tensions
+            .set
+            .get()
+            .map(|_| self.tensions.carried.get().copied().unwrap_or(false))
     }
 }

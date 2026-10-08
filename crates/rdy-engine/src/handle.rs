@@ -118,8 +118,12 @@ impl Rdy {
             serve: cfg.serve.resolve(),
             briefs: Arc::new(brief::BriefRegistry::new(brief::BRIEF_REGISTRY_CAP)),
             detectors: &tensions::DETECTORS,
+            tension_seen: None,
+            tension_base: None,
         };
         r.invalidate();
+        // that publish replaced the placeholder state: the first write records the base
+        r.tension_base = None;
         Ok(r)
     }
 

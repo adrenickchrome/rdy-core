@@ -6,7 +6,7 @@ use crate::brief::{effective_lifecycle, effective_stable};
 use crate::{InflightSet, Materialized, RdyError, ReadState, Scope};
 use imbl::OrdMap;
 use rdy_graph::{DerivedStatus, Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, edges_of};
-use rdy_model::{Block, BlockId, FieldValue, Hash, Op, decision};
+use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Op, decision};
 use rdy_schema::{Pack, Trait};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -78,21 +78,10 @@ impl Writes {
         for c in &set.changes {
             read.push((*c, st.reader().change(c)?));
         }
-        // each change's writes, one per block: the first op's base, the last op's block
-        let mut per_change: BTreeMap<Hash, ChangeWrites> = BTreeMap::new();
-        for (c, change) in &read {
-            let blocks = per_change.entry(*c).or_default();
-            for op in &change.ops {
-                let new = match op {
-                    Op::Create { block } | Op::Update { block, .. } => Some(block.clone()),
-                    Op::Delete { .. } => None,
-                };
-                blocks
-                    .entry(op.block_id().clone())
-                    .and_modify(|w| w.1 = new.clone())
-                    .or_insert((op.base(), new));
-            }
-        }
+        let per_change: BTreeMap<Hash, ChangeWrites> = read
+            .iter()
+            .map(|(c, change)| (*c, writes_of(change)))
+            .collect();
         // the views in which a later change overwrote (c, b): it writes b and depends on c
         let no_views: Vec<String> = vec![];
         let views_of = |c: &Hash| set.views_of.get(c).unwrap_or(&no_views);
@@ -156,7 +145,169 @@ impl Writes {
         Ok(w)
     }
 
-    /// Adds live write `w` to the name, text, supersede and reference indexes.
+    /// Whether `set` is the set these writes were built from plus `change` (new, and in no view
+    /// that held these changes): every other change in the same views.
+    pub(crate) fn extends_to(&self, set: &InflightSet, change: &Hash) -> bool {
+        set.changes.len() == self.changes.len() + 1
+            && !self.changes.contains_key(change)
+            && set.views_of.contains_key(change)
+            && self
+                .changes
+                .values()
+                .all(|f| set.views_of.get(&f.id) == Some(&f.views))
+    }
+
+    /// These writes with in-flight change `change` (just committed to `view`) added: its writes,
+    /// the liveness of every write on the blocks it writes, and their index entries, as
+    /// [`Writes::build`] over the state's in-flight set computes them. When that set is not
+    /// these writes' set plus `change`, the full build.
+    pub fn with_change(
+        &self,
+        st: &ReadState,
+        change: Hash,
+        view: &str,
+    ) -> Result<Writes, RdyError> {
+        let set = st.inflight_set()?;
+        if !self.extends_to(&set, &change) {
+            return Writes::build(st, &set);
+        }
+        let read = st.reader().change(&change)?;
+        let mine = writes_of(&read);
+        let views = set
+            .views_of
+            .get(&change)
+            .cloned()
+            .unwrap_or_else(|| vec![view.to_string()]);
+        let pack = st.pack();
+        let min_words = pack.duplicate_text_min_words();
+        let mut w = self.clone();
+        w.changes.insert(
+            change,
+            ChangeFacts {
+                id: change,
+                deps: read.deps.clone(),
+                actor: read.provenance.actor.clone(),
+                run: read.provenance.run.clone(),
+                justified: read.justification.is_some(),
+                views,
+                blocks: mine.keys().cloned().collect(),
+            },
+        );
+        let mut own = Vec::with_capacity(mine.len());
+        let mut touched = IndexKeys::default();
+        for (b, (base, new)) in mine {
+            let before = w.by_block.get(&b).cloned().unwrap_or_default();
+            // the old live writes on b leave the indexes
+            for x in before.iter().filter(|x| x.live) {
+                touched.add(pack, min_words, x);
+            }
+            w.unindex_block(&touched, &b);
+            let at = before.partition_point(|x| x.change < change);
+            let mut writes: Vec<Arc<Write>> = before;
+            writes.insert(
+                at,
+                Arc::new(Write {
+                    change,
+                    block: b.clone(),
+                    base,
+                    version: new.as_ref().map(Block::version_hash),
+                    new: new.map(Arc::new),
+                    live: true,
+                }),
+            );
+            // the liveness of every write on b, from the changes that write b
+            let writers: Vec<Hash> = writes.iter().map(|x| x.change).collect();
+            let mut next = Vec::with_capacity(writes.len());
+            for x in &writes {
+                let views = w
+                    .changes
+                    .get(&x.change)
+                    .map(|f| f.views.as_slice())
+                    .unwrap_or(&[]);
+                let gone: BTreeSet<&str> = writers
+                    .iter()
+                    .filter(|r| **r != x.change)
+                    .filter_map(|r| w.changes.get(r))
+                    .filter(|f| f.deps.contains(&x.change))
+                    .flat_map(|f| f.views.iter().map(String::as_str))
+                    .collect();
+                let live = views.iter().any(|v| !gone.contains(v.as_str()));
+                let y = if live == x.live {
+                    Arc::clone(x)
+                } else {
+                    Arc::new(Write {
+                        live,
+                        ..(**x).clone()
+                    })
+                };
+                next.push(y);
+            }
+            for y in &next {
+                if y.live {
+                    touched.add(pack, min_words, y);
+                    w.index_live(pack, min_words, y);
+                }
+                if y.change == change {
+                    own.push(Arc::clone(y));
+                } else if let Some(list) = w.by_change.get_mut(&y.change)
+                    && let Some(slot) = list.iter_mut().find(|z| z.block == b)
+                {
+                    *slot = Arc::clone(y);
+                }
+            }
+            w.by_block.insert(b, next);
+        }
+        w.by_change.insert(change, own);
+        w.sort_index(&touched);
+        Ok(w)
+    }
+
+    /// Removes every entry of a write on `b` from the index entries `keys` names.
+    fn unindex_block(&mut self, keys: &IndexKeys, b: &BlockId) {
+        for k in &keys.names {
+            retain_key(&mut self.named, k, |x| &x.block != b);
+        }
+        for k in &keys.texts {
+            retain_key(&mut self.texted, k, |x| &x.block != b);
+        }
+        for k in &keys.targets {
+            retain_key(&mut self.superseding, k, |(x, _)| &x.block != b);
+        }
+        for k in &keys.pointed {
+            retain_key(&mut self.pointing, k, |(x, _)| &x.block != b);
+        }
+    }
+
+    /// Orders the index entries `keys` names as a build does: by change, then block (a stable
+    /// sort keeps one write's edges in their order).
+    fn sort_index(&mut self, keys: &IndexKeys) {
+        fn order(x: &Write, y: &Write) -> std::cmp::Ordering {
+            (x.change, &x.block).cmp(&(y.change, &y.block))
+        }
+        for k in &keys.names {
+            if let Some(v) = self.named.get_mut(k) {
+                v.sort_by(|x, y| order(x, y));
+            }
+        }
+        for k in &keys.texts {
+            if let Some(v) = self.texted.get_mut(k) {
+                v.sort_by(|x, y| order(x, y));
+            }
+        }
+        for k in &keys.targets {
+            if let Some(v) = self.superseding.get_mut(k) {
+                v.sort_by(|(x, _), (y, _)| order(x, y));
+            }
+        }
+        for k in &keys.pointed {
+            if let Some(v) = self.pointing.get_mut(k) {
+                v.sort_by(|(x, _), (y, _)| order(x, y));
+            }
+        }
+    }
+
+    /// Adds live write `w` to the name, text, supersede and reference indexes (`IndexKeys::add`
+    /// names the same keys).
     fn index_live(&mut self, pack: &Pack, min_words: usize, w: &Arc<Write>) {
         let Some(b) = w.new.as_deref() else {
             return;
@@ -248,6 +399,78 @@ impl Writes {
     /// The live writes whose block has a pointing or premise edge to `x`, with that edge.
     pub fn pointing_at(&self, x: &BlockId) -> Vec<(Arc<Write>, Edge)> {
         self.pointing.get(x).cloned().unwrap_or_default()
+    }
+}
+
+/// One change's writes, one per block: the first op's base, the last op's block.
+fn writes_of(change: &Change) -> ChangeWrites {
+    let mut blocks = ChangeWrites::new();
+    for op in &change.ops {
+        let new = match op {
+            Op::Create { block } | Op::Update { block, .. } => Some(block.clone()),
+            Op::Delete { .. } => None,
+        };
+        blocks
+            .entry(op.block_id().clone())
+            .and_modify(|w| w.1 = new.clone())
+            .or_insert((op.base(), new));
+    }
+    blocks
+}
+
+/// Keeps the entries of `map[k]` that `keep` accepts; a key left with none is removed.
+fn retain_key<K: Ord + Clone, T: Clone>(
+    map: &mut OrdMap<K, Vec<T>>,
+    k: &K,
+    keep: impl Fn(&T) -> bool,
+) {
+    let empty = match map.get_mut(k) {
+        Some(v) => {
+            v.retain(|x| keep(x));
+            v.is_empty()
+        }
+        None => false,
+    };
+    if empty {
+        map.remove(k);
+    }
+}
+
+/// The index keys some live writes are filed under.
+#[derive(Default)]
+struct IndexKeys {
+    names: BTreeSet<String>,
+    texts: BTreeSet<Hash>,
+    targets: BTreeSet<BlockId>,
+    pointed: BTreeSet<BlockId>,
+}
+
+impl IndexKeys {
+    /// Adds the keys `index_live` files live write `w` under (keep the two in step).
+    fn add(&mut self, pack: &Pack, min_words: usize, w: &Write) {
+        let Some(b) = w.new.as_deref() else {
+            return;
+        };
+        if defines(pack, b)
+            && let Some(name) = b.field_str("name")
+        {
+            self.names.insert(normalize_name(name));
+        }
+        if is_normative(pack, b)
+            && let Some(h) = normalize_text(&b.body, min_words)
+        {
+            self.texts.insert(h);
+        }
+        if b.block_type == decision::DECISION {
+            for l in b.links.get(decision::SUPERSEDES).into_iter().flatten() {
+                self.targets.insert(l.target.clone());
+            }
+        }
+        for e in edges_of(b) {
+            if premise_edge(&e) || pointing_edge(&e) {
+                self.pointed.insert(e.to.clone());
+            }
+        }
     }
 }
 

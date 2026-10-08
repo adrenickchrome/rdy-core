@@ -39,6 +39,8 @@ pub struct Writer {
     queued: Arc<AtomicUsize>,
     /// The idle checkpoint has failed and the failure was logged; cleared by a success.
     checkpoint_failing: bool,
+    /// Settling the tension set has failed and the failure was logged; cleared by a success.
+    settle_failing: bool,
 }
 
 /// A handle on the writer thread: send it writes, reloads and the shutdown.
@@ -78,6 +80,7 @@ impl Writer {
             rx,
             queued: Arc::clone(&queued),
             checkpoint_failing: false,
+            settle_failing: false,
         };
         let thread = std::thread::Builder::new()
             .name("rdy-writer".into())
@@ -178,6 +181,21 @@ impl Writer {
         }
     }
 
+    /// Settles the tension set after a write (tevt1). A failure never fails the write: it is
+    /// logged once, until a settle succeeds again.
+    fn settle(&mut self, rdy: &mut Rdy) {
+        match rdy.settle_tensions() {
+            Err(e) if !self.settle_failing => {
+                self.settle_failing = true;
+                log(&format!(
+                    "settling the tension set failed ({e}); no tension events are sent until it succeeds, and it is retried after every write"
+                ));
+            }
+            Err(_) => {}
+            Ok(_) => self.settle_failing = false,
+        }
+    }
+
     /// The loop: one message at a time, in arrival order, until shutdown or disconnect.
     fn run(mut self, mut rdy: Rdy) {
         loop {
@@ -210,6 +228,8 @@ impl Writer {
                     };
                     let published = self.publish(&rdy);
                     let _ = reply.send(out);
+                    // the tension events follow the reply, before the next message
+                    self.settle(&mut rdy);
                     published
                 }
                 Msg::Reload(reply) => {

@@ -100,6 +100,30 @@ pub enum EventKind {
         actor: String,
         run: Option<String>,
     },
+    /// A tension the settled set did not have (`Rdy::settle_tensions`). `kind` and `severity`
+    /// are their wire names, `sides` the full side labels; `rekeyed_from` is the tension of the
+    /// same vkey it replaces (a side landed or moved, its content did not).
+    TensionOpened {
+        #[serde(serialize_with = "hex::one")]
+        tension: Hash,
+        kind: String,
+        severity: String,
+        sides: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none", serialize_with = "hex::opt")]
+        rekeyed_from: Option<Hash>,
+    },
+    /// A tension of the settled set that is gone. `by` is what the last batch did
+    /// (`landing:<hex>`, `change:<hex>` or `op:<hex>`); `rekeyed_to` is the tension of the same
+    /// vkey that replaces it.
+    TensionResolved {
+        #[serde(serialize_with = "hex::one")]
+        tension: Hash,
+        kind: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none", serialize_with = "hex::opt")]
+        rekeyed_to: Option<Hash>,
+    },
 }
 
 /// Hashes in an event's JSON as lowercase hex strings.

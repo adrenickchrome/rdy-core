@@ -118,8 +118,13 @@ impl Engine for Local {
         self.lock().read()
     }
 
+    /// Runs `f`, then settles the tension set (its events follow the write's); a failed settle
+    /// never fails the write.
     fn write(&self, f: WriteFn) -> Result<serde_json::Value, RdyError> {
-        f(&mut self.lock())
+        let mut r = self.lock();
+        let out = f(&mut r);
+        let _ = r.settle_tensions();
+        out
     }
 
     fn open_report(&self) -> OpenReport {
