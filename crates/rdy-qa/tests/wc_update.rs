@@ -685,3 +685,33 @@ fn wcup1_a_conflicted_file_takes_the_store_changes_that_do_not_conflict() {
         "not deleted"
     );
 }
+
+#[test]
+fn wcup1_a_case_only_rename_in_the_store_takes_its_spelling_on_disk() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    store_write(
+        &s,
+        "work",
+        json!([{"op": "update", "id": seed.notes, "fields": {"name": "Notes"}}]),
+    );
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk && v["conflicts"].as_array().unwrap().is_empty(), "{v}");
+    let names: Vec<String> = std::fs::read_dir(at(&s, ""))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.to_lowercase() == "notes.yaml")
+        .collect();
+    assert_eq!(names, ["Notes.yaml"], "the store's spelling is on disk");
+    assert_eq!(
+        entry(&s, "Notes.yaml", &seed.note)["body"].as_str(),
+        Some("Note.")
+    );
+    let (okk, v) = json(&s, &["add", "."]);
+    assert!(okk, "{v}");
+    assert!(
+        v["staged"].as_array().unwrap().is_empty() && v["deleted"].as_array().unwrap().is_empty(),
+        "the update leaves nothing to commit, so the store's rename is not reverted: {v}"
+    );
+}

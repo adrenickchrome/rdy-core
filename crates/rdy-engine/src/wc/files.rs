@@ -164,9 +164,9 @@ fn occupied(
     })
 }
 
-/// Gives the existing directory `dir` the spelling its path asks for. On a case-insensitive
-/// filesystem `Guides` opens the directory stored as `guides`; it is renamed through a temporary
-/// name, never deleted and recreated, so what else it holds stays in it.
+/// Gives the existing directory or file `dir` the spelling its path asks for. On a
+/// case-insensitive filesystem `Guides` opens the directory stored as `guides`; it is renamed
+/// through a temporary name, never deleted and recreated, so what else it holds stays in it.
 fn fix_case(dir: &Path) -> Result<(), RdyError> {
     let (Some(parent), Some(want)) = (dir.parent(), dir.file_name()) else {
         return Ok(());
@@ -240,7 +240,9 @@ pub(crate) fn write_at(
 }
 
 /// As `write_at`, but the file is replaced in one step (a durable temporary file renamed over
-/// it): an error or a crash leaves either the old text or the new, never a part.
+/// it): an error or a crash leaves either the old text or the new, never a part. An existing file
+/// first takes the spelling `rel` asks for (`fix_case`): on a case-insensitive filesystem a
+/// rename over `notes.yaml` to `Notes.yaml` keeps the old spelling (a case-only rename).
 pub(crate) fn replace_at(
     root: &Path,
     rel: &str,
@@ -250,8 +252,10 @@ pub(crate) fn replace_at(
     let p = inside(rel)?;
     make_dirs(root, p, cases)?;
     let path = root.join(p);
-    if fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_file() && !m.is_dir()) {
-        remove_file(&path)?; // a link is replaced, never written through
+    match fs::symlink_metadata(&path) {
+        Ok(m) if m.file_type().is_file() => fix_case(&path)?,
+        Ok(m) if !m.is_dir() => remove_file(&path)?, // a link is replaced, never written through
+        _ => {}
     }
     rdy_store::fsutil::write_durable(&path, text.as_bytes()).map_err(|e| io_err(&path, "write", e))
 }
