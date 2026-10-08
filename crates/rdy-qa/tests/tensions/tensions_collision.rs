@@ -282,6 +282,39 @@ fn tcol1_a_chain_through_canons_version_is_not_a_collision_after_a_landing() {
 }
 
 #[test]
+fn tcol1_a_chain_whose_middle_write_meets_canons_version_still_collides_after_a_landing() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.a, "A first."));
+    put(&mut r, "a", upd(&s.a, "A same."));
+    put(&mut r, "a", upd(&s.a, "A later."));
+    put(&mut r, "b", upd(&s.a, "A same."));
+    land(&mut r, "b").unwrap();
+    assert!(
+        conflicted(&r, "a", &s.a),
+        "the merge reads a's first write as against canon's version"
+    );
+    let t = one(&r, TensionKind::EditCollision);
+    assert!(has_canon(&t), "the recorded conflict is the tension");
+}
+
+#[test]
+fn tcol1_a_chain_that_ends_at_canons_version_still_collides_after_a_landing() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.a, "A first."));
+    put(&mut r, "a", upd(&s.a, "A same."));
+    put(&mut r, "b", upd(&s.a, "A same."));
+    land(&mut r, "b").unwrap();
+    assert!(
+        conflicted(&r, "a", &s.a),
+        "the merge reads a's first write as against canon's version"
+    );
+    let t = one(&r, TensionKind::EditCollision);
+    assert!(has_canon(&t), "the recorded conflict is the tension");
+}
+
+#[test]
 fn tcol1_a_double_delete_is_not_a_collision_before_or_after_a_landing() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);

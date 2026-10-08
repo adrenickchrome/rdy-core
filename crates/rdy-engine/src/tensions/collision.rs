@@ -8,14 +8,14 @@
 //! (a) Every pair of live writes on one block from distinct changes with equal root bases and
 //! different outcomes, where neither chain lists the other change in its deps and the two are not
 //! a member pair of one open alternative set (FW-CH6a: the set's own rules govern them). (b) A
-//! live write whose outcome differs from canon's, whose chain does not pass through canon's
-//! version (canon's version is neither the root base nor the version of a write on the chain: the
-//! merge reads a write whose base is canon's version as clean), and whose chain does not depend on
-//! canon's version: on the producer of canon's version, or, when
-//! canon has no version of the block, on an in-flight write of the block (the merge reads that
-//! as the resolution of the delete). Equal outcomes are clean in the merge, so they never
-//! collide. No canon-scope form (FW-CH6a): canon holds one version per block, and the trigger
-//! needs in-flight work.
+//! live write whose chain meets canon's version only after its first write (canon's version is
+//! neither the root base nor the version of the chain's first write: the merge reads the first
+//! write as clean only then, and a later chain write does not cover canon's side of the conflict
+//! the first write records), and whose chain does not depend on canon's version: on the producer
+//! of canon's version, or, when canon has no version of the block, on an in-flight write of the
+//! block (the merge reads that as the resolution of the delete). A single write with canon's
+//! outcome is its own first write, so equal outcomes never collide. No canon-scope form
+//! (FW-CH6a): canon holds one version per block, and the trigger needs in-flight work.
 use super::{DetectCx, DetectScope, Detector, Found, Involved, SideRef, TensionKind, Write};
 use crate::RdyError;
 use rdy_model::{BlockId, Hash};
@@ -25,12 +25,11 @@ use std::sync::Arc;
 /// This kind's detector.
 pub struct EditCollision;
 
-/// A live write's chain on its block: the root base, the versions the chain passes through (the
-/// root base and every chain write's version, so every base and every version on the chain), and
-/// the changes on the chain, the write's own change among them.
+/// A live write's chain on its block: the root base, the version of the chain's first write (the
+/// write whose base is the root), and the changes on the chain, the write's own change among them.
 struct Chain {
     root: Option<Hash>,
-    through: BTreeSet<Option<Hash>>,
+    first: Option<Hash>,
     changes: BTreeSet<Hash>,
 }
 
@@ -95,13 +94,13 @@ impl Detector for EditCollision {
                     ));
                 }
             }
-            // (b) a live write against a canon version its chain does not pass through
+            // (b) a live write whose chain's first write is against canon's version
             let cv = canon.version_of(&b);
-            let stale = |w: &Write, ch: &Chain| w.version != cv && !ch.through.contains(&cv);
+            let stale = |ch: &Chain| ch.root != cv && ch.first != cv;
             let against: Vec<(&Arc<Write>, &Chain)> = live
                 .iter()
                 .zip(&chains)
-                .filter(|(w, ch)| stale(w, ch))
+                .filter(|(_, ch)| stale(ch))
                 .collect();
             if !against.is_empty() {
                 let producer = match cv {
@@ -165,20 +164,19 @@ impl Detector for EditCollision {
 /// is the version of an in-flight write whose change the current change lists in its deps.
 fn chain(cx: &DetectCx<'_>, all: &[Arc<Write>], w: &Write) -> Chain {
     let mut changes = BTreeSet::from([w.change]);
-    let mut through = BTreeSet::from([w.version, w.base]);
-    let (mut root, mut at) = (w.base, w.change);
+    let (mut root, mut first, mut at) = (w.base, w.version, w.change);
     while let Some(x) = all
         .iter()
         .find(|x| !changes.contains(&x.change) && x.version == root && depends(cx, &at, &x.change))
     {
         changes.insert(x.change);
-        through.insert(x.base);
         root = x.base;
+        first = x.version;
         at = x.change;
     }
     Chain {
         root,
-        through,
+        first,
         changes,
     }
 }
