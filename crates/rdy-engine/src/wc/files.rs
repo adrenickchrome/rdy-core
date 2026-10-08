@@ -100,7 +100,7 @@ fn io_err(path: &Path, what: &str, e: impl std::fmt::Display) -> RdyError {
 }
 
 /// `rel` as a path under the root: only plain names, never `..`, `/` or a prefix.
-fn inside(rel: &str) -> Result<&Path, RdyError> {
+pub(crate) fn inside(rel: &str) -> Result<&Path, RdyError> {
     let p = Path::new(rel);
     if rel.is_empty() || !p.components().all(|c| matches!(c, Component::Normal(_))) {
         return Err(RdyError::new(
@@ -127,14 +127,14 @@ fn ancestors(root: &Path, rel: &Path) -> Vec<PathBuf> {
 /// Whether one of the directories between the root and `rel`'s file exists as something other
 /// than a directory (a link, a file): what is under it is not the working tree's, so it is never
 /// read, written or deleted through it.
-fn behind_link(root: &Path, rel: &Path) -> bool {
+pub(crate) fn behind_link(root: &Path, rel: &Path) -> bool {
     ancestors(root, rel)
         .iter()
         .any(|d| fs::symlink_metadata(d).is_ok_and(|m| !m.file_type().is_dir()))
 }
 
 /// The file's identity on disk (device and inode), for a regular file not behind a link.
-fn identity(root: &Path, rel: &str) -> Option<(u64, u64)> {
+pub(crate) fn identity(root: &Path, rel: &str) -> Option<(u64, u64)> {
     let p = inside(rel).ok()?;
     if behind_link(root, p) {
         return None;
@@ -204,7 +204,7 @@ fn fix_case(dir: &Path) -> Result<(), RdyError> {
     Ok(())
 }
 
-fn remove_file(path: &Path) -> Result<(), RdyError> {
+pub(crate) fn remove_file(path: &Path) -> Result<(), RdyError> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -212,7 +212,7 @@ fn remove_file(path: &Path) -> Result<(), RdyError> {
     }
 }
 
-fn remove_tree(path: &Path) -> Result<(), RdyError> {
+pub(crate) fn remove_tree(path: &Path) -> Result<(), RdyError> {
     match fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -224,7 +224,7 @@ fn remove_tree(path: &Path) -> Result<(), RdyError> {
 /// a link, checked by the caller or discarded with `--force`) is removed first, so a link is
 /// replaced, never written through. With `cases`, each existing directory on the way is given
 /// its path's spelling once (`fix_case`); `cases` holds the directories already done.
-fn write_at(
+pub(crate) fn write_at(
     root: &Path,
     rel: &str,
     text: &str,
@@ -508,7 +508,7 @@ fn drop_tracked(
 
 /// Removes the directories between `top` and `rel`'s file that are left empty, deepest first;
 /// nothing when one of them is a link (what is behind it is not the working tree's).
-fn prune_dirs(top: &Path, rel: &str) {
+pub(crate) fn prune_dirs(top: &Path, rel: &str) {
     let Ok(p) = inside(rel) else { return };
     if behind_link(top, p) {
         return;

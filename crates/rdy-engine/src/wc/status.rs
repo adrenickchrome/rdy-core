@@ -4,7 +4,7 @@
 
 use crate::tree_io::FOLDER_FILE;
 use crate::wc::layout::WcTree;
-use crate::wc::state::{ConflictKind, Place, WcState, stage_paths};
+use crate::wc::state::{ConflictEntry, ConflictKind, Place, WcState, stage_paths};
 use rdy_model::{BlockId, Hash};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -296,41 +296,10 @@ pub fn compute(place: &Place, st: &WcState, tree: &WcTree) -> WcStatus {
     let mut conflicts: Vec<ConflictLine> = st
         .conflicts
         .iter()
-        .map(|c| {
-            let message = match c.kind {
-                ConflictKind::Blocks => format!(
-                    "{}: changed here and in the store (see {}.theirs.yaml)",
-                    c.path,
-                    c.path.strip_suffix(".yaml").unwrap_or(&c.path),
-                ),
-                ConflictKind::Kept => match c.store_name.as_deref() {
-                    Some(to) if to != c.path => format!(
-                        "{}: committed, but not written back to {to} (a file is in the way); move {to} aside, then run rdy checkout --force",
-                        c.path
-                    ),
-                    _ => format!(
-                        "{}: committed, but not written back (it holds edits the commit did not record); copy it aside, then run rdy checkout --force",
-                        c.path
-                    ),
-                },
-                ConflictKind::DocRename | ConflictKind::FolderRename => {
-                    let what = if c.kind == ConflictKind::DocRename {
-                        "doc"
-                    } else {
-                        "folder"
-                    };
-                    format!(
-                        "{what} renamed here to {}, in the store to {}",
-                        c.local_name.as_deref().unwrap_or("?"),
-                        c.store_name.as_deref().unwrap_or("?")
-                    )
-                }
-            };
-            ConflictLine {
-                path: c.path.clone(),
-                kind: c.kind,
-                message,
-            }
+        .map(|c| ConflictLine {
+            path: c.path.clone(),
+            kind: c.kind,
+            message: conflict_message(c),
         })
         .collect();
     conflicts.sort_by(|a, b| a.path.cmp(&b.path));
@@ -342,6 +311,39 @@ pub fn compute(place: &Place, st: &WcState, tree: &WcTree) -> WcStatus {
         unstaged: sorted(unstaged),
         untracked,
         conflicts,
+    }
+}
+
+/// The status line of one open conflict.
+pub fn conflict_message(c: &ConflictEntry) -> String {
+    match c.kind {
+        ConflictKind::Blocks => format!(
+            "{}: changed here and in the store (see {}.theirs.yaml)",
+            c.path,
+            c.path.strip_suffix(".yaml").unwrap_or(&c.path),
+        ),
+        ConflictKind::Kept => match c.store_name.as_deref() {
+            Some(to) if to != c.path => format!(
+                "{}: committed, but not written back to {to} (a file is in the way); move {to} aside, then run rdy checkout --force",
+                c.path
+            ),
+            _ => format!(
+                "{}: committed, but not written back (it holds edits the commit did not record); copy it aside, then run rdy checkout --force",
+                c.path
+            ),
+        },
+        ConflictKind::DocRename | ConflictKind::FolderRename => {
+            let what = if c.kind == ConflictKind::DocRename {
+                "doc"
+            } else {
+                "folder"
+            };
+            format!(
+                "{what} renamed here to {}, in the store to {}",
+                c.local_name.as_deref().unwrap_or("?"),
+                c.store_name.as_deref().unwrap_or("?")
+            )
+        }
     }
 }
 

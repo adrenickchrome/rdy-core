@@ -5,8 +5,10 @@ use super::{Open, open, tree};
 use crate::Env;
 use rdy_daemon::ErrorReply;
 use rdy_engine::wc::layout::{THEIRS_SUFFIX, WcTree};
-use rdy_engine::wc::state::{Place, WcState, stage_clear, stage_put};
-use rdy_engine::{E_BAD_INPUT, E_NOT_FOUND, E_WC_INVALID, RdyError};
+use rdy_engine::wc::merge::theirs_path;
+use rdy_engine::wc::state::{ConflictKind, Place, WcState, stage_clear, stage_put};
+use rdy_engine::{E_BAD_INPUT, E_NOT_FOUND, E_WC_CONFLICT, E_WC_INVALID, RdyError};
+use rdy_model::BlockId;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -142,6 +144,59 @@ fn plan_one(
     }
 }
 
+/// wcup1: the conflicts adding `rel` resolves, by index in `st.conflicts`: the one naming a file
+/// added, and each one a directory added holds (a folder rename names its directory). Refused
+/// with `E_WC_CONFLICT` while one's `.theirs.yaml` (or `_folder.theirs.yaml`) still exists.
+fn resolves(
+    place: &Place,
+    st: &WcState,
+    rel: &str,
+    out: &mut BTreeSet<usize>,
+) -> Result<(), ErrorReply> {
+    let is_dir = rel.is_empty()
+        || fs::symlink_metadata(place.root.join(rel)).is_ok_and(|m| m.file_type().is_dir());
+    for (i, c) in st.conflicts.iter().enumerate() {
+        if c.kind == ConflictKind::Kept {
+            continue; // only rdy checkout --force clears a kept file
+        }
+        let hit = if is_dir {
+            is_under(&c.path, rel)
+        } else {
+            c.path == rel
+        };
+        if !hit {
+            continue;
+        }
+        let theirs = theirs_path(c);
+        if fs::symlink_metadata(place.root.join(&theirs)).is_ok() {
+            return Err(refuse(
+                E_WC_CONFLICT,
+                format!("delete {theirs} first"),
+                format!(
+                    "edit {} to the version you want, delete {theirs}, then rdy add {}",
+                    c.path, c.path
+                ),
+            ));
+        }
+        out.insert(i);
+    }
+    Ok(())
+}
+
+/// The store's path of a doc or folder in a rename conflict: the doc's file, or the folder's
+/// directory.
+fn store_place(kind: ConflictKind, parent: &str, name: &str) -> String {
+    let at = if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent}/{name}")
+    };
+    match kind {
+        ConflictKind::DocRename => format!("{at}.yaml"),
+        _ => at,
+    }
+}
+
 fn not_in_tree(typed: &str) -> ErrorReply {
     refuse(
         E_BAD_INPUT,
@@ -158,6 +213,7 @@ pub(super) fn run(env: &Env, paths: Vec<PathBuf>) -> Result<(Value, String), Err
     } = open(env, true)?;
     let (_pack, wt) = tree(env, &place)?;
     let mut acts: BTreeMap<String, Act> = BTreeMap::new();
+    let mut resolved: BTreeSet<usize> = BTreeSet::new();
     for p in &paths {
         let typed = p.display().to_string();
         let rel = under_root(&place.root, &env.cwd, p).ok_or_else(|| {
@@ -168,6 +224,37 @@ pub(super) fn run(env: &Env, paths: Vec<PathBuf>) -> Result<(Value, String), Err
             )
         })?;
         plan_one(&place, &state, &wt, &typed, &rel, &mut acts)?;
+        resolves(&place, &state, &rel, &mut resolved)?;
+    }
+    // A resolved rename also stages the deletion of the store's paths of the files staged here
+    // (the base holds the store's paths after update), so the commit renames, not duplicates.
+    let heads: BTreeSet<&BlockId> = acts
+        .iter()
+        .filter(|(_, a)| **a == Act::Put)
+        .filter_map(|(p, _)| wt.files.get(p))
+        .filter(|f| !f.new_head)
+        .map(|f| &f.head)
+        .collect();
+    for &i in &resolved {
+        let c = &state.conflicts[i];
+        if !matches!(c.kind, ConflictKind::DocRename | ConflictKind::FolderRename) {
+            continue;
+        }
+        let (Some(name), Some(parent)) = (c.store_name.as_deref(), c.store_parent.as_deref())
+        else {
+            continue;
+        };
+        let at = store_place(c.kind, parent, name);
+        for (q, h) in &state.base.files {
+            let under = if c.kind == ConflictKind::FolderRename {
+                is_under(q, &at)
+            } else {
+                *q == at
+            };
+            if under && heads.contains(h) && !acts.contains_key(q) {
+                acts.insert(q.clone(), Act::Delete);
+            }
+        }
     }
     // the bytes first, so a file that cannot be read stages nothing
     let mut put: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -201,12 +288,28 @@ pub(super) fn run(env: &Env, paths: Vec<PathBuf>) -> Result<(Value, String), Err
             deleted.insert(p.clone());
         }
     }
+    let mut done: Vec<String> = vec![];
+    for i in resolved.iter().rev() {
+        let c = state.conflicts.remove(*i);
+        if c.kind != ConflictKind::FolderRename {
+            // the store's copy of the file (a folder rename keeps none)
+            let _ = fs::remove_file(place.conflict_file(&c.path));
+        }
+        done.push(c.path);
+    }
+    done.sort();
     state.save(&place)?;
     drop(lock);
-    let text = format!(
+    let mut text = format!(
         "staged {} file(s), {} deletion(s)",
         staged.len(),
         deleted.len()
     );
-    Ok((json!({"staged": staged, "deleted": deleted}), text))
+    if !done.is_empty() {
+        text.push_str(&format!(", {} conflict(s) resolved", done.len()));
+    }
+    Ok((
+        json!({"staged": staged, "deleted": deleted, "resolved": done}),
+        text,
+    ))
 }

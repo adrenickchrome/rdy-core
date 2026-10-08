@@ -49,6 +49,9 @@ pub enum WcCmd {
         #[arg(long, num_args = 2, value_names = ["CLASS", "REASON"], conflicts_with = "implements")]
         editorial: Vec<String>,
     },
+    /// Bring the bound view's changes made elsewhere into the files, keeping local edits; what
+    /// changed on both sides is written beside the file as .theirs.yaml.
+    Update,
 }
 
 pub fn run(cmd: WcCmd, env: &Env) -> Result<(Value, String), ErrorReply> {
@@ -67,6 +70,7 @@ pub fn run(cmd: WcCmd, env: &Env) -> Result<(Value, String), ErrorReply> {
                 editorial,
             },
         ),
+        WcCmd::Update => update::run(env),
     }
 }
 
