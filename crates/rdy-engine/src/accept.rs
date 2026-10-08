@@ -307,6 +307,8 @@ impl Rdy {
                 unset: vec![],
                 body: None,
                 links: Some(links),
+                block_type: None,
+                move_to: None,
             });
         }
         drop(st);

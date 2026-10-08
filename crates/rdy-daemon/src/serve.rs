@@ -9,7 +9,7 @@ use crate::ops::{OpContext, dispatch};
 use crate::session::{SessionId, SessionInfo};
 use crate::shared::Shared;
 use rdy_engine::{E_LOCKED, Rdy, RdyError, Scope, Session, SessionKind};
-use rdy_engine::{classify, human_actor_from_env};
+use rdy_engine::{classify, human_actor_for_env};
 use rdy_model::Role;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -39,7 +39,7 @@ pub struct ServeOptions {
     pub detach: bool,
     /// `None` never idles out (a foreground `rdy serve`).
     pub idle_timeout: Option<Duration>,
-    /// Test hook: `Some` replaces `human_actor_from_env()` for session classification.
+    /// Test hook: `Some` replaces `human_actor_for_env(<root>)` for session classification.
     #[doc(hidden)]
     pub human_actor: Option<String>,
 }
@@ -354,7 +354,7 @@ pub struct CtlSession {
 /// The host's [`Handler`]: the `session` op, the ctl ops over the shared engine, and MCP.
 pub struct ServeHandler {
     shared: Arc<Shared>,
-    /// Replaces `human_actor_from_env()` when set (a test hook).
+    /// Replaces `human_actor_for_env(<root>)` when set (a test hook).
     human: Option<String>,
     ctl: Mutex<HashMap<SessionId, CtlSession>>,
     /// The pack generation each session has heard of (for its `pack_changed` notice).
@@ -393,7 +393,10 @@ impl ServeHandler {
                 "args for session: {actor?, run?}",
             )
         })?;
-        let human = self.human.clone().unwrap_or_else(human_actor_from_env);
+        let human = self
+            .human
+            .clone()
+            .unwrap_or_else(|| human_actor_for_env(&self.shared.engine().root()));
         let s = classify(&human, a.actor.as_deref(), a.run.as_deref(), Role::Writer)?;
         let reply = json!({
             "actor": s.actor,

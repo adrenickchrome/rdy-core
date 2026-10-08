@@ -48,6 +48,9 @@ pub struct ChangeSummary {
     pub at_ms: i64,
     pub message: String,
     pub blocks: Vec<String>,
+    /// The nonce of the working-copy commit that wrote the change (wccm1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_nonce: Option<String>,
     /// The intent the change was written under (`in-<short>`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub intent: Option<String>,
@@ -299,6 +302,50 @@ impl ReadState {
         Ok(n)
     }
 
+    /// The change whose `links.client_nonce` is `nonce` (wccm1, R-I6): view `view`'s included
+    /// changes newest first, then canon's landings newest first (each landing's changes last
+    /// first); `None` once `limit` changes are read without a match.
+    pub fn change_by_nonce(
+        &self,
+        view: &str,
+        nonce: &str,
+        limit: usize,
+    ) -> Result<Option<Hash>, RdyError> {
+        let reader = self.reader();
+        let mut read = 0usize;
+        let mut seen: HashSet<Hash> = HashSet::new();
+        // Some(true): found; Some(false): read (or seen) and not it; None: the limit is reached
+        let mut check = |h: &Hash| -> Result<Option<bool>, RdyError> {
+            if !seen.insert(*h) {
+                return Ok(Some(false));
+            }
+            if read >= limit {
+                return Ok(None);
+            }
+            read += 1;
+            let c = reader.change(h)?;
+            Ok(Some(c.links.client_nonce.as_deref() == Some(nonce)))
+        };
+        for h in self.included(view).iter().rev() {
+            match check(h)? {
+                Some(true) => return Ok(Some(*h)),
+                Some(false) => {}
+                None => return Ok(None),
+            }
+        }
+        for landing in self.landing_walk() {
+            let (_, rec) = landing?;
+            for h in rec.changes.iter().rev() {
+                match check(h)? {
+                    Some(true) => return Ok(Some(*h)),
+                    Some(false) => {}
+                    None => return Ok(None),
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// View `name` in detail (FND-7): its head, each change it includes with the blocks it
     /// touches, its conflicts, and its op chain back to the latest checkpoint.
     pub fn view_show(&self, name: &str) -> Result<ViewDetail, RdyError> {
@@ -317,6 +364,7 @@ impl ReadState {
                 at_ms: change.provenance.at_ms,
                 message: change.message.clone(),
                 blocks: blocks.iter().map(|b| b.to_string()).collect(),
+                client_nonce: change.links.client_nonce.clone(),
                 intent: change.links.intent.as_ref().map(intent_label),
                 alternative: change.links.alternative.map(|a| AltRef {
                     set: alt_label(&a.set),

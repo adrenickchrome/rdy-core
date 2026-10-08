@@ -1166,7 +1166,11 @@ fn subjects(pack: &Pack, m: &Materialized, ops: &[OpInput]) -> Vec<Subject> {
                 }
             }
             OpInput::Update {
-                id, fields, unset, ..
+                id,
+                fields,
+                unset,
+                move_to,
+                ..
             } => {
                 let Some(b) = existing(id).and_then(|i| m.get(&i)) else {
                     continue;
@@ -1175,10 +1179,22 @@ fn subjects(pack: &Pack, m: &Materialized, ops: &[OpInput]) -> Vec<Subject> {
                     continue;
                 }
                 let before = effective_stable(m, Some(&b.id));
+                // wcmv1: a move_to counts as a move to that place does
+                let moved_to =
+                    move_to
+                        .as_ref()
+                        .map(|to| match anchor(&created, to.parent.as_deref()) {
+                            Anchor::At(p) => effective_stable(m, Some(&p)),
+                            Anchor::Top | Anchor::Unknown => false,
+                        });
+                let inherited =
+                    || moved_to.unwrap_or_else(|| effective_stable(m, b.parent.as_ref()));
                 let after = if let Some(l) = fields.get("lifecycle") {
                     l.as_str() == Some(STABLE)
                 } else if unset.iter().any(|u| u == "lifecycle") {
-                    effective_stable(m, b.parent.as_ref())
+                    inherited()
+                } else if moved_to.is_some() {
+                    own_lifecycle(b).map_or_else(inherited, |l| l.as_str() == Some(STABLE))
                 } else {
                     before
                 };

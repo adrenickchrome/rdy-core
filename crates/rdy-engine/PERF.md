@@ -927,3 +927,20 @@ A per-block delta must also handle entity name changes (they change the mentions
 and edges into a doc from anywhere (they change its unlinked state).
 
 Linux bench rows (enperf2): <filled from two cargo qa --only perf runs on the bench>
+
+## M2f-a: the working copy (2026-10-07)
+
+The `qa-perf` typical tier gained two ops in `tier_wc`. It runs after `tier_code` and before
+`tier_render`. No laptop figures are recorded here.
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `wc_project_typical` | `ReadState::wc_project` over canon, the whole tree: every doc and folder as file text, with the block table | 10 | recorded, no spec budget (M2f-a): the working copy |
+| `wc_plan_one_doc` | one staged doc file, planned for commit: `stage_put` then `plan_commit`. The checkout is written once into a temporary directory, outside the timer. Each run first edits the first body of one doc file (outside the timer) | 10 | recorded, no spec budget (M2f-a): the working copy |
+
+`wc_plan_one_doc` grows with the size of the checkout, not of the commit: the planner builds the
+commit tree from the base files and the staged copies, then lints and diffs the whole tree.
+
+Baseline: `qa-baseline.json` is not changed here.
+
+Deep gate (bench): <orchestrator fills in>

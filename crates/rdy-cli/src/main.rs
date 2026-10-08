@@ -1,13 +1,14 @@
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 use rdy_daemon::{
     Attempt, Client, E_DAEMON_GONE, ErrorReply, Hello, OpContext, PROTO_VERSION, Proto, RunDir,
     STOP_GRACE, ServeError, ServeOptions, StartOptions, connect, connect_or_start, dispatch,
     process_alive, serve, serve_command, spawn_serve,
 };
 use rdy_engine::engine::Local;
+use rdy_engine::wc::state::{Place, WcState, pointer_project};
 use rdy_engine::{
     E_BAD_INPUT, E_CONFIG, E_IO, E_NO_PROJECT, Rdy, RdyError, Session, check_path, classify,
-    human_actor_from_env, project_pack, serve_config,
+    human_actor_for_env, lexical_path, project_pack, serve_config,
 };
 use rdy_model::Role;
 use serde_json::{Value, json};
@@ -18,9 +19,11 @@ use std::time::{Duration, Instant};
 
 mod alt_cmd;
 mod brief_text;
+mod config_cmd;
 mod history_text;
 mod intent_cmd;
 mod view_cmd;
+mod wc;
 
 /// This binary's version: the hello's `version`, so a client only talks to a daemon of its own.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -84,13 +87,16 @@ enum Cmd {
         #[arg(long, default_value = "canon")]
         scope: String,
     },
-    /// Brief on a file in a linked code repo: the design blocks its commits implement and the blocks whose reflects globs match it.
+    /// Brief on a file, a directory or a block of the working copy (and record the briefing for the next commit), or on a file in a linked code repo with --code.
+    #[command(group(ArgGroup::new("what").required(true).multiple(false).args(["target", "code"])))]
     Brief {
+        /// A doc file, a folder or a directory of the working copy, or a block id or key. Outside a working copy, a target with a `/` is a path.
+        target: Option<String>,
         /// A file in a linked code repo: relative to the repo's top folder, or a path from here.
         #[arg(long = "code")]
-        code: String,
-        /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name>.
-        #[arg(long)]
+        code: Option<String>,
+        /// canon, an existing view's name, tag:<version>, landing:<id> or view:<name> (with --code).
+        #[arg(long, requires = "code")]
         scope: Option<String>,
         /// The budget for the briefing; the longest lists are cut to fit.
         #[arg(long = "max-tokens")]
@@ -279,9 +285,14 @@ enum Cmd {
     },
     /// Run the MCP server over stdio.
     Mcp,
-    /// Lint export-format-2 files (a doc file, a _folder.yaml or a directory) without touching the store.
+    /// Lint export-format-2 files (a doc file, a _folder.yaml or a directory) without touching the
+    /// store. Inside a checkout, with no path or a path in the working tree, it lints the
+    /// working copy against the bound view: a new entry needs no id, and a file rdy does not
+    /// read is a warning. Commit rewrites the committed files in canonical form and drops their
+    /// YAML comments.
     Check {
-        path: PathBuf,
+        /// The file or directory (required outside a checkout; default: the working tree).
+        path: Option<PathBuf>,
         /// Check against this pack (required outside a project).
         #[arg(long)]
         pack: Option<String>,
@@ -307,6 +318,14 @@ enum Cmd {
         #[arg(long, hide = true, requires = "detach")]
         spawned: bool,
     },
+    /// Show the settings in effect, one row per key (no daemon is started).
+    Config {
+        /// Also name the file each value comes from, or `default`.
+        #[arg(long)]
+        show_origin: bool,
+    },
+    #[command(flatten)]
+    Wc(wc::WcCmd),
 }
 
 #[derive(Subcommand)]
@@ -348,12 +367,34 @@ enum PackCmd {
 fn find_project(start: &Path) -> PathBuf {
     let mut cur = Some(start);
     while let Some(dir) = cur {
+        // a worktree's pointer file names its project; it is checked before the config file at
+        // each level
+        if let Some(project) = pointer_project(dir) {
+            return project;
+        }
         if dir.join(".rdy/config.yaml").exists() {
             return dir.to_path_buf();
         }
         cur = dir.parent();
     }
     start.to_path_buf()
+}
+
+/// Whether `path` (relative to `cwd`) is the working-tree `root` or under it. `..` never counts
+/// toward "under": a path that exists is compared by its real location, and one that does not
+/// by its words with `.` and `..` resolved (`/root/../x` is not under `/root`).
+fn in_tree(root: &Path, cwd: &Path, path: &Path) -> bool {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let canon_root = canon(root);
+    if let Ok(real) = abs.canonicalize() {
+        return real.starts_with(&canon_root);
+    }
+    lexical_path(&abs).is_some_and(|flat| flat.starts_with(root) || flat.starts_with(&canon_root))
 }
 
 fn is_project(dir: &Path) -> bool {
@@ -409,6 +450,52 @@ struct Env {
     project: PathBuf,
     cwd: PathBuf,
     no_daemon: bool,
+    /// The working copy the command runs in: the one `cwd` is inside when it belongs to the
+    /// command's project, else the project's own.
+    place: Option<Place>,
+}
+
+/// The ops that write to a view; for the human, the bound view is their default view (R-P10).
+const BOUND_VIEW_OPS: &[&str] = &[
+    "new_folder",
+    "new_doc",
+    "block",
+    "edit_block",
+    "propose",
+    "keys_assign",
+];
+
+/// The view the working copy is bound to, read from `bound.yaml` without the lock; `None` when
+/// it is not bound (or the file does not read).
+fn bound_view(env: &Env) -> Option<String> {
+    let place = env.place.as_ref()?;
+    Some(WcState::load_bound(place).ok()??.view)
+}
+
+/// Whether the command runs as the human: `RDY_ACTOR` unset or naming the human actor.
+fn human_session(env: &Env) -> bool {
+    match std::env::var("RDY_ACTOR") {
+        Ok(a) => a == human_actor_for_env(&env.project),
+        Err(_) => true,
+    }
+}
+
+/// `args` with the bound view as `view` for an op in `BOUND_VIEW_OPS` that names none, and for
+/// `brief` naming neither `view` nor `scope`; only in a human session.
+fn with_bound_view(env: &Env, op: &str, mut args: Value) -> Value {
+    let wants = if op == "brief" {
+        args["view"].is_null() && args["scope"].is_null()
+    } else {
+        BOUND_VIEW_OPS.contains(&op) && args["view"].is_null()
+    };
+    if wants
+        && (args.is_object() || args.is_null())
+        && human_session(env)
+        && let Some(view) = bound_view(env)
+    {
+        args["view"] = Value::String(view);
+    }
+    args
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime, ErrorReply> {
@@ -466,7 +553,7 @@ impl Conn {
         if env.no_daemon {
             let local = Local::open(&env.project)?;
             match classify(
-                &human_actor_from_env(),
+                &human_actor_for_env(&env.project),
                 actor.as_deref(),
                 run.as_deref(),
                 Role::Writer,
@@ -562,6 +649,7 @@ fn close_local(local: Local) {
 
 /// Runs one ctl op on a session of its own.
 fn call(env: &Env, op: &str, args: Value) -> Result<Value, ErrorReply> {
+    let args = with_bound_view(env, op, args);
     let mut c = Conn::open(env)?;
     let out = c.op(op, args);
     c.close();
@@ -1127,6 +1215,8 @@ fn edit(
 
 fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
     match cli.cmd {
+        Cmd::Config { show_origin } => config_cmd::run(&env.project, show_origin),
+        Cmd::Wc(c) => wc::run(c, env),
         Cmd::Init { dir, pack } => {
             let dir = dir.or(cli.project).unwrap_or_else(|| env.cwd.clone());
             Rdy::init(&dir, &pack)?;
@@ -1157,12 +1247,20 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             cmd: PackCmd::Check,
         } => {
             let pack = project_pack(&env.project)?;
+            let classes: serde_json::Map<String, Value> = pack
+                .block_types
+                .keys()
+                .map(|t| (t.clone(), json!(pack.class_of(t).as_str())))
+                .collect();
             let areas: Vec<Value> = pack
                 .areas
                 .iter()
                 .map(|(n, a)| json!({"name": n, "description": a.description, "paths": a.paths}))
                 .collect();
             let mut text = format!("pack {} {} ok", pack.name, pack.version);
+            for t in pack.block_types.keys() {
+                text.push_str(&format!("\n  {t}  {}", pack.class_of(t).as_str()));
+            }
             for (name, a) in &pack.areas {
                 text.push_str(&format!("\narea {name}: {}", a.paths.join(", ")));
                 if !a.description.is_empty() {
@@ -1170,7 +1268,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                 }
             }
             Ok((
-                json!({"pack": pack.name, "version": pack.version, "types": pack.block_types.len(), "areas": areas}),
+                json!({"pack": pack.name, "version": pack.version, "types": pack.block_types.len(), "classes": classes, "areas": areas}),
                 text,
             ))
         }
@@ -1190,8 +1288,9 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             Ok((v, lines.join("\n")))
         }
         Cmd::Status => {
-            let v = call(env, "status", json!({}))?;
-            let t = status_text(&v);
+            let mut v = call(env, "status", json!({}))?;
+            let mut t = status_text(&v);
+            wc::status::attach(env, &mut v, &mut t)?;
             Ok((v, t))
         }
         Cmd::Show { id, scope, blame } => {
@@ -1227,18 +1326,46 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                 }
             };
             let prefix = if kind == "doc" { "d-" } else { "fd-" };
-            let last = v["created"]
+            let created: Vec<String> = v["created"]
                 .as_object()
                 .into_iter()
                 .flat_map(|m| m.values())
                 .filter_map(Value::as_str)
+                .map(String::from)
+                .collect();
+            let last = created
+                .iter()
                 .rfind(|id| id.starts_with(prefix))
-                .unwrap_or_default()
-                .to_string();
-            let t = format!(
+                .cloned()
+                .unwrap_or_default();
+            let mut t = format!(
                 "created {kind} {path} ({last}){}",
                 brief_text::consequences_text(&v)
             );
+            let mut v = v;
+            // the new docs and folders also become files in a working copy bound to this view
+            let ids: Vec<String> = created
+                .into_iter()
+                .filter(|id| id.starts_with("d-") || id.starts_with("fd-"))
+                .collect();
+            // the write is done: a working copy that cannot take the files is a warning, not a
+            // failed `rdy new` (a retry would meet E_ALREADY_EXISTS)
+            match wc::new_files::write_new(env, text(&v["view"]), &ids) {
+                Ok(wrote) => {
+                    t.push_str(&wrote.text());
+                    if !wrote.wrote.is_empty() || !wrote.skipped.is_empty() {
+                        v["files"] = json!(wrote.wrote);
+                        v["skipped"] = json!(wrote.skipped);
+                    }
+                }
+                Err(e) => {
+                    t.push_str(&format!(
+                        "\nwarning: not written: {}: {} ({})",
+                        e.code, e.message, e.fix
+                    ));
+                    v["files_error"] = json!(format!("{}: {}", e.code, e.message));
+                }
+            }
             Ok((v, t))
         }
         Cmd::Ls { path, scope, depth } => {
@@ -1266,10 +1393,14 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             Ok((v, t))
         }
         Cmd::Brief {
+            target,
             code,
             scope,
             max_tokens,
         } => {
+            if let Some(target) = target {
+                return wc::brief::run(env, target, max_tokens);
+            }
             let v = call(
                 env,
                 "brief",
@@ -1571,11 +1702,26 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
 
 /// `rdy check`: inside a project through the `check` op (the pack and canon come from the
 /// project's state); outside one, against a built-in pack, with no store.
-fn run_check(env: &Env, path: &Path, pack: Option<&str>, as_json: bool) -> ExitCode {
+fn run_check(env: &Env, path: Option<&Path>, pack: Option<&str>, as_json: bool) -> ExitCode {
     let result = (|| -> Result<Value, ErrorReply> {
+        let missing = || ErrorReply::new(E_BAD_INPUT, "no path to check", "pass a path to check");
         if is_project(&env.project) {
+            // inside a bound checkout, no path or a path in the working tree lints the working copy
+            if let Some(view) = bound_view(env)
+                && let Some(place) = &env.place
+                && path.is_none_or(|p| in_tree(&place.root, &env.cwd, p))
+            {
+                let target = path.unwrap_or(&place.root);
+                return call(
+                    env,
+                    "check",
+                    json!({"path": path_arg(target)?, "pack": pack, "wc": true, "view": view}),
+                );
+            }
+            let path = path.ok_or_else(missing)?;
             call(env, "check", json!({"path": path_arg(path)?, "pack": pack}))
         } else {
+            let path = path.ok_or_else(missing)?;
             let name = pack.ok_or_else(|| {
                 ErrorReply::new(
                     E_NO_PROJECT,
@@ -1776,6 +1922,23 @@ fn print_error(e: &ErrorReply, as_json: bool) {
             );
         }
     }
+    for d in e
+        .extra
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        eprintln!(
+            "{}:{}:{}: {} {} (fix: {})",
+            text(&d["file"]),
+            num(&d["line"]),
+            num(&d["column"]),
+            text(&d["code"]),
+            text(&d["message"]),
+            text(&d["fix"])
+        );
+    }
 }
 
 fn main() -> ExitCode {
@@ -1788,13 +1951,24 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let project = cli.project.clone().unwrap_or_else(|| find_project(&cwd));
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    };
+    let place = Place::locate(&cwd)
+        .filter(|p| same(&p.project, &project))
+        .unwrap_or_else(|| Place::main(&project));
     let env = Env {
-        project: cli.project.clone().unwrap_or_else(|| find_project(&cwd)),
+        project,
         cwd,
         no_daemon: cli.no_daemon || std::env::var("RDY_NO_DAEMON").is_ok_and(|v| v == "1"),
+        place: Some(place),
     };
     match &cli.cmd {
-        Cmd::Check { path, pack } => return run_check(&env, path, pack.as_deref(), as_json),
+        Cmd::Check { path, pack } => {
+            return run_check(&env, path.as_deref(), pack.as_deref(), as_json);
+        }
         Cmd::Serve {
             detach,
             stop,
@@ -1802,8 +1976,20 @@ fn main() -> ExitCode {
         } => return run_serve(&env, *detach, *stop, *spawned, as_json),
         _ => {}
     }
+    // the config warnings print once per process on stderr; `rdy config --show-origin` and
+    // `rdy status` carry them in their own output
+    let own_warnings = match &cli.cmd {
+        Cmd::Status | Cmd::Mcp => true,
+        Cmd::Config { show_origin } => *show_origin && !as_json,
+        _ => false,
+    };
     match run(cli, &env) {
         Ok((v, text)) => {
+            if !own_warnings {
+                for w in rdy_engine::config_levels::config_warnings_for_env(&env.project) {
+                    eprintln!("warning {}: {}; {}", w.code, w.message, w.fix);
+                }
+            }
             if v.is_null() {
             } else if as_json {
                 println!("{v}");
@@ -1835,8 +2021,42 @@ fn keys_lines(v: &Value, why: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{log_text, notices, show_text};
+    use super::{in_tree, log_text, notices, show_text};
     use serde_json::json;
+    use std::path::Path;
+
+    /// Fix round 1 (wcck1): `..` is resolved before the tree test, for paths that exist and
+    /// for paths that do not.
+    #[test]
+    fn wcck1_in_tree_resolves_dotdot() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("tree/sub")).unwrap();
+        std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+        let tree = root.join("tree");
+        let cwd = tree.join("sub");
+        assert!(in_tree(&tree, &cwd, Path::new("..")), "the root through ..");
+        assert!(in_tree(&tree, &cwd, Path::new("../sub")));
+        assert!(
+            !in_tree(&tree, &tree, Path::new("../elsewhere")),
+            "exists, outside"
+        );
+        assert!(!in_tree(&tree, &tree, &tree.join("../elsewhere")));
+        assert!(
+            !in_tree(&tree, &tree, Path::new("../nothing")),
+            "missing, outside"
+        );
+        assert!(!in_tree(
+            &tree,
+            &tree,
+            &tree.join("a/../../elsewhere/x.yaml")
+        ));
+        assert!(
+            in_tree(&tree, &tree, &tree.join("a/../b.yaml")),
+            "missing, inside"
+        );
+        assert!(in_tree(&tree, &tree, Path::new("new.yaml")));
+    }
 
     /// Final-review fix round 1: `rdy log` prints the alternative a landing chose, as `rdy
     /// approve` does.

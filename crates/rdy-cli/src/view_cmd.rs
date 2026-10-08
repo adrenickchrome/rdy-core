@@ -331,10 +331,15 @@ fn show_text(v: &Value, all: bool) -> String {
             .filter_map(Value::as_str)
             .collect();
         out.push_str(&format!(
-            "\n  {} {} {} {}",
+            "\n  {} {} {}{} {}",
             short(text(&c["id"])),
             text(&c["actor"]),
             if message.is_empty() { "-" } else { message },
+            if c["client_nonce"].is_string() {
+                " [wc]"
+            } else {
+                ""
+            },
             blocks_text(&blocks, all)
         ));
     }

@@ -74,7 +74,7 @@ block_types:
     body: required
     fields:
       planned: { kind: bool }
-  rationale:   { prefix: ra, traits: [informative], body: required }
+  rationale:   { prefix: ra, traits: [informative], body: required, class: supporting }
   table:
     prefix: tb
     traits: [informative]

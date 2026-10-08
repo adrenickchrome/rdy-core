@@ -4,6 +4,7 @@ mod areas;
 pub mod brief;
 pub mod code_brief;
 pub mod code_index;
+pub mod config_levels;
 pub mod consequence;
 pub mod coord_graph;
 pub mod coverage;
@@ -35,6 +36,7 @@ mod version;
 pub mod view_api;
 pub mod view_query;
 pub mod views;
+pub mod wc;
 mod write;
 mod yaml_pos;
 
@@ -64,7 +66,7 @@ pub use read_state::{CoordHeads, Delta, InflightSet, OpenIntent, ReadState};
 pub use search::{SearchQuery, SearchResult};
 pub use session::{
     HUMAN_RUN, INFLIGHT_SCOPE, PinnedClock, Scope, Session, SessionKind, classify, human_actor,
-    human_actor_from_env, now_ms, pin_clock, rfc3339, rfc3339_now,
+    human_actor_for, human_actor_for_env, now_ms, pin_clock, rfc3339, rfc3339_now,
 };
 pub use tree_io::Diagnostic;
 pub use version::{
@@ -72,7 +74,11 @@ pub use version::{
 };
 pub use view_query::{ChangeSummary, Compare, CompareEntry, OpSummary, ViewDetail, ViewSummary};
 pub use views::{ConflictInfo, ConflictSide, OwnerInfo, ViewHeadInfo, ViewOpResult};
-pub use write::{LinkInput, OpInput, WriteRequest, WriteResult, json_to_field};
+pub use wc::project::Projection;
+pub use write::{
+    LinkInput, OpInput, WriteRequest, WriteResult, editorial_class, json_to_field,
+    parse_justification,
+};
 
 pub use engine::{Engine, Local, WriteFn};
 pub use rdy_store::OpenReport;
@@ -153,13 +159,12 @@ impl ServeConfig {
 /// client must be able to start a daemon on a project whose config is broken, and the daemon
 /// then reports the config error.
 pub fn serve_config(project: &Path) -> ServeConfig {
-    let section = std::fs::read_to_string(project.join(".rdy/config.yaml"))
-        .ok()
-        .and_then(|t| serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&t).ok())
-        .and_then(|v| v.get("serve").cloned());
+    let merged =
+        config_levels::effective_lenient(project, config_levels::user_file_from_env().as_deref())
+            .merged;
+    let section = merged.get("serve");
     let secs = |key: &str| {
         section
-            .as_ref()
             .and_then(|s| s.get(key))
             .and_then(serde_yaml_ng::Value::as_u64)
     };
@@ -206,8 +211,8 @@ impl FileStamp {
     }
 }
 
-/// What the pack-defining files looked like at one moment: `.rdy/config.yaml` and every
-/// `.rdy/packs/*.yaml` (and `.yml`), sorted by path, each with the [`FileStamp`] taken just before
+/// What the pack-defining files looked like at one moment: `.rdy/config.yaml`, then
+/// `.rdy/local.yaml` when it exists, and every `.rdy/packs/*.yaml` (and `.yml`), sorted by path, each with the [`FileStamp`] taken just before
 /// its bytes were read; `hash` is BLAKE3 over each file's path bytes, a NUL, its contents and a
 /// NUL, in that order. Equal hashes mean equal bytes whatever the stamps say. `at` is this
 /// machine's wall clock read before the first stat: a file whose `ctime` is not safely before
@@ -237,20 +242,27 @@ pub fn pack_source_reads() -> usize {
 struct Sources {
     fingerprint: PackFingerprint,
     config: Vec<u8>,
+    /// `.rdy/local.yaml`'s bytes when it exists.
+    local: Option<Vec<u8>>,
     /// Each `.rdy/packs` file and its bytes, in fingerprint order.
     packs: Vec<(PathBuf, Vec<u8>)>,
 }
 
-/// Reads `.rdy/config.yaml` and the pack files, each stat'ed just before its bytes are read.
+/// Reads `.rdy/config.yaml`, `.rdy/local.yaml` when it exists, and the pack files, each stat'ed just before its bytes are read.
 /// No config file is `E_NO_PROJECT`; any other failure is an I/O error.
 fn read_sources(project: &Path) -> Result<Sources, RdyError> {
     SOURCE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let at = std::time::SystemTime::now();
-    let cfg_path = project.join(".rdy/config.yaml");
+    let cfg_path = project.join(config_levels::PROJECT_FILE);
     if !cfg_path.exists() {
         return Err(no_project(project));
     }
     let mut paths = vec![cfg_path];
+    let local = project.join(config_levels::LOCAL_FILE);
+    let has_local = local.exists();
+    if has_local {
+        paths.push(local);
+    }
     paths.extend(pack_files(&project.join(".rdy/packs"))?);
     let mut files = Vec::with_capacity(paths.len());
     let mut contents = Vec::with_capacity(paths.len());
@@ -267,6 +279,11 @@ fn read_sources(project: &Path) -> Result<Sources, RdyError> {
     }
     let mut contents = contents.into_iter();
     let (_, config) = contents.next().expect("the config is always first");
+    let local = if has_local {
+        contents.next().map(|(_, b)| b)
+    } else {
+        None
+    };
     Ok(Sources {
         fingerprint: PackFingerprint {
             files,
@@ -274,6 +291,7 @@ fn read_sources(project: &Path) -> Result<Sources, RdyError> {
             at,
         },
         config,
+        local,
         packs: contents.collect(),
     })
 }
@@ -396,6 +414,99 @@ pub fn project_pack(project: &Path) -> Result<Pack, RdyError> {
     resolve_pack(project, &cfg.pack)
 }
 
+/// Lints the working tree under `root` against `view` (the bound view's materialization): the
+/// tree read with the project's `.rdyignore`, then `lint_tree` with references resolved in the
+/// view, then one `W_WC_UNTRACKED` warning for each file the scan does not read as a doc file.
+/// With `path` (absolute, or relative to `root`), only the diagnostics in files under it.
+pub fn check_wc(
+    pack: &Pack,
+    view: &Materialized,
+    root: &Path,
+    path: Option<&Path>,
+) -> Result<Vec<Diagnostic>, RdyError> {
+    use wc::layout::read_tree;
+    let ignore = wc::ignore::Ignore::load(root)?;
+    let mut tree = read_tree(root, &ignore, pack);
+    let mut diags = wc::lint::lint_tree(&mut tree, pack, Some(view), Some(root));
+    for u in &tree.untracked {
+        diags.push(Diagnostic {
+            file: u.path.clone(),
+            line: 1,
+            column: 1,
+            code: W_WC_UNTRACKED.into(),
+            message: format!("{}: {}", u.path, u.reason),
+            fix: format!("rdy check {}", u.path),
+            severity: rdy_schema::Severity::Warning,
+        });
+    }
+    if let Some(under) = path.map(|p| relative_to(root, p)).transpose()?.flatten() {
+        let prefix = format!("{under}/");
+        diags.retain(|d| d.file == under || d.file.starts_with(&prefix));
+    }
+    diags.sort_by(|a, b| (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column)));
+    Ok(diags)
+}
+
+/// `path` with `.` and `..` resolved by the words alone. `None` for a relative path whose `..`
+/// climbs above its start. On an absolute path, `..` at the filesystem root stays there.
+pub fn lexical_path(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let climbs = matches!(out.components().next_back(), Some(Component::Normal(_)));
+                if climbs {
+                    out.pop();
+                } else if !out.has_root() {
+                    return None;
+                }
+            }
+            c => out.push(c.as_os_str()),
+        }
+    }
+    Some(out)
+}
+
+/// `path` as a `/`-separated path under `root`; `Ok(None)` for the root itself. `..` is resolved
+/// first (`Path::starts_with` compares components, so `/root/../x` would start with `/root`); a
+/// path that is not under `root` is `E_BAD_INPUT`, never a path read as if it were.
+fn relative_to(root: &Path, path: &Path) -> Result<Option<String>, RdyError> {
+    use std::path::Component;
+    let outside = || {
+        RdyError::new(
+            E_BAD_INPUT,
+            format!("{} is not under {}", path.display(), root.display()),
+            "pass a path inside the working tree",
+        )
+    };
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let rel = if path.is_absolute() {
+        let flat = lexical_path(path).ok_or_else(outside)?;
+        let (root_flat, root_canon) = (
+            lexical_path(root).unwrap_or_else(|| root.to_path_buf()),
+            canon(root),
+        );
+        let real = canon(&flat);
+        flat.strip_prefix(&root_flat)
+            .or_else(|_| flat.strip_prefix(&root_canon))
+            .or_else(|_| real.strip_prefix(&root_canon))
+            .map(Path::to_path_buf)
+            .map_err(|_| outside())?
+    } else {
+        lexical_path(path).ok_or_else(outside)?
+    };
+    let parts: Vec<String> = rel
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    Ok((!parts.is_empty()).then(|| parts.join("/")))
+}
+
 /// The `.yaml` and `.yml` files of a packs directory, sorted; none if it does not exist.
 fn pack_files(dir: &Path) -> Result<Vec<PathBuf>, RdyError> {
     if !dir.exists() {
@@ -412,18 +523,32 @@ fn pack_files(dir: &Path) -> Result<Vec<PathBuf>, RdyError> {
 }
 
 fn read_config(root: &Path) -> Result<Config, RdyError> {
-    let cfg_path = root.join(".rdy/config.yaml");
-    if !cfg_path.exists() {
-        return Err(no_project(root));
-    }
-    parse_config(&std::fs::read(&cfg_path).map_err(io)?)
+    let effective = config_levels::effective(root, config_levels::user_file_from_env().as_deref())?;
+    config_of(effective)
 }
 
-fn parse_config(bytes: &[u8]) -> Result<Config, RdyError> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|e| io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-    serde_yaml_ng::from_str(text)
-        .map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "fix .rdy/config.yaml"))
+/// The config from the bytes `read_sources` read (the project and local files; the user config
+/// is read from the environment), so what is loaded is what the fingerprint hashed.
+fn parse_config(root: &Path, config: &[u8], local: Option<&[u8]>) -> Result<Config, RdyError> {
+    let effective = config_levels::effective_from(
+        root,
+        config_levels::user_file_from_env().as_deref(),
+        config_levels::GivenFiles {
+            project: config,
+            local,
+        },
+    )?;
+    config_of(effective)
+}
+
+fn config_of(effective: config_levels::Effective) -> Result<Config, RdyError> {
+    serde_yaml_ng::from_value(serde_yaml_ng::Value::Mapping(effective.merged)).map_err(|e| {
+        RdyError::new(
+            E_CONFIG,
+            e.to_string(),
+            format!("fix {}", config_levels::PROJECT_FILE),
+        )
+    })
 }
 
 fn load_pack(root: &Path, name: &str) -> Result<(Pack, Vec<String>), RdyError> {
@@ -512,7 +637,7 @@ impl Rdy {
                 return Err(e);
             }
         };
-        let cfg = parse_config(&sources.config)?;
+        let cfg = parse_config(project, &sources.config, sources.local.as_deref())?;
         let fingerprint = sources.fingerprint;
         let (pack, lineage) = load_pack_from(&sources.packs, &cfg.pack)?;
         let mut store = layout::open_project_store(&project.join(".rdy"))?;
@@ -611,7 +736,7 @@ impl Rdy {
             return Ok(ReloadOutcome::Unchanged);
         }
         // parsed from the bytes `fp` hashed: what is loaded (or found invalid) is what is seen
-        let loaded = parse_config(&sources.config)
+        let loaded = parse_config(&self.root, &sources.config, sources.local.as_deref())
             .and_then(|cfg| load_pack_from(&sources.packs, &cfg.pack).map(|(p, l)| (cfg, p, l)));
         let (cfg, pack, lineage) = match loaded {
             Ok(v) => v,
@@ -1204,8 +1329,10 @@ impl Rdy {
 
 /// The config at `root` as it is on disk; any read or parse error reads as no config.
 fn read_config_lenient(root: &Path) -> Option<Config> {
-    let text = std::fs::read_to_string(root.join(".rdy/config.yaml")).ok()?;
-    serde_yaml_ng::from_str(&text).ok()
+    let merged =
+        config_levels::effective_lenient(root, config_levels::user_file_from_env().as_deref())
+            .merged;
+    serde_yaml_ng::from_value(serde_yaml_ng::Value::Mapping(merged)).ok()
 }
 
 /// The project's name and description as a site shows them, parsed once when a state is
@@ -1252,5 +1379,41 @@ impl ReadState {
     /// The config's `description`, when it had a non-empty one when this state was published.
     pub fn project_description(&self) -> Option<String> {
         self.description.as_deref().map(str::to_string)
+    }
+}
+
+#[cfg(test)]
+mod relative_to_tests {
+    use super::{E_BAD_INPUT, lexical_path, relative_to};
+    use std::path::Path;
+
+    /// Fix round 1 (wcck1): `..` is resolved, and a path that leaves the root is an error, not
+    /// a path with its `..` dropped.
+    #[test]
+    fn wcck1_relative_to_resolves_dotdot_and_refuses_a_path_outside() {
+        let root = Path::new("/nonexistent-root/tree");
+        let rel = |p: &str| relative_to(root, Path::new(p));
+        assert_eq!(rel("/nonexistent-root/tree").unwrap(), None);
+        assert_eq!(
+            rel("/nonexistent-root/tree/a/../b/c.yaml")
+                .unwrap()
+                .as_deref(),
+            Some("b/c.yaml")
+        );
+        assert_eq!(rel("a/./b.yaml").unwrap().as_deref(), Some("a/b.yaml"));
+        for outside in [
+            "/nonexistent-root/tree/../elsewhere/x.yaml",
+            "/nonexistent-root/elsewhere",
+            "../elsewhere",
+            "a/../../elsewhere",
+        ] {
+            let e = rel(outside).unwrap_err();
+            assert_eq!(e.code, E_BAD_INPUT, "{outside}");
+        }
+        assert_eq!(
+            lexical_path(Path::new("/a/../..")).as_deref(),
+            Some(Path::new("/"))
+        );
+        assert_eq!(lexical_path(Path::new("../a")), None);
     }
 }

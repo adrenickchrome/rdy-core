@@ -63,6 +63,8 @@ impl Rdy {
                 unset: vec![],
                 body: None,
                 links: None,
+                block_type: None,
+                move_to: None,
             })
             .collect();
         let n = ops.len();
@@ -394,4 +396,9 @@ pub(crate) fn rewrite_block(
     }
     b.body = rewrite(&b.body, RefMode::for_body(&b.block_type), lookup)?;
     b.fields.values_mut().try_for_each(|v| value(v, lookup))
+}
+
+/// lbr1: the fix text that says how to write a `{{token}}` that names nothing as literal text.
+pub(crate) fn literal_hint(token: &str) -> String {
+    format!("or, if \"{{{{{token}}}}}\" is literal text, write it as \\{{{{{token}}}}}")
 }

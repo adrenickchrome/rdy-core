@@ -1,5 +1,5 @@
 use crate::glob::Glob;
-use crate::pack::{BodyRule, FieldKind, Pack};
+use crate::pack::{BodyRule, FieldKind, Pack, TypeClass};
 use rdy_model::tree;
 use rdy_model::{Block, BlockId, FieldValue, RefMode, ref_spans};
 use serde::Serialize;
@@ -22,19 +22,6 @@ pub struct Issue {
 
 /// The engine field naming the code a block reflects: a list of path globs, on content block types.
 pub const REFLECTS_FIELD: &str = "reflects";
-
-/// Block types that may not carry `reflects`: supporting types, which link to code another way
-/// (a decision through `Implements:` trailers). Named until M2f's type classing replaces this list.
-pub const REFLECTS_EXCLUDED_TYPES: &[&str] = &[
-    "decision",
-    "question",
-    "rationale",
-    "review",
-    "tension",
-    "intent",
-    "finding",
-    "source",
-];
 
 /// The most path globs one `reflects` field may hold.
 pub const MAX_REFLECTS_GLOBS: usize = 32;
@@ -108,6 +95,34 @@ fn check_reflects(block: &Block, v: &FieldValue, out: &mut Vec<Issue>) {
     }
 }
 
+/// E_PREFIX for a block read from files (import, `rdy check`): its id's prefix belongs to no
+/// type, or to a type it could not have been retyped from (rtyp1), so `D-` stays a decision and
+/// `c-` never names a supporting type. A write checks the exact prefix when it creates a block.
+pub fn validate_prefix(pack: &Pack, block: &Block) -> Option<Issue> {
+    let def = pack.block_types.get(&block.block_type)?;
+    let prefix = block.id.prefix();
+    if prefix == def.prefix
+        || pack
+            .block_types
+            .iter()
+            .any(|(from, d)| d.prefix == prefix && pack.may_retype(from, &block.block_type))
+    {
+        return None;
+    }
+    Some(err(
+        block,
+        "E_PREFIX",
+        format!(
+            "id {} has prefix {:?} but type {} uses {:?}",
+            block.id, prefix, block.block_type, def.prefix
+        ),
+        format!(
+            "omit the id to let rdy generate one, or use the prefix {:?}",
+            def.prefix
+        ),
+    ))
+}
+
 pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec<Issue> {
     let mut out = vec![];
     let Some(def) = pack.block_types.get(&block.block_type) else {
@@ -120,23 +135,6 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
         ));
         return out;
     };
-    if block.id.prefix() != def.prefix {
-        out.push(err(
-            block,
-            "E_PREFIX",
-            format!(
-                "id {} has prefix {:?} but type {} uses {:?}",
-                block.id,
-                block.id.prefix(),
-                block.block_type,
-                def.prefix
-            ),
-            format!(
-                "omit the id to let rdy generate one, or use the prefix {:?}",
-                def.prefix
-            ),
-        ));
-    }
     for (name, v) in &block.fields {
         if name == "key" {
             // `key` is an engine field on every type, never listed per type.
@@ -184,7 +182,7 @@ pub fn validate_block(pack: &Pack, block: &Block, parent: Option<&Block>) -> Vec
         }
         if name == REFLECTS_FIELD {
             // `reflects` is an engine field on content types, never listed per type.
-            if REFLECTS_EXCLUDED_TYPES.contains(&block.block_type.as_str()) {
+            if pack.class_of(&block.block_type) == TypeClass::Supporting {
                 out.push(err(
                     block,
                     "E_FIELD_UNKNOWN",

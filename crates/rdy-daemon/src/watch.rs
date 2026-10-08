@@ -18,6 +18,7 @@
 //! fresh stamp look old, so a same-tick rewrite there can be missed. (git compares with its index
 //! file's own mtime, stamped by the same server; a marker file under `.rdy/run` would do the same
 //! here, at the price of a write per check.)
+use rdy_engine::config_levels::{LOCAL_FILE, PROJECT_FILE};
 use rdy_engine::{FileStamp, PackFingerprint, pack_fingerprint};
 use rdy_model::Hash;
 use std::path::{Path, PathBuf};
@@ -107,10 +108,15 @@ impl PackWatch {
         self.table.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The pack-defining files as they stand, in fingerprint order: the config, then each
+    /// The pack-defining files as they stand, in fingerprint order: the config, the local
+    /// settings when the file exists, then each
     /// `*.yaml` (and `*.yml`) of `.rdy/packs/` sorted by path.
     fn listing(&self) -> Vec<(PathBuf, Stat)> {
-        let mut paths = vec![self.root.join(".rdy/config.yaml")];
+        let mut paths = vec![self.root.join(PROJECT_FILE)];
+        let local = self.root.join(LOCAL_FILE);
+        if local.exists() {
+            paths.push(local);
+        }
         if let Ok(dir) = std::fs::read_dir(self.root.join(".rdy/packs")) {
             let mut packs: Vec<PathBuf> = dir
                 .filter_map(Result::ok)

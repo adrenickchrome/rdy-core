@@ -133,6 +133,12 @@ fn spec_target(op: &str) -> Option<String> {
         "brief_code" => {
             "recorded, no spec budget: one git rev-parse per call plus a briefing over the file's anchors (warm index)"
         }
+        "wc_project_typical" => {
+            "recorded, no spec budget (M2f-a): the working copy: canon projected as files, whole tree"
+        }
+        "wc_plan_one_doc" => {
+            "recorded, no spec budget (M2f-a): the working copy: one staged doc file planned for commit"
+        }
         "history_100" | "last_changes_doc" | "log_page_20" => "< 5 ms p99 (reads, spec 11)",
         "log_full" => "recorded: 2000 landings, no spec target",
         // bounds the functional tests used to assert by the clock, moved here (a wall-clock bound
@@ -1408,6 +1414,53 @@ fn tier_code(out: &mut Vec<Measure>, r: &Rdy, fx: &Fixture, _dir: &std::path::Pa
     std::fs::write(&config, saved).expect("restore the project config");
 }
 
+/// The working copy: the whole of canon projected as files (`wc_project_typical`), and the plan
+/// of a commit that stages one edited doc file (`wc_plan_one_doc`). The checkout is written once
+/// into a temporary directory, outside every timer; each plan run edits the first body in one
+/// doc file, stages it and plans the commit. Typical tier only.
+fn tier_wc(out: &mut Vec<Measure>, r: &Rdy, dir: &std::path::Path) {
+    use rdy_engine::wc::files::checkout;
+    use rdy_engine::wc::ignore::Ignore;
+    use rdy_engine::wc::layout::{FileKind, read_tree};
+    use rdy_engine::wc::plan::plan_commit;
+    use rdy_engine::wc::state::{Place, WcState, stage_put};
+    let st = r.read();
+    out.push(measure("wc_project_typical", 10, |_| {
+        let p = st.wc_project(&Scope::Canon, None).expect("project canon");
+        assert!(!p.files.is_empty());
+    }));
+    // setup, untimed: a checkout, and the doc file to edit
+    let root = dir.join("wc");
+    std::fs::create_dir_all(&root).expect("mkdir");
+    let place = Place::main(&root);
+    let mut state = WcState::load(&place).expect("load the state");
+    let pack = st.pack().clone();
+    let tree = read_tree(&root, &Ignore::empty(), &pack);
+    let proj = st.wc_project(&Scope::Canon, None).expect("project canon");
+    checkout(&place, &mut state, &tree, &proj, false).expect("checkout");
+    let file = proj
+        .files
+        .iter()
+        .find(|f| f.kind == FileKind::Doc)
+        .expect("a doc file");
+    let mut entries: Vec<serde_yaml_ng::Value> =
+        serde_yaml_ng::from_str(&file.text).expect("a doc file is a list");
+    out.push(measure_timed("wc_plan_one_doc", 10, |i| {
+        let entry = entries
+            .iter_mut()
+            .find_map(|e| e.get_mut("body"))
+            .expect("an entry with a body");
+        *entry = serde_yaml_ng::Value::String(format!("Edited in the working copy, run {i}."));
+        let text = serde_yaml_ng::to_string(&entries).expect("yaml");
+        let s = Instant::now();
+        stage_put(&place, &file.path, text.as_bytes()).expect("stage");
+        let plan = plan_commit(&place, &state, &pack).expect("plan the commit");
+        let took = s.elapsed();
+        assert!(!plan.ops.is_empty());
+        took
+    }));
+}
+
 fn tier_render(out: &mut Vec<Measure>, r: &Rdy, dir: &std::path::Path, sfx: &str, runs: usize) {
     out.push(measure(&format!("render{sfx}"), runs, |i| {
         let site = dir.join(format!("site{sfx}{i}"));
@@ -1543,6 +1596,7 @@ pub fn run_workload() -> Vec<Measure> {
     tier_reads(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
     tier_edit_loop(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
     tier_code(&mut out, &r, &fx, dir.path());
+    tier_wc(&mut out, &r, dir.path());
     tier_render(&mut out, &r, dir.path(), "", 5);
     out.push(measure("export_import", 5, |i| {
         let export = dir.path().join(format!("export{i}"));
@@ -2678,6 +2732,41 @@ mod tests {
                 .find(|m| m.op == op)
                 .unwrap_or_else(|| panic!("{op} missing"));
             assert!(m.median_ms > 0.0);
+        }
+    }
+
+    #[test]
+    #[ignore = "runs the typical perf workload; cargo test -p rdy-qa --release --lib -- --ignored wcperf1"]
+    fn wcperf1_the_working_copy_ops_have_targets_and_run() {
+        for op in ["wc_project_typical", "wc_plan_one_doc"] {
+            assert!(spec_target(op).is_some(), "{op} has no target");
+        }
+        let ms = run_workload();
+        for op in ["wc_project_typical", "wc_plan_one_doc"] {
+            let m = ms
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            assert!(m.median_ms > 0.0);
+        }
+    }
+
+    #[test]
+    fn wcperf1_the_working_copy_tier_measures_both_ops_on_a_small_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).unwrap();
+        testkit::generate_tree(&proj, 2, 2, 5);
+        let mut r = Rdy::open(&proj).unwrap();
+        land(&mut r, "work").unwrap();
+        let mut out = vec![];
+        tier_wc(&mut out, &r, dir.path());
+        for op in ["wc_project_typical", "wc_plan_one_doc"] {
+            let m = out
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            assert!(m.median_ms > 0.0, "{op}: {m:?}");
         }
     }
 

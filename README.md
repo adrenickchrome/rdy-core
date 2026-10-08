@@ -88,10 +88,55 @@ tag and import. An agent sets `RDY_ACTOR` (and optionally `RDY_RUN`): its writes
 run's view, else `work-<actor>` (`:` becomes `-`, e.g. `work-agent-x`), and approving, tagging
 and importing are refused with `E_PERMISSION`.
 
+rdy checks the user config as it checks the project's. If the file does not parse, is not a
+mapping of settings, or sets a key at the wrong level, every command in every project fails with
+`E_CONFIG`, and the error names the file. rdy never skips the file, because that would change
+who the human is.
+
 View ownership: the first commit into a view records its owner (the actor and run that made it),
 and `rdy status` shows each view's owner. An agent session may write only into a view it owns or
 a new one; writing into another session's view (the human's `work`, or the same actor's view
 from another run) is `E_VIEW_OWNER`, and the fix names the agent's own view.
+
+## Working copy
+
+For a person, a view can be a folder of YAML files. You edit them in your own editor. rdy puts
+your edits back into the view as one change. Agents do not use the files: they read and write
+through the tools (the MCP server and the commands above).
+
+```bash
+rdy checkout [<view>]        # write the view as files and bind this folder to it (default: work)
+rdy status                   # what changed in the files, what is staged, what is in conflict
+rdy add notes.yaml guides/   # stage files or folders (a deleted file stages its deletion)
+rdy commit -m "reword setup" # record the staged files as one change in the bound view
+rdy update                   # bring in changes made elsewhere; edits of yours stay
+rdy brief guides/intro.yaml  # the briefing for a file, a folder or a block
+rdy check                    # lint the files against the bound view
+rdy worktree add ../review work-review   # a second folder, bound to its own view
+```
+
+- **Files.** Each doc is `<path>.yaml`, a list of block entries. Each folder is
+  `<path>/_folder.yaml`. A new entry needs no `id`: rdy gives it one at commit. The order of the
+  entries in the file is the order of the blocks. Decisions and questions are not in the files;
+  they live in the store, and so do the links to them (`decided_by`, `implements`). A commit
+  keeps them.
+- **Commit rewrites the files it commits in canonical form, and drops their YAML comments.**
+  Keep notes in a block, not in a comment.
+- **Briefing.** When a person commits a change to accepted content, rdy shows the briefing
+  first, then commits. `rdy brief` shows it earlier.
+- **Conflicts.** If a block changed in the view and in your file, `rdy update` keeps your file and
+  writes the view's side next to it as `<name>.theirs.yaml`. Fix the file, delete the
+  `.theirs.yaml` file, then run `rdy add` on the file.
+- **New docs.** `rdy new doc` and `rdy new folder` also write the file into a folder bound to
+  the same view. A file already at that path is never overwritten: rdy warns and leaves it.
+- **Figures.** Name an image file in the `blob` field of a `figure` entry, as a path from the
+  doc file's folder. Commit stores the image and copies it to `_blobs/<hash>.<ext>`. Checkout
+  and update write the view's images into `_blobs/` first, so a checkout or update that is then
+  refused can leave images there. Each name is the image's hash, so such a file is never wrong
+  and the next checkout uses it.
+- **Ignored files.** `.rdyignore` (a subset of the gitignore patterns) keeps files out of the working copy.
+- **Where it lives.** The state is local, in `.rdy/wc/` (a worktree has its own). It is never
+  part of the project's history.
 
 ## QA gate
 

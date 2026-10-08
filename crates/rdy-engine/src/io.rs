@@ -9,7 +9,7 @@ use rdy_model::{
     Block, BlockId, Change, ChangeLinks, EditorialClass, FieldValue, Hash, Justification, Link, Op,
     tree,
 };
-use rdy_schema::{has_errors, skeleton_gaps, validate_block};
+use rdy_schema::{has_errors, skeleton_gaps, validate_block, validate_prefix};
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -66,7 +66,7 @@ where
 
 /// lkey1: a link target written as a key, held until the keys of the import or the view can
 /// resolve it. `at` is its position in the kind's list.
-pub(crate) struct KeyedLink {
+pub struct KeyedLink {
     kind: String,
     at: usize,
     text: String,
@@ -77,6 +77,24 @@ impl KeyedLink {
     /// The text a keyed target was written as.
     pub(crate) fn text(&self) -> &str {
         &self.text
+    }
+
+    /// The link kind it was written under.
+    #[allow(dead_code)] // read by the working-copy layer
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    /// Its position in the kind's list.
+    #[allow(dead_code)] // read by the working-copy layer
+    pub fn at(&self) -> usize {
+        self.at
+    }
+
+    /// The part it names, if any.
+    #[allow(dead_code)] // read by the working-copy layer
+    pub fn part(&self) -> Option<&str> {
+        self.part.as_deref()
     }
 }
 
@@ -767,7 +785,8 @@ impl Rdy {
             }
         }
         let (mut blocks, keyed): (Vec<Block>, Vec<Vec<KeyedLink>>) = {
-            let (loaded, diags) = tree_io::read_tree(&dir.join("docs"), "docs");
+            let ignore = crate::wc::ignore::Ignore::load(dir)?;
+            let (loaded, diags) = tree_io::read_tree_with(&dir.join("docs"), "docs", Some(&ignore));
             if let Some(d) = diags
                 .iter()
                 .find(|d| d.severity == rdy_schema::Severity::Error)
@@ -878,7 +897,10 @@ impl Rdy {
                                 "{} references {{{{{t}}}}}, which is not in the import",
                                 b.id
                             ),
-                            "export the whole project, or remove the reference",
+                            format!(
+                                "export the whole project, or remove the reference; {}",
+                                crate::keys::literal_hint(&t)
+                            ),
                         ));
                     }
                 }
@@ -920,6 +942,7 @@ impl Rdy {
                 .parent
                 .as_ref()
                 .and_then(|p| incoming.get(p).copied().or_else(|| existing.get(p)));
+            issues.extend(validate_prefix(&self.pack, b));
             issues.extend(validate_block(&self.pack, b, parent));
         }
         if has_errors(&issues) {
@@ -1117,6 +1140,8 @@ impl Rdy {
             unset,
             body: (cur.body != edited.body).then(|| edited.body.clone()),
             links,
+            block_type: None,
+            move_to: None,
         };
         let reason = reason.filter(|r| !r.trim().is_empty());
         let justification = reason.map(|r| Justification::Editorial {

@@ -4,7 +4,7 @@ use rdy_engine::code_brief::e_code_path_alone;
 use rdy_engine::consequence::{propose_and_report, write_and_report};
 use rdy_engine::engine::{Engine, open_report_json};
 use rdy_engine::*;
-use rdy_model::{BlockId, EditorialClass, Justification, Role};
+use rdy_model::{BlockId, Role};
 use rdy_schema::{BodyRule, Trait};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -150,7 +150,7 @@ pub struct WriteParams {
     pub view: Option<String>,
     /// Ops, each a JSON object (rdy_schema lists them under "ops"):
     /// {"op":"create","type":<type>,"id":"$name"?,"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?,"fields":{..}?,"body":".."?,"links":{..}?}
-    /// {"op":"update","id":<id or path>,"base":<version>?,"fields":{..}?,"unset":[<field>]?,"body":".."?,"links":{..}?}
+    /// {"op":"update","id":<id or path>,"base":<version>?,"fields":{..}?,"unset":[<field>]?,"body":".."?,"links":{..}?,"type":<new type>?,"move_to":{"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?}?} type changes a content block's type in place (same id); move_to moves it in the same op.
     /// {"op":"move","id":<id or path>,"base":<version>?,"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?}
     /// {"op":"delete","id":<id or path>,"base":<version>?}
     /// {"op":"rebalance","parent":<id or path>?}
@@ -446,7 +446,7 @@ pub const WRITE_OPS: &[(&str, &str)] = &[
     ),
     (
         "update",
-        r#"{"op":"update","id":<id or path>,"base":<version>?,"fields":{..}?,"unset":[<field>]?,"body":".."?,"links":{..}?}"#,
+        r#"{"op":"update","id":<id or path>,"base":<version>?,"fields":{..}?,"unset":[<field>]?,"body":".."?,"links":{..}?,"type":<new type>?,"move_to":{"parent":<id or path>?,"after":<sibling>?,"before":<sibling>?}?} type changes a content block's type in place (same id); move_to moves it in the same op."#,
     ),
     (
         "move",
@@ -570,7 +570,13 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
     st.view = view;
     st.session = Some(session);
     st.reported.clear();
-    Ok(json!({ "view": st.view, "role": p.role }))
+    let mut out = json!({ "view": st.view, "role": p.role });
+    // R-P6: a config key rdy does not know is a warning, never silence
+    let warnings = rdy_engine::config_levels::config_warnings_for_env(&st.engine.root());
+    if !warnings.is_empty() {
+        out["warnings"] = json!(warnings);
+    }
+    Ok(out)
 }
 
 pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError> {
@@ -1143,6 +1149,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         PAGE_STALE_FIX,
     ),
     (
+        "W_CONFIG_UNKNOWN",
+        "a config file (.rdy/local.yaml, the project config or the user config) holds a key rdy does not know, such as a typo; rdy ignores the key; reported by rdy config --show-origin, rdy status, every CLI command and rdy_session",
+        "fix the key's spelling (the fix names the nearest known key), or remove it",
+    ),
+    (
         "W_SKELETON_MISSING",
         "a doc lacks a required section of its doc_type; reported once per doc per session, and later writes count the repeats in warnings_repeated",
         "add the section, or give the doc a doc_type without it (page)",
@@ -1182,7 +1193,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             if def.body == BodyRule::Required {
                 example["body"] = json!("…");
             }
-            let mut out = json!({"type": t, "prefix": def.prefix, "traits": traits(&def.traits), "body": format!("{:?}", def.body).to_lowercase(), "fields": fields, "children": def.children, "example": example});
+            let mut out = json!({"type": t, "prefix": def.prefix, "class": pack.class_of(&t).as_str(), "traits": traits(&def.traits), "body": format!("{:?}", def.body).to_lowercase(), "fields": fields, "children": def.children, "example": example});
             out["links"] = json!({"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE, "kinds": pack.link_types});
             if rdy_model::tree::is_tree_type(&t) {
                 out["example"]["parent"] = json!("<folder id or path; omit for the top level>");
@@ -1204,7 +1215,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             Ok(json!({
                 "pack": pack.name,
                 "types": pack.block_types.iter().map(|(n, d)| {
-                    let mut row = json!({"type": n, "prefix": d.prefix, "traits": traits(&d.traits)});
+                    let mut row = json!({"type": n, "prefix": d.prefix, "class": pack.class_of(n).as_str(), "traits": traits(&d.traits)});
                     if !d.tracking.is_empty() {
                         row["tracking"] = json!(d.tracking);
                     }
@@ -1299,54 +1310,16 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
             })
         })
         .collect::<Result<_, _>>()?;
-    let justification = match (p.implements, p.editorial) {
-        (Some(_), Some(_)) => {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                "give either implements or editorial, not both",
-                "implements for decision-backed changes, editorial for typo/restructure/clarify",
-            ));
-        }
-        (Some(d), None) => {
-            let texts = match d {
-                OneOrMany::One(t) => vec![t],
-                OneOrMany::Many(v) => v,
-            };
-            if texts.is_empty() {
-                return Err(RdyError::new(
-                    E_BAD_INPUT,
-                    "implements is empty",
-                    "name the decision this change carries out, or leave implements out",
-                ));
-            }
-            let scope = Scope::View(p.view.clone().unwrap_or_else(|| st.view.clone()));
-            let read = st.engine.read();
-            let mut ids: Vec<BlockId> = vec![];
-            for t in &texts {
-                let id = read.resolve_id(&scope, t)?;
-                if !ids.contains(&id) {
-                    ids.push(id);
-                }
-            }
-            Some(Justification::Implements(ids))
-        }
-        (None, Some(e)) => Some(Justification::Editorial {
-            class: match e.class.as_str() {
-                "typo" => EditorialClass::Typo,
-                "restructure" => EditorialClass::Restructure,
-                "clarify" => EditorialClass::Clarify,
-                other => {
-                    return Err(RdyError::new(
-                        E_BAD_INPUT,
-                        format!("unknown editorial class {other:?}"),
-                        "use typo, restructure or clarify",
-                    ));
-                }
-            },
-            reason: e.reason,
+    let scope = Scope::View(p.view.clone().unwrap_or_else(|| st.view.clone()));
+    let justification = parse_justification(
+        &st.engine.read(),
+        &scope,
+        p.implements.map(|d| match d {
+            OneOrMany::One(t) => vec![t],
+            OneOrMany::Many(v) => v,
         }),
-        (None, None) => None,
-    };
+        p.editorial.map(|e| (e.class, e.reason)),
+    )?;
     let view = p.view.unwrap_or_else(|| st.view.clone());
     let req = WriteRequest {
         view,

@@ -234,3 +234,29 @@ impl From<StoreError> for RdyError {
         }
     }
 }
+
+/// This directory is not a working copy: no view is checked out here.
+pub const E_WC_NOT_BOUND: &str = "E_WC_NOT_BOUND";
+/// The working copy holds edits that the command would overwrite.
+pub const E_WC_DIRTY: &str = "E_WC_DIRTY";
+/// A file a person made sits where checkout wants to write.
+pub const E_WC_OCCUPIED: &str = "E_WC_OCCUPIED";
+/// The working copy is behind its view: update it first.
+pub const E_WC_STALE: &str = "E_WC_STALE";
+/// The working copy holds conflicts that are not resolved.
+pub const E_WC_CONFLICT: &str = "E_WC_CONFLICT";
+/// The files cannot be committed as they are (each problem is an issue).
+pub const E_WC_INVALID: &str = "E_WC_INVALID";
+/// Another rdy command is using this working copy.
+pub const E_WC_LOCKED: &str = "E_WC_LOCKED";
+/// Diagnostic: a supporting block (a decision, a question) was put in a doc file.
+pub const E_WC_SUPPORTING: &str = "E_WC_SUPPORTING";
+/// Diagnostic: a file holds a field or link that lives only in the store.
+pub const E_WC_STORE_ONLY: &str = "E_WC_STORE_ONLY";
+/// Diagnostic: a file in the working tree is not tracked.
+pub const W_WC_UNTRACKED: &str = "W_WC_UNTRACKED";
+/// Diagnostic: a block moved into a file that is not staged.
+pub const W_WC_UNSTAGED_MOVE: &str = "W_WC_UNSTAGED_MOVE";
+/// Diagnostic: the commit's write-back left a path as it was, because it holds what the commit
+/// did not record (a file rdy does not track, or later edits).
+pub const W_WC_KEPT: &str = "W_WC_KEPT";
