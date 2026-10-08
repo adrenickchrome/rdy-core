@@ -27,3 +27,5 @@ pub use id::{seed_ids_for_tests, unseed_ids_for_tests};
 pub use order::{MAX_ORDER_KEY_LEN, OrderError, order_between, rebalance_keys, valid_order_key};
 pub use value::FieldValue;
 pub mod reference;
+pub mod review;
+pub use review::{Finding, Review, ReviewSubject, Verdict};

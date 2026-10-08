@@ -11,7 +11,8 @@ use std::path::Path;
 /// `ViewOpKind::Fork.owner`, `RelayEvidence.question`, `LandingRecord.evidence` and
 /// `Proposal.canon_at`. 5 (plan M2c3): pins hold content hashes (FW-LP1); Justification::Implements holds a list; Proposal.summary (FW-G7c).
 /// 6 (plan M2d1): kinds INTENT and ALT_SET, refs intent/ and alt/.
-pub const STORE_FORMAT: u32 = 6;
+/// 7 (plan M2d2): kind REVIEW and refs dismiss/.
+pub const STORE_FORMAT: u32 = 7;
 /// The mirror file in the store directory.
 pub const FORMAT_FILE: &str = "FORMAT";
 /// The log ref holding `store_format`, in ASCII decimal.
