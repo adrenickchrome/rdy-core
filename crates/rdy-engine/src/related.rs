@@ -1,5 +1,5 @@
 //! Related decisions (FW-EN5, FW-EN5a).
-use crate::lexicon::{Lexicon, tied};
+use crate::lexicon::{Lexicon, is_tie};
 use crate::query::summary_in;
 use crate::{Materialized, RdyError, ReadState, Scope};
 use rdy_graph::{DerivedStatus, EdgeKind, Graph};
@@ -40,11 +40,11 @@ const NEIGHBOURS: [(&str, &str, &str); 3] = [
 const SAME_ENTITY: &str = "same_entity";
 
 /// The entities `id` is tied to: existing blocks of an entity type that `id` references or
-/// links with `describes` or `affects`.
+/// links with `describes` or `affects`. One pass over its outgoing edges.
 fn entities_of(g: &Graph, lex: &Lexicon, m: &Materialized, id: &BlockId) -> BTreeSet<BlockId> {
     g.outgoing(id)
         .iter()
-        .filter(|e| tied(g, id, &e.to))
+        .filter(|e| is_tie(&e.kind))
         .filter(|e| {
             m.get(&e.to)
                 .is_some_and(|b| lex.is_entity_type(&b.block_type))
@@ -117,10 +117,11 @@ impl ReadState {
             }
             let mine = entities_of(&g, &lex, &m, x);
             let mut shared: BTreeMap<BlockId, BTreeSet<BlockId>> = BTreeMap::new();
+            // each incoming edge that is itself a tie: one pass over the entity's edges
             for ent in &mine {
                 for e in g.incoming(ent) {
                     if e.from != *x
-                        && tied(&g, &e.from, ent)
+                        && is_tie(&e.kind)
                         && matches!(
                             g.status(&e.from),
                             Some(

@@ -56,33 +56,34 @@ fn is_word_char(c: char) -> bool {
 
 /// The words of `text`, in order: runs of `[\w]+([-.][\w]+)*`.
 pub fn words(text: &str) -> Vec<Word> {
-    let chars: Vec<(usize, char)> = text.char_indices().collect();
-    let end_of = |i: usize| chars.get(i).map_or(text.len(), |(b, _)| *b);
     let mut out = vec![];
-    let mut i = 0;
-    while i < chars.len() {
-        if !is_word_char(chars[i].1) {
-            i += 1;
+    let mut it = text.char_indices().peekable();
+    while let Some((start, c)) = it.next() {
+        if !is_word_char(c) {
             continue;
         }
-        let start = i;
+        let mut end = start + c.len_utf8();
         loop {
-            while i < chars.len() && is_word_char(chars[i].1) {
-                i += 1;
+            while let Some(&(i, c)) = it.peek() {
+                if !is_word_char(c) {
+                    break;
+                }
+                end = i + c.len_utf8();
+                it.next();
             }
-            let joins = i + 1 < chars.len()
-                && matches!(chars[i].1, '-' | '.')
-                && is_word_char(chars[i + 1].1);
-            if !joins {
-                break;
+            // a `-` or `.` joins this run to a next one that starts right after it
+            let mut look = it.clone();
+            match (look.next(), look.next()) {
+                (Some((_, '-' | '.')), Some((_, n))) if is_word_char(n) => {
+                    it.next();
+                }
+                _ => break,
             }
-            i += 1;
         }
-        let (s, e) = (end_of(start), end_of(i));
         out.push(Word {
-            start: s,
-            end: e,
-            folded: text[s..e].to_lowercase(),
+            start,
+            end,
+            folded: text[start..end].to_lowercase(),
         });
     }
     out
@@ -103,20 +104,35 @@ pub fn phrase(text: &str) -> String {
 pub fn find_phrases(text: &str, known: &dyn Fn(&str) -> bool) -> Vec<(String, Range<usize>)> {
     let ws = words(text);
     let mut out = vec![];
+    // the window of n words is the first n words of the longest window: one join per word,
+    // and each shorter window is a prefix of it (`ends[n - 1]` bytes, `chars[n - 1]` chars)
+    let mut joined = String::new();
+    let mut ends = [0usize; MAX_NAME_WORDS];
+    let mut chars = [0usize; MAX_NAME_WORDS];
     let mut i = 0;
     while i < ws.len() {
         let longest = MAX_NAME_WORDS.min(ws.len() - i);
-        let hit = (1..=longest).rev().find_map(|n| {
-            let p = ws[i..i + n]
-                .iter()
-                .map(|w| w.folded.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
-            (p.chars().count() >= MIN_MENTION_CHARS && known(&p)).then_some((n, p))
-        });
+        joined.clear();
+        let mut count = 0;
+        for (n, w) in ws[i..i + longest].iter().enumerate() {
+            if n > 0 {
+                joined.push(' ');
+                count += 1;
+            }
+            joined.push_str(&w.folded);
+            count += w.folded.chars().count();
+            ends[n] = joined.len();
+            chars[n] = count;
+        }
+        let hit = (1..=longest)
+            .rev()
+            .find(|&n| chars[n - 1] >= MIN_MENTION_CHARS && known(&joined[..ends[n - 1]]));
         match hit {
-            Some((n, p)) => {
-                out.push((p, ws[i].start..ws[i + n - 1].end));
+            Some(n) => {
+                out.push((
+                    joined[..ends[n - 1]].to_string(),
+                    ws[i].start..ws[i + n - 1].end,
+                ));
                 i += n;
             }
             None => i += 1,

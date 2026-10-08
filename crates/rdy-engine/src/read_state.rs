@@ -5,6 +5,7 @@ use crate::coverage::GraphCoverage;
 use crate::error::*;
 use crate::lexicon::Lexicon;
 use crate::paths::TreeNode;
+use crate::suggest::MentionScan;
 use crate::version::VposCache;
 use crate::{AS_OF_CACHE_ENTRIES, Materialized, Scope};
 use rdy_graph::Graph;
@@ -59,6 +60,8 @@ pub(crate) struct Built {
     pub(crate) lexicon: OnceLock<Arc<Lexicon>>,
     /// The whole scope's graph coverage (FW-EN4), memoised; never carried.
     pub(crate) coverage: OnceLock<Arc<GraphCoverage>>,
+    /// The mention scans briefings made (FW-EN3), most recent first; carried across a write.
+    pub(crate) mentions: Mutex<Vec<MentionScan>>,
 }
 
 impl Built {
@@ -70,16 +73,25 @@ impl Built {
             tree: OnceLock::new(),
             lexicon: OnceLock::new(),
             coverage: OnceLock::new(),
+            mentions: Mutex::new(vec![]),
         }
     }
 
     /// gcar1: this state with `ops` applied: the same conflicts and, only if this state's graph is
     /// built, that graph carried across the ops (their blocks' old edges out, their new ones in),
-    /// which equals a rebuild. The lexicon is carried the same way when it is built (lex1). The
-    /// tree and the coverage are not carried.
+    /// which equals a rebuild. The lexicon is carried the same way when it is built (lex1), and
+    /// so are the mention scans (`MentionScan::carried`). The tree and the coverage are not
+    /// carried.
     pub(crate) fn after(&self, ops: &[Op]) -> Built {
         let m = Arc::new(self.m.with(ops));
         let next = Built::new(Arc::clone(&m), Arc::clone(&self.conflicts));
+        {
+            let scans = self.mentions.lock().unwrap_or_else(|e| e.into_inner());
+            if !scans.is_empty() {
+                *next.mentions.lock().unwrap_or_else(|e| e.into_inner()) =
+                    MentionScan::carried(&scans, &self.m, ops);
+            }
+        }
         let (graph, lexicon) = (self.graph.get(), self.lexicon.get());
         if graph.is_none() && lexicon.is_none() {
             return next;

@@ -1,12 +1,13 @@
 //! Suggestions (FW-EN3): links to the entities written text names, and new entities for literals that recur.
 use crate::error::RdyError;
 use crate::lexicon::{Mention, link_kind_for, linked_from_outside, text_in, tied};
-use crate::{ReadState, Scope};
+use crate::{Materialized, ReadState, Scope};
 use rdy_model::entity::{MIN_MENTION_CHARS, code_literals, find_phrases, phrase};
 use rdy_model::tree::DOC;
 use rdy_model::{Block, BlockId, Hash, Op};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 /// One suggestion: a link from a written block to an entity its text names, or a new entity for
 /// a code literal that recurs.
@@ -50,6 +51,60 @@ pub const RECUR_MIN: usize = 3;
 pub const ENTITY_BLOCKS_SHOWN: usize = 10;
 /// The most mentions of new docs one call lists; the rest are counted.
 pub const MENTIONED_BY_CAP: usize = 20;
+
+/// Each phrase of the new docs one `mentioned_by` call reads, and the docs it names.
+pub(crate) type Phrases = BTreeMap<String, BTreeSet<BlockId>>;
+/// Every (doc, block) pair one `mentioned_by` call finds, uncut, with the field and the text.
+type Found = imbl::OrdMap<(BlockId, BlockId), (String, String)>;
+
+/// The most mention scans one scope's build keeps; the least recently used goes first.
+const MENTION_SCANS: usize = 8;
+
+/// One `mentioned_by` result, uncut, for one set of phrases, kept in the scope's build. Each
+/// (doc, block) pair is a function of the block, of the doc it sits in and of the phrases, so
+/// a write that moves no other block into another doc changes only the pairs of the blocks it
+/// writes: carried across it, those are `stale` and read again on next use.
+#[derive(Clone)]
+pub(crate) struct MentionScan {
+    phrases: Arc<Phrases>,
+    found: Found,
+    stale: BTreeSet<BlockId>,
+}
+
+impl MentionScan {
+    /// `scans` carried across `ops` (applied to `before`): the written blocks become stale. None
+    /// when an op can move a block it does not write into another doc: a delete of a block with
+    /// children, or an update that changes the parent or the type of a block with children.
+    pub(crate) fn carried(
+        scans: &[MentionScan],
+        before: &Materialized,
+        ops: &[Op],
+    ) -> Vec<MentionScan> {
+        let moves_others = ops.iter().any(|op| {
+            let Some(old) = before.get(op.block_id()) else {
+                return false;
+            };
+            let moved = match op {
+                Op::Delete { .. } => true,
+                Op::Create { block } | Op::Update { block, .. } => {
+                    block.parent != old.parent || block.block_type != old.block_type
+                }
+            };
+            moved && !before.children(Some(&old.id)).is_empty()
+        });
+        if moves_others {
+            return vec![];
+        }
+        scans
+            .iter()
+            .map(|s| {
+                let mut s = s.clone();
+                s.stale.extend(ops.iter().map(|op| op.block_id().clone()));
+                s
+            })
+            .collect()
+    }
+}
 
 /// A block outside a new doc whose text names the doc: the doc's id, the block's id, the field
 /// the text is in, and the text as written.
@@ -153,9 +208,14 @@ impl ReadState {
     /// The blocks that mention each new doc of `docs` (ids that are not docs are ignored): a doc
     /// is new while nothing outside it links into it. Its phrases are those of its `title` and
     /// its `key` with at least [`MIN_MENTION_CHARS`] characters. Every block that can link and
-    /// sits in another doc is scanned; each (doc, block) pair is listed once, with the first
-    /// field and the text as written, unless the block is tied to the doc. Sorted by (doc,
-    /// block), cut to [`MENTIONED_BY_CAP`]; the count the cut dropped is returned.
+    /// sits in another doc is read; each (doc, block) pair is listed once, with the first field
+    /// and the text as written, unless the block is tied to the doc. Sorted by (doc, block), cut
+    /// to [`MENTIONED_BY_CAP`]; the count the cut dropped is returned.
+    ///
+    /// Only a block that holds every word of a phrase can name it, so the first call for a set
+    /// of phrases reads only the blocks the lexicon's word index gives. Its result is kept in the
+    /// scope's build and carried across writes ([`MentionScan`]): a later call reads only the
+    /// blocks written since.
     pub fn mentioned_by(
         &self,
         scope: &Scope,
@@ -172,7 +232,7 @@ impl ReadState {
         }
         let g = self.graph(scope)?;
         // each phrase and the new docs it names
-        let mut phrases: BTreeMap<String, BTreeSet<BlockId>> = BTreeMap::new();
+        let mut phrases: Phrases = BTreeMap::new();
         for d in candidates {
             if linked_from_outside(&g, &m, &d.id) {
                 continue;
@@ -190,32 +250,67 @@ impl ReadState {
         if phrases.is_empty() {
             return Ok((vec![], 0));
         }
-        let known = |p: &str| phrases.contains_key(p);
-        let mut found: BTreeMap<(BlockId, BlockId), (String, String)> = BTreeMap::new();
-        for b in m.iter() {
-            if link_kind_for(self.pack(), b).is_none() {
-                continue;
-            }
-            let Some(own) = m.doc_of(&b.id).map(|d| d.id.clone()) else {
-                continue;
-            };
-            for (field, text) in text_in(self.pack(), b) {
-                for (p, range) in find_phrases(&text, &known) {
-                    for doc in phrases.get(&p).into_iter().flatten() {
-                        if *doc == own || found.contains_key(&(doc.clone(), b.id.clone())) {
-                            continue;
-                        }
-                        if tied(&g, &b.id, doc) {
-                            continue;
-                        }
-                        found.insert(
-                            (doc.clone(), b.id.clone()),
-                            (field.clone(), text[range.clone()].to_string()),
-                        );
+        let built = self.built(scope)?;
+        let kept = {
+            let scans = built.mentions.lock().unwrap_or_else(|e| e.into_inner());
+            scans.iter().find(|s| *s.phrases == phrases).cloned()
+        };
+        let scan = match kept {
+            Some(kept) if kept.stale.is_empty() => kept,
+            Some(kept) => {
+                // the blocks written since: their pairs out, then each read again
+                let mut found = kept.found;
+                for id in &kept.stale {
+                    for doc in kept.phrases.values().flatten() {
+                        found.remove(&(doc.clone(), id.clone()));
+                    }
+                    if let Some(b) = m.get(id) {
+                        let own = m.doc_of(id).map(|d| d.id.clone());
+                        self.mentions_in(&g, &phrases, b, own, &mut found);
                     }
                 }
+                MentionScan {
+                    phrases: kept.phrases,
+                    found,
+                    stale: BTreeSet::new(),
+                }
             }
+            None => {
+                let lex = self.lexicon(scope)?;
+                let read: BTreeSet<BlockId> = phrases
+                    .keys()
+                    .flat_map(|p| lex.blocks_with_words(p))
+                    .collect();
+                let mut found = Found::new();
+                // the doc each parent sits in: the blocks read share few parents
+                let mut doc_under: HashMap<&BlockId, Option<BlockId>> = HashMap::new();
+                for b in read.iter().filter_map(|id| m.get(id)) {
+                    let own = if b.block_type == DOC {
+                        Some(b.id.clone())
+                    } else {
+                        b.parent.as_ref().and_then(|p| {
+                            doc_under
+                                .entry(p)
+                                .or_insert_with(|| m.doc_of(p).map(|d| d.id.clone()))
+                                .clone()
+                        })
+                    };
+                    self.mentions_in(&g, &phrases, b, own, &mut found);
+                }
+                MentionScan {
+                    phrases: Arc::new(phrases),
+                    found,
+                    stale: BTreeSet::new(),
+                }
+            }
+        };
+        {
+            let mut scans = built.mentions.lock().unwrap_or_else(|e| e.into_inner());
+            scans.retain(|s| s.phrases != scan.phrases);
+            scans.insert(0, scan.clone());
+            scans.truncate(MENTION_SCANS);
         }
+        let found = scan.found;
         let omitted = found.len().saturating_sub(MENTIONED_BY_CAP);
         let out = found
             .into_iter()
@@ -228,5 +323,41 @@ impl ReadState {
             })
             .collect();
         Ok((out, omitted))
+    }
+
+    /// The pairs block `b` (in doc `own`) adds to a mention scan for `phrases`: for each doc a
+    /// phrase in its text names, the first field and the text as written, unless `b` cannot
+    /// link, sits in no doc or in that doc, or is tied to it.
+    fn mentions_in(
+        &self,
+        g: &rdy_graph::Graph,
+        phrases: &Phrases,
+        b: &Block,
+        own: Option<BlockId>,
+        found: &mut Found,
+    ) {
+        if link_kind_for(self.pack(), b).is_none() {
+            return;
+        }
+        let Some(own) = own else {
+            return;
+        };
+        let known = |p: &str| phrases.contains_key(p);
+        // a (doc, block) pair is listed once, with the first field and text that name the doc
+        let mut named: BTreeSet<&BlockId> = BTreeSet::new();
+        for (field, text) in text_in(self.pack(), b) {
+            for (p, range) in find_phrases(&text, &known) {
+                for doc in phrases.get(&p).into_iter().flatten() {
+                    if *doc == own || named.contains(doc) || tied(g, &b.id, doc) {
+                        continue;
+                    }
+                    named.insert(doc);
+                    found.insert(
+                        (doc.clone(), b.id.clone()),
+                        (field.clone(), text[range.clone()].to_string()),
+                    );
+                }
+            }
+        }
     }
 }

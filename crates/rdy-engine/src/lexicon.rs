@@ -1,12 +1,30 @@
-//! The entity lexicon (FW-EN1, FW-EN3): entity keys, names and aliases by phrase, and the blocks that hold each code literal. Built on first use per scope and carried across writes like the graph.
+//! The entity lexicon (FW-EN1, FW-EN3): entity keys, names and aliases by phrase, and the blocks that hold each code literal and each word. Built on first use per scope and carried across writes like the graph.
 use crate::Materialized;
 use rdy_graph::{EdgeKind, Graph};
-use rdy_model::entity::{aliases, code_literals, find_phrases, phrase, source_field, text_sources};
+use rdy_model::entity::{
+    aliases, code_literals, find_phrases, phrase, source_field, text_sources, words,
+};
 use rdy_model::{Block, BlockId, decision};
 use rdy_schema::{FieldKind, Pack, Trait};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::Cell;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
+
+thread_local! {
+    static TEXT_SCANS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Test hook: how many block texts this thread has read for a mention or literal scan
+/// ([`text_in`] and the lexicon's own reads), so a test can bound the blocks a read touches.
+#[doc(hidden)]
+pub fn text_scans() -> usize {
+    TEXT_SCANS.with(Cell::get)
+}
+
+fn count_scan() {
+    TEXT_SCANS.with(|c| c.set(c.get() + 1));
+}
 
 /// How a phrase names an entity. Declaration order is the match order: a key beats a name, a
 /// name beats an alias.
@@ -41,6 +59,9 @@ pub struct Lexicon {
     phrases: imbl::OrdMap<String, imbl::OrdSet<(BlockId, NameKind)>>,
     /// Each code literal (exact text) and the blocks whose text holds it.
     literals: imbl::OrdMap<String, imbl::OrdSet<BlockId>>,
+    /// Each word (case-folded, as [`words`] splits text) and the blocks whose text holds it: a
+    /// phrase can only be found in a block that holds each of its words.
+    words: imbl::OrdMap<String, imbl::OrdSet<BlockId>>,
 }
 
 impl Lexicon {
@@ -58,10 +79,29 @@ impl Lexicon {
             names: imbl::OrdMap::new(),
             phrases: imbl::OrdMap::new(),
             literals: imbl::OrdMap::new(),
+            words: imbl::OrdMap::new(),
         };
+        // the term maps are gathered in plain maps first and made persistent once: one insert
+        // per (term, block) into a persistent set costs several times more
+        let mut literals: HashMap<String, Vec<BlockId>> = HashMap::new();
+        let mut folded: HashMap<String, Vec<BlockId>> = HashMap::new();
         for b in blocks {
-            l.add(b);
+            l.add_names(b);
+            let (lits, ws) = l.terms_of(b);
+            for t in lits {
+                literals.entry(t).or_default().push(b.id.clone());
+            }
+            for t in ws {
+                folded.entry(t).or_default().push(b.id.clone());
+            }
         }
+        let persist = |m: HashMap<String, Vec<BlockId>>| {
+            m.into_iter()
+                .map(|(t, ids)| (t, ids.into_iter().collect::<imbl::OrdSet<BlockId>>()))
+                .collect::<imbl::OrdMap<_, _>>()
+        };
+        l.literals = persist(literals);
+        l.words = persist(folded);
         l
     }
 
@@ -115,6 +155,10 @@ impl Lexicon {
     /// The entities `b`'s text names by name or alias (never by key), one mention per entity,
     /// the first found, reading `text_in` in order. An entity never mentions itself.
     pub fn mentions(&self, b: &Block) -> Vec<Mention> {
+        // no name to find: the text is not read
+        if self.phrases.is_empty() {
+            return vec![];
+        }
         let known = |p: &str| {
             self.phrases
                 .get(p)
@@ -175,19 +219,61 @@ impl Lexicon {
 
     /// The text `b` holds under this lexicon's pack: [`text_in`].
     fn sources(&self, b: &Block) -> Vec<(String, String)> {
+        count_scan();
         let enums = self.enum_fields.get(&b.block_type);
         without(text_sources(b), |f| enums.is_some_and(|e| e.contains(f)))
     }
 
-    /// The distinct code literals of `b`'s text sources.
-    fn literals_of(&self, b: &Block) -> BTreeSet<String> {
-        self.sources(b)
+    /// The blocks whose text holds every word of `phrase` (a [`phrase`]: folded words joined by
+    /// one space), sorted by id. Every block in which [`find_phrases`] can find `phrase` is
+    /// among them. Empty for an empty phrase.
+    pub fn blocks_with_words(&self, phrase: &str) -> Vec<BlockId> {
+        let mut sets = vec![];
+        for w in phrase.split(' ').filter(|w| !w.is_empty()) {
+            match self.words.get(w) {
+                Some(set) => sets.push(set),
+                None => return vec![],
+            }
+        }
+        sets.sort_by_key(|s| s.len());
+        let Some((first, rest)) = sets.split_first() else {
+            return vec![];
+        };
+        first
             .iter()
-            .flat_map(|(_, text)| code_literals(text))
+            .filter(|id| rest.iter().all(|s| s.contains(*id)))
+            .cloned()
             .collect()
     }
 
+    /// The distinct code literals and the distinct folded words of `b`'s text sources.
+    fn terms_of(&self, b: &Block) -> (BTreeSet<String>, BTreeSet<String>) {
+        let sources = self.sources(b);
+        let literals = sources
+            .iter()
+            .flat_map(|(_, text)| code_literals(text))
+            .collect();
+        let folded = sources
+            .iter()
+            .flat_map(|(_, text)| words(text))
+            .map(|w| w.folded)
+            .collect();
+        (literals, folded)
+    }
+
     fn add(&mut self, b: &Block) {
+        self.add_names(b);
+        let (literals, words) = self.terms_of(b);
+        for lit in literals {
+            self.literals.entry(lit).or_default().insert(b.id.clone());
+        }
+        for w in words {
+            self.words.entry(w).or_default().insert(b.id.clone());
+        }
+    }
+
+    /// The key, name and alias phrases of `b` when it is an entity.
+    fn add_names(&mut self, b: &Block) {
         if self.is_entity_type(&b.block_type) {
             let names = Lexicon::names_of(b);
             for (kind, p) in &names {
@@ -197,9 +283,6 @@ impl Lexicon {
                     .insert((b.id.clone(), *kind));
             }
             self.names.insert(b.id.clone(), names);
-        }
-        for lit in self.literals_of(b) {
-            self.literals.entry(lit).or_default().insert(b.id.clone());
         }
     }
 
@@ -214,11 +297,14 @@ impl Lexicon {
                 }
             }
         }
-        for lit in self.literals_of(b) {
-            if let Some(set) = self.literals.get_mut(&lit) {
-                set.remove(&b.id);
-                if set.is_empty() {
-                    self.literals.remove(&lit);
+        let (literals, words) = self.terms_of(b);
+        for (map, terms) in [(&mut self.literals, literals), (&mut self.words, words)] {
+            for t in terms {
+                if let Some(set) = map.get_mut(&t) {
+                    set.remove(&b.id);
+                    if set.is_empty() {
+                        map.remove(&t);
+                    }
                 }
             }
         }
@@ -254,6 +340,7 @@ fn without(sources: Vec<(String, String)>, skip: impl Fn(&str) -> bool) -> Vec<(
 /// the metadata fields) without the fields the pack gives kind `enum`, whose values are a fixed
 /// list, never prose.
 pub fn text_in(pack: &Pack, b: &Block) -> Vec<(String, String)> {
+    count_scan();
     let def = pack.block_types.get(&b.block_type);
     without(text_sources(b), |f| {
         def.and_then(|d| d.fields.get(f))

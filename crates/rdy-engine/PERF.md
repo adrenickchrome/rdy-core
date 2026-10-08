@@ -891,3 +891,39 @@ Baseline: `qa-baseline.json` is not changed here.
 Linux bench rows: (bench: the orchestrator fills these rows from two cargo qa --only perf --deep runs on the isolated Linux bench)
 
 Deep gate (bench): <orchestrator fills in>
+
+### Briefings and the entity work (enperf2)
+
+The deep gate failed `brief_doc` (9.5 ms against 0.205 ms) and `brief_doc_50k` (51 ms against
+0.226 ms). The cost grew with the project. The cause was `mentioned_by` (FW-EN3): for a covered
+new doc, it read the text of every block of the scope. The fixture's doc ("Doc 0") is new, so
+each briefing read 10k blocks (50k in the large tier). On the M4 Pro, that was 15.3 ms of a
+16.1 ms briefing. Graph coverage of the covered blocks took 0.22 ms and related decisions
+0.03 ms.
+
+The fix:
+
+- The lexicon holds a word index: each case-folded word and the blocks whose text holds it. A
+  phrase can only be found in a block that holds each of its words, so `mentioned_by` reads only
+  those blocks. The index is built with the lexicon and carried across writes with it.
+- The mention scan of a set of phrases is kept in the scope's build and carried across a write
+  (`MentionScan`). The next briefing reads only the blocks written since. A write that can move
+  a block it does not write into another doc (a delete or a move of a block with children) drops
+  the kept scans.
+- `find_phrases` joins each window once per word, not once per window size.
+- `Lexicon::mentions` does not read text when the lexicon has no names.
+- Related decisions check each edge for a tie once (it was once per pair of edges).
+
+In the fixture, 873 blocks outside the doc name "Doc 0" (1,070 hold both words). A cold scan
+reads those 1,070 blocks. A carried scan reads the one block the write added.
+
+M4 Pro figures (the `brief_doc` loop, 10k): the briefing after a write took 16.1 ms before and
+0.6 ms after; `mentioned_by` took 15.3 ms before and 0.05 ms after. A cold lexicon build over
+the same 10k view took 2 ms before and 8.7 ms after (the word index).
+
+Whole-scope graph coverage (`rdy status`, `rdy_overview`) is still memoised per build and not
+carried, so the first read after a write pays the full pass. It is not made incremental here.
+A per-block delta must also handle entity name changes (they change the mentions of any block)
+and edges into a doc from anywhere (they change its unlinked state).
+
+Linux bench rows (enperf2): <filled from two cargo qa --only perf runs on the bench>
