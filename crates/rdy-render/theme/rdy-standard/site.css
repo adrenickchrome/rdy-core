@@ -246,6 +246,8 @@ figcaption { font-size: 0.84rem; color: var(--ink-soft); margin-top: 0.5rem; }
 .term dd { margin: 0.15rem 0 0; }
 .entity { margin: 1.4rem 0; padding-left: 1rem; border-left: 2px solid var(--line); }
 .entity-name, .flow-name { margin-top: 0; }
+.entity-value { margin: 0 0 0.6rem; font-weight: 600; }
+.entity-aliases { margin: 0 0 0.6rem; color: var(--ink-soft); }
 .described-by { font-size: 0.88rem; color: var(--ink-soft); }
 .flow { margin: 1.4rem 0; }
 .ref.unresolved { text-decoration: underline dotted; color: var(--ink-soft); }

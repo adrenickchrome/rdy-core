@@ -1,6 +1,6 @@
 //! The designed rendering of every content type, and the references inside text.
 use crate::{highlight, inline};
-use rdy_model::{Block, BlockId, FieldValue, Hash, RefMode, RefSpan, ref_spans};
+use rdy_model::{Block, BlockId, FieldValue, Hash, RefMode, RefSpan, entity, ref_spans};
 use rdy_schema::Pack;
 use std::fmt::Write;
 
@@ -277,6 +277,20 @@ fn display_name(block_type: &str) -> String {
     }
 }
 
+/// The `Also: …` line of a block that has aliases, else nothing.
+fn aliases_html(b: &Block) -> String {
+    let aliases = entity::aliases(b);
+    if aliases.is_empty() {
+        return String::new();
+    }
+    let joined = aliases
+        .iter()
+        .map(|a| escape(a))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("<p class=\"entity-aliases\">Also: {joined}</p>")
+}
+
 /// The marker (eyebrow) of a block, or nothing for a presentational type.
 fn marker(ctx: &BlockCtx, block_type: &str, words: &str) -> String {
     if ctx.pack.is_presentational(block_type) {
@@ -341,12 +355,13 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
         // supporting text: off the site (FW-D10)
         "rationale" => String::new(),
         "term" => format!(
-            "<dl class=\"term\"><dt id=\"{}\">{}</dt><dd>{}</dd></dl>",
+            "<dl class=\"term\"><dt id=\"{}\">{}</dt><dd>{}{}</dd></dl>",
             escape(ctx.anchor),
             f("name"),
-            inline::body_inline_html(&b.body, &ictx)
+            inline::body_inline_html(&b.body, &ictx),
+            aliases_html(b)
         ),
-        "component" | "actor" | "interface" => {
+        "component" | "actor" | "interface" | "value" | "entity" => {
             let described = if ctx.described_by.is_empty() {
                 String::new()
             } else {
@@ -359,10 +374,20 @@ pub fn block_html(b: &Block, ctx: &BlockCtx) -> String {
                         .join(", ")
                 )
             };
+            // an entity's kind is its eyebrow, when it has one
+            let eyebrow = match b.field_str("kind").map(str::trim).filter(|k| !k.is_empty()) {
+                Some(k) if t == entity::ENTITY => display_name(k),
+                _ => display_name(t),
+            };
+            let value = match entity::value_text(b) {
+                Some(v) => format!("<p class=\"entity-value\">{}</p>", escape(&v)),
+                None => String::new(),
+            };
             format!(
-                "<div class=\"entity entity-{t}\">{}<h{item_level} class=\"entity-name\">{}</h{item_level}>{}{described}</div>",
-                marker(ctx, t, &display_name(t)),
+                "<div class=\"entity entity-{t}\">{}<h{item_level} class=\"entity-name\">{}</h{item_level}>{value}{}{}{described}</div>",
+                marker(ctx, t, &eyebrow),
                 f("name"),
+                aliases_html(b),
                 body()
             )
         }

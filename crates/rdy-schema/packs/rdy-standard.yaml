@@ -4,14 +4,14 @@ link_types: [describes, implements, decided_by, affects]
 default_doc_type: overview
 
 block_types:
-  doc: { prefix: d, traits: [structural], body: forbidden, children: [section, prose, claim, requirement, constraint, term, component, actor, interface, flow, example, note, rationale, table, diagram, figure, code, decision, question] }
+  doc: { prefix: d, traits: [structural], body: forbidden, children: [section, prose, claim, requirement, constraint, term, component, actor, interface, value, entity, flow, example, note, rationale, table, diagram, figure, code, decision, question] }
   section:
     prefix: s
     traits: [structural]
     fields:
       title: { kind: str, required: true }
       lifecycle: { kind: enum, values: [draft, stable, deprecated] }
-    children: [section, prose, claim, requirement, constraint, term, component, actor, interface, flow, example, note, rationale, table, diagram, figure, code, decision, question]
+    children: [section, prose, claim, requirement, constraint, term, component, actor, interface, value, entity, flow, example, note, rationale, table, diagram, figure, code, decision, question]
   prose:       { prefix: p,  traits: [informative], body: required }
   claim:       { prefix: c,  traits: [normative, describes], body: required }
   requirement:
@@ -27,21 +27,40 @@ block_types:
     body: required
     fields:
       name: { kind: str, required: true }
+      aliases: { kind: list }
   component:
     prefix: m
     traits: [defines]
     fields:
       name: { kind: str, required: true }
+      aliases: { kind: list }
   actor:
     prefix: a
     traits: [defines]
     fields:
       name: { kind: str, required: true }
+      aliases: { kind: list }
   interface:
     prefix: i
     traits: [defines, normative]
     fields:
       name: { kind: str, required: true }
+      aliases: { kind: list }
+  value:
+    prefix: v
+    traits: [defines, normative]
+    fields:
+      name: { kind: str, required: true }
+      value: { kind: str, required: true }
+      unit: { kind: str }
+      aliases: { kind: list }
+  entity:
+    prefix: en
+    traits: [defines]
+    fields:
+      name: { kind: str, required: true }
+      kind: { kind: str }
+      aliases: { kind: list }
   flow:
     prefix: f
     traits: [normative, describes]

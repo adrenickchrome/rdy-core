@@ -11,7 +11,9 @@ use std::collections::BTreeMap;
 /// Folder guides / doc alpha / section A (stable): claim ac, code ak. Doc beta / section B
 /// (draft): claim bg, decision d (affects bg), rejected decision r, term t, claim bc (decided_by
 /// d), claim bd (describes t), claim be (references t), claim bf (implements d). Each says
-/// "needle". Landed. Returns the ids by placeholder, and the landing id under "landing".
+/// "needle". The term is named "Needle", so the query names it (esrch1): an unfiltered search
+/// starts from its sheet, which holds t, bd and be; a filtered one keeps them as matches. Landed.
+/// Returns the ids by placeholder, and the landing id under "landing".
 fn corpus(r: &mut Rdy) -> BTreeMap<String, String> {
     let w = write_as(&approver(), r, "work", json!([
         {"op": "create", "type": "folder", "id": "$g", "fields": {"name": "guides", "title": "Guides"}},
@@ -75,12 +77,36 @@ fn pick(ids: &BTreeMap<String, String>, keys: &[&str]) -> Vec<String> {
 const ALL: [&str; 10] = [
     "$ac", "$ak", "$bg", "$d", "$r", "$t", "$bc", "$bd", "$be", "$bf",
 ];
+/// What the term's sheet holds, so an unfiltered "needle" search leaves out (esrch1).
+const UNFILTERED_HELD: [&str; 3] = ["$t", "$bd", "$be"];
 
 #[test]
 fn sflt1_no_filter_finds_every_block_in_reading_order() {
     let (_d, mut r) = project();
     let ids = corpus(&mut r);
-    assert_eq!(hits(&r, SearchFilters::default()), pick(&ids, &ALL));
+    // esrch1: the query names the term, so its sheet comes first and holds t, bd and be
+    let res = r
+        .read()
+        .search(
+            &Scope::Canon,
+            &query(SearchFilters::default()),
+            None,
+            Some(100_000),
+        )
+        .unwrap();
+    assert_eq!(
+        res.entities
+            .iter()
+            .map(|s| s.id.clone())
+            .collect::<Vec<_>>(),
+        pick(&ids, &["$t"])
+    );
+    let rest: Vec<&str> = ALL
+        .iter()
+        .copied()
+        .filter(|k| !UNFILTERED_HELD.contains(k))
+        .collect();
+    assert_eq!(hits(&r, SearchFilters::default()), pick(&ids, &rest));
 }
 
 #[test]
@@ -293,8 +319,8 @@ fn sflt1_suspect_keeps_blocks_with_an_open_suspect() {
     );
     assert_eq!(
         hits_in(&r, &work, SearchFilters::default()).len(),
-        ALL.len(),
-        "suspect: false filters nothing"
+        ALL.len() - UNFILTERED_HELD.len(),
+        "suspect: false filters nothing; the term's sheet holds three blocks"
     );
 }
 

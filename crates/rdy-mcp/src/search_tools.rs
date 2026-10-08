@@ -40,6 +40,8 @@ pub struct SearchParams {
     pub linked_to: Option<String>,
     /// Keep only blocks with an open suspect.
     pub suspect: Option<bool>,
+    /// Keep blocks that name an entity by name or alias: linked (tied to it) or unlinked (not linked yet).
+    pub mentions: Option<String>,
     /// Add a briefing over this page's hits; cite its base.token to write those blocks.
     pub brief: Option<bool>,
 }
@@ -74,6 +76,7 @@ pub fn rdy_search(st: &mut McpState, p: SearchParams) -> Result<Value, RdyError>
                 describes: p.describes,
                 linked_to: p.linked_to,
                 suspect: p.suspect.unwrap_or(false),
+                mentions: p.mentions,
             },
         },
         p.page.as_deref(),

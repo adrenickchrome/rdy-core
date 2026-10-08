@@ -2,7 +2,7 @@
 //! the order a reader walks the docs in.
 use crate::inline::{self, Form};
 use rdy_engine::Materialized;
-use rdy_model::{Block, BlockId, RefMode, decision, tree};
+use rdy_model::{Block, BlockId, RefMode, decision, entity, tree};
 use rdy_schema::Pack;
 use regex::Regex;
 use std::cell::RefCell;
@@ -52,10 +52,11 @@ const LABEL_DEPTH: usize = 3;
 
 /// The key a reference typed as a key (`{{id|@key}}`) reads as, if the target has one. A doc, a
 /// folder or a section has a title a reader knows it by, so a key-typed reference to one reads as
-/// that title, as `{{id}}` does (FW-F2b); any other keyed block reads as its key (FW-F2a).
+/// that title, as `{{id}}` does (FW-F2b); a value reads as its value (FW-EN2); any other keyed
+/// block reads as its key (FW-F2a).
 pub fn typed_key(b: &Block) -> Option<&str> {
     match b.block_type.as_str() {
-        tree::DOC | tree::FOLDER | "section" => None,
+        tree::DOC | tree::FOLDER | "section" | entity::VALUE => None,
         _ => b.field_str("key"),
     }
 }
@@ -499,6 +500,9 @@ impl<'a> Site<'a> {
     }
 
     fn label_uncached(&self, b: &Block, depth: usize) -> String {
+        if let Some(v) = entity::value_text(b) {
+            return v;
+        }
         let tree = tree::is_tree_type(&b.block_type);
         let said = b
             .field_str("title")
@@ -683,7 +687,9 @@ impl<'a> Site<'a> {
         }
         let named = match b.block_type.as_str() {
             "section" => b.field_str("title"),
-            "term" | "component" | "actor" | "interface" | "flow" => b.field_str("name"),
+            "term" | "component" | "actor" | "interface" | "flow" | "value" | "entity" => {
+                b.field_str("name")
+            }
             _ => None,
         };
         match named.filter(|t| !t.trim().is_empty()) {

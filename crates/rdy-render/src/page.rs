@@ -625,7 +625,9 @@ fn doc_parts(sh: &Shared, doc: &Block, page: &str, title: &str) -> (DocBody, Vec
         // the heading or name as a reader reads it: its references as their labels
         let title = match b.block_type.as_str() {
             "section" => b.field_str("title"),
-            "term" | "component" | "actor" | "interface" | "flow" => b.field_str("name"),
+            "term" | "component" | "actor" | "interface" | "flow" | "value" | "entity" => {
+                b.field_str("name")
+            }
             _ => None,
         }
         .map(|t| site.words(t));

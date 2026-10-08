@@ -94,6 +94,18 @@ fn spec_target(op: &str) -> Option<String> {
         "view_ls_50" => {
             "no spec target: view_list(all) over 50 open views plus the closed ones, cold (recorded for M2c)"
         }
+        "lexicon_build" => {
+            "no spec target: a cold build of the entity lexicon over a 10k view (recorded for FW-EN1)"
+        }
+        "entity_search" => {
+            "< 5 ms p99 (a read, spec 11): an entity search with its fact sheet, first page"
+        }
+        "suggestions_after_write" => {
+            "no spec target: the suggestions of a one-claim write over a carried lexicon (recorded for FW-EN3; they ride on every write response)"
+        }
+        "coverage_all" => {
+            "no spec target: cold graph coverage over a 10k view (recorded for FW-EN4 and FW-EN1a; rdy status and rdy_overview)"
+        }
         "context_inflight_1k" | "impact_inflight_1k" | "context_view_1k" | "impact_view_1k" => {
             "< 5 ms p99 with 1k in-flight changes (spec 15.1; the overlays must not regress them)"
         }
@@ -632,6 +644,62 @@ fn prepare_rebased_view(r: &mut Rdy, fx: &Fixture, runs: &Runs) {
     make_vr(r, fx, runs);
     doc_write(r, "lr", "rebase-vr");
     land(r, "lr").expect("land lr");
+}
+
+/// FW-EN1, FW-EN3, FW-EN4: the entity ops on view `ve`: the fixture's canon plus 50 entities and
+/// 200 claims that name them and share ten code literals. Run after `tier_views`: the view it
+/// leaves behind would change the numbers of the ops before it. Run before `tier_inflight`,
+/// which closes every open view (`ve` too) and adds 1k in-flight changes.
+fn tier_entities(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs: &Runs) {
+    let ve = Scope::View("ve".into());
+    let section = fx.section.to_string();
+    let ents: Vec<serde_json::Value> = (0..50)
+        .map(|i| json!({"op": "create", "type": "entity", "parent": section, "fields": {"name": format!("Entity {i}"), "aliases": [format!("ent{i}")], "kind": "service"}}))
+        .collect();
+    write(r, "ve", serde_json::Value::Array(ents)).expect("entities");
+    let claims: Vec<serde_json::Value> = (0..200)
+        .map(|i| json!({"op": "create", "type": "claim", "parent": section, "body": format!("Entity {} talks to ent{} through `cfg_{}`.", i % 50, (i + 1) % 50, i % 10)}))
+        .collect();
+    write(r, "ve", serde_json::Value::Array(claims)).expect("claims");
+    out.push(measure_timed(
+        &format!("lexicon_build{sfx}"),
+        runs.read,
+        |_| {
+            cold(r, |r| {
+                r.read().lexicon(&ve).expect("lexicon");
+            })
+            .1
+        },
+    ));
+    let q = rdy_engine::SearchQuery {
+        text: "Entity 7".into(),
+        ..Default::default()
+    };
+    out.push(measure(&format!("entity_search{sfx}"), runs.read, |_| {
+        r.read().search(&ve, &q, None, Some(4000)).expect("search");
+    }));
+    out.push(measure_timed(
+        &format!("suggestions_after_write{sfx}"),
+        runs.write,
+        |i| {
+            let w = write(r, "ve", json!([{"op": "create", "type": "claim", "parent": section, "body": format!("Entity {} and ent{} use `cfg_1` ({i}).", i % 50, (i + 7) % 50)}]))
+                .expect("write");
+            let change: Hash = w.change.parse().expect("change");
+            let s = Instant::now();
+            r.read().suggestions(&ve, &change).expect("suggestions");
+            s.elapsed()
+        },
+    ));
+    out.push(measure_timed(
+        &format!("coverage_all{sfx}"),
+        runs.read,
+        |_| {
+            cold(r, |r| {
+                r.read().graph_coverage(&ve, None).expect("coverage");
+            })
+            .1
+        },
+    ));
 }
 
 /// The view ops on a project whose `vr` is an unpinned view a landing has rebased: the cold
@@ -1519,6 +1587,9 @@ pub fn run_workload() -> Vec<Measure> {
     // the view ops last: the views and landings they leave behind would move the ops above
     let mut r = Rdy::open(&proj).expect("open");
     tier_views(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
+    // after the view ops (the view it leaves behind would move the ops before it), before the
+    // in-flight ops (which close it and add 1k in-flight changes)
+    tier_entities(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
     tier_inflight(&mut out, &mut r, &fx, "", &TYPICAL_RUNS, INFLIGHT_N);
     drop(r);
     // on projects of their own: the records they add move nothing above
@@ -2450,6 +2521,57 @@ mod tests {
                 .find(|m| m.op == op)
                 .unwrap_or_else(|| panic!("{op} missing"));
             assert!(m.median_ms > 0.0);
+        }
+    }
+
+    #[test]
+    fn enperf1_the_entity_ops_run_on_a_small_tree() {
+        rdy_model::seed_ids_for_tests(0x7064_6566);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let fx = fixture(&r, &docs);
+        let runs = Runs {
+            write: 1,
+            read: 2,
+            ..TYPICAL_RUNS
+        };
+        let mut out = vec![];
+        tier_entities(&mut out, &mut r, &fx, "", &runs);
+        let ops: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(
+            ops,
+            vec![
+                "lexicon_build",
+                "entity_search",
+                "suggestions_after_write",
+                "coverage_all"
+            ]
+        );
+        for op in ops {
+            assert!(spec_target(op).is_some(), "{op} has no target text");
+        }
+        rdy_model::unseed_ids_for_tests();
+    }
+
+    #[test]
+    #[ignore = "runs the typical perf workload; cargo test -p rdy-qa --release --lib -- --ignored enperf1"]
+    fn enperf1_entity_ops_have_targets_and_run() {
+        let ms = run_workload();
+        for op in [
+            "lexicon_build",
+            "entity_search",
+            "suggestions_after_write",
+            "coverage_all",
+        ] {
+            let m = ms
+                .iter()
+                .find(|m| m.op == op)
+                .unwrap_or_else(|| panic!("{op} missing"));
+            assert!(m.median_ms > 0.0, "{op}");
         }
     }
 
