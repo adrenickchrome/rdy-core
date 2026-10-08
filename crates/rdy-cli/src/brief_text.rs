@@ -32,6 +32,29 @@ fn section(out: &mut Vec<String>, title: &str, entries: impl Iterator<Item = Str
     }
 }
 
+/// One related decision: `<decision> [<status>] <relation> (<entities>): <statement>`, without
+/// the parentheses when it names no entity.
+fn related_line(r: &Value) -> String {
+    let entities: Vec<&str> = r["entities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let on = if entities.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", entities.join(", "))
+    };
+    format!(
+        "{} [{}] {}{on}: {}",
+        s(r, "decision"),
+        s(r, "status"),
+        s(r, "relation"),
+        s(r, "statement")
+    )
+}
+
 /// The briefing as `#` comment lines, one section per list, ending in a bare `#` line.
 pub fn header(briefing: &Value) -> String {
     let list = |k: &str| briefing[k].as_array().into_iter().flatten();
@@ -171,6 +194,39 @@ pub fn header(briefing: &Value) -> String {
         });
         section(&mut out, "in flight", views.chain(proposals).chain(intents));
     }
+    let related = list("related_decisions")
+        .map(related_line)
+        .collect::<Vec<_>>();
+    if !related.is_empty() {
+        section(&mut out, "related decisions", related.into_iter());
+    }
+    let mentions = list("mentioned_by")
+        .map(|m| {
+            format!(
+                "{} names {} (\"{}\" in {})",
+                s(m, "block"),
+                s(m, "doc"),
+                s(m, "mention"),
+                s(m, "field")
+            )
+        })
+        .collect::<Vec<_>>();
+    if !mentions.is_empty() {
+        section(&mut out, "mentioned by", mentions.into_iter());
+    }
+    let g = &briefing["coverage"]["grounded"];
+    let n = |k: &str| g[k].as_u64().unwrap_or(0);
+    if g.is_object() && n("facts") + n("content") + n("mentions") > 0 {
+        out.push(format!(
+            "# coverage: {}/{} facts tied, {}/{} content tied, {}/{} mentions linked",
+            n("facts_tied"),
+            n("facts"),
+            n("content_tied"),
+            n("content"),
+            n("mentions_linked"),
+            n("mentions")
+        ));
+    }
     if let Some(m) = briefing["omitted"].as_object().filter(|m| !m.is_empty()) {
         let mut names: Vec<_> = m.iter().collect();
         names.sort_by_key(|(k, _)| k.as_str());
@@ -263,9 +319,17 @@ pub fn plain(v: &Value) -> String {
     out
 }
 
-/// A write reply's consequences as text to append to its one-line summary: empty when there are
-/// none, else `\nconsequences:` and one line per entry, with a line for what a cut left out.
+/// A write reply's extras as text to append to its one-line summary: empty when there are none,
+/// else `\nconsequences:` and one line per entry (with a line for what a cut left out), then
+/// `\nsuggestions:` and `\nrelated decisions:` in the same way.
 pub fn consequences_text(reply: &Value) -> String {
+    let mut t = consequences_part(reply);
+    t.push_str(&suggestions_part(reply));
+    t.push_str(&related_part(reply));
+    t
+}
+
+fn consequences_part(reply: &Value) -> String {
     let items = reply["consequences"].as_array().map_or(&[][..], |a| a);
     if items.is_empty() {
         return String::new();
@@ -291,6 +355,54 @@ pub fn consequences_text(reply: &Value) -> String {
         let n: u64 = m.values().filter_map(Value::as_u64).sum();
         let kinds: Vec<String> = m.iter().map(|(k, v)| format!("{k} {v}")).collect();
         t.push_str(&format!("\n  and {n} more ({})", kinds.join(", ")));
+    }
+    t
+}
+
+fn suggestions_part(reply: &Value) -> String {
+    let items = reply["suggestions"].as_array().map_or(&[][..], |a| a);
+    if items.is_empty() {
+        return String::new();
+    }
+    let mut t = String::from("\nsuggestions:");
+    for x in items {
+        if s(x, "kind") == "entity" {
+            t.push_str(&format!(
+                "\n  entity `{}` ({} blocks)",
+                one_line(s(x, "literal")),
+                x["count"]
+            ));
+        } else {
+            t.push_str(&format!(
+                "\n  link {} {} {} (\"{}\" in {})",
+                s(x, "block"),
+                s(x, "link"),
+                s(x, "target"),
+                one_line(s(x, "mention")),
+                s(x, "field")
+            ));
+        }
+    }
+    if let Some(n) = reply["suggestions_omitted"].as_u64().filter(|n| *n > 0) {
+        t.push_str(&format!("\n  and {n} more"));
+    }
+    t
+}
+
+fn related_part(reply: &Value) -> String {
+    let items = reply["related_decisions"].as_array().map_or(&[][..], |a| a);
+    if items.is_empty() {
+        return String::new();
+    }
+    let mut t = String::from("\nrelated decisions:");
+    for r in items {
+        t.push_str(&format!("\n  {}", one_line(&related_line(r))));
+    }
+    if let Some(n) = reply["related_decisions_omitted"]
+        .as_u64()
+        .filter(|n| *n > 0)
+    {
+        t.push_str(&format!("\n  and {n} more"));
     }
     t
 }
@@ -457,6 +569,61 @@ mod tests {
                 &"#   proposal P-abcdef012345@1 from va  - x \"Change A body: INJECTED # z  a b c\": c-A"
             ),
             "{h}"
+        );
+    }
+
+    #[test]
+    fn bent1_the_header_shows_related_decisions_mentions_and_coverage() {
+        let b = json!({
+            "governs": [], "dependents": [], "will_go_stale": [], "suspects": [],
+            "base": {"token": "abcdef0123456789", "blocks": [{"id": "D-2", "version": "x"}]},
+            "related_decisions": [{"for": "D-2", "decision": "D-1", "status": "live", "statement": "Ledger first", "relation": "same_entity", "entities": ["en-1"]}],
+            "mentioned_by": [{"doc": "d-1", "block": "c-1", "field": "body", "mention": "Archive"}],
+            "coverage": {"scope": "covered", "grounded": {"facts": 2, "facts_tied": 1, "facts_tied_pct": 50, "content": 3, "content_tied": 1, "content_tied_pct": 33, "mentions": 2, "mentions_linked": 1, "mentions_linked_pct": 50}, "connected": {"docs": 0, "unlinked_docs": []}, "entities": 0, "kinds": [], "similar_kinds": []}
+        });
+        let h = header(&b);
+        assert!(
+            h.contains("# related decisions:\n#   D-1 [live] same_entity (en-1): Ledger first\n"),
+            "{h}"
+        );
+        assert!(
+            h.contains("# mentioned by:\n#   c-1 names d-1 (\"Archive\" in body)\n"),
+            "{h}"
+        );
+        assert!(
+            h.contains("# coverage: 1/2 facts tied, 1/3 content tied, 1/2 mentions linked\n"),
+            "{h}"
+        );
+        assert!(h.ends_with("\n#\n"), "the closing # stays last: {h}");
+        let quiet = header(
+            &json!({"governs": [], "dependents": [], "will_go_stale": [], "suspects": [], "base": {"token": "t", "blocks": []}}),
+        );
+        assert!(
+            !quiet.contains("related decisions")
+                && !quiet.contains("mentioned by")
+                && !quiet.contains("coverage"),
+            "{quiet}"
+        );
+    }
+
+    #[test]
+    fn bent1_write_text_lists_suggestions_and_related_decisions() {
+        let v = json!({
+            "consequences": [],
+            "suggestions": [
+                {"kind": "link", "id": "sg-1", "block": "c-1", "link": "describes", "target": "en-1", "mention": "ledger", "field": "body"},
+                {"kind": "entity", "id": "sg-2", "literal": "max_conn", "blocks": ["c-1", "c-2", "c-3"], "count": 3}
+            ],
+            "suggestions_omitted": 2,
+            "related_decisions": [{"for": "D-2", "decision": "D-1", "status": "live", "statement": "Ledger first", "relation": "same_entity", "entities": ["en-1"]}]
+        });
+        assert_eq!(
+            consequences_text(&v),
+            "\nsuggestions:\n  link c-1 describes en-1 (\"ledger\" in body)\n  entity `max_conn` (3 blocks)\n  and 2 more\nrelated decisions:\n  D-1 [live] same_entity (en-1): Ledger first"
+        );
+        assert_eq!(
+            consequences_text(&json!({"consequences": [], "suggestions": []})),
+            ""
         );
     }
 }

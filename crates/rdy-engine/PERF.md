@@ -850,3 +850,80 @@ is refused when the scope has one line over about 8 KiB, even though it is cheap
 No laptop figures are recorded here: the first timing of these ops is the Linux bench's.
 
 Linux bench rows: (bench: the orchestrator fills these rows from two cargo qa --only perf --deep runs on the isolated Linux bench)
+
+## Entities and fact sheets (2026-10-06)
+
+The `qa-perf` typical tier gained four ops in `tier_entities`. It runs after `tier_views` and
+before `tier_inflight` (which closes every open view, `ve` too, and adds 1k in-flight changes, so
+the entity ops run on a clean state and the in-flight ops after them as before), on a fresh view
+`ve`. `ve` holds the fixture's canon plus 50
+entities (each with a name, one alias and a kind) and 200 claims. Each claim names two entities
+and one of ten shared code literals. The ops carry no `write` prefix on purpose: `spec_target`
+gives every op that starts with `write` the write budget, and `fsync_bound` widens its margin.
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `lexicon_build` | `lexicon(ve)` after the engine caches are dropped (outside the timer): the materialization, the graph and one pass over the text of the scope | `runs.read` | no spec target: a cold build of the entity lexicon over a 10k view (recorded for FW-EN1) |
+| `entity_search` | `search(ve, "Entity 7", first page, 4000 tokens)` with the lexicon and graph warm: the entity resolves, its fact sheet is built and the match list is filtered | `runs.read` | < 5 ms p99 (a read, spec 11): an entity search with its fact sheet, first page |
+| `suggestions_after_write` | `suggestions(ve, change)` for the change of a one-claim write. The write is outside the timer. The write carries the lexicon over its own blocks | `runs.write` | no spec target: the suggestions of a one-claim write over a carried lexicon (recorded for FW-EN3; they ride on every write response) |
+| `coverage_all` | `graph_coverage(ve, None)` after the engine caches are dropped (outside the timer): the materialization, the graph, the lexicon and one pass over every block | `runs.read` | no spec target: cold graph coverage over a 10k view (recorded for FW-EN4 and FW-EN1a; rdy status and rdy_overview) |
+
+What each cost grows with:
+
+- `lexicon_build` grows with the total text of the scope. It is built once per scope, then
+  carried across each commit and landing in time proportional to the text of the written blocks.
+  Every publish now carries it once it is built.
+- `entity_search` grows with the number of entities that match the query (at most 8 sheets) and
+  with the edges of each. The match scan is `search_literal`'s, read in any case and spacing (a
+  literal that names an entity matches every unlinked mention).
+- `suggestions_after_write` grows with the text of the written blocks and with the holders of
+  each code literal they contain. It does not grow with the project. Every write response
+  computes it, so it adds to the write path (`write_and_report`) but not to the durable flush.
+- `coverage_all` grows with the number of blocks: it checks every block for ties and every
+  linkable block for mentions. It runs for `rdy status` and for `rdy_overview`, not on a write.
+  The whole scope's coverage is memoised in the scope's build, so a warm `rdy_overview` or
+  `rdy status` pays it once per build (a write gives a new build); the op times the cold pass.
+
+No laptop figures are recorded here: the first timing of these ops is the Linux bench's.
+
+Baseline: `qa-baseline.json` is not changed here.
+
+Linux bench rows: (bench: the orchestrator fills these rows from two cargo qa --only perf --deep runs on the isolated Linux bench)
+
+Deep gate (bench): <orchestrator fills in>
+
+### Briefings and the entity work (enperf2)
+
+The deep gate failed `brief_doc` (9.5 ms against 0.205 ms) and `brief_doc_50k` (51 ms against
+0.226 ms). The cost grew with the project. The cause was `mentioned_by` (FW-EN3): for a covered
+new doc, it read the text of every block of the scope. The fixture's doc ("Doc 0") is new, so
+each briefing read 10k blocks (50k in the large tier). On the M4 Pro, that was 15.3 ms of a
+16.1 ms briefing. Graph coverage of the covered blocks took 0.22 ms and related decisions
+0.03 ms.
+
+The fix:
+
+- The lexicon holds a word index: each case-folded word and the blocks whose text holds it. A
+  phrase can only be found in a block that holds each of its words, so `mentioned_by` reads only
+  those blocks. The index is built with the lexicon and carried across writes with it.
+- The mention scan of a set of phrases is kept in the scope's build and carried across a write
+  (`MentionScan`). The next briefing reads only the blocks written since. A write that can move
+  a block it does not write into another doc (a delete or a move of a block with children) drops
+  the kept scans.
+- `find_phrases` joins each window once per word, not once per window size.
+- `Lexicon::mentions` does not read text when the lexicon has no names.
+- Related decisions check each edge for a tie once (it was once per pair of edges).
+
+In the fixture, 873 blocks outside the doc name "Doc 0" (1,070 hold both words). A cold scan
+reads those 1,070 blocks. A carried scan reads the one block the write added.
+
+M4 Pro figures (the `brief_doc` loop, 10k): the briefing after a write took 16.1 ms before and
+0.6 ms after; `mentioned_by` took 15.3 ms before and 0.05 ms after. A cold lexicon build over
+the same 10k view took 2 ms before and 8.7 ms after (the word index).
+
+Whole-scope graph coverage (`rdy status`, `rdy_overview`) is still memoised per build and not
+carried, so the first read after a write pays the full pass. It is not made incremental here.
+A per-block delta must also handle entity name changes (they change the mentions of any block)
+and edges into a doc from anywhere (they change its unlinked state).
+
+Linux bench rows (enperf2): <filled from two cargo qa --only perf runs on the bench>

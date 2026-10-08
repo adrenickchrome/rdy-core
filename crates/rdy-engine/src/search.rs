@@ -2,7 +2,10 @@
 //! each block's body and string fields, in reading order, with lines windowed and capped per
 //! block, pages cut by a token budget and a stateless cursor that a changed match set stales.
 use crate::error::{E_BAD_INPUT, E_LIMIT, E_PAGE_STALE, E_UNKNOWN_BLOCK, PAGE_STALE_FIX, RdyError};
+use crate::factsheet::{FactSheet, MAX_RESOLVED};
+use crate::lexicon::{link_kind_for, tied};
 use crate::materialize::Materialized;
+use crate::suggest::{Suggestion, suggestion_id};
 use crate::{ReadState, Scope};
 use rdy_graph::EdgeKind;
 use rdy_model::decision::{AFFECTS, DECIDED_BY, DECISION, DESCRIBES, IMPLEMENTS};
@@ -90,6 +93,9 @@ pub struct SearchFilters {
     /// Only blocks with an open suspect.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub suspect: bool,
+    /// linked or unlinked: blocks that name an entity (by name or alias, whole words) and are tied to it (linked), or that name one they are not tied to yet (unlinked). Only blocks that can link to an entity count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mentions: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -97,6 +103,13 @@ pub struct SearchResult {
     pub query: String,
     pub regex: bool,
     pub ignore_case: bool,
+    /// esrch1 (FW-EN1, FW-SR1): on the first page, the fact sheets of the entities a literal
+    /// query names (its key, name or alias), at most `MAX_RESOLVED`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<FactSheet>,
+    /// Named entities past `MAX_RESOLVED`.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub entities_omitted: usize,
     /// Matching blocks over the whole search, every page.
     pub total: usize,
     /// stot1 (FW-SR3): hits per doc path and per block type over the whole search, every page.
@@ -133,13 +146,20 @@ pub struct SearchMatch {
     /// `history`, in result order. Never cut.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub also: Vec<SearchAlso>,
+    /// esrch1: a link from this block to each entity the query names, when the block holds the
+    /// query as a phrase, names the entity by name or alias as whole words, and is not tied to
+    /// the entity yet.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<Suggestion>,
 }
 
-/// A hit folded into an earlier entry.
+/// A hit folded into an earlier entry. It keeps its own suggestions.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SearchAlso {
     pub id: String,
     pub path: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<Suggestion>,
 }
 
 /// Hits over the whole search: per doc path (most hits first, at most `TOTALS_DOCS`) and per
@@ -182,6 +202,19 @@ impl ReadState {
         max_tokens: Option<usize>,
     ) -> Result<SearchResult, RdyError> {
         let (re, words) = compile(q)?;
+        // 3b (esrch1): a literal that names entities starts from them, and reads text the way
+        // resolution does (any case, any spacing), so every unlinked mention is a match
+        let resolved = if q.regex {
+            vec![]
+        } else {
+            self.resolve_entities(scope, &q.text)?
+        };
+        let ignore_case = q.ignore_case || !resolved.is_empty();
+        let (re, words) = if resolved.is_empty() {
+            (re, words)
+        } else {
+            compile_as(q, true, true)?
+        };
         let m = self.materialized(scope)?;
         let plan = self.filter_plan(scope, &m, &q.filters)?;
         let cursor = page.map(parse_page).transpose()?;
@@ -234,6 +267,7 @@ impl ReadState {
                         lines,
                         more_lines,
                         history: early.unwrap_or_else(|| history_of(b)),
+                        suggestions: vec![],
                     };
                     if words {
                         all_words.push(hit);
@@ -243,6 +277,69 @@ impl ReadState {
                 }
             }
             stack.extend(m.children(Some(&b.id)).into_iter().rev().map(|c| (c, own)));
+        }
+
+        // 3b (esrch1): the first page shows the sheets of the first `MAX_RESOLVED` resolved
+        // entities; every page builds them, so every page drops the same hits.
+        let sheets: Vec<FactSheet> = resolved
+            .iter()
+            .take(MAX_RESOLVED)
+            .map(|(e, kind)| self.fact_sheet(scope, e, *kind))
+            .collect::<Result<_, _>>()?;
+        if !resolved.is_empty() {
+            // A hit drops out only when a sheet holds it: the sheet's entity, or a block tied to
+            // the entity that one of its lists shows (a history decision is not listed, and a
+            // list's cut is not shown). A filtered search keeps every hit: a sheet shows no
+            // suspect, change or filter target.
+            if q.filters == SearchFilters::default() {
+                let mut held: BTreeSet<BlockId> = BTreeSet::new();
+                for ((e, _), sheet) in resolved.iter().zip(&sheets) {
+                    held.insert(e.clone());
+                    let listed = sheet
+                        .facts
+                        .iter()
+                        .chain(&sheet.also_described_in)
+                        .chain(&sheet.dependents)
+                        .map(|b| b.id.as_str())
+                        .chain(sheet.decisions.iter().map(|d| d.id.as_str()));
+                    for id in listed {
+                        if let Ok(id) = BlockId::parse(id)
+                            && tied(&graph, &id, e)
+                        {
+                            held.insert(id);
+                        }
+                    }
+                }
+                phrase.retain(|h| !held.contains(&h.block.id));
+                all_words.retain(|h| !held.contains(&h.block.id));
+            }
+            // a link suggestion per entity the hit's text names as whole words (a name or an
+            // alias, as a write's suggestions read it) and is not tied to yet
+            let pack = self.pack();
+            let lexicon = self.lexicon(scope)?;
+            for h in &mut phrase {
+                let Some(kind) = link_kind_for(pack, h.block) else {
+                    continue;
+                };
+                let mentions = lexicon.mentions(h.block);
+                for (e, _) in &resolved {
+                    let Some(mention) = mentions.iter().find(|mn| mn.entity == e.as_str()) else {
+                        continue;
+                    };
+                    if h.block.id == *e || tied(&graph, &h.block.id, e) {
+                        continue;
+                    }
+                    let (block, target) = (h.block.id.to_string(), e.to_string());
+                    h.suggestions.push(Suggestion::Link {
+                        id: suggestion_id(kind, &block, &target),
+                        block,
+                        link: kind.to_string(),
+                        target,
+                        mention: q.text.clone(),
+                        field: mention.field.clone(),
+                    });
+                }
+            }
         }
 
         let mut token = TOKEN_DOMAIN.to_vec();
@@ -265,6 +362,21 @@ impl ReadState {
             token.extend_from_slice(&version.0);
             token.push(u8::from(h.history));
             token.push(u8::from(i >= words_from));
+        }
+        if !resolved.is_empty() {
+            token.extend_from_slice(b"entities\0");
+            for (e, kind) in &resolved {
+                // resolved ids are in the scope, so each has a version
+                let version = m
+                    .version_of(e)
+                    .or_else(|| m.get(e).map(Block::version_hash));
+                token.extend_from_slice(e.as_str().as_bytes());
+                token.push(0);
+                token.push(*kind as u8);
+                if let Some(v) = version {
+                    token.extend_from_slice(&v.0);
+                }
+            }
         }
         let token = Hash::of(&token).to_string();
 
@@ -289,6 +401,7 @@ impl ReadState {
                 entries[at].also.push(SearchAlso {
                     id: h.block.id.to_string(),
                     path,
+                    suggestions: h.suggestions,
                 });
                 continue;
             }
@@ -301,6 +414,7 @@ impl ReadState {
                 history: key.history,
                 all_words: key.all_words,
                 also: vec![],
+                suggestions: h.suggestions,
             });
             seen.insert(key, entries.len() - 1);
         }
@@ -320,10 +434,21 @@ impl ReadState {
             Some((_, offset)) => offset,
         };
 
-        // the totals come first, so they take their share of the budget
-        let budget = max_tokens
+        // the first page's fact sheets (FW-SR1: entity matches first)
+        let (entities, entities_omitted) = if cursor.is_none() {
+            let omitted = resolved.len() - sheets.len();
+            (sheets, omitted)
+        } else {
+            (vec![], 0)
+        };
+
+        // the totals come first, then the sheets, so they take their share of the budget
+        let mut budget = max_tokens
             .unwrap_or(DEFAULT_SEARCH_TOKENS)
             .saturating_sub(tokens_of(&totals));
+        if !entities.is_empty() {
+            budget = budget.saturating_sub(tokens_of(&entities));
+        }
         let mut used = 0;
         let mut matches = vec![];
         for entry in entries.into_iter().skip(offset) {
@@ -339,7 +464,9 @@ impl ReadState {
         Ok(SearchResult {
             query: q.text.clone(),
             regex: q.regex,
-            ignore_case: q.ignore_case,
+            ignore_case,
+            entities,
+            entities_omitted,
             total,
             totals,
             matches,
@@ -356,6 +483,8 @@ struct Hit<'a> {
     lines: Vec<SearchLine>,
     more_lines: usize,
     history: bool,
+    /// esrch1: link suggestions; not part of the collapse key.
+    suggestions: Vec<Suggestion>,
 }
 
 /// What two hits share to share an entry.
@@ -575,6 +704,30 @@ impl ReadState {
         if f.suspect {
             allowed.push(self.suspects(scope)?.into_iter().map(|s| s.block).collect());
         }
+        if let Some(want) = &f.mentions {
+            if !matches!(want.as_str(), "linked" | "unlinked") {
+                return Err(RdyError::new(
+                    E_BAD_INPUT,
+                    format!("mentions: {want:?} is not linked or unlinked"),
+                    "pass linked or unlinked",
+                ));
+            }
+            let linked = want == "linked";
+            let lex = self.lexicon(scope)?;
+            let mut set: BTreeSet<BlockId> = BTreeSet::new();
+            for b in m.iter() {
+                if link_kind_for(pack, b).is_none() {
+                    continue;
+                }
+                let hit = lex.mentions(b).iter().any(|ms| {
+                    BlockId::parse(&ms.entity).is_ok_and(|e| tied(&g, &b.id, &e) == linked)
+                });
+                if hit {
+                    set.insert(b.id.clone());
+                }
+            }
+            allowed.push(set);
+        }
         let pack_traits = pack
             .block_types
             .iter()
@@ -626,6 +779,16 @@ fn block_of<'a>(m: &'a Materialized, id: &BlockId) -> Result<&'a Block, RdyError
 /// The query as a bounded regex, and, for a literal of two or more distinct words, each word as
 /// one (sord1). A literal is escaped first.
 fn compile(q: &SearchQuery) -> Result<(Regex, Vec<Regex>), RdyError> {
+    compile_as(q, q.ignore_case, false)
+}
+
+/// [`compile`] with `ignore_case` given; with `names` (a literal that names an entity), the
+/// literal's words match with any spacing between them.
+fn compile_as(
+    q: &SearchQuery,
+    ignore_case: bool,
+    names: bool,
+) -> Result<(Regex, Vec<Regex>), RdyError> {
     if q.text.is_empty() {
         return Err(RdyError::new(
             E_BAD_INPUT,
@@ -645,10 +808,16 @@ fn compile(q: &SearchQuery) -> Result<(Regex, Vec<Regex>), RdyError> {
     }
     let pattern = if q.regex {
         q.text.clone()
+    } else if names {
+        q.text
+            .split_whitespace()
+            .map(regex::escape)
+            .collect::<Vec<_>>()
+            .join(r"\s+")
     } else {
         regex::escape(&q.text)
     };
-    let phrase = build(&pattern, q.ignore_case)?;
+    let phrase = build(&pattern, ignore_case)?;
     let mut distinct: Vec<&str> = vec![];
     if !q.regex {
         for w in q.text.split_whitespace() {
@@ -660,7 +829,7 @@ fn compile(q: &SearchQuery) -> Result<(Regex, Vec<Regex>), RdyError> {
     let words = if distinct.len() >= 2 {
         distinct
             .into_iter()
-            .map(|w| build(&regex::escape(w), q.ignore_case))
+            .map(|w| build(&regex::escape(w), ignore_case))
             .collect::<Result<_, _>>()?
     } else {
         vec![]

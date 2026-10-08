@@ -380,8 +380,16 @@ impl ReadState {
             let Some(src) = m.get(&block) else { continue };
             let deleted = m.get(&cause.changed).is_none();
             // no entry for a decision that asserts nothing live
-            let Some(follow) = follow_up(self.pack(), src, g.status(&block).as_ref(), deleted)
-            else {
+            let value_reference = cause.edge == "references"
+                && m.get(&cause.changed)
+                    .is_some_and(|b| b.block_type == rdy_model::entity::VALUE);
+            let Some(follow) = follow_up(
+                self.pack(),
+                src,
+                g.status(&block).as_ref(),
+                deleted,
+                value_reference,
+            ) else {
                 continue;
             };
             let kind = if cause.suspect {
@@ -456,7 +464,8 @@ pub(crate) fn attach(v: &mut serde_json::Value, c: Result<Consequences, RdyError
 /// `write_typed`, then the write's consequences read from the state it published: on success
 /// `consequences` is always present (with `consequences_omitted` when a cut dropped some, or
 /// `consequences_error` when they could not be read; the write stands), then `intents` when other
-/// sessions' open intents cover blocks the change wrote (iwr1); on a briefing refusal
+/// sessions' open intents cover blocks the change wrote (iwr1), and the write's suggestions
+/// (FW-EN3), which never fail the write; on a briefing refusal
 /// the error carries a fresh briefing for exactly the blocks the write touches.
 pub fn write_and_report<T: Serialize + 'static>(
     engine: &dyn Engine,
@@ -501,7 +510,67 @@ pub fn write_and_report<T: Serialize + 'static>(
         }
         None => v["consequences"] = serde_json::json!([]),
     }
+    match change {
+        Some(h) => match engine.read().suggestions(&Scope::View(view.into()), &h) {
+            Ok((s, n)) => {
+                v["suggestions"] =
+                    serde_json::to_value(&s).expect("suggestions serialize: strings only");
+                if n > 0 {
+                    v["suggestions_omitted"] = n.into();
+                }
+            }
+            Err(e) => {
+                v["suggestions"] = serde_json::json!([]);
+                v["suggestions_error"] = format!("{}: {}", e.code, e.message).into();
+            }
+        },
+        None => v["suggestions"] = serde_json::json!([]),
+    }
+    if let Some(h) = change {
+        attach_related(&mut v, engine, view, &h);
+    }
     Ok(v)
+}
+
+/// FW-EN5: when the change creates decisions, `related_decisions` lists the decisions related
+/// to them (with `related_decisions_omitted` when a cap dropped some), or `[]` and
+/// `related_decisions_error` when they could not be read; the write stands. A change that
+/// creates no decision adds no key.
+fn attach_related(v: &mut serde_json::Value, engine: &dyn Engine, view: &str, change: &Hash) {
+    let st = engine.read();
+    let ids: Result<Vec<BlockId>, RdyError> = st
+        .reader()
+        .change(change)
+        .map_err(RdyError::from)
+        .map(|ch| {
+            ch.ops
+                .iter()
+                .filter_map(|o| match o {
+                    Op::Create { block } if block.block_type == DECISION => Some(block.id.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+    match ids {
+        Ok(ids) if ids.is_empty() => {}
+        Ok(ids) => match st.related_decisions(&Scope::View(view.into()), &ids) {
+            Ok((rel, n)) => {
+                v["related_decisions"] =
+                    serde_json::to_value(&rel).expect("related decisions serialize: strings only");
+                if n > 0 {
+                    v["related_decisions_omitted"] = n.into();
+                }
+            }
+            Err(e) => {
+                v["related_decisions"] = serde_json::json!([]);
+                v["related_decisions_error"] = format!("{}: {}", e.code, e.message).into();
+            }
+        },
+        Err(e) => {
+            v["related_decisions"] = serde_json::json!([]);
+            v["related_decisions_error"] = format!("{}: {}", e.code, e.message).into();
+        }
+    }
 }
 
 /// iwr1: other sessions' open intents on the blocks change `h` wrote, in `view`, with each block's

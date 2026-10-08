@@ -3,10 +3,13 @@
 //! or every block under a doc or folder path); its token changes when, and only when, a covered
 //! block or one of their dependencies changes version. Registered briefings live in memory
 //! (`BriefRegistry`), one registry per open project.
+use crate::coverage::GraphCoverage;
 use crate::error::*;
 use crate::inflight::Inflight;
 use crate::keys;
 use crate::query::summary_in;
+use crate::related::{RELATED_CAP, RelatedDecision};
+use crate::suggest::MentionedBy;
 use crate::write::OpInput;
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, EdgeKind, IMPACT_LINKS, IMPACT_SHOWN, SUSPECT_LINKS, Suspect};
@@ -241,7 +244,9 @@ pub enum FollowUp {
 
 /// The follow-up a dependent block owes when a block it depends on changed. `status` is the
 /// dependent's derived decision status (`None` for a block that is not a decision);
-/// `target_deleted` says the changed block no longer exists. `None` means no follow-up at all.
+/// `target_deleted` says the changed block no longer exists; `value_reference` says the dependent
+/// reaches the changed block through a reference and that block is a value. `None` means no
+/// follow-up at all.
 ///
 /// Exact, in order:
 /// 1. a decision that asserts nothing live (rejected, revoked or fully superseded): `None`;
@@ -249,13 +254,16 @@ pub enum FollowUp {
 /// 3. a proposed decision (mutable): `Update`;
 /// 4. any other block while the target is deleted (a repin cannot pin to a block that is gone):
 ///    `Update`;
-/// 5. a `normative` or `defines` type, or a `table` marked `normative: true`: `Update`;
-/// 6. anything else (informative, structural, no classifying trait, asset): `Confirm`.
+/// 5. a reference to a changed value (`value_reference`): `Confirm`, since the reference's text
+///    updates by itself and only the advice around it may need a look (FW-EN2);
+/// 6. a `normative` or `defines` type, or a `table` marked `normative: true`: `Update`;
+/// 7. anything else (informative, structural, no classifying trait, asset): `Confirm`.
 pub fn follow_up(
     pack: &Pack,
     dependent: &Block,
     status: Option<&DerivedStatus>,
     target_deleted: bool,
+    value_reference: bool,
 ) -> Option<FollowUp> {
     match status {
         Some(
@@ -271,6 +279,9 @@ pub fn follow_up(
     }
     if target_deleted {
         return Some(FollowUp::Update);
+    }
+    if value_reference {
+        return Some(FollowUp::Confirm);
     }
     let classifying = pack
         .block_types
@@ -354,6 +365,19 @@ pub struct Briefing {
     pub suspects: Vec<Suspect>,
     /// Other views and open proposals that change a covered block (not part of the token).
     pub inflight: Inflight,
+    /// Graph coverage of the covered blocks (FW-EN4). Not paged or cut: every page carries it.
+    pub coverage: GraphCoverage,
+    /// Blocks in other docs that name a covered new doc (FW-EN3). Not paged or cut.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mentioned_by: Vec<MentionedBy>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub mentioned_by_omitted: usize,
+    /// Decisions related to the covered decisions (FW-EN5), at most `RELATED_CAP` in all. Not
+    /// paged or cut.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub related_decisions: Vec<RelatedDecision>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub related_decisions_omitted: usize,
     pub base: Base,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
@@ -378,6 +402,10 @@ pub struct Briefing {
     pub scope: String,
     #[serde(skip)]
     pub record: Arc<BriefRecord>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 impl Briefing {
@@ -856,8 +884,15 @@ impl ReadState {
                 if edge_in(&e.kind, &SUSPECT_LINKS)
                     && e.pin.is_some()
                     && let Some(from) = m.get(&e.from)
-                    && let Some(f) =
-                        follow_up(pack, from, g.status(&e.from).as_ref(), m.get(id).is_none())
+                    && let Some(f) = follow_up(
+                        pack,
+                        from,
+                        g.status(&e.from).as_ref(),
+                        m.get(id).is_none(),
+                        matches!(e.kind, EdgeKind::References)
+                            && m.get(id)
+                                .is_some_and(|b| b.block_type == rdy_model::entity::VALUE),
+                    )
                 {
                     stale.insert(key, f);
                 }
@@ -914,6 +949,17 @@ impl ReadState {
         }
         suspects.sort_by(|a, b| (&a.block, &a.target).cmp(&(&b.block, &b.target)));
         let inflight = self.inflight(scope, ids)?;
+        let coverage = self.graph_coverage(scope, Some(ids))?;
+        let (mentioned_by, mentioned_by_omitted) = self.mentioned_by(scope, ids)?;
+        let decisions: Vec<BlockId> = ids.iter().cloned().collect();
+        let (mut related_decisions, mut related_decisions_omitted) =
+            self.related_decisions(scope, &decisions)?;
+        // a briefing over many decisions would carry the per-decision cap for each: cut it
+        // to one cap in all, and count what this cut drops
+        if related_decisions.len() > RELATED_CAP {
+            related_decisions_omitted += related_decisions.len() - RELATED_CAP;
+            related_decisions.truncate(RELATED_CAP);
+        }
 
         let base = Base {
             token: token.to_string(),
@@ -949,6 +995,11 @@ impl ReadState {
             will_go_stale,
             suspects,
             inflight,
+            coverage,
+            mentioned_by,
+            mentioned_by_omitted,
+            related_decisions,
+            related_decisions_omitted,
             base,
             truncated: false,
             omitted: BTreeMap::new(),

@@ -142,6 +142,9 @@ enum Cmd {
         /// Keep blocks linked to or from this block.
         #[arg(long = "linked-to")]
         linked_to: Option<String>,
+        /// linked or unlinked: keep blocks that name an entity and are (or are not yet) linked to it.
+        #[arg(long)]
+        mentions: Option<String>,
         /// Keep only blocks with an open suspect.
         #[arg(long)]
         suspect: bool,
@@ -614,6 +617,53 @@ fn warning_lines(v: &Value) -> String {
         .collect()
 }
 
+/// The `coverage:`, `kinds:` and `similar kinds:` lines of `rdy status` (FW-EN4, FW-EN1a), each
+/// with its leading newline; nothing when the status carries no coverage.
+fn coverage_lines(c: &Value) -> String {
+    if !c.is_object() {
+        return String::new();
+    }
+    let (g, d) = (&c["grounded"], &c["connected"]);
+    let unlinked =
+        d["unlinked_docs"].as_array().map_or(0, Vec::len) as u64 + num(&d["unlinked_docs_omitted"]);
+    let mut out = format!(
+        "\ncoverage: {}/{} facts tied, {}/{} content tied, {}/{} mentions linked, {unlinked} of {} docs unlinked",
+        num(&g["facts_tied"]),
+        num(&g["facts"]),
+        num(&g["content_tied"]),
+        num(&g["content"]),
+        num(&g["mentions_linked"]),
+        num(&g["mentions"]),
+        num(&d["docs"]),
+    );
+    let kinds: Vec<String> = c["kinds"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|k| format!("{} {}", text(&k["kind"]), num(&k["entities"])))
+        .collect();
+    if !kinds.is_empty() {
+        out.push_str(&format!("\nkinds: {}", kinds.join(", ")));
+    }
+    let groups: Vec<String> = c["similar_kinds"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|g| {
+            g.as_array()
+                .into_iter()
+                .flatten()
+                .map(text)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .collect();
+    if !groups.is_empty() {
+        out.push_str(&format!("\nsimilar kinds: {}", groups.join("; ")));
+    }
+    out
+}
+
 fn status_text(v: &Value) -> String {
     let views = v["views"]
         .as_array()
@@ -629,11 +679,12 @@ fn status_text(v: &Value) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let mut out = format!(
-        "pack {}\ncanon: {} ({} landings, {} suspects)\nviews:\n{views}",
+        "pack {}\ncanon: {} ({} landings, {} suspects){}\nviews:\n{views}",
         text(&v["pack"]),
         text(&v["version_position"]["label"]),
         num(&v["landings"]),
         num(&v["suspects"]),
+        coverage_lines(&v["coverage"]),
     );
     let caught_up = num(&v["open_report"]["caught_up_frames"]);
     if caught_up > 0 {
@@ -809,6 +860,80 @@ fn impact_text(v: &Value) -> String {
 }
 
 /// csrch1: the matching blocks, one header per block and its matching lines under it.
+/// One entity's fact sheet in `rdy search` text (FW-EN1, FW-EN1a).
+fn sheet_lines(sheet: &Value, out: &mut Vec<String>) {
+    let mut head = format!(
+        "entity {} ({}, {})",
+        text(&sheet["name"]),
+        text(&sheet["type"]),
+        text(&sheet["id"])
+    );
+    if let Some(value) = sheet["value"].as_str() {
+        head.push_str(&format!(" = {value}"));
+    }
+    if let Some(kind) = sheet["kind"].as_str() {
+        head.push_str(&format!(" [{kind}]"));
+    }
+    head.push_str(&format!(", matched by {}", text(&sheet["matched_by"])));
+    out.push(head);
+    let first = text(&sheet["definition"]).lines().next().unwrap_or("");
+    if !first.is_empty() {
+        out.push(format!("  definition: {first}"));
+    }
+    for (key, title) in [
+        ("facts", "facts"),
+        ("also_described_in", "also described in"),
+    ] {
+        let list = sheet[key].as_array().cloned().unwrap_or_default();
+        if !list.is_empty() {
+            out.push(format!("  {title}:"));
+            for b in &list {
+                out.push(format!(
+                    "    {} ({}) {}",
+                    text(&b["id"]),
+                    text(&b["via"]),
+                    text(&b["summary"])
+                ));
+            }
+        }
+    }
+    let decisions = sheet["decisions"].as_array().cloned().unwrap_or_default();
+    if !decisions.is_empty() {
+        out.push("  decisions:".to_string());
+        for d in &decisions {
+            out.push(format!(
+                "    {} [{}] ({}) {}",
+                text(&d["id"]),
+                text(&d["status"]),
+                text(&d["via"]),
+                text(&d["statement"])
+            ));
+        }
+    }
+    let dependents = sheet["dependents"].as_array().cloned().unwrap_or_default();
+    if !dependents.is_empty() {
+        out.push("  depends on it:".to_string());
+        for b in &dependents {
+            out.push(format!(
+                "    {} ({}) {}",
+                text(&b["id"]),
+                text(&b["via"]),
+                text(&b["summary"])
+            ));
+        }
+    }
+    if let Some(omitted) = sheet["omitted"].as_object().filter(|o| !o.is_empty()) {
+        out.push(format!(
+            "  omitted: {}",
+            omitted
+                .iter()
+                .map(|(k, n)| format!("{} {}", k.replace('_', " "), num(n)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+}
+
 fn search_text(v: &Value) -> String {
     let mut out = vec![format!("{} matching blocks", num(&v["total"]))];
     let docs = v["totals"]["docs"].as_array().cloned().unwrap_or_default();
@@ -835,6 +960,13 @@ fn search_text(v: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+    }
+    for sheet in v["entities"].as_array().into_iter().flatten() {
+        sheet_lines(sheet, &mut out);
+    }
+    let more = num(&v["entities_omitted"]);
+    if more > 0 {
+        out.push(format!("and {more} more entities"));
     }
     for m in v["matches"].as_array().into_iter().flatten() {
         let path = m["path"].as_str().unwrap_or("-");
@@ -866,6 +998,13 @@ fn search_text(v: &Value) -> String {
                     .map(|a| format!("{} {}", a["path"].as_str().unwrap_or("-"), text(&a["id"])))
                     .collect::<Vec<_>>()
                     .join(", ")
+            ));
+        }
+        for s in m["suggestions"].as_array().into_iter().flatten() {
+            out.push(format!(
+                "  suggest: {} {}",
+                text(&s["link"]),
+                text(&s["target"])
             ));
         }
     }
@@ -1155,6 +1294,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
             governed_by,
             describes,
             linked_to,
+            mentions,
             suspect,
         } => {
             // Empty lists and false flags are sent as absent.
@@ -1166,7 +1306,7 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
                 json!({"query": query, "regex": regex, "ignore_case": ignore_case, "scope": scope, "max_tokens": max_tokens, "page": page,
                     "types": list(types), "traits": list(traits), "path": path, "lifecycle": lifecycle, "changed_since": changed_since,
                     "exclude_history": flag(exclude_history), "governed_by": governed_by, "describes": describes, "linked_to": linked_to,
-                    "suspect": flag(suspect)}),
+                    "mentions": mentions, "suspect": flag(suspect)}),
             )?;
             let t = search_text(&v);
             Ok((v, t))

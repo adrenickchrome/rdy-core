@@ -270,7 +270,7 @@ pub fn error_json(e: &RdyError) -> Value {
 
 /// adv1: drop the advisory warnings (`ADVISORY_ONCE`) this session already reported and count
 /// them in `warnings_repeated`. The `warnings` array stays, possibly empty.
-fn report_once(st: &mut McpState, mut v: Value) -> Value {
+pub(crate) fn report_once(st: &mut McpState, mut v: Value) -> Value {
     let Some(warnings) = v.get_mut("warnings").and_then(Value::as_array_mut) else {
         return v;
     };
@@ -580,7 +580,16 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     let scope = scope_of(&st.view, &st_, &p.scope)?;
     let position = st_.version_position(&scope)?;
     let max = p.max_tokens.unwrap_or(4000);
-    let tree = fit_tree(st_.tree(&scope, None, None)?, max.saturating_sub(300));
+    let coverage = serde_json::to_value(st_.graph_coverage(&scope, None)?).map_err(|e| {
+        RdyError::new(
+            E_INTERNAL,
+            format!("graph coverage did not serialize: {e}"),
+            "report this as a bug in rdy",
+        )
+    })?;
+    // the tree gets what the fixed parts (coverage included) leave
+    let reserve = 300 + tokens_of(&coverage);
+    let tree = fit_tree(st_.tree(&scope, None, None)?, max.saturating_sub(reserve));
     let views: Vec<Value> = st_
         .view_names()
         .into_iter()
@@ -596,6 +605,7 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
         "canon": {"landings": landings},
         "open_report": open_report_json(&st.engine.open_report()),
         "views": views, "tree": tree, "version_position": position,
+        "coverage": coverage,
     });
     // malt1: a session in a member view of an open set sees the set and its other members
     if let Some((stable, version, set)) = st_.alt_of_view(&st.view)? {
@@ -1024,8 +1034,11 @@ const TEXT_RULES: &str = "Bodies and text fields: **bold**, *italic*, `code`, [l
 /// The decision home's rule, in `rdy_schema` (FW-PR2).
 pub const DECISIONS_RULE: &str = "Record new decisions in the decision home (rdy_decide without parent records there) and link the content they govern to them with decided_by; don't put decisions inside content docs. With no home configured, pass parent, or set decisions.home in .rdy/config.yaml.";
 
+/// What an entity is and how to link facts to it (FW-EN1, FW-EN3), shown by `rdy_schema`.
+pub const ENTITY_RULE: &str = "Entities are the things the docs talk about: blocks of a type that defines something (term, component, actor, interface, value, entity). Give each a name and, if it helps, aliases. rdy_search on a key, name or alias returns its fact sheet. Link facts to the entities they describe (describes; affects for a decision): write responses suggest these links, and rdy_accept takes the right ones in one call. A value renders as its value and unit wherever it is referenced; a value whose value is blank renders as its name, so give every value a value.";
+
 /// How to edit with briefings, in `rdy_schema`.
-pub const EDIT_LOOP_DOC: &str = "Brief before editing: rdy_brief {ids or path} returns governs, dependents, lineage (the refines, supersedes and revokes edges of the covered blocks, in both directions: {block, kind, direction (in or out), on, summary}; the incoming refines and supersedes are dependents too), will_go_stale, suspects, inflight (other views and open proposals that change the blocks) and base (each covered block's version and the briefing token). Pass brief: <token> on rdy_write, rdy_decide, rdy_supersede (inside decision) and rdy_revoke. A write that touches stable content (a block whose own or inherited lifecycle is stable before or after the op; for a create, its parent's) needs a current briefing that covers it: brief the block, or its parent to create under it. A briefing is current while no block it recorded has moved in the write's view. Drafts need none; a stale one there only warns (W_BRIEF_STALE). E_BRIEF_REQUIRED and E_BRIEF_STALE carry a fresh briefing for exactly the blocks the write touches: retry with its base.token. Every write response lists consequences: {id, block, kind (conflict, suspect or dependent; tension arrives with tensions), because {edge, changed}, follow_up (update, confirm, reaffirm or resolve)}; max_tokens bounds them. A cut briefing carries next and per-doc counts (docs): pass page: <next> alone, in the scope of the first page, to read the rest. Every page of a cut briefing has truncated: true and docs; the last page has no next. A page is stale (E_PAGE_STALE) when a paged entry other than inflight came, went or changed; inflight is advice and may shift between pages. rdy_view include, exclude and undo return consequences too, with conflict entries (follow_up resolve) for conflicts the op exposed; rdy_propose returns the consequences for canon of landing it (advice). An entry with already_written: true is a block your view already rewrote: confirm it (repin) unless its meaning changed.";
+pub const EDIT_LOOP_DOC: &str = "Brief before editing: rdy_brief {ids or path} returns governs, dependents, lineage (the refines, supersedes and revokes edges of the covered blocks, in both directions: {block, kind, direction (in or out), on, summary}; the incoming refines and supersedes are dependents too), will_go_stale, suspects, inflight (other views and open proposals that change the blocks) and base (each covered block's version and the briefing token). Pass brief: <token> on rdy_write, rdy_decide, rdy_supersede (inside decision) and rdy_revoke. A write that touches stable content (a block whose own or inherited lifecycle is stable before or after the op; for a create, its parent's) needs a current briefing that covers it: brief the block, or its parent to create under it. A briefing is current while no block it recorded has moved in the write's view. Drafts need none; a stale one there only warns (W_BRIEF_STALE). E_BRIEF_REQUIRED and E_BRIEF_STALE carry a fresh briefing for exactly the blocks the write touches: retry with its base.token. Every write response lists consequences: {id, block, kind (conflict, suspect or dependent; tension arrives with tensions), because {edge, changed}, follow_up (update, confirm, reaffirm or resolve)}; max_tokens bounds them. A cut briefing carries next and per-doc counts (docs): pass page: <next> alone, in the scope of the first page, to read the rest. Every page of a cut briefing has truncated: true and docs; the last page has no next. A page is stale (E_PAGE_STALE) when a paged entry other than inflight came, went or changed; inflight is advice and may shift between pages. rdy_view include, exclude and undo return consequences too, with conflict entries (follow_up resolve) for conflicts the op exposed; rdy_propose returns the consequences for canon of landing it (advice). An entry with already_written: true is a block your view already rewrote: confirm it (repin) unless its meaning changed. Every write response also lists suggestions: {kind: link, block, link (describes or affects), target, mention, field} or {kind: entity, literal, blocks, count}. They never block; pass the ones you want to rdy_accept. A write that records a decision lists related_decisions: decisions it refines, supersedes or revokes, or that refine, supersede or revoke it, and live or proposed decisions on the same entities.";
 
 /// `rdy_schema`'s error rows: `(code, when, fix)`.
 pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
@@ -1181,29 +1194,38 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
             }
             Ok(out)
         }
-        None => Ok(json!({
-            "pack": pack.name,
-            "types": pack.block_types.iter().map(|(n, d)| {
-                let mut row = json!({"type": n, "prefix": d.prefix, "traits": traits(&d.traits)});
-                if !d.tracking.is_empty() {
-                    row["tracking"] = json!(d.tracking);
-                }
-                row
-            }).collect::<Vec<_>>(),
-            "link_types": pack.link_types,
-            "areas": pack.areas.iter().map(|(n, a)| json!({"name": n, "description": a.description, "paths": a.paths})).collect::<Vec<_>>(),
-            "link_shape": {"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE},
-            "ops": WRITE_OPS.iter().map(|(n, s)| (n.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
-            "views": view_tools::SCHEMA_DOC,
-            "intents": crate::intent_tools::INTENT_DOC,
-            "alternatives": crate::alt_tools::ALT_DOC,
-            "decisions": {"home": st_.decisions_home(), "rule": DECISIONS_RULE},
-            "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT, "socket_line_bytes": MAX_REQUEST_BYTES, "transport": TRANSPORT_NOTE},
-            "errors": ERROR_ROWS.iter().map(|(c, w, f)| (c.to_string(), json!({"when": w, "fix": f}))).collect::<serde_json::Map<_, _>>(),
-            "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
-            "text": TEXT_RULES,
-            "edit_loop": EDIT_LOOP_DOC,
-        })),
+        None => {
+            let entity_types: Vec<&String> = pack
+                .block_types
+                .iter()
+                .filter(|(_, d)| d.traits.contains(&Trait::Defines))
+                .map(|(n, _)| n)
+                .collect();
+            Ok(json!({
+                "pack": pack.name,
+                "types": pack.block_types.iter().map(|(n, d)| {
+                    let mut row = json!({"type": n, "prefix": d.prefix, "traits": traits(&d.traits)});
+                    if !d.tracking.is_empty() {
+                        row["tracking"] = json!(d.tracking);
+                    }
+                    row
+                }).collect::<Vec<_>>(),
+                "link_types": pack.link_types,
+                "areas": pack.areas.iter().map(|(n, a)| json!({"name": n, "description": a.description, "paths": a.paths})).collect::<Vec<_>>(),
+                "link_shape": {"shape": LINK_SHAPE, "example": link_example(), "update": LINK_UPDATE},
+                "ops": WRITE_OPS.iter().map(|(n, s)| (n.to_string(), json!(s))).collect::<serde_json::Map<_, _>>(),
+                "views": view_tools::SCHEMA_DOC,
+                "intents": crate::intent_tools::INTENT_DOC,
+                "alternatives": crate::alt_tools::ALT_DOC,
+                "decisions": {"home": st_.decisions_home(), "rule": DECISIONS_RULE},
+                "entities": {"types": entity_types, "rule": ENTITY_RULE},
+                "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT, "socket_line_bytes": MAX_REQUEST_BYTES, "transport": TRANSPORT_NOTE},
+                "errors": ERROR_ROWS.iter().map(|(c, w, f)| (c.to_string(), json!({"when": w, "fix": f}))).collect::<serde_json::Map<_, _>>(),
+                "doc_types": pack.doc_types.iter().map(|(n, d)| json!({"doc_type": n, "skeleton": d.skeleton.iter().map(|s| json!({"title": s.title, "required": s.required})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
+                "text": TEXT_RULES,
+                "edit_loop": EDIT_LOOP_DOC,
+            }))
+        }
     }
 }
 

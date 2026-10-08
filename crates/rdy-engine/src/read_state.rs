@@ -1,8 +1,11 @@
 //! Published read states (snap1): what a reader holds is an immutable `ReadState`, built lazily
 //! and shared. The writer publishes a new one after every write, before the write returns, and
 //! seeds the cells it can fill in O(ops) (the written view after a commit, canon after a landing).
+use crate::coverage::GraphCoverage;
 use crate::error::*;
+use crate::lexicon::Lexicon;
 use crate::paths::TreeNode;
+use crate::suggest::MentionScan;
 use crate::version::VposCache;
 use crate::{AS_OF_CACHE_ENTRIES, Materialized, Scope};
 use rdy_graph::Graph;
@@ -53,6 +56,12 @@ pub(crate) struct Built {
     pub(crate) graph: OnceLock<Arc<Graph>>,
     /// The full tree, memoised (filled by the tree reads).
     pub(crate) tree: OnceLock<Arc<Vec<TreeNode>>>,
+    /// The entity lexicon (FW-EN1), memoised; carried across a write like the graph.
+    pub(crate) lexicon: OnceLock<Arc<Lexicon>>,
+    /// The whole scope's graph coverage (FW-EN4), memoised; never carried.
+    pub(crate) coverage: OnceLock<Arc<GraphCoverage>>,
+    /// The mention scans briefings made (FW-EN3), most recent first; carried across a write.
+    pub(crate) mentions: Mutex<Vec<MentionScan>>,
 }
 
 impl Built {
@@ -62,20 +71,39 @@ impl Built {
             conflicts,
             graph: OnceLock::new(),
             tree: OnceLock::new(),
+            lexicon: OnceLock::new(),
+            coverage: OnceLock::new(),
+            mentions: Mutex::new(vec![]),
         }
     }
 
     /// gcar1: this state with `ops` applied: the same conflicts and, only if this state's graph is
     /// built, that graph carried across the ops (their blocks' old edges out, their new ones in),
-    /// which equals a rebuild. The tree is not carried.
+    /// which equals a rebuild. The lexicon is carried the same way when it is built (lex1), and
+    /// so are the mention scans (`MentionScan::carried`). The tree and the coverage are not
+    /// carried.
     pub(crate) fn after(&self, ops: &[Op]) -> Built {
         let m = Arc::new(self.m.with(ops));
         let next = Built::new(Arc::clone(&m), Arc::clone(&self.conflicts));
-        if let Some(g) = self.graph.get() {
-            let ids: BTreeSet<&BlockId> = ops.iter().map(Op::block_id).collect();
-            let old = ids.iter().filter_map(|id| self.m.get(id));
-            let new = ids.iter().filter_map(|id| m.get(id));
-            let _ = next.graph.set(Arc::new(g.with_changes(old, new)));
+        {
+            let scans = self.mentions.lock().unwrap_or_else(|e| e.into_inner());
+            if !scans.is_empty() {
+                *next.mentions.lock().unwrap_or_else(|e| e.into_inner()) =
+                    MentionScan::carried(&scans, &self.m, ops);
+            }
+        }
+        let (graph, lexicon) = (self.graph.get(), self.lexicon.get());
+        if graph.is_none() && lexicon.is_none() {
+            return next;
+        }
+        let ids: BTreeSet<&BlockId> = ops.iter().map(Op::block_id).collect();
+        let old = || ids.iter().filter_map(|id| self.m.get(id));
+        let new = || ids.iter().filter_map(|id| m.get(id));
+        if let Some(g) = graph {
+            let _ = next.graph.set(Arc::new(g.with_changes(old(), new())));
+        }
+        if let Some(l) = lexicon {
+            let _ = next.lexicon.set(Arc::new(l.with_changes(old(), new())));
         }
         next
     }
@@ -582,6 +610,23 @@ impl ReadState {
         })))
     }
 
+    /// The scope's entity lexicon (FW-EN1), built with the scope and filled on first use.
+    pub fn lexicon(&self, scope: &Scope) -> Result<Arc<Lexicon>, RdyError> {
+        let built = self.built(scope)?;
+        Ok(Arc::clone(built.lexicon.get_or_init(|| {
+            Arc::new(Lexicon::build(&self.pack, built.m.iter()))
+        })))
+    }
+
+    /// Whether `scope`'s lexicon is built in this state. Never builds, and never marks an as-of
+    /// scope used.
+    pub fn lexicon_built(&self, scope: &Scope) -> bool {
+        self.peek_entry(scope)
+            .as_deref()
+            .and_then(Entry::built_ok)
+            .is_some_and(|b| b.lexicon.get().is_some())
+    }
+
     /// The conflicts the scope's merge recorded (always empty for canon and as-of scopes).
     pub fn conflicts(&self, scope: &Scope) -> Result<Arc<Vec<Conflict>>, RdyError> {
         Ok(Arc::clone(&self.built(scope)?.conflicts))
@@ -629,25 +674,29 @@ impl ReadState {
     /// builds, and never marks an as-of scope used.
     #[doc(hidden)]
     pub fn is_built(&self, scope: &Scope) -> (bool, bool) {
-        if let Scope::Inflight = scope {
-            return match self.inflight_cell.built_ok() {
-                Some(b) => (true, b.graph.get().is_some()),
-                None => (false, false),
-            };
+        match self.peek_entry(scope).as_deref().and_then(Entry::built_ok) {
+            Some(b) => (true, b.graph.get().is_some()),
+            None => (false, false),
         }
-        let entry = match scope {
+    }
+
+    /// The entry `scope` reads in this state, if there is one. Never builds, and never marks an
+    /// as-of scope used. A floating view reads canon's entry, as `built` does; the in-flight
+    /// scope reads its cell's entry when one was made without an error.
+    fn peek_entry(&self, scope: &Scope) -> Option<Arc<Entry>> {
+        match scope {
             Scope::Canon => Some(Arc::clone(&self.canon)),
-            // a floating view reads canon's entry
             Scope::View(v) => match self.views.get(v) {
                 Some(e) if e.floats() => Some(Arc::clone(&self.canon)),
                 e => e.cloned(),
             },
             Scope::At(h) => self.as_of.peek(h),
-            Scope::Inflight => None,
-        };
-        match entry.as_deref().and_then(Entry::built_ok) {
-            Some(b) => (true, b.graph.get().is_some()),
-            None => (false, false),
+            Scope::Inflight => self
+                .inflight_cell
+                .entry
+                .get()
+                .and_then(|r| r.as_ref().ok())
+                .cloned(),
         }
     }
 

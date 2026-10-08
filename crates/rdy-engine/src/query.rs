@@ -65,15 +65,27 @@ pub fn summary(b: &Block) -> String {
 }
 
 /// Like [`summary`], but each `{{id}}` reference to a block in `m` is shown as that block's own
-/// [`summary`] (never expanded further); unknown targets show the bare id.
+/// [`summary`] (never expanded further), except that a referenced value shows as its
+/// [`rdy_model::entity::value_text`]; unknown targets show the bare id.
 pub fn summary_in(b: &Block, m: &Materialized) -> String {
-    summarize(b, &|tok| {
-        BlockId::parse(tok)
-            .ok()
-            .and_then(|id| m.get(&id))
-            .map(summary)
-            .unwrap_or_else(|| tok.to_string())
+    summarize(b, &|tok| label_in(tok, m))
+}
+
+/// `b`'s body with each reference rendered as [`summary_in`] renders it, whitespace and line
+/// breaks kept (a fact sheet's definition).
+pub(crate) fn body_in(b: &Block, m: &Materialized) -> String {
+    render_refs(&b.body, RefMode::for_body(&b.block_type), &|tok| {
+        label_in(tok, m)
     })
+}
+
+/// How a reference reads in [`summary_in`]: the target's value text or summary, else the id.
+fn label_in(tok: &str, m: &Materialized) -> String {
+    BlockId::parse(tok)
+        .ok()
+        .and_then(|id| m.get(&id))
+        .map(|t| rdy_model::entity::value_text(t).unwrap_or_else(|| summary(t)))
+        .unwrap_or_else(|| tok.to_string())
 }
 
 fn summarize(b: &Block, resolve: &dyn Fn(&str) -> String) -> String {

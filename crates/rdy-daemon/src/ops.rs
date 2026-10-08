@@ -148,6 +148,7 @@ struct SearchArgs {
     describes: Option<String>,
     linked_to: Option<String>,
     suspect: Option<bool>,
+    mentions: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -420,7 +421,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             parse(
                 op,
                 args,
-                "{query, regex?, ignore_case?, scope?, max_tokens?, page?, types?, traits?, path?, lifecycle?, changed_since?, exclude_history?, governed_by?, describes?, linked_to?, suspect?}",
+                "{query, regex?, ignore_case?, scope?, max_tokens?, page?, types?, traits?, path?, lifecycle?, changed_since?, exclude_history?, governed_by?, describes?, linked_to?, mentions?, suspect?}",
             )?,
         ),
         "render" => render(cx, parse(op, args, "{out, scope?}")?),
@@ -512,6 +513,7 @@ fn status(cx: &OpContext) -> Result<Value, RdyError> {
         "pack": st.pack().name,
         "landings": landings,
         "suspects": suspects,
+        "coverage": st.graph_coverage(&Scope::Canon, None)?,
         "version_position": canon,
         "views": views,
         "warnings": warnings,
@@ -700,6 +702,7 @@ fn search(cx: &OpContext, a: SearchArgs) -> Result<Value, RdyError> {
                 describes: a.describes,
                 linked_to: a.linked_to,
                 suspect: a.suspect.unwrap_or(false),
+                mentions: a.mentions,
             },
         },
         a.page.as_deref(),

@@ -3,6 +3,7 @@ mod canon;
 mod change;
 mod coord;
 pub mod decision;
+pub mod entity;
 mod hash;
 mod id;
 pub mod key;
