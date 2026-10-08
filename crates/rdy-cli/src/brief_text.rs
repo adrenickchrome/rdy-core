@@ -342,6 +342,7 @@ pub fn plain(v: &Value) -> String {
 /// `\nsuggestions:` and `\nrelated decisions:` in the same way.
 pub fn consequences_text(reply: &Value) -> String {
     let mut t = consequences_part(reply);
+    t.push_str(&on_change_part(reply));
     t.push_str(&suggestions_part(reply));
     t.push_str(&related_part(reply));
     t
@@ -362,6 +363,9 @@ fn consequences_part(reply: &Value) -> String {
             s(&c["because"], "edge"),
             s(&c["because"], "changed")
         ));
+        if let Some(tn) = c["tension"].as_str() {
+            t.push_str(&format!(" {tn}"));
+        }
         if let Some(fix) = c["fix"].as_str() {
             t.push_str(&format!("\n    fix: {fix}"));
         }
@@ -373,6 +377,39 @@ fn consequences_part(reply: &Value) -> String {
         let n: u64 = m.values().filter_map(Value::as_u64).sum();
         let kinds: Vec<String> = m.iter().map(|(k, v)| format!("{k} {v}")).collect();
         t.push_str(&format!("\n  and {n} more ({})", kinds.join(", ")));
+    }
+    t
+}
+
+/// The tensions the write opened and resolved (`on_change`), and the advisory ones a cut left
+/// out; nothing when there are none. Printed even when there are no consequences.
+fn on_change_part(reply: &Value) -> String {
+    let change = &reply["on_change"];
+    let opened = change["tensions"].as_array().map_or(&[][..], |a| a);
+    let resolved = change["resolved"].as_array().map_or(&[][..], |a| a);
+    let mut t = String::new();
+    if !opened.is_empty() {
+        t.push_str("\ntensions opened:");
+        for x in opened {
+            t.push_str(&format!(
+                "\n  {} {} {}: {}",
+                s(x, "id"),
+                s(x, "severity"),
+                s(x, "kind"),
+                one_line(s(x, "summary"))
+            ));
+        }
+    }
+    if let Some(m) = change["collapsed"].as_object().filter(|m| !m.is_empty()) {
+        let kinds: Vec<String> = m.iter().map(|(k, v)| format!("{v} {k}")).collect();
+        t.push_str(&format!("\ntensions not listed: {}", kinds.join(", ")));
+    }
+    if !resolved.is_empty() {
+        let list: Vec<String> = resolved
+            .iter()
+            .map(|x| format!("{} ({})", s(x, "id"), s(x, "kind")))
+            .collect();
+        t.push_str(&format!("\ntensions resolved: {}", list.join(", ")));
     }
     t
 }
@@ -475,6 +512,39 @@ mod tests {
         assert_eq!(
             consequences_text(&v),
             "\nconsequences:\n  suspect c-B: confirm (references c-A)\n  suspect D-2: reaffirm (depends_on c-A)\n    fix: supersede it, or leave it suspect; re-affirmation arrives with FW-R6\n  and 3 more (dependent 3)"
+        );
+    }
+
+    #[test]
+    fn tonc1_consequences_text_names_the_tension_and_the_on_change_sections() {
+        let reply = serde_json::json!({
+            "consequences": [{"id": "cq-1", "block": "c-AAAAA", "kind": "tension",
+                "because": {"edge": "premise_shift", "changed": "c-BBBBB"},
+                "follow_up": "resolve", "tension": "tn-0123456789ab", "fix": "resolve it"}],
+            "on_change": {
+                "tensions": [{"id": "tn-0123456789ab", "kind": "premise_shift", "severity": "blocking",
+                    "summary": "c-BBBBB changed; c-AAAAA still cites it"}],
+                "resolved": [{"id": "tn-ffffffffffff", "kind": "edit_collision"}]
+            }
+        });
+        let t = consequences_text(&reply);
+        assert!(
+            t.contains("tension c-AAAAA: resolve (premise_shift c-BBBBB) tn-0123456789ab"),
+            "{t}"
+        );
+        assert!(t.contains("tensions opened:\n  tn-0123456789ab blocking premise_shift: c-BBBBB changed; c-AAAAA still cites it"), "{t}");
+        assert!(
+            t.contains("tensions resolved: tn-ffffffffffff (edit_collision)"),
+            "{t}"
+        );
+        let quiet =
+            serde_json::json!({"consequences": [], "on_change": {"tensions": [], "resolved": []}});
+        assert_eq!(consequences_text(&quiet), "");
+        let collapsed = serde_json::json!({"consequences": [], "on_change": {"tensions": [],
+            "resolved": [], "collapsed": {"duplicate_definition": 10, "area_overlap": 2}}});
+        assert!(
+            consequences_text(&collapsed)
+                .contains("tensions not listed: 2 area_overlap, 10 duplicate_definition")
         );
     }
 

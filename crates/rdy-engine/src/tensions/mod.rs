@@ -15,6 +15,7 @@
 //! `cx.scope()` is `DetectScope::Canon`. An index a new kind adds to `DetectCx` is lazy (a
 //! `OnceLock`), so the kinds that do not read it pay nothing.
 pub mod collision;
+pub mod delta;
 pub mod deprecated;
 pub mod dismiss;
 pub mod duplicate;
