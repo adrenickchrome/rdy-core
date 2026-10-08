@@ -1,11 +1,22 @@
-use crate::alt_tools;
-use crate::entity_tools::{self, AcceptParams};
-use crate::intent_tools;
+mod alt;
+mod asset;
+mod brief;
+mod decide;
+mod entity;
+mod graph;
+mod instructions;
+mod intent;
+mod propose;
+mod read;
+mod schema;
+mod search;
+mod session;
+mod views;
+mod write;
+pub use instructions::{INSTRUCTION_SENTENCES, INSTRUCTIONS};
+
 use crate::order::{Order, Ordered, Stamped};
-use crate::params::Parameters;
-use crate::search_tools::{self, SearchParams};
 use crate::tools::{self, *};
-use crate::view_tools;
 use rdy_engine::engine::{Engine, Local};
 use rdy_engine::{E_INTERNAL, E_LIMIT, RdyError};
 use rmcp::{
@@ -16,7 +27,7 @@ use rmcp::{
         ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
-    tool, tool_handler, tool_router,
+    tool_handler,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -39,14 +50,26 @@ fn result(r: Result<serde_json::Value, RdyError>) -> CallToolResult {
     }
 }
 
-#[tool_router]
 impl RdyServer {
     pub fn new(engine: Arc<dyn Engine>, sid: Option<u64>) -> Self {
         let mut st = McpState::new(engine);
         st.sid = sid;
         RdyServer {
             state: Arc::new(Mutex::new(st)),
-            tool_router: Self::tool_router(),
+            tool_router: Self::session_router()
+                + Self::read_router()
+                + Self::graph_router()
+                + Self::schema_router()
+                + Self::brief_router()
+                + Self::search_router()
+                + Self::write_router()
+                + Self::decide_router()
+                + Self::propose_router()
+                + Self::asset_router()
+                + Self::views_router()
+                + Self::entity_router()
+                + Self::intent_router()
+                + Self::alt_router(),
         }
     }
 
@@ -113,160 +136,6 @@ impl RdyServer {
             )))
         })
     }
-
-    #[tool(
-        description = "Start a session: who you are (actor), your run, and role (reader, writer, reviewer). Required before other tools. Your writes go to a view named after your run, or work-<actor> without one; a reader may pass view \"canon\" to read canon by default."
-    )]
-    async fn rdy_session(&self, Parameters(p): Parameters<SessionParams>) -> CallToolResult {
-        self.run("rdy_session", p, tools::rdy_session).await
-    }
-
-    #[tool(
-        description = "Project overview: pack, the folder and doc tree, views, canon history and the version position. Also graph coverage: facts and content tied to entities, entity mentions linked, docs nothing links to, entity kinds."
-    )]
-    async fn rdy_overview(&self, Parameters(p): Parameters<ScopeParams>) -> CallToolResult {
-        self.run("rdy_overview", p, tools::rdy_overview).await
-    }
-
-    #[tool(
-        description = "Versions (frozen snapshots of canon, e.g. v1.2.0), oldest first, and the current version. Read one with scope \"tag:<version>\"."
-    )]
-    async fn rdy_tags(&self, Parameters(p): Parameters<TagsParams>) -> CallToolResult {
-        self.run("rdy_tags", p, tools::rdy_tags).await
-    }
-
-    #[tool(
-        description = "Read a document, folder or subtree by id or path (e.g. wallets/transactions) as compact lines (default: each block's id, type and its whole statement, prompt, name or title, else its body's first sentence; references as bare ids), markdown or yaml. max_tokens pages long output by whole blocks: a cut read returns truncated, omitted (the blocks left) and next; pass next as page to continue. A block larger than max_tokens is shown alone and cut, and cut: {id, omitted_bytes} names it. scope is 'canon', an existing view's name (or your session's), 'tag:<version>' or 'landing:<id>'; an unknown view is E_NOT_FOUND. A compact line ends with [implements <decision>] or [editorial <class>] when the change that last wrote the block carried one; when the store cannot say which change that was, the markers are left out and warnings says why. `id` may be `id@version` or a ref line `[id@version] …`, read under that version. id may also be a proposal version, P-<id>@<n> or P-<id> (its latest): its title, proposer, changes with block counts, the conflicts and other reasons that block approving it, and its version chain. pattern keeps only matching blocks (a substring, or /regex/); <doc>#<heading-slug> reads one section."
-    )]
-    async fn rdy_read(&self, Parameters(p): Parameters<ReadParams>) -> CallToolResult {
-        self.run("rdy_read", p, tools::rdy_read).await
-    }
-
-    #[tool(
-        description = "By id or path: everything about one block: fields, body, version (use as base for updates), doc, links in and out, decision status, governing decisions, suspects. Also the block's history (newest 20 versions: change, author, justification, landing and approver) and the justification of the change that last wrote it. history_more says the block has older versions than those 20; truncated and omitted say max_tokens cut entries from the reply. `id` may be `id@version` or a ref line `[id@version] …`, read under that version."
-    )]
-    async fn rdy_context(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
-        self.run("rdy_context", p, tools::rdy_context).await
-    }
-
-    #[tool(
-        description = "How to write block types: fields, required values, allowed children and an example op. Omit block_type to list all types and document skeletons."
-    )]
-    async fn rdy_schema(&self, Parameters(p): Parameters<SchemaParams>) -> CallToolResult {
-        self.run("rdy_schema", p, tools::rdy_schema).await
-    }
-
-    #[tool(
-        description = "Brief before editing: for blocks (ids) or a doc or folder (path), the decisions that govern them, what depends on them, their lineage (the decisions they refine, supersede or revoke, and the ones that do so to them), what will go stale if they change, their open suspects, work in flight (other views and open proposals that change them), and their current versions with the briefing token. Cite the token as brief on your next write; writes to stable content need it. To create a block, brief its parent. A cut briefing carries next: pass page: <next> alone (same scope) to continue it. For a code file, pass code_path alone: the blocks its commits implement (Implements: trailers) and the blocks whose reflects globs match it, plus a code section (provisional when a cited decision is still proposed, rework when it was rejected). A briefing also gives graph coverage for what it covers, for a new doc the blocks that mention it, and for a decision its related decisions."
-    )]
-    async fn rdy_brief(&self, Parameters(p): Parameters<BriefParams>) -> CallToolResult {
-        self.run("rdy_brief", p, tools::rdy_brief).await
-    }
-
-    #[tool(
-        description = "Find text in blocks: a literal (or, with regex: true, a pattern) in every block's body and string fields, code included, within scope (default: your session's view). The result starts with totals (hits per doc path and per block type). Each entry gives the block's id, type, path and matching lines (field, line number, text); blocks with identical matching lines collapse into one entry whose also lists the others. A literal of several words finds the exact phrase first, then blocks holding all the words (all_words: true), each in reading order. Filters combine with AND: types, traits, path, lifecycle, changed_since, exclude_history, governed_by, describes, linked_to, suspect. A match inside a superseded, rejected or revoked decision carries history: true. brief: true adds a registered briefing over the page's hits: cite its base.token to write them. Deterministic, no model. A cut result carries next: pass it as page with the same query and filters to continue. References are stored as ids, so search a block's id to find text that references it. A literal query that names an entity (its key, name or alias, any case) also returns its fact sheet in entities on the first page: definition, value, facts, governing decisions, dependents. Such a literal matches text in any case and spacing (the result says ignore_case: true), so every unlinked mention comes back. A match drops out only when a returned sheet lists it and it is tied to that entity (a filtered search keeps every match); each other match that names the entity carries a suggestion to link it."
-    )]
-    async fn rdy_search(&self, Parameters(p): Parameters<SearchParams>) -> CallToolResult {
-        self.run("rdy_search", p, search_tools::rdy_search).await
-    }
-
-    #[tool(
-        description = "Accept suggestions in bulk: pass suggestion objects from a write or search response unchanged (an entity suggestion may add name, type, entity_kind, value, unit, body (a term needs one), parent; a link's target must be an entity). Links are added, never replaced; a link already there is skipped. New entities go under parent. One write: cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences and suggestions."
-    )]
-    async fn rdy_accept(&self, Parameters(p): Parameters<AcceptParams>) -> CallToolResult {
-        self.run("rdy_accept", p, entity_tools::rdy_accept).await
-    }
-
-    #[tool(
-        description = "By id or path: blast radius: blocks that depend on the given block through references or dependency links (depends_on, conditional_on, implements, decided_by, describes, affects), by depth. Decisions that refine or supersede it are listed at depth 1 and not followed. Each item's via says which edge reached it: via.kind (references or a link name) to via.from."
-    )]
-    async fn rdy_impact(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
-        self.run("rdy_impact", p, tools::rdy_impact).await
-    }
-
-    #[tool(
-        description = "References and premises (depends_on, conditional_on, implements, decided_by) whose target changed or was deleted since the block pinned it, or links of any kind to a decision that was superseded or revoked. After checking a \"changed\" suspect, clear it with a repin op in rdy_write."
-    )]
-    async fn rdy_suspects(&self, Parameters(p): Parameters<ScopeParams>) -> CallToolResult {
-        self.run("rdy_suspects", p, tools::rdy_suspects).await
-    }
-
-    #[tool(
-        description = "Atomic batch write of ops (create, update, move, delete, rebalance, repin; rdy_schema lists them under \"ops\"). Place a block with after or before a sibling, or neither to append. Use id \"$name\" placeholders to refer to blocks created earlier in the same batch, including {{$name}} inside text. Reference blocks in text as {{id}}, or {{id|your words}} to choose the link text; a block's key (fields.key, e.g. REQ-12) works wherever an id does and is stored as the id. Bodies take a small Markdown subset (rdy_schema \"text\"). links: {\"<kind>\": [{\"target\": \"<id or path>\"}]}. An update replaces only the link kinds it names; \"<kind>\": [] removes that kind. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
-    )]
-    async fn rdy_write(&self, Parameters(p): Parameters<WriteParams>) -> CallToolResult {
-        self.run("rdy_write", p, tools::rdy_write).await
-    }
-
-    #[tool(
-        description = "Propose a decision (status proposed; accepted when its proposal lands). Omit parent to record it in the project's decision home. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
-    )]
-    async fn rdy_decide(&self, Parameters(p): Parameters<DecideParams>) -> CallToolResult {
-        self.run("rdy_decide", p, tools::rdy_decide).await
-    }
-
-    #[tool(
-        description = "Propose a decision that supersedes an existing one. When the change retires only some of the old decision's rules, pass part (the words of the rules it retires) and the rest stays in force; omit part to supersede all of it. It inherits the old decision's affects, depends_on, conditional_on and refines links unless you give that kind (an empty list drops it); the result's inherited lists what was copied. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
-    )]
-    async fn rdy_supersede(&self, Parameters(p): Parameters<SupersedeParams>) -> CallToolResult {
-        self.run("rdy_supersede", p, tools::rdy_supersede).await
-    }
-
-    #[tool(
-        description = "Propose revoking an existing decision. Omit parent to record it in the project's decision home. Cite brief: <token> from rdy_brief for stable content; the response lists the write's consequences."
-    )]
-    async fn rdy_revoke(&self, Parameters(p): Parameters<RevokeParams>) -> CallToolResult {
-        self.run("rdy_revoke", p, tools::rdy_revoke).await
-    }
-
-    #[tool(
-        description = "Propose your view's changes for canon. A human approves it with rdy approve. The result lists the consequences for canon: what landing it would make suspect, with follow-ups (advice)."
-    )]
-    async fn rdy_propose(&self, Parameters(p): Parameters<ProposeParams>) -> CallToolResult {
-        self.run("rdy_propose", p, tools::rdy_propose).await
-    }
-
-    #[tool(
-        description = "Upload a binary asset (base64); returns the hash to put in a figure block's blob field."
-    )]
-    async fn rdy_asset(&self, Parameters(p): Parameters<AssetParams>) -> CallToolResult {
-        self.run("rdy_asset", p, tools::rdy_asset).await
-    }
-
-    #[tool(
-        description = "Create, fork, include, exclude, compare, list, show, close or undo views. Include, exclude, close and undo need ownership of the target view. Include, exclude and undo return the op's consequences, with conflict entries to resolve."
-    )]
-    async fn rdy_view(&self, Parameters(p): Parameters<view_tools::ViewParams>) -> CallToolResult {
-        self.run("rdy_view", p, view_tools::rdy_view).await
-    }
-
-    #[tool(
-        description = "Post, renew, withdraw or list intents: advisory notes on the blocks or area you are about to change, with an expiry (default 2h, at most 7d). An intent never locks anything."
-    )]
-    async fn rdy_intent(
-        &self,
-        Parameters(p): Parameters<intent_tools::IntentParams>,
-    ) -> CallToolResult {
-        self.run("rdy_intent", p, intent_tools::rdy_intent).await
-    }
-
-    #[tool(
-        description = "Create, change, list, compare or abandon an alternative set: member views that answer one question. A proposal from a member view names its set and its own member."
-    )]
-    async fn rdy_alternatives(
-        &self,
-        Parameters(p): Parameters<alt_tools::AltParams>,
-    ) -> CallToolResult {
-        self.run("rdy_alternatives", p, alt_tools::rdy_alternatives)
-            .await
-    }
-
-    #[tool(
-        description = "Canon's landings, newest first: who approved which proposal version, how (assurance, relay, evidence), and the tags on each. Each row names the proposer (proposed_by) and the approver. limit and since page it."
-    )]
-    async fn rdy_log(&self, Parameters(p): Parameters<view_tools::LogParams>) -> CallToolResult {
-        self.run("rdy_log", p, view_tools::rdy_log).await
-    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -295,9 +164,6 @@ impl ServerHandler for RdyServer {
             .with_instructions(INSTRUCTIONS)
     }
 }
-
-/// What the server tells a host about rdy.
-pub const INSTRUCTIONS: &str = "rdy keeps decisions and documentation consistent while agents change them. Call rdy_session first, then rdy_overview. Read and write through rdy's tools, not the working-copy files. Brief before editing (rdy_brief); writes to stable content must cite a briefing (brief: <token>). Write with rdy_write; propose with rdy_propose. Work in your own view; include others' changes, never write into their views. Conflicts are recorded, not errors: resolve one by writing the block. When a block comes back as a consequence a second time in a session, do not rewrite it again: confirm it (repin) or ask the person, and show what remains as a change plan. Before editing a block, read it with format markdown or yaml: compact lines are a summary. When a change retires only some of a decision's rules, supersede that part (rdy_supersede with part), not the whole decision. Before a larger change, post an intent (rdy_intent) on its area or blocks; write responses name other sessions' intents on what you wrote, and nothing is ever locked. Record decisions in the project's decision home (rdy_decide without parent records there; rdy_schema names it) and link content to them with decided_by; don't put decisions inside content docs. Search a thing's name, key or alias with rdy_search to get its fact sheet. Write responses carry suggestions (links to the entities your text names, new entities for literals that recur): accept the right ones with one rdy_accept call; they never block.";
 
 /// The longest id value [`IdScanner`] will capture; a longer one counts as no id.
 const MAX_ID_BYTES: usize = 1024;
@@ -707,6 +573,39 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mrt1_every_tool_is_in_exactly_one_family_router() {
+        let families = [
+            RdyServer::session_router(),
+            RdyServer::read_router(),
+            RdyServer::graph_router(),
+            RdyServer::schema_router(),
+            RdyServer::brief_router(),
+            RdyServer::search_router(),
+            RdyServer::write_router(),
+            RdyServer::decide_router(),
+            RdyServer::propose_router(),
+            RdyServer::asset_router(),
+            RdyServer::views_router(),
+            RdyServer::entity_router(),
+            RdyServer::intent_router(),
+            RdyServer::alt_router(),
+        ];
+        let mut names: Vec<String> = families
+            .iter()
+            .flat_map(|r| r.list_all().into_iter().map(|t| t.name.to_string()))
+            .collect();
+        let all = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), all, "a tool is in two families: {names:?}");
+        let combined = families.into_iter().fold(
+            rmcp::handler::server::router::tool::ToolRouter::new(),
+            |a, b| a + b,
+        );
+        assert_eq!(combined.list_all().len(), all);
+    }
 
     async fn pump(input: &str, max: usize) -> String {
         let (mut w, r) = (Vec::new(), input.as_bytes());
