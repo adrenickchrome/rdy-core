@@ -23,6 +23,9 @@ pub const LOCK_WAIT: Duration = Duration::from_secs(10);
 pub const LOCK_POLL: Duration = Duration::from_millis(20);
 /// The marker of a checkout in flight, in the state directory.
 pub const CHECKOUT_FILE: &str = "checkout.yaml";
+/// The record of an update in flight (its plan and the files' earlier text), in the state
+/// directory: `rdy update` finishes it.
+pub const UPDATE_FILE: &str = "update.json";
 /// The most briefing records kept.
 pub const MAX_BRIEFS: usize = 64;
 
@@ -174,14 +177,19 @@ pub struct Pending {
     pub at_ms: i64,
 }
 
-/// A checkout in flight: written durably before checkout changes any file, removed by the save
-/// that finishes it. While it exists the files, the base copies and the state may disagree, so
-/// every command that needs the binding refuses, and only `rdy checkout <view> --force` clears it.
+/// A checkout or an update in flight: written durably before it changes any file, removed by the
+/// save that finishes it. While it exists the files, the base copies and the state may disagree,
+/// so every command that needs the binding refuses. `rdy checkout <view> --force` clears it; an
+/// update's (`update`) is also cleared by `rdy update`, which finishes the update.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckoutMark {
     pub view: String,
     pub head: String,
     pub at_ms: i64,
+    /// The rewrite in flight is `rdy update`'s, recorded in `UPDATE_FILE`: `rdy update` finishes
+    /// it, keeping the local edits.
+    #[serde(default)]
+    pub update: bool,
 }
 
 /// A briefing recorded for a later commit.
@@ -303,6 +311,12 @@ impl WcState {
         self.save_checkout_mark(place)
     }
 
+    /// Clears the checkout marker and removes only its file.
+    pub fn unmark_checkout(&mut self, place: &Place) -> Result<(), RdyError> {
+        self.checkout = None;
+        self.save_checkout_mark(place)
+    }
+
     fn save_checkout_mark(&self, place: &Place) -> Result<(), RdyError> {
         let path = place.state.join(CHECKOUT_FILE);
         match &self.checkout {
@@ -315,6 +329,14 @@ impl WcState {
     pub fn require_settled(&self) -> Result<(), RdyError> {
         match &self.checkout {
             None => Ok(()),
+            Some(m) if m.update => Err(RdyError::new(
+                E_WC_DIRTY,
+                format!(
+                    "an update of {} was interrupted: the files and the working copy's state may disagree",
+                    m.view
+                ),
+                "rdy update (it finishes the update and keeps your edits)",
+            )),
             Some(m) => Err(RdyError::new(
                 E_WC_DIRTY,
                 format!(

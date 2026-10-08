@@ -6,7 +6,7 @@ use super::{Open, open, tree};
 use crate::{Env, call, hash_short, path_arg};
 use rdy_daemon::ErrorReply;
 use rdy_engine::wc::layout::BLOBS_DIR;
-use rdy_engine::wc::merge::{apply_update, plan_update};
+use rdy_engine::wc::merge::{UpdatePlan, apply_update, plan_update, resume_update};
 use rdy_engine::wc::state::ConflictKind;
 use rdy_engine::wc::status::conflict_message;
 use rdy_engine::{E_BAD_INPUT, E_WC_CONFLICT, Projection, RdyError};
@@ -17,7 +17,14 @@ pub(super) fn run(env: &Env) -> Result<(Value, String), ErrorReply> {
         place,
         lock,
         mut state,
-    } = open(env, true)?;
+    } = open(env, false)?;
+    if state.checkout.as_ref().is_some_and(|m| m.update) {
+        // an update was interrupted: finish it from its record before anything else
+        let j = resume_update(&place, &mut state)?;
+        drop(lock);
+        return Ok(report(&j.view, &j.head, &j.plan, true));
+    }
+    state.require_bound()?;
     // a kept file's base is older than the store: a merge against it would record its new
     // blocks a second time
     let kept: Vec<&str> = state
@@ -56,10 +63,20 @@ pub(super) fn run(env: &Env) -> Result<(Value, String), ErrorReply> {
     let plan = plan_update(&place, &state, &wt, &proj, &pack)?;
     apply_update(&place, &mut state, &plan, &proj)?;
     drop(lock);
-    let head = proj.head.strip_prefix("canon:").unwrap_or(&proj.head);
+    Ok(report(&view, &proj.head, &plan, false))
+}
+
+/// The output of an update; `finished` when it finished an interrupted one.
+fn report(view: &str, head: &str, plan: &UpdatePlan, finished: bool) -> (Value, String) {
+    let short = head.strip_prefix("canon:").unwrap_or(head);
     let mut text = format!(
-        "updated {view} to {}: {} file(s) written, {} conflict(s)",
-        hash_short(head),
+        "{} {view} to {}: {} file(s) written, {} conflict(s)",
+        if finished {
+            "finished the interrupted update of"
+        } else {
+            "updated"
+        },
+        hash_short(short),
         plan.writes.len(),
         plan.conflicts.len()
     );
@@ -76,10 +93,10 @@ pub(super) fn run(env: &Env) -> Result<(Value, String), ErrorReply> {
     let written: Vec<&str> = plan.writes.iter().map(|(p, _)| p.as_str()).collect();
     let out = json!({
         "view": view,
-        "head": proj.head,
+        "head": head,
         "written": written,
         "removed": plan.removes,
         "conflicts": conflicts,
     });
-    Ok((out, text))
+    (out, text)
 }

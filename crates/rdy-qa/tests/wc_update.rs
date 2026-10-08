@@ -286,3 +286,402 @@ fn wcup1_a_block_new_in_the_store_lands_after_its_sibling_in_a_merged_file() {
     assert_eq!(store_block(&s, "work", &seed.claim).body, "Mine claim.");
     assert_eq!(store_block(&s, "work", &added).body, "Added.");
 }
+
+/// Adds top-level doc `other` (prose `Other.`) to the store before the checkout; returns its id
+/// and its prose's id.
+fn with_other(s: &rdy_qa::daemon::Served) -> (String, String) {
+    let w = store_write(
+        s,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "other", "title": "Other", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$op", "parent": "$o", "body": "Other."}
+        ]),
+    );
+    (w.created["$o"].clone(), w.created["$op"].clone())
+}
+
+fn by_id(a: &str) -> rdy_model::BlockId {
+    rdy_model::BlockId::parse(a).unwrap()
+}
+
+/// Doc `here` is renamed to c here; the store renames doc `there` to c and edits `here`'s
+/// prose. Update refuses with E_WC_CONFLICT before writing anything, whichever id sorts first.
+fn two_docs_on_one_path(local_renames_smaller: bool) {
+    let (s, seed) = seeded();
+    let (other, other_p) = with_other(&s);
+    ok(&s, &["checkout"]);
+    let mut docs = [
+        ("notes", seed.notes.clone(), seed.note.clone()),
+        ("other", other, other_p),
+    ];
+    docs.sort_by_key(|d| by_id(&d.1));
+    let (here, there) = if local_renames_smaller {
+        (docs[0].clone(), docs[1].clone())
+    } else {
+        (docs[1].clone(), docs[0].clone())
+    };
+    let there_file = format!("{}.yaml", there.0);
+    std::fs::rename(at(&s, &format!("{}.yaml", here.0)), at(&s, "c.yaml")).unwrap();
+    store_write(
+        &s,
+        "work",
+        json!([
+            {"op": "update", "id": there.1, "fields": {"name": "c"}},
+            {"op": "update", "id": here.2, "body": "Theirs."}
+        ]),
+    );
+    let (c_before, there_before) = (read(&s, "c.yaml"), read(&s, &there_file));
+    let (okk, v) = json(&s, &["update"]);
+    assert!(
+        !okk && v["code"] == E_WC_CONFLICT && v["message"].as_str().unwrap().contains("c.yaml"),
+        "{v}"
+    );
+    assert_eq!(read(&s, "c.yaml"), c_before, "nothing written");
+    assert_eq!(read(&s, &there_file), there_before, "nothing removed");
+    // the fix: another name here, then update again
+    std::fs::rename(at(&s, "c.yaml"), at(&s, "mine.yaml")).unwrap();
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk && v["conflicts"].as_array().unwrap().is_empty(), "{v}");
+    assert!(!at(&s, &there_file).exists());
+    assert!(
+        entries(&s, "c.yaml")
+            .iter()
+            .any(|e| e["id"].as_str() == Some(&there.2))
+    );
+    assert_eq!(
+        entry(&s, "mine.yaml", &here.2)["body"].as_str(),
+        Some("Theirs.")
+    );
+}
+
+#[test]
+fn wcup1_two_docs_on_one_path_are_refused_when_the_local_one_sorts_first() {
+    two_docs_on_one_path(true);
+}
+
+#[test]
+fn wcup1_two_docs_on_one_path_are_refused_when_the_store_one_sorts_first() {
+    two_docs_on_one_path(false);
+}
+
+/// Folder `here` is renamed to z here; the store renames folder `there` to z and retitles
+/// `here`. Update refuses with E_WC_CONFLICT before writing anything, whichever id sorts first.
+fn two_folders_on_one_path(local_renames_smaller: bool) {
+    let (s, seed) = seeded();
+    let w = store_write(
+        &s,
+        "work",
+        json!([
+            {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "extra", "title": "Extra"}},
+            {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "ex", "title": "Ex", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "Ex."}
+        ]),
+    );
+    ok(&s, &["checkout"]);
+    let mut folders = [
+        ("guides", seed.folder.clone()),
+        ("extra", w.created["$f"].clone()),
+    ];
+    folders.sort_by_key(|f| by_id(&f.1));
+    let (here, there) = if local_renames_smaller {
+        (folders[0].clone(), folders[1].clone())
+    } else {
+        (folders[1].clone(), folders[0].clone())
+    };
+    std::fs::rename(at(&s, here.0), at(&s, "z")).unwrap();
+    store_write(
+        &s,
+        "work",
+        json!([
+            {"op": "update", "id": there.1, "fields": {"name": "z"}},
+            {"op": "update", "id": here.1, "fields": {"title": "Retitled"}}
+        ]),
+    );
+    let z_before = read(&s, "z/_folder.yaml");
+    let there_before = read(&s, &format!("{}/_folder.yaml", there.0));
+    let (okk, v) = json(&s, &["update"]);
+    assert!(
+        !okk && v["code"] == E_WC_CONFLICT
+            && v["message"].as_str().unwrap().contains("z/_folder.yaml"),
+        "{v}"
+    );
+    assert_eq!(read(&s, "z/_folder.yaml"), z_before, "nothing written");
+    assert_eq!(
+        read(&s, &format!("{}/_folder.yaml", there.0)),
+        there_before,
+        "nothing removed"
+    );
+}
+
+#[test]
+fn wcup1_two_folders_on_one_path_are_refused_when_the_local_one_sorts_first() {
+    two_folders_on_one_path(true);
+}
+
+#[test]
+fn wcup1_two_folders_on_one_path_are_refused_when_the_store_one_sorts_first() {
+    two_folders_on_one_path(false);
+}
+
+#[test]
+fn wcup1_a_path_one_doc_leaves_and_another_takes_is_not_occupied() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let w = store_write(
+        &s,
+        "work",
+        json!([
+            {"op": "update", "id": seed.notes, "fields": {"name": "old"}},
+            {"op": "create", "type": "doc", "id": "$n", "fields": {"name": "notes", "title": "New notes", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$n", "body": "New."}
+        ]),
+    );
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk && v["conflicts"].as_array().unwrap().is_empty(), "{v}");
+    assert_eq!(
+        entry(&s, "old.yaml", &seed.note)["body"].as_str(),
+        Some("Note.")
+    );
+    assert_eq!(
+        entry(&s, "notes.yaml", &w.created["$p"])["body"].as_str(),
+        Some("New.")
+    );
+    let (okk, v) = json(&s, &["add", "."]);
+    assert!(okk, "{v}");
+    assert!(
+        v["staged"].as_array().unwrap().is_empty() && v["deleted"].as_array().unwrap().is_empty(),
+        "nothing to commit after the update: {v}"
+    );
+}
+
+#[test]
+fn wcup1_two_docs_swapping_names_in_the_store_update_cleanly() {
+    let (s, seed) = seeded();
+    let (other, other_p) = with_other(&s);
+    ok(&s, &["checkout"]);
+    store_write(
+        &s,
+        "work",
+        json!([
+            {"op": "update", "id": seed.notes, "fields": {"name": "swapping"}},
+            {"op": "update", "id": other, "fields": {"name": "notes"}}
+        ]),
+    );
+    store_write(
+        &s,
+        "work",
+        json!([{"op": "update", "id": seed.notes, "fields": {"name": "other"}}]),
+    );
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk && v["conflicts"].as_array().unwrap().is_empty(), "{v}");
+    assert_eq!(
+        entry(&s, "other.yaml", &seed.note)["body"].as_str(),
+        Some("Note.")
+    );
+    assert_eq!(
+        entry(&s, "notes.yaml", &other_p)["body"].as_str(),
+        Some("Other.")
+    );
+    let (okk, v) = json(&s, &["add", "."]);
+    assert!(okk, "{v}");
+    assert!(
+        v["staged"].as_array().unwrap().is_empty() && v["deleted"].as_array().unwrap().is_empty(),
+        "nothing to commit after the update: {v}"
+    );
+}
+
+#[test]
+fn wcup1_a_folder_the_store_deleted_stays_while_a_doc_in_it_is_edited_here() {
+    let (s, _seed) = seeded();
+    let w = store_write(
+        &s,
+        "work",
+        json!([
+            {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "old", "title": "Old"}},
+            {"op": "create", "type": "doc", "id": "$d", "parent": "$f", "fields": {"name": "d", "title": "D", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$p", "parent": "$d", "body": "D."}
+        ]),
+    );
+    let (f, d, p) = (
+        w.created["$f"].clone(),
+        w.created["$d"].clone(),
+        w.created["$p"].clone(),
+    );
+    ok(&s, &["checkout"]);
+    set_body(&s, "old/d.yaml", &p, "Mine.");
+    store_write(
+        &s,
+        "work",
+        json!([
+            {"op": "delete", "id": p},
+            {"op": "delete", "id": d},
+            {"op": "delete", "id": f}
+        ]),
+    );
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk, "{v}");
+    let paths: Vec<&str> = v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["old/_folder.yaml", "old/d.yaml"], "{v}");
+    assert!(
+        at(&s, "old/_folder.yaml").exists(),
+        "the folder of a kept doc stays"
+    );
+    assert_eq!(entry(&s, "old/d.yaml", &p)["body"].as_str(), Some("Mine."));
+    // resolution goes through rdy add
+    std::fs::remove_file(at(&s, "old/_folder.theirs.yaml")).unwrap();
+    std::fs::remove_file(at(&s, "old/d.theirs.yaml")).unwrap();
+    ok(&s, &["add", "old"]);
+    let (_, st) = json(&s, &["status"]);
+    assert!(
+        st["working_copy"]["conflicts"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{st}"
+    );
+    // the commit records the kept folder and doc again
+    ok(&s, &["commit", "-m", "keep old"]);
+    let kept = entries(&s, "old/d.yaml")
+        .into_iter()
+        .find(|e| e["body"].as_str() == Some("Mine."))
+        .expect("the edited block");
+    assert_eq!(
+        store_block(&s, "work", kept["id"].as_str().unwrap()).body,
+        "Mine."
+    );
+}
+
+#[test]
+fn wcup1_an_update_that_fails_before_changing_a_file_leaves_no_marker() {
+    use std::os::unix::fs::PermissionsExt;
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    set_body(&s, "notes.yaml", &seed.note, "My precious local edit.");
+    store_write(
+        &s,
+        "work",
+        json!([{"op": "create", "type": "doc", "parent": seed.folder, "fields": {"name": "zz", "title": "Zz", "doc_type": "page"}}]),
+    );
+    let mode = |m: u32| {
+        std::fs::set_permissions(at(&s, "guides"), std::fs::Permissions::from_mode(m)).unwrap()
+    };
+    mode(0o555);
+    let (okk, v) = json(&s, &["update"]);
+    mode(0o755);
+    assert!(!okk && v["code"] == E_IO, "{v}");
+    ok(&s, &["status"]);
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk, "{v}");
+    assert!(at(&s, "guides/zz.yaml").exists());
+    assert_eq!(
+        entry(&s, "notes.yaml", &seed.note)["body"].as_str(),
+        Some("My precious local edit.")
+    );
+}
+
+#[test]
+fn wcup1_an_interrupted_update_is_finished_by_rdy_update() {
+    use std::os::unix::fs::PermissionsExt;
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    set_body(&s, "guides/intro.yaml", &seed.prose, "Local.");
+    store_write(
+        &s,
+        "work",
+        json!([
+            {"op": "update", "id": seed.claim, "body": "Theirs claim."},
+            {"op": "update", "id": seed.note, "body": "Theirs."}
+        ]),
+    );
+    // guides/intro.yaml is written first; notes.yaml then fails in the read-only root
+    let root = s.dir.path().to_path_buf();
+    let mode =
+        |m: u32| std::fs::set_permissions(&root, std::fs::Permissions::from_mode(m)).unwrap();
+    mode(0o555);
+    let (okk, v) = json(&s, &["update"]);
+    mode(0o755);
+    assert!(!okk && v["code"] == E_IO, "{v}");
+    assert_eq!(
+        entry(&s, "guides/intro.yaml", &seed.claim)["body"].as_str(),
+        Some("Theirs claim."),
+        "the update got part way"
+    );
+    let (okk, v) = json(&s, &["status"]);
+    assert!(
+        !okk && v["code"] == E_WC_DIRTY
+            && v["message"].as_str().unwrap().contains("update")
+            && v["fix"].as_str().unwrap().starts_with("rdy update"),
+        "{v}"
+    );
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk, "{v}");
+    assert_eq!(
+        entry(&s, "guides/intro.yaml", &seed.prose)["body"].as_str(),
+        Some("Local."),
+        "the local edit is kept"
+    );
+    assert_eq!(
+        entry(&s, "notes.yaml", &seed.note)["body"].as_str(),
+        Some("Theirs.")
+    );
+    ok(&s, &["status"]);
+    ok(&s, &["add", "guides/intro.yaml"]);
+    ok(&s, &["commit", "-m", "after the finished update"]);
+    assert_eq!(store_block(&s, "work", &seed.prose).body, "Local.");
+    assert_eq!(store_block(&s, "work", &seed.claim).body, "Theirs claim.");
+    assert_eq!(store_block(&s, "work", &seed.note).body, "Theirs.");
+}
+
+#[test]
+fn wcup1_a_conflicted_file_takes_the_store_changes_that_do_not_conflict() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    set_body(&s, "guides/intro.yaml", &seed.prose, "Mine.");
+    let w = store_write(
+        &s,
+        "work",
+        json!([
+            {"op": "update", "id": seed.prose, "body": "Theirs."},
+            {"op": "update", "id": seed.claim, "body": "Theirs claim."},
+            {"op": "create", "type": "prose", "id": "$a", "parent": seed.section, "body": "Added by them."}
+        ]),
+    );
+    let added = w.created["$a"].clone();
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk, "{v}");
+    assert_eq!(v["conflicts"][0]["path"], "guides/intro.yaml", "{v}");
+    let f = "guides/intro.yaml";
+    assert_eq!(
+        entry(&s, f, &seed.prose)["body"].as_str(),
+        Some("Mine."),
+        "the conflicting block stays local"
+    );
+    assert_eq!(
+        entry(&s, f, &seed.claim)["body"].as_str(),
+        Some("Theirs claim.")
+    );
+    assert_eq!(
+        entry(&s, f, &added)["body"].as_str(),
+        Some("Added by them.")
+    );
+    std::fs::remove_file(at(&s, "guides/intro.theirs.yaml")).unwrap();
+    ok(&s, &["add", f]);
+    ok(&s, &["commit", "-m", "keep mine"]);
+    assert_eq!(store_block(&s, "work", &seed.prose).body, "Mine.");
+    assert_eq!(
+        store_block(&s, "work", &seed.claim).body,
+        "Theirs claim.",
+        "not reverted"
+    );
+    assert_eq!(
+        store_block(&s, "work", &added).body,
+        "Added by them.",
+        "not deleted"
+    );
+}

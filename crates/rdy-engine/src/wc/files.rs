@@ -6,8 +6,8 @@ use crate::tree_io::Diagnostic;
 use crate::wc::layout::{FileKind, WcTree};
 use crate::wc::project::Projection;
 use crate::wc::state::{
-    Base, BaseBlock, Bound, CheckoutMark, ConflictEntry, ConflictKind, Place, Stage, WcState,
-    new_nonce, stage_paths,
+    Base, BaseBlock, Bound, CheckoutMark, ConflictEntry, ConflictKind, Place, Stage, UPDATE_FILE,
+    WcState, new_nonce, stage_paths,
 };
 use rdy_model::BlockId;
 use rdy_schema::Severity;
@@ -228,9 +228,41 @@ pub(crate) fn write_at(
     root: &Path,
     rel: &str,
     text: &str,
-    mut cases: Option<&mut BTreeSet<PathBuf>>,
+    cases: Option<&mut BTreeSet<PathBuf>>,
 ) -> Result<(), RdyError> {
     let p = inside(rel)?;
+    make_dirs(root, p, cases)?;
+    let path = root.join(p);
+    if fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_dir()) {
+        remove_file(&path)?;
+    }
+    fs::write(&path, text).map_err(|e| io_err(&path, "write", e))
+}
+
+/// As `write_at`, but the file is replaced in one step (a durable temporary file renamed over
+/// it): an error or a crash leaves either the old text or the new, never a part.
+pub(crate) fn replace_at(
+    root: &Path,
+    rel: &str,
+    text: &str,
+    cases: Option<&mut BTreeSet<PathBuf>>,
+) -> Result<(), RdyError> {
+    let p = inside(rel)?;
+    make_dirs(root, p, cases)?;
+    let path = root.join(p);
+    if fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_file() && !m.is_dir()) {
+        remove_file(&path)?; // a link is replaced, never written through
+    }
+    rdy_store::fsutil::write_durable(&path, text.as_bytes()).map_err(|e| io_err(&path, "write", e))
+}
+
+/// Creates the directories between the root and `p`'s file (what stands in the way and is not a
+/// directory is removed first); with `cases`, see `write_at`.
+fn make_dirs(
+    root: &Path,
+    p: &Path,
+    mut cases: Option<&mut BTreeSet<PathBuf>>,
+) -> Result<(), RdyError> {
     for d in ancestors(root, p) {
         match fs::symlink_metadata(&d) {
             Ok(m) if m.file_type().is_dir() => {
@@ -247,11 +279,7 @@ pub(crate) fn write_at(
             Err(_) => fs::create_dir(&d).map_err(|e| io_err(&d, "create", e))?,
         }
     }
-    let path = root.join(p);
-    if fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_dir()) {
-        remove_file(&path)?;
-    }
-    fs::write(&path, text).map_err(|e| io_err(&path, "write", e))
+    Ok(())
 }
 
 /// Checks out `proj` into the working copy (wcco1, exact order): refuses with `E_WC_OCCUPIED`
@@ -307,6 +335,7 @@ pub fn checkout(
             view: proj.view.clone(),
             head: proj.head.clone(),
             at_ms: now_ms(),
+            update: false,
         },
     )?;
     let mut summary = CheckoutSummary {
@@ -363,6 +392,8 @@ pub fn checkout(
     });
     st.checkout = None;
     st.save(place)?;
+    // an interrupted update's record goes with the marker it belonged to
+    remove_file(&place.state.join(UPDATE_FILE))?;
     Ok(summary)
 }
 

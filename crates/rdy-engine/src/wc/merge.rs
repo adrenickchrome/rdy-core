@@ -10,23 +10,25 @@ use crate::now_ms;
 use crate::tree_io::FOLDER_FILE;
 use crate::wc::files::{
     base_from, behind_link, changed_since_staged, identity, inside, prune_dirs, remove_file,
-    remove_tree, write_at,
+    remove_tree, replace_at, write_at,
 };
 use crate::wc::layout::{FOLDER_THEIRS, FileKind, THEIRS_SUFFIX, WcBlock, WcTree};
 use crate::wc::project::Projection;
 use crate::wc::state::{
-    Base, Bound, CheckoutMark, ConflictEntry, ConflictKind, Place, WcState, stage_clear,
-    stage_paths, stage_put,
+    Base, Bound, CheckoutMark, ConflictEntry, ConflictKind, Place, UPDATE_FILE, WcState,
+    stage_clear, stage_paths, stage_put,
 };
 use rdy_model::{Block, BlockId};
 use rdy_schema::{Pack, STORE_ONLY_FIELDS, Severity};
+use rdy_store::fsutil::write_durable;
 use serde::{Deserialize, Serialize};
 use serde_yaml_ng::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::path::Path;
 
 /// What `rdy update` writes. Every path is relative to the root and `/`-separated.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct UpdatePlan {
     /// The working files to write, sorted by path.
     pub writes: Vec<(String, String)>,
@@ -390,18 +392,24 @@ fn position_of(res: &[Entry], id: &BlockId) -> Option<usize> {
     res.iter().position(|e| e.id.as_ref() == Some(id))
 }
 
+/// Rule 3's result for one file.
+struct Merged {
+    /// The merged entries; `None` when no file can be made of them (the head is gone while
+    /// entries stay).
+    raws: Option<Vec<Value>>,
+    /// The blocks in conflict, sorted.
+    conflicts: Vec<BlockId>,
+}
+
 /// Rule 3: merges the entries of one file by block id. A block changed on both sides to
 /// different entries (its content, or its position), or deleted on one side and changed on the
-/// other, is a conflict: `Err` lists them. Else local's entries, with each block changed only in
-/// theirs replaced, each block new in theirs inserted after its previous sibling in theirs (or
-/// first under its parent), each block theirs moved moved likewise, and each block theirs
-/// deleted that local did not change dropped.
-fn merge_entries(
-    head: &BlockId,
-    base: &[Entry],
-    local: &[Entry],
-    theirs: &[Entry],
-) -> Result<Vec<Value>, Vec<BlockId>> {
+/// other, is a conflict, and keeps local's side. Else local's entries, with each block changed
+/// only in theirs replaced, each block new in theirs inserted after its previous sibling in
+/// theirs (or first under its parent), each block theirs moved moved likewise, and each block
+/// theirs deleted that local did not change dropped (unless a block kept here sits inside it:
+/// then it is a conflict too). So a conflicted file still takes every change of theirs that does
+/// not conflict, and its base (theirs, rule 6) differs from it only in the conflicting blocks.
+fn merge_entries(head: &BlockId, base: &[Entry], local: &[Entry], theirs: &[Entry]) -> Merged {
     let index = |l: &[Entry]| -> BTreeMap<BlockId, usize> {
         l.iter()
             .enumerate()
@@ -468,8 +476,23 @@ fn merge_entries(
             _ => {}
         }
     }
-    if !conflicts.is_empty() {
-        return Err(conflicts.into_iter().collect());
+    // a block theirs deleted stays while a block kept here sits inside it
+    let parents: BTreeMap<&BlockId, &BlockId> = local
+        .iter()
+        .filter_map(|e| Some((e.id.as_ref()?, e.parent.as_ref()?)))
+        .collect();
+    for e in local {
+        if e.id.as_ref().is_some_and(|id| drop.contains(id)) {
+            continue;
+        }
+        let mut cur = e.parent.as_ref();
+        for _ in 0..=local.len() {
+            let Some(c) = cur else { break };
+            if drop.remove(c) {
+                conflicts.insert(c.clone());
+            }
+            cur = parents.get(c).copied();
+        }
     }
     let mut res: Vec<Entry> = local
         .iter()
@@ -529,15 +552,19 @@ fn merge_entries(
         };
         res.splice(at..at, group);
     }
-    if !lost.is_empty() {
-        lost.sort();
-        return Err(lost);
-    }
+    conflicts.extend(lost);
     if res.first().is_some_and(|e| e.id.as_ref() != Some(head)) {
         // the head is gone while entries stay: deleted on one side, added to on the other
-        return Err(vec![head.clone()]);
+        conflicts.insert(head.clone());
+        return Merged {
+            raws: None,
+            conflicts: conflicts.into_iter().collect(),
+        };
     }
-    Ok(res.into_iter().map(|e| e.raw).collect())
+    Merged {
+        raws: Some(res.into_iter().map(|e| e.raw).collect()),
+        conflicts: conflicts.into_iter().collect(),
+    }
 }
 
 /// The canonical text of a merged file; `None` when no entry is left.
@@ -556,8 +583,21 @@ fn render(kind: FileKind, raws: Vec<Value>) -> Option<String> {
 enum Outcome {
     /// Its text, or `None` when the file goes.
     Text(Option<String>),
-    /// The blocks changed on both sides.
-    Conflict(Vec<BlockId>),
+    /// The blocks changed on both sides, and the text the file holds meanwhile (`None` when
+    /// there is no file here): the merge, with local's side of each conflicting block.
+    Conflict {
+        ids: Vec<BlockId>,
+        text: Option<String>,
+    },
+}
+
+impl Outcome {
+    /// The text of the file this outcome leaves at its path, if any.
+    fn kept(&self) -> Option<&str> {
+        match self {
+            Outcome::Text(t) | Outcome::Conflict { text: t, .. } => t.as_deref(),
+        }
+    }
 }
 
 /// The store's version of every block of theirs' file at `path`.
@@ -575,11 +615,59 @@ fn commented(text: &str) -> String {
     text.lines().map(|l| format!("# {l}\n")).collect()
 }
 
+/// One doc's or folder's resolved path and content.
+struct Decided {
+    head: BlockId,
+    kind: FileKind,
+    target: String,
+    outcome: Outcome,
+}
+
+/// `E_WC_CONFLICT`: docs or folders `a` and `b` would both end up at `at`.
+fn clash(a: &BlockId, b: &BlockId, at: &str, base: &Side, local: &Side, their: &Side) -> RdyError {
+    let describe = |h: &BlockId| match (local.by_head.get(h), their.by_head.get(h)) {
+        (Some(l), _) => format!("{} here", l.path),
+        (None, Some(t)) => format!("{} in the store", t.path),
+        (None, None) => h.to_string(),
+    };
+    let here = |h: &BlockId| local.by_head.contains_key(h);
+    let moved_here = |h: &BlockId| here(h) && local.place(h) != base.place(h);
+    let pair = [a, b];
+    let chosen = pair
+        .into_iter()
+        .find(|h| moved_here(h))
+        .or_else(|| pair.into_iter().find(|h| here(h)));
+    let fix = match chosen {
+        Some(h) => {
+            let f = &local.by_head[h];
+            format!(
+                "rename {} here to another name, then update again",
+                match f.kind {
+                    FileKind::Folder => stem_of(&f.path, f.kind),
+                    FileKind::Doc => f.path.as_str(),
+                }
+            )
+        }
+        None => "rename one of them here, then update again".to_string(),
+    };
+    RdyError::new(
+        E_WC_CONFLICT,
+        format!(
+            "update would put two docs or folders at {at}: {} and {}",
+            describe(a),
+            describe(b)
+        ),
+        fix,
+    )
+}
+
 /// Plans `rdy update` (wcup1, exact): refuses with `E_WC_DIRTY` when a staged file changed after
 /// `rdy add`, with `E_WC_INVALID` when a tracked file does not read, and with `E_WC_OCCUPIED`
 /// when a path to write holds a file rdy does not track; resolves every doc's and folder's place
 /// (a folder or doc moved on both sides to different places keeps the local one and records a
-/// rename conflict), then merges each one's content three ways (rules 1 to 3). Reads only.
+/// rename conflict), then merges each one's content three ways (rules 1 to 3). A folder the store
+/// deleted that still holds a doc or folder kept here is kept, in conflict. Two docs or folders
+/// that would end up at one path (ignoring case) give `E_WC_CONFLICT` naming both. Reads only.
 pub fn plan_update(
     place: &Place,
     st: &WcState,
@@ -697,15 +785,8 @@ pub fn plan_update(
         places.placed.insert(h.clone(), resolved);
     }
 
-    let mut out = UpdatePlan::default();
-    let mut write_heads: BTreeMap<String, BlockId> = BTreeMap::new();
-    let mut writes: BTreeMap<String, String> = BTreeMap::new();
-    let mut removes: BTreeSet<String> = BTreeSet::new();
-    let mut theirs_files: BTreeMap<String, String> = BTreeMap::new();
-    let mut copies: BTreeMap<String, String> = BTreeMap::new();
-    let mut drops: BTreeSet<String> = BTreeSet::new();
-    let mut conflicted: BTreeSet<BlockId> = BTreeSet::new();
-    let mut stays_deleted: BTreeSet<BlockId> = BTreeSet::new();
+    // contents, per head (rules 1 to 3)
+    let mut decided: Vec<Decided> = vec![];
     for h in &heads {
         let (b, l, t) = (
             base.by_head.get(h),
@@ -741,11 +822,77 @@ pub fn plan_update(
                 )?,
                 None => vec![],
             };
-            match merge_entries(h, &entries(b)?, &le, &entries(t)?) {
-                Ok(raws) => Outcome::Text(render(kind, raws)),
-                Err(ids) => Outcome::Conflict(ids),
+            let m = merge_entries(h, &entries(b)?, &le, &entries(t)?);
+            let text = m.raws.and_then(|r| render(kind, r));
+            if m.conflicts.is_empty() {
+                Outcome::Text(text)
+            } else {
+                Outcome::Conflict {
+                    ids: m.conflicts,
+                    text: text.or_else(|| lt.map(String::from)),
+                }
             }
         };
+        decided.push(Decided {
+            head: h.clone(),
+            kind,
+            target,
+            outcome,
+        });
+    }
+
+    // a folder the store deleted stays while a doc or folder kept here is inside it: it is in
+    // conflict (deleted in the store, still holding local edits), so its files stay readable
+    let mut holding: BTreeSet<BlockId> = BTreeSet::new();
+    for d in decided.iter().filter(|d| d.outcome.kept().is_some()) {
+        let mut cur = places.placed.get(&d.head).and_then(|p| p.0.clone());
+        while let Some(c) = cur {
+            if !holding.insert(c.clone()) {
+                break;
+            }
+            cur = places.placed.get(&c).and_then(|p| p.0.clone());
+        }
+    }
+    for d in &mut decided {
+        if matches!(d.kind, FileKind::Folder)
+            && matches!(d.outcome, Outcome::Text(None))
+            && holding.contains(&d.head)
+            && let Some(l) = local.by_head.get(&d.head)
+        {
+            d.outcome = Outcome::Conflict {
+                ids: vec![d.head.clone()],
+                text: Some(l.text.clone()),
+            };
+        }
+    }
+
+    // two docs or folders never end up at one path (ignoring case, as a file system may)
+    let mut claims: BTreeMap<String, &BlockId> = BTreeMap::new();
+    for d in decided.iter().filter(|d| d.outcome.kept().is_some()) {
+        if let Some(other) = claims.insert(d.target.to_lowercase(), &d.head) {
+            return Err(clash(other, &d.head, &d.target, &base, &local, &their));
+        }
+    }
+
+    let mut out = UpdatePlan::default();
+    let mut write_heads: BTreeMap<String, BlockId> = BTreeMap::new();
+    let mut writes: BTreeMap<String, String> = BTreeMap::new();
+    let mut removes: BTreeSet<String> = BTreeSet::new();
+    let mut theirs_files: BTreeMap<String, String> = BTreeMap::new();
+    let mut copies: BTreeMap<String, String> = BTreeMap::new();
+    let mut drops: BTreeSet<String> = BTreeSet::new();
+    let mut conflicted: BTreeSet<BlockId> = BTreeSet::new();
+    let mut stays_deleted: BTreeSet<BlockId> = BTreeSet::new();
+    for Decided {
+        head: h,
+        kind,
+        target,
+        outcome,
+    } in decided
+    {
+        let h = &h;
+        let (l, t) = (local.by_head.get(h), their.by_head.get(h));
+        let (lt, tt) = (local.text(h), their.text(h));
         let lp = l.map(|f| f.path.as_str());
         let is_staged = |p: Option<&str>| p.is_some_and(|p| staged.contains(p));
         match outcome {
@@ -783,14 +930,19 @@ pub fn plan_update(
                     }
                 }
             }
-            Outcome::Conflict(ids) => {
+            Outcome::Conflict { ids, text } => {
                 conflicted.insert(h.clone());
-                if let Some(l) = l
-                    && l.path != target
+                // the file holds the merge, with local's side of each conflicting block
+                if let Some(text) = text
+                    && (lp != Some(target.as_str()) || lt != Some(text.as_str()))
                 {
-                    writes.insert(target.clone(), l.text.clone());
+                    writes.insert(target.clone(), text);
                     write_heads.insert(target.clone(), h.clone());
-                    removes.insert(l.path.clone());
+                    if let Some(lp) = lp
+                        && lp != target
+                    {
+                        removes.insert(lp.to_string());
+                    }
                 }
                 theirs_files.insert(
                     theirs_beside(&target),
@@ -857,12 +1009,13 @@ pub fn plan_update(
             });
         }
     }
+    // rule 5: nothing rdy does not track is overwritten. A file a head leaves (moved away, or
+    // deleted) may be taken by another, so `leaving` is every such file, the paths another
+    // head takes included.
+    let leaving: BTreeSet<(u64, u64)> = removes.iter().filter_map(|p| identity(root, p)).collect();
     for p in writes.keys() {
         removes.remove(p);
     }
-
-    // rule 5: nothing rdy does not track is overwritten
-    let leaving: BTreeSet<(u64, u64)> = removes.iter().filter_map(|p| identity(root, p)).collect();
     let mut taken: Vec<String> = vec![];
     for (path, h) in &write_heads {
         let p = inside(path)?;
@@ -876,9 +1029,22 @@ pub fn plan_update(
             Ok(_) => {
                 let here = identity(root, path);
                 let own = local.by_head.get(h).and_then(|f| identity(root, &f.path));
-                let fine = here.is_some_and(|i| Some(i) == own || leaving.contains(&i));
-                if !fine {
-                    taken.push(path.clone());
+                if here.is_some_and(|i| Some(i) == own || leaving.contains(&i)) {
+                    continue;
+                }
+                // a tracked file that stays, under a name the file system takes as the same
+                // (Unicode form, or case)
+                let stays = here.and_then(|i| {
+                    local
+                        .by_head
+                        .iter()
+                        .find(|(_, f)| identity(root, &f.path) == Some(i))
+                });
+                match stays {
+                    Some((other, _)) => {
+                        return Err(clash(other, h, path, &base, &local, &their));
+                    }
+                    None => taken.push(path.clone()),
                 }
             }
         }
@@ -937,6 +1103,7 @@ pub fn plan_update(
     out.stage_drops = drops.into_iter().collect();
     out.stage_writes.sort();
     out.stage_deleted.sort();
+    out.conflicts.sort_by(|a, b| a.path.cmp(&b.path));
     // rule 6: the base is theirs
     out.base = base_from(theirs);
     out.base_files = theirs
@@ -947,12 +1114,59 @@ pub fn plan_update(
     Ok(out)
 }
 
-/// Applies an update plan (wcup1, exact order): marks the working copy as being rewritten (the
-/// checkout marker, so an interrupted update is finished by `rdy checkout --force`); writes the
-/// files; deletes the files to remove (never one just written, never through a link) and the
-/// directories that leaves empty; writes the `.theirs.yaml` files and the state's `conflicts/`
-/// copies; replaces the base and its file copies with theirs; updates the stage; replaces the
-/// conflicts on the same paths; binds to theirs' head (rule 8); saves, which clears the marker.
+/// The record of an update in flight (`UPDATE_FILE`), written durably before the first working
+/// file changes: the plan, and the text each file it writes or removes had before. `rdy update`
+/// reads it to finish an interrupted update, so local edits survive an error or a crash part way.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UpdateJournal {
+    pub view: String,
+    pub head: String,
+    pub plan: UpdatePlan,
+    /// Each working file the plan writes or removes, and its text before the update (`None`: no
+    /// file there).
+    pub before: BTreeMap<String, Option<String>>,
+}
+
+/// The text of the regular file at `rel` (not behind a link), `None` when there is none.
+fn disk_text(root: &Path, rel: &str) -> Option<String> {
+    let p = inside(rel).ok()?;
+    if behind_link(root, p) {
+        return None;
+    }
+    let path = root.join(p);
+    if !fs::symlink_metadata(&path).ok()?.file_type().is_file() {
+        return None;
+    }
+    fs::read(&path)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// An error while the working files are rewritten: `rdy update` is what to run once its cause is
+/// fixed (it starts again when nothing changed yet, else it finishes the update).
+fn update_err(mut e: RdyError) -> RdyError {
+    e.fix = "fix the cause (the file or its directory's permissions, or the disk), then run rdy update again".into();
+    e
+}
+
+fn state_err(path: &Path, what: &str, e: impl std::fmt::Display) -> RdyError {
+    RdyError::new(
+        E_IO,
+        format!("cannot {what} {}: {e}", path.display()),
+        "check the working copy's state directory and its permissions, then run rdy update again",
+    )
+}
+
+/// Applies an update plan (wcup1, exact order). Before anything changes it creates the state's
+/// `conflicts/` directory, records the plan and the files' earlier text durably
+/// (`UpdateJournal`) and sets the checkout marker as an update's. Then it writes the files, each
+/// replaced in one step; deletes the files to remove (never one just written, never through a
+/// link) and the directories that leaves empty; writes the `.theirs.yaml` files. Then the state:
+/// the `conflicts/` copies; the base and its file copies, replaced with theirs; the stage; the
+/// conflicts on the same paths, replaced; the binding, to theirs' head (rule 8); the save, which
+/// clears the marker; the record goes last. An error before any working file changed clears the
+/// marker and the record (nothing is in flight); after that, `rdy update` finishes the update
+/// (`resume_update`).
 pub fn apply_update(
     place: &Place,
     st: &mut WcState,
@@ -960,18 +1174,113 @@ pub fn apply_update(
     theirs: &Projection,
 ) -> Result<(), RdyError> {
     let root = &place.root;
-    st.mark_checkout(
-        place,
-        CheckoutMark {
-            view: theirs.view.clone(),
-            head: theirs.head.clone(),
-            at_ms: now_ms(),
-        },
-    )?;
+    let conflicts_dir = place.state.join("conflicts");
+    fs::create_dir_all(&conflicts_dir).map_err(|e| state_err(&conflicts_dir, "create", e))?;
+    let touched = plan
+        .writes
+        .iter()
+        .map(|(p, _)| p)
+        .chain(&plan.removes)
+        .chain(plan.theirs_files.iter().map(|(p, _)| p));
+    let journal = UpdateJournal {
+        view: theirs.view.clone(),
+        head: theirs.head.clone(),
+        plan: plan.clone(),
+        before: touched.map(|p| (p.clone(), disk_text(root, p))).collect(),
+    };
+    let jpath = place.state.join(UPDATE_FILE);
+    let bytes = serde_json::to_vec(&journal).expect("json of an update plan");
+    write_durable(&jpath, &bytes).map_err(|e| state_err(&jpath, "write", e))?;
+    let mark = CheckoutMark {
+        view: theirs.view.clone(),
+        head: theirs.head.clone(),
+        at_ms: now_ms(),
+        update: true,
+    };
+    if let Err(e) = st.mark_checkout(place, mark) {
+        let _ = fs::remove_file(&jpath);
+        return Err(e);
+    }
+    if let Err(e) = apply_files(root, &journal.plan) {
+        if journal
+            .before
+            .iter()
+            .all(|(p, was)| disk_text(root, p) == *was)
+        {
+            // no working file changed: nothing is in flight
+            if st.unmark_checkout(place).is_ok() {
+                let _ = fs::remove_file(&jpath);
+            }
+        }
+        return Err(update_err(e));
+    }
+    finish_update(place, st, &journal)
+}
+
+/// Finishes an interrupted update from its record (`UPDATE_FILE`): refuses with `E_WC_DIRTY`
+/// when a file it writes or removes changed since (it holds neither its earlier text, nor the
+/// update's, nor is gone), else applies the recorded plan again from the start (each step is
+/// safe to repeat). Returns the record.
+pub fn resume_update(place: &Place, st: &mut WcState) -> Result<UpdateJournal, RdyError> {
+    let root = &place.root;
+    let view = st
+        .checkout
+        .as_ref()
+        .map(|m| m.view.clone())
+        .unwrap_or_default();
+    let jpath = place.state.join(UPDATE_FILE);
+    let journal: UpdateJournal = fs::read(&jpath)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .ok_or_else(|| {
+            RdyError::new(
+                E_WC_DIRTY,
+                format!("the record of the interrupted update of {view} is missing or damaged"),
+                format!(
+                    "copy the files you edited aside, then run rdy checkout {view} --force (it discards uncommitted edits)"
+                ),
+            )
+        })?;
+    // the update's text of each path, ignoring case (a case-only rename names one file twice)
+    let planned: BTreeMap<String, &str> = journal
+        .plan
+        .writes
+        .iter()
+        .chain(&journal.plan.theirs_files)
+        .map(|(p, t)| (p.to_lowercase(), t.as_str()))
+        .collect();
+    let changed: Vec<&str> = journal
+        .before
+        .iter()
+        .filter(|(p, was)| {
+            let now = disk_text(root, p);
+            !(now.is_none()
+                || now == **was
+                || now.as_deref() == planned.get(&p.to_lowercase()).copied())
+        })
+        .map(|(p, _)| p.as_str())
+        .collect();
+    if let Some(first) = changed.first() {
+        return Err(RdyError::new(
+            E_WC_DIRTY,
+            format!(
+                "{} changed after the update was interrupted",
+                changed.join(", ")
+            ),
+            format!("move {first} aside, then run rdy update again to finish the update"),
+        ));
+    }
+    apply_files(root, &journal.plan).map_err(update_err)?;
+    finish_update(place, st, &journal)?;
+    Ok(journal)
+}
+
+/// The working files of an update: the writes, the removes, the `.theirs.yaml` files.
+fn apply_files(root: &Path, plan: &UpdatePlan) -> Result<(), RdyError> {
     // an existing directory takes the spelling its new path asks for (a case-only rename)
     let mut cases = BTreeSet::new();
     for (p, text) in &plan.writes {
-        write_at(root, p, text, Some(&mut cases))?;
+        replace_at(root, p, text, Some(&mut cases))?;
     }
     let written: BTreeSet<(u64, u64)> = plan
         .writes
@@ -990,27 +1299,22 @@ pub fn apply_update(
         prune_dirs(root, p);
     }
     for (p, text) in &plan.theirs_files {
-        write_at(root, p, text, None)?;
+        replace_at(root, p, text, None)?;
     }
-    let mkdir = |d: &std::path::Path| {
-        fs::create_dir_all(d).map_err(|e| {
-            RdyError::new(
-                E_IO,
-                format!("cannot create {}: {e}", d.display()),
-                "check the working copy's state directory and its permissions",
-            )
-        })
-    };
+    Ok(())
+}
+
+/// The state half of an update, then the record goes.
+fn finish_update(place: &Place, st: &mut WcState, journal: &UpdateJournal) -> Result<(), RdyError> {
+    let plan = &journal.plan;
     let conflicts_dir = place.state.join("conflicts");
-    if !plan.conflict_copies.is_empty() {
-        mkdir(&conflicts_dir)?;
-    }
+    fs::create_dir_all(&conflicts_dir).map_err(|e| state_err(&conflicts_dir, "create", e))?;
     for (p, text) in &plan.conflict_copies {
         write_at(&conflicts_dir, p, text, None)?;
     }
     let base_dir = place.state.join("base/files");
     remove_tree(&base_dir)?;
-    mkdir(&base_dir)?;
+    fs::create_dir_all(&base_dir).map_err(|e| state_err(&base_dir, "create", e))?;
     for (p, text) in &plan.base_files {
         write_at(&base_dir, p, text, None)?;
     }
@@ -1027,10 +1331,12 @@ pub fn apply_update(
     st.conflicts.retain(|c| !paths.contains(c.path.as_str()));
     st.conflicts.extend(plan.conflicts.iter().cloned());
     st.bound = Some(Bound {
-        view: theirs.view.clone(),
-        head: theirs.head.clone(),
+        view: journal.view.clone(),
+        head: journal.head.clone(),
         at_ms: now_ms(),
     });
     st.checkout = None;
-    st.save(place)
+    st.save(place)?;
+    let jpath = place.state.join(UPDATE_FILE);
+    remove_file(&jpath)
 }
