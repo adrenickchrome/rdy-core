@@ -230,8 +230,8 @@ impl TensionSet {
     /// tensions with one of `changes` as a side and those that involve one of `blocks`, in
     /// either set, each checked against the other. Exact only when every tension the step
     /// opened or resolved involves one of them: `newer` is this set carried across the one
-    /// change in `changes`, and `blocks` are its seeds (a carry only adds or removes tensions
-    /// around its seeds). `tension_delta` checks that before it calls this. Its cost follows
+    /// change in `changes`, and `blocks` are the blocks the carry re-detected around (its seeds
+    /// and every detector's reach: a carry only adds or removes tensions around them). `tension_delta` checks that before it calls this. Its cost follows
     /// those tensions, not the size of the sets.
     pub fn diff_scoped(
         &self,
@@ -277,7 +277,7 @@ pub struct TensionDelta {
 /// What the step from `before` to `after` did to the tension set. `changes` are the changes
 /// the step added or removed (`None` for a rebase or a moved base). Only when `after`'s set was
 /// carried from `before`'s across the one change in `changes` are just the tensions around it
-/// and its seeds read (`diff_scoped`). Every other step diffs the two sets whole: a commit that
+/// and the blocks the carry re-detected around read (`diff_scoped`). Every other step diffs the two sets whole: a commit that
 /// does not carry (a delete, a structural write, a move, a lifecycle change) and a view op
 /// (its state builds the set again) can open or resolve tensions away from the change and its
 /// blocks, for example an area overlap that a deleted `affects` target gave.
@@ -289,7 +289,10 @@ pub fn tension_delta(
     let (old, new) = (before.tensions()?, after.tensions()?);
     match changes {
         Some([change]) if after.tensions_carried_from(&old, change) => {
-            let blocks = seeds_of(after, change)?;
+            let blocks = match after.tensions.around.get() {
+                Some(b) => b.clone(),
+                None => seeds_of(after, change)?,
+            };
             Ok(old.diff_scoped(&new, &[*change], &blocks))
         }
         _ => Ok(old.diff_counted(&new)),
@@ -379,6 +382,9 @@ pub(crate) struct TensionCell {
     pub(crate) carry: Option<(Arc<TensionSet>, Hash, String)>,
     /// Whether the set was carried; set before `set` is.
     carried: OnceLock<bool>,
+    /// The blocks a carry re-detected around (its seeds and every detector's reach); set
+    /// before `carried` is.
+    around: OnceLock<BTreeSet<BlockId>>,
 }
 
 impl TensionCell {
@@ -425,16 +431,18 @@ fn seeds_into(st: &ReadState, c: &Change, seeds: &mut BTreeSet<BlockId>) -> Resu
 }
 
 /// The carry (tcar1): `prev`'s canon part (canon did not move); its in-flight part less every
-/// tension that involves a seed; and what the state's detectors find in flight around the seeds
-/// that involves one. `None` when the state's in-flight set is not `prev`'s plus `change`. It
-/// starts from a clone of `prev` (structure shared), so its cost follows the seeds' tensions, not
-/// the size of the set.
+/// tension that involves a seed, and less each kind's tensions that involve a block of its
+/// [`Detector::reach`]; and what the state's detectors find in flight around the seeds and the
+/// reach that involves one of them. With the blocks it re-detected around (seeds and every
+/// reach). `None` when the state's in-flight set is not `prev`'s plus `change`. It starts from a
+/// clone of `prev` (structure shared), so its cost follows the seeds' tensions, not the size of
+/// the set.
 fn carry(
     st: &ReadState,
     prev: &TensionSet,
     change: Hash,
     view: &str,
-) -> Result<Option<TensionSet>, RdyError> {
+) -> Result<Option<(TensionSet, BTreeSet<BlockId>)>, RdyError> {
     if let Some(e) = &st.error {
         return Err(e.clone());
     }
@@ -454,20 +462,31 @@ fn carry(
             next.remove(id);
         }
     }
-    let involves_seed = |t: &Tension| t.involved.iter().any(|i| seeds.contains(&i.block));
     let cx = DetectCx::new(st, &writes, canon_index_of(st)?, DetectScope::Inflight);
+    let mut around_all = seeds.clone();
     for d in st.detectors {
+        let reach = d.reach(&cx, &seeds)?;
+        for b in reach.difference(&seeds) {
+            for id in prev.by_block.get(b).into_iter().flatten() {
+                if prev.tensions.get(id).is_some_and(|t| t.kind == d.kind()) {
+                    next.remove(id);
+                }
+            }
+        }
+        let mut around = seeds.clone();
+        around.extend(reach);
         let mut found = vec![];
-        d.detect(&cx, Some(&seeds), &mut found)?;
+        d.detect(&cx, Some(&around), &mut found)?;
         for t in found
             .into_iter()
             .filter_map(|f| tension_from(st.pack(), f, false, DetectScope::Inflight))
-            .filter(|t| involves_seed(t))
+            .filter(|t| t.involved.iter().any(|i| around.contains(&i.block)))
         {
             next.insert(Arc::new(t));
         }
+        around_all.extend(around);
     }
-    Ok(Some(next))
+    Ok(Some((next, around_all)))
 }
 
 /// The canon part for `detectors`: each run in the canon scope (always a full run), kept when
@@ -602,8 +621,9 @@ impl ReadState {
             .get_or_init(|| {
                 // a carry that cannot run (another in-flight set) or fails falls back to a build
                 if let Some((prev, change, view)) = &cell.carry
-                    && let Ok(Some(set)) = carry(self, prev, *change, view)
+                    && let Ok(Some((set, around))) = carry(self, prev, *change, view)
                 {
+                    let _ = cell.around.set(around);
                     let _ = cell.carried.set(true);
                     return Ok(Arc::new(set));
                 }

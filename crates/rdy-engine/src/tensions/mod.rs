@@ -254,6 +254,17 @@ pub(crate) fn tension_from(
 /// what involves one of those blocks (the core drops anything else).
 pub trait Detector: Sync {
     fn kind(&self) -> TensionKind;
+    /// The blocks besides `seeds` whose tensions of this kind a change on `seeds` can open or
+    /// resolve (in flight). A carry also drops this kind's tensions that involve one of them and
+    /// re-detects with them as seeds. A group kind (duplicate definition, FW-TN2) names the
+    /// other members of every group a seed was or is in. Default: none.
+    fn reach(
+        &self,
+        _cx: &DetectCx<'_>,
+        _seeds: &BTreeSet<BlockId>,
+    ) -> Result<BTreeSet<BlockId>, RdyError> {
+        Ok(BTreeSet::new())
+    }
     fn detect(
         &self,
         cx: &DetectCx<'_>,

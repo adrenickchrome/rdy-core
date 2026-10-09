@@ -104,15 +104,16 @@ fn w_max(e: &Local, who: &str, max: usize, ops: Value) -> Value {
 }
 
 /// View a holds term Fee and an edit of A. The returned ops (for view b) cite A (one blocking
-/// premise shift) and create four more terms named fee (ten advisory duplicate definitions).
+/// premise shift) and create ten pairs of terms named `fee 0` to `fee 9` (ten advisory duplicate
+/// definitions: one per name group, FW-TN2).
 fn crowd(e: &Local, s: &Spec) -> Value {
     w(e, "a", term(&s.section, "Fee"));
     w(e, "a", upd(&s.a, "A changed."));
     let mut ops = cite(&s.section, &s.a).as_array().unwrap().clone();
-    for i in 0..4 {
+    for i in 0..20 {
         ops.push(
             json!({"op": "create", "type": "term", "id": format!("$t{i}"),
-            "parent": s.section.to_string(), "fields": {"name": "fee"},
+            "parent": s.section.to_string(), "fields": {"name": format!("fee {}", i / 2)},
             "body": format!("Fee number {i} is a term.")}),
         );
     }
@@ -562,19 +563,23 @@ fn tonc1_a_tension_read_error_never_fails_the_consequences_or_a_briefing() {
     );
 }
 
-/// The cite of A (in view b, one blocking premise shift once view a changed A) and `n` terms
-/// named fee: n·(n−1)/2 advisory duplicate definitions, all in one change.
+/// The cite of A (in view b, one blocking premise shift once view a changed A) and `n` pairs of
+/// terms named `fee 0` .. `fee n-1`: n advisory duplicate definitions (one per name group,
+/// FW-TN2), all in one change.
 fn fees(s: &Spec, n: usize) -> Value {
     let mut ops = cite(&s.section, &s.a).as_array().unwrap().clone();
-    for i in 0..n {
+    for i in 0..2 * n {
         ops.push(
             json!({"op": "create", "type": "term", "id": format!("$f{i}"),
-            "parent": s.section.to_string(), "fields": {"name": "fee"},
+            "parent": s.section.to_string(), "fields": {"name": format!("fee {}", i / 2)},
             "body": format!("Fee number {i} is a term.")}),
         );
     }
     Value::Array(ops)
 }
+
+/// How many duplicate groups `tonc1_a_write_that_opens_thousands…` opens in one write.
+const GROUPS: usize = 2000;
 
 /// Perf fix (mcp_write_9mib): a write that opens thousands of advisory tensions returns
 /// within `max_tokens`, keeps its blocking tension, counts the advisory ones per kind, builds
@@ -589,7 +594,7 @@ fn tonc1_a_write_that_opens_thousands_of_advisory_tensions_is_cut_in_linear_time
     let (_d, e, s) = local();
     w(&e, "a", upd(&s.a, "A changed."));
     let before = e.read();
-    let reply = w(&e, "b", fees(&s, 100));
+    let reply = w(&e, "b", fees(&s, GROUPS));
     let after = e.read();
     let oc = &reply["on_change"];
     assert!(
@@ -606,10 +611,10 @@ fn tonc1_a_write_that_opens_thousands_of_advisory_tensions_is_cut_in_linear_time
     assert_eq!(blocking[0]["kind"], "premise_shift");
     assert_eq!(oc["detail_cut"], true);
     let collapsed = oc["collapsed"]["duplicate_definition"].as_u64().unwrap();
-    assert_eq!(collapsed as usize + kept.len() - 1, 4950, "{oc}");
+    assert_eq!(collapsed as usize + kept.len() - 1, GROUPS, "{oc}");
 
     let d = full_delta(&before, &after);
-    assert_eq!(d.opened.len(), 4951);
+    assert_eq!(d.opened.len(), GROUPS + 1);
     let changes: BTreeSet<Hash> = d.opened.iter().flat_map(|t| change_sides(t)).collect();
     // warms the state's in-flight set, which the sides read
     on_change(&before, &after, "b", Some(10_000_000), &d).unwrap();
@@ -632,7 +637,7 @@ fn tonc1_a_write_that_opens_thousands_of_advisory_tensions_is_cut_in_linear_time
     let (f0, (s0, b0)) = (after.reader().frames_read(), info_counts());
     let o = on_change(&before, &after, "b", Some(10_000_000), &d).unwrap();
     let (s1, b1) = info_counts();
-    assert_eq!(o.tensions.len(), 4951);
+    assert_eq!(o.tensions.len(), GROUPS + 1);
     assert!(o.tensions.iter().all(|t: &TensionInfo| !t.sides.is_empty()));
     assert!(!o.detail_cut && o.collapsed.is_empty());
     assert!(
@@ -640,8 +645,12 @@ fn tonc1_a_write_that_opens_thousands_of_advisory_tensions_is_cut_in_linear_time
             .iter()
             .any(|t| t.severity == TensionSeverity::Blocking)
     );
-    assert_eq!(b1 - b0, 4951);
-    assert!(s1 - s0 <= 2 * 4951, "{} serializations", s1 - s0);
+    assert_eq!(b1 - b0, GROUPS as u64 + 1);
+    assert!(
+        s1 - s0 <= 2 * (GROUPS as u64 + 1),
+        "{} serializations",
+        s1 - s0
+    );
     let frames = after.reader().frames_read() - f0;
     assert!(
         frames <= changes.len() as u64,

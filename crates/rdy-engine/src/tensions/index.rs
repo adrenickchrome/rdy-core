@@ -842,6 +842,12 @@ impl<'a> DetectCx<'a> {
         text_key(self.st.pack(), b, self.st.pack().duplicate_text_min_words())
     }
 
+    /// The text duplicates compare for `b` (a decision's statement, any other normative block's
+    /// body), before normalization.
+    pub fn duplicate_text<'b>(&self, b: &'b Block) -> Option<&'b str> {
+        duplicate_text(self.st.pack(), b)
+    }
+
     /// Whether `b` defines a name (a `defines` type with a string `name` field).
     pub fn defines(&self, b: &Block) -> bool {
         defines(self.st.pack(), b)

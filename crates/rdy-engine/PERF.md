@@ -845,7 +845,8 @@ What each cost grows with:
 
 - `tension_carry_1k` and `tension_on_change_1k` grow with the tensions around the seed blocks of
   the one change, not with the number of changes in flight: the carry removes and re-detects only
-  those. A commit that is structural, moves a block or changes its lifecycle does not carry and
+  those. For duplicate definition (FW-TN2: one tension per group) the carry also re-detects around
+  every member of each group a seed was or is in, so it grows with the size of those groups. A commit that is structural, moves a block or changes its lifecycle does not carry and
   pays the full build.
 - `tension_on_change_delete_1k` and `tension_on_change_view_op_1k` grow with the in-flight changes
   and their writes: a delete, a view op, a structural, move or lifecycle write builds the
@@ -864,7 +865,9 @@ What each cost grows with:
   pays it once per published state, on its first tension read. It includes the cold build of the
   in-flight state, as canon is not built after the `invalidate`.
 - `tensions_canon` grows with the tree (and with the all-canon tensions in it). It is the canon
-  part of `tensions_full_1k`, paid once per canon build.
+  part of `tensions_full_1k`, paid once per canon build. FW-TN2: the generated tree's text
+  duplicates are 970 groups (10 members each at 10k, 50 at 50k) instead of 43,650 pairs at 10k
+  and about 1.19M at 50k; on macOS the canon build of the 10k tree went from 305 ms to 52 ms.
 - `gate_tensions_1k` grows with the changes of the version and the tensions that involve them.
 
 Baseline: `qa-baseline.json` is not changed here.

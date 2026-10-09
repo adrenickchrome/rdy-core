@@ -778,11 +778,12 @@ fn tgat1_a_version_with_thousands_of_tensions_builds_only_the_listed_ones() {
     use rdy_engine::tensions::info::info_counts;
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
+    // 2,000 pairs of terms with one name each: 2,000 duplicate groups (FW-TN2)
     let mut ops = vec![];
-    for i in 0..100 {
+    for i in 0..4000 {
         ops.push(
             json!({"op": "create", "type": "term", "id": format!("$f{i}"),
-            "parent": s.section.to_string(), "fields": {"name": "fee"},
+            "parent": s.section.to_string(), "fields": {"name": format!("fee {}", i / 2)},
             "body": format!("Fee number {i} is a term.")}),
         );
     }
@@ -791,7 +792,7 @@ fn tgat1_a_version_with_thousands_of_tensions_builds_only_the_listed_ones() {
     let p = propose(&mut r, "b");
     let (_, b1) = info_counts();
     assert_eq!(p.tensions.len(), PROPOSAL_TENSIONS_MAX);
-    assert_eq!(p.tensions.len() + p.tensions_omitted, 4950);
+    assert_eq!(p.tensions.len() + p.tensions_omitted, 2000);
     let mut ids: Vec<&String> = p.tensions.iter().map(|t| &t.tension).collect();
     ids.sort();
     assert_eq!(
@@ -804,4 +805,72 @@ fn tgat1_a_version_with_thousands_of_tensions_builds_only_the_listed_ones() {
         "{} rows built",
         b1 - b0
     );
+}
+
+/// FW-TN2: the landing form of a duplicate group is the group over canon and the landing set. A
+/// member in flight elsewhere is not in it; the all-canon group alone never refused. A landed
+/// member changes the group, so the next landing's form has a new id (the dismissal is void).
+#[test]
+fn tgat1_a_group_with_one_member_in_the_proposal_refuses_only_when_all_would_be_in_canon() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let mut canon = vec![];
+    for (v, n) in [("x", "Fee"), ("y", "fee")] {
+        canon.push(created(&put(&mut r, v, term(&s.section, n)), "$t"));
+        land(&mut r, v).unwrap();
+    }
+    let tok = brief_of(&r, &Scope::Canon, &[&s.section]).base.token;
+    write_cited_as(
+        &mut r,
+        &writer(),
+        "st",
+        json!([{"op": "update", "id": s.section.to_string(), "fields": {"lifecycle": "stable"}}]),
+        Some(&tok),
+    )
+    .unwrap();
+    land(&mut r, "st").unwrap();
+    let standing = one(&r, TensionKind::DuplicateDefinition);
+    assert!(change_sides(&standing).is_empty(), "{standing:#?}");
+    assert_eq!(standing.severity, TensionSeverity::Blocking);
+    let tok = brief_of(&r, &Scope::Canon, &[&s.section]).base.token;
+    let b = created(
+        &write_cited_as(&mut r, &ag("b"), "b", term(&s.section, "FEE"), Some(&tok)).unwrap(),
+        "$t",
+    );
+    let c = created(
+        &write_cited_as(&mut r, &ag("c"), "c", term(&s.section, "fEE"), Some(&tok)).unwrap(),
+        "$t",
+    );
+    let refusing = |p: &ProposalInfo| -> Vec<TensionInfo> {
+        p.tensions
+            .iter()
+            .filter(|t| t.refuses == Some(true))
+            .cloned()
+            .collect()
+    };
+    let pb = propose(&mut r, "b");
+    let rb = refusing(&pb);
+    assert_eq!(rb.len(), 1, "{:?}", pb.tensions);
+    let mut want: Vec<String> = [&canon[0], &canon[1], &b]
+        .iter()
+        .map(|x| x.to_string())
+        .collect();
+    want.sort();
+    assert_eq!(rb[0].blocks, want, "c is in flight elsewhere: not a member");
+    assert_eq!(approve(&mut r, &pb).unwrap_err().code, E_BLOCKING_TENSION);
+    r.dismiss_tension(&reviewer(), &rb[0].id, "one meaning")
+        .unwrap();
+    let pb = propose(&mut r, "b");
+    approve(&mut r, &pb).unwrap();
+    let pc = propose(&mut r, "c");
+    let rc = refusing(&pc);
+    assert_eq!(rc.len(), 1, "{:?}", pc.tensions);
+    assert_eq!(rc[0].blocks.len(), 4);
+    assert_ne!(rc[0].id, rb[0].id);
+    assert_eq!(
+        rc[0].status, "open",
+        "the membership changed: the dismissal is void"
+    );
+    assert_eq!(approve(&mut r, &pc).unwrap_err().code, E_BLOCKING_TENSION);
+    assert!(rc[0].blocks.contains(&c.to_string()), "{:?}", rc[0].blocks);
 }

@@ -13,12 +13,14 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: cases(12), ..ProptestConfig::default() })]
     #[test]
     fn tcar1_a_carried_tension_set_equals_a_rebuilt_one(
-        steps in proptest::collection::vec((0u8..7, 0u8..3, 0u8..3), 1..12)
+        steps in proptest::collection::vec((0u8..9, 0u8..3, 0u8..3), 1..12)
     ) {
         let (_d, mut r) = project();
         let s = spec_doc(&mut r);
         let names = ["a", "b", "c"];
         let claims = [s.a.clone(), s.b.clone(), s.c.clone()];
+        // FW-TN2: texts that form duplicate groups (two normalize to one) and one that does not
+        let texts = ["Fees are charged monthly.", "fees ARE charged  monthly.", "Fees are charged yearly."];
         for (i, (kind, v, k)) in steps.into_iter().enumerate() {
             let vn = names[v as usize];
             let target = &claims[k as usize];
@@ -38,7 +40,10 @@ proptest! {
                     }
                 }
                 5 => try_put(&mut r, vn, json!([{"op": "repin", "id": target.to_string()}])).is_ok(),
-                _ => land(&mut r, vn).is_ok(),
+                6 => land(&mut r, vn).is_ok(),
+                7 => try_put(&mut r, vn, json!([{"op": "create", "type": "claim",
+                        "parent": s.section.to_string(), "body": texts[k as usize]}])).is_ok(),
+                _ => try_put(&mut r, vn, upd(target, texts[k as usize])).is_ok(),
             };
             let st = r.read();
             let carried: Vec<_> = st.tensions().unwrap().iter().map(|t| t.id).collect();

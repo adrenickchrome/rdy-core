@@ -267,16 +267,17 @@ fn tbrf1_a_briefing_over_thousands_of_tensions_builds_each_row_once() {
     use rdy_engine::tensions::info::info_counts;
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
+    // 2,000 pairs of terms with one name each: 2,000 duplicate groups (FW-TN2)
     let mut ops = vec![];
-    for i in 0..100 {
+    for i in 0..4000 {
         ops.push(
             serde_json::json!({"op": "create", "type": "term", "id": format!("$f{i}"),
-            "parent": s.section.to_string(), "fields": {"name": "fee"},
+            "parent": s.section.to_string(), "fields": {"name": format!("fee {}", i / 2)},
             "body": format!("Fee number {i} is a term.")}),
         );
     }
     let w = put(&mut r, "b", serde_json::Value::Array(ops));
-    let ids: Vec<String> = (0..100)
+    let ids: Vec<String> = (0..4000)
         .map(|i| created(&w, &format!("$f{i}")).to_string())
         .collect();
     let cov = Coverage { ids, path: None };
@@ -292,7 +293,7 @@ fn tbrf1_a_briefing_over_thousands_of_tensions_builds_each_row_once() {
     );
     assert!(json_tokens(&b) <= BRIEF_DEFAULT_TOKENS);
     let all = b.inflight.tensions.len() + b.omitted.get("inflight.tensions").copied().unwrap_or(0);
-    assert_eq!(all, 4950);
-    assert_eq!(b1 - b0, 4950, "each row built once");
-    assert!(s1 - s0 <= 6 * 4950, "{} serializations", s1 - s0);
+    assert_eq!(all, 2000);
+    assert_eq!(b1 - b0, 2000, "each row built once");
+    assert!(s1 - s0 <= 6 * 2000, "{} serializations", s1 - s0);
 }

@@ -1,14 +1,16 @@
-//! Duplicate definition: two blocks define the same name, or have the same normative text.
+//! Duplicate definition: blocks that define the same name, or have the same normative text.
 //!
 //! A group is the blocks that share one normalized name, or one normalized text of at least the
 //! pack's `duplicate_text_min_words` words. A decision's text is its `statement`, never its body
 //! (founder ruling 2026-10-08: register boilerplate such as "Disposition: … / Trigger: …" makes
 //! bodies match across unrelated decisions); a decision without a statement has no text. Any
 //! other normative block's text is its body. In flight, a group is its live writes plus the canon
-//! blocks no change writes; every pair of distinct blocks with an in-flight side is a tension.
-//! In canon (FW-CH6, FW-CH6a) every pair of canon blocks in a group is one: a duplicate is a
-//! standing condition, so two duplicates that both land keep their vkey until one is renamed or
-//! removed.
+//! blocks no change writes. FW-TN2: a group of two or more members is ONE tension whose involved
+//! items are every member, so a membership change (a member added, edited away or removed)
+//! gives a new id and vkey and voids a dismissal. In flight a group is kept when a member has a
+//! change side; in canon (FW-CH6, FW-CH6a) a group of canon blocks is a standing condition, so
+//! duplicates that land keep their vkey until one is renamed or removed. A text group whose
+//! members all define one name is that name group's tension, reported once, as the name.
 use super::{DetectCx, DetectScope, Detector, Found, SideRef, TensionKind, Write, normalize_name};
 use crate::RdyError;
 use rdy_model::{BlockId, Hash};
@@ -78,34 +80,41 @@ fn can_pair(canon: &[BlockId], writes: &[Arc<Write>]) -> bool {
     blocks.len() >= 2
 }
 
-/// The keys to examine: every key of the scope, or in flight with `seeds` those of the seeds'
-/// live writes. The canon scope always examines every canon key.
+/// The keys of block `b`: its normalized name (when it defines one) and its text key.
+fn keys_of(cx: &DetectCx<'_>, b: &rdy_model::Block, out: &mut BTreeSet<Key>) {
+    if cx.defines(b)
+        && let Some(n) = b.field_str("name")
+    {
+        out.insert(Key::Name(normalize_name(n)));
+    }
+    if let Some(h) = cx.text_key(b) {
+        out.insert(Key::Text(h));
+    }
+}
+
+/// The keys to examine: every key of the scope, or in flight with `seeds` every key a seed had
+/// or has: those of every write on a seed (live or not) and of its canon version. The canon
+/// scope always examines every canon key.
 fn keys(cx: &DetectCx<'_>, seeds: Option<&BTreeSet<BlockId>>) -> Result<BTreeSet<Key>, RdyError> {
     let mut out = BTreeSet::new();
-    let mut add = |b: &rdy_model::Block| {
-        if cx.defines(b)
-            && let Some(n) = b.field_str("name")
-        {
-            out.insert(Key::Name(normalize_name(n)));
-        }
-        if let Some(h) = cx.text_key(b) {
-            out.insert(Key::Text(h));
-        }
-    };
     match (seeds, cx.scope()) {
         (None, _) => {
             for w in cx.writes.live() {
                 if let Some(b) = w.new.as_deref() {
-                    add(b);
+                    keys_of(cx, b, &mut out);
                 }
             }
         }
         (Some(seeds), DetectScope::Inflight) => {
+            let canon = cx.canon_m()?;
             for s in seeds {
-                for w in cx.writes.live_on(s) {
+                for w in cx.writes.all_on(s) {
                     if let Some(b) = w.new.as_deref() {
-                        add(b);
+                        keys_of(cx, b, &mut out);
                     }
+                }
+                if let Some(b) = canon.get(s) {
+                    keys_of(cx, b, &mut out);
                 }
             }
         }
@@ -120,9 +129,61 @@ fn keys(cx: &DetectCx<'_>, seeds: Option<&BTreeSet<BlockId>>) -> Result<BTreeSet
     Ok(out)
 }
 
+/// The index entries of `key`: canon's blocks and the live writes.
+fn entries<'c>(cx: &'c DetectCx<'_>, key: &Key) -> (&'c [BlockId], Vec<Arc<Write>>) {
+    let ix = cx.canon_index();
+    let (canon, writes) = match key {
+        Key::Name(n) => (ix.names.get(n), cx.writes.named(n)),
+        Key::Text(h) => (ix.texts.get(h), cx.writes.texted(h)),
+    };
+    (canon.map_or(&[][..], Vec::as_slice), writes)
+}
+
+/// How many members a summary names before "and N more".
+const NAMED: usize = 5;
+
+/// The members of a group as a summary names them: `A and B`, `A, B and C`, or the first
+/// [`NAMED`] and `and N more`.
+fn listed(group: &[Member]) -> String {
+    let ids: Vec<String> = group.iter().map(|m| m.block.to_string()).collect();
+    if ids.len() > NAMED {
+        return format!("{} and {} more", ids[..NAMED].join(", "), ids.len() - NAMED);
+    }
+    match ids.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => ids.join(""),
+    }
+}
+
+/// A text clipped to `n` characters, with an ellipsis when cut.
+fn clipped(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(n).collect();
+    out.push('…');
+    out
+}
+
 impl Detector for DuplicateDefinition {
     fn kind(&self) -> TensionKind {
         TensionKind::DuplicateDefinition
+    }
+
+    /// FW-TN2: a write on a seed can change the membership of every group the seed was or is
+    /// in, so the carry re-detects around every block of those groups (from the index alone).
+    fn reach(
+        &self,
+        cx: &DetectCx<'_>,
+        seeds: &BTreeSet<BlockId>,
+    ) -> Result<BTreeSet<BlockId>, RdyError> {
+        let mut out = BTreeSet::new();
+        for key in keys(cx, Some(seeds))? {
+            let (canon, writes) = entries(cx, &key);
+            out.extend(canon.iter().cloned());
+            out.extend(writes.iter().map(|w| w.block.clone()));
+        }
+        Ok(out)
     }
 
     fn detect(
@@ -131,47 +192,76 @@ impl Detector for DuplicateDefinition {
         seeds: Option<&BTreeSet<BlockId>>,
         out: &mut Vec<Found>,
     ) -> Result<(), RdyError> {
-        let ix = cx.canon_index();
-        let mut seen: BTreeSet<(BlockId, BlockId)> = BTreeSet::new();
-        // names before texts: two blocks that share both are reported once, as a name
+        // names before texts: a text group whose members all define one name is reported once,
+        // as that name
         let mut keys: Vec<Key> = keys(cx, seeds)?.into_iter().collect();
         keys.sort_by_key(|k| matches!(k, Key::Text(_)));
         for key in keys {
-            let (canon, writes, what) = match &key {
-                Key::Name(n) => (
-                    ix.names.get(n),
-                    cx.writes.named(n),
-                    format!("both define \"{n}\""),
-                ),
-                Key::Text(h) => (
-                    ix.texts.get(h),
-                    cx.writes.texted(h),
-                    "have the same text".to_string(),
-                ),
-            };
-            let canon = canon.map_or(&[][..], Vec::as_slice);
+            let (canon, writes) = entries(cx, &key);
             if !can_pair(canon, &writes) {
                 continue;
             }
-            let group = members(cx, canon, writes)?;
-            for (i, x) in group.iter().enumerate() {
-                for y in &group[i + 1..] {
-                    let anchored = cx.scope() == DetectScope::Canon
-                        || [x, y].iter().any(|m| matches!(m.side, SideRef::Change(_)));
-                    if !anchored || !seen.insert((x.block.clone(), y.block.clone())) {
+            let group = members(cx, canon, writes.clone())?;
+            if group.len() < 2 {
+                continue;
+            }
+            let anchored = cx.scope() == DetectScope::Canon
+                || group.iter().any(|m| matches!(m.side, SideRef::Change(_)));
+            if !anchored {
+                continue;
+            }
+            let what = match &key {
+                Key::Name(n) => {
+                    let verb = if group.len() == 2 { "both" } else { "all" };
+                    format!("{verb} define \"{n}\"")
+                }
+                Key::Text(_) => {
+                    let canon_m = cx.canon_m()?;
+                    let mut names = BTreeSet::new();
+                    let mut text = None;
+                    for m in &group {
+                        // a member's block: its write's, or canon's
+                        let b = match m.side {
+                            SideRef::Change(c) => writes
+                                .iter()
+                                .find(|w| w.change == c && w.block == m.block)
+                                .and_then(|w| w.new.as_deref()),
+                            _ => canon_m.get(&m.block),
+                        };
+                        names.insert(
+                            b.filter(|b| cx.defines(b))
+                                .and_then(|b| b.field_str("name"))
+                                .map(normalize_name),
+                        );
+                        if text.is_none() {
+                            text = b.and_then(|b| cx.duplicate_text(b)).map(normalize_name);
+                        }
+                    }
+                    if names.len() == 1 && names.iter().all(Option::is_some) {
                         continue;
                     }
-                    out.push(Found {
-                        kind: TensionKind::DuplicateDefinition,
-                        summary: format!("{} and {} {what}", x.block, y.block),
-                        stable: cx.stable(&x.block)? || cx.stable(&y.block)?,
-                        involved: [x, y]
-                            .into_iter()
-                            .map(|m| cx.involved(m.side.clone(), &m.block, m.version))
-                            .collect::<Result<_, _>>()?,
-                    });
+                    format!(
+                        "have the same text \"{}\"",
+                        clipped(&text.unwrap_or_default(), 80)
+                    )
+                }
+            };
+            let mut stable = false;
+            for m in &group {
+                if cx.stable(&m.block)? {
+                    stable = true;
+                    break;
                 }
             }
+            out.push(Found {
+                kind: TensionKind::DuplicateDefinition,
+                summary: format!("{} {what}", listed(&group)),
+                stable,
+                involved: group
+                    .iter()
+                    .map(|m| cx.involved(m.side.clone(), &m.block, m.version))
+                    .collect::<Result<_, _>>()?,
+            });
         }
         Ok(())
     }
