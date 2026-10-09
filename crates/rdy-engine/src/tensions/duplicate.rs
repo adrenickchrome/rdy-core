@@ -78,8 +78,8 @@ fn can_pair(canon: &[BlockId], writes: &[Arc<Write>]) -> bool {
     blocks.len() >= 2
 }
 
-/// The keys to examine: every key of the scope, or with `seeds` those of the seeds' blocks (their
-/// live writes in flight, canon's version in the canon scope).
+/// The keys to examine: every key of the scope, or in flight with `seeds` those of the seeds'
+/// live writes. The canon scope always examines every canon key.
 fn keys(cx: &DetectCx<'_>, seeds: Option<&BTreeSet<BlockId>>) -> Result<BTreeSet<Key>, RdyError> {
     let min_words = cx.st.pack().duplicate_text_min_words();
     let mut out = BTreeSet::new();
@@ -112,16 +112,10 @@ fn keys(cx: &DetectCx<'_>, seeds: Option<&BTreeSet<BlockId>>) -> Result<BTreeSet
                 }
             }
         }
-        (Some(seeds), DetectScope::Canon) => {
-            let m = cx.canon_m()?;
-            for s in seeds {
-                if let Some(b) = m.get(s) {
-                    add(b);
-                }
-            }
-        }
+        // the canon part is always a full run (no seeds)
+        (Some(_), DetectScope::Canon) => {}
     }
-    if seeds.is_none() && cx.scope() == DetectScope::Canon {
+    if cx.scope() == DetectScope::Canon {
         let ix = cx.canon_index();
         out.extend(ix.names.keys().cloned().map(Key::Name));
         out.extend(ix.texts.keys().copied().map(Key::Text));

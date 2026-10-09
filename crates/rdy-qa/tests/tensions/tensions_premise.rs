@@ -51,28 +51,117 @@ fn tprm1_after_the_edit_lands_the_shift_rekeys_to_canon_until_the_citer_repins()
 fn tprm1_superseding_a_decision_another_view_depends_on_shifts_its_premise() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
-    put(
-        &mut r,
-        "b",
-        json!([{"op": "create", "type": "claim", "id": "$y",
-        "parent": s.section.to_string(), "body": "Y.",
-        "links": {"decided_by": [{"target": s.decision.to_string()}]}}]),
+    let y = created(
+        &put(
+            &mut r,
+            "b",
+            json!([{"op": "create", "type": "claim", "id": "$y",
+            "parent": s.section.to_string(), "body": "Y.",
+            "links": {"decided_by": [{"target": s.decision.to_string()}]}}]),
+        ),
+        "$y",
     );
-    r.supersede(
-        &ag("a"),
-        "a",
-        &s.decision.to_string(),
-        None,
-        DecisionInput {
-            parent: s.section.to_string(),
-            statement: "Keep A, differently".into(),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let d = r
+        .supersede(
+            &ag("a"),
+            "a",
+            &s.decision.to_string(),
+            None,
+            DecisionInput {
+                parent: s.section.to_string(),
+                statement: "Keep A, differently".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let d = created(&d, "$decision");
     let t = one(&r, TensionKind::PremiseShift);
     assert_eq!(change_sides(&t).len(), 2);
     assert!(t.summary.contains(&s.decision.to_string()), "{}", t.summary);
+    // checklist line 19: the changer's item is the superseding decision, not the target
+    assert_eq!(t.blocks(), {
+        let mut v = vec![d, y];
+        v.sort();
+        v
+    });
+}
+
+/// Checklist line 17: a decision that revokes a block another view depends on shifts its
+/// premise; the involved items are the revoking decision and the citer.
+#[test]
+fn tprm1_revoking_a_decision_another_view_depends_on_shifts_its_premise() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let y = created(
+        &put(
+            &mut r,
+            "b",
+            json!([{"op": "create", "type": "claim", "id": "$y",
+            "parent": s.section.to_string(), "body": "Y.",
+            "links": {"decided_by": [{"target": s.decision.to_string()}]}}]),
+        ),
+        "$y",
+    );
+    let w = put(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "decision", "id": "$n", "parent": s.section.to_string(),
+                "fields": {"statement": "No rule", "status": "proposed"},
+                "links": {"revokes": [{"target": s.decision.to_string()}]}}]),
+    );
+    let n = created(&w, "$n");
+    let t = one(&r, TensionKind::PremiseShift);
+    assert_eq!(change_sides(&t).len(), 2, "{t:#?}");
+    assert!(change_sides(&t).contains(&change_of(&w)));
+    assert_eq!(t.blocks(), {
+        let mut v = vec![n, y];
+        v.sort();
+        v
+    });
+}
+
+/// Checklist line 17: a citer of a block that canon deleted shifts against canon's absent side
+/// (no landing, no version).
+#[test]
+fn tprm1_a_citer_of_a_block_deleted_in_canon_shifts_against_canons_absent_side() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    // a claim no canon block references, so its delete can land
+    let x = created(
+        &write(
+            &mut r,
+            "seed",
+            json!([{"op": "create", "type": "claim", "id": "$x",
+                    "parent": s.section.to_string(), "body": "X holds."}]),
+        )
+        .unwrap(),
+        "$x",
+    );
+    land(&mut r, "seed").unwrap();
+    let wb = put(&mut r, "b", cite(&s.section, &x));
+    let (cb, y) = (change_of(&wb), created(&wb, "$y"));
+    put(&mut r, "d", json!([{"op": "delete", "id": x.to_string()}]));
+    let before = one(&r, TensionKind::PremiseShift);
+    land(&mut r, "d").unwrap();
+    let t = one(&r, TensionKind::PremiseShift);
+    assert_eq!(change_sides(&t), vec![cb]);
+    let canon: Vec<&Involved> = t
+        .involved
+        .iter()
+        .filter(|i| matches!(i.side, SideRef::Canon { .. }))
+        .collect();
+    assert_eq!(canon.len(), 1, "{t:#?}");
+    assert_eq!(canon[0].side, SideRef::Canon { landing: None });
+    assert_eq!(
+        (canon[0].block.clone(), canon[0].version),
+        (x.clone(), None)
+    );
+    assert_eq!(t.blocks(), {
+        let mut v = vec![x, y];
+        v.sort();
+        v
+    });
+    assert_eq!(t.vkey, before.vkey, "the landing re-keys it");
 }
 
 #[test]
@@ -234,4 +323,103 @@ fn tprm1_a_tracking_edit_of_a_landed_successor_shifts_no_premise() {
     .unwrap();
     let shifts = of_kind(&r, TensionKind::PremiseShift);
     assert!(shifts.is_empty(), "{shifts:#?}");
+}
+
+/// Final review X2 (ruling on item 26): a decision naming, in its text, the block it supersedes
+/// is not a premise citation, as the graph rules for suspects.
+#[test]
+fn tprm1_a_decisions_reference_to_what_it_supersedes_is_not_a_citation() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    for (who, body) in [
+        ("a", String::new()),
+        ("b", format!("Replaces {{{{{}}}}}.", s.decision)),
+    ] {
+        r.supersede(
+            &ag(who),
+            who,
+            &s.decision.to_string(),
+            None,
+            DecisionInput {
+                parent: s.section.to_string(),
+                statement: format!("{who} replaces it"),
+                body,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    one(&r, TensionKind::Fork);
+    assert!(
+        of_kind(&r, TensionKind::PremiseShift).is_empty(),
+        "{:#?}",
+        of_kind(&r, TensionKind::PremiseShift)
+    );
+}
+
+/// Checklist line 18: one shift over two citations of blocks one decision retires has one id;
+/// its summary does not depend on the path that found it (a carry or a rebuild).
+#[test]
+fn tprm1_one_shift_over_two_citations_reads_the_same_carried_or_rebuilt() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let d1: rdy_model::BlockId = rdy_model::BlockId::parse(
+        &r.decide(
+            &writer(),
+            "seed",
+            DecisionInput {
+                parent: s.section.to_string(),
+                statement: "Second rule".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"],
+    )
+    .unwrap();
+    land(&mut r, "seed").unwrap();
+    // y cites the larger id first (references come before links), so its edge order is not
+    // id order
+    let (x1, x2) = if s.decision > d1 {
+        (s.decision.clone(), d1.clone())
+    } else {
+        (d1.clone(), s.decision.clone())
+    };
+    put(
+        &mut r,
+        "b",
+        json!([{"op": "create", "type": "claim", "id": "$y", "parent": s.section.to_string(),
+                "body": format!("Builds on {{{{{x1}}}}}."),
+                "links": {"decided_by": [{"target": x2.to_string()}]}}]),
+    );
+    r.read().tensions().unwrap();
+    put(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "decision", "id": "$n", "parent": s.section.to_string(),
+                "fields": {"statement": "One rule for both", "status": "proposed"},
+                "links": {"revokes": [{"target": x1.to_string()}, {"target": x2.to_string()}]}}]),
+    );
+    let st = r.read();
+    let carried: Vec<(String, String)> = st
+        .tensions()
+        .unwrap()
+        .iter()
+        .filter(|t| t.kind == TensionKind::PremiseShift)
+        .map(|t| (tension_label(&t.id), t.summary.clone()))
+        .collect();
+    assert_eq!(st.tensions_carried(), Some(true));
+    let rebuilt: Vec<(String, String)> = st
+        .tensions_rebuilt()
+        .unwrap()
+        .iter()
+        .filter(|t| t.kind == TensionKind::PremiseShift)
+        .map(|t| (tension_label(&t.id), t.summary.clone()))
+        .collect();
+    assert_eq!(carried.len(), 1, "{carried:#?}");
+    assert_eq!(carried, rebuilt);
+    assert!(
+        carried[0].1.starts_with(&x2.to_string()),
+        "the smaller id: {carried:?}"
+    );
 }

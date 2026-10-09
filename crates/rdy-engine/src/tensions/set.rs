@@ -12,44 +12,82 @@ use rdy_model::{Block, BlockId, Change, Hash, Op, decision};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
 
-/// The event-derived tensions of one state, by id, with indexes by block and by change.
+/// The canon part of a tension set (FW-CH6): the tensions whose sides are all canon, by id,
+/// with their index by block. Memoised per canon build and shared by every set built on it, so
+/// a build does not copy it and a diff between two such sets skips it.
+#[derive(Clone, Debug, Default)]
+pub struct CanonPart {
+    tensions: OrdMap<Hash, Arc<Tension>>,
+    by_block: OrdMap<BlockId, OrdSet<Hash>>,
+}
+
+impl CanonPart {
+    /// The part of `tensions` (a repeated id keeps the first).
+    fn of(tensions: impl IntoIterator<Item = Arc<Tension>>) -> CanonPart {
+        let mut part = CanonPart::default();
+        for t in tensions {
+            if part.tensions.contains_key(&t.id) {
+                continue;
+            }
+            for b in t.blocks() {
+                part.by_block.entry(b).or_default().insert(t.id);
+            }
+            part.tensions.insert(t.id, t);
+        }
+        part
+    }
+}
+
+/// The event-derived tensions of one state, by id: the canon part (shared) and the in-flight
+/// part, with indexes by block and by change. The two parts never share an id: an in-flight
+/// tension has a change side, a canon one none.
 #[derive(Clone, Debug, Default)]
 pub struct TensionSet {
+    canon: Arc<CanonPart>,
+    /// The in-flight part.
     tensions: OrdMap<Hash, Arc<Tension>>,
     by_block: OrdMap<BlockId, OrdSet<Hash>>,
     by_change: OrdMap<Hash, OrdSet<Hash>>,
-    /// The ids that came from the canon part (every side canon).
-    canon: OrdSet<Hash>,
     /// The in-flight writes the set was built from.
     writes: Arc<Writes>,
 }
 
+/// The entries of two maps with disjoint keys, by key.
+fn merged<'a>(
+    a: &'a OrdMap<Hash, Arc<Tension>>,
+    b: &'a OrdMap<Hash, Arc<Tension>>,
+) -> impl Iterator<Item = &'a Arc<Tension>> {
+    let (mut a, mut b) = (a.iter().peekable(), b.iter().peekable());
+    std::iter::from_fn(move || match (a.peek(), b.peek()) {
+        (Some((x, _)), Some((y, _))) if x <= y => a.next().map(|(_, t)| t),
+        (Some(_), Some(_)) | (None, Some(_)) => b.next().map(|(_, t)| t),
+        (Some(_), None) => a.next().map(|(_, t)| t),
+        (None, None) => None,
+    })
+}
+
 impl TensionSet {
-    /// The set of `canon` (the canon part) and `inflight` (the in-flight part) built from
-    /// `writes`, inserted by id: a repeated id keeps the first.
+    /// The set of the canon part `canon` and the in-flight tensions `inflight`, built from
+    /// `writes`: a repeated id keeps the first.
     fn of(
-        canon: &[Arc<Tension>],
+        canon: Arc<CanonPart>,
         inflight: impl IntoIterator<Item = Arc<Tension>>,
         writes: Arc<Writes>,
     ) -> TensionSet {
         let mut set = TensionSet {
+            canon,
             writes,
             ..TensionSet::default()
         };
-        for t in canon {
-            if set.insert(Arc::clone(t)) {
-                set.canon.insert(t.id);
-            }
-        }
         for t in inflight {
             set.insert(t);
         }
         set
     }
 
-    /// Adds `t` unless its id is in the set already; true if it was added.
+    /// Adds in-flight tension `t` unless its id is in the set already; true if it was added.
     fn insert(&mut self, t: Arc<Tension>) -> bool {
-        if self.tensions.contains_key(&t.id) {
+        if self.tensions.contains_key(&t.id) || self.canon.tensions.contains_key(&t.id) {
             return false;
         }
         for b in t.blocks() {
@@ -64,7 +102,7 @@ impl TensionSet {
         true
     }
 
-    /// Removes tension `id` and its index entries; true if it was in the set.
+    /// Removes in-flight tension `id` and its index entries; true if it was in the set.
     fn remove(&mut self, id: &Hash) -> bool {
         let Some(t) = self.tensions.remove(id) else {
             return false;
@@ -87,25 +125,26 @@ impl TensionSet {
                 }
             }
         }
-        self.canon.remove(id);
         true
     }
 
     pub fn len(&self) -> usize {
-        self.tensions.len()
+        self.canon.tensions.len() + self.tensions.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tensions.is_empty()
+        self.len() == 0
     }
 
     /// Every tension, by id.
     pub fn iter(&self) -> impl Iterator<Item = &Arc<Tension>> {
-        self.tensions.values()
+        merged(&self.canon.tensions, &self.tensions)
     }
 
     pub fn get(&self, id: &Hash) -> Option<&Arc<Tension>> {
-        self.tensions.get(id)
+        self.tensions
+            .get(id)
+            .or_else(|| self.canon.tensions.get(id))
     }
 
     /// The in-flight writes the set was built from.
@@ -115,46 +154,76 @@ impl TensionSet {
 
     /// Whether tension `id` came from the canon part (every side canon).
     pub fn from_canon(&self, id: &Hash) -> bool {
-        self.canon.contains(id)
+        self.canon.tensions.contains_key(id)
     }
 
-    fn by_ids(&self, ids: Option<&OrdSet<Hash>>) -> Vec<Arc<Tension>> {
+    /// Whether this set and `other` share their canon part (built on one canon build).
+    pub(crate) fn shares_canon(&self, other: &TensionSet) -> bool {
+        Arc::ptr_eq(&self.canon, &other.canon)
+    }
+
+    /// The tensions with an id in `ids`, by id.
+    fn by_ids<'a>(&self, ids: impl IntoIterator<Item = &'a Hash>) -> Vec<Arc<Tension>> {
+        let ids: BTreeSet<&Hash> = ids.into_iter().collect();
         ids.into_iter()
-            .flatten()
-            .filter_map(|id| self.tensions.get(id).cloned())
+            .filter_map(|id| self.get(id).cloned())
             .collect()
     }
 
     /// The tensions that involve block `b`, by id.
     pub fn involving_block(&self, b: &BlockId) -> Vec<Arc<Tension>> {
-        self.by_ids(self.by_block.get(b))
+        self.by_ids(
+            self.canon
+                .by_block
+                .get(b)
+                .into_iter()
+                .flatten()
+                .chain(self.by_block.get(b).into_iter().flatten()),
+        )
     }
 
-    /// The tensions with change `c` as a side, by id.
+    /// The tensions with change `c` as a side, by id (in-flight ones only).
     pub fn involving_change(&self, c: &Hash) -> Vec<Arc<Tension>> {
-        self.by_ids(self.by_change.get(c))
+        self.by_ids(self.by_change.get(c).into_iter().flatten())
     }
 
     /// The tension `text` names: `tn-` and a hex prefix, or the prefix alone (at least 6 hex
     /// digits), matching exactly one tension.
     pub fn resolve(&self, text: &str) -> Result<Arc<Tension>, RdyError> {
-        resolve_among(self.tensions.values(), text)
+        resolve_among(self.iter(), text)
     }
 
     /// The tensions `newer` has that this set has not (opened), and those this set has that
     /// `newer` has not (resolved), each by id. The structure a carry shares with the set it
-    /// started from is skipped, so the cost follows what changed, not the size of the sets.
+    /// started from is skipped, and so is a canon part both sets share, so the cost follows
+    /// what changed, not the size of the sets. Also how many entries the diff examined.
     pub fn diff(&self, newer: &TensionSet) -> (Vec<Arc<Tension>>, Vec<Arc<Tension>>) {
-        let (mut opened, mut resolved) = (vec![], vec![]);
-        for item in self.tensions.diff(&newer.tensions) {
-            match item {
-                DiffItem::Add(_, t) => opened.push(Arc::clone(t)),
-                DiffItem::Remove(_, t) => resolved.push(Arc::clone(t)),
-                // one id is one tension: same kind, sides and involved items
-                DiffItem::Update { .. } => {}
+        let d = self.diff_counted(newer);
+        (d.opened, d.resolved)
+    }
+
+    /// `diff`, with the number of entries it examined.
+    fn diff_counted(&self, newer: &TensionSet) -> TensionDelta {
+        let mut d = TensionDelta::default();
+        let mut parts = vec![(&self.tensions, &newer.tensions)];
+        d.examined = self.tensions.len() + newer.tensions.len();
+        if !self.shares_canon(newer) {
+            parts.push((&self.canon.tensions, &newer.canon.tensions));
+            d.examined += self.canon.tensions.len() + newer.canon.tensions.len();
+        }
+        for (old, new) in parts {
+            for item in old.diff(new) {
+                match item {
+                    DiffItem::Add(_, t) => d.opened.push(Arc::clone(t)),
+                    DiffItem::Remove(_, t) => d.resolved.push(Arc::clone(t)),
+                    // one id is one tension: same kind, sides and involved items
+                    DiffItem::Update { .. } => {}
+                }
             }
         }
-        (opened, resolved)
+        d.opened.sort_by_key(|t| t.id);
+        d.resolved.sort_by_key(|t| t.id);
+        d
     }
 
     /// The same opened and resolved lists as `diff`, found from what a step can touch: the
@@ -177,6 +246,7 @@ impl TensionSet {
             }
             for b in blocks {
                 candidates.extend(set.by_block.get(b).into_iter().flatten().copied());
+                candidates.extend(set.canon.by_block.get(b).into_iter().flatten().copied());
             }
         }
         let mut delta = TensionDelta {
@@ -184,7 +254,7 @@ impl TensionSet {
             ..TensionDelta::default()
         };
         for id in &candidates {
-            match (self.tensions.get(id), newer.tensions.get(id)) {
+            match (self.get(id), newer.get(id)) {
                 (None, Some(t)) => delta.opened.push(Arc::clone(t)),
                 (Some(t), None) => delta.resolved.push(Arc::clone(t)),
                 _ => {}
@@ -222,14 +292,7 @@ pub fn tension_delta(
             let blocks = seeds_of(after, change)?;
             Ok(old.diff_scoped(&new, &[*change], &blocks))
         }
-        _ => {
-            let (opened, resolved) = old.diff(&new);
-            Ok(TensionDelta {
-                opened,
-                resolved,
-                examined: old.len() + new.len(),
-            })
-        }
+        _ => Ok(old.diff_counted(&new)),
     }
 }
 
@@ -239,27 +302,38 @@ pub(crate) fn resolve_among<'a>(
     tensions: impl IntoIterator<Item = &'a Arc<Tension>>,
     text: &str,
 ) -> Result<Arc<Tension>, RdyError> {
+    find_among(tensions, text)?.ok_or_else(|| no_tension(text))
+}
+
+/// `E_NOT_FOUND` for a tension `text` names that no list holds.
+pub(crate) fn no_tension(text: &str) -> RdyError {
+    RdyError::new(
+        E_NOT_FOUND,
+        format!("no tension {}", clip(text)),
+        "rdy_tensions lists them; a tension whose side changed has a new id",
+    )
+}
+
+/// The tension of `tensions` that `text` names, or `None` when none matches (or `text` is no
+/// tension id); `E_NOT_FOUND` when several match.
+pub(crate) fn find_among<'a>(
+    tensions: impl IntoIterator<Item = &'a Arc<Tension>>,
+    text: &str,
+) -> Result<Option<Arc<Tension>>, RdyError> {
     let hex = text
         .strip_prefix("tn-")
         .unwrap_or(text)
         .to_ascii_lowercase();
-    let not_found = || {
-        RdyError::new(
-            E_NOT_FOUND,
-            format!("no tension {}", clip(text)),
-            "rdy_tensions lists them; a tension whose side changed has a new id",
-        )
-    };
     if !(6..=64).contains(&hex.len()) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(not_found());
+        return Ok(None);
     }
     let found: Vec<&Arc<Tension>> = tensions
         .into_iter()
         .filter(|t| t.id.to_string().starts_with(&hex))
         .collect();
     match found.as_slice() {
-        [] => Err(not_found()),
-        [t] => Ok(Arc::clone(t)),
+        [] => Ok(None),
+        [t] => Ok(Some(Arc::clone(t))),
         many => Err(RdyError::new(
             E_NOT_FOUND,
             format!(
@@ -357,12 +431,10 @@ fn carry(
         writes: Arc::clone(&writes),
         ..prev.clone()
     };
+    // the canon part stays: canon did not move
     for seed in &seeds {
         for id in prev.by_block.get(seed).into_iter().flatten() {
-            // a canon-part tension stays: canon did not move
-            if !prev.from_canon(id) {
-                next.remove(id);
-            }
+            next.remove(id);
         }
     }
     let involves_seed = |t: &Tension| t.involved.iter().any(|i| seeds.contains(&i.block));
@@ -381,26 +453,27 @@ fn carry(
     Ok(Some(next))
 }
 
-/// The canon part for `detectors`: each run in the canon scope, kept when every side is canon,
-/// by id (a repeated id keeps the first).
-fn canon_part(st: &ReadState, detectors: &[&dyn Detector]) -> Result<Vec<Arc<Tension>>, RdyError> {
+/// The canon part for `detectors`: each run in the canon scope (always a full run), kept when
+/// every side is canon, by id (a repeated id keeps the first).
+fn canon_part(st: &ReadState, detectors: &[&dyn Detector]) -> Result<CanonPart, RdyError> {
     let writes = Writes::empty();
     let cx = DetectCx::new(st, &writes, canon_index_of(st)?, DetectScope::Canon);
-    let mut out = OrdMap::new();
+    let mut out = vec![];
     for d in detectors {
         let mut found = vec![];
         d.detect(&cx, None, &mut found)?;
-        for f in found {
-            if let Some(t) = tension_from(st.pack(), f, false, DetectScope::Canon) {
-                out.entry(t.id).or_insert_with(|| Arc::new(t));
-            }
-        }
+        out.extend(
+            found
+                .into_iter()
+                .filter_map(|f| tension_from(st.pack(), f, false, DetectScope::Canon))
+                .map(Arc::new),
+        );
     }
-    Ok(out.into_iter().map(|(_, t)| t).collect())
+    Ok(CanonPart::of(out))
 }
 
-/// The full build for `detectors`: the canon part (canon's memo when `memo`) and the in-flight
-/// part.
+/// The full build for `detectors`: the canon part (canon's memo when `memo`, shared, not
+/// copied) and the in-flight part.
 fn build(st: &ReadState, detectors: &[&dyn Detector], memo: bool) -> Result<TensionSet, RdyError> {
     if let Some(e) = &st.error {
         return Err(e.clone());
@@ -428,7 +501,7 @@ fn build(st: &ReadState, detectors: &[&dyn Detector], memo: bool) -> Result<Tens
                 .map(Arc::new),
         );
     }
-    Ok(TensionSet::of(&canon, inflight, writes))
+    Ok(TensionSet::of(canon, inflight, writes))
 }
 
 impl ReadState {
@@ -541,7 +614,11 @@ impl ReadState {
         if let Some(e) = &self.error {
             return Err(e.clone());
         }
-        canon_part(self, self.detectors)
+        Ok(canon_part(self, self.detectors)?
+            .tensions
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect())
     }
 
     /// Every block involved in an open tension: the event-derived set (all-canon tensions

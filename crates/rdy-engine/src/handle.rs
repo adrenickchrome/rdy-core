@@ -101,6 +101,7 @@ impl Rdy {
             detectors: &tensions::DETECTORS,
             error: None,
         });
+        let settled_batch = store.last_batch_end();
         let mut r = Rdy {
             root: project.to_path_buf(),
             state,
@@ -119,6 +120,8 @@ impl Rdy {
             briefs: Arc::new(brief::BriefRegistry::new(brief::BRIEF_REGISTRY_CAP)),
             detectors: &tensions::DETECTORS,
             tension_seen: None,
+            publish_gen: 0,
+            settled_batch,
             tension_base: None,
         };
         r.invalidate();

@@ -81,6 +81,10 @@ pub struct Consequences {
     /// How many entries a cut dropped, by kind.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub omitted: BTreeMap<String, usize>,
+    /// Why the tension entries could not be read (the other entries stand); a reply carries it
+    /// as `consequences_tension_error`.
+    #[serde(skip)]
+    pub tensions_error: Option<String>,
 }
 
 /// The hint on a `reaffirm` entry.
@@ -162,16 +166,24 @@ impl ReadState {
         let ch = self.reader().change(change)?;
         let (touched, changed) = changed_by_ops(&ch.ops);
         let mine = |s: &SideRef| matches!(s, SideRef::Change(c) if c == change);
-        let tensions: Vec<Consequence> = self
-            .tensions()?
-            .involving_change(change)
-            .iter()
-            .map(|t| tension_entry(change, t, &mine))
-            .collect();
+        // a tension set that cannot be built never fails the other entries
+        let (tensions, tensions_error): (Vec<Consequence>, _) = match self.tensions() {
+            Ok(set) => (
+                set.involving_change(change)
+                    .iter()
+                    .map(|t| tension_entry(change, t, &mine))
+                    .collect(),
+                None,
+            ),
+            Err(e) => (vec![], Some(format!("{}: {}", e.code, e.message))),
+        };
         // nothing can point at a block that did not exist: no graph to read
         let only_creates = ch.ops.iter().all(|o| matches!(o, Op::Create { .. }));
         if only_creates && changed == touched {
-            return Ok(cut(tensions, max_tokens));
+            return Ok(Consequences {
+                tensions_error,
+                ..cut(tensions, max_tokens)
+            });
         }
         let g = self.graph(scope)?;
         let m = self.materialized(scope)?;
@@ -180,17 +192,20 @@ impl ReadState {
             Scope::Canon | Scope::At(_) | Scope::Inflight => None,
         };
         let written = self.written_in(view);
-        Ok(self.consequences_in(
-            &g,
-            &m,
-            change,
-            &touched,
-            &changed,
-            &written,
-            vec![],
-            tensions,
-            max_tokens,
-        ))
+        Ok(Consequences {
+            tensions_error,
+            ..self.consequences_in(
+                &g,
+                &m,
+                change,
+                &touched,
+                &changed,
+                &written,
+                vec![],
+                tensions,
+                max_tokens,
+            )
+        })
     }
 
     /// Whether `view`'s own included changes wrote a block (always false for no view), read
@@ -467,7 +482,7 @@ impl ReadState {
 fn cut(items: Vec<Consequence>, max_tokens: Option<usize>) -> Consequences {
     let mut out = Consequences {
         items,
-        omitted: BTreeMap::new(),
+        ..Consequences::default()
     };
     let budget = max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS).saturating_mul(4);
     let size = |c: &Consequences| {
@@ -529,6 +544,9 @@ pub(crate) fn attach(v: &mut serde_json::Value, c: Result<Consequences, RdyError
             if !c.omitted.is_empty() {
                 v["consequences_omitted"] =
                     serde_json::to_value(&c.omitted).expect("a map of counts serializes");
+            }
+            if let Some(e) = c.tensions_error {
+                v["consequences_tension_error"] = e.into();
             }
         }
         Err(e) => {

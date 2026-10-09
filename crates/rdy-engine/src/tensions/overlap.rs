@@ -129,18 +129,10 @@ impl Detector for AreaOverlap {
     }
 }
 
-/// Whether the write `w` of change `w.change` is by a change in some view named `view`.
-fn in_view(st: &ReadState, w: &Write, view: &str) -> Result<bool, RdyError> {
-    Ok(st
-        .tensions()?
-        .writes()
-        .change(&w.change)
-        .is_some_and(|c| c.views.iter().any(|v| v == view)))
-}
-
 impl ReadState {
     /// The read-time area overlaps at `now_ms`: each open, unexpired intent against the live
     /// writes of other views' changes on the blocks it covers. Never in the event-derived set.
+    /// The in-flight writes are read once, and each written block's areas once.
     pub fn intent_tensions(&self, now_ms: i64) -> Result<Vec<Tension>, RdyError> {
         let open: Vec<_> = self
             .coord_heads()
@@ -151,16 +143,34 @@ impl ReadState {
         if open.is_empty() {
             return Ok(vec![]);
         }
+        let any_area = open.iter().any(|(_, o)| o.intent.area.is_some());
         let set = self.tensions()?;
         let writes = set.writes();
+        let tracking = self.reader().tracking();
         let mut out: BTreeMap<Hash, Tension> = BTreeMap::new();
+        // live writes come by block: the areas of the block in hand
+        let mut areas: Option<(BlockId, Vec<String>)> = None;
         for w in writes.live() {
+            if any_area && areas.as_ref().is_none_or(|(b, _)| *b != w.block) {
+                areas = Some((
+                    w.block.clone(),
+                    self.block_areas(&Scope::Inflight, &w.block)?,
+                ));
+            }
+            let in_areas = |a: &String| areas.as_ref().is_some_and(|(_, v)| v.contains(a));
+            let views = writes
+                .change(&w.change)
+                .map(|c| c.views.as_slice())
+                .unwrap_or(&[]);
+            let mut content = None;
             for (stable, o) in &open {
-                if !self.intent_covers(&Scope::Inflight, &o.intent, &w.block)?
-                    || in_view(self, w, &o.intent.view)?
-                {
+                let it = &o.intent;
+                let covers = it.blocks.contains(&w.block) || it.area.as_ref().is_some_and(in_areas);
+                if !covers || views.contains(&it.view) {
                     continue;
                 }
+                let content = *content
+                    .get_or_insert_with(|| w.new.as_deref().map(|b| b.content_hash_with(tracking)));
                 let involved = vec![
                     Involved {
                         side: SideRef::Intent {
@@ -175,10 +185,7 @@ impl ReadState {
                         side: SideRef::Change(w.change),
                         block: w.block.clone(),
                         version: w.version,
-                        content: w
-                            .new
-                            .as_deref()
-                            .map(|b| b.content_hash_with(self.reader().tracking())),
+                        content,
                     },
                 ];
                 let found = Found {
@@ -186,7 +193,7 @@ impl ReadState {
                     summary: format!(
                         "intent {} ({}) covers {}, which change {} edits",
                         intent_label(stable),
-                        o.intent.actor,
+                        it.actor,
                         w.block,
                         w.change.short()
                     ),

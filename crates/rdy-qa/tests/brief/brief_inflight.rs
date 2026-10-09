@@ -124,17 +124,16 @@ fn infl1_a_cut_shortens_inflight_and_keeps_coverage() {
         )
         .unwrap();
     }
+    let full = brief_of(&r, &Scope::Canon, &[&s.a]);
+    assert_eq!(
+        full.inflight.views.len(),
+        40,
+        "the 780 edit collisions are cut before a view (Q15, ruling on item 54)"
+    );
     let cov = Coverage {
         ids: vec![s.a.to_string()],
         path: None,
     };
-    // forty views edit one block: their edit collisions are a long `inflight.tensions` list, so
-    // the whole briefing needs a budget far over the default
-    let full = r
-        .read()
-        .brief(&Scope::Canon, &cov, Some(1_000_000))
-        .unwrap();
-    assert_eq!(full.inflight.views.len(), 40);
     let cut = r.read().brief(&Scope::Canon, &cov, Some(300)).unwrap();
     assert!(cut.truncated);
     assert!(cut.inflight.views.len() < 40);

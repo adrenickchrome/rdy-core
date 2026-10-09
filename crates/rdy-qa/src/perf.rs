@@ -116,6 +116,9 @@ fn spec_target(op: &str) -> Option<String> {
         "tension_carry_1k" | "tension_on_change_1k" => {
             "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change and tension detection, included in the write response)"
         }
+        "tension_on_change_delete_1k" | "tension_on_change_view_op_1k" => {
+            "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change, included in the response); a delete and a view op never carry, so this is the in-flight build plus a diff that skips the shared canon part"
+        }
         "tension_settle_1k" => {
             "recorded, no spec target: the writer's post-reply settle (diff and events), compare with tension_carry_1k"
         }
@@ -1145,7 +1148,7 @@ fn tier_tensions(
     };
     let (edited, fresh) = ids.split_at(n);
     assert!(
-        edited.len() > citing && fresh.len() >= 2 * runs.incremental,
+        edited.len() > citing && fresh.len() >= 3 * runs.incremental,
         "canon has claims to cite and to edit besides the in-flight fixture's"
     );
     let section = fx.section.to_string();
@@ -1214,6 +1217,65 @@ fn tier_tensions(
             let took = s.elapsed();
             assert!(!o.tensions.is_empty(), "the write opened a premise shift");
             took
+        },
+    ));
+    // `on_change` of a delete: a delete never carries (it takes a block out of reads the seeds
+    // do not cover), so the response builds the in-flight part of the state after and diffs
+    // it; the canon part both sets share is not copied or diffed
+    out.push(measure_timed(
+        &format!("tension_on_change_delete_1k{sfx}"),
+        runs.incremental,
+        |_| {
+            let before = r.read();
+            before.tensions().expect("warm tensions");
+            let id = fresh.next().expect("a fresh claim");
+            let w = write(r, "inf1", json!([{"op": "delete", "id": id.to_string()}]))
+                .expect("a delete");
+            let change: Hash = w.change.parse().expect("change");
+            let after = r.read();
+            let s = Instant::now();
+            let delta = rdy_engine::tensions::tension_delta(&before, &after, Some(&[change]))
+                .expect("delta");
+            rdy_engine::tensions::delta::on_change(&before, &after, "inf1", None, &delta)
+                .expect("on_change");
+            let took = s.elapsed();
+            assert_eq!(after.tensions_carried(), Some(false), "a delete rebuilds");
+            took
+        },
+    ));
+    // `on_change` of a view op: one of inf2's changes included into a fresh view (its in-flight
+    // set changes, so the state after builds its in-flight part again)
+    let human = writer();
+    let inf2: Vec<String> = r
+        .read()
+        .included("inf2")
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let picked = inf2.last().expect("inf2 holds changes").clone();
+    out.push(measure_timed(
+        &format!("tension_on_change_view_op_1k{sfx}"),
+        runs.incremental,
+        |i| {
+            let name = format!("tvo{i}");
+            let before = r.read();
+            before.tensions().expect("warm tensions");
+            let res = r
+                .view_include(&human, &name, std::slice::from_ref(&picked))
+                .expect("include");
+            let changes: Vec<Hash> = res
+                .added
+                .iter()
+                .chain(&res.added_deps)
+                .map(|h| h.parse().expect("change"))
+                .collect();
+            let after = r.read();
+            let s = Instant::now();
+            let delta = rdy_engine::tensions::tension_delta(&before, &after, Some(&changes))
+                .expect("delta");
+            rdy_engine::tensions::delta::on_change(&before, &after, &name, None, &delta)
+                .expect("on_change");
+            s.elapsed()
         },
     ));
     // the settle: the writer diffs the last settled set and the published one after the reply
@@ -2669,6 +2731,8 @@ mod tests {
             [
                 "tension_carry_1k",
                 "tension_on_change_1k",
+                "tension_on_change_delete_1k",
+                "tension_on_change_view_op_1k",
                 "tension_settle_1k",
                 "tensions_full_1k",
                 "tensions_canon",
@@ -2683,6 +2747,8 @@ mod tests {
         for op in [
             "tension_carry_1k",
             "tension_on_change_1k",
+            "tension_on_change_delete_1k",
+            "tension_on_change_view_op_1k",
             "tension_settle_1k",
             "tensions_full_1k",
             "tensions_canon",

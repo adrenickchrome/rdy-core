@@ -138,8 +138,15 @@ pub struct Rdy {
     briefs: Arc<brief::BriefRegistry>,
     /// The tension detectors every published state runs: the registry, unless a test set others.
     detectors: &'static [&'static dyn tensions::Detector],
-    /// The tension set the last `settle_tensions` recorded, and the `seq` of its state.
-    tension_seen: Option<(Arc<tensions::TensionSet>, Location)>,
+    /// The tension set the last `settle_tensions` recorded, and the publish (`publish_gen`) of
+    /// its state.
+    tension_seen: Option<(Arc<tensions::TensionSet>, u64)>,
+    /// How many states `publish` has published since open: a settle keys on it, so a publish
+    /// with no store write (a pack reload) is settled too.
+    publish_gen: u64,
+    /// The store's last batch end at the last settle (at open: the origin): a settle with no
+    /// batch since names no `by`.
+    settled_batch: Location,
     /// The state `publish` held before the first write since open, while nothing is settled:
     /// the first settle diffs against its set.
     tension_base: Option<Arc<ReadState>>,

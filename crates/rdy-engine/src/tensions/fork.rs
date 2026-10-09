@@ -37,26 +37,21 @@ fn targets_of(b: &Block, into: &mut BTreeSet<BlockId>) {
     }
 }
 
-/// The targets to examine: with `seeds`, the seeds as targets and the targets of the decisions
-/// the seeds are (live in-flight writes, and canon's version); without, every target a live
-/// in-flight write supersedes, and in the canon scope every target canon has a decision for.
-fn targets(
-    cx: &DetectCx<'_>,
-    seeds: Option<&BTreeSet<BlockId>>,
-) -> Result<BTreeSet<BlockId>, RdyError> {
+/// The targets to examine: with `seeds` (in flight: a carry, a landing), the seeds as targets
+/// and the targets of the seeds' live in-flight decision writes (a tension that a seed's canon
+/// version gave involves the seed, so the carry drops it; a canon decision with an in-flight
+/// write is no candidate); without, every target a live in-flight write supersedes, and in the
+/// canon scope (always a full run) every target canon has a decision for.
+fn targets(cx: &DetectCx<'_>, seeds: Option<&BTreeSet<BlockId>>) -> BTreeSet<BlockId> {
     let mut out = BTreeSet::new();
     match seeds {
         Some(seeds) => {
-            let canon = cx.canon_m()?;
             for s in seeds {
                 out.insert(s.clone());
                 for w in cx.writes.live_on(s) {
                     if let Some(b) = w.new.as_deref() {
                         targets_of(b, &mut out);
                     }
-                }
-                if let Some(b) = canon.get(s) {
-                    targets_of(b, &mut out);
                 }
             }
         }
@@ -71,7 +66,7 @@ fn targets(
             }
         }
     }
-    Ok(out)
+    out
 }
 
 /// The decisions that supersede `t`: live in-flight decision writes (not rejected), and canon's
@@ -119,7 +114,7 @@ impl Detector for Fork {
         seeds: Option<&BTreeSet<BlockId>>,
         out: &mut Vec<Found>,
     ) -> Result<(), RdyError> {
-        for t in targets(cx, seeds)? {
+        for t in targets(cx, seeds) {
             let cands = candidates(cx, &t)?;
             for (i, x) in cands.iter().enumerate() {
                 for y in &cands[i + 1..] {

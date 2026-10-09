@@ -498,3 +498,66 @@ proptest! {
         }
     }
 }
+
+/// A detector that always fails.
+struct Failing;
+impl rdy_engine::tensions::Detector for Failing {
+    fn kind(&self) -> rdy_engine::tensions::TensionKind {
+        rdy_engine::tensions::TensionKind::EditCollision
+    }
+    fn detect(
+        &self,
+        _cx: &rdy_engine::tensions::DetectCx<'_>,
+        _seeds: Option<&std::collections::BTreeSet<BlockId>>,
+        _out: &mut Vec<rdy_engine::tensions::Found>,
+    ) -> Result<(), rdy_engine::RdyError> {
+        Err(rdy_engine::RdyError::new(
+            rdy_engine::E_INTERNAL,
+            "boom",
+            "a test detector",
+        ))
+    }
+}
+static FAILING: Failing = Failing;
+static FAILING_DETS: [&dyn rdy_engine::tensions::Detector; 1] = [&FAILING];
+
+/// Final review M14: a tension set that cannot be built never fails a write's consequences or
+/// a briefing (a briefing gates writes); each says so in its own error field.
+#[test]
+fn tonc1_a_tension_read_error_never_fails_the_consequences_or_a_briefing() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    r.set_detectors_for_tests(&FAILING_DETS);
+    let e = Local::new(r);
+    let v = w(&e, "a", upd(&s.c, "C changed."));
+    assert!(v.get("consequences_error").is_none(), "{v:#}");
+    assert!(v["consequences"].is_array(), "{v:#}");
+    assert!(
+        v["consequences_tension_error"]
+            .as_str()
+            .is_some_and(|m| m.contains("boom")),
+        "{v:#}"
+    );
+    assert!(
+        v["on_change_error"]
+            .as_str()
+            .is_some_and(|m| m.contains("boom")),
+        "{v:#}"
+    );
+    let cov = rdy_engine::brief::Coverage {
+        ids: vec![s.a.to_string()],
+        path: None,
+    };
+    let b = e
+        .read()
+        .brief(&rdy_engine::Scope::Canon, &cov, None)
+        .unwrap();
+    assert!(
+        b.inflight
+            .tensions_error
+            .as_deref()
+            .is_some_and(|m| m.contains("boom")),
+        "{:?}",
+        b.inflight
+    );
+}

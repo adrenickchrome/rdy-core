@@ -88,26 +88,11 @@ impl DeprecatedReference {
         Ok(())
     }
 
-    /// The canon form: live canon blocks (the seeds, and the blocks that point at a seed) with a
-    /// pointing edge to a deprecated canon block.
-    fn canon(
-        cx: &DetectCx<'_>,
-        seeds: Option<&BTreeSet<BlockId>>,
-        out: &mut Vec<Found>,
-    ) -> Result<(), RdyError> {
+    /// The canon form: live canon blocks with a pointing edge to a deprecated canon block. The
+    /// canon part is always a full run, so it reads every canon block.
+    fn canon(cx: &DetectCx<'_>, out: &mut Vec<Found>) -> Result<(), RdyError> {
         let m = cx.canon_m()?;
-        let ys: Vec<BlockId> = match seeds {
-            None => m.iter().map(|b| b.id.clone()).collect(),
-            Some(seeds) => {
-                let g = cx.canon_graph()?;
-                let mut ys = BTreeSet::new();
-                for s in seeds {
-                    ys.insert(s.clone());
-                    ys.extend(g.incoming(s).iter().map(|e| e.from.clone()));
-                }
-                ys.into_iter().collect()
-            }
-        };
+        let ys: Vec<BlockId> = m.iter().map(|b| b.id.clone()).collect();
         let mut seen: BTreeSet<(BlockId, BlockId)> = BTreeSet::new();
         for y in ys {
             let Some(b) = m.get(&y) else {
@@ -152,7 +137,7 @@ impl Detector for DeprecatedReference {
     ) -> Result<(), RdyError> {
         match cx.scope() {
             DetectScope::Inflight => Self::inflight(cx, seeds, out),
-            DetectScope::Canon => Self::canon(cx, seeds, out),
+            DetectScope::Canon => Self::canon(cx, out),
         }
     }
 }

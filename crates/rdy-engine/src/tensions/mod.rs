@@ -12,8 +12,12 @@
 //! canon). The tension set is the union of both, by id. A kind reports a canon form only when it
 //! describes a standing condition of canon (fork, duplicate definition and deprecated reference;
 //! Coverage and confidence adds value disagreement and restatement drift), and does so when
-//! `cx.scope()` is `DetectScope::Canon`. An index a new kind adds to `DetectCx` is lazy (a
-//! `OnceLock`), so the kinds that do not read it pay nothing.
+//! `cx.scope()` is `DetectScope::Canon`. The canon part is memoised per canon build, so a
+//! canon-scope run must read canon only: there `cx.writes` is empty, `DetectCx::inflight_m` and
+//! `DetectCx::inflight_graph` return canon's, and a detector must not read the published
+//! state's in-flight set, views or coordination refs through `cx.st`. The canon part is always
+//! a full run (no seeds). An index a new kind adds to `DetectCx` is lazy (a `OnceLock`), so the
+//! kinds that do not read it pay nothing.
 pub mod api;
 pub mod collision;
 pub mod delta;

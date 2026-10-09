@@ -695,3 +695,78 @@ fn tgat1_a_landing_only_fork_is_dismissable_by_its_id() {
     let pb = propose(&mut r, "b");
     approve(&mut r, &pb).unwrap();
 }
+
+/// Final review X1 (ledger, Task 13 note): a tension the gate refuses with that exists only in
+/// its landing form is listed by `rdy_tensions`, marked with its proposal, and the listing the
+/// refusal names (`involving` a change of the version) shows it.
+#[test]
+fn tgat1_a_landing_only_form_is_listed_with_its_proposal() {
+    use rdy_engine::tensions::api::{TensionsRequest, run_tensions};
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    let tok = |r: &Rdy| brief_of(r, &Scope::Canon, &[&s.section]).base.token;
+    let t0 = tok(&r);
+    write_cited_as(&mut r, &ag("a"), "a", term(&s.section, "Fee"), Some(&t0)).unwrap();
+    let pa = propose(&mut r, "a");
+    approve(&mut r, &pa).unwrap();
+    let t1 = tok(&r);
+    write_cited_as(
+        &mut r,
+        &ag("o"),
+        "o",
+        json!([{"op": "update", "id": s.section.to_string(), "fields": {"lifecycle": "draft"}}]),
+        Some(&t1),
+    )
+    .unwrap();
+    let t2 = tok(&r);
+    let wb = write_cited_as(&mut r, &ag("b"), "b", term(&s.section, "fee"), Some(&t2)).unwrap();
+    let cb = change_of(&wb);
+    let pb = propose(&mut r, "b");
+    let refusing: Vec<String> = pb
+        .tensions
+        .iter()
+        .filter(|t| t.refuses == Some(true))
+        .map(|t| t.id.clone())
+        .collect();
+    assert_eq!(refusing.len(), 1, "{:?}", pb.tensions);
+    assert!(
+        open(&r).iter().all(|t| tension_label(&t.id) != refusing[0]),
+        "a landing-only form"
+    );
+    let e = approve(&mut r, &pb).unwrap_err();
+    assert_eq!(e.code, E_BLOCKING_TENSION);
+    assert!(
+        e.fix.contains("rdy tensions --involving <change>"),
+        "{}",
+        e.fix
+    );
+    let engine = Local::new(r);
+    let listed = |req: TensionsRequest| -> Vec<serde_json::Value> {
+        run_tensions(&engine, &writer(), req).unwrap()["tensions"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let all = listed(TensionsRequest::default());
+    let row = all
+        .iter()
+        .find(|t| t["id"] == refusing[0].as_str())
+        .unwrap_or_else(|| panic!("the landing form is listed: {all:#?}"));
+    assert_eq!(row["proposal"], pb.r#ref.as_str(), "{row:#?}");
+    assert_eq!(row["severity"], "blocking");
+    let involving = listed(TensionsRequest {
+        involving: Some(cb.to_string()[..12].to_string()),
+        ..Default::default()
+    });
+    assert!(
+        involving.iter().any(|t| t["id"] == refusing[0].as_str()),
+        "{involving:#?}"
+    );
+    // the in-flight forms carry no proposal
+    assert!(
+        all.iter()
+            .filter(|t| t["id"] != refusing[0].as_str())
+            .all(|t| t.get("proposal").is_none()),
+        "{all:#?}"
+    );
+}

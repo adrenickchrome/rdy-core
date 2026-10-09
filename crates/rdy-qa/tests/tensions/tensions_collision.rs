@@ -356,6 +356,57 @@ fn tcol1_a_double_delete_is_not_a_collision_before_or_after_a_landing() {
     assert!(of_kind(&r, TensionKind::EditCollision).is_empty());
 }
 
+/// Final review X6 (the merge after hotfix 11cf3d3): only a change that depends on the change
+/// that deleted a block in canon undoes the delete; a dependency on another in-flight write of
+/// the block does not.
+#[test]
+fn tcol1_updates_against_a_canon_delete_collide_however_many_the_view_chains() {
+    for n in [1usize, 2] {
+        let (_d, mut r) = project();
+        let s = spec_doc(&mut r);
+        put(&mut r, "v", upd(&s.c, "C one."));
+        if n == 2 {
+            put(&mut r, "v", upd(&s.c, "C two."));
+        }
+        put(&mut r, "d", del(&s.c));
+        land(&mut r, "d").unwrap();
+        assert!(
+            conflicted(&r, "v", &s.c),
+            "n={n}: the merge keeps the delete"
+        );
+        let t = one_involving(&r, TensionKind::EditCollision, &s.c);
+        assert!(has_canon(&t), "n={n}: {t:#?}");
+        assert_eq!(change_sides(&t).len(), 1, "n={n}");
+    }
+}
+
+/// Final review X7 (checklist line 25): a write that resolved its conflict against canon's
+/// version is, for the merge, an edit from that version, so a fresh edit from canon's version
+/// in another view collides with it.
+#[test]
+fn tcol1_a_resolution_and_a_fresh_edit_from_canons_version_collide() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.c, "C by a."));
+    put(&mut r, "b", upd(&s.c, "C by b."));
+    land(&mut r, "a").unwrap();
+    let ops = resolve(&r, "b", &s.c, "C merged by b.");
+    let cb = change_of(&put(&mut r, "b", ops));
+    assert!(!conflicted(&r, "b", &s.c));
+    assert!(of_kind(&r, TensionKind::EditCollision).is_empty());
+    let cf = change_of(&put(&mut r, "f", upd(&s.c, "C by f.")));
+    let t = one_involving(&r, TensionKind::EditCollision, &s.c);
+    let mut want = vec![cb, cf];
+    want.sort();
+    assert_eq!(change_sides(&t), want, "{t:#?}");
+    assert!(!has_canon(&t));
+    land(&mut r, "f").unwrap();
+    assert!(conflicted(&r, "b", &s.c), "the merge agrees once f lands");
+    let t = one_involving(&r, TensionKind::EditCollision, &s.c);
+    assert_eq!(change_sides(&t), vec![cb]);
+    assert!(has_canon(&t));
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: cases(16), ..ProptestConfig::default() })]
     #[test]

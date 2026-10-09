@@ -82,3 +82,23 @@ fn tunj1_landing_an_unjustified_change_resolves_it() {
     land(&mut r, "a").unwrap();
     assert!(of_kind(&r, TensionKind::UnjustifiedChange).is_empty());
 }
+
+/// Checklist line 30: a delete of stable normative content without a justification is
+/// unjustified (the type comes from the deleted block).
+#[test]
+fn tunj1_an_unjustified_delete_of_stable_normative_content_counts() {
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    let tok = brief_of(&r, &Scope::Canon, &[&s.c]).base.token;
+    let w = write_cited_as(
+        &mut r,
+        &ag("a"),
+        "a",
+        json!([{"op": "delete", "id": s.c.to_string()}]),
+        Some(&tok),
+    )
+    .unwrap();
+    let t = one(&r, TensionKind::UnjustifiedChange);
+    assert_eq!(change_sides(&t), vec![change_of(&w)]);
+    assert_eq!(t.blocks(), vec![s.c.clone()]);
+}

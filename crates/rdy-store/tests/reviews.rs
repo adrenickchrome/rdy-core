@@ -74,7 +74,7 @@ fn rvw1_fsck_counts_reviews_and_checks_the_ref_names_its_own_tension() {
     let h2 = s.put_dismissal(&review(k2, "b")).unwrap();
     assert_eq!(s.check_objects().unwrap().reviews, 2);
     // point k1's ref at the review of k2
-    s.set_refs(vec![(format!("{DISMISS_REF}{k1}"), h2.0.to_vec())])
+    s.set_refs_unchecked_for_tests(vec![(format!("{DISMISS_REF}{k1}"), h2.0.to_vec())])
         .unwrap();
     match s.check_objects() {
         Err(StoreError::Decode(m)) => assert!(m.contains("another tension"), "{m}"),
@@ -109,4 +109,78 @@ fn rvw1_the_same_dismissal_again_is_an_idempotent_retry_that_writes_nothing() {
     assert_eq!(s.put_dismissal(&review(k, "fine")).unwrap(), h);
     assert_eq!(s.write_count(), writes, "a retry writes nothing");
     assert_eq!(s.dismissals().unwrap(), vec![(k, h)]);
+}
+
+#[test]
+fn rvw1_a_dismissal_is_one_batch_of_the_review_and_its_ref() {
+    let (_d, mut s) = store();
+    s.put_dismissal(&review(Hash([8; 32]), "fine")).unwrap();
+    let kinds_written: Vec<u8> = s.last_batch().iter().map(|(k, _)| *k).collect();
+    assert_eq!(kinds_written, vec![kinds::REVIEW, kinds::REF_UPDATE]);
+}
+
+#[test]
+fn rvw1_the_general_ref_api_refuses_a_dismiss_ref() {
+    // final review M12: only put_dismissal writes a dismiss/ ref (it is never rewritten)
+    let (_d, mut s) = store();
+    let k = Hash([9; 32]);
+    let h = s.put_dismissal(&review(k, "fine")).unwrap();
+    for name in [
+        format!("{DISMISS_REF}{k}"),
+        format!("{DISMISS_REF}{}", Hash([10; 32])),
+    ] {
+        match s.set_refs(vec![(name.clone(), Hash([11; 32]).0.to_vec())]) {
+            Err(StoreError::Decode(m)) => assert!(m.contains("put_dismissal"), "{m}"),
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+    assert_eq!(s.dismissals().unwrap(), vec![(k, h)]);
+}
+
+/// The fsck error of a store whose refs `refs` were forged in.
+fn fsck_after(refs: Vec<(String, Vec<u8>)>) -> String {
+    let (_d, mut s) = store();
+    s.put_dismissal(&review(Hash([12; 32]), "fine")).unwrap();
+    s.set_refs_unchecked_for_tests(refs).unwrap();
+    match s.check_objects() {
+        Err(StoreError::Decode(m)) => m,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn rvw1_fsck_refuses_a_dismiss_ref_to_a_missing_review() {
+    let k = Hash([13; 32]);
+    let m = fsck_after(vec![(
+        format!("{DISMISS_REF}{k}"),
+        Hash([14; 32]).0.to_vec(),
+    )]);
+    assert!(m.contains("is not a stored review"), "{m}");
+    assert!(m.contains(&k.to_string()), "{m}");
+}
+
+#[test]
+fn rvw1_fsck_refuses_a_dismiss_ref_to_an_object_of_another_kind() {
+    let (_d, mut s) = store();
+    let blob = s.put_blob(b"not a review").unwrap();
+    let k = Hash([15; 32]);
+    s.set_refs_unchecked_for_tests(vec![(format!("{DISMISS_REF}{k}"), blob.0.to_vec())])
+        .unwrap();
+    match s.check_objects() {
+        Err(StoreError::Decode(m)) => {
+            assert!(m.contains("is not a stored review"), "{m}");
+            assert!(m.contains(&k.to_string()), "{m}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn rvw1_fsck_refuses_a_malformed_dismiss_key() {
+    let m = fsck_after(vec![(
+        format!("{DISMISS_REF}not-a-vkey"),
+        Hash([16; 32]).0.to_vec(),
+    )]);
+    assert!(m.contains("dismiss/not-a-vkey"), "{m}");
+    assert!(m.contains("tension vkey"), "{m}");
 }

@@ -631,7 +631,7 @@ fn blocking_tensions(pref: &ProposalRef, refusing: &[TensionInfo]) -> RdyError {
             "landing {pref} would put {} blocking tension(s) into canon",
             refusing.len()
         ),
-        "resolve each with a change, repin the citation, or dismiss it (rdy resolve <tn-…> --dismiss <reason>; a reviewer of another actor or a human); rdy tensions --involving <change> lists them",
+        "resolve each with a change, repin the citation, or dismiss it (rdy resolve <tn-…> --dismiss <reason>; a reviewer of another actor or a human); rdy tensions --involving <change> lists them, a form only this landing gives with its proposal",
     );
     e.issues = refusing
         .iter()

@@ -107,3 +107,33 @@ fn tdup1_two_landed_duplicate_terms_stay_a_duplicate_in_canon() {
     assert_eq!(t.vkey, before.vkey, "re-keyed, not resolved");
     assert_eq!(t.severity, TensionSeverity::Advisory, "draft content");
 }
+
+/// Checklist line 31: two blocks that share both a name and a normative text are one tension,
+/// reported as the name, carried or rebuilt.
+#[test]
+fn tdup1_a_pair_sharing_a_name_and_a_text_is_one_tension_carried_or_rebuilt() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let iface = |name: &str| {
+        json!([{"op": "create", "type": "interface", "id": "$i", "parent": s.section.to_string(),
+                "fields": {"name": name}, "body": "Charges a card once per order."}])
+    };
+    put(&mut r, "a", iface("Pay API"));
+    r.read().tensions().unwrap();
+    put(&mut r, "b", iface("pay  api"));
+    let st = r.read();
+    let pick = |set: &TensionSet| -> Vec<(rdy_model::Hash, String)> {
+        set.iter()
+            .filter(|t| t.kind == TensionKind::DuplicateDefinition)
+            .map(|t| (t.id, t.summary.clone()))
+            .collect()
+    };
+    let carried = pick(&st.tensions().unwrap());
+    assert_eq!(st.tensions_carried(), Some(true));
+    assert_eq!(carried.len(), 1, "{carried:#?}");
+    assert!(
+        carried[0].1.contains("both define \"pay api\""),
+        "{carried:?}"
+    );
+    assert_eq!(carried, pick(&st.tensions_rebuilt().unwrap()));
+}

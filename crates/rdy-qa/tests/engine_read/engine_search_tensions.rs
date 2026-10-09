@@ -59,3 +59,69 @@ fn tsrch1_the_tension_filter_keeps_only_blocks_in_an_open_tension() {
         "a dismissed tension is not open"
     );
 }
+
+/// Checklist line 47: the blocks of a read-time overlap are in an open tension while the intent
+/// is open, and not once it expired.
+#[test]
+fn tsrch1_a_read_time_overlap_counts_until_its_intent_expires() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let it = r
+        .intent_post(
+            &ag("i"),
+            Some("i"),
+            None,
+            &[s.a.to_string()],
+            "rework A",
+            None,
+        )
+        .unwrap();
+    put(&mut r, "b", upd(&s.a, "A by b."));
+    let st = r.read();
+    assert!(
+        st.open_tension_blocks(rdy_engine::now_ms())
+            .unwrap()
+            .contains(&s.a)
+    );
+    assert!(
+        !st.open_tension_blocks(it.expires_at_ms)
+            .unwrap()
+            .contains(&s.a)
+    );
+}
+
+/// Checklist line 47: an all-canon tension (FW-CH6) counts: its blocks are in an open tension.
+#[test]
+fn tsrch1_an_all_canon_tension_counts() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let w = put(
+        &mut r,
+        "w",
+        serde_json::json!([{"op": "create", "type": "claim", "id": "$y",
+            "parent": s.section.to_string(), "body": "Y.",
+            "links": {"decided_by": [{"target": s.decision.to_string()}]}}]),
+    );
+    let y = created(&w, "$y");
+    land(&mut r, "w").unwrap();
+    r.supersede(
+        &ag("n"),
+        "n",
+        &s.decision.to_string(),
+        None,
+        rdy_engine::DecisionInput {
+            parent: s.section.to_string(),
+            statement: "A new rule".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    land(&mut r, "n").unwrap();
+    let t = one_involving(&r, TensionKind::DeprecatedReference, &y);
+    assert!(t.sides.iter().all(|x| matches!(x, SideRef::Canon { .. })));
+    let blocks = r.read().open_tension_blocks(rdy_engine::now_ms()).unwrap();
+    assert!(
+        blocks.contains(&y) && blocks.contains(&s.decision),
+        "{blocks:?}"
+    );
+}

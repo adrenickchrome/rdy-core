@@ -439,3 +439,135 @@ fn tset1_accepting_a_decision_at_landing_keeps_the_vkey() {
 fn created_of(w: &rdy_engine::WriteResult) -> BlockId {
     created(w, "$decision")
 }
+
+/// Counts its canon-scope runs (each is a build of the canon part) and reports every live write.
+struct CountsCanon;
+static CANON_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+impl Detector for CountsCanon {
+    fn kind(&self) -> TensionKind {
+        TensionKind::AreaOverlap
+    }
+    fn detect(
+        &self,
+        cx: &DetectCx<'_>,
+        seeds: Option<&BTreeSet<BlockId>>,
+        out: &mut Vec<Found>,
+    ) -> Result<(), RdyError> {
+        if cx.scope() == DetectScope::Canon {
+            CANON_RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Ok(());
+        }
+        for w in cx.writes.live() {
+            if seeds.is_some_and(|s| !s.contains(&w.block)) {
+                continue;
+            }
+            out.push(Found {
+                kind: TensionKind::AreaOverlap,
+                involved: vec![cx.of_write(w)],
+                summary: "written".into(),
+                stable: true,
+            });
+        }
+        Ok(())
+    }
+}
+static COUNTS_CANON: CountsCanon = CountsCanon;
+static COUNTING: [&dyn Detector; 1] = [&COUNTS_CANON];
+
+/// Checklist line 15: the canon part is built once per canon build: a commit (carried or not), a
+/// view op and an intent never build it again; a landing does.
+#[test]
+fn tset1_the_canon_part_is_built_once_per_canon_build() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    r.set_detectors_for_tests(&COUNTING);
+    let runs = || CANON_RUNS.load(std::sync::atomic::Ordering::SeqCst);
+    let read = |r: &rdy_engine::Rdy| {
+        r.read().tensions().unwrap();
+    };
+    read(&r);
+    let n = runs();
+    let ca = change_of(&put(&mut r, "a", upd(&s.a, "A one.")));
+    read(&r);
+    assert_eq!(r.read().tensions_carried(), Some(true));
+    put(
+        &mut r,
+        "a",
+        serde_json::json!([{"op": "delete", "id": s.c.to_string()}]),
+    );
+    read(&r);
+    assert_eq!(
+        r.read().tensions_carried(),
+        Some(false),
+        "a delete rebuilds"
+    );
+    r.view_include(&ag("b"), "b", &[ca.to_string()]).unwrap();
+    read(&r);
+    r.intent_post(
+        &ag("i"),
+        Some("i"),
+        None,
+        &[s.b.to_string()],
+        "B",
+        Some(60_000),
+    )
+    .unwrap();
+    read(&r);
+    assert_eq!(runs(), n, "canon did not move");
+    land(&mut r, "a").unwrap();
+    read(&r);
+    assert_eq!(runs(), n + 1, "a landing builds it again");
+    let st = r.read();
+    let ids = |set: &TensionSet| set.iter().map(|t| t.id).collect::<Vec<Hash>>();
+    assert_eq!(
+        ids(&st.tensions().unwrap()),
+        ids(&st.tensions_rebuilt().unwrap())
+    );
+}
+
+/// Checklist line 15: a publish that moves nothing the tension set reads keeps the cell (the
+/// same set): a proposal (`Seq`), a tag (`Tags`) and an intent (`Coord` with the alternative
+/// sets' members unchanged). A `Coord` that changes the members starts it again.
+#[test]
+fn tset1_the_cell_is_kept_by_seq_tags_and_a_coord_that_keeps_the_members() {
+    use rdy_engine::alt::AltMemberInput;
+    use std::sync::Arc;
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.a, "A by a."));
+    put(&mut r, "b", upd(&s.a, "A by b."));
+    let set = |r: &rdy_engine::Rdy| r.read().tensions().unwrap();
+    let before = set(&r);
+    r.propose(&writer(), "a", "a").unwrap();
+    assert!(Arc::ptr_eq(&before, &set(&r)), "a proposal (Seq)");
+    r.intent_post(
+        &ag("i"),
+        Some("i"),
+        None,
+        &[s.b.to_string()],
+        "B",
+        Some(60_000),
+    )
+    .unwrap();
+    assert!(
+        Arc::ptr_eq(&before, &set(&r)),
+        "an intent (Coord, members kept)"
+    );
+    let m = |label: &str, view: &str| AltMemberInput {
+        label: label.into(),
+        view: view.into(),
+    };
+    r.alt_create(&ag("o"), "A's wording", None, &[m("x", "a"), m("y", "b")])
+        .unwrap();
+    let after_alt = set(&r);
+    assert!(!Arc::ptr_eq(&before, &after_alt), "the members moved");
+    assert!(
+        of_kind(&r, TensionKind::EditCollision).is_empty(),
+        "members do not collide"
+    );
+    put(&mut r, "w", upd(&s.c, "C by w."));
+    land(&mut r, "w").unwrap();
+    let landed = set(&r);
+    r.tag(&approver(), "v0.1.0", None, None).unwrap();
+    assert!(Arc::ptr_eq(&landed, &set(&r)), "a tag (Tags)");
+}

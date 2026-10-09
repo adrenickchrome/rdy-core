@@ -13,11 +13,11 @@ use crate::{RdyError, ReadState, Scope, Session};
 use rdy_model::{BlockId, Hash};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// `rdy_schema`'s paragraph on tensions.
-pub const TENSIONS_DOC: &str = "rdy_tensions {scope?, kind?, severity?, status?, view?, area?, involving?, reviews?, max_tokens?} lists tensions: disagreements between in-flight changes, between a change and canon, or inside canon. Kinds: edit_collision, fork, premise_shift, area_overlap, duplicate_definition, unjustified_change, deprecated_reference. scope: inflight (default, every tension), canon (tensions whose sides are all canon) or a view. status: open (default) or dismissed. A side is a change id or canon@<landing>; intent overlaps (read_time) have an intent side. A fork, duplicate definition or deprecated reference (from content that is not itself deprecated) stays open in canon after its last change lands, until its trigger stops; the other kinds end when their last change lands (a stale pin in canon is a suspect, not a tension). Members of one alternative set never raise edit_collision with each other. Normative text duplicates need at least duplicate_text_min_words words (a pack setting, default 3). A blocking tension refuses a landing only when a side is in the proposal and every side would be in canon after it (E_BLOCKING_TENSION); a tension whose sides are all canon already never refuses. Resolve a tension with a change (edit or repin a side); dismiss one with rdy_resolve {tension, dismiss: {reason}}: anyone who writes may dismiss an advisory one; a blocking one needs the reviewer role or a human, of another actor than every side's author (E_PERMISSION, E_SELF_REVIEW). A dismissal stays with the tension (status dismissed) until a side's content changes.";
+pub const TENSIONS_DOC: &str = "rdy_tensions {scope?, kind?, severity?, status?, view?, area?, involving?, reviews?, max_tokens?} lists tensions: disagreements between in-flight changes, between a change and canon, or inside canon. Kinds: edit_collision, fork, premise_shift, area_overlap, duplicate_definition, unjustified_change, deprecated_reference. scope: inflight (default, every tension), canon (tensions whose sides are all canon) or a view. status: open (default) or dismissed. A side is a change id or canon@<landing>; intent overlaps (read_time) have an intent side and are resolved through their intent, never dismissed. The listing also shows the landing form of an open proposal (proposal: P-x@n) when it differs from the in-flight one: the gate judges that form, and a refusal names it. A fork, duplicate definition or deprecated reference (from content that is not itself deprecated) stays open in canon after its last change lands, until its trigger stops; the other kinds end when their last change lands (a stale pin in canon is a suspect, not a tension). Members of one alternative set never raise edit_collision with each other. Normative text duplicates need at least duplicate_text_min_words words (a pack setting, default 3). A blocking tension refuses a landing only when a side is in the proposal and every side would be in canon after it (E_BLOCKING_TENSION); a tension whose sides are all canon already never refuses. Resolve a tension with a change (edit or repin a side); dismiss one with rdy_resolve {tension, dismiss: {reason}}: anyone who writes may dismiss an advisory one; a blocking one needs the reviewer role or a human, of another actor than every side's author (E_PERMISSION, E_SELF_REVIEW). A dismissal stays with the tension (status dismissed) until a side's content changes.";
 
 /// One tensions request: which tensions to list. Every filter given must match.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -271,38 +271,51 @@ fn block_areas(st: &ReadState, b: &BlockId) -> Result<Vec<String>, RdyError> {
     Ok(vec![])
 }
 
-/// Every tension a listing can show: the event-derived set and the read-time overlaps as of
-/// now, once each, by id.
-fn candidates(st: &ReadState) -> Result<Vec<Arc<Tension>>, RdyError> {
-    let mut all: std::collections::BTreeMap<Hash, Arc<Tension>> = st
+/// One tension a listing can show, with the open proposal whose landing form it is (for a form
+/// only a landing gives).
+struct Candidate {
+    t: Arc<Tension>,
+    proposal: Option<String>,
+}
+
+/// Every tension a listing can show, once each, by id: the event-derived set, the read-time
+/// overlaps as of now, and the landing forms of every open proposal that the set does not hold
+/// (tgat1: the gate refuses with a landing form, so the listing a refusal names must show it).
+fn candidates(st: &ReadState) -> Result<Vec<Candidate>, RdyError> {
+    let mut all: BTreeMap<Hash, Candidate> = st
         .tensions()?
         .iter()
-        .map(|t| (t.id, Arc::clone(t)))
+        .map(|t| {
+            (
+                t.id,
+                Candidate {
+                    t: Arc::clone(t),
+                    proposal: None,
+                },
+            )
+        })
         .collect();
     for t in st.intent_tensions(now_ms())? {
-        all.entry(t.id).or_insert_with(|| Arc::new(t));
+        all.entry(t.id).or_insert_with(|| Candidate {
+            t: Arc::new(t),
+            proposal: None,
+        });
+    }
+    for (pref, p) in open_proposals(st)? {
+        for t in st.landing_tensions(&p.view, &p.changes)? {
+            all.entry(t.id).or_insert_with(|| Candidate {
+                t,
+                proposal: Some(pref.to_string()),
+            });
+        }
     }
     Ok(all.into_values().collect())
 }
 
-/// The vkeys of every tension that exists now: the listed ones and the landing form of every
-/// open proposal. A dismissal whose vkey is in it still holds.
-fn live_vkeys(st: &ReadState, listed: &[Arc<Tension>]) -> Result<BTreeSet<Hash>, RdyError> {
-    let mut out: BTreeSet<Hash> = listed.iter().map(|t| t.vkey).collect();
-    for (_, p) in open_proposals(st)? {
-        out.extend(
-            st.landing_tensions(&p.view, &p.changes)?
-                .iter()
-                .map(|t| t.vkey),
-        );
-    }
-    Ok(out)
-}
-
 /// Every dismissal review, by time then hash: the review, the tension it dismissed as it was,
-/// who and when, and whether it still holds.
-fn review_rows(st: &ReadState, listed: &[Arc<Tension>]) -> Result<Vec<Value>, RdyError> {
-    let live = live_vkeys(st, listed)?;
+/// who and when, and whether it still holds (its vkey is that of a tension that exists now:
+/// `live`, every candidate of the listing, landing forms included).
+fn review_rows(st: &ReadState, live: &BTreeSet<Hash>) -> Result<Vec<Value>, RdyError> {
     let mut rows = vec![];
     for (vkey, review) in st.dismissals.iter() {
         let r = st.reader().review(review)?;
@@ -341,10 +354,55 @@ fn review_rows(st: &ReadState, listed: &[Arc<Tension>]) -> Result<Vec<Value>, Rd
     Ok(rows.into_iter().map(|(_, _, v)| v).collect())
 }
 
+/// How many of `sizes` (each row's JSON length) fit `room` bytes as a JSON array's elements,
+/// counted from the front: each row after the first adds a comma.
+fn fitting(sizes: &[usize], room: usize) -> usize {
+    let mut used = 0usize;
+    for (i, n) in sizes.iter().enumerate() {
+        used += n + usize::from(i > 0);
+        if used > room {
+            return i;
+        }
+    }
+    sizes.len()
+}
+
+/// The bytes `sizes` take as a JSON array's elements.
+fn array_bytes(sizes: &[usize]) -> usize {
+    sizes.iter().sum::<usize>() + sizes.len().saturating_sub(1)
+}
+
+/// The cut of a listing (checklist 45: each row is measured once, so the cost follows the
+/// rows): how many tensions and reviews to keep, from the front, so that the reply fits
+/// `budget` bytes. `frame` is the reply with both lists empty. Tensions go first, from the end;
+/// reviews go only when no tension is left. Each `…omitted` count a cut adds is counted in.
+fn cut(frame: usize, tensions: &[usize], reviews: &[usize], budget: usize) -> (usize, usize) {
+    let (t, r) = (array_bytes(tensions), array_bytes(reviews));
+    if frame + t + r <= budget {
+        return (tensions.len(), reviews.len());
+    }
+    // a count's key at its widest
+    let key = |name: &str, n: usize| {
+        if n == 0 {
+            0
+        } else {
+            format!(",\"{name}\":{n}").len()
+        }
+    };
+    let frame = frame + key("omitted", tensions.len());
+    let keep_t = fitting(tensions, budget.saturating_sub(frame + r));
+    if keep_t > 0 || frame + r <= budget {
+        return (keep_t, reviews.len());
+    }
+    let frame = frame + key("reviews_omitted", reviews.len());
+    (0, fitting(reviews, budget.saturating_sub(frame)))
+}
+
 /// Lists the tensions `req` selects, blocking first, then by kind, then by id, cut from the end
-/// to `max_tokens` (default `BRIEF_DEFAULT_TOKENS`; four bytes a token) with `omitted`. The
-/// reply is `{tensions, counts: {open, blocking_open, dismissed}, omitted?, reviews?}`; the
-/// counts cover the selection but for the status.
+/// to `max_tokens` (default `BRIEF_DEFAULT_TOKENS`; four bytes a token) with `omitted`: the
+/// tensions first, then the reviews, each row measured once. The reply is `{tensions, counts:
+/// {open, blocking_open, dismissed}, omitted?, reviews?, reviews_omitted?}`; the counts cover
+/// the selection but for the status. A landing-only form carries its `proposal`.
 pub fn run_tensions(
     engine: &dyn Engine,
     _s: &Session,
@@ -359,16 +417,18 @@ pub fn run_tensions(
         .unwrap_or_default();
     let listed = candidates(&st)?;
     let mut kept = vec![];
-    for t in &listed {
-        if f.keeps(&st, t, &in_view)? {
-            kept.push(Arc::clone(t));
+    for c in &listed {
+        if f.keeps(&st, &c.t, &in_view)? {
+            kept.push(c);
         }
     }
-    kept.sort_by_key(|t| (t.severity, t.kind, t.id));
+    kept.sort_by_key(|c| (c.t.severity, c.t.kind, c.t.id));
     let (mut open, mut blocking_open, mut dismissed) = (0, 0, 0);
     let mut infos = vec![];
-    for t in &kept {
-        match st.tension_status(t) {
+    for c in &kept {
+        let t = &c.t;
+        let status = st.tension_status(t);
+        match status {
             TensionStatus::Open => {
                 open += 1;
                 if t.severity == TensionSeverity::Blocking {
@@ -377,41 +437,44 @@ pub fn run_tensions(
             }
             TensionStatus::Dismissed(_) => dismissed += 1,
         }
-        if (st.tension_status(t) != TensionStatus::Open) == f.dismissed {
-            infos.push(st.tension_info(t));
+        if (status != TensionStatus::Open) == f.dismissed {
+            let mut info = st.tension_info(t);
+            info.proposal = c.proposal.clone();
+            infos.push(serde_json::to_value(&info).expect("a tension info serializes"));
         }
     }
-    let mut reviews = if req.reviews == Some(true) {
-        Some(review_rows(&st, &listed)?)
+    let reviews = if req.reviews == Some(true) {
+        let live: BTreeSet<Hash> = listed.iter().map(|c| c.t.vkey).collect();
+        Some(review_rows(&st, &live)?)
     } else {
         None
     };
     let mut out = json!({
-        "tensions": infos,
+        "tensions": [],
         "counts": {"open": open, "blocking_open": blocking_open, "dismissed": dismissed},
     });
-    if let Some(rows) = &reviews {
-        out["reviews"] = json!(rows);
+    if reviews.is_some() {
+        out["reviews"] = json!([]);
     }
     let budget = req
         .max_tokens
         .unwrap_or(BRIEF_DEFAULT_TOKENS)
         .saturating_mul(4);
     let size = |v: &Value| v.to_string().len();
-    let (mut omitted, mut reviews_omitted) = (0usize, 0usize);
-    while size(&out) > budget {
-        if let Some(list) = out["tensions"].as_array_mut()
-            && list.pop().is_some()
-        {
-            omitted += 1;
-        } else if let Some(rows) = reviews.as_mut()
-            && rows.pop().is_some()
-        {
-            reviews_omitted += 1;
-            out["reviews"] = json!(rows);
-        } else {
-            break;
-        }
+    let rows = reviews.unwrap_or_default();
+    let (keep_t, keep_r) = cut(
+        size(&out),
+        &infos.iter().map(size).collect::<Vec<_>>(),
+        &rows.iter().map(size).collect::<Vec<_>>(),
+        budget,
+    );
+    let (omitted, reviews_omitted) = (infos.len() - keep_t, rows.len() - keep_r);
+    infos.truncate(keep_t);
+    out["tensions"] = Value::Array(infos);
+    if req.reviews == Some(true) {
+        let mut rows = rows;
+        rows.truncate(keep_r);
+        out["reviews"] = Value::Array(rows);
     }
     if omitted > 0 {
         out["omitted"] = json!(omitted);
@@ -444,6 +507,51 @@ pub fn run_resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A row-at-a-time cut: drop the last tension (else the last review) while the reply, with
+    /// each omitted count at its widest, is over budget.
+    fn naive(frame: usize, t: &[usize], r: &[usize], budget: usize) -> (usize, usize) {
+        let (mut kt, mut kr) = (t.len(), r.len());
+        let total = |kt: usize, kr: usize| {
+            let key = |name: &str, kept: usize, all: usize| {
+                if kept == all {
+                    0
+                } else {
+                    format!(",\"{name}\":{all}").len()
+                }
+            };
+            frame
+                + array_bytes(&t[..kt])
+                + array_bytes(&r[..kr])
+                + key("omitted", kt, t.len())
+                + key("reviews_omitted", kr, r.len())
+        };
+        while total(kt, kr) > budget {
+            if kt > 0 {
+                kt -= 1;
+            } else if kr > 0 {
+                kr -= 1;
+            } else {
+                break;
+            }
+        }
+        (kt, kr)
+    }
+
+    #[test]
+    fn mten1_the_cut_keeps_what_a_row_at_a_time_cut_keeps() {
+        let t: Vec<usize> = (0..300).map(|i| 200 + (i * 37) % 150).collect();
+        let r: Vec<usize> = (0..40).map(|i| 300 + (i * 53) % 200).collect();
+        for budget in (0..120_000).step_by(997) {
+            for (tt, rr) in [(&t[..], &r[..]), (&t[..], &[][..]), (&[][..], &r[..])] {
+                assert_eq!(
+                    cut(60, tt, rr, budget),
+                    naive(60, tt, rr, budget),
+                    "budget {budget}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn mten1_the_tensions_doc_names_every_kind() {

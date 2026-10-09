@@ -60,6 +60,8 @@ pub struct Writes {
     texted: OrdMap<Hash, Vec<Arc<Write>>>,
     /// Live decision writes that supersede a target, by target, with the part superseded.
     superseding: OrdMap<BlockId, Vec<Superseding>>,
+    /// Live decision writes that supersede or revoke a target, by target, each once.
+    retiring: OrdMap<BlockId, Vec<Arc<Write>>>,
     /// Live writes whose block has a premise or pointing edge to a block, by that block.
     pointing: OrdMap<BlockId, Vec<(Arc<Write>, Edge)>>,
 }
@@ -273,6 +275,9 @@ impl Writes {
         for k in &keys.targets {
             retain_key(&mut self.superseding, k, |(x, _)| &x.block != b);
         }
+        for k in &keys.retired {
+            retain_key(&mut self.retiring, k, |x| &x.block != b);
+        }
         for k in &keys.pointed {
             retain_key(&mut self.pointing, k, |(x, _)| &x.block != b);
         }
@@ -297,6 +302,11 @@ impl Writes {
         for k in &keys.targets {
             if let Some(v) = self.superseding.get_mut(k) {
                 v.sort_by(|(x, _), (y, _)| order(x, y));
+            }
+        }
+        for k in &keys.retired {
+            if let Some(v) = self.retiring.get_mut(k) {
+                v.sort_by(|x, y| order(x, y));
             }
         }
         for k in &keys.pointed {
@@ -331,6 +341,12 @@ impl Writes {
                     .entry(l.target.clone())
                     .or_default()
                     .push((Arc::clone(w), l.part.clone()));
+            }
+            for t in retired_by(b) {
+                let list = self.retiring.entry(t).or_default();
+                if !list.iter().any(|x| Arc::ptr_eq(x, w)) {
+                    list.push(Arc::clone(w));
+                }
             }
         }
         for e in edges_of(b) {
@@ -396,6 +412,11 @@ impl Writes {
         self.superseding.get(t).cloned().unwrap_or_default()
     }
 
+    /// The live decision writes that supersede or revoke `t`, each once, by change.
+    pub fn retiring(&self, t: &BlockId) -> Vec<Arc<Write>> {
+        self.retiring.get(t).cloned().unwrap_or_default()
+    }
+
     /// The live writes whose block has a pointing or premise edge to `x`, with that edge.
     pub fn pointing_at(&self, x: &BlockId) -> Vec<(Arc<Write>, Edge)> {
         self.pointing.get(x).cloned().unwrap_or_default()
@@ -416,6 +437,18 @@ fn writes_of(change: &Change) -> ChangeWrites {
             .or_insert((op.base(), new));
     }
     blocks
+}
+
+/// The blocks decision `b` supersedes or revokes (none for another block type), each once.
+pub fn retired_by(b: &Block) -> BTreeSet<BlockId> {
+    if b.block_type != decision::DECISION {
+        return BTreeSet::new();
+    }
+    [decision::SUPERSEDES, decision::REVOKES]
+        .into_iter()
+        .flat_map(|k| b.links.get(k).into_iter().flatten())
+        .map(|l| l.target.clone())
+        .collect()
 }
 
 /// Keeps the entries of `map[k]` that `keep` accepts; a key left with none is removed.
@@ -442,6 +475,7 @@ struct IndexKeys {
     names: BTreeSet<String>,
     texts: BTreeSet<Hash>,
     targets: BTreeSet<BlockId>,
+    retired: BTreeSet<BlockId>,
     pointed: BTreeSet<BlockId>,
 }
 
@@ -465,6 +499,7 @@ impl IndexKeys {
             for l in b.links.get(decision::SUPERSEDES).into_iter().flatten() {
                 self.targets.insert(l.target.clone());
             }
+            self.retired.extend(retired_by(b));
         }
         for e in edges_of(b) {
             if premise_edge(&e) || pointing_edge(&e) {
@@ -614,11 +649,14 @@ impl<'a> DetectCx<'a> {
         self.st.materialized(&Scope::Canon)
     }
 
-    /// The in-flight materialization (a landing's run: the canon its landing would give).
+    /// The in-flight materialization (a landing's run: the canon its landing would give). In the
+    /// canon scope, canon's: the canon part is memoised per canon build, so a canon-scope run
+    /// never reads in-flight data.
     pub fn inflight_m(&self) -> Result<Arc<Materialized>, RdyError> {
-        match &self.landing {
-            Some((m, _)) => Ok(Arc::clone(m)),
-            None => self.st.materialized(&Scope::Inflight),
+        match (&self.landing, self.scope) {
+            (_, DetectScope::Canon) => self.canon_m(),
+            (Some((m, _)), DetectScope::Inflight) => Ok(Arc::clone(m)),
+            (None, DetectScope::Inflight) => self.st.materialized(&Scope::Inflight),
         }
     }
 
@@ -626,29 +664,25 @@ impl<'a> DetectCx<'a> {
         self.st.graph(&Scope::Canon)
     }
 
-    /// The in-flight graph (a landing's run: the graph of the canon its landing would give).
+    /// The in-flight graph (a landing's run: the graph of the canon its landing would give). In
+    /// the canon scope, canon's (see [`DetectCx::inflight_m`]).
     pub fn inflight_graph(&self) -> Result<Arc<Graph>, RdyError> {
-        match &self.landing {
-            Some((_, g)) => Ok(Arc::clone(g)),
-            None => self.st.graph(&Scope::Inflight),
+        match (&self.landing, self.scope) {
+            (_, DetectScope::Canon) => self.canon_graph(),
+            (Some((_, g)), DetectScope::Inflight) => Ok(Arc::clone(g)),
+            (None, DetectScope::Inflight) => self.st.graph(&Scope::Inflight),
         }
     }
 
     /// The materialization `stable`, `deprecated` and `areas_of` read: the in-flight one, or
     /// canon's in the canon scope.
     fn current_m(&self) -> Result<Arc<Materialized>, RdyError> {
-        match self.scope {
-            DetectScope::Inflight => self.inflight_m(),
-            DetectScope::Canon => self.canon_m(),
-        }
+        self.inflight_m()
     }
 
     /// The graph of [`DetectCx::current_m`].
     fn current_graph(&self) -> Result<Arc<Graph>, RdyError> {
-        match self.scope {
-            DetectScope::Inflight => self.inflight_graph(),
-            DetectScope::Canon => self.canon_graph(),
-        }
+        self.inflight_graph()
     }
 
     /// The content hash of `b` as a vkey hashes it: [`Block::content_hash_with`] the tracking
@@ -733,31 +767,17 @@ impl<'a> DetectCx<'a> {
     }
 
     /// The side that holds `b`'s current version (in flight, or canon's in the canon scope) and
-    /// that version (`None`: an in-flight delete). In flight: the live write of that version
-    /// (the merge's last writer first), else any write of it, else canon's side when canon has
-    /// that version. `None` when `b` is absent and nothing deletes it.
+    /// that version (`None`: an in-flight delete). In flight: the live write of that version with
+    /// the smallest change id, else any write of it (the smallest change id), else canon's side
+    /// when canon has that version. A function of the in-flight writes, so two states with one
+    /// change set name one side. `None` when `b` is absent and nothing deletes it.
     pub fn side_at(&self, b: &BlockId) -> Result<Option<(SideRef, Option<Hash>)>, RdyError> {
         if self.scope == DetectScope::Canon {
             return Ok(self.canon_side(b)?.map(|(s, v)| (s, Some(v))));
         }
         let v = self.inflight_m()?.version_of(b);
-        // the merge's last writer is the published in-flight scope's (none for a landing's run)
-        let last = match self.landing {
-            Some(_) => None,
-            None => self
-                .st
-                .inflight_cell
-                .last
-                .get()
-                .and_then(|l| l.get(b).copied()),
-        };
-        let live = self.writes.live_on(b);
-        let matching: Vec<&Arc<Write>> = live.iter().filter(|w| w.version == v).collect();
-        if let Some(w) = matching
-            .iter()
-            .find(|w| Some(w.change) == last)
-            .or(matching.first())
-        {
+        // writes on a block are in change-id order
+        if let Some(w) = self.writes.live_on(b).iter().find(|w| w.version == v) {
             return Ok(Some((SideRef::Change(w.change), v)));
         }
         if let Some(w) = self.writes.all_on(b).iter().find(|w| w.version == v) {

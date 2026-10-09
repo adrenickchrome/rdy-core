@@ -524,3 +524,180 @@ fn tdis1_a_repin_or_tracking_edit_keeps_a_dismissal() {
         TensionStatus::Dismissed(_)
     ));
 }
+
+#[test]
+fn tdis1_the_actor_who_wrote_canons_version_back_is_its_author() {
+    // final review X5 (ruling on items 37/42): a canon version is credited to the producer that
+    // carried it into canon last, as of canon's head, not to the one that wrote it first
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let rw = |run: &str| as_agent("agent:r", run);
+    let v0 = r
+        .read()
+        .materialized(&rdy_engine::Scope::Canon)
+        .unwrap()
+        .version_of(&s.a)
+        .unwrap();
+    write_as(&mut r, &rw("w1"), "w1", upd(&s.a, "A one.")).unwrap();
+    land(&mut r, "w1").unwrap();
+    put(&mut r, "z", upd(&s.a, "A by z."));
+    let original = r.store().get_block(&v0).unwrap().body;
+    write_as(&mut r, &rw("w2"), "w2", upd(&s.a, &original)).unwrap();
+    land(&mut r, "w2").unwrap();
+    let v2 = r
+        .read()
+        .materialized(&rdy_engine::Scope::Canon)
+        .unwrap()
+        .version_of(&s.a)
+        .unwrap();
+    assert_eq!(v2, v0, "agent:r wrote A back to its first version");
+    let t = one_involving(&r, TensionKind::EditCollision, &s.a);
+    assert!(has_canon(&t), "{t:#?}");
+    let canon = r
+        .read()
+        .tension_info(&t)
+        .sides
+        .into_iter()
+        .find(|x| x.side.starts_with("canon"))
+        .unwrap();
+    assert_eq!(canon.actor.as_deref(), Some("agent:r"), "{canon:#?}");
+    let e = r
+        .dismiss_tension(&reviewer("agent:r", "rev"), &tension_label(&t.id), "fine")
+        .unwrap_err();
+    assert_eq!(e.code, rdy_engine::E_SELF_REVIEW, "{e}");
+    r.dismiss_tension(&reviewer("agent:q", "rq"), &tension_label(&t.id), "fine")
+        .unwrap();
+}
+
+#[test]
+fn tdis1_an_absent_canon_item_with_no_author_fails_closed() {
+    // ruling on item 42: an absent canon item that names no author never shows a session
+    // independent of it
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    r.set_detectors_for_tests(&GONE_DETS);
+    put(
+        &mut r,
+        "a",
+        serde_json::json!([{"op": "create", "type": "claim", "id": "$n",
+            "parent": s.section.to_string(), "body": "New."}]),
+    );
+    let t = pick(&r, TensionKind::EditCollision);
+    let e = r
+        .dismiss_tension(&reviewer("agent:r", "rr"), &tension_label(&t.id), "x")
+        .unwrap_err();
+    assert_eq!(e.code, rdy_engine::E_SELF_REVIEW, "{e}");
+    assert!(e.message.contains("cannot be read"), "{}", e.message);
+}
+
+#[test]
+fn tdis1_tension_info_lists_every_author_of_a_canon_side() {
+    let (_d, mut r) = project();
+    r.set_detectors_for_tests(&CANON_DETS);
+    let s = spec_doc(&mut r);
+    let other = Session::human("human:other".into(), Role::Writer);
+    write_as(&mut r, &writer(), "work", upd(&s.c, "C paired.")).unwrap();
+    write_as(
+        &mut r,
+        &other,
+        "work",
+        serde_json::json!([{"op": "create", "type": "claim", "id": "$e",
+            "parent": s.section.to_string(), "body": "E paired."}]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let t = pick(&r, TensionKind::EditCollision);
+    let info = r.read().tension_info(&t);
+    assert_eq!(info.sides.len(), 1);
+    let mut authors = info.sides[0].authors.clone();
+    authors.sort();
+    assert_eq!(authors, vec!["human:other", "human:qa"], "{info:#?}");
+}
+
+#[test]
+fn tdis1_a_read_time_overlap_cannot_be_dismissed() {
+    // ruling on items 31/36: an intent overlap is read-time; it is resolved through the intent
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    r.intent_post(
+        &ag("i"),
+        Some("i"),
+        None,
+        &[s.a.to_string()],
+        "rework A",
+        Some(3_600_000),
+    )
+    .unwrap();
+    put(&mut r, "b", upd(&s.a, "A by b."));
+    let it = r.read().intent_tensions(rdy_engine::now_ms()).unwrap();
+    assert_eq!(it.len(), 1, "{it:#?}");
+    r.settle_tensions().unwrap();
+    let rx = r.subscribe();
+    let e = r
+        .dismiss_tension(&ag("b"), &tension_label(&it[0].id), "fine")
+        .unwrap_err();
+    assert_eq!(e.code, rdy_engine::E_BAD_INPUT, "{e}");
+    assert_eq!(
+        e.message,
+        "intent overlaps are read-time; resolve the intent instead"
+    );
+    r.settle_tensions().unwrap();
+    let ev: Vec<EventKind> = rx.try_iter().map(|e| e.kind.clone()).collect();
+    assert!(
+        !ev.iter()
+            .any(|k| matches!(k, EventKind::TensionDismissed { .. })),
+        "{ev:?}"
+    );
+    assert!(
+        r.store().dismissals().unwrap().is_empty(),
+        "no review written"
+    );
+}
+
+#[test]
+fn tdis1_the_refusals_say_exactly_why() {
+    let (_d, mut r, _c) = setup(&ag("a"), "a");
+    let blocking = tension_label(&pick(&r, TensionKind::EditCollision).id);
+    let e = r.dismiss_tension(&ag("b"), &blocking, "x").unwrap_err();
+    assert_eq!(
+        (e.message.as_str(), e.fix.as_str()),
+        (
+            "dismissing a blocking tension needs the reviewer role or a human session",
+            "start a session with role reviewer, or ask a human"
+        )
+    );
+    let t = pick(&r, TensionKind::AreaOverlap);
+    let info = r
+        .dismiss_tension(&ag("b"), &tension_label(&t.id), "ok")
+        .unwrap();
+    let e = r
+        .dismiss_tension(&ag("c"), &tension_label(&t.id), "again")
+        .unwrap_err();
+    assert_eq!(
+        e.message,
+        format!(
+            "tension {} is already dismissed by review {} (agent:b)",
+            tension_label(&t.id),
+            &info.review[..12]
+        )
+    );
+    let review = r.store().review(&info.review.parse().unwrap()).unwrap();
+    let rdy_model::ReviewSubject::Tension {
+        id,
+        vkey,
+        kind,
+        severity,
+        sides,
+        blocks,
+    } = review.subject;
+    assert_eq!((id, vkey), (t.id, t.vkey));
+    assert_eq!(
+        (kind.as_str(), severity.as_str()),
+        ("area_overlap", "advisory")
+    );
+    assert_eq!(
+        sides,
+        t.sides.iter().map(SideRef::label).collect::<Vec<_>>()
+    );
+    assert_eq!(blocks, t.blocks());
+}

@@ -11,7 +11,7 @@ use crate::review::DISMISS_REF;
 use crate::view::{ViewHead, ViewOpKind, resolve};
 use rdy_model::{
     AltChoice, AltSet, AltStatus, Assurance, Change, EvidenceKind, Hash, Intent, LandingRecord,
-    Review,
+    Review, Verdict,
 };
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -136,12 +136,19 @@ impl StoreReader {
         })
     }
 
-    /// Every `dismiss/` ref names a stored review whose subject's vkey is the ref's key. Returns
-    /// how many refs there are.
+    /// Every `dismiss/` ref is keyed by a tension vkey and names a stored review with verdict
+    /// `Dismiss` whose subject's vkey is the ref's key. Returns how many refs there are.
     fn check_dismissals(&self) -> Result<usize, StoreError> {
         let mut n = 0;
         for (key, value) in self.refs_with_prefix(DISMISS_REF)? {
-            let vkey = key_hash(&key, DISMISS_REF, "dismissal")?;
+            let vkey: Hash = key
+                .strip_prefix(DISMISS_REF)
+                .and_then(|k| k.parse().ok())
+                .ok_or_else(|| {
+                    bad(format!(
+                        "ref {key:?} does not name a dismissal by its tension vkey"
+                    ))
+                })?;
             let h = crate::index::hash_from(&value, &format!("dismissal ref {vkey}"))?;
             let r: Review = match self.get_typed(kinds::REVIEW, &h) {
                 Err(StoreError::NotFound(_)) => {
@@ -149,6 +156,11 @@ impl StoreReader {
                 }
                 r => r?,
             };
+            if r.verdict != Verdict::Dismiss {
+                return Err(bad(format!(
+                    "dismissal {vkey}: review {h} is not a dismissal"
+                )));
+            }
             if r.vkey() != Some(vkey) {
                 return Err(bad(format!(
                     "dismissal {vkey}: review {h} is for another tension"

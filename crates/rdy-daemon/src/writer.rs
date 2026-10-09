@@ -222,8 +222,11 @@ impl Writer {
             };
             let published = match msg {
                 Msg::Run(f, reply) => {
-                    // its outcome is logged and reported in the replies' notices
-                    let _ = self.maybe_reload(&mut rdy);
+                    // its outcome is logged and reported in the replies' notices; a reload's
+                    // tension events are settled before the write's, with no `by`
+                    if let Ok(ReloadOutcome::Reloaded) = self.maybe_reload(&mut rdy) {
+                        self.settle(&mut rdy);
+                    }
                     let out = match catch_unwind(AssertUnwindSafe(|| f(&mut rdy))) {
                         Ok(out) => out,
                         Err(p) => {
@@ -245,7 +248,12 @@ impl Writer {
                 Msg::Reload(reply) => {
                     let out = self.maybe_reload(&mut rdy);
                     let published = self.publish(&rdy);
+                    let reloaded = matches!(out, Ok(ReloadOutcome::Reloaded));
                     let _ = reply.send(out);
+                    // a reload changes the tension set without a store write (M8)
+                    if reloaded {
+                        self.settle(&mut rdy);
+                    }
                     published
                 }
                 Msg::Shutdown(reply) => {

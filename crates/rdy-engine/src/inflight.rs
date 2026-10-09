@@ -6,6 +6,7 @@ use crate::error::*;
 use crate::gate::open_proposals;
 use crate::intent::status_open_at;
 use crate::session::{now_ms, rfc3339};
+use crate::tensions::Tension;
 use crate::tensions::info::TensionInfo;
 use crate::views::OwnerInfo;
 use crate::{ReadState, Scope};
@@ -30,9 +31,23 @@ pub struct Inflight {
     pub proposals: Vec<InflightProposal>,
     /// Open, unexpired intents of other views on a covered block or its area, by id.
     pub intents: Vec<InflightIntent>,
-    /// Tensions that involve a covered block, open or dismissed, by id: the event-derived set
-    /// (all-canon tensions included) and the read-time overlaps.
+    /// Tensions that involve a covered block, open or dismissed, blocking first, then by kind,
+    /// then by id: the event-derived set (all-canon tensions included) and the read-time
+    /// overlaps. A cut briefing pages them like any list, after the Q15 rule (FW Q15, ruling
+    /// on item 54): their sides go first (`tensions_detail_cut`), then advisory ones collapse
+    /// into `tensions_collapsed`; a blocking one is never collapsed.
     pub tensions: Vec<TensionInfo>,
+    /// The cut left out every listed tension's `sides`; `rdy_tensions {involving: <block>}`
+    /// has them.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub tensions_detail_cut: bool,
+    /// Advisory tensions this page leaves out, by kind (also in `omitted`); a later page lists
+    /// them, or collapses them again.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub tensions_collapsed: BTreeMap<String, usize>,
+    /// Why the tensions could not be read (the rest of the briefing stands).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tensions_error: Option<String>,
 }
 
 /// An open view that changes covered blocks.
@@ -196,31 +211,39 @@ impl ReadState {
             });
         }
         let intents = self.inflight_intents(scope, own, ids)?;
-        let tensions = self.inflight_tensions(ids)?;
+        // the tensions never fail a briefing (a briefing gates writes): an error is reported
+        let (tensions, tensions_error) = match self.inflight_tensions(ids) {
+            Ok(t) => (t, None),
+            Err(e) => (vec![], Some(format!("{}: {}", e.code, e.message))),
+        };
         Ok(Inflight {
             views,
             proposals,
             intents,
             tensions,
+            tensions_error,
+            ..Inflight::default()
         })
     }
 
     /// The tensions that involve any of `ids`, open or dismissed: the event-derived set and the
-    /// read-time overlaps as of now, each once, by id.
+    /// read-time overlaps as of now, each once, blocking first, then by kind, then by id.
     fn inflight_tensions(&self, ids: &BTreeSet<BlockId>) -> Result<Vec<TensionInfo>, RdyError> {
         let set = self.tensions()?;
-        let mut found: BTreeMap<Hash, TensionInfo> = BTreeMap::new();
+        let mut found: BTreeMap<Hash, Arc<Tension>> = BTreeMap::new();
         for id in ids {
             for t in set.involving_block(id) {
-                found.entry(t.id).or_insert_with(|| self.tension_info(&t));
+                found.entry(t.id).or_insert(t);
             }
         }
         for t in self.intent_tensions(now_ms())? {
             if t.blocks().iter().any(|b| ids.contains(b)) {
-                found.entry(t.id).or_insert_with(|| self.tension_info(&t));
+                found.entry(t.id).or_insert_with(|| Arc::new(t));
             }
         }
-        Ok(found.into_values().collect())
+        let mut found: Vec<Arc<Tension>> = found.into_values().collect();
+        found.sort_by_key(|t| (t.severity, t.kind, t.id));
+        Ok(found.iter().map(|t| self.tension_info(t)).collect())
     }
 
     /// The open intents (as of now) of views other than `own` that cover any of `ids` in

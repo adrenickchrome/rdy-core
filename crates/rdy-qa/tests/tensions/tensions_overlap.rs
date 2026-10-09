@@ -116,3 +116,67 @@ fn tovl1_landing_one_of_the_decisions_ends_the_overlap() {
     land(&mut r, "a").unwrap();
     assert!(of_kind(&r, TensionKind::AreaOverlap).is_empty());
 }
+
+/// Checklist line 29: an intent in the view of the change that edits the block is no overlap.
+#[test]
+fn tovl1_an_intent_in_the_writes_own_view_is_no_overlap() {
+    let (_d, mut r) = qa_project();
+    let (_s, x, _y) = payments(&mut r);
+    r.intent_post(
+        &ag("b"),
+        Some("b"),
+        None,
+        &[x.to_string()],
+        "rework fees",
+        None,
+    )
+    .unwrap();
+    put(&mut r, "b", upd(&x, "Fees are weekly."));
+    assert!(r.read().intent_tensions(now_ms()).unwrap().is_empty());
+}
+
+/// Checklist line 29: an intent on an area covers the area's blocks.
+#[test]
+fn tovl1_an_intent_on_an_area_covers_its_blocks() {
+    let (_d, mut r) = qa_project();
+    let (_s, x, _y) = payments(&mut r);
+    r.intent_post(&ag("c"), None, Some("payments"), &[], "rework fees", None)
+        .unwrap();
+    let cb = change_of(&put(&mut r, "b", upd(&x, "Fees are weekly.")));
+    let ts = r.read().intent_tensions(now_ms()).unwrap();
+    assert_eq!(ts.len(), 1, "{ts:#?}");
+    assert_eq!(change_sides(&ts[0]), vec![cb]);
+    assert_eq!(ts[0].blocks(), vec![x]);
+}
+
+/// Checklist line 29: a rejected decision never overlaps.
+#[test]
+fn tovl1_a_rejected_decision_never_overlaps() {
+    let (_d, mut r) = qa_project();
+    let (s, x, _y) = payments(&mut r);
+    decide(&mut r, "a", &s, &x);
+    // a human records a rejected decision (an agent may write only proposed ones)
+    write_as(
+        &mut r,
+        &approver(),
+        "b",
+        json!([{"op": "create", "type": "decision", "id": "$d", "parent": s.to_string(),
+                "fields": {"statement": "b decides", "status": "rejected",
+                           "decided_at": "2021-01-10T09:00:00Z", "recorded_at": "2021-01-10T09:00:00Z"},
+                "links": {"affects": [{"target": x.to_string()}]}}]),
+    )
+    .unwrap();
+    assert!(of_kind(&r, TensionKind::AreaOverlap).is_empty());
+}
+
+/// Checklist line 29: two decisions whose changes share a view never overlap.
+#[test]
+fn tovl1_decisions_of_changes_that_share_a_view_never_overlap() {
+    let (_d, mut r) = qa_project();
+    let (s, x, _y) = payments(&mut r);
+    decide(&mut r, "a", &s, &x);
+    let cb = change_of(&decide(&mut r, "b", &s, &x));
+    one(&r, TensionKind::AreaOverlap);
+    r.view_include(&ag("a"), "a", &[cb.to_string()]).unwrap();
+    assert!(of_kind(&r, TensionKind::AreaOverlap).is_empty());
+}

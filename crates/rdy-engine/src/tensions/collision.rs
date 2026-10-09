@@ -5,17 +5,23 @@
 //! write whose base is the version of an in-flight write its change lists in its deps), back to
 //! the chain's root base. A view that writes a block twice edits it from its first base.
 //!
-//! (a) Every pair of live writes on one block from distinct changes with equal root bases and
+//! The chain is then judged against canon as the merge does (hotfix 11cf3d3). It is against
+//! canon when canon's version is neither its root base nor the version of its first write (the
+//! merge reads the first write as clean only then, and a later chain write does not cover
+//! canon's side of the conflict the first write records), and the chain is not built on
+//! canon's side: it does not depend (directly, or through in-flight changes that write the
+//! block) on the producer of canon's version or, when canon has no version of the block, on
+//! the change that deleted it (as of canon's head). A canon version with no known producer is
+//! settled by a chain that depends on another in-flight write of the block; a delete with no
+//! known deleter is never undone. A chain that is not against canon edits, for the merge, from
+//! canon's version: that is its root, so a resolution pairs with a fresh edit from canon.
+//!
+//! (a) Every pair of live writes on one block from distinct changes with equal roots and
 //! different outcomes, where neither chain lists the other change in its deps and the two are not
 //! a member pair of one open alternative set (FW-CH6a: the set's own rules govern them). (b) A
-//! live write whose chain meets canon's version only after its first write (canon's version is
-//! neither the root base nor the version of the chain's first write: the merge reads the first
-//! write as clean only then, and a later chain write does not cover canon's side of the conflict
-//! the first write records), and whose chain does not depend on canon's version: on the producer
-//! of canon's version (directly, or through in-flight changes that write the block), or, when canon has no version of the block, on an in-flight write of the
-//! block (the merge reads that as the resolution of the delete). A single write with canon's
-//! outcome is its own first write, so equal outcomes never collide. No canon-scope form
-//! (FW-CH6a): canon holds one version per block, and the trigger needs in-flight work.
+//! live write whose chain is against canon. A single write with canon's outcome is its own first
+//! write, so equal outcomes never collide. No canon-scope form (FW-CH6a): canon holds one
+//! version per block, and the trigger needs in-flight work.
 use super::{DetectCx, DetectScope, Detector, Found, SideRef, TensionKind, Write};
 use crate::RdyError;
 use rdy_model::{BlockId, Hash};
@@ -25,12 +31,15 @@ use std::sync::Arc;
 /// This kind's detector.
 pub struct EditCollision;
 
-/// A live write's chain on its block: the root base, the version of the chain's first write (the
-/// write whose base is the root), and the changes on the chain, the write's own change among them.
+/// A live write's chain on its block: the root base (canon's version when the merge reads the
+/// chain as built on it), the version of the chain's first write (the write whose base is the
+/// root), the changes on the chain, the write's own change among them, and whether the merge
+/// reads it as against canon's version.
 struct Chain {
     root: Option<Hash>,
     first: Option<Hash>,
     changes: BTreeSet<Hash>,
+    against: bool,
 }
 
 impl Detector for EditCollision {
@@ -63,7 +72,24 @@ impl Detector for EditCollision {
                 continue;
             }
             let all = cx.writes.all_on(&b);
-            let chains: Vec<Chain> = live.iter().map(|w| chain(cx, &all, w)).collect();
+            let cv = canon.version_of(&b);
+            let mut chains: Vec<Chain> = live.iter().map(|w| chain(cx, &all, w)).collect();
+            if chains.iter().any(|ch| ch.root != cv && ch.first != cv) {
+                // canon's side as the merge reads it: the producer of canon's version, or the
+                // change that deleted the block (as of canon's head)
+                let reader = cx.st.reader();
+                let owner = match cv {
+                    Some(v) => Owner::Producer(reader.producer(&v)?),
+                    None => Owner::Deleter(reader.deleter_at(&b, cx.st.canon_head().as_ref())?),
+                };
+                for ch in &mut chains {
+                    judge(cx, ch, &all, cv, &owner);
+                }
+            } else {
+                for ch in &mut chains {
+                    ch.root = cv;
+                }
+            }
             let mut found = vec![];
             // (a) pairs from one root base, in change-id order
             for (i, (w1, ch1)) in live.iter().zip(&chains).enumerate() {
@@ -83,37 +109,19 @@ impl Detector for EditCollision {
                     ));
                 }
             }
-            // (b) a live write whose chain's first write is against canon's version
-            let cv = canon.version_of(&b);
-            let stale = |ch: &Chain| ch.root != cv && ch.first != cv;
-            let against: Vec<(&Arc<Write>, &Chain)> = live
+            // (b) a live write whose chain the merge reads as against canon's version
+            let against: Vec<&Arc<Write>> = live
                 .iter()
                 .zip(&chains)
-                .filter(|(_, ch)| stale(ch))
+                .filter(|(_, ch)| ch.against)
+                .map(|(w, _)| w)
                 .collect();
             if !against.is_empty() {
-                let producer = match cv {
-                    Some(v) => cx.st.reader().producer(&v)?,
-                    None => None,
-                };
                 let canon_side = match cx.canon_side(&b)? {
                     Some((side, v)) => cx.involved(side, &b, Some(v))?,
                     None => cx.involved(SideRef::Canon { landing: None }, &b, None)?,
                 };
-                for (w, ch) in against {
-                    let built_on = match (cv, producer) {
-                        (Some(_), Some(p)) => chain_reaches(cx, ch, &all, &p),
-                        (Some(_), None) => false,
-                        // canon deleted b: a side with no change counts as covered in the merge,
-                        // so a chain that depends on an in-flight write of b resolves the delete
-                        (None, _) => ch.changes.iter().any(|c| {
-                            all.iter()
-                                .any(|y| y.change != *c && depends(cx, c, &y.change))
-                        }),
-                    };
-                    if built_on {
-                        continue;
-                    }
+                for w in against {
                     found.push((
                         vec![cx.of_write(w), canon_side.clone()],
                         format!(
@@ -138,6 +146,16 @@ impl Detector for EditCollision {
     }
 }
 
+/// Canon's side of a block as the merge reads it.
+enum Owner {
+    /// Canon holds the block: the producer of its version (`None`: no known producer, which
+    /// the merge reads as settled).
+    Producer(Option<Hash>),
+    /// Canon lacks the block: the change that deleted it (`None`: no known deleter, which no
+    /// change can undo).
+    Deleter(Option<Hash>),
+}
+
 /// Live write `w`'s chain among `all`, the writes on its block: walk back while the current base
 /// is the version of an in-flight write whose change the current change lists in its deps.
 fn chain(cx: &DetectCx<'_>, all: &[Arc<Write>], w: &Write) -> Chain {
@@ -156,6 +174,36 @@ fn chain(cx: &DetectCx<'_>, all: &[Arc<Write>], w: &Write) -> Chain {
         root,
         first,
         changes,
+        against: false,
+    }
+}
+
+/// Judges chain `ch` (among `all`, the writes on its block) against canon's version `cv`, held
+/// by `owner`, as the merge does: the chain is against canon when its first write is (canon's
+/// version is neither the root base nor the chain's first version) and the chain is not built
+/// on canon's side. A chain that is not against canon edits, for the merge, from canon's
+/// version, which becomes its root: a resolution pairs with a fresh edit from that version.
+fn judge(cx: &DetectCx<'_>, ch: &mut Chain, all: &[Arc<Write>], cv: Option<Hash>, owner: &Owner) {
+    if ch.root == cv || ch.first == cv {
+        ch.root = cv;
+        return;
+    }
+    let built_on = match owner {
+        Owner::Producer(Some(p)) | Owner::Deleter(Some(p)) => chain_reaches(cx, ch, all, p),
+        // a version with no known producer: the merge settles canon's side at the next write
+        // of the block that covers the chain's own sides, as when a chain depends on another
+        // in-flight write of the block
+        Owner::Producer(None) => ch.changes.iter().any(|c| {
+            all.iter()
+                .any(|y| y.change != *c && depends(cx, c, &y.change))
+        }),
+        // a delete with no known deleter: no change can undo it
+        Owner::Deleter(None) => false,
+    };
+    if built_on {
+        ch.root = cv;
+    } else {
+        ch.against = true;
     }
 }
 

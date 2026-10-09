@@ -6,9 +6,9 @@ use crate::error::*;
 use crate::lexicon::Lexicon;
 use crate::paths::TreeNode;
 use crate::suggest::MentionScan;
+use crate::tensions::Detector;
 use crate::tensions::index::CanonIndex;
 use crate::tensions::set::TensionCell;
-use crate::tensions::{Detector, Tension};
 use crate::version::VposCache;
 use crate::{AS_OF_CACHE_ENTRIES, Materialized, Scope};
 use rdy_graph::Graph;
@@ -72,7 +72,7 @@ pub(crate) struct Built {
     pub(crate) tension_index: OnceLock<Arc<CanonIndex>>,
     /// The canon part of the tension set for the state's detectors (FW-CH6), memoised; never
     /// carried.
-    pub(crate) tension_canon: OnceLock<Result<Arc<Vec<Arc<Tension>>>, RdyError>>,
+    pub(crate) tension_canon: OnceLock<Result<Arc<crate::tensions::set::CanonPart>, RdyError>>,
 }
 
 impl Built {

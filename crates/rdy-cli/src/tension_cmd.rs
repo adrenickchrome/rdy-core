@@ -45,7 +45,8 @@ pub(crate) struct ResolveArgs {
     dismiss: String,
 }
 
-/// `<id>  <severity>  <kind>  <status>  <summary>`, then the sides and the dismissal.
+/// `<id>  <severity>  <kind>  <status>  <summary>`, then the sides, the proposal of a landing
+/// form, and the dismissal.
 fn tension_text(t: &Value) -> String {
     let mut out = format!(
         "{}  {}  {}  {}  {}",
@@ -75,6 +76,11 @@ fn tension_text(t: &Value) -> String {
         .collect();
     if !sides.is_empty() {
         out.push_str(&format!("\n  sides: {}", sides.join("; ")));
+    }
+    if let Some(p) = t["proposal"].as_str() {
+        out.push_str(&format!(
+            "\n  landing form of {p} (not in flight; the gate judges it)"
+        ));
     }
     if t["dismissal"].is_object() {
         out.push_str(&format!(
@@ -179,4 +185,21 @@ pub(crate) fn resolve(env: &Env, a: ResolveArgs) -> Result<(Value, String), Erro
         hash_short(text(&v["review"]))
     );
     Ok((v, t))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn cten1_a_landing_form_names_its_proposal() {
+        let t = json!({"id": "tn-0123456789ab", "severity": "blocking", "kind": "duplicate_definition",
+            "status": "open", "summary": "t-A and t-B both define \"fee\"", "sides": [],
+            "proposal": "P-abcdef012345@1"});
+        assert_eq!(
+            tension_text(&t),
+            "tn-0123456789ab  blocking  duplicate_definition  open  t-A and t-B both define \"fee\"\n  landing form of P-abcdef012345@1 (not in flight; the gate judges it)"
+        );
+    }
 }

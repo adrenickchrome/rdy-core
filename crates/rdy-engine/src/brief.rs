@@ -10,6 +10,7 @@ use crate::keys;
 use crate::query::summary_in;
 use crate::related::{RELATED_CAP, RelatedDecision};
 use crate::suggest::MentionedBy;
+use crate::tensions::TensionSeverity;
 use crate::write::OpInput;
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, EdgeKind, IMPACT_LINKS, IMPACT_SHOWN, SUSPECT_LINKS, Suspect};
@@ -417,10 +418,14 @@ impl Briefing {
 
     /// The JSON size in tokens (4 bytes each).
     fn tokens(&self) -> usize {
+        self.bytes() / 4
+    }
+
+    /// The JSON size in bytes.
+    fn bytes(&self) -> usize {
         serde_json::to_string(self)
             .expect("a briefing serializes: strings, numbers and string-keyed maps only")
             .len()
-            / 4
     }
 
     /// The first `DIGEST_HEX` hex digits of `digest`, as a cursor carries them.
@@ -491,11 +496,73 @@ impl Briefing {
         self.drop_first(&skip);
         self.settle(&skip, &totals);
         if cut {
+            if self.tokens() > max && self.cut_tensions(max, floor) {
+                self.settle(&skip, &totals);
+            }
             while self.tokens() > max && self.halve(floor) {
                 self.settle(&skip, &totals);
             }
         }
         Ok(())
+    }
+
+    /// The Q15 rule for `inflight.tensions` (ruling on item 54), before any list is halved:
+    /// every listed tension's sides go (`tensions_detail_cut`); then, while the briefing is
+    /// over `max` tokens, advisory tensions go from the end of the list (they come after the
+    /// blocking ones), each counted in `tensions_collapsed` under its kind and in `omitted`. A
+    /// blocking tension is never collapsed: a page that cannot hold it leaves it to a later
+    /// page. With `floor`, one entry is left. Each tension is measured once, and the whole
+    /// briefing once more per count the cut adds. `true` if it cut.
+    fn cut_tensions(&mut self, max: usize, floor: bool) -> bool {
+        let mut changed = false;
+        if self.inflight.tensions.iter().any(|t| !t.sides.is_empty()) {
+            for t in &mut self.inflight.tensions {
+                t.sides.clear();
+            }
+            self.inflight.tensions_detail_cut = true;
+            changed = true;
+        }
+        let mut bytes = self.bytes();
+        while bytes > max * 4 + 3 {
+            match self.collapse_last(floor) {
+                Some(n) => bytes = bytes.saturating_sub(n),
+                None => break,
+            }
+            changed = true;
+        }
+        // the counts the cut added, measured exactly
+        while self.tokens() > max && self.collapse_last(floor).is_some() {
+            changed = true;
+        }
+        changed
+    }
+
+    /// Collapses the last listed tension when it is advisory (and, with `floor`, more than one
+    /// entry is shown): it leaves the list and is counted in `tensions_collapsed` and
+    /// `omitted`. Its JSON size with its comma, or `None`.
+    fn collapse_last(&mut self, floor: bool) -> Option<usize> {
+        if floor && self.lens().iter().sum::<usize>() <= 1 {
+            return None;
+        }
+        let t = self
+            .inflight
+            .tensions
+            .pop_if(|t| t.severity == TensionSeverity::Advisory)?;
+        let n = serde_json::to_string(&t)
+            .expect("a tension info serializes")
+            .len()
+            + 1;
+        *self
+            .inflight
+            .tensions_collapsed
+            .entry(t.kind.name().to_string())
+            .or_default() += 1;
+        *self
+            .omitted
+            .entry("inflight.tensions".to_string())
+            .or_default() += 1;
+        self.truncated = true;
+        Some(n)
     }
 
     /// Sets `offsets`, `next` and `truncated` from what this page shows now, so that the cut

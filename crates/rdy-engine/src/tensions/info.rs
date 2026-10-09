@@ -37,6 +37,10 @@ pub struct TensionInfo {
     pub refuses: Option<bool>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub read_time: bool,
+    /// A landing-only form (`rdy_tensions`): the open proposal (`P-<stable short>@<n>`) whose
+    /// landing it describes. The gate judges this form; the in-flight set does not hold it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<String>,
 }
 
 /// One side of a tension: its label, what it is (a change, a landing, an intent), the open views
@@ -55,6 +59,10 @@ pub struct SideInfo {
     pub actor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
+    /// A canon side's authors: every actor who wrote one of its items (the dismissal rules
+    /// read them all), sorted. Empty for a change or an intent side, whose author is `actor`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub authors: Vec<String>,
     pub blocks: Vec<SideBlock>,
 }
 
@@ -89,10 +97,10 @@ impl ReadState {
     }
 
     /// `t` as the surfaces list it. A change side's views are the open views that hold it and
-    /// its actor and run the change's; a canon side's actor and run are those of the change that
-    /// produced its first involved version (the dismissal rules read every item's); an intent
-    /// side's are the intent's. A dismissed tension carries its review. What cannot be read is
-    /// left out.
+    /// its actor and run the change's; a canon side's `authors` are every actor who wrote one of
+    /// its items (as the dismissal rules read them), and its actor and run those of its first
+    /// item's writer; an intent side's are the intent's. A dismissed tension carries its
+    /// review. What cannot be read is left out.
     pub fn tension_info(&self, t: &Tension) -> TensionInfo {
         let (status, dismissal) = match self.tension_status(t) {
             TensionStatus::Open => ("open", None),
@@ -111,6 +119,7 @@ impl ReadState {
             dismissal,
             refuses: None,
             read_time: t.read_time,
+            proposal: None,
         }
     }
 
@@ -139,6 +148,7 @@ impl ReadState {
             views: vec![],
             actor: None,
             run: None,
+            authors: vec![],
             blocks: items
                 .iter()
                 .map(|i| SideBlock {
@@ -161,13 +171,19 @@ impl ReadState {
             }
             SideRef::Canon { landing } => {
                 info.landing = landing.map(|l| l.to_string());
-                let producer = items
-                    .iter()
-                    .find_map(|i| i.version)
-                    .and_then(|v| reader.producer(&v).ok().flatten());
-                if let Some(p) = producer.as_ref().and_then(provenance) {
-                    (info.actor, info.run) = (Some(p.actor), p.run);
+                let mut authors = std::collections::BTreeSet::new();
+                for i in &items {
+                    let writers = self
+                        .canon_item_writers(&i.block, i.version)
+                        .unwrap_or_default();
+                    for p in writers.iter().filter_map(provenance) {
+                        if info.actor.is_none() {
+                            (info.actor, info.run) = (Some(p.actor.clone()), p.run);
+                        }
+                        authors.insert(p.actor);
+                    }
                 }
+                info.authors = authors.into_iter().collect();
             }
             SideRef::Intent { stable, version } => {
                 info.intent = Some(intent_label(stable));

@@ -196,3 +196,85 @@ fn tevt1_a_dismissal_keeps_the_tension_and_settle_emits_nothing_for_it() {
     );
     assert!(r.read().tensions().unwrap().get(&t.id).is_some());
 }
+
+/// Final review M8: a pack reload changes the tension set without a store write; its events are
+/// settled after the reload, with no `by` (no batch caused them).
+#[test]
+fn tevt1_a_pack_reload_settles_its_events_without_a_by() {
+    let (d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.a, "A by a."));
+    put(&mut r, "b", upd(&s.a, "A by b."));
+    r.settle_tensions().unwrap();
+    let before = one(&r, TensionKind::EditCollision);
+    assert_eq!(before.severity, TensionSeverity::Blocking);
+    let rx = r.subscribe();
+    std::fs::write(
+        d.path().join(".rdy/packs/soft.yaml"),
+        "name: soft\nversion: \"1\"\nextends: rdy-standard\ntensions:\n  edit_collision: advisory\n",
+    )
+    .unwrap();
+    std::fs::write(d.path().join(".rdy/config.yaml"), "pack: soft\n").unwrap();
+    assert!(matches!(
+        r.reload_pack().unwrap(),
+        rdy_engine::ReloadOutcome::Reloaded
+    ));
+    assert!(r.settle_tensions().unwrap() > 0, "the reload's events");
+    let kinds: Vec<EventKind> = rx.try_iter().map(|e| e.kind.clone()).collect();
+    assert!(
+        kinds.iter().any(|k| matches!(k,
+            EventKind::TensionResolved { tension, by, .. } if *tension == before.id && by.is_none())),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds.iter().any(|k| matches!(k,
+            EventKind::TensionOpened { severity, .. } if severity == "advisory")),
+        "{kinds:?}"
+    );
+    // the next write's events carry its own `by` and nothing of the reload's
+    let rx = r.subscribe();
+    put(&mut r, "c", upd(&s.b, "B by c."));
+    r.settle_tensions().unwrap();
+    let kinds: Vec<EventKind> = rx.try_iter().map(|e| e.kind.clone()).collect();
+    assert!(
+        !kinds.iter().any(
+            |k| matches!(k, EventKind::TensionResolved { tension, .. } if *tension == before.id)
+        ),
+        "{kinds:?}"
+    );
+}
+
+/// A detector that panics.
+struct Panics;
+impl Detector for Panics {
+    fn kind(&self) -> TensionKind {
+        TensionKind::EditCollision
+    }
+    fn detect(
+        &self,
+        _cx: &DetectCx<'_>,
+        _seeds: Option<&std::collections::BTreeSet<rdy_model::BlockId>>,
+        _out: &mut Vec<Found>,
+    ) -> Result<(), rdy_engine::RdyError> {
+        panic!("a detector bug")
+    }
+}
+static PANICS: Panics = Panics;
+static PANICS_DETS: [&dyn Detector; 1] = [&PANICS];
+
+/// Final review M7: in the in-process engine (direct-mode CLI, the stdio MCP server) a settle
+/// that panics never reaches the caller of a committed write, and the engine stays usable.
+#[test]
+fn tevt1_a_settle_panic_never_fails_a_local_write() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    r.set_detectors_for_tests(&PANICS_DETS);
+    let e = Local::new(r);
+    let a = s.a.clone();
+    let v = write_typed(&e, move |r| try_put(r, "a", upd(&a, "A by a.")));
+    assert!(v.is_ok(), "{v:?}");
+    let b = s.b.clone();
+    let v = write_typed(&e, move |r| try_put(r, "a", upd(&b, "B by a.")));
+    assert!(v.is_ok(), "the engine is usable after the panic: {v:?}");
+    assert_eq!(e.read().included("a").len(), 2);
+}

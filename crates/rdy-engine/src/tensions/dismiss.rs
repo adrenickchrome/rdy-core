@@ -7,12 +7,15 @@
 //! Who may dismiss: any writer-role session may dismiss an advisory tension, its authors
 //! included. A blocking tension needs the reviewer role or a human session, of an actor that
 //! wrote none of its items (another run of the same actor is not independent). On a canon side
-//! every item counts: one landing can carry blocks several actors wrote, and the actor whose
-//! landed change deleted a block is an author of that block's absent canon item.
+//! every item counts: one landing can carry blocks several actors wrote. A canon version is
+//! credited to the change that carried it into canon last (as of canon's head), so writing a
+//! block back to an earlier text makes the writer its author; the actor whose landed change
+//! deleted a block is an author of that block's absent canon item; and an item that names no
+//! author fails closed. A read-time intent overlap is never dismissed: its intent resolves it.
 //!
 //! A dismissal binds to the vkey, which covers the severity: one made while a tension was
 //! advisory does not hold once it is blocking, and the blocking tension needs its own review.
-use super::set::resolve_among;
+use super::set::{find_among, no_tension};
 use super::{SideRef, Tension, TensionKind, TensionSeverity, TensionStatus, tension_label};
 use crate::error::*;
 use crate::gate::open_proposals;
@@ -40,34 +43,76 @@ pub struct DismissInfo {
 }
 
 impl ReadState {
-    /// The tension `text` names (`tn-` and a hex prefix, or the prefix alone): among the
-    /// event-derived set, the read-time ones at `now_ms`, and the landing tensions of every
-    /// open proposal (tgat1: a form the gate refuses with is a tension of its own, so a refusal
-    /// can always be dismissed by the id it names). One id is one tension, wherever it is found.
+    /// The tension `text` names (`tn-` and a hex prefix, or the prefix alone), among the
+    /// event-derived set and then, on a miss, the landing tensions of every open proposal
+    /// (tgat1: a form the gate refuses with is a tension of its own, so a refusal can always be
+    /// dismissed by the id it names). One id is one tension, wherever it is found. A read-time
+    /// overlap at `now_ms` (read only when neither holds it) is `E_BAD_INPUT`: it is resolved
+    /// through its intent, never dismissed.
     pub fn resolve_tension(&self, text: &str, now_ms: i64) -> Result<Arc<Tension>, RdyError> {
-        let mut all: BTreeMap<Hash, Arc<Tension>> = self
-            .tensions()?
-            .iter()
-            .map(|t| (t.id, Arc::clone(t)))
-            .collect();
-        for t in self.intent_tensions(now_ms)? {
-            all.entry(t.id).or_insert_with(|| Arc::new(t));
+        if let Some(t) = find_among(self.tensions()?.iter(), text)? {
+            return Ok(t);
         }
+        let mut landing: BTreeMap<Hash, Arc<Tension>> = BTreeMap::new();
         for (_, p) in open_proposals(self)? {
             for t in self.landing_tensions(&p.view, &p.changes)? {
-                all.entry(t.id).or_insert(t);
+                landing.entry(t.id).or_insert(t);
             }
         }
-        resolve_among(all.values(), text)
+        if let Some(t) = find_among(landing.values(), text)? {
+            return Ok(t);
+        }
+        let read_time: Vec<Arc<Tension>> = self
+            .intent_tensions(now_ms)?
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        if find_among(read_time.iter(), text)?.is_some() {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "intent overlaps are read-time; resolve the intent instead",
+                "withdraw the intent (rdy_intent {op: withdraw}) or let it expire, or move the edit into the intent's view",
+            ));
+        }
+        Err(no_tension(text))
+    }
+
+    /// The changes that wrote canon item `block` at `version`, as of canon's head: the producer
+    /// that carried the version into canon last (a block written back to an earlier text is
+    /// credited to the change that wrote it back); for a block canon does not hold, every
+    /// landed change that deleted it. Empty when none can be named.
+    pub(crate) fn canon_item_writers(
+        &self,
+        block: &rdy_model::BlockId,
+        version: Option<Hash>,
+    ) -> Result<Vec<Hash>, RdyError> {
+        let reader = self.reader();
+        match version {
+            Some(v) => {
+                let producers = reader.producers(&v)?;
+                Ok(reader
+                    .producer_at(&producers, self.canon_head().as_ref())?
+                    .into_iter()
+                    .collect())
+            }
+            None => {
+                let mut out = vec![];
+                for d in reader.deleters(block)? {
+                    if reader.landing_of(&d)?.is_some() {
+                        out.push(d);
+                    }
+                }
+                Ok(out)
+            }
+        }
     }
 
     /// Every actor who wrote an item of `t`, with the side of the item, in item order: a change
-    /// side's change; for each canon item, the change that produced its version, or, for a block
-    /// canon does not hold, every landed change that deleted it (none when canon never held
-    /// it); an intent side's intent. A canon side groups the items one landing carried, which
-    /// several actors can have written, so every item counts, not one per side. An author that
-    /// cannot be read fails closed: a store error is returned, and a canon version with no
-    /// producer is refused with `E_SELF_REVIEW`.
+    /// side's change; for each canon item, the changes `canon_item_writers` names; an intent
+    /// side's intent. A canon side groups the items one landing carried, which several actors
+    /// can have written, so every item counts, not one per side. An author that cannot be read
+    /// fails closed: a store error is returned, and a canon item that names no writer is
+    /// refused with `E_SELF_REVIEW`.
     fn authors(&self, t: &Tension, label: &str) -> Result<Vec<(SideRef, String)>, RdyError> {
         let reader = self.reader();
         let mut out: Vec<(SideRef, String)> = vec![];
@@ -77,10 +122,11 @@ impl ReadState {
             }
         };
         for i in &t.involved {
-            match (&i.side, i.version) {
-                (SideRef::Change(c), _) => add(&i.side, reader.change(c)?.provenance.actor),
-                (SideRef::Canon { .. }, Some(v)) => {
-                    let Some(c) = reader.producer(&v)? else {
+            match &i.side {
+                SideRef::Change(c) => add(&i.side, reader.change(c)?.provenance.actor),
+                SideRef::Canon { .. } => {
+                    let writers = self.canon_item_writers(&i.block, i.version)?;
+                    if writers.is_empty() {
                         return Err(RdyError::new(
                             E_SELF_REVIEW,
                             format!(
@@ -88,19 +134,14 @@ impl ReadState {
                                 i.block,
                                 i.side.short()
                             ),
-                            "run rdy fsck; the store has a version that no change produced",
+                            "run rdy fsck; resolve the tension with a change instead",
                         ));
-                    };
-                    add(&i.side, reader.change(&c)?.provenance.actor);
-                }
-                (SideRef::Canon { .. }, None) => {
-                    for d in reader.deleters(&i.block)? {
-                        if reader.landing_of(&d)?.is_some() {
-                            add(&i.side, reader.change(&d)?.provenance.actor);
-                        }
+                    }
+                    for c in writers {
+                        add(&i.side, reader.change(&c)?.provenance.actor);
                     }
                 }
-                (SideRef::Intent { version, .. }, _) => add(&i.side, reader.intent(version)?.actor),
+                SideRef::Intent { version, .. } => add(&i.side, reader.intent(version)?.actor),
             }
         }
         Ok(out)
@@ -138,7 +179,11 @@ impl Rdy {
         let t = st.resolve_tension(tension, now_ms())?;
         let label = tension_label(&t.id);
         if let TensionStatus::Dismissed(review) = st.tension_status(&t) {
-            let by = st.reader().review(&review)?.provenance.actor;
+            // an unreadable review still answers that the tension is dismissed
+            let by = st
+                .reader()
+                .review(&review)
+                .map_or_else(|_| "unknown actor".to_string(), |r| r.provenance.actor);
             return Err(RdyError::new(
                 E_BAD_INPUT,
                 format!(

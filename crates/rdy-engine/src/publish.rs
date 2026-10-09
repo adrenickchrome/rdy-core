@@ -28,6 +28,7 @@ impl Rdy {
     /// before the next publish; an earlier one is only in `replay_events`. M2b routes every
     /// write through the engine.
     pub(crate) fn publish(&mut self, delta: Delta) -> Result<(), RdyError> {
+        self.publish_gen += 1;
         let prev = self.state.load_full();
         // nothing settled since open: the first settle diffs against the state before the
         // first write
@@ -413,16 +414,18 @@ impl Rdy {
     /// one of the same vkey are a re-key (paired in id order): `tension_resolved` names the new
     /// id in `rekeyed_to`, `tension_opened` the old one in `rekeyed_from`. Every resolved
     /// tension is emitted first, then every opened one; `by` and `at_ms` come from the store's
-    /// last batch. Before the first settle since open, the set of the state before the first
-    /// write is the last settled one; with no write either, the published set is recorded and
-    /// nothing is emitted. Returns the number of events. Reads never settle: the writer calls
-    /// this after each write.
+    /// last batch when a batch was written since the last settle (a pack reload writes none:
+    /// its events have no `by`). Before the first settle since open, the set of the state
+    /// before the first write is the last settled one; with no write either, the published set
+    /// is recorded and nothing is emitted. Returns the number of events. Reads never settle:
+    /// the writer calls this after each write and each pack reload.
     pub fn settle_tensions(&mut self) -> Result<usize, RdyError> {
         let st = self.read();
+        let generation = self.publish_gen;
         if self
             .tension_seen
             .as_ref()
-            .is_some_and(|(_, seq)| *seq == st.seq())
+            .is_some_and(|(_, g)| *g == generation)
         {
             return Ok(0);
         }
@@ -433,7 +436,10 @@ impl Rdy {
             (None, Some(base)) => base.tensions().ok(),
             (None, None) => None,
         };
-        self.tension_seen = Some((Arc::clone(&current), st.seq()));
+        self.tension_seen = Some((Arc::clone(&current), generation));
+        let batch = self.store.last_batch_end();
+        let batch_since = batch != self.settled_batch;
+        self.settled_batch = batch;
         let Some(prev) = prev else {
             return Ok(0);
         };
@@ -460,7 +466,11 @@ impl Rdy {
                 *n += 1;
             }
         }
-        let (by, at_ms) = self.settled_by();
+        let (by, at_ms) = if batch_since {
+            self.settled_by()
+        } else {
+            (None, crate::now_ms())
+        };
         let seq = st.seq();
         let mut events = Vec::with_capacity(opened.len() + resolved.len());
         for t in &resolved {

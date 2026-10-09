@@ -206,10 +206,28 @@ pub fn header(briefing: &Value) -> String {
                 s(t, "summary")
             )
         });
+        let collapsed = inflight["tensions_collapsed"]
+            .as_object()
+            .filter(|m| !m.is_empty())
+            .map(|m| {
+                let kinds: Vec<String> = m
+                    .iter()
+                    .map(|(k, n)| format!("{} {k}", n.as_u64().unwrap_or(0)))
+                    .collect();
+                format!("tensions not listed: {}", kinds.join(", "))
+            });
+        let unread = inflight["tensions_error"]
+            .as_str()
+            .map(|e| format!("tensions not read: {e}"));
         section(
             &mut out,
             "in flight",
-            views.chain(proposals).chain(intents).chain(tensions),
+            views
+                .chain(proposals)
+                .chain(intents)
+                .chain(tensions)
+                .chain(collapsed)
+                .chain(unread),
         );
     }
     let related = list("related_decisions")
@@ -653,6 +671,25 @@ mod tests {
             ),
             "{h}"
         );
+    }
+
+    #[test]
+    fn tbrf1_the_edit_header_counts_collapsed_tensions_and_a_read_error() {
+        let b = json!({
+            "governs": [], "dependents": [], "will_go_stale": [], "suspects": [],
+            "inflight": {
+                "views": [], "proposals": [], "intents": [], "tensions": [],
+                "tensions_collapsed": {"area_overlap": 2, "duplicate_definition": 10},
+                "tensions_error": "E_INTERNAL: boom"
+            },
+            "base": {"token": "0123456789abcdef0123", "blocks": [{"id": "c-A", "version": "ff"}], "depends": 0}
+        });
+        let h = header(&b);
+        assert!(
+            h.contains("  tensions not listed: 2 area_overlap, 10 duplicate_definition\n"),
+            "{h}"
+        );
+        assert!(h.contains("  tensions not read: E_INTERNAL: boom\n"), "{h}");
     }
 
     #[test]
