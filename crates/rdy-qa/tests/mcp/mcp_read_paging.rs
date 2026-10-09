@@ -415,3 +415,49 @@ fn msw17_a_regex_read_past_the_haystack_cap_is_refused_and_a_substring_is_not() 
     let ok = read(&mut st, json!({"id": c["$d"], "pattern": "qqq"})).unwrap();
     assert_eq!(ok["matched"], 0, "{ok}");
 }
+
+#[test]
+fn msw17_a_code_blocks_language_keeps_it_for_a_pattern() {
+    let (_d, mut st, c) = st_with(json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Code", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Run"}},
+        {"op": "create", "type": "code", "id": "$c", "parent": "$s", "body": "print(1)\nprint(2)", "fields": {"lang": "python"}}
+    ]));
+    for pat in ["python", "/^```python$/"] {
+        let v = read(&mut st, json!({"id": c["$d"], "pattern": pat})).unwrap();
+        assert_eq!(v["matched"], 1, "{pat}: {v}");
+    }
+    let v = read(&mut st, json!({"id": c["$d"], "pattern": "ruby"})).unwrap();
+    assert_eq!(v["matched"], 0, "{v}");
+}
+
+#[test]
+fn msw17_a_regex_read_past_the_cap_is_refused_whatever_the_regex_matches() {
+    // five prose blocks, each over 1 MiB, and each head matches /hit/ at once
+    let rest = format!("\n\n{}", format!("{}\n", "y".repeat(1023)).repeat(1100));
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Big", "doc_type": "page"}}),
+        json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Dump"}}),
+    ];
+    for i in 0..5 {
+        ops.push(json!({"op": "create", "type": "claim", "id": format!("$c{i}"), "parent": "$s", "body": format!("hit.{rest}")}));
+    }
+    let (_d, mut st, c) = st_with(Value::Array(ops));
+    for pat in ["/hit/", "/qqq/"] {
+        let e = read(&mut st, json!({"id": c["$d"], "pattern": pat})).unwrap_err();
+        assert_eq!(e.code, "E_LIMIT", "{pat}: {e}");
+        let n = e
+            .message
+            .strip_prefix("the read is too large to match a regex against (")
+            .and_then(|m| m.strip_suffix(" bytes; the limit is 4 MiB)"))
+            .unwrap_or_else(|| panic!("message shape: {e}"));
+        let n: usize = n.parse().unwrap();
+        assert!(n >= 5 * 1100 * 1024, "the count is the whole text: {e}");
+        assert_eq!(
+            e.fix,
+            "narrow the read with #section, or use a plain-text pattern"
+        );
+    }
+    let ok = read(&mut st, json!({"id": c["$d"], "pattern": "hit"})).unwrap();
+    assert_eq!(ok["matched"], 5, "{ok}");
+}
