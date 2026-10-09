@@ -78,7 +78,7 @@ enum Status {
 pub struct Readiness(Arc<watch::Sender<Status>>);
 
 impl Readiness {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Readiness(Arc::new(
             watch::channel(Status::Starting("starting".into())).0,
         ))

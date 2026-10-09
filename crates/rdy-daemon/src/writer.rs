@@ -59,7 +59,7 @@ fn gone() -> RdyError {
     )
 }
 
-fn panic_text(p: &(dyn Any + Send)) -> String {
+pub(crate) fn panic_text(p: &(dyn Any + Send)) -> String {
     if let Some(s) = p.downcast_ref::<&str>() {
         (*s).to_string()
     } else if let Some(s) = p.downcast_ref::<String>() {
@@ -109,7 +109,41 @@ impl Writer {
     /// stays), are recorded as seen (as the reload read them, so a fix that lands meanwhile is
     /// still a change) so they are not parsed again until they change, and set the pack error,
     /// bumping the generation when the error is new. A failed check is logged.
+    ///
+    /// A panic never ends the writer: the caches may be half-updated, so they are cleared (the
+    /// caller republishes); the previous pack stays loaded, the pack error says so, and the call
+    /// answers `E_INTERNAL`.
     fn maybe_reload(&self, rdy: &mut Rdy) -> Result<ReloadOutcome, RdyError> {
+        match catch_unwind(AssertUnwindSafe(|| self.reload_unguarded(rdy))) {
+            Ok(out) => out,
+            Err(p) => {
+                rdy.invalidate();
+                let text = format!(
+                    "pack reload panicked: {}; the previous pack stays loaded",
+                    panic_text(&*p)
+                );
+                // the watch still sees the change, so the next write retries the reload: like an
+                // invalid pack, the generation moves and the log speaks only when the error is new
+                if let Some(sh) = self.shared.upgrade() {
+                    let mut error = sh.pack_error_lock();
+                    if error.as_deref() != Some(text.as_str()) {
+                        *error = Some(text.clone());
+                        sh.pack_gen.fetch_add(1, Ordering::SeqCst);
+                        drop(error);
+                        log(&text);
+                    }
+                }
+                Err(RdyError::new(
+                    E_INTERNAL,
+                    format!("internal error on the writer: {text}"),
+                    "this is a bug in rdy; fix or revert the pack files, then retry",
+                ))
+            }
+        }
+    }
+
+    /// The body of [`Self::maybe_reload`], outside its panic guard.
+    fn reload_unguarded(&self, rdy: &mut Rdy) -> Result<ReloadOutcome, RdyError> {
         let Some(sh) = self.shared.upgrade() else {
             return Ok(ReloadOutcome::Unchanged);
         };
@@ -371,6 +405,21 @@ mod tests {
         assert!(matches!(out, ReloadOutcome::Reloaded), "{out:?}");
         assert_eq!(sh.pack_status().1, None, "the fix clears the pack error");
         assert_eq!(sh.state.load().pack().version, "2");
+        sh.shutdown().unwrap();
+    }
+
+    #[test]
+    fn msw9_a_panic_in_the_pack_reload_before_a_write_does_not_kill_the_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
+        std::fs::write(dir.path().join(".rdy/packs/proj.yaml"), PACK_A).unwrap();
+        std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: proj\n").unwrap();
+        *sh.after_reload.lock().unwrap() = Some(Box::new(|| panic!("reload test panic")));
+        let out = sh
+            .writer
+            .run(Box::new(|_: &mut Rdy| Ok(serde_json::Value::Null)));
+        assert!(out.is_ok(), "{out:?}");
+        assert!(sh.writer.is_alive(), "the writer survives a reload panic");
         sh.shutdown().unwrap();
     }
 }

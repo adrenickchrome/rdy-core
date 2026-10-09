@@ -8,6 +8,7 @@ use crate::layout::RunDir;
 use crate::ops::{OpContext, dispatch};
 use crate::session::{SessionId, SessionInfo};
 use crate::shared::Shared;
+use crate::writer::panic_text;
 use rdy_engine::{E_LOCKED, Rdy, RdyError, Scope, Session, SessionKind};
 use rdy_engine::{classify, human_actor_for_env};
 use rdy_model::Role;
@@ -17,6 +18,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::io;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -310,6 +312,19 @@ fn close(shared: &Shared) {
     }
 }
 
+/// Runs the warm-up, then answers ready. A panic in the warm-up is logged and the daemon serves
+/// with a cold cache: readiness is always reached, so no client waits out its start timeout.
+pub(crate) fn warm_then_ready(readiness: &Readiness, warm: impl FnOnce()) {
+    if let Err(p) = catch_unwind(AssertUnwindSafe(warm)) {
+        log(&format!(
+            "warm-up panicked ({}); serving with a cold cache",
+            panic_text(&*p)
+        ));
+    }
+    readiness.ready();
+    log("ready");
+}
+
 /// The body of the `rdy-serve` thread: warms canon beside the accept loop, then, once the
 /// daemon exits, closes the store.
 fn serve_thread(
@@ -322,18 +337,17 @@ fn serve_thread(
     log("building canon");
     let warm = Arc::clone(&shared);
     rt.spawn_blocking(move || {
-        let st = warm.engine().read();
-        for scope in WARM_SCOPES {
-            if let Err(e) = st
-                .materialized(scope)
-                .and_then(|_| st.graph(scope).map(drop))
-            {
-                log(&format!("warm-up failed: {e}"));
+        warm_then_ready(&readiness, || {
+            let st = warm.engine().read();
+            for scope in WARM_SCOPES {
+                if let Err(e) = st
+                    .materialized(scope)
+                    .and_then(|_| st.graph(scope).map(drop))
+                {
+                    log(&format!("warm-up failed: {e}"));
+                }
             }
-        }
-        drop(st);
-        readiness.ready();
-        log("ready");
+        });
     });
     let ran = rt.block_on(daemon.run());
     // waits for the blocking pool (warm-up, in-flight handlers) to finish while the writer still
@@ -495,5 +509,16 @@ impl Handler for ServeHandler {
             .remove(&session.id);
         self.sessions().remove(&session.id);
         self.shared.end_session(session.id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn msw9_a_warm_up_that_panics_still_answers_ready() {
+        let r = Readiness::new();
+        warm_then_ready(&r, || panic!("warm-up test panic"));
+        assert!(r.is_ready());
     }
 }
