@@ -200,8 +200,10 @@ impl Rdy {
             // carrying instead of leaving the next read a full build
             Delta::Commit { view, change, ops } if self.carries_tensions(ops) => {
                 match prev.tensions_without_build() {
-                    Some(set) => Arc::new(TensionCell::carrying(set, *change, view.clone())),
-                    None => Arc::default(),
+                    Some(set) if self.writes_fresh(prev, &set, ops) => {
+                        Arc::new(TensionCell::carrying(set, *change, view.clone()))
+                    }
+                    _ => Arc::default(),
                 }
             }
             _ => Arc::default(),
@@ -385,8 +387,9 @@ impl Rdy {
     /// areas), and no update moves a block or changes its `lifecycle` against its base (which
     /// every descendant's effective lifecycle reads). A created structural block (a new doc,
     /// section or folder) carries: it has no descendant but the blocks the same change
-    /// creates, which are seeds, so it moves no other block's path, areas or lifecycle. An
-    /// unreadable base never carries.
+    /// creates, which are seeds, so it moves no other block's path, areas or lifecycle, when
+    /// its id is new (`writes_fresh`, checked once the set before is in hand). An unreadable
+    /// base never carries.
     fn carries_tensions(&self, ops: &[rdy_model::Op]) -> bool {
         use rdy_model::Op;
         let structural = |ty: Option<&str>| {
@@ -412,6 +415,49 @@ impl Rdy {
             // `affects` target's path gives its deciders their areas), so it never carries
             Op::Delete { .. } => false,
         })
+    }
+
+    /// Whether `ops` leave every other block's reads as the seeds' re-detection sees them, by
+    /// what the in-flight state before holds (`set` is its tension set): no block they write
+    /// has an in-flight delete, and every block they create is new (no change ever deleted it,
+    /// canon does not hold it, no in-flight change writes it). A write on a block another
+    /// change deletes, or the re-create of a deleted id, gives back to blocks no seed covers
+    /// what the delete took (an `affects` target's path gives its deciders their areas); a
+    /// create of an id another view created is a create/create conflict the in-flight merge
+    /// drops, so the blocks written under that id elsewhere lose their path. None of them
+    /// carries. A failed index read never carries.
+    fn writes_fresh(
+        &self,
+        prev: &ReadState,
+        set: &crate::tensions::set::TensionSet,
+        ops: &[rdy_model::Op],
+    ) -> bool {
+        use rdy_model::Op;
+        let deleted_in_flight =
+            |b: &rdy_model::BlockId| set.writes().all_on(b).iter().any(|w| w.new.is_none());
+        if ops.iter().any(|op| deleted_in_flight(op.block_id())) {
+            return false;
+        }
+        let created: Vec<&rdy_model::BlockId> = ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Create { block } => Some(&block.id),
+                _ => None,
+            })
+            .collect();
+        if created.is_empty() {
+            return true;
+        }
+        let Ok(canon) = prev.materialized(&crate::Scope::Canon) else {
+            return false;
+        };
+        created
+            .iter()
+            .all(|b| canon.get(b).is_none() && set.writes().all_on(b).is_empty())
+            && !self
+                .store
+                .ever_deleted(created.iter().copied())
+                .unwrap_or(true)
     }
 
     /// Settles the tension set (tevt1): emits the difference between the last settled set and

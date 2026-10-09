@@ -2,7 +2,7 @@
 use proptest::prelude::*;
 use rdy_engine::tensions::TensionKind;
 use rdy_engine::{DecisionInput, Rdy, Scope};
-use rdy_model::BlockId;
+use rdy_model::{BlockId, Hash};
 use rdy_qa::edit_loop::spec_doc;
 use rdy_qa::fixtures::*;
 use rdy_qa::packs::qa_project;
@@ -13,10 +13,12 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: cases(12), ..ProptestConfig::default() })]
     #[test]
     fn tcar1_a_carried_tension_set_equals_a_rebuilt_one(
-        steps in proptest::collection::vec((0u8..11, 0u8..3, 0u8..3), 1..12)
+        steps in proptest::collection::vec((0u8..13, 0u8..3, 0u8..3), 1..12)
     ) {
         let (_d, mut r) = project();
         let s = spec_doc(&mut r);
+        // one explicit section id that several views create (a create/create conflict)
+        let shared = BlockId::new(s.section.prefix());
         let names = ["a", "b", "c"];
         let claims = [s.a.clone(), s.b.clone(), s.c.clone()];
         // FW-TN2: texts that form duplicate groups (two normalize to one) and one that does not
@@ -53,6 +55,16 @@ proptest! {
                     ])).is_ok()
                 }
                 10 => r.new_doc(&ag(vn), vn, &format!("n{i}"), None, None).is_ok(),
+                // adversarial review of e613de0: a delete then a re-create of the same id, and
+                // a section id another view may have created, with a claim under it
+                11 => try_put(&mut r, vn, json!([{"op": "delete", "id": target.to_string()}])).is_ok()
+                    && r.read().tensions().is_ok()
+                    && try_put(&mut r, vn, json!([{"op": "create", "type": "claim", "id": target.to_string(),
+                        "parent": s.section.to_string(), "body": texts[k as usize]}])).is_ok(),
+                12 => try_put(&mut r, vn, json!([
+                        {"op": "create", "type": "section", "id": shared.to_string(), "parent": s.doc.to_string(), "fields": {"title": format!("X {i}")}},
+                        {"op": "create", "type": "claim", "parent": shared.to_string(), "body": texts[k as usize]}
+                    ])).is_ok(),
                 _ => try_put(&mut r, vn, upd(target, texts[k as usize])).is_ok(),
             };
             let st = r.read();
@@ -203,4 +215,219 @@ fn tcar1_a_created_doc_or_section_carries_and_an_unread_commit_still_carries() {
         .map(|t| t.id)
         .collect();
     assert_eq!(carried, rebuilt);
+}
+
+/// Tensions by kind and id.
+type Kinded = Vec<(TensionKind, Hash)>;
+
+/// The carried set and a rebuild of the current state, by id.
+fn carried_and_rebuilt(r: &Rdy) -> (Kinded, Kinded) {
+    let st = r.read();
+    let carried = st
+        .tensions()
+        .unwrap()
+        .iter()
+        .map(|t| (t.kind, t.id))
+        .collect();
+    let rebuilt = st
+        .tensions_rebuilt()
+        .unwrap()
+        .iter()
+        .map(|t| (t.kind, t.id))
+        .collect();
+    (carried, rebuilt)
+}
+
+/// Two decisions in `notes/misc` (views a and b) that are in area payments only through their
+/// `affects` target `target`.
+fn decide_affecting(r: &mut Rdy, n: &BlockId, target: &BlockId) {
+    for who in ["a", "b"] {
+        r.decide(
+            &ag(who),
+            who,
+            DecisionInput {
+                parent: n.to_string(),
+                statement: format!("{who} decides"),
+                affects: vec![target.to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+}
+
+/// Adversarial review of e613de0 (F1): re-creating a deleted section gives the decisions that
+/// `affects` it their area back, which no seed covers; it must not carry.
+#[test]
+fn tcar1_recreating_a_deleted_section_carries_the_same_set_as_a_rebuild() {
+    let (_d, mut r) = qa_project();
+    let (x, _) = landed_doc(&mut r, "payments/fees", false);
+    let (n, _) = landed_doc(&mut r, "notes/misc", false);
+    decide_affecting(&mut r, &n, &x);
+    assert_eq!(of_kind(&r, TensionKind::AreaOverlap).len(), 1);
+    let doc = r
+        .read()
+        .resolve_path(&Scope::Canon, "payments/fees")
+        .unwrap();
+    put(&mut r, "c", json!([{"op": "delete", "id": x.to_string()}]));
+    r.read().tensions().unwrap();
+    put(
+        &mut r,
+        "c",
+        json!([{"op": "create", "type": "section", "id": x.to_string(), "parent": doc.to_string(), "fields": {"title": "S again"}}]),
+    );
+    let (carried, rebuilt) = carried_and_rebuilt(&r);
+    assert_eq!(rebuilt.len(), 1, "{rebuilt:?}");
+    assert_eq!(carried, rebuilt);
+}
+
+/// Adversarial review of e613de0 (F1, also at 7129477): the same for a re-created claim.
+#[test]
+fn tcar1_recreating_a_deleted_claim_carries_the_same_set_as_a_rebuild() {
+    let (_d, mut r) = qa_project();
+    let (fees, x) = landed_doc(&mut r, "payments/fees", true);
+    let x = x.unwrap();
+    let (n, _) = landed_doc(&mut r, "notes/misc", false);
+    decide_affecting(&mut r, &n, &x);
+    put(&mut r, "c", json!([{"op": "delete", "id": x.to_string()}]));
+    r.read().tensions().unwrap();
+    put(
+        &mut r,
+        "c",
+        json!([{"op": "create", "type": "claim", "id": x.to_string(), "parent": fees.to_string(), "body": "Fees are monthly."}]),
+    );
+    let (carried, rebuilt) = carried_and_rebuilt(&r);
+    assert_eq!(rebuilt.len(), 1, "{rebuilt:?}");
+    assert_eq!(carried, rebuilt);
+}
+
+/// Adversarial review of e613de0 (F2): view b creates a section id that view a created too.
+/// The in-flight merge drops it (create/create), so a's decision under it loses the path that
+/// put it in area payments; the create must not carry.
+#[test]
+fn tcar1_a_section_id_another_view_created_carries_the_same_set_as_a_rebuild() {
+    let (_d, mut r) = qa_project();
+    let (k_sec, _) = landed_doc(&mut r, "payments/fees", false);
+    let pay = r
+        .read()
+        .resolve_path(&Scope::Canon, "payments/fees")
+        .unwrap();
+    let (_, k2) = landed_doc(&mut r, "notes/misc", true);
+    let k2 = k2.unwrap();
+    let notes = r.read().resolve_path(&Scope::Canon, "notes/misc").unwrap();
+    let xs = BlockId::new(k_sec.prefix()).to_string();
+    put(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "section", "id": xs, "parent": pay.to_string(), "fields": {"title": "A's X"}}]),
+    );
+    for (who, parent) in [("a", xs.clone()), ("c", k_sec.to_string())] {
+        r.decide(
+            &ag(who),
+            who,
+            DecisionInput {
+                parent,
+                statement: format!("{who} decides"),
+                affects: vec![k2.to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(of_kind(&r, TensionKind::AreaOverlap).len(), 1);
+    put(
+        &mut r,
+        "b",
+        json!([{"op": "create", "type": "section", "id": xs, "parent": notes.to_string(), "fields": {"title": "B's X"}}]),
+    );
+    let (carried, rebuilt) = carried_and_rebuilt(&r);
+    assert_eq!(carried, rebuilt);
+}
+
+/// Fix round for e613de0 (found by the property below, also at 7129477): view a updates X
+/// while view c deletes it; the in-flight merge keeps X, so the decisions that `affects` X get
+/// their area back, which no seed covers. A write on a block an in-flight change deletes must
+/// not carry.
+#[test]
+fn tcar1_updating_a_block_another_view_deletes_carries_the_same_set_as_a_rebuild() {
+    let (_d, mut r) = qa_project();
+    let (_, x) = landed_doc(&mut r, "payments/fees", true);
+    let x = x.unwrap();
+    let (n, _) = landed_doc(&mut r, "notes/misc", false);
+    decide_affecting(&mut r, &n, &x);
+    put(&mut r, "c", json!([{"op": "delete", "id": x.to_string()}]));
+    r.read().tensions().unwrap();
+    put(&mut r, "a", upd(&x, "Fees are weekly."));
+    let (carried, rebuilt) = carried_and_rebuilt(&r);
+    assert!(
+        rebuilt.iter().any(|(k, _)| *k == TensionKind::AreaOverlap),
+        "{rebuilt:?}"
+    );
+    assert_eq!(carried, rebuilt);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: cases(12), ..ProptestConfig::default() })]
+    /// Adversarial review of e613de0: deletes, re-creates of a deleted id, a section id that
+    /// several views create, decisions that `affects` those ids, in the QA pack's areas; some
+    /// states are left unread, so the next commit carries them when it is published.
+    #[test]
+    fn tcar1_a_carried_set_equals_a_rebuilt_one_across_recreates_and_shared_ids(
+        steps in proptest::collection::vec((0u8..8, 0u8..3, 0u8..3), 1..12)
+    ) {
+        let (_d, mut r) = qa_project();
+        let (sx, x) = landed_doc(&mut r, "payments/fees", true);
+        let x = x.unwrap();
+        let (n, _) = landed_doc(&mut r, "notes/misc", false);
+        let pay = r.read().resolve_path(&Scope::Canon, "payments/fees").unwrap();
+        let notes = r.read().resolve_path(&Scope::Canon, "notes/misc").unwrap();
+        let shared = BlockId::new(sx.prefix());
+        // decisions in a and b that are in area payments only through `affects` x
+        decide_affecting(&mut r, &n, &x);
+        let names = ["a", "b", "c"];
+        let targets = [x.clone(), sx.clone(), shared.clone()];
+        for (i, (kind, v, k)) in steps.into_iter().enumerate() {
+            let vn = names[v as usize];
+            let target = &targets[k as usize];
+            let _ok = match kind {
+                0 => r.decide(&ag(vn), vn, DecisionInput {
+                        parent: if k == 2 { shared.to_string() } else { n.to_string() },
+                        statement: format!("d{i}"),
+                        affects: vec![target.to_string()],
+                        ..Default::default()
+                    }).is_ok(),
+                1 => try_put(&mut r, vn, json!([{"op": "delete", "id": target.to_string()}])).is_ok(),
+                // a delete, the set read, and a re-create of the deleted id
+                2 => try_put(&mut r, vn, json!([{"op": "delete", "id": x.to_string()}])).is_ok()
+                    && r.read().tensions().is_ok()
+                    && try_put(&mut r, vn, json!([{"op": "create", "type": "claim", "id": x.to_string(),
+                        "parent": sx.to_string(), "body": "Fees are monthly."}])).is_ok(),
+                3 => try_put(&mut r, vn, json!([{"op": "create", "type": "section", "id": sx.to_string(),
+                        "parent": pay.to_string(), "fields": {"title": format!("S {i}")}}])).is_ok(),
+                // one explicit section id that several views create, under either doc, with a
+                // decision under it that `affects` x
+                4 => try_put(&mut r, vn, json!([
+                        {"op": "create", "type": "section", "id": shared.to_string(),
+                            "parent": if k == 0 { notes.to_string() } else { pay.to_string() }, "fields": {"title": format!("X {i}")}},
+                        {"op": "create", "type": "claim", "parent": shared.to_string(), "body": format!("Under X {i}.")}
+                    ])).is_ok()
+                    && r.decide(&ag(vn), vn, DecisionInput {
+                        parent: shared.to_string(),
+                        statement: format!("x{i}"),
+                        affects: vec![x.to_string()],
+                        ..Default::default()
+                    }).is_ok(),
+                5 => try_put(&mut r, vn, upd(&x, &format!("{vn} {i}"))).is_ok(),
+                6 => land(&mut r, vn).is_ok(),
+                _ => r.new_doc(&ag(vn), vn, &format!("payments/n{i}"), None, None).is_ok(),
+            };
+            // every third state is left unread: the next commit carries it when published
+            if i % 3 != 1 {
+                let (carried, rebuilt) = carried_and_rebuilt(&r);
+                prop_assert_eq!(carried, rebuilt, "step {}", i);
+            }
+        }
+        let (carried, rebuilt) = carried_and_rebuilt(&r);
+        prop_assert_eq!(carried, rebuilt, "end");
+    }
 }
