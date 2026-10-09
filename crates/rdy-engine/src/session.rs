@@ -1,4 +1,4 @@
-use crate::error::{E_PERMISSION, RdyError};
+use crate::error::{E_BAD_INPUT, E_PERMISSION, RdyError};
 use rdy_model::{Provenance, Role};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -79,6 +79,22 @@ impl Session {
                 E_PERMISSION,
                 "agent sessions cannot hold the approver role",
                 "approvals are made by the human actor: unset RDY_ACTOR, or set actor: in the user's rdy config",
+            ));
+        }
+        if actor.trim().is_empty() {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "an agent session needs an actor",
+                "pass an actor, e.g. agent:claude",
+            ));
+        }
+        if let Some(r) = &run
+            && (r.trim().is_empty() || r.contains('/') || r.starts_with('.'))
+        {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("the run {r:?} is not a plain name"),
+                "pass a run name such as r7 (no '/', not starting with '.'), or none (the view is then work-<actor>)",
             ));
         }
         Ok(Session {

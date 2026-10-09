@@ -449,6 +449,7 @@ impl Rdy {
             ));
         }
         let view = view.map_or_else(|| s.default_view(), str::to_string);
+        crate::write::writable_view(&view)?;
         let scope = Scope::View(view.clone());
         let mut ids = BTreeSet::new();
         if !blocks.is_empty() {

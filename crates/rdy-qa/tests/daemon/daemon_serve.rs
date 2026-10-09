@@ -4,7 +4,7 @@ use rdy_daemon::{
     E_NO_SESSION, ExitReason, Hello, PROTO_VERSION, Proto, RunDir, ServeError, ServeOptions,
     connect, start,
 };
-use rdy_engine::{E_PERMISSION, E_VIEW_OWNER, Rdy};
+use rdy_engine::{E_BAD_INPUT, E_PERMISSION, E_VIEW_OWNER, Rdy};
 use rdy_qa::daemon::{Hosted, short_tempdir};
 use serde_json::json;
 use std::time::Duration;
@@ -358,4 +358,23 @@ fn serve1_a_successor_started_as_soon_as_a_stopped_daemons_socket_is_gone_comes_
     assert_eq!(old.join().unwrap().unwrap(), ExitReason::Stopped);
     new.handle().stop();
     assert_eq!(new.wait().unwrap(), ExitReason::Stopped);
+}
+
+#[test]
+fn msw13_the_session_op_refuses_an_empty_actor_or_run() {
+    let h = Hosted::new();
+    let rt = Hosted::rt();
+    rt.block_on(async {
+        let mut c = h.client(None, None).await;
+        for args in [
+            json!({"actor": "", "run": ""}),
+            json!({"actor": "", "run": null}),
+            json!({"actor": "  ", "run": null}),
+            json!({"actor": "agent:w", "run": ""}),
+            json!({"actor": "agent:w", "run": "../x"}),
+        ] {
+            let e = c.ctl("session", args.clone()).await.unwrap_err();
+            assert_eq!(e.code, E_BAD_INPUT, "{args}: {}", e.message);
+        }
+    });
 }

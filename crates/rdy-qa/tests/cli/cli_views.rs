@@ -1,4 +1,5 @@
 //! cview1: the view commands on the CLI, through the daemon, as the human and as an agent.
+use rdy_daemon::{OpContext, dispatch};
 use rdy_engine::*;
 use rdy_qa::daemon::Served;
 use rdy_qa::fixtures::*;
@@ -226,4 +227,50 @@ fn cview1_close_stale_keeps_the_humans_work_view_and_says_so() {
         ok && out.starts_with("closed 0 views") && out.contains("kept work open"),
         "{out}"
     );
+}
+
+#[test]
+fn msw13_block_and_brief_strip_a_view_prefix_as_edit_block_does() {
+    let (d, mut r) = project();
+    let (_doc, _s, c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    write(
+        &mut r,
+        "foo",
+        json!([{"op": "update", "id": c, "body": "two"}]),
+    )
+    .unwrap();
+    let want = version_of(&r, &Scope::View("foo".into()), &c);
+    let e = Local::new(r);
+    let h = writer();
+    let cx = OpContext {
+        engine: &e,
+        session: &h,
+        cwd: d.path(),
+    };
+    let b = dispatch(&cx, "block", json!({"id": c, "view": "view:foo"})).unwrap();
+    assert_eq!(b["version"], want.as_str(), "{b}");
+    let br = dispatch(&cx, "brief", json!({"ids": [c], "view": "view:foo"})).unwrap();
+    assert_eq!(br["base"]["blocks"][0]["version"], want.as_str(), "{br}");
+    e.close().unwrap();
+}
+
+#[test]
+fn msw13_a_write_or_proposal_to_the_empty_view_name_is_refused() {
+    let (d, r) = project();
+    let e = Local::new(r);
+    let h = writer();
+    let cx = OpContext {
+        engine: &e,
+        session: &h,
+        cwd: d.path(),
+    };
+    for view in ["view:", ""] {
+        let err = dispatch(&cx, "new_doc", json!({"path": "a", "view": view})).unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT, "{view:?}: {err}");
+        assert!(err.message.contains("empty"), "{err}");
+    }
+    let err = dispatch(&cx, "propose", json!({"title": "t", "view": ""})).unwrap_err();
+    assert!(err.message.contains("empty"), "{err}");
+    e.close().unwrap();
 }

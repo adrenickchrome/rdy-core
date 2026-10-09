@@ -519,3 +519,53 @@ fn intn1_the_open_intent_index_follows_every_intent_change() {
     land(&mut r, "seed").unwrap();
     assert_eq!(index(&r), vec![row(&i2)]);
 }
+
+#[test]
+fn msw13_intent_post_refuses_a_view_that_cannot_be_written() {
+    let (_d, mut r) = qa_project();
+    let (_doc, _s, claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = agent("agent:a", Some("ra"));
+    for v in ["canon", "inflight", "tag:v1", "landing:x", ""] {
+        let e = r
+            .intent_post(&a, Some(v), Some("payments"), &[], "x", None)
+            .unwrap_err();
+        assert!(
+            [E_RESERVED_VIEW, E_BAD_INPUT].contains(&e.code),
+            "{v:?}: {e}"
+        );
+        let e = r
+            .intent_post(&a, Some(v), None, std::slice::from_ref(&claim), "x", None)
+            .unwrap_err();
+        assert!(
+            [E_RESERVED_VIEW, E_BAD_INPUT].contains(&e.code),
+            "{v:?} with blocks: {e}"
+        );
+    }
+    // a valid view that does not exist yet stays allowed (a session's default often doesn't)
+    r.intent_post(&a, Some("not-yet"), Some("payments"), &[], "x", None)
+        .unwrap();
+}
+
+#[test]
+fn msw13_intent_post_caps_the_view_name() {
+    let (_d, mut r) = qa_project();
+    let a = agent("agent:a", Some("ra"));
+    let e = r
+        .intent_post(
+            &a,
+            Some(&"v".repeat(2_000_000)),
+            Some("payments"),
+            &[],
+            "x",
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(
+        e.code,
+        E_LIMIT,
+        "{}",
+        &e.message[..e.message.len().min(200)]
+    );
+    assert!(e.message.len() < 1_000, "the message clips the name");
+}

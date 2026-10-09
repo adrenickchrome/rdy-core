@@ -192,7 +192,7 @@ pub(super) fn tags(cx: &OpContext) -> Result<Value, RdyError> {
 
 pub(super) fn block(cx: &OpContext, a: BlockArgs) -> Result<Value, RdyError> {
     let st = cx.engine.read();
-    let view = a.view.unwrap_or_else(|| cx.session.default_view());
+    let view = view_of(cx.session, a.view);
     let scope = Scope::View(view);
     let bid = st.resolve_id(&scope, &a.id)?;
     let b = st.block(&scope, &bid)?;

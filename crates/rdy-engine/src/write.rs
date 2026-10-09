@@ -2166,6 +2166,7 @@ pub(crate) fn check_view_access(
     action: views::Action,
 ) -> Result<(), RdyError> {
     let propose = action == views::Action::Propose;
+    non_empty_view(view)?;
     if !propose {
         writable_view(view)?;
     }
@@ -2240,6 +2241,17 @@ fn own_view_fix(view: &str, s: &Session) -> String {
 /// Views that can receive writes: not `canon`, and no `:` (reserved for scope kinds such as
 /// `tag:` and `landing:`; legacy M1 views with `:` stay readable and proposable via `view:<name>`).
 pub(crate) fn writable_view(name: &str) -> Result<(), RdyError> {
+    non_empty_view(name)?;
+    if name.chars().count() > MAX_VIEW_NAME {
+        return Err(RdyError::new(
+            E_LIMIT,
+            format!(
+                "a view name is longer than {MAX_VIEW_NAME} characters ({})",
+                views::clip(name)
+            ),
+            "use a shorter view name",
+        ));
+    }
     if name == "canon" {
         return Err(RdyError::new(
             E_RESERVED_VIEW,
@@ -2261,6 +2273,21 @@ pub(crate) fn writable_view(name: &str) -> Result<(), RdyError> {
                 "view names cannot contain ':' ({name:?}): ':' introduces scope kinds such as tag: and landing:"
             ),
             "write to a view name without ':' (for example replace it with '-')",
+        ));
+    }
+    Ok(())
+}
+
+/// A view name has at most this many characters.
+pub(crate) const MAX_VIEW_NAME: usize = 256;
+
+/// `E_BAD_INPUT` for the empty view name, which no write or proposal may target.
+fn non_empty_view(name: &str) -> Result<(), RdyError> {
+    if name.is_empty() {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "a view name is empty",
+            "name a view, e.g. work",
         ));
     }
     Ok(())
