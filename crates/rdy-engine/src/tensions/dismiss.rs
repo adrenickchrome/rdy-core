@@ -15,7 +15,7 @@
 //!
 //! A dismissal binds to the vkey, which covers the severity: one made while a tension was
 //! advisory does not hold once it is blocking, and the blocking tension needs its own review.
-use super::set::{find_among, no_tension};
+use super::set::{ambiguous, matching, no_tension, tension_hex};
 use super::{SideRef, Tension, TensionKind, TensionSeverity, TensionStatus, tension_label};
 use crate::error::*;
 use crate::gate::open_proposals;
@@ -44,37 +44,32 @@ pub struct DismissInfo {
 
 impl ReadState {
     /// The tension `text` names (`tn-` and a hex prefix, or the prefix alone), among the
-    /// event-derived set and then, on a miss, the landing tensions of every open proposal
-    /// (tgat1: a form the gate refuses with is a tension of its own, so a refusal can always be
-    /// dismissed by the id it names). One id is one tension, wherever it is found. A read-time
-    /// overlap at `now_ms` (read only when neither holds it) is `E_BAD_INPUT`: it is resolved
-    /// through its intent, never dismissed.
+    /// event-derived set, the landing tensions of every open proposal (tgat1: a form the gate
+    /// refuses with is a tension of its own, so a refusal can always be dismissed by the id it
+    /// names) and the read-time overlaps at `now_ms`. Only a prefix that one tension matches
+    /// across all three resolves (see `resolve_in`). A read-time overlap is `E_BAD_INPUT`: it
+    /// is resolved through its intent, never dismissed.
     pub fn resolve_tension(&self, text: &str, now_ms: i64) -> Result<Arc<Tension>, RdyError> {
-        if let Some(t) = find_among(self.tensions()?.iter(), text)? {
-            return Ok(t);
-        }
-        let mut landing: BTreeMap<Hash, Arc<Tension>> = BTreeMap::new();
-        for (_, p) in open_proposals(self)? {
-            for t in self.landing_tensions(&p.view, &p.changes)? {
-                landing.entry(t.id).or_insert(t);
-            }
-        }
-        if let Some(t) = find_among(landing.values(), text)? {
-            return Ok(t);
-        }
-        let read_time: Vec<Arc<Tension>> = self
-            .intent_tensions(now_ms)?
-            .into_iter()
-            .map(Arc::new)
-            .collect();
-        if find_among(read_time.iter(), text)?.is_some() {
-            return Err(RdyError::new(
-                E_BAD_INPUT,
-                "intent overlaps are read-time; resolve the intent instead",
-                "withdraw the intent (rdy_intent {op: withdraw}) or let it expire, or move the edit into the intent's view",
-            ));
-        }
-        Err(no_tension(text))
+        resolve_in(
+            text,
+            self.tensions()?.iter(),
+            || {
+                let mut landing: BTreeMap<Hash, Arc<Tension>> = BTreeMap::new();
+                for (_, p) in open_proposals(self)? {
+                    for t in self.landing_tensions(&p.view, &p.changes)? {
+                        landing.entry(t.id).or_insert(t);
+                    }
+                }
+                Ok(landing.into_values().collect())
+            },
+            || {
+                Ok(self
+                    .intent_tensions(now_ms)?
+                    .into_iter()
+                    .map(Arc::new)
+                    .collect())
+            },
+        )
     }
 
     /// The changes that wrote canon item `block` at `version`, as of canon's head: the producer
@@ -244,5 +239,186 @@ impl Rdy {
             review: id.to_string(),
             status: "dismissed".to_string(),
         })
+    }
+}
+
+/// The one tension `text` names among the event-derived set `event`, the `landing` forms of
+/// open proposals and the `read_time` overlaps. Only a prefix that one tension matches across
+/// all three lists resolves; one id is one tension, wherever it is found (the event-derived
+/// form first). A full label (12 hex or more) found in one list ends the search there, so the
+/// later lists are read only on a miss; a shorter prefix reads every list, so a match in a
+/// later list makes it ambiguous. A read-time overlap is refused: it is resolved through its
+/// intent, never dismissed.
+fn resolve_in<'a>(
+    text: &str,
+    event: impl IntoIterator<Item = &'a Arc<Tension>>,
+    landing: impl FnOnce() -> Result<Vec<Arc<Tension>>, RdyError>,
+    read_time: impl FnOnce() -> Result<Vec<Arc<Tension>>, RdyError>,
+) -> Result<Arc<Tension>, RdyError> {
+    let Some(hex) = tension_hex(text) else {
+        return Err(no_tension(text));
+    };
+    let full = hex.len() >= 12;
+    fn add<'a>(
+        found: &mut BTreeMap<Hash, Arc<Tension>>,
+        list: impl IntoIterator<Item = &'a Arc<Tension>>,
+        hex: &str,
+    ) {
+        for t in matching(list, hex) {
+            found.entry(t.id).or_insert_with(|| Arc::clone(t));
+        }
+    }
+    let mut found: BTreeMap<Hash, Arc<Tension>> = BTreeMap::new();
+    add(&mut found, event, &hex);
+    if !full || found.is_empty() {
+        add(&mut found, &landing()?, &hex);
+    }
+    if !full || found.is_empty() {
+        add(&mut found, &read_time()?, &hex);
+    }
+    let found: Vec<Arc<Tension>> = found.into_values().collect();
+    match found.as_slice() {
+        [] => Err(no_tension(text)),
+        [t] if t.read_time => Err(read_time_refusal()),
+        [t] => Ok(Arc::clone(t)),
+        many => Err(ambiguous(text, many.iter())),
+    }
+}
+
+/// `E_BAD_INPUT` for a read-time overlap named for dismissal.
+fn read_time_refusal() -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        "intent overlaps are read-time; resolve the intent instead",
+        "withdraw the intent (rdy_intent {op: withdraw}) or let it expire, or move the edit into the intent's view",
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tension whose id starts with the bytes `head` (the rest zero, then `tail`).
+    fn tn(head: &[u8], tail: u8, read_time: bool) -> Arc<Tension> {
+        let mut b = [0u8; 32];
+        b[..head.len()].copy_from_slice(head);
+        b[31] = tail;
+        Arc::new(Tension {
+            id: Hash(b),
+            vkey: Hash([tail; 32]),
+            kind: TensionKind::ALL[0],
+            severity: TensionSeverity::Advisory,
+            overridden: false,
+            sides: vec![],
+            involved: vec![],
+            summary: String::new(),
+            read_time,
+        })
+    }
+
+    const HEAD: &[u8] = &[0xab, 0xcd, 0xef];
+    const SHORT: &str = "tn-abcdef";
+
+    fn resolve(
+        text: &str,
+        event: &[Arc<Tension>],
+        landing: &[Arc<Tension>],
+        read_time: &[Arc<Tension>],
+    ) -> Result<Arc<Tension>, RdyError> {
+        resolve_in(
+            text,
+            event.iter(),
+            || Ok(landing.to_vec()),
+            || Ok(read_time.to_vec()),
+        )
+    }
+
+    fn assert_ambiguous(r: Result<Arc<Tension>, RdyError>) {
+        let e = r.unwrap_err();
+        assert_eq!(e.code, E_NOT_FOUND, "{e}");
+        assert_eq!(
+            e.message,
+            format!("tension {SHORT} is ambiguous (2 tensions)")
+        );
+    }
+
+    #[test]
+    fn tdis1_a_short_prefix_of_an_event_tension_and_a_landing_form_is_ambiguous() {
+        assert_ambiguous(resolve(
+            SHORT,
+            &[tn(HEAD, 1, false)],
+            &[tn(HEAD, 2, false)],
+            &[],
+        ));
+    }
+
+    #[test]
+    fn tdis1_a_short_prefix_of_an_event_tension_and_a_read_time_overlap_is_ambiguous() {
+        assert_ambiguous(resolve(
+            SHORT,
+            &[tn(HEAD, 1, false)],
+            &[],
+            &[tn(HEAD, 2, true)],
+        ));
+    }
+
+    #[test]
+    fn tdis1_a_short_prefix_of_a_landing_form_and_a_read_time_overlap_is_ambiguous() {
+        assert_ambiguous(resolve(
+            SHORT,
+            &[],
+            &[tn(HEAD, 1, false)],
+            &[tn(HEAD, 2, true)],
+        ));
+    }
+
+    #[test]
+    fn tdis1_one_id_in_two_lists_is_one_tension() {
+        let t = tn(HEAD, 1, false);
+        let got = resolve(SHORT, &[Arc::clone(&t)], &[Arc::clone(&t)], &[]).unwrap();
+        assert_eq!(got.id, t.id);
+    }
+
+    #[test]
+    fn tdis1_a_full_label_of_an_event_tension_reads_no_other_list() {
+        // M6: a full label found in the event-derived set needs no landing or read-time read
+        let t = tn(HEAD, 1, false);
+        let got = resolve_in(
+            &tension_label(&t.id),
+            [Arc::clone(&t)].iter(),
+            || panic!("landing forms read"),
+            || panic!("read-time overlaps read"),
+        )
+        .unwrap();
+        assert_eq!(got.id, t.id);
+    }
+
+    #[test]
+    fn tdis1_a_full_label_of_a_landing_form_reads_no_read_time_overlap() {
+        let t = tn(HEAD, 1, false);
+        let got = resolve_in(
+            &tension_label(&t.id),
+            [].iter(),
+            || Ok(vec![Arc::clone(&t)]),
+            || panic!("read-time overlaps read"),
+        )
+        .unwrap();
+        assert_eq!(got.id, t.id);
+    }
+
+    #[test]
+    fn tdis1_a_unique_short_prefix_resolves_and_a_read_time_one_is_refused() {
+        let t = tn(HEAD, 1, false);
+        let other = tn(&[0x12, 0x34, 0x56], 2, true);
+        let got = resolve(SHORT, &[], &[Arc::clone(&t)], std::slice::from_ref(&other)).unwrap();
+        assert_eq!(got.id, t.id);
+        let e = resolve(SHORT, &[], &[], &[tn(HEAD, 3, true)]).unwrap_err();
+        assert_eq!(e.code, E_BAD_INPUT, "{e}");
+        assert_eq!(
+            e.message,
+            "intent overlaps are read-time; resolve the intent instead"
+        );
+        let e = resolve("tn-abcdee", &[t], &[], &[other]).unwrap_err();
+        assert_eq!(e.code, E_NOT_FOUND, "{e}");
     }
 }

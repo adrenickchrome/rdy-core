@@ -314,43 +314,60 @@ pub(crate) fn no_tension(text: &str) -> RdyError {
     )
 }
 
+/// The lowercase hex of a tension id `text` (`tn-` and 6 to 64 hex digits, or the hex alone),
+/// or `None` when `text` is no tension id.
+pub(crate) fn tension_hex(text: &str) -> Option<String> {
+    let hex = text
+        .strip_prefix("tn-")
+        .unwrap_or(text)
+        .to_ascii_lowercase();
+    ((6..=64).contains(&hex.len()) && hex.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hex)
+}
+
+/// The tensions of `tensions` whose id starts with `hex`.
+pub(crate) fn matching<'a>(
+    tensions: impl IntoIterator<Item = &'a Arc<Tension>>,
+    hex: &str,
+) -> impl Iterator<Item = &'a Arc<Tension>> {
+    tensions
+        .into_iter()
+        .filter(move |t| t.id.to_string().starts_with(hex))
+}
+
 /// The tension of `tensions` that `text` names, or `None` when none matches (or `text` is no
 /// tension id); `E_NOT_FOUND` when several match.
 pub(crate) fn find_among<'a>(
     tensions: impl IntoIterator<Item = &'a Arc<Tension>>,
     text: &str,
 ) -> Result<Option<Arc<Tension>>, RdyError> {
-    let hex = text
-        .strip_prefix("tn-")
-        .unwrap_or(text)
-        .to_ascii_lowercase();
-    if !(6..=64).contains(&hex.len()) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+    let Some(hex) = tension_hex(text) else {
         return Ok(None);
-    }
-    let found: Vec<&Arc<Tension>> = tensions
-        .into_iter()
-        .filter(|t| t.id.to_string().starts_with(&hex))
-        .collect();
+    };
+    let found: Vec<&Arc<Tension>> = matching(tensions, &hex).collect();
     match found.as_slice() {
         [] => Ok(None),
         [t] => Ok(Some(Arc::clone(t))),
-        many => Err(RdyError::new(
-            E_NOT_FOUND,
-            format!(
-                "tension {} is ambiguous ({} tensions)",
-                clip(text),
-                many.len()
-            ),
-            format!(
-                "use more characters: it matches {}",
-                many.iter()
-                    .take(5)
-                    .map(|t| tension_label(&t.id))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        )),
+        many => Err(ambiguous(text, many.iter().copied())),
     }
+}
+
+/// `E_NOT_FOUND` for a tension `text` names that several tensions (`many`) match.
+pub(crate) fn ambiguous<'a>(
+    text: &str,
+    many: impl ExactSizeIterator<Item = &'a Arc<Tension>>,
+) -> RdyError {
+    let n = many.len();
+    RdyError::new(
+        E_NOT_FOUND,
+        format!("tension {} is ambiguous ({n} tensions)", clip(text)),
+        format!(
+            "use more characters: it matches {}",
+            many.take(5)
+                .map(|t| tension_label(&t.id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    )
 }
 
 /// A state's tension set, built on first read: carried from the state before when `carry` is
