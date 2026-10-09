@@ -372,6 +372,9 @@ fn msw13_the_session_op_refuses_an_empty_actor_or_run() {
             json!({"actor": "  ", "run": null}),
             json!({"actor": "agent:w", "run": ""}),
             json!({"actor": "agent:w", "run": "../x"}),
+            json!({"actor": "agent:w", "run": ".x"}),
+            json!({"actor": "agent:w", "run": "r".repeat(257)}),
+            json!({"actor": "a".repeat(300), "run": null}),
         ] {
             let e = c.ctl("session", args.clone()).await.unwrap_err();
             assert_eq!(e.code, E_BAD_INPUT, "{args}: {}", e.message);

@@ -89,20 +89,36 @@ impl Session {
             ));
         }
         if let Some(r) = &run
-            && (r.trim().is_empty() || r.contains('/') || r.starts_with('.'))
+            && (r.trim().is_empty()
+                || r.contains('/')
+                || r.starts_with('.')
+                || r.chars().count() > crate::write::MAX_VIEW_NAME)
         {
             return Err(RdyError::new(
                 E_BAD_INPUT,
-                format!("the run {r:?} is not a plain name"),
-                "pass a run name such as r7 (no '/', not starting with '.'), or none (the view is then work-<actor>)",
+                format!("the run {:?} is not a plain name", crate::views::clip(r)),
+                "pass a run name such as r7 (no '/', not starting with '.', at most 256 characters), or none (the view is then work-<actor>)",
             ));
         }
-        Ok(Session {
+        let session = Session {
             actor,
             run,
             role,
             kind: SessionKind::Agent,
-        })
+        };
+        // The default view is the run, else work-<actor>; it must be a writable name.
+        if session.default_view().chars().count() > crate::write::MAX_VIEW_NAME {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!(
+                    "the actor or run makes a view name longer than {} characters ({})",
+                    crate::write::MAX_VIEW_NAME,
+                    crate::views::clip(&session.default_view())
+                ),
+                "pass a shorter actor or run (the view is the run, or work-<actor>)",
+            ));
+        }
+        Ok(session)
     }
 
     pub fn is_human(&self) -> bool {

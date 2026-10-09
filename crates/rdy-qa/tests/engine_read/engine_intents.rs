@@ -569,3 +569,17 @@ fn msw13_intent_post_caps_the_view_name() {
     );
     assert!(e.message.len() < 1_000, "the message clips the name");
 }
+
+#[test]
+fn msw13_intent_post_strips_a_view_prefix_as_the_write_ops_do() {
+    let (_d, mut r) = qa_project();
+    let a = agent("agent:a", Some("ra"));
+    let it = r
+        .intent_post(&a, Some("view:foo"), Some("payments"), &[], "x", None)
+        .unwrap();
+    assert_eq!(it.view, "foo", "{it:?}");
+    let e = r
+        .intent_post(&a, Some("view:"), Some("payments"), &[], "x", None)
+        .unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT, "{e}");
+}
