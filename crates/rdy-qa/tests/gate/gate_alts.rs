@@ -557,3 +557,81 @@ fn msw2_a_pre_set_change_only_another_member_holds_is_that_members_alternative()
     );
     assert!(!canon_bodies(&r).iter().any(|b| b == "W"));
 }
+
+fn claim_in(r: &mut Rdy, view: &str, section: &str, body: &str) -> String {
+    write(
+        r,
+        view,
+        json!([{"op": "create", "type": "claim", "parent": section, "body": body}]),
+    )
+    .unwrap()
+    .change
+}
+
+#[test]
+fn msw2_a_pre_set_change_a_non_member_wrote_binds_to_the_one_member_that_holds_it() {
+    // fix round 2 (P2): Z is written in non-member n and included only by member a before the
+    // set: the writer does not matter, so Z is a's alternative while the set is open
+    let (_d, mut r) = project();
+    let (_doc, section, _claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    claim_in(&mut r, "a", &section, "alt A");
+    claim_in(&mut r, "b", &section, "alt B");
+    let z = claim_in(&mut r, "n", &section, "Z");
+    r.view_include(&writer(), "a", std::slice::from_ref(&z))
+        .unwrap();
+    r.alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap();
+    r.view_include(&writer(), "d", std::slice::from_ref(&z))
+        .unwrap();
+    let e = r
+        .propose(&writer(), "d", "d")
+        .and_then(|p| r.land(&approver(), &p.id))
+        .unwrap_err();
+    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
+    assert!(
+        e.message.contains("member x"),
+        "a's alternative: {}",
+        e.message
+    );
+    assert!(!canon_bodies(&r).iter().any(|b| b == "Z"));
+}
+
+#[test]
+fn msw2_a_pre_set_change_stays_bound_after_its_writer_leaves_the_set() {
+    // fix round 2 (P3): P is written in b, included by member a and excluded by b; b leaves the
+    // set, and P is still a's alternative, since a is the one member that holds it
+    let (_d, mut r) = project();
+    let (_doc, section, _claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    claim_in(&mut r, "a", &section, "alt A");
+    let p = claim_in(&mut r, "b", &section, "P");
+    claim_in(&mut r, "c", &section, "alt C");
+    r.view_include(&writer(), "a", std::slice::from_ref(&p))
+        .unwrap();
+    r.view_exclude(&writer(), "b", std::slice::from_ref(&p), false)
+        .unwrap();
+    let set = r
+        .alt_create(
+            &writer(),
+            "T",
+            None,
+            &[m("x", "a"), m("y", "b"), m("z", "c")],
+        )
+        .unwrap()
+        .id;
+    r.alt_remove(&writer(), &set, "y").unwrap();
+    r.view_include(&writer(), "d", std::slice::from_ref(&p))
+        .unwrap();
+    let e = r
+        .propose(&writer(), "d", "d")
+        .and_then(|p| r.land(&approver(), &p.id))
+        .unwrap_err();
+    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
+    assert!(
+        e.message.contains("member x"),
+        "a's alternative: {}",
+        e.message
+    );
+    assert!(!canon_bodies(&r).iter().any(|b| b == "P"));
+}

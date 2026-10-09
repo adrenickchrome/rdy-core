@@ -899,8 +899,9 @@ fn not_lost(st: &ReadState, view: &str, what: impl Fn(&str) -> String) -> Result
 /// member's alternative: it lands only in a version proposed from that member's view that chose
 /// that member (`chosen`). A link binds while its set is open and still lists the member. A
 /// change with no binding link (written before the set was made, or linked to a set that is
-/// settled or dropped the member) is the alternative of the one member of its view's open set
-/// that holds it (msw2; see `unlinked_alt`).
+/// settled or dropped the member) is bound by its holders instead, whichever view wrote it: in
+/// each open set exactly one of whose members holds it, it is that member's alternative, and
+/// every such binding applies (msw2; see `sole_holders`).
 fn linked_alts(
     st: &ReadState,
     view: &str,
@@ -909,66 +910,74 @@ fn linked_alts(
     changes: &[Change],
 ) -> Result<(), RdyError> {
     let open = &st.coord_heads().open_alts;
+    // read only when a change has no binding link, and then once for all of `ids`
+    let mut held: Option<HashMap<Hash, Vec<AltChoice>>> = None;
     for (id, c) in ids.iter().zip(changes) {
         let linked = c.links.alternative.as_ref().filter(|a| {
             open.get(&a.set)
                 .is_some_and(|(_, set)| set.members.iter().any(|m| m.view == a.member))
         });
-        let unlinked;
-        let a = match linked {
-            Some(a) => a,
-            None => match unlinked_alt(st, id, &c.view)? {
-                Some(a) => {
-                    unlinked = a;
-                    &unlinked
-                }
-                None => continue,
-            },
+        let bindings: &[AltChoice] = match linked {
+            Some(a) => std::slice::from_ref(a),
+            None => held
+                .get_or_insert_with(|| sole_holders(st, ids))
+                .get(id)
+                .map_or(&[], Vec::as_slice),
         };
-        let Some((_, set)) = open.get(&a.set) else {
-            continue;
-        };
-        if a.member == view && chosen == Some(a) {
-            continue;
+        for a in bindings {
+            let Some((_, set)) = open.get(&a.set) else {
+                continue;
+            };
+            if a.member == view && chosen == Some(a) {
+                continue;
+            }
+            return Err(RdyError::new(
+                E_ALT_MEMBER,
+                format!(
+                    "change {} is {} member {}'s alternative",
+                    id.short(),
+                    alt_label(&a.set),
+                    member_label(set, &a.member)
+                ),
+                format!("propose from {} to choose it", a.member),
+            ));
         }
-        return Err(RdyError::new(
-            E_ALT_MEMBER,
-            format!(
-                "change {} is {} member {}'s alternative",
-                id.short(),
-                alt_label(&a.set),
-                member_label(set, &a.member)
-            ),
-            format!("propose from {} to choose it", a.member),
-        ));
     }
     Ok(())
 }
 
-/// The alternative change `id`, written in view `written_in` and bound by no link, belongs to,
-/// when `written_in` is a member of an open set: the member of that set that holds the change,
-/// when exactly one does, whichever view wrote it. A change that more than one member holds (a
-/// view forked from another member, an include) is common ground: no member's alternative, so
-/// it lands with any member and chooses nothing. One that no member holds is no alternative.
-fn unlinked_alt(
-    st: &ReadState,
-    id: &Hash,
-    written_in: &str,
-) -> Result<Option<AltChoice>, RdyError> {
-    let Some((stable, _, set)) = st.alt_of_view(written_in)? else {
-        return Ok(None);
-    };
-    let mut holders = set
-        .members
-        .iter()
-        .filter(|m| st.included(&m.view).contains(id));
-    match (holders.next(), holders.next()) {
-        (Some(only), None) => Ok(Some(AltChoice {
-            set: stable,
-            member: only.view.clone(),
-        })),
-        _ => Ok(None),
+/// For each of `ids` that some open set's members hold: the open sets, by stable id, exactly one
+/// of whose members holds it, each as that member's alternative. A change that more than one
+/// member of a set holds (a view forked from another member, an include) is common ground in
+/// that set: no member's alternative there, so it lands with any member and chooses nothing.
+/// One that no member of a set holds is not bound by that set. Reads only the open sets'
+/// member views.
+fn sole_holders(st: &ReadState, ids: &[Hash]) -> HashMap<Hash, Vec<AltChoice>> {
+    let wanted: BTreeSet<&Hash> = ids.iter().collect();
+    let mut out: HashMap<Hash, Vec<AltChoice>> = HashMap::new();
+    for (stable, (_, set)) in &st.coord_heads().open_alts {
+        // each wanted change any member holds: its first holder and whether another holds it
+        let mut holders: BTreeMap<Hash, (&str, bool)> = BTreeMap::new();
+        for m in &set.members {
+            let included = st.included(&m.view);
+            let mine: BTreeSet<&Hash> = included.iter().filter(|h| wanted.contains(h)).collect();
+            for h in mine {
+                holders
+                    .entry(*h)
+                    .and_modify(|(_, shared)| *shared = true)
+                    .or_insert((m.view.as_str(), false));
+            }
+        }
+        for (h, (member, shared)) in holders {
+            if !shared {
+                out.entry(h).or_default().push(AltChoice {
+                    set: *stable,
+                    member: member.to_string(),
+                });
+            }
+        }
     }
+    out
 }
 
 /// The canon that would result from landing `changes` on `st`'s canon, and each applied change's
