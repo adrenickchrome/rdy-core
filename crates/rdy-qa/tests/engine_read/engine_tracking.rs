@@ -299,6 +299,13 @@ fn msw7_a_tracking_edit_cannot_add_a_reference_pin_to_a_frozen_decision() {
     )
     .unwrap_err();
     assert_eq!(e.code, E_FROZEN, "{e}");
+    // the engine's own refusal, not the store's frozen_for fallback
+    assert!(
+        e.message
+            .contains("a tracking edit cannot add or drop a reference"),
+        "{e}"
+    );
+    assert!(e.fix.contains("keep its references as they are"), "{e}");
 }
 
 #[test]
@@ -314,4 +321,76 @@ fn msw7_a_tracking_edit_that_keeps_the_references_still_passes() {
         Some("note"),
     )
     .unwrap();
+}
+
+/// Like `accepted`, but the decision's trigger already cites the seed claim, so it lands with a
+/// pin. Returns (decision, cited claim).
+fn accepted_citing(r: &mut Rdy) -> (String, String) {
+    let (_doc, section, c) = seed_doc(r, "seed");
+    let d = r
+        .decide(
+            &writer(),
+            "seed",
+            DecisionInput {
+                parent: section.clone(),
+                statement: "Ship weekly".into(),
+                fields: [("trigger".to_string(), json!(format!("after {{{{{c}}}}}")))]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let dec = d.created["$decision"].clone();
+    write(r, "seed", json!([{"op": "create", "type": "claim", "id": "$c", "parent": section, "body": "We ship weekly.", "links": {"decided_by": [{"target": dec}]}}])).unwrap();
+    land(r, "seed").unwrap();
+    let b = r.read().block(&Scope::Canon, &id(&dec)).unwrap();
+    assert_eq!(b.field_str("status"), Some("accepted"));
+    assert!(
+        b.pins.contains_key(&id(&c)),
+        "the trigger's citation is pinned"
+    );
+    (dec, c)
+}
+
+#[test]
+fn msw7_a_tracking_edit_that_keeps_a_pinned_reference_still_passes() {
+    // guard with a real pin: the edit rewrites the tracking field but cites the same target
+    let (_d, mut r) = trk_project();
+    let (dec, c) = accepted_citing(&mut r);
+    let before = r.read().block(&Scope::Canon, &id(&dec)).unwrap().pins;
+    update(
+        &mut r,
+        "reg",
+        &dec,
+        json!({"trigger": format!("once {{{{{c}}}}} ships")}),
+        Some("note"),
+    )
+    .unwrap();
+    let after = r
+        .read()
+        .block(&Scope::View("reg".into()), &id(&dec))
+        .unwrap()
+        .pins;
+    assert_eq!(before, after, "the pins stay as they were");
+}
+
+#[test]
+fn msw7_a_tracking_edit_cannot_drop_a_reference_of_a_frozen_decision() {
+    let (_d, mut r) = trk_project();
+    let (dec, _c) = accepted_citing(&mut r);
+    let e = update(
+        &mut r,
+        "reg",
+        &dec,
+        json!({"trigger": "after the audit"}),
+        Some("drop the citation"),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, E_FROZEN, "{e}");
+    assert!(
+        e.message
+            .contains("a tracking edit cannot add or drop a reference"),
+        "{e}"
+    );
 }
