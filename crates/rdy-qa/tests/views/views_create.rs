@@ -331,7 +331,8 @@ fn hb1_require_up_to_date_is_read_from_the_project_config_on_a_full_publish() {
         !r.read().require_up_to_date(),
         "a published state never changes"
     );
-    r.invalidate();
+    // the config is loaded at open and by a pack reload; a full publish keeps it (msw19)
+    assert!(matches!(r.reload_pack().unwrap(), ReloadOutcome::Reloaded));
     assert!(r.read().require_up_to_date());
     let (_doc, section, _c) = seed_doc(&mut r, "seed");
     write(
@@ -344,4 +345,84 @@ fn hb1_require_up_to_date_is_read_from_the_project_config_on_a_full_publish() {
         r.read().require_up_to_date(),
         "carried over by a commit's publish"
     );
+}
+
+#[test]
+fn msw19_a_full_publish_over_a_broken_config_keeps_the_review_gate_on() {
+    let (d, mut r) = project();
+    let cfg = d.path().join(".rdy/config.yaml");
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    std::fs::write(
+        &cfg,
+        format!("{text}reviews:\n  require_up_to_date: true\n"),
+    )
+    .unwrap();
+    assert!(matches!(r.reload_pack().unwrap(), ReloadOutcome::Reloaded));
+    assert!(r.read().require_up_to_date());
+    for broken in ["reviews:\n  require_up_to_date: \"true\"\n", "reviews: [\n"] {
+        std::fs::write(&cfg, format!("{text}{broken}")).unwrap();
+        assert!(
+            matches!(r.reload_pack().unwrap(), ReloadOutcome::Invalid { .. }),
+            "{broken:?}"
+        );
+        r.invalidate();
+        assert!(
+            r.read().require_up_to_date(),
+            "{broken:?} must not turn the review gate off"
+        );
+    }
+}
+
+#[test]
+fn msw19_an_unknown_key_under_reviews_is_a_config_error() {
+    for bad in [
+        "reviews:\n  require_uptodate: true\n",
+        "review:\n  require_up_to_date: true\n",
+    ] {
+        let (d, r) = project();
+        drop(r);
+        let cfg = d.path().join(".rdy/config.yaml");
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        std::fs::write(&cfg, format!("{text}{bad}")).unwrap();
+        let e = Rdy::open(d.path())
+            .err()
+            .expect("an unknown review setting must not open");
+        assert_eq!(e.code, E_CONFIG, "{bad:?}: {e}");
+        assert!(
+            format!("{} {}", e.message, e.fix).contains("reviews.require_up_to_date"),
+            "{e}"
+        );
+    }
+}
+
+#[test]
+fn msw19_a_reload_whose_publish_panics_keeps_the_previous_pack_and_config() {
+    let (d, mut r) = project();
+    let old_pack = r.pack().name.clone();
+    let old_fp = r.pack_fingerprint().clone();
+    std::fs::write(
+        d.path().join(".rdy/packs/soft.yaml"),
+        "name: soft\nversion: \"1\"\nextends: rdy-standard\n",
+    )
+    .unwrap();
+    std::fs::write(
+        d.path().join(".rdy/config.yaml"),
+        "pack: soft\nreviews:\n  require_up_to_date: true\n",
+    )
+    .unwrap();
+    r.panic_full_publishes_for_tests(1);
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.reload_pack()));
+    assert!(panicked.is_err(), "the publish's panic propagates");
+    assert_eq!(r.pack().name, old_pack, "the previous pack stays loaded");
+    assert_eq!(r.pack_fingerprint(), &old_fp, "the fingerprint stays");
+    r.invalidate();
+    assert_eq!(r.read().pack().name, old_pack);
+    assert!(
+        !r.read().require_up_to_date(),
+        "the previous config stays loaded"
+    );
+    // the files did not change since: the next reload loads them
+    assert!(matches!(r.reload_pack().unwrap(), ReloadOutcome::Reloaded));
+    assert_eq!(r.pack().name, "soft");
+    assert!(r.read().require_up_to_date());
 }

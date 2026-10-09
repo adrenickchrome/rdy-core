@@ -3,7 +3,8 @@
 //! most specific level that sets a key wins. Each key of [`KEY_LEVELS`] names the levels that may
 //! set it (R-P6); a key in a file of another level is `E_CONFIG` naming the right file. Keys
 //! outside the table are kept as they are and never shown; each one is a `W_CONFIG_UNKNOWN`
-//! warning naming the key, the file and the level (R-P6).
+//! warning naming the key, the file and the level (R-P6). An unknown key under `reviews` (or one
+//! nearest to a `reviews` key) is `E_CONFIG` instead: the review gate would stay off (#832).
 
 use crate::{E_CONFIG, E_IO, E_NO_PROJECT, RdyError};
 use rdy_schema::{Issue, Severity};
@@ -11,7 +12,7 @@ use serde::Serialize;
 use serde_yaml_ng::{Mapping, Value};
 use std::path::{Path, PathBuf};
 
-/// The project config, read by `read_config`, `read_config_lenient`, `serve_config` and
+/// The project config, read by `read_config`, `parse_config`, `serve_config` and
 /// `pack_fingerprint`. M2f-b changes this constant.
 pub const PROJECT_FILE: &str = ".rdy/config.yaml";
 
@@ -437,6 +438,14 @@ fn nearest_key(path: &str, level: Level) -> Option<&'static str> {
         .map(|(_, k)| k)
 }
 
+/// The fix text of an unknown key: the nearest known key, else remove it.
+fn unknown_fix(path: &str, level: Level, file: &str) -> String {
+    match nearest_key(path, level) {
+        Some(k) => format!("did you mean {k}? rename {path} in {file}"),
+        None => format!("remove {path} from {file}, or check its spelling"),
+    }
+}
+
 fn unknown_warnings(level: Level, map: &Mapping, user_file: Option<&Path>) -> Vec<Issue> {
     let mut paths = Vec::new();
     unknown_paths(map, "", &mut paths);
@@ -451,12 +460,30 @@ fn unknown_warnings(level: Level, map: &Mapping, user_file: Option<&Path>) -> Ve
                 "unknown key {path} in {file} ({} level); rdy ignores it",
                 level_name(level)
             ),
-            fix: match nearest_key(&path, level) {
-                Some(k) => format!("did you mean {k}? rename {path} in {file}"),
-                None => format!("remove {path} from {file}, or check its spelling"),
-            },
+            fix: unknown_fix(&path, level, &file),
         })
         .collect()
+}
+
+/// The first unknown key of `map` under `reviews`, or nearest to a `reviews` key, as `E_CONFIG`
+/// (R2): a misspelled review setting would leave the review gate off with only a warning.
+fn unknown_review_setting(
+    level: Level,
+    map: &Mapping,
+    user_file: Option<&Path>,
+) -> Option<RdyError> {
+    let mut paths = Vec::new();
+    unknown_paths(map, "", &mut paths);
+    let path = paths.into_iter().find(|p| {
+        p.starts_with("reviews.")
+            || nearest_key(p, level).is_some_and(|k| k.starts_with("reviews."))
+    })?;
+    let file = file_name(level, user_file);
+    Some(RdyError::new(
+        E_CONFIG,
+        format!("unknown review setting {path} in {file}; the review gate would stay off"),
+        unknown_fix(&path, level, &file),
+    ))
 }
 
 /// Why the value `rule.key` has in `map` is of the wrong type, or `None` when it has the type or
@@ -519,6 +546,13 @@ fn build(
         .iter()
         .flat_map(|(level, map)| unknown_warnings(*level, map, user_file))
         .collect();
+    if !lenient
+        && let Some(e) = files
+            .iter()
+            .find_map(|(level, map)| unknown_review_setting(*level, map, user_file))
+    {
+        return Err(e);
+    }
     for (level, map) in &mut files {
         for rule in KEY_LEVELS {
             if rule.levels.contains(level) || get_path(map, rule.key).is_none() {
@@ -762,6 +796,23 @@ mod tests {
             "{}",
             e.warnings[0].fix
         );
+    }
+
+    #[test]
+    fn msw19_a_lenient_read_keeps_an_unknown_review_setting_a_warning() {
+        let d = project("pack: p\nreviews:\n  require_uptodate: true\n", None);
+        let e = effective(d.path(), None).unwrap_err();
+        assert_eq!(e.code, E_CONFIG);
+        assert!(
+            e.message.contains("reviews.require_uptodate") && e.fix.contains("did you mean"),
+            "{e}"
+        );
+        let w = effective_lenient(d.path(), None).warnings;
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(w[0].code, "W_CONFIG_UNKNOWN");
+        // an unknown key outside reviews stays a warning
+        let d = project("pack: p\nlater: 1\n", None);
+        assert_eq!(effective(d.path(), None).unwrap().warnings.len(), 1);
     }
 
     #[test]

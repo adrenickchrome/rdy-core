@@ -1,6 +1,6 @@
 //! Publishing read states and the event bus: what every write runs after it lands.
 
-use crate::config::{Config, read_config_lenient, site_identity};
+use crate::config::site_identity;
 use crate::read_state::{self, CoordHeads, Entry, InflightCell};
 use crate::tensions::SideRef;
 use crate::tensions::set::TensionCell;
@@ -152,18 +152,20 @@ impl Rdy {
     fn next_state(&self, prev: &ReadState, delta: Delta) -> Result<ReadState, RdyError> {
         let seq = self.store.log_end();
         let canon_head = self.store.canon_head()?;
-        // the config is re-read only by a full publish (open, invalidate, reindex); every other
-        // publish carries the previous state's name, description and review rules
+        // a full publish (open, invalidate, reindex, a pack reload) takes the name, description
+        // and review rules from the config loaded at open or by the last successful reload, never
+        // from the files again: a broken file must not turn the review gate off (#832). Every
+        // other publish carries them from the previous state.
         let (name, description, require_up_to_date, idle_days, decisions_home) = match delta {
             Delta::Full => {
-                let cfg = read_config_lenient(&prev.root);
-                let (name, description) = site_identity(&prev.root, cfg.as_ref());
+                let cfg = &self.config;
+                let (name, description) = site_identity(&prev.root, cfg);
                 (
                     name,
                     description,
-                    Config::require_up_to_date(cfg.as_ref()),
-                    Config::idle_days(cfg.as_ref()),
-                    Config::decisions_home(cfg.as_ref()),
+                    cfg.require_up_to_date(),
+                    cfg.idle_days(),
+                    cfg.decisions_home(),
                 )
             }
             _ => (

@@ -109,11 +109,14 @@ fn url1_the_site_name_is_read_when_the_state_is_published_not_when_it_is_asked()
         "First",
         "no publish has re-read it"
     );
+    // the config is loaded at open and by a pack reload; a full publish keeps it (msw19)
     r.invalidate();
+    assert_eq!(r.read().project_name(), "First", "a full publish keeps it");
+    assert!(matches!(r.reload_pack().unwrap(), ReloadOutcome::Reloaded));
     assert_eq!(
         r.read().project_name(),
         "Second",
-        "a full publish re-reads the config"
+        "a pack reload re-reads the config"
     );
     assert_eq!(r.read().project_description(), None);
     assert_eq!(held.project_name(), "First", "a held state never follows");

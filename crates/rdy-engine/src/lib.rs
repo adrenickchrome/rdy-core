@@ -137,6 +137,10 @@ pub struct Rdy {
     lineage: Vec<String>,
     /// The pack files as they were when `pack` was last loaded.
     fingerprint: PackFingerprint,
+    /// The config as it was parsed at open or by the last successful pack reload. A full
+    /// publish reads the site identity and the review and view settings from it, never from the
+    /// files again (#832).
+    config: Arc<config::Config>,
     serve: ServeConfig,
     /// The registered briefings (in memory; one registry per open project).
     briefs: Arc<brief::BriefRegistry>,

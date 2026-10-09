@@ -277,7 +277,8 @@ fn hb1_strict_and_require_up_to_date_refuse_any_moved_base() {
         format!("{text}reviews:\n  require_up_to_date: true\n"),
     )
     .unwrap();
-    r.invalidate();
+    // the config is loaded at open and by a pack reload (msw19)
+    assert!(matches!(r.reload_pack().unwrap(), ReloadOutcome::Reloaded));
     let e = r.land_report(&approver(), &p.r#ref).unwrap_err();
     assert_eq!(e.code, E_PROPOSAL_MOVED, "{e}");
     assert!(e.fix.contains("require_up_to_date"), "{e}");
