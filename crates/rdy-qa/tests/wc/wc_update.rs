@@ -1192,3 +1192,84 @@ fn msw16_a_folder_taken_under_the_store_name_waits_for_its_moved_theirs_file() {
         Some("handbook")
     );
 }
+
+/// msw16 fix round 2: a plain directory at the store's name is not the folder. Adding it neither
+/// trips on the conflict nor resolves it.
+#[test]
+fn msw16_an_empty_dir_at_the_store_name_is_not_the_folder() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::rename(at(&s, "guides"), at(&s, "manuals")).unwrap();
+    store_write(
+        &s,
+        "work",
+        json!([{"op": "update", "id": seed.folder, "fields": {"name": "handbook"}}]),
+    );
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk && v["conflicts"][0]["path"] == "manuals", "{v}");
+    std::fs::create_dir(at(&s, "handbook")).unwrap();
+    let (okk, v) = json(&s, &["add", "handbook"]);
+    assert!(okk && v["resolved"].as_array().unwrap().is_empty(), "{v}");
+    std::fs::remove_file(at(&s, "manuals/_folder.theirs.yaml")).unwrap();
+    let (okk, v) = json(&s, &["add", "handbook"]);
+    assert!(okk && v["resolved"].as_array().unwrap().is_empty(), "{v}");
+    let (okk, v) = json(&s, &["commit", "-m", "too early"]);
+    assert!(!okk && v["code"] == E_WC_CONFLICT, "{v}");
+    ok(&s, &["add", "manuals"]);
+    ok(&s, &["commit", "-m", "keep manuals"]);
+    assert_eq!(
+        store_block(&s, "work", &seed.folder).field_str("name"),
+        Some("manuals")
+    );
+    assert_eq!(store_block(&s, "work", &seed.prose).body, "Hello.");
+}
+
+/// msw16 fix round 2: a folder renamed on both sides with a doc under it edited on both sides;
+/// taking the store's name resolves the doc's conflict too, once its moved theirs file is gone.
+#[test]
+fn msw16_a_folder_taken_under_the_store_name_takes_its_docs_conflicts() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::rename(at(&s, "guides"), at(&s, "manuals")).unwrap();
+    set_body(&s, "manuals/intro.yaml", &seed.prose, "Mine.");
+    store_write(
+        &s,
+        "work",
+        json!([
+            {"op": "update", "id": seed.folder, "fields": {"name": "handbook"}},
+            {"op": "update", "id": seed.prose, "body": "Theirs."}
+        ]),
+    );
+    let (okk, v) = json(&s, &["update"]);
+    let paths: Vec<&str> = v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        okk && paths.contains(&"manuals") && paths.contains(&"manuals/intro.yaml"),
+        "{v}"
+    );
+    std::fs::rename(at(&s, "manuals"), at(&s, "handbook")).unwrap();
+    std::fs::remove_file(at(&s, "handbook/_folder.theirs.yaml")).unwrap();
+    set_body(&s, "handbook/intro.yaml", &seed.prose, "Resolved.");
+    let (okk, v) = json(&s, &["add", "handbook"]);
+    assert!(
+        !okk && v["code"] == E_WC_CONFLICT
+            && v["message"]
+                .as_str()
+                .unwrap()
+                .contains("handbook/intro.theirs.yaml"),
+        "{v}"
+    );
+    std::fs::remove_file(at(&s, "handbook/intro.theirs.yaml")).unwrap();
+    let (okk, v) = json(&s, &["add", "handbook"]);
+    assert!(okk && v["resolved"].as_array().unwrap().len() == 2, "{v}");
+    ok(&s, &["commit", "-m", "take handbook"]);
+    assert_eq!(
+        store_block(&s, "work", &seed.folder).field_str("name"),
+        Some("handbook")
+    );
+    assert_eq!(store_block(&s, "work", &seed.prose).body, "Resolved.");
+}
