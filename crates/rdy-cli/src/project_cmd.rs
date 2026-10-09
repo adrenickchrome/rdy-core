@@ -169,7 +169,7 @@ pub(crate) fn run_check(
         let missing = || ErrorReply::new(E_BAD_INPUT, "no path to check", "pass a path to check");
         if is_project(&env.project) {
             // inside a bound checkout, no path or a path in the working tree lints the working copy
-            if let Some(view) = bound_view(env)
+            if let Some(view) = bound_view(env)?
                 && let Some(place) = &env.place
                 && path.is_none_or(|p| in_tree(&place.root, &env.cwd, p))
             {

@@ -123,3 +123,30 @@ fn wcwt1_names_are_sanitized_and_numbered() {
     ok(&s, &["worktree", "rm", odd.to_str().unwrap()]);
     assert!(!odd.exists(), "the odd-named worktree is removable");
 }
+
+#[test]
+fn msw10_a_damaged_worktree_pointer_is_an_error_not_the_main_copy() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    let side = at(&s, "side");
+    ok(&s, &["worktree", "add", side.to_str().unwrap(), "side"]);
+    std::fs::write(side.join(".rdy-worktree"), "project: [\n").unwrap();
+    let o = Command::new(rdy_qa::fixtures::rdy_bin())
+        .args(["--json", "status"])
+        .current_dir(&side)
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .envs(s.env_pairs())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        !o.status.success(),
+        "ran on the main working copy: {}",
+        String::from_utf8_lossy(&o.stdout)
+    );
+    assert!(
+        err.contains(".rdy-worktree") && err.contains(E_BAD_INPUT),
+        "{err}"
+    );
+}

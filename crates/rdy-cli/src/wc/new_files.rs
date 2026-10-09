@@ -39,7 +39,7 @@ impl NewFiles {
 /// skipped, never overwritten.
 pub(crate) fn write_new(env: &Env, view: &str, created: &[String]) -> Result<NewFiles, ErrorReply> {
     // the cheap look first: a project that never checked out takes no lock and gets no state
-    if created.is_empty() || bound_view(env).as_deref() != Some(view) {
+    if created.is_empty() || bound_view(env)?.as_deref() != Some(view) {
         return Ok(NewFiles::default());
     }
     let mut open = open(env, true)?;

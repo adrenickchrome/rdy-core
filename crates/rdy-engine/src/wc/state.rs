@@ -56,26 +56,40 @@ impl Place {
         }
     }
 
+    /// [`Place::try_locate`], with a damaged pointer file read as no place.
+    pub fn locate(start: &Path) -> Option<Place> {
+        Place::try_locate(start).ok().flatten()
+    }
+
     /// Walks `start` and its ancestors. The first directory with a regular file `.rdy-worktree`
     /// gives a worktree place; else the first with a `.rdy` directory gives the main place. No
-    /// path is canonicalized.
-    pub fn locate(start: &Path) -> Option<Place> {
+    /// path is canonicalized. A regular `.rdy-worktree` that [`Place::from_pointer`] rejects is
+    /// `E_BAD_INPUT`: the walk never passes it to reach the main working copy.
+    pub fn try_locate(start: &Path) -> Result<Option<Place>, RdyError> {
         for dir in start.ancestors() {
-            if let Ok(m) = fs::symlink_metadata(dir.join(POINTER_FILE))
-                && m.is_file()
-                && let Some(p) = Place::from_pointer(dir)
-            {
-                return Some(p);
+            if fs::symlink_metadata(dir.join(POINTER_FILE)).is_ok_and(|m| m.is_file()) {
+                return match Place::from_pointer(dir) {
+                    Some(p) => Ok(Some(p)),
+                    None => Err(RdyError::new(
+                        E_BAD_INPUT,
+                        format!(
+                            "{}/{POINTER_FILE} does not name a worktree: it does not parse, or its name is not one plain name",
+                            dir.display()
+                        ),
+                        "repair it (project: <path>, name: <name>), or delete it",
+                    )),
+                };
             }
             if fs::metadata(dir.join(".rdy")).is_ok_and(|m| m.is_dir()) {
-                return Some(Place::main(dir));
+                return Ok(Some(Place::main(dir)));
             }
         }
-        None
+        Ok(None)
     }
 
     /// The worktree place `dir`'s pointer file names (`dir` holds the pointer itself; nothing is
-    /// walked); `None` when the file is missing, does not parse or names an unsafe name.
+    /// walked); `None` when the file is missing, does not parse or names an unsafe name. A
+    /// relative `project` is joined to `dir`.
     pub fn from_pointer(dir: &Path) -> Option<Place> {
         let text = fs::read_to_string(dir.join(POINTER_FILE)).ok()?;
         let ptr: Pointer = serde_yaml_ng::from_str(&text).ok()?;
@@ -84,10 +98,11 @@ impl Place {
         if !plain {
             return None;
         }
+        let project = dir.join(&ptr.project);
         Some(Place {
             root: dir.to_path_buf(),
-            state: ptr.project.join(WORKTREES_DIR).join(&ptr.name),
-            project: ptr.project,
+            state: project.join(WORKTREES_DIR).join(&ptr.name),
+            project,
         })
     }
 

@@ -179,7 +179,14 @@ fn main() -> ExitCode {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
     };
-    let place = Place::locate(&cwd)
+    let located = match Place::try_locate(&cwd) {
+        Ok(p) => p,
+        Err(e) => {
+            print_error(&e.into(), as_json);
+            return ExitCode::FAILURE;
+        }
+    };
+    let place = located
         .filter(|p| same(&p.project, &project))
         .unwrap_or_else(|| Place::main(&project));
     let env = Env {

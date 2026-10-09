@@ -149,3 +149,22 @@ fn wclk1_a_waiter_gets_the_lock_once_it_is_released() {
     drop(held);
     waiter.join().unwrap().unwrap();
 }
+
+#[test]
+fn msw10_a_relative_project_in_the_pointer_is_joined_to_its_directory() {
+    let top = tempfile::tempdir().unwrap();
+    let p = top.path().join("proj");
+    std::fs::create_dir_all(&p).unwrap();
+    drop(Rdy::init(&p, "rdy-standard").unwrap());
+    let w = top.path().join("side");
+    std::fs::create_dir_all(w.join("sub")).unwrap();
+    std::fs::write(w.join(POINTER_FILE), "project: ../proj\nname: side\n").unwrap();
+    let place = Place::locate(&w.join("sub")).unwrap();
+    assert_eq!(place.root, w);
+    assert_eq!(place.project, w.join("../proj"));
+    assert!(place.project.join(".rdy").is_dir());
+    assert_eq!(
+        place.state,
+        w.join("../proj").join(WORKTREES_DIR).join("side")
+    );
+}
