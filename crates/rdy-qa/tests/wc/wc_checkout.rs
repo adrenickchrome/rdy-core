@@ -481,3 +481,26 @@ fn msw10_damaged_wc_state_refuses_rdy_edit_before_the_editor() {
         );
     }
 }
+
+#[test]
+fn msw16_dirty_fix_text_says_new_files_stay() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    put(
+        &s,
+        "mine.yaml",
+        "- type: doc\n  fields:\n    title: Mine\n    doc_type: page\n",
+    );
+    let (okk, v) = json(&s, &["checkout"]);
+    assert!(!okk && v["code"] == E_WC_DIRTY, "{v}");
+    assert!(v["message"].as_str().unwrap().contains("mine.yaml"), "{v}");
+    ok(&s, &["checkout", "--force"]);
+    assert!(at(&s, "mine.yaml").exists(), "--force keeps a new file");
+    let (okk, v) = json(&s, &["checkout"]);
+    assert!(!okk && v["code"] == E_WC_DIRTY, "{v}");
+    let fix = v["fix"].as_str().unwrap();
+    assert!(
+        !fix.contains("--force to discard them") && fix.contains("new files stay"),
+        "{v}"
+    );
+}

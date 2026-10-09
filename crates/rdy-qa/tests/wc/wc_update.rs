@@ -1054,3 +1054,29 @@ fn msw5_finishing_an_update_keeps_a_directory_or_link_where_a_removed_doc_was() 
     );
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "mine\n");
 }
+
+#[test]
+fn msw16_a_rename_conflict_resolves_by_taking_the_store_name() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::rename(at(&s, "notes.yaml"), at(&s, "jot.yaml")).unwrap();
+    store_write(
+        &s,
+        "work",
+        json!([{"op": "update", "id": seed.notes, "fields": {"name": "memo"}}]),
+    );
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk && v["conflicts"][0]["path"] == "jot.yaml", "{v}");
+    std::fs::remove_file(at(&s, "jot.theirs.yaml")).unwrap();
+    std::fs::rename(at(&s, "jot.yaml"), at(&s, "memo.yaml")).unwrap();
+    ok(&s, &["add", "memo.yaml"]);
+    let (_, v) = json(&s, &["commit", "-m", "take memo"]);
+    assert!(
+        v["code"] != E_WC_CONFLICT,
+        "the conflict is still open: {v}"
+    );
+    assert_eq!(
+        store_block(&s, "work", &seed.notes).field_str("name"),
+        Some("memo")
+    );
+}

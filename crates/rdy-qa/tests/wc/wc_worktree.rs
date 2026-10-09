@@ -150,3 +150,26 @@ fn msw10_a_damaged_worktree_pointer_is_an_error_not_the_main_copy() {
         "{err}"
     );
 }
+
+#[test]
+fn msw16_rm_of_a_copied_worktree_dir_keeps_the_real_worktree() {
+    let (s, _seed) = seeded();
+    let tmp = tempfile::tempdir().unwrap();
+    let side = tmp.path().join("side");
+    let copy = tmp.path().join("side2");
+    ok(&s, &["worktree", "add", side.to_str().unwrap(), "side"]);
+    let o = Command::new("cp")
+        .arg("-R")
+        .arg(&side)
+        .arg(&copy)
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    let (okk, v) = json(&s, &["worktree", "rm", copy.to_str().unwrap()]);
+    assert!(!okk && v["code"] == E_BAD_INPUT, "{v}");
+    assert!(
+        at(&s, ".rdy/worktrees/side/bound.yaml").exists(),
+        "the real worktree's state stays"
+    );
+    assert!(copy.join("notes.yaml").exists() && side.join("notes.yaml").exists());
+}

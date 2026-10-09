@@ -6,7 +6,7 @@ use crate::Env;
 use rdy_daemon::ErrorReply;
 use rdy_engine::wc::layout::{THEIRS_SUFFIX, WcTree};
 use rdy_engine::wc::merge::theirs_path;
-use rdy_engine::wc::state::{ConflictKind, Place, WcState, stage_clear, stage_put};
+use rdy_engine::wc::state::{ConflictEntry, ConflictKind, Place, WcState, stage_clear, stage_put};
 use rdy_engine::{E_BAD_INPUT, E_NOT_FOUND, E_WC_CONFLICT, E_WC_INVALID, RdyError};
 use rdy_model::BlockId;
 use serde_json::{Value, json};
@@ -145,7 +145,8 @@ fn plan_one(
 }
 
 /// wcup1: the conflicts adding `rel` resolves, by index in `st.conflicts`: the one naming a file
-/// added, and each one a directory added holds (a folder rename names its directory). Refused
+/// added, and each one a directory added holds (a folder rename names its directory). A rename
+/// conflict also matches at the store's name (msw16), so a person may keep either name. Refused
 /// with `E_WC_CONFLICT` while one's `.theirs.yaml` (or `_folder.theirs.yaml`) still exists.
 fn resolves(
     place: &Place,
@@ -163,7 +164,7 @@ fn resolves(
             is_under(&c.path, rel)
         } else {
             c.path == rel
-        };
+        } || store_hit(c, rel, is_dir);
         if !hit {
             continue;
         }
@@ -181,6 +182,23 @@ fn resolves(
         out.insert(i);
     }
     Ok(())
+}
+
+/// msw16: a rename conflict is also resolved under the store's name: `rel` is the doc's file at
+/// the store's place, or (for a directory) the folder's place or a directory holding it.
+fn store_hit(c: &ConflictEntry, rel: &str, is_dir: bool) -> bool {
+    if !matches!(c.kind, ConflictKind::DocRename | ConflictKind::FolderRename) {
+        return false;
+    }
+    let (Some(name), Some(parent)) = (c.store_name.as_deref(), c.store_parent.as_deref()) else {
+        return false;
+    };
+    let at = store_place(c.kind, parent, name);
+    if is_dir {
+        is_under(&at, rel)
+    } else {
+        rel == at
+    }
 }
 
 /// The store's path of a doc or folder in a rename conflict: the doc's file, or the folder's
