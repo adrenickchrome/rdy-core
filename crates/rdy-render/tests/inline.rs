@@ -415,6 +415,8 @@ fn msw12_a_backtick_in_a_nested_link_target_does_not_hide_a_later_link() {
         spans("[[a](b`c)] [d](e) `"),
         "[<a href=\"b`c\">a</a>] <a href=\"e\">d</a> `"
     );
+    // accepted divergence from 4c9ec60 (ledger "Group 4 rulings"): the outer link wins
+    assert_eq!(spans("[x [a](b]c) y](z)"), "<a href=\"z\">x [a](b]c) y</a>");
 }
 
 #[test]
