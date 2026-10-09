@@ -312,11 +312,11 @@ fn bracket_closes(toks: &[Tok]) -> Vec<usize> {
             Tok::Ch(']') => {
                 if let Some(o) = open.pop() {
                     closes[o] = j;
-                    // a link that ends the outermost bracket: its target is read as a target,
-                    // not as code spans, so skip past it as `parse_spans` does
-                    let image = o > 0 && open.is_empty() && matches!(toks[o - 1], Tok::Ch('!'));
-                    if open.is_empty()
-                        && !(image && was_bang_at(toks, o))
+                    // a link: its target is read as a target, not as code spans, so skip past
+                    // it as `parse_spans` does. A scan starts only at a `](`, and one that
+                    // fails stops at the next `(`, so the scans stay linear overall.
+                    let image = o > 0 && matches!(toks[o - 1], Tok::Ch('!'));
+                    if !(image && was_bang_at(toks, o))
                         && let Some((_, _, end)) = link_at(toks, o, j)
                     {
                         j = end;
