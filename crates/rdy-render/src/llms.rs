@@ -370,7 +370,7 @@ fn reader_text(html: &str) -> String {
                 out.cur.push_str(&text);
             } else {
                 // a `|` in a cell would end the cell
-                let line_start = out.cur.trim().is_empty() && out.prefix.is_empty();
+                let line_start = out.cur.trim().is_empty();
                 let text = md_escape(&text, line_start);
                 if out.kind == Some(Line::Row) {
                     out.cur.push_str(&text.replace('|', "\\|"));
@@ -591,6 +591,12 @@ mod tests {
             reader_text("<ol start=\"3\"><li>three</li><li>four</li></ol>"),
             "3. three\n4. four"
         );
+    }
+
+    #[test]
+    fn msw12_author_text_in_a_list_item_is_not_a_heading_or_a_marker() {
+        assert_eq!(reader_text("<ul><li># x</li></ul>"), "- \\# x");
+        assert_eq!(reader_text("<ol><li>2. x</li></ol>"), "1. 2\\. x");
     }
 
     #[test]

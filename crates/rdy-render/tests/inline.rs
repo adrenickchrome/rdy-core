@@ -394,6 +394,14 @@ fn md1_deep_or_unbalanced_markup_renders_without_overflowing() {
 }
 
 #[test]
+fn msw12_a_backtick_in_a_link_target_does_not_hide_a_later_link() {
+    assert_eq!(
+        spans("[a](x`y) [b](z) `"),
+        "<a href=\"x`y\">a</a> <a href=\"z\">b</a> `"
+    );
+}
+
+#[test]
 fn msw12_hostile_bodies_render_in_linear_time() {
     let open = "[".repeat(2_000_000);
     assert_eq!(spans(&open), open);

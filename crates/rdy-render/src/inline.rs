@@ -312,6 +312,16 @@ fn bracket_closes(toks: &[Tok]) -> Vec<usize> {
             Tok::Ch(']') => {
                 if let Some(o) = open.pop() {
                     closes[o] = j;
+                    // a link that ends the outermost bracket: its target is read as a target,
+                    // not as code spans, so skip past it as `parse_spans` does
+                    let image = o > 0 && open.is_empty() && matches!(toks[o - 1], Tok::Ch('!'));
+                    if open.is_empty()
+                        && !(image && was_bang_at(toks, o))
+                        && let Some((_, _, end)) = link_at(toks, o, j)
+                    {
+                        j = end;
+                        continue;
+                    }
                 }
             }
             Tok::Ch('\\') if matches!(toks.get(j + 1), Some(Tok::Ch(p)) if p.is_ascii_punctuation()) => {
@@ -327,6 +337,16 @@ fn bracket_closes(toks: &[Tok]) -> Vec<usize> {
         j += 1;
     }
     closes
+}
+
+/// Whether the `[` at `o` follows an unescaped `!`.
+fn was_bang_at(toks: &[Tok], o: usize) -> bool {
+    let slashes = toks[..o.saturating_sub(1)]
+        .iter()
+        .rev()
+        .take_while(|t| **t == Tok::Ch('\\'))
+        .count();
+    slashes % 2 == 0
 }
 
 /// No `]` closes this `[`.
