@@ -349,6 +349,53 @@ impl ReadState {
         self.nonce_scan(view, nonce, RECENT_NONCE_LIMIT, 1, usize::MAX)
     }
 
+    /// `change_by_nonce` over the changes view `view` gained after the head `since` (msw11): the
+    /// probe a working-copy commit makes after an error reply, with `since` the view head the
+    /// copy last saw. It walks the view's op chain from its head back to `since` and checks the
+    /// change of every op on the way (a commit's, an include's or a fork's). There is no fixed
+    /// cap: the reads grow with the ops after `since`, so the commit is found however many other
+    /// writes came after it. The commit's own op is always on that walk, also when the view was
+    /// rebased onto a landing meanwhile, since the chain keeps every op. A `since` that is not a
+    /// view op hash (`canon:<hash>`, for a view that had no head) walks the whole chain.
+    pub fn change_by_nonce_since(
+        &self,
+        view: &str,
+        nonce: &str,
+        since: &str,
+    ) -> Result<NonceLookup, RdyError> {
+        let stop = since.parse::<Hash>().ok();
+        let reader = self.reader();
+        let mut read = 0usize;
+        let mut seen: HashSet<Hash> = HashSet::new();
+        let mut cur = self.view_head(view).map(|h| h.head);
+        while let Some(h) = cur {
+            if Some(h) == stop {
+                break;
+            }
+            read += 1;
+            let op = reader.view_op(&h)?;
+            cur = op.prev;
+            let changes = match op.op {
+                ViewOpKind::Commit { change } => vec![change],
+                ViewOpKind::Include { changes } | ViewOpKind::Fork { changes, .. } => changes,
+                _ => vec![],
+            };
+            for c in changes.iter().rev() {
+                if !seen.insert(*c) {
+                    continue;
+                }
+                read += 1;
+                if reader.change(c)?.links.client_nonce.as_deref() == Some(nonce) {
+                    return Ok(NonceLookup {
+                        change: Some(*c),
+                        read,
+                    });
+                }
+            }
+        }
+        Ok(NonceLookup { change: None, read })
+    }
+
     /// The nonce search: at most `per_source` changes of the view and of each landing, at most
     /// `landings` landings, and at most `limit` change frames in all.
     fn nonce_scan(

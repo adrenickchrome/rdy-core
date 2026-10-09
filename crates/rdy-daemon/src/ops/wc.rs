@@ -48,8 +48,11 @@ pub(super) struct WcNonceArgs {
     view: String,
     nonce: String,
     rewrite: Vec<String>,
-    /// Search only the recent changes (msw11): the probe after a refused commit.
+    /// Search only the recent changes (msw11).
     recent: Option<bool>,
+    /// Search the changes after this view head (msw11): the probe after a refused commit, with
+    /// the head the working copy last saw. It wins over `recent`.
+    since: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -374,21 +377,23 @@ pub(super) fn wc_commit(cx: &OpContext, a: WcCommitArgs) -> Result<Value, RdyErr
 /// and then the projection of the files of `rewrite` (as `wc_commit` adds it); else
 /// `{change: null}`. The answer is conclusive: it first waits while a `wc_commit` with the nonce
 /// runs in this daemon (`{change: null, pending: true}` when it still runs after `NONCE_WAIT`),
-/// then reads on the writer, after every write queued before it. With `recent`, it reads only the
-/// view's newest changes and canon's newest landing (`change_by_recent_nonce`): the probe a
-/// commit makes after an error reply, which must not stall the writer with a full scan.
+/// then reads on the writer, after every write queued before it. With `since` (a view head), it
+/// reads only the changes the view gained after that head (`change_by_nonce_since`): the probe a
+/// commit makes after an error reply, which must not stall the writer with a full scan and must
+/// still find its write behind any number of later ones. Without `since`, `recent` reads only the
+/// view's newest changes and canon's newest landing (`change_by_recent_nonce`).
 pub(super) fn wc_nonce(cx: &OpContext, a: WcNonceArgs) -> Result<Value, RdyError> {
     if !wait_not_in_flight(&a.nonce) {
         return Ok(json!({"change": null, "pending": true}));
     }
     let view = view_of(cx.session, Some(a.view));
-    let (nonce, rewrite, recent) = (a.nonce, a.rewrite, a.recent == Some(true));
+    let (nonce, rewrite, recent, since) = (a.nonce, a.rewrite, a.recent == Some(true), a.since);
     cx.engine.write(Box::new(move |r| {
         let st = r.read();
-        let found = if recent {
-            st.change_by_recent_nonce(&view, &nonce)?
-        } else {
-            st.change_by_nonce(&view, &nonce, NONCE_SCAN_LIMIT)?
+        let found = match &since {
+            Some(since) => st.change_by_nonce_since(&view, &nonce, since)?,
+            None if recent => st.change_by_recent_nonce(&view, &nonce)?,
+            None => st.change_by_nonce(&view, &nonce, NONCE_SCAN_LIMIT)?,
         };
         match found.change {
             None => Ok(json!({"change": null})),

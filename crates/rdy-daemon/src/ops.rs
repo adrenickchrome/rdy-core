@@ -246,7 +246,10 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{view, ops, nonce, rewrite, message?, implements?, editorial?, brief?, max_tokens?}",
             )?,
         ),
-        "wc_nonce" => wc_nonce(cx, parse(op, args, "{view, nonce, rewrite, recent?}")?),
+        "wc_nonce" => wc_nonce(
+            cx,
+            parse(op, args, "{view, nonce, rewrite, recent?, since?}")?,
+        ),
         "intent" => intent::run_intent(
             cx.engine,
             cx.session,

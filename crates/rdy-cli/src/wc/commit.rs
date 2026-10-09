@@ -92,6 +92,8 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
         editorial_class(class)?;
     }
     let view = state.require_bound()?.view.clone();
+    // the view head this copy saw: a probe after an error reply searches the changes after it
+    let seen_head = state.require_bound()?.head.clone();
     let pack = project_pack(&env.project)?;
     let mut plan = plan_commit(&place, &state, &pack).map_err(|w| invalid(w.diags))?;
     if plan.ops.is_empty() {
@@ -221,7 +223,7 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
             }
             // #675: an error can come after the write (a projection error, a writer panic), so
             // the journal goes only when the daemon says the change is not there
-            AfterError::Probe => match probe_nonce(env, &state) {
+            AfterError::Probe => match probe_nonce(env, &state, &seen_head) {
                 Some(v) if v["change"].is_string() => (v, Some(e)),
                 Some(v) if v["pending"] != true => {
                     state.pending = None;
@@ -332,10 +334,11 @@ fn after_commit_error(code: &str) -> AfterError {
 }
 
 /// How far a `wc_nonce` request searches.
-enum NonceScope {
-    /// The view's newest changes and canon's newest landing: the probe after an error reply,
-    /// which runs on every refused commit and must not stall the daemon's writer (msw11).
-    Recent,
+enum NonceScope<'a> {
+    /// The changes the view gained after the head the working copy last saw: the probe after an
+    /// error reply. It runs on every refused commit, so it must not stall the daemon's writer
+    /// with a full scan, and it must find the write behind any number of later ones (msw11).
+    Since(&'a str),
     /// Every change up to the daemon's scan limit: `recover`, for a reply that never came.
     Full,
 }
@@ -344,17 +347,18 @@ enum NonceScope {
 fn nonce_args(p: &Pending, scope: NonceScope) -> Value {
     let rewrite: Vec<String> = p.rewrite.iter().map(ToString::to_string).collect();
     let mut args = json!({"view": p.view, "nonce": p.nonce, "rewrite": rewrite});
-    if matches!(scope, NonceScope::Recent) {
-        args["recent"] = json!(true);
+    if let NonceScope::Since(head) = scope {
+        args["since"] = json!(head);
     }
     args
 }
 
 /// The `wc_nonce` reply for the journal's commit, quietly: `None` when the request fails. It
-/// searches the recent changes only: the commit's write, when there was one, is the newest.
-fn probe_nonce(env: &Env, st: &WcState) -> Option<Value> {
+/// searches the changes after `since`, the view head the copy saw before it sent the commit, so
+/// the commit's write is on the search when there was one.
+fn probe_nonce(env: &Env, st: &WcState, since: &str) -> Option<Value> {
     let p = st.pending.as_ref()?;
-    call(env, "wc_nonce", nonce_args(p, NonceScope::Recent)).ok()
+    call(env, "wc_nonce", nonce_args(p, NonceScope::Since(since))).ok()
 }
 
 /// The figure pass (wcfg1): stores each upload's image as a blob, puts the hash in the ops where
@@ -663,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn msw11_the_commit_probe_asks_for_recent_changes_only_and_recover_scans_in_full() {
+    fn msw11_the_commit_probe_asks_since_the_seen_head_and_recover_scans_in_full() {
         let p = Pending {
             nonce: "n1".into(),
             view: "work".into(),
@@ -673,8 +677,8 @@ mod tests {
             at_ms: 0,
         };
         assert_eq!(
-            nonce_args(&p, NonceScope::Recent),
-            json!({"view": "work", "nonce": "n1", "rewrite": [], "recent": true})
+            nonce_args(&p, NonceScope::Since("h1")),
+            json!({"view": "work", "nonce": "n1", "rewrite": [], "since": "h1"})
         );
         assert_eq!(
             nonce_args(&p, NonceScope::Full),
