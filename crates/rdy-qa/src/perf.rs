@@ -36,7 +36,37 @@ pub struct Verdict {
     pub spec_target: Option<String>,
 }
 
-pub const FLOOR_MS: f64 = 2.0;
+/// The absolute floor of an fsync-bound op: its median moves with the disk, so a rise of less
+/// than this is noise, whatever its percentage (ruling R5).
+pub const FSYNC_FLOOR_MS: f64 = 2.0;
+/// The absolute floor of every other op: small enough that a sub-millisecond read that grows
+/// many-fold fails, large enough to absorb timer jitter.
+pub const READ_FLOOR_MS: f64 = 0.05;
+
+/// The rise in median (ms) below which `op` never counts as regressed.
+pub fn floor_ms(op: &str) -> f64 {
+    if fsync_bound(op) {
+        FSYNC_FLOOR_MS
+    } else {
+        READ_FLOOR_MS
+    }
+}
+
+/// The spec's ceiling for `op` in ms, enforced on its p95 with or without a baseline. Exact op
+/// names only: a `_50k` op has none, and an op whose target is reported (not enforced) has none.
+pub fn spec_ceiling_ms(op: &str) -> Option<f64> {
+    Some(match op {
+        "tree_full" | "tree_full_memo" | "brief_doc" | "version_position" => 5.0,
+        "view_materialize_cold" | "view_cold" => 50.0,
+        "view_materialize_incremental" | "view_incremental" => 1.0,
+        "render" | "cold_open" | "cold_open_lagging" | "daemon_cold_start" => 2000.0,
+        _ => return None,
+    })
+}
+
+/// The suffix of a read target that is measured cold, so its spec figure (a warm read) is
+/// reported but not enforced.
+const COLD_READ_NOTE: &str = " (reported, not enforced: measured cold)";
 
 /// The note a `_50k` op carries: its budget is the typical tier's, applied at 50k blocks.
 const LARGE_TIER_NOTE: &str = " (large tier: budget at 50k, DECISIONS-rdy-m2 §7)";
@@ -47,16 +77,28 @@ fn spec_target(op: &str) -> Option<String> {
         None => (op, false),
     };
     let target = match base {
-        o if o.starts_with("write") || o.starts_with("propose") => {
+        "write_batch_200" => {
+            "no spec target: one write of 200 creates, one durable flush (recorded; the < 5 ms write budget is for one op)"
+        }
+        "propose_land_500_flat" => {
+            "no spec target: one write of 500 docs and its landing (recorded; the < 5 ms write budget is for one op)"
+        }
+        o if (o.starts_with("write") && !o.starts_with("write_batch_"))
+            || (o.starts_with("propose") && !o.starts_with("propose_land_")) =>
+        {
             "< 5 ms p99 on Linux NVMe; one durable flush + < 1 ms on macOS (spec 11, restated per hardware class)"
         }
         "brief_doc" => "< 5 ms p99 at 10k with the view's graph carried (the read budget, spec 11)",
         "brief_expired_intents_1k" => {
             "< 5 ms p99 (the read budget, spec 11): a briefing with 1,000 expired intents and 5 open ones in the project"
         }
-        "context" | "impact" | "version_position" | "resolve_path" | "tree_full" => {
-            "< 5 ms p99 (spec 11)"
+        "context" | "impact" | "resolve_path" => {
+            return Some(format!(
+                "< 5 ms p99 (spec 11){COLD_READ_NOTE}{}",
+                if large { LARGE_TIER_NOTE } else { "" }
+            ));
         }
+        "version_position" | "tree_full" => "< 5 ms p99 (spec 11)",
         "version_position_cached" => "< 10 us p99 on the isolated Linux bench (vpos1)",
         "tree_full_memo" => {
             "< 5 ms p99 at 1k folders / 10k docs, memoised per canon head (M2 spec 15.1)"
@@ -230,10 +272,11 @@ pub fn compare(baseline: Option<&Baseline>, measured: &[Measure]) -> Vec<Verdict
         .map(|m| {
             let base = baseline.and_then(|b| b.ops.get(&m.op)).map(|b| b.median_ms);
             let margin = if fsync_bound(&m.op) { 0.50 } else { 0.25 };
-            let pass = match base {
-                None => true,
-                Some(b) => !(m.median_ms > b * (1.0 + margin) && m.median_ms - b > FLOOR_MS),
-            };
+            let regressed = base.is_some_and(|b| {
+                m.median_ms > b * (1.0 + margin) && m.median_ms - b > floor_ms(&m.op)
+            });
+            let over_ceiling = spec_ceiling_ms(&m.op).is_some_and(|c| m.p95_ms > c);
+            let pass = !regressed && !over_ceiling;
             Verdict {
                 op: m.op.clone(),
                 median_ms: m.median_ms,
@@ -2488,8 +2531,68 @@ mod tests {
         let v = compare(Some(&base), &[m("write_single", 31.0)]);
         assert!(!v[0].pass);
         assert!(
-            compare(None, &[m("render", 1e9)])[0].pass,
-            "no baseline passes"
+            compare(None, &[m("log_full", 1e9)])[0].pass,
+            "no baseline and no spec ceiling passes"
+        );
+    }
+
+    #[test]
+    fn msw6_a_sub_floor_read_that_regresses_many_fold_fails() {
+        let base = Baseline {
+            machine: "x".into(),
+            ops: [
+                ("tree_full_memo".to_string(), m("tree_full_memo", 0.0001)),
+                ("brief_doc".to_string(), m("brief_doc", 0.20)),
+                ("write_single".to_string(), m("write_single", 0.6)),
+            ]
+            .into(),
+        };
+        let v = compare(
+            Some(&base),
+            &[
+                m("tree_full_memo", 1.3),
+                m("brief_doc", 0.22),
+                m("write_single", 2.4),
+            ],
+        );
+        assert!(
+            !v[0].pass,
+            "0.0001 -> 1.3 ms is a 13,000x regression: {:?}",
+            v[0]
+        );
+        assert!(v[1].pass, "+10% is inside the margin");
+        assert!(
+            v[2].pass,
+            "an fsync op keeps its 2 ms disk-noise floor (ruling R5)"
+        );
+    }
+
+    #[test]
+    fn msw6_a_spec_ceiling_fails_with_no_baseline_and_inside_the_margin() {
+        let over = Measure {
+            op: "tree_full".into(),
+            median_ms: 4.2,
+            p95_ms: 5.5,
+            runs: 20,
+        };
+        assert!(
+            !compare(None, std::slice::from_ref(&over))[0].pass,
+            "p95 over the 5 ms ceiling, no baseline"
+        );
+        let base = Baseline {
+            machine: "x".into(),
+            ops: [(
+                "tree_full".to_string(),
+                Measure {
+                    median_ms: 4.0,
+                    ..over.clone()
+                },
+            )]
+            .into(),
+        };
+        assert!(
+            !compare(Some(&base), &[over])[0].pass,
+            "+5% is inside the margin but over the ceiling"
         );
     }
 

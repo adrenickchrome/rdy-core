@@ -4,7 +4,7 @@ use rdy_daemon::{
     Attempt, E_DAEMON_GONE, E_DAEMON_START, Hello, PROTO_VERSION, Proto, RunDir, connect,
 };
 use rdy_engine::{Rdy, Scope};
-use rdy_qa::daemon::Served;
+use rdy_qa::daemon::{Served, human_command};
 use rdy_qa::fixtures::deep;
 use rdy_qa::invariants::check;
 use serde_json::{Value, json};
@@ -48,12 +48,7 @@ fn kill2_a_daemon_killed_mid_write_loses_no_acknowledged_write_and_never_duplica
                 let mut i = 0;
                 while !stop.load(std::sync::atomic::Ordering::SeqCst) {
                     let name = format!("r{round}-{i}");
-                    let out = std::process::Command::new(rdy_qa::fixtures::rdy_bin())
-                        .args(["--project"])
-                        .arg(&s_dir)
-                        .args(["--json", "new", "doc", &name])
-                        .envs(env.clone())
-                        .env_remove("RDY_ACTOR")
+                    let out = human_command(&s_dir, &env, &["--json", "new", "doc", &name])
                         .output()
                         .unwrap();
                     if out.status.success() {
@@ -170,15 +165,10 @@ fn kill2_killed_during_landings_keeps_canon_consistent_and_catches_up() {
             let env = s.env_pairs();
             std::thread::spawn(move || {
                 let run = |args: &[&str]| -> (bool, Value) {
-                    let out = std::process::Command::new(rdy_qa::fixtures::rdy_bin())
-                        .args(["--project"])
-                        .arg(&s_dir)
-                        .arg("--json")
-                        .args(args)
-                        .envs(env.clone())
-                        .env_remove("RDY_ACTOR")
-                        .output()
-                        .unwrap();
+                    let args: Vec<&str> = std::iter::once("--json")
+                        .chain(args.iter().copied())
+                        .collect();
+                    let out = human_command(&s_dir, &env, &args).output().unwrap();
                     let text = if out.status.success() {
                         &out.stdout
                     } else {
@@ -252,14 +242,13 @@ fn kill2_clients_reconnect_and_exactly_one_successor_replaces_the_dead_daemon() 
             std::thread::spawn(move || {
                 let mut failures = 0;
                 for i in 0..PER_THREAD {
-                    let out = std::process::Command::new(rdy_qa::fixtures::rdy_bin())
-                        .args(["--project"])
-                        .arg(&s_dir)
-                        .args(["--json", "new", "doc", &format!("t{t}-{i}")])
-                        .envs(env.clone())
-                        .env_remove("RDY_ACTOR")
-                        .output()
-                        .unwrap();
+                    let out = human_command(
+                        &s_dir,
+                        &env,
+                        &["--json", "new", "doc", &format!("t{t}-{i}")],
+                    )
+                    .output()
+                    .unwrap();
                     if out.status.success() {
                         acked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     } else {
@@ -355,4 +344,21 @@ fn kill2_a_kill_in_the_checkpoint_window_is_catch_up_not_reindex() {
         st["open_report"]["caught_up_frames"].as_u64().unwrap() > 0,
         "{st}"
     );
+}
+
+#[test]
+fn msw6_a_worker_command_strips_the_session_and_direct_mode_env() {
+    let s = Served::new();
+    let cmd = rdy_qa::daemon::human_command(s.dir.path(), &s.env_pairs(), &["--json", "status"]);
+    let removed: Vec<String> = cmd
+        .get_envs()
+        .filter(|(_, v)| v.is_none())
+        .map(|(k, _)| k.to_string_lossy().into_owned())
+        .collect();
+    for k in ["RDY_ACTOR", "RDY_RUN", "RDY_NO_DAEMON"] {
+        assert!(
+            removed.iter().any(|r| r == k),
+            "{k} leaks into the worker: {removed:?}"
+        );
+    }
 }

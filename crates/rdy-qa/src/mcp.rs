@@ -24,6 +24,10 @@ pub enum Reply {
 }
 
 impl Reply {
+    /// True for a result only: a tool error and a protocol (JSON-RPC) error are both failures.
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Reply::Ok(_))
+    }
     pub fn code(&self) -> Option<&str> {
         match self {
             Reply::ToolError(v) => v["code"].as_str(),

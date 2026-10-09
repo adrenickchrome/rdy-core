@@ -3,8 +3,8 @@
 //! between direct mode and the daemon is clean.
 use rdy_daemon::{Attempt, Hello, PROTO_VERSION, Proto, RunDir, connect};
 use rdy_engine::{E_INTERNAL, E_LOCKED};
-use rdy_qa::daemon::Served;
-use rdy_qa::fixtures::deep;
+use rdy_qa::daemon::{Served, human_command};
+use rdy_qa::fixtures::{deep, output_within};
 use rdy_qa::mcp::McpClient;
 use serde_json::json;
 use std::time::{Duration, Instant};
@@ -15,6 +15,10 @@ use std::time::{Duration, Instant};
 /// 2 s budget failed `conc1_eight...` on the Linux bench with no defect behind it.
 const CALL_BUDGET: Duration = Duration::from_secs(30);
 
+/// A CLI command's hang guard: one still running at this budget is killed and the test fails.
+/// A guard, not a speed check (the perf tier measures speed).
+const HANG_BUDGET: Duration = Duration::from_secs(120);
+
 #[test]
 fn conc1_eight_mcp_proxies_and_a_cli_hammer_one_daemon() {
     let s = Served::new();
@@ -24,13 +28,13 @@ fn conc1_eight_mcp_proxies_and_a_cli_hammer_one_daemon() {
             let mut c = McpClient::start_proxy(&s);
             std::thread::spawn(move || {
                 let r = c.call_within("rdy_session", json!({"actor": format!("agent:a{a}"), "role": "writer"}), CALL_BUDGET);
-                assert!(r.code().is_none());
+                assert!(r.is_ok(), "agent {a} session: {r:?}");
                 for i in 0..per {
                     let w = c.call_within("rdy_write", json!({"ops": [{"op": "create", "type": "doc", "fields": {"name": format!("a{a}-{i}"), "title": "A", "doc_type": "glossary"}}]}), CALL_BUDGET);
-                    assert!(w.code().is_none(), "agent {a} write {i}: {:?}", w.ok());
+                    assert!(w.is_ok(), "agent {a} write {i}: {w:?}");
                     if i % 5 == 0 {
                         let o = c.call_within("rdy_overview", json!({}), CALL_BUDGET);
-                        assert!(o.code().is_none());
+                        assert!(o.is_ok(), "agent {a} overview {i}: {o:?}");
                     }
                 }
                 c.calls()
@@ -42,28 +46,23 @@ fn conc1_eight_mcp_proxies_and_a_cli_hammer_one_daemon() {
         let env = s.env_pairs();
         std::thread::spawn(move || {
             for i in 0..per {
-                let out = std::process::Command::new(rdy_qa::fixtures::rdy_bin())
-                    .args(["--project"])
-                    .arg(&s_dir)
-                    .args(["--json", "new", "doc", &format!("h{i}")])
-                    .envs(env.clone())
-                    .env_remove("RDY_ACTOR")
-                    .output()
-                    .unwrap();
+                let name = format!("h{i}");
+                let mut cmd = human_command(&s_dir, &env, &["--json", "new", "doc", &name]);
+                let out = output_within(&mut cmd, HANG_BUDGET)
+                    .unwrap_or_else(|e| panic!("a command hung: {e}"));
                 assert!(
                     out.status.success(),
                     "cli write {i}: {}",
                     String::from_utf8_lossy(&out.stderr)
                 );
-                let out = std::process::Command::new(rdy_qa::fixtures::rdy_bin())
-                    .args(["--project"])
-                    .arg(&s_dir)
-                    .args(["--json", "status"])
-                    .envs(env.clone())
-                    .env_remove("RDY_ACTOR")
-                    .output()
-                    .unwrap();
-                assert!(out.status.success());
+                let mut cmd = human_command(&s_dir, &env, &["--json", "status"]);
+                let out = output_within(&mut cmd, HANG_BUDGET)
+                    .unwrap_or_else(|e| panic!("a command hung: {e}"));
+                assert!(
+                    out.status.success(),
+                    "cli status {i}: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
             }
         })
     };
@@ -213,27 +212,22 @@ fn conc1_direct_mode_and_the_daemon_contend_for_the_lock_cleanly() {
             let env = s.env_pairs();
             std::thread::spawn(move || {
                 let mut codes = vec![];
-                let start = Instant::now();
                 for i in 0..12 {
                     let name = format!("x{t}-{i}");
                     let direct = (t + i) % 2 == 0;
-                    let mut cmd = std::process::Command::new(rdy_qa::fixtures::rdy_bin());
-                    cmd.args(["--project"]).arg(&s_dir).arg("--json");
+                    let mut args = vec!["--json"];
                     if direct {
-                        cmd.arg("--no-daemon");
+                        args.push("--no-daemon");
                     }
-                    let out = cmd
-                        .args(["new", "doc", &name])
-                        .envs(env.clone())
-                        .env_remove("RDY_ACTOR")
-                        .output()
-                        .unwrap();
+                    args.extend(["new", "doc", &name]);
+                    let mut cmd = human_command(&s_dir, &env, &args);
+                    let out = output_within(&mut cmd, HANG_BUDGET)
+                        .unwrap_or_else(|e| panic!("a command hung: {e}"));
                     if !out.status.success() {
                         let v: serde_json::Value =
                             serde_json::from_slice(&out.stderr).unwrap_or(serde_json::Value::Null);
                         codes.push(v["code"].as_str().unwrap_or("?").to_string());
                     }
-                    assert!(start.elapsed() < Duration::from_secs(120), "a command hung");
                 }
                 codes
             })
@@ -246,4 +240,23 @@ fn conc1_direct_mode_and_the_daemon_contend_for_the_lock_cleanly() {
     }
     let (ok, _) = s.json(&["--json", "status"]);
     assert!(ok, "the daemon serves at the end");
+}
+
+#[test]
+fn msw6_a_protocol_error_is_not_a_success() {
+    use rdy_qa::mcp::Reply;
+    assert!(!Reply::RpcError(json!({"code": -32602, "message": "invalid params"})).is_ok());
+    assert!(!Reply::ToolError(json!({"code": "E_LOCKED"})).is_ok());
+    assert!(Reply::Ok(json!({})).is_ok());
+}
+
+#[test]
+fn msw6_a_hung_command_is_killed_at_its_budget_not_waited_on() {
+    let mut cmd = std::process::Command::new("sleep");
+    cmd.arg("600");
+    let r = rdy_qa::fixtures::output_within(&mut cmd, Duration::from_millis(200));
+    assert!(
+        r.is_err(),
+        "a command past its budget is an error, not a wait: {r:?}"
+    );
 }

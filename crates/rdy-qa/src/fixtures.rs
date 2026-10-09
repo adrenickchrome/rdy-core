@@ -1,7 +1,10 @@
 use rdy_engine::{Rdy, RdyError, Session, WriteRequest, WriteResult};
 use rdy_model::{Block, BlockId, Change, ChangeLinks, FieldValue, Op, Role};
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::PathBuf;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 pub fn writer() -> Session {
     Session::human("human:qa".into(), Role::Writer)
@@ -198,6 +201,54 @@ pub fn rdy_bin() -> PathBuf {
         bin.display()
     );
     bin
+}
+
+/// Runs `cmd` as `Command::output` does (stdin null, stdout and stderr captured), but kills it
+/// at `budget`: a hang guard, not a speed check. A command still running at `budget` is killed,
+/// reaped, and returned as an error.
+pub fn output_within(cmd: &mut Command, budget: Duration) -> Result<Output, String> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{cmd:?} did not start: {e}"))?;
+    let out = drain(child.stdout.take());
+    let err = drain(child.stderr.take());
+    let deadline = Instant::now() + budget;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // the drain threads are left behind: a grandchild may still hold the pipes open
+                return Err(format!("{cmd:?} still running after {budget:?}"));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{cmd:?} could not be waited on: {e}"));
+            }
+        }
+    };
+    Ok(Output {
+        status,
+        stdout: out.join().unwrap_or_default(),
+        stderr: err.join().unwrap_or_default(),
+    })
+}
+
+/// Reads `pipe` to its end on a thread (nothing when there is no pipe).
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = vec![];
+        if let Some(mut p) = pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    })
 }
 
 /// The libtest name of `test_fn` in the test file whose `module_path!()` is `module_path`:

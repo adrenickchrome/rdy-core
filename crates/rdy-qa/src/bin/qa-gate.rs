@@ -322,6 +322,7 @@ fn main() {
             ignored: run.ignored,
             ok,
             failures: run.failures,
+            panics: run.panics,
         });
     }
 
