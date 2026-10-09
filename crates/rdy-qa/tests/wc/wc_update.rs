@@ -915,3 +915,88 @@ fn msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes() {
     assert_eq!(read(&s, "zfold"), "mine\n");
     assert!(!okk && v["code"] == E_WC_DIRTY, "{v}");
 }
+
+/// Stops an update midway, as `msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes`
+/// does: the claim and the note change with `extra`, the root goes read-only, so
+/// `guides/intro.yaml` is written and `notes.yaml` fails. False when a read-only directory
+/// still takes writes (running as root): the caller skips.
+fn msw5_interrupt(s: &rdy_qa::daemon::Served, seed: &Seed, extra: serde_json::Value) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let mut ops = vec![
+        json!({"op": "update", "id": seed.claim, "body": "Theirs claim."}),
+        json!({"op": "update", "id": seed.note, "body": "Theirs."}),
+    ];
+    ops.push(extra);
+    store_write(s, "work", serde_json::Value::Array(ops));
+    let root = s.dir.path().to_path_buf();
+    let mode =
+        |m: u32| std::fs::set_permissions(&root, std::fs::Permissions::from_mode(m)).unwrap();
+    mode(0o555);
+    let probe = root.join(".msw5-probe");
+    if std::fs::write(&probe, "").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        mode(0o755);
+        eprintln!("msw5: skipped, a read-only directory takes writes here (running as root?)");
+        return false;
+    }
+    let (okk, v) = json(s, &["update"]);
+    mode(0o755);
+    assert!(!okk && v["code"] == E_IO, "{v}");
+    true
+}
+
+#[test]
+fn msw5_finishing_an_update_keeps_a_link_where_a_new_doc_goes() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let doc = json!({"op": "create", "type": "doc", "fields": {"name": "zdoc", "title": "Zdoc", "doc_type": "page"}});
+    if !msw5_interrupt(&s, &seed, doc) {
+        return;
+    }
+    assert!(!at(&s, "zdoc.yaml").exists(), "stopped before the new doc");
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("mine.yaml");
+    std::fs::write(&target, "mine\n").unwrap();
+    std::os::unix::fs::symlink(&target, at(&s, "zdoc.yaml")).unwrap();
+    let (okk, v) = json(&s, &["update"]);
+    assert!(
+        std::fs::symlink_metadata(at(&s, "zdoc.yaml"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link was replaced by a file: {v}"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "mine\n");
+    assert!(
+        !okk && v["code"] == E_WC_DIRTY && v["message"].as_str().unwrap().contains("zdoc.yaml"),
+        "{v}"
+    );
+}
+
+#[test]
+fn msw5_finishing_an_update_names_the_file_where_a_new_folder_goes() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let folder =
+        json!({"op": "create", "type": "folder", "fields": {"name": "zfold", "title": "Zfold"}});
+    if !msw5_interrupt(&s, &seed, folder) {
+        return;
+    }
+    put(&s, "zfold", "mine\n");
+    let (okk, v) = json(&s, &["update"]);
+    assert!(!okk && v["code"] == E_WC_DIRTY, "{v}");
+    assert_eq!(
+        v["message"], "zfold is a file where the update writes zfold/_folder.yaml",
+        "{v}"
+    );
+    assert_eq!(
+        v["fix"], "move zfold aside, then run rdy update again to finish the update",
+        "{v}"
+    );
+    // the fix works: with the file moved aside the update finishes
+    std::fs::rename(at(&s, "zfold"), at(&s, "zfold.mine")).unwrap();
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk, "{v}");
+    assert!(at(&s, "zfold/_folder.yaml").is_file(), "{v}");
+    assert_eq!(read(&s, "zfold.mine"), "mine\n");
+}

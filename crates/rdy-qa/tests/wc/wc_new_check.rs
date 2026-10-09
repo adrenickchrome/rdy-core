@@ -227,3 +227,26 @@ fn msw5_rdy_new_keeps_a_tracked_file_with_unstaged_edits() {
         Some("Unstaged.")
     );
 }
+
+#[test]
+fn msw5_rdy_new_skips_a_tracked_path_that_differs_only_in_case() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    // an unstaged delete: notes.yaml stays tracked
+    std::fs::remove_file(at(&s, "notes.yaml")).unwrap();
+    store_write(
+        &s,
+        "work",
+        serde_json::json!([{"op": "delete", "id": seed.note}, {"op": "delete", "id": seed.notes}]),
+    );
+    let text = ok(&s, &["new", "doc", "Notes", "--title", "Fresh"]);
+    assert!(text.contains("not written: Notes.yaml"), "{text}");
+    let on_disk: Vec<String> = std::fs::read_dir(s.dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.to_lowercase() == "notes.yaml")
+        .collect();
+    assert!(on_disk.is_empty(), "{on_disk:?}");
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk, "{v}");
+}
