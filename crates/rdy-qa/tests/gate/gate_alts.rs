@@ -510,3 +510,50 @@ fn msw2_a_change_linked_to_a_set_that_dropped_its_member_binds_to_the_members_op
     assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
     assert!(!canon_bodies(&r).iter().any(|b| b == "H"));
 }
+
+#[test]
+fn msw2_a_pre_set_change_only_another_member_holds_is_that_members_alternative() {
+    // fix round 1 ruling: written in member b, excluded by b, included only by member a: it is
+    // a's alternative, so a non-member view cannot land it while the set is open
+    let (_d, mut r) = project();
+    let (_doc, section, _claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    write(
+        &mut r,
+        "b",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "alt B"}]),
+    )
+    .unwrap();
+    let w = write(
+        &mut r,
+        "b",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "W"}]),
+    )
+    .unwrap()
+    .change;
+    write(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "alt A"}]),
+    )
+    .unwrap();
+    r.view_include(&writer(), "a", std::slice::from_ref(&w))
+        .unwrap();
+    r.view_exclude(&writer(), "b", std::slice::from_ref(&w), false)
+        .unwrap();
+    r.alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap();
+    r.view_include(&writer(), "d", std::slice::from_ref(&w))
+        .unwrap();
+    let e = r
+        .propose(&writer(), "d", "d")
+        .and_then(|p| r.land(&approver(), &p.id))
+        .unwrap_err();
+    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
+    assert!(
+        e.message.contains("member x"),
+        "a's alternative: {}",
+        e.message
+    );
+    assert!(!canon_bodies(&r).iter().any(|b| b == "W"));
+}

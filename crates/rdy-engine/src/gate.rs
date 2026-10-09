@@ -899,8 +899,8 @@ fn not_lost(st: &ReadState, view: &str, what: impl Fn(&str) -> String) -> Result
 /// member's alternative: it lands only in a version proposed from that member's view that chose
 /// that member (`chosen`). A link binds while its set is open and still lists the member. A
 /// change with no binding link (written before the set was made, or linked to a set that is
-/// settled or dropped the member) is the alternative of its view's open set when its view is
-/// the only member that holds it (msw2; see `unlinked_alt`).
+/// settled or dropped the member) is the alternative of the one member of its view's open set
+/// that holds it (msw2; see `unlinked_alt`).
 fn linked_alts(
     st: &ReadState,
     view: &str,
@@ -945,11 +945,11 @@ fn linked_alts(
     Ok(())
 }
 
-/// The alternative change `id`, written in view `written_in` and bound by no link, belongs to:
-/// that view's member of the open set it is a member of, when no other member of the set
-/// holds the change. A change that more than one member holds (a view forked from another
-/// member, an include) is common ground: no member's alternative, so it lands with any member
-/// and chooses nothing. One the view no longer holds is no member's alternative either.
+/// The alternative change `id`, written in view `written_in` and bound by no link, belongs to,
+/// when `written_in` is a member of an open set: the member of that set that holds the change,
+/// when exactly one does, whichever view wrote it. A change that more than one member holds (a
+/// view forked from another member, an include) is common ground: no member's alternative, so
+/// it lands with any member and chooses nothing. One that no member holds is no alternative.
 fn unlinked_alt(
     st: &ReadState,
     id: &Hash,
@@ -963,9 +963,9 @@ fn unlinked_alt(
         .iter()
         .filter(|m| st.included(&m.view).contains(id));
     match (holders.next(), holders.next()) {
-        (Some(only), None) if only.view == written_in => Ok(Some(AltChoice {
+        (Some(only), None) => Ok(Some(AltChoice {
             set: stable,
-            member: written_in.to_string(),
+            member: only.view.clone(),
         })),
         _ => Ok(None),
     }
