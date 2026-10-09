@@ -920,13 +920,13 @@ fn msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes() {
 /// does: the claim and the note change with `extra`, the root goes read-only, so
 /// `guides/intro.yaml` is written and `notes.yaml` fails. False when a read-only directory
 /// still takes writes (running as root): the caller skips.
-fn msw5_interrupt(s: &rdy_qa::daemon::Served, seed: &Seed, extra: serde_json::Value) -> bool {
+fn msw5_interrupt(s: &rdy_qa::daemon::Served, seed: &Seed, extra: &[serde_json::Value]) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let mut ops = vec![
         json!({"op": "update", "id": seed.claim, "body": "Theirs claim."}),
         json!({"op": "update", "id": seed.note, "body": "Theirs."}),
     ];
-    ops.push(extra);
+    ops.extend_from_slice(extra);
     store_write(s, "work", serde_json::Value::Array(ops));
     let root = s.dir.path().to_path_buf();
     let mode =
@@ -950,7 +950,7 @@ fn msw5_finishing_an_update_keeps_a_link_where_a_new_doc_goes() {
     let (s, seed) = seeded();
     ok(&s, &["checkout"]);
     let doc = json!({"op": "create", "type": "doc", "fields": {"name": "zdoc", "title": "Zdoc", "doc_type": "page"}});
-    if !msw5_interrupt(&s, &seed, doc) {
+    if !msw5_interrupt(&s, &seed, &[doc]) {
         return;
     }
     assert!(!at(&s, "zdoc.yaml").exists(), "stopped before the new doc");
@@ -979,7 +979,7 @@ fn msw5_finishing_an_update_names_the_file_where_a_new_folder_goes() {
     ok(&s, &["checkout"]);
     let folder =
         json!({"op": "create", "type": "folder", "fields": {"name": "zfold", "title": "Zfold"}});
-    if !msw5_interrupt(&s, &seed, folder) {
+    if !msw5_interrupt(&s, &seed, &[folder]) {
         return;
     }
     put(&s, "zfold", "mine\n");
@@ -999,4 +999,58 @@ fn msw5_finishing_an_update_names_the_file_where_a_new_folder_goes() {
     assert!(okk, "{v}");
     assert!(at(&s, "zfold/_folder.yaml").is_file(), "{v}");
     assert_eq!(read(&s, "zfold.mine"), "mine\n");
+}
+
+#[test]
+fn msw5_finishing_an_update_keeps_a_directory_or_link_where_a_removed_doc_was() {
+    let (s, seed) = seeded();
+    let w = store_write(
+        &s,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$g", "fields": {"name": "zgone", "title": "Zgone", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$l", "fields": {"name": "zlink", "title": "Zlink", "doc_type": "page"}}
+        ]),
+    );
+    ok(&s, &["checkout"]);
+    assert!(at(&s, "zgone.yaml").is_file() && at(&s, "zlink.yaml").is_file());
+    let gone = [
+        json!({"op": "delete", "id": w.created["$g"]}),
+        json!({"op": "delete", "id": w.created["$l"]}),
+    ];
+    // the removes come after the writes: the update stops before it reaches them
+    if !msw5_interrupt(&s, &seed, &gone) {
+        return;
+    }
+    // a directory and a link where the update removes a file: it leaves them, as a fresh
+    // update does
+    std::fs::remove_file(at(&s, "zgone.yaml")).unwrap();
+    std::fs::create_dir(at(&s, "zgone.yaml")).unwrap();
+    put(&s, "zgone.yaml/mine", "mine\n");
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("mine.yaml");
+    std::fs::write(&target, "mine\n").unwrap();
+    std::fs::remove_file(at(&s, "zlink.yaml")).unwrap();
+    std::os::unix::fs::symlink(&target, at(&s, "zlink.yaml")).unwrap();
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk, "{v}");
+    assert_eq!(
+        entry(&s, "notes.yaml", &seed.note)["body"].as_str(),
+        Some("Theirs.")
+    );
+    assert!(
+        std::fs::symlink_metadata(at(&s, "zgone.yaml"))
+            .unwrap()
+            .is_dir(),
+        "{v}"
+    );
+    assert_eq!(read(&s, "zgone.yaml/mine"), "mine\n");
+    assert!(
+        std::fs::symlink_metadata(at(&s, "zlink.yaml"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "{v}"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "mine\n");
 }

@@ -1242,8 +1242,8 @@ pub fn apply_update(
 
 /// Finishes an interrupted update from its record (`UPDATE_FILE`): refuses with `E_WC_DIRTY`
 /// when a file it writes or removes changed since (it holds neither its earlier text, nor the
-/// update's, nor is gone; or a link or a directory stands at it, or a non-directory where one of
-/// its directories goes, which the refusal names), else applies the recorded plan again from the
+/// update's, nor is gone; or, at a path it writes, a link or a directory stands at it, or a
+/// non-directory where one of its directories goes, which the refusal names), else applies the recorded plan again from the
 /// start (each step is safe to repeat). Returns the record.
 pub fn resume_update(place: &Place, st: &mut WcState) -> Result<UpdateJournal, RdyError> {
     let root = &place.root;
@@ -1277,12 +1277,18 @@ pub fn resume_update(place: &Place, st: &mut WcState) -> Result<UpdateJournal, R
         .before
         .iter()
         .filter(|(p, was)| {
-            // a non-directory where an ancestor directory must go, or a link or directory at
-            // the path itself: writing would remove it (an update writes only regular files)
-            if inside(p).is_ok_and(|q| {
-                behind_link(root, q)
-                    || fs::symlink_metadata(root.join(q)).is_ok_and(|m| !m.file_type().is_file())
-            }) {
+            // at a path the update writes: a non-directory where an ancestor directory must go,
+            // or a link or directory at the path itself. Writing would remove it (an update
+            // writes only regular files). A removed path is not checked: apply_files leaves
+            // what is not a regular file there, as a fresh update does.
+            let writes = planned.contains_key(&p.to_lowercase());
+            if writes
+                && inside(p).is_ok_and(|q| {
+                    behind_link(root, q)
+                        || fs::symlink_metadata(root.join(q))
+                            .is_ok_and(|m| !m.file_type().is_file())
+                })
+            {
                 return true;
             }
             let now = disk_text(root, p);
