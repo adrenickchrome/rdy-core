@@ -100,7 +100,8 @@ pub fn phrase(text: &str) -> String {
 
 /// The phrases of `text` that `known` accepts, left to right, longest first at each word
 /// (windows of [`MAX_NAME_WORDS`] words down to one), each with its byte range. A phrase
-/// shorter than [`MIN_MENTION_CHARS`] characters is skipped. Matches never overlap.
+/// shorter than [`MIN_MENTION_CHARS`] characters is skipped. Matches never overlap. A `'\0'`
+/// between two words (a blanked reference) ends a window: no phrase spans it.
 pub fn find_phrases(text: &str, known: &dyn Fn(&str) -> bool) -> Vec<(String, Range<usize>)> {
     let ws = words(text);
     let mut out = vec![];
@@ -111,7 +112,12 @@ pub fn find_phrases(text: &str, known: &dyn Fn(&str) -> bool) -> Vec<(String, Ra
     let mut chars = [0usize; MAX_NAME_WORDS];
     let mut i = 0;
     while i < ws.len() {
-        let longest = MAX_NAME_WORDS.min(ws.len() - i);
+        let mut longest = MAX_NAME_WORDS.min(ws.len() - i);
+        if let Some(k) =
+            (1..longest).find(|&k| text[ws[i + k - 1].end..ws[i + k].start].contains('\0'))
+        {
+            longest = k;
+        }
         joined.clear();
         let mut count = 0;
         for (n, w) in ws[i..i + longest].iter().enumerate() {
@@ -183,7 +189,8 @@ pub fn value_text(b: &Block) -> Option<String> {
 }
 
 /// The code literals of `text`: per line, each pair of backticks, its inner text trimmed, kept
-/// when it has [`LITERAL_MIN_CHARS`] to [`LITERAL_MAX_CHARS`] characters and holds no `{{`.
+/// when it has [`LITERAL_MIN_CHARS`] to [`LITERAL_MAX_CHARS`] characters and holds no `{{` and
+/// no `'\0'` (a reference that [`text_sources`] blanked).
 /// An unmatched backtick is ignored. Repeats are kept.
 pub fn code_literals(text: &str) -> Vec<String> {
     let mut out = vec![];
@@ -197,7 +204,10 @@ pub fn code_literals(text: &str) -> Vec<String> {
             }
             let lit = inner.trim();
             let n = lit.chars().count();
-            if (LITERAL_MIN_CHARS..=LITERAL_MAX_CHARS).contains(&n) && !lit.contains("{{") {
+            if (LITERAL_MIN_CHARS..=LITERAL_MAX_CHARS).contains(&n)
+                && !lit.contains("{{")
+                && !lit.contains('\0')
+            {
                 out.push(lit.to_string());
             }
         }
@@ -205,13 +215,14 @@ pub fn code_literals(text: &str) -> Vec<String> {
     out
 }
 
-/// `text` with every reference under `mode` replaced by spaces of the same byte length.
+/// `text` with every reference under `mode` replaced by `'\0'`s of the same byte length, so a
+/// phrase never spans one (see [`find_phrases`]).
 fn blank_refs(text: &str, mode: RefMode) -> String {
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
     for span in ref_spans(text, mode) {
         out.push_str(&text[at..span.range.start]);
-        out.push_str(&" ".repeat(span.range.len()));
+        out.push_str(&"\0".repeat(span.range.len()));
         at = span.range.end;
     }
     out.push_str(&text[at..]);

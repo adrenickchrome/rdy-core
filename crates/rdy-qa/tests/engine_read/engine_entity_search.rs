@@ -737,3 +737,44 @@ fn fsh1_the_definition_reads_references_as_their_summaries() {
         "Keeps the books.\nAnswers within 5 ms."
     );
 }
+
+#[test]
+fn msw18_a_long_definition_is_cut_and_counted() {
+    let (_d, mut r) = project();
+    let o = ops(&mut r);
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": o.e, "body": "word ".repeat(20_000)}]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    let s = &sheets(&r, "ledger service")[0];
+    assert!(
+        s.definition.chars().count() <= 1_001,
+        "{}",
+        s.definition.chars().count()
+    );
+    assert!(s.omitted.contains_key("definition"), "{:?}", s.omitted);
+}
+
+#[test]
+fn msw18_a_long_on_list_is_cut_and_counted() {
+    use rdy_engine::factsheet::SHEET_LIST_CAP;
+    let (_d, mut r) = project();
+    let o = ops(&mut r);
+    // 25 claims describe the entity and are decided by D2: D2 governs them and r1 (26 blocks)
+    let claims: Vec<Value> = (0..25)
+        .map(|i| {
+            json!({"op": "create", "type": "claim", "id": format!("$k{i}"), "parent": o.s,
+            "body": format!("Rule {i} holds."),
+            "links": {"describes": [{"target": o.e}], "decided_by": [{"target": o.d2}]}})
+        })
+        .collect();
+    write(&mut r, "work", Value::Array(claims)).unwrap();
+    land(&mut r, "work").unwrap();
+    let s = &sheets(&r, "ledger service")[0];
+    let d2 = s.decisions.iter().find(|d| d.id == o.d2).unwrap();
+    assert_eq!(d2.on.len(), SHEET_LIST_CAP, "{:?}", d2.on);
+    assert_eq!(s.omitted.get("on"), Some(&6), "{:?}", s.omitted);
+}

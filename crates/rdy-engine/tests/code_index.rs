@@ -3,13 +3,24 @@ use rdy_engine::code_index::*;
 use std::collections::BTreeSet;
 use std::path::Path;
 
-/// One commit record as `git log -z --name-status --format=<LOG_FORMAT>` prints it.
+/// The nonce the records below carry.
+const N: &str = "0123456789abcdef0123456789abcdef";
+
+/// Full commit hashes (40 hex characters): `parse_log` skips a record with any other hash.
+const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const C: &str = "cccccccccccccccccccccccccccccccccccccccc";
+
+/// One commit record as `git log -z --name-status --format=<log_format(N)>` prints it.
 fn rec(hash: &str, trailers: &str, changes: &[&str]) -> Vec<u8> {
     let mut v = vec![0x1e];
+    v.extend_from_slice(N.as_bytes());
     v.extend_from_slice(hash.as_bytes());
     v.push(0x1f);
+    v.extend_from_slice(N.as_bytes());
     v.extend_from_slice(trailers.as_bytes());
     v.push(0x1f);
+    v.extend_from_slice(N.as_bytes());
     if !changes.is_empty() {
         v.extend_from_slice(b"\0\n");
     }
@@ -39,27 +50,27 @@ fn hashes(h: &[&str]) -> Vec<String> {
 #[test]
 fn cidx1_parse_log_reads_hashes_trailers_and_changes() {
     let mut out = rec(
-        "aaaa",
+        A,
         "s-AAAAA, k-BBBBB,D-CCCCC",
         &["A", "src/a.rs", "M", "src/b.rs"],
     );
     out.extend(rec(
-        "bbbb",
+        B,
         "",
         &[
             "R096", "src/a.rs", "src/c.rs", "D", "src/b.rs", "T", "src/t.rs",
         ],
     ));
     assert_eq!(
-        parse_log(&out),
+        parse_log(&out, N),
         vec![
             commit(
-                "aaaa",
+                A,
                 &["s-AAAAA", "k-BBBBB", "D-CCCCC"],
                 vec![t("src/a.rs"), t("src/b.rs")]
             ),
             commit(
-                "bbbb",
+                B,
                 &[],
                 vec![
                     FileChange::Rename {
@@ -76,15 +87,15 @@ fn cidx1_parse_log_reads_hashes_trailers_and_changes() {
 
 #[test]
 fn cidx1_empty_values_and_repeats_in_a_trailer_are_dropped() {
-    let c = parse_log(&rec("aaaa", " , s-AAAAA,,s-AAAAA , ", &["M", "x.rs"]));
+    let c = parse_log(&rec(A, " , s-AAAAA,,s-AAAAA , ", &["M", "x.rs"]), N);
     assert_eq!(c[0].implements, vec!["s-AAAAA".to_string()]);
 }
 
 #[test]
 fn cidx1_a_commit_with_no_changes_parses() {
-    let mut out = rec("aaaa", "s-AAAAA", &[]);
-    out.extend(rec("bbbb", "", &["M", "x.rs"]));
-    let c = parse_log(&out);
+    let mut out = rec(A, "s-AAAAA", &[]);
+    out.extend(rec(B, "", &["M", "x.rs"]));
+    let c = parse_log(&out, N);
     assert_eq!(c.len(), 2);
     assert!(c[0].changes.is_empty());
     assert_eq!(c[1].changes, vec![t("x.rs")]);
@@ -92,17 +103,19 @@ fn cidx1_a_commit_with_no_changes_parses() {
 
 #[test]
 fn cidx1_a_path_that_is_not_utf8_is_skipped() {
-    let mut out = rec("aaaa", "s-AAAAA", &["M"]);
+    let mut out = rec(A, "s-AAAAA", &["M"]);
     out.extend_from_slice(b"bad\xff.rs\0");
     out.extend_from_slice(b"M\0ok.rs\0");
-    assert_eq!(parse_log(&out)[0].changes, vec![t("ok.rs")]);
+    assert_eq!(parse_log(&out, N)[0].changes, vec![t("ok.rs")]);
 }
 
 #[test]
 fn cidx1_a_truncated_record_ends_without_a_panic() {
-    let mut out = rec("aaaa", "s-AAAAA", &["M", "a.rs", "R100", "b.rs"]);
-    out.extend_from_slice(b"\x1ecccc");
-    let c = parse_log(&out);
+    let mut out = rec(A, "s-AAAAA", &["M", "a.rs", "R100", "b.rs"]);
+    out.push(0x1e);
+    out.extend_from_slice(N.as_bytes());
+    out.extend_from_slice(C.as_bytes());
+    let c = parse_log(&out, N);
     assert_eq!(c.len(), 1, "the chunk without separators is skipped");
     assert_eq!(c[0].changes, vec![t("a.rs")], "the rename lacks its target");
 }
@@ -259,12 +272,12 @@ fn cidx1_the_git_command_never_fetches_from_a_promisor_remote() {
 fn cidx1_a_copy_status_parses_as_a_touch_of_the_copy() {
     // `C` (copy detection, -C) names the source and the copy; only the copy changed.
     let out = rec(
-        "aaaa",
+        A,
         "s-AAAAA",
         &["C075", "src/a.rs", "src/b.rs", "M", "src/a.rs"],
     );
     assert_eq!(
-        parse_log(&out)[0].changes,
+        parse_log(&out, N)[0].changes,
         vec![t("src/b.rs"), t("src/a.rs")]
     );
 }

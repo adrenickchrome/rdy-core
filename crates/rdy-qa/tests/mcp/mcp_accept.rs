@@ -301,3 +301,64 @@ fn acc1_a_deleted_block_in_an_entity_item_is_skipped_as_missing() {
         json!([{"index": 0, "reason": format!("no block {c} in view {}", st.view)}])
     );
 }
+
+#[test]
+fn msw18_a_stale_link_item_is_skipped_and_the_rest_are_accepted() {
+    use rdy_engine::accept::AcceptItem;
+    let (_d, mut r) = project();
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "ops", "title": "Ops", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Summary"}},
+        {"op": "create", "type": "entity", "id": "$e", "parent": "$s", "fields": {"name": "Ledger service"}},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "The ledger is append-only."}
+    ])).unwrap();
+    let (s, e, c) = (
+        w.created["$s"].clone(),
+        w.created["$e"].clone(),
+        w.created["$c"].clone(),
+    );
+    let dec = r
+        .decide(
+            &writer(),
+            "work",
+            rdy_engine::DecisionInput {
+                parent: s,
+                statement: "Keep the ledger".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"]
+        .clone();
+    land(&mut r, "work").unwrap(); // the gate accepts dec: it is frozen now
+    let items = vec![
+        AcceptItem::Link {
+            block: dec.clone(),
+            link: "affects".into(),
+            target: e.clone(),
+        },
+        AcceptItem::Link {
+            block: c.clone(),
+            link: "describes".into(),
+            target: e.clone(),
+        },
+    ];
+    let a = r.accept(&writer(), "v", items, None, None, None).unwrap();
+    assert_eq!(a.accepted.links, 1);
+    assert_eq!(a.skipped.len(), 1, "{:?}", a.skipped);
+    assert_eq!(a.skipped[0].index, 0);
+    assert!(
+        a.skipped[0].reason.contains("cannot link to an entity"),
+        "{:?}",
+        a.skipped
+    );
+    let cb = r
+        .read()
+        .block(&Scope::View("v".into()), &BlockId::parse(&c).unwrap())
+        .unwrap();
+    assert!(
+        cb.links
+            .get("describes")
+            .is_some_and(|ls| ls.iter().any(|l| l.target.to_string() == e))
+    );
+}

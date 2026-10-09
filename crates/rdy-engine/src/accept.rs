@@ -178,14 +178,33 @@ impl Rdy {
                             "link to an entity: a block of a type that defines one (rdy_schema entities.types)",
                         ));
                     }
-                    add(
-                        &mut pending,
-                        &mut skipped,
-                        i,
-                        block,
-                        kind,
-                        target.to_string(),
-                    )?;
+                    // a stale item (the block is gone, or can no longer link this way) is
+                    // skipped; the rest of the batch still lands
+                    let Some(b) = m.get(&block) else {
+                        skipped.push(Skipped {
+                            index: i,
+                            reason: format!("no block {block} in view {view}"),
+                        });
+                        continue;
+                    };
+                    match link_kind_for(&self.pack, b) {
+                        None => skipped.push(Skipped {
+                            index: i,
+                            reason: format!("{block} cannot link to an entity"),
+                        }),
+                        Some(k) if k != kind => skipped.push(Skipped {
+                            index: i,
+                            reason: format!("{block} links to an entity by {k}, not {link}"),
+                        }),
+                        Some(_) => add(
+                            &mut pending,
+                            &mut skipped,
+                            i,
+                            block,
+                            kind,
+                            target.to_string(),
+                        )?,
+                    }
                 }
                 AcceptItem::Entity {
                     literal,

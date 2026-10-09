@@ -16,10 +16,15 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 pub const CODE_REPOS_KEY: &str = "code_repos";
 /// At most this many linked code checkouts.
 pub const MAX_CODE_REPOS: usize = 16;
-/// `git log --format`: per commit, a record separator, the hash, a unit separator, the
-/// `Implements:` trailer values joined by `,`, a unit separator; the `--name-status` list follows.
-pub const LOG_FORMAT: &str =
-    "%x1e%H%x1f%(trailers:key=Implements,valueonly,separator=%x2C,unfold)%x1f";
+/// `git log --format` for one run: per commit, a record separator, the hash, a unit separator,
+/// the `Implements:` trailer values joined by `,`, a unit separator; the `--name-status` list
+/// follows. Each separator is followed by `nonce`, which a commit message cannot know, so a
+/// trailer value holding a separator cannot forge a record.
+pub fn log_format(nonce: &str) -> String {
+    format!(
+        "%x1e{nonce}%H%x1f{nonce}%(trailers:key=Implements,valueonly,separator=%x2C,unfold)%x1f{nonce}"
+    )
+}
 /// The caller's git environment that would point git at another repository or config.
 pub const GIT_ENV_REMOVED: &[&str] = &[
     "GIT_DIR",
@@ -135,27 +140,29 @@ pub struct Commit {
     pub changes: Vec<FileChange>,
 }
 
-/// The commits in `git log -z --name-status --format=<LOG_FORMAT>` output. Malformed records,
-/// non-UTF-8 hashes and non-UTF-8 paths are skipped; it never panics.
-pub fn parse_log(out: &[u8]) -> Vec<Commit> {
+/// The commits in `git log -z --name-status --format=<log_format(nonce)>` output. Records
+/// split on the separators followed by `nonce`. A hash that is not 40 or 64 lowercase hex
+/// characters skips its record, as do malformed records; non-UTF-8 paths are skipped; it never
+/// panics.
+pub fn parse_log(out: &[u8], nonce: &str) -> Vec<Commit> {
+    let record = [&[0x1e], nonce.as_bytes()].concat();
+    let unit = [&[0x1f], nonce.as_bytes()].concat();
     let mut commits = Vec::new();
-    for chunk in out.split(|b| *b == 0x1e) {
-        if chunk.is_empty() {
+    // the bytes before the first record marker are no record
+    for chunk in split_on(out, &record).skip(1) {
+        let Some(i) = find(chunk, &unit) else {
+            continue;
+        };
+        let (hash, rest) = (&chunk[..i], &chunk[i + unit.len()..]);
+        let Some(j) = find(rest, &unit) else {
+            continue;
+        };
+        let (trailers, tail) = (&rest[..j], &rest[j + unit.len()..]);
+        if !is_hash(hash) {
             continue;
         }
-        let Some(i) = chunk.iter().position(|b| *b == 0x1f) else {
-            continue;
-        };
-        let (hash, rest) = (&chunk[..i], &chunk[i + 1..]);
-        let Some(j) = rest.iter().position(|b| *b == 0x1f) else {
-            continue;
-        };
-        let (trailers, tail) = (&rest[..j], &rest[j + 1..]);
-        let Ok(hash) = std::str::from_utf8(hash) else {
-            continue;
-        };
         commits.push(Commit {
-            hash: hash.to_string(),
+            hash: String::from_utf8_lossy(hash).into_owned(),
             implements: implements_of(&String::from_utf8_lossy(trailers)),
             changes: changes_of(tail),
         });
@@ -163,11 +170,40 @@ pub fn parse_log(out: &[u8]) -> Vec<Commit> {
     commits
 }
 
-/// The trailer values: split on `,`, trimmed, empties and repeats dropped.
+/// The first position of `needle` (not empty) in `hay`.
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// The parts of `hay` between the occurrences of `sep` (not empty), the first part included.
+fn split_on<'a>(hay: &'a [u8], sep: &'a [u8]) -> impl Iterator<Item = &'a [u8]> + 'a {
+    let mut rest = Some(hay);
+    std::iter::from_fn(move || {
+        let r = rest?;
+        match find(r, sep) {
+            Some(i) => {
+                rest = Some(&r[i + sep.len()..]);
+                Some(&r[..i])
+            }
+            None => {
+                rest = None;
+                Some(r)
+            }
+        }
+    })
+}
+
+/// A full commit hash: 40 (SHA-1) or 64 (SHA-256) lowercase hex characters.
+fn is_hash(h: &[u8]) -> bool {
+    matches!(h.len(), 40 | 64) && h.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The trailer values: split on `,`, trimmed, empties, values holding a control character and
+/// repeats dropped.
 fn implements_of(trailers: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for v in trailers.split(',').map(str::trim) {
-        if !v.is_empty() && !out.iter().any(|x| x == v) {
+        if !v.is_empty() && !v.chars().any(char::is_control) && !out.iter().any(|x| x == v) {
             out.push(v.to_string());
         }
     }
@@ -328,8 +364,8 @@ fn git_failed(repo: &CodeRepo, what: &str, out: &Output, fix: &str) -> RdyError 
     )
 }
 
-/// `repo.root` is a git checkout's top folder and not a partial clone (checked once per process
-/// per root, and again after a read of HEAD fails).
+/// `repo.root` is a git checkout's top folder, not a partial clone and not a shallow clone
+/// (checked once per process per root, and again after a read of HEAD fails).
 fn check_top(repo: &CodeRepo) -> Result<(), RdyError> {
     if lock(&TOPS).contains(&repo.root) {
         return Ok(());
@@ -364,6 +400,24 @@ fn check_top(repo: &CodeRepo) -> Result<(), RdyError> {
             E_CONFIG,
             format!("code repo {} is a partial clone", repo.configured),
             "link a full clone: rdy reads every commit and never fetches",
+        ));
+    }
+    let mut c = git_command(&repo.root);
+    c.args(["rev-parse", "--is-shallow-repository"]);
+    let out = run(c)?;
+    if !out.status.success() {
+        return Err(git_failed(
+            repo,
+            "rev-parse",
+            &out,
+            "check the repository with git status",
+        ));
+    }
+    if String::from_utf8_lossy(&out.stdout).trim() == "true" {
+        return Err(RdyError::new(
+            E_CONFIG,
+            format!("code repo {} is a shallow clone", repo.configured),
+            "link a full clone (git fetch --unshallow): a shallow clone attributes every file to its oldest commit",
         ));
     }
     lock(&TOPS).insert(repo.root.clone());
@@ -463,6 +517,7 @@ fn read_head(repo: &CodeRepo) -> Result<Option<String>, RdyError> {
 /// The index of `head` (which HEAD named when it was read), read at that hash rather than at
 /// `HEAD`, so HEAD moving meanwhile cannot give an index labelled with another commit.
 fn build_at(repo: &CodeRepo, head: String) -> Result<CodeIndex, RdyError> {
+    let nonce = crate::wc::state::new_nonce();
     let mut c = git_command(&repo.root);
     c.args([
         "log",
@@ -473,7 +528,7 @@ fn build_at(repo: &CodeRepo, head: String) -> Result<CodeIndex, RdyError> {
         "-z",
         "--no-color",
     ])
-    .arg(format!("--format={LOG_FORMAT}"))
+    .arg(format!("--format={}", log_format(&nonce)))
     .args([head.as_str(), "--"]);
     let log = run(c)?;
     if !log.status.success() {
@@ -503,7 +558,7 @@ fn build_at(repo: &CodeRepo, head: String) -> Result<CodeIndex, RdyError> {
         .filter_map(|p| std::str::from_utf8(p).ok().map(str::to_string))
         .collect();
     Ok(CodeIndex::from_commits(
-        &parse_log(&log.stdout),
+        &parse_log(&log.stdout, &nonce),
         Some(&at_head),
         Some(head),
     ))
