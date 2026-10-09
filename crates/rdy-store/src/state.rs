@@ -10,7 +10,7 @@ use rdy_model::{
     StateSnapshot, Tag, decision,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// What `Store::view` returns: a view's base landing and the changes it includes, in order. It is
@@ -161,10 +161,20 @@ impl StoreReader {
                 .iter()
                 .flat_map(|c| c.ops.iter().map(|op| op.block_id())),
         )?;
+        // the producer of each base version an op touches, read before the merge, so a read
+        // error fails the merge: read as "no producer", it would settle canon's side
+        let mut producers: HashMap<Hash, Option<Hash>> = HashMap::new();
+        for op in changes.iter().flat_map(|c| c.ops.iter()) {
+            if let Some(v) = base.blocks.get(op.block_id())
+                && !producers.contains_key(v)
+            {
+                producers.insert(*v, self.producer(v)?);
+            }
+        }
         Ok(merge_indexed(
             base,
             &input,
-            &|v| self.producer(v).ok().flatten(),
+            &|v| producers.get(v).copied().flatten(),
             &|b| deleters.get(b).copied(),
         ))
     }
@@ -573,6 +583,19 @@ impl Store {
     /// version it follows, `canon_at` canon's head now.
     fn next_version(&mut self, prev: &Hash, p: Proposal) -> Result<Hash, StoreError> {
         let stable = p.stable.unwrap_or(*prev);
+        // only the latest version has a next one: a next of a superseded version would branch
+        // the chain and move the ref (as `land_atomic` checks)
+        let latest = match self.get_ref(&proposal_ref(&stable))? {
+            Some(b) => crate::index::hash_from(&b, "proposal ref")?,
+            None => {
+                return Err(StoreError::Decode(format!(
+                    "proposal {stable} has no ref; run rdy reindex"
+                )));
+            }
+        };
+        if latest != *prev {
+            return Err(StoreError::ProposalMoved { stable, latest });
+        }
         let next = Proposal {
             stable: Some(stable),
             prev: Some(*prev),

@@ -333,3 +333,31 @@ fn gconf1_the_store_refuses_an_empty_proposal_version() {
     );
     assert_eq!(s.proposal(&p1).unwrap().changes, vec![c1]);
 }
+
+#[test]
+fn msw4_a_next_version_of_a_superseded_version_is_proposal_moved_and_writes_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    let mut s = Store::create(&d.path().join("s")).unwrap();
+    let c1 = create(&mut s, "v", "c-00001");
+    let p1 = s.propose("v", "t", prov("agent:v")).unwrap();
+    let c2 = create(&mut s, "v", "c-00002");
+    let p2 = s
+        .propose_next(&p1, vec![c1, c2], "t2", None, prov("agent:v"), None)
+        .unwrap();
+    let end = s.log_end();
+    let e = s
+        .propose_next(&p1, vec![c1], "t3", None, prov("agent:v"), None)
+        .unwrap_err();
+    assert!(
+        matches!(e, StoreError::ProposalMoved { stable, latest } if stable == p1 && latest == p2),
+        "{e}"
+    );
+    let e = s.propose_version(&p1, &[c2]).unwrap_err();
+    assert!(matches!(e, StoreError::ProposalMoved { .. }), "{e}");
+    assert_eq!(s.log_end(), end, "nothing written");
+    let latest = s
+        .get_ref(&format!("proposal/{p1}"))
+        .unwrap()
+        .map(|b| Hash(b.try_into().unwrap()));
+    assert_eq!(latest, Some(p2), "the ref did not move");
+}

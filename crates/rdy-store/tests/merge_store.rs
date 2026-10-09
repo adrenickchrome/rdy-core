@@ -306,3 +306,90 @@ fn merge1_a_canon_version_names_the_change_that_landed_it() {
         .unwrap();
     assert_eq!(s.change(&c1).unwrap().deps, vec![b1]);
 }
+
+/// Review Focus 4: a damaged producer entry is a read error, never "no producer".
+#[test]
+fn msw4_an_unreadable_producer_entry_fails_the_landing_instead_of_settling_canons_side() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let x0 = block("b-00001", "zero");
+    let y = block("b-00001", "canon");
+    let (u1, u2) = (block("b-00001", "u1"), block("b-00001", "u2"));
+    {
+        let mut s = Store::create(&path).unwrap();
+        seeded(&mut s, &x0);
+        let c1 = s
+            .commit_to_view(
+                "v",
+                change(
+                    "v",
+                    vec![Op::Update {
+                        base: x0.version_hash(),
+                        block: u1.clone(),
+                    }],
+                ),
+            )
+            .unwrap();
+        let c2 = s
+            .commit_to_view(
+                "v",
+                change(
+                    "v",
+                    vec![Op::Update {
+                        base: u1.version_hash(),
+                        block: u2.clone(),
+                    }],
+                ),
+            )
+            .unwrap();
+        assert!(s.change(&c2).unwrap().deps.contains(&c1));
+        s.commit_to_view(
+            "other",
+            change(
+                "other",
+                vec![Op::Update {
+                    base: x0.version_hash(),
+                    block: y.clone(),
+                }],
+            ),
+        )
+        .unwrap();
+        let po = s.propose("other", "other", prov(Role::Writer)).unwrap();
+        s.land(&po, prov(Role::Approver)).unwrap();
+        let p = s.propose("v", "v", prov(Role::Writer)).unwrap();
+        assert!(
+            matches!(
+                s.land(&p, prov(Role::Approver)),
+                Err(StoreError::StaleBase { .. })
+            ),
+            "healthy index: stale"
+        );
+    }
+    {
+        const PRODUCERS: redb::TableDefinition<&[u8], &[u8]> =
+            redb::TableDefinition::new("producers");
+        let db = redb::Database::open(path.join("index.redb")).unwrap();
+        let w = db.begin_write().unwrap();
+        {
+            let mut t = w.open_table(PRODUCERS).unwrap();
+            let mut key = y.version_hash().0.to_vec();
+            key.extend_from_slice(&[0xAB; 3]); // a damaged producer entry: not 64 bytes
+            t.insert(&key[..], &[][..]).unwrap();
+        }
+        w.commit().unwrap();
+    }
+    let mut s = Store::open(&path).unwrap();
+    assert!(
+        s.producer(&y.version_hash()).is_err(),
+        "the damaged entry reads as an error"
+    );
+    let res = s
+        .propose("v", "again", prov(Role::Writer))
+        .and_then(|p| s.land(&p, prov(Role::Approver)));
+    assert!(res.is_err(), "must not land over canon's side: {res:?}");
+    assert_eq!(
+        s.canon_state().unwrap().blocks[&x0.id],
+        y.version_hash(),
+        "canon keeps y"
+    );
+}

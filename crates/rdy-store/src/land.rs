@@ -241,11 +241,18 @@ impl Store {
         // version's producers has landed yet, the ones this landing lands (the acceptance change
         // included) win, smallest hash first, as `Store::producer` breaks ties within a landing.
         // Otherwise an earlier landing's producer already wins, before the write and after it.
-        let producer = |v: &Hash| {
-            let all = self.index().producers(v).ok().unwrap_or_default();
-            let landed_before = all
-                .iter()
-                .any(|c| self.landing_of(c).ok().flatten().is_some());
+        // A read error fails the landing: read as "no producer", it would settle canon's side.
+        // `rebase_conflicts` asks this only for the versions its merge needs, and keeps each
+        // answer in `producers` for the next view.
+        let producer = |v: &Hash| -> Result<Option<Hash>, StoreError> {
+            let all = self.index().producers(v)?;
+            let mut landed_before = false;
+            for c in &all {
+                if self.landing_of(c)?.is_some() {
+                    landed_before = true;
+                    break;
+                }
+            }
             if !landed_before {
                 let mine = all
                     .iter()
@@ -254,14 +261,12 @@ impl Store {
                     .min()
                     .copied();
                 if mine.is_some() {
-                    return mine;
+                    return Ok(mine);
                 }
             }
-            self.producer(v)
-                .ok()
-                .flatten()
-                .or_else(|| accepted.get(v).copied())
+            Ok(self.producer(v)?.or_else(|| accepted.get(v).copied()))
         };
+        let mut producers: HashMap<Hash, Option<Hash>> = HashMap::new();
         // The delete that removed each block this landing touches and the new canon lacks, as
         // `deleters_at` will answer after this write: for a block canon held until now, this
         // landing's delete of it (smallest hash first, as `deleters_at` breaks ties within a
@@ -324,8 +329,14 @@ impl Store {
             };
             let (dropped, remaining): (Vec<Hash>, Vec<Hash>) =
                 vincluded.into_iter().partition(|c| landed.contains(c));
-            let conflicts =
-                self.rebase_conflicts(&state, &remaining, &touched_l, &producer, &deleter)?;
+            let conflicts = self.rebase_conflicts(
+                &state,
+                &remaining,
+                &touched_l,
+                &producer,
+                &mut producers,
+                &deleter,
+            )?;
             let rebase = encode(&ViewOp {
                 view: name.clone(),
                 prev: Some(if proposing { tip } else { vhead.head }),
@@ -409,13 +420,15 @@ impl Store {
 
     /// The conflicts a view's `remaining` changes have with canon's new `state`, on the blocks
     /// both they and the landing (`touched_l`) touch: none when they share no block, so the merge
-    /// work is O(touched).
+    /// work is O(touched). `producer` reads a version's producer, and `producers` keeps the
+    /// answers across views; a read error fails the call.
     fn rebase_conflicts(
         &self,
         state: &rdy_model::StateSnapshot,
         remaining: &[Hash],
         touched_l: &BTreeSet<&BlockId>,
-        producer: &dyn Fn(&Hash) -> Option<Hash>,
+        producer: &dyn Fn(&Hash) -> Result<Option<Hash>, StoreError>,
+        producers: &mut HashMap<Hash, Option<Hash>>,
         deleter: &dyn Fn(&BlockId) -> Option<Hash>,
     ) -> Result<Vec<Conflict>, StoreError> {
         if remaining.is_empty() {
@@ -443,7 +456,15 @@ impl Store {
                 ops: &c.ops,
             })
             .collect();
-        Ok(merge_on_blocks(state, &input, producer, deleter, &isect).conflicts)
+        // the merge asks only for canon's versions of `isect`: read them first, so a read error
+        // fails here and is never read as "no producer"
+        for v in isect.iter().filter_map(|b| state.blocks.get(b)) {
+            if !producers.contains_key(v) {
+                producers.insert(*v, producer(v)?);
+            }
+        }
+        let known = |v: &Hash| producers.get(v).copied().flatten();
+        Ok(merge_on_blocks(state, &input, &known, deleter, &isect).conflicts)
     }
 }
 
