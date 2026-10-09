@@ -392,3 +392,11 @@ fn md1_deep_or_unbalanced_markup_renders_without_overflowing() {
     let h = body(&brackets);
     assert!(h.starts_with("<p>[[[") && h.ends_with("</p>"));
 }
+
+#[test]
+fn msw12_hostile_bodies_render_in_linear_time() {
+    let open = "[".repeat(2_000_000);
+    assert_eq!(spans(&open), open);
+    let gap = format!("- a{}- b", "\n".repeat(2_000_000));
+    assert_eq!(body(&gap), "<ul><li>a</li><li>b</li></ul>");
+}

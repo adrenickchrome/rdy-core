@@ -300,17 +300,18 @@ fn parse_label(toks: &[Tok]) -> Vec<Node> {
     out
 }
 
-/// A link at `i` (a `[`): the end of its text, its target and the index after it.
-fn link_at(toks: &[Tok], i: usize) -> Option<(usize, String, usize)> {
-    // the text: balanced brackets, skipping escapes and code spans
-    let (mut depth, mut j) = (1usize, i + 1);
-    let close = loop {
-        match *toks.get(j)? {
-            Tok::Ch('[') => depth += 1,
+/// The `]` that closes each `[`, or `NO_CLOSE`: balanced brackets, skipping escapes and code
+/// spans. One pass, left to right, so an unclosed `[` costs nothing more than a closed one.
+fn bracket_closes(toks: &[Tok]) -> Vec<usize> {
+    let mut closes = vec![NO_CLOSE; toks.len()];
+    let mut open: Vec<usize> = vec![];
+    let mut j = 0;
+    while j < toks.len() {
+        match toks[j] {
+            Tok::Ch('[') => open.push(j),
             Tok::Ch(']') => {
-                depth -= 1;
-                if depth == 0 {
-                    break j;
+                if let Some(o) = open.pop() {
+                    closes[o] = j;
                 }
             }
             Tok::Ch('\\') if matches!(toks.get(j + 1), Some(Tok::Ch(p)) if p.is_ascii_punctuation()) => {
@@ -324,7 +325,19 @@ fn link_at(toks: &[Tok], i: usize) -> Option<(usize, String, usize)> {
             _ => {}
         }
         j += 1;
-    };
+    }
+    closes
+}
+
+/// No `]` closes this `[`.
+const NO_CLOSE: usize = usize::MAX;
+
+/// A link at `i` (a `[`) whose text ends at `close`: the end of its text, its target and the
+/// index after it.
+fn link_at(toks: &[Tok], i: usize, close: usize) -> Option<(usize, String, usize)> {
+    if close == NO_CLOSE {
+        return None;
+    }
     if close == i + 1 || toks.get(close + 1) != Some(&Tok::Ch('(')) {
         return None;
     }
@@ -378,6 +391,12 @@ fn parse_spans(toks: &[Tok], in_link: bool) -> Vec<Node> {
         Some(Piece::Node(Node::Text(t))) => t.push(c),
         _ => pieces.push(Piece::Node(Node::Text(c.to_string()))),
     };
+    // a link's own text holds no link, so only the outermost run needs its brackets matched
+    let closes = if in_link {
+        vec![]
+    } else {
+        bracket_closes(toks)
+    };
     let mut i = 0;
     // whether the character before is an unescaped `!` (an image, which is not supported)
     let mut bang = false;
@@ -417,7 +436,7 @@ fn parse_spans(toks: &[Tok], in_link: bool) -> Vec<Node> {
                     }
                 }
             }
-            Tok::Ch('[') if !in_link && !was_bang => match link_at(toks, i) {
+            Tok::Ch('[') if !in_link && !was_bang => match link_at(toks, i, closes[i]) {
                 Some((close, target, end)) => {
                     let children = parse_spans(&toks[i + 1..close], true);
                     pieces.push(Piece::Node(Node::Link { target, children }));
@@ -730,6 +749,16 @@ fn marker(line: &str) -> Option<(usize, bool, u32, &str)> {
 
 fn parse_body(text: &str) -> Vec<Block> {
     let lines: Vec<&str> = text.lines().collect();
+    // the first line at or after each line that is not blank: one reverse pass, not a scan per
+    // blank line
+    let mut next_nonblank = vec![lines.len(); lines.len() + 1];
+    for (i, l) in lines.iter().enumerate().rev() {
+        next_nonblank[i] = if l.trim().is_empty() {
+            next_nonblank[i + 1]
+        } else {
+            i
+        };
+    }
     let mut out: Vec<Block> = vec![];
     let mut para: Vec<&str> = vec![];
     let mut stack: Vec<List> = vec![];
@@ -765,7 +794,7 @@ fn parse_body(text: &str) -> Vec<Block> {
         if line.trim().is_empty() {
             flush(&mut para, &mut out);
             if let Some(inner) = stack.last() {
-                let next = lines[i + 1..].iter().find(|l| !l.trim().is_empty());
+                let next = lines.get(next_nonblank[i + 1]);
                 let keep = next.is_some_and(|n| marker(n).is_some() || indent(n) > inner.indent);
                 if !keep {
                     close_all(&mut stack, &mut out);

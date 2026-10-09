@@ -513,7 +513,7 @@ impl<'a> Site<'a> {
             None if tree => self
                 .m
                 .name_of(&b.id)
-                .map(|n| name_as_title(&n))
+                .map(|n| name_as_title(&n, &b.id))
                 .unwrap_or_default(),
             None if b.block_type == "code" => {
                 let k = self.number(b);
@@ -754,13 +754,9 @@ fn upper_first(s: &str) -> String {
 }
 
 /// A tree name worded as a title: `-` becomes a space, the first letter is upper-cased, and the
-/// name `untitled-<id>` that a doc without a title gets reads as `Untitled`.
-fn name_as_title(name: &str) -> String {
-    let id_chars = "0123456789abcdefghjkmnpqrstvwxyz";
-    let derived = name
-        .strip_prefix("untitled-")
-        .is_some_and(|b| b.chars().count() == 5 && b.chars().all(|c| id_chars.contains(c)));
-    if derived {
+/// name `untitled-<id>` that a doc without a title gets (the one `id` gives) reads as `Untitled`.
+fn name_as_title(name: &str, id: &BlockId) -> String {
+    if name == rdy_model::tree::default_name(None, id) {
         return "Untitled".to_string();
     }
     let words = name.replace('-', " ");
@@ -841,10 +837,16 @@ mod tests {
 
     #[test]
     fn a_name_is_worded_as_a_title() {
-        assert_eq!(name_as_title("untitled-one"), "Untitled one");
-        assert_eq!(name_as_title("untitled-7kq2m"), "Untitled");
-        assert_eq!(name_as_title("doc-1"), "Doc 1");
-        assert_eq!(name_as_title("wallets"), "Wallets");
+        let id: BlockId = "d-7KQ2M".parse().unwrap();
+        assert_eq!(name_as_title("untitled-one", &id), "Untitled one");
+        assert_eq!(name_as_title("untitled-draft", &id), "Untitled draft");
+        assert_eq!(name_as_title("untitled-7kq2m", &id), "Untitled");
+        assert_eq!(
+            name_as_title("untitled-7kq2m", &"d-AAAAA".parse().unwrap()),
+            "Untitled 7kq2m"
+        );
+        assert_eq!(name_as_title("doc-1", &id), "Doc 1");
+        assert_eq!(name_as_title("wallets", &id), "Wallets");
     }
 
     #[test]

@@ -90,6 +90,50 @@ fn plain(html: &str) -> String {
     one_line(&decode(&text))
 }
 
+/// `s` as Markdown text: every character that could start markup is backslash-escaped, so the
+/// words read as they are written and never become a link, code, emphasis or a heading.
+fn md_text(s: &str) -> String {
+    md_escape(s, true)
+}
+
+/// [`md_text`]; `line_start` says whether `s` begins a line, where a `#`, `-`, `+` or `N.` would
+/// open a heading, a list item or a numbered one.
+fn md_escape(s: &str, line_start: bool) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    let lead = s.len() - s.trim_start().len();
+    out.push_str(&s[..lead]);
+    let body = &s[lead..];
+    if line_start {
+        let digits = body.bytes().take_while(u8::is_ascii_digit).count();
+        match body.chars().next() {
+            Some(c @ ('#' | '-' | '+')) => {
+                out.push('\\');
+                out.push(c);
+                return out + &md_chars(&body[1..]);
+            }
+            Some(_) if digits > 0 && body[digits..].starts_with(['.', ')']) => {
+                out.push_str(&body[..digits]);
+                out.push('\\');
+                return out + &md_chars(&body[digits..]);
+            }
+            _ => {}
+        }
+    }
+    out + &md_chars(body)
+}
+
+/// `s` with each of `\ ` * _ [ ] < > !` backslash-escaped.
+fn md_chars(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if matches!(c, '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '!') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// A title as link text: nothing in it can close the link or start a destination.
 fn link_text(title: &str) -> String {
     let spaced: String = title
@@ -119,8 +163,8 @@ fn blurb(p: &PageContext, site: &Site) -> Option<String> {
         _ => return None,
     };
     let cut: String = text.chars().take(BLURB_MAX).collect();
-    let cut = cut.trim_end().to_string();
-    (!cut.is_empty()).then_some(cut)
+    let cut = cut.trim_end();
+    (!cut.is_empty()).then(|| md_text(cut))
 }
 
 /// What both files open with, as the home page shows it: the site's name, its description when
@@ -322,11 +366,17 @@ fn reader_text(html: &str) -> String {
         };
         if skip.is_none() {
             let text = decode(text);
-            // a `|` in a cell would end the cell
-            if out.kind == Some(Line::Row) && !pre {
-                out.cur.push_str(&text.replace('|', "\\|"));
-            } else {
+            if pre {
                 out.cur.push_str(&text);
+            } else {
+                // a `|` in a cell would end the cell
+                let line_start = out.cur.trim().is_empty() && out.prefix.is_empty();
+                let text = md_escape(&text, line_start);
+                if out.kind == Some(Line::Row) {
+                    out.cur.push_str(&text.replace('|', "\\|"));
+                } else {
+                    out.cur.push_str(&text);
+                }
             }
         }
         let Some(tag) = tag else { break };
@@ -358,9 +408,12 @@ fn reader_text(html: &str) -> String {
             // the highlighter's spans are inline; the text keeps its own lines
             if closing && name == "pre" {
                 let code = std::mem::take(&mut out.cur);
+                // a fence longer than any run of backticks in the code cannot be closed by it
+                let longest = code.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+                let fence = "`".repeat(longest.saturating_add(1).max(3));
                 out.done.push((
                     Line::Fence,
-                    format!("```\n{}\n```", code.trim_end_matches('\n')),
+                    format!("{fence}\n{}\n{fence}", code.trim_end_matches('\n')),
                 ));
                 pre = false;
             }
@@ -372,7 +425,9 @@ fn reader_text(html: &str) -> String {
                 pre = true;
             }
             ("ul", false) => out.lists.push(None),
-            ("ol", false) => out.lists.push(Some(0)),
+            ("ol", false) => out.lists.push(Some(
+                attr(tag, "start").and_then(|s| s.parse().ok()).unwrap_or(1),
+            )),
             ("ul" | "ol", true) => {
                 out.end();
                 out.lists.pop();
@@ -381,8 +436,9 @@ fn reader_text(html: &str) -> String {
                 let indent = "  ".repeat(out.lists.len().saturating_sub(1));
                 let marker = match out.lists.last_mut() {
                     Some(Some(n)) => {
+                        let marker = format!("{n}. ");
                         *n += 1;
-                        format!("{n}. ")
+                        marker
                     }
                     _ => "- ".to_string(),
                 };
@@ -412,9 +468,11 @@ fn reader_text(html: &str) -> String {
             ("li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6", true) => out.end(),
             (
                 "p" | "div" | "dl" | "dt" | "dd" | "table" | "caption" | "figure" | "figcaption"
-                | "aside" | "details" | "summary" | "blockquote" | "br",
+                | "aside" | "details" | "summary" | "blockquote",
                 _,
             ) => out.flush(),
+            // a line break keeps its row, item or paragraph: it reads as a space
+            ("br", _) => out.cur.push(' '),
             _ => {}
         }
     }
@@ -431,7 +489,7 @@ fn full_text(
 ) -> String {
     let mut t = head(site_name, description, version);
     for p in pages.iter().filter(|p| matches!(p.kind, "doc" | "folder")) {
-        t.push_str(&format!("# {}\n\n", one_line(&p.title)));
+        t.push_str(&format!("# {}\n\n", md_text(&one_line(&p.title))));
         let mut parts: Vec<String> = vec![];
         if let Some(f) = &p.body.folder {
             parts.extend(f.description_html.as_deref().map(|d| format!("<p>{d}</p>")));
@@ -503,6 +561,35 @@ mod tests {
         assert_eq!(
             plain("A <a href=\"x\" title=\"t\">link</a> &amp; &lt;b&gt; it&#39;s<br>fine"),
             "A link & <b> it's fine"
+        );
+    }
+
+    #[test]
+    fn msw12_a_line_break_does_not_end_a_row_an_item_or_a_paragraph() {
+        assert_eq!(
+            reader_text("<table><tbody><tr><td>one<br>two</td><td>2</td></tr></tbody></table>"),
+            "| one two | 2 |"
+        );
+        assert_eq!(
+            reader_text("<ol><li>first<br>still first</li><li>second</li></ol>"),
+            "1. first still first\n2. second"
+        );
+        assert_eq!(reader_text("<p>a<br>b</p>"), "a b");
+    }
+
+    #[test]
+    fn msw12_a_fence_is_longer_than_any_backtick_run_in_the_code() {
+        assert_eq!(
+            reader_text("<pre><code>```py\nx = 1\n```</code></pre>"),
+            "````\n```py\nx = 1\n```\n````"
+        );
+    }
+
+    #[test]
+    fn msw12_a_numbered_list_keeps_its_start() {
+        assert_eq!(
+            reader_text("<ol start=\"3\"><li>three</li><li>four</li></ol>"),
+            "3. three\n4. four"
         );
     }
 
