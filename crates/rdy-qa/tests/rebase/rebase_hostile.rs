@@ -57,6 +57,9 @@ fn outcome<T>(r: Result<T, RdyError>) -> Result<(), &'static str> {
     r.map(|_| ()).map_err(|e| e.code)
 }
 
+/// The engine's view-name cap (`MAX_VIEW_NAME`, counted in chars).
+const MAX_VIEW_NAME_CHARS: usize = 256;
+
 #[test]
 fn vhost1_hostile_view_names() {
     for (label, name) in names() {
@@ -86,9 +89,19 @@ fn vhost1_hostile_view_names() {
                 "{label}: {op} wrote a file outside .rdy"
             );
             if let Err(code) = got {
+                // the engine caps a view name at 256 characters with E_LIMIT
+                if name.chars().count() > MAX_VIEW_NAME_CHARS {
+                    assert_eq!(code, E_LIMIT, "{label}: {op} failed with {code}");
+                } else {
+                    assert!(
+                        code == E_RESERVED_VIEW || code == E_BAD_INPUT,
+                        "{label}: {op} failed with {code}"
+                    );
+                }
+            } else {
                 assert!(
-                    code == E_RESERVED_VIEW || code == E_BAD_INPUT,
-                    "{label}: {op} failed with {code}"
+                    name.chars().count() <= MAX_VIEW_NAME_CHARS,
+                    "{label}: {op} accepted a view name over {MAX_VIEW_NAME_CHARS} characters"
                 );
             }
             if got.is_ok() {
