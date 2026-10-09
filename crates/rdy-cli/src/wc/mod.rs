@@ -45,7 +45,8 @@ pub enum WcCmd {
         /// A decision this change carries out (id, key or path); repeat for more.
         #[arg(long)]
         implements: Vec<String>,
-        /// An editorial change: its class (typo, restructure or clarify) and the reason.
+        /// An editorial change: its class (typo, restructure or clarify) and the reason. Give it
+        /// once.
         #[arg(long, num_args = 2, value_names = ["CLASS", "REASON"], conflicts_with = "implements")]
         editorial: Vec<String>,
     },

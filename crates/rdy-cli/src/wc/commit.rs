@@ -16,8 +16,8 @@ use rdy_engine::wc::state::{ConflictKind, Pending, Place, WcState, new_nonce, st
 use rdy_engine::{
     Diagnostic, E_BAD_INPUT, E_BAD_NAME, E_HAS_CHILDREN, E_IO, E_KEY_CLASH, E_PATH_CLASH,
     E_STALE_BASE, E_UNKNOWN_REF, E_VALIDATION, E_WC_CONFLICT, E_WC_DIRTY, E_WC_INVALID,
-    E_WC_LOCKED, E_WC_STALE, Projection, RdyError, W_WC_UNSTAGED_MOVE, editorial_class, now_ms,
-    project_pack,
+    E_WC_LOCKED, E_WC_OCCUPIED, E_WC_STALE, Projection, RdyError, W_WC_UNSTAGED_MOVE,
+    editorial_class, now_ms, project_pack,
 };
 use rdy_model::BlockId;
 use rdy_schema::Severity;
@@ -46,6 +46,15 @@ pub(super) struct Justify {
 }
 
 pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, String), ErrorReply> {
+    if !matches!(j.editorial.len(), 0 | 2) {
+        // #677: two --editorial flags give four values, which no justification reads
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "--editorial is given more than once",
+            "pass --editorial once: a class (typo, restructure or clarify) and a reason",
+        )
+        .into());
+    }
     if env.no_daemon && !human_session(env) {
         // R-I7: the briefing registry lives in one process, so no recorded token would be known
         // to the next command
@@ -201,20 +210,32 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
     }
     let reply = conn.op("wc_commit", args);
     conn.close();
-    let reply = match reply {
-        Ok(v) => v,
-        Err(mut e) if e.code == E_DAEMON_GONE => {
-            // the store may hold the change: the journal stays for the next command
-            e.fix = LOST_FIX.into();
-            return Err(e);
-        }
-        Err(e) => {
-            state.pending = None;
-            // a refused briefing is replaced by the fresh one the refusal carries
-            record_refusal(&mut state, &e, &view);
-            state.save(&place)?;
-            return Err(map_error(e, &plan, &state, &view));
-        }
+    // the error of a commit the store recorded all the same: reported as a warning
+    let (reply, recorded_error) = match reply {
+        Ok(v) => (v, None),
+        Err(mut e) => match after_commit_error(&e.code) {
+            AfterError::KeepJournal => {
+                // the store may hold the change: the journal stays for the next command
+                e.fix = LOST_FIX.into();
+                return Err(e);
+            }
+            // #675: an error can come after the write (a projection error, a writer panic), so
+            // the journal goes only when the daemon says the change is not there
+            AfterError::Probe => match probe_nonce(env, &state) {
+                Some(v) if v["change"].is_string() => (v, Some(e)),
+                Some(v) if v["pending"] != true => {
+                    state.pending = None;
+                    // a refused briefing is replaced by the fresh one the refusal carries
+                    record_refusal(&mut state, &e, &view);
+                    state.save(&place)?;
+                    return Err(map_error(e, &plan, &state, &view));
+                }
+                _ => {
+                    e.fix = LOST_FIX.into();
+                    return Err(e);
+                }
+            },
+        },
     };
     let proj = projection(&reply, &view)?;
     let wb = apply_writeback(
@@ -258,11 +279,26 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
             w["message"].as_str().unwrap_or("")
         ));
     }
+    if let Some(e) = &recorded_error {
+        text.push_str(&format!(
+            "\nwarning {}: {} (the commit was recorded)",
+            e.code, e.message
+        ));
+    }
     text.push_str(&plan_warnings_text(&plan));
     text.push_str(&kept_text(&wb.kept));
     text.push_str(&consequences_text(&reply));
     let mut out = reply;
     if let Some(o) = out.as_object_mut() {
+        if let Some(e) = recorded_error {
+            let w = json!({"code": e.code, "message": e.message, "fix": e.fix});
+            match o.get_mut("warnings").and_then(Value::as_array_mut) {
+                Some(ws) => ws.push(w),
+                None => {
+                    o.insert("warnings".into(), json!([w]));
+                }
+            }
+        }
         for k in ["files", "blocks", "blobs", "missing", "head"] {
             o.remove(k);
         }
@@ -278,10 +314,40 @@ pub(super) fn run(env: &Env, message: String, j: Justify) -> Result<(Value, Stri
     Ok((out, text))
 }
 
+/// What a commit does with the journal after an error reply.
+enum AfterError {
+    /// The daemon may have recorded the change: ask it with the journal's nonce.
+    Probe,
+    /// The connection went: the journal stays for the next command's recovery.
+    KeepJournal,
+}
+
+/// #675: only a lost connection skips the question; any other error can come after the write.
+fn after_commit_error(code: &str) -> AfterError {
+    if code == E_DAEMON_GONE {
+        AfterError::KeepJournal
+    } else {
+        AfterError::Probe
+    }
+}
+
+/// The `wc_nonce` reply for the journal's commit, quietly: `None` when the request fails.
+fn probe_nonce(env: &Env, st: &WcState) -> Option<Value> {
+    let p = st.pending.as_ref()?;
+    let rewrite: Vec<String> = p.rewrite.iter().map(ToString::to_string).collect();
+    call(
+        env,
+        "wc_nonce",
+        json!({"view": p.view, "nonce": p.nonce, "rewrite": rewrite}),
+    )
+    .ok()
+}
+
 /// The figure pass (wcfg1): stores each upload's image as a blob, puts the hash in the ops where
-/// the planner left `"$upload:<n>"`, and copies the image to `_blobs/<hash>.<ext>` unless the
-/// file is there. Before the journal: a failed commit leaves the stored blobs, which are content
-/// addressed and harmless.
+/// the planner left `"$upload:<n>"`, and writes the image to `_blobs/<hash>.<ext>` unless the
+/// file there already holds its bytes. A `_blobs` or a blob path that exists as something else
+/// (a link included) is `E_WC_OCCUPIED`. Before the journal: a failed commit leaves the stored
+/// blobs, which are content addressed and harmless.
 fn upload_figures(place: &Place, conn: &mut Conn, plan: &mut CommitPlan) -> Result<(), ErrorReply> {
     for (n, up) in plan.uploads.iter().enumerate() {
         let reply = conn.op(
@@ -303,17 +369,43 @@ fn upload_figures(place: &Place, conn: &mut Conn, plan: &mut CommitPlan) -> Resu
         }
         let dir = place.root.join(BLOBS_DIR);
         let to = dir.join(blob_name(hash, up.media_type.as_deref()));
-        if std::fs::symlink_metadata(&to).is_err() {
-            let io = |e: std::io::Error| {
-                ErrorReply::from(RdyError::new(
-                    E_IO,
-                    format!("cannot write {}: {e}", to.display()),
-                    "check the directory and its permissions",
-                ))
-            };
-            std::fs::create_dir_all(&dir).map_err(io)?;
-            std::fs::copy(&up.file, &to).map_err(io)?;
+        // #642: a link at `_blobs` or at the blob's name would take the write outside the tree
+        let occupied = |p: &std::path::Path, what: &str| {
+            ErrorReply::from(RdyError::new(
+                E_WC_OCCUPIED,
+                format!("{} is not a {what}", p.display()),
+                "move it aside, then run the command again",
+            ))
+        };
+        if std::fs::symlink_metadata(&dir).is_ok_and(|m| !m.is_dir()) {
+            return Err(occupied(&dir, "directory"));
         }
+        let existing = match std::fs::symlink_metadata(&to) {
+            Ok(m) if m.is_file() => Some(m.len()),
+            Ok(_) => return Err(occupied(&to, "regular file")),
+            Err(_) => None,
+        };
+        let read_io = |e: std::io::Error| {
+            ErrorReply::from(RdyError::new(
+                E_IO,
+                format!("cannot read {}: {e}", up.file.display()),
+                "check that the file exists and can be read",
+            ))
+        };
+        let io = |e: std::io::Error| {
+            ErrorReply::from(RdyError::new(
+                E_IO,
+                format!("cannot write {}: {e}", to.display()),
+                "check the directory and its permissions",
+            ))
+        };
+        let bytes = std::fs::read(&up.file).map_err(read_io)?;
+        // #649: a torn or changed file is rewritten (temp file and rename)
+        if existing == Some(bytes.len() as u64) && std::fs::read(&to).is_ok_and(|b| b == bytes) {
+            continue;
+        }
+        std::fs::create_dir_all(&dir).map_err(io)?;
+        rdy_engine::write_durable(&to, &bytes).map_err(io)?;
     }
     Ok(())
 }
@@ -542,4 +634,23 @@ fn map_error(e: ErrorReply, plan: &CommitPlan, st: &WcState, view: &str) -> Erro
             .collect()
     };
     invalid(diags)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn msw11_an_error_reply_never_drops_the_journal_without_asking_the_daemon() {
+        for code in ["E_INTERNAL", "E_PATH_CLASH", "E_IO", "E_WC_INVALID"] {
+            assert!(
+                matches!(after_commit_error(code), AfterError::Probe),
+                "{code}"
+            );
+        }
+        assert!(matches!(
+            after_commit_error("E_DAEMON_GONE"),
+            AfterError::KeepJournal
+        ));
+    }
 }

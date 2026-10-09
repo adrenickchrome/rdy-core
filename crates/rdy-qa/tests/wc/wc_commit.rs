@@ -762,3 +762,27 @@ fn wccm1_an_order_only_edit_leaves_the_file_clean() {
         assert!(st["working_copy"][k].as_array().unwrap().is_empty(), "{st}");
     }
 }
+
+#[test]
+fn msw11_a_repeated_editorial_is_refused() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    set_body(&s, "notes.yaml", &seed.note, "Edited.");
+    ok(&s, &["add", "notes.yaml"]);
+    let (okk, v) = json(
+        &s,
+        &[
+            "commit",
+            "-m",
+            "x",
+            "--editorial",
+            "typo",
+            "a",
+            "--editorial",
+            "clarify",
+            "b",
+        ],
+    );
+    assert!(!okk && v["code"] == E_BAD_INPUT, "{v}");
+    assert_eq!(store_block(&s, "work", &seed.note).body, "Note.");
+}

@@ -74,3 +74,41 @@ fn wcfg1_a_missing_outside_or_untyped_image_is_e_wc_invalid() {
         "{v}"
     );
 }
+
+#[test]
+fn msw11_blobs_are_never_written_through_a_linked_blobs_dir() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::create_dir_all(at(&s, "guides/img")).unwrap();
+    std::fs::write(at(&s, "guides/img/chart.png"), b"\x89PNG chart").unwrap();
+    add_figure(&s, &seed.section, "img/chart.png", "");
+    ok(&s, &["commit", "-m", "a figure"]);
+    std::fs::remove_dir_all(at(&s, "_blobs")).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), at(&s, "_blobs")).unwrap();
+    let _ = json(&s, &["checkout", "--force"]);
+    assert_eq!(
+        std::fs::read_dir(outside.path()).unwrap().count(),
+        0,
+        "a blob was written outside the working copy"
+    );
+}
+
+#[test]
+fn msw11_a_torn_blob_file_is_repaired_by_checkout() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::create_dir_all(at(&s, "guides/img")).unwrap();
+    std::fs::write(at(&s, "guides/img/chart.png"), b"\x89PNG chart").unwrap();
+    add_figure(&s, &seed.section, "img/chart.png", "");
+    ok(&s, &["commit", "-m", "a figure"]);
+    let fig = entries(&s, "guides/intro.yaml")
+        .into_iter()
+        .find(|e| e["type"].as_str() == Some("figure"))
+        .unwrap();
+    let hash = fig["fields"]["blob"].as_str().unwrap().to_string();
+    let path = at(&s, &format!("_blobs/{hash}.png"));
+    std::fs::write(&path, b"\x89PN").unwrap();
+    ok(&s, &["checkout", "--force"]);
+    assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG chart");
+}

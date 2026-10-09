@@ -96,6 +96,7 @@ pub use pack_load::{
     resolve_pack,
 };
 pub use rdy_store::OpenReport;
+pub use rdy_store::fsutil::write_durable;
 pub use wc_check::{check_wc, lexical_path};
 
 use arc_swap::ArcSwap;
