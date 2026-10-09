@@ -749,42 +749,53 @@ fn conflicted_for_edit<'b>(
 /// from any version: the edit would change or drop an accepted or rejected decision. The way out
 /// is to drop a side's change from the view or to supersede the decision. msw1 (#1165): the hint
 /// names only the sides' changes the view can exclude, the ones that have not landed (a landed
-/// change is not in the view), frozen or not.
+/// change is not in the view), frozen or not. The check reads the blocks first and the landings
+/// only when something is frozen, so a plain conflict never reads the landed index.
 fn frozen_in_conflict(
     id: &BlockId,
     c: &Conflict,
     store: &rdy_store::Store,
 ) -> Result<(), RdyError> {
-    let mut frozen = None;
-    if let Some(cb) = c.base
-        && decision::is_frozen(&store.get_block(&cb)?)
-    {
-        frozen = Some(format!("its base {}", cb.short()));
+    // first pass: the base's and the sides' blocks decide whether anything is frozen
+    let frozen_base = match c.base {
+        Some(cb) if decision::is_frozen(&store.get_block(&cb)?) => Some(cb),
+        _ => None,
+    };
+    let mut frozen_side = None;
+    if frozen_base.is_none() {
+        for (i, s) in c.sides.iter().enumerate() {
+            if let Some(v) = s.version
+                && decision::is_frozen(&store.get_block(&v)?)
+            {
+                frozen_side = Some(i);
+                break;
+            }
+        }
+        if frozen_side.is_none() {
+            return Ok(());
+        }
     }
+    // second pass: the landings give the label and the changes the view can exclude
+    let mut which = frozen_base
+        .map(|cb| format!("its base {}", cb.short()))
+        .unwrap_or_default();
     let mut excludable = vec![];
-    for s in &c.sides {
-        let side_frozen = match s.version {
-            Some(v) => decision::is_frozen(&store.get_block(&v)?),
-            None => false,
-        };
+    for (i, s) in c.sides.iter().enumerate() {
         let landing = match s.change {
             Some(ch) => store.landing_of(&ch)?,
             None => None,
         };
-        if side_frozen && frozen.is_none() {
-            frozen = Some(match (s.change, landing) {
+        if frozen_side == Some(i) {
+            which = match (s.change, landing) {
                 (Some(ch), Some(l)) => format!("side {} landed in {}", ch.short(), l.short()),
                 (Some(ch), None) => format!("side {}", ch.short()),
                 (None, _) => "a side in canon".to_string(),
-            });
+            };
         }
         if let (Some(ch), None) = (s.change, landing) {
             excludable.push(ch.to_string());
         }
     }
-    let Some(which) = frozen else {
-        return Ok(());
-    };
     let supersede = format!("write a new decision that supersedes or revokes {id}");
     let fix = match excludable.as_slice() {
         [] => supersede,

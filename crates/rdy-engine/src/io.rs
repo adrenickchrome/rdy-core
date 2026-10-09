@@ -886,6 +886,19 @@ impl Rdy {
                     "import into a fresh project or view",
                 ));
             }
+            // msw1 (#1160): a create/create conflict has no base, so the view reads the block as
+            // absent; importing it would silently resolve the conflict with the import's version
+            if let Some(c) = conflicts.iter().find(|c| c.block == b.id) {
+                return Err(RdyError::new(
+                    E_ALREADY_EXISTS,
+                    format!(
+                        "block {} already exists in view {view}: it is conflicted ({})",
+                        b.id,
+                        c.id.short()
+                    ),
+                    "import into a fresh project or view",
+                ));
+            }
             let exists = |id: &BlockId| incoming.contains_key(id) || existing.get(id).is_some();
             for t in b.ref_tokens() {
                 match BlockId::parse(&t) {

@@ -504,3 +504,71 @@ fn msw1_a_frozen_conflict_names_only_changes_the_view_can_exclude() {
         .unwrap();
     assert!(r.read().conflicts(&view("b")).unwrap().is_empty());
 }
+
+/// msw1 (#1160, fix round 1): an import is a second way to create a block. A create/create
+/// conflict has no base, so the view reads the block as absent; the import must still refuse it,
+/// as a write does, and leave the conflict in place.
+#[test]
+fn msw1_an_import_never_resolves_a_create_create_conflict() {
+    let (_d, mut r) = project();
+    let mk = |title: &str| {
+        json!([{"op": "create", "type": "doc", "id": "d-D36QY",
+                "fields": {"name": "dd", "title": title, "doc_type": "overview"}}])
+    };
+    write(&mut r, "x", mk("X title")).unwrap();
+    let cy = write(&mut r, "y", mk("Y title")).unwrap().change;
+    r.store_mut()
+        .view_append(
+            "x",
+            vec![ViewOpKind::Include {
+                changes: vec![cy.parse().unwrap()],
+            }],
+            &writer().provenance(),
+        )
+        .unwrap();
+    r.invalidate();
+    let cs = r.read().conflicts(&view("x")).unwrap();
+    assert_eq!(cs.len(), 1);
+    assert_eq!(cs[0].base, None, "a create/create conflict");
+    let out = tempfile::tempdir().unwrap();
+    let dir = out.path().join("export");
+    r.read().export(&view("y"), &dir).unwrap();
+    let e = r.import(&approver(), "x", &dir).unwrap_err();
+    assert_eq!(e.code, E_ALREADY_EXISTS, "{e}");
+    assert!(e.message.contains("conflicted"), "{e}");
+    assert_eq!(
+        r.read().conflicts(&view("x")).unwrap().len(),
+        1,
+        "nothing imported"
+    );
+}
+
+/// msw1 (fix round 1): the frozen check reads a side's landing only once it knows a side or the
+/// base is frozen, so a damaged landed entry does not block the resolution of a plain conflict.
+#[test]
+fn msw1_a_plain_conflict_resolves_even_when_a_sides_landed_entry_is_damaged() {
+    let (_d, mut r, c, v, ca, cb) = conflicted();
+    let cbh: rdy_model::Hash = cb.parse().unwrap();
+    r.store_mut()
+        .set_landed_raw_for_tests(&cbh, &[0xAB; 3])
+        .unwrap();
+    r.invalidate();
+    assert!(
+        r.store_mut().landing_of(&cbh).is_err(),
+        "the damaged entry reads as an error"
+    );
+    let a = as_agent("agent:a", "r1");
+    let res = write_as(&mut r, &a, "a", update(&c, Some(&v), "merged")).unwrap();
+    let deps: Vec<String> = r
+        .read()
+        .reader()
+        .change(&res.change.parse().unwrap())
+        .unwrap()
+        .deps
+        .iter()
+        .map(|h| h.to_string())
+        .collect();
+    assert!(deps.contains(&ca) && deps.contains(&cb), "{deps:?}");
+    assert!(r.read().conflicts(&view("a")).unwrap().is_empty());
+    assert_eq!(body_of(&r, &view("a"), &c), "merged");
+}
