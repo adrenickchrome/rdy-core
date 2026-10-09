@@ -305,7 +305,7 @@ impl ReadState {
     }
 
     /// The areas of `b` in `scope`; none for a block absent there.
-    fn block_areas(&self, scope: &Scope, b: &BlockId) -> Result<Vec<String>, RdyError> {
+    pub(crate) fn block_areas(&self, scope: &Scope, b: &BlockId) -> Result<Vec<String>, RdyError> {
         match self.areas_of(scope, b) {
             Err(e) if e.code == E_UNKNOWN_BLOCK => Ok(vec![]),
             r => r,

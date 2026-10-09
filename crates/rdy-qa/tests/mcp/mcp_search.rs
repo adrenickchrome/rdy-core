@@ -1,8 +1,11 @@
 //! msrch1: rdy_search over MCP: matches by scope (session view by default), paging through `page`
 //! and `next`, and rdy errors for bad input.
 use rdy_engine::Rdy;
+use rdy_qa::daemon::Served;
+use rdy_qa::edit_loop::spec_doc;
 use rdy_qa::fixtures::*;
 use rdy_qa::mcp::McpClient;
+use rdy_qa::tensions::{put, upd};
 use serde_json::{Value, json};
 
 fn seed(r: &mut Rdy) {
@@ -77,4 +80,50 @@ fn msrch1_rdy_search_pages_and_refuses_bad_input() {
         Some("E_LIMIT")
     );
     c.alive();
+}
+
+#[test]
+fn tsrch1_rdy_search_takes_the_tension_filter() {
+    let s = Served::new();
+    let (a, c) = {
+        let mut r = Rdy::open(s.dir.path()).unwrap();
+        let sp = spec_doc(&mut r);
+        put(&mut r, "a", upd(&sp.a, "Shared word: alpha."));
+        put(&mut r, "b", upd(&sp.a, "Shared word: beta."));
+        put(&mut r, "c", upd(&sp.c, "Shared word: gamma."));
+        r.close().unwrap();
+        (sp.a.to_string(), sp.c.to_string())
+    };
+    let mut m = McpClient::start_proxy(&s);
+    m.call(
+        "rdy_session",
+        json!({"actor": "agent:q", "run": "q1", "role": "writer"}),
+    )
+    .ok();
+    let ids = |m: &mut McpClient, scope: &str, tension: bool| -> Vec<String> {
+        let v = m
+            .call(
+                "rdy_search",
+                json!({"query": "Shared word", "scope": scope, "tension": tension}),
+            )
+            .ok();
+        v["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(ids(&mut m, "a", false), vec![a.clone()]);
+    assert_eq!(
+        ids(&mut m, "a", true),
+        [a],
+        "a's block is in an open tension"
+    );
+    assert_eq!(ids(&mut m, "c", false), [c]);
+    assert!(
+        ids(&mut m, "c", true).is_empty(),
+        "c's block is in no open tension"
+    );
+    m.alive();
 }

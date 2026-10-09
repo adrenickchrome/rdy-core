@@ -13,6 +13,8 @@ pub struct FsckReport {
     pub intents: usize,
     /// The alternative sets, each with its version chain checked.
     pub alt_sets: usize,
+    /// The dismissals, each a `dismiss/` ref naming a review of its own tension.
+    pub reviews: usize,
 }
 
 impl Rdy {
@@ -33,6 +35,7 @@ impl Rdy {
             landed_changes: objects.landed_changes,
             intents: objects.intents,
             alt_sets: objects.alt_sets,
+            reviews: objects.reviews,
         })
     }
 }

@@ -227,11 +227,13 @@ fn vcq1_the_full_diff_equals_the_change_driven_one() {
     let after = r.read();
     let head: Hash = res.head.parse().unwrap();
     let ch: Vec<Hash> = vec![cb.parse().unwrap()];
+    let scoped = rdy_engine::tensions::tension_delta(&before, &after, Some(&ch)).unwrap();
+    let whole = rdy_engine::tensions::tension_delta(&before, &after, None).unwrap();
     let by_changes = after
-        .view_consequences(&before, "r1", &head, Some(&ch), None)
+        .view_consequences(&before, "r1", &head, Some(&ch), &scoped, None)
         .unwrap();
     let full = after
-        .view_consequences(&before, "r1", &head, None, None)
+        .view_consequences(&before, "r1", &head, None, &whole, None)
         .unwrap();
     assert_eq!(by_changes, full);
     assert!(!full.items.is_empty());

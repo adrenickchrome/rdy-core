@@ -125,7 +125,11 @@ fn infl1_a_cut_shortens_inflight_and_keeps_coverage() {
         .unwrap();
     }
     let full = brief_of(&r, &Scope::Canon, &[&s.a]);
-    assert_eq!(full.inflight.views.len(), 40);
+    assert_eq!(
+        full.inflight.views.len(),
+        40,
+        "the 780 edit collisions are cut before a view (Q15, ruling on item 54)"
+    );
     let cov = Coverage {
         ids: vec![s.a.to_string()],
         path: None,

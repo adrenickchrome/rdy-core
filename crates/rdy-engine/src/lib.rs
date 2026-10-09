@@ -35,6 +35,7 @@ pub mod related;
 pub mod search;
 mod session;
 pub mod suggest;
+pub mod tensions;
 pub mod testkit;
 mod tree_io;
 mod version;
@@ -54,7 +55,8 @@ pub use decide::DecisionInput;
 pub use error::*;
 pub use events::{Event, EventKind, Events};
 pub use gate::{
-    LandInfo, LandOptions, LandingRow, ProposalInfo, ProposalRef, RebasedInfo, RelayedByRow,
+    LandInfo, LandOptions, LandingRow, PROPOSAL_TENSIONS_MAX, ProposalInfo, ProposalRef,
+    RebasedInfo, RelayedByRow,
 };
 pub use history::{Author, HISTORY_MAX, History, HistoryEntry, JustificationInfo, LandingRef};
 pub use io::{ExportSummary, block_from_yaml, block_to_yaml, refuse_inflight_export};
@@ -134,4 +136,18 @@ pub struct Rdy {
     serve: ServeConfig,
     /// The registered briefings (in memory; one registry per open project).
     briefs: Arc<brief::BriefRegistry>,
+    /// The tension detectors every published state runs: the registry, unless a test set others.
+    detectors: &'static [&'static dyn tensions::Detector],
+    /// The tension set the last `settle_tensions` recorded, and the publish (`publish_gen`) of
+    /// its state.
+    tension_seen: Option<(Arc<tensions::TensionSet>, u64)>,
+    /// How many states `publish` has published since open: a settle keys on it, so a publish
+    /// with no store write (a pack reload) is settled too.
+    publish_gen: u64,
+    /// The store's last batch end at the last settle (at open: the origin): a settle with no
+    /// batch since names no `by`.
+    settled_batch: Location,
+    /// The state `publish` held before the first write since open, while nothing is settled:
+    /// the first settle diffs against its set.
+    tension_base: Option<Arc<ReadState>>,
 }

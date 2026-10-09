@@ -1,7 +1,9 @@
 //! cflt1: `rdy search` prints totals and collapsed hits, and takes the filter flags.
 use rdy_engine::Rdy;
 use rdy_qa::daemon::Served;
+use rdy_qa::edit_loop::spec_doc;
 use rdy_qa::fixtures::*;
+use rdy_qa::tensions::{put, upd};
 use serde_json::json;
 
 #[test]
@@ -49,5 +51,36 @@ fn cflt1_rdy_search_prints_totals_and_takes_filter_flags() {
     let (ok, v) = s.json(&["--json", "search", "8080", "--lifecycle", "final"]);
     assert!(!ok);
     assert_eq!(v["code"], "E_BAD_INPUT", "{v}");
+    s.stop();
+}
+
+#[test]
+fn tsrch1_rdy_search_takes_the_tension_flag() {
+    let s = Served::new();
+    let (a, c) = {
+        let mut r = Rdy::open(s.dir.path()).unwrap();
+        let sp = spec_doc(&mut r);
+        put(&mut r, "a", upd(&sp.a, "Shared word: alpha."));
+        put(&mut r, "b", upd(&sp.a, "Shared word: beta."));
+        put(&mut r, "c", upd(&sp.c, "Shared word: gamma."));
+        r.close().unwrap();
+        (sp.a.to_string(), sp.c.to_string())
+    };
+    let ids = |args: &[&str]| -> Vec<String> {
+        let mut full = vec!["--json", "search", "Shared word"];
+        full.extend_from_slice(args);
+        let (ok, v) = s.json(&full);
+        assert!(ok, "{v}");
+        v["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(ids(&["--scope", "a"]), vec![a.clone()]);
+    assert_eq!(ids(&["--scope", "a", "--tension"]), [a]);
+    assert_eq!(ids(&["--scope", "c"]), [c]);
+    assert!(ids(&["--scope", "c", "--tension"]).is_empty());
     s.stop();
 }

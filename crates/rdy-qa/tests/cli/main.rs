@@ -19,4 +19,5 @@ mod cli_search;
 mod cli_search_filters;
 mod cli_state;
 mod cli_suspects;
+mod cli_tensions;
 mod cli_views;

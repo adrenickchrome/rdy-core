@@ -22,6 +22,7 @@ mod read_cmd;
 mod search_cmd;
 mod serve_cmd;
 mod site_cmd;
+mod tension_cmd;
 mod view_cmd;
 mod wc;
 
@@ -78,6 +79,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: intent_cmd::IntentCmd,
     },
+    /// List tensions: disagreements between in-flight changes, with canon, or inside canon.
+    Tensions(tension_cmd::TensionsArgs),
+    /// Dismiss a tension with a reason. A tension is otherwise resolved by a change.
+    Resolve(tension_cmd::ResolveArgs),
     /// Undo the newest op of this session on a view, or the named op.
     Undo(view_cmd::UndoArgs),
     /// Name a landing (default: canon's head) as a version, e.g. v1.2.0. Approver only.
@@ -144,6 +149,8 @@ fn run(cli: Cli, env: &Env) -> Result<(Value, String), ErrorReply> {
         Cmd::View { cmd } => view_cmd::view(env, cmd),
         Cmd::Alt { cmd } => alt_cmd::alt(env, cmd),
         Cmd::Intent { cmd } => intent_cmd::intent(env, cmd),
+        Cmd::Tensions(a) => tension_cmd::tensions(env, a),
+        Cmd::Resolve(a) => tension_cmd::resolve(env, a),
         Cmd::Undo(a) => view_cmd::undo(env, a),
         Cmd::Tag(a) => land_cmd::tag(env, a),
         Cmd::Tags => read_cmd::tags(env),

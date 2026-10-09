@@ -218,8 +218,9 @@ fn as_of_snapshots_survive_landings() {
     );
     assert_eq!(
         r.read().is_built(&Scope::Canon),
-        (true, false),
-        "a landing seeds canon incrementally; the graph is built on demand"
+        (true, true),
+        "a landing seeds canon incrementally; the gate's tension check (tgat1) read the graph \
+         before it, so the graph is carried too"
     );
 }
 

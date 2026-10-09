@@ -86,8 +86,8 @@ fn ibrf1_intents_on_covered_blocks_or_their_area_are_listed_and_not_in_the_token
 
 #[test]
 fn ibrf1_paging_has_an_intents_section_before_the_base() {
-    assert_eq!(PAGE_SECTIONS.len(), 9);
+    assert_eq!(PAGE_SECTIONS.len(), 10);
     assert_eq!(PAGE_SECTIONS[6], "inflight.proposals");
     assert_eq!(PAGE_SECTIONS[7], "inflight.intents");
-    assert_eq!(PAGE_SECTIONS[8], "base.blocks");
+    assert_eq!(PAGE_SECTIONS[9], "base.blocks");
 }

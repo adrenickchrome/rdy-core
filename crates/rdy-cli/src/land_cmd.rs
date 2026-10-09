@@ -93,6 +93,24 @@ pub(crate) fn propose(env: &Env, a: ProposeArgs) -> Result<(Value, String), Erro
             "\nblocking: {blocking} conflict(s) on blocks this proposal writes"
         ));
     }
+    let tensions = v["tensions"].as_array().map_or(&[][..], Vec::as_slice);
+    if !tensions.is_empty() {
+        let refusing: Vec<&str> = tensions
+            .iter()
+            .filter(|t| t["refuses"].as_bool() == Some(true))
+            .map(|t| text(&t["id"]))
+            .collect();
+        t.push_str(&format!(
+            "\ntensions: {} ({} would refuse the landing{})",
+            tensions.len() as u64 + num(&v["tensions_omitted"]),
+            refusing.len(),
+            if refusing.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", refusing.join(", "))
+            }
+        ));
+    }
     t.push_str(&brief_text::consequences_text(&v));
     t.push_str(&new_keys_text(&v));
     t.push_str(&format!("\napprove with: rdy approve {pref}"));

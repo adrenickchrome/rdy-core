@@ -12,6 +12,7 @@ pub mod packs;
 pub mod perf;
 pub mod report;
 pub mod site;
+pub mod tensions;
 pub mod wc;
 
 /// The libtest name of the test fn `$f` in the calling file (see `fixtures::libtest_name`):

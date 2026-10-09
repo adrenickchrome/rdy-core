@@ -152,10 +152,17 @@ pub struct Pack {
     /// Severity overrides per tension kind: only what the pack wrote.
     #[serde(default)]
     pub tensions: BTreeMap<TensionKind, TensionSeverity>,
+    /// Normative text duplicates need at least this many words (default 3).
+    #[serde(default)]
+    pub duplicate_text_min_words: Option<usize>,
     /// Named areas of the tree, by area name.
     #[serde(default)]
     pub areas: BTreeMap<String, AreaDef>,
 }
+
+/// The fewest words a normative text needs before two equal texts are a duplicate definition,
+/// when the pack does not set `duplicate_text_min_words`.
+pub const DUPLICATE_TEXT_MIN_WORDS: usize = 3;
 
 /// The kinds of tension the engine can raise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -201,6 +208,13 @@ impl TensionKind {
             | TensionKind::DeprecatedReference => TensionSeverity::Advisory,
             _ => TensionSeverity::Blocking,
         }
+    }
+
+    /// Whether a tension of this kind is advisory in draft content when the pack does not set
+    /// its severity: blocking in stable content, advisory in draft. True for
+    /// `duplicate_definition` only.
+    pub fn softens_in_draft(&self) -> bool {
+        matches!(self, TensionKind::DuplicateDefinition)
     }
 }
 
@@ -352,6 +366,13 @@ impl Pack {
             Some(s) => (*s, true),
             None => (kind.default_severity(), false),
         }
+    }
+
+    /// The fewest words a normative text needs before two equal texts are a duplicate
+    /// definition: the pack's `duplicate_text_min_words`, else [`DUPLICATE_TEXT_MIN_WORDS`].
+    pub fn duplicate_text_min_words(&self) -> usize {
+        self.duplicate_text_min_words
+            .unwrap_or(DUPLICATE_TEXT_MIN_WORDS)
     }
 
     /// Every kind in `TensionKind::ALL` order with its severity and whether

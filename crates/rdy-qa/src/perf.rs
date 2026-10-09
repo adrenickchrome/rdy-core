@@ -8,7 +8,7 @@ use rdy_engine::{Materialized, Rdy, Scope, now_ms, testkit};
 use rdy_model::{Block, BlockId, Hash, Op};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -113,6 +113,24 @@ fn spec_target(op: &str) -> Option<String> {
             "no spec target: the in-flight state's (coordination graph's) cold build, once per published state (recorded for M2d1)"
         }
         "inflight_carry" => "< 1 ms incremental (spec 15.1, view materialization)",
+        "tension_carry_1k" | "tension_on_change_1k" => {
+            "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change and tension detection, included in the write response)"
+        }
+        "tension_on_change_delete_1k" | "tension_on_change_view_op_1k" => {
+            "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change, included in the response); a delete and a view op never carry, so this is the in-flight build plus a diff that skips the shared canon part"
+        }
+        "tension_settle_1k" => {
+            "recorded, no spec target: the writer's post-reply settle (diff and events), compare with tension_carry_1k"
+        }
+        "tensions_full_1k" => {
+            "no spec target: the cold build of every tension at 1k in-flight changes, once per landing or structural update (recorded for M2d2)"
+        }
+        "tensions_canon" => {
+            "no spec target: the canon-scope build of the tensions (FW-CH6), once per landing; recorded for Coverage and confidence"
+        }
+        "gate_tensions_1k" => {
+            "recorded: the land message's tension check on a built set (inside the landing budget, M2 spec 15.1)"
+        }
         "mcp_params_9mib" => {
             "no spec target: parse_params::<WriteParams> alone on one ~9 MiB rdy_write call (recorded; the comparator for mcp_write_9mib)"
         }
@@ -905,8 +923,10 @@ fn tier_views(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs
                 .map(|h| h.parse().expect("change"))
                 .collect();
             let s = Instant::now();
+            let delta = rdy_engine::tensions::tension_delta(&before, &after, Some(&changes))
+                .expect("tension delta");
             after
-                .view_consequences(&before, &name, &head, Some(&changes), None)
+                .view_consequences(&before, &name, &head, Some(&changes), &delta, None)
                 .expect("view consequences");
             s.elapsed()
         },
@@ -1095,6 +1115,227 @@ fn tier_inflight(
     ));
 }
 
+/// Citing claims the tension ops add on top of the in-flight fixture.
+const TENSION_CITING: usize = 50;
+
+/// The tension ops (M2d2): the carry of the tension set across one commit, `on_change` for one
+/// write, the writer's post-reply settle, the cold builds of the set and of its canon part, and
+/// the land message's tension check, with `n` changes in flight (`1k` in the names, as in
+/// [`tier_inflight`]). Run right after `tier_inflight`, on the same project: it reuses the `n`
+/// changes left in `inf0` … `inf19` and adds `citing` claims written round-robin into those views,
+/// each citing a claim another view updated, so premise shifts exist (asserts at least `citing`
+/// tensions, untimed).
+fn tier_tensions(
+    out: &mut Vec<Measure>,
+    r: &mut Rdy,
+    fx: &Fixture,
+    sfx: &str,
+    runs: &Runs,
+    n: usize,
+    citing: usize,
+) {
+    // the claims `inflight_views` updated are the first `n` by id (besides the fixture's): each
+    // `ids[i]` is in `inf{i % 20}`. A fresh claim is one past them.
+    let ids: Vec<BlockId> = {
+        let canon = r.read().materialized(&Scope::Canon).expect("canon");
+        let mut v: Vec<BlockId> = canon
+            .iter()
+            .filter(|b| b.block_type == "claim" && b.id != fx.claim)
+            .map(|b| b.id.clone())
+            .collect();
+        v.sort();
+        v
+    };
+    let (edited, fresh) = ids.split_at(n);
+    assert!(
+        edited.len() > citing && fresh.len() >= 3 * runs.incremental,
+        "canon has claims to cite and to edit besides the in-flight fixture's"
+    );
+    let section = fx.section.to_string();
+    for k in 0..citing {
+        // the claim `k + 1` is updated in the next view round-robin: never the citer's own
+        write(
+            r,
+            &format!("inf{}", k % INFLIGHT_VIEWS),
+            json!([{"op": "create", "type": "claim", "parent": section,
+                "body": format!("Builds on {{{{{}}}}}.", edited[k + 1])}]),
+        )
+        .expect("a citing claim");
+    }
+    let held = r.read().tensions().expect("tensions").len();
+    assert!(held >= citing, "{held} tensions, wanted {citing}");
+    let mut fresh = fresh.iter();
+    // the carry: the state's set is built (outside the timer), one update of a fresh canon claim
+    // into `inf0` seeds the next state, and the timed part is the read of its set
+    out.push(measure_timed(
+        &format!("tension_carry_1k{sfx}"),
+        runs.incremental,
+        |i| {
+            r.read().tensions().expect("warm tensions");
+            let id = fresh.next().expect("a fresh claim");
+            write(
+                r,
+                "inf0",
+                json!([{"op": "update", "id": id.to_string(), "body": format!("Carried {i}.")}]),
+            )
+            .expect("carried write");
+            let st = r.read();
+            let s = Instant::now();
+            st.tensions().expect("tensions");
+            let took = s.elapsed();
+            assert_eq!(
+                st.tensions_carried(),
+                Some(true),
+                "the commit did not carry the tension set"
+            );
+            took
+        },
+    ));
+    // `on_change` of one write, as the write response computes it: the tension delta between the
+    // states before and after (their sets are built, the second one by the carry) and the
+    // report for the view
+    out.push(measure_timed(
+        &format!("tension_on_change_1k{sfx}"),
+        runs.incremental,
+        |i| {
+            let before = r.read();
+            before.tensions().expect("warm tensions");
+            let w = write(
+                r,
+                "inf1",
+                json!([{"op": "create", "type": "claim", "parent": section,
+                    "body": format!("Builds on {{{{{}}}}}. Run {i}.", edited[2])}]),
+            )
+            .expect("a citing write");
+            let change: Hash = w.change.parse().expect("change");
+            let after = r.read();
+            let s = Instant::now();
+            let delta = rdy_engine::tensions::tension_delta(&before, &after, Some(&[change]))
+                .expect("delta");
+            let o = rdy_engine::tensions::delta::on_change(&before, &after, "inf1", None, &delta)
+                .expect("on_change");
+            let took = s.elapsed();
+            assert!(!o.tensions.is_empty(), "the write opened a premise shift");
+            took
+        },
+    ));
+    // `on_change` of a delete: a delete never carries (it takes a block out of reads the seeds
+    // do not cover), so the response builds the in-flight part of the state after and diffs
+    // it; the canon part both sets share is not copied or diffed
+    out.push(measure_timed(
+        &format!("tension_on_change_delete_1k{sfx}"),
+        runs.incremental,
+        |_| {
+            let before = r.read();
+            before.tensions().expect("warm tensions");
+            let id = fresh.next().expect("a fresh claim");
+            let w = write(r, "inf1", json!([{"op": "delete", "id": id.to_string()}]))
+                .expect("a delete");
+            let change: Hash = w.change.parse().expect("change");
+            let after = r.read();
+            let s = Instant::now();
+            let delta = rdy_engine::tensions::tension_delta(&before, &after, Some(&[change]))
+                .expect("delta");
+            rdy_engine::tensions::delta::on_change(&before, &after, "inf1", None, &delta)
+                .expect("on_change");
+            let took = s.elapsed();
+            assert_eq!(after.tensions_carried(), Some(false), "a delete rebuilds");
+            took
+        },
+    ));
+    // `on_change` of a view op: one of inf2's changes included into a fresh view (its in-flight
+    // set changes, so the state after builds its in-flight part again)
+    let human = writer();
+    let inf2: Vec<String> = r
+        .read()
+        .included("inf2")
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let picked = inf2.last().expect("inf2 holds changes").clone();
+    out.push(measure_timed(
+        &format!("tension_on_change_view_op_1k{sfx}"),
+        runs.incremental,
+        |i| {
+            let name = format!("tvo{i}");
+            let before = r.read();
+            before.tensions().expect("warm tensions");
+            let res = r
+                .view_include(&human, &name, std::slice::from_ref(&picked))
+                .expect("include");
+            let changes: Vec<Hash> = res
+                .added
+                .iter()
+                .chain(&res.added_deps)
+                .map(|h| h.parse().expect("change"))
+                .collect();
+            let after = r.read();
+            let s = Instant::now();
+            let delta = rdy_engine::tensions::tension_delta(&before, &after, Some(&changes))
+                .expect("delta");
+            rdy_engine::tensions::delta::on_change(&before, &after, &name, None, &delta)
+                .expect("on_change");
+            s.elapsed()
+        },
+    ));
+    // the settle: the writer diffs the last settled set and the published one after the reply
+    r.settle_tensions().expect("first settle");
+    out.push(measure_timed(
+        &format!("tension_settle_1k{sfx}"),
+        runs.incremental,
+        |_| {
+            let id = fresh.next().expect("a fresh claim");
+            write(
+                r,
+                "inf0",
+                json!([{"op": "update", "id": id.to_string(), "body": "Settled."}]),
+            )
+            .expect("settled write");
+            let s = Instant::now();
+            r.settle_tensions().expect("settle");
+            s.elapsed()
+        },
+    ));
+    out.push(measure_timed(
+        &format!("tensions_full_1k{sfx}"),
+        runs.materialize_cold,
+        |_| cold(r, |r| r.read().tensions_rebuilt().expect("tensions").len()).1,
+    ));
+    out.push(measure_timed(
+        &format!("tensions_canon{sfx}"),
+        runs.materialize_cold,
+        |_| {
+            cold(r, |r| {
+                r.read()
+                    .canon_tensions_rebuilt()
+                    .expect("canon tensions")
+                    .len()
+            })
+            .1
+        },
+    ));
+    // the land message's check, on a built set
+    let st = r.read();
+    st.tensions().expect("tensions");
+    let mine: Vec<Hash> = st.included("inf2").to_vec();
+    assert!(!mine.is_empty(), "inf2 holds changes");
+    out.push(measure_timed(
+        &format!("gate_tensions_1k{sfx}"),
+        runs.read,
+        |_| {
+            let s = Instant::now();
+            st.proposal_tensions(
+                "inf2",
+                &mine,
+                &BTreeSet::new(),
+                rdy_engine::PROPOSAL_TENSIONS_MAX,
+            )
+            .expect("proposal tensions");
+            s.elapsed()
+        },
+    ));
+}
+
 /// Intents and alternative sets ever made in the coordination ops' projects: none is ever
 /// deleted (an intent expires at read time; a set is settled, not removed), so a swarm's count
 /// grows for the project's lifetime.
@@ -1245,10 +1486,13 @@ fn mcp_write_args(i: usize) -> serde_json::Map<String, serde_json::Value> {
         json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": format!("mw-{i}"), "title": "MW", "doc_type": "glossary"}}),
         json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}),
     ];
-    ops.extend(
-        (0..MCP_CLAIMS)
-            .map(|_| json!({"op": "create", "type": "claim", "parent": "$s", "body": body})),
-    );
+    // each claim's body is its own (the run index and the claim index lead it): every run
+    // writes into the same view `mw`, so a body that depended on `k` alone would duplicate
+    // claim `k` of every earlier run. This op measures the ~9 MiB intake and parameter path,
+    // not duplicate definitions
+    ops.extend((0..MCP_CLAIMS).map(|k| {
+        json!({"op": "create", "type": "claim", "parent": "$s", "body": format!("{i}-{k} {body}")})
+    }));
     match json!({"view": "mw", "ops": ops}) {
         serde_json::Value::Object(m) => m,
         _ => unreachable!("an object literal"),
@@ -1645,6 +1889,15 @@ pub fn run_workload() -> Vec<Measure> {
     // in-flight ops (which close it and add 1k in-flight changes)
     tier_entities(&mut out, &mut r, &fx, "", &TYPICAL_RUNS);
     tier_inflight(&mut out, &mut r, &fx, "", &TYPICAL_RUNS, INFLIGHT_N);
+    tier_tensions(
+        &mut out,
+        &mut r,
+        &fx,
+        "",
+        &TYPICAL_RUNS,
+        INFLIGHT_N,
+        TENSION_CITING,
+    );
     drop(r);
     // on projects of their own: the records they add move nothing above
     tier_coord(&mut out, dir.path(), "", &TYPICAL_RUNS, COORD_N);
@@ -2161,6 +2414,15 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
     prepare_rebased_view(&mut r, &fx, &LARGE_RUNS);
     tier_views(&mut out, &mut r, &fx, sfx, &LARGE_RUNS);
     tier_inflight(&mut out, &mut r, &fx, sfx, &LARGE_RUNS, INFLIGHT_N);
+    tier_tensions(
+        &mut out,
+        &mut r,
+        &fx,
+        sfx,
+        &LARGE_RUNS,
+        INFLIGHT_N,
+        TENSION_CITING,
+    );
     out
 }
 
@@ -2440,6 +2702,82 @@ mod tests {
                 "impact_view_1k",
                 "coord_build_1k"
             ]
+        );
+    }
+
+    /// The tension ops run end to end on a small tree (n and the citing claims scaled down), after
+    /// the in-flight ops, as the tiers run them.
+    #[test]
+    fn d2perf1_the_tension_ops_run_on_a_small_tree() {
+        rdy_model::seed_ids_for_tests(0x7064_6566);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let fx = fixture(&r, &docs);
+        let runs = Runs {
+            write: 1,
+            read: 2,
+            tree: 1,
+            materialize_cold: 2,
+            incremental: 2,
+            view_ops: 2,
+            landing: 2,
+            view_changes: 12,
+            landing_views: 8,
+        };
+        let mut inflight = vec![];
+        tier_inflight(&mut inflight, &mut r, &fx, "", &runs, 40);
+        let mut out = vec![];
+        tier_tensions(&mut out, &mut r, &fx, "", &runs, 40, 10);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "tension_carry_1k",
+                "tension_on_change_1k",
+                "tension_on_change_delete_1k",
+                "tension_on_change_view_op_1k",
+                "tension_settle_1k",
+                "tensions_full_1k",
+                "tensions_canon",
+                "gate_tensions_1k"
+            ]
+        );
+        assert!(r.read().tensions().expect("tensions").len() >= 10);
+    }
+
+    #[test]
+    fn d2perf1_the_m2d2_ops_state_their_targets() {
+        for op in [
+            "tension_carry_1k",
+            "tension_on_change_1k",
+            "tension_on_change_delete_1k",
+            "tension_on_change_view_op_1k",
+            "tension_settle_1k",
+            "tensions_full_1k",
+            "tensions_canon",
+            "gate_tensions_1k",
+        ] {
+            assert!(spec_target(op).is_some(), "{op} has no target");
+        }
+        assert!(
+            spec_target("tension_carry_1k")
+                .unwrap()
+                .contains("< 10 ms p99")
+        );
+        assert!(
+            spec_target("tension_on_change_1k")
+                .unwrap()
+                .contains("< 10 ms p99")
+        );
+        assert!(
+            spec_target("tensions_canon_50k")
+                .unwrap()
+                .contains("no spec target")
         );
     }
 

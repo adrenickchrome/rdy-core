@@ -39,6 +39,8 @@ pub struct Writer {
     queued: Arc<AtomicUsize>,
     /// The idle checkpoint has failed and the failure was logged; cleared by a success.
     checkpoint_failing: bool,
+    /// Settling the tension set has failed and the failure was logged; cleared by a success.
+    settle_failing: bool,
 }
 
 /// A handle on the writer thread: send it writes, reloads and the shutdown.
@@ -78,6 +80,7 @@ impl Writer {
             rx,
             queued: Arc::clone(&queued),
             checkpoint_failing: false,
+            settle_failing: false,
         };
         let thread = std::thread::Builder::new()
             .name("rdy-writer".into())
@@ -178,6 +181,31 @@ impl Writer {
         }
     }
 
+    /// Settles the tension set after a write (tevt1). A failure never fails the write, and a
+    /// panic never ends the writer: the caches may be half-updated, so a clean state is
+    /// republished. Either is logged once, until a settle succeeds again.
+    fn settle(&mut self, rdy: &mut Rdy) {
+        let failed = match catch_unwind(AssertUnwindSafe(|| rdy.settle_tensions())) {
+            Ok(Ok(_)) => None,
+            Ok(Err(e)) => Some(e.to_string()),
+            Err(p) => {
+                rdy.invalidate();
+                self.publish(rdy);
+                Some(format!("internal error: {}", panic_text(&*p)))
+            }
+        };
+        match failed {
+            Some(e) if !self.settle_failing => {
+                self.settle_failing = true;
+                log(&format!(
+                    "settling the tension set failed ({e}); no tension events are sent until it succeeds, and it is retried after every write"
+                ));
+            }
+            Some(_) => {}
+            None => self.settle_failing = false,
+        }
+    }
+
     /// The loop: one message at a time, in arrival order, until shutdown or disconnect.
     fn run(mut self, mut rdy: Rdy) {
         loop {
@@ -194,8 +222,11 @@ impl Writer {
             };
             let published = match msg {
                 Msg::Run(f, reply) => {
-                    // its outcome is logged and reported in the replies' notices
-                    let _ = self.maybe_reload(&mut rdy);
+                    // its outcome is logged and reported in the replies' notices; a reload's
+                    // tension events are settled before the write's, with no `by`
+                    if let Ok(ReloadOutcome::Reloaded) = self.maybe_reload(&mut rdy) {
+                        self.settle(&mut rdy);
+                    }
                     let out = match catch_unwind(AssertUnwindSafe(|| f(&mut rdy))) {
                         Ok(out) => out,
                         Err(p) => {
@@ -210,12 +241,19 @@ impl Writer {
                     };
                     let published = self.publish(&rdy);
                     let _ = reply.send(out);
+                    // the tension events follow the reply, before the next message
+                    self.settle(&mut rdy);
                     published
                 }
                 Msg::Reload(reply) => {
                     let out = self.maybe_reload(&mut rdy);
                     let published = self.publish(&rdy);
+                    let reloaded = matches!(out, Ok(ReloadOutcome::Reloaded));
                     let _ = reply.send(out);
+                    // a reload changes the tension set without a store write (M8)
+                    if reloaded {
+                        self.settle(&mut rdy);
+                    }
                     published
                 }
                 Msg::Shutdown(reply) => {

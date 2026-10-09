@@ -2,10 +2,14 @@
 
 use crate::config::{Config, read_config_lenient, site_identity};
 use crate::read_state::{self, CoordHeads, Entry, InflightCell};
-use crate::{Delta, Event, Rdy, RdyError, ReadState, events};
-use rdy_model::Op;
+use crate::tensions::SideRef;
+use crate::tensions::set::TensionCell;
+use crate::{Delta, Event, EventKind, Rdy, RdyError, ReadState, events};
+use rdy_model::{Hash, Op};
 use rdy_store::kinds;
 use rdy_store::segment::Location;
+use rdy_store::view::ViewOpKind;
+use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
 impl Rdy {
@@ -24,7 +28,13 @@ impl Rdy {
     /// before the next publish; an earlier one is only in `replay_events`. M2b routes every
     /// write through the engine.
     pub(crate) fn publish(&mut self, delta: Delta) -> Result<(), RdyError> {
+        self.publish_gen += 1;
         let prev = self.state.load_full();
+        // nothing settled since open: the first settle diffs against the state before the
+        // first write
+        if self.tension_seen.is_none() && self.tension_base.is_none() {
+            self.tension_base = Some(Arc::clone(&prev));
+        }
         // a state that holds an error has nothing to carry over
         let delta = if prev.error.is_some() {
             Delta::Full
@@ -59,6 +69,9 @@ impl Rdy {
                     inflight_cell: Arc::clone(&prev.inflight_cell),
                     coord_heads: Arc::clone(&prev.coord_heads),
                     coord: OnceLock::new(),
+                    tensions: Arc::default(),
+                    dismissals: Arc::clone(&prev.dismissals),
+                    detectors: self.detectors,
                     error: Some(e.clone()),
                 }));
                 Err(e)
@@ -171,6 +184,35 @@ impl Rdy {
             Arc::new(self.coord_heads(&prev.coord_heads)?)
         } else {
             Arc::clone(&prev.coord_heads)
+        };
+        // the tension set reads canon, the in-flight changes and the open alternative sets
+        // (edit collision skips members of one set): a publish that moves none keeps it
+        let tensions = match &delta {
+            Delta::Seq | Delta::Tags | Delta::Dismissed { .. } => Arc::clone(&prev.tensions),
+            Delta::Coord { closed }
+                if closed.is_empty() && coord_heads.alt_members == prev.coord_heads.alt_members =>
+            {
+                Arc::clone(&prev.tensions)
+            }
+            // tcar1: a commit carries a built set, re-detecting around the blocks it writes. A
+            // set the state before has not read yet but can carry is carried now (its cost
+            // follows that commit), so a run of commits that nobody reads in between keeps
+            // carrying instead of leaving the next read a full build
+            Delta::Commit { view, change, ops } if self.carries_tensions(ops) => {
+                match prev.tensions_without_build() {
+                    Some(set) if self.writes_fresh(prev, &set, ops) => {
+                        Arc::new(TensionCell::carrying(set, *change, view.clone()))
+                    }
+                    _ => Arc::default(),
+                }
+            }
+            _ => Arc::default(),
+        };
+        // the dismissals: re-read by a full publish, one added by a dismissal, else carried
+        let dismissals = match &delta {
+            Delta::Full => Arc::new(self.store.dismissals()?.into_iter().collect()),
+            Delta::Dismissed { vkey, review } => Arc::new(prev.dismissals.update(*vkey, *review)),
+            _ => Arc::clone(&prev.dismissals),
         };
         let (canon, views, tags, inflight_cell) = match delta {
             Delta::Full => {
@@ -305,7 +347,7 @@ impl Rdy {
                 Arc::new(self.version_tags()?),
                 Arc::clone(&prev.inflight_cell),
             ),
-            Delta::Seq => (
+            Delta::Seq | Delta::Dismissed { .. } => (
                 Arc::clone(&prev.canon),
                 prev.views.clone(),
                 Arc::clone(&prev.tags),
@@ -333,8 +375,205 @@ impl Rdy {
             inflight_cell,
             coord_heads,
             coord: OnceLock::new(),
+            tensions,
+            dismissals,
+            detectors: self.detectors,
             error: None,
         })
+    }
+
+    /// Whether a commit of `ops` may carry the tension set: no op is a delete, no update writes
+    /// a structural block (a rename or retitle moves every descendant's path, and so its
+    /// areas), and no update moves a block or changes its `lifecycle` against its base (which
+    /// every descendant's effective lifecycle reads). A created structural block (a new doc,
+    /// section or folder) carries: it has no descendant but the blocks the same change
+    /// creates, which are seeds, so it moves no other block's path, areas or lifecycle, when
+    /// its id is new (`writes_fresh`, checked once the set before is in hand). An unreadable
+    /// base never carries.
+    fn carries_tensions(&self, ops: &[rdy_model::Op]) -> bool {
+        use rdy_model::Op;
+        let structural = |ty: Option<&str>| {
+            ty.and_then(|t| self.pack.block_types.get(t))
+                .is_some_and(|d| d.traits.contains(&rdy_schema::Trait::Structural))
+        };
+        let lifecycle = |b: &rdy_model::Block| {
+            b.fields
+                .get("lifecycle")
+                .filter(|v| **v != rdy_model::FieldValue::Null)
+                .cloned()
+        };
+        let reader = self.store.reader();
+        ops.iter().all(|op| match op {
+            Op::Create { .. } => true,
+            Op::Update { base, block } => {
+                !structural(Some(&block.block_type))
+                    && reader.get_block(base).is_ok_and(|old| {
+                        old.parent == block.parent && lifecycle(&old) == lifecycle(block)
+                    })
+            }
+            // a delete takes a block out of other blocks' reads that the seeds do not cover (an
+            // `affects` target's path gives its deciders their areas), so it never carries
+            Op::Delete { .. } => false,
+        })
+    }
+
+    /// Whether `ops` leave every other block's reads as the seeds' re-detection sees them, by
+    /// what the in-flight state before holds (`set` is its tension set): no block they write
+    /// has an in-flight delete, and every block they create is new (no change ever deleted it,
+    /// canon does not hold it, no in-flight change writes it). A write on a block another
+    /// change deletes, or the re-create of a deleted id, gives back to blocks no seed covers
+    /// what the delete took (an `affects` target's path gives its deciders their areas); a
+    /// create of an id another view created is a create/create conflict the in-flight merge
+    /// drops, so the blocks written under that id elsewhere lose their path. None of them
+    /// carries. A failed index read never carries.
+    fn writes_fresh(
+        &self,
+        prev: &ReadState,
+        set: &crate::tensions::set::TensionSet,
+        ops: &[rdy_model::Op],
+    ) -> bool {
+        use rdy_model::Op;
+        let deleted_in_flight =
+            |b: &rdy_model::BlockId| set.writes().all_on(b).iter().any(|w| w.new.is_none());
+        if ops.iter().any(|op| deleted_in_flight(op.block_id())) {
+            return false;
+        }
+        let created: Vec<&rdy_model::BlockId> = ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Create { block } => Some(&block.id),
+                _ => None,
+            })
+            .collect();
+        if created.is_empty() {
+            return true;
+        }
+        let Ok(canon) = prev.materialized(&crate::Scope::Canon) else {
+            return false;
+        };
+        created
+            .iter()
+            .all(|b| canon.get(b).is_none() && set.writes().all_on(b).is_empty())
+            && !self
+                .store
+                .ever_deleted(created.iter().copied())
+                .unwrap_or(true)
+    }
+
+    /// Settles the tension set (tevt1): emits the difference between the last settled set and
+    /// the published state's, and records the published one. A resolved tension and an opened
+    /// one of the same vkey are a re-key (paired in id order): `tension_resolved` names the new
+    /// id in `rekeyed_to`, `tension_opened` the old one in `rekeyed_from`. Every resolved
+    /// tension is emitted first, then every opened one; `by` and `at_ms` come from the store's
+    /// last batch when a batch was written since the last settle (a pack reload writes none:
+    /// its events have no `by`). Before the first settle since open, the set of the state
+    /// before the first write is the last settled one; with no write either, the published set
+    /// is recorded and nothing is emitted. Returns the number of events. Reads never settle:
+    /// the writer calls this after each write and each pack reload.
+    pub fn settle_tensions(&mut self) -> Result<usize, RdyError> {
+        let st = self.read();
+        let generation = self.publish_gen;
+        if self
+            .tension_seen
+            .as_ref()
+            .is_some_and(|(_, g)| *g == generation)
+        {
+            return Ok(0);
+        }
+        let current = st.tensions()?;
+        let prev = match (&self.tension_seen, self.tension_base.take()) {
+            (Some((set, _)), _) => Some(Arc::clone(set)),
+            // a base whose set cannot be built (a state that held an error) is no baseline
+            (None, Some(base)) => base.tensions().ok(),
+            (None, None) => None,
+        };
+        self.tension_seen = Some((Arc::clone(&current), generation));
+        let batch = self.store.last_batch_end();
+        let batch_since = batch != self.settled_batch;
+        self.settled_batch = batch;
+        let Some(prev) = prev else {
+            return Ok(0);
+        };
+        if Arc::ptr_eq(&prev, &current) {
+            return Ok(0);
+        }
+        let (opened, resolved) = prev.diff(&current);
+        if opened.is_empty() && resolved.is_empty() {
+            return Ok(0);
+        }
+        // re-keys: per vkey, the resolved and the opened tensions paired in id order
+        let mut by_vkey: BTreeMap<Hash, Vec<Hash>> = BTreeMap::new();
+        for t in &opened {
+            by_vkey.entry(t.vkey).or_default().push(t.id);
+        }
+        let mut rekeyed_to: BTreeMap<Hash, Hash> = BTreeMap::new();
+        let mut rekeyed_from: BTreeMap<Hash, Hash> = BTreeMap::new();
+        let mut taken: BTreeMap<Hash, usize> = BTreeMap::new();
+        for t in &resolved {
+            let n = taken.entry(t.vkey).or_default();
+            if let Some(to) = by_vkey.get(&t.vkey).and_then(|ids| ids.get(*n)) {
+                rekeyed_to.insert(t.id, *to);
+                rekeyed_from.insert(*to, t.id);
+                *n += 1;
+            }
+        }
+        let (by, at_ms) = if batch_since {
+            self.settled_by()
+        } else {
+            (None, crate::now_ms())
+        };
+        let seq = st.seq();
+        let mut events = Vec::with_capacity(opened.len() + resolved.len());
+        for t in &resolved {
+            events.push(EventKind::TensionResolved {
+                tension: t.id,
+                kind: t.kind.name().to_string(),
+                by: by.clone(),
+                rekeyed_to: rekeyed_to.get(&t.id).copied(),
+            });
+        }
+        for t in &opened {
+            events.push(EventKind::TensionOpened {
+                tension: t.id,
+                kind: t.kind.name().to_string(),
+                severity: t.severity.to_string(),
+                sides: t.sides.iter().map(SideRef::label).collect(),
+                rekeyed_from: rekeyed_from.get(&t.id).copied(),
+            });
+        }
+        let n = events.len();
+        for kind in events {
+            self.events.publish(Arc::new(Event { seq, at_ms, kind }));
+        }
+        Ok(n)
+    }
+
+    /// What the store's last batch did, as a resolution's `by` (`landing:<hex>` for a landing,
+    /// else `change:<hex>` for a commit, else `op:<hex>` for the last view op, else none), and
+    /// the `at_ms` of its last event (now when it has none).
+    fn settled_by(&self) -> (Option<String>, i64) {
+        let reader = self.store.reader();
+        let frames = self.store.last_batch();
+        let at_ms = events::events_for_batch(&reader, self.store.last_batch_end(), frames)
+            .ok()
+            .and_then(|e| e.last().map(|e| e.at_ms))
+            .unwrap_or_else(crate::now_ms);
+        if let Some((_, h)) = frames.iter().find(|(k, _)| *k == kinds::LANDING) {
+            return (Some(format!("landing:{h}")), at_ms);
+        }
+        let ops: Vec<&Hash> = frames
+            .iter()
+            .filter(|(k, _)| *k == kinds::VIEW_OP)
+            .map(|(_, h)| h)
+            .collect();
+        for h in &ops {
+            if let Ok(op) = reader.view_op(h)
+                && let ViewOpKind::Commit { change } = op.op
+            {
+                return (Some(format!("change:{change}")), at_ms);
+            }
+        }
+        (ops.last().map(|h| format!("op:{h}")), at_ms)
     }
 
     /// Re-reads view `view`'s entry into `views` (`Delta::View`, and each view `Delta::Coord`

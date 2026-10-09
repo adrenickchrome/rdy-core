@@ -11,4 +11,5 @@ mod brief_intents;
 mod brief_mcp;
 mod brief_paging;
 mod brief_rebase;
+mod brief_tensions;
 mod brief_write;

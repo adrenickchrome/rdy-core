@@ -466,3 +466,51 @@ fn alts1_an_agent_never_enrols_or_closes_the_humans_work_view() {
     let (_, closed) = r.alt_abandon(&writer(), &hs.id, "neither").unwrap();
     assert_eq!(closed, vec!["work".to_string(), "c0".to_string()]);
 }
+
+#[test]
+fn talt1_alternative_compare_lists_each_members_tensions() {
+    let (_d, mut r) = project();
+    let claim = two_members(&mut r);
+    let v = version_of(&r, &Scope::Canon, &claim);
+    let o = agent("agent:o", Some("o"));
+    let set = r
+        .alt_create(&o, "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap();
+    let kind = rdy_engine::tensions::TensionKind::EditCollision;
+    // members of one set never collide with each other (FW-CH6a)
+    let cmp = r.read().alt_compare(&set.id).unwrap();
+    for row in &cmp.members {
+        assert!(
+            row.tensions.iter().all(|t| t.kind != kind),
+            "{}: {:?}",
+            row.view,
+            row.tensions
+        );
+    }
+    // a view outside the set changes the claim in canon: each member's write collides with canon
+    write_as(
+        &mut r,
+        &agent("agent:c", Some("c")),
+        "c",
+        json!([{"op": "update", "id": claim, "base": v, "body": "C"}]),
+    )
+    .unwrap();
+    land(&mut r, "c").unwrap();
+    let cmp = r.read().alt_compare(&set.id).unwrap();
+    for row in &cmp.members {
+        assert_eq!(row.tensions.len(), 1, "{}: {:?}", row.view, row.tensions);
+        let t = &row.tensions[0];
+        assert_eq!(t.kind, kind);
+        assert!(t.blocks.contains(&claim));
+        assert!(
+            t.sides.iter().any(|x| x.landing.is_some()),
+            "a canon side: {t:?}"
+        );
+        let changes: Vec<_> = t.sides.iter().filter(|x| x.change.is_some()).collect();
+        assert_eq!(changes.len(), 1, "{t:?}");
+        assert!(
+            changes[0].views.contains(&row.view),
+            "the member's own change: {t:?}"
+        );
+    }
+}

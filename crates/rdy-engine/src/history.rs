@@ -73,7 +73,7 @@ pub struct History {
     pub more: bool,
 }
 
-fn role_str(r: Role) -> &'static str {
+pub(crate) fn role_str(r: Role) -> &'static str {
     match r {
         Role::Reader => "reader",
         Role::Writer => "writer",

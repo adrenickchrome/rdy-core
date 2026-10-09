@@ -55,6 +55,9 @@ pub(crate) struct SearchArgs {
     /// Keep only blocks with an open suspect.
     #[arg(long)]
     suspect: bool,
+    /// Keep only blocks involved in an open tension (rdy tensions lists them).
+    #[arg(long)]
+    tension: bool,
 }
 
 pub(crate) fn search(env: &Env, a: SearchArgs) -> Result<(Value, String), ErrorReply> {
@@ -76,6 +79,7 @@ pub(crate) fn search(env: &Env, a: SearchArgs) -> Result<(Value, String), ErrorR
         linked_to,
         mentions,
         suspect,
+        tension,
     } = a;
     // Empty lists and false flags are sent as absent.
     let list = |v: Vec<String>| (!v.is_empty()).then_some(v);
@@ -86,7 +90,7 @@ pub(crate) fn search(env: &Env, a: SearchArgs) -> Result<(Value, String), ErrorR
         json!({"query": query, "regex": regex, "ignore_case": ignore_case, "scope": scope, "max_tokens": max_tokens, "page": page,
                 "types": list(types), "traits": list(traits), "path": path, "lifecycle": lifecycle, "changed_since": changed_since,
                 "exclude_history": flag(exclude_history), "governed_by": governed_by, "describes": describes, "linked_to": linked_to,
-                "mentions": mentions, "suspect": flag(suspect)}),
+                "mentions": mentions, "suspect": flag(suspect), "tension": flag(tension)}),
     )?;
     let t = search_text(&v);
     Ok((v, t))

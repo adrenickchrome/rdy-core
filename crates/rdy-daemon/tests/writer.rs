@@ -2,8 +2,11 @@
 //! writer keeps serving; shutdown closes the store once.
 use rdy_daemon::{CHECKPOINT_TICK, DaemonEngine, E_DAEMON_GONE, Shared, WriterHandle};
 use rdy_engine::engine::write_typed;
+use rdy_engine::tensions::{DetectCx, Detector, Found, TensionKind};
 use rdy_engine::{E_INTERNAL, Rdy, Scope, Session, WriteRequest};
-use rdy_model::Role;
+use rdy_model::{BlockId, Role};
+use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
@@ -100,6 +103,43 @@ fn wrt1_a_panic_in_a_write_answers_e_internal_and_the_writer_keeps_serving() {
     assert!(shared.writer.is_alive());
     write_typed(&*e, |r| doc(r, "work", "after")).unwrap();
     assert_eq!(e.read().included("work").len(), 1);
+    shared.shutdown().unwrap();
+}
+
+/// Panics while `BOOM` is set: a tension detector that fails the settle after a write.
+struct Boom;
+static BOOM: AtomicBool = AtomicBool::new(false);
+static BOOM_DETECTORS: [&dyn Detector; 1] = [&Boom];
+impl Detector for Boom {
+    fn kind(&self) -> TensionKind {
+        TensionKind::EditCollision
+    }
+    fn detect(
+        &self,
+        _cx: &DetectCx<'_>,
+        _seeds: Option<&BTreeSet<BlockId>>,
+        _out: &mut Vec<Found>,
+    ) -> Result<(), rdy_engine::RdyError> {
+        assert!(!BOOM.load(Ordering::SeqCst), "settle boom");
+        Ok(())
+    }
+}
+
+#[test]
+fn wrt1_a_panic_while_settling_tensions_leaves_the_writer_serving() {
+    let (_d, mut r) = project();
+    r.set_detectors_for_tests(&BOOM_DETECTORS);
+    let shared = Shared::new(r);
+    let e = shared.engine();
+    BOOM.store(true, Ordering::SeqCst);
+    // the write itself builds no tensions: it succeeds, and the settle after its reply panics
+    write_typed(&*e, |r| doc(r, "work", "one")).unwrap();
+    write_typed(&*e, |r| doc(r, "work", "two")).unwrap();
+    assert!(shared.writer.is_alive());
+    BOOM.store(false, Ordering::SeqCst);
+    write_typed(&*e, |r| doc(r, "work", "three")).unwrap();
+    assert_eq!(e.read().included("work").len(), 3);
+    assert!(e.read().tensions().unwrap().is_empty());
     shared.shutdown().unwrap();
 }
 

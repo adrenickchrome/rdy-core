@@ -192,7 +192,43 @@ pub fn header(briefing: &Value) -> String {
                 s(i, "expires_at")
             )
         });
-        section(&mut out, "in flight", views.chain(proposals).chain(intents));
+        let tensions = at("tensions").map(|t| {
+            let dismissed = if t["status"].as_str() == Some("dismissed") {
+                " (dismissed)"
+            } else {
+                ""
+            };
+            format!(
+                "tension {} {} {}: {}{dismissed}",
+                s(t, "id"),
+                s(t, "severity"),
+                s(t, "kind"),
+                s(t, "summary")
+            )
+        });
+        let collapsed = inflight["tensions_collapsed"]
+            .as_object()
+            .filter(|m| !m.is_empty())
+            .map(|m| {
+                let kinds: Vec<String> = m
+                    .iter()
+                    .map(|(k, n)| format!("{} {k}", n.as_u64().unwrap_or(0)))
+                    .collect();
+                format!("tensions not listed: {}", kinds.join(", "))
+            });
+        let unread = inflight["tensions_error"]
+            .as_str()
+            .map(|e| format!("tensions not read: {e}"));
+        section(
+            &mut out,
+            "in flight",
+            views
+                .chain(proposals)
+                .chain(intents)
+                .chain(tensions)
+                .chain(collapsed)
+                .chain(unread),
+        );
     }
     let related = list("related_decisions")
         .map(related_line)
@@ -324,6 +360,7 @@ pub fn plain(v: &Value) -> String {
 /// `\nsuggestions:` and `\nrelated decisions:` in the same way.
 pub fn consequences_text(reply: &Value) -> String {
     let mut t = consequences_part(reply);
+    t.push_str(&on_change_part(reply));
     t.push_str(&suggestions_part(reply));
     t.push_str(&related_part(reply));
     t
@@ -344,6 +381,9 @@ fn consequences_part(reply: &Value) -> String {
             s(&c["because"], "edge"),
             s(&c["because"], "changed")
         ));
+        if let Some(tn) = c["tension"].as_str() {
+            t.push_str(&format!(" {tn}"));
+        }
         if let Some(fix) = c["fix"].as_str() {
             t.push_str(&format!("\n    fix: {fix}"));
         }
@@ -355,6 +395,39 @@ fn consequences_part(reply: &Value) -> String {
         let n: u64 = m.values().filter_map(Value::as_u64).sum();
         let kinds: Vec<String> = m.iter().map(|(k, v)| format!("{k} {v}")).collect();
         t.push_str(&format!("\n  and {n} more ({})", kinds.join(", ")));
+    }
+    t
+}
+
+/// The tensions the write opened and resolved (`on_change`), and the advisory ones a cut left
+/// out; nothing when there are none. Printed even when there are no consequences.
+fn on_change_part(reply: &Value) -> String {
+    let change = &reply["on_change"];
+    let opened = change["tensions"].as_array().map_or(&[][..], |a| a);
+    let resolved = change["resolved"].as_array().map_or(&[][..], |a| a);
+    let mut t = String::new();
+    if !opened.is_empty() {
+        t.push_str("\ntensions opened:");
+        for x in opened {
+            t.push_str(&format!(
+                "\n  {} {} {}: {}",
+                s(x, "id"),
+                s(x, "severity"),
+                s(x, "kind"),
+                one_line(s(x, "summary"))
+            ));
+        }
+    }
+    if let Some(m) = change["collapsed"].as_object().filter(|m| !m.is_empty()) {
+        let kinds: Vec<String> = m.iter().map(|(k, v)| format!("{v} {k}")).collect();
+        t.push_str(&format!("\ntensions not listed: {}", kinds.join(", ")));
+    }
+    if !resolved.is_empty() {
+        let list: Vec<String> = resolved
+            .iter()
+            .map(|x| format!("{} ({})", s(x, "id"), s(x, "kind")))
+            .collect();
+        t.push_str(&format!("\ntensions resolved: {}", list.join(", ")));
     }
     t
 }
@@ -461,6 +534,39 @@ mod tests {
     }
 
     #[test]
+    fn tonc1_consequences_text_names_the_tension_and_the_on_change_sections() {
+        let reply = serde_json::json!({
+            "consequences": [{"id": "cq-1", "block": "c-AAAAA", "kind": "tension",
+                "because": {"edge": "premise_shift", "changed": "c-BBBBB"},
+                "follow_up": "resolve", "tension": "tn-0123456789ab", "fix": "resolve it"}],
+            "on_change": {
+                "tensions": [{"id": "tn-0123456789ab", "kind": "premise_shift", "severity": "blocking",
+                    "summary": "c-BBBBB changed; c-AAAAA still cites it"}],
+                "resolved": [{"id": "tn-ffffffffffff", "kind": "edit_collision"}]
+            }
+        });
+        let t = consequences_text(&reply);
+        assert!(
+            t.contains("tension c-AAAAA: resolve (premise_shift c-BBBBB) tn-0123456789ab"),
+            "{t}"
+        );
+        assert!(t.contains("tensions opened:\n  tn-0123456789ab blocking premise_shift: c-BBBBB changed; c-AAAAA still cites it"), "{t}");
+        assert!(
+            t.contains("tensions resolved: tn-ffffffffffff (edit_collision)"),
+            "{t}"
+        );
+        let quiet =
+            serde_json::json!({"consequences": [], "on_change": {"tensions": [], "resolved": []}});
+        assert_eq!(consequences_text(&quiet), "");
+        let collapsed = serde_json::json!({"consequences": [], "on_change": {"tensions": [],
+            "resolved": [], "collapsed": {"duplicate_definition": 10, "area_overlap": 2}}});
+        assert!(
+            consequences_text(&collapsed)
+                .contains("tensions not listed: 2 area_overlap, 10 duplicate_definition")
+        );
+    }
+
+    #[test]
     fn ccli1_code_text_lists_implements_reflects_and_unresolved() {
         let v = json!({"code": {
             "path": "src/a.rs", "repos": ["../app"], "provisional": true, "rework": false,
@@ -538,6 +644,52 @@ mod tests {
             ]
         );
         assert_eq!(lines[at + 4], "#");
+    }
+
+    #[test]
+    fn tbrf1_the_edit_header_lists_tensions() {
+        let b = json!({
+            "governs": [], "dependents": [], "will_go_stale": [], "suspects": [],
+            "inflight": {
+                "views": [], "proposals": [], "intents": [],
+                "tensions": [
+                    {"id": "tn-0123456789ab", "kind": "fork", "severity": "blocking", "status": "dismissed", "summary": "D-1 and D-2 both supersede D-0"},
+                    {"id": "tn-abcdef012345", "kind": "area_overlap", "severity": "advisory", "status": "open", "summary": "two intents\nshare an area"}
+                ]
+            },
+            "base": {"token": "0123456789abcdef0123", "blocks": [{"id": "c-A", "version": "ff"}], "depends": 0}
+        });
+        let h = header(&b);
+        assert!(h.lines().all(|l| l.starts_with('#')), "{h}");
+        assert!(
+            h.contains("  tension tn-0123456789ab blocking fork: D-1 and D-2 both supersede D-0 (dismissed)\n"),
+            "{h}"
+        );
+        assert!(
+            h.contains(
+                "  tension tn-abcdef012345 advisory area_overlap: two intents share an area\n"
+            ),
+            "{h}"
+        );
+    }
+
+    #[test]
+    fn tbrf1_the_edit_header_counts_collapsed_tensions_and_a_read_error() {
+        let b = json!({
+            "governs": [], "dependents": [], "will_go_stale": [], "suspects": [],
+            "inflight": {
+                "views": [], "proposals": [], "intents": [], "tensions": [],
+                "tensions_collapsed": {"area_overlap": 2, "duplicate_definition": 10},
+                "tensions_error": "E_INTERNAL: boom"
+            },
+            "base": {"token": "0123456789abcdef0123", "blocks": [{"id": "c-A", "version": "ff"}], "depends": 0}
+        });
+        let h = header(&b);
+        assert!(
+            h.contains("  tensions not listed: 2 area_overlap, 10 duplicate_definition\n"),
+            "{h}"
+        );
+        assert!(h.contains("  tensions not read: E_INTERNAL: boom\n"), "{h}");
     }
 
     #[test]

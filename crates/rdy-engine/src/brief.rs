@@ -10,6 +10,8 @@ use crate::keys;
 use crate::query::summary_in;
 use crate::related::{RELATED_CAP, RelatedDecision};
 use crate::suggest::MentionedBy;
+use crate::tensions::info::{InfoCache, SideInfo, row_bytes, rows_bytes};
+use crate::tensions::{Tension, TensionSeverity};
 use crate::write::OpInput;
 use crate::{Materialized, ReadState, Scope};
 use rdy_graph::{DerivedStatus, EdgeKind, IMPACT_LINKS, IMPACT_SHOWN, SUSPECT_LINKS, Suspect};
@@ -202,7 +204,7 @@ impl BriefRegistry {
 
 /// The paged sections of a briefing, in cursor order: a cursor holds one offset per section, how
 /// many of its entries earlier pages showed.
-pub const PAGE_SECTIONS: [&str; 9] = [
+pub const PAGE_SECTIONS: [&str; 10] = [
     "governs",
     "dependents",
     "lineage",
@@ -211,6 +213,7 @@ pub const PAGE_SECTIONS: [&str; 9] = [
     "inflight.views",
     "inflight.proposals",
     "inflight.intents",
+    "inflight.tensions",
     "base.blocks",
 ];
 
@@ -402,6 +405,15 @@ pub struct Briefing {
     pub scope: String,
     #[serde(skip)]
     pub record: Arc<BriefRecord>,
+    /// While a page has not read them: the tensions `inflight.tensions` lists, row for row,
+    /// whose sides are still to read. `page` reads them only for the rows it can show with
+    /// their sides, and empties this.
+    #[serde(skip)]
+    unsided: Vec<Arc<Tension>>,
+    /// The JSON size of each `inflight.tensions` row, row for row, once measured (`bytes`
+    /// measures a row once, not once per measure of the briefing).
+    #[serde(skip)]
+    row_sizes: Vec<Option<usize>>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -415,11 +427,27 @@ impl Briefing {
     }
 
     /// The JSON size in tokens (4 bytes each).
-    fn tokens(&self) -> usize {
-        serde_json::to_string(self)
+    fn tokens(&mut self) -> usize {
+        self.bytes() / 4
+    }
+
+    /// The JSON size in bytes: the briefing without its tension rows, and each row (measured
+    /// once while it does not change) with the comma between rows.
+    fn bytes(&mut self) -> usize {
+        let rows = std::mem::take(&mut self.inflight.tensions);
+        let frame = serde_json::to_string(self)
             .expect("a briefing serializes: strings, numbers and string-keyed maps only")
-            .len()
-            / 4
+            .len();
+        if self.row_sizes.len() != rows.len() {
+            self.row_sizes = vec![None; rows.len()];
+        }
+        let total: usize = rows
+            .iter()
+            .zip(&mut self.row_sizes)
+            .map(|(row, size)| *size.get_or_insert_with(|| row_bytes(row)))
+            .sum();
+        self.inflight.tensions = rows;
+        frame + rows_bytes(total, self.inflight.tensions.len())
     }
 
     /// The first `DIGEST_HEX` hex digits of `digest`, as a cursor carries them.
@@ -438,6 +466,7 @@ impl Briefing {
             self.inflight.views.len(),
             self.inflight.proposals.len(),
             self.inflight.intents.len(),
+            self.inflight.tensions.len(),
             self.base.blocks.len(),
         ]
     }
@@ -455,7 +484,14 @@ impl Briefing {
         drop(&mut self.inflight.views, skip[5]);
         drop(&mut self.inflight.proposals, skip[6]);
         drop(&mut self.inflight.intents, skip[7]);
-        drop(&mut self.base.blocks, skip[8]);
+        drop(&mut self.inflight.tensions, skip[8]);
+        if !self.unsided.is_empty() {
+            drop(&mut self.unsided, skip[8]);
+        }
+        if !self.row_sizes.is_empty() {
+            drop(&mut self.row_sizes, skip[8]);
+        }
+        drop(&mut self.base.blocks, skip[9]);
     }
 
     /// Shows the entries after the first `skip[i]` of each section, cut to `max` tokens, and
@@ -466,12 +502,18 @@ impl Briefing {
     /// section (`inflight`, which may shrink between pages) counts as all of it shown. `Err`
     /// (`E_PAGE_STALE`) when an offset is past the end of any other section: the sections are no
     /// longer the ones the cursor counted in.
+    ///
+    /// The tension rows' sides (`sides` reads them) are read only for the rows this page can
+    /// show with them: a row's sides only add to its size, so a briefing whose rows are over
+    /// `max` without them loses them to the detail cut (Q15) anyway. The outcome is the one of
+    /// a briefing assembled with every side read.
     fn page(
         &mut self,
         mut skip: [usize; PAGE_SECTIONS.len()],
         max: usize,
         floor: bool,
         docs: impl FnOnce(&Briefing) -> Vec<DocCounts>,
+        sides: &mut dyn FnMut(&Tension) -> Vec<SideInfo>,
     ) -> Result<(), RdyError> {
         let totals = self.lens();
         for (i, s) in skip.iter_mut().enumerate() {
@@ -481,18 +523,115 @@ impl Briefing {
                 return Err(e_page_moved());
             }
         }
-        let cut = skip.iter().any(|s| *s > 0) || self.tokens() > max;
+        let skips = skip.iter().any(|s| *s > 0);
+        let mut tokens = self.tokens();
+        // uncut without the sides: whether it is cut with them depends on them
+        if !skips && tokens <= max && self.read_sides(sides) {
+            tokens = self.tokens();
+        }
+        let cut = skips || tokens > max;
         if cut {
             self.docs = docs(self);
         }
         self.drop_first(&skip);
         self.settle(&skip, &totals);
         if cut {
+            let mut tokens = self.tokens();
+            // within `max` without the sides: whether the detail cut drops them depends on them
+            if tokens <= max && self.read_sides(sides) {
+                tokens = self.tokens();
+            }
+            if tokens > max && self.cut_tensions(max, floor) {
+                self.settle(&skip, &totals);
+            }
             while self.tokens() > max && self.halve(floor) {
                 self.settle(&skip, &totals);
             }
         }
         Ok(())
+    }
+
+    /// The Q15 rule for `inflight.tensions` (ruling on item 54), before any list is halved:
+    /// every listed tension's sides go (`tensions_detail_cut`); then, while the briefing is
+    /// over `max` tokens, advisory tensions go from the end of the list (they come after the
+    /// blocking ones), each counted in `tensions_collapsed` under its kind and in `omitted`. A
+    /// blocking tension is never collapsed: a page that cannot hold it leaves it to a later
+    /// page. With `floor`, one entry is left. Each tension is measured once, and the whole
+    /// briefing once more per count the cut adds. `true` if it cut.
+    fn cut_tensions(&mut self, max: usize, floor: bool) -> bool {
+        let mut changed = false;
+        // rows whose sides are unread have sides (every tension has one), which the cut drops
+        let unsided = !self.unsided.is_empty();
+        self.unsided.clear();
+        if unsided || self.inflight.tensions.iter().any(|t| !t.sides.is_empty()) {
+            for t in &mut self.inflight.tensions {
+                t.sides.clear();
+            }
+            self.row_sizes.clear();
+            self.inflight.tensions_detail_cut = true;
+            changed = true;
+        }
+        let mut bytes = self.bytes();
+        while bytes > max * 4 + 3 {
+            match self.collapse_last(floor) {
+                Some(n) => bytes = bytes.saturating_sub(n),
+                None => break,
+            }
+            changed = true;
+        }
+        // the counts the cut added, measured exactly
+        while self.tokens() > max && self.collapse_last(floor).is_some() {
+            changed = true;
+        }
+        changed
+    }
+
+    /// Reads the sides of every tension row whose sides are unread; `true` if there was one.
+    fn read_sides(&mut self, sides: &mut dyn FnMut(&Tension) -> Vec<SideInfo>) -> bool {
+        let any = !self.unsided.is_empty();
+        for (row, t) in self
+            .inflight
+            .tensions
+            .iter_mut()
+            .zip(self.unsided.drain(..))
+        {
+            row.sides = sides(&t);
+        }
+        if any {
+            self.row_sizes.clear();
+        }
+        any
+    }
+
+    /// Collapses the last listed tension when it is advisory (and, with `floor`, more than one
+    /// entry is shown): it leaves the list and is counted in `tensions_collapsed` and
+    /// `omitted`. Its JSON size with its comma, or `None`.
+    fn collapse_last(&mut self, floor: bool) -> Option<usize> {
+        if floor && self.lens().iter().sum::<usize>() <= 1 {
+            return None;
+        }
+        let t = self
+            .inflight
+            .tensions
+            .pop_if(|t| t.severity == TensionSeverity::Advisory)?;
+        let size = if self.row_sizes.len() == self.inflight.tensions.len() + 1 {
+            self.row_sizes.pop().flatten()
+        } else {
+            self.row_sizes.clear();
+            None
+        };
+        let n = size.unwrap_or_else(|| row_bytes(&t)) + 1;
+        *self
+            .inflight
+            .tensions_collapsed
+            .entry(t.kind.name().to_string())
+            .or_default() += 1;
+        *self
+            .omitted
+            .entry("inflight.tensions".to_string())
+            .or_default() += 1;
+        self.truncated = true;
+        Some(n)
     }
 
     /// Sets `offsets`, `next` and `truncated` from what this page shows now, so that the cut
@@ -544,6 +683,10 @@ impl Briefing {
             5 => self.inflight.views.truncate(keep),
             6 => self.inflight.proposals.truncate(keep),
             7 => self.inflight.intents.truncate(keep),
+            8 => {
+                self.inflight.tensions.truncate(keep);
+                self.row_sizes.truncate(keep);
+            }
             _ => self.base.blocks.truncate(keep),
         }
         *self
@@ -765,11 +908,13 @@ impl ReadState {
         refuse_inflight(scope)?;
         let mut briefing = self.assemble(scope, ids)?;
         let m = self.materialized(scope)?;
+        let mut cache = InfoCache::default();
         briefing.page(
             [0; PAGE_SECTIONS.len()],
             max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS),
             false,
             |b| doc_counts(&m, b),
+            &mut |t| self.sides_info(t, &mut cache),
         )?;
         Ok(briefing)
     }
@@ -809,11 +954,13 @@ impl ReadState {
             return Err(e_page_moved());
         }
         let m = self.materialized(scope)?;
+        let mut cache = InfoCache::default();
         briefing.page(
             skip,
             max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS),
             true,
             |b| doc_counts(&m, b),
+            &mut |t| self.sides_info(t, &mut cache),
         )?;
         Ok(briefing)
     }
@@ -948,7 +1095,7 @@ impl ReadState {
             suspects.extend(found);
         }
         suspects.sort_by(|a, b| (&a.block, &a.target).cmp(&(&b.block, &b.target)));
-        let inflight = self.inflight(scope, ids)?;
+        let (inflight, unsided) = self.inflight_unsided(scope, ids)?;
         let coverage = self.graph_coverage(scope, Some(ids))?;
         let (mentioned_by, mentioned_by_omitted) = self.mentioned_by(scope, ids)?;
         let decisions: Vec<BlockId> = ids.iter().cloned().collect();
@@ -1013,6 +1160,8 @@ impl ReadState {
                 covers: ids.clone(),
                 recorded,
             }),
+            unsided,
+            row_sizes: vec![],
         })
     }
 }
@@ -1108,13 +1257,20 @@ fn own_lifecycle(b: &Block) -> Option<&FieldValue> {
 }
 
 /// The `lifecycle` of `id` or of its nearest ancestor that has one is `stable`.
-fn effective_stable(m: &Materialized, id: Option<&BlockId>) -> bool {
+pub(crate) fn effective_stable(m: &Materialized, id: Option<&BlockId>) -> bool {
+    effective_lifecycle(m, id).as_deref() == Some(STABLE)
+}
+
+/// The effective lifecycle of `id`: its own `lifecycle`, else that of its nearest ancestor that
+/// has one. `None` when no block on the way has one, `id` is absent, or the nearest value is not
+/// a string.
+pub(crate) fn effective_lifecycle(m: &Materialized, id: Option<&BlockId>) -> Option<String> {
     let mut cur = id.and_then(|i| m.get(i));
     // a damaged store may loop: never walk more steps than there are blocks
     let mut steps = 0;
     while let Some(b) = cur {
         if let Some(l) = own_lifecycle(b) {
-            return l.as_str() == Some(STABLE);
+            return l.as_str().map(str::to_string);
         }
         steps += 1;
         if steps > m.len() {
@@ -1122,7 +1278,7 @@ fn effective_stable(m: &Materialized, id: Option<&BlockId>) -> bool {
         }
         cur = b.parent.as_ref().and_then(|p| m.get(p));
     }
-    false
+    None
 }
 
 /// The subjects of `ops` against `m` (the target view before the write), in op order. Ops whose

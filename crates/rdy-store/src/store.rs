@@ -983,7 +983,28 @@ impl Store {
             .collect()
     }
 
+    /// Writes refs in one batch. A `dismiss/` ref is refused: only `put_dismissal` writes one,
+    /// and nothing rewrites it (FW-CH7).
     pub fn set_refs(&mut self, refs: Vec<(String, Vec<u8>)>) -> Result<(), StoreError> {
+        if let Some((name, _)) = refs
+            .iter()
+            .find(|(name, _)| name.starts_with(crate::review::DISMISS_REF))
+        {
+            return Err(StoreError::Decode(format!(
+                "ref {name:?} is a dismissal: only put_dismissal writes one, and nothing rewrites it"
+            )));
+        }
+        let items = self.ref_items(refs);
+        self.write(items)?;
+        Ok(())
+    }
+
+    /// Test hook: `set_refs` without its checks, to forge refs that fsck must catch.
+    #[doc(hidden)]
+    pub fn set_refs_unchecked_for_tests(
+        &mut self,
+        refs: Vec<(String, Vec<u8>)>,
+    ) -> Result<(), StoreError> {
         let items = self.ref_items(refs);
         self.write(items)?;
         Ok(())
@@ -1446,6 +1467,11 @@ impl StoreReader {
     /// The changes with an op that produces `version`, ascending.
     pub fn producers(&self, version: &Hash) -> Result<Vec<Hash>, StoreError> {
         self.index().producers(version)
+    }
+
+    /// The changes with an op that deletes `block`, ascending.
+    pub fn deleters(&self, block: &BlockId) -> Result<Vec<Hash>, StoreError> {
+        self.index().deleters(block)
     }
 }
 

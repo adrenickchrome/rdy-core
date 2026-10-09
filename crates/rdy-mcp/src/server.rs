@@ -11,6 +11,7 @@ mod read;
 mod schema;
 mod search;
 mod session;
+mod tension;
 mod views;
 mod write;
 pub use instructions::{INSTRUCTION_SENTENCES, INSTRUCTIONS};
@@ -64,7 +65,7 @@ impl RdyServer {
 
     /// The tool router of each family (`server/<family>.rs`), once. `new` registers their sum;
     /// a new family adds one line here.
-    fn family_routers() -> [ToolRouter<Self>; 14] {
+    fn family_routers() -> [ToolRouter<Self>; 15] {
         [
             Self::session_router(),
             Self::read_router(),
@@ -80,6 +81,7 @@ impl RdyServer {
             Self::entity_router(),
             Self::intent_router(),
             Self::alt_router(),
+            Self::tension_router(),
         ]
     }
 

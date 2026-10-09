@@ -51,10 +51,10 @@ fn set(views: &[&str]) -> AltSet {
 }
 
 #[test]
-fn cfmt1_kinds_15_and_16_and_format_6() {
+fn cfmt1_kinds_15_and_16_and_format_7() {
     assert_eq!(kinds::INTENT, 15);
     assert_eq!(kinds::ALT_SET, 16);
-    assert_eq!(rdy_store::format::STORE_FORMAT, 6);
+    assert_eq!(rdy_store::format::STORE_FORMAT, 7);
 }
 
 #[test]

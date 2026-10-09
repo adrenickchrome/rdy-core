@@ -1,7 +1,7 @@
 //! The event stream (evt1): what a write batch did, derived from the batch's own frames, and the
 //! in-process bus that fans the events out to subscribers.
 use crate::RdyError;
-use rdy_model::{AltSet, AltStatus, Hash};
+use rdy_model::{AltSet, AltStatus, Hash, ReviewSubject};
 use rdy_store::segment::Location;
 use rdy_store::view::ViewOpKind;
 use rdy_store::{StoreReader, kinds};
@@ -87,6 +87,42 @@ pub enum EventKind {
         version: Hash,
         change: String,
         members: Vec<String>,
+    },
+    /// A review dismissed tension `tension` (its id when dismissed); the dismissal binds to
+    /// `vkey` (FW-CH7).
+    TensionDismissed {
+        #[serde(serialize_with = "hex::one")]
+        tension: Hash,
+        #[serde(serialize_with = "hex::one")]
+        vkey: Hash,
+        #[serde(serialize_with = "hex::one")]
+        review: Hash,
+        actor: String,
+        run: Option<String>,
+    },
+    /// A tension the settled set did not have (`Rdy::settle_tensions`). `kind` and `severity`
+    /// are their wire names, `sides` the full side labels; `rekeyed_from` is the tension of the
+    /// same vkey it replaces (a side landed or moved, its content did not).
+    TensionOpened {
+        #[serde(serialize_with = "hex::one")]
+        tension: Hash,
+        kind: String,
+        severity: String,
+        sides: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none", serialize_with = "hex::opt")]
+        rekeyed_from: Option<Hash>,
+    },
+    /// A tension of the settled set that is gone. `by` is what the last batch did
+    /// (`landing:<hex>`, `change:<hex>` or `op:<hex>`); `rekeyed_to` is the tension of the same
+    /// vkey that replaces it.
+    TensionResolved {
+        #[serde(serialize_with = "hex::one")]
+        tension: Hash,
+        kind: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none", serialize_with = "hex::opt")]
+        rekeyed_to: Option<Hash>,
     },
 }
 
@@ -215,6 +251,21 @@ pub fn events_for_batch(
                         version: hash,
                         change: alt_change(before.as_ref(), &a).to_string(),
                         members: a.members.iter().map(|m| m.view.clone()).collect(),
+                    },
+                });
+            }
+            kinds::REVIEW => {
+                let r = reader.review(&hash)?;
+                let ReviewSubject::Tension { id, vkey, .. } = r.subject;
+                out.push(Event {
+                    seq,
+                    at_ms: r.provenance.at_ms,
+                    kind: EventKind::TensionDismissed {
+                        tension: id,
+                        vkey,
+                        review: hash,
+                        actor: r.provenance.actor,
+                        run: r.provenance.run,
                     },
                 });
             }

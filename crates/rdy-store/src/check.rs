@@ -1,14 +1,17 @@
 //! Structural checks of the typed objects (fsck2, fsck3): view chains and heads, the view-op
 //! index, canon's landings against the change -> landing index, the relay and evidence rules of
 //! a landing, recorded conflicts, undo chains, the dependency DAG and closed included sets, and
-//! the version chains of intents and alternative sets and the links that name them (cfmt1).
+//! the version chains of intents and alternative sets and the links that name them (cfmt1), and
+//! the dismissal refs and the reviews they name (rvw1).
 use crate::StoreReader;
 use crate::coord::{ALT_REF, INTENT_REF, key_hash};
 use crate::error::StoreError;
 use crate::kinds;
+use crate::review::DISMISS_REF;
 use crate::view::{ViewHead, ViewOpKind, resolve};
 use rdy_model::{
     AltChoice, AltSet, AltStatus, Assurance, Change, EvidenceKind, Hash, Intent, LandingRecord,
+    Review, Verdict,
 };
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -30,6 +33,8 @@ pub struct StoreCheck {
     pub intents: usize,
     /// The `alt/` refs, each with its version chain checked.
     pub alt_sets: usize,
+    /// The `dismiss/` refs, each naming a review of its own tension.
+    pub reviews: usize,
 }
 
 /// What `check_view` found out about one view.
@@ -66,8 +71,8 @@ fn variant(k: &ViewOpKind) -> &'static str {
 impl StoreReader {
     /// Checks the view chains, their heads and index entries, canon's landings (relay and evidence
     /// rules included), recorded conflicts, undo chains, the dependency DAG, the closure of every
-    /// view's included set, the version chains of intents and alternative sets, and the links that
-    /// name them; the first failure found is a `StoreError::Decode`.
+    /// view's included set, the version chains of intents and alternative sets, the links that
+    /// name them, and the dismissal refs; the first failure found is a `StoreError::Decode`.
     pub fn check_objects(&self) -> Result<StoreCheck, StoreError> {
         let mut views = 0;
         let mut view_ops = 0;
@@ -118,6 +123,7 @@ impl StoreReader {
             alt_sets: alt_sets.iter().map(|(k, _)| *k).collect(),
         };
         self.check_dag(&landings, &sets, &keys)?;
+        let reviews = self.check_dismissals()?;
         Ok(StoreCheck {
             views,
             view_ops,
@@ -126,7 +132,43 @@ impl StoreReader {
             conflicts_recorded,
             intents: intents.len(),
             alt_sets: alt_sets.len(),
+            reviews,
         })
+    }
+
+    /// Every `dismiss/` ref is keyed by a tension vkey and names a stored review with verdict
+    /// `Dismiss` whose subject's vkey is the ref's key. Returns how many refs there are.
+    fn check_dismissals(&self) -> Result<usize, StoreError> {
+        let mut n = 0;
+        for (key, value) in self.refs_with_prefix(DISMISS_REF)? {
+            let vkey: Hash = key
+                .strip_prefix(DISMISS_REF)
+                .and_then(|k| k.parse().ok())
+                .ok_or_else(|| {
+                    bad(format!(
+                        "ref {key:?} does not name a dismissal by its tension vkey"
+                    ))
+                })?;
+            let h = crate::index::hash_from(&value, &format!("dismissal ref {vkey}"))?;
+            let r: Review = match self.get_typed(kinds::REVIEW, &h) {
+                Err(StoreError::NotFound(_)) => {
+                    return Err(bad(format!("dismissal {vkey}: {h} is not a stored review")));
+                }
+                r => r?,
+            };
+            if r.verdict != Verdict::Dismiss {
+                return Err(bad(format!(
+                    "dismissal {vkey}: review {h} is not a dismissal"
+                )));
+            }
+            if r.vkey() != Some(vkey) {
+                return Err(bad(format!(
+                    "dismissal {vkey}: review {h} is for another tension"
+                )));
+            }
+            n += 1;
+        }
+        Ok(n)
     }
 
     /// Every ref under `prefix` names an object of `kind`, and walking `prev` from it reaches a

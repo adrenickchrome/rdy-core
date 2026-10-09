@@ -24,6 +24,7 @@ pub(super) struct SearchArgs {
     describes: Option<String>,
     linked_to: Option<String>,
     suspect: Option<bool>,
+    tension: Option<bool>,
     mentions: Option<String>,
 }
 
@@ -49,6 +50,7 @@ pub(super) fn search(cx: &OpContext, a: SearchArgs) -> Result<Value, RdyError> {
                 describes: a.describes,
                 linked_to: a.linked_to,
                 suspect: a.suspect.unwrap_or(false),
+                tension: a.tension.unwrap_or(false),
                 mentions: a.mentions,
             },
         },

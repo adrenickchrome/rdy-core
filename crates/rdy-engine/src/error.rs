@@ -7,6 +7,8 @@ pub const E_LOCKED: &str = "E_LOCKED";
 pub const E_NO_PROJECT: &str = "E_NO_PROJECT";
 pub const E_CONFIG: &str = "E_CONFIG";
 pub const E_PERMISSION: &str = "E_PERMISSION";
+/// A dismissal of a blocking tension by the actor who wrote one of its sides (plan M2d2).
+pub const E_SELF_REVIEW: &str = "E_SELF_REVIEW";
 /// An agent session wrote into a view another session owns.
 pub const E_VIEW_OWNER: &str = "E_VIEW_OWNER";
 pub const E_BAD_INPUT: &str = "E_BAD_INPUT";
@@ -49,6 +51,8 @@ pub const E_HAS_DEPENDENTS: &str = "E_HAS_DEPENDENTS";
 pub const E_DEPS_MISSING: &str = "E_DEPS_MISSING";
 /// The version being landed carries conflicts it has not resolved (each one is an issue).
 pub const E_CONFLICT_UNRESOLVED: &str = "E_CONFLICT_UNRESOLVED";
+/// The landing would put blocking, undismissed tensions into canon (each one is an issue).
+pub const E_BLOCKING_TENSION: &str = "E_BLOCKING_TENSION";
 /// An undo would leave the view inconsistent (each blocking op is an issue).
 pub const E_UNDO_BLOCKED: &str = "E_UNDO_BLOCKED";
 /// An undo would bring back or remove work that has landed.

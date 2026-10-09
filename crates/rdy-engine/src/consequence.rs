@@ -6,6 +6,9 @@ use crate::engine::{Engine, write_typed};
 use crate::error::RdyError;
 use crate::gate::{LandInfo, ProposalInfo, applied_ops, changes_of, landed_as};
 use crate::intent::IntentNote;
+use crate::tensions::delta::on_change;
+use crate::tensions::{SideRef, Tension, tension_label};
+use crate::tensions::{TensionDelta, tension_delta};
 use crate::views::{UndoResult, ViewOpResult};
 use crate::{Materialized, Rdy, ReadState, Scope, now_ms};
 use rdy_graph::{Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, Suspect};
@@ -26,7 +29,7 @@ pub enum ConsequenceKind {
     Dependent,
     /// A view op recorded a new conflict on the block.
     Conflict,
-    /// Reserved for M2d2; never produced here.
+    /// The change opened a tension (or, for a view op, the view has a new one).
     Tension,
 }
 
@@ -58,6 +61,9 @@ pub struct Consequence {
     /// For a `conflict` entry: the conflict's id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conflict: Option<String>,
+    /// For a `tension` entry: the tension's display id (`tn-…`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tension: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<String>,
     /// The view's own included changes already wrote this block (FW-LP2).
@@ -75,6 +81,10 @@ pub struct Consequences {
     /// How many entries a cut dropped, by kind.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub omitted: BTreeMap<String, usize>,
+    /// Why the tension entries could not be read (the other entries stand); a reply carries it
+    /// as `consequences_tension_error`.
+    #[serde(skip)]
+    pub tensions_error: Option<String>,
 }
 
 /// The hint on a `reaffirm` entry.
@@ -83,6 +93,9 @@ pub const REAFFIRM_FIX: &str =
 
 /// The hint on a `conflict` entry.
 pub const CONFLICT_FIX: &str = "write the block from the version you want (rdy_context lists the sides), or exclude one side's change";
+
+/// The hint on a `tension` entry.
+pub const TENSION_FIX: &str = "resolve it with a change (rdy_tensions shows both sides), or ask a reviewer to dismiss it with rdy_resolve";
 
 /// `cq-` and the first 16 hex characters of the hash of the batch, kind and target.
 /// For a write, `batch` is the change hash; for a view op, the view op's hash.
@@ -152,10 +165,25 @@ impl ReadState {
     ) -> Result<Consequences, RdyError> {
         let ch = self.reader().change(change)?;
         let (touched, changed) = changed_by_ops(&ch.ops);
+        let mine = |s: &SideRef| matches!(s, SideRef::Change(c) if c == change);
+        // a tension set that cannot be built never fails the other entries
+        let (tensions, tensions_error): (Vec<Consequence>, _) = match self.tensions() {
+            Ok(set) => (
+                set.involving_change(change)
+                    .iter()
+                    .map(|t| tension_entry(change, t, &mine))
+                    .collect(),
+                None,
+            ),
+            Err(e) => (vec![], Some(format!("{}: {}", e.code, e.message))),
+        };
         // nothing can point at a block that did not exist: no graph to read
         let only_creates = ch.ops.iter().all(|o| matches!(o, Op::Create { .. }));
         if only_creates && changed == touched {
-            return Ok(Consequences::default());
+            return Ok(Consequences {
+                tensions_error,
+                ..cut(tensions, max_tokens)
+            });
         }
         let g = self.graph(scope)?;
         let m = self.materialized(scope)?;
@@ -164,16 +192,20 @@ impl ReadState {
             Scope::Canon | Scope::At(_) | Scope::Inflight => None,
         };
         let written = self.written_in(view);
-        Ok(self.consequences_in(
-            &g,
-            &m,
-            change,
-            &touched,
-            &changed,
-            &written,
-            vec![],
-            max_tokens,
-        ))
+        Ok(Consequences {
+            tensions_error,
+            ..self.consequences_in(
+                &g,
+                &m,
+                change,
+                &touched,
+                &changed,
+                &written,
+                vec![],
+                tensions,
+                max_tokens,
+            )
+        })
     }
 
     /// Whether `view`'s own included changes wrote a block (always false for no view), read
@@ -198,6 +230,7 @@ impl ReadState {
         view: &str,
         batch: &Hash,
         changes: Option<&[Hash]>,
+        delta: &TensionDelta,
         max_tokens: Option<usize>,
     ) -> Result<Consequences, RdyError> {
         let scope = Scope::View(view.to_string());
@@ -250,17 +283,34 @@ impl ReadState {
                 },
                 follow_up: FollowUp::Resolve,
                 conflict: Some(c.id.to_string()),
+                tension: None,
                 fix: Some(CONFLICT_FIX.to_string()),
                 already_written: false,
             })
             .collect();
-        if changed.is_empty() && conflicts.is_empty() {
-            return Ok(Consequences::default());
+        // the tensions this state has and the one before had not, with a change side among the
+        // op's changes (all the view's, for a full diff)
+        let ours: BTreeSet<Hash> = match changes {
+            Some(changes) => changes.iter().copied().collect(),
+            None => self.included(view).iter().copied().collect(),
+        };
+        let mine = |s: &SideRef| matches!(s, SideRef::Change(c) if ours.contains(c));
+        let tensions: Vec<Consequence> = delta
+            .opened
+            .iter()
+            .filter(|t| t.sides.iter().any(mine))
+            .map(|t| tension_entry(batch, t, &mine))
+            .collect();
+        if changed.is_empty() {
+            let mut lead = conflicts;
+            lead.sort_by(|a, b| a.block.cmp(&b.block));
+            lead.extend(tensions);
+            return Ok(cut(lead, max_tokens));
         }
         let g = self.graph(&scope)?;
         let written = self.written_in(Some(view));
         Ok(self.consequences_in(
-            &g, &m, batch, &touched, &changed, &written, conflicts, max_tokens,
+            &g, &m, batch, &touched, &changed, &written, conflicts, tensions, max_tokens,
         ))
     }
 
@@ -313,13 +363,15 @@ impl ReadState {
             &changed,
             &|_| false,
             vec![],
+            vec![],
             max_tokens,
         ))
     }
 
     /// The entries for `changed` in graph `g` over `m`: for each changed block, each block
-    /// outside `touched` that points at it. `conflicts` come first, then suspect entries, then
-    /// dependent ones, each by block id; `written` marks `already_written`. The list is cut
+    /// outside `touched` that points at it. `conflicts` (by block id) come first, then
+    /// `tensions` (as given), then suspect entries, then dependent ones, each by block id;
+    /// `written` marks `already_written`. The list is cut
     /// from the end to `max_tokens` (default `BRIEF_DEFAULT_TOKENS`), counting what it drops in
     /// `omitted`.
     #[allow(clippy::too_many_arguments)]
@@ -332,6 +384,7 @@ impl ReadState {
         changed: &BTreeSet<BlockId>,
         written: &dyn Fn(&BlockId) -> bool,
         mut conflicts: Vec<Consequence>,
+        tensions: Vec<Consequence>,
         max_tokens: Option<usize>,
     ) -> Consequences {
         let mut suspects_of: BTreeMap<BlockId, Vec<Suspect>> = BTreeMap::new();
@@ -407,6 +460,7 @@ impl ReadState {
                 },
                 follow_up: follow,
                 conflict: None,
+                tension: None,
                 fix: (follow == FollowUp::Reaffirm).then(|| REAFFIRM_FIX.to_string()),
                 already_written: written(&block),
             };
@@ -416,28 +470,66 @@ impl ReadState {
             }
         }
         conflicts.sort_by(|a, b| a.block.cmp(&b.block));
+        conflicts.extend(tensions);
         conflicts.extend(suspect_items);
         conflicts.extend(dependent_items);
-        let mut out = Consequences {
-            items: conflicts,
-            omitted: BTreeMap::new(),
-        };
+        cut(conflicts, max_tokens)
+    }
+}
 
-        let budget = max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS).saturating_mul(4);
-        let size = |c: &Consequences| {
-            serde_json::to_string(c)
-                .expect("consequences serialize: strings and string-keyed maps only")
-                .len()
-        };
-        while !out.items.is_empty() && size(&out) > budget {
-            let drop = out.items.len().div_ceil(2);
-            for dropped in out.items.split_off(out.items.len() - drop) {
-                *out.omitted
-                    .entry(dropped.kind.as_str().to_string())
-                    .or_default() += 1;
-            }
+/// `items` cut from the end to `max_tokens` (default `BRIEF_DEFAULT_TOKENS`; four bytes a
+/// token), counting what it drops in `omitted`, by kind.
+fn cut(items: Vec<Consequence>, max_tokens: Option<usize>) -> Consequences {
+    let mut out = Consequences {
+        items,
+        ..Consequences::default()
+    };
+    let budget = max_tokens.unwrap_or(BRIEF_DEFAULT_TOKENS).saturating_mul(4);
+    let size = |c: &Consequences| {
+        serde_json::to_string(c)
+            .expect("consequences serialize: strings and string-keyed maps only")
+            .len()
+    };
+    while !out.items.is_empty() && size(&out) > budget {
+        let drop = out.items.len().div_ceil(2);
+        for dropped in out.items.split_off(out.items.len() - drop) {
+            *out.omitted
+                .entry(dropped.kind.as_str().to_string())
+                .or_default() += 1;
         }
-        out
+    }
+    out
+}
+
+/// The entry for tension `t`: its `block` is the first involved block of an item whose side is
+/// not `mine` (else the first involved block), `changed` the first involved block of an item
+/// that is. The id covers the batch, the tension and the block.
+fn tension_entry(batch: &Hash, t: &Tension, mine: &dyn Fn(&SideRef) -> bool) -> Consequence {
+    let first = |own: bool| {
+        t.involved
+            .iter()
+            .filter(|i| mine(&i.side) == own)
+            .map(|i| &i.block)
+            .min()
+    };
+    let block = first(false)
+        .or_else(|| t.involved.iter().map(|i| &i.block).min())
+        .expect("a tension involves a block")
+        .clone();
+    let changed = first(true).unwrap_or(&block).clone();
+    Consequence {
+        id: consequence_id(batch, &format!("tension {}", t.id), &block),
+        block: block.to_string(),
+        kind: ConsequenceKind::Tension,
+        because: Because {
+            edge: t.kind.name().to_string(),
+            changed: changed.to_string(),
+        },
+        follow_up: FollowUp::Resolve,
+        conflict: None,
+        tension: Some(tension_label(&t.id)),
+        fix: Some(TENSION_FIX.to_string()),
+        already_written: false,
     }
 }
 
@@ -453,6 +545,9 @@ pub(crate) fn attach(v: &mut serde_json::Value, c: Result<Consequences, RdyError
                 v["consequences_omitted"] =
                     serde_json::to_value(&c.omitted).expect("a map of counts serializes");
             }
+            if let Some(e) = c.tensions_error {
+                v["consequences_tension_error"] = e.into();
+            }
         }
         Err(e) => {
             v["consequences"] = serde_json::json!([]);
@@ -461,11 +556,30 @@ pub(crate) fn attach(v: &mut serde_json::Value, c: Result<Consequences, RdyError
     }
 }
 
+/// Writes `o` into a write's or a view op's reply as `on_change`, or an empty one and
+/// `on_change_error` when it could not be read (the write stands).
+fn attach_on_change(
+    v: &mut serde_json::Value,
+    o: Result<crate::tensions::delta::OnChange, RdyError>,
+) {
+    match o {
+        Ok(o) => {
+            v["on_change"] = serde_json::to_value(&o)
+                .expect("on_change serializes: strings and string-keyed maps only");
+        }
+        Err(e) => {
+            v["on_change"] = serde_json::json!({"tensions": [], "resolved": []});
+            v["on_change_error"] = format!("{}: {}", e.code, e.message).into();
+        }
+    }
+}
+
 /// `write_typed`, then the write's consequences read from the state it published: on success
 /// `consequences` is always present (with `consequences_omitted` when a cut dropped some, or
 /// `consequences_error` when they could not be read; the write stands), then `intents` when other
-/// sessions' open intents cover blocks the change wrote (iwr1), and the write's suggestions
-/// (FW-EN3), which never fail the write; on a briefing refusal
+/// sessions' open intents cover blocks the change wrote (iwr1), then `on_change` (the tensions
+/// the write opened or resolved in the view; `on_change_error` when they could not be read),
+/// and the write's suggestions (FW-EN3), which never fail the write; on a briefing refusal
 /// the error carries a fresh briefing for exactly the blocks the write touches.
 pub fn write_and_report<T: Serialize + 'static>(
     engine: &dyn Engine,
@@ -473,12 +587,16 @@ pub fn write_and_report<T: Serialize + 'static>(
     max_tokens: Option<usize>,
     f: impl FnOnce(&mut Rdy) -> Result<T, RdyError> + Send + 'static,
 ) -> Result<serde_json::Value, RdyError> {
-    // the state before the write, captured on the writer: a deleted or moved block's old areas
-    let slot: Arc<Mutex<Option<Arc<ReadState>>>> = Arc::default();
+    // the states before and after the write, captured on the writer: a deleted or moved block's
+    // old areas, and what the write did to the tensions
+    type States = (Arc<ReadState>, Arc<ReadState>);
+    let slot: Arc<Mutex<Option<States>>> = Arc::default();
     let inner = Arc::clone(&slot);
     let f = move |r: &mut Rdy| {
-        *inner.lock().unwrap_or_else(|p| p.into_inner()) = Some(r.read());
-        f(r)
+        let before = r.read();
+        let t = f(r)?;
+        *inner.lock().unwrap_or_else(|p| p.into_inner()) = Some((before, r.read()));
+        Ok(t)
     };
     let mut v = match write_typed(engine, f) {
         Ok(v) => v,
@@ -492,7 +610,8 @@ pub fn write_and_report<T: Serialize + 'static>(
             ));
         }
     };
-    let before = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
+    let states = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
+    let before = states.as_ref().map(|s| &*s.0);
     let change = v
         .get("change")
         .and_then(|c| c.as_str())
@@ -502,10 +621,15 @@ pub fn write_and_report<T: Serialize + 'static>(
             let st = engine.read();
             let c = st.consequences(&Scope::View(view.into()), &h, max_tokens);
             attach(&mut v, c);
-            if let Some(notes) = intent_notes_of(&st, before.as_deref(), view, &h)
+            if let Some(notes) = intent_notes_of(&st, before, view, &h)
                 && !notes.is_empty()
             {
                 v["intents"] = serde_json::to_value(&notes).expect("intent notes serialize");
+            }
+            if let Some((b, a)) = &states {
+                let r = tension_delta(b, a, Some(&[h]))
+                    .and_then(|d| on_change(b, a, view, max_tokens, &d));
+                attach_on_change(&mut v, r);
             }
         }
         None => v["consequences"] = serde_json::json!([]),
@@ -662,8 +786,19 @@ pub fn view_op_and_report<T: Serialize + 'static>(
     };
     let full = e.full || before.effective_base(view) != after.effective_base(view);
     let changes = (!full).then_some(&e.changes[..]);
-    let c = after.view_consequences(&before, view, &e.batch, changes, max_tokens);
-    attach(&mut v, c);
+    // one delta for both: the consequences' tension entries and `on_change` (a view op's state
+    // builds its tension set again, so `tension_delta` diffs the two sets whole)
+    match tension_delta(&before, &after, changes) {
+        Ok(d) => {
+            let c = after.view_consequences(&before, view, &e.batch, changes, &d, max_tokens);
+            attach(&mut v, c);
+            attach_on_change(&mut v, on_change(&before, &after, view, max_tokens, &d));
+        }
+        Err(err) => {
+            attach(&mut v, Err(err.clone()));
+            attach_on_change(&mut v, Err(err));
+        }
+    }
     Ok(v)
 }
 

@@ -6,6 +6,9 @@ use crate::error::*;
 use crate::lexicon::Lexicon;
 use crate::paths::TreeNode;
 use crate::suggest::MentionScan;
+use crate::tensions::Detector;
+use crate::tensions::index::CanonIndex;
+use crate::tensions::set::TensionCell;
 use crate::version::VposCache;
 use crate::{AS_OF_CACHE_ENTRIES, Materialized, Scope};
 use rdy_graph::Graph;
@@ -44,6 +47,9 @@ pub enum Delta {
     Coord { closed: Vec<String> },
     /// A tag was written.
     Tags,
+    /// Review `review` dismissed the tensions of vkey `vkey`: every cell is carried, and the
+    /// tension set too (a dismissal is state on a still-computed tension, FW-CH7).
+    Dismissed { vkey: Hash, review: Hash },
     /// Only the log moved (a proposal): no view content changed.
     Seq,
 }
@@ -62,6 +68,14 @@ pub(crate) struct Built {
     pub(crate) coverage: OnceLock<Arc<GraphCoverage>>,
     /// The mention scans briefings made (FW-EN3), most recent first; carried across a write.
     pub(crate) mentions: Mutex<Vec<MentionScan>>,
+    /// Canon's tension index (names, texts, supersedes), memoised; never carried.
+    pub(crate) tension_index: OnceLock<Arc<CanonIndex>>,
+    /// The canon part of the tension set for the state's detectors (FW-CH6), memoised; never
+    /// carried.
+    pub(crate) tension_canon: OnceLock<Result<Arc<crate::tensions::set::CanonPart>, RdyError>>,
+    /// Canon's store state (each block's version at canon's head), memoised for the gate's
+    /// merges onto canon (a proposal and its landing read it on one canon); never carried.
+    pub(crate) snapshot: OnceLock<Arc<rdy_model::StateSnapshot>>,
 }
 
 impl Built {
@@ -74,14 +88,17 @@ impl Built {
             lexicon: OnceLock::new(),
             coverage: OnceLock::new(),
             mentions: Mutex::new(vec![]),
+            tension_index: OnceLock::new(),
+            tension_canon: OnceLock::new(),
+            snapshot: OnceLock::new(),
         }
     }
 
     /// gcar1: this state with `ops` applied: the same conflicts and, only if this state's graph is
     /// built, that graph carried across the ops (their blocks' old edges out, their new ones in),
     /// which equals a rebuild. The lexicon is carried the same way when it is built (lex1), and
-    /// so are the mention scans (`MentionScan::carried`). The tree and the coverage are not
-    /// carried.
+    /// so are the mention scans (`MentionScan::carried`). The tree, the coverage and the tension
+    /// index and canon part are not carried.
     pub(crate) fn after(&self, ops: &[Op]) -> Built {
         let m = Arc::new(self.m.with(ops));
         let next = Built::new(Arc::clone(&m), Arc::clone(&self.conflicts));
@@ -502,6 +519,13 @@ pub struct ReadState {
     pub(crate) coord_heads: Arc<CoordHeads>,
     /// cgr1: the coordination graph, built on first read; never carried to the next state.
     pub(crate) coord: OnceLock<Result<Arc<crate::coord_graph::CoordIndex>, RdyError>>,
+    /// The event-derived tension set, built on first read; a publish that changes nothing it
+    /// reads keeps it.
+    pub(crate) tensions: Arc<TensionCell>,
+    /// Each dismissed tension's vkey, mapped to the review that dismissed it.
+    pub(crate) dismissals: Arc<imbl::OrdMap<Hash, Hash>>,
+    /// The tension detectors: the registry, unless a test set others.
+    pub(crate) detectors: &'static [&'static dyn Detector],
     /// A `Full` publish that failed to read the heads: every read of this state returns it.
     pub(crate) error: Option<RdyError>,
 }
@@ -703,6 +727,17 @@ impl ReadState {
     /// The one lookup behind every read of a scope: its entry's build, built on first use. A view
     /// with no ref, or one that floats (unpinned, nothing included), reads canon's entry; an
     /// as-of read marks its entry used in the shared cache.
+    /// The store's state of canon's head, read once per canon build: what the gate merges a
+    /// version's changes onto.
+    pub(crate) fn canon_snapshot(&self) -> Result<Arc<rdy_model::StateSnapshot>, RdyError> {
+        let built = self.built(&Scope::Canon)?;
+        if let Some(s) = built.snapshot.get() {
+            return Ok(Arc::clone(s));
+        }
+        let s = self.reader.state_of(self.canon_head)?;
+        Ok(Arc::clone(built.snapshot.get_or_init(|| Arc::new(s))))
+    }
+
     pub(crate) fn built(&self, scope: &Scope) -> Result<Arc<Built>, RdyError> {
         if let Some(e) = &self.error {
             return Err(e.clone());

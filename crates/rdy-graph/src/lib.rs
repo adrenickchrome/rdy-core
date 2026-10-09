@@ -200,6 +200,37 @@ fn enlist(map: &mut OrdMap<BlockId, Vec<Edge>>, key: BlockId, e: Edge) {
     list.insert(at, e);
 }
 
+/// The edges from `b` that its own content makes, in the order a graph lists them: one
+/// `References` edge per reference token in set order, then its links in map order, each with
+/// its pin (and a link with its part). The `Contains` edge from `b`'s parent is not one of them.
+pub fn edges_of(b: &Block) -> Vec<Edge> {
+    let mut edges = vec![];
+    for tok in b.ref_tokens() {
+        if let Ok(t) = BlockId::parse(&tok) {
+            let pin = b.pins.get(&t).copied();
+            edges.push(Edge {
+                from: b.id.clone(),
+                to: t,
+                kind: EdgeKind::References,
+                part: None,
+                pin,
+            });
+        }
+    }
+    for (name, links) in &b.links {
+        for l in links {
+            edges.push(Edge {
+                from: b.id.clone(),
+                to: l.target.clone(),
+                kind: EdgeKind::Link(name.clone()),
+                part: l.part.clone(),
+                pin: b.pins.get(&l.target).copied(),
+            });
+        }
+    }
+    edges
+}
+
 impl Graph {
     /// The graph of `blocks`, which are visited in the order given (id order, for a state), with
     /// no tracking fields.
@@ -230,8 +261,8 @@ impl Graph {
         g
     }
 
-    /// The edges `b`'s own content makes, in order: `Contains` from its parent (if any), one
-    /// `References` edge per reference token in set order, then its links in map order.
+    /// The edges `b`'s own content makes, in order: `Contains` from its parent (if any), then
+    /// [`edges_of`]'s.
     fn edges_of(b: &Block) -> Vec<Edge> {
         let mut edges = vec![];
         if let Some(p) = &b.parent {
@@ -243,29 +274,7 @@ impl Graph {
                 pin: None,
             });
         }
-        for tok in b.ref_tokens() {
-            if let Ok(t) = BlockId::parse(&tok) {
-                let pin = b.pins.get(&t).copied();
-                edges.push(Edge {
-                    from: b.id.clone(),
-                    to: t,
-                    kind: EdgeKind::References,
-                    part: None,
-                    pin,
-                });
-            }
-        }
-        for (name, links) in &b.links {
-            for l in links {
-                edges.push(Edge {
-                    from: b.id.clone(),
-                    to: l.target.clone(),
-                    kind: EdgeKind::Link(name.clone()),
-                    part: l.part.clone(),
-                    pin: b.pins.get(&l.target).copied(),
-                });
-            }
-        }
+        edges.extend(edges_of(b));
         edges
     }
 

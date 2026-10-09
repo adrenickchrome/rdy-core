@@ -118,8 +118,20 @@ impl Engine for Local {
         self.lock().read()
     }
 
+    /// Runs `f`, then settles the tension set (its events follow the write's); a failed settle
+    /// never fails the write, and a settle that panics never reaches the caller of a committed
+    /// write: the caches may be half-updated, so a clean state is republished (as the daemon
+    /// writer does).
     fn write(&self, f: WriteFn) -> Result<serde_json::Value, RdyError> {
-        f(&mut self.lock())
+        let mut r = self.lock();
+        let out = f(&mut r);
+        let settled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = r.settle_tensions();
+        }));
+        if settled.is_err() {
+            r.invalidate();
+        }
+        out
     }
 
     fn open_report(&self) -> OpenReport {

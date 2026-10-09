@@ -5,7 +5,7 @@ use crate::pack_load::{load_pack, load_pack_from, read_sources};
 use crate::read_state::{AsOfCache, Entry};
 use crate::{
     E_ALREADY_EXISTS, E_IO, Events, OpenReport, PackFingerprint, Rdy, RdyError, ReadState,
-    ServeConfig, brief, inflight, version,
+    ServeConfig, brief, inflight, tensions, version,
 };
 use arc_swap::ArcSwap;
 use rdy_schema::Pack;
@@ -96,8 +96,12 @@ impl Rdy {
             inflight_cell: Arc::default(),
             coord_heads: Arc::default(),
             coord: OnceLock::new(),
+            tensions: Arc::default(),
+            dismissals: Arc::default(),
+            detectors: &tensions::DETECTORS,
             error: None,
         });
+        let settled_batch = store.last_batch_end();
         let mut r = Rdy {
             root: project.to_path_buf(),
             state,
@@ -114,8 +118,15 @@ impl Rdy {
             fingerprint,
             serve: cfg.serve.resolve(),
             briefs: Arc::new(brief::BriefRegistry::new(brief::BRIEF_REGISTRY_CAP)),
+            detectors: &tensions::DETECTORS,
+            tension_seen: None,
+            publish_gen: 0,
+            settled_batch,
+            tension_base: None,
         };
         r.invalidate();
+        // that publish replaced the placeholder state: the first write records the base
+        r.tension_base = None;
         Ok(r)
     }
 
@@ -174,6 +185,15 @@ impl Rdy {
     /// The current published state: what every read reads. Cheap; a held state never changes.
     pub fn read(&self) -> Arc<ReadState> {
         self.state.load_full()
+    }
+
+    /// Test hook: every state published from now on runs `d` in place of the registry's
+    /// detectors. Republishes everything (`Delta::Full`); a failed publish leaves its error in
+    /// the published state.
+    #[doc(hidden)]
+    pub fn set_detectors_for_tests(&mut self, d: &'static [&'static dyn tensions::Detector]) {
+        self.detectors = d;
+        let _ = self.publish(crate::Delta::Full);
     }
 
     /// Days without a write after which an open view is idle (`views.idle_days`, default 14).

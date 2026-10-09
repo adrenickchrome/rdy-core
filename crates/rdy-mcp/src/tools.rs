@@ -11,6 +11,7 @@ mod read;
 mod schema;
 mod schema_docs;
 mod session;
+mod tension;
 mod write;
 
 pub use asset::*;
@@ -25,4 +26,5 @@ pub use read::*;
 pub use schema::*;
 pub use schema_docs::*;
 pub use session::*;
+pub use tension::*;
 pub use write::*;
