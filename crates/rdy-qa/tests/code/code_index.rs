@@ -323,3 +323,42 @@ fn msw18_a_shallow_clone_is_refused() {
     assert_eq!(e.code, "E_CONFIG", "{e}");
     assert!(e.message.contains("shallow clone"), "{}", e.message);
 }
+
+#[test]
+fn msw18_a_checkout_made_shallow_after_its_first_index_is_refused() {
+    let g = GitRepo::new();
+    g.write("src/old.rs", &lines(40, "old"));
+    g.commit("feat: old\n\nImplements: c-AAAAA");
+    let parent = tempfile::tempdir().unwrap();
+    let clone = parent.path().join("clone");
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let url = format!("file://{}", g.path().display());
+    let b = clone.to_string_lossy().into_owned();
+    git(&["clone", "-q", &url, &b]);
+    let r = CodeRepo {
+        configured: b.clone(),
+        root: std::fs::canonicalize(&clone).unwrap(),
+    };
+    index_of(&r).expect("a full clone is indexed");
+    g.write("src/new.rs", &lines(40, "new"));
+    g.commit("feat: new\n\nImplements: s-BBBBB");
+    git(&["-C", &b, "fetch", "-q", "--depth=1", "origin"]);
+    git(&["-C", &b, "reset", "-q", "--hard", "FETCH_HEAD"]);
+    let e = index_of(&r).unwrap_err();
+    assert_eq!(e.code, "E_CONFIG", "{e}");
+    assert!(e.message.contains("shallow clone"), "{}", e.message);
+}

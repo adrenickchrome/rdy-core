@@ -364,8 +364,8 @@ fn git_failed(repo: &CodeRepo, what: &str, out: &Output, fix: &str) -> RdyError 
     )
 }
 
-/// `repo.root` is a git checkout's top folder, not a partial clone and not a shallow clone
-/// (checked once per process per root, and again after a read of HEAD fails).
+/// `repo.root` is a git checkout's top folder and not a partial clone (checked once per process
+/// per root, and again after a read of HEAD fails). The shallow check is in `build_at`.
 fn check_top(repo: &CodeRepo) -> Result<(), RdyError> {
     if lock(&TOPS).contains(&repo.root) {
         return Ok(());
@@ -400,24 +400,6 @@ fn check_top(repo: &CodeRepo) -> Result<(), RdyError> {
             E_CONFIG,
             format!("code repo {} is a partial clone", repo.configured),
             "link a full clone: rdy reads every commit and never fetches",
-        ));
-    }
-    let mut c = git_command(&repo.root);
-    c.args(["rev-parse", "--is-shallow-repository"]);
-    let out = run(c)?;
-    if !out.status.success() {
-        return Err(git_failed(
-            repo,
-            "rev-parse",
-            &out,
-            "check the repository with git status",
-        ));
-    }
-    if String::from_utf8_lossy(&out.stdout).trim() == "true" {
-        return Err(RdyError::new(
-            E_CONFIG,
-            format!("code repo {} is a shallow clone", repo.configured),
-            "link a full clone (git fetch --unshallow): a shallow clone attributes every file to its oldest commit",
         ));
     }
     lock(&TOPS).insert(repo.root.clone());
@@ -514,9 +496,35 @@ fn read_head(repo: &CodeRepo) -> Result<Option<String>, RdyError> {
     Ok(None)
 }
 
+/// `repo.root` is not a shallow clone. Checked on every build, not once per root: a full
+/// checkout can become shallow later (`git fetch --depth=1`), and an index from shallow
+/// history attributes every file to its oldest commit.
+fn check_not_shallow(repo: &CodeRepo) -> Result<(), RdyError> {
+    let mut c = git_command(&repo.root);
+    c.args(["rev-parse", "--is-shallow-repository"]);
+    let out = run(c)?;
+    if !out.status.success() {
+        return Err(git_failed(
+            repo,
+            "rev-parse",
+            &out,
+            "check the repository with git status",
+        ));
+    }
+    if String::from_utf8_lossy(&out.stdout).trim() == "true" {
+        return Err(RdyError::new(
+            E_CONFIG,
+            format!("code repo {} is a shallow clone", repo.configured),
+            "link a full clone (git fetch --unshallow): a shallow clone attributes every file to its oldest commit",
+        ));
+    }
+    Ok(())
+}
+
 /// The index of `head` (which HEAD named when it was read), read at that hash rather than at
 /// `HEAD`, so HEAD moving meanwhile cannot give an index labelled with another commit.
 fn build_at(repo: &CodeRepo, head: String) -> Result<CodeIndex, RdyError> {
+    check_not_shallow(repo)?;
     let nonce = crate::wc::state::new_nonce();
     let mut c = git_command(&repo.root);
     c.args([

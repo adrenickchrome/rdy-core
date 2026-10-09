@@ -113,6 +113,8 @@ impl Rdy {
         let mut pending: BTreeMap<(BlockId, &'static str), Vec<String>> = BTreeMap::new();
         let mut skipped: Vec<Skipped> = vec![];
         let mut new_links = 0usize;
+        // the skips that are a link already there (or added by an earlier item)
+        let mut already = 0usize;
         let mut add = |pending: &mut BTreeMap<(BlockId, &'static str), Vec<String>>,
                        skipped: &mut Vec<Skipped>,
                        index: usize,
@@ -133,6 +135,7 @@ impl Rdy {
                 .is_some_and(|ls| ls.iter().any(|l| l.target.to_string() == target));
             let list = pending.entry((block.clone(), kind)).or_default();
             if has || list.contains(&target) {
+                already += 1;
                 skipped.push(Skipped {
                     index,
                     reason: format!("{block} already links to {target} by {kind}"),
@@ -311,9 +314,24 @@ impl Rdy {
                 .insert(kind.to_string(), list);
         }
         if creates.is_empty() && updates.is_empty() {
+            if already == skipped.len() {
+                return Err(bad(
+                    "nothing to accept: every link is already there",
+                    "nothing to do",
+                ));
+            }
+            // some skips have another reason (a frozen decision, a deleted block): say each one,
+            // so a caller does not read the refusal as "the links are there"
+            let reasons: Vec<String> = skipped
+                .iter()
+                .map(|s| format!("suggestion {}: {}", s.index, s.reason))
+                .collect();
             return Err(bad(
-                "nothing to accept: every link is already there",
-                "nothing to do",
+                format!(
+                    "nothing to accept: every suggestion was skipped; {}",
+                    reasons.join("; ")
+                ),
+                "re-run the suggestions and accept the ones that still apply",
             ));
         }
         let entities = creates.len();
