@@ -1,6 +1,7 @@
 //! The tensions requests (plan M2d2 Task 13; mten1). The one dispatcher behind MCP's
 //! `rdy_tensions` and `rdy_resolve` and the ctl `tensions` and `resolve` ops, as `view_api` is
 //! for views. A listing reads one snapshot; a dismissal runs on the writer.
+use super::info::InfoCache;
 use super::{SideRef, Tension, TensionKind, TensionSeverity, TensionStatus};
 use crate::brief::BRIEF_DEFAULT_TOKENS;
 use crate::engine::{Engine, write_typed};
@@ -423,8 +424,16 @@ pub fn run_tensions(
         }
     }
     kept.sort_by_key(|c| (c.t.severity, c.t.kind, c.t.id));
+    let budget = req
+        .max_tokens
+        .unwrap_or(BRIEF_DEFAULT_TOKENS)
+        .saturating_mul(4);
+    let size = |v: &Value| v.to_string().len();
     let (mut open, mut blocking_open, mut dismissed) = (0, 0, 0);
-    let mut infos = vec![];
+    // the rows listed, built (each measured once) only while they fit the budget alone: a row
+    // past it is never built, and counts at `budget + 1` bytes, which no cut keeps
+    let (mut infos, mut sizes, mut used) = (vec![], vec![], 0usize);
+    let mut cache = InfoCache::default();
     for c in &kept {
         let t = &c.t;
         let status = st.tension_status(t);
@@ -438,9 +447,17 @@ pub fn run_tensions(
             TensionStatus::Dismissed(_) => dismissed += 1,
         }
         if (status != TensionStatus::Open) == f.dismissed {
-            let mut info = st.tension_info(t);
+            if used > budget {
+                sizes.push(budget.saturating_add(1));
+                continue;
+            }
+            let mut info = st.tension_info_with(t, &mut cache);
             info.proposal = c.proposal.clone();
-            infos.push(serde_json::to_value(&info).expect("a tension info serializes"));
+            let v = serde_json::to_value(&info).expect("a tension info serializes");
+            let n = size(&v);
+            used = used.saturating_add(n + 1);
+            sizes.push(n);
+            infos.push(v);
         }
     }
     let reviews = if req.reviews == Some(true) {
@@ -456,19 +473,14 @@ pub fn run_tensions(
     if reviews.is_some() {
         out["reviews"] = json!([]);
     }
-    let budget = req
-        .max_tokens
-        .unwrap_or(BRIEF_DEFAULT_TOKENS)
-        .saturating_mul(4);
-    let size = |v: &Value| v.to_string().len();
     let rows = reviews.unwrap_or_default();
     let (keep_t, keep_r) = cut(
         size(&out),
-        &infos.iter().map(size).collect::<Vec<_>>(),
+        &sizes,
         &rows.iter().map(size).collect::<Vec<_>>(),
         budget,
     );
-    let (omitted, reviews_omitted) = (infos.len() - keep_t, rows.len() - keep_r);
+    let (omitted, reviews_omitted) = (sizes.len() - keep_t, rows.len() - keep_r);
     infos.truncate(keep_t);
     out["tensions"] = Value::Array(infos);
     if req.reviews == Some(true) {

@@ -561,3 +561,91 @@ fn tonc1_a_tension_read_error_never_fails_the_consequences_or_a_briefing() {
         b.inflight
     );
 }
+
+/// The cite of A (in view b, one blocking premise shift once view a changed A) and `n` terms
+/// named fee: n·(n−1)/2 advisory duplicate definitions, all in one change.
+fn fees(s: &Spec, n: usize) -> Value {
+    let mut ops = cite(&s.section, &s.a).as_array().unwrap().clone();
+    for i in 0..n {
+        ops.push(
+            json!({"op": "create", "type": "term", "id": format!("$f{i}"),
+            "parent": s.section.to_string(), "fields": {"name": "fee"},
+            "body": format!("Fee number {i} is a term.")}),
+        );
+    }
+    Value::Array(ops)
+}
+
+/// Perf fix (mcp_write_9mib): a write that opens thousands of advisory tensions returns
+/// within `max_tokens`, keeps its blocking tension, counts the advisory ones per kind, builds
+/// no sides for a reply whose bare rows already overflow, serializes each row a bounded number
+/// of times, and reads each change's provenance at most once.
+#[test]
+fn tonc1_a_write_that_opens_thousands_of_advisory_tensions_is_cut_in_linear_time() {
+    use rdy_engine::brief::BRIEF_DEFAULT_TOKENS;
+    use rdy_engine::tensions::info::info_counts;
+    use rdy_engine::tensions::{TensionSeverity, info::TensionInfo};
+    use std::collections::BTreeSet;
+    let (_d, e, s) = local();
+    w(&e, "a", upd(&s.a, "A changed."));
+    let before = e.read();
+    let reply = w(&e, "b", fees(&s, 100));
+    let after = e.read();
+    let oc = &reply["on_change"];
+    assert!(
+        oc.to_string().len() <= BRIEF_DEFAULT_TOKENS * 4,
+        "{} bytes",
+        oc.to_string().len()
+    );
+    let kept = oc["tensions"].as_array().unwrap();
+    let blocking: Vec<&Value> = kept
+        .iter()
+        .filter(|t| t["severity"] == "blocking")
+        .collect();
+    assert_eq!(blocking.len(), 1, "{oc}");
+    assert_eq!(blocking[0]["kind"], "premise_shift");
+    assert_eq!(oc["detail_cut"], true);
+    let collapsed = oc["collapsed"]["duplicate_definition"].as_u64().unwrap();
+    assert_eq!(collapsed as usize + kept.len() - 1, 4950, "{oc}");
+
+    let d = full_delta(&before, &after);
+    assert_eq!(d.opened.len(), 4951);
+    let changes: BTreeSet<Hash> = d.opened.iter().flat_map(|t| change_sides(t)).collect();
+    // warms the state's in-flight set, which the sides read
+    on_change(&before, &after, "b", Some(10_000_000), &d).unwrap();
+
+    let (f0, (s0, b0)) = (after.reader().frames_read(), info_counts());
+    let o = on_change(&before, &after, "b", None, &d).unwrap();
+    let (s1, b1) = info_counts();
+    assert_eq!(serde_json::to_value(&o).unwrap(), *oc);
+    assert_eq!(b1 - b0, 0, "rows the budget cannot hold bare get no sides");
+    assert!(
+        s1 - s0 <= 2 * (o.tensions.len() as u64 + 2),
+        "{} serializations for {} rows kept",
+        s1 - s0,
+        o.tensions.len()
+    );
+    assert!(after.reader().frames_read() - f0 <= changes.len() as u64);
+
+    // a budget that holds every row with its sides: each row built and measured once, each
+    // change's provenance read once
+    let (f0, (s0, b0)) = (after.reader().frames_read(), info_counts());
+    let o = on_change(&before, &after, "b", Some(10_000_000), &d).unwrap();
+    let (s1, b1) = info_counts();
+    assert_eq!(o.tensions.len(), 4951);
+    assert!(o.tensions.iter().all(|t: &TensionInfo| !t.sides.is_empty()));
+    assert!(!o.detail_cut && o.collapsed.is_empty());
+    assert!(
+        o.tensions
+            .iter()
+            .any(|t| t.severity == TensionSeverity::Blocking)
+    );
+    assert_eq!(b1 - b0, 4951);
+    assert!(s1 - s0 <= 2 * 4951, "{} serializations", s1 - s0);
+    let frames = after.reader().frames_read() - f0;
+    assert!(
+        frames <= changes.len() as u64,
+        "{frames} frames for {} changes",
+        changes.len()
+    );
+}

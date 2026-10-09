@@ -1324,8 +1324,13 @@ fn tier_tensions(
         runs.read,
         |_| {
             let s = Instant::now();
-            st.proposal_tensions("inf2", &mine, &BTreeSet::new())
-                .expect("proposal tensions");
+            st.proposal_tensions(
+                "inf2",
+                &mine,
+                &BTreeSet::new(),
+                rdy_engine::PROPOSAL_TENSIONS_MAX,
+            )
+            .expect("proposal tensions");
             s.elapsed()
         },
     ));
@@ -1481,10 +1486,12 @@ fn mcp_write_args(i: usize) -> serde_json::Map<String, serde_json::Value> {
         json!({"op": "create", "type": "doc", "id": "$d", "fields": {"name": format!("mw-{i}"), "title": "MW", "doc_type": "glossary"}}),
         json!({"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "S"}}),
     ];
-    ops.extend(
-        (0..MCP_CLAIMS)
-            .map(|_| json!({"op": "create", "type": "claim", "parent": "$s", "body": body})),
-    );
+    // each claim's body is its own (the index leads it): this op measures the ~9 MiB intake and
+    // parameter path, not the 2,000·1,999/2 duplicate definitions that 2,000 identical bodies
+    // open in one write
+    ops.extend((0..MCP_CLAIMS).map(
+        |k| json!({"op": "create", "type": "claim", "parent": "$s", "body": format!("{k} {body}")}),
+    ));
     match json!({"view": "mw", "ops": ops}) {
         serde_json::Value::Object(m) => m,
         _ => unreachable!("an object literal"),

@@ -259,3 +259,40 @@ fn tbrf1_a_read_time_overlap_is_listed() {
         t[0]
     );
 }
+
+/// Perf fix (mcp_write_9mib): a briefing over blocks with thousands of tensions builds each
+/// row once and measures it a bounded number of times, whatever it cuts.
+#[test]
+fn tbrf1_a_briefing_over_thousands_of_tensions_builds_each_row_once() {
+    use rdy_engine::tensions::info::info_counts;
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let mut ops = vec![];
+    for i in 0..100 {
+        ops.push(
+            serde_json::json!({"op": "create", "type": "term", "id": format!("$f{i}"),
+            "parent": s.section.to_string(), "fields": {"name": "fee"},
+            "body": format!("Fee number {i} is a term.")}),
+        );
+    }
+    let w = put(&mut r, "b", serde_json::Value::Array(ops));
+    let ids: Vec<String> = (0..100)
+        .map(|i| created(&w, &format!("$f{i}")).to_string())
+        .collect();
+    let cov = Coverage { ids, path: None };
+    let st = r.read();
+    st.brief(&Scope::View("b".into()), &cov, None).unwrap();
+    let (f0, (s0, b0)) = (st.reader().frames_read(), info_counts());
+    let b = st.brief(&Scope::View("b".into()), &cov, None).unwrap();
+    let (s1, b1) = info_counts();
+    let frames = st.reader().frames_read() - f0;
+    assert!(
+        frames <= 4,
+        "{frames} frames: each change's provenance is read once"
+    );
+    assert!(json_tokens(&b) <= BRIEF_DEFAULT_TOKENS);
+    let all = b.inflight.tensions.len() + b.omitted.get("inflight.tensions").copied().unwrap_or(0);
+    assert_eq!(all, 4950);
+    assert_eq!(b1 - b0, 4950, "each row built once");
+    assert!(s1 - s0 <= 6 * 4950, "{} serializations", s1 - s0);
+}

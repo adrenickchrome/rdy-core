@@ -586,40 +586,49 @@ impl ReadState {
     /// ([`ReadState::refusing_tensions`]), each with `refuses` (true exactly for the refusing
     /// ones, so it agrees with what landing does). The refusing ones come first, then by id. A
     /// tension whose involved blocks all carry one of the version's blocking conflicts
-    /// (`conflicted`) is left out: the conflict reports it.
+    /// (`conflicted`) is left out: the conflict reports it. At most `max` are listed, built
+    /// with their sides; the rest are only counted (the second value).
     pub fn proposal_tensions(
         &self,
         view: &str,
         changes: &[Hash],
         conflicted: &BTreeSet<BlockId>,
-    ) -> Result<Vec<TensionInfo>, RdyError> {
+        max: usize,
+    ) -> Result<(Vec<TensionInfo>, usize), RdyError> {
         let refusing = self.refusing_tensions(view, changes)?;
         let refuses: BTreeSet<Hash> = refusing.iter().map(|t| t.id).collect();
         let set = self.tensions()?;
         let mut seen = BTreeSet::new();
-        let mut out = vec![];
+        let mut listed = vec![];
         // a refusing tension is listed in its landing form; an in-flight form with another id
         // (another severity, sides or versions) is listed beside it as information
-        let listed = refusing
+        let all = refusing
             .into_iter()
             .chain(changes.iter().flat_map(|c| set.involving_change(c)));
-        for t in listed {
+        for t in all {
             if !seen.insert(t.id) {
                 continue;
             }
             if !conflicted.is_empty() && t.blocks().iter().all(|b| conflicted.contains(b)) {
                 continue;
             }
-            let mut info = self.tension_info(&t);
-            info.refuses = Some(refuses.contains(&t.id));
-            out.push(info);
+            listed.push((refuses.contains(&t.id), t));
         }
-        out.sort_by(|a, b| {
-            b.refuses
-                .cmp(&a.refuses)
-                .then_with(|| a.tension.cmp(&b.tension))
-        });
-        Ok(out)
+        // the order needs only the ids (hex in a fixed width sorts as the bytes do), so only the
+        // listed ones are built
+        listed.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+        let omitted = listed.len().saturating_sub(max);
+        let mut cache = crate::tensions::info::InfoCache::default();
+        let out = listed
+            .into_iter()
+            .take(max)
+            .map(|(r, t)| {
+                let mut info = self.tension_info_with(&t, &mut cache);
+                info.refuses = Some(r);
+                info
+            })
+            .collect();
+        Ok((out, omitted))
     }
 }
 
@@ -1500,11 +1509,12 @@ impl Rdy {
         let canon_at = stored.canon_at;
         self.publish(Delta::Seq)?;
         // tgat1: the version's tensions, read after a re-key change (if any) was committed
-        let mut tensions = self
-            .read()
-            .proposal_tensions(view, &stored.changes, &conflicted)?;
-        let tensions_omitted = tensions.len().saturating_sub(PROPOSAL_TENSIONS_MAX);
-        tensions.truncate(PROPOSAL_TENSIONS_MAX);
+        let (tensions, tensions_omitted) = self.read().proposal_tensions(
+            view,
+            &stored.changes,
+            &conflicted,
+            PROPOSAL_TENSIONS_MAX,
+        )?;
         let pref = ProposalRef {
             version: id,
             stable,
@@ -1701,10 +1711,11 @@ impl Rdy {
         }
         // tgat1: a blocking, undismissed tension every side of which would be in canon after
         // the landing refuses it
+        let mut cache = crate::tensions::info::InfoCache::default();
         let refusing: Vec<TensionInfo> = st
             .refusing_tensions(&p.view, &p.changes)?
             .iter()
-            .map(|t| st.tension_info(t))
+            .map(|t| st.tension_info_with(t, &mut cache))
             .collect();
         if !refusing.is_empty() {
             return Err(blocking_tensions(&pref, &refusing));

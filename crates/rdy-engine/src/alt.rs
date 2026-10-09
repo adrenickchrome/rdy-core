@@ -293,9 +293,12 @@ impl ReadState {
     fn view_tensions(&self, view: &str) -> Result<Vec<TensionInfo>, RdyError> {
         let set = self.tensions()?;
         let mut found = BTreeMap::new();
+        let mut cache = crate::tensions::info::InfoCache::default();
         for c in self.included(view).iter() {
             for t in set.involving_change(c) {
-                found.entry(t.id).or_insert_with(|| self.tension_info(&t));
+                found
+                    .entry(t.id)
+                    .or_insert_with(|| self.tension_info_with(&t, &mut cache));
             }
         }
         Ok(found.into_values().collect())

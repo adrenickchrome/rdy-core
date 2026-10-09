@@ -243,7 +243,11 @@ impl ReadState {
         }
         let mut found: Vec<Arc<Tension>> = found.into_values().collect();
         found.sort_by_key(|t| (t.severity, t.kind, t.id));
-        Ok(found.iter().map(|t| self.tension_info(t)).collect())
+        let mut cache = crate::tensions::info::InfoCache::default();
+        Ok(found
+            .iter()
+            .map(|t| self.tension_info_with(t, &mut cache))
+            .collect())
     }
 
     /// The open intents (as of now) of views other than `own` that cover any of `ids` in

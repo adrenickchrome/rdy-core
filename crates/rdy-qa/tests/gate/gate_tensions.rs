@@ -770,3 +770,38 @@ fn tgat1_a_landing_only_form_is_listed_with_its_proposal() {
         "{all:#?}"
     );
 }
+
+/// Perf fix (mcp_write_9mib): a version with thousands of tensions builds the sides of only the
+/// `PROPOSAL_TENSIONS_MAX` it lists; the rest are counted in `tensions_omitted`.
+#[test]
+fn tgat1_a_version_with_thousands_of_tensions_builds_only_the_listed_ones() {
+    use rdy_engine::tensions::info::info_counts;
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let mut ops = vec![];
+    for i in 0..100 {
+        ops.push(
+            json!({"op": "create", "type": "term", "id": format!("$f{i}"),
+            "parent": s.section.to_string(), "fields": {"name": "fee"},
+            "body": format!("Fee number {i} is a term.")}),
+        );
+    }
+    put(&mut r, "b", serde_json::Value::Array(ops));
+    let (_, b0) = info_counts();
+    let p = propose(&mut r, "b");
+    let (_, b1) = info_counts();
+    assert_eq!(p.tensions.len(), PROPOSAL_TENSIONS_MAX);
+    assert_eq!(p.tensions.len() + p.tensions_omitted, 4950);
+    let mut ids: Vec<&String> = p.tensions.iter().map(|t| &t.tension).collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        p.tensions.iter().map(|t| &t.tension).collect::<Vec<_>>(),
+        "by id"
+    );
+    assert!(
+        b1 - b0 <= PROPOSAL_TENSIONS_MAX as u64,
+        "{} rows built",
+        b1 - b0
+    );
+}
