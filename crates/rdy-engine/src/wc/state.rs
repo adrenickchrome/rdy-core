@@ -76,7 +76,7 @@ impl Place {
                             "{}/{POINTER_FILE} does not name a worktree: it does not parse, or its name is not one plain name",
                             dir.display()
                         ),
-                        "repair it (project: <path>, name: <name>), or delete it",
+                        "repair it (project: <path>, name: <name>; rdy worktree ls shows the name)",
                     )),
                 };
             }

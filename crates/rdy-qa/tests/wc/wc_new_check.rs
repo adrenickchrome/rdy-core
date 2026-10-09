@@ -250,3 +250,25 @@ fn msw5_rdy_new_skips_a_tracked_path_that_differs_only_in_case() {
     let (okk, v) = json(&s, &["update"]);
     assert!(okk, "{v}");
 }
+
+/// A damaged `bound.yaml` does not stop `rdy check` on a path outside the working tree: that
+/// path never uses the working copy, so it is linted against canon as before.
+#[test]
+fn msw10_damaged_wc_state_does_not_block_check_outside_the_tree() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::write(at(&s, ".rdy/wc/bound.yaml"), "view: [\n").unwrap();
+    let outside = rdy_qa::daemon::short_tempdir();
+    std::fs::write(outside.path().join("bad.yaml"), "just: a map\n").unwrap();
+    let (okk, v) = check(&s, &[outside.path().to_str().unwrap()]);
+    assert!(
+        v.as_array().is_some_and(|a| a
+            .iter()
+            .any(|d| d["file"].as_str().is_some_and(|f| f.ends_with("bad.yaml")))),
+        "the outside directory is checked: {v}"
+    );
+    assert!(!okk, "its bad file fails the check: {v}");
+    // no path, or a path in the tree, uses the working copy: its damaged state is the error
+    let (okk, v) = check(&s, &["notes.yaml"]);
+    assert!(!okk && v["code"] == E_IO, "{v}");
+}

@@ -168,3 +168,21 @@ fn msw10_a_relative_project_in_the_pointer_is_joined_to_its_directory() {
         w.join("../proj").join(WORKTREES_DIR).join("side")
     );
 }
+
+/// A damaged pointer's fix points at repair only: a worktree whose pointer is deleted is an
+/// orphan that `rdy worktree rm` refuses, so the fix never offers deleting it.
+#[test]
+fn msw10_a_damaged_pointer_fix_points_at_repair_only() {
+    let top = tempfile::tempdir().unwrap();
+    let w = top.path().join("side");
+    std::fs::create_dir_all(w.join("sub")).unwrap();
+    std::fs::write(w.join(POINTER_FILE), "project: [\n").unwrap();
+    let e = Place::try_locate(&w.join("sub")).expect_err("a damaged pointer is an error");
+    assert_eq!(e.code, E_BAD_INPUT, "{e:?}");
+    assert!(e.message.contains(POINTER_FILE), "{e:?}");
+    assert!(
+        e.fix.starts_with("repair it") && e.fix.contains("rdy worktree ls"),
+        "{e:?}"
+    );
+    assert!(!e.fix.contains("delete"), "{e:?}");
+}
