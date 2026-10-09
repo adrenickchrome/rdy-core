@@ -340,3 +340,47 @@ fn gconf1_a_subset_without_the_creation_of_a_childs_parent_is_e_deps_missing() {
     let child = c2.created.values().next().unwrap().clone();
     assert_eq!(body_of(&r, &Scope::Canon, &child), "child");
 }
+
+#[test]
+fn msw2_an_approve_path_stale_base_tells_the_approver_what_the_author_must_do() {
+    let (_d, mut r) = project();
+    let (_doc, _section, c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let v = version_of(&r, &Scope::Canon, &c);
+    let sa = as_agent("agent:a", "r1");
+    r.view_create(&sa, "pinned", None, true).unwrap();
+    write_as(&mut r, &sa, "pinned", update(&c, &v, "pinned's")).unwrap();
+    write_as(
+        &mut r,
+        &as_agent("agent:b", "r1"),
+        "b",
+        update(&c, &v, "b's"),
+    )
+    .unwrap();
+    land(&mut r, "b").unwrap();
+    let pid = r
+        .store_mut()
+        .propose("pinned", "p", sa.provenance())
+        .unwrap();
+    r.invalidate();
+    // M2d2: the gate reports the edit collision as a blocking tension before it merges; a
+    // human approver dismisses it, so the landing reaches the merge and its stale base
+    let t = r.land_report(&approver(), &pid.to_string()).unwrap_err();
+    assert_eq!(t.code, E_BLOCKING_TENSION, "{t}");
+    for i in &t.issues {
+        let label = i.message.split_whitespace().next().unwrap();
+        r.dismiss_tension(&approver(), label, "the approver sees the stale base")
+            .unwrap();
+    }
+    let e = r.land_report(&approver(), &pid.to_string()).unwrap_err();
+    assert_eq!(e.code, E_STALE_BASE, "{e}");
+    assert!(
+        !e.message.contains("you read it"),
+        "the message speaks to the approver: {e}"
+    );
+    assert!(
+        e.fix.contains("pinned") && e.fix.contains(&c),
+        "the fix names the view and the block: {e}"
+    );
+    assert!(!e.fix.contains("rebase the view"), "{e}");
+}

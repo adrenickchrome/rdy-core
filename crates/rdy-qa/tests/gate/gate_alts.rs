@@ -401,3 +401,33 @@ fn altg1_a_lost_member_cannot_propose_under_a_later_set_or_a_pick() {
     r.land(&approver(), &pd.id).unwrap();
     assert!(canon_bodies(&r).iter().any(|b| b == "alt D"));
 }
+
+#[test]
+fn msw2_a_members_change_from_before_the_set_cannot_land_from_a_non_member_view() {
+    let (_d, mut r) = project();
+    let (_doc, section, _claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    write(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "alt A"}]),
+    )
+    .unwrap();
+    let early_b = write(
+        &mut r,
+        "b",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "alt B"}]),
+    )
+    .unwrap()
+    .change;
+    r.alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap();
+    r.view_include(&writer(), "d", std::slice::from_ref(&early_b))
+        .unwrap();
+    let e = r
+        .propose(&writer(), "d", "d")
+        .and_then(|p| r.land(&approver(), &p.id))
+        .unwrap_err();
+    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
+    assert!(!canon_bodies(&r).iter().any(|b| b == "alt B"));
+}

@@ -12,7 +12,7 @@ use rdy_model::{
     AltChoice, AltSet, AltStatus, ApprovalEvidence, Block, BlockId, Change, ChangeLinks,
     EvidenceKind, FieldValue, Hash, LandingRecord, Op, Proposal, decision,
 };
-use rdy_schema::{Issue, Severity, validate_block};
+use rdy_schema::{Issue, Severity, validate_block, validate_prefix};
 use rdy_store::{AltLanding, Conflict, LandRequest, MergeChange, Relay, merge_on_blocks};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -181,10 +181,6 @@ pub struct LandingRow {
     pub chosen: Option<AltRef>,
 }
 
-/// The advice an approver gets when the version no longer applies to canon: the fix is the
-/// author's, never "re-read and retry", which is a writer's.
-const STALE_FOR_APPROVER: &str = "the proposal is stale: its author must rebase the view and propose again; then approve the new version";
-
 /// A 32-byte ref value as a hash.
 fn ref_hash(bytes: &[u8], what: &str) -> Result<Hash, RdyError> {
     <[u8; 32]>::try_from(bytes)
@@ -233,13 +229,60 @@ fn moved(
     ))
 }
 
-/// An `E_STALE_BASE` or `E_ALREADY_EXISTS` on the approve path keeps its code and message, with
-/// the approver's advice as its fix.
-fn approver_stale(mut e: RdyError) -> RdyError {
-    if e.code == E_STALE_BASE || e.code == E_ALREADY_EXISTS {
-        e.fix = STALE_FOR_APPROVER.into();
+/// A store refusal on the approve path, worded for the approver: an `E_STALE_BASE` or
+/// `E_ALREADY_EXISTS` keeps its code, names the block and the version's view `view`, and gives
+/// the author's fix, never "re-read and retry", which is a writer's. Any other error converts as
+/// usual.
+fn approver_stale(e: rdy_store::StoreError, view: &str) -> RdyError {
+    use rdy_store::StoreError;
+    match e {
+        StoreError::StaleBase {
+            id,
+            expected,
+            actual: Some(actual),
+        } => RdyError::new(
+            E_STALE_BASE,
+            format!(
+                "{id} changed in canon after this version's base: the version writes it from {}, canon has {}",
+                expected.short(),
+                actual.short()
+            ),
+            format!(
+                "the version no longer applies: its author must update {id} from canon's version in view {view} (or, if {view} is pinned, in a view that reads canon) and propose again; then approve the new version"
+            ),
+        ),
+        StoreError::StaleBase {
+            id,
+            expected,
+            actual: None,
+        } => RdyError::new(
+            E_STALE_BASE,
+            format!(
+                "{id} was deleted in canon after this version's base ({})",
+                expected.short()
+            ),
+            format!(
+                "its author must drop the op on {id}, or re-create it from a view that reads canon, and propose again; then approve the new version"
+            ),
+        ),
+        StoreError::DeletedSince(id) => RdyError::new(
+            E_STALE_BASE,
+            format!(
+                "{id} was deleted in canon after the base view {view} reads; landing this version would bring it back without having seen that delete"
+            ),
+            format!(
+                "its author must re-create {id} from a view that reads canon, or drop the change that creates it, and propose again; then approve the new version"
+            ),
+        ),
+        StoreError::AlreadyExists(id) => RdyError::new(
+            E_ALREADY_EXISTS,
+            format!("{id} was created in canon after this version's base"),
+            format!(
+                "its author must drop the create of {id}, or update canon's {id} in view {view}, and propose again; then approve the new version"
+            ),
+        ),
+        other => other.into(),
     }
-    e
 }
 
 /// FW-B9: what a relayed approval must satisfy, and the evidence it records. Only a human
@@ -278,11 +321,25 @@ fn relay_evidence_kind(
             "quote the human's words with --evidence",
         ));
     }
-    if relay.by.actor.is_empty() {
+    if relay.by.actor.trim().is_empty() {
         return Err(RdyError::new(
             E_BAD_INPUT,
             "relayed_by needs an actor",
             "name the relaying agent, e.g. --relayed-by agent:name",
+        ));
+    }
+    if relay.by.run.as_deref().is_some_and(|r| r.trim().is_empty()) {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "relayed_by has an empty run",
+            "name the run after '/', e.g. --relayed-by agent:name/run-7, or drop the '/'",
+        ));
+    }
+    if relay.evidence.session_ref.trim().is_empty() {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "the session reference is empty",
+            "pass --session <ref>, or leave it out (it defaults to cli)",
         ));
     }
     match &opts.evidence {
@@ -831,7 +888,9 @@ fn not_lost(st: &ReadState, view: &str, what: impl Fn(&str) -> String) -> Result
 
 /// altg1: a change written in a member view of an open set (its `links.alternative`) is that
 /// member's alternative: it lands only in a version proposed from that member's view that chose
-/// that member (`chosen`). A member since removed from the set no longer binds its changes.
+/// that member (`chosen`). A member since removed from the set no longer binds its changes. A
+/// change with no link, written in a member view before the set was made, is that member's
+/// alternative too (msw2).
 fn linked_alts(
     st: &ReadState,
     view: &str,
@@ -840,8 +899,19 @@ fn linked_alts(
     changes: &[Change],
 ) -> Result<(), RdyError> {
     for (id, c) in ids.iter().zip(changes) {
-        let Some(a) = &c.links.alternative else {
-            continue;
+        let unlinked;
+        let a = match &c.links.alternative {
+            Some(a) => a,
+            None => match st.alt_of_view(&c.view)? {
+                Some((stable, _, _)) => {
+                    unlinked = AltChoice {
+                        set: stable,
+                        member: c.view.clone(),
+                    };
+                    &unlinked
+                }
+                None => continue,
+            },
         };
         let Some((_, set)) = st.coord_heads().open_alts.get(&a.set) else {
             continue;
@@ -868,10 +938,20 @@ fn linked_alts(
 
 /// The canon that would result from landing `changes` on `st`'s canon, and each applied change's
 /// position in `changes`, in applied order. The merge surfaces E_STALE_BASE, E_ALREADY_EXISTS and
-/// E_FROZEN early.
-fn prospective(st: &ReadState, changes: &[Change]) -> Result<(Materialized, Vec<usize>), RdyError> {
+/// E_FROZEN early; on the approve path (`approving`, the version's view) they are worded for the
+/// approver.
+fn prospective(
+    st: &ReadState,
+    changes: &[Change],
+    approving: Option<&str>,
+) -> Result<(Materialized, Vec<usize>), RdyError> {
     let reader = st.reader();
-    let (_, applied) = reader.merge_checked(&*st.canon_snapshot()?, changes)?;
+    let (_, applied) = reader
+        .merge_checked(&*st.canon_snapshot()?, changes)
+        .map_err(|e| match approving {
+            Some(view) => approver_stale(e, view),
+            None => e.into(),
+        })?;
     let next = st
         .materialized(&Scope::Canon)?
         .with(&applied_ops(changes, &applied));
@@ -910,13 +990,15 @@ pub(crate) fn applied_ops(changes: &[Change], applied: &[usize]) -> Vec<Op> {
 
 impl Rdy {
     /// Validates the canon that would result from landing `changes` on `st`'s canon; returns the
-    /// issues and each applied change's position in `changes`, in applied order.
+    /// issues and each applied change's position in `changes`, in applied order. `approving` is
+    /// the version's view on the approve path (see `prospective`).
     fn prospective_issues(
         &self,
         st: &ReadState,
         changes: &[Change],
+        approving: Option<&str>,
     ) -> Result<(Vec<Issue>, Vec<usize>), RdyError> {
-        let (next, applied) = prospective(st, changes)?;
+        let (next, applied) = prospective(st, changes, approving)?;
         Ok((self.issues_in(st, changes, &next, &applied)?, applied))
     }
 
@@ -988,6 +1070,7 @@ impl Rdy {
                     found
                 };
             let parent = b.parent.as_ref().and_then(|p| next.get(p));
+            issues.extend(validate_prefix(st.pack(), b));
             issues.extend(validate_block(st.pack(), b, parent));
             // two views can each be fine alone and clash or loop once both are in canon
             let mut walk = b.parent.clone();
@@ -1424,7 +1507,7 @@ impl Rdy {
         if blocking.is_empty() {
             // K1 (FW-PR3): a key rdy derived for a block this version creates, held by another
             // block in the prospective canon, is re-derived by a change rdy adds to the view
-            let (next, applied) = prospective(&st, &changes)?;
+            let (next, applied) = prospective(&st, &changes, None)?;
             let vm = st.materialized(&Scope::View(view.to_string()))?;
             let re = crate::keys::rederive(
                 &next,
@@ -1439,7 +1522,7 @@ impl Rdy {
                 change.links.alternative = alternative.clone();
                 let mut all = changes.clone();
                 all.push(change.clone());
-                issues = self.prospective_issues(&st, &all)?.0;
+                issues = self.prospective_issues(&st, &all, None)?.0;
                 rekey = Some((change, re));
             }
             if let Some(first) = issues.iter().find(|i| i.severity == Severity::Error) {
@@ -1629,8 +1712,8 @@ impl Rdy {
                     ids.join(", ")
                 ),
                 format!(
-                    "the proposal is stale: its author must rebase the view and propose again (rdy propose --view {}); then approve the new version",
-                    p.view
+                    "the proposal is stale: its author must update the changed blocks in view {view} (rdy view show {view} lists its conflicts) and propose again (rdy propose --view {view}); then approve the new version",
+                    view = p.view
                 ),
             );
             e.issues = hit
@@ -1840,7 +1923,7 @@ impl Rdy {
         };
         let mut all = changes;
         all.extend(accept.clone());
-        let (mut issues, order) = self.prospective_issues(&st, &all).map_err(approver_stale)?;
+        let (mut issues, order) = self.prospective_issues(&st, &all, Some(&p.view))?;
         if let Some(first) = issues.iter().find(|i| i.severity == Severity::Error) {
             let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
             e.issues = issues;
@@ -1869,7 +1952,7 @@ impl Rdy {
             Err(rdy_store::StoreError::ProposalMoved { latest, .. }) => {
                 return Err(moved(&st, &pref, &latest, &p.view)?);
             }
-            Err(e) => return Err(approver_stale(e.into())),
+            Err(e) => return Err(approver_stale(e, &p.view)),
         };
         // 5. publish canon incrementally: the previous canon with the landed ops (snap1)
         if let Err(e) = self.publish(Delta::Landed {

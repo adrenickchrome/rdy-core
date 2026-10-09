@@ -99,3 +99,31 @@ fn gate1_a_recreated_folder_is_checked_with_the_folders_other_views_added_under_
     assert!(e.issues.iter().any(|i| i.code == "E_TOO_DEEP"), "{e:?}");
     check(&r, &Scope::Canon).unwrap();
 }
+
+#[test]
+fn msw2_the_gate_refuses_a_cross_class_id_prefix() {
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    // ra- is rationale's prefix (a supporting type): no claim can carry it
+    raw_commit(
+        &mut r,
+        "x",
+        vec![raw("ra-AAAAA", "claim", Some(&section), "zz", &[], "x")],
+    );
+    let e = land(&mut r, "x").unwrap_err();
+    assert_eq!(e.code, E_VALIDATION, "{e}");
+    assert!(
+        e.issues.iter().any(|i| i.code == "E_PREFIX"),
+        "{:?}",
+        e.issues
+    );
+    let id = rdy_model::BlockId::parse("ra-AAAAA").unwrap();
+    assert!(
+        r.read()
+            .materialized(&Scope::Canon)
+            .unwrap()
+            .get(&id)
+            .is_none()
+    );
+}
