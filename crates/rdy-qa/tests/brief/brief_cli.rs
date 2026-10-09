@@ -393,3 +393,73 @@ fn kroot1_rdy_edit_prints_each_new_key() {
         "{text}"
     );
 }
+
+#[test]
+fn msw8_a_stale_rdy_edit_of_a_draft_is_stale_base_and_keeps_the_concurrent_change() {
+    let s = Served::new();
+    let id = new_doc(&s);
+    let inner = script(
+        &s,
+        "inner.sh",
+        "sed -i.bak 's/title: Before/title: Second/' \"$1\"\n",
+    );
+    let nested = format!(
+        "if [ -z \"$RDY_NESTED\" ]; then RDY_NESTED=1 EDITOR='{}' '{}' --project '{}' edit {id} >/dev/null; fi\nsed -i.bak 's/title: Before/title: Outer/' \"$1\"\n",
+        inner.display(),
+        rdy_bin().display(),
+        s.dir.path().display()
+    );
+    let outer = script(&s, "outer.sh", &nested);
+    let out = edit(&s, &outer, &id, true);
+    assert!(
+        !out.status.success(),
+        "the stale edit landed: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let e: Value = serde_json::from_str(
+        String::from_utf8_lossy(&out.stderr)
+            .trim()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(e["code"], "E_STALE_BASE", "{e}");
+    assert!(e["saved_edit"].is_string(), "the edit is kept: {e}");
+    let (_, shown) = s.json(&["--json", "show", &id, "--scope", "work"]);
+    assert_eq!(
+        shown["fields"]["title"], "Second",
+        "the concurrent change stands"
+    );
+}
+
+#[test]
+fn msw8_rdy_edit_text_mode_prints_a_stale_briefing_warning() {
+    let s = Served::new();
+    let spec = {
+        let mut r = Rdy::open(s.dir.path()).unwrap();
+        let spec = spec_doc(&mut r);
+        r.close().unwrap();
+        spec
+    };
+    let inner = script(&s, "inner.sh", "sed -i.bak 's/A holds./A moved./' \"$1\"\n");
+    let nested = format!(
+        "if [ -z \"$RDY_NESTED\" ]; then RDY_NESTED=1 EDITOR='{}' '{}' --project '{}' edit {} >/dev/null; fi\nsed -i.bak 's/B builds on/B now builds on/' \"$1\"\n",
+        inner.display(),
+        rdy_bin().display(),
+        s.dir.path().display(),
+        spec.a
+    );
+    let outer = script(&s, "outer.sh", &nested);
+    let out = edit(&s, &outer, &spec.b.to_string(), false);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("warning W_BRIEF_STALE: the cited briefing is stale"),
+        "{text}"
+    );
+}

@@ -32,6 +32,8 @@ pub(super) struct KeysAssignArgs {
 pub(super) struct EditBlockArgs {
     yaml: String,
     view: Option<String>,
+    /// msw8 (#1064): the version the editor read (the `block` op's `version`); none is current.
+    base: Option<String>,
     brief: Option<String>,
     max_tokens: Option<usize>,
     /// The edit's editorial reason (`rdy edit --reason`).
@@ -80,8 +82,8 @@ pub(super) fn edit_block(cx: &OpContext, a: EditBlockArgs) -> Result<Value, RdyE
     let s = cx.session.clone();
     let view = view_of(&s, a.view);
     let (yaml, brief, max_tokens, v) = (a.yaml, a.brief, a.max_tokens, view.clone());
-    let reason = a.reason;
+    let (base, reason) = (a.base, a.reason);
     write_and_report(cx.engine, &v, max_tokens, move |r| {
-        r.edit_yaml(&s, &view, &yaml, brief, reason.as_deref())
+        r.edit_yaml_at(&s, &view, &yaml, base.as_deref(), brief, reason.as_deref())
     })
 }

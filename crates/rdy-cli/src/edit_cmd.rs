@@ -107,22 +107,32 @@ pub(crate) fn run_edit(env: &Env, a: EditArgs) -> Result<(Value, String), ErrorR
     let EditArgs { id, view, reason } = a;
     let v = edit(env, &id, view.as_deref(), reason.as_deref())?;
     // F4 (FW-PR3b): a rename or a top-level name re-derives keys rdy assigned
-    let t = format!(
+    let mut t = format!(
         "change {}{}{}",
         hash_short(text(&v["change"])),
         keys_lines(&v, ""),
         brief_text::consequences_text(&v)
     );
+    // msw8 (#874): a person sees the write's warnings, W_BRIEF_STALE among them
+    for w in v["warnings"].as_array().into_iter().flatten() {
+        t.push_str(&format!(
+            "\nwarning {}: {}",
+            text(&w["code"]),
+            text(&w["message"])
+        ));
+    }
     Ok((v, t))
 }
 
 /// `rdy edit`: the block as YAML from the `block` op, its briefing from the `brief` op shown as
 /// `#` lines above the YAML, `$EDITOR` on a temp file, then the `edit_block` op citing the
-/// briefing's token, with `reason` as the edit's editorial reason (a briefing that moved while the editor was open is `E_BRIEF_STALE`, and the
-/// edit is kept). Each op runs on a session of its own: the editor may stay open for long, and
-/// the daemon may stop meanwhile (`rdy serve --stop` after a rebuild), so the write connects
-/// afresh (starting a daemon again if need be); it is sent once and never retried. When the write
-/// fails, the edited file is kept and named in the error (`fix`, and `saved_edit` in JSON).
+/// briefing's token and the block's `version` as the base, with `reason` as the edit's editorial
+/// reason (a block changed while the editor was open is `E_STALE_BASE`, a briefing that moved is
+/// `E_BRIEF_STALE`, and the edit is kept). Each op runs on a session of its own: the editor may
+/// stay open for long, and the daemon may stop meanwhile (`rdy serve --stop` after a rebuild), so
+/// the write connects afresh (starting a daemon again if need be); it is sent once and never
+/// retried. When the write fails, the edited file is kept and named in the error (`fix`, and
+/// `saved_edit` in JSON).
 fn edit(
     env: &Env,
     id: &str,
@@ -170,7 +180,8 @@ fn edit(
     call(
         env,
         "edit_block",
-        json!({"yaml": yaml, "view": view, "brief": brief, "reason": reason}),
+        // msw8 (#1064): the version the editor read, so a block changed meanwhile is refused
+        json!({"yaml": yaml, "view": view, "base": block["version"], "brief": brief, "reason": reason}),
     )
     .map_err(|mut e| {
         if let Ok(path) = tmp.into_temp_path().keep() {

@@ -1049,6 +1049,21 @@ impl Rdy {
         brief: Option<String>,
         reason: Option<&str>,
     ) -> Result<WriteResult, RdyError> {
+        self.edit_yaml_at(s, view, yaml, None, brief, reason)
+    }
+
+    /// msw8 (#1064): [`Rdy::edit_yaml`] against `base`, the version the editor read (the
+    /// `block` op's `version`). A block that changed since then is refused (`E_STALE_BASE`, or
+    /// `E_BRIEF_STALE` for a stable block), so a stale buffer never reverts a concurrent change.
+    pub fn edit_yaml_at(
+        &mut self,
+        s: &Session,
+        view: &str,
+        yaml: &str,
+        base: Option<&str>,
+        brief: Option<String>,
+        reason: Option<&str>,
+    ) -> Result<WriteResult, RdyError> {
         let (mut edited, keyed) = parse_yaml(yaml)?;
         if !keyed.is_empty() {
             let m = self.read().materialized(&Scope::View(view.to_string()))?;
@@ -1058,7 +1073,7 @@ impl Rdy {
                 crate::keys::sole_holder(t, keys.holders(t).iter().map(|(_, id)| id))
             })?;
         }
-        self.edit_block_with(s, view, edited, brief, reason)
+        self.edit_block_at(s, view, edited, base, brief, reason)
     }
 
     /// [`Rdy::edit_block_with`] with no reason.
@@ -1084,9 +1099,28 @@ impl Rdy {
         brief: Option<String>,
         reason: Option<&str>,
     ) -> Result<WriteResult, RdyError> {
+        self.edit_block_at(s, view, edited, None, brief, reason)
+    }
+
+    /// msw8 (#1064): [`Rdy::edit_block_with`] against `base`, the version hash the editor read;
+    /// `None` is the current version. When `base` is not the current version, the local checks
+    /// are skipped (they compare against a version the editor never saw) and the write decides:
+    /// `E_BRIEF_STALE` for a stable block, else `E_STALE_BASE`.
+    pub fn edit_block_at(
+        &mut self,
+        s: &Session,
+        view: &str,
+        edited: Block,
+        base: Option<&str>,
+        brief: Option<String>,
+        reason: Option<&str>,
+    ) -> Result<WriteResult, RdyError> {
         let scope = Scope::View(view.to_string());
         let cur = self.read().block(&scope, &edited.id)?;
-        if cur == edited {
+        let cur_hash = cur.version_hash().to_string();
+        let base = base.unwrap_or(&cur_hash).to_string();
+        let current = base == cur_hash;
+        if current && cur == edited {
             return Err(RdyError::new(
                 E_BAD_INPUT,
                 format!("nothing changed in {}", edited.id),
@@ -1095,16 +1129,17 @@ impl Rdy {
         }
         // edit1: pins are rdy's record of what a block was checked against; an edit carries
         // fields, body and links only, so a pin change would commit an update that changes nothing
-        if cur.pins != edited.pins {
+        if current && cur.pins != edited.pins {
             return Err(RdyError::new(
                 E_BAD_INPUT,
                 format!("the edit changes the pins of {}", edited.id),
                 "pins are set by rdy; remove the pins change",
             ));
         }
-        if cur.block_type != edited.block_type
-            || cur.parent != edited.parent
-            || cur.order != edited.order
+        if current
+            && (cur.block_type != edited.block_type
+                || cur.parent != edited.parent
+                || cur.order != edited.order)
         {
             return Err(RdyError::new(
                 E_BAD_INPUT,
@@ -1148,7 +1183,7 @@ impl Rdy {
         });
         let op = OpInput::Update {
             id: edited.id.to_string(),
-            base: Some(cur.version_hash().to_string()),
+            base: Some(base),
             fields,
             unset,
             body: (cur.body != edited.body).then(|| edited.body.clone()),
