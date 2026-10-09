@@ -59,7 +59,7 @@ pub use gate::{
     RebasedInfo, RelayedByRow,
 };
 pub use history::{Author, HISTORY_MAX, History, HistoryEntry, JustificationInfo, LandingRef};
-pub use io::{ExportSummary, block_from_yaml, block_to_yaml, refuse_inflight_export};
+pub use io::{EditBase, ExportSummary, block_from_yaml, block_to_yaml, refuse_inflight_export};
 pub use lint::check_path;
 pub use materialize::{Materialized, PathMiss};
 pub use paths::TreeNode;

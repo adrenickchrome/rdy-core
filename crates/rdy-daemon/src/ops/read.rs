@@ -196,7 +196,13 @@ pub(super) fn block(cx: &OpContext, a: BlockArgs) -> Result<Value, RdyError> {
     let scope = Scope::View(view);
     let bid = st.resolve_id(&scope, &a.id)?;
     let b = st.block(&scope, &bid)?;
-    Ok(
-        json!({"id": b.id.to_string(), "version": b.version_hash().to_string(), "yaml": block_to_yaml(&b)}),
-    )
+    // msw8: the conflict the view reads the block under, which `rdy edit` sends back with the
+    // version, so a conflict that changed while the editor was open is refused
+    let conflict = st.conflict_on(&scope, &bid)?.map(|c| c.id.to_string());
+    Ok(json!({
+        "id": b.id.to_string(),
+        "version": b.version_hash().to_string(),
+        "conflict": conflict,
+        "yaml": block_to_yaml(&b),
+    }))
 }

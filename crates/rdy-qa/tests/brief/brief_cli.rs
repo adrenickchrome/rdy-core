@@ -463,3 +463,123 @@ fn msw8_rdy_edit_text_mode_prints_a_stale_briefing_warning() {
         "{text}"
     );
 }
+
+/// msw8 fix round 1: an edit token (base and conflict) checked against a block that became
+/// conflicted, or whose conflict changed, while the editor was open.
+mod msw8_conflicts {
+    use rdy_engine::{EditBase, Rdy, RdyError, Scope};
+    use rdy_model::BlockId;
+    use rdy_qa::fixtures::{as_agent, body_of, land, project, seed_doc, version_of, write_as};
+    use serde_json::json;
+
+    fn view(v: &str) -> Scope {
+        Scope::View(v.into())
+    }
+
+    fn update(r: &mut Rdy, v: &str, actor: &str, id: &str, body: &str) -> String {
+        let base = version_of(r, &view(v), id);
+        let ops = json!([{"op": "update", "id": id, "base": base, "body": body}]);
+        write_as(r, &as_agent(actor, "r1"), v, ops).unwrap().change
+    }
+
+    fn conflict_of(r: &Rdy, v: &str, id: &str) -> Option<String> {
+        let id = BlockId::parse(id).unwrap();
+        r.read()
+            .conflict_on(&view(v), &id)
+            .unwrap()
+            .map(|c| c.id.to_string())
+    }
+
+    /// `rdy edit` in view a: the editor buffer is the block at `base`, its body `body`.
+    fn save(
+        r: &mut Rdy,
+        base: &str,
+        conflict: Option<&str>,
+        body: &str,
+    ) -> Result<rdy_engine::WriteResult, RdyError> {
+        let mut b = r.store().get_block(&base.parse().unwrap()).unwrap();
+        b.body = body.into();
+        let base = EditBase {
+            version: base,
+            conflict,
+        };
+        r.edit_block_at(&as_agent("agent:a", "r1"), "a", b, Some(base), None, None)
+    }
+
+    /// The claim lands "one" (vc); view a updates it to "alpha" (v0); view b updates it to
+    /// "bravo" and lands, which rebases a onto a conflict (base vc, sides v0 and b's).
+    fn a_conflicted_after_b_lands() -> (tempfile::TempDir, Rdy, String, String, String) {
+        let (d, mut r) = project();
+        let (_doc, _section, c) = seed_doc(&mut r, "seed");
+        land(&mut r, "seed").unwrap();
+        let vc = version_of(&r, &Scope::Canon, &c);
+        update(&mut r, "a", "agent:a", &c, "alpha");
+        let v0 = version_of(&r, &view("a"), &c);
+        update(&mut r, "b", "agent:b", &c, "bravo");
+        land(&mut r, "b").unwrap();
+        assert!(
+            conflict_of(&r, "a", &c).is_some(),
+            "b's landing conflicts a"
+        );
+        (d, r, c, vc, v0)
+    }
+
+    #[test]
+    fn msw8_a_stale_buffer_on_a_block_that_became_conflicted_is_stale_base() {
+        let (_d, mut r, c, vc, v0) = a_conflicted_after_b_lands();
+        let cid = conflict_of(&r, "a", &c);
+        // the editor opened on a at v0, before b landed (no conflict then)
+        let e = save(&mut r, &v0, None, "alpha, extended").unwrap_err();
+        assert_eq!(e.code, "E_STALE_BASE", "{e:?}");
+        assert!(
+            e.message
+                .contains(&format!("{c} changed since you read it: your base is ")),
+            "{e:?}"
+        );
+        // even a caller that names the current conflict cannot resolve it from a stale base
+        let e = save(&mut r, &v0, cid.as_deref(), "alpha, extended").unwrap_err();
+        assert_eq!(e.code, "E_STALE_BASE", "{e:?}");
+        assert_eq!(conflict_of(&r, "a", &c), cid, "the conflict stands");
+        assert_eq!(
+            body_of(&r, &view("a"), &c),
+            "one",
+            "a reads the conflict base"
+        );
+        assert_eq!(version_of(&r, &view("a"), &c), vc);
+    }
+
+    #[test]
+    fn msw8_a_conflict_rekeyed_while_the_editor_is_open_is_stale_base() {
+        let (_d, mut r, c, vc, _v0) = a_conflicted_after_b_lands();
+        // the editor opens on a: it reads the conflict base and the conflict
+        let read = conflict_of(&r, "a", &c).unwrap();
+        // view c lands "charlie": a's conflict re-keys (same base, a new side)
+        update(&mut r, "c", "agent:c", &c, "charlie");
+        land(&mut r, "c").unwrap();
+        let now = conflict_of(&r, "a", &c).unwrap();
+        assert_ne!(now, read, "the conflict re-keyed");
+        assert_eq!(version_of(&r, &view("a"), &c), vc, "same base");
+        let e = save(&mut r, &vc, Some(&read), "merged").unwrap_err();
+        assert_eq!(e.code, "E_STALE_BASE", "{e:?}");
+        assert_eq!(conflict_of(&r, "a", &c).as_deref(), Some(now.as_str()));
+        // a token that names the block as unconflicted is refused too
+        let e = save(&mut r, &vc, None, "merged").unwrap_err();
+        assert_eq!(e.code, "E_STALE_BASE", "{e:?}");
+        // the current token resolves the conflict
+        save(&mut r, &vc, Some(&now), "merged").unwrap();
+        assert_eq!(conflict_of(&r, "a", &c), None);
+        assert_eq!(body_of(&r, &view("a"), &c), "merged");
+    }
+
+    #[test]
+    fn msw8_a_token_read_as_conflicted_on_a_resolved_block_is_stale_base() {
+        let (_d, mut r, c, vc, _v0) = a_conflicted_after_b_lands();
+        let read = conflict_of(&r, "a", &c).unwrap();
+        // another session resolves a's conflict while the editor is open
+        save(&mut r, &vc, Some(&read), "resolved").unwrap();
+        let cur = version_of(&r, &view("a"), &c);
+        let e = save(&mut r, &cur, Some(&read), "mine").unwrap_err();
+        assert_eq!(e.code, "E_STALE_BASE", "{e:?}");
+        assert_eq!(body_of(&r, &view("a"), &c), "resolved");
+    }
+}

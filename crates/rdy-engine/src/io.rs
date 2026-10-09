@@ -1060,7 +1060,7 @@ impl Rdy {
         s: &Session,
         view: &str,
         yaml: &str,
-        base: Option<&str>,
+        base: Option<EditBase<'_>>,
         brief: Option<String>,
         reason: Option<&str>,
     ) -> Result<WriteResult, RdyError> {
@@ -1111,15 +1111,66 @@ impl Rdy {
         s: &Session,
         view: &str,
         edited: Block,
-        base: Option<&str>,
+        base: Option<EditBase<'_>>,
         brief: Option<String>,
         reason: Option<&str>,
     ) -> Result<WriteResult, RdyError> {
         let scope = Scope::View(view.to_string());
         let cur = self.read().block(&scope, &edited.id)?;
         let cur_hash = cur.version_hash().to_string();
-        let base = base.unwrap_or(&cur_hash).to_string();
+        let token = base.is_some();
+        let conflict = base.and_then(|b| b.conflict);
+        let base = base.map_or(cur_hash.as_str(), |b| b.version).to_string();
         let current = base == cur_hash;
+        let id = &edited.id;
+        let now = self.read().conflict_on(&scope, id)?.map(|c| c.id);
+        // msw8 fix round 1: a stale buffer never resolves a conflict; the view reads the
+        // conflict's base, and a side may be the editor's own old version, which cres1 accepts
+        if !current && now.is_some() {
+            return Err(RdyError::new(
+                E_STALE_BASE,
+                format!(
+                    "{id} changed since you read it: your base is {}, current is {}",
+                    short(&base),
+                    short(&cur_hash)
+                ),
+                format!("re-read {id} (rdy_context) and retry with base={cur_hash}"),
+            ));
+        }
+        // msw8 fix round 1 (ruling): the edit token carries the conflict the editor read; a
+        // conflict that appeared, re-keyed or went away since then is a change the editor never saw
+        if token && conflict != now.map(|c| c.to_string()).as_deref() {
+            let message = match (conflict, now) {
+                (None, n) => format!(
+                    "{id} changed since you read it: it is now conflicted ({})",
+                    n.map(|n| n.short()).unwrap_or_default()
+                ),
+                (Some(r), None) => format!(
+                    "{id} changed since you read it: its conflict {} is resolved",
+                    short(r)
+                ),
+                (Some(r), Some(n)) => format!(
+                    "{id} changed since you read it: its conflict {} is now {}",
+                    short(r),
+                    n.short()
+                ),
+            };
+            return Err(RdyError::new(
+                E_STALE_BASE,
+                message,
+                format!("re-read {id} (rdy_context lists its conflict's sides) and edit it again"),
+            ));
+        }
+        // the diff is taken against the version the editor read, so a field or body the buffer
+        // left alone is never sent as a change (the write refuses a stale base before it applies)
+        let cur = if current {
+            cur
+        } else {
+            match base.parse::<Hash>() {
+                Ok(h) => self.store.get_block(&h).unwrap_or(cur),
+                Err(_) => cur,
+            }
+        };
         if current && cur == edited {
             return Err(RdyError::new(
                 E_BAD_INPUT,
@@ -1216,4 +1267,18 @@ impl Rdy {
             e
         })
     }
+}
+
+/// msw8: what an editor read of a block, sent back with its edit: the block's version (the `block`
+/// op's `version`) and the conflict the view read it under (`conflict`; none when not
+/// conflicted). A block or conflict that changed since then refuses the edit (`E_STALE_BASE`).
+#[derive(Clone, Copy, Debug)]
+pub struct EditBase<'a> {
+    pub version: &'a str,
+    pub conflict: Option<&'a str>,
+}
+
+/// The first 12 characters of a version or conflict hash the caller sent, as `Hash::short`.
+fn short(h: &str) -> &str {
+    h.get(..12).unwrap_or(h)
 }

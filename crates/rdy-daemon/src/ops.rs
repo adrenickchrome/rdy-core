@@ -205,7 +205,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             parse(
                 op,
                 args,
-                "{yaml, view?, base?, brief?, max_tokens?, reason?}",
+                "{yaml, view?, base?, conflict?, brief?, max_tokens?, reason?}",
             )?,
         ),
         "propose" => propose(
