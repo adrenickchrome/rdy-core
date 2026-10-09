@@ -497,3 +497,87 @@ fn msw3_the_undo_depth_cap_is_e_limit_with_a_way_out_not_a_repair() {
     }
     panic!("no depth cap after 101 nested undos");
 }
+
+#[test]
+fn msw3_a_landed_dep_refusal_names_the_include_that_adds_it_not_a_revoke() {
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = as_agent("agent:a", "r1");
+    r.view_create(&a, "a", None, true).unwrap(); // pinned: landings never rebase it
+    let c1 = write_as(&mut r, &a, "a", claim(&section, "x")).unwrap();
+    let x = c1.created.values().next().unwrap().clone();
+    let v1 = version_of(&r, &view("a"), &x);
+    let c2 = write_as(&mut r, &a, "a", update(&x, &v1, "x2"))
+        .unwrap()
+        .change;
+    let e1 = r
+        .view_exclude(&a, "a", std::slice::from_ref(&c2), false)
+        .unwrap()
+        .head;
+    r.view_exclude(&a, "a", std::slice::from_ref(&c1.change), false)
+        .unwrap();
+    let b = as_agent("agent:b", "r1");
+    r.view_include(&b, "b", std::slice::from_ref(&c1.change))
+        .unwrap();
+    land(&mut r, "b").unwrap(); // c1 lands; pinned a keeps its base
+    let e = r.undo(&a, "a", Some(&e1), false).unwrap_err();
+    assert_eq!(e.code, E_UNDO_LANDING, "{e}");
+    assert!(e.message.contains("a dep of"), "{e}");
+    assert!(
+        !e.fix.contains("rdy_revoke"),
+        "nothing landed is undone: {e}"
+    );
+    assert!(
+        e.fix.contains(&format!("rdy view include a {c2}")),
+        "the way out names the full change id: {e}"
+    );
+    // the way out works: the include adds the landed dep
+    r.view_include(&a, "a", std::slice::from_ref(&c2)).unwrap();
+    let inc = r.read().included("a");
+    assert_eq!(inc.len(), 2, "{inc:?}");
+    check(&r, &view("a")).unwrap();
+}
+
+#[test]
+fn msw3_an_undo_reads_canons_landing_chain_once_not_once_per_change() {
+    const K: usize = 10;
+    const L: u64 = 40;
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    let ids: Vec<String> = (0..K)
+        .map(|i| {
+            let w = write(&mut r, "seed", claim(&section, &format!("k{i}"))).unwrap();
+            w.created.values().next().unwrap().clone()
+        })
+        .collect();
+    land(&mut r, "seed").unwrap();
+    for i in 0..L {
+        let v = format!("l{i}");
+        write(&mut r, &v, claim(&section, &format!("l{i}"))).unwrap();
+        land(&mut r, &v).unwrap();
+    }
+    // unpinned a: each update's dep is the landed change that created its block
+    let a = as_agent("agent:a", "r1");
+    let mut changes = vec![];
+    for x in &ids {
+        let v = version_of(&r, &Scope::Canon, x);
+        changes.push(
+            write_as(&mut r, &a, "a", update(x, &v, "u"))
+                .unwrap()
+                .change,
+        );
+    }
+    r.view_exclude(&a, "a", &changes, false).unwrap();
+    let f0 = r.read().reader().frames_read();
+    let u = r.undo(&a, "a", None, false).unwrap();
+    let frames = r.read().reader().frames_read() - f0;
+    assert_eq!(u.included.len(), K, "{u:?}");
+    // one walk of canon's 1 + L landings, plus the view's ops and changes; a walk per
+    // put-back change reads about (K + 1) x L frames
+    assert!(
+        frames < 2 * L + 10 * K as u64,
+        "{frames} frames for {K} changes over {L} landings"
+    );
+    check(&r, &view("a")).unwrap();
+}

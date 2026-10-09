@@ -99,3 +99,17 @@ fn erow1_the_edit_loop_doc_says_every_page_of_a_cut_briefing_is_truncated() {
         "{EDIT_LOOP_DOC}"
     );
 }
+
+#[test]
+fn msw3_the_undo_rows_cover_a_closed_view_and_a_landed_dep() {
+    let (when, _) = row(E_VIEW_CLOSED);
+    assert_eq!(
+        when,
+        "the view is closed and takes no write, include, exclude or undo, except the undo of its close"
+    );
+    let (_, fix) = row(E_UNDO_LANDING);
+    assert!(
+        fix.contains("rdy_revoke") && fix.contains("rdy_view include"),
+        "{fix}"
+    );
+}

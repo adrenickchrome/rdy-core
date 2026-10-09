@@ -16,7 +16,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_VIEW_CLOSED",
-        "the view is closed and takes no write, include or exclude",
+        "the view is closed and takes no write, include, exclude or undo, except the undo of its close",
         "reopen it with rdy_view {op: \"undo\", view, target: <the close op>}, or fork it",
     ),
     (
@@ -57,7 +57,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (
         "E_UNDO_LANDING",
         "an undo would bring back or remove work that has landed",
-        "a landing is undone by a revoking decision (rdy_revoke)",
+        "a landing is undone by a revoking decision (rdy_revoke); when only a dep of the change landed, include the change directly with rdy_view include, which adds the landed dep",
     ),
     (
         "E_NOTHING_TO_UNDO",

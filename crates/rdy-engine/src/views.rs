@@ -540,14 +540,27 @@ pub(crate) fn missing_deps(
     included: &BTreeSet<Hash>,
     added: &[Hash],
 ) -> Result<Vec<Hash>, RdyError> {
+    Ok(missing_deps_rooted(st, base, included, added)?
+        .into_iter()
+        .map(|(d, _)| d)
+        .collect())
+}
+
+/// `missing_deps`, each dep with the change of `added` whose closure first reached it.
+pub(crate) fn missing_deps_rooted(
+    st: &ReadState,
+    base: Option<Hash>,
+    included: &BTreeSet<Hash>,
+    added: &[Hash],
+) -> Result<Vec<(Hash, Hash)>, RdyError> {
     let reader = st.reader();
     let added_set: BTreeSet<Hash> = added.iter().copied().collect();
-    let mut found: Vec<Hash> = vec![];
+    let mut found: Vec<(Hash, Hash)> = vec![];
     let mut found_set: BTreeSet<Hash> = BTreeSet::new();
-    let mut queue: VecDeque<Hash> = added.iter().copied().collect();
+    let mut queue: VecDeque<(Hash, Hash)> = added.iter().map(|c| (*c, *c)).collect();
     // the landings through the base, walked once for the whole closure
     let mut based = None;
-    while let Some(c) = queue.pop_front() {
+    while let Some((c, root)) = queue.pop_front() {
         for d in reader.change(&c)?.deps {
             if included.contains(&d)
                 || added_set.contains(&d)
@@ -557,8 +570,8 @@ pub(crate) fn missing_deps(
                 continue;
             }
             found_set.insert(d);
-            found.push(d);
-            queue.push_back(d);
+            found.push((d, root));
+            queue.push_back((d, root));
         }
     }
     Ok(found)

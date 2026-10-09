@@ -2,7 +2,7 @@
 //! `rdy view close` closes views.
 use super::{
     Action, ConflictInfo, check_view_op, conflict_infos, dependents, dependents_refusal,
-    missing_deps, no_view, strings,
+    missing_deps_rooted, no_view, strings,
 };
 use crate::error::*;
 use crate::read_state::ReadState;
@@ -87,52 +87,70 @@ fn undo_landing(message: String) -> RdyError {
     )
 }
 
-/// The landed rule: an undo never brings back or removes landed work. `Some` refusal when
-/// `effect` would re-include a landed change or a landed dep its re-include adds, or would
-/// exclude changes that all landed and none of which the view still includes.
+/// What the landed rule says of an undo's effect.
+enum Landed {
+    /// The undo may go ahead; for a re-include, the missing deps it adds (step 5 writes them).
+    Clear(Vec<Hash>),
+    Refused(RdyError),
+}
+
+/// The changes a re-include of `cs` puts back: those `included` lacks, each once, in order.
+fn put_back_of(cs: &[Hash], included: &BTreeSet<Hash>) -> Vec<Hash> {
+    let mut seen = BTreeSet::new();
+    cs.iter()
+        .filter(|c| !included.contains(c) && seen.insert(**c))
+        .copied()
+        .collect()
+}
+
+/// The landed rule: an undo never brings back or removes landed work. `Refused` when `effect`
+/// would re-include a landed change or a landed dep its re-include adds, or would exclude
+/// changes that all landed and none of which the view still includes. The deps come from one
+/// closure over the whole put-back set, so canon's landing chain is walked at most once.
 fn landed_refusal(
     st: &ReadState,
     view: &str,
     short: &str,
     effect: &ResolvedOp,
     included: &BTreeSet<Hash>,
-) -> Result<Option<RdyError>, RdyError> {
+) -> Result<Landed, RdyError> {
     let reader = st.reader();
     match effect {
         ResolvedOp::Include(cs) => {
             for c in cs {
                 if let Some(l) = reader.landing_of(c)? {
-                    return Ok(Some(undo_landing(format!(
+                    return Ok(Landed::Refused(undo_landing(format!(
                         "op {short} would re-include {}, which landed in {}",
                         c.short(),
                         l.short()
                     ))));
                 }
             }
-            // the deps the re-include adds (the closure step 5 writes), each with the change
-            // that needs it
-            let mut seen = BTreeSet::new();
-            let base = st.effective_base(view);
-            for c in cs
-                .iter()
-                .filter(|c| !included.contains(c) && seen.insert(**c))
-            {
-                for d in missing_deps(st, base, included, std::slice::from_ref(c))? {
-                    if let Some(l) = reader.landing_of(&d)? {
-                        return Ok(Some(undo_landing(format!(
+            // the deps the re-include adds (the closure step 5 writes), each with the
+            // put-back change whose closure reached it
+            let put_back = put_back_of(cs, included);
+            let rooted = missing_deps_rooted(st, st.effective_base(view), included, &put_back)?;
+            for (d, c) in &rooted {
+                if let Some(l) = reader.landing_of(d)? {
+                    return Ok(Landed::Refused(RdyError::new(
+                        E_UNDO_LANDING,
+                        format!(
                             "op {short} would re-include {}, a dep of {}, which landed in {}",
                             d.short(),
                             c.short(),
                             l.short()
-                        ))));
-                    }
+                        ),
+                        format!(
+                            "include the change directly instead: rdy view include {view} {c} (MCP: rdy_view include); an include adds the landed dep"
+                        ),
+                    )));
                 }
             }
-            Ok(None)
+            Ok(Landed::Clear(rooted.into_iter().map(|(d, _)| d).collect()))
         }
         ResolvedOp::Exclude(cs) if !cs.is_empty() => {
             if cs.iter().any(|c| included.contains(c)) {
-                return Ok(None);
+                return Ok(Landed::Clear(vec![]));
             }
             let mut first = None;
             for c in cs {
@@ -140,13 +158,18 @@ fn landed_refusal(
                     Some(l) => {
                         first.get_or_insert(l);
                     }
-                    None => return Ok(None),
+                    None => return Ok(Landed::Clear(vec![])),
                 }
             }
-            Ok(first
-                .map(|l| undo_landing(format!("op {short}'s change(s) landed in {}", l.short()))))
+            Ok(match first {
+                Some(l) => Landed::Refused(undo_landing(format!(
+                    "op {short}'s change(s) landed in {}",
+                    l.short()
+                ))),
+                None => Landed::Clear(vec![]),
+            })
         }
-        _ => Ok(None),
+        _ => Ok(Landed::Clear(vec![])),
     }
 }
 
@@ -186,7 +209,7 @@ impl Rdy {
         let included_list = st.included(view);
         let included: BTreeSet<Hash> = included_list.iter().copied().collect();
         // 3 and 4. the target, its effect, and the rules on it
-        let (target, target_op, effect) = match target {
+        let (target, target_op, effect, deps) = match target {
             Some(text) => {
                 if !is_op_prefix(text) {
                     return Err(RdyError::new(
@@ -234,14 +257,15 @@ impl Rdy {
                     ));
                 }
                 let effect = reader.undo_effect(view, &h)?;
-                if let Some(e) = landed_refusal(&st, view, &h.short(), &effect, &included)? {
-                    return Err(e);
-                }
+                let deps = match landed_refusal(&st, view, &h.short(), &effect, &included)? {
+                    Landed::Refused(e) => return Err(e),
+                    Landed::Clear(deps) => deps,
+                };
                 // a closed view takes no undo but the one of its close
                 if head.closed && effect != ResolvedOp::Reopen {
                     return Err(StoreError::ViewClosed(view.into()).into());
                 }
-                (h, op, effect)
+                (h, op, effect, deps)
             }
             None => {
                 let mut pick = None;
@@ -264,8 +288,10 @@ impl Rdy {
                     if head.closed && effect != ResolvedOp::Reopen {
                         continue;
                     }
-                    if landed_refusal(&st, view, &h.short(), &effect, &included)?.is_none() {
-                        pick = Some((*h, op.clone(), effect));
+                    if let Landed::Clear(deps) =
+                        landed_refusal(&st, view, &h.short(), &effect, &included)?
+                    {
+                        pick = Some((*h, op.clone(), effect, deps));
                         break;
                     }
                 }
@@ -321,13 +347,8 @@ impl Rdy {
                 }
             }
             ResolvedOp::Include(cs) => {
-                let mut seen = BTreeSet::new();
-                put_back = cs
-                    .iter()
-                    .filter(|c| !included.contains(c) && seen.insert(**c))
-                    .copied()
-                    .collect();
-                let deps = missing_deps(&st, st.effective_base(view), &included, &put_back)?;
+                // the deps `landed_refusal` found for this put-back set
+                put_back = put_back_of(cs, &included);
                 if !deps.is_empty() {
                     ops.push(ViewOpKind::Include {
                         changes: deps.clone(),
