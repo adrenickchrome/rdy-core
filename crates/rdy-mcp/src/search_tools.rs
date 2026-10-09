@@ -44,7 +44,7 @@ pub struct SearchParams {
     pub tension: Option<bool>,
     /// Keep blocks that name an entity by name or alias: linked (tied to it) or unlinked (not linked yet).
     pub mentions: Option<String>,
-    /// Add a briefing over this page's hits; cite its base.token to write those blocks.
+    /// Add a briefing over this page's hits and over the blocks of the entity sheets; cite its base.token to write those blocks.
     pub brief: Option<bool>,
 }
 
@@ -85,15 +85,26 @@ pub fn rdy_search(st: &mut McpState, p: SearchParams) -> Result<Value, RdyError>
         p.page.as_deref(),
         search_tokens,
     )?;
-    let briefing = if brief && !r.matches.is_empty() {
-        let mut ids: Vec<String> = Vec::new();
-        for m in &r.matches {
-            for id in std::iter::once(&m.id).chain(m.also.iter().map(|a| &a.id)) {
-                if !ids.contains(id) {
-                    ids.push(id.clone());
-                }
+    // The page's hits, and the blocks of each entity sheet: a call whose every hit is held by a
+    // sheet still gets a briefing over the sheet's blocks.
+    let mut ids: Vec<String> = Vec::new();
+    if brief {
+        let hits = r
+            .matches
+            .iter()
+            .flat_map(|m| std::iter::once(&m.id).chain(m.also.iter().map(|a| &a.id)));
+        let sheets = r.entities.iter().flat_map(|e| {
+            std::iter::once(&e.id)
+                .chain(e.facts.iter().map(|b| &b.id))
+                .chain(e.also_described_in.iter().map(|b| &b.id))
+        });
+        for id in hits.chain(sheets) {
+            if !ids.contains(id) {
+                ids.push(id.clone());
             }
         }
+    }
+    let briefing = if !ids.is_empty() {
         // A briefing that fails fails the call: never a token without its briefing.
         let b = st_.brief(&scope, &Coverage { ids, path: None }, briefing_tokens)?;
         b.register(&st.engine.briefs());

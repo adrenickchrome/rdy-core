@@ -4,12 +4,15 @@ use rdy_engine::{E_BAD_INPUT, E_UNKNOWN_BLOCK, Materialized, RdyError};
 use rdy_model::tree::{DOC, slug as slug_of};
 use rdy_model::{Block, BlockId};
 use serde::Serialize;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 
 /// The most cut reads one MCP session keeps a cursor for; the oldest is dropped first.
 pub const READ_REGISTRY_CAP: usize = 32;
 /// The longest pattern `rdy_read` accepts, in characters.
 pub const MAX_PATTERN: usize = 1024;
+/// The most text, in bytes, a `/regex/` read matches against. Every page call runs the pattern
+/// over the whole read while it holds the session lock, so the text is capped.
+pub(crate) const READ_REGEX_HAYSTACK_MAX: usize = 4 * 1024 * 1024;
 
 /// A read as its first call gave it (`format` defaulted to `compact`). Its JSON is part of the
 /// page token, and a page call reads with it again.
@@ -73,14 +76,19 @@ impl Pattern {
         }
         if text.len() >= 2 && text.starts_with('/') && text.ends_with('/') {
             let inner = &text[1..text.len() - 1];
-            return regex::RegexBuilder::new(inner)
-                .size_limit(1 << 20)
-                .build()
+            return rdy_engine::search::bounded_regex(inner, false)
                 .map(Pattern::Regex)
                 .map_err(|e| {
+                    if e.code != E_BAD_INPUT {
+                        return e;
+                    }
+                    let detail = e
+                        .message
+                        .strip_prefix("query is not a valid pattern: ")
+                        .unwrap_or(&e.message);
                     RdyError::new(
                         E_BAD_INPUT,
-                        format!("pattern is not a valid regex: {e}"),
+                        format!("pattern is not a valid regex: {detail}"),
                         "write /regex/ in Rust regex syntax, or a plain substring",
                     )
                 });
@@ -112,7 +120,8 @@ pub fn parse_cursor(text: &str) -> Option<(String, usize)> {
 
 /// rfoc1: the section of `doc` that `slug` names. Sections are named by the slug of their title,
 /// depth-first in child order; the 2nd, 3rd, … section with the same slug in this doc is named
-/// `{slug}-2`, `{slug}-3`, …. The first exact match wins.
+/// `{slug}-2`, `{slug}-3`, …, skipping a name an earlier section already has. The first exact
+/// match wins.
 pub fn section_by_slug(m: &Materialized, doc: &Block, slug: &str) -> Result<BlockId, RdyError> {
     if doc.block_type != DOC {
         return Err(RdyError::new(
@@ -124,7 +133,7 @@ pub fn section_by_slug(m: &Materialized, doc: &Block, slug: &str) -> Result<Bloc
             "pass a doc's id, key or path before #",
         ));
     }
-    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    let mut taken: BTreeSet<String> = BTreeSet::new();
     let mut walk: Vec<&Block> = m.children(Some(&doc.id)).into_iter().rev().collect();
     while let Some(b) = walk.pop() {
         // a doc inside this doc has its own sections
@@ -133,9 +142,15 @@ pub fn section_by_slug(m: &Materialized, doc: &Block, slug: &str) -> Result<Bloc
         }
         if b.block_type == "section" {
             let base = slug_of(b.field_str("title").unwrap_or(""));
-            let n = seen.entry(base.clone()).or_insert(0);
-            *n += 1;
-            let name = if *n == 1 { base } else { format!("{base}-{n}") };
+            let name = if taken.contains(&base) {
+                (2..)
+                    .map(|n| format!("{base}-{n}"))
+                    .find(|c| !taken.contains(c))
+                    .expect("an unbounded range has a free name")
+            } else {
+                base
+            };
+            taken.insert(name.clone());
             if name == slug {
                 return Ok(b.id.clone());
             }
@@ -245,5 +260,19 @@ mod tests {
             Pattern::parse(&"é".repeat(MAX_PATTERN)).is_ok(),
             "characters, not bytes"
         );
+    }
+
+    #[test]
+    fn msw17_a_read_pattern_has_the_searchs_regex_limits() {
+        let deep = format!("/{}a{}/", "(".repeat(100), ")".repeat(100));
+        assert_eq!(
+            Pattern::parse(&deep).err().map(|e| e.code),
+            Some(E_BAD_INPUT),
+            "nesting past 64 is refused"
+        );
+        let big = Pattern::parse("/(?:a{1000}){1000}/")
+            .err()
+            .expect("compiles too large");
+        assert_eq!(big.code, rdy_engine::E_LIMIT);
     }
 }

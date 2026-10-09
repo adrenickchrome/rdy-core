@@ -194,3 +194,34 @@ fn mflt1_rdy_search_takes_filters_and_starts_with_totals() {
     );
     c.alive();
 }
+
+#[test]
+fn msw17_brief_true_briefs_the_sheet_when_every_hit_is_held() {
+    let (dir, mut r) = project();
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "ops", "title": "Ops", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Summary"}},
+        {"op": "create", "type": "entity", "id": "$e", "parent": "$s", "body": "Keeps the books.", "fields": {"name": "Ledger service"}}
+    ])).unwrap();
+    land(&mut r, "work").unwrap();
+    let e = w.created["$e"].clone();
+    drop(r);
+    let mut c = McpClient::start(dir.path());
+    agent(&mut c, "s1");
+    let v = c
+        .call(
+            "rdy_search",
+            json!({"query": "Ledger service", "brief": true}),
+        )
+        .ok();
+    assert_eq!(v["entities"][0]["id"], e.as_str(), "{v}");
+    assert!(
+        v["matches"].as_array().is_none_or(|a| a.is_empty()),
+        "every hit is held: {v}"
+    );
+    assert!(
+        v["briefing"]["base"]["token"].is_string(),
+        "the sheet's blocks are briefed: {v}"
+    );
+    c.alive();
+}

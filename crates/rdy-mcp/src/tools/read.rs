@@ -74,7 +74,18 @@ pub fn rdy_read(st: &mut McpState, p: ReadParams) -> Result<Value, RdyError> {
                 PAGE_STALE_FIX,
             )
         })?;
-        let read = read_entries(st, &q)?;
+        // a target that is gone, or a view that closed, is a read that moved
+        let read = read_entries(st, &q).map_err(|e| {
+            if [E_UNKNOWN_BLOCK, E_NOT_FOUND, E_VIEW_CLOSED].contains(&e.code) {
+                RdyError::new(
+                    E_PAGE_STALE,
+                    "the read moved since its first page: read again",
+                    PAGE_STALE_FIX,
+                )
+            } else {
+                e
+            }
+        })?;
         if read.token(&q) != token {
             return Err(RdyError::new(
                 E_PAGE_STALE,
@@ -252,7 +263,23 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
     } else {
         Default::default()
     };
-    let keeps = |line: &str| pattern.as_ref().is_none_or(|p| p.matches(line));
+    // a /regex/ sees at most READ_REGEX_HAYSTACK_MAX bytes of text: past it no line is matched,
+    // and the read is refused after the walk, with the whole size
+    let is_regex = matches!(pattern, Some(read_page::Pattern::Regex(_)));
+    let haystack = std::cell::Cell::new(0usize);
+    let keeps = |line: &str| {
+        let Some(p) = pattern.as_ref() else {
+            return true;
+        };
+        if is_regex {
+            let seen = haystack.get().saturating_add(line.len() + 1);
+            haystack.set(seen);
+            if seen > read_page::READ_REGEX_HAYSTACK_MAX {
+                return false;
+            }
+        }
+        p.matches(line)
+    };
     let (mut entries, mut ids) = (vec![], vec![]);
     let mut stack = vec![(root, 0usize)];
     while let Some((b, depth)) = stack.pop() {
@@ -281,7 +308,8 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
             }
             _ => {
                 let pad = "  ".repeat(depth);
-                let mut head = format!("{pad}{} {}: {}", b.id, b.block_type, compact_summary(b));
+                // the pattern sees the head without its indent, as it sees a code line
+                let mut head = format!("{} {}: {}", b.id, b.block_type, compact_summary(b));
                 if suspects.contains(&b.id) {
                     head.push_str(" [suspect]");
                 }
@@ -296,20 +324,21 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
                 }
                 // a pattern matches the head line, a code line's own text, or any line of the
                 // block's whole text (as markdown gives it: a prose body past its first sentence,
-                // table rows, diagram source); a kept code block shows only the lines that match
+                // table rows, diagram source); a kept code block shows only the lines that match.
+                // A code block's lines are matched once, so markdown does not repeat them.
                 let body = code_lines(b);
                 let matching: Vec<&String> = body.iter().filter(|l| keeps(l)).collect();
                 let hit = pattern.is_none()
                     || keeps(&head)
                     || !matching.is_empty()
-                    || markdown().lines().any(keeps);
+                    || (b.block_type != "code" && markdown().lines().any(keeps));
                 hit.then(|| {
                     let shown: Vec<&String> = if pattern.is_some() {
                         matching
                     } else {
                         body.iter().collect()
                     };
-                    let mut lines = vec![head];
+                    let mut lines = vec![format!("{pad}{head}")];
                     for l in shown {
                         lines.push(if l.is_empty() {
                             format!("{pad}  |")
@@ -328,6 +357,16 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
         for c in m.children(Some(&b.id)).into_iter().rev() {
             stack.push((c, depth + 1));
         }
+    }
+    if haystack.get() > read_page::READ_REGEX_HAYSTACK_MAX {
+        return Err(RdyError::new(
+            E_LIMIT,
+            format!(
+                "the read is too large to match a regex against ({} bytes; the limit is 4 MiB)",
+                haystack.get()
+            ),
+            "narrow the read with #section, or use a plain-text pattern",
+        ));
     }
     let sep = match format {
         "yaml" => "---\n",

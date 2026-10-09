@@ -331,3 +331,87 @@ fn rpag1_every_page_fits_max_tokens_under_a_conflict_on_the_root() {
     }
     assert!(pages > 1, "{pages}");
 }
+
+#[test]
+fn msw17_an_anchored_pattern_matches_an_indented_head_line() {
+    let (_d, mut st, c) = st_with(json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Guide", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Goals"}},
+        {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "First goal."}
+    ]));
+    let a = c["$a"].as_str();
+    let v = read(
+        &mut st,
+        json!({"id": c["$d"], "pattern": format!("/^{a} claim:/")}),
+    )
+    .unwrap();
+    assert_eq!(v["matched"], 1, "{v}");
+    let text = v["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("    ") && text.trim_start().starts_with(a),
+        "{v}"
+    );
+}
+
+#[test]
+fn msw17_a_page_of_a_section_read_whose_heading_changed_is_stale() {
+    let (_d, mut st, c) = st_with(many(200));
+    let first = read(
+        &mut st,
+        json!({"id": format!("{}#claims", c["$d"]), "max_tokens": 300}),
+    )
+    .unwrap();
+    let next = first["next"].as_str().unwrap().to_string();
+    let s = c["$s"].clone();
+    st.engine
+        .write(Box::new(move |r| {
+            write(
+                r,
+                "work",
+                json!([{"op": "update", "id": s, "fields": {"title": "Renamed"}}]),
+            )?;
+            Ok(Value::Null)
+        }))
+        .unwrap();
+    let e = read(&mut st, json!({"page": next})).unwrap_err();
+    assert_eq!(e.code, "E_PAGE_STALE", "{e}");
+    assert!(e.message.contains("moved since its first page"), "{e}");
+}
+
+#[test]
+fn msw17_a_repeated_heading_skips_slugs_already_taken() {
+    let (_d, mut st, c) = st_with(json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Guide", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$a", "parent": "$d", "fields": {"title": "Goals"}},
+        {"op": "create", "type": "section", "id": "$b", "parent": "$d", "fields": {"title": "Goals 2"}},
+        {"op": "create", "type": "section", "id": "$g", "parent": "$d", "fields": {"title": "Goals"}}
+    ]));
+    for (slug, want) in [("goals", "$a"), ("goals-2", "$b"), ("goals-3", "$g")] {
+        let v = read(&mut st, json!({"id": format!("{}#{slug}", c["$d"])})).unwrap();
+        assert_eq!(v["id"], c[want].as_str(), "{slug}: {v}");
+    }
+}
+
+#[test]
+fn msw17_a_regex_read_past_the_haystack_cap_is_refused_and_a_substring_is_not() {
+    let line = format!("{}\n", "x".repeat(1023));
+    let big = line.repeat(4 * 1024 + 8);
+    let (_d, mut st, c) = st_with(json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Big", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Dump"}},
+        {"op": "create", "type": "code", "id": "$c", "parent": "$s", "body": big, "fields": {"lang": "text"}}
+    ]));
+    let e = read(&mut st, json!({"id": c["$d"], "pattern": "/qqq/"})).unwrap_err();
+    assert_eq!(e.code, "E_LIMIT", "{e}");
+    assert!(
+        e.message
+            .starts_with("the read is too large to match a regex against ("),
+        "{e}"
+    );
+    assert_eq!(
+        e.fix,
+        "narrow the read with #section, or use a plain-text pattern"
+    );
+    let ok = read(&mut st, json!({"id": c["$d"], "pattern": "qqq"})).unwrap();
+    assert_eq!(ok["matched"], 0, "{ok}");
+}

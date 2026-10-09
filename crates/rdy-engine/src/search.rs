@@ -823,7 +823,7 @@ fn compile_as(
     } else {
         regex::escape(&q.text)
     };
-    let phrase = build(&pattern, ignore_case)?;
+    let phrase = bounded_regex(&pattern, ignore_case)?;
     let mut distinct: Vec<&str> = vec![];
     if !q.regex {
         for w in q.text.split_whitespace() {
@@ -835,7 +835,7 @@ fn compile_as(
     let words = if distinct.len() >= 2 {
         distinct
             .into_iter()
-            .map(|w| build(&regex::escape(w), ignore_case))
+            .map(|w| bounded_regex(&regex::escape(w), ignore_case))
             .collect::<Result<_, _>>()?
     } else {
         vec![]
@@ -843,8 +843,9 @@ fn compile_as(
     Ok((phrase, words))
 }
 
-/// One bounded regex; its errors as rdy errors.
-fn build(pattern: &str, ignore_case: bool) -> Result<Regex, RdyError> {
+/// One regex with the search's limits (program size, lazy-DFA cache, nesting); its errors as rdy
+/// errors. `rdy_read`'s `/regex/` patterns use it too.
+pub fn bounded_regex(pattern: &str, ignore_case: bool) -> Result<Regex, RdyError> {
     RegexBuilder::new(pattern)
         .case_insensitive(ignore_case)
         .size_limit(REGEX_SIZE_LIMIT)
