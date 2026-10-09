@@ -213,7 +213,7 @@ impl Detector for DuplicateDefinition {
             let what = match &key {
                 Key::Name(n) => {
                     let verb = if group.len() == 2 { "both" } else { "all" };
-                    format!("{verb} define \"{n}\"")
+                    format!("{verb} define \"{}\"", clipped(n, 80))
                 }
                 Key::Text(_) => {
                     let canon_m = cx.canon_m()?;

@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// `rdy_schema`'s paragraph on tensions.
-pub const TENSIONS_DOC: &str = "rdy_tensions {scope?, kind?, severity?, status?, view?, area?, involving?, reviews?, max_tokens?} lists tensions: disagreements between in-flight changes, between a change and canon, or inside canon. Kinds: edit_collision, fork, premise_shift, area_overlap, duplicate_definition, unjustified_change, deprecated_reference. scope: inflight (default, every tension), canon (tensions whose sides are all canon) or a view. status: open (default) or dismissed. A side is a change id or canon@<landing>; intent overlaps (read_time) have an intent side and are resolved through their intent, never dismissed. The listing also shows the landing form of an open proposal (proposal: P-x@n) when it differs from the in-flight one: the gate judges that form, and a refusal names it. A fork, duplicate definition or deprecated reference (from content that is not itself deprecated) stays open in canon after its last change lands, until its trigger stops; the other kinds end when their last change lands (a stale pin in canon is a suspect, not a tension). Members of one alternative set never raise edit_collision with each other. Normative text duplicates need at least duplicate_text_min_words words (a pack setting, default 3). A blocking tension refuses a landing only when a side is in the proposal and every side would be in canon after it (E_BLOCKING_TENSION); a tension whose sides are all canon already never refuses. Resolve a tension with a change (edit or repin a side); dismiss one with rdy_resolve {tension, dismiss: {reason}}: anyone who writes may dismiss an advisory one; a blocking one needs the reviewer role or a human, of another actor than every side's author (E_PERMISSION, E_SELF_REVIEW). A dismissal stays with the tension (status dismissed) until a side's content changes.";
+pub const TENSIONS_DOC: &str = "rdy_tensions {scope?, kind?, severity?, status?, view?, area?, involving?, reviews?, max_tokens?} lists tensions: disagreements between in-flight changes, between a change and canon, or inside canon. Kinds: edit_collision, fork, premise_shift, area_overlap, duplicate_definition, unjustified_change, deprecated_reference. scope: inflight (default, every tension), canon (tensions whose sides are all canon) or a view. status: open (default) or dismissed. A side is a change id or canon@<landing>; intent overlaps (read_time) have an intent side and are resolved through their intent, never dismissed. The listing also shows the landing form of an open proposal (proposal: P-x@n) when it differs from the in-flight one: the gate judges that form, and a refusal names it. A fork, duplicate definition or deprecated reference (from content that is not itself deprecated) stays open in canon after its last change lands, until its trigger stops; the other kinds end when their last change lands (a stale pin in canon is a suspect, not a tension). Members of one alternative set never raise edit_collision with each other. A duplicate_definition is one tension per group: every block that defines one name, or every normative block with one text, is a member. Normative text duplicates need at least duplicate_text_min_words words (a pack setting, default 3). A blocking tension refuses a landing only when a side is in the proposal and every side would be in canon after it (E_BLOCKING_TENSION); a tension whose sides are all canon already never refuses. Resolve a tension with a change (edit or repin a side); dismiss one with rdy_resolve {tension, dismiss: {reason}}: anyone who writes may dismiss an advisory one; a blocking one needs the reviewer role or a human, of another actor than every side's author (E_PERMISSION, E_SELF_REVIEW). A dismissal stays with the tension (status dismissed) until a side's content changes; for a duplicate_definition, also until the group's membership changes (a member added, edited away or removed).";
 
 /// One tensions request: which tensions to list. Every filter given must match.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -563,6 +563,14 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// FW-TN2: the doc says a duplicate is one tension per group and that a membership change
+    /// voids a dismissal.
+    #[test]
+    fn mten1_the_tensions_doc_says_a_duplicate_is_one_tension_per_group() {
+        assert!(TENSIONS_DOC.contains("A duplicate_definition is one tension per group"));
+        assert!(TENSIONS_DOC.contains("also until the group's membership changes"));
     }
 
     #[test]

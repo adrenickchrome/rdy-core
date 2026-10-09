@@ -286,7 +286,9 @@ fn tdup1_removing_a_member_down_to_one_resolves_it() {
     assert_carry_matches(&r);
     let two = one(&r, TensionKind::DuplicateDefinition);
     assert_ne!(two.id, three.id);
-    assert_eq!(two.blocks(), vec![ids[0].clone(), ids[1].clone()]);
+    let mut want = vec![ids[0].clone(), ids[1].clone()];
+    want.sort();
+    assert_eq!(two.blocks(), want, "blocks() is sorted by id");
     put(&mut r, "b", upd(&ids[1], "Fees are charged weekly."));
     assert_carry_matches(&r);
     assert!(of_kind(&r, TensionKind::DuplicateDefinition).is_empty());
@@ -342,4 +344,21 @@ fn tdup1_a_name_group() {
     for id in &ids {
         assert!(t.summary.contains(&id.to_string()), "{}", t.summary);
     }
+}
+
+/// FW-TN2 review: a long defined name is clipped in the summary, as a text is (80 characters).
+#[test]
+fn tdup1_a_long_name_is_clipped_in_the_summary() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let long = "fee ".repeat(40);
+    put(&mut r, "a", term(&s.section, &long));
+    put(&mut r, "b", term(&s.section, &long.to_uppercase()));
+    let t = one(&r, TensionKind::DuplicateDefinition);
+    let clipped: String = normalize_name(&long).chars().take(80).collect();
+    assert!(
+        t.summary.contains(&format!("\"{clipped}…\"")),
+        "{}",
+        t.summary
+    );
 }
