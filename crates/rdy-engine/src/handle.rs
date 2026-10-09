@@ -123,6 +123,7 @@ impl Rdy {
             publish_gen: 0,
             settled_batch,
             tension_base: None,
+            full_publish_panics: 0,
         };
         r.invalidate();
         // that publish replaced the placeholder state: the first write records the base
@@ -194,6 +195,13 @@ impl Rdy {
     pub fn set_detectors_for_tests(&mut self, d: &'static [&'static dyn tensions::Detector]) {
         self.detectors = d;
         let _ = self.publish(crate::Delta::Full);
+    }
+
+    /// Test hook: the next `n` `Delta::Full` publishes (a pack reload's, `invalidate`'s) panic
+    /// before they change anything.
+    #[doc(hidden)]
+    pub fn panic_full_publishes_for_tests(&mut self, n: u32) {
+        self.full_publish_panics = n;
     }
 
     /// Days without a write after which an open view is idle (`views.idle_days`, default 14).

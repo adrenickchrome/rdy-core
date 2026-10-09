@@ -41,6 +41,9 @@ pub struct Writer {
     checkpoint_failing: bool,
     /// Settling the tension set has failed and the failure was logged; cleared by a success.
     settle_failing: bool,
+    /// A clean republish after a panic panicked too: the published state may be stale, so the
+    /// next message retries it first. Cleared by a success.
+    republish_pending: bool,
 }
 
 /// A handle on the writer thread: send it writes, reloads and the shutdown.
@@ -81,6 +84,7 @@ impl Writer {
             queued: Arc::clone(&queued),
             checkpoint_failing: false,
             settle_failing: false,
+            republish_pending: false,
         };
         let thread = std::thread::Builder::new()
             .name("rdy-writer".into())
@@ -104,6 +108,33 @@ impl Writer {
         }
     }
 
+    /// After a panic the caches may be half-updated: republishes a clean state (`invalidate`). A
+    /// panic in that republish is caught and logged, and the last published state stays, so the
+    /// writer keeps serving; the next message retries the republish. `after` names what
+    /// panicked first.
+    fn invalidate_after_panic(&mut self, rdy: &mut Rdy, after: &str) {
+        match catch_unwind(AssertUnwindSafe(|| rdy.invalidate())) {
+            Ok(()) => self.republish_pending = false,
+            Err(p) => {
+                self.republish_pending = true;
+                log(&format!(
+                    "the clean republish after a panic in {after} panicked too ({}); the last published state stays until a retry succeeds",
+                    panic_text(&*p)
+                ));
+            }
+        }
+    }
+
+    /// Retries a clean republish that panicked (see [`Self::invalidate_after_panic`]).
+    fn retry_republish(&mut self, rdy: &mut Rdy) {
+        if self.republish_pending {
+            self.invalidate_after_panic(rdy, "the retried republish");
+            if !self.republish_pending {
+                log("the retried clean republish succeeded");
+            }
+        }
+    }
+
     /// Reloads the config and packs if the watch saw them change. A reload bumps the pack
     /// generation and clears the pack error; files that do not load stay out (the loaded pack
     /// stays), are recorded as seen (as the reload read them, so a fix that lands meanwhile is
@@ -113,11 +144,11 @@ impl Writer {
     /// A panic never ends the writer: the caches may be half-updated, so they are cleared (the
     /// caller republishes); the previous pack stays loaded, the pack error says so, and the call
     /// answers `E_INTERNAL`.
-    fn maybe_reload(&self, rdy: &mut Rdy) -> Result<ReloadOutcome, RdyError> {
+    fn maybe_reload(&mut self, rdy: &mut Rdy) -> Result<ReloadOutcome, RdyError> {
         match catch_unwind(AssertUnwindSafe(|| self.reload_unguarded(rdy))) {
             Ok(out) => out,
             Err(p) => {
-                rdy.invalidate();
+                self.invalidate_after_panic(rdy, "the pack reload");
                 let text = format!(
                     "pack reload panicked: {}; the previous pack stays loaded",
                     panic_text(&*p)
@@ -223,7 +254,7 @@ impl Writer {
             Ok(Ok(_)) => None,
             Ok(Err(e)) => Some(e.to_string()),
             Err(p) => {
-                rdy.invalidate();
+                self.invalidate_after_panic(rdy, "the tension settle");
                 self.publish(rdy);
                 Some(format!("internal error: {}", panic_text(&*p)))
             }
@@ -256,6 +287,7 @@ impl Writer {
             };
             let published = match msg {
                 Msg::Run(f, reply) => {
+                    self.retry_republish(&mut rdy);
                     // its outcome is logged and reported in the replies' notices; a reload's
                     // tension events are settled before the write's, with no `by`
                     if let Ok(ReloadOutcome::Reloaded) = self.maybe_reload(&mut rdy) {
@@ -265,7 +297,7 @@ impl Writer {
                         Ok(out) => out,
                         Err(p) => {
                             // the caches may be half-updated: republish a clean state
-                            rdy.invalidate();
+                            self.invalidate_after_panic(&mut rdy, "a write");
                             Err(RdyError::new(
                                 E_INTERNAL,
                                 format!("internal error on the writer: {}", panic_text(&*p)),
@@ -280,6 +312,7 @@ impl Writer {
                     published
                 }
                 Msg::Reload(reply) => {
+                    self.retry_republish(&mut rdy);
                     let out = self.maybe_reload(&mut rdy);
                     let published = self.publish(&rdy);
                     let reloaded = matches!(out, Ok(ReloadOutcome::Reloaded));
@@ -420,6 +453,70 @@ mod tests {
             .run(Box::new(|_: &mut Rdy| Ok(serde_json::Value::Null)));
         assert!(out.is_ok(), "{out:?}");
         assert!(sh.writer.is_alive(), "the writer survives a reload panic");
+        sh.shutdown().unwrap();
+    }
+
+    #[test]
+    fn msw9_a_panic_inside_the_pack_reloads_publish_does_not_kill_the_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
+        // reload_pack's own publish panics, then the panic arm's clean republish panics too
+        let out = sh.writer.run(Box::new(|rdy: &mut Rdy| {
+            rdy.panic_full_publishes_for_tests(2);
+            Ok(serde_json::Value::Null)
+        }));
+        assert!(out.is_ok(), "{out:?}");
+        std::fs::write(dir.path().join(".rdy/packs/proj.yaml"), PACK_A).unwrap();
+        std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: proj\n").unwrap();
+        let out = sh
+            .writer
+            .run(Box::new(|_: &mut Rdy| Ok(serde_json::Value::Null)));
+        assert!(out.is_ok(), "{out:?}");
+        assert!(
+            sh.writer.is_alive(),
+            "the writer survives a panic in the reload's publish"
+        );
+        assert!(
+            sh.pack_status()
+                .1
+                .is_some_and(|e| e.contains("pack reload panicked")),
+            "{:?}",
+            sh.pack_status()
+        );
+        // the hook is spent: the next write first retries the clean republish, so the state
+        // it publishes holds the pack that reload_pack swapped in
+        let out = sh
+            .writer
+            .run(Box::new(|_: &mut Rdy| Ok(serde_json::Value::Null)));
+        assert!(out.is_ok(), "{out:?}");
+        assert_eq!(
+            sh.pack_status().1,
+            None,
+            "the reload succeeds and clears the error"
+        );
+        assert_eq!(sh.state.load().pack().name, "proj");
+        sh.shutdown().unwrap();
+    }
+
+    #[test]
+    fn msw9_a_panic_in_a_writes_clean_republish_does_not_kill_the_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
+        // the write panics, then the f arm's clean republish panics too
+        let out = sh.writer.run(Box::new(|rdy: &mut Rdy| {
+            rdy.panic_full_publishes_for_tests(1);
+            panic!("write test panic")
+        }));
+        let e = out.unwrap_err();
+        assert_eq!(e.code, rdy_engine::E_INTERNAL, "{e:?}");
+        assert!(
+            sh.writer.is_alive(),
+            "the writer survives a panic in the clean republish"
+        );
+        let out = sh
+            .writer
+            .run(Box::new(|_: &mut Rdy| Ok(serde_json::Value::Null)));
+        assert!(out.is_ok(), "{out:?}");
         sh.shutdown().unwrap();
     }
 }

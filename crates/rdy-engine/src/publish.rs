@@ -28,6 +28,10 @@ impl Rdy {
     /// before the next publish; an earlier one is only in `replay_events`. M2b routes every
     /// write through the engine.
     pub(crate) fn publish(&mut self, delta: Delta) -> Result<(), RdyError> {
+        if matches!(delta, Delta::Full) && self.full_publish_panics > 0 {
+            self.full_publish_panics -= 1;
+            panic!("test hook: a full publish panics");
+        }
         self.publish_gen += 1;
         let prev = self.state.load_full();
         // nothing settled since open: the first settle diffs against the state before the

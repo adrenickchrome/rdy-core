@@ -150,4 +150,6 @@ pub struct Rdy {
     /// The state `publish` held before the first write since open, while nothing is settled:
     /// the first settle diffs against its set.
     tension_base: Option<Arc<ReadState>>,
+    /// Test hook: how many of the next `Delta::Full` publishes panic (0 in every real run).
+    full_publish_panics: u32,
 }
