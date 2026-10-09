@@ -14,6 +14,18 @@ use rdy_store::{MergeChange, merge_on_blocks};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+/// The most changes `change_by_recent_nonce` reads from the view, and from canon's newest
+/// landing (msw11).
+pub const RECENT_NONCE_LIMIT: usize = 16;
+
+/// The answer of a nonce lookup: the change that carries the nonce, if any, and how many change
+/// frames the lookup read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NonceLookup {
+    pub change: Option<Hash>,
+    pub read: usize,
+}
+
 /// One row of `rdy view ls`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ViewSummary {
@@ -319,13 +331,34 @@ impl ReadState {
 
     /// The change whose `links.client_nonce` is `nonce` (wccm1, R-I6): view `view`'s included
     /// changes newest first, then canon's landings newest first (each landing's changes last
-    /// first); `None` once `limit` changes are read without a match.
+    /// first); not found once `limit` changes are read without a match.
     pub fn change_by_nonce(
         &self,
         view: &str,
         nonce: &str,
         limit: usize,
-    ) -> Result<Option<Hash>, RdyError> {
+    ) -> Result<NonceLookup, RdyError> {
+        self.nonce_scan(view, nonce, usize::MAX, usize::MAX, limit)
+    }
+
+    /// `change_by_nonce` over the recent changes only (msw11): view `view`'s newest
+    /// `RECENT_NONCE_LIMIT` included changes, then the newest `RECENT_NONCE_LIMIT` changes of
+    /// canon's newest landing. It reads at most `2 * RECENT_NONCE_LIMIT` change frames, so a
+    /// commit refused before its write asks cheaply whether the write happened.
+    pub fn change_by_recent_nonce(&self, view: &str, nonce: &str) -> Result<NonceLookup, RdyError> {
+        self.nonce_scan(view, nonce, RECENT_NONCE_LIMIT, 1, usize::MAX)
+    }
+
+    /// The nonce search: at most `per_source` changes of the view and of each landing, at most
+    /// `landings` landings, and at most `limit` change frames in all.
+    fn nonce_scan(
+        &self,
+        view: &str,
+        nonce: &str,
+        per_source: usize,
+        landings: usize,
+        limit: usize,
+    ) -> Result<NonceLookup, RdyError> {
         let reader = self.reader();
         let mut read = 0usize;
         let mut seen: HashSet<Hash> = HashSet::new();
@@ -341,24 +374,36 @@ impl ReadState {
             let c = reader.change(h)?;
             Ok(Some(c.links.client_nonce.as_deref() == Some(nonce)))
         };
-        for h in self.included(view).iter().rev() {
-            match check(h)? {
-                Some(true) => return Ok(Some(*h)),
-                Some(false) => {}
-                None => return Ok(None),
-            }
-        }
-        for landing in self.landing_walk() {
-            let (_, rec) = landing?;
-            for h in rec.changes.iter().rev() {
+        let mut found = None;
+        'scan: {
+            for h in self.included(view).iter().rev().take(per_source) {
                 match check(h)? {
-                    Some(true) => return Ok(Some(*h)),
+                    Some(true) => {
+                        found = Some(*h);
+                        break 'scan;
+                    }
                     Some(false) => {}
-                    None => return Ok(None),
+                    None => break 'scan,
+                }
+            }
+            for landing in self.landing_walk().take(landings) {
+                let (_, rec) = landing?;
+                for h in rec.changes.iter().rev().take(per_source) {
+                    match check(h)? {
+                        Some(true) => {
+                            found = Some(*h);
+                            break 'scan;
+                        }
+                        Some(false) => {}
+                        None => break 'scan,
+                    }
                 }
             }
         }
-        Ok(None)
+        Ok(NonceLookup {
+            change: found,
+            read,
+        })
     }
 
     /// View `name` in detail (FND-7): its head, each change it includes with the blocks it

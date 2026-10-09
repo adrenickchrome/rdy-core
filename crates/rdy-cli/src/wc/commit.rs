@@ -331,16 +331,30 @@ fn after_commit_error(code: &str) -> AfterError {
     }
 }
 
-/// The `wc_nonce` reply for the journal's commit, quietly: `None` when the request fails.
+/// How far a `wc_nonce` request searches.
+enum NonceScope {
+    /// The view's newest changes and canon's newest landing: the probe after an error reply,
+    /// which runs on every refused commit and must not stall the daemon's writer (msw11).
+    Recent,
+    /// Every change up to the daemon's scan limit: `recover`, for a reply that never came.
+    Full,
+}
+
+/// The `wc_nonce` arguments for the journal's commit `p`.
+fn nonce_args(p: &Pending, scope: NonceScope) -> Value {
+    let rewrite: Vec<String> = p.rewrite.iter().map(ToString::to_string).collect();
+    let mut args = json!({"view": p.view, "nonce": p.nonce, "rewrite": rewrite});
+    if matches!(scope, NonceScope::Recent) {
+        args["recent"] = json!(true);
+    }
+    args
+}
+
+/// The `wc_nonce` reply for the journal's commit, quietly: `None` when the request fails. It
+/// searches the recent changes only: the commit's write, when there was one, is the newest.
 fn probe_nonce(env: &Env, st: &WcState) -> Option<Value> {
     let p = st.pending.as_ref()?;
-    let rewrite: Vec<String> = p.rewrite.iter().map(ToString::to_string).collect();
-    call(
-        env,
-        "wc_nonce",
-        json!({"view": p.view, "nonce": p.nonce, "rewrite": rewrite}),
-    )
-    .ok()
+    call(env, "wc_nonce", nonce_args(p, NonceScope::Recent)).ok()
 }
 
 /// The figure pass (wcfg1): stores each upload's image as a blob, puts the hash in the ops where
@@ -449,13 +463,7 @@ pub(super) fn recover(env: &Env, place: &Place, st: &mut WcState) -> Result<(), 
     let Some(p) = st.pending.clone() else {
         return Ok(());
     };
-    let rewrite: Vec<String> = p.rewrite.iter().map(ToString::to_string).collect();
-    let v = call(
-        env,
-        "wc_nonce",
-        json!({"view": p.view, "nonce": p.nonce, "rewrite": rewrite}),
-    )
-    .map_err(|mut e| {
+    let v = call(env, "wc_nonce", nonce_args(&p, NonceScope::Full)).map_err(|mut e| {
         e.message = format!("cannot finish an interrupted commit: {}", e.message);
         e
     })?;
@@ -652,5 +660,25 @@ mod tests {
             after_commit_error("E_DAEMON_GONE"),
             AfterError::KeepJournal
         ));
+    }
+
+    #[test]
+    fn msw11_the_commit_probe_asks_for_recent_changes_only_and_recover_scans_in_full() {
+        let p = Pending {
+            nonce: "n1".into(),
+            view: "work".into(),
+            assigned: vec![],
+            rewrite: vec![],
+            files: vec![],
+            at_ms: 0,
+        };
+        assert_eq!(
+            nonce_args(&p, NonceScope::Recent),
+            json!({"view": "work", "nonce": "n1", "rewrite": [], "recent": true})
+        );
+        assert_eq!(
+            nonce_args(&p, NonceScope::Full),
+            json!({"view": "work", "nonce": "n1", "rewrite": []})
+        );
     }
 }

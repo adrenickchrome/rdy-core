@@ -48,6 +48,8 @@ pub(super) struct WcNonceArgs {
     view: String,
     nonce: String,
     rewrite: Vec<String>,
+    /// Search only the recent changes (msw11): the probe after a refused commit.
+    recent: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -372,16 +374,23 @@ pub(super) fn wc_commit(cx: &OpContext, a: WcCommitArgs) -> Result<Value, RdyErr
 /// and then the projection of the files of `rewrite` (as `wc_commit` adds it); else
 /// `{change: null}`. The answer is conclusive: it first waits while a `wc_commit` with the nonce
 /// runs in this daemon (`{change: null, pending: true}` when it still runs after `NONCE_WAIT`),
-/// then reads on the writer, after every write queued before it.
+/// then reads on the writer, after every write queued before it. With `recent`, it reads only the
+/// view's newest changes and canon's newest landing (`change_by_recent_nonce`): the probe a
+/// commit makes after an error reply, which must not stall the writer with a full scan.
 pub(super) fn wc_nonce(cx: &OpContext, a: WcNonceArgs) -> Result<Value, RdyError> {
     if !wait_not_in_flight(&a.nonce) {
         return Ok(json!({"change": null, "pending": true}));
     }
     let view = view_of(cx.session, Some(a.view));
-    let (nonce, rewrite) = (a.nonce, a.rewrite);
+    let (nonce, rewrite, recent) = (a.nonce, a.rewrite, a.recent == Some(true));
     cx.engine.write(Box::new(move |r| {
         let st = r.read();
-        match st.change_by_nonce(&view, &nonce, NONCE_SCAN_LIMIT)? {
+        let found = if recent {
+            st.change_by_recent_nonce(&view, &nonce)?
+        } else {
+            st.change_by_nonce(&view, &nonce, NONCE_SCAN_LIMIT)?
+        };
+        match found.change {
             None => Ok(json!({"change": null})),
             Some(h) => {
                 let mut out = json!({"change": h.to_string()});

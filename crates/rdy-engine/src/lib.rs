@@ -80,7 +80,10 @@ pub use tree_io::Diagnostic;
 pub use version::{
     AS_OF_CACHE_ENTRIES, VersionInfo, VersionPosition, VersionRef, ViewPosition, parse_version,
 };
-pub use view_query::{ChangeSummary, Compare, CompareEntry, OpSummary, ViewDetail, ViewSummary};
+pub use view_query::{
+    ChangeSummary, Compare, CompareEntry, NonceLookup, OpSummary, RECENT_NONCE_LIMIT, ViewDetail,
+    ViewSummary,
+};
 pub use views::{ConflictInfo, ConflictSide, OwnerInfo, ViewHeadInfo, ViewOpResult};
 pub use wc::project::Projection;
 pub use write::{

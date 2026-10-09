@@ -705,3 +705,36 @@ fn questions_cannot_be_deleted() {
     assert_eq!(e.code, "E_BAD_INPUT");
     assert!(e.message.contains("never deleted"), "{}", e.message);
 }
+
+#[test]
+fn msw11_a_recent_nonce_lookup_reads_only_the_newest_changes() {
+    let (_d, mut r) = project();
+    let n = 2 * RECENT_NONCE_LIMIT + 8;
+    for i in 0..n {
+        let req = req(json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": format!("doc{i}"), "title": format!("Doc {i}"), "doc_type": "glossary"}}
+        ]));
+        let links = ChangeLinks {
+            client_nonce: Some(format!("nonce-{i}")),
+            ..Default::default()
+        };
+        r.write_linked(&agent(), req, links, None).unwrap();
+    }
+    let st = r.read();
+    // a refused commit's probe: the nonce is in no change, and only the recent set is read
+    let absent = st.change_by_recent_nonce("work", "nonce-none").unwrap();
+    assert_eq!(absent.change, None);
+    assert!(absent.read <= 2 * RECENT_NONCE_LIMIT, "{absent:?}");
+    assert!(absent.read >= RECENT_NONCE_LIMIT, "{absent:?}");
+    // the newest change is the first one read
+    let newest = st
+        .change_by_recent_nonce("work", &format!("nonce-{}", n - 1))
+        .unwrap();
+    assert!(newest.change.is_some() && newest.read == 1, "{newest:?}");
+    // an old change is outside the recent set; the full scan (recover) still finds it
+    let old = st.change_by_recent_nonce("work", "nonce-0").unwrap();
+    assert_eq!(old.change, None);
+    assert!(old.read <= 2 * RECENT_NONCE_LIMIT, "{old:?}");
+    let full = st.change_by_nonce("work", "nonce-0", 10_000).unwrap();
+    assert!(full.change.is_some() && full.read >= n, "{full:?}");
+}

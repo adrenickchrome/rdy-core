@@ -112,3 +112,55 @@ fn msw11_a_torn_blob_file_is_repaired_by_checkout() {
     ok(&s, &["checkout", "--force"]);
     assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG chart");
 }
+
+/// Commits one figure and returns the blob's working-copy path and its temp-file name.
+fn msw11_committed_blob(s: &Served, section: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    std::fs::create_dir_all(at(s, "guides/img")).unwrap();
+    std::fs::write(at(s, "guides/img/chart.png"), b"\x89PNG chart").unwrap();
+    add_figure(s, section, "img/chart.png", "");
+    ok(s, &["commit", "-m", "a figure"]);
+    let fig = entries(s, "guides/intro.yaml")
+        .into_iter()
+        .find(|e| e["type"].as_str() == Some("figure"))
+        .unwrap();
+    let hash = fig["fields"]["blob"].as_str().unwrap().to_string();
+    (
+        at(s, &format!("_blobs/{hash}.png")),
+        at(s, &format!("_blobs/.{hash}.png.tmp")),
+    )
+}
+
+#[test]
+fn msw11_checkout_never_writes_a_blob_through_a_link_at_its_temp_name() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let (blob, tmp) = msw11_committed_blob(&s, &seed.section);
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("victim.txt");
+    std::fs::write(&victim, b"keep me").unwrap();
+    std::fs::remove_file(&blob).unwrap();
+    std::os::unix::fs::symlink(&victim, &tmp).unwrap();
+    ok(&s, &["checkout", "--force"]);
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
+    assert!(std::fs::symlink_metadata(&blob).unwrap().is_file());
+    assert_eq!(std::fs::read(&blob).unwrap(), b"\x89PNG chart");
+}
+
+#[test]
+fn msw11_commit_never_writes_a_blob_through_a_link_at_its_temp_name() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let (blob, tmp) = msw11_committed_blob(&s, &seed.section);
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("victim2.txt");
+    std::fs::write(&victim, b"keep me").unwrap();
+    std::fs::remove_file(&blob).unwrap();
+    std::os::unix::fs::symlink(&victim, &tmp).unwrap();
+    // a second figure with the same bytes uploads to the same blob name
+    std::fs::write(at(&s, "guides/img/again.png"), b"\x89PNG chart").unwrap();
+    add_figure(&s, &seed.section, "img/again.png", "");
+    ok(&s, &["commit", "-m", "the same figure again"]);
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
+    assert!(std::fs::symlink_metadata(&blob).unwrap().is_file());
+    assert_eq!(std::fs::read(&blob).unwrap(), b"\x89PNG chart");
+}
