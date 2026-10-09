@@ -194,15 +194,16 @@ impl Rdy {
             {
                 Arc::clone(&prev.tensions)
             }
-            // tcar1: a commit carries a built set, re-detecting around the blocks it writes
-            Delta::Commit { view, change, ops } => match prev.tensions.set.get() {
-                Some(Ok(set)) if self.carries_tensions(ops) => Arc::new(TensionCell::carrying(
-                    Arc::clone(set),
-                    *change,
-                    view.clone(),
-                )),
-                _ => Arc::default(),
-            },
+            // tcar1: a commit carries a built set, re-detecting around the blocks it writes. A
+            // set the state before has not read yet but can carry is carried now (its cost
+            // follows that commit), so a run of commits that nobody reads in between keeps
+            // carrying instead of leaving the next read a full build
+            Delta::Commit { view, change, ops } if self.carries_tensions(ops) => {
+                match prev.tensions_without_build() {
+                    Some(set) => Arc::new(TensionCell::carrying(set, *change, view.clone())),
+                    None => Arc::default(),
+                }
+            }
             _ => Arc::default(),
         };
         // the dismissals: re-read by a full publish, one added by a dismissal, else carried
@@ -379,9 +380,13 @@ impl Rdy {
         })
     }
 
-    /// Whether a commit of `ops` may carry the tension set: no op is a delete, no op writes a
-    /// structural block, and no update moves a block or changes its `lifecycle` against its base
-    /// (which every descendant's effective lifecycle reads). An unreadable base never carries.
+    /// Whether a commit of `ops` may carry the tension set: no op is a delete, no update writes
+    /// a structural block (a rename or retitle moves every descendant's path, and so its
+    /// areas), and no update moves a block or changes its `lifecycle` against its base (which
+    /// every descendant's effective lifecycle reads). A created structural block (a new doc,
+    /// section or folder) carries: it has no descendant but the blocks the same change
+    /// creates, which are seeds, so it moves no other block's path, areas or lifecycle. An
+    /// unreadable base never carries.
     fn carries_tensions(&self, ops: &[rdy_model::Op]) -> bool {
         use rdy_model::Op;
         let structural = |ty: Option<&str>| {
@@ -396,7 +401,7 @@ impl Rdy {
         };
         let reader = self.store.reader();
         ops.iter().all(|op| match op {
-            Op::Create { block } => !structural(Some(&block.block_type)),
+            Op::Create { .. } => true,
             Op::Update { base, block } => {
                 !structural(Some(&block.block_type))
                     && reader.get_block(base).is_ok_and(|old| {

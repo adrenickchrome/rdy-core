@@ -278,7 +278,7 @@ pub struct TensionDelta {
 /// the step added or removed (`None` for a rebase or a moved base). Only when `after`'s set was
 /// carried from `before`'s across the one change in `changes` are just the tensions around it
 /// and the blocks the carry re-detected around read (`diff_scoped`). Every other step diffs the two sets whole: a commit that
-/// does not carry (a delete, a structural write, a move, a lifecycle change) and a view op
+/// does not carry (a delete, a structural update, a move, a lifecycle change) and a view op
 /// (its state builds the set again) can open or resolve tensions away from the change and its
 /// blocks, for example an area overlap that a deleted `affects` target gave.
 pub fn tension_delta(
@@ -371,6 +371,22 @@ pub(crate) fn ambiguous<'a>(
                 .join(", ")
         ),
     )
+}
+
+thread_local! {
+    /// This thread's count of full tension-set builds (`ReadState::tensions` with no carry).
+    static FULL_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn count_full_build() {
+    FULL_BUILDS.with(|c| c.set(c.get() + 1));
+}
+
+/// This thread's count of full tension-set builds so far (a state's set built without a
+/// carry). A test reads the difference over a call to check that the call built no whole set.
+#[doc(hidden)]
+pub fn full_builds() -> u64 {
+    FULL_BUILDS.with(std::cell::Cell::get)
 }
 
 /// A state's tension set, built on first read: carried from the state before when `carry` is
@@ -562,13 +578,32 @@ impl ReadState {
             .iter()
             .map(|c| reader.change(c))
             .collect::<Result<_, _>>()?;
+        let applied = self.landing_order(&read);
+        self.landing_tensions_applied(view, changes, &read, &applied)
+    }
+
+    /// The order the landing of `read` applies its changes in: the merge's onto canon, or the
+    /// list order when the merge refuses (the gate reports that refusal itself).
+    pub(crate) fn landing_order(&self, read: &[Change]) -> Vec<usize> {
+        self.canon_snapshot()
+            .and_then(|canon| Ok(self.reader().merge_checked(&canon, read)?))
+            .map_or_else(|_| (0..read.len()).collect(), |(_, at)| at)
+    }
+
+    /// [`ReadState::landing_tensions`] for `changes`, read (`read`) and applied in the order
+    /// `applied` ([`ReadState::landing_order`]).
+    pub(crate) fn landing_tensions_applied(
+        &self,
+        view: &str,
+        changes: &[Hash],
+        read: &[Change],
+        applied: &[usize],
+    ) -> Result<Vec<Arc<Tension>>, RdyError> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
         // the canon the landing would give: the ops in the order the merge applies the changes
-        // (list order when the merge refuses: the gate reports that refusal itself)
-        let applied = reader
-            .state_of(self.canon_head())
-            .and_then(|canon| reader.merge_checked(&canon, &read))
-            .map_or_else(|_| (0..read.len()).collect(), |(_, at)| at);
-        let ops = applied_ops(&read, &applied);
+        let ops = applied_ops(read, applied);
         let canon_m = self.materialized(&Scope::Canon)?;
         let m = canon_m.with(&ops);
         let touched: BTreeSet<&BlockId> = ops.iter().map(Op::block_id).collect();
@@ -585,7 +620,7 @@ impl ReadState {
         };
         let writes = Writes::build(self, &set)?;
         let mut seeds = BTreeSet::new();
-        for c in &read {
+        for c in read {
             seeds_into(self, c, &mut seeds)?;
         }
         let cx = DetectCx::landing(
@@ -628,9 +663,99 @@ impl ReadState {
                     return Ok(Arc::new(set));
                 }
                 let _ = cell.carried.set(false);
+                count_full_build();
                 build(self, self.detectors, true).map(Arc::new)
             })
             .clone()
+    }
+
+    /// The state's tension set when it is built, or when its carry runs (the cost follows the
+    /// committed change); `None` when only a full build would give it. Never builds the whole
+    /// set: a carry that cannot run leaves the cell unbuilt.
+    pub(crate) fn tensions_without_build(&self) -> Option<Arc<TensionSet>> {
+        if self.error.is_some() {
+            return None;
+        }
+        let cell = &self.tensions;
+        if let Some(r) = cell.set.get() {
+            return r.as_ref().ok().cloned();
+        }
+        let (prev, change, view) = cell.carry.as_ref()?;
+        let (set, around) = carry(self, prev, *change, view).ok()??;
+        // another reader may have built the cell meanwhile: its set is the same
+        cell.set
+            .get_or_init(|| {
+                let _ = cell.around.set(around);
+                let _ = cell.carried.set(true);
+                Ok(Arc::new(set))
+            })
+            .as_ref()
+            .ok()
+            .cloned()
+    }
+
+    /// The in-flight tensions with one of `changes` as a side, by id: what
+    /// `tensions()?.involving_change(c)` gives for each, once. Read from the set when it is
+    /// built or carried; otherwise the state's detectors run seeded with the blocks the changes
+    /// write (and the targets their decisions supersede or revoke) and each detector's reach,
+    /// over every in-flight write, as a carry re-detects around them. Every tension with a
+    /// change side involves a block that change writes, so the seeded run finds them all. It
+    /// never builds the whole set, and never the canon part (a canon tension has no change
+    /// side).
+    pub fn tensions_of_changes(&self, changes: &[Hash]) -> Result<Vec<Arc<Tension>>, RdyError> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        match self.tensions_without_build() {
+            Some(set) => {
+                let mut out: BTreeMap<Hash, Arc<Tension>> = BTreeMap::new();
+                for c in changes {
+                    for t in set.involving_change(c) {
+                        out.entry(t.id).or_insert(t);
+                    }
+                }
+                Ok(out.into_values().collect())
+            }
+            None => self.tensions_of_changes_seeded(changes),
+        }
+    }
+
+    /// Test hook: `tensions_of_changes` by the seeded run, whatever the cell holds.
+    #[doc(hidden)]
+    pub fn tensions_of_changes_seeded(
+        &self,
+        changes: &[Hash],
+    ) -> Result<Vec<Arc<Tension>>, RdyError> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        let reader = self.reader();
+        let mut seeds = BTreeSet::new();
+        for c in changes {
+            seeds_into(self, &reader.change(c)?, &mut seeds)?;
+        }
+        let wanted: BTreeSet<&Hash> = changes.iter().collect();
+        let writes = Writes::build(self, &*self.inflight_set()?)?;
+        let cx = DetectCx::new(self, &writes, canon_index_of(self)?, DetectScope::Inflight);
+        let mut out: BTreeMap<Hash, Arc<Tension>> = BTreeMap::new();
+        for d in self.detectors {
+            let mut around = seeds.clone();
+            around.extend(d.reach(&cx, &seeds)?);
+            let mut found = vec![];
+            d.detect(&cx, Some(&around), &mut found)?;
+            for t in found
+                .into_iter()
+                .filter_map(|f| tension_from(self.pack(), f, false, DetectScope::Inflight))
+                .filter(|t| {
+                    t.sides
+                        .iter()
+                        .any(|s| matches!(s, SideRef::Change(c) if wanted.contains(c)))
+                })
+            {
+                out.entry(t.id).or_insert_with(|| Arc::new(t));
+            }
+        }
+        Ok(out.into_values().collect())
     }
 
     /// Test hook: the tension set `d` finds in this state, built fresh.

@@ -123,7 +123,7 @@ fn spec_target(op: &str) -> Option<String> {
             "recorded, no spec target: the writer's post-reply settle (diff and events), compare with tension_carry_1k"
         }
         "tensions_full_1k" => {
-            "no spec target: the cold build of every tension at 1k in-flight changes, once per landing or structural write (recorded for M2d2)"
+            "no spec target: the cold build of every tension at 1k in-flight changes, once per landing or structural update (recorded for M2d2)"
         }
         "tensions_canon" => {
             "no spec target: the canon-scope build of the tensions (FW-CH6), once per landing; recorded for Coverage and confidence"

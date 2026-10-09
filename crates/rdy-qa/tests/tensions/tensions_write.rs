@@ -416,7 +416,7 @@ fn wide_ops(
         3 => json!([{"op": "delete", "id": target.to_string()}]),
         // a move (never carries)
         4 => json!([{"op": "move", "id": target.to_string(), "parent": section.to_string()}]),
-        // structural writes: a section create, a section delete, a doc create
+        // structural writes: a section create and a doc create (both carry), a section delete
         5 => json!([{"op": "create", "type": "section", "id": "$s",
             "parent": parent.to_string(), "fields": {"title": format!("New {n}")}}]),
         // a section delete: of an empty one this run created, when there is one

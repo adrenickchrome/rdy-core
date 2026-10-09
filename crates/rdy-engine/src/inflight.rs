@@ -168,6 +168,22 @@ impl ReadState {
     /// own that includes changes writing one of them, and every open proposal whose latest
     /// version writes one of them.
     pub fn inflight(&self, scope: &Scope, ids: &BTreeSet<BlockId>) -> Result<Inflight, RdyError> {
+        let (mut out, rows) = self.inflight_unsided(scope, ids)?;
+        let mut cache = crate::tensions::info::InfoCache::default();
+        for (info, t) in out.tensions.iter_mut().zip(&rows) {
+            info.sides = self.sides_info(t, &mut cache);
+        }
+        Ok(out)
+    }
+
+    /// [`ReadState::inflight`] with every tension row's `sides` left empty, and the tensions
+    /// the rows show, in row order: a briefing reads the sides only for the rows a page can
+    /// show with them (a side reads the store).
+    pub(crate) fn inflight_unsided(
+        &self,
+        scope: &Scope,
+        ids: &BTreeSet<BlockId>,
+    ) -> Result<(Inflight, Vec<Arc<Tension>>), RdyError> {
         let own = match scope {
             Scope::View(v) => Some(v.as_str()),
             Scope::Canon | Scope::At(_) | Scope::Inflight => None,
@@ -212,23 +228,27 @@ impl ReadState {
         }
         let intents = self.inflight_intents(scope, own, ids)?;
         // the tensions never fail a briefing (a briefing gates writes): an error is reported
-        let (tensions, tensions_error) = match self.inflight_tensions(ids) {
+        let (rows, tensions_error) = match self.inflight_tensions(ids) {
             Ok(t) => (t, None),
             Err(e) => (vec![], Some(format!("{}: {}", e.code, e.message))),
         };
-        Ok(Inflight {
-            views,
-            proposals,
-            intents,
-            tensions,
-            tensions_error,
-            ..Inflight::default()
-        })
+        let tensions = rows.iter().map(|t| self.tension_info_bare(t)).collect();
+        Ok((
+            Inflight {
+                views,
+                proposals,
+                intents,
+                tensions,
+                tensions_error,
+                ..Inflight::default()
+            },
+            rows,
+        ))
     }
 
     /// The tensions that involve any of `ids`, open or dismissed: the event-derived set and the
     /// read-time overlaps as of now, each once, blocking first, then by kind, then by id.
-    fn inflight_tensions(&self, ids: &BTreeSet<BlockId>) -> Result<Vec<TensionInfo>, RdyError> {
+    fn inflight_tensions(&self, ids: &BTreeSet<BlockId>) -> Result<Vec<Arc<Tension>>, RdyError> {
         let set = self.tensions()?;
         let mut found: BTreeMap<Hash, Arc<Tension>> = BTreeMap::new();
         for id in ids {
@@ -243,11 +263,7 @@ impl ReadState {
         }
         let mut found: Vec<Arc<Tension>> = found.into_values().collect();
         found.sort_by_key(|t| (t.severity, t.kind, t.id));
-        let mut cache = crate::tensions::info::InfoCache::default();
-        Ok(found
-            .iter()
-            .map(|t| self.tension_info_with(t, &mut cache))
-            .collect())
+        Ok(found)
     }
 
     /// The open intents (as of now) of views other than `own` that cover any of `ids` in

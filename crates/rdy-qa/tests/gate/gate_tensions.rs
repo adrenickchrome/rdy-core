@@ -874,3 +874,33 @@ fn tgat1_a_group_with_one_member_in_the_proposal_refuses_only_when_all_would_be_
     assert_eq!(approve(&mut r, &pc).unwrap_err().code, E_BLOCKING_TENSION);
     assert!(rc[0].blocks.contains(&c.to_string()), "{:?}", rc[0].blocks);
 }
+
+/// Perf fix (pre-merge, propose_land_500_flat): a proposal made right after a landing lists the
+/// tensions of its changes without building the whole set (canon's part included), and lists
+/// the ones the built set has.
+#[test]
+fn tgat1_a_proposal_after_a_landing_builds_no_whole_tension_set() {
+    use rdy_engine::tensions::set::full_builds;
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "b", cite(&s.section, &s.a));
+    put(&mut r, "a", upd(&s.a, "A changed."));
+    put(&mut r, "c", upd(&s.c, "C changed."));
+    let pc = propose(&mut r, "c");
+    approve(&mut r, &pc).unwrap();
+    let before = full_builds();
+    let pb = propose(&mut r, "b");
+    assert_eq!(full_builds(), before, "no whole set was built");
+    assert_eq!(pb.tensions.len(), 1, "{:?}", pb.tensions);
+    assert_eq!(pb.tensions[0].kind, TensionKind::PremiseShift);
+    let st = r.read();
+    let set = st.tensions().unwrap();
+    let from_set: BTreeSet<String> = st
+        .included("b")
+        .iter()
+        .flat_map(|c| set.involving_change(c))
+        .map(|t| t.id.to_string())
+        .collect();
+    let listed: BTreeSet<String> = pb.tensions.iter().map(|t| t.tension.clone()).collect();
+    assert_eq!(listed, from_set);
+}

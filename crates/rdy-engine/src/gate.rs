@@ -565,9 +565,14 @@ impl ReadState {
         view: &str,
         changes: &[Hash],
     ) -> Result<Vec<Arc<Tension>>, RdyError> {
+        let tensions = self.landing_tensions(view, changes)?;
+        Ok(self.refusing_among(changes, tensions))
+    }
+
+    /// The refusing ones of `tensions` (the landing tensions of `changes`).
+    fn refusing_among(&self, changes: &[Hash], tensions: Vec<Arc<Tension>>) -> Vec<Arc<Tension>> {
         let mine: BTreeSet<&Hash> = changes.iter().collect();
-        Ok(self
-            .landing_tensions(view, changes)?
+        tensions
             .into_iter()
             .filter(|t| {
                 t.severity == TensionSeverity::Blocking
@@ -578,7 +583,7 @@ impl ReadState {
                         SideRef::Intent { .. } => false,
                     })
             })
-            .collect())
+            .collect()
     }
 
     /// The tensions a version of view `view` with changes `changes` lists: the event-derived
@@ -597,14 +602,14 @@ impl ReadState {
     ) -> Result<(Vec<TensionInfo>, usize), RdyError> {
         let refusing = self.refusing_tensions(view, changes)?;
         let refuses: BTreeSet<Hash> = refusing.iter().map(|t| t.id).collect();
-        let set = self.tensions()?;
+        // never the whole set: a proposal made right after a landing must not build canon's
+        // part, which no tension with a change side is in
+        let mine = self.tensions_of_changes(changes)?;
         let mut seen = BTreeSet::new();
         let mut listed = vec![];
         // a refusing tension is listed in its landing form; an in-flight form with another id
         // (another severity, sides or versions) is listed beside it as information
-        let all = refusing
-            .into_iter()
-            .chain(changes.iter().flat_map(|c| set.involving_change(c)));
+        let all = refusing.into_iter().chain(mine);
         for t in all {
             if !seen.insert(t.id) {
                 continue;
@@ -866,7 +871,7 @@ fn linked_alts(
 /// E_FROZEN early.
 fn prospective(st: &ReadState, changes: &[Change]) -> Result<(Materialized, Vec<usize>), RdyError> {
     let reader = st.reader();
-    let (_, applied) = reader.merge_checked(&reader.state_of(st.canon_head())?, changes)?;
+    let (_, applied) = reader.merge_checked(&*st.canon_snapshot()?, changes)?;
     let next = st
         .materialized(&Scope::Canon)?
         .with(&applied_ops(changes, &applied));
@@ -1711,9 +1716,14 @@ impl Rdy {
         }
         // tgat1: a blocking, undismissed tension every side of which would be in canon after
         // the landing refuses it
+        // the ops fold in the order the merge applies the changes (deps first), not the list
+        // order: a version can list a delete before the creation it depends on. A merge that
+        // refuses is left to `prospective_issues` below, which reports it.
+        let applied = st.landing_order(&changes);
         let mut cache = crate::tensions::info::InfoCache::default();
+        let landing = st.landing_tensions_applied(&p.view, &p.changes, &changes, &applied)?;
         let refusing: Vec<TensionInfo> = st
-            .refusing_tensions(&p.view, &p.changes)?
+            .refusing_among(&p.changes, landing)
             .iter()
             .map(|t| st.tension_info_with(t, &mut cache))
             .collect();
@@ -1722,14 +1732,6 @@ impl Rdy {
         }
 
         // 1. prospective canon: canon + the proposal's own changes
-        // the ops fold in the order the merge applies the changes (deps first), not the list
-        // order: a version can list a delete before the creation it depends on. A merge that
-        // refuses is left to `prospective_issues` below, which reports it.
-        let reader = st.reader();
-        let applied = reader
-            .state_of(st.canon_head())
-            .and_then(|canon| reader.merge_checked(&canon, &changes))
-            .map_or_else(|_| (0..changes.len()).collect(), |(_, at)| at);
         let ops = applied_ops(&changes, &applied);
         let prospective = st.materialized(&Scope::Canon)?.with(&ops);
         let mut ids = BTreeSet::new();

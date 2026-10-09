@@ -294,6 +294,33 @@ fn tbrf1_a_briefing_over_thousands_of_tensions_builds_each_row_once() {
     assert!(json_tokens(&b) <= BRIEF_DEFAULT_TOKENS);
     let all = b.inflight.tensions.len() + b.omitted.get("inflight.tensions").copied().unwrap_or(0);
     assert_eq!(all, 2000);
-    assert_eq!(b1 - b0, 2000, "each row built once");
+    // perf fix (pre-merge): the detail cut drops every side, so no side is read (each row was
+    // built with its sides once before)
+    assert_eq!(b1 - b0, 0, "the detail cut drops every side: none is read");
     assert!(s1 - s0 <= 6 * 2000, "{} serializations", s1 - s0);
+}
+
+/// Perf fix (pre-merge, brief_doc): a briefing after commits on a read set carries it and never
+/// builds the whole set; a briefing that lists its tensions in full still shows their sides.
+#[test]
+fn tbrf1_a_briefing_after_commits_builds_no_whole_tension_set() {
+    use rdy_engine::tensions::set::full_builds;
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.a, "A one."));
+    put(&mut r, "b", upd(&s.a, "A two."));
+    r.read().brief(&Scope::Canon, &cov(&s.a), None).unwrap();
+    put(&mut r, "b", upd(&s.b, "B two."));
+    put(&mut r, "c", upd(&s.c, "C two."));
+    let before = full_builds();
+    let b = r.read().brief(&Scope::Canon, &cov(&s.a), None).unwrap();
+    assert_eq!(full_builds(), before, "no whole set was built");
+    assert_eq!(b.inflight.tensions.len(), 1, "{:?}", b.inflight.tensions);
+    assert_eq!(b.inflight.tensions[0].kind, TensionKind::EditCollision);
+    assert_eq!(
+        b.inflight.tensions[0].sides.len(),
+        2,
+        "uncut: the sides are shown"
+    );
+    assert!(!b.inflight.tensions_detail_cut);
 }

@@ -13,7 +13,7 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: cases(12), ..ProptestConfig::default() })]
     #[test]
     fn tcar1_a_carried_tension_set_equals_a_rebuilt_one(
-        steps in proptest::collection::vec((0u8..9, 0u8..3, 0u8..3), 1..12)
+        steps in proptest::collection::vec((0u8..11, 0u8..3, 0u8..3), 1..12)
     ) {
         let (_d, mut r) = project();
         let s = spec_doc(&mut r);
@@ -43,12 +43,33 @@ proptest! {
                 6 => land(&mut r, vn).is_ok(),
                 7 => try_put(&mut r, vn, json!([{"op": "create", "type": "claim",
                         "parent": s.section.to_string(), "body": texts[k as usize]}])).is_ok(),
+                // perf fix (pre-merge): a created structural block carries
+                9 => {
+                    let name = ["Fee", "Charge", "fee"][k as usize];
+                    try_put(&mut r, vn, json!([
+                        {"op": "create", "type": "section", "id": "$n", "parent": s.doc.to_string(), "fields": {"title": format!("New {i}")}},
+                        {"op": "create", "type": "claim", "parent": "$n", "body": texts[k as usize]},
+                        {"op": "create", "type": "term", "parent": "$n", "fields": {"name": name}, "body": "A term."}
+                    ])).is_ok()
+                }
+                10 => r.new_doc(&ag(vn), vn, &format!("n{i}"), None, None).is_ok(),
                 _ => try_put(&mut r, vn, upd(target, texts[k as usize])).is_ok(),
             };
             let st = r.read();
-            let carried: Vec<_> = st.tensions().unwrap().iter().map(|t| t.id).collect();
+            let set = st.tensions().unwrap();
+            let carried: Vec<_> = set.iter().map(|t| t.id).collect();
             let rebuilt: Vec<_> = st.tensions_rebuilt().unwrap().iter().map(|t| t.id).collect();
             prop_assert_eq!(carried, rebuilt, "step {}", i);
+            // perf fix (pre-merge): what a proposal of each view lists from the set, the seeded
+            // run finds without the set
+            for vn in names {
+                let inc = st.included(vn);
+                let mut from_set: Vec<_> = inc.iter().flat_map(|c| set.involving_change(c)).map(|t| t.id).collect();
+                from_set.sort();
+                from_set.dedup();
+                let seeded: Vec<_> = st.tensions_of_changes_seeded(&inc).unwrap().iter().map(|t| t.id).collect();
+                prop_assert_eq!(seeded, from_set, "step {} view {}", i, vn);
+            }
         }
     }
 }
@@ -147,4 +168,39 @@ fn tcar1_deleting_an_affects_target_carries_the_same_set_as_a_rebuild() {
     assert!(rebuilt.is_empty(), "{rebuilt:?}");
     assert_eq!(carried, rebuilt);
     assert_eq!(st.tensions_carried(), Some(false), "a delete rebuilds");
+}
+
+/// Perf fix (pre-merge, daemon_write_single): a new doc or section carries the set, and a
+/// commit nobody read the set of is carried when the next one is published, so the read after
+/// a run of commits never builds the whole set.
+#[test]
+fn tcar1_a_created_doc_or_section_carries_and_an_unread_commit_still_carries() {
+    use rdy_engine::tensions::set::full_builds;
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.a, "A one."));
+    r.read().tensions().unwrap();
+    let before = full_builds();
+    r.new_doc(&ag("b"), "b", "notes", None, None).unwrap();
+    r.read().tensions().unwrap();
+    assert_eq!(r.read().tensions_carried(), Some(true), "a new doc carries");
+    put(
+        &mut r,
+        "b",
+        json!([{"op": "create", "type": "section", "parent": s.doc.to_string(), "fields": {"title": "More"}}]),
+    );
+    // nobody reads this state's set: the next commit carries it when it is published
+    put(&mut r, "c", upd(&s.a, "A by c."));
+    assert_eq!(of_kind(&r, TensionKind::EditCollision).len(), 1);
+    assert_eq!(r.read().tensions_carried(), Some(true));
+    assert_eq!(full_builds(), before, "no whole set was built");
+    let st = r.read();
+    let carried: Vec<_> = st.tensions().unwrap().iter().map(|t| t.id).collect();
+    let rebuilt: Vec<_> = st
+        .tensions_rebuilt()
+        .unwrap()
+        .iter()
+        .map(|t| t.id)
+        .collect();
+    assert_eq!(carried, rebuilt);
 }

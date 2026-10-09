@@ -837,7 +837,7 @@ round, I7):
 | `tension_on_change_delete_1k` | one delete of a fresh canon claim into `inf1` between two captured states, then `tension_delta` and `delta::on_change` for `inf1`. A delete never carries, so the timer holds the in-flight build of the second state's set and the diff. The write is outside the timer. Asserts the set was rebuilt | `runs.incremental` | same as `tension_carry_1k` |
 | `tension_on_change_view_op_1k` | one of `inf2`'s changes included into a fresh view between two captured states, then `tension_delta` and `delta::on_change` for that view. A view op never carries, so the timer holds the in-flight build and the diff | `runs.incremental` | same as `tension_carry_1k` |
 | `tension_settle_1k` | one update into `inf0` (outside the timer), then `settle_tensions()`: the diff of the last settled set and the published one, and the events | `runs.incremental` | recorded, no spec target: the writer's post-reply settle; compare with `tension_carry_1k` |
-| `tensions_full_1k` | cold: `invalidate`, then `tensions_rebuilt()` (every detector over canon and every in-flight change) | `runs.materialize_cold` | no spec target: the cold build of every tension at 1k in-flight changes, once per landing or structural write (recorded for M2d2) |
+| `tensions_full_1k` | cold: `invalidate`, then `tensions_rebuilt()` (every detector over canon and every in-flight change) | `runs.materialize_cold` | no spec target: the cold build of every tension at 1k in-flight changes, once per landing or structural update (recorded for M2d2) |
 | `tensions_canon` | cold: `invalidate`, then `canon_tensions_rebuilt()` (the canon scope only; FW-CH6). It runs once per landing: the canon part is memoised on canon's build, so a commit never pays it | `runs.materialize_cold` | no spec target: the canon-scope build of the tensions (FW-CH6), once per landing; recorded for Coverage and confidence |
 | `gate_tensions_1k` | `proposal_tensions` for `inf2` with its changes, on a built set | `runs.read` | recorded: the land message's tension check on a built set (inside the landing budget, M2 spec 15.1) |
 
@@ -846,10 +846,14 @@ What each cost grows with:
 - `tension_carry_1k` and `tension_on_change_1k` grow with the tensions around the seed blocks of
   the one change, not with the number of changes in flight: the carry removes and re-detects only
   those. For duplicate definition (FW-TN2: one tension per group) the carry also re-detects around
-  every member of each group a seed was or is in, so it grows with the size of those groups. A commit that is structural, moves a block or changes its lifecycle does not carry and
-  pays the full build.
+  every member of each group a seed was or is in, so it grows with the size of those groups. A commit that updates a structural block, moves a block or changes its lifecycle does not carry and
+  pays the full build. A created doc, section or folder carries (perf fix before the M2d2 merge:
+  `daemon_write_single` is a `new_doc`, and its settle on the writer did the full build before the
+  next request). A commit whose state before was not read yet carries that state's set first, when
+  it is published, so a run of commits that nobody reads in between never leaves the next read a
+  full build (the first `brief_doc` run did).
 - `tension_on_change_delete_1k` and `tension_on_change_view_op_1k` grow with the in-flight changes
-  and their writes: a delete, a view op, a structural, move or lifecycle write builds the
+  and their writes: a delete, a view op, a structural update, a move or a lifecycle write builds the
   in-flight part of the set again (`Writes::build` and every detector over the live writes). A
   delete does not carry by design (a deviation from the plan's carry rule, fix 118991c,
   confirmed in the final review's fix round): it takes a block out of reads that the seeds do not
@@ -861,8 +865,12 @@ What each cost grows with:
 - `tension_settle_1k` runs on the writer after the reply. It grows with the diff of the two sets,
   by id. If it nears the write budget, the follow-up is to move the settle to a read-pool task
   (ledger question).
-- `tensions_full_1k` grows with the in-flight changes and the tree; a landing or a structural write
-  pays it once per published state, on its first tension read. It includes the cold build of the
+- `tensions_full_1k` grows with the in-flight changes and the tree; a landing or a structural update
+  pays it once per published state, on its first tension read (on the daemon, the writer's settle
+  after the reply). A briefing after a carried commit and a proposal never pay it: a proposal lists
+  its changes' tensions from the set when it is built or carried, else from the detectors seeded
+  with what its changes write (no canon part); a briefing reads the sides of a tension row only for
+  the rows a page shows with them, and measures each row once. It includes the cold build of the
   in-flight state, as canon is not built after the `invalidate`.
 - `tensions_canon` grows with the tree (and with the all-canon tensions in it). It is the canon
   part of `tensions_full_1k`, paid once per canon build. FW-TN2: the generated tree's text

@@ -73,6 +73,9 @@ pub(crate) struct Built {
     /// The canon part of the tension set for the state's detectors (FW-CH6), memoised; never
     /// carried.
     pub(crate) tension_canon: OnceLock<Result<Arc<crate::tensions::set::CanonPart>, RdyError>>,
+    /// Canon's store state (each block's version at canon's head), memoised for the gate's
+    /// merges onto canon (a proposal and its landing read it on one canon); never carried.
+    pub(crate) snapshot: OnceLock<Arc<rdy_model::StateSnapshot>>,
 }
 
 impl Built {
@@ -87,6 +90,7 @@ impl Built {
             mentions: Mutex::new(vec![]),
             tension_index: OnceLock::new(),
             tension_canon: OnceLock::new(),
+            snapshot: OnceLock::new(),
         }
     }
 
@@ -723,6 +727,17 @@ impl ReadState {
     /// The one lookup behind every read of a scope: its entry's build, built on first use. A view
     /// with no ref, or one that floats (unpinned, nothing included), reads canon's entry; an
     /// as-of read marks its entry used in the shared cache.
+    /// The store's state of canon's head, read once per canon build: what the gate merges a
+    /// version's changes onto.
+    pub(crate) fn canon_snapshot(&self) -> Result<Arc<rdy_model::StateSnapshot>, RdyError> {
+        let built = self.built(&Scope::Canon)?;
+        if let Some(s) = built.snapshot.get() {
+            return Ok(Arc::clone(s));
+        }
+        let s = self.reader.state_of(self.canon_head)?;
+        Ok(Arc::clone(built.snapshot.get_or_init(|| Arc::new(s))))
+    }
+
     pub(crate) fn built(&self, scope: &Scope) -> Result<Arc<Built>, RdyError> {
         if let Some(e) = &self.error {
             return Err(e.clone());
