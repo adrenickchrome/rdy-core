@@ -289,7 +289,8 @@ pub(crate) fn replace_at(
 }
 
 /// Creates the directories between the root and `p`'s file (what stands in the way and is not a
-/// directory is removed first); with `cases`, see `write_at`.
+/// directory is removed first); with `cases`, see `write_at`. Callers run an occupied check first
+/// (`occupied`, `behind_link`), so what is removed is never a file a person keeps.
 fn make_dirs(
     root: &Path,
     p: &Path,
@@ -438,9 +439,10 @@ pub struct Added {
 }
 
 /// Adds the files of `proj` (the doc and folder files a write just created) to a bound working
-/// copy: a path that holds something not in `base.files` (a file, a directory, or a link or file
-/// on the way) is skipped, never overwritten; any other is written, its base copy written, and
-/// its blocks and file added to `base`. The state is not saved here.
+/// copy: a path in `base.files` (another doc's file, on disk or not) or one that holds anything
+/// (a file, a directory, or a link or file on the way) is skipped, never overwritten; any other
+/// is written, its base copy written, and its blocks and file added to `base`. The state is not
+/// saved here.
 pub fn add_projected(
     place: &Place,
     st: &mut WcState,
@@ -450,7 +452,9 @@ pub fn add_projected(
     let base_dir = place.state.join("base/files");
     let mut out = Added::default();
     for f in &proj.files {
-        if occupied(root, &f.path, &st.base.files, &BTreeSet::new())? {
+        if st.base.files.contains_key(&f.path)
+            || occupied(root, &f.path, &BTreeMap::new(), &BTreeSet::new())?
+        {
             out.skipped.push(f.path.clone());
             continue;
         }

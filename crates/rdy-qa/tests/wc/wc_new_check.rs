@@ -209,3 +209,21 @@ fn wcck1_a_link_to_a_question_by_its_key_is_store_only() {
         "nothing recorded"
     );
 }
+
+#[test]
+fn msw5_rdy_new_keeps_a_tracked_file_with_unstaged_edits() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    set_body(&s, "notes.yaml", &seed.note, "Unstaged.");
+    store_write(
+        &s,
+        "work",
+        serde_json::json!([{"op": "delete", "id": seed.note}, {"op": "delete", "id": seed.notes}]),
+    );
+    let text = ok(&s, &["new", "doc", "notes", "--title", "Fresh"]);
+    assert!(text.contains("not written: notes.yaml"), "{text}");
+    assert_eq!(
+        entry(&s, "notes.yaml", &seed.note)["body"].as_str(),
+        Some("Unstaged.")
+    );
+}

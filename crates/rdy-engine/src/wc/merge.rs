@@ -1242,8 +1242,9 @@ pub fn apply_update(
 
 /// Finishes an interrupted update from its record (`UPDATE_FILE`): refuses with `E_WC_DIRTY`
 /// when a file it writes or removes changed since (it holds neither its earlier text, nor the
-/// update's, nor is gone), else applies the recorded plan again from the start (each step is
-/// safe to repeat). Returns the record.
+/// update's, nor is gone, or a non-directory stands where one of its directories goes), else
+/// applies the recorded plan again from the start (each step is safe to repeat). Returns the
+/// record.
 pub fn resume_update(place: &Place, st: &mut WcState) -> Result<UpdateJournal, RdyError> {
     let root = &place.root;
     let view = st
@@ -1276,6 +1277,10 @@ pub fn resume_update(place: &Place, st: &mut WcState) -> Result<UpdateJournal, R
         .before
         .iter()
         .filter(|(p, was)| {
+            // a non-directory where an ancestor directory must go: writing would remove it
+            if inside(p).is_ok_and(|q| behind_link(root, q)) {
+                return true;
+            }
             let now = disk_text(root, p);
             !(now.is_none()
                 || now == **was

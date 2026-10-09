@@ -13,7 +13,7 @@ use serde_json::json;
 pub(crate) struct NewFiles {
     /// The files written, in the projection's order.
     pub wrote: Vec<String>,
-    /// The paths left alone because they hold a file rdy does not track.
+    /// The paths left alone because they hold a file rdy does not track, or another doc's file.
     pub skipped: Vec<String>,
 }
 
@@ -26,7 +26,7 @@ impl NewFiles {
         }
         for p in &self.skipped {
             out.push_str(&format!(
-                "\nwarning: not written: {p} is occupied by a file rdy does not track; move it, then run rdy update"
+                "\nwarning: not written: {p} is occupied by a file rdy does not track, or by another doc's file; move it, then run rdy update"
             ));
         }
         out
@@ -35,7 +35,8 @@ impl NewFiles {
 
 /// Writes the files of the docs and folders `created` (ids) into the working copy, when it is
 /// bound to `view`, the view the write went to. Outside a checkout, or bound to another view,
-/// nothing is written. A path that holds a file rdy does not track is skipped, never overwritten.
+/// nothing is written. A path that holds a file rdy does not track, or another doc's file, is
+/// skipped, never overwritten.
 pub(crate) fn write_new(env: &Env, view: &str, created: &[String]) -> Result<NewFiles, ErrorReply> {
     // the cheap look first: a project that never checked out takes no lock and gets no state
     if created.is_empty() || bound_view(env).as_deref() != Some(view) {

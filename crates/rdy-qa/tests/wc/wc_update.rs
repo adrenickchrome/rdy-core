@@ -872,3 +872,46 @@ fn wcup1_update_of_a_kept_rename_asks_for_the_file_in_the_way_first() {
         assert!(st["working_copy"][k].as_array().unwrap().is_empty(), "{st}");
     }
 }
+
+#[test]
+fn msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes() {
+    use std::os::unix::fs::PermissionsExt;
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    store_write(
+        &s,
+        "work",
+        json!([
+            {"op": "update", "id": seed.claim, "body": "Theirs claim."},
+            {"op": "update", "id": seed.note, "body": "Theirs."},
+            {"op": "create", "type": "folder", "fields": {"name": "zfold", "title": "Zfold"}}
+        ]),
+    );
+    // guides/intro.yaml is written, notes.yaml fails in the read-only root, zfold/ is not reached
+    let root = s.dir.path().to_path_buf();
+    let mode =
+        |m: u32| std::fs::set_permissions(&root, std::fs::Permissions::from_mode(m)).unwrap();
+    mode(0o555);
+    // as root a read-only directory still takes writes: the update cannot be stopped here
+    let probe = root.join(".msw5-probe");
+    if std::fs::write(&probe, "").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        mode(0o755);
+        eprintln!("msw5: skipped, a read-only directory takes writes here (running as root?)");
+        return;
+    }
+    let (okk, v) = json(&s, &["update"]);
+    mode(0o755);
+    assert!(!okk && v["code"] == E_IO, "{v}");
+    assert!(!at(&s, "zfold").exists(), "stopped before the new folder");
+    put(&s, "zfold", "mine\n");
+    let (okk, v) = json(&s, &["update"]);
+    assert!(
+        std::fs::symlink_metadata(at(&s, "zfold"))
+            .unwrap()
+            .is_file(),
+        "the untracked file was replaced by a directory: {v}"
+    );
+    assert_eq!(read(&s, "zfold"), "mine\n");
+    assert!(!okk && v["code"] == E_WC_DIRTY, "{v}");
+}
