@@ -3,8 +3,11 @@
 //! most specific level that sets a key wins. Each key of [`KEY_LEVELS`] names the levels that may
 //! set it (R-P6); a key in a file of another level is `E_CONFIG` naming the right file. Keys
 //! outside the table are kept as they are and never shown; each one is a `W_CONFIG_UNKNOWN`
-//! warning naming the key, the file and the level (R-P6). An unknown key under `reviews` (or one
-//! nearest to a `reviews` key) is `E_CONFIG` instead: the review gate would stay off (#832).
+//! warning naming the key, the file and the level (R-P6). A mapping key that holds a `.` is never
+//! known: rdy reads only nested keys. An unknown key meant as a review setting is `E_CONFIG`
+//! instead (#832): one under `reviews` or nearest to a `reviews` key, a dotted `reviews.` key, and
+//! one anywhere whose last segment is (or is within 2 edits of) a `reviews` leaf. The review gate
+//! would stay off.
 
 use crate::{E_CONFIG, E_IO, E_NO_PROJECT, RdyError};
 use rdy_schema::{Issue, Severity};
@@ -388,13 +391,29 @@ fn level_name(level: Level) -> &'static str {
     }
 }
 
-/// The dotted paths in `map` that are neither a key of the table nor a section on the way to one.
-/// An unknown section is named by its leaves (`decision.home`), so a typo in a section's name
-/// still gets the nearest key.
-fn unknown_paths(map: &Mapping, prefix: &str, out: &mut Vec<String>) {
+/// A path of a file that is neither a key of the table nor a section on the way to one.
+struct Unknown {
+    /// The dotted path (`decision.home`).
+    path: String,
+    /// The value, when the path ends in one mapping key that holds a `.` (`"serve.idle_timeout":
+    /// 5`): rdy reads only nested keys, so that key is never known.
+    dotted: Option<Value>,
+}
+
+/// The unknown paths of `map`. An unknown section is named by its leaves (`decision.home`), so a
+/// typo in a section's name still gets the nearest key. A mapping key that holds a `.` is never a
+/// key or a section of the table, whatever it names.
+fn unknown_paths(map: &Mapping, prefix: &str, out: &mut Vec<Unknown>) {
     for (k, v) in map {
         let Some(k) = k.as_str() else { continue };
         let path = format!("{prefix}{k}");
+        if k.contains('.') {
+            out.push(Unknown {
+                path,
+                dotted: Some(v.clone()),
+            });
+            continue;
+        }
         if KEY_LEVELS.iter().any(|r| r.key == path) {
             continue;
         }
@@ -407,9 +426,18 @@ fn unknown_paths(map: &Mapping, prefix: &str, out: &mut Vec<String>) {
         }
         match v {
             Value::Mapping(inner) if !inner.is_empty() => unknown_paths(inner, &dotted, out),
-            _ => out.push(path),
+            _ => out.push(Unknown { path, dotted: None }),
         }
     }
+}
+
+/// The fix of a dotted key: the same setting written nested, its first segment on one line.
+fn nested_fix(path: &str, value: &Value) -> String {
+    let (head, rest) = path.split_once('.').unwrap_or((path, ""));
+    format!(
+        "write it nested: `{head}:` then `  {rest}: {}` on the next line",
+        flow(value)
+    )
 }
 
 fn edit_distance(a: &str, b: &str) -> usize {
@@ -452,21 +480,38 @@ fn unknown_warnings(level: Level, map: &Mapping, user_file: Option<&Path>) -> Ve
     let file = file_name(level, user_file);
     paths
         .into_iter()
-        .map(|path| Issue {
+        .map(|u| Issue {
             severity: Severity::Warning,
             code: "W_CONFIG_UNKNOWN",
             block: None,
             message: format!(
-                "unknown key {path} in {file} ({} level); rdy ignores it",
+                "unknown key {} in {file} ({} level); rdy ignores it",
+                u.path,
                 level_name(level)
             ),
-            fix: unknown_fix(&path, level, &file),
+            fix: match &u.dotted {
+                Some(v) => nested_fix(&u.path, v),
+                None => unknown_fix(&u.path, level, &file),
+            },
         })
         .collect()
 }
 
-/// The first unknown key of `map` under `reviews`, or nearest to a `reviews` key, as `E_CONFIG`
-/// (R2): a misspelled review setting would leave the review gate off with only a warning.
+/// The leaf of the `reviews` key whose leaf `segment` is, or is within 2 edits of.
+fn review_leaf(segment: &str) -> Option<&'static str> {
+    KEY_LEVELS
+        .iter()
+        .filter_map(|r| r.key.strip_prefix("reviews."))
+        .map(|leaf| (edit_distance(segment, leaf), leaf))
+        .filter(|(d, _)| *d <= 2)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, leaf)| leaf)
+}
+
+/// The first unknown key of `map` that is meant as a review setting, as `E_CONFIG` (R2): it would
+/// leave the review gate off with only a warning. That is a dotted key under `reviews`, an
+/// unknown key under `reviews` or nearest to a `reviews` key, and a key anywhere whose last
+/// segment is (or is within 2 edits of) the leaf of a `reviews` key.
 fn unknown_review_setting(
     level: Level,
     map: &Mapping,
@@ -474,16 +519,44 @@ fn unknown_review_setting(
 ) -> Option<RdyError> {
     let mut paths = Vec::new();
     unknown_paths(map, "", &mut paths);
-    let path = paths.into_iter().find(|p| {
-        p.starts_with("reviews.")
-            || nearest_key(p, level).is_some_and(|k| k.starts_with("reviews."))
-    })?;
     let file = file_name(level, user_file);
-    Some(RdyError::new(
-        E_CONFIG,
-        format!("unknown review setting {path} in {file}; the review gate would stay off"),
-        unknown_fix(&path, level, &file),
-    ))
+    paths.into_iter().find_map(|u| {
+        let path = &u.path;
+        if let (Some(v), true) = (&u.dotted, path.starts_with("reviews.")) {
+            return Some(RdyError::new(
+                E_CONFIG,
+                format!(
+                    "{file}: `{path}` is written as one dotted key; rdy reads only nested keys, \
+                     so the review setting would be ignored"
+                ),
+                nested_fix(path, v),
+            ));
+        }
+        let unknown = || {
+            RdyError::new(
+                E_CONFIG,
+                format!("unknown review setting {path} in {file}; the review gate would stay off"),
+                unknown_fix(path, level, &file),
+            )
+        };
+        if path.starts_with("reviews.") {
+            return Some(unknown());
+        }
+        let last = path.rsplit('.').next().unwrap_or(path);
+        if let Some(leaf) = review_leaf(last) {
+            return Some(RdyError::new(
+                E_CONFIG,
+                format!(
+                    "unknown review setting {path} in {file}; the review gate would stay off; \
+                     did you mean reviews.{leaf}?"
+                ),
+                "move it under `reviews:`",
+            ));
+        }
+        nearest_key(path, level)
+            .is_some_and(|k| k.starts_with("reviews."))
+            .then(unknown)
+    })
 }
 
 /// Why the value `rule.key` has in `map` is of the wrong type, or `None` when it has the type or

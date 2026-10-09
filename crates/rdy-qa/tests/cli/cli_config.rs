@@ -222,3 +222,57 @@ fn cfgl1_a_user_config_that_does_not_parse_is_e_config_naming_it() {
         assert!(e.message.contains(&shown) || e.fix.contains(&shown), "{e}");
     }
 }
+
+#[test]
+fn msw19_a_dotted_key_that_is_not_a_review_setting_warns() {
+    let (_d, p) = proj();
+    append(&p, PROJECT_FILE, "serve.idle_timeout: 5\n");
+    let e = effective(&p, None).unwrap();
+    let w: Vec<_> = e
+        .warnings
+        .iter()
+        .filter(|w| w.code == "W_CONFIG_UNKNOWN")
+        .collect();
+    assert_eq!(w.len(), 1, "{:?}", e.warnings);
+    assert!(
+        w[0].message.contains("serve.idle_timeout"),
+        "{}",
+        w[0].message
+    );
+    assert_eq!(
+        w[0].fix,
+        "write it nested: `serve:` then `  idle_timeout: 5` on the next line"
+    );
+    let idle = e
+        .origins
+        .iter()
+        .find(|o| o.key == "serve.idle_timeout")
+        .unwrap();
+    assert_eq!(idle.level, Level::Default, "the dotted key is not read");
+}
+
+#[test]
+fn msw19_a_dotted_review_key_fails_rdy_config_and_rdy_status() {
+    let s = Served::new();
+    append(
+        s.dir.path(),
+        PROJECT_FILE,
+        "reviews.require_up_to_date: true\n",
+    );
+    for args in [&["config", "--show-origin"][..], &["status"][..]] {
+        let o = s.rdy(args);
+        let out = format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        );
+        assert!(
+            out.contains("E_CONFIG") && out.contains("is written as one dotted key"),
+            "{args:?}: {out}"
+        );
+        assert!(
+            !out.contains("require_up_to_date = false"),
+            "{args:?}: {out}"
+        );
+    }
+}
