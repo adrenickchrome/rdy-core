@@ -271,3 +271,59 @@ fn snap1_a_reopen_refused_by_a_held_state_names_this_process_not_another() {
     drop(held);
     Rdy::open(dir.path()).unwrap();
 }
+
+fn retitle(r: &mut Rdy, view: &str, id: &str, title: &str) {
+    let ops = serde_json::from_value(serde_json::json!([
+        {"op": "update", "id": id, "fields": {"title": title}}
+    ]))
+    .unwrap();
+    r.write(
+        &writer(),
+        WriteRequest {
+            view: view.into(),
+            ops,
+            justification: None,
+            message: String::new(),
+        },
+    )
+    .unwrap();
+}
+
+/// A damaged producer entry of canon's version makes a view's conflict count an error. Read as
+/// "no producer", it would settle canon's side and report 0 conflicts.
+#[test]
+fn msw4_an_unreadable_producer_entry_fails_the_view_conflict_count_instead_of_reporting_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let id = doc(&mut r, "seed", "glossary");
+    land(&mut r, "seed");
+    // w1 then w2 (on w1): with canon's side read as "no producer", w2 would settle the conflict
+    retitle(&mut r, "w", &id, "W1");
+    retitle(&mut r, "w", &id, "W2");
+    retitle(&mut r, "o", &id, "O");
+    land(&mut r, "o");
+    let count = |r: &Rdy| -> Result<usize, rdy_engine::RdyError> {
+        let views = r.read().view_list(false, 30, 0)?;
+        Ok(views.iter().find(|v| v.name == "w").unwrap().conflicts)
+    };
+    assert_eq!(count(&r).unwrap(), 1, "healthy index: one conflict");
+    let canon = r
+        .read()
+        .materialized(&Scope::Canon)
+        .unwrap()
+        .iter()
+        .find(|b| b.id.as_str() == id)
+        .unwrap()
+        .version_hash();
+    let mut key = canon.0.to_vec();
+    key.extend_from_slice(&[0xAB; 3]); // a damaged producer entry: not 64 bytes
+    r.store_mut().put_raw_producer_for_tests(&key).unwrap();
+    drop(r);
+    let r = Rdy::open(dir.path()).unwrap();
+    assert!(
+        r.store().producer(&canon).is_err(),
+        "the damaged entry reads as an error"
+    );
+    let res = count(&r);
+    assert!(res.is_err(), "must not report the count: {res:?}");
+}

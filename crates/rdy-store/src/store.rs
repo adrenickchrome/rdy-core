@@ -731,6 +731,12 @@ impl Store {
         self.index().dump()
     }
 
+    /// Writes one raw `producers` row (a test hook that damages the index).
+    #[doc(hidden)]
+    pub fn put_raw_producer_for_tests(&mut self, key: &[u8]) -> Result<(), StoreError> {
+        self.index().put_raw_producer_for_tests(key)
+    }
+
     /// Rebuilds the index from the log in a new database at the same path. The store's reader
     /// then holds the new index; a reader cloned before keeps the old one, which stays readable
     /// through its unlinked file until that reader drops (Unix).

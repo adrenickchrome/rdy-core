@@ -393,3 +393,109 @@ fn msw4_an_unreadable_producer_entry_fails_the_landing_instead_of_settling_canon
         "canon keeps y"
     );
 }
+
+/// The landing in a store at `path` that proposes view v (x0 -> u) while view w holds w1
+/// (x0 -> a) and w2 (a -> c, on w1): the store is closed after the setup, so the caller can
+/// damage the index before it lands.
+fn msw4_rebase_setup(path: &std::path::Path, x0: &Block, u: &Block) -> rdy_model::Hash {
+    let (a, c) = (block("b-00001", "a"), block("b-00001", "c"));
+    let mut s = Store::create(path).unwrap();
+    seeded(&mut s, x0);
+    let w1 = s
+        .commit_to_view(
+            "w",
+            change(
+                "w",
+                vec![Op::Update {
+                    base: x0.version_hash(),
+                    block: a.clone(),
+                }],
+            ),
+        )
+        .unwrap();
+    let w2 = s
+        .commit_to_view(
+            "w",
+            change(
+                "w",
+                vec![Op::Update {
+                    base: a.version_hash(),
+                    block: c,
+                }],
+            ),
+        )
+        .unwrap();
+    assert!(s.change(&w2).unwrap().deps.contains(&w1));
+    s.commit_to_view(
+        "v",
+        change(
+            "v",
+            vec![Op::Update {
+                base: x0.version_hash(),
+                block: u.clone(),
+            }],
+        ),
+    )
+    .unwrap();
+    s.propose("v", "v", prov(Role::Writer)).unwrap()
+}
+
+fn msw4_land(s: &mut Store, p: rdy_model::Hash) -> Result<rdy_store::LandOutcome, StoreError> {
+    s.land_atomic(rdy_store::LandRequest {
+        proposal: p,
+        accept: None,
+        approver: prov(Role::Approver),
+        alt: None,
+        relay: None,
+        evidence: None,
+    })
+}
+
+/// Review Focus 4, the rebase half: the producer of the landed version is read for every view
+/// the landing rebases. A damaged entry fails the landing; read as "no producer", it would settle
+/// canon's side and drop view w's conflict.
+#[test]
+fn msw4_an_unreadable_producer_of_the_landed_version_fails_the_landing_instead_of_dropping_a_views_conflict()
+ {
+    let x0 = block("b-00001", "zero");
+    let u = block("b-00001", "u");
+    // control: with a healthy index, the landing rebases w with exactly one conflict
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s");
+        let p = msw4_rebase_setup(&path, &x0, &u);
+        let mut s = Store::open(&path).unwrap();
+        let out = msw4_land(&mut s, p).unwrap();
+        let w = out.rebased.iter().find(|r| r.view == "w").unwrap();
+        assert_eq!(w.conflicts.len(), 1, "healthy index: {:?}", w.conflicts);
+        assert_eq!(s.canon_state().unwrap().blocks[&x0.id], u.version_hash());
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let p = msw4_rebase_setup(&path, &x0, &u);
+    {
+        const PRODUCERS: redb::TableDefinition<&[u8], &[u8]> =
+            redb::TableDefinition::new("producers");
+        let db = redb::Database::open(path.join("index.redb")).unwrap();
+        let tx = db.begin_write().unwrap();
+        {
+            let mut t = tx.open_table(PRODUCERS).unwrap();
+            let mut key = u.version_hash().0.to_vec();
+            key.extend_from_slice(&[0xAB; 3]); // a damaged producer entry: not 64 bytes
+            t.insert(&key[..], &[][..]).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let mut s = Store::open(&path).unwrap();
+    assert!(
+        s.producer(&u.version_hash()).is_err(),
+        "the damaged entry reads as an error"
+    );
+    let res = msw4_land(&mut s, p);
+    assert!(res.is_err(), "must not drop w's conflict: {res:?}");
+    assert_eq!(
+        s.canon_state().unwrap().blocks[&x0.id],
+        x0.version_hash(),
+        "canon keeps x0"
+    );
+}

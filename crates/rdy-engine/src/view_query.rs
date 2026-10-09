@@ -293,10 +293,21 @@ impl ReadState {
         let deleters =
             self.reader()
                 .merge_deleters(entry.base.as_ref(), &bases[&entry.base], blocks)?;
+        // the producer of each base version of `blocks`, read before the merge, so a read error
+        // fails the count: read as "no producer", it would settle canon's side
+        let mut producers: HashMap<Hash, Option<Hash>> = HashMap::new();
+        for v in blocks
+            .iter()
+            .filter_map(|b| bases[&entry.base].blocks.get(b))
+        {
+            if !producers.contains_key(v) {
+                producers.insert(*v, self.reader().producer(v)?);
+            }
+        }
         let n = merge_on_blocks(
             &bases[&entry.base],
             &input,
-            &|v| self.reader().producer(v).ok().flatten(),
+            &|v| producers.get(v).copied().flatten(),
             &|b| deleters.get(b).copied(),
             blocks,
         )

@@ -439,6 +439,19 @@ impl Index {
         })
     }
 
+    /// Writes one raw `producers` row in a durable commit. No store path calls it: it is the test
+    /// hook that damages the index (a key that is not a version and a change).
+    #[doc(hidden)]
+    pub fn put_raw_producer_for_tests(&self, key: &[u8]) -> Result<(), StoreError> {
+        let w = self.db.begin_write().map_err(db)?;
+        {
+            let mut t = w.open_table(PRODUCERS).map_err(db)?;
+            t.insert(key, &[][..]).map_err(db)?;
+        }
+        w.commit().map_err(db)?;
+        Ok(())
+    }
+
     pub fn get_ref(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
         let r = self.db.begin_read().map_err(db)?;
         let t = r.open_table(REFS).map_err(db)?;
