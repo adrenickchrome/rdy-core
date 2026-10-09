@@ -15,7 +15,7 @@ use rdy_model::{
 use rdy_schema::{Issue, Severity, validate_block, validate_prefix};
 use rdy_store::{AltLanding, Conflict, LandRequest, MergeChange, Relay, merge_on_blocks};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// A proposal version as an approver names it: the version's hash, the proposal's stable id (its
@@ -548,10 +548,19 @@ pub(crate) fn blocking_conflicts(
         })
         .collect();
     let deleters = reader.merge_deleters(base.as_ref(), &state, &touched)?;
+    // the merge asks for the producer of each touched block's base version only: read them
+    // first, so a damaged index entry fails the check instead of reading as "no producer",
+    // which would settle the base's side of a conflict (msw2)
+    let mut producers: HashMap<Hash, Option<Hash>> = HashMap::new();
+    for v in touched.iter().filter_map(|b| state.blocks.get(b)) {
+        if !producers.contains_key(v) {
+            producers.insert(*v, reader.producer(v)?);
+        }
+    }
     Ok(merge_on_blocks(
         &state,
         &input,
-        &|v| reader.producer(v).ok().flatten(),
+        &|v| producers.get(v).copied().flatten(),
         &|b| deleters.get(b).copied(),
         &touched,
     )
@@ -888,9 +897,10 @@ fn not_lost(st: &ReadState, view: &str, what: impl Fn(&str) -> String) -> Result
 
 /// altg1: a change written in a member view of an open set (its `links.alternative`) is that
 /// member's alternative: it lands only in a version proposed from that member's view that chose
-/// that member (`chosen`). A member since removed from the set no longer binds its changes. A
-/// change with no link, written in a member view before the set was made, is that member's
-/// alternative too (msw2).
+/// that member (`chosen`). A link binds while its set is open and still lists the member. A
+/// change with no binding link (written before the set was made, or linked to a set that is
+/// settled or dropped the member) is the alternative of its view's open set when its view is
+/// the only member that holds it (msw2; see `unlinked_alt`).
 fn linked_alts(
     st: &ReadState,
     view: &str,
@@ -898,27 +908,26 @@ fn linked_alts(
     ids: &[Hash],
     changes: &[Change],
 ) -> Result<(), RdyError> {
+    let open = &st.coord_heads().open_alts;
     for (id, c) in ids.iter().zip(changes) {
+        let linked = c.links.alternative.as_ref().filter(|a| {
+            open.get(&a.set)
+                .is_some_and(|(_, set)| set.members.iter().any(|m| m.view == a.member))
+        });
         let unlinked;
-        let a = match &c.links.alternative {
+        let a = match linked {
             Some(a) => a,
-            None => match st.alt_of_view(&c.view)? {
-                Some((stable, _, _)) => {
-                    unlinked = AltChoice {
-                        set: stable,
-                        member: c.view.clone(),
-                    };
+            None => match unlinked_alt(st, id, &c.view)? {
+                Some(a) => {
+                    unlinked = a;
                     &unlinked
                 }
                 None => continue,
             },
         };
-        let Some((_, set)) = st.coord_heads().open_alts.get(&a.set) else {
+        let Some((_, set)) = open.get(&a.set) else {
             continue;
         };
-        if !set.members.iter().any(|m| m.view == a.member) {
-            continue;
-        }
         if a.member == view && chosen == Some(a) {
             continue;
         }
@@ -934,6 +943,32 @@ fn linked_alts(
         ));
     }
     Ok(())
+}
+
+/// The alternative change `id`, written in view `written_in` and bound by no link, belongs to:
+/// that view's member of the open set it is a member of, when no other member of the set
+/// holds the change. A change that more than one member holds (a view forked from another
+/// member, an include) is common ground: no member's alternative, so it lands with any member
+/// and chooses nothing. One the view no longer holds is no member's alternative either.
+fn unlinked_alt(
+    st: &ReadState,
+    id: &Hash,
+    written_in: &str,
+) -> Result<Option<AltChoice>, RdyError> {
+    let Some((stable, _, set)) = st.alt_of_view(written_in)? else {
+        return Ok(None);
+    };
+    let mut holders = set
+        .members
+        .iter()
+        .filter(|m| st.included(&m.view).contains(id));
+    match (holders.next(), holders.next()) {
+        (Some(only), None) if only.view == written_in => Ok(Some(AltChoice {
+            set: stable,
+            member: written_in.to_string(),
+        })),
+        _ => Ok(None),
+    }
 }
 
 /// The canon that would result from landing `changes` on `st`'s canon, and each applied change's

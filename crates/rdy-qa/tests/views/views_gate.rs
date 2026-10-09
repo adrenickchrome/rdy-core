@@ -384,3 +384,70 @@ fn msw2_an_approve_path_stale_base_tells_the_approver_what_the_author_must_do() 
     );
     assert!(!e.fix.contains("rebase the view"), "{e}");
 }
+
+#[test]
+fn msw2_an_unreadable_producer_fails_the_conflict_check_instead_of_settling_canons_side() {
+    // fix round 1: canon's side of b's conflict is a's change; b's second change settles the
+    // conflict only if canon's side has no known producer, so a producer lookup that fails must
+    // fail the check, not read as "no producer"
+    let (d, mut r) = project();
+    let (_doc, _section, c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let v = version_of(&r, &Scope::Canon, &c);
+    let sa = as_agent("agent:a", "r1");
+    let sb = as_agent("agent:b", "r1");
+    write_as(&mut r, &sa, "a", update(&c, &v, "a's")).unwrap();
+    write_as(&mut r, &sb, "b", update(&c, &v, "b1")).unwrap();
+    let b1 = version_of(&r, &view("b"), &c);
+    write_as(&mut r, &sb, "b", update(&c, &b1, "b2")).unwrap();
+    land(&mut r, "a").unwrap();
+    let pb = r.propose(&sb, "b", "b").unwrap();
+    assert_eq!(
+        pb.conflicts.len(),
+        1,
+        "healthy index: canon's side holds the conflict open"
+    );
+    let y: rdy_model::Hash = version_of(&r, &Scope::Canon, &c).parse().unwrap();
+    r.close().unwrap();
+    {
+        // damage: a second producer of canon's version, indexed as landed by a landing the
+        // index does not hold, so the producer lookup fails
+        let idx = rdy_store::index::Index::open(&d.path().join(".rdy/store/index.redb")).unwrap();
+        let upto = idx.indexed_upto().unwrap();
+        let fake = rdy_model::Hash([0xAB; 32]);
+        idx.apply_durable(
+            &[
+                rdy_store::index::IndexEntry::Producer {
+                    version: y,
+                    change: fake,
+                },
+                rdy_store::index::IndexEntry::Landed {
+                    change: fake,
+                    landing: rdy_model::Hash([0xCD; 32]),
+                },
+            ],
+            upto,
+        )
+        .unwrap();
+    }
+    let mut r = Rdy::open(d.path()).unwrap();
+    assert!(r.store().producer(&y).is_err(), "the damage is real");
+    let shown = r.read().proposal_show(&pb.r#ref);
+    assert!(
+        shown.is_err(),
+        "proposal show must not report no conflict: {:?}",
+        shown.map(|s| s.conflicts.len())
+    );
+    let again = r.propose(&sb, "b", "again");
+    assert!(
+        again.is_err(),
+        "propose must not report no conflict: {:?}",
+        again.map(|p| p.conflicts.len())
+    );
+    let approved = r.land_report(&approver(), &pb.r#ref);
+    assert!(
+        approved.is_err(),
+        "must not land over canon's side: {:?}",
+        approved.map(|_| ())
+    );
+}

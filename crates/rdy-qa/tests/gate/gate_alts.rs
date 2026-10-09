@@ -431,3 +431,82 @@ fn msw2_a_members_change_from_before_the_set_cannot_land_from_a_non_member_view(
     assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
     assert!(!canon_bodies(&r).iter().any(|b| b == "alt B"));
 }
+
+#[test]
+fn msw2_a_pre_set_change_two_members_hold_is_common_ground() {
+    // fix round 1: a view forked from member b holds b's pre-set change; once both are members,
+    // that change is no member's alternative, so it lands with either and chooses nothing
+    let (_d, mut r) = project();
+    let (_doc, section, _claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    write(
+        &mut r,
+        "b",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "ground G"}]),
+    )
+    .unwrap();
+    r.view_fork(&writer(), "b", "a").unwrap();
+    write(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "alt A"}]),
+    )
+    .unwrap();
+    let set = r
+        .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap()
+        .id;
+    let p = r
+        .propose_with(&writer(), "a", "a", None, None, Some(&pick(&set, "x")))
+        .unwrap();
+    r.land(&approver(), &p.id).unwrap();
+    let bodies = canon_bodies(&r);
+    assert!(
+        bodies.iter().any(|b| b == "ground G") && bodies.iter().any(|b| b == "alt A"),
+        "{bodies:?}"
+    );
+}
+
+#[test]
+fn msw2_a_change_linked_to_a_set_that_dropped_its_member_binds_to_the_members_open_set() {
+    // fix round 1: H is linked to S0's member b; b leaves S0 and joins S2, so H is b's
+    // alternative in S2 and a non-member view cannot land it
+    let (_d, mut r) = project();
+    let (_doc, section, _claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    for v in ["b", "c", "e", "a"] {
+        write(
+            &mut r,
+            v,
+            json!([{"op": "create", "type": "claim", "parent": section, "body": format!("alt {v}")}]),
+        )
+        .unwrap();
+    }
+    let s0 = r
+        .alt_create(
+            &writer(),
+            "S0",
+            None,
+            &[m("x", "b"), m("y", "c"), m("z", "e")],
+        )
+        .unwrap()
+        .id;
+    let h = write(
+        &mut r,
+        "b",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "H"}]),
+    )
+    .unwrap()
+    .change;
+    r.alt_remove(&writer(), &s0, "x").unwrap();
+    r.alt_create(&writer(), "S2", None, &[m("p", "a"), m("q", "b")])
+        .unwrap();
+    r.view_include(&writer(), "d", std::slice::from_ref(&h))
+        .unwrap();
+    let e = r
+        .propose(&writer(), "d", "d")
+        .and_then(|p| r.land(&approver(), &p.id))
+        .unwrap_err();
+    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
+    assert!(!canon_bodies(&r).iter().any(|b| b == "H"));
+}
