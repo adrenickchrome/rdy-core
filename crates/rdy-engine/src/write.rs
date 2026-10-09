@@ -747,7 +747,9 @@ fn conflicted_for_edit<'b>(
 
 /// cres1: a conflict whose base or any side is a frozen decision cannot be resolved by an edit,
 /// from any version: the edit would change or drop an accepted or rejected decision. The way out
-/// is to drop the stale change(s) or to supersede the decision.
+/// is to drop a side's change from the view or to supersede the decision. msw1 (#1165): the hint
+/// names only the sides' changes the view can exclude, the ones that have not landed (a landed
+/// change is not in the view), frozen or not.
 fn frozen_in_conflict(
     id: &BlockId,
     c: &Conflict,
@@ -759,36 +761,38 @@ fn frozen_in_conflict(
     {
         frozen = Some(format!("its base {}", cb.short()));
     }
-    let mut stale = vec![];
+    let mut excludable = vec![];
     for s in &c.sides {
         let side_frozen = match s.version {
             Some(v) => decision::is_frozen(&store.get_block(&v)?),
             None => false,
         };
-        match (side_frozen, s.change) {
-            (true, change) if frozen.is_none() => {
-                let landing = match change {
-                    Some(ch) => store.landing_of(&ch)?,
-                    None => None,
-                };
-                frozen = Some(match (change, landing) {
-                    (Some(ch), Some(l)) => format!("side {} landed in {}", ch.short(), l.short()),
-                    (Some(ch), None) => format!("side {}", ch.short()),
-                    (None, _) => "a side in canon".to_string(),
-                });
-            }
-            (false, Some(ch)) => stale.push(ch.to_string()),
-            _ => {}
+        let landing = match s.change {
+            Some(ch) => store.landing_of(&ch)?,
+            None => None,
+        };
+        if side_frozen && frozen.is_none() {
+            frozen = Some(match (s.change, landing) {
+                (Some(ch), Some(l)) => format!("side {} landed in {}", ch.short(), l.short()),
+                (Some(ch), None) => format!("side {}", ch.short()),
+                (None, _) => "a side in canon".to_string(),
+            });
+        }
+        if let (Some(ch), None) = (s.change, landing) {
+            excludable.push(ch.to_string());
         }
     }
     let Some(which) = frozen else {
         return Ok(());
     };
-    let exclude = match stale.as_slice() {
-        [] => "exclude the stale change from the view (rdy view exclude)".to_string(),
-        [one] => format!("exclude the stale change {one} from the view (rdy view exclude)"),
+    let supersede = format!("write a new decision that supersedes or revokes {id}");
+    let fix = match excludable.as_slice() {
+        [] => supersede,
+        [one] => {
+            format!("exclude the change {one} from the view (rdy view exclude), or {supersede}")
+        }
         many => format!(
-            "exclude the stale changes {} from the view (rdy view exclude)",
+            "exclude the changes {} from the view (rdy view exclude), or {supersede}",
             many.join(", ")
         ),
     };
@@ -797,7 +801,7 @@ fn frozen_in_conflict(
         format!(
             "{id} is an accepted or rejected decision ({which}) and cannot change; this conflict cannot be resolved by an edit"
         ),
-        format!("{exclude}, or write a new decision that supersedes or revokes {id}"),
+        fix,
     ))
 }
 
@@ -1299,6 +1303,18 @@ fn build_ops(
                         E_ALREADY_EXISTS,
                         format!("block {new_id} already exists"),
                         "omit id to let rdy generate one",
+                    ));
+                }
+                // msw1 (#1160): a create/create conflict has no base, so the view reads the
+                // block as absent; a create under its id would silently resolve the conflict
+                if let Some(c) = conflicts.iter().find(|c| c.block == new_id) {
+                    return Err(RdyError::new(
+                        E_ALREADY_EXISTS,
+                        format!(
+                            "block {new_id} already exists: it is conflicted ({})",
+                            c.id.short()
+                        ),
+                        "update it with base=<one of its sides' versions> to resolve the conflict (rdy_context shows them), or omit id to create a new block",
                     ));
                 }
                 let parent = parent.as_deref().map(|p| res.id(p)).transpose()?;

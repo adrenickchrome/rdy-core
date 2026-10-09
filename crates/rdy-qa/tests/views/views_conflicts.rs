@@ -386,3 +386,121 @@ fn cres1_a_resolution_from_a_side_checks_the_sides_key_against_the_view() {
     assert_eq!(e.code, E_KEY_CLASH, "{e}");
     check(&r, &view("a")).unwrap();
 }
+
+#[test]
+fn msw1_a_create_on_a_create_create_conflicted_id_is_refused_naming_the_conflict() {
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let mk = |body: &str| json!([{"op": "create", "type": "claim", "id": "c-PR0B1", "parent": section, "body": body}]);
+    write(&mut r, "x", mk("x's")).unwrap();
+    let cy = write(&mut r, "y", mk("y's")).unwrap().change;
+    r.store_mut()
+        .view_append(
+            "x",
+            vec![ViewOpKind::Include {
+                changes: vec![cy.parse().unwrap()],
+            }],
+            &writer().provenance(),
+        )
+        .unwrap();
+    r.invalidate();
+    let cs = r.read().conflicts(&view("x")).unwrap();
+    assert_eq!(cs.len(), 1);
+    assert_eq!(cs[0].base, None, "a create/create conflict");
+    let e = write(&mut r, "x", mk("third")).unwrap_err();
+    assert_eq!(e.code, E_ALREADY_EXISTS, "{e}");
+    assert!(e.message.contains("conflicted"), "{e}");
+    assert_eq!(
+        r.read().conflicts(&view("x")).unwrap().len(),
+        1,
+        "nothing written"
+    );
+}
+
+#[test]
+fn msw1_a_frozen_conflict_names_only_changes_the_view_can_exclude() {
+    use rdy_model::{Change, ChangeLinks, FieldValue, Op};
+    fn store_land(r: &mut Rdy, v: &str) {
+        let p = r.store_mut().propose(v, v, writer().provenance()).unwrap();
+        r.store_mut()
+            .land_atomic(rdy_store::LandRequest {
+                proposal: p,
+                accept: None,
+                approver: approver().provenance(),
+                alt: None,
+                relay: None,
+                evidence: None,
+            })
+            .unwrap();
+        r.invalidate();
+    }
+    let (_d, mut r) = project();
+    let seeded = write(&mut r, "seed", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "log", "title": "Log", "doc_type": "decisions-log"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Decisions"}},
+        {"op": "create", "type": "decision", "id": "$x", "parent": "$s", "fields": {"statement": "D", "status": "proposed"}}
+    ])).unwrap();
+    let d = seeded.created["$x"].clone();
+    let id = rdy_model::BlockId::parse(&d).unwrap();
+    store_land(&mut r, "seed"); // canon holds d, proposed
+    let vd = version_of(&r, &Scope::Canon, &d);
+    // b accepts d through the store (only the gate writes status: accepted)
+    let mut acc = r.read().block(&Scope::Canon, &id).unwrap();
+    acc.fields
+        .insert("status".into(), FieldValue::Str("accepted".into()));
+    let cb = r
+        .store_mut()
+        .commit_to_view(
+            "b",
+            Change {
+                view: "b".into(),
+                ops: vec![Op::Update {
+                    base: vd.parse().unwrap(),
+                    block: acc,
+                }],
+                deps: vec![],
+                provenance: writer().provenance(),
+                justification: None,
+                message: "accept".into(),
+                links: ChangeLinks::default(),
+            },
+        )
+        .unwrap()
+        .to_string();
+    r.invalidate();
+    // a edits d's statement from vd; it lands, still proposed
+    let x = write(
+        &mut r,
+        "a",
+        json!([{"op": "update", "id": d, "base": vd, "fields": {"statement": "D by a"}}]),
+    )
+    .unwrap()
+    .change;
+    store_land(&mut r, "a");
+    assert!(
+        r.read().conflict_info(&view("b"), &id).unwrap().is_some(),
+        "d conflicted in b"
+    );
+    let e = write(
+        &mut r,
+        "b",
+        json!([{"op": "update", "id": d, "base": vd, "fields": {"statement": "D merged"}}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, E_FROZEN, "{e}");
+    assert!(
+        !e.fix.contains(&x),
+        "x landed: the view cannot exclude it: {e}"
+    );
+    assert_eq!(
+        r.view_exclude(&writer(), "b", std::slice::from_ref(&x), false)
+            .unwrap_err()
+            .code,
+        E_BAD_INPUT
+    );
+    assert!(e.fix.contains(&cb), "cb is b's own: the hint names it: {e}");
+    r.view_exclude(&writer(), "b", std::slice::from_ref(&cb), false)
+        .unwrap();
+    assert!(r.read().conflicts(&view("b")).unwrap().is_empty());
+}
