@@ -2,7 +2,7 @@
 //! its own view. There is no agent form. Every other working-copy command run inside a worktree
 //! uses its place (`Place::locate` reads the pointer file).
 
-use super::{Open, checkout, open_at, tree};
+use super::{Open, checkout, open_with, tree};
 use crate::Env;
 use clap::Subcommand;
 use rdy_daemon::ErrorReply;
@@ -217,18 +217,6 @@ fn ls(env: &Env) -> Result<(Value, String), ErrorReply> {
     Ok((v, text))
 }
 
-/// msw16: `dir`'s pointer names worktree `name`, but that worktree is elsewhere (or nowhere).
-fn not_this_dir(dir: &Path, name: &str, where_: &str) -> ErrorReply {
-    ErrorReply::new(
-        E_BAD_INPUT,
-        format!(
-            "{} is not a worktree of this project: its pointer names worktree {name}, {where_}",
-            dir.display()
-        ),
-        "name a directory that rdy worktree ls shows; delete a copied directory by hand",
-    )
-}
-
 fn rm(env: &Env, dir: &Path, force: bool) -> Result<(Value, String), ErrorReply> {
     let dir = absolute(dir)?;
     let not_a_worktree = || {
@@ -257,20 +245,13 @@ fn rm(env: &Env, dir: &Path, force: bool) -> Result<(Value, String), ErrorReply>
         .unwrap_or_default()
         .to_string();
     // msw16: a copied directory carries the same pointer, so the pointer alone does not name
-    // this directory; the worktree's own directory is the one `add` recorded in its state
-    let recorded = fs::read_to_string(place.state.join(WORKTREE_DIR_FILE))
-        .ok()
-        .map(|t| t.trim_end_matches('\n').to_string());
-    match recorded {
-        Some(r) if same(Path::new(&r), &dir) => {}
-        Some(r) => {
-            return Err(not_this_dir(&dir, &name, &format!("which is at {r}")));
-        }
-        None => {
-            return Err(not_this_dir(&dir, &name, "which has no recorded directory"));
-        }
-    }
-    let Open { place, lock, state } = open_at(env, place, false)?;
+    // this directory; `open_with` refuses a copy and takes a moved worktree
+    let Open { place, lock, state } = open_with(
+        env,
+        place,
+        false,
+        Some("name a directory that rdy worktree ls shows; delete a copied directory by hand"),
+    )?;
     if !force {
         let (_pack, wt) = tree(env, &place)?;
         let dirty = dirty_paths(&place, &state, &wt);

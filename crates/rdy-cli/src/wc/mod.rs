@@ -106,7 +106,38 @@ pub(crate) fn open(env: &Env, require_bound: bool) -> Result<Open, ErrorReply> {
 
 /// `open` for the working copy at `place` (a worktree the command names, not the one it runs in).
 pub(crate) fn open_at(env: &Env, place: Place, require_bound: bool) -> Result<Open, ErrorReply> {
+    open_with(env, place, require_bound, None)
+}
+
+/// `open_at`. A worktree directory that is a copy of the real one (msw16, `Place::copy_of`) is
+/// refused with `E_BAD_INPUT` and the given fix (default: work in the real directory); a moved
+/// worktree records its new directory and goes on.
+pub(crate) fn open_with(
+    env: &Env,
+    place: Place,
+    require_bound: bool,
+    copy_fix: Option<&str>,
+) -> Result<Open, ErrorReply> {
     let lock = WcLock::take(&place.state, LOCK_WAIT)?;
+    if let Some(real) = place.copy_of()? {
+        let name = place
+            .state
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let fix = copy_fix.map_or_else(
+            || format!("run the command in {real}; delete a copied directory by hand"),
+            String::from,
+        );
+        return Err(ErrorReply::new(
+            E_BAD_INPUT,
+            format!(
+                "{} is not a worktree of this project: its pointer names worktree {name}, which is at {real}",
+                place.root.display()
+            ),
+            fix,
+        ));
+    }
     let mut state = WcState::load(&place)?;
     commit::recover(env, &place, &mut state)?;
     if require_bound {

@@ -106,6 +106,60 @@ impl Place {
         })
     }
 
+    /// msw16: for a worktree place, the directory of the real worktree when `root` is a copy of
+    /// it: the directory recorded in `dir.txt` still exists, is not `root`, and its pointer names
+    /// this same worktree. Otherwise `None`, and `root` is the worktree: when the recorded
+    /// directory is gone, holds no such pointer, or `dir.txt` is missing (the worktree moved, or
+    /// `rdy worktree add` stopped before it wrote `dir.txt`), `dir.txt` is rewritten to `root`.
+    /// The main place, and a worktree whose state directory is gone, are always `None`. Call it
+    /// with the working copy's lock held.
+    pub fn copy_of(&self) -> Result<Option<String>, RdyError> {
+        if self.state == self.project.join(WC_DIR) || !self.state.is_dir() {
+            return Ok(None);
+        }
+        let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => a == b,
+        };
+        let file = self.state.join(WORKTREE_DIR_FILE);
+        let recorded = fs::read_to_string(&file)
+            .ok()
+            .map(|t| t.trim_end_matches('\n').to_string());
+        if let Some(r) = &recorded {
+            let r_dir = Path::new(r);
+            if same(r_dir, &self.root) {
+                return Ok(None);
+            }
+            let live = fs::symlink_metadata(r_dir.join(POINTER_FILE)).is_ok_and(|m| m.is_file())
+                && Place::from_pointer(r_dir).is_some_and(|p| same(&p.state, &self.state));
+            if live {
+                return Ok(Some(r.clone()));
+            }
+        }
+        let root = std::path::absolute(&self.root).map_err(|e| {
+            RdyError::new(
+                E_IO,
+                format!("cannot resolve {}: {e}", self.root.display()),
+                "check the directory, then retry",
+            )
+        })?;
+        let text = root.to_str().ok_or_else(|| {
+            RdyError::new(
+                E_BAD_INPUT,
+                format!("{} is not valid UTF-8", root.display()),
+                "move the worktree to a directory whose path is valid UTF-8",
+            )
+        })?;
+        write_durable(&file, text.as_bytes()).map_err(|e| {
+            RdyError::new(
+                E_IO,
+                format!("cannot write {}: {e}", file.display()),
+                "check the state directory, then retry",
+            )
+        })?;
+        Ok(None)
+    }
+
     /// The base copy of the file at `rel`.
     pub fn base_file(&self, rel: &str) -> PathBuf {
         self.state.join("base/files").join(rel)

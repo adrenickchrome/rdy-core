@@ -4,7 +4,7 @@
 use super::{Open, open, tree};
 use crate::Env;
 use rdy_daemon::ErrorReply;
-use rdy_engine::wc::layout::{THEIRS_SUFFIX, WcTree};
+use rdy_engine::wc::layout::{FOLDER_THEIRS, THEIRS_SUFFIX, WcTree};
 use rdy_engine::wc::merge::theirs_path;
 use rdy_engine::wc::state::{ConflictEntry, ConflictKind, Place, WcState, stage_clear, stage_put};
 use rdy_engine::{E_BAD_INPUT, E_NOT_FOUND, E_WC_CONFLICT, E_WC_INVALID, RdyError};
@@ -13,6 +13,9 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+
+/// A folder's own file in its directory.
+const FOLDER_FILE: &str = "_folder.yaml";
 
 /// What `rdy add` does with one path.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -146,30 +149,20 @@ fn plan_one(
 
 /// wcup1: the conflicts adding `rel` resolves, by index in `st.conflicts`: the one naming a file
 /// added, and each one a directory added holds (a folder rename names its directory). A rename
-/// conflict also matches at the store's name (msw16), so a person may keep either name. Refused
-/// with `E_WC_CONFLICT` while one's `.theirs.yaml` (or `_folder.theirs.yaml`) still exists.
+/// conflict also matches at the store's name (msw16), so a person may keep either name; it then
+/// takes along the `Blocks` conflict of the same file. Refused with `E_WC_CONFLICT` while one's
+/// `.theirs.yaml` (or `_folder.theirs.yaml`) still exists, at the local place or the store's.
 fn resolves(
     place: &Place,
     st: &WcState,
+    wt: &WcTree,
     rel: &str,
     out: &mut BTreeSet<usize>,
 ) -> Result<(), ErrorReply> {
     let is_dir = rel.is_empty()
         || fs::symlink_metadata(place.root.join(rel)).is_ok_and(|m| m.file_type().is_dir());
-    for (i, c) in st.conflicts.iter().enumerate() {
-        if c.kind == ConflictKind::Kept {
-            continue; // rdy update (or rdy checkout --force) clears a kept file
-        }
-        let hit = if is_dir {
-            is_under(&c.path, rel)
-        } else {
-            c.path == rel
-        } || store_hit(c, rel, is_dir);
-        if !hit {
-            continue;
-        }
-        let theirs = theirs_path(c);
-        if fs::symlink_metadata(place.root.join(&theirs)).is_ok() {
+    let blocked = |c: &ConflictEntry, theirs: &str| -> Result<(), ErrorReply> {
+        if fs::symlink_metadata(place.root.join(theirs)).is_ok() {
             return Err(refuse(
                 E_WC_CONFLICT,
                 format!("delete {theirs} first"),
@@ -179,25 +172,85 @@ fn resolves(
                 ),
             ));
         }
+        Ok(())
+    };
+    for (i, c) in st.conflicts.iter().enumerate() {
+        if c.kind == ConflictKind::Kept {
+            continue; // rdy update (or rdy checkout --force) clears a kept file
+        }
+        let local = if is_dir {
+            is_under(&c.path, rel)
+        } else {
+            c.path == rel
+        };
+        let store = store_hit(place, st, wt, c, rel, is_dir);
+        if !local && store.is_none() {
+            continue;
+        }
+        blocked(c, &theirs_path(c))?;
+        if let Some(store_theirs) = &store {
+            blocked(c, store_theirs)?;
+            // the same file's content conflict sits at the local path: the doc's file, or the
+            // renamed folder's _folder.yaml
+            let file = match c.kind {
+                ConflictKind::FolderRename => join(&c.path, FOLDER_FILE),
+                _ => c.path.clone(),
+            };
+            for (j, d) in st.conflicts.iter().enumerate() {
+                if j != i && d.kind == ConflictKind::Blocks && d.path == file {
+                    blocked(d, &theirs_path(d))?;
+                    out.insert(j);
+                }
+            }
+        }
         out.insert(i);
     }
     Ok(())
 }
 
-/// msw16: a rename conflict is also resolved under the store's name: `rel` is the doc's file at
-/// the store's place, or (for a directory) the folder's place or a directory holding it.
-fn store_hit(c: &ConflictEntry, rel: &str, is_dir: bool) -> bool {
+/// msw16: a rename conflict resolved under the store's name. `Some` (the store's side's theirs
+/// path at the store's place) when `rel` names the store's place and the tree holds the doc or
+/// folder there: for a doc, the file at the store's path with the doc's head; for a folder, a
+/// directory at the store's path, which `rel` is or holds.
+fn store_hit(
+    place: &Place,
+    st: &WcState,
+    wt: &WcTree,
+    c: &ConflictEntry,
+    rel: &str,
+    is_dir: bool,
+) -> Option<String> {
     if !matches!(c.kind, ConflictKind::DocRename | ConflictKind::FolderRename) {
-        return false;
+        return None;
     }
     let (Some(name), Some(parent)) = (c.store_name.as_deref(), c.store_parent.as_deref()) else {
-        return false;
+        return None;
     };
     let at = store_place(c.kind, parent, name);
-    if is_dir {
+    let named = if is_dir {
         is_under(&at, rel)
     } else {
         rel == at
+    };
+    if !named {
+        return None;
+    }
+    if c.kind == ConflictKind::FolderRename {
+        let dir = fs::symlink_metadata(place.root.join(&at)).is_ok_and(|m| m.file_type().is_dir());
+        dir.then(|| join(&at, FOLDER_THEIRS))
+    } else {
+        // the base holds the store's paths after update, so its entry at `at` names the doc
+        let head = st.base.files.get(&at)?;
+        let there = wt.files.get(&at).is_some_and(|f| f.head == *head);
+        there.then(|| format!("{}{THEIRS_SUFFIX}", at.strip_suffix(".yaml").unwrap_or(&at)))
+    }
+}
+
+fn join(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}/{name}")
     }
 }
 
@@ -242,7 +295,7 @@ pub(super) fn run(env: &Env, paths: Vec<PathBuf>) -> Result<(Value, String), Err
             )
         })?;
         plan_one(&place, &state, &wt, &typed, &rel, &mut acts)?;
-        resolves(&place, &state, &rel, &mut resolved)?;
+        resolves(&place, &state, &wt, &rel, &mut resolved)?;
     }
     // A resolved rename also stages the deletion of the store's paths of the files staged here
     // (the base holds the store's paths after update), so the commit renames, not duplicates.

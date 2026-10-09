@@ -173,3 +173,109 @@ fn msw16_rm_of_a_copied_worktree_dir_keeps_the_real_worktree() {
     );
     assert!(copy.join("notes.yaml").exists() && side.join("notes.yaml").exists());
 }
+
+/// `rdy --json <args>` run inside `dir` (no `--project`): whether it succeeded, and its JSON.
+fn json_in(
+    s: &rdy_qa::daemon::Served,
+    dir: &std::path::Path,
+    args: &[&str],
+) -> (bool, serde_json::Value) {
+    let o = Command::new(rdy_qa::fixtures::rdy_bin())
+        .arg("--json")
+        .args(args)
+        .current_dir(dir)
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .envs(s.env_pairs())
+        .output()
+        .unwrap();
+    let okk = o.status.success();
+    let text = String::from_utf8_lossy(if okk { &o.stdout } else { &o.stderr }).into_owned();
+    let v = serde_json::from_str(text.trim())
+        .or_else(|_| serde_json::from_str(text.trim().lines().last().unwrap_or("")))
+        .unwrap_or(serde_json::Value::String(text));
+    (okk, v)
+}
+
+fn same_dir(a: &str, b: &std::path::Path) -> bool {
+    std::path::Path::new(a).canonicalize().ok() == b.canonicalize().ok()
+}
+
+/// msw16 fix round 1 (ruling): a moved worktree is still the worktree. A command run inside it
+/// records its new directory, and rm removes it.
+#[test]
+fn msw16_a_moved_worktree_is_used_and_removed() {
+    let (s, _seed) = seeded();
+    let tmp = tempfile::tempdir().unwrap();
+    let side = tmp.path().join("side");
+    let moved = tmp.path().join("moved");
+    ok(&s, &["worktree", "add", side.to_str().unwrap(), "side"]);
+    std::fs::rename(&side, &moved).unwrap();
+    let (okk, v) = json_in(&s, &moved, &["update"]);
+    assert!(okk, "{v}");
+    let (_, v) = json(&s, &["worktree", "ls"]);
+    assert!(same_dir(v[0]["dir"].as_str().unwrap(), &moved), "{v}");
+    let (okk, v) = json(&s, &["worktree", "rm", moved.to_str().unwrap()]);
+    assert!(okk, "{v}");
+    assert!(!at(&s, ".rdy/worktrees/side").exists());
+    assert!(!moved.join("notes.yaml").exists() && !moved.join(".rdy-worktree").exists());
+}
+
+/// msw16 fix round 1 (ruling): a crash between the pointer write and the dir.txt write leaves a
+/// worktree with no recorded directory; rm still removes it.
+#[test]
+fn msw16_rm_of_a_worktree_without_dir_txt_removes_it() {
+    let (s, _seed) = seeded();
+    let tmp = tempfile::tempdir().unwrap();
+    let side = tmp.path().join("side");
+    ok(&s, &["worktree", "add", side.to_str().unwrap(), "side"]);
+    std::fs::remove_file(at(&s, ".rdy/worktrees/side/dir.txt")).unwrap();
+    let (okk, v) = json(&s, &["worktree", "rm", side.to_str().unwrap()]);
+    assert!(okk, "{v}");
+    assert!(!at(&s, ".rdy/worktrees/side").exists());
+    assert!(!side.join(".rdy-worktree").exists());
+}
+
+/// msw16 fix round 1 (ruling): a command run inside a copied worktree directory is refused and
+/// names the real worktree; the real worktree and its view are untouched.
+#[test]
+fn msw16_a_command_in_a_copied_worktree_is_refused() {
+    let (s, seed) = seeded();
+    let tmp = tempfile::tempdir().unwrap();
+    let side = tmp.path().join("side");
+    let copy = tmp.path().join("side2");
+    ok(&s, &["worktree", "add", side.to_str().unwrap(), "side"]);
+    let o = Command::new("cp")
+        .arg("-R")
+        .arg(&side)
+        .arg(&copy)
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    let before = std::fs::read_to_string(side.join("notes.yaml")).unwrap();
+    let text = before.replace("Note.", "Copy.");
+    assert_ne!(text, before);
+    std::fs::write(copy.join("notes.yaml"), text).unwrap();
+    for args in [
+        &["add", "notes.yaml"][..],
+        &["commit", "-m", "from the copy"][..],
+    ] {
+        let (okk, v) = json_in(&s, &copy, args);
+        assert!(!okk && v["code"] == E_BAD_INPUT, "{args:?}: {v}");
+        let m = v["message"].as_str().unwrap();
+        assert!(
+            m.contains("worktree side") && m.contains(side.file_name().unwrap().to_str().unwrap()),
+            "{v}"
+        );
+    }
+    assert_eq!(store_block(&s, "side", &seed.note).body, "Note.");
+    assert!(!at(&s, ".rdy/worktrees/side/stage/files/notes.yaml").exists());
+    assert_eq!(
+        std::fs::read_to_string(side.join("notes.yaml")).unwrap(),
+        before
+    );
+    let (_, v) = json(&s, &["worktree", "ls"]);
+    assert!(same_dir(v[0]["dir"].as_str().unwrap(), &side), "{v}");
+    let (okk, v) = json_in(&s, &side, &["status"]);
+    assert!(okk, "{v}");
+}
