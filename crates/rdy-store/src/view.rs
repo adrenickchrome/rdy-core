@@ -194,10 +194,10 @@ impl<'r> Resolver<'r> {
         }
         let op = self.op(op_id)?;
         if depth > MAX_UNDO_DEPTH {
-            return Err(StoreError::Decode(format!(
-                "view {:?}: the undo chain at {op_id} is deeper than {MAX_UNDO_DEPTH}",
-                self.view
-            )));
+            return Err(StoreError::UndoTooDeep {
+                view: self.view.to_string(),
+                op: *op_id,
+            });
         }
         let r = match op.op {
             ViewOpKind::Commit { change } => ResolvedOp::Include(vec![change]),

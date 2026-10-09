@@ -8,6 +8,7 @@ use crate::error::*;
 use crate::read_state::ReadState;
 use crate::{Delta, Rdy, Scope, Session};
 use rdy_model::Hash;
+use rdy_store::StoreError;
 use rdy_store::view::{ResolvedOp, ViewOp, ViewOpKind};
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -87,10 +88,11 @@ fn undo_landing(message: String) -> RdyError {
 }
 
 /// The landed rule: an undo never brings back or removes landed work. `Some` refusal when
-/// `effect` would re-include a landed change, or would exclude changes that all landed and none
-/// of which the view still includes.
+/// `effect` would re-include a landed change or a landed dep its re-include adds, or would
+/// exclude changes that all landed and none of which the view still includes.
 fn landed_refusal(
     st: &ReadState,
+    view: &str,
     short: &str,
     effect: &ResolvedOp,
     included: &BTreeSet<Hash>,
@@ -105,6 +107,25 @@ fn landed_refusal(
                         c.short(),
                         l.short()
                     ))));
+                }
+            }
+            // the deps the re-include adds (the closure step 5 writes), each with the change
+            // that needs it
+            let mut seen = BTreeSet::new();
+            let base = st.effective_base(view);
+            for c in cs
+                .iter()
+                .filter(|c| !included.contains(c) && seen.insert(**c))
+            {
+                for d in missing_deps(st, base, included, std::slice::from_ref(c))? {
+                    if let Some(l) = reader.landing_of(&d)? {
+                        return Ok(Some(undo_landing(format!(
+                            "op {short} would re-include {}, a dep of {}, which landed in {}",
+                            d.short(),
+                            c.short(),
+                            l.short()
+                        ))));
+                    }
                 }
             }
             Ok(None)
@@ -213,8 +234,12 @@ impl Rdy {
                     ));
                 }
                 let effect = reader.undo_effect(view, &h)?;
-                if let Some(e) = landed_refusal(&st, &h.short(), &effect, &included)? {
+                if let Some(e) = landed_refusal(&st, view, &h.short(), &effect, &included)? {
                     return Err(e);
+                }
+                // a closed view takes no undo but the one of its close
+                if head.closed && effect != ResolvedOp::Reopen {
+                    return Err(StoreError::ViewClosed(view.into()).into());
                 }
                 (h, op, effect)
             }
@@ -236,10 +261,16 @@ impl Rdy {
                         continue;
                     }
                     let effect = reader.undo_effect(view, h)?;
-                    if landed_refusal(&st, &h.short(), &effect, &included)?.is_none() {
+                    if head.closed && effect != ResolvedOp::Reopen {
+                        continue;
+                    }
+                    if landed_refusal(&st, view, &h.short(), &effect, &included)?.is_none() {
                         pick = Some((*h, op.clone(), effect));
                         break;
                     }
+                }
+                if pick.is_none() && head.closed {
+                    return Err(StoreError::ViewClosed(view.into()).into());
                 }
                 pick.ok_or_else(|| {
                     let by = match &s.run {

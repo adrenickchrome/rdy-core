@@ -412,3 +412,88 @@ fn undo1_an_op_is_undone_only_while_its_newest_undo_is_live() {
     check(&r, &view("a")).unwrap();
     r.fsck().unwrap();
 }
+
+#[test]
+fn msw3_undo_on_a_closed_view_only_reopens_it() {
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = as_agent("agent:a", "r1");
+    write_as(&mut r, &a, "a", claim(&section, "1")).unwrap();
+    let c2 = write_as(&mut r, &a, "a", claim(&section, "2"))
+        .unwrap()
+        .change;
+    let c2_op = head(&r, "a");
+    r.view_close(&a, &["a".into()], "done").unwrap();
+    let e = r
+        .view_exclude(&a, "a", std::slice::from_ref(&c2), false)
+        .unwrap_err();
+    assert_eq!(e.code, E_VIEW_CLOSED, "{e}");
+    let e = r.undo(&a, "a", Some(&c2_op), false).unwrap_err();
+    assert_eq!(e.code, E_VIEW_CLOSED, "a targeted undo of a commit: {e}");
+    assert_eq!(r.read().included("a").len(), 2, "nothing written");
+    let u = r.undo(&a, "a", None, false).unwrap();
+    assert!(u.reopened, "the undo of the close still reopens: {u:?}");
+    r.view_close(&writer(), &["a".into()], "paused by hand")
+        .unwrap();
+    let e = r.undo(&a, "a", None, false).unwrap_err();
+    assert_eq!(
+        e.code, E_VIEW_CLOSED,
+        "a target-less undo on a view a human closed: {e}"
+    );
+    assert_eq!(r.read().included("a").len(), 2, "nothing written");
+    assert!(r.read().view_head("a").unwrap().closed);
+    check(&r, &view("a")).unwrap();
+}
+
+#[test]
+fn msw3_an_undo_never_re_includes_a_landed_dep_through_its_closure() {
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = as_agent("agent:a", "r1");
+    r.view_create(&a, "a", None, true).unwrap(); // pinned: landings never rebase it
+    let c1 = write_as(&mut r, &a, "a", claim(&section, "x")).unwrap();
+    let x = c1.created.values().next().unwrap().clone();
+    let v1 = version_of(&r, &view("a"), &x);
+    let c2 = write_as(&mut r, &a, "a", update(&x, &v1, "x2"))
+        .unwrap()
+        .change;
+    let e1 = r
+        .view_exclude(&a, "a", std::slice::from_ref(&c2), false)
+        .unwrap()
+        .head;
+    r.view_exclude(&a, "a", std::slice::from_ref(&c1.change), false)
+        .unwrap();
+    let b = as_agent("agent:b", "r1");
+    r.view_include(&b, "b", std::slice::from_ref(&c1.change))
+        .unwrap();
+    land(&mut r, "b").unwrap(); // c1 lands; pinned a keeps its base
+    let e = r.undo(&a, "a", Some(&e1), false).unwrap_err();
+    assert_eq!(e.code, E_UNDO_LANDING, "{e}");
+    assert!(e.message.contains("landed"), "{e}");
+    assert!(r.read().included("a").is_empty(), "nothing written");
+}
+
+#[test]
+fn msw3_the_undo_depth_cap_is_e_limit_with_a_way_out_not_a_repair() {
+    let (_d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let a = as_agent("agent:a", "r1");
+    write_as(&mut r, &a, "a", claim(&section, "x")).unwrap();
+    let mut last = r.undo(&a, "a", None, false).unwrap().op;
+    for i in 1..=100 {
+        match r.undo(&a, "a", Some(&last), false) {
+            Ok(u) => last = u.op,
+            Err(e) => {
+                assert!(i >= 64, "refused at nested undo {}: {e}", i + 1);
+                assert_eq!(e.code, E_LIMIT, "{e}");
+                assert!(!e.fix.contains("fsck") && !e.fix.contains("reindex"), "{e}");
+                check(&r, &view("a")).unwrap();
+                return;
+            }
+        }
+    }
+    panic!("no depth cap after 101 nested undos");
+}

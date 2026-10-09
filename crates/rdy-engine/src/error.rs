@@ -234,6 +234,16 @@ impl From<StoreError> for RdyError {
                 ),
             ),
             StoreError::Format { message, fix } => RdyError::new(E_STORE_FORMAT, message, fix),
+            StoreError::UndoTooDeep { view, op } => RdyError::new(
+                E_LIMIT,
+                format!(
+                    "view {view:?}: op {} ends a chain of more than 64 undos of undos",
+                    op.short()
+                ),
+                format!(
+                    "include or exclude the change directly instead: rdy view include|exclude {view} <change> (MCP: rdy_view include/exclude)"
+                ),
+            ),
             StoreError::Io(e) if e.kind() == std::io::ErrorKind::InvalidData => RdyError::new(
                 E_IO,
                 format!("i/o error: {e}"),

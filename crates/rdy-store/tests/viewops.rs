@@ -525,10 +525,7 @@ fn vop1_an_undo_chain_deeper_than_64_is_refused_before_it_is_written() {
     let e = s
         .view_append("a", vec![ViewOpKind::Undo { target }], &by)
         .unwrap_err();
-    assert!(
-        matches!(&e, StoreError::Decode(m) if m.contains("is deeper than 64")),
-        "{e}"
-    );
+    assert!(matches!(&e, StoreError::UndoTooDeep { .. }), "{e}");
     assert_eq!(
         s.view_head("a").unwrap().unwrap().head,
         target,
