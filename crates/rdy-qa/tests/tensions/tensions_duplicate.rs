@@ -137,3 +137,63 @@ fn tdup1_a_pair_sharing_a_name_and_a_text_is_one_tension_carried_or_rebuilt() {
     );
     assert_eq!(carried, pick(&st.tensions_rebuilt().unwrap()));
 }
+
+/// Records a proposed decision in view `who` under `parent`.
+fn decide(
+    r: &mut rdy_engine::Rdy,
+    who: &str,
+    parent: &rdy_model::BlockId,
+    statement: &str,
+    body: &str,
+) {
+    r.decide(
+        &ag(who),
+        who,
+        rdy_engine::DecisionInput {
+            parent: parent.to_string(),
+            statement: statement.into(),
+            body: body.into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+}
+
+/// Founder ruling 2026-10-08: a decision's text is its statement, never its body. Register
+/// boilerplate in two bodies does not make two decisions duplicates.
+#[test]
+fn tdup1_decisions_with_the_same_body_and_different_statements_are_not_duplicates() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let body = "Disposition: rdyhub / Trigger: rdyhub spec";
+    decide(&mut r, "a", &s.section, "Sync runs on the hub only", body);
+    decide(&mut r, "b", &s.section, "Teams are a hub feature", body);
+    assert!(
+        of_kind(&r, TensionKind::DuplicateDefinition).is_empty(),
+        "{:#?}",
+        of_kind(&r, TensionKind::DuplicateDefinition)
+    );
+}
+
+#[test]
+fn tdup1_decisions_with_the_same_statement_are_duplicates() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    decide(
+        &mut r,
+        "a",
+        &s.section,
+        "Sync runs on the hub only",
+        "Disposition: M2b",
+    );
+    decide(
+        &mut r,
+        "b",
+        &s.section,
+        "sync runs on  the HUB only",
+        "Notes: a different body here",
+    );
+    let t = one(&r, TensionKind::DuplicateDefinition);
+    assert_eq!(change_sides(&t).len(), 2);
+    assert!(t.summary.contains("same text"), "{}", t.summary);
+}

@@ -330,9 +330,7 @@ impl Writes {
                 .or_default()
                 .push(Arc::clone(w));
         }
-        if is_normative(pack, b)
-            && let Some(h) = normalize_text(&b.body, min_words)
-        {
+        if let Some(h) = text_key(pack, b, min_words) {
             self.texted.entry(h).or_default().push(Arc::clone(w));
         }
         if b.block_type == decision::DECISION {
@@ -490,9 +488,7 @@ impl IndexKeys {
         {
             self.names.insert(normalize_name(name));
         }
-        if is_normative(pack, b)
-            && let Some(h) = normalize_text(&b.body, min_words)
-        {
+        if let Some(h) = text_key(pack, b, min_words) {
             self.texts.insert(h);
         }
         if b.block_type == decision::DECISION {
@@ -535,9 +531,7 @@ impl CanonIndex {
                     .or_default()
                     .push(b.id.clone());
             }
-            if is_normative(pack, b)
-                && let Some(h) = normalize_text(&b.body, min_words)
-            {
+            if let Some(h) = text_key(pack, b, min_words) {
                 ix.texts.entry(h).or_default().push(b.id.clone());
             }
             if b.block_type == decision::DECISION
@@ -579,6 +573,22 @@ pub(crate) fn canon_index_of(st: &ReadState) -> Result<Arc<CanonIndex>, RdyError
 fn is_normative(pack: &Pack, b: &Block) -> bool {
     has_trait(pack, b, Trait::Normative)
         || (b.block_type == "table" && b.fields.get("normative") == Some(&FieldValue::Bool(true)))
+}
+
+/// The normative text duplicates compare for `b`: a decision's `statement` (never its body,
+/// founder ruling 2026-10-08: register boilerplate in bodies is not a duplicate), any other
+/// normative block's body; `None` for a block that is not normative or a decision without a
+/// statement.
+fn duplicate_text<'b>(pack: &Pack, b: &'b Block) -> Option<&'b str> {
+    if b.block_type == decision::DECISION {
+        return b.field_str("statement");
+    }
+    is_normative(pack, b).then_some(b.body.as_str())
+}
+
+/// The text key `b` is grouped under: [`normalize_text`] of its [`duplicate_text`].
+pub(crate) fn text_key(pack: &Pack, b: &Block, min_words: usize) -> Option<Hash> {
+    normalize_text(duplicate_text(pack, b)?, min_words)
 }
 
 /// Whether `b` defines a name: its type has the `defines` trait and it has a string `name`.
@@ -824,6 +834,12 @@ impl<'a> DetectCx<'a> {
     /// Whether `b` is normative content (a `normative` type, or a `table` with `normative: true`).
     pub fn is_normative(&self, b: &Block) -> bool {
         is_normative(self.st.pack(), b)
+    }
+
+    /// The text key duplicates group `b` under (a decision's statement, any other normative
+    /// block's body), or `None` when it has none or it is under the pack's word minimum.
+    pub fn text_key(&self, b: &Block) -> Option<Hash> {
+        text_key(self.st.pack(), b, self.st.pack().duplicate_text_min_words())
     }
 
     /// Whether `b` defines a name (a `defines` type with a string `name` field).

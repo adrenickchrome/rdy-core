@@ -1,15 +1,15 @@
 //! Duplicate definition: two blocks define the same name, or have the same normative text.
 //!
 //! A group is the blocks that share one normalized name, or one normalized text of at least the
-//! pack's `duplicate_text_min_words` words. In flight, a group is its live writes plus the canon
+//! pack's `duplicate_text_min_words` words. A decision's text is its `statement`, never its body
+//! (founder ruling 2026-10-08: register boilerplate such as "Disposition: … / Trigger: …" makes
+//! bodies match across unrelated decisions); a decision without a statement has no text. Any
+//! other normative block's text is its body. In flight, a group is its live writes plus the canon
 //! blocks no change writes; every pair of distinct blocks with an in-flight side is a tension.
 //! In canon (FW-CH6, FW-CH6a) every pair of canon blocks in a group is one: a duplicate is a
 //! standing condition, so two duplicates that both land keep their vkey until one is renamed or
 //! removed.
-use super::{
-    DetectCx, DetectScope, Detector, Found, SideRef, TensionKind, Write, normalize_name,
-    normalize_text,
-};
+use super::{DetectCx, DetectScope, Detector, Found, SideRef, TensionKind, Write, normalize_name};
 use crate::RdyError;
 use rdy_model::{BlockId, Hash};
 use std::collections::{BTreeMap, BTreeSet};
@@ -81,7 +81,6 @@ fn can_pair(canon: &[BlockId], writes: &[Arc<Write>]) -> bool {
 /// The keys to examine: every key of the scope, or in flight with `seeds` those of the seeds'
 /// live writes. The canon scope always examines every canon key.
 fn keys(cx: &DetectCx<'_>, seeds: Option<&BTreeSet<BlockId>>) -> Result<BTreeSet<Key>, RdyError> {
-    let min_words = cx.st.pack().duplicate_text_min_words();
     let mut out = BTreeSet::new();
     let mut add = |b: &rdy_model::Block| {
         if cx.defines(b)
@@ -89,9 +88,7 @@ fn keys(cx: &DetectCx<'_>, seeds: Option<&BTreeSet<BlockId>>) -> Result<BTreeSet
         {
             out.insert(Key::Name(normalize_name(n)));
         }
-        if cx.is_normative(b)
-            && let Some(h) = normalize_text(&b.body, min_words)
-        {
+        if let Some(h) = cx.text_key(b) {
             out.insert(Key::Text(h));
         }
     };
