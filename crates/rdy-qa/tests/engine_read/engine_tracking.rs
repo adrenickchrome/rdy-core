@@ -283,3 +283,35 @@ fn trk1_an_edit_with_a_reason_moves_a_tracking_field() {
         })
     );
 }
+
+#[test]
+fn msw7_a_tracking_edit_cannot_add_a_reference_pin_to_a_frozen_decision() {
+    let (_d, mut r) = trk_project();
+    let (dec, claim) = accepted(&mut r);
+    let before = r.read().block(&Scope::Canon, &id(&dec)).unwrap().pins;
+    assert!(!before.contains_key(&id(&claim)));
+    let e = update(
+        &mut r,
+        "reg",
+        &dec,
+        json!({"trigger": format!("after {{{{{claim}}}}}")}),
+        Some("cite the claim"),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, E_FROZEN, "{e}");
+}
+
+#[test]
+fn msw7_a_tracking_edit_that_keeps_the_references_still_passes() {
+    // guard: legitimate tracking edits keep working
+    let (_d, mut r) = trk_project();
+    let (dec, _claim) = accepted(&mut r);
+    update(
+        &mut r,
+        "reg",
+        &dec,
+        json!({"trigger": "after the audit"}),
+        Some("note"),
+    )
+    .unwrap();
+}

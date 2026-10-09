@@ -1844,6 +1844,20 @@ fn build_ops(
                 let h = old_pins.get(&target).copied().unwrap_or(current);
                 pins.insert(target, h);
             }
+            // msw7: a tracking edit of a frozen decision keeps the set of targets it pins; a new
+            // or dropped {{id}} in a tracking field would repin it, which the ruling forbids
+            if tracking_edits.contains(&block.id) && !pins.keys().eq(old_pins.keys()) {
+                let id = &block.id;
+                return Err(RdyError::new(
+                    E_FROZEN,
+                    format!(
+                        "{id}: a tracking edit cannot add or drop a reference of an accepted or rejected decision"
+                    ),
+                    format!(
+                        "keep its references as they are; write a new decision that supersedes {id} to change what it cites"
+                    ),
+                ));
+            }
             block.pins = pins;
         }
     }

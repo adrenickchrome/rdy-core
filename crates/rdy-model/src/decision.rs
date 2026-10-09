@@ -41,7 +41,7 @@ pub const RULING_FIELDS: [&str; 3] = ["statement", "options", "status"];
 
 /// trk1 (D-DZC1J): `new` differs from `old` in at least one tracking field of `old`'s type and in
 /// nothing else: the same id, type, parent, order, body and links, and every non-tracking field
-/// equal. Pins are not compared.
+/// equal. Pins are compared.
 pub fn only_tracking_changed(old: &Block, new: &Block, t: &Tracking) -> bool {
     let Some(tracking) = t.fields(&old.block_type) else {
         return false;
@@ -52,6 +52,7 @@ pub fn only_tracking_changed(old: &Block, new: &Block, t: &Tracking) -> bool {
         || old.order != new.order
         || old.body != new.body
         || old.links != new.links
+        || old.pins != new.pins
     {
         return false;
     }
