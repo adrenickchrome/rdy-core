@@ -58,3 +58,16 @@ fn qclean1_fsck_lists_quarantine_and_only_the_human_cleans_it() {
     let (ok, v) = s.json(&["--json", "log"]);
     assert!(ok, "the store still reads: {v}");
 }
+
+#[test]
+fn msw15_clean_quarantine_fsyncs_each_directory_it_removed_from() {
+    let d = tempfile::tempdir().unwrap();
+    let store = d.path().join(".rdy/store");
+    std::fs::create_dir_all(store.join("segments")).unwrap();
+    std::fs::write(store.join("segments/seg-0.log.torn-77"), b"torn").unwrap();
+    std::fs::write(store.join("index.redb.damaged-1"), b"old").unwrap();
+    let (c, synced) = rdy_store::fsutil::record_syncs(|| rdy_daemon::clean_quarantine(d.path()));
+    assert_eq!(c.removed.len(), 2, "{c:?}");
+    assert!(synced.contains(&store), "{synced:?}");
+    assert!(synced.contains(&store.join("segments")), "{synced:?}");
+}

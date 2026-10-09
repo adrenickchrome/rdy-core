@@ -59,9 +59,13 @@ pub struct Cleaned {
 /// Removes the quarantine files `quarantine(root)` names, in its order. Only regular files are
 /// removed: a symlink or a directory carrying a quarantine name is skipped untouched (never
 /// followed, never recursed), and an error leaves the file in `skipped` with the error text.
+/// Then each directory a file was removed from is fsynced, so a removal reported here survives a
+/// power loss; a directory whose fsync fails goes in `skipped` under its store-relative name
+/// (`.` for the store itself).
 pub fn clean_quarantine(root: &Path) -> Cleaned {
     let store = root.join(".rdy/store");
     let mut c = Cleaned::default();
+    let mut dirs = std::collections::BTreeSet::new();
     for name in quarantine(root) {
         let path = store.join(&name);
         let result = std::fs::symlink_metadata(&path)
@@ -74,8 +78,28 @@ pub fn clean_quarantine(root: &Path) -> Cleaned {
                 }
             });
         match result {
-            Ok(()) => c.removed.push(name),
+            Ok(()) => {
+                let dir = Path::new(&name)
+                    .parent()
+                    .unwrap_or(Path::new(""))
+                    .to_path_buf();
+                dirs.insert(dir);
+                c.removed.push(name);
+            }
             Err(reason) => c.skipped.push((name, reason)),
+        }
+    }
+    for dir in dirs {
+        if let Err(e) = rdy_engine::sync_dir(&store.join(&dir)) {
+            let shown = if dir.as_os_str().is_empty() {
+                ".".to_string()
+            } else {
+                dir.display().to_string()
+            };
+            c.skipped.push((
+                shown,
+                format!("removed, but the directory fsync failed: {e}"),
+            ));
         }
     }
     c

@@ -1,8 +1,9 @@
 //! Where the daemon's files live: `<project>/.rdy/run/`.
 
-use std::fs;
-use std::io;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use crate::lock::open_no_follow;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 pub const RUN_DIR: &str = "run";
@@ -10,6 +11,8 @@ pub const SOCKET_FILE: &str = "rdy.sock";
 pub const START_LOCK_FILE: &str = "start.lock";
 pub const PID_FILE: &str = "daemon.pid";
 pub const LOG_FILE: &str = "daemon.log";
+/// The run dir's own `.gitignore`: its files are the daemon's, never a checkout's.
+const GITIGNORE_FILE: &str = ".gitignore";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunDir(PathBuf);
@@ -21,6 +24,12 @@ impl RunDir {
 
     pub fn path(&self) -> &Path {
         &self.0
+    }
+
+    /// This run dir made absolute against the working directory (`std::path::absolute`), so a
+    /// check of its length sees the path the daemon binds.
+    pub fn absolute(&self) -> io::Result<RunDir> {
+        std::path::absolute(&self.0).map(RunDir)
     }
 
     pub fn socket(&self) -> PathBuf {
@@ -40,8 +49,28 @@ impl RunDir {
     }
 
     /// Creates `.rdy/run` (and `.rdy` if missing) with mode 0o700 on `run`; tightens an existing
-    /// `run` directory to 0o700; refuses anything else (a file, a symlink) in its place.
+    /// `run` directory to 0o700; refuses anything else (a file, a symlink) in its place. Then
+    /// writes the run dir's `.gitignore` (`*`) when it is missing, so git ignores the socket, pid,
+    /// lock and log; whatever already stands at that name, a link included, is left untouched.
     pub fn ensure(&self) -> io::Result<()> {
+        self.ensure_dir()?;
+        self.ignore_self()
+    }
+
+    fn ignore_self(&self) -> io::Result<()> {
+        let path = self.0.join(GITIGNORE_FILE);
+        // `create_new` (O_EXCL) never follows a link at the name, and O_NOFOLLOW refuses one
+        match open_no_follow(
+            OpenOptions::new().write(true).create_new(true).mode(0o600),
+            &path,
+        ) {
+            Ok(mut f) => f.write_all(b"*\n"),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn ensure_dir(&self) -> io::Result<()> {
         let path = &self.0;
         match fs::symlink_metadata(path) {
             Ok(m) if m.is_dir() => {
