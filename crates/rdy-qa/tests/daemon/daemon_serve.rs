@@ -413,3 +413,37 @@ fn hd3_the_session_op_gets_a_did_you_mean_for_a_misspelt_key() {
         assert_eq!(v["kind"], "agent", "the connection lives");
     });
 }
+
+#[test]
+fn hd4_an_oversized_line_on_the_mcp_socket_is_refused_and_the_session_lives() {
+    let h = Hosted::new();
+    let rt = Hosted::rt();
+    rt.block_on(async {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let (r, mut w) = h.mcp_stream().await.into_split();
+        let mut r = BufReader::new(r);
+        let mut line = String::new();
+        let send = |v: serde_json::Value| format!("{v}\n");
+        w.write_all(send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion": rdy_qa::mcp::PROTOCOL_VERSION,"capabilities":{},
+            "clientInfo":{"name":"t","version":"0"}}})).as_bytes()).await.unwrap();
+        r.read_line(&mut line).await.unwrap();
+        w.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n").await.unwrap();
+        w.write_all(send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"rdy_session",
+            "arguments":{"actor":"agent:hd4","run":"hd4","role":"writer"}}})).as_bytes()).await.unwrap();
+        line.clear();
+        r.read_line(&mut line).await.unwrap();
+        let big = "x".repeat(17 * 1024 * 1024);
+        let req = format!(r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"rdy_write","arguments":{{"message":"{big}","ops":[]}}}}}}"#);
+        tokio::time::timeout(Duration::from_secs(30), w.write_all(format!("{req}\n").as_bytes()))
+            .await.expect("written").unwrap();
+        line.clear();
+        tokio::time::timeout(Duration::from_secs(30), r.read_line(&mut line)).await.expect("a reply").unwrap();
+        assert!(line.contains("rdy_request_too_large") && line.contains("E_LIMIT"), "{}", &line[..line.len().min(400)]);
+        w.write_all(send(json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+            "params":{"name":"rdy_overview","arguments":{}}})).as_bytes()).await.unwrap();
+        line.clear();
+        r.read_line(&mut line).await.unwrap();
+        assert!(line.contains("\"id\":4"), "{line}");
+    });
+}

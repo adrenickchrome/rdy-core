@@ -593,7 +593,13 @@ where
     R: AsyncRead + Send + Unpin + 'static,
     W: AsyncWrite + Send + Unpin + 'static,
 {
-    serve(RdyServer::new(engine, Some(sid)), r, w).await
+    let (to_server, from_pump) = tokio::io::duplex(1 << 16);
+    let mut dropped = |n: usize, why: Dropped| {
+        eprintln!("rdy daemon: mcp session {sid} dropped a {n}-byte request line: {why}")
+    };
+    let pump = pump_lines(r, to_server, tools::MAX_REQUEST_BYTES, &mut dropped);
+    let (_, served) = tokio::join!(pump, serve(RdyServer::new(engine, Some(sid)), from_pump, w));
+    served
 }
 
 #[cfg(test)]

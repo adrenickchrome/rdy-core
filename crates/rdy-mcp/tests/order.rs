@@ -91,3 +91,48 @@ async fn ord1_pipelined_calls_on_a_multi_thread_runtime_apply_and_answer_in_orde
         s.await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn hd4_serve_on_answers_an_oversized_line_with_the_limit_error_and_lives() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine: Arc<dyn Engine> =
+        Arc::new(Local::new(Rdy::init(dir.path(), "rdy-standard").unwrap()));
+    let (client, server) = tokio::io::duplex(1 << 20);
+    let (sr, sw) = tokio::io::split(server);
+    tokio::spawn(serve_on(engine, 1, sr, sw));
+    let (cr, mut cw) = tokio::io::split(client);
+    let mut cr = BufReader::new(cr);
+    send(&mut cw, json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+        "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "hd4", "version": "0"}}})).await;
+    assert_eq!(recv(&mut cr).await["id"], 0);
+    send(
+        &mut cw,
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    )
+    .await;
+    send(
+        &mut cw,
+        call(
+            1,
+            "rdy_session",
+            json!({"actor": "agent:hd4", "run": "hd4", "role": "writer"}),
+        ),
+    )
+    .await;
+    assert_eq!(recv(&mut cr).await["id"], 1);
+    let big = "x".repeat(rdy_mcp::tools::MAX_REQUEST_BYTES + 1024);
+    send(
+        &mut cw,
+        call(9, "rdy_write", json!({"message": big, "ops": []})),
+    )
+    .await;
+    let reply = recv(&mut cr).await;
+    assert_eq!(reply["id"], 9, "{reply}");
+    let text = reply.to_string();
+    assert!(
+        text.contains("rdy_request_too_large") && text.contains("E_LIMIT"),
+        "{text}"
+    );
+    send(&mut cw, call(10, "rdy_overview", json!({}))).await;
+    assert_eq!(recv(&mut cr).await["id"], 10, "the session lives");
+}

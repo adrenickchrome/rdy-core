@@ -14,7 +14,7 @@ pub const E_NO_SESSION: &str = "E_NO_SESSION";
 /// The most ops one `rdy_write` may carry.
 pub const MAX_OPS_PER_WRITE: usize = 5_000;
 
-/// The longest JSON-RPC request line the stdio server passes on.
+/// The longest JSON-RPC request line rdy reads, on every transport: stdio, the proxy and the daemon's MCP socket.
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 /// The largest asset (decoded bytes) `rdy_asset` accepts.
