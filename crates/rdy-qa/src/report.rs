@@ -1049,4 +1049,44 @@ mod tests {
     fn tail_keeps_the_last_lines() {
         assert_eq!(tail("a\n\nb\nc\n", 2), "b\nc");
     }
+
+    #[test]
+    fn hd12_ci_runs_the_fast_gate_as_a_user_with_node() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let text = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("ci.yml");
+        let toolchain = std::fs::read_to_string(root.join("rust-toolchain.toml")).unwrap();
+        let ci: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).unwrap();
+        let steps = ci["jobs"]["fast"]["steps"]
+            .as_sequence()
+            .expect("jobs.fast.steps");
+        let runs: Vec<&str> = steps.iter().filter_map(|s| s["run"].as_str()).collect();
+        let uses: Vec<&str> = steps.iter().filter_map(|s| s["uses"].as_str()).collect();
+        assert!(
+            uses.iter().any(|u| u.starts_with("actions/setup-node@")),
+            "{uses:?}"
+        );
+        assert!(
+            runs.iter().any(|r| r.contains("test \"$(id -u)\" -ne 0")),
+            "a non-root check: {runs:?}"
+        );
+        assert!(
+            runs.iter()
+                .any(|r| r.contains("cargo qa --skip-perf --require-all")),
+            "{runs:?}"
+        );
+        let channel = toolchain
+            .lines()
+            .find_map(|l| l.strip_prefix("channel = "))
+            .unwrap()
+            .trim_matches('"');
+        assert!(
+            runs.iter()
+                .any(|r| r.contains(&format!("rustup toolchain install {channel}"))),
+            "{runs:?}"
+        );
+        assert!(
+            !text.contains("--deep") && !text.contains("--only perf"),
+            "deep and perf stay off CI"
+        );
+    }
 }

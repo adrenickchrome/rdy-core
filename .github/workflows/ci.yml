@@ -1,0 +1,28 @@
+# Cheap checks (FW-HD2): fmt, clippy and the fast suite. The deep and perf gates run
+# elsewhere; the external gate decides merges.
+name: ci
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  fast:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal --component clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Not root
+        run: test "$(id -u)" -ne 0
+      - name: Fast gate (fmt, clippy, tests; no perf)
+        run: cargo qa --skip-perf --require-all
