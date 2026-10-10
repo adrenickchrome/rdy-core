@@ -305,6 +305,15 @@ fn trk1_the_store_lets_only_a_tracking_edit_through_a_frozen_decision() {
     moved
         .fields
         .insert("disposition".into(), FieldValue::Str("M2d2".into()));
+    // msw7: a tracking edit that also adds a pin is a repin, so it stays frozen
+    let mut repinned = moved.clone();
+    repinned
+        .pins
+        .insert(BlockId::parse("C-4Q8ZT").unwrap(), Hash::of(b"claim"));
+    assert!(matches!(
+        s.commit_to_view("p", update("p", &d, repinned)),
+        Err(StoreError::Frozen(_))
+    ));
     s.commit_to_view("t", update("t", &d, moved.clone()))
         .unwrap();
     let pt = s.propose("t", "move", prov(Role::Writer)).unwrap();

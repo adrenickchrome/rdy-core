@@ -559,8 +559,10 @@ pub async fn connect_or_start(run: &RunDir, opts: StartOptions) -> Result<Client
     }
 
     // a daemon spawned for a socket path over `sun_path` would only die at its bind; refuse it
-    // here rather than wait out the start timeout
-    crate::socket::check_socket_path(run)
+    // here rather than wait out the start timeout. The daemon binds the absolute path, so check
+    // that one, not a run dir relative to the caller's working directory.
+    run.absolute()
+        .and_then(|r| crate::socket::check_socket_path(&r))
         .map_err(|e| start_error(format!("could not start the daemon: {e}")))?;
 
     // 2. take start.lock; the guard unlocks on every return below

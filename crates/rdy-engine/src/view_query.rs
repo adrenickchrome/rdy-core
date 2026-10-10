@@ -14,6 +14,16 @@ use rdy_store::{MergeChange, merge_on_blocks};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+/// The answer of a nonce lookup: the change that carries the nonce, if any, how many frames the
+/// lookup read, and whether it stopped at its limit before it read everything it searches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NonceLookup {
+    pub change: Option<Hash>,
+    pub read: usize,
+    /// The lookup reached its limit with no match: the change may still be further back.
+    pub capped: bool,
+}
+
 /// One row of `rdy view ls`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ViewSummary {
@@ -293,10 +303,21 @@ impl ReadState {
         let deleters =
             self.reader()
                 .merge_deleters(entry.base.as_ref(), &bases[&entry.base], blocks)?;
+        // the producer of each base version of `blocks`, read before the merge, so a read error
+        // fails the count: read as "no producer", it would settle canon's side
+        let mut producers: HashMap<Hash, Option<Hash>> = HashMap::new();
+        for v in blocks
+            .iter()
+            .filter_map(|b| bases[&entry.base].blocks.get(b))
+        {
+            if !producers.contains_key(v) {
+                producers.insert(*v, self.reader().producer(v)?);
+            }
+        }
         let n = merge_on_blocks(
             &bases[&entry.base],
             &input,
-            &|v| self.reader().producer(v).ok().flatten(),
+            &|v| producers.get(v).copied().flatten(),
             &|b| deleters.get(b).copied(),
             blocks,
         )
@@ -308,13 +329,13 @@ impl ReadState {
 
     /// The change whose `links.client_nonce` is `nonce` (wccm1, R-I6): view `view`'s included
     /// changes newest first, then canon's landings newest first (each landing's changes last
-    /// first); `None` once `limit` changes are read without a match.
+    /// first); not found (`capped`) once `limit` changes are read without a match.
     pub fn change_by_nonce(
         &self,
         view: &str,
         nonce: &str,
         limit: usize,
-    ) -> Result<Option<Hash>, RdyError> {
+    ) -> Result<NonceLookup, RdyError> {
         let reader = self.reader();
         let mut read = 0usize;
         let mut seen: HashSet<Hash> = HashSet::new();
@@ -330,24 +351,109 @@ impl ReadState {
             let c = reader.change(h)?;
             Ok(Some(c.links.client_nonce.as_deref() == Some(nonce)))
         };
-        for h in self.included(view).iter().rev() {
-            match check(h)? {
-                Some(true) => return Ok(Some(*h)),
-                Some(false) => {}
-                None => return Ok(None),
-            }
-        }
-        for landing in self.landing_walk() {
-            let (_, rec) = landing?;
-            for h in rec.changes.iter().rev() {
+        let mut found = None;
+        let mut capped = false;
+        'scan: {
+            for h in self.included(view).iter().rev() {
                 match check(h)? {
-                    Some(true) => return Ok(Some(*h)),
+                    Some(true) => {
+                        found = Some(*h);
+                        break 'scan;
+                    }
                     Some(false) => {}
-                    None => return Ok(None),
+                    None => {
+                        capped = true;
+                        break 'scan;
+                    }
+                }
+            }
+            for landing in self.landing_walk() {
+                let (_, rec) = landing?;
+                for h in rec.changes.iter().rev() {
+                    match check(h)? {
+                        Some(true) => {
+                            found = Some(*h);
+                            break 'scan;
+                        }
+                        Some(false) => {}
+                        None => {
+                            capped = true;
+                            break 'scan;
+                        }
+                    }
                 }
             }
         }
-        Ok(None)
+        Ok(NonceLookup {
+            change: found,
+            read,
+            capped,
+        })
+    }
+
+    /// `change_by_nonce` over the changes view `view` gained after the head `since` (msw11): the
+    /// probe a working-copy commit makes after an error reply, with `since` the view head the
+    /// copy last saw. It walks the view's op chain from its head back to `since` and checks the
+    /// change of every op on the way (a commit's, an include's or a fork's). The commit's own op
+    /// is always on that walk, also when the view was rebased onto a landing meanwhile, since the
+    /// chain keeps every op. A `since` that is not a view op hash (`canon:<hash>`, for a view that
+    /// had no head) walks the whole chain. The probe runs on the daemon's writer, so the walk
+    /// stops (`capped`) once it has read `limit` frames (ops and changes) with no match: the
+    /// caller cannot tell then whether the commit was written.
+    pub fn change_by_nonce_since(
+        &self,
+        view: &str,
+        nonce: &str,
+        since: &str,
+        limit: usize,
+    ) -> Result<NonceLookup, RdyError> {
+        let stop = since.parse::<Hash>().ok();
+        let reader = self.reader();
+        let mut read = 0usize;
+        let mut seen: HashSet<Hash> = HashSet::new();
+        let mut cur = self.view_head(view).map(|h| h.head);
+        let capped = |read| NonceLookup {
+            change: None,
+            read,
+            capped: true,
+        };
+        while let Some(h) = cur {
+            if Some(h) == stop {
+                break;
+            }
+            if read >= limit {
+                return Ok(capped(read));
+            }
+            read += 1;
+            let op = reader.view_op(&h)?;
+            cur = op.prev;
+            let changes = match op.op {
+                ViewOpKind::Commit { change } => vec![change],
+                ViewOpKind::Include { changes } | ViewOpKind::Fork { changes, .. } => changes,
+                _ => vec![],
+            };
+            for c in changes.iter().rev() {
+                if !seen.insert(*c) {
+                    continue;
+                }
+                if read >= limit {
+                    return Ok(capped(read));
+                }
+                read += 1;
+                if reader.change(c)?.links.client_nonce.as_deref() == Some(nonce) {
+                    return Ok(NonceLookup {
+                        change: Some(*c),
+                        read,
+                        capped: false,
+                    });
+                }
+            }
+        }
+        Ok(NonceLookup {
+            change: None,
+            read,
+            capped: false,
+        })
     }
 
     /// View `name` in detail (FND-7): its head, each change it includes with the blocks it

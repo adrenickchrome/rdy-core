@@ -149,3 +149,39 @@ fn wclk1_a_waiter_gets_the_lock_once_it_is_released() {
     drop(held);
     waiter.join().unwrap().unwrap();
 }
+
+#[test]
+fn msw10_a_relative_project_in_the_pointer_is_joined_to_its_directory() {
+    let top = tempfile::tempdir().unwrap();
+    let p = top.path().join("proj");
+    std::fs::create_dir_all(&p).unwrap();
+    drop(Rdy::init(&p, "rdy-standard").unwrap());
+    let w = top.path().join("side");
+    std::fs::create_dir_all(w.join("sub")).unwrap();
+    std::fs::write(w.join(POINTER_FILE), "project: ../proj\nname: side\n").unwrap();
+    let place = Place::locate(&w.join("sub")).unwrap();
+    assert_eq!(place.root, w);
+    // final review M10: joined and normalised, so `..` never lengthens the path
+    assert_eq!(place.project, p);
+    assert!(place.project.join(".rdy").is_dir());
+    assert_eq!(place.state, p.join(WORKTREES_DIR).join("side"));
+}
+
+/// A damaged pointer's fix points at repair only, and never offers deleting the directory (it
+/// holds the person's files). `rdy worktree rm` takes the directory `rdy worktree ls` shows, so
+/// the worktree can still be removed (final review M2).
+#[test]
+fn msw10_a_damaged_pointer_fix_points_at_repair_only() {
+    let top = tempfile::tempdir().unwrap();
+    let w = top.path().join("side");
+    std::fs::create_dir_all(w.join("sub")).unwrap();
+    std::fs::write(w.join(POINTER_FILE), "project: [\n").unwrap();
+    let e = Place::try_locate(&w.join("sub")).expect_err("a damaged pointer is an error");
+    assert_eq!(e.code, E_BAD_INPUT, "{e:?}");
+    assert!(e.message.contains(POINTER_FILE), "{e:?}");
+    assert!(
+        e.fix.starts_with("repair it") && e.fix.contains("rdy worktree ls"),
+        "{e:?}"
+    );
+    assert!(!e.fix.contains("delete"), "{e:?}");
+}

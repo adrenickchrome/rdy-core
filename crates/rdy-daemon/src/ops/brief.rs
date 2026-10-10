@@ -16,16 +16,17 @@ pub(super) struct BriefArgs {
     /// Continue a cut briefing: its `next` cursor. Alone (scope and max_tokens allowed).
     page: Option<String>,
     scope: Option<String>,
-    /// A write target, resolved as `edit_block` writes it: this view when it has a head, else
-    /// canon.
+    /// A write target, named as `edit_block` names it (a leading `view:` is dropped): this view
+    /// when it has a head, else canon.
     view: Option<String>,
     max_tokens: Option<usize>,
 }
 
 /// A briefing over blocks and/or a doc or folder path, registered so its token can be cited.
 /// The scope is the one given (a read: an unknown view is `E_NOT_FOUND`); else `view` as a write
-/// target (that view when it has a head, else canon, as a write there would read it); else the
-/// session's default view when it has a head, else canon.
+/// target, named as the write ops name it (a leading `view:` is dropped; that view when it has a
+/// head, else canon, as a write there would read it); else the session's default view when it
+/// has a head, else canon.
 pub(super) fn brief(cx: &OpContext, a: BriefArgs) -> Result<Value, RdyError> {
     check_max_tokens(a.max_tokens)?;
     let st = cx.engine.read();
@@ -40,7 +41,7 @@ pub(super) fn brief(cx: &OpContext, a: BriefArgs) -> Result<Value, RdyError> {
     let scope = match (a.scope.as_deref(), a.view) {
         (Some(t), _) => st.resolve_read_scope(t, Some(&own))?,
         (None, view) => {
-            let target = view.unwrap_or(own);
+            let target = view_of(cx.session, view);
             if st.view_head(&target).is_some() {
                 Scope::View(target)
             } else {

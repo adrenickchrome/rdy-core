@@ -369,3 +369,19 @@ fn wait_gone(run: &RunDir) {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+#[test]
+fn msw15_the_run_dir_ignores_itself_in_git() {
+    let d = tempfile::tempdir().unwrap();
+    let run = RunDir::of_project(d.path());
+    run.ensure().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(run.path().join(".gitignore")).unwrap(),
+        "*\n"
+    );
+    run.ensure().unwrap(); // idempotent on an existing dir
+    assert_eq!(
+        std::fs::read_to_string(run.path().join(".gitignore")).unwrap(),
+        "*\n"
+    );
+}

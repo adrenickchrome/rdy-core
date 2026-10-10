@@ -405,3 +405,45 @@ fn hb1_strict_refuses_a_moved_base_for_one_call() {
         "without --strict the approval survives the unrelated landing: {v}"
     );
 }
+
+#[test]
+fn msw2_the_approve_op_refuses_an_empty_relay_actor_run_or_session_ref() {
+    let (d, mut r) = project();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "claim", "parent": section, "body": "x"}]),
+    )
+    .unwrap();
+    let pref = r.propose(&writer(), "work", "t").unwrap().r#ref;
+    let e = Local::new(r);
+    let h = writer();
+    let cx = OpContext {
+        engine: &e,
+        session: &h,
+        cwd: d.path(),
+    };
+    for (by, sref) in [
+        ("agent:r/", None),
+        ("  ", None),
+        ("agent:r/x", Some("")),
+        ("agent:r/x", Some("  ")),
+    ] {
+        let mut args = json!({"proposal": pref, "relayed_by": by, "evidence": "yes"});
+        if let Some(sr) = sref {
+            args["session_ref"] = json!(sr);
+        }
+        let err = dispatch(&cx, "approve", args).unwrap_err();
+        assert_eq!(err.code, E_BAD_INPUT, "{by:?} {sref:?}: {err}");
+    }
+    let v = dispatch(
+        &cx,
+        "approve",
+        json!({"proposal": pref, "relayed_by": "agent:r/x", "evidence": "yes"}),
+    )
+    .unwrap();
+    assert_eq!(v["assurance"], "relayed");
+    e.close().unwrap();
+}

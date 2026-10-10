@@ -3,12 +3,13 @@ use rdy_daemon::{
     serve_command, spawn_serve,
 };
 use rdy_engine::engine::Local;
-use rdy_engine::wc::state::{Place, WcState, pointer_project};
+use rdy_engine::wc::state::{POINTER_FILE, Place, WcState, pointer_project};
 use rdy_engine::{
     E_BAD_INPUT, E_IO, E_NO_PROJECT, RdyError, Session, classify, human_actor_for_env, serve_config,
 };
 use rdy_model::Role;
 use serde_json::{Value, json};
+use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
@@ -19,9 +20,10 @@ pub(crate) fn find_project(start: &Path) -> PathBuf {
     let mut cur = Some(start);
     while let Some(dir) = cur {
         // a worktree's pointer file names its project; it is checked before the config file at
-        // each level
-        if let Some(project) = pointer_project(dir) {
-            return project;
+        // each level. A damaged pointer stops the walk at its directory, so `Place::try_locate`
+        // reports it instead of the walk reaching the main working copy.
+        if fs::symlink_metadata(dir.join(POINTER_FILE)).is_ok_and(|m| m.is_file()) {
+            return pointer_project(dir).unwrap_or_else(|| dir.to_path_buf());
         }
         if dir.join(".rdy/config.yaml").exists() {
             return dir.to_path_buf();
@@ -86,10 +88,12 @@ const BOUND_VIEW_OPS: &[&str] = &[
 ];
 
 /// The view the working copy is bound to, read from `bound.yaml` without the lock; `None` when
-/// it is not bound (or the file does not read).
-pub(crate) fn bound_view(env: &Env) -> Option<String> {
-    let place = env.place.as_ref()?;
-    Some(WcState::load_bound(place).ok()??.view)
+/// there is no working copy or it is not bound. A `bound.yaml` that does not read is its error.
+pub(crate) fn bound_view(env: &Env) -> Result<Option<String>, ErrorReply> {
+    let Some(place) = env.place.as_ref() else {
+        return Ok(None);
+    };
+    Ok(WcState::load_bound(place)?.map(|b| b.view))
 }
 
 /// Whether the command runs as the human: `RDY_ACTOR` unset or naming the human actor.
@@ -102,7 +106,7 @@ pub(crate) fn human_session(env: &Env) -> bool {
 
 /// `args` with the bound view as `view` for an op in `BOUND_VIEW_OPS` that names none, and for
 /// `brief` naming neither `view` nor `scope`; only in a human session.
-fn with_bound_view(env: &Env, op: &str, mut args: Value) -> Value {
+fn with_bound_view(env: &Env, op: &str, mut args: Value) -> Result<Value, ErrorReply> {
     let wants = if op == "brief" {
         args["view"].is_null() && args["scope"].is_null()
     } else {
@@ -111,11 +115,11 @@ fn with_bound_view(env: &Env, op: &str, mut args: Value) -> Value {
     if wants
         && (args.is_object() || args.is_null())
         && human_session(env)
-        && let Some(view) = bound_view(env)
+        && let Some(view) = bound_view(env)?
     {
         args["view"] = Value::String(view);
     }
-    args
+    Ok(args)
 }
 
 pub(crate) fn runtime() -> Result<tokio::runtime::Runtime, ErrorReply> {
@@ -269,7 +273,7 @@ fn close_local(local: Local) {
 
 /// Runs one ctl op on a session of its own.
 pub(crate) fn call(env: &Env, op: &str, args: Value) -> Result<Value, ErrorReply> {
-    let args = with_bound_view(env, op, args);
+    let args = with_bound_view(env, op, args)?;
     let mut c = Conn::open(env)?;
     let out = c.op(op, args);
     c.close();

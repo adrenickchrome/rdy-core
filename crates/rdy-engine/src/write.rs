@@ -638,6 +638,13 @@ fn place(
     }
 }
 
+/// The conflicts of the view a write goes to, and the changes it includes: an `E_FROZEN` hint
+/// names a side's change only when the view includes it (msw1).
+pub(crate) struct ViewConflicts<'a> {
+    pub list: &'a [Conflict],
+    pub included: &'a [Hash],
+}
+
 /// The block an update, move, delete or repin of `id` starts from, and the base its op records.
 ///
 /// cres1: a block with a recorded conflict reads as the conflict's base, and an edit of it must
@@ -652,7 +659,7 @@ fn current_for_edit<'b>(
     id: &BlockId,
     base: &Option<String>,
     touched: &BTreeSet<BlockId>,
-    conflicts: &[Conflict],
+    conflicts: &ViewConflicts<'_>,
     store: &rdy_store::Store,
     update: bool,
 ) -> Result<(Hash, Cow<'b, Block>), RdyError> {
@@ -662,8 +669,8 @@ fn current_for_edit<'b>(
             "combine the edits into one op",
         ));
     }
-    if let Some(c) = conflicts.iter().find(|c| c.block == *id) {
-        let (b, cur) = conflicted_for_edit(ov, id, base, c, store)?;
+    if let Some(c) = conflicts.list.iter().find(|c| c.block == *id) {
+        let (b, cur) = conflicted_for_edit(ov, id, base, c, store, conflicts.included)?;
         check_not_frozen(id, &cur)?;
         return Ok((b, cur));
     }
@@ -701,10 +708,11 @@ fn conflicted_for_edit<'b>(
     base: &Option<String>,
     c: &Conflict,
     store: &rdy_store::Store,
+    included: &[Hash],
 ) -> Result<(Hash, Cow<'b, Block>), RdyError> {
     let cid = c.id.short();
     let sides: Vec<Hash> = c.sides.iter().filter_map(|s| s.version).collect();
-    frozen_in_conflict(id, c, store)?;
+    frozen_in_conflict(id, c, store, included)?;
     let Some(b) = parse_base(base)? else {
         let side_list = sides
             .iter()
@@ -747,48 +755,67 @@ fn conflicted_for_edit<'b>(
 
 /// cres1: a conflict whose base or any side is a frozen decision cannot be resolved by an edit,
 /// from any version: the edit would change or drop an accepted or rejected decision. The way out
-/// is to drop the stale change(s) or to supersede the decision.
+/// is to drop a side's change from the view or to supersede the decision. msw1 (#1165): the hint
+/// names only the sides' changes the view can exclude, the ones it includes (`included`), frozen
+/// or not. A landed change is in a view only when the view is pinned (a pinned view is never
+/// rebased), and then it can be excluded too. The check reads the blocks first and the landings
+/// only when something is frozen, so a plain conflict never reads the landed index.
 fn frozen_in_conflict(
     id: &BlockId,
     c: &Conflict,
     store: &rdy_store::Store,
+    included: &[Hash],
 ) -> Result<(), RdyError> {
-    let mut frozen = None;
-    if let Some(cb) = c.base
-        && decision::is_frozen(&store.get_block(&cb)?)
-    {
-        frozen = Some(format!("its base {}", cb.short()));
-    }
-    let mut stale = vec![];
-    for s in &c.sides {
-        let side_frozen = match s.version {
-            Some(v) => decision::is_frozen(&store.get_block(&v)?),
-            None => false,
-        };
-        match (side_frozen, s.change) {
-            (true, change) if frozen.is_none() => {
-                let landing = match change {
-                    Some(ch) => store.landing_of(&ch)?,
-                    None => None,
-                };
-                frozen = Some(match (change, landing) {
-                    (Some(ch), Some(l)) => format!("side {} landed in {}", ch.short(), l.short()),
-                    (Some(ch), None) => format!("side {}", ch.short()),
-                    (None, _) => "a side in canon".to_string(),
-                });
+    // first pass: the base's and the sides' blocks decide whether anything is frozen
+    let frozen_base = match c.base {
+        Some(cb) if decision::is_frozen(&store.get_block(&cb)?) => Some(cb),
+        _ => None,
+    };
+    let mut frozen_side = None;
+    if frozen_base.is_none() {
+        for (i, s) in c.sides.iter().enumerate() {
+            if let Some(v) = s.version
+                && decision::is_frozen(&store.get_block(&v)?)
+            {
+                frozen_side = Some(i);
+                break;
             }
-            (false, Some(ch)) => stale.push(ch.to_string()),
-            _ => {}
+        }
+        if frozen_side.is_none() {
+            return Ok(());
         }
     }
-    let Some(which) = frozen else {
-        return Ok(());
-    };
-    let exclude = match stale.as_slice() {
-        [] => "exclude the stale change from the view (rdy view exclude)".to_string(),
-        [one] => format!("exclude the stale change {one} from the view (rdy view exclude)"),
+    // second pass: the landings give the label and the changes the view can exclude
+    let mut which = frozen_base
+        .map(|cb| format!("its base {}", cb.short()))
+        .unwrap_or_default();
+    let mut excludable = vec![];
+    for (i, s) in c.sides.iter().enumerate() {
+        let landing = match s.change {
+            Some(ch) => store.landing_of(&ch)?,
+            None => None,
+        };
+        if frozen_side == Some(i) {
+            which = match (s.change, landing) {
+                (Some(ch), Some(l)) => format!("side {} landed in {}", ch.short(), l.short()),
+                (Some(ch), None) => format!("side {}", ch.short()),
+                (None, _) => "a side in canon".to_string(),
+            };
+        }
+        if let Some(ch) = s.change
+            && included.contains(&ch)
+        {
+            excludable.push(ch.to_string());
+        }
+    }
+    let supersede = format!("write a new decision that supersedes or revokes {id}");
+    let fix = match excludable.as_slice() {
+        [] => supersede,
+        [one] => {
+            format!("exclude the change {one} from the view (rdy view exclude), or {supersede}")
+        }
         many => format!(
-            "exclude the stale changes {} from the view (rdy view exclude)",
+            "exclude the changes {} from the view (rdy view exclude), or {supersede}",
             many.join(", ")
         ),
     };
@@ -797,7 +824,7 @@ fn frozen_in_conflict(
         format!(
             "{id} is an accepted or rejected decision ({which}) and cannot change; this conflict cannot be resolved by an edit"
         ),
-        format!("{exclude}, or write a new decision that supersedes or revokes {id}"),
+        fix,
     ))
 }
 
@@ -1209,7 +1236,7 @@ fn build_ops(
     base: &Materialized,
     session: &Session,
     inputs: Vec<OpInput>,
-    conflicts: &[Conflict],
+    conflicts: &ViewConflicts<'_>,
     justification: Option<&Justification>,
     rdy_keys: &BTreeSet<BlockId>,
 ) -> Result<Built, RdyError> {
@@ -1299,6 +1326,18 @@ fn build_ops(
                         E_ALREADY_EXISTS,
                         format!("block {new_id} already exists"),
                         "omit id to let rdy generate one",
+                    ));
+                }
+                // msw1 (#1160): a create/create conflict has no base, so the view reads the
+                // block as absent; a create under its id would silently resolve the conflict
+                if let Some(c) = conflicts.list.iter().find(|c| c.block == new_id) {
+                    return Err(RdyError::new(
+                        E_ALREADY_EXISTS,
+                        format!(
+                            "block {new_id} already exists: it is conflicted ({})",
+                            c.id.short()
+                        ),
+                        "update it with base=<one of its sides' versions> to resolve the conflict (rdy_context shows them), or omit id to create a new block",
                     ));
                 }
                 let parent = parent.as_deref().map(|p| res.id(p)).transpose()?;
@@ -1685,7 +1724,7 @@ fn build_ops(
         &mut ops,
         &mut prior,
         &touched,
-        conflicts,
+        conflicts.list,
         &mut assigned,
     );
     touched.extend(followed.iter().cloned());
@@ -1816,6 +1855,20 @@ fn build_ops(
             for (target, current) in targets.into_iter().filter(|(t, _)| *t != block.id) {
                 let h = old_pins.get(&target).copied().unwrap_or(current);
                 pins.insert(target, h);
+            }
+            // msw7: a tracking edit of a frozen decision keeps the set of targets it pins; a new
+            // or dropped {{id}} in a tracking field would repin it, which the ruling forbids
+            if tracking_edits.contains(&block.id) && !pins.keys().eq(old_pins.keys()) {
+                let id = &block.id;
+                return Err(RdyError::new(
+                    E_FROZEN,
+                    format!(
+                        "{id}: a tracking edit cannot add or drop a reference of an accepted or rejected decision"
+                    ),
+                    format!(
+                        "keep its references as they are; write a new decision that supersedes {id} to change what it cites"
+                    ),
+                ));
             }
             block.pins = pins;
         }
@@ -2049,6 +2102,7 @@ impl Rdy {
             });
         }
         let conflicts = st.conflicts(&scope)?;
+        let included = st.included(&req.view);
         let m = st.materialized(&scope)?;
         let brief_warnings = crate::brief::check(&self.pack, &self.briefs, &m, &req.ops, brief)?;
         let (ops, created, touched, names, keys) = build_ops(
@@ -2057,7 +2111,10 @@ impl Rdy {
             &m,
             session,
             req.ops,
-            &conflicts,
+            &ViewConflicts {
+                list: &conflicts,
+                included: &included,
+            },
             req.justification.as_ref(),
             rdy_keys,
         )?;
@@ -2125,6 +2182,7 @@ pub(crate) fn check_view_access(
     action: views::Action,
 ) -> Result<(), RdyError> {
     let propose = action == views::Action::Propose;
+    non_empty_view(view)?;
     if !propose {
         writable_view(view)?;
     }
@@ -2199,6 +2257,7 @@ fn own_view_fix(view: &str, s: &Session) -> String {
 /// Views that can receive writes: not `canon`, and no `:` (reserved for scope kinds such as
 /// `tag:` and `landing:`; legacy M1 views with `:` stay readable and proposable via `view:<name>`).
 pub(crate) fn writable_view(name: &str) -> Result<(), RdyError> {
+    non_empty_view(name)?;
     if name == "canon" {
         return Err(RdyError::new(
             E_RESERVED_VIEW,
@@ -2220,6 +2279,32 @@ pub(crate) fn writable_view(name: &str) -> Result<(), RdyError> {
                 "view names cannot contain ':' ({name:?}): ':' introduces scope kinds such as tag: and landing:"
             ),
             "write to a view name without ':' (for example replace it with '-')",
+        ));
+    }
+    Ok(())
+}
+
+/// A view name has at most this many characters.
+pub(crate) const MAX_VIEW_NAME: usize = 256;
+
+/// The checks every view name a write or proposal targets passes: `E_BAD_INPUT` for the empty
+/// name, `E_LIMIT` for one longer than `MAX_VIEW_NAME` characters (R10).
+fn non_empty_view(name: &str) -> Result<(), RdyError> {
+    if name.is_empty() {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "a view name is empty",
+            "name a view, e.g. work",
+        ));
+    }
+    if name.chars().count() > MAX_VIEW_NAME {
+        return Err(RdyError::new(
+            E_LIMIT,
+            format!(
+                "a view name is longer than {MAX_VIEW_NAME} characters ({})",
+                views::clip(name)
+            ),
+            "use a shorter view name",
         ));
     }
     Ok(())

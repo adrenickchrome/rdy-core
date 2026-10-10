@@ -452,6 +452,10 @@ impl Model {
                         }
                     }
                     let missing = self.missing_deps(view, &put_back);
+                    // a re-include never pulls a landed dep back in (msw3)
+                    if missing.iter().any(landed) {
+                        continue;
+                    }
                     return Ok(MUndo::Include {
                         op: i,
                         put_back,

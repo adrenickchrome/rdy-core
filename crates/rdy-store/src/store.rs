@@ -327,8 +327,12 @@ impl Drop for Store {
     /// Closes the store as `close` does. A failure leaves the sentinel, so the next open catches
     /// up; it cannot be returned from here, so it is written to stderr.
     fn drop(&mut self) {
+        use std::io::Write as _;
         if let Err(e) = self.close_once() {
-            eprintln!(
+            // a write whose error is dropped, not the print macro: that panics when stderr is
+            // closed, and a panic in Drop during an unwind aborts the process
+            let _ = writeln!(
+                std::io::stderr(),
                 "rdy: the store at {} did not close cleanly ({e}); the next open catches its index up from the log",
                 self.dir.display()
             );
@@ -725,6 +729,12 @@ impl Store {
     #[doc(hidden)]
     pub fn index_dump_for_tests(&self) -> Result<crate::index::IndexDump, StoreError> {
         self.index().dump()
+    }
+
+    /// Writes one raw `producers` row (a test hook that damages the index).
+    #[doc(hidden)]
+    pub fn put_raw_producer_for_tests(&mut self, key: &[u8]) -> Result<(), StoreError> {
+        self.index().put_raw_producer_for_tests(key)
     }
 
     /// Rebuilds the index from the log in a new database at the same path. The store's reader
@@ -1613,5 +1623,20 @@ impl StoreReader {
             *slot = Some(self.included(view)?.iter().copied().collect());
         }
         Ok(slot.as_ref().expect("set above"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn msw4_store_drop_never_uses_eprintln() {
+        let src = include_str!("store.rs");
+        let start = src.find("impl Drop for Store").unwrap();
+        let end = start + src[start..].find("\n}\n").unwrap();
+        assert!(
+            !src[start..end].contains("eprintln!"),
+            "{}",
+            &src[start..end]
+        );
     }
 }

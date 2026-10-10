@@ -872,3 +872,410 @@ fn wcup1_update_of_a_kept_rename_asks_for_the_file_in_the_way_first() {
         assert!(st["working_copy"][k].as_array().unwrap().is_empty(), "{st}");
     }
 }
+
+#[test]
+fn msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes() {
+    use std::os::unix::fs::PermissionsExt;
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    store_write(
+        &s,
+        "work",
+        json!([
+            {"op": "update", "id": seed.claim, "body": "Theirs claim."},
+            {"op": "update", "id": seed.note, "body": "Theirs."},
+            {"op": "create", "type": "folder", "fields": {"name": "zfold", "title": "Zfold"}}
+        ]),
+    );
+    // guides/intro.yaml is written, notes.yaml fails in the read-only root, zfold/ is not reached
+    let root = s.dir.path().to_path_buf();
+    let mode =
+        |m: u32| std::fs::set_permissions(&root, std::fs::Permissions::from_mode(m)).unwrap();
+    mode(0o555);
+    // as root a read-only directory still takes writes: the update cannot be stopped here
+    let probe = root.join(".msw5-probe");
+    if std::fs::write(&probe, "").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        mode(0o755);
+        eprintln!("msw5: skipped, a read-only directory takes writes here (running as root?)");
+        return;
+    }
+    let (okk, v) = json(&s, &["update"]);
+    mode(0o755);
+    assert!(!okk && v["code"] == E_IO, "{v}");
+    assert!(!at(&s, "zfold").exists(), "stopped before the new folder");
+    put(&s, "zfold", "mine\n");
+    let (okk, v) = json(&s, &["update"]);
+    assert!(
+        std::fs::symlink_metadata(at(&s, "zfold"))
+            .unwrap()
+            .is_file(),
+        "the untracked file was replaced by a directory: {v}"
+    );
+    assert_eq!(read(&s, "zfold"), "mine\n");
+    assert!(!okk && v["code"] == E_WC_DIRTY, "{v}");
+}
+
+/// Stops an update midway, as `msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes`
+/// does: the claim and the note change with `extra`, the root goes read-only, so
+/// `guides/intro.yaml` is written and `notes.yaml` fails. False when a read-only directory
+/// still takes writes (running as root): the caller skips.
+fn msw5_interrupt(s: &rdy_qa::daemon::Served, seed: &Seed, extra: &[serde_json::Value]) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let mut ops = vec![
+        json!({"op": "update", "id": seed.claim, "body": "Theirs claim."}),
+        json!({"op": "update", "id": seed.note, "body": "Theirs."}),
+    ];
+    ops.extend_from_slice(extra);
+    store_write(s, "work", serde_json::Value::Array(ops));
+    let root = s.dir.path().to_path_buf();
+    let mode =
+        |m: u32| std::fs::set_permissions(&root, std::fs::Permissions::from_mode(m)).unwrap();
+    mode(0o555);
+    let probe = root.join(".msw5-probe");
+    if std::fs::write(&probe, "").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        mode(0o755);
+        eprintln!("msw5: skipped, a read-only directory takes writes here (running as root?)");
+        return false;
+    }
+    let (okk, v) = json(s, &["update"]);
+    mode(0o755);
+    assert!(!okk && v["code"] == E_IO, "{v}");
+    true
+}
+
+#[test]
+fn msw5_finishing_an_update_keeps_a_link_where_a_new_doc_goes() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let doc = json!({"op": "create", "type": "doc", "fields": {"name": "zdoc", "title": "Zdoc", "doc_type": "page"}});
+    if !msw5_interrupt(&s, &seed, &[doc]) {
+        return;
+    }
+    assert!(!at(&s, "zdoc.yaml").exists(), "stopped before the new doc");
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("mine.yaml");
+    std::fs::write(&target, "mine\n").unwrap();
+    std::os::unix::fs::symlink(&target, at(&s, "zdoc.yaml")).unwrap();
+    let (okk, v) = json(&s, &["update"]);
+    assert!(
+        std::fs::symlink_metadata(at(&s, "zdoc.yaml"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link was replaced by a file: {v}"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "mine\n");
+    assert!(
+        !okk && v["code"] == E_WC_DIRTY && v["message"].as_str().unwrap().contains("zdoc.yaml"),
+        "{v}"
+    );
+}
+
+#[test]
+fn msw5_finishing_an_update_names_the_file_where_a_new_folder_goes() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let folder =
+        json!({"op": "create", "type": "folder", "fields": {"name": "zfold", "title": "Zfold"}});
+    if !msw5_interrupt(&s, &seed, &[folder]) {
+        return;
+    }
+    put(&s, "zfold", "mine\n");
+    let (okk, v) = json(&s, &["update"]);
+    assert!(!okk && v["code"] == E_WC_DIRTY, "{v}");
+    assert_eq!(
+        v["message"], "zfold is a file where the update writes zfold/_folder.yaml",
+        "{v}"
+    );
+    assert_eq!(
+        v["fix"], "move zfold aside, then run rdy update again to finish the update",
+        "{v}"
+    );
+    // the fix works: with the file moved aside the update finishes
+    std::fs::rename(at(&s, "zfold"), at(&s, "zfold.mine")).unwrap();
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk, "{v}");
+    assert!(at(&s, "zfold/_folder.yaml").is_file(), "{v}");
+    assert_eq!(read(&s, "zfold.mine"), "mine\n");
+}
+
+#[test]
+fn msw5_finishing_an_update_keeps_a_directory_or_link_where_a_removed_doc_was() {
+    let (s, seed) = seeded();
+    let w = store_write(
+        &s,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$g", "fields": {"name": "zgone", "title": "Zgone", "doc_type": "page"}},
+            {"op": "create", "type": "doc", "id": "$l", "fields": {"name": "zlink", "title": "Zlink", "doc_type": "page"}}
+        ]),
+    );
+    ok(&s, &["checkout"]);
+    assert!(at(&s, "zgone.yaml").is_file() && at(&s, "zlink.yaml").is_file());
+    let gone = [
+        json!({"op": "delete", "id": w.created["$g"]}),
+        json!({"op": "delete", "id": w.created["$l"]}),
+    ];
+    // the removes come after the writes: the update stops before it reaches them
+    if !msw5_interrupt(&s, &seed, &gone) {
+        return;
+    }
+    // a directory and a link where the update removes a file: it leaves them, as a fresh
+    // update does
+    std::fs::remove_file(at(&s, "zgone.yaml")).unwrap();
+    std::fs::create_dir(at(&s, "zgone.yaml")).unwrap();
+    put(&s, "zgone.yaml/mine", "mine\n");
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("mine.yaml");
+    std::fs::write(&target, "mine\n").unwrap();
+    std::fs::remove_file(at(&s, "zlink.yaml")).unwrap();
+    std::os::unix::fs::symlink(&target, at(&s, "zlink.yaml")).unwrap();
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk, "{v}");
+    assert_eq!(
+        entry(&s, "notes.yaml", &seed.note)["body"].as_str(),
+        Some("Theirs.")
+    );
+    assert!(
+        std::fs::symlink_metadata(at(&s, "zgone.yaml"))
+            .unwrap()
+            .is_dir(),
+        "{v}"
+    );
+    assert_eq!(read(&s, "zgone.yaml/mine"), "mine\n");
+    assert!(
+        std::fs::symlink_metadata(at(&s, "zlink.yaml"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "{v}"
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "mine\n");
+}
+
+#[test]
+fn msw16_a_rename_conflict_resolves_by_taking_the_store_name() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::rename(at(&s, "notes.yaml"), at(&s, "jot.yaml")).unwrap();
+    store_write(
+        &s,
+        "work",
+        json!([{"op": "update", "id": seed.notes, "fields": {"name": "memo"}}]),
+    );
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk && v["conflicts"][0]["path"] == "jot.yaml", "{v}");
+    std::fs::remove_file(at(&s, "jot.theirs.yaml")).unwrap();
+    std::fs::rename(at(&s, "jot.yaml"), at(&s, "memo.yaml")).unwrap();
+    ok(&s, &["add", "memo.yaml"]);
+    let (_, v) = json(&s, &["commit", "-m", "take memo"]);
+    assert!(
+        v["code"] != E_WC_CONFLICT,
+        "the conflict is still open: {v}"
+    );
+    assert_eq!(
+        store_block(&s, "work", &seed.notes).field_str("name"),
+        Some("memo")
+    );
+}
+
+/// msw16 fix round 1: the store's name counts only when the tree holds the doc there. An
+/// unrelated `rdy add` of the store's directory neither trips on the conflict nor resolves it.
+#[test]
+fn msw16_the_store_name_counts_only_when_the_doc_is_there() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::rename(at(&s, "notes.yaml"), at(&s, "jot.yaml")).unwrap();
+    store_write(
+        &s,
+        "work",
+        json!([{"op": "move", "id": seed.notes, "parent": seed.folder}]),
+    );
+    store_write(
+        &s,
+        "work",
+        json!([{"op": "update", "id": seed.notes, "fields": {"name": "memo"}}]),
+    );
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk && v["conflicts"][0]["path"] == "jot.yaml", "{v}");
+    set_body(&s, "guides/intro.yaml", &seed.prose, "Unrelated.");
+    let (okk, v) = json(&s, &["add", "guides"]);
+    assert!(okk, "an unrelated add is refused: {v}");
+    assert!(v["resolved"].as_array().unwrap().is_empty(), "{v}");
+    std::fs::remove_file(at(&s, "jot.theirs.yaml")).unwrap();
+    let (okk, v) = json(&s, &["add", "guides"]);
+    assert!(okk && v["resolved"].as_array().unwrap().is_empty(), "{v}");
+    let (okk, v) = json(&s, &["commit", "-m", "too early"]);
+    assert!(!okk && v["code"] == E_WC_CONFLICT, "{v}");
+    ok(&s, &["add", "jot.yaml"]);
+    ok(&s, &["commit", "-m", "keep jot"]);
+    assert_eq!(
+        store_block(&s, "work", &seed.notes).field_str("name"),
+        Some("jot")
+    );
+    assert_eq!(store_block(&s, "work", &seed.note).body, "Note.");
+    assert_eq!(store_block(&s, "work", &seed.prose).body, "Unrelated.");
+}
+
+/// msw16 fix round 1: renamed and edited on both sides gives two conflicts at the local path;
+/// taking the store's name resolves both.
+#[test]
+fn msw16_a_doc_renamed_and_edited_on_both_sides_resolves_under_the_store_name() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::rename(at(&s, "notes.yaml"), at(&s, "jot.yaml")).unwrap();
+    set_body(&s, "jot.yaml", &seed.note, "Mine.");
+    store_write(
+        &s,
+        "work",
+        json!([
+            {"op": "update", "id": seed.notes, "fields": {"name": "memo"}},
+            {"op": "update", "id": seed.note, "body": "Theirs."}
+        ]),
+    );
+    let (okk, v) = json(&s, &["update"]);
+    let c = v["conflicts"].as_array().unwrap();
+    assert!(
+        okk && c.len() == 2 && c.iter().all(|c| c["path"] == "jot.yaml"),
+        "{v}"
+    );
+    std::fs::remove_file(at(&s, "jot.theirs.yaml")).unwrap();
+    set_body(&s, "jot.yaml", &seed.note, "Resolved.");
+    std::fs::rename(at(&s, "jot.yaml"), at(&s, "memo.yaml")).unwrap();
+    let (okk, v) = json(&s, &["add", "memo.yaml"]);
+    assert!(okk && v["resolved"].as_array().unwrap().len() == 2, "{v}");
+    ok(&s, &["commit", "-m", "take memo"]);
+    assert_eq!(
+        store_block(&s, "work", &seed.notes).field_str("name"),
+        Some("memo")
+    );
+    assert_eq!(store_block(&s, "work", &seed.note).body, "Resolved.");
+}
+
+/// msw16 fix round 1: a folder renamed on both sides, taken under the store's name: the
+/// `_folder.theirs.yaml` moved with the directory and still blocks.
+#[test]
+fn msw16_a_folder_taken_under_the_store_name_waits_for_its_moved_theirs_file() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::rename(at(&s, "guides"), at(&s, "manuals")).unwrap();
+    store_write(
+        &s,
+        "work",
+        json!([{"op": "update", "id": seed.folder, "fields": {"name": "handbook"}}]),
+    );
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk && v["conflicts"][0]["path"] == "manuals", "{v}");
+    std::fs::rename(at(&s, "manuals"), at(&s, "handbook")).unwrap();
+    assert!(at(&s, "handbook/_folder.theirs.yaml").exists());
+    let (okk, v) = json(&s, &["add", "handbook"]);
+    assert!(
+        !okk && v["code"] == E_WC_CONFLICT
+            && v["message"]
+                .as_str()
+                .unwrap()
+                .contains("handbook/_folder.theirs.yaml"),
+        "{v}"
+    );
+    // final review M11: the fix names the place that blocked, not the old one (gone now)
+    let fix = v["fix"].as_str().unwrap();
+    assert!(
+        fix.contains("then rdy add handbook") && !fix.contains("manuals"),
+        "{v}"
+    );
+    std::fs::remove_file(at(&s, "handbook/_folder.theirs.yaml")).unwrap();
+    let (okk, v) = json(&s, &["add", "handbook"]);
+    assert!(okk && v["resolved"] == json!(["manuals"]), "{v}");
+    // the files now match the store, so nothing is left to commit
+    let (okk, v) = json(&s, &["commit", "-m", "take handbook"]);
+    assert!(!okk && v["code"] == E_BAD_INPUT, "{v}");
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk && v["conflicts"].as_array().unwrap().is_empty(), "{v}");
+    assert_eq!(
+        store_block(&s, "work", &seed.folder).field_str("name"),
+        Some("handbook")
+    );
+}
+
+/// msw16 fix round 2: a plain directory at the store's name is not the folder. Adding it neither
+/// trips on the conflict nor resolves it.
+#[test]
+fn msw16_an_empty_dir_at_the_store_name_is_not_the_folder() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::rename(at(&s, "guides"), at(&s, "manuals")).unwrap();
+    store_write(
+        &s,
+        "work",
+        json!([{"op": "update", "id": seed.folder, "fields": {"name": "handbook"}}]),
+    );
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk && v["conflicts"][0]["path"] == "manuals", "{v}");
+    std::fs::create_dir(at(&s, "handbook")).unwrap();
+    let (okk, v) = json(&s, &["add", "handbook"]);
+    assert!(okk && v["resolved"].as_array().unwrap().is_empty(), "{v}");
+    std::fs::remove_file(at(&s, "manuals/_folder.theirs.yaml")).unwrap();
+    let (okk, v) = json(&s, &["add", "handbook"]);
+    assert!(okk && v["resolved"].as_array().unwrap().is_empty(), "{v}");
+    let (okk, v) = json(&s, &["commit", "-m", "too early"]);
+    assert!(!okk && v["code"] == E_WC_CONFLICT, "{v}");
+    ok(&s, &["add", "manuals"]);
+    ok(&s, &["commit", "-m", "keep manuals"]);
+    assert_eq!(
+        store_block(&s, "work", &seed.folder).field_str("name"),
+        Some("manuals")
+    );
+    assert_eq!(store_block(&s, "work", &seed.prose).body, "Hello.");
+}
+
+/// msw16 fix round 2: a folder renamed on both sides with a doc under it edited on both sides;
+/// taking the store's name resolves the doc's conflict too, once its moved theirs file is gone.
+#[test]
+fn msw16_a_folder_taken_under_the_store_name_takes_its_docs_conflicts() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::rename(at(&s, "guides"), at(&s, "manuals")).unwrap();
+    set_body(&s, "manuals/intro.yaml", &seed.prose, "Mine.");
+    store_write(
+        &s,
+        "work",
+        json!([
+            {"op": "update", "id": seed.folder, "fields": {"name": "handbook"}},
+            {"op": "update", "id": seed.prose, "body": "Theirs."}
+        ]),
+    );
+    let (okk, v) = json(&s, &["update"]);
+    let paths: Vec<&str> = v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        okk && paths.contains(&"manuals") && paths.contains(&"manuals/intro.yaml"),
+        "{v}"
+    );
+    std::fs::rename(at(&s, "manuals"), at(&s, "handbook")).unwrap();
+    std::fs::remove_file(at(&s, "handbook/_folder.theirs.yaml")).unwrap();
+    set_body(&s, "handbook/intro.yaml", &seed.prose, "Resolved.");
+    let (okk, v) = json(&s, &["add", "handbook"]);
+    assert!(
+        !okk && v["code"] == E_WC_CONFLICT
+            && v["message"]
+                .as_str()
+                .unwrap()
+                .contains("handbook/intro.theirs.yaml"),
+        "{v}"
+    );
+    std::fs::remove_file(at(&s, "handbook/intro.theirs.yaml")).unwrap();
+    let (okk, v) = json(&s, &["add", "handbook"]);
+    assert!(okk && v["resolved"].as_array().unwrap().len() == 2, "{v}");
+    ok(&s, &["commit", "-m", "take handbook"]);
+    assert_eq!(
+        store_block(&s, "work", &seed.folder).field_str("name"),
+        Some("handbook")
+    );
+    assert_eq!(store_block(&s, "work", &seed.prose).body, "Resolved.");
+}

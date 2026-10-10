@@ -33,6 +33,9 @@ pub struct Shared {
     /// Test hook: run once by the writer right after `reload_pack` returns.
     #[cfg(test)]
     pub(crate) after_reload: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Test count: the log lines the writer wrote for a failed clean republish.
+    #[cfg(test)]
+    pub(crate) republish_failure_logs: std::sync::atomic::AtomicUsize,
 }
 
 impl Shared {
@@ -55,6 +58,8 @@ impl Shared {
             session_end: Mutex::new(Vec::new()),
             #[cfg(test)]
             after_reload: Mutex::new(None),
+            #[cfg(test)]
+            republish_failure_logs: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 

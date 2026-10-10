@@ -156,9 +156,16 @@ fn ancestors(root: &Path, rel: &Path) -> Vec<PathBuf> {
 /// than a directory (a link, a file): what is under it is not the working tree's, so it is never
 /// read, written or deleted through it.
 pub(crate) fn behind_link(root: &Path, rel: &Path) -> bool {
+    blocking_ancestor(root, rel).is_some()
+}
+
+/// The first directory between the root and `rel`'s file, nearest the root first, that exists
+/// as something other than a directory (see `behind_link`), relative to the root.
+pub(crate) fn blocking_ancestor(root: &Path, rel: &Path) -> Option<PathBuf> {
     ancestors(root, rel)
-        .iter()
-        .any(|d| fs::symlink_metadata(d).is_ok_and(|m| !m.file_type().is_dir()))
+        .into_iter()
+        .find(|d| fs::symlink_metadata(d).is_ok_and(|m| !m.file_type().is_dir()))
+        .and_then(|d| d.strip_prefix(root).ok().map(Path::to_path_buf))
 }
 
 /// The file's identity on disk (device and inode), for a regular file not behind a link.
@@ -289,7 +296,8 @@ pub(crate) fn replace_at(
 }
 
 /// Creates the directories between the root and `p`'s file (what stands in the way and is not a
-/// directory is removed first); with `cases`, see `write_at`.
+/// directory is removed first); with `cases`, see `write_at`. Callers run an occupied check first
+/// (`occupied`, `behind_link`), so what is removed is never a file a person keeps.
 fn make_dirs(
     root: &Path,
     p: &Path,
@@ -438,9 +446,10 @@ pub struct Added {
 }
 
 /// Adds the files of `proj` (the doc and folder files a write just created) to a bound working
-/// copy: a path that holds something not in `base.files` (a file, a directory, or a link or file
-/// on the way) is skipped, never overwritten; any other is written, its base copy written, and
-/// its blocks and file added to `base`. The state is not saved here.
+/// copy: a path in `base.files` ignoring case (another doc's file, on disk or not) or one that
+/// holds anything (a file, a directory, or a link or file on the way) is skipped, never
+/// overwritten; any other is written, its base copy written, and its blocks and file added to
+/// `base`. The state is not saved here.
 pub fn add_projected(
     place: &Place,
     st: &mut WcState,
@@ -450,7 +459,11 @@ pub fn add_projected(
     let base_dir = place.state.join("base/files");
     let mut out = Added::default();
     for f in &proj.files {
-        if occupied(root, &f.path, &st.base.files, &BTreeSet::new())? {
+        // tracked ignoring case, as the update planner and a file system may
+        let lower = f.path.to_lowercase();
+        if st.base.files.keys().any(|k| k.to_lowercase() == lower)
+            || occupied(root, &f.path, &BTreeMap::new(), &BTreeSet::new())?
+        {
             out.skipped.push(f.path.clone());
             continue;
         }

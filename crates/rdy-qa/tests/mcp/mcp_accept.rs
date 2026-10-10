@@ -301,3 +301,175 @@ fn acc1_a_deleted_block_in_an_entity_item_is_skipped_as_missing() {
         json!([{"index": 0, "reason": format!("no block {c} in view {}", st.view)}])
     );
 }
+
+#[test]
+fn msw18_a_stale_link_item_is_skipped_and_the_rest_are_accepted() {
+    use rdy_engine::accept::AcceptItem;
+    let (_d, mut r) = project();
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "ops", "title": "Ops", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Summary"}},
+        {"op": "create", "type": "entity", "id": "$e", "parent": "$s", "fields": {"name": "Ledger service"}},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "The ledger is append-only."}
+    ])).unwrap();
+    let (s, e, c) = (
+        w.created["$s"].clone(),
+        w.created["$e"].clone(),
+        w.created["$c"].clone(),
+    );
+    let dec = r
+        .decide(
+            &writer(),
+            "work",
+            rdy_engine::DecisionInput {
+                parent: s,
+                statement: "Keep the ledger".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"]
+        .clone();
+    land(&mut r, "work").unwrap(); // the gate accepts dec: it is frozen now
+    let items = vec![
+        AcceptItem::Link {
+            block: dec.clone(),
+            link: "affects".into(),
+            target: e.clone(),
+        },
+        AcceptItem::Link {
+            block: c.clone(),
+            link: "describes".into(),
+            target: e.clone(),
+        },
+    ];
+    let a = r.accept(&writer(), "v", items, None, None, None).unwrap();
+    assert_eq!(a.accepted.links, 1);
+    assert_eq!(a.skipped.len(), 1, "{:?}", a.skipped);
+    assert_eq!(a.skipped[0].index, 0);
+    assert!(
+        a.skipped[0].reason
+            == format!("{dec} is an accepted or rejected decision and cannot change"),
+        "{:?}",
+        a.skipped
+    );
+    let cb = r
+        .read()
+        .block(&Scope::View("v".into()), &BlockId::parse(&c).unwrap())
+        .unwrap();
+    assert!(
+        cb.links
+            .get("describes")
+            .is_some_and(|ls| ls.iter().any(|l| l.target.to_string() == e))
+    );
+}
+
+#[test]
+fn msw18_every_item_skipped_on_a_frozen_decision_says_why() {
+    use rdy_engine::accept::AcceptItem;
+    let (_d, mut r) = project();
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "ops", "title": "Ops", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Summary"}},
+        {"op": "create", "type": "entity", "id": "$e", "parent": "$s", "fields": {"name": "Ledger service"}}
+    ])).unwrap();
+    let (s, e) = (w.created["$s"].clone(), w.created["$e"].clone());
+    let dec = r
+        .decide(
+            &writer(),
+            "work",
+            rdy_engine::DecisionInput {
+                parent: s,
+                statement: "Keep the ledger".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"]
+        .clone();
+    land(&mut r, "work").unwrap(); // the gate accepts dec: it is frozen now
+    let items = vec![AcceptItem::Link {
+        block: dec.clone(),
+        link: "affects".into(),
+        target: e,
+    }];
+    let err = r
+        .accept(&writer(), "v", items, None, None, None)
+        .unwrap_err();
+    assert_eq!(
+        (err.code, err.message.as_str(), err.fix.as_str()),
+        (
+            "E_BAD_INPUT",
+            format!(
+                "nothing to accept: every suggestion was skipped; suggestion 0: {dec} is an accepted or rejected decision and cannot change"
+            )
+            .as_str(),
+            "re-run the suggestions and accept the ones that still apply"
+        )
+    );
+}
+
+#[test]
+fn msw18_every_item_skipped_on_a_deleted_block_says_why() {
+    let (_d, mut st, s, e) = books();
+    let v = claim(&mut st, &s, "The ledger is append-only.");
+    let c = v["created"]["$c"].as_str().unwrap().to_string();
+    rdy_write(&mut st, p(json!({"ops": [{"op": "delete", "id": c}]}))).unwrap();
+    let item = json!({"kind": "link", "block": c, "link": "describes", "target": e});
+    let err = rdy_accept(&mut st, p(json!({"suggestions": [item]}))).unwrap_err();
+    assert_eq!(
+        (err.code, err.message, err.fix),
+        (
+            "E_BAD_INPUT",
+            format!(
+                "nothing to accept: every suggestion was skipped; suggestion 0: no block {c} in view {}",
+                st.view
+            ),
+            "re-run the suggestions and accept the ones that still apply".to_string()
+        )
+    );
+}
+
+/// Final review M13: the all-skipped refusal lists the first skips and counts the rest, so a
+/// batch of up to MAX_ACCEPT items never gives an error of tens of KB.
+#[test]
+fn msw18_every_item_skipped_lists_the_first_ten_and_counts_the_rest() {
+    let (_d, mut st, s, e) = books();
+    let v = claim(&mut st, &s, "The ledger is append-only.");
+    let c = v["created"]["$c"].as_str().unwrap().to_string();
+    rdy_write(&mut st, p(json!({"ops": [{"op": "delete", "id": c}]}))).unwrap();
+    let item = json!({"kind": "link", "block": c, "link": "describes", "target": e});
+    let items: Vec<_> = (0..14).map(|_| item.clone()).collect();
+    let err = rdy_accept(&mut st, p(json!({"suggestions": items}))).unwrap_err();
+    assert_eq!(err.code, "E_BAD_INPUT");
+    assert_eq!(
+        err.message.matches("suggestion ").count(),
+        11,
+        "{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("suggestion 9: no block"),
+        "{}",
+        err.message
+    );
+    assert!(!err.message.contains("suggestion 10:"), "{}", err.message);
+    assert!(err.message.ends_with("; and 4 more"), "{}", err.message);
+}
+
+#[test]
+fn msw18_every_item_already_linked_keeps_the_already_there_text() {
+    let (_d, mut st, s, _e) = books();
+    let v = claim(&mut st, &s, "The ledger is append-only.");
+    let one = v["suggestions"][0].clone();
+    rdy_accept(&mut st, p(json!({"suggestions": [one.clone()]}))).unwrap();
+    let err = rdy_accept(&mut st, p(json!({"suggestions": [one.clone(), one]}))).unwrap_err();
+    assert_eq!(
+        (err.code, err.message.as_str(), err.fix.as_str()),
+        (
+            "E_BAD_INPUT",
+            "nothing to accept: every link is already there",
+            "nothing to do"
+        )
+    );
+}

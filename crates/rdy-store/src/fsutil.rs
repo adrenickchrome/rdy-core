@@ -54,6 +54,11 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
 /// Makes `bytes` the durable content of `path`, as a replacement that is atomic against crashes:
 /// writes `<parent>/.<file name>.tmp`, fsyncs it, renames it over `path`, then fsyncs the parent
 /// directory (`.` for a bare file name). Records `path`, then the parent, in the sync recorder.
+///
+/// The temp name is predictable, so whatever stands there is removed first, and the temp file is
+/// created with `create_new` (`O_EXCL`): a link planted at the temp name is never followed, and
+/// one raced in after the removal fails the write. Something that cannot be removed there (a
+/// directory) fails the write with an error that names the temp path.
 pub fn write_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
@@ -66,7 +71,23 @@ pub fn write_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
     tmp_name.push(name);
     tmp_name.push(".tmp");
     let tmp = parent.join(tmp_name);
-    let mut f = File::create(&tmp)?;
+    match std::fs::remove_file(&tmp) {
+        // a directory (or anything else rdy cannot remove) at the temp name: the person moves it
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            return Err(io::Error::new(
+                e.kind(),
+                format!(
+                    "cannot remove {} to write through it ({e}); move it aside",
+                    tmp.display()
+                ),
+            ));
+        }
+        _ => {}
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
     f.write_all(bytes)?;
     f.sync_all()?;
     drop(f);
@@ -103,4 +124,42 @@ pub fn create_dir_durable(dir: &Path) -> io::Result<Vec<PathBuf>> {
     }
     synced.reverse();
     Ok(synced)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn msw11_write_durable_never_writes_through_a_link_at_the_temp_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, b"keep me").unwrap();
+        let path = dir.path().join("blob.png");
+        std::os::unix::fs::symlink(&victim, dir.path().join(".blob.png.tmp")).unwrap();
+        write_durable(&path, b"new bytes").unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
+        assert!(std::fs::symlink_metadata(&path).unwrap().is_file());
+        assert_eq!(std::fs::read(&path).unwrap(), b"new bytes");
+        assert!(std::fs::symlink_metadata(dir.path().join(".blob.png.tmp")).is_err());
+    }
+
+    /// Final review M6: a directory at the temp name fails the write with an error that names
+    /// the temp path, so a person knows what to move aside; the directory is kept.
+    #[test]
+    fn msw11_a_directory_at_the_temp_name_is_named_in_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.png");
+        let tmp = dir.path().join(".blob.png.tmp");
+        std::fs::create_dir(&tmp).unwrap();
+        std::fs::write(tmp.join("kept.txt"), b"mine").unwrap();
+        let e = write_durable(&path, b"new bytes").unwrap_err();
+        assert!(
+            e.to_string().contains(&tmp.display().to_string()),
+            "the error names the temp path: {e}"
+        );
+        assert_eq!(std::fs::read(tmp.join("kept.txt")).unwrap(), b"mine");
+        assert!(std::fs::symlink_metadata(&path).is_err());
+    }
 }

@@ -265,3 +265,38 @@ fn dfu1_fixing_a_broken_pack_sends_pack_changed() {
         assert!(a.take_notice().is_none(), "once");
     });
 }
+
+#[test]
+fn msw15_a_relative_project_whose_absolute_socket_path_is_too_long_is_refused_before_a_spawn() {
+    let base = rdy_qa::daemon::short_tempdir();
+    let deep = base.path().join("d".repeat(100));
+    let project = deep.join("p");
+    std::fs::create_dir_all(&project).unwrap();
+    drop(Rdy::init(&project, "rdy-standard").unwrap());
+    let out = std::process::Command::new(rdy_qa::fixtures::rdy_bin())
+        .current_dir(&deep)
+        .args(["--json", "--project", "p", "status"])
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .env_remove("RDY_NO_DAEMON")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let e: Value = serde_json::from_str(
+        String::from_utf8_lossy(&out.stderr)
+            .trim()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(e["code"], E_DAEMON_START, "{e}");
+    assert!(
+        e["message"].as_str().unwrap().contains("the limit is"),
+        "{e}"
+    );
+    assert!(
+        !project.join(".rdy/run/daemon.log").exists(),
+        "a daemon was spawned: {e}"
+    );
+}

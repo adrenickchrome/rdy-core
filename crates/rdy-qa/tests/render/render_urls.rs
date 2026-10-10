@@ -109,11 +109,14 @@ fn url1_the_site_name_is_read_when_the_state_is_published_not_when_it_is_asked()
         "First",
         "no publish has re-read it"
     );
+    // the config is loaded at open and by a pack reload; a full publish keeps it (msw19)
     r.invalidate();
+    assert_eq!(r.read().project_name(), "First", "a full publish keeps it");
+    assert!(matches!(r.reload_pack().unwrap(), ReloadOutcome::Reloaded));
     assert_eq!(
         r.read().project_name(),
         "Second",
-        "a full publish re-reads the config"
+        "a pack reload re-reads the config"
     );
     assert_eq!(r.read().project_description(), None);
     assert_eq!(held.project_name(), "First", "a held state never follows");
@@ -359,4 +362,18 @@ fn url1_anchors_never_collide_with_the_pages_own_element_ids() {
         q.contains("id=\"main-2\"") && q.matches("id=\"main\"").count() == 1,
         "{q}"
     );
+}
+
+#[test]
+fn msw12_an_authored_untitled_name_is_not_the_default() {
+    let (_d, mut r) = tiny();
+    write(&mut r, "work", json!([
+        {"op":"create","type":"doc","id":"$d","fields":{"title":"","name":"untitled-draft","doc_type":"glossary"}},
+        {"op":"create","type":"section","parent":"$d","fields":{"title":"Terms"}}
+    ])).unwrap();
+    land(&mut r, "work").unwrap();
+    let out = tempfile::tempdir().unwrap();
+    render_site(&r.read(), &Scope::Canon, out.path()).unwrap();
+    let h = std::fs::read_to_string(out.path().join("index.html")).unwrap();
+    assert!(h.contains(">Untitled draft<"), "{h}");
 }

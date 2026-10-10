@@ -53,6 +53,10 @@ pub enum StoreError {
     /// file is unreadable).
     #[error("{message}")]
     Format { message: String, fix: String },
+    /// An undo that ends a chain of more than `MAX_UNDO_DEPTH` undos of undos: the store is
+    /// sound, the walk refuses to follow it.
+    #[error("view {view:?}: op {op} ends a chain of more than 64 undos of undos")]
+    UndoTooDeep { view: String, op: Hash },
 }
 
 pub(crate) fn db<E: std::fmt::Display>(e: E) -> StoreError {

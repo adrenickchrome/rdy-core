@@ -1,10 +1,11 @@
 //! Loading and reloading the project's pack, and the fingerprint of its files.
 
-use crate::config::{parse_config, read_config};
+use crate::config::{Config, parse_config, read_config};
 use crate::config_levels;
 use crate::handle::io;
-use crate::{Delta, E_CONFIG, E_NO_PROJECT, Rdy, RdyError};
-use rdy_schema::{Pack, PackSet};
+use crate::{Delta, E_CONFIG, E_NO_PROJECT, Rdy, RdyError, ServeConfig};
+use rdy_schema::{AreaMatcher, Pack, PackSet};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -231,7 +232,9 @@ impl Rdy {
     /// pack that does not resolve is `Invalid`: the loaded pack, lineage and fingerprint stay, so
     /// a later fix counts as a change and a still-invalid state is reported again. On success the
     /// state is republished with the new pack. `Err` is only an I/O error reading the
-    /// fingerprint (or a failed republish).
+    /// fingerprint, or a failed republish. A republish that fails or panics restores the
+    /// previous pack, config and fingerprint before it returns its error or resumes its panic,
+    /// so the previous pack stays loaded and the next reload sees the files as changed.
     pub fn reload_pack(&mut self) -> Result<ReloadOutcome, RdyError> {
         let sources = read_sources(&self.root)?;
         let fp = sources.fingerprint;
@@ -250,12 +253,50 @@ impl Rdy {
                 });
             }
         };
-        self.areas = Arc::new(pack.area_matcher());
-        self.store.set_tracking(pack.tracking());
-        self.pack = Arc::new(pack);
-        self.lineage = lineage;
-        self.serve = cfg.serve.resolve();
-        self.fingerprint = fp;
+        // what is loaded now, restored if the publish of the new pack fails or panics
+        let previous = Loaded {
+            areas: Arc::clone(&self.areas),
+            pack: Arc::clone(&self.pack),
+            lineage: self.lineage.clone(),
+            serve: self.serve,
+            fingerprint: self.fingerprint.clone(),
+            config: Arc::clone(&self.config),
+        };
+        self.swap_loaded(Loaded {
+            areas: Arc::new(pack.area_matcher()),
+            pack: Arc::new(pack),
+            lineage,
+            serve: cfg.serve.resolve(),
+            fingerprint: fp,
+            config: Arc::new(cfg),
+        });
+        let failed = match catch_unwind(AssertUnwindSafe(|| self.publish(Delta::Full))) {
+            Ok(Ok(())) => return Ok(ReloadOutcome::Reloaded),
+            Ok(Err(e)) => Ok(e),
+            Err(p) => Err(p),
+        };
+        self.swap_loaded(previous);
+        match failed {
+            Ok(e) => {
+                // the failed publish left a state that names the new pack: publish one under
+                // the previous pack (it keeps its own error if the read fails again)
+                self.invalidate();
+                Err(e)
+            }
+            Err(p) => resume_unwind(p),
+        }
+    }
+
+    /// Puts `loaded` in place of the loaded pack and config, and drops the cached entries
+    /// built under the pack it replaces.
+    fn swap_loaded(&mut self, loaded: Loaded) {
+        self.store.set_tracking(loaded.pack.tracking());
+        self.areas = loaded.areas;
+        self.pack = loaded.pack;
+        self.lineage = loaded.lineage;
+        self.serve = loaded.serve;
+        self.fingerprint = loaded.fingerprint;
+        self.config = loaded.config;
         // entries built under the old pack must not serve the new one
         self.as_of
             .lru
@@ -263,7 +304,15 @@ impl Rdy {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         *self.vpos.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
-        self.publish(Delta::Full)?;
-        Ok(ReloadOutcome::Reloaded)
     }
+}
+
+/// The pack and config a project has loaded, with what is derived from them.
+struct Loaded {
+    areas: Arc<AreaMatcher>,
+    pack: Arc<Pack>,
+    lineage: Vec<String>,
+    serve: ServeConfig,
+    fingerprint: PackFingerprint,
+    config: Arc<Config>,
 }

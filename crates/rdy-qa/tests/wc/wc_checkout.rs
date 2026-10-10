@@ -415,3 +415,92 @@ fn wcco1_a_case_only_folder_rename_renames_the_directory_on_a_case_insensitive_f
     );
     ok(&s, &["checkout"]);
 }
+
+/// #695: a damaged `bound.yaml` stops `rdy new` before it lands anything; it never falls back to
+/// the default view outside the checkout.
+#[test]
+fn msw10_damaged_wc_state_refuses_rdy_new_before_it_lands() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout", "side"]);
+    std::fs::write(at(&s, ".rdy/wc/bound.yaml"), "view: [\n").unwrap();
+    let (okk, v) = json(&s, &["new", "doc", "fresh", "--title", "Fresh"]);
+    assert!(!okk && v["code"] == E_IO, "{v}");
+    assert!(v["message"].as_str().unwrap().contains("bound.yaml"), "{v}");
+    s.stop();
+    let r = Rdy::open(s.dir.path()).unwrap();
+    {
+        let st = r.read();
+        for view in ["side", "work"] {
+            assert!(
+                st.resolve_id(&Scope::View(view.into()), "fresh").is_err(),
+                "landed in {view}"
+            );
+        }
+    }
+    r.close().unwrap();
+}
+
+/// #695: a damaged `bound.yaml` stops `rdy edit` before the editor opens; the block is unchanged
+/// in the bound view and in the default view.
+#[test]
+fn msw10_damaged_wc_state_refuses_rdy_edit_before_the_editor() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout", "side"]);
+    std::fs::write(at(&s, ".rdy/wc/bound.yaml"), "view: [\n").unwrap();
+    let marker = at(&s, "editor-ran");
+    let script = at(&s, "ed.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nsed -i.bak 's/Claims hold./Edited./' \"$1\"\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let o = rdy_qa::daemon::human_command(
+        s.dir.path(),
+        &s.env_pairs(),
+        &["--json", "edit", &seed.claim],
+    )
+    .env("EDITOR", &script)
+    .output()
+    .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success(), "{err}");
+    let v: serde_json::Value = serde_json::from_str(&err).unwrap_or_else(|_| panic!("{err}"));
+    assert!(v["code"] == E_IO, "{v}");
+    assert!(v["message"].as_str().unwrap().contains("bound.yaml"), "{v}");
+    assert!(!marker.exists(), "the editor opened");
+    for view in ["side", "work"] {
+        assert_eq!(
+            store_block(&s, view, &seed.claim).body,
+            "Claims hold.",
+            "{view}"
+        );
+    }
+}
+
+#[test]
+fn msw16_dirty_fix_text_says_new_files_stay() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    put(
+        &s,
+        "mine.yaml",
+        "- type: doc\n  fields:\n    title: Mine\n    doc_type: page\n",
+    );
+    let (okk, v) = json(&s, &["checkout"]);
+    assert!(!okk && v["code"] == E_WC_DIRTY, "{v}");
+    assert!(v["message"].as_str().unwrap().contains("mine.yaml"), "{v}");
+    ok(&s, &["checkout", "--force"]);
+    assert!(at(&s, "mine.yaml").exists(), "--force keeps a new file");
+    let (okk, v) = json(&s, &["checkout"]);
+    assert!(!okk && v["code"] == E_WC_DIRTY, "{v}");
+    let fix = v["fix"].as_str().unwrap();
+    assert!(
+        !fix.contains("--force to discard them") && fix.contains("new files stay"),
+        "{v}"
+    );
+}

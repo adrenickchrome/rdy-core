@@ -331,7 +331,8 @@ fn hb1_require_up_to_date_is_read_from_the_project_config_on_a_full_publish() {
         !r.read().require_up_to_date(),
         "a published state never changes"
     );
-    r.invalidate();
+    // the config is loaded at open and by a pack reload; a full publish keeps it (msw19)
+    assert!(matches!(r.reload_pack().unwrap(), ReloadOutcome::Reloaded));
     assert!(r.read().require_up_to_date());
     let (_doc, section, _c) = seed_doc(&mut r, "seed");
     write(
@@ -344,4 +345,130 @@ fn hb1_require_up_to_date_is_read_from_the_project_config_on_a_full_publish() {
         r.read().require_up_to_date(),
         "carried over by a commit's publish"
     );
+}
+
+#[test]
+fn msw19_a_full_publish_over_a_broken_config_keeps_the_review_gate_on() {
+    let (d, mut r) = project();
+    let cfg = d.path().join(".rdy/config.yaml");
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    std::fs::write(
+        &cfg,
+        format!("{text}reviews:\n  require_up_to_date: true\n"),
+    )
+    .unwrap();
+    assert!(matches!(r.reload_pack().unwrap(), ReloadOutcome::Reloaded));
+    assert!(r.read().require_up_to_date());
+    for broken in ["reviews:\n  require_up_to_date: \"true\"\n", "reviews: [\n"] {
+        std::fs::write(&cfg, format!("{text}{broken}")).unwrap();
+        assert!(
+            matches!(r.reload_pack().unwrap(), ReloadOutcome::Invalid { .. }),
+            "{broken:?}"
+        );
+        r.invalidate();
+        assert!(
+            r.read().require_up_to_date(),
+            "{broken:?} must not turn the review gate off"
+        );
+    }
+}
+
+/// The one warning `Rdy::open` gives for the project config `text` appended with `bad`; the
+/// project opens and the review gate stays off (founder ruling: config typos warn).
+fn opens_with_one_warning(bad: &str) -> rdy_schema::Issue {
+    let (d, r) = project();
+    drop(r);
+    let cfg = d.path().join(".rdy/config.yaml");
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    std::fs::write(&cfg, format!("{text}{bad}")).unwrap();
+    let r = Rdy::open(d.path()).unwrap_or_else(|e| panic!("{bad:?} must open: {e}"));
+    assert!(!r.read().require_up_to_date(), "{bad:?}");
+    let w = rdy_engine::config_levels::config_warnings(d.path(), None);
+    assert_eq!(w.len(), 1, "{bad:?}: {w:?}");
+    assert_eq!(w[0].code, "W_CONFIG_UNKNOWN", "{bad:?}");
+    w[0].clone()
+}
+
+#[test]
+fn msw19_an_unknown_key_under_reviews_opens_with_the_warning() {
+    for bad in [
+        "reviews:\n  require_uptodate: true\n",
+        "review:\n  require_up_to_date: true\n",
+    ] {
+        let w = opens_with_one_warning(bad);
+        assert!(
+            format!("{} {}", w.message, w.fix).contains("reviews.require_up_to_date"),
+            "{bad:?}: {w:?}"
+        );
+    }
+}
+
+#[test]
+fn msw19_a_reload_whose_publish_panics_keeps_the_previous_pack_and_config() {
+    let (d, mut r) = project();
+    let old_pack = r.pack().name.clone();
+    let old_fp = r.pack_fingerprint().clone();
+    std::fs::write(
+        d.path().join(".rdy/packs/soft.yaml"),
+        "name: soft\nversion: \"1\"\nextends: rdy-standard\n",
+    )
+    .unwrap();
+    std::fs::write(
+        d.path().join(".rdy/config.yaml"),
+        "pack: soft\nreviews:\n  require_up_to_date: true\n",
+    )
+    .unwrap();
+    r.panic_full_publishes_for_tests(1);
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.reload_pack()));
+    assert!(panicked.is_err(), "the publish's panic propagates");
+    assert_eq!(r.pack().name, old_pack, "the previous pack stays loaded");
+    assert_eq!(r.pack_fingerprint(), &old_fp, "the fingerprint stays");
+    r.invalidate();
+    assert_eq!(r.read().pack().name, old_pack);
+    assert!(
+        !r.read().require_up_to_date(),
+        "the previous config stays loaded"
+    );
+    // the files did not change since: the next reload loads them
+    assert!(matches!(r.reload_pack().unwrap(), ReloadOutcome::Reloaded));
+    assert_eq!(r.pack().name, "soft");
+    assert!(r.read().require_up_to_date());
+}
+
+#[test]
+fn msw19_a_dotted_review_key_opens_with_the_warning() {
+    for bad in [
+        "reviews.require_up_to_date: true\n",
+        "\"reviews.require_up_to_date\": true\n",
+        "'reviews.require_up_to_date': true\n",
+    ] {
+        let w = opens_with_one_warning(bad);
+        assert_eq!(
+            w.message,
+            ".rdy/config.yaml: `reviews.require_up_to_date` is written as one dotted key; \
+             rdy reads only nested keys, so the review setting would be ignored",
+            "{bad:?}"
+        );
+        assert_eq!(
+            w.fix, "write it nested: `reviews:` then `  require_up_to_date: true` on the next line",
+            "{bad:?}"
+        );
+    }
+}
+
+#[test]
+fn msw19_a_review_setting_outside_reviews_opens_with_the_warning() {
+    for bad in [
+        "require_up_to_date: true\n",
+        "require_uptodate: true\n",
+        "views:\n  require_up_to_date: true\n",
+    ] {
+        let w = opens_with_one_warning(bad);
+        assert!(
+            w.message
+                .contains("did you mean reviews.require_up_to_date?"),
+            "{bad:?}: {w:?}"
+        );
+        assert_eq!(w.fix, "move it under `reviews:`", "{bad:?}");
+    }
 }

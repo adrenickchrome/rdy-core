@@ -56,26 +56,41 @@ impl Place {
         }
     }
 
+    /// [`Place::try_locate`], with a damaged pointer file read as no place.
+    pub fn locate(start: &Path) -> Option<Place> {
+        Place::try_locate(start).ok().flatten()
+    }
+
     /// Walks `start` and its ancestors. The first directory with a regular file `.rdy-worktree`
     /// gives a worktree place; else the first with a `.rdy` directory gives the main place. No
-    /// path is canonicalized.
-    pub fn locate(start: &Path) -> Option<Place> {
+    /// path is canonicalized. A regular `.rdy-worktree` that [`Place::from_pointer`] rejects is
+    /// `E_BAD_INPUT`: the walk never passes it to reach the main working copy.
+    pub fn try_locate(start: &Path) -> Result<Option<Place>, RdyError> {
         for dir in start.ancestors() {
-            if let Ok(m) = fs::symlink_metadata(dir.join(POINTER_FILE))
-                && m.is_file()
-                && let Some(p) = Place::from_pointer(dir)
-            {
-                return Some(p);
+            if fs::symlink_metadata(dir.join(POINTER_FILE)).is_ok_and(|m| m.is_file()) {
+                return match Place::from_pointer(dir) {
+                    Some(p) => Ok(Some(p)),
+                    None => Err(RdyError::new(
+                        E_BAD_INPUT,
+                        format!(
+                            "{}/{POINTER_FILE} does not name a worktree: it does not parse, or its name is not one plain name",
+                            dir.display()
+                        ),
+                        "repair it (project: <path>, name: <name>; rdy worktree ls shows the name)",
+                    )),
+                };
             }
             if fs::metadata(dir.join(".rdy")).is_ok_and(|m| m.is_dir()) {
-                return Some(Place::main(dir));
+                return Ok(Some(Place::main(dir)));
             }
         }
-        None
+        Ok(None)
     }
 
     /// The worktree place `dir`'s pointer file names (`dir` holds the pointer itself; nothing is
-    /// walked); `None` when the file is missing, does not parse or names an unsafe name.
+    /// walked); `None` when the file is missing, does not parse or names an unsafe name. A
+    /// relative `project` is joined to `dir` and normalised (`.` and `..` segments are taken out
+    /// lexically), so the project path, and the daemon socket path under it, does not grow.
     pub fn from_pointer(dir: &Path) -> Option<Place> {
         let text = fs::read_to_string(dir.join(POINTER_FILE)).ok()?;
         let ptr: Pointer = serde_yaml_ng::from_str(&text).ok()?;
@@ -84,11 +99,69 @@ impl Place {
         if !plain {
             return None;
         }
+        let project = normalise(&dir.join(&ptr.project));
         Some(Place {
             root: dir.to_path_buf(),
-            state: ptr.project.join(WORKTREES_DIR).join(&ptr.name),
-            project: ptr.project,
+            state: project.join(WORKTREES_DIR).join(&ptr.name),
+            project,
         })
+    }
+
+    /// msw16: for a worktree place, the directory of the real worktree when `root` is a copy of
+    /// it: the directory recorded in `dir.txt` still exists, is not `root`, and its pointer names
+    /// this same worktree. Otherwise `None`, and `root` is the worktree: when the recorded
+    /// directory is gone, holds no such pointer, or `dir.txt` is missing (the worktree moved, or
+    /// `rdy worktree add` stopped before it wrote `dir.txt`), `dir.txt` is rewritten to `root`.
+    /// The main place, and a worktree whose state directory is gone, are always `None`. So a
+    /// copy takes the worktree over when the real directory's pointer is missing or damaged (it
+    /// no longer names this worktree): `dir.txt` then names the copy, and the real directory is
+    /// no longer the worktree (ruling: a different live holder refuses, anything else is a
+    /// move). Call it with the working copy's lock held.
+    pub fn copy_of(&self) -> Result<Option<String>, RdyError> {
+        if self.state == self.project.join(WC_DIR) || !self.state.is_dir() {
+            return Ok(None);
+        }
+        let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => a == b,
+        };
+        let file = self.state.join(WORKTREE_DIR_FILE);
+        let recorded = fs::read_to_string(&file)
+            .ok()
+            .map(|t| t.trim_end_matches('\n').to_string());
+        if let Some(r) = &recorded {
+            let r_dir = Path::new(r);
+            if same(r_dir, &self.root) {
+                return Ok(None);
+            }
+            let live = fs::symlink_metadata(r_dir.join(POINTER_FILE)).is_ok_and(|m| m.is_file())
+                && Place::from_pointer(r_dir).is_some_and(|p| same(&p.state, &self.state));
+            if live {
+                return Ok(Some(r.clone()));
+            }
+        }
+        let root = std::path::absolute(&self.root).map_err(|e| {
+            RdyError::new(
+                E_IO,
+                format!("cannot resolve {}: {e}", self.root.display()),
+                "check the directory, then retry",
+            )
+        })?;
+        let text = root.to_str().ok_or_else(|| {
+            RdyError::new(
+                E_BAD_INPUT,
+                format!("{} is not valid UTF-8", root.display()),
+                "move the worktree to a directory whose path is valid UTF-8",
+            )
+        })?;
+        write_durable(&file, text.as_bytes()).map_err(|e| {
+            RdyError::new(
+                E_IO,
+                format!("cannot write {}: {e}", file.display()),
+                "check the state directory, then retry",
+            )
+        })?;
+        Ok(None)
     }
 
     /// The base copy of the file at `rel`.
@@ -105,6 +178,26 @@ impl Place {
     pub fn conflict_file(&self, rel: &str) -> PathBuf {
         self.state.join("conflicts").join(rel)
     }
+}
+
+/// `path` with its `.` segments dropped and each `..` taking out the segment before it, without
+/// reading the file system. A `..` with no segment before it stays.
+fn normalise(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                } else {
+                    out.push(c);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// The project the pointer file directly in `dir` names: for a directory that holds a regular
@@ -545,4 +638,28 @@ pub fn new_nonce() -> String {
         std::thread::current().id()
     );
     Hash::of(seed.as_bytes()).to_string()[..32].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Final review M10: a relative pointer is joined and normalised, so `..` segments never
+    /// lengthen the project path (and the daemon socket path under it).
+    #[test]
+    fn msw16_a_relative_pointer_names_the_project_without_dot_segments() {
+        let d = tempfile::tempdir().unwrap();
+        let wt = d.path().join("trees/wt1");
+        fs::create_dir_all(&wt).unwrap();
+        fs::write(wt.join(POINTER_FILE), "project: ../../proj/./\nname: wt1\n").unwrap();
+        let p = Place::from_pointer(&wt).unwrap();
+        assert_eq!(p.project, d.path().join("proj"));
+        assert_eq!(
+            p.state,
+            d.path().join("proj").join(WORKTREES_DIR).join("wt1")
+        );
+        // an absolute pointer stays as written
+        fs::write(wt.join(POINTER_FILE), "project: /a/b\nname: wt1\n").unwrap();
+        assert_eq!(Place::from_pointer(&wt).unwrap().project, Path::new("/a/b"));
+    }
 }

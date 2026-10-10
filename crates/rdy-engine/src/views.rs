@@ -540,14 +540,27 @@ pub(crate) fn missing_deps(
     included: &BTreeSet<Hash>,
     added: &[Hash],
 ) -> Result<Vec<Hash>, RdyError> {
+    Ok(missing_deps_rooted(st, base, included, added)?
+        .into_iter()
+        .map(|(d, _)| d)
+        .collect())
+}
+
+/// `missing_deps`, each dep with the change of `added` whose closure first reached it.
+pub(crate) fn missing_deps_rooted(
+    st: &ReadState,
+    base: Option<Hash>,
+    included: &BTreeSet<Hash>,
+    added: &[Hash],
+) -> Result<Vec<(Hash, Hash)>, RdyError> {
     let reader = st.reader();
     let added_set: BTreeSet<Hash> = added.iter().copied().collect();
-    let mut found: Vec<Hash> = vec![];
+    let mut found: Vec<(Hash, Hash)> = vec![];
     let mut found_set: BTreeSet<Hash> = BTreeSet::new();
-    let mut queue: VecDeque<Hash> = added.iter().copied().collect();
+    let mut queue: VecDeque<(Hash, Hash)> = added.iter().map(|c| (*c, *c)).collect();
     // the landings through the base, walked once for the whole closure
     let mut based = None;
-    while let Some(c) = queue.pop_front() {
+    while let Some((c, root)) = queue.pop_front() {
         for d in reader.change(&c)?.deps {
             if included.contains(&d)
                 || added_set.contains(&d)
@@ -557,8 +570,8 @@ pub(crate) fn missing_deps(
                 continue;
             }
             found_set.insert(d);
-            found.push(d);
-            queue.push_back(d);
+            found.push((d, root));
+            queue.push_back((d, root));
         }
     }
     Ok(found)
@@ -569,7 +582,10 @@ pub(crate) fn missing_deps(
 /// parent a block of theirs is created or moved under that neither the view nor the include
 /// has, the unlanded change that creates it, with that change's own closure, until nothing is
 /// missing. A parent no unlanded change creates (one that landed after a pinned base, say)
-/// refuses the include with `E_DEPS_MISSING`, one issue per parent.
+/// refuses the include with `E_DEPS_MISSING`, one issue per parent. A dep that landed after a
+/// pinned base is brought along: an include is an explicit act, so it may bring landed work into
+/// a pinned view, which an undo never does on its own (`E_UNDO_LANDING` sends the agent here;
+/// final review I3, kept as built pending the founder's ruling).
 fn include_closure(
     st: &ReadState,
     view: &str,

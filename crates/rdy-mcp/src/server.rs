@@ -30,6 +30,7 @@ use rmcp::{
     service::RequestContext,
     tool_handler,
 };
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -122,7 +123,7 @@ impl RdyServer {
                 }
                 Err(panic) => {
                     // the invalidate runs on the writer, where `Rdy` is
-                    let _ = st.engine.write(Box::new(|r| {
+                    let republished = st.engine.write(Box::new(|r| {
                         r.invalidate();
                         Ok(serde_json::Value::Null)
                     }));
@@ -131,9 +132,22 @@ impl RdyServer {
                         .map(|s| s.to_string())
                         .or_else(|| panic.downcast_ref::<String>().cloned())
                         .unwrap_or_else(|| "unknown panic".into());
+                    let mut message = format!("internal error in {tool}: {msg}");
+                    if let Err(e) = republished {
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "rdy mcp: after a panic in {tool} the state was not republished ({}: {})",
+                            e.code,
+                            e.message
+                        );
+                        message.push_str(&format!(
+                            "; the state was not republished ({}: {})",
+                            e.code, e.message
+                        ));
+                    }
                     result(Err(RdyError::new(
                         E_INTERNAL,
-                        format!("internal error in {tool}: {msg}"),
+                        message,
                         "this is a bug in rdy; the request may or may not have been applied: re-read before retrying",
                     )))
                 }
@@ -585,6 +599,51 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FailingWrite(Local);
+    impl Engine for FailingWrite {
+        fn read(&self) -> Arc<rdy_engine::ReadState> {
+            self.0.read()
+        }
+        fn write(&self, _f: rdy_engine::WriteFn) -> Result<serde_json::Value, RdyError> {
+            Err(RdyError::new(
+                "E_DAEMON_GONE",
+                "the daemon's writer has stopped",
+                "restart the daemon",
+            ))
+        }
+        fn open_report(&self) -> rdy_engine::OpenReport {
+            self.0.open_report()
+        }
+        fn root(&self) -> PathBuf {
+            self.0.root()
+        }
+        fn briefs(&self) -> Arc<rdy_engine::BriefRegistry> {
+            self.0.briefs()
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn msw9_a_failed_republish_after_a_tool_panic_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let server = RdyServer::new(Arc::new(FailingWrite(Local::new(rdy))), None);
+        let p = SessionParams {
+            actor: "__rdy_test_panic__".into(),
+            run: None,
+            role: "writer".into(),
+            view: None,
+        };
+        let out = serde_json::to_value(server.run("rdy_session", Ok(p), tools::rdy_session).await)
+            .unwrap()
+            .to_string();
+        assert!(
+            out.contains("E_INTERNAL")
+                && out.contains("not republished")
+                && out.contains("E_DAEMON_GONE"),
+            "{out}"
+        );
+    }
 
     #[test]
     fn mrt1_every_tool_is_in_exactly_one_family_router() {

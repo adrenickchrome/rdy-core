@@ -74,7 +74,18 @@ pub fn rdy_read(st: &mut McpState, p: ReadParams) -> Result<Value, RdyError> {
                 PAGE_STALE_FIX,
             )
         })?;
-        let read = read_entries(st, &q)?;
+        // a target that is gone, or a view that closed, is a read that moved
+        let read = read_entries(st, &q).map_err(|e| {
+            if [E_UNKNOWN_BLOCK, E_NOT_FOUND, E_VIEW_CLOSED].contains(&e.code) {
+                RdyError::new(
+                    E_PAGE_STALE,
+                    "the read moved since its first page: read again",
+                    PAGE_STALE_FIX,
+                )
+            } else {
+                e
+            }
+        })?;
         if read.token(&q) != token {
             return Err(RdyError::new(
                 E_PAGE_STALE,
@@ -177,6 +188,18 @@ fn read_page_of(
     out
 }
 
+/// Whether any line of a block's markdown is kept. A code block's body lines are matched
+/// elsewhere (`code_lines`), so only its id line, blank line and opening fence (with the
+/// language) are scanned here.
+fn markdown_hit(md: &str, b: &rdy_model::Block, keeps: &impl Fn(&str) -> bool) -> bool {
+    let n = if b.block_type == "code" {
+        3
+    } else {
+        usize::MAX
+    };
+    md.lines().take(n).any(keeps)
+}
+
 /// The entries of a read as `q` gives it, on the state the engine publishes now.
 fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, RdyError> {
     let pattern = q
@@ -252,83 +275,116 @@ fn read_entries(st: &McpState, q: &read_page::ReadQuery) -> Result<ReadEntries, 
     } else {
         Default::default()
     };
-    let keeps = |line: &str| pattern.as_ref().is_none_or(|p| p.matches(line));
-    let (mut entries, mut ids) = (vec![], vec![]);
-    let mut stack = vec![(root, 0usize)];
-    while let Some((b, depth)) = stack.pop() {
-        let status = g.status(&b.id).map(|s| {
-            serde_json::to_value(s)
-                .ok()
-                .and_then(|v| v["status"].as_str().map(String::from))
-                .unwrap_or_default()
-        });
-        let markdown = || {
-            crate::markdown::block_markdown(
-                b,
-                &m,
-                crate::markdown::doc_depth(&m, b),
-                status.as_deref(),
-            )
-        };
-        let entry = match format {
-            "yaml" | "markdown" => {
-                let text = if format == "yaml" {
-                    block_to_yaml(b)
-                } else {
-                    markdown()
-                };
-                (pattern.is_none() || text.lines().any(keeps)).then_some(text)
+    // a /regex/ read is refused, before any regex runs, when the text it would match exceeds
+    // READ_REGEX_HAYSTACK_MAX. A first pass counts every candidate line (no short-circuit) and
+    // matches nothing; the second pass matches.
+    let is_regex = matches!(pattern, Some(read_page::Pattern::Regex(_)));
+    let haystack = std::cell::Cell::new(0usize);
+    let walk = |counting: bool| -> (Vec<String>, Vec<BlockId>) {
+        let keeps = |line: &str| {
+            let Some(p) = pattern.as_ref() else {
+                return true;
+            };
+            if counting {
+                haystack.set(haystack.get().saturating_add(line.len() + 1));
+                return false;
             }
-            _ => {
-                let pad = "  ".repeat(depth);
-                let mut head = format!("{pad}{} {}: {}", b.id, b.block_type, compact_summary(b));
-                if suspects.contains(&b.id) {
-                    head.push_str(" [suspect]");
-                }
-                if let Some(c) = conflicts.get(&b.id) {
-                    head.push_str(&format!(" [conflict {c}]"));
-                }
-                if let Some(s) = &status {
-                    head.push_str(&format!(" [{s}]"));
-                }
-                if let Some(j) = justified.get(&b.id) {
-                    head.push_str(&format!(" [{j}]"));
-                }
-                // a pattern matches the head line, a code line's own text, or any line of the
-                // block's whole text (as markdown gives it: a prose body past its first sentence,
-                // table rows, diagram source); a kept code block shows only the lines that match
-                let body = code_lines(b);
-                let matching: Vec<&String> = body.iter().filter(|l| keeps(l)).collect();
-                let hit = pattern.is_none()
-                    || keeps(&head)
-                    || !matching.is_empty()
-                    || markdown().lines().any(keeps);
-                hit.then(|| {
-                    let shown: Vec<&String> = if pattern.is_some() {
-                        matching
+            p.matches(line)
+        };
+        let (mut entries, mut ids) = (vec![], vec![]);
+        let mut stack = vec![(root, 0usize)];
+        while let Some((b, depth)) = stack.pop() {
+            let status = g.status(&b.id).map(|s| {
+                serde_json::to_value(s)
+                    .ok()
+                    .and_then(|v| v["status"].as_str().map(String::from))
+                    .unwrap_or_default()
+            });
+            let markdown = || {
+                crate::markdown::block_markdown(
+                    b,
+                    &m,
+                    crate::markdown::doc_depth(&m, b),
+                    status.as_deref(),
+                )
+            };
+            let entry = match format {
+                "yaml" | "markdown" => {
+                    let text = if format == "yaml" {
+                        block_to_yaml(b)
                     } else {
-                        body.iter().collect()
+                        markdown()
                     };
-                    let mut lines = vec![head];
-                    for l in shown {
-                        lines.push(if l.is_empty() {
-                            format!("{pad}  |")
-                        } else {
-                            format!("{pad}  | {l}")
-                        });
+                    (pattern.is_none() || text.lines().any(keeps)).then_some(text)
+                }
+                _ => {
+                    let pad = "  ".repeat(depth);
+                    // the pattern sees the head without its indent, as it sees a code line
+                    let mut head = format!("{} {}: {}", b.id, b.block_type, compact_summary(b));
+                    if suspects.contains(&b.id) {
+                        head.push_str(" [suspect]");
                     }
-                    lines.join("\n")
-                })
+                    if let Some(c) = conflicts.get(&b.id) {
+                        head.push_str(&format!(" [conflict {c}]"));
+                    }
+                    if let Some(s) = &status {
+                        head.push_str(&format!(" [{s}]"));
+                    }
+                    if let Some(j) = justified.get(&b.id) {
+                        head.push_str(&format!(" [{j}]"));
+                    }
+                    // a pattern matches the head line, a code line's own text, or any line of the
+                    // block's whole text (as markdown gives it: a prose body past its first sentence,
+                    // table rows, diagram source); a kept code block shows only the lines that match.
+                    // A code block's lines are matched once, so markdown does not repeat them.
+                    let body = code_lines(b);
+                    let matching: Vec<&String> = body.iter().filter(|l| keeps(l)).collect();
+                    let hit = pattern.is_none()
+                        || keeps(&head)
+                        || !matching.is_empty()
+                        || markdown_hit(&markdown(), b, &keeps);
+                    hit.then(|| {
+                        let shown: Vec<&String> = if pattern.is_some() {
+                            matching
+                        } else {
+                            body.iter().collect()
+                        };
+                        let mut lines = vec![format!("{pad}{head}")];
+                        for l in shown {
+                            lines.push(if l.is_empty() {
+                                format!("{pad}  |")
+                            } else {
+                                format!("{pad}  | {l}")
+                            });
+                        }
+                        lines.join("\n")
+                    })
+                }
+            };
+            if let Some(e) = entry {
+                entries.push(e);
+                ids.push(b.id.clone());
             }
-        };
-        if let Some(e) = entry {
-            entries.push(e);
-            ids.push(b.id.clone());
+            for c in m.children(Some(&b.id)).into_iter().rev() {
+                stack.push((c, depth + 1));
+            }
         }
-        for c in m.children(Some(&b.id)).into_iter().rev() {
-            stack.push((c, depth + 1));
+        (entries, ids)
+    };
+    if is_regex {
+        walk(true);
+        if haystack.get() > read_page::READ_REGEX_HAYSTACK_MAX {
+            return Err(RdyError::new(
+                E_LIMIT,
+                format!(
+                    "the read is too large to match a regex against ({} bytes; the limit is 4 MiB)",
+                    haystack.get()
+                ),
+                "narrow the read with #section, or use a plain-text pattern",
+            ));
         }
     }
+    let (entries, ids) = walk(false);
     let sep = match format {
         "yaml" => "---\n",
         "markdown" => "\n\n",

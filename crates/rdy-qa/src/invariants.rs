@@ -3,7 +3,7 @@ use rdy_engine::{Rdy, Scope};
 use rdy_model::{
     Block, BlockId, FieldValue, LandingRecord, StateSnapshot, decision, tree, valid_order_key,
 };
-use rdy_schema::{Severity, validate_block};
+use rdy_schema::{Severity, validate_block, validate_prefix};
 use rdy_store::{Conflict, ViewOpKind, kinds};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -126,7 +126,10 @@ pub fn check(r: &Rdy, scope: &Scope) -> Result<(), Vec<Violation>> {
         {
             checked.fields.insert("name".into(), FieldValue::Str(n));
         }
-        for i in validate_block(&pack, &checked, parent) {
+        for i in validate_prefix(&pack, &checked)
+            .into_iter()
+            .chain(validate_block(&pack, &checked, parent))
+        {
             if i.severity == Severity::Error && i.code != "E_ORDER_KEY" {
                 out.push(v(
                     "schema",

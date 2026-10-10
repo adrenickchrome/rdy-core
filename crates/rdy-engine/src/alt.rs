@@ -2,17 +2,25 @@
 //! answer one question; a view is a member of at most one open set. Create, add, remove and
 //! abandon each write a new version of the set; abandon also closes every open member view in
 //! the same batch. Changes written in a member view record the set (`write_linked`).
+//!
+//! msw20 (FW-AL1): bindings are fixed when a change enters the set. A change that exactly one
+//! member held when the set was created (or when that member joined it) stays bound to that
+//! member, whatever any view includes or excludes later; one that two or more members held then
+//! is common ground. A chosen set keeps its losers bound: their changes land only with a decision
+//! that supersedes or refines the choice. An abandoned set binds nothing (`alt_binds`).
 use crate::engine::{Engine, write_typed};
 use crate::error::*;
+use crate::read_state::{AltBinds, AltChosenBy};
 use crate::session::rfc3339;
 use crate::tensions::info::TensionInfo;
 use crate::views::OwnerInfo;
 use crate::write::not_humans_view;
 use crate::{Compare, Delta, Rdy, ReadState, Scope, Session};
-use rdy_model::{AltMember, AltSet, AltStatus, BlockId, Hash, Provenance};
+use rdy_model::{AltMember, AltSet, AltStatus, BlockId, Hash, Op, Provenance, decision};
+use rdy_store::StoreReader;
 use rdy_store::coord::abandoned_reason;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub use crate::coord_graph::alt_label;
 
@@ -75,7 +83,8 @@ pub struct AltCompareRow {
     pub label: String,
     pub view: String,
     pub compare: Compare,
-    /// The event-derived tensions with a change side in the member view, by id.
+    /// The event-derived tensions with a change side in the member view, by id; an
+    /// unjustified_change in the landing form of the whole view (FW-JU1).
     pub tensions: Vec<TensionInfo>,
 }
 
@@ -171,6 +180,102 @@ fn need_open(stable: &Hash, set: &AltSet) -> Result<(), RdyError> {
             "only an open set changes; list the open sets with rdy alt ls (MCP: rdy_alternatives list)",
         )),
     }
+}
+
+/// The bindings of set `set`, whose latest version is `latest` (msw20, FW-AL1); `None` for an
+/// abandoned set. They are fixed when a change enters the set, read from history alone:
+/// - The versions are read oldest first. At each version, a member it no longer lists releases
+///   its bindings (a change it shared stays common ground; a later re-add snapshots again).
+/// - At each version that adds members (every member, at the first), each change a joiner held
+///   just before that version was written, and that the set does not bind or share yet, is
+///   counted among the version's members as they held it then: one holder binds it to that
+///   member, two or more make it common ground. Bindings fixed earlier never change. A change
+///   linked to this set and to a member the version lists (`links.alternative`) is skipped: its
+///   link binds it already, so a joiner that holds it never binds it a second time.
+///   If the linked member is removed later, the change ends up unbound: removing a member
+///   releases its bindings (FW-AL1a Q3), and the link was this change's binding.
+/// - A chosen set also carries its choice: the member, the landing, and the decision blocks the
+///   landing's changes created.
+///
+/// The log is a total order of writes and each version is written in a batch of its own, so a
+/// member's holdings then are `included_before(member, version)`: the same after a reindex.
+pub(crate) fn alt_binds(
+    reader: &StoreReader,
+    latest: &Hash,
+    set: &AltSet,
+) -> Result<Option<AltBinds>, RdyError> {
+    if matches!(set.status, AltStatus::Abandoned { .. }) {
+        return Ok(None);
+    }
+    // the versions, newest first, then oldest first
+    let mut versions: Vec<(Hash, AltSet)> = vec![(*latest, set.clone())];
+    while let Some(prev) = versions.last().and_then(|(_, v)| v.prev) {
+        versions.push((prev, reader.alt_set(&prev)?));
+    }
+    versions.reverse();
+    let stable = versions[0].0;
+    let mut bound: BTreeMap<Hash, String> = BTreeMap::new();
+    let mut shared: BTreeSet<Hash> = BTreeSet::new();
+    let mut listed: BTreeSet<&str> = BTreeSet::new();
+    for (vh, v) in &versions {
+        let members: BTreeSet<&str> = v.members.iter().map(|m| m.view.as_str()).collect();
+        bound.retain(|_, m| members.contains(m.as_str()));
+        let joined: Vec<&str> = members.difference(&listed).copied().collect();
+        if !joined.is_empty() {
+            let mut held: BTreeMap<&str, BTreeSet<Hash>> = BTreeMap::new();
+            for m in &members {
+                let set = reader.included_before(m, vh)?;
+                held.insert(m, set.iter().copied().collect());
+            }
+            for j in &joined {
+                for c in &held[j] {
+                    if bound.contains_key(c) || shared.contains(c) {
+                        continue;
+                    }
+                    // already bound to this set by its live link to a member this version lists
+                    if reader
+                        .change(c)?
+                        .links
+                        .alternative
+                        .is_some_and(|a| a.set == stable && members.contains(a.member.as_str()))
+                    {
+                        continue;
+                    }
+                    let mut holders = held.iter().filter(|(_, h)| h.contains(c)).map(|(m, _)| *m);
+                    match (holders.next(), holders.next()) {
+                        (Some(only), None) => {
+                            bound.insert(*c, only.to_string());
+                        }
+                        _ => {
+                            shared.insert(*c);
+                        }
+                    }
+                }
+            }
+        }
+        listed = members;
+    }
+    let chosen = match &set.status {
+        AltStatus::Chosen { member, landing } => {
+            let mut decisions = BTreeSet::new();
+            for h in &reader.landing(landing)?.changes {
+                for op in reader.change(h)?.ops {
+                    if let Op::Create { block } = op
+                        && block.block_type == decision::DECISION
+                    {
+                        decisions.insert(block.id);
+                    }
+                }
+            }
+            Some(AltChosenBy {
+                member: member.clone(),
+                landing: *landing,
+                decisions: decisions.into_iter().collect(),
+            })
+        }
+        _ => None,
+    };
+    Ok(Some(AltBinds { bound, chosen }))
 }
 
 impl ReadState {
@@ -289,17 +394,27 @@ impl ReadState {
     }
 
     /// The event-derived tensions with a change side among the changes view `view` includes,
-    /// by id.
+    /// by id. FW-JU1: a kind judged on the net change is the view's own landing form
+    /// (`view_net_tensions`), as the view's proposal lists it, never another view's in-flight
+    /// form that the view holds.
     fn view_tensions(&self, view: &str) -> Result<Vec<TensionInfo>, RdyError> {
         let set = self.tensions()?;
         let mut found = BTreeMap::new();
         let mut cache = crate::tensions::info::InfoCache::default();
         for c in self.included(view).iter() {
             for t in set.involving_change(c) {
+                if crate::tensions::judged_on_the_net_change(t.kind) {
+                    continue;
+                }
                 found
                     .entry(t.id)
                     .or_insert_with(|| self.tension_info_with(&t, &mut cache));
             }
+        }
+        for t in self.view_net_tensions(view)? {
+            found
+                .entry(t.id)
+                .or_insert_with(|| self.tension_info_with(&t, &mut cache));
         }
         Ok(found.into_values().collect())
     }

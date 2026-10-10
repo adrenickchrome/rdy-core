@@ -2,7 +2,7 @@
 //! its own view. There is no agent form. Every other working-copy command run inside a worktree
 //! uses its place (`Place::locate` reads the pointer file).
 
-use super::{Open, checkout, open_at, tree};
+use super::{Open, checkout, open_with, tree};
 use crate::Env;
 use clap::Subcommand;
 use rdy_daemon::ErrorReply;
@@ -226,25 +226,47 @@ fn rm(env: &Env, dir: &Path, force: bool) -> Result<(Value, String), ErrorReply>
             "name a directory that rdy worktree ls shows",
         )
     };
-    let place = fs::symlink_metadata(dir.join(POINTER_FILE))
-        .ok()
-        .filter(|m| m.is_file())
-        .and_then(|_| Place::from_pointer(&dir))
-        .ok_or_else(not_a_worktree)?;
     let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
     };
-    if !same(&place.project, &env.project) {
-        return Err(not_a_worktree());
-    }
+    let pointed = fs::symlink_metadata(dir.join(POINTER_FILE))
+        .ok()
+        .filter(|m| m.is_file())
+        .and_then(|_| Place::from_pointer(&dir));
+    let place = match pointed {
+        Some(p) => {
+            if !same(&p.project, &env.project) {
+                return Err(not_a_worktree());
+            }
+            p
+        }
+        // a missing or damaged pointer: the directory `rdy worktree ls` shows for a worktree
+        // (its dir.txt) still names it
+        None => worktrees(&env.project)
+            .into_iter()
+            .find(|w| !w.dir.is_empty() && same(Path::new(&w.dir), &dir))
+            .map(|w| Place {
+                root: dir.clone(),
+                state: env.project.join(WORKTREES_DIR).join(&w.name),
+                project: env.project.clone(),
+            })
+            .ok_or_else(not_a_worktree)?,
+    };
     let name = place
         .state
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_default()
         .to_string();
-    let Open { place, lock, state } = open_at(env, place, false)?;
+    // msw16: a copied directory carries the same pointer, so the pointer alone does not name
+    // this directory; `open_with` refuses a copy and takes a moved worktree
+    let Open { place, lock, state } = open_with(
+        env,
+        place,
+        false,
+        Some("name a directory that rdy worktree ls shows; delete a copied directory by hand"),
+    )?;
     if !force {
         let (_pack, wt) = tree(env, &place)?;
         let dirty = dirty_paths(&place, &state, &wt);
@@ -261,14 +283,17 @@ fn rm(env: &Env, dir: &Path, force: bool) -> Result<(Value, String), ErrorReply>
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
-                "commit them, or pass --force to discard them",
+                "commit them, or pass --force to discard the edits to tracked files; new files stay: move them aside or rdy add them",
             )
             .into());
         }
     }
     let removed = remove_tracked(&place, &state)?;
     let ptr = place.root.join(POINTER_FILE);
-    fs::remove_file(&ptr).map_err(|e| io_err(&ptr, "remove", e))?;
+    match fs::remove_file(&ptr) {
+        Err(e) if e.kind() != ErrorKind::NotFound => return Err(io_err(&ptr, "remove", e)),
+        _ => {}
+    }
     fs::remove_dir_all(&place.state).map_err(|e| io_err(&place.state, "remove", e))?;
     drop(lock);
     let _ = fs::remove_dir(&place.root); // only when empty

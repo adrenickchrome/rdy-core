@@ -95,3 +95,27 @@ fn malt1_schema_rows_and_doc() {
         assert!(s["errors"][code]["fix"].is_string(), "{code}");
     }
 }
+
+#[test]
+fn msw20_the_schema_and_the_alternatives_doc_carry_e_alt_chosen() {
+    let row = ERROR_ROWS
+        .iter()
+        .find(|(c, _, _)| *c == "E_ALT_CHOSEN")
+        .expect("an E_ALT_CHOSEN row");
+    assert!(
+        row.1.contains("chosen") && row.2.contains("supersedes or refines"),
+        "{row:?}"
+    );
+    let member = ERROR_ROWS
+        .iter()
+        .find(|(c, _, _)| *c == "E_ALT_MEMBER")
+        .unwrap();
+    assert!(
+        member.1.contains("two open sets") && member.2.contains("exclude"),
+        "{member:?}"
+    );
+    assert!(
+        ALT_DOC.contains("E_ALT_CHOSEN") && ALT_DOC.contains("when it joined"),
+        "{ALT_DOC}"
+    );
+}

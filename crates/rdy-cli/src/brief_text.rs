@@ -105,14 +105,25 @@ pub fn header(briefing: &Value) -> String {
         &mut out,
         "Lineage",
         list("lineage").map(|l| {
-            format!(
-                "{} ({} {} {}) {}",
-                s(l, "block"),
-                s(l, "direction"),
-                s(l, "kind"),
-                s(l, "on"),
-                s(l, "summary")
-            )
+            if s(l, "direction") == "out" {
+                format!(
+                    "{} (out: {} {} {}) {}",
+                    s(l, "block"),
+                    s(l, "on"),
+                    s(l, "kind"),
+                    s(l, "block"),
+                    s(l, "summary")
+                )
+            } else {
+                format!(
+                    "{} ({} {} {}) {}",
+                    s(l, "block"),
+                    s(l, "direction"),
+                    s(l, "kind"),
+                    s(l, "on"),
+                    s(l, "summary")
+                )
+            }
         }),
     );
     section(
@@ -777,5 +788,22 @@ mod tests {
             consequences_text(&json!({"consequences": [], "suggestions": []})),
             ""
         );
+    }
+
+    #[test]
+    fn msw14_an_outgoing_lineage_line_reads_subject_verb_object() {
+        let b = json!({
+            "covers": 1, "governs": [], "dependents": [],
+            "lineage": [{"block": "c-A", "kind": "refines", "direction": "out", "on": "c-B", "summary": "A holds."}],
+            "will_go_stale": [], "suspects": [],
+            "base": {"token": "0123456789abcdef0123", "blocks": [{"id": "c-B", "version": "ff"}], "depends": 0}
+        });
+        let h = header(&b);
+        assert!(
+            h.lines()
+                .any(|l| l == "#   c-A (out: c-B refines c-A) A holds."),
+            "{h}"
+        );
+        assert!(!h.contains("(out refines c-B)"), "{h}");
     }
 }

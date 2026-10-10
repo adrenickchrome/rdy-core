@@ -59,7 +59,7 @@ pub use gate::{
     RebasedInfo, RelayedByRow,
 };
 pub use history::{Author, HISTORY_MAX, History, HistoryEntry, JustificationInfo, LandingRef};
-pub use io::{ExportSummary, block_from_yaml, block_to_yaml, refuse_inflight_export};
+pub use io::{EditBase, ExportSummary, block_from_yaml, block_to_yaml, refuse_inflight_export};
 pub use lint::check_path;
 pub use materialize::{Materialized, PathMiss};
 pub use paths::TreeNode;
@@ -70,7 +70,9 @@ pub use query::{
     Context, ImpactItem, ImpactVia, code_lines, compact_summary, field_json, summary, summary_in,
 };
 pub use rdy_store::Relay;
-pub use read_state::{CoordHeads, Delta, InflightSet, OpenIntent, ReadState};
+pub use read_state::{
+    AltBinds, AltChosenBy, CoordHeads, Delta, InflightSet, OpenIntent, ReadState,
+};
 pub use search::{SearchQuery, SearchResult};
 pub use session::{
     HUMAN_RUN, INFLIGHT_SCOPE, PinnedClock, Scope, Session, SessionKind, classify, human_actor,
@@ -80,7 +82,9 @@ pub use tree_io::Diagnostic;
 pub use version::{
     AS_OF_CACHE_ENTRIES, VersionInfo, VersionPosition, VersionRef, ViewPosition, parse_version,
 };
-pub use view_query::{ChangeSummary, Compare, CompareEntry, OpSummary, ViewDetail, ViewSummary};
+pub use view_query::{
+    ChangeSummary, Compare, CompareEntry, NonceLookup, OpSummary, ViewDetail, ViewSummary,
+};
 pub use views::{ConflictInfo, ConflictSide, OwnerInfo, ViewHeadInfo, ViewOpResult};
 pub use wc::project::Projection;
 pub use write::{
@@ -96,6 +100,7 @@ pub use pack_load::{
     resolve_pack,
 };
 pub use rdy_store::OpenReport;
+pub use rdy_store::fsutil::{sync_dir, write_durable};
 pub use wc_check::{check_wc, lexical_path};
 
 use arc_swap::ArcSwap;
@@ -133,6 +138,10 @@ pub struct Rdy {
     lineage: Vec<String>,
     /// The pack files as they were when `pack` was last loaded.
     fingerprint: PackFingerprint,
+    /// The config as it was parsed at open or by the last successful pack reload. A full
+    /// publish reads the site identity and the review and view settings from it, never from the
+    /// files again (#832).
+    config: Arc<config::Config>,
     serve: ServeConfig,
     /// The registered briefings (in memory; one registry per open project).
     briefs: Arc<brief::BriefRegistry>,
@@ -150,4 +159,6 @@ pub struct Rdy {
     /// The state `publish` held before the first write since open, while nothing is settled:
     /// the first settle diffs against its set.
     tension_base: Option<Arc<ReadState>>,
+    /// Test hook: how many of the next `Delta::Full` publishes panic (0 in every real run).
+    full_publish_panics: u32,
 }

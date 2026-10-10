@@ -2,8 +2,8 @@
 use super::*;
 use rdy_engine::consequence::write_and_report;
 use rdy_engine::{
-    E_BAD_INPUT, E_IO, E_LIMIT, E_NOT_FOUND, E_PERMISSION, OpInput, RdyError, ReadState, Scope,
-    WriteRequest, parse_justification,
+    E_BAD_INPUT, E_IO, E_LIMIT, E_NOT_FOUND, E_PERMISSION, E_WC_OCCUPIED, OpInput, RdyError,
+    ReadState, Scope, WriteRequest, parse_justification,
 };
 use rdy_mcp::tools::MAX_ASSET_BYTES;
 use rdy_model::ChangeLinks;
@@ -48,6 +48,9 @@ pub(super) struct WcNonceArgs {
     view: String,
     nonce: String,
     rewrite: Vec<String>,
+    /// Search the changes after this view head (msw11): the probe after a refused commit, with
+    /// the head the working copy last saw.
+    since: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -58,8 +61,9 @@ pub(super) struct WcPutBlobArgs {
 
 /// wcco1: a view as working-copy files. The scope is the view when it has a head, else canon;
 /// `ids` resolve in that scope. With `blobs_dir` (resolved against the session's directory), each
-/// blob whose file is not there yet is written from the store; a blob the store lacks is
-/// `E_NOT_FOUND`, as export's is.
+/// blob whose file is missing or differs from the store's bytes is written from the store (temp
+/// file and rename); a blob the store lacks is `E_NOT_FOUND`, as export's is. A `blobs_dir` or a
+/// blob path that exists as something else (a link included) is `E_WC_OCCUPIED`.
 pub(super) fn wc_view(cx: &OpContext, a: WcViewArgs) -> Result<Value, RdyError> {
     let st = cx.engine.read();
     let view = view_of(cx.session, a.view);
@@ -80,11 +84,15 @@ pub(super) fn wc_view(cx: &OpContext, a: WcViewArgs) -> Result<Value, RdyError> 
     proj.view = view;
     if let Some(dir) = a.blobs_dir {
         let dir = resolve_path(cx.cwd, &dir);
+        // #642: a link at `_blobs` or at a blob's name would take the write outside the tree
+        refuse_not_dir(&dir)?;
         for b in &proj.blobs {
             let path = dir.join(&b.name);
-            if std::fs::symlink_metadata(&path).is_ok() {
-                continue;
-            }
+            let existing = match std::fs::symlink_metadata(&path) {
+                Ok(m) if m.is_file() => Some(m.len()),
+                Ok(_) => return Err(not_a_regular_file(&path)),
+                Err(_) => None,
+            };
             let not_found = || {
                 RdyError::new(
                     E_NOT_FOUND,
@@ -107,11 +115,39 @@ pub(super) fn wc_view(cx: &OpContext, a: WcViewArgs) -> Result<Value, RdyError> 
                     "check the directory and its permissions",
                 )
             };
+            // #649: the name is a manifest hash, not a hash of the file: a torn or changed file
+            // (or one that does not read) is rewritten from the store's bytes
+            if existing == Some(bytes.len() as u64)
+                && std::fs::read(&path).is_ok_and(|f| f == bytes)
+            {
+                continue;
+            }
             std::fs::create_dir_all(&dir).map_err(io)?;
-            std::fs::write(&path, bytes).map_err(io)?;
+            rdy_engine::write_durable(&path, &bytes).map_err(io)?;
         }
     }
     Ok(to_json(&proj))
+}
+
+/// `E_WC_OCCUPIED` when `dir` exists and is not a directory (a link to one included).
+fn refuse_not_dir(dir: &std::path::Path) -> Result<(), RdyError> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(m) if !m.is_dir() => Err(RdyError::new(
+            E_WC_OCCUPIED,
+            format!("{} is not a directory", dir.display()),
+            "move it aside, then run the command again",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// `E_WC_OCCUPIED` for a blob path that exists and is not a regular file.
+fn not_a_regular_file(path: &std::path::Path) -> RdyError {
+    RdyError::new(
+        E_WC_OCCUPIED,
+        format!("{} is not a regular file", path.display()),
+        "move it aside, then run the command again",
+    )
 }
 
 /// wcfg1: stores the file at `path` (resolved against the session's directory) as a blob and
@@ -339,16 +375,26 @@ pub(super) fn wc_commit(cx: &OpContext, a: WcCommitArgs) -> Result<Value, RdyErr
 /// and then the projection of the files of `rewrite` (as `wc_commit` adds it); else
 /// `{change: null}`. The answer is conclusive: it first waits while a `wc_commit` with the nonce
 /// runs in this daemon (`{change: null, pending: true}` when it still runs after `NONCE_WAIT`),
-/// then reads on the writer, after every write queued before it.
+/// then reads on the writer, after every write queued before it. With `since` (a view head), it
+/// reads only the changes the view gained after that head (`change_by_nonce_since`): the probe a
+/// commit makes after an error reply, which finds its write behind later ones. Every search
+/// stops at `NONCE_SCAN_LIMIT` frames, so it never stalls the writer; a `since` walk that stops
+/// there answers `{change: null, pending: true}`, so the client keeps its journal (it cannot
+/// tell whether the write happened).
 pub(super) fn wc_nonce(cx: &OpContext, a: WcNonceArgs) -> Result<Value, RdyError> {
     if !wait_not_in_flight(&a.nonce) {
         return Ok(json!({"change": null, "pending": true}));
     }
     let view = view_of(cx.session, Some(a.view));
-    let (nonce, rewrite) = (a.nonce, a.rewrite);
+    let (nonce, rewrite, since) = (a.nonce, a.rewrite, a.since);
     cx.engine.write(Box::new(move |r| {
         let st = r.read();
-        match st.change_by_nonce(&view, &nonce, NONCE_SCAN_LIMIT)? {
+        let found = match &since {
+            Some(since) => st.change_by_nonce_since(&view, &nonce, since, NONCE_SCAN_LIMIT)?,
+            None => st.change_by_nonce(&view, &nonce, NONCE_SCAN_LIMIT)?,
+        };
+        match found.change {
+            None if since.is_some() && found.capped => Ok(json!({"change": null, "pending": true})),
             None => Ok(json!({"change": null})),
             Some(h) => {
                 let mut out = json!({"change": h.to_string()});

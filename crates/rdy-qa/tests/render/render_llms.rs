@@ -84,8 +84,9 @@ fn llms1_every_line_of_llms_txt_is_text_a_reader_sees() {
                 &c[2]
             );
             if let Some(blurb) = c.get(3) {
+                // the blurb is escaped Markdown: what a reader sees has no backslash escapes
                 assert!(
-                    main.contains(&squash(blurb.as_str())),
+                    main.contains(&squash(&blurb.as_str().replace('\\', ""))),
                     "{line}: the blurb is not on {}",
                     &c[2]
                 );
@@ -96,7 +97,7 @@ fn llms1_every_line_of_llms_txt_is_text_a_reader_sees() {
                 .trim_start_matches("# ")
                 .trim_start_matches("> ");
             assert!(
-                home.contains(&squash(words)),
+                home.contains(&squash(&words.replace('\\', ""))),
                 "{line}: not on the home page"
             );
         }
@@ -260,4 +261,55 @@ fn llms1_neither_file_carries_an_id_a_type_name_or_the_landing_hash() {
             }
         }
     }
+}
+
+/// `t` with every backslash-escaped character removed: what is left is live Markdown.
+fn unescaped(t: &str) -> String {
+    let mut out = String::new();
+    let mut it = t.chars();
+    while let Some(c) = it.next() {
+        if c == '\\' {
+            it.next();
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+fn msw12_a_blurb_cannot_become_a_link_in_llms_txt() {
+    let (_d, mut r) = tiny();
+    write(&mut r, "work", serde_json::json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "probe", "title": "Probe", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Summary"}},
+        {"op": "create", "type": "prose", "parent": "$s", "body": "See \\[docs\\](javascript:alert(1)) and `[x](javascript:y)` or <javascript:z>."}
+    ])).unwrap();
+    land(&mut r, "work").unwrap();
+    let out = render(&r);
+    let t = std::fs::read_to_string(out.path().join("llms.txt")).unwrap();
+    assert!(t.contains("- [Probe](probe.html): "), "{t}");
+    let live = unescaped(&t);
+    assert!(
+        !live.contains("](javascript:") && !live.contains("<javascript:"),
+        "{t}"
+    );
+}
+
+#[test]
+fn msw12_author_text_cannot_inject_links_or_headings_into_llms_full_txt() {
+    let (_d, mut r) = tiny();
+    write(&mut r, "work", serde_json::json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "probe", "title": "[Probe](javascript:alert(1))", "doc_type": "overview"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules [x](javascript:y)"}},
+        {"op": "create", "type": "prose", "parent": "$s", "body": "# Not a heading\n\nSee \\[a\\](javascript:x)."}
+    ])).unwrap();
+    land(&mut r, "work").unwrap();
+    let out = render(&r);
+    let full = std::fs::read_to_string(out.path().join("llms-full.txt")).unwrap();
+    assert!(!unescaped(&full).contains("](javascript:"), "{full}");
+    assert!(
+        full.lines().all(|l| !l.starts_with("# Not a heading")),
+        "{full}"
+    );
 }

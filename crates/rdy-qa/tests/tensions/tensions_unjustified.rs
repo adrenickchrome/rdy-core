@@ -1,6 +1,6 @@
 //! tunj1: unjustified change: a change to stable normative content has no justification.
 use rdy_engine::tensions::*;
-use rdy_engine::{OpInput, Scope, WriteRequest};
+use rdy_engine::{DecisionInput, OpInput, ProposalInfo, Scope, WriteRequest};
 use rdy_model::{EditorialClass, Justification};
 use rdy_qa::edit_loop::{brief_of, spec_doc, stable_spec, write_cited_as};
 use rdy_qa::fixtures::*;
@@ -101,4 +101,217 @@ fn tunj1_an_unjustified_delete_of_stable_normative_content_counts() {
     let t = one(&r, TensionKind::UnjustifiedChange);
     assert_eq!(change_sides(&t), vec![change_of(&w)]);
     assert_eq!(t.blocks(), vec![s.c.clone()]);
+}
+
+/// FW-JU1: a decision's creation (decide, supersede) and an edit of it while proposed never
+/// count. A new claim under the stable section still does.
+#[test]
+fn msw21_creating_a_decision_and_editing_it_while_proposed_are_not_unjustified() {
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    let d = try_decide_in(&mut r, "a", &s.section, "Keep C short").unwrap();
+    put_j(&mut r, "a", upd(&d, "Short claims read better."), None);
+    try_briefed(&mut r, "b", |r, t| {
+        r.supersede(
+            &ag("b"),
+            "b",
+            &s.decision.to_string(),
+            None,
+            DecisionInput {
+                parent: s.section.to_string(),
+                statement: "Keep A and B".into(),
+                brief: t,
+                ..Default::default()
+            },
+        )
+    })
+    .unwrap();
+    let found = of_kind(&r, TensionKind::UnjustifiedChange);
+    assert!(found.is_empty(), "{found:#?}");
+    let w = put_j(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "claim", "parent": s.section.to_string(),
+                "body": "New rule."}]),
+        None,
+    );
+    let t = one(&r, TensionKind::UnjustifiedChange);
+    assert_eq!(change_sides(&t), vec![change_of(&w)]);
+}
+
+/// FW-JU1: a later justified rewrite of the block in the same view clears the tension on the
+/// earlier unjustified change, and the carried set equals a rebuild.
+#[test]
+fn msw21_a_later_justified_rewrite_in_the_view_clears_the_tension() {
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    let c1 = change_of(&put_j(&mut r, "a", upd(&s.c, "C changed."), None));
+    assert_eq!(
+        change_sides(&one(&r, TensionKind::UnjustifiedChange)),
+        vec![c1]
+    );
+    put_j(
+        &mut r,
+        "a",
+        upd(&s.c, "C, as D says."),
+        j_implements(&s.decision),
+    );
+    let found = of_kind(&r, TensionKind::UnjustifiedChange);
+    assert!(found.is_empty(), "{found:#?}");
+    let st = r.read();
+    assert_eq!(st.tensions_carried(), Some(true));
+    let ids = |set: &TensionSet| set.iter().map(|t| t.id).collect::<Vec<_>>();
+    assert_eq!(
+        ids(&st.tensions().unwrap()),
+        ids(&st.tensions_rebuilt().unwrap())
+    );
+}
+
+/// FW-JU1: a justification on another change of the view that writes the block covers the
+/// view's later unjustified rewrite. It covers only that block: a change on two blocks is one
+/// tension per block.
+#[test]
+fn msw21_a_justification_on_another_change_of_the_view_covers_the_block() {
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    put_j(&mut r, "a", upd(&s.c, "C, typo fixed."), j_typo());
+    put_j(&mut r, "a", upd(&s.c, "C, reworded."), None);
+    let found = of_kind(&r, TensionKind::UnjustifiedChange);
+    assert!(found.is_empty(), "{found:#?}");
+    let w = put_j(
+        &mut r,
+        "a",
+        json!([{"op": "update", "id": s.a.to_string(), "body": "A changed."},
+               {"op": "update", "id": s.c.to_string(), "body": "C, once more."}]),
+        None,
+    );
+    let t = one(&r, TensionKind::UnjustifiedChange);
+    assert_eq!(t.blocks(), vec![s.a.clone()]);
+    assert_eq!(change_sides(&t), vec![change_of(&w)]);
+}
+
+/// The tension's id follows the view's net version of the block: an unrelated write keeps it
+/// and its dismissal; an unjustified rewrite of the block replaces it with an open one.
+#[test]
+fn msw21_a_dismissal_holds_until_the_view_rewrites_the_block() {
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    put_j(&mut r, "a", upd(&s.c, "C changed."), None);
+    let t = one(&r, TensionKind::UnjustifiedChange);
+    r.dismiss_tension(&ag("a"), &tension_label(&t.id), "a small fix")
+        .unwrap();
+    put_j(
+        &mut r,
+        "a",
+        upd(&s.a, "A, as D says."),
+        j_implements(&s.decision),
+    );
+    let same = one_involving(&r, TensionKind::UnjustifiedChange, &s.c);
+    assert_eq!(same.id, t.id);
+    assert!(matches!(
+        r.read().tension_status(&same),
+        TensionStatus::Dismissed(_)
+    ));
+    let w = put_j(&mut r, "a", upd(&s.c, "C changed again."), None);
+    let next = one_involving(&r, TensionKind::UnjustifiedChange, &s.c);
+    assert_eq!(change_sides(&next), vec![change_of(&w)]);
+    assert_eq!(r.read().tension_status(&next), TensionStatus::Open);
+}
+
+/// FW-JU1, per view: view b includes a's unjustified change and justifies its own rewrite. a's
+/// tension stays; b's proposal does not list it; a's proposal does.
+#[test]
+fn msw21_another_views_unjustified_change_is_not_cleared_by_this_views_justification() {
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    let c1 = change_of(&put_j(&mut r, "a", upd(&s.c, "C changed."), None));
+    r.view_include(&ag("b"), "b", &[c1.to_string()]).unwrap();
+    put_j(
+        &mut r,
+        "b",
+        upd(&s.c, "C, as D says."),
+        j_implements(&s.decision),
+    );
+    let t = one(&r, TensionKind::UnjustifiedChange);
+    assert_eq!(change_sides(&t), vec![c1]);
+    let unjustified = |p: &ProposalInfo| {
+        p.tensions
+            .iter()
+            .filter(|t| t.kind == TensionKind::UnjustifiedChange)
+            .count()
+    };
+    let pb = r.propose(&writer(), "b", "b").unwrap();
+    assert_eq!(unjustified(&pb), 0, "{:?}", pb.tensions);
+    let pa = r.propose(&writer(), "a", "a").unwrap();
+    assert_eq!(unjustified(&pa), 1, "{:?}", pa.tensions);
+}
+
+/// FW-JU1 in a view listing (final review I2): a listing scoped to a view judges an unjustified
+/// change on the view's net change, as its proposal does. View b includes a's unjustified change
+/// and justifies its own rewrite: b's listing shows no unjustified_change; a's shows it.
+#[test]
+fn msw21_a_view_listing_judges_an_unjustified_change_on_the_views_net_change() {
+    use rdy_engine::engine::Local;
+    use rdy_engine::tensions::api::{TensionsRequest, run_tensions};
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    let c1 = change_of(&put_j(&mut r, "a", upd(&s.c, "C changed."), None));
+    r.view_include(&ag("b"), "b", &[c1.to_string()]).unwrap();
+    put_j(
+        &mut r,
+        "b",
+        upd(&s.c, "C, as D says."),
+        j_implements(&s.decision),
+    );
+    let engine = Local::new(r);
+    let unjustified = |view: &str| -> Vec<serde_json::Value> {
+        run_tensions(
+            &engine,
+            &writer(),
+            TensionsRequest {
+                view: Some(view.into()),
+                kind: Some("unjustified_change".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap()["tensions"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    assert!(unjustified("b").is_empty(), "{:#?}", unjustified("b"));
+    assert_eq!(unjustified("a").len(), 1, "{:#?}", unjustified("a"));
+    // the in-flight listing still shows a's tension
+    let all = run_tensions(
+        &engine,
+        &writer(),
+        TensionsRequest {
+            kind: Some("unjustified_change".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(all["tensions"].as_array().unwrap().len(), 1, "{all:#}");
+}
+
+/// FW-JU1 Q3 (final review M16): a view that writes canon's text back no longer changes the
+/// block, so its earlier unjustified edit leaves no tension.
+#[test]
+fn msw21_writing_canons_text_back_in_the_view_leaves_no_unjustified_change() {
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    let canon_body = r.read().block(&Scope::Canon, &s.c).unwrap().body;
+    put_j(&mut r, "a", upd(&s.c, "C changed."), None);
+    one(&r, TensionKind::UnjustifiedChange);
+    put_j(&mut r, "a", upd(&s.c, &canon_body), None);
+    assert_eq!(
+        r.read()
+            .block(&Scope::View("a".into()), &s.c)
+            .unwrap()
+            .version_hash(),
+        r.read().block(&Scope::Canon, &s.c).unwrap().version_hash(),
+        "the view holds canon's version again"
+    );
+    let found = of_kind(&r, TensionKind::UnjustifiedChange);
+    assert!(found.is_empty(), "{found:#?}");
 }

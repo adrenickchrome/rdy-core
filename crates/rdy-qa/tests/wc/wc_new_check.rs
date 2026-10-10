@@ -209,3 +209,66 @@ fn wcck1_a_link_to_a_question_by_its_key_is_store_only() {
         "nothing recorded"
     );
 }
+
+#[test]
+fn msw5_rdy_new_keeps_a_tracked_file_with_unstaged_edits() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    set_body(&s, "notes.yaml", &seed.note, "Unstaged.");
+    store_write(
+        &s,
+        "work",
+        serde_json::json!([{"op": "delete", "id": seed.note}, {"op": "delete", "id": seed.notes}]),
+    );
+    let text = ok(&s, &["new", "doc", "notes", "--title", "Fresh"]);
+    assert!(text.contains("not written: notes.yaml"), "{text}");
+    assert_eq!(
+        entry(&s, "notes.yaml", &seed.note)["body"].as_str(),
+        Some("Unstaged.")
+    );
+}
+
+#[test]
+fn msw5_rdy_new_skips_a_tracked_path_that_differs_only_in_case() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    // an unstaged delete: notes.yaml stays tracked
+    std::fs::remove_file(at(&s, "notes.yaml")).unwrap();
+    store_write(
+        &s,
+        "work",
+        serde_json::json!([{"op": "delete", "id": seed.note}, {"op": "delete", "id": seed.notes}]),
+    );
+    let text = ok(&s, &["new", "doc", "Notes", "--title", "Fresh"]);
+    assert!(text.contains("not written: Notes.yaml"), "{text}");
+    let on_disk: Vec<String> = std::fs::read_dir(s.dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.to_lowercase() == "notes.yaml")
+        .collect();
+    assert!(on_disk.is_empty(), "{on_disk:?}");
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk, "{v}");
+}
+
+/// A damaged `bound.yaml` does not stop `rdy check` on a path outside the working tree: that
+/// path never uses the working copy, so it is linted against canon as before.
+#[test]
+fn msw10_damaged_wc_state_does_not_block_check_outside_the_tree() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::write(at(&s, ".rdy/wc/bound.yaml"), "view: [\n").unwrap();
+    let outside = rdy_qa::daemon::short_tempdir();
+    std::fs::write(outside.path().join("bad.yaml"), "just: a map\n").unwrap();
+    let (okk, v) = check(&s, &[outside.path().to_str().unwrap()]);
+    assert!(
+        v.as_array().is_some_and(|a| a
+            .iter()
+            .any(|d| d["file"].as_str().is_some_and(|f| f.ends_with("bad.yaml")))),
+        "the outside directory is checked: {v}"
+    );
+    assert!(!okk, "its bad file fails the check: {v}");
+    // no path, or a path in the tree, uses the working copy: its damaged state is the error
+    let (okk, v) = check(&s, &["notes.yaml"]);
+    assert!(!okk && v["code"] == E_IO, "{v}");
+}

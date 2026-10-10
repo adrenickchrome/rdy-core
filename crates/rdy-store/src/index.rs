@@ -408,6 +408,17 @@ impl Index {
         }
     }
 
+    /// Test hook: overwrites the landed entry of `change` with raw bytes, so a test can damage it.
+    #[doc(hidden)]
+    pub fn set_landed_raw_for_tests(&self, change: &Hash, raw: &[u8]) -> Result<(), StoreError> {
+        let w = self.db.begin_write().map_err(db)?;
+        {
+            let mut t = w.open_table(LANDED).map_err(db)?;
+            t.insert(&change.0[..], raw).map_err(db)?;
+        }
+        w.commit().map_err(db)
+    }
+
     /// Every table's rows, from one read transaction.
     #[doc(hidden)]
     pub fn dump(&self) -> Result<IndexDump, StoreError> {
@@ -426,6 +437,19 @@ impl Index {
             landed: dump_table(&r, LANDED)?,
             deleters: dump_table(&r, DELETERS)?,
         })
+    }
+
+    /// Writes one raw `producers` row in a durable commit. No store path calls it: it is the test
+    /// hook that damages the index (a key that is not a version and a change).
+    #[doc(hidden)]
+    pub fn put_raw_producer_for_tests(&self, key: &[u8]) -> Result<(), StoreError> {
+        let w = self.db.begin_write().map_err(db)?;
+        {
+            let mut t = w.open_table(PRODUCERS).map_err(db)?;
+            t.insert(key, &[][..]).map_err(db)?;
+        }
+        w.commit().map_err(db)?;
+        Ok(())
     }
 
     pub fn get_ref(&self, name: &str) -> Result<Option<Vec<u8>>, StoreError> {
@@ -478,5 +502,18 @@ impl Index {
             segment: 0,
             offset: 0,
         }))
+    }
+}
+
+impl crate::Store {
+    /// Test hook: overwrites the landed entry of `change` with raw bytes (a damaged entry when
+    /// `raw` is not a hash).
+    #[doc(hidden)]
+    pub fn set_landed_raw_for_tests(
+        &mut self,
+        change: &Hash,
+        raw: &[u8],
+    ) -> Result<(), StoreError> {
+        self.index().set_landed_raw_for_tests(change, raw)
     }
 }

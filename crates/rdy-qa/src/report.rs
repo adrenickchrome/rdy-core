@@ -13,13 +13,49 @@ pub struct TestRun {
     pub failed: usize,
     pub ignored: usize,
     pub failures: Vec<String>,
+    /// Each failing test's first panic, `<location>: <message>`, cut to `PANIC_CHARS`.
+    pub panics: BTreeMap<String, String>,
 }
 
-/// Sums every `test result:` line and collects the names of `test <name> ... FAILED` lines.
+/// The most characters of a panic message the report keeps.
+const PANIC_CHARS: usize = 300;
+
+/// Sums every `test result:` line, collects the names of `test <name> ... FAILED` lines, and
+/// keeps each failing test's first panic: in a `---- <name> stdout ----` block, the line after
+/// `thread '<thread>' panicked at <location>:` is the message (`panic_location`).
 pub fn parse_cargo_test(output: &str) -> TestRun {
     let mut run = TestRun::default();
+    // the test whose captured output is being read, and the location of its panic once seen
+    let mut block: Option<String> = None;
+    let mut panic_at: Option<String> = None;
     for line in output.lines() {
+        if let Some(at) = panic_at.take() {
+            if let Some(name) = &block
+                && !run.panics.contains_key(name)
+            {
+                let text = format!("{at}: {}", line.trim());
+                run.panics
+                    .insert(name.clone(), text.chars().take(PANIC_CHARS).collect());
+            }
+            continue;
+        }
+        if let Some(name) = line
+            .strip_prefix("---- ")
+            .and_then(|r| r.strip_suffix(" stdout ----"))
+        {
+            block = Some(name.to_string());
+            continue;
+        }
+        if block.is_some()
+            && let Some(at) = panic_location(line)
+        {
+            panic_at = Some(at.to_string());
+            continue;
+        }
         let line = line.trim();
+        if line == "failures:" || line.starts_with("test result:") {
+            block = None;
+        }
         if let Some(rest) = line.strip_prefix("test result:") {
             for part in rest.split([';', '.']) {
                 let mut words = part.split_whitespace();
@@ -41,6 +77,22 @@ pub fn parse_cargo_test(output: &str) -> TestRun {
         }
     }
     run
+}
+
+/// `<location>` of a `thread '<thread>' panicked at <location>:` line. Newer toolchains print the
+/// thread id too (`thread '<thread>' (<id>) panicked at`). A panic on a thread the test spawned
+/// counts: it is often the cause of the test's own panic.
+fn panic_location(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("thread '")?;
+    let (_, rest) = rest.split_once("' ")?;
+    let rest = match rest.strip_prefix('(') {
+        Some(r) => {
+            let (id, r) = r.split_once(") ")?;
+            id.chars().all(|c| c.is_ascii_digit()).then_some(r)?
+        }
+        None => rest,
+    };
+    rest.strip_prefix("panicked at ")?.strip_suffix(':')
 }
 
 /// The pinned-defect ids (`ord1`, `blob1`, ...) of `cargo test -- --list` output, per area.
@@ -104,6 +156,10 @@ pub fn plan(only: Option<&str>, files: &[String], skip_perf: bool) -> Result<Pla
             perf: true,
             guarded: false,
         }),
+        None if files.is_empty() => Err(
+            "no rdy-qa test areas under crates/rdy-qa/tests: the gate would run no area binary"
+                .into(),
+        ),
         _ => {
             let chosen: Vec<String> = files
                 .iter()
@@ -129,14 +185,16 @@ pub fn plan(only: Option<&str>, files: &[String], skip_perf: bool) -> Result<Pla
     }
 }
 
-/// `engine_splitbrain` -> `engine`; the `render_quality*` files are their own area, apart from
-/// `render`.
-pub fn area_of(stem: &str) -> &str {
-    if stem.starts_with("render_quality") {
-        "render_quality"
-    } else {
-        stem.split('_').next().unwrap_or(stem)
-    }
+/// Test binaries that report under another area: the two engine binaries are one area.
+const GROUPED: &[(&str, &str)] = &[("engine_read", "engine")];
+
+/// The area of the test binary `tests/<dir>/main.rs`: its directory name, unless `GROUPED` maps
+/// it to another area (`engine_read` -> `engine`). `entity_search` is its own area.
+pub fn area_of(dir: &str) -> &str {
+    GROUPED
+        .iter()
+        .find(|(d, _)| *d == dir)
+        .map_or(dir, |(_, area)| area)
 }
 
 /// `ord1_append_after_a_tie` -> `ord1` (`^[a-z]+\d+_`).
@@ -193,6 +251,10 @@ pub fn test_areas(tests_dir: &Path) -> Vec<String> {
 /// the layout is right. A test file without its `mod` line compiles and never runs.
 pub fn layout_problems(tests_dir: &Path) -> Vec<String> {
     let mut out = vec![];
+    // read here, not through `dir_paths`: an unreadable tests dir must not look like an empty one
+    if let Err(e) = std::fs::read_dir(tests_dir) {
+        return vec![format!("tests/ cannot be read: {e}")];
+    }
     for p in dir_paths(tests_dir) {
         let name = name_of(&p);
         if is_rs_file(&p) {
@@ -264,6 +326,8 @@ pub struct Area {
     /// (a compile error, a crash).
     pub ok: bool,
     pub failures: Vec<String>,
+    /// Each failing test's first panic (`TestRun::panics`).
+    pub panics: BTreeMap<String, String>,
 }
 
 /// Adds one `rdy-qa` test binary's run to the report's area rows, under `area_of(binary)`: an
@@ -277,6 +341,9 @@ pub fn add_run(areas: &mut Vec<Area>, binary: &str, ok: bool, run: TestRun) {
             a.ignored += run.ignored;
             a.ok &= ok;
             a.failures.extend(run.failures);
+            for (name, panic) in run.panics {
+                a.panics.entry(name).or_insert(panic);
+            }
         }
         None => areas.push(Area {
             name,
@@ -285,6 +352,7 @@ pub fn add_run(areas: &mut Vec<Area>, binary: &str, ok: bool, run: TestRun) {
             ignored: run.ignored,
             ok,
             failures: run.failures,
+            panics: run.panics,
         }),
     }
 }
@@ -368,7 +436,14 @@ pub fn markdown(r: &Report) -> String {
             );
         }
         for f in &a.failures {
-            let _ = writeln!(s, "- `{f}`");
+            match a.panics.get(f) {
+                Some(p) => {
+                    let _ = writeln!(s, "- `{f}`: {p}");
+                }
+                None => {
+                    let _ = writeln!(s, "- `{f}`");
+                }
+            }
         }
     }
 
@@ -482,14 +557,13 @@ mod tests {
 
     #[test]
     fn area_of_keeps_render_quality_whole() {
-        assert_eq!(area_of("render_quality_css"), "render_quality");
         assert_eq!(area_of("render_quality"), "render_quality");
-        assert_eq!(area_of("render_site"), "render");
+        assert_eq!(area_of("render"), "render");
     }
 
     #[test]
     fn only_narrows_the_run_and_perf_is_an_area() {
-        let files: Vec<String> = ["cli", "engine", "engine_splitbrain", "mcp"]
+        let files: Vec<String> = ["cli", "engine", "engine_read", "mcp"]
             .map(String::from)
             .to_vec();
         let all = plan(None, &files, false).unwrap();
@@ -505,7 +579,7 @@ mod tests {
         );
         assert!(!plan(None, &files, true).unwrap().perf, "--skip-perf");
         let engine = plan(Some("engine"), &files, false).unwrap();
-        assert_eq!(engine.files, vec!["engine", "engine_splitbrain"]);
+        assert_eq!(engine.files, vec!["engine", "engine_read"]);
         assert!(engine.checks && engine.lib && engine.perf);
         // `--only perf`: the build and the perf tier, nothing else
         assert_eq!(
@@ -577,6 +651,7 @@ mod tests {
             failed,
             ignored,
             failures: failures.iter().map(|f| f.to_string()).collect(),
+            panics: Default::default(),
         };
         add_run(&mut rows, "engine", true, run(134, 0, 0, &[]));
         add_run(
@@ -738,6 +813,100 @@ mod tests {
         let d = baseline_drift(&base, &[m("same"), m("new")]);
         assert_eq!(d.len(), 2);
         assert!(d[0].contains("`new`") && d[1].contains("`old`"));
+    }
+
+    #[test]
+    fn msw6_a_full_run_with_no_test_areas_is_an_error() {
+        assert!(
+            plan(None, &[], false).is_err(),
+            "a full gate with no area binary must not run"
+        );
+        assert!(plan(None, &[], true).is_err());
+        assert!(
+            plan(Some("perf"), &[], false).is_ok(),
+            "--only perf needs no area"
+        );
+        let d = tempfile::tempdir().unwrap();
+        let gone = d.path().join("missing");
+        assert!(
+            !layout_problems(&gone).is_empty(),
+            "an unreadable tests dir is a layout problem"
+        );
+    }
+
+    #[test]
+    fn msw6_an_underscored_area_dir_is_its_own_area() {
+        let files: Vec<String> = ["engine", "engine_read", "entity", "entity_search"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(area_of("entity_search"), "entity_search");
+        assert_eq!(
+            area_of("engine_read"),
+            "engine",
+            "the two engine binaries are one area"
+        );
+        assert_eq!(area_of("render_quality"), "render_quality");
+        assert_eq!(
+            plan(Some("entity_search"), &files, true).unwrap().files,
+            vec!["entity_search"]
+        );
+        assert_eq!(
+            plan(Some("entity"), &files, true).unwrap().files,
+            vec!["entity"]
+        );
+        assert_eq!(
+            plan(Some("engine"), &files, true).unwrap().files,
+            vec!["engine", "engine_read"]
+        );
+    }
+
+    #[test]
+    fn msw6_a_failing_test_keeps_its_panic_message() {
+        let out = "test a::b ... FAILED\n\nfailures:\n\n---- a::b stdout ----\n\nthread 'a::b' panicked at crates/x.rs:3:5:\nassertion failed: boom\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\nfailures:\n    a::b\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n";
+        let run = parse_cargo_test(out);
+        assert_eq!(run.failures, vec!["a::b".to_string()]);
+        assert_eq!(
+            run.panics.get("a::b").map(String::as_str),
+            Some("crates/x.rs:3:5: assertion failed: boom")
+        );
+    }
+
+    #[test]
+    fn msw6_a_panic_line_with_a_thread_id_reaches_the_report() {
+        // rustc 1.99 prints the thread id; a spawned worker's panic comes first and is kept
+        let out = "test kill2_x ... FAILED\n\nfailures:\n\n---- kill2_x stdout ----\nthread '<unnamed>' (4242) panicked at crates/w.rs:9:1:\nworker failed\nthread 'kill2_x' (4241) panicked at crates/t.rs:2:2:\njoin failed\n\nfailures:\n    kill2_x\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n";
+        let run = parse_cargo_test(out);
+        assert_eq!(
+            run.panics.get("kill2_x").map(String::as_str),
+            Some("crates/w.rs:9:1: worker failed")
+        );
+        let long = format!(
+            "---- a stdout ----\nthread 'a' panicked at x.rs:1:1:\n{}\n",
+            "y".repeat(400)
+        );
+        assert_eq!(parse_cargo_test(&long).panics["a"].chars().count(), 300);
+        let mut areas = vec![];
+        add_run(&mut areas, "daemon", false, run);
+        let r = Report {
+            revision: "r".into(),
+            dirty: false,
+            machine: "m".into(),
+            mode: "full".into(),
+            duration_secs: 0.0,
+            pass: false,
+            gates: vec![],
+            areas,
+            perf: vec![],
+            perf_note: String::new(),
+            failing_seeds: vec![],
+            notes: vec![],
+            guarded: BTreeMap::new(),
+        };
+        assert!(
+            markdown(&r).contains("- `kill2_x`: crates/w.rs:9:1: worker failed\n"),
+            "{}",
+            markdown(&r)
+        );
     }
 
     #[test]

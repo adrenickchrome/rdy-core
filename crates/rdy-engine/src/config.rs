@@ -91,8 +91,14 @@ pub fn serve_config(project: &Path) -> ServeConfig {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct ViewsConfig {
-    /// Days without a write after which `rdy view ls` flags an open view as idle.
+    /// Days without a write after which `rdy view ls` flags an open view as idle. Defaulted, so a
+    /// `views:` section that holds only a misspelt key opens with its warning (config typos warn).
+    #[serde(default = "default_idle_days")]
     idle_days: u32,
+}
+
+fn default_idle_days() -> u32 {
+    DEFAULT_IDLE_DAYS
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -113,19 +119,20 @@ pub(crate) struct ReviewsConfig {
 }
 
 impl Config {
-    pub(crate) fn require_up_to_date(cfg: Option<&Config>) -> bool {
-        cfg.and_then(|c| c.reviews.as_ref())
-            .is_some_and(|r| r.require_up_to_date)
+    pub(crate) fn require_up_to_date(&self) -> bool {
+        self.reviews.as_ref().is_some_and(|r| r.require_up_to_date)
     }
 
-    pub(crate) fn idle_days(cfg: Option<&Config>) -> u32 {
-        cfg.and_then(|c| c.views.as_ref())
+    pub(crate) fn idle_days(&self) -> u32 {
+        self.views
+            .as_ref()
             .map_or(DEFAULT_IDLE_DAYS, |v| v.idle_days)
     }
 
     /// `decisions.home`, trimmed; an empty text counts as unset.
-    pub(crate) fn decisions_home(cfg: Option<&Config>) -> Option<Arc<str>> {
-        cfg.and_then(|c| c.decisions.as_ref())
+    pub(crate) fn decisions_home(&self) -> Option<Arc<str>> {
+        self.decisions
+            .as_ref()
             .and_then(|d| d.home.as_deref())
             .map(str::trim)
             .filter(|h| !h.is_empty())
@@ -166,23 +173,12 @@ fn config_of(effective: config_levels::Effective) -> Result<Config, RdyError> {
     })
 }
 
-/// The config at `root` as it is on disk; any read or parse error reads as no config.
-pub(crate) fn read_config_lenient(root: &Path) -> Option<Config> {
-    let merged =
-        config_levels::effective_lenient(root, config_levels::user_file_from_env().as_deref())
-            .merged;
-    serde_yaml_ng::from_value(serde_yaml_ng::Value::Mapping(merged)).ok()
-}
-
 /// The project's name and description as a site shows them, parsed once when a state is
 /// published (a state is a snapshot). The name is the config's `name`, else the project
 /// directory's name (`-` and `_` turned into spaces, the first letter upper-cased), else
 /// `Design docs`; the description is the config's non-empty `description`.
-pub(crate) fn site_identity(root: &Path, cfg: Option<&Config>) -> (Arc<str>, Option<Arc<str>>) {
-    let named = cfg
-        .and_then(|c| c.name.as_deref())
-        .map(str::trim)
-        .filter(|n| !n.is_empty());
+pub(crate) fn site_identity(root: &Path, cfg: &Config) -> (Arc<str>, Option<Arc<str>>) {
+    let named = cfg.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
     let name = match named {
         Some(n) => n.to_string(),
         None => {
@@ -202,7 +198,8 @@ pub(crate) fn site_identity(root: &Path, cfg: Option<&Config>) -> (Arc<str>, Opt
         }
     };
     let description = cfg
-        .and_then(|c| c.description.as_deref())
+        .description
+        .as_deref()
         .map(str::trim)
         .filter(|d| !d.is_empty())
         .map(Arc::from);

@@ -560,3 +560,46 @@ fn wcfg1_wc_put_blob_stores_a_file_and_refuses_a_reader_a_directory_and_a_missin
     .unwrap_err();
     assert_eq!(err.code, E_BAD_INPUT, "{err}");
 }
+
+#[test]
+fn msw11_a_wc_nonce_since_the_seen_head_finds_the_commit_behind_many_others() {
+    use rdy_engine::engine::Engine as _;
+    let (d, e) = project();
+    let s = human();
+    let c = cx(&e, &s, d.path());
+    let commit = |name: String, nonce: String| {
+        let v = dispatch(
+            &c,
+            "wc_commit",
+            json!({
+                "view": "work",
+                "ops": [{"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "D", "doc_type": "glossary"}}],
+                "nonce": nonce,
+                "rewrite": [],
+                "message": "m",
+            }),
+        )
+        .unwrap();
+        assert!(v["change"].is_string(), "{v}");
+    };
+    commit("first".into(), "first".into());
+    let since = e.read().view_head("work").unwrap().head.to_string();
+    commit("mine".into(), "mine".into());
+    for i in 0..20 {
+        commit(format!("d{i}"), format!("other-{i}"));
+    }
+    let probe = dispatch(
+        &c,
+        "wc_nonce",
+        json!({"view": "work", "nonce": "mine", "rewrite": [], "since": since}),
+    )
+    .unwrap();
+    assert!(probe["change"].is_string(), "{probe}");
+    let none = dispatch(
+        &c,
+        "wc_nonce",
+        json!({"view": "work", "nonce": "none", "rewrite": [], "since": since}),
+    )
+    .unwrap();
+    assert!(none["change"].is_null(), "{none}");
+}

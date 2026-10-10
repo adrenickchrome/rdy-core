@@ -70,10 +70,10 @@ impl Rdy {
         let as_of = Arc::new(AsOfCache::default());
         let vpos: Arc<Mutex<version::VposCache>> = Default::default();
         let proposal_touched = inflight::ProposalTouched::default();
-        let (name, description) = site_identity(project, Some(&cfg));
-        let require_up_to_date = Config::require_up_to_date(Some(&cfg));
-        let idle_days = Config::idle_days(Some(&cfg));
-        let decisions_home = Config::decisions_home(Some(&cfg));
+        let (name, description) = site_identity(project, &cfg);
+        let require_up_to_date = cfg.require_up_to_date();
+        let idle_days = cfg.idle_days();
+        let decisions_home = cfg.decisions_home();
         // a placeholder until the first publish below, which replaces all of it
         let state = ArcSwap::from_pointee(ReadState {
             seq: store.log_end(),
@@ -117,12 +117,14 @@ impl Rdy {
             lineage,
             fingerprint,
             serve: cfg.serve.resolve(),
+            config: Arc::new(cfg),
             briefs: Arc::new(brief::BriefRegistry::new(brief::BRIEF_REGISTRY_CAP)),
             detectors: &tensions::DETECTORS,
             tension_seen: None,
             publish_gen: 0,
             settled_batch,
             tension_base: None,
+            full_publish_panics: 0,
         };
         r.invalidate();
         // that publish replaced the placeholder state: the first write records the base
@@ -194,6 +196,13 @@ impl Rdy {
     pub fn set_detectors_for_tests(&mut self, d: &'static [&'static dyn tensions::Detector]) {
         self.detectors = d;
         let _ = self.publish(crate::Delta::Full);
+    }
+
+    /// Test hook: the next `n` `Delta::Full` publishes (a pack reload's, `invalidate`'s) panic
+    /// before they change anything.
+    #[doc(hidden)]
+    pub fn panic_full_publishes_for_tests(&mut self, n: u32) {
+        self.full_publish_panics = n;
     }
 
     /// Days without a write after which an open view is idle (`views.idle_days`, default 14).

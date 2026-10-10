@@ -1,4 +1,4 @@
-use crate::error::{E_PERMISSION, RdyError};
+use crate::error::{E_BAD_INPUT, E_PERMISSION, RdyError};
 use rdy_model::{Provenance, Role};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -81,12 +81,53 @@ impl Session {
                 "approvals are made by the human actor: unset RDY_ACTOR, or set actor: in the user's rdy config",
             ));
         }
-        Ok(Session {
+        if actor.trim().is_empty() {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "an agent session needs an actor",
+                "pass an actor, e.g. agent:claude",
+            ));
+        }
+        if let Some(r) = &run
+            && (r.trim().is_empty()
+                || r.contains('/')
+                || r.starts_with('.')
+                || r.chars().count() > crate::write::MAX_VIEW_NAME)
+        {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("the run {:?} is not a plain name", crate::views::clip(r)),
+                "pass a run name such as r7 (no '/', not starting with '.', at most 256 characters), or none (the view is then work-<actor>)",
+            ));
+        }
+        let session = Session {
             actor,
             run,
             role,
             kind: SessionKind::Agent,
-        })
+        };
+        // The default view is the run, else work-<actor>; it must be a writable name: not too
+        // long, and not a reserved view (`:` becomes `-`, and work-<actor> is never reserved)
+        let view = session.default_view();
+        if view == "canon" || view == INFLIGHT_SCOPE {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("the run {view:?} names a reserved view, which an agent cannot write"),
+                "pass another run name: canon and inflight are reserved",
+            ));
+        }
+        if view.chars().count() > crate::write::MAX_VIEW_NAME {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!(
+                    "the actor or run makes a view name longer than {} characters ({})",
+                    crate::write::MAX_VIEW_NAME,
+                    crate::views::clip(&session.default_view())
+                ),
+                "pass a shorter actor or run (the view is the run, or work-<actor>)",
+            ));
+        }
+        Ok(session)
     }
 
     pub fn is_human(&self) -> bool {

@@ -26,7 +26,7 @@ pub(crate) fn run(
     target: String,
     max_tokens: Option<usize>,
 ) -> Result<(Value, String), ErrorReply> {
-    if env.place.is_some() && bound_view(env).is_some() {
+    if env.place.is_some() && bound_view(env)?.is_some() {
         let Open {
             place,
             lock,

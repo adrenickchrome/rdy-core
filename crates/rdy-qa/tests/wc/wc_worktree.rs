@@ -123,3 +123,236 @@ fn wcwt1_names_are_sanitized_and_numbered() {
     ok(&s, &["worktree", "rm", odd.to_str().unwrap()]);
     assert!(!odd.exists(), "the odd-named worktree is removable");
 }
+
+#[test]
+fn msw10_a_damaged_worktree_pointer_is_an_error_not_the_main_copy() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    let side = at(&s, "side");
+    ok(&s, &["worktree", "add", side.to_str().unwrap(), "side"]);
+    std::fs::write(side.join(".rdy-worktree"), "project: [\n").unwrap();
+    let o = Command::new(rdy_qa::fixtures::rdy_bin())
+        .args(["--json", "status"])
+        .current_dir(&side)
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .envs(s.env_pairs())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        !o.status.success(),
+        "ran on the main working copy: {}",
+        String::from_utf8_lossy(&o.stdout)
+    );
+    assert!(
+        err.contains(".rdy-worktree") && err.contains(E_BAD_INPUT),
+        "{err}"
+    );
+}
+
+#[test]
+fn msw16_rm_of_a_copied_worktree_dir_keeps_the_real_worktree() {
+    let (s, _seed) = seeded();
+    let tmp = tempfile::tempdir().unwrap();
+    let side = tmp.path().join("side");
+    let copy = tmp.path().join("side2");
+    ok(&s, &["worktree", "add", side.to_str().unwrap(), "side"]);
+    let o = Command::new("cp")
+        .arg("-R")
+        .arg(&side)
+        .arg(&copy)
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    let (okk, v) = json(&s, &["worktree", "rm", copy.to_str().unwrap()]);
+    assert!(!okk && v["code"] == E_BAD_INPUT, "{v}");
+    assert!(
+        at(&s, ".rdy/worktrees/side/bound.yaml").exists(),
+        "the real worktree's state stays"
+    );
+    assert!(copy.join("notes.yaml").exists() && side.join("notes.yaml").exists());
+}
+
+/// `rdy --json <args>` run inside `dir` (no `--project`): whether it succeeded, and its JSON.
+fn json_in(
+    s: &rdy_qa::daemon::Served,
+    dir: &std::path::Path,
+    args: &[&str],
+) -> (bool, serde_json::Value) {
+    let o = Command::new(rdy_qa::fixtures::rdy_bin())
+        .arg("--json")
+        .args(args)
+        .current_dir(dir)
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .envs(s.env_pairs())
+        .output()
+        .unwrap();
+    let okk = o.status.success();
+    let text = String::from_utf8_lossy(if okk { &o.stdout } else { &o.stderr }).into_owned();
+    let v = serde_json::from_str(text.trim())
+        .or_else(|_| serde_json::from_str(text.trim().lines().last().unwrap_or("")))
+        .unwrap_or(serde_json::Value::String(text));
+    (okk, v)
+}
+
+fn same_dir(a: &str, b: &std::path::Path) -> bool {
+    std::path::Path::new(a).canonicalize().ok() == b.canonicalize().ok()
+}
+
+/// msw16 fix round 1 (ruling): a moved worktree is still the worktree. A command run inside it
+/// records its new directory, and rm removes it.
+#[test]
+fn msw16_a_moved_worktree_is_used_and_removed() {
+    let (s, _seed) = seeded();
+    let tmp = tempfile::tempdir().unwrap();
+    let side = tmp.path().join("side");
+    let moved = tmp.path().join("moved");
+    ok(&s, &["worktree", "add", side.to_str().unwrap(), "side"]);
+    std::fs::rename(&side, &moved).unwrap();
+    let (okk, v) = json_in(&s, &moved, &["update"]);
+    assert!(okk, "{v}");
+    let (_, v) = json(&s, &["worktree", "ls"]);
+    assert!(same_dir(v[0]["dir"].as_str().unwrap(), &moved), "{v}");
+    let (okk, v) = json(&s, &["worktree", "rm", moved.to_str().unwrap()]);
+    assert!(okk, "{v}");
+    assert!(!at(&s, ".rdy/worktrees/side").exists());
+    assert!(!moved.join("notes.yaml").exists() && !moved.join(".rdy-worktree").exists());
+}
+
+/// msw16 fix round 1 (ruling): a crash between the pointer write and the dir.txt write leaves a
+/// worktree with no recorded directory; rm still removes it.
+#[test]
+fn msw16_rm_of_a_worktree_without_dir_txt_removes_it() {
+    let (s, _seed) = seeded();
+    let tmp = tempfile::tempdir().unwrap();
+    let side = tmp.path().join("side");
+    ok(&s, &["worktree", "add", side.to_str().unwrap(), "side"]);
+    std::fs::remove_file(at(&s, ".rdy/worktrees/side/dir.txt")).unwrap();
+    let (okk, v) = json(&s, &["worktree", "rm", side.to_str().unwrap()]);
+    assert!(okk, "{v}");
+    assert!(!at(&s, ".rdy/worktrees/side").exists());
+    assert!(!side.join(".rdy-worktree").exists());
+}
+
+/// msw16 fix round 1 (ruling): a command run inside a copied worktree directory is refused and
+/// names the real worktree; the real worktree and its view are untouched.
+#[test]
+fn msw16_a_command_in_a_copied_worktree_is_refused() {
+    let (s, seed) = seeded();
+    let tmp = tempfile::tempdir().unwrap();
+    let side = tmp.path().join("side");
+    let copy = tmp.path().join("side2");
+    ok(&s, &["worktree", "add", side.to_str().unwrap(), "side"]);
+    let o = Command::new("cp")
+        .arg("-R")
+        .arg(&side)
+        .arg(&copy)
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    let before = std::fs::read_to_string(side.join("notes.yaml")).unwrap();
+    let text = before.replace("Note.", "Copy.");
+    assert_ne!(text, before);
+    std::fs::write(copy.join("notes.yaml"), text).unwrap();
+    for args in [
+        &["add", "notes.yaml"][..],
+        &["commit", "-m", "from the copy"][..],
+    ] {
+        let (okk, v) = json_in(&s, &copy, args);
+        assert!(!okk && v["code"] == E_BAD_INPUT, "{args:?}: {v}");
+        let m = v["message"].as_str().unwrap();
+        assert!(
+            m.contains("worktree side") && m.contains(side.file_name().unwrap().to_str().unwrap()),
+            "{v}"
+        );
+    }
+    assert_eq!(store_block(&s, "side", &seed.note).body, "Note.");
+    assert!(!at(&s, ".rdy/worktrees/side/stage/files/notes.yaml").exists());
+    assert_eq!(
+        std::fs::read_to_string(side.join("notes.yaml")).unwrap(),
+        before
+    );
+    let (_, v) = json(&s, &["worktree", "ls"]);
+    assert!(same_dir(v[0]["dir"].as_str().unwrap(), &side), "{v}");
+    let (okk, v) = json_in(&s, &side, &["status"]);
+    assert!(okk, "{v}");
+}
+
+/// A worktree `side` added under a fresh temp dir, and a `cp -R` copy of it (`side2`).
+fn side_and_copy(
+    s: &rdy_qa::daemon::Served,
+) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let side = tmp.path().join("side");
+    let copy = tmp.path().join("side2");
+    ok(s, &["worktree", "add", side.to_str().unwrap(), "side"]);
+    let o = Command::new("cp")
+        .arg("-R")
+        .arg(&side)
+        .arg(&copy)
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    (tmp, side, copy)
+}
+
+/// Final review M1: `rdy new` inside a copied worktree is refused before the store write, so
+/// nothing is created in the real worktree's view and a retry there succeeds.
+#[test]
+fn msw16_rdy_new_in_a_copied_worktree_is_refused_before_the_write() {
+    let (s, _seed) = seeded();
+    let (_tmp, side, copy) = side_and_copy(&s);
+    let (okk, v) = json_in(&s, &copy, &["new", "doc", "fromcopy"]);
+    assert!(!okk && v["code"] == E_BAD_INPUT, "{v}");
+    assert!(
+        v["message"].as_str().unwrap().contains("worktree side"),
+        "{v}"
+    );
+    assert!(!copy.join("fromcopy.yaml").exists());
+    let (okk, v) = json_in(&s, &side, &["new", "doc", "fromcopy"]);
+    assert!(okk, "the real worktree creates it: {v}");
+    assert!(side.join("fromcopy.yaml").exists(), "{v}");
+}
+
+/// Final review M10: `rdy status` inside a copied worktree still shows the store status and
+/// reports the refusal under `working_copy`.
+#[test]
+fn msw16_rdy_status_in_a_copied_worktree_reports_the_refusal() {
+    let (s, _seed) = seeded();
+    let (_tmp, _side, copy) = side_and_copy(&s);
+    let (okk, v) = json_in(&s, &copy, &["status"]);
+    assert!(okk, "{v}");
+    let refused = &v["working_copy"]["refused"];
+    assert_eq!(refused["code"], E_BAD_INPUT, "{v}");
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("worktree side"),
+        "{v}"
+    );
+}
+
+/// Final review M2: a worktree whose pointer is missing or damaged is removed by the directory
+/// `rdy worktree ls` shows.
+#[test]
+fn msw16_rm_of_a_worktree_with_a_missing_or_damaged_pointer_removes_it() {
+    for damage in [None, Some("not: [a pointer\n")] {
+        let (s, _seed) = seeded();
+        let tmp = tempfile::tempdir().unwrap();
+        let side = tmp.path().join("side");
+        ok(&s, &["worktree", "add", side.to_str().unwrap(), "side"]);
+        match damage {
+            None => std::fs::remove_file(side.join(".rdy-worktree")).unwrap(),
+            Some(text) => std::fs::write(side.join(".rdy-worktree"), text).unwrap(),
+        }
+        let (okk, v) = json(&s, &["worktree", "rm", side.to_str().unwrap()]);
+        assert!(okk, "{damage:?}: {v}");
+        assert!(!at(&s, ".rdy/worktrees/side").exists(), "{damage:?}");
+        assert!(!side.join("notes.yaml").exists(), "{damage:?}");
+        let (_, v) = json(&s, &["worktree", "ls"]);
+        assert_eq!(v, serde_json::json!([]), "{damage:?}");
+    }
+}

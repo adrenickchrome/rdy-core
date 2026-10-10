@@ -61,7 +61,7 @@ fn checkout_in(
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
-                "commit them, or pass --force to discard them",
+                "commit them, or pass --force to discard the edits to tracked files; new files stay: move them aside or rdy add them",
             )
             .into());
         }

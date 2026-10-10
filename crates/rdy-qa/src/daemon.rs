@@ -353,6 +353,22 @@ pub struct Served {
     env: Vec<(String, String)>,
 }
 
+/// The command `rdy --project <dir> <args>` run in `dir` as a person: no `RDY_ACTOR`, `RDY_RUN`
+/// or `RDY_NO_DAEMON` from this process, and `env` (a user config, as `Served::env_pairs`
+/// gives). Worker threads build their commands here so the shell's session never leaks in.
+pub fn human_command(dir: &Path, env: &[(String, String)], args: &[&str]) -> Command {
+    let mut cmd = Command::new(crate::fixtures::rdy_bin());
+    cmd.arg("--project")
+        .arg(dir)
+        .args(args)
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .env_remove("RDY_NO_DAEMON")
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .current_dir(dir);
+    cmd
+}
+
 /// How long `Served::kill9` waits for the killed daemon's socket to stop answering.
 const KILL_WAIT: Duration = Duration::from_secs(30);
 
@@ -370,19 +386,9 @@ impl Served {
         Served { dir, cfg, env }
     }
 
-    /// The command `rdy --project <dir> <args>` in the project, as the human: no `RDY_ACTOR`,
-    /// `RDY_RUN` or `RDY_NO_DAEMON` from this process, the user config of `human:qa`.
+    /// The command `rdy --project <dir> <args>` in the project, as the human (`human_command`).
     fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(crate::fixtures::rdy_bin());
-        cmd.arg("--project")
-            .arg(self.dir.path())
-            .args(args)
-            .env_remove("RDY_ACTOR")
-            .env_remove("RDY_RUN")
-            .env_remove("RDY_NO_DAEMON")
-            .envs(self.env.iter().map(|(k, v)| (k, v)))
-            .current_dir(self.dir.path());
-        cmd
+        human_command(self.dir.path(), &self.env, args)
     }
 
     /// Starts `rdy --project <dir> <args>` as the human, without waiting (stdout and stderr

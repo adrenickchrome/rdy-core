@@ -177,3 +177,13 @@ fn wcbr1_a_human_commit_of_drafts_prints_the_briefing_only_when_it_says_somethin
         "{text}"
     );
 }
+
+#[test]
+fn msw10_damaged_wc_state_is_reported_not_skipped() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    std::fs::write(at(&s, ".rdy/wc/bound.yaml"), "view: [\n").unwrap();
+    let (okk, v) = json(&s, &["brief", "guides/intro.yaml"]);
+    assert!(!okk && v["code"] == E_IO, "{v}");
+    assert!(v["message"].as_str().unwrap().contains("bound.yaml"), "{v}");
+}

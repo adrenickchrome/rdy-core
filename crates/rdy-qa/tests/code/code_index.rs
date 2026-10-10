@@ -281,3 +281,84 @@ fn cidx1_a_copy_in_a_repo_that_detects_copies_inherits_no_citations() {
     assert_eq!(a["c-AAAAA"], vec![c1]);
     assert_eq!(a["c-BBBBB"], vec![c2]);
 }
+
+#[test]
+fn msw18_a_trailer_value_cannot_forge_a_log_record() {
+    let g = GitRepo::new();
+    g.write("a.rs", "a\n");
+    let forged = format!("s-AAAAA\x1e{}\x1fk-FORGED\x1f", "0".repeat(40));
+    let c1 = g.commit(&format!("feat: a\n\nImplements: {forged}"));
+    let idx = build(&repo_of(&g)).unwrap();
+    assert_eq!(idx.commits, 1, "{idx:?}");
+    assert!(!idx.cited.contains_key("k-FORGED"), "{idx:?}");
+    assert!(idx.cited.values().flatten().all(|h| *h == c1), "{idx:?}");
+}
+
+#[test]
+fn msw18_a_shallow_clone_is_refused() {
+    let g = GitRepo::new();
+    g.write("src/old.rs", &lines(40, "old"));
+    g.commit("feat: old\n\nImplements: c-AAAAA");
+    g.mv("src/old.rs", "src/moved.rs");
+    g.commit("refactor: move\n\nImplements: s-BBBBB");
+    let parent = tempfile::tempdir().unwrap();
+    let clone = parent.path().join("clone");
+    let out = std::process::Command::new("git")
+        .args(["clone", "-q", "--depth=1"])
+        .arg(format!("file://{}", g.path().display()))
+        .arg(&clone)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let r = CodeRepo {
+        configured: clone.to_string_lossy().into_owned(),
+        root: std::fs::canonicalize(&clone).unwrap(),
+    };
+    let e = build(&r).unwrap_err();
+    assert_eq!(e.code, "E_CONFIG", "{e}");
+    assert!(e.message.contains("shallow clone"), "{}", e.message);
+}
+
+#[test]
+fn msw18_a_checkout_made_shallow_after_its_first_index_is_refused() {
+    let g = GitRepo::new();
+    g.write("src/old.rs", &lines(40, "old"));
+    g.commit("feat: old\n\nImplements: c-AAAAA");
+    let parent = tempfile::tempdir().unwrap();
+    let clone = parent.path().join("clone");
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let url = format!("file://{}", g.path().display());
+    let b = clone.to_string_lossy().into_owned();
+    git(&["clone", "-q", &url, &b]);
+    let r = CodeRepo {
+        configured: b.clone(),
+        root: std::fs::canonicalize(&clone).unwrap(),
+    };
+    index_of(&r).expect("a full clone is indexed");
+    g.write("src/new.rs", &lines(40, "new"));
+    g.commit("feat: new\n\nImplements: s-BBBBB");
+    git(&["-C", &b, "fetch", "-q", "--depth=1", "origin"]);
+    git(&["-C", &b, "reset", "-q", "--hard", "FETCH_HEAD"]);
+    let e = index_of(&r).unwrap_err();
+    assert_eq!(e.code, "E_CONFIG", "{e}");
+    assert!(e.message.contains("shallow clone"), "{}", e.message);
+}

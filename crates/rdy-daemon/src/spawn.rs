@@ -17,12 +17,14 @@ use std::sync::{Arc, Mutex};
 /// in that process rather than spawn another), stdin from /dev/null, stdout and stderr appended
 /// to the run dir's `daemon.log` (created 0600; refused if it is a symlink), every `RDY_*`
 /// variable removed from its environment, and a new session (so a new process group) of its own
-/// from before its exec. A socket path the daemon could not bind (`socket::check_socket_path`) is refused here,
-/// before anything is created, rather than spawning a daemon that would only die at its bind.
-/// A relative `project` is made absolute against the caller's working directory first: the child
-/// runs in the project, where the relative path would name `<project>/<project>`.
+/// from before its exec. The run dir is made absolute first, and a socket path the daemon could
+/// not bind (`socket::check_socket_path`) is refused on that absolute path, before anything is
+/// created, rather than spawning a daemon that would only die at its bind. A relative `project`
+/// is made absolute against the caller's working directory too: the child runs in the project,
+/// where the relative path would name `<project>/<project>`.
 pub fn serve_command(rdy_bin: &Path, project: &Path, run: &RunDir) -> io::Result<Command> {
-    check_socket_path(run)?;
+    let run = run.absolute()?;
+    check_socket_path(&run)?;
     let project = std::path::absolute(project)?;
     run.ensure()?;
     let log = open_no_follow(

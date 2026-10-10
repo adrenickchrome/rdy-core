@@ -125,7 +125,7 @@ fn ent1_text_sources_skip_code_bodies_and_keys_and_blank_references() {
         vec![
             (
                 "body".to_string(),
-                format!("Uses {} and the Ledger.", " ".repeat(11))
+                format!("Uses {} and the Ledger.", "\0".repeat(11))
             ),
             ("name".to_string(), "Close".to_string()),
             ("steps[0]".to_string(), "see Ledger".to_string()),
@@ -182,4 +182,19 @@ fn ent1_text_sources_skip_metadata_fields() {
         let b = block("note", &[(f, s("Ledger"))], "");
         assert_eq!(text_sources(&b), vec![], "{f}");
     }
+}
+
+#[test]
+fn msw18_a_reference_parts_a_phrase() {
+    let b = block("claim", &[], "The Ledger {{m-AAAAA}} service is fine.");
+    let (_, text) = text_sources(&b).into_iter().next().unwrap();
+    let known = |p: &str| p == "ledger service";
+    assert!(find_phrases(&text, &known).is_empty());
+}
+
+#[test]
+fn msw18_a_literal_holding_a_blanked_reference_is_not_a_literal() {
+    let b = block("claim", &[], "Run `ledger {{m-AAAAA}}` and `ledger start`.");
+    let (_, text) = text_sources(&b).into_iter().next().unwrap();
+    assert_eq!(code_literals(&text), vec!["ledger start".to_string()]);
 }

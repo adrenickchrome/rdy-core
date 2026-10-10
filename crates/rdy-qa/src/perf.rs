@@ -36,7 +36,41 @@ pub struct Verdict {
     pub spec_target: Option<String>,
 }
 
-pub const FLOOR_MS: f64 = 2.0;
+/// The absolute floor of an fsync-bound op: its median moves with the disk, so a rise of less
+/// than this is noise, whatever its percentage (ruling R5).
+pub const FSYNC_FLOOR_MS: f64 = 2.0;
+/// The absolute floor of every other op: small enough that a sub-millisecond read that grows
+/// many-fold fails, large enough to absorb timer jitter.
+pub const READ_FLOOR_MS: f64 = 0.05;
+
+/// The rise in median (ms) below which `op` never counts as regressed.
+pub fn floor_ms(op: &str) -> f64 {
+    if fsync_bound(op) {
+        FSYNC_FLOOR_MS
+    } else {
+        READ_FLOOR_MS
+    }
+}
+
+/// The spec's ceiling for `op` in ms, enforced on its p95 with or without a baseline. Exact op
+/// names only: a `_50k` op has none, and an op whose target is reported (not enforced) has none.
+pub fn spec_ceiling_ms(op: &str) -> Option<f64> {
+    Some(match op {
+        "tree_full" | "tree_full_memo" | "brief_doc" | "version_position" => 5.0,
+        "view_materialize_cold" | "view_cold" => 50.0,
+        "view_materialize_incremental" | "view_incremental" => 1.0,
+        "render"
+        | "cold_open"
+        | "cold_open_lagging"
+        | "daemon_cold_start"
+        | "open_chosen_alts_100" => 2000.0,
+        _ => return None,
+    })
+}
+
+/// The suffix of a read target that is measured cold, so its spec figure (a warm read) is
+/// reported but not enforced.
+const COLD_READ_NOTE: &str = " (reported, not enforced: measured cold)";
 
 /// The note a `_50k` op carries: its budget is the typical tier's, applied at 50k blocks.
 const LARGE_TIER_NOTE: &str = " (large tier: budget at 50k, DECISIONS-rdy-m2 §7)";
@@ -47,16 +81,31 @@ fn spec_target(op: &str) -> Option<String> {
         None => (op, false),
     };
     let target = match base {
-        o if o.starts_with("write") || o.starts_with("propose") => {
+        "write_batch_200" => {
+            "no spec target: one write of 200 creates, one durable flush (recorded; the < 5 ms write budget is for one op)"
+        }
+        "propose_land_500_flat" => {
+            "no spec target: one write of 500 docs and its landing (recorded; the < 5 ms write budget is for one op)"
+        }
+        o if (o.starts_with("write") && !o.starts_with("write_batch_"))
+            || (o.starts_with("propose") && !o.starts_with("propose_land_")) =>
+        {
             "< 5 ms p99 on Linux NVMe; one durable flush + < 1 ms on macOS (spec 11, restated per hardware class)"
         }
         "brief_doc" => "< 5 ms p99 at 10k with the view's graph carried (the read budget, spec 11)",
+        "open_chosen_alts_100" => {
+            "< 2 s (the cold-open budget, spec 11): open with 100 chosen alternative sets whose winner views wrote 50 changes each after the set was created"
+        }
         "brief_expired_intents_1k" => {
             "< 5 ms p99 (the read budget, spec 11): a briefing with 1,000 expired intents and 5 open ones in the project"
         }
-        "context" | "impact" | "version_position" | "resolve_path" | "tree_full" => {
-            "< 5 ms p99 (spec 11)"
+        "context" | "impact" | "resolve_path" => {
+            return Some(format!(
+                "< 5 ms p99 (spec 11){COLD_READ_NOTE}{}",
+                if large { LARGE_TIER_NOTE } else { "" }
+            ));
         }
+        "version_position" | "tree_full" => "< 5 ms p99 (spec 11)",
         "version_position_cached" => "< 10 us p99 on the isolated Linux bench (vpos1)",
         "tree_full_memo" => {
             "< 5 ms p99 at 1k folders / 10k docs, memoised per canon head (M2 spec 15.1)"
@@ -230,10 +279,11 @@ pub fn compare(baseline: Option<&Baseline>, measured: &[Measure]) -> Vec<Verdict
         .map(|m| {
             let base = baseline.and_then(|b| b.ops.get(&m.op)).map(|b| b.median_ms);
             let margin = if fsync_bound(&m.op) { 0.50 } else { 0.25 };
-            let pass = match base {
-                None => true,
-                Some(b) => !(m.median_ms > b * (1.0 + margin) && m.median_ms - b > FLOOR_MS),
-            };
+            let regressed = base.is_some_and(|b| {
+                m.median_ms > b * (1.0 + margin) && m.median_ms - b > floor_ms(&m.op)
+            });
+            let over_ceiling = spec_ceiling_ms(&m.op).is_some_and(|c| m.p95_ms > c);
+            let pass = !regressed && !over_ceiling;
             Verdict {
                 op: m.op.clone(),
                 median_ms: m.median_ms,
@@ -1473,6 +1523,165 @@ fn tier_coord(out: &mut Vec<Measure>, parent: &std::path::Path, sfx: &str, runs:
             reported_write(&engine, &b, "rb", &fx.claim, format!("Settled {i}."));
         },
     ));
+    drop(engine);
+
+    tier_coord_chosen(out, parent, sfx, runs, n);
+}
+
+/// msw20 (fix rounds 1 and 2): `n / 10` chosen alternative sets, each {w: w<i>, l: l<i>} chosen
+/// for w, whose winner view wrote `n / 20` (at least 5) changes after the set was created, in a
+/// fresh small project. The last `sets / 10` (at least 1) sets are heavy: before the set was
+/// created, their loser view wrote the same number of new claims (bound to it: a long pre-set
+/// chain); a third member j<i> joined with `alt_add` holding as many of its own (the joiner reads);
+/// and the winner recorded a choice decision. They come last, so few landings rebase their views.
+/// `open_chosen_alts_100` reopens the project: `CoordHeads::read` derives every chosen set's
+/// bindings from history (each member's walk from its head back to the set's creation, and the
+/// set built there). `propose_chosen_alts_100` proposes a view of the same number of changes plus
+/// one loser change of a heavy set and a decision that refines that set's choice decision: the
+/// gate checks each change against every settled set and folds the proposal's decisions.
+fn tier_coord_chosen(
+    out: &mut Vec<Measure>,
+    parent: &std::path::Path,
+    sfx: &str,
+    runs: &Runs,
+    n: usize,
+) {
+    let (sets, chain) = (n / 10, (n / 20).max(5));
+    let heavy = (sets / 10).max(1);
+    let (proj, mut r, fx) = coord_project(parent, "coord-chosen");
+    let o = crate::fixtures::agent("agent:o", Some("o"));
+    let claim = fx.claim.to_string();
+    let section = fx.section.to_string();
+    let edit = |r: &mut Rdy, view: &str, body: String| -> String {
+        write(
+            r,
+            view,
+            json!([{"op": "update", "id": claim, "body": body}]),
+        )
+        .expect("a member write")
+        .change
+    };
+    let create = |r: &mut Rdy, view: &str, body: String| -> String {
+        write(
+            r,
+            view,
+            json!([{"op": "create", "type": "claim", "parent": section, "body": body}]),
+        )
+        .expect("a member claim")
+        .change
+    };
+    let member = |label: &str, view: &str| rdy_engine::alt::AltMemberInput {
+        label: label.into(),
+        view: view.into(),
+    };
+    // (a loser change, the choice decision) of the last heavy set
+    let mut release: Option<(String, String)> = None;
+    for i in 0..sets {
+        let is_heavy = i >= sets - heavy;
+        let (w, l, j) = (format!("w{i}"), format!("l{i}"), format!("j{i}"));
+        for v in [&w, &l] {
+            r.view_create(&writer(), v, None, false)
+                .expect("a member view");
+        }
+        let mut lost = vec![];
+        if is_heavy {
+            for k in 0..chain {
+                lost.push(create(&mut r, &l, format!("Loser {i}.{k}.")));
+                create(&mut r, &j, format!("Joiner {i}.{k}."));
+            }
+        }
+        let set = r
+            .alt_create(
+                &o,
+                &format!("chosen {i}"),
+                None,
+                &[member("w", &w), member("l", &l)],
+            )
+            .expect("a set");
+        if is_heavy {
+            r.alt_add(&o, &set.id, &member("j", &j)).expect("a joiner");
+        }
+        for k in 0..chain {
+            edit(&mut r, &w, format!("Winner {i}.{k}."));
+        }
+        let decision = is_heavy.then(|| {
+            r.decide(
+                &writer(),
+                &w,
+                rdy_engine::DecisionInput {
+                    parent: section.clone(),
+                    statement: format!("Pick w{i}"),
+                    ..Default::default()
+                },
+            )
+            .expect("a choice decision")
+            .created["$decision"]
+                .clone()
+        });
+        let pick = rdy_engine::alt::AltPick {
+            set: set.id.clone(),
+            chosen: "w".into(),
+        };
+        let p = r
+            .propose_with(&writer(), &w, &w, None, None, Some(&pick))
+            .expect("a choosing proposal");
+        r.land(&approver(), &p.id).expect("the choosing landing");
+        if let (Some(d), Some(c)) = (decision, lost.first()) {
+            release = Some((c.clone(), d));
+        }
+    }
+    let (loser, decision) = release.expect("a heavy set");
+    let mut source: Vec<String> = (0..chain)
+        .map(|k| edit(&mut r, "ps", format!("Proposed {k}.")))
+        .collect();
+    source.push(loser);
+    let st = r.read();
+    let binds = &st.coord_heads().alt_binds;
+    assert_eq!(
+        binds.values().filter(|b| b.chosen.is_some()).count(),
+        sets,
+        "every set is chosen"
+    );
+    assert_eq!(
+        binds.values().map(|b| b.bound.len()).sum::<usize>(),
+        heavy * 2 * chain,
+        "each heavy set binds its loser's and its joiner's changes"
+    );
+    drop(st);
+    drop(r);
+    out.push(measure(
+        &format!("open_chosen_alts_100{sfx}"),
+        runs.materialize_cold,
+        |_| {
+            let r = Rdy::open(&proj).expect("open");
+            assert_eq!(r.read().coord_heads().alt_binds.len(), sets);
+        },
+    ));
+    let mut r = Rdy::open(&proj).expect("open");
+    out.push(measure_timed(
+        &format!("propose_chosen_alts_100{sfx}"),
+        runs.write,
+        |i| {
+            let name = format!("pp{i}");
+            r.view_include(&writer(), &name, &source)
+                .expect("include the proposal's changes");
+            r.decide(
+                &writer(),
+                &name,
+                rdy_engine::DecisionInput {
+                    parent: section.clone(),
+                    statement: format!("Revisit {i}"),
+                    refines: vec![decision.clone()],
+                    ..Default::default()
+                },
+            )
+            .expect("the release decision");
+            let s = Instant::now();
+            r.propose(&writer(), &name, &name)
+                .expect("propose: the decision releases the loser change");
+            s.elapsed()
+        },
+    ));
 }
 
 /// Ops in one `mcp_write_args` call: a doc, its section and 2,000 claims.
@@ -2488,8 +2697,68 @@ mod tests {
         let v = compare(Some(&base), &[m("write_single", 31.0)]);
         assert!(!v[0].pass);
         assert!(
-            compare(None, &[m("render", 1e9)])[0].pass,
-            "no baseline passes"
+            compare(None, &[m("log_full", 1e9)])[0].pass,
+            "no baseline and no spec ceiling passes"
+        );
+    }
+
+    #[test]
+    fn msw6_a_sub_floor_read_that_regresses_many_fold_fails() {
+        let base = Baseline {
+            machine: "x".into(),
+            ops: [
+                ("tree_full_memo".to_string(), m("tree_full_memo", 0.0001)),
+                ("brief_doc".to_string(), m("brief_doc", 0.20)),
+                ("write_single".to_string(), m("write_single", 0.6)),
+            ]
+            .into(),
+        };
+        let v = compare(
+            Some(&base),
+            &[
+                m("tree_full_memo", 1.3),
+                m("brief_doc", 0.22),
+                m("write_single", 2.4),
+            ],
+        );
+        assert!(
+            !v[0].pass,
+            "0.0001 -> 1.3 ms is a 13,000x regression: {:?}",
+            v[0]
+        );
+        assert!(v[1].pass, "+10% is inside the margin");
+        assert!(
+            v[2].pass,
+            "an fsync op keeps its 2 ms disk-noise floor (ruling R5)"
+        );
+    }
+
+    #[test]
+    fn msw6_a_spec_ceiling_fails_with_no_baseline_and_inside_the_margin() {
+        let over = Measure {
+            op: "tree_full".into(),
+            median_ms: 4.2,
+            p95_ms: 5.5,
+            runs: 20,
+        };
+        assert!(
+            !compare(None, std::slice::from_ref(&over))[0].pass,
+            "p95 over the 5 ms ceiling, no baseline"
+        );
+        let base = Baseline {
+            machine: "x".into(),
+            ops: [(
+                "tree_full".to_string(),
+                Measure {
+                    median_ms: 4.0,
+                    ..over.clone()
+                },
+            )]
+            .into(),
+        };
+        assert!(
+            !compare(Some(&base), &[over])[0].pass,
+            "+5% is inside the margin but over the ceiling"
         );
     }
 
@@ -2874,13 +3143,21 @@ mod tests {
             [
                 "write_expired_intents_1k",
                 "brief_expired_intents_1k",
-                "write_settled_alts_1k"
+                "write_settled_alts_1k",
+                "open_chosen_alts_100",
+                "propose_chosen_alts_100"
             ]
         );
         for op in names {
             let target = spec_target(op).unwrap_or_else(|| panic!("{op} has no target"));
-            assert!(target.contains("< 5 ms p99"), "{op}: {target}");
+            let budget = if op.starts_with("open_") {
+                "< 2 s"
+            } else {
+                "< 5 ms p99"
+            };
+            assert!(target.contains(budget), "{op}: {target}");
         }
+        assert!(fsync_bound("propose_chosen_alts_100") && !fsync_bound("open_chosen_alts_100"));
         assert!(
             fsync_bound("write_expired_intents_1k") && !fsync_bound("brief_expired_intents_1k")
         );
@@ -2902,6 +3179,8 @@ mod tests {
             "write_expired_intents_1k",
             "brief_expired_intents_1k",
             "write_settled_alts_1k",
+            "open_chosen_alts_100",
+            "propose_chosen_alts_100",
         ];
         for op in ops {
             assert!(spec_target(op).is_some(), "{op} has no target");

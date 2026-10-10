@@ -4,15 +4,18 @@
 use super::{Open, open, tree};
 use crate::Env;
 use rdy_daemon::ErrorReply;
-use rdy_engine::wc::layout::{THEIRS_SUFFIX, WcTree};
+use rdy_engine::wc::layout::{FOLDER_THEIRS, THEIRS_SUFFIX, WcTree};
 use rdy_engine::wc::merge::theirs_path;
-use rdy_engine::wc::state::{ConflictKind, Place, WcState, stage_clear, stage_put};
+use rdy_engine::wc::state::{ConflictEntry, ConflictKind, Place, WcState, stage_clear, stage_put};
 use rdy_engine::{E_BAD_INPUT, E_NOT_FOUND, E_WC_CONFLICT, E_WC_INVALID, RdyError};
 use rdy_model::BlockId;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+
+/// A folder's own file in its directory.
+const FOLDER_FILE: &str = "_folder.yaml";
 
 /// What `rdy add` does with one path.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -145,42 +148,138 @@ fn plan_one(
 }
 
 /// wcup1: the conflicts adding `rel` resolves, by index in `st.conflicts`: the one naming a file
-/// added, and each one a directory added holds (a folder rename names its directory). Refused
-/// with `E_WC_CONFLICT` while one's `.theirs.yaml` (or `_folder.theirs.yaml`) still exists.
+/// added, and each one a directory added holds (a folder rename names its directory). A rename
+/// conflict also matches at the store's name (msw16), so a person may keep either name; it then
+/// takes along the `Blocks` conflicts that moved with it (the doc's file, or each file under the
+/// folder). Refused with `E_WC_CONFLICT` while one's
+/// `.theirs.yaml` (or `_folder.theirs.yaml`) still exists, at the local place or the store's.
 fn resolves(
     place: &Place,
     st: &WcState,
+    wt: &WcTree,
     rel: &str,
     out: &mut BTreeSet<usize>,
 ) -> Result<(), ErrorReply> {
     let is_dir = rel.is_empty()
         || fs::symlink_metadata(place.root.join(rel)).is_ok_and(|m| m.file_type().is_dir());
+    // `at`: the place the conflict is resolved at, the local one or the store's (after a rename,
+    // the local one may be gone)
+    let blocked = |at: &str, theirs: &str| -> Result<(), ErrorReply> {
+        if fs::symlink_metadata(place.root.join(theirs)).is_ok() {
+            return Err(refuse(
+                E_WC_CONFLICT,
+                format!("delete {theirs} first"),
+                format!("edit {at} to the version you want, delete {theirs}, then rdy add {at}"),
+            ));
+        }
+        Ok(())
+    };
     for (i, c) in st.conflicts.iter().enumerate() {
         if c.kind == ConflictKind::Kept {
             continue; // rdy update (or rdy checkout --force) clears a kept file
         }
-        let hit = if is_dir {
+        let local = if is_dir {
             is_under(&c.path, rel)
         } else {
             c.path == rel
         };
-        if !hit {
+        let store = store_hit(st, wt, c, rel, is_dir);
+        if !local && store.is_none() {
             continue;
         }
-        let theirs = theirs_path(c);
-        if fs::symlink_metadata(place.root.join(&theirs)).is_ok() {
-            return Err(refuse(
-                E_WC_CONFLICT,
-                format!("delete {theirs} first"),
-                format!(
-                    "edit {} to the version you want, delete {theirs}, then rdy add {}",
-                    c.path, c.path
-                ),
-            ));
+        blocked(&c.path, &theirs_path(c))?;
+        if let Some(at) = &store {
+            let folder = c.kind == ConflictKind::FolderRename;
+            blocked(
+                at,
+                &if folder {
+                    join(at, FOLDER_THEIRS)
+                } else {
+                    theirs_beside(at)
+                },
+            )?;
+            // the content conflicts that moved with it: the doc's own file, or every file under
+            // the renamed folder (its _folder.yaml and its docs), each now under the store's place
+            for (j, d) in st.conflicts.iter().enumerate() {
+                if j == i || d.kind != ConflictKind::Blocks {
+                    continue;
+                }
+                let moved = if folder {
+                    match d.path.strip_prefix(&c.path) {
+                        Some(rest) if rest.starts_with('/') => {
+                            format!("{at}{rest}")
+                        }
+                        _ => continue,
+                    }
+                } else if d.path == c.path {
+                    at.clone()
+                } else {
+                    continue;
+                };
+                blocked(&d.path, &theirs_path(d))?;
+                blocked(&moved, &theirs_beside(&moved))?;
+                out.insert(j);
+            }
         }
         out.insert(i);
     }
     Ok(())
+}
+
+/// msw16: a rename conflict resolved under the store's name. `Some` (the store's place) when
+/// `rel` names that place and the tree holds the doc or folder there: the doc's file, or the
+/// folder's `_folder.yaml`, at the store's path with its head. For a directory, `rel` is the
+/// store's place or holds it.
+fn store_hit(
+    st: &WcState,
+    wt: &WcTree,
+    c: &ConflictEntry,
+    rel: &str,
+    is_dir: bool,
+) -> Option<String> {
+    if !matches!(c.kind, ConflictKind::DocRename | ConflictKind::FolderRename) {
+        return None;
+    }
+    let (Some(name), Some(parent)) = (c.store_name.as_deref(), c.store_parent.as_deref()) else {
+        return None;
+    };
+    let at = store_place(c.kind, parent, name);
+    let named = if is_dir {
+        is_under(&at, rel)
+    } else {
+        rel == at
+    };
+    if !named {
+        return None;
+    }
+    // the base holds the store's paths after update, so its entry at the doc's file (or the
+    // folder's _folder.yaml) names the doc or folder; the tree must hold it there
+    let file = if c.kind == ConflictKind::FolderRename {
+        join(&at, FOLDER_FILE)
+    } else {
+        at.clone()
+    };
+    let head = st.base.files.get(&file)?;
+    wt.files
+        .get(&file)
+        .is_some_and(|f| f.head == *head)
+        .then_some(at)
+}
+
+/// The `.theirs.yaml` beside a doc's file.
+fn theirs_beside(path: &str) -> String {
+    format!(
+        "{}{THEIRS_SUFFIX}",
+        path.strip_suffix(".yaml").unwrap_or(path)
+    )
+}
+
+fn join(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}/{name}")
+    }
 }
 
 /// The store's path of a doc or folder in a rename conflict: the doc's file, or the folder's
@@ -224,7 +323,7 @@ pub(super) fn run(env: &Env, paths: Vec<PathBuf>) -> Result<(Value, String), Err
             )
         })?;
         plan_one(&place, &state, &wt, &typed, &rel, &mut acts)?;
-        resolves(&place, &state, &rel, &mut resolved)?;
+        resolves(&place, &state, &wt, &rel, &mut resolved)?;
     }
     // A resolved rename also stages the deletion of the store's paths of the files staged here
     // (the base holds the store's paths after update), so the commit renames, not duplicates.

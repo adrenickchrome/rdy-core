@@ -187,3 +187,37 @@ fn each_rule_catches_its_violation() {
     raw_commit(&mut r, "deep", chain);
     assert!(rules(&mut r, &Scope::View("deep".into())).contains(&"depth"));
 }
+
+#[test]
+fn msw2_a_cross_class_id_prefix_is_a_schema_violation() {
+    let (_d, mut r) = project();
+    raw_commit(
+        &mut r,
+        "pre",
+        vec![
+            raw(
+                "d-AAAAA",
+                "doc",
+                None,
+                "V",
+                &[("name", "a"), ("title", "T"), ("doc_type", "glossary")],
+                "",
+            ),
+            raw(
+                "s-AAAAA",
+                "section",
+                Some("d-AAAAA"),
+                "V",
+                &[("title", "S")],
+                "",
+            ),
+            raw("ra-AAAAA", "claim", Some("s-AAAAA"), "V", &[], "x"),
+        ],
+    );
+    let v = check(&r, &Scope::View("pre".into())).unwrap_err();
+    assert!(
+        v.iter()
+            .any(|v| v.rule == "schema" && v.detail.starts_with("E_PREFIX")),
+        "{v:?}"
+    );
+}

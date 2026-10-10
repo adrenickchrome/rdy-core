@@ -1,7 +1,7 @@
 //! trk1: tracking fields are outside a block's content hash; only_tracking_changed says when an
 //! edit of a frozen decision touches tracking fields and nothing else.
 use rdy_model::decision::{RULING_FIELDS, only_tracking_changed};
-use rdy_model::{Block, BlockId, FieldValue, Tracking};
+use rdy_model::{Block, BlockId, FieldValue, Hash, Tracking};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn tracking() -> Tracking {
@@ -115,6 +115,14 @@ fn trk1_only_tracking_changed_needs_a_tracking_difference_and_nothing_else() {
     assert!(
         !only_tracking_changed(&old, &linked, &t),
         "links are the ruling"
+    );
+    let mut pinned = moved.clone();
+    pinned
+        .pins
+        .insert(BlockId::parse("C-4Q8ZT").unwrap(), Hash::of(b"claim"));
+    assert!(
+        !only_tracking_changed(&old, &pinned, &t),
+        "msw7: pins are the ruling's references"
     );
     assert!(
         !only_tracking_changed(&old, &moved, &Tracking::default()),

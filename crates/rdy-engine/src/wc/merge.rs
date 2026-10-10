@@ -9,8 +9,8 @@ use crate::io::{BlockYaml, KeyedLink, from_yaml_struct};
 use crate::now_ms;
 use crate::tree_io::FOLDER_FILE;
 use crate::wc::files::{
-    base_from, behind_link, changed_since_staged, identity, inside, prune_dirs, remove_file,
-    remove_tree, replace_at, write_at,
+    base_from, behind_link, blocking_ancestor, changed_since_staged, identity, inside, prune_dirs,
+    remove_file, remove_tree, replace_at, write_at,
 };
 use crate::wc::layout::{FOLDER_THEIRS, FileKind, THEIRS_SUFFIX, WcBlock, WcTree};
 use crate::wc::project::Projection;
@@ -1242,8 +1242,9 @@ pub fn apply_update(
 
 /// Finishes an interrupted update from its record (`UPDATE_FILE`): refuses with `E_WC_DIRTY`
 /// when a file it writes or removes changed since (it holds neither its earlier text, nor the
-/// update's, nor is gone), else applies the recorded plan again from the start (each step is
-/// safe to repeat). Returns the record.
+/// update's, nor is gone; or, at a path it writes, a link or a directory stands at it, or a
+/// non-directory where one of its directories goes, which the refusal names), else applies the recorded plan again from the
+/// start (each step is safe to repeat). Returns the record.
 pub fn resume_update(place: &Place, st: &mut WcState) -> Result<UpdateJournal, RdyError> {
     let root = &place.root;
     let view = st
@@ -1276,6 +1277,20 @@ pub fn resume_update(place: &Place, st: &mut WcState) -> Result<UpdateJournal, R
         .before
         .iter()
         .filter(|(p, was)| {
+            // at a path the update writes: a non-directory where an ancestor directory must go,
+            // or a link or directory at the path itself. Writing would remove it (an update
+            // writes only regular files). A removed path is not checked: apply_files leaves
+            // what is not a regular file there, as a fresh update does.
+            let writes = planned.contains_key(&p.to_lowercase());
+            if writes
+                && inside(p).is_ok_and(|q| {
+                    behind_link(root, q)
+                        || fs::symlink_metadata(root.join(q))
+                            .is_ok_and(|m| !m.file_type().is_file())
+                })
+            {
+                return true;
+            }
             let now = disk_text(root, p);
             !(now.is_none()
                 || now == **was
@@ -1284,6 +1299,15 @@ pub fn resume_update(place: &Place, st: &mut WcState) -> Result<UpdateJournal, R
         .map(|(p, _)| p.as_str())
         .collect();
     if let Some(first) = changed.first() {
+        // behind a file: what to move aside is that file, not the path under it
+        if let Some(ancestor) = inside(first).ok().and_then(|q| blocking_ancestor(root, q)) {
+            let ancestor = ancestor.display();
+            return Err(RdyError::new(
+                E_WC_DIRTY,
+                format!("{ancestor} is a file where the update writes {first}"),
+                format!("move {ancestor} aside, then run rdy update again to finish the update"),
+            ));
+        }
         return Err(RdyError::new(
             E_WC_DIRTY,
             format!(

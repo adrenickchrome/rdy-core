@@ -15,6 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const SHEET_LIST_CAP: usize = 20;
 /// The most fact sheets one search returns; `entities_omitted` counts the rest.
 pub const MAX_RESOLVED: usize = 8;
+/// The most characters of a sheet's `definition` (RULING R17); `omitted["definition"]` counts
+/// the characters cut.
+pub const DEFINITION_MAX: usize = 1000;
 
 /// What the graph says about one entity: its definition and value, the facts and other content
 /// that describe it, the decisions that govern it or those, and what else depends on it.
@@ -33,7 +36,8 @@ pub struct FactSheet {
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
-    /// The entity's body, each reference read as the summaries read it (a value as its value).
+    /// The entity's body, each reference read as the summaries read it (a value as its value),
+    /// cut to [`DEFINITION_MAX`] characters on a word boundary and ended with `…` when longer.
     pub definition: String,
     pub path: Option<String>,
     /// Normative facts tied to the entity (claims, requirements, constraints, flows).
@@ -42,7 +46,8 @@ pub struct FactSheet {
     pub also_described_in: Vec<SheetBlock>,
     pub decisions: Vec<SheetDecision>,
     pub dependents: Vec<SheetBlock>,
-    /// Entries each list's cut dropped, by list name.
+    /// Entries each list's cut dropped, by list name; `on` sums the ids cut from the listed
+    /// decisions' `on`, and `definition` counts the characters cut from the definition.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub omitted: BTreeMap<String, usize>,
 }
@@ -64,7 +69,8 @@ pub struct SheetDecision {
     pub status: String,
     pub statement: String,
     pub via: String,
-    /// The facts or content blocks a `governs` decision governs.
+    /// The facts or content blocks a `governs` decision governs, at most [`SHEET_LIST_CAP`];
+    /// the sheet's `omitted["on"]` counts the rest.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub on: Vec<String>,
 }
@@ -113,6 +119,30 @@ fn cut<T>(name: &str, mut items: Vec<T>, omitted: &mut BTreeMap<String, usize>) 
         items.truncate(SHEET_LIST_CAP);
     }
     items
+}
+
+/// `text` cut to [`DEFINITION_MAX`] characters at the last word boundary within them, then `…`,
+/// with the count of characters cut; `text` itself and 0 when it fits.
+fn cut_definition(text: String) -> (String, usize) {
+    let total = text.chars().count();
+    if total <= DEFINITION_MAX {
+        return (text, 0);
+    }
+    let end = text
+        .char_indices()
+        .nth(DEFINITION_MAX)
+        .map_or(text.len(), |(i, _)| i);
+    let head = &text[..end];
+    // a word the limit splits is dropped whole, unless the head is one word
+    let head = match text[end..].chars().next() {
+        Some(c) if !c.is_whitespace() => {
+            head.rfind(char::is_whitespace).map_or(head, |i| &head[..i])
+        }
+        _ => head,
+    }
+    .trim_end();
+    let kept = head.chars().count();
+    (format!("{head}…"), total - kept)
 }
 
 impl ReadState {
@@ -274,8 +304,23 @@ impl ReadState {
         let mut omitted = BTreeMap::new();
         let facts = cut("facts", blocks(facts), &mut omitted);
         let also_described_in = cut("also_described_in", blocks(content), &mut omitted);
-        let decisions = cut("decisions", decisions, &mut omitted);
+        let mut decisions = cut("decisions", decisions, &mut omitted);
+        // each listed decision's `on` keeps its first SHEET_LIST_CAP ids; one count for all
+        let mut on_cut = 0;
+        for d in &mut decisions {
+            if d.on.len() > SHEET_LIST_CAP {
+                on_cut += d.on.len() - SHEET_LIST_CAP;
+                d.on.truncate(SHEET_LIST_CAP);
+            }
+        }
+        if on_cut > 0 {
+            omitted.insert("on".to_string(), on_cut);
+        }
         let dependents = cut("dependents", blocks(dependents), &mut omitted);
+        let (definition, definition_cut) = cut_definition(body_in(e, &m).trim().to_string());
+        if definition_cut > 0 {
+            omitted.insert("definition".to_string(), definition_cut);
+        }
         let path = match m.doc_of(id) {
             Some(doc) => m.path_of(&doc.id),
             None => m.path_of(id),
@@ -293,7 +338,7 @@ impl ReadState {
                 .filter(|k| !k.is_empty())
                 .map(str::to_string),
             value: value_text(e),
-            definition: body_in(e, &m).trim().to_string(),
+            definition,
             path,
             facts,
             also_described_in,

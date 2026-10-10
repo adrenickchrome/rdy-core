@@ -12,10 +12,10 @@ use rdy_model::{
     AltChoice, AltSet, AltStatus, ApprovalEvidence, Block, BlockId, Change, ChangeLinks,
     EvidenceKind, FieldValue, Hash, LandingRecord, Op, Proposal, decision,
 };
-use rdy_schema::{Issue, Severity, validate_block};
+use rdy_schema::{Issue, Severity, validate_block, validate_prefix};
 use rdy_store::{AltLanding, Conflict, LandRequest, MergeChange, Relay, merge_on_blocks};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// A proposal version as an approver names it: the version's hash, the proposal's stable id (its
@@ -55,9 +55,9 @@ pub struct ProposalInfo {
     pub blocking: Vec<ConflictInfo>,
     /// The tensions that involve one of the version's changes, each with `refuses`: the
     /// refusing ones first (they refuse its landing, `E_BLOCKING_TENSION`; read from what the
-    /// version lands, `ReadState::refusing_tensions`), then by id; at most
-    /// `PROPOSAL_TENSIONS_MAX`. A tension whose blocks all carry a blocking conflict is left
-    /// out: the conflict reports it.
+    /// version lands, its landing form), then by id; at most `PROPOSAL_TENSIONS_MAX`. A kind
+    /// judged on the net change (unjustified_change, FW-JU1) is listed only in its landing form.
+    /// A tension whose blocks all carry a blocking conflict is left out: the conflict reports it.
     pub tensions: Vec<TensionInfo>,
     /// The tensions left out past `PROPOSAL_TENSIONS_MAX`.
     #[serde(skip_serializing_if = "is_zero")]
@@ -181,10 +181,6 @@ pub struct LandingRow {
     pub chosen: Option<AltRef>,
 }
 
-/// The advice an approver gets when the version no longer applies to canon: the fix is the
-/// author's, never "re-read and retry", which is a writer's.
-const STALE_FOR_APPROVER: &str = "the proposal is stale: its author must rebase the view and propose again; then approve the new version";
-
 /// A 32-byte ref value as a hash.
 fn ref_hash(bytes: &[u8], what: &str) -> Result<Hash, RdyError> {
     <[u8; 32]>::try_from(bytes)
@@ -233,13 +229,60 @@ fn moved(
     ))
 }
 
-/// An `E_STALE_BASE` or `E_ALREADY_EXISTS` on the approve path keeps its code and message, with
-/// the approver's advice as its fix.
-fn approver_stale(mut e: RdyError) -> RdyError {
-    if e.code == E_STALE_BASE || e.code == E_ALREADY_EXISTS {
-        e.fix = STALE_FOR_APPROVER.into();
+/// A store refusal on the approve path, worded for the approver: an `E_STALE_BASE` or
+/// `E_ALREADY_EXISTS` keeps its code, names the block and the version's view `view`, and gives
+/// the author's fix, never "re-read and retry", which is a writer's. Any other error converts as
+/// usual.
+fn approver_stale(e: rdy_store::StoreError, view: &str) -> RdyError {
+    use rdy_store::StoreError;
+    match e {
+        StoreError::StaleBase {
+            id,
+            expected,
+            actual: Some(actual),
+        } => RdyError::new(
+            E_STALE_BASE,
+            format!(
+                "{id} changed in canon after this version's base: the version writes it from {}, canon has {}",
+                expected.short(),
+                actual.short()
+            ),
+            format!(
+                "the version no longer applies: its author must update {id} from canon's version in view {view} (or, if {view} is pinned, in a view that reads canon) and propose again; then approve the new version"
+            ),
+        ),
+        StoreError::StaleBase {
+            id,
+            expected,
+            actual: None,
+        } => RdyError::new(
+            E_STALE_BASE,
+            format!(
+                "{id} was deleted in canon after this version's base ({})",
+                expected.short()
+            ),
+            format!(
+                "its author must drop the op on {id}, or re-create it from a view that reads canon, and propose again; then approve the new version"
+            ),
+        ),
+        StoreError::DeletedSince(id) => RdyError::new(
+            E_STALE_BASE,
+            format!(
+                "{id} was deleted in canon after the base view {view} reads; landing this version would bring it back without having seen that delete"
+            ),
+            format!(
+                "its author must re-create {id} from a view that reads canon, or drop the change that creates it, and propose again; then approve the new version"
+            ),
+        ),
+        StoreError::AlreadyExists(id) => RdyError::new(
+            E_ALREADY_EXISTS,
+            format!("{id} was created in canon after this version's base"),
+            format!(
+                "its author must drop the create of {id}, or update canon's {id} in view {view}, and propose again; then approve the new version"
+            ),
+        ),
+        other => other.into(),
     }
-    e
 }
 
 /// FW-B9: what a relayed approval must satisfy, and the evidence it records. Only a human
@@ -278,11 +321,25 @@ fn relay_evidence_kind(
             "quote the human's words with --evidence",
         ));
     }
-    if relay.by.actor.is_empty() {
+    if relay.by.actor.trim().is_empty() {
         return Err(RdyError::new(
             E_BAD_INPUT,
             "relayed_by needs an actor",
             "name the relaying agent, e.g. --relayed-by agent:name",
+        ));
+    }
+    if relay.by.run.as_deref().is_some_and(|r| r.trim().is_empty()) {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "relayed_by has an empty run",
+            "name the run after '/', e.g. --relayed-by agent:name/run-7, or drop the '/'",
+        ));
+    }
+    if relay.evidence.session_ref.trim().is_empty() {
+        return Err(RdyError::new(
+            E_BAD_INPUT,
+            "the session reference is empty",
+            "pass --session <ref>, or leave it out (it defaults to cli)",
         ));
     }
     match &opts.evidence {
@@ -491,10 +548,19 @@ pub(crate) fn blocking_conflicts(
         })
         .collect();
     let deleters = reader.merge_deleters(base.as_ref(), &state, &touched)?;
+    // the merge asks for the producer of each touched block's base version only: read them
+    // first, so a damaged index entry fails the check instead of reading as "no producer",
+    // which would settle the base's side of a conflict (msw2)
+    let mut producers: HashMap<Hash, Option<Hash>> = HashMap::new();
+    for v in touched.iter().filter_map(|b| state.blocks.get(b)) {
+        if !producers.contains_key(v) {
+            producers.insert(*v, reader.producer(v)?);
+        }
+    }
     Ok(merge_on_blocks(
         &state,
         &input,
-        &|v| reader.producer(v).ok().flatten(),
+        &|v| producers.get(v).copied().flatten(),
         &|b| deleters.get(b).copied(),
         &touched,
     )
@@ -552,24 +618,15 @@ fn is_zero(n: &usize) -> bool {
 
 impl ReadState {
     /// The tensions that refuse landing `changes` (one version's changes, proposed from view
-    /// `view`): of [`ReadState::landing_tensions`], each blocking, not dismissed, and with every
-    /// side canon or one of `changes`, so that landing them would put it into canon. By id.
+    /// `view`), of `tensions` (their [`ReadState::landing_tensions`]): each blocking, not
+    /// dismissed, and with every side canon or one of `changes`, so that landing them would put
+    /// it into canon. By id.
     ///
     /// The gate judges what lands (tgat1): a change that another view also holds, or a write the
     /// view overwrites later but a subset leaves out, is read as the landing set has it, not as
     /// the in-flight set does. A tension whose sides are all canon (a fork, duplicate definition
     /// or deprecated reference standing in canon; FW-CH6, D-CRTJG) has no change side, so it
     /// never refuses a landing.
-    pub fn refusing_tensions(
-        &self,
-        view: &str,
-        changes: &[Hash],
-    ) -> Result<Vec<Arc<Tension>>, RdyError> {
-        let tensions = self.landing_tensions(view, changes)?;
-        Ok(self.refusing_among(changes, tensions))
-    }
-
-    /// The refusing ones of `tensions` (the landing tensions of `changes`).
     fn refusing_among(&self, changes: &[Hash], tensions: Vec<Arc<Tension>>) -> Vec<Arc<Tension>> {
         let mine: BTreeSet<&Hash> = changes.iter().collect();
         tensions
@@ -588,8 +645,10 @@ impl ReadState {
 
     /// The tensions a version of view `view` with changes `changes` lists: the event-derived
     /// tensions that involve one of `changes` (informational), and the refusing ones
-    /// ([`ReadState::refusing_tensions`]), each with `refuses` (true exactly for the refusing
-    /// ones, so it agrees with what landing does). The refusing ones come first, then by id. A
+    /// (`refusing_among` the landing forms), each with `refuses` (true exactly for the refusing
+    /// ones, so it agrees with what landing does). A kind judged on the net change
+    /// (unjustified_change, FW-JU1) is listed only in its landing form, never in another view's
+    /// in-flight form. The refusing ones come first, then by id. A
     /// tension whose involved blocks all carry one of the version's blocking conflicts
     /// (`conflicted`) is left out: the conflict reports it. At most `max` are listed, built
     /// with their sides; the rest are only counted (the second value).
@@ -600,16 +659,23 @@ impl ReadState {
         conflicted: &BTreeSet<BlockId>,
         max: usize,
     ) -> Result<(Vec<TensionInfo>, usize), RdyError> {
-        let refusing = self.refusing_tensions(view, changes)?;
+        let landing = self.landing_tensions(view, changes)?;
+        let net = |t: &Tension| crate::tensions::judged_on_the_net_change(t.kind);
+        let net_forms: Vec<Arc<Tension>> = landing.iter().filter(|t| net(t)).cloned().collect();
+        let refusing = self.refusing_among(changes, landing);
         let refuses: BTreeSet<Hash> = refusing.iter().map(|t| t.id).collect();
         // never the whole set: a proposal made right after a landing must not build canon's
         // part, which no tension with a change side is in
-        let mine = self.tensions_of_changes(changes)?;
+        // FW-JU1: an unjustified change is judged on the proposal's net change: its landing form, never another view's in-flight form
+        let mine = self
+            .tensions_of_changes(changes)?
+            .into_iter()
+            .filter(|t| !net(t));
         let mut seen = BTreeSet::new();
         let mut listed = vec![];
         // a refusing tension is listed in its landing form; an in-flight form with another id
         // (another severity, sides or versions) is listed beside it as information
-        let all = refusing.into_iter().chain(mine);
+        let all = refusing.into_iter().chain(net_forms).chain(mine);
         for t in all {
             if !seen.insert(t.id) {
                 continue;
@@ -829,9 +895,30 @@ fn not_lost(st: &ReadState, view: &str, what: impl Fn(&str) -> String) -> Result
     }
 }
 
-/// altg1: a change written in a member view of an open set (its `links.alternative`) is that
-/// member's alternative: it lands only in a version proposed from that member's view that chose
-/// that member (`chosen`). A member since removed from the set no longer binds its changes.
+/// altg1, msw20 (FW-AL1): the bindings of a proposal's changes.
+///
+/// 1. **Bindings are fixed when a change enters the set.** A change written in a member view of
+///    an open set (its `links.alternative`) is that member's alternative while the set is open
+///    and still lists the member. A change that exactly one member held when the set was created
+///    stays bound to that member, whatever any view includes or excludes later; one that two or
+///    more members held then is common ground; one that no member held then is not bound
+///    (`CoordHeads::alt_binds`). A member added later is snapshotted at its join the same way;
+///    bindings fixed earlier never change. A removed member releases its bindings (only an open
+///    set changes members), and a change it shared stays common ground. Every binding applies:
+///    a bound change lands only in a version proposed from its member's view that chose that
+///    member.
+/// 2. **A chosen set keeps its losers bound.** A change bound to a member the set did not choose
+///    (by its link or by rule 1) lands only in a proposal that records a decision superseding or
+///    refining a decision the choosing landing created (`E_ALT_CHOSEN`), whichever view proposes.
+///    A losing alternative never releases itself: the release must come from a change that has
+///    no losing binding.
+///    When that landing created no decision, only a decision the proposal creates releases it,
+///    in a change that is not itself bound to a losing member: an `Update` never releases, and
+///    neither does a loser's own decision. An abandoned set binds nothing.
+/// 3. **Two open sets.** A change bound in more than one open set can never land: one proposal
+///    chooses in one set only, so the refusal names every set and says to exclude the change.
+///
+/// Open-set checks run before chosen-set checks.
 fn linked_alts(
     st: &ReadState,
     view: &str,
@@ -839,39 +926,218 @@ fn linked_alts(
     ids: &[Hash],
     changes: &[Change],
 ) -> Result<(), RdyError> {
+    let heads = st.coord_heads();
+    let open = &heads.open_alts;
     for (id, c) in ids.iter().zip(changes) {
-        let Some(a) = &c.links.alternative else {
+        // the open-set bindings, in stable-id order: the live link and each set's fixed binding
+        let mut bindings: BTreeSet<AltChoice> = BTreeSet::new();
+        if let Some(a) = &c.links.alternative
+            && open
+                .get(&a.set)
+                .is_some_and(|(_, set)| set.members.iter().any(|m| m.view == a.member))
+        {
+            bindings.insert(a.clone());
+        }
+        for stable in open.keys() {
+            if let Some(member) = heads.alt_binds.get(stable).and_then(|b| b.bound.get(id)) {
+                bindings.insert(AltChoice {
+                    set: *stable,
+                    member: member.clone(),
+                });
+            }
+        }
+        let Some(broken) = bindings
+            .iter()
+            .find(|a| !(a.member == view && chosen == Some(*a)))
+        else {
             continue;
         };
-        let Some((_, set)) = st.coord_heads().open_alts.get(&a.set) else {
-            continue;
+        let label = |a: &AltChoice| {
+            open.get(&a.set)
+                .map_or(a.member.as_str(), |(_, set)| member_label(set, &a.member))
+                .to_string()
         };
-        if !set.members.iter().any(|m| m.view == a.member) {
-            continue;
+        if bindings.len() == 1 {
+            return Err(RdyError::new(
+                E_ALT_MEMBER,
+                format!(
+                    "change {} is {} member {}'s alternative",
+                    id.short(),
+                    alt_label(&broken.set),
+                    label(broken)
+                ),
+                format!("propose from {} to choose it", broken.member),
+            ));
         }
-        if a.member == view && chosen == Some(a) {
-            continue;
-        }
+        let named: Vec<String> = bindings
+            .iter()
+            .map(|a| format!("{} member {}", alt_label(&a.set), label(a)))
+            .collect();
         return Err(RdyError::new(
             E_ALT_MEMBER,
             format!(
-                "change {} is {} member {}'s alternative",
+                "change {} is bound in {} open sets: {}; one proposal chooses in one set only",
                 id.short(),
-                alt_label(&a.set),
-                member_label(set, &a.member)
+                bindings.len(),
+                named.join(", ")
             ),
-            format!("propose from {} to choose it", a.member),
+            format!(
+                "exclude {} from view {view} (rdy view exclude) and propose without it; it can land once only one of these sets is open",
+                id.short()
+            ),
         ));
+    }
+    // each change's losing bindings in chosen sets: (set, losing member)
+    let losers: Vec<Vec<(&Hash, &AltSet, &str)>> = ids
+        .iter()
+        .zip(changes)
+        .map(|(id, c)| {
+            let mut out = Vec::new();
+            for (stable, (_, set)) in &heads.settled_alts {
+                let Some(binds) = heads.alt_binds.get(stable) else {
+                    continue;
+                };
+                let Some(ch) = binds.chosen.as_ref() else {
+                    continue;
+                };
+                let linked = c
+                    .links
+                    .alternative
+                    .as_ref()
+                    .filter(|a| a.set == *stable)
+                    .map(|a| a.member.as_str());
+                let fixed = binds.bound.get(id).map(String::as_str);
+                for loser in [linked, fixed].into_iter().flatten() {
+                    if loser != ch.member && set.members.iter().any(|m| m.view == loser) {
+                        out.push((stable, set, loser));
+                    }
+                }
+            }
+            out
+        })
+        .collect();
+    if losers.iter().all(Vec::is_empty) {
+        return Ok(());
+    }
+    // the decisions the proposal writes: read once, only when a chosen-set binding needs them
+    let free: Vec<bool> = losers.iter().map(Vec::is_empty).collect();
+    let (created, targets) = decisions_written(st, changes, &free);
+    for (id, bound) in ids.iter().zip(&losers) {
+        for &(stable, set, loser) in bound {
+            let ch = heads.alt_binds[stable]
+                .chosen
+                .as_ref()
+                .expect("a losing binding is in a chosen set");
+            let ok = if ch.decisions.is_empty() {
+                created
+            } else {
+                ch.decisions.iter().any(|d| targets.contains(d))
+            };
+            if ok {
+                continue;
+            }
+            let at = format!(
+                "change {} belongs to member {}, which lost set {}",
+                id.short(),
+                member_label(set, loser),
+                alt_label(stable)
+            );
+            return Err(if ch.decisions.is_empty() {
+                RdyError::new(
+                    E_ALT_CHOSEN,
+                    format!(
+                        "{at} (chosen by landing {}, which recorded no decision)",
+                        ch.landing.short()
+                    ),
+                    "land it with a new decision that records the revisit",
+                )
+            } else {
+                let d = ch
+                    .decisions
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                RdyError::new(
+                    E_ALT_CHOSEN,
+                    format!("{at} (chosen by {d})"),
+                    format!("land it with a decision that supersedes or refines {d}"),
+                )
+            });
+        }
     }
     Ok(())
 }
 
+/// msw20: whether `changes` create a decision that releases a loser when the choice recorded
+/// none (RULING Q1, Group 8), and the blocks the proposal's decisions supersede or refine. One
+/// principle covers both: a losing alternative never releases itself. A change marked `free`
+/// has no losing binding in a chosen set.
+/// The decision blocks are folded in landing order: the last `Create` or `Update` of each block
+/// wins, and a `Delete` drops it. A block counts as created only when a `Create` in a free change
+/// made it (an `Update`, tracking-only or not, never creates). Its supersede and refine targets
+/// count only when a free change wrote its surviving version (a free change's `Update` that adds
+/// a refine counts; a loser's own decision never does).
+fn decisions_written(
+    st: &ReadState,
+    changes: &[Change],
+    free: &[bool],
+) -> (bool, BTreeSet<BlockId>) {
+    // per block: the surviving version, whether a free change created it, and whether a free
+    // change wrote the surviving version
+    let mut last: BTreeMap<&BlockId, (Option<&Block>, bool, bool)> = BTreeMap::new();
+    for i in st.landing_order(changes) {
+        for op in &changes[i].ops {
+            match op {
+                Op::Create { block } => {
+                    last.insert(&block.id, (Some(block), free[i], free[i]));
+                }
+                Op::Update { block, .. } => {
+                    let e = last.entry(&block.id).or_insert((None, false, false));
+                    e.0 = Some(block);
+                    e.2 = free[i];
+                }
+                Op::Delete { id, .. } => {
+                    last.insert(id, (None, false, false));
+                }
+            }
+        }
+    }
+    let decisions: Vec<(&Block, bool, bool)> = last
+        .into_values()
+        .filter_map(|(b, created, wrote)| b.map(|b| (b, created, wrote)))
+        .filter(|(b, _, _)| b.block_type == decision::DECISION)
+        .collect();
+    let targets = decisions
+        .iter()
+        .filter(|(_, _, wrote)| *wrote)
+        .flat_map(|(b, _, _)| {
+            [decision::SUPERSEDES, decision::REFINES]
+                .into_iter()
+                .filter_map(|k| b.links.get(k))
+                .flatten()
+                .map(|l| l.target.clone())
+        })
+        .collect();
+    (decisions.iter().any(|(_, created, _)| *created), targets)
+}
+
 /// The canon that would result from landing `changes` on `st`'s canon, and each applied change's
 /// position in `changes`, in applied order. The merge surfaces E_STALE_BASE, E_ALREADY_EXISTS and
-/// E_FROZEN early.
-fn prospective(st: &ReadState, changes: &[Change]) -> Result<(Materialized, Vec<usize>), RdyError> {
+/// E_FROZEN early; on the approve path (`approving`, the version's view) they are worded for the
+/// approver.
+fn prospective(
+    st: &ReadState,
+    changes: &[Change],
+    approving: Option<&str>,
+) -> Result<(Materialized, Vec<usize>), RdyError> {
     let reader = st.reader();
-    let (_, applied) = reader.merge_checked(&*st.canon_snapshot()?, changes)?;
+    let (_, applied) = reader
+        .merge_checked(&*st.canon_snapshot()?, changes)
+        .map_err(|e| match approving {
+            Some(view) => approver_stale(e, view),
+            None => e.into(),
+        })?;
     let next = st
         .materialized(&Scope::Canon)?
         .with(&applied_ops(changes, &applied));
@@ -910,13 +1176,15 @@ pub(crate) fn applied_ops(changes: &[Change], applied: &[usize]) -> Vec<Op> {
 
 impl Rdy {
     /// Validates the canon that would result from landing `changes` on `st`'s canon; returns the
-    /// issues and each applied change's position in `changes`, in applied order.
+    /// issues and each applied change's position in `changes`, in applied order. `approving` is
+    /// the version's view on the approve path (see `prospective`).
     fn prospective_issues(
         &self,
         st: &ReadState,
         changes: &[Change],
+        approving: Option<&str>,
     ) -> Result<(Vec<Issue>, Vec<usize>), RdyError> {
-        let (next, applied) = prospective(st, changes)?;
+        let (next, applied) = prospective(st, changes, approving)?;
         Ok((self.issues_in(st, changes, &next, &applied)?, applied))
     }
 
@@ -988,6 +1256,7 @@ impl Rdy {
                     found
                 };
             let parent = b.parent.as_ref().and_then(|p| next.get(p));
+            issues.extend(validate_prefix(st.pack(), b));
             issues.extend(validate_block(st.pack(), b, parent));
             // two views can each be fine alone and clash or loop once both are in canon
             let mut walk = b.parent.clone();
@@ -1424,7 +1693,7 @@ impl Rdy {
         if blocking.is_empty() {
             // K1 (FW-PR3): a key rdy derived for a block this version creates, held by another
             // block in the prospective canon, is re-derived by a change rdy adds to the view
-            let (next, applied) = prospective(&st, &changes)?;
+            let (next, applied) = prospective(&st, &changes, None)?;
             let vm = st.materialized(&Scope::View(view.to_string()))?;
             let re = crate::keys::rederive(
                 &next,
@@ -1439,7 +1708,7 @@ impl Rdy {
                 change.links.alternative = alternative.clone();
                 let mut all = changes.clone();
                 all.push(change.clone());
-                issues = self.prospective_issues(&st, &all)?.0;
+                issues = self.prospective_issues(&st, &all, None)?.0;
                 rekey = Some((change, re));
             }
             if let Some(first) = issues.iter().find(|i| i.severity == Severity::Error) {
@@ -1629,8 +1898,8 @@ impl Rdy {
                     ids.join(", ")
                 ),
                 format!(
-                    "the proposal is stale: its author must rebase the view and propose again (rdy propose --view {}); then approve the new version",
-                    p.view
+                    "the proposal is stale: its author must update the changed blocks in view {view} (rdy view show {view} lists its conflicts) and propose again (rdy propose --view {view}); then approve the new version",
+                    view = p.view
                 ),
             );
             e.issues = hit
@@ -1840,7 +2109,7 @@ impl Rdy {
         };
         let mut all = changes;
         all.extend(accept.clone());
-        let (mut issues, order) = self.prospective_issues(&st, &all).map_err(approver_stale)?;
+        let (mut issues, order) = self.prospective_issues(&st, &all, Some(&p.view))?;
         if let Some(first) = issues.iter().find(|i| i.severity == Severity::Error) {
             let mut e = RdyError::new(E_VALIDATION, first.message.clone(), first.fix.clone());
             e.issues = issues;
@@ -1869,7 +2138,7 @@ impl Rdy {
             Err(rdy_store::StoreError::ProposalMoved { latest, .. }) => {
                 return Err(moved(&st, &pref, &latest, &p.view)?);
             }
-            Err(e) => return Err(approver_stale(e.into())),
+            Err(e) => return Err(approver_stale(e, &p.view)),
         };
         // 5. publish canon incrementally: the previous canon with the landed ops (snap1)
         if let Err(e) = self.publish(Delta::Landed {

@@ -202,7 +202,11 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "keys_assign" => keys_assign(cx, parse(op, args, "{view?}")?),
         "edit_block" => edit_block(
             cx,
-            parse(op, args, "{yaml, view?, brief?, max_tokens?, reason?}")?,
+            parse(
+                op,
+                args,
+                "{yaml, view?, base?, conflict?, brief?, max_tokens?, reason?}",
+            )?,
         ),
         "propose" => propose(
             cx,
@@ -242,7 +246,10 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
                 "{view, ops, nonce, rewrite, message?, implements?, editorial?, brief?, max_tokens?}",
             )?,
         ),
-        "wc_nonce" => wc_nonce(cx, parse(op, args, "{view, nonce, rewrite}")?),
+        "wc_nonce" => wc_nonce(
+            cx,
+            parse(op, args, "{view, nonce, rewrite, recent?, since?}")?,
+        ),
         "intent" => intent::run_intent(
             cx.engine,
             cx.session,

@@ -194,10 +194,10 @@ impl<'r> Resolver<'r> {
         }
         let op = self.op(op_id)?;
         if depth > MAX_UNDO_DEPTH {
-            return Err(StoreError::Decode(format!(
-                "view {:?}: the undo chain at {op_id} is deeper than {MAX_UNDO_DEPTH}",
-                self.view
-            )));
+            return Err(StoreError::UndoTooDeep {
+                view: self.view.to_string(),
+                op: *op_id,
+            });
         }
         let r = match op.op {
             ViewOpKind::Commit { change } => ResolvedOp::Include(vec![change]),
@@ -329,17 +329,61 @@ impl StoreReader {
     /// since: a read that needs a view's head and its set together reads the head once and passes
     /// it here, never `included`, which would read the head again.
     pub fn included_at(&self, name: &str, head: &ViewHead) -> Result<Arc<Vec<Hash>>, StoreError> {
-        let cached = self.cached_set(name);
-        if let Some((h, set)) = &cached
-            && *h == head.head
+        self.set_at(name, head.head, true)
+    }
+
+    /// The changes view `name` included just before the log took object `object` (msw20): the
+    /// set at the newest op of `name`'s chain that the log holds before `object`. The walk goes
+    /// back from the head. A view with no op before `object` (or no ref) is empty. `object` must
+    /// be indexed (`NotFound`). The read never reads or writes the per-view set cache, so a
+    /// past set never serves a later `included`.
+    pub fn included_before(&self, name: &str, object: &Hash) -> Result<Arc<Vec<Hash>>, StoreError> {
+        let mark = self
+            .index()
+            .object(object)?
+            .ok_or(StoreError::NotFound(*object))?;
+        let Some(head) = self.view_head(name)? else {
+            return Ok(Arc::new(vec![]));
+        };
+        let mut cur = head.head;
+        loop {
+            let at = self
+                .index()
+                .typed(kinds::VIEW_OP, &cur)?
+                .ok_or_else(|| broken(name, &cur, "the op is missing"))?;
+            if at < mark {
+                return self.set_at(name, cur, false);
+            }
+            let op = self.view_op(&cur)?;
+            if op.view != name {
+                return Err(broken(
+                    name,
+                    &cur,
+                    format!("the op belongs to view {:?}", op.view),
+                ));
+            }
+            match op.prev {
+                Some(prev) => cur = prev,
+                None => return Ok(Arc::new(vec![])),
+            }
+        }
+    }
+
+    /// The changes view `name` includes at op `head`: the walk back to a checkpoint, then the
+    /// ops after it applied. With `cached`, the walk also stops at the cached head, and the
+    /// answer becomes the cached set; without it, the cache is neither read nor written.
+    fn set_at(&self, name: &str, head: Hash, cached: bool) -> Result<Arc<Vec<Hash>>, StoreError> {
+        let cache = if cached { self.cached_set(name) } else { None };
+        if let Some((h, set)) = &cache
+            && *h == head
         {
             return Ok(Arc::clone(set));
         }
         // newest first: the ops after the checkpoint (or the cached head), with their ids
         let mut pending: Vec<(Hash, ViewOpKind)> = vec![];
-        let mut cur = head.head;
+        let mut cur = head;
         let set: Vec<Hash> = loop {
-            if let Some((h, set)) = &cached
+            if let Some((h, set)) = &cache
                 && *h == cur
             {
                 break set.as_ref().clone();
@@ -385,7 +429,9 @@ impl StoreReader {
             }
         }
         let set = Arc::new(set.list);
-        self.cache_set(name, head.head, Arc::clone(&set));
+        if cached {
+            self.cache_set(name, head, Arc::clone(&set));
+        }
         Ok(set)
     }
 }

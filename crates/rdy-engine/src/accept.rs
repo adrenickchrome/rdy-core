@@ -3,13 +3,16 @@ use crate::error::*;
 use crate::lexicon::link_kind_for;
 use crate::write::{LinkInput, OpInput, WriteRequest, WriteResult};
 use crate::{Rdy, Scope, Session};
-use rdy_model::BlockId;
+use rdy_model::{BlockId, decision};
 use rdy_schema::Trait;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The most suggestions one accept takes.
 pub const MAX_ACCEPT: usize = 500;
+
+/// The most skips the all-skipped refusal lists; the rest are counted.
+const SKIPS_LISTED: usize = 10;
 
 /// One suggestion, as a write or search response gave it (keys it does not use are ignored).
 #[derive(Clone, Debug, Deserialize)]
@@ -113,6 +116,8 @@ impl Rdy {
         let mut pending: BTreeMap<(BlockId, &'static str), Vec<String>> = BTreeMap::new();
         let mut skipped: Vec<Skipped> = vec![];
         let mut new_links = 0usize;
+        // the skips that are a link already there (or added by an earlier item)
+        let mut already = 0usize;
         let mut add = |pending: &mut BTreeMap<(BlockId, &'static str), Vec<String>>,
                        skipped: &mut Vec<Skipped>,
                        index: usize,
@@ -133,6 +138,7 @@ impl Rdy {
                 .is_some_and(|ls| ls.iter().any(|l| l.target.to_string() == target));
             let list = pending.entry((block.clone(), kind)).or_default();
             if has || list.contains(&target) {
+                already += 1;
                 skipped.push(Skipped {
                     index,
                     reason: format!("{block} already links to {target} by {kind}"),
@@ -178,14 +184,39 @@ impl Rdy {
                             "link to an entity: a block of a type that defines one (rdy_schema entities.types)",
                         ));
                     }
-                    add(
-                        &mut pending,
-                        &mut skipped,
-                        i,
-                        block,
-                        kind,
-                        target.to_string(),
-                    )?;
+                    // a stale item (the block is gone, or can no longer link this way) is
+                    // skipped; the rest of the batch still lands
+                    let Some(b) = m.get(&block) else {
+                        skipped.push(Skipped {
+                            index: i,
+                            reason: format!("no block {block} in view {view}"),
+                        });
+                        continue;
+                    };
+                    match link_kind_for(&self.pack, b) {
+                        None if decision::is_frozen(b) => skipped.push(Skipped {
+                            index: i,
+                            reason: format!(
+                                "{block} is an accepted or rejected decision and cannot change"
+                            ),
+                        }),
+                        None => skipped.push(Skipped {
+                            index: i,
+                            reason: format!("{block} cannot link to an entity"),
+                        }),
+                        Some(k) if k != kind => skipped.push(Skipped {
+                            index: i,
+                            reason: format!("{block} links to an entity by {k}, not {link}"),
+                        }),
+                        Some(_) => add(
+                            &mut pending,
+                            &mut skipped,
+                            i,
+                            block,
+                            kind,
+                            target.to_string(),
+                        )?,
+                    }
                 }
                 AcceptItem::Entity {
                     literal,
@@ -292,9 +323,28 @@ impl Rdy {
                 .insert(kind.to_string(), list);
         }
         if creates.is_empty() && updates.is_empty() {
+            if already == skipped.len() {
+                return Err(bad(
+                    "nothing to accept: every link is already there",
+                    "nothing to do",
+                ));
+            }
+            // some skips have another reason (a frozen decision, a deleted block): say each one,
+            // so a caller does not read the refusal as "the links are there"
+            let mut reasons: Vec<String> = skipped
+                .iter()
+                .take(SKIPS_LISTED)
+                .map(|s| format!("suggestion {}: {}", s.index, s.reason))
+                .collect();
+            if skipped.len() > SKIPS_LISTED {
+                reasons.push(format!("and {} more", skipped.len() - SKIPS_LISTED));
+            }
             return Err(bad(
-                "nothing to accept: every link is already there",
-                "nothing to do",
+                format!(
+                    "nothing to accept: every suggestion was skipped; {}",
+                    reasons.join("; ")
+                ),
+                "re-run the suggestions and accept the ones that still apply",
             ));
         }
         let entities = creates.len();

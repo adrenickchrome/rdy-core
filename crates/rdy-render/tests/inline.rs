@@ -392,3 +392,39 @@ fn md1_deep_or_unbalanced_markup_renders_without_overflowing() {
     let h = body(&brackets);
     assert!(h.starts_with("<p>[[[") && h.ends_with("</p>"));
 }
+
+#[test]
+fn msw12_a_backtick_in_a_link_target_does_not_hide_a_later_link() {
+    assert_eq!(
+        spans("[a](x`y) [b](z) `"),
+        "<a href=\"x`y\">a</a> <a href=\"z\">b</a> `"
+    );
+}
+
+#[test]
+fn msw12_a_backtick_in_a_nested_link_target_does_not_hide_a_later_link() {
+    assert_eq!(
+        spans("[x [a](b`c) y [d](e) `"),
+        "[x <a href=\"b`c\">a</a> y <a href=\"e\">d</a> `"
+    );
+    assert_eq!(
+        spans("[a [b](c`d) [e](f) `"),
+        "[a <a href=\"c`d\">b</a> <a href=\"f\">e</a> `"
+    );
+    assert_eq!(
+        spans("[[a](b`c)] [d](e) `"),
+        "[<a href=\"b`c\">a</a>] <a href=\"e\">d</a> `"
+    );
+    // accepted divergence from 4c9ec60 (ledger "Group 4 rulings"): the outer link wins
+    assert_eq!(spans("[x [a](b]c) y](z)"), "<a href=\"z\">x [a](b]c) y</a>");
+}
+
+#[test]
+fn msw12_hostile_bodies_render_in_linear_time() {
+    let open = "[".repeat(2_000_000);
+    assert_eq!(spans(&open), open);
+    let nested = "[x [a](b".repeat(250_000);
+    assert!(spans(&nested).starts_with("[x [a](b"));
+    let gap = format!("- a{}- b", "\n".repeat(2_000_000));
+    assert_eq!(body(&gap), "<ul><li>a</li><li>b</li></ul>");
+}

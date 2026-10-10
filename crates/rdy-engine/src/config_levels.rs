@@ -3,7 +3,12 @@
 //! most specific level that sets a key wins. Each key of [`KEY_LEVELS`] names the levels that may
 //! set it (R-P6); a key in a file of another level is `E_CONFIG` naming the right file. Keys
 //! outside the table are kept as they are and never shown; each one is a `W_CONFIG_UNKNOWN`
-//! warning naming the key, the file and the level (R-P6).
+//! warning naming the key, the file and the level (R-P6). A mapping key that holds a `.` is never
+//! known: rdy reads only nested keys. An unknown key meant as a review setting gets its own
+//! warning text (#832): one under `reviews` or nearest to a `reviews` key, a dotted `reviews.` key,
+//! and one anywhere whose last segment is (or is within 2 edits of) a `reviews` leaf. The text says
+//! that the review gate would stay off. Founder ruling (config typos warn): it is a warning, never
+//! `E_CONFIG`, and the project opens.
 
 use crate::{E_CONFIG, E_IO, E_NO_PROJECT, RdyError};
 use rdy_schema::{Issue, Severity};
@@ -11,7 +16,7 @@ use serde::Serialize;
 use serde_yaml_ng::{Mapping, Value};
 use std::path::{Path, PathBuf};
 
-/// The project config, read by `read_config`, `read_config_lenient`, `serve_config` and
+/// The project config, read by `read_config`, `parse_config`, `serve_config` and
 /// `pack_fingerprint`. M2f-b changes this constant.
 pub const PROJECT_FILE: &str = ".rdy/config.yaml";
 
@@ -387,13 +392,29 @@ fn level_name(level: Level) -> &'static str {
     }
 }
 
-/// The dotted paths in `map` that are neither a key of the table nor a section on the way to one.
-/// An unknown section is named by its leaves (`decision.home`), so a typo in a section's name
-/// still gets the nearest key.
-fn unknown_paths(map: &Mapping, prefix: &str, out: &mut Vec<String>) {
+/// A path of a file that is neither a key of the table nor a section on the way to one.
+struct Unknown {
+    /// The dotted path (`decision.home`).
+    path: String,
+    /// The value, when the path ends in one mapping key that holds a `.` (`"serve.idle_timeout":
+    /// 5`): rdy reads only nested keys, so that key is never known.
+    dotted: Option<Value>,
+}
+
+/// The unknown paths of `map`. An unknown section is named by its leaves (`decision.home`), so a
+/// typo in a section's name still gets the nearest key. A mapping key that holds a `.` is never a
+/// key or a section of the table, whatever it names.
+fn unknown_paths(map: &Mapping, prefix: &str, out: &mut Vec<Unknown>) {
     for (k, v) in map {
         let Some(k) = k.as_str() else { continue };
         let path = format!("{prefix}{k}");
+        if k.contains('.') {
+            out.push(Unknown {
+                path,
+                dotted: Some(v.clone()),
+            });
+            continue;
+        }
         if KEY_LEVELS.iter().any(|r| r.key == path) {
             continue;
         }
@@ -406,9 +427,34 @@ fn unknown_paths(map: &Mapping, prefix: &str, out: &mut Vec<String>) {
         }
         match v {
             Value::Mapping(inner) if !inner.is_empty() => unknown_paths(inner, &dotted, out),
-            _ => out.push(path),
+            _ => out.push(Unknown { path, dotted: None }),
         }
     }
+}
+
+/// The fix of a dotted key: the same setting written nested, one segment a line. `home` names the
+/// file to write it in when it is not the file it stands in (a review setting is project-only).
+fn nested_fix(path: &str, value: &Value, home: &str) -> String {
+    let segments: Vec<&str> = path.split('.').collect();
+    let last = segments.len() - 1;
+    let lines: Vec<String> = segments
+        .iter()
+        .enumerate()
+        .map(|(i, seg)| {
+            let pad = "  ".repeat(i);
+            if i == last {
+                format!("`{pad}{seg}: {}`", flow(value))
+            } else {
+                format!("`{pad}{seg}:`")
+            }
+        })
+        .collect();
+    let next = if segments.len() > 2 {
+        "on the next lines"
+    } else {
+        "on the next line"
+    };
+    format!("write it nested{home}: {} {next}", lines.join(" then "))
 }
 
 fn edit_distance(a: &str, b: &str) -> usize {
@@ -437,26 +483,100 @@ fn nearest_key(path: &str, level: Level) -> Option<&'static str> {
         .map(|(_, k)| k)
 }
 
+/// The fix text of an unknown key: the nearest known key, else remove it.
+fn unknown_fix(path: &str, level: Level, file: &str) -> String {
+    match nearest_key(path, level) {
+        Some(k) => format!("did you mean {k}? rename {path} in {file}"),
+        None => format!("remove {path} from {file}, or check its spelling"),
+    }
+}
+
+/// The `W_CONFIG_UNKNOWN` warnings of `map`, one per unknown path. A key meant as a review
+/// setting gets the review texts (#832): the review gate would stay off. That is a dotted key under
+/// `reviews`, an unknown key under `reviews` or nearest to a `reviews` key, and a key anywhere
+/// whose last segment is (or is within 2 edits of) the leaf of a `reviews` key. Founder ruling
+/// (config typos warn): a warning, never `E_CONFIG`, so the project opens.
 fn unknown_warnings(level: Level, map: &Mapping, user_file: Option<&Path>) -> Vec<Issue> {
     let mut paths = Vec::new();
     unknown_paths(map, "", &mut paths);
     let file = file_name(level, user_file);
     paths
         .into_iter()
-        .map(|path| Issue {
-            severity: Severity::Warning,
-            code: "W_CONFIG_UNKNOWN",
-            block: None,
-            message: format!(
-                "unknown key {path} in {file} ({} level); rdy ignores it",
-                level_name(level)
-            ),
-            fix: match nearest_key(&path, level) {
-                Some(k) => format!("did you mean {k}? rename {path} in {file}"),
-                None => format!("remove {path} from {file}, or check its spelling"),
-            },
+        .map(|u| {
+            let (message, fix) = unknown_text(level, &file, &u);
+            Issue {
+                severity: Severity::Warning,
+                code: "W_CONFIG_UNKNOWN",
+                block: None,
+                message,
+                fix,
+            }
         })
         .collect()
+}
+
+/// The leaf of the `reviews` key whose leaf `segment` is, or is within 2 edits of.
+fn review_leaf(segment: &str) -> Option<&'static str> {
+    KEY_LEVELS
+        .iter()
+        .filter_map(|r| r.key.strip_prefix("reviews."))
+        .map(|leaf| (edit_distance(segment, leaf), leaf))
+        .filter(|(d, _)| *d <= 2)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, leaf)| leaf)
+}
+
+/// The message and fix of unknown path `u` in `file` (`level`): the review texts for a key meant
+/// as a review setting, else the plain ones.
+fn unknown_text(level: Level, file: &str, u: &Unknown) -> (String, String) {
+    let path = &u.path;
+    // review settings are project-only: a fix in another file names the project config
+    let home = if level == Level::Project {
+        String::new()
+    } else {
+        format!(" in {PROJECT_FILE}")
+    };
+    if let (Some(v), true) = (&u.dotted, path.starts_with("reviews.")) {
+        return (
+            format!(
+                "{file}: `{path}` is written as one dotted key; rdy reads only nested keys, so \
+                 the review setting would be ignored"
+            ),
+            nested_fix(path, v, &home),
+        );
+    }
+    let unknown = || {
+        (
+            format!("unknown review setting {path} in {file}; the review gate would stay off"),
+            unknown_fix(path, level, file),
+        )
+    };
+    if path.starts_with("reviews.") {
+        return unknown();
+    }
+    let last = path.rsplit('.').next().unwrap_or(path);
+    if let Some(leaf) = review_leaf(last) {
+        return (
+            format!(
+                "unknown review setting {path} in {file}; the review gate would stay off; did you \
+                 mean reviews.{leaf}?"
+            ),
+            format!("move it under `reviews:`{home}"),
+        );
+    }
+    if nearest_key(path, level).is_some_and(|k| k.starts_with("reviews.")) {
+        return unknown();
+    }
+    (
+        format!(
+            "unknown key {path} in {file} ({} level); rdy ignores it",
+            level_name(level)
+        ),
+        match &u.dotted {
+            Some(v) => nested_fix(path, v, ""),
+            None => unknown_fix(path, level, file),
+        },
+    )
 }
 
 /// Why the value `rule.key` has in `map` is of the wrong type, or `None` when it has the type or
@@ -761,6 +881,69 @@ mod tests {
             e.warnings[0].fix.contains("serve.idle_timeout"),
             "{}",
             e.warnings[0].fix
+        );
+    }
+
+    /// Founder ruling (config typos warn): an unknown review setting is a warning in every
+    /// read, with the review-specific text; the project opens.
+    #[test]
+    fn msw19_an_unknown_review_setting_is_a_warning_in_every_read() {
+        let d = project("pack: p\nreviews:\n  require_uptodate: true\n", None);
+        let strict = effective(d.path(), None).unwrap().warnings;
+        let lenient = effective_lenient(d.path(), None).warnings;
+        for w in [&strict, &lenient] {
+            assert_eq!(w.len(), 1, "{w:?}");
+            assert_eq!(w[0].code, "W_CONFIG_UNKNOWN");
+            assert_eq!(
+                w[0].message,
+                "unknown review setting reviews.require_uptodate in .rdy/config.yaml; the review gate would stay off"
+            );
+            assert!(
+                w[0].fix
+                    .contains("did you mean reviews.require_up_to_date?"),
+                "{}",
+                w[0].fix
+            );
+        }
+        // an unknown key outside reviews stays a plain warning
+        let d = project("pack: p\nlater: 1\n", None);
+        assert_eq!(effective(d.path(), None).unwrap().warnings.len(), 1);
+    }
+
+    /// M14: a dotted key of three segments, or one inside a section, is nested a segment a line.
+    #[test]
+    fn msw19_a_dotted_key_of_three_segments_nests_each_segment() {
+        for config in ["pack: p\nserve.a.b: 1\n", "pack: p\nserve:\n  a.b: 1\n"] {
+            let d = project(config, None);
+            let w = effective(d.path(), None).unwrap().warnings;
+            assert_eq!(w.len(), 1, "{config:?}: {w:?}");
+            assert_eq!(
+                w[0].fix, "write it nested: `serve:` then `  a:` then `    b: 1` on the next lines",
+                "{config:?}"
+            );
+        }
+    }
+
+    /// M14: review settings are project-only, so a review key in .rdy/local.yaml is sent to the
+    /// project config.
+    #[test]
+    fn msw19_a_review_setting_in_local_yaml_names_the_project_config() {
+        let d = project("pack: p\n", Some("require_up_to_date: true\n"));
+        let w = effective(d.path(), None).unwrap().warnings;
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(
+            w[0].message
+                .contains("did you mean reviews.require_up_to_date?"),
+            "{}",
+            w[0].message
+        );
+        assert_eq!(w[0].fix, "move it under `reviews:` in .rdy/config.yaml");
+        let d = project("pack: p\n", Some("reviews.require_up_to_date: true\n"));
+        let w = effective(d.path(), None).unwrap().warnings;
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(
+            w[0].fix,
+            "write it nested in .rdy/config.yaml: `reviews:` then `  require_up_to_date: true` on the next line"
         );
     }
 

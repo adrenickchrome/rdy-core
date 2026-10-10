@@ -705,3 +705,88 @@ fn questions_cannot_be_deleted() {
     assert_eq!(e.code, "E_BAD_INPUT");
     assert!(e.message.contains("never deleted"), "{}", e.message);
 }
+
+#[test]
+fn msw11_a_nonce_lookup_since_a_head_reads_only_the_changes_after_it() {
+    let (_d, mut r) = project();
+    let commit = |r: &mut Rdy, name: String, nonce: String| {
+        let req = req(json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "D", "doc_type": "glossary"}}
+        ]));
+        let links = ChangeLinks {
+            client_nonce: Some(nonce),
+            ..Default::default()
+        };
+        r.write_linked(&agent(), req, links, None).unwrap();
+    };
+    for i in 0..30 {
+        commit(&mut r, format!("old{i}"), format!("old-{i}"));
+    }
+    let since = r.read().view_head("work").unwrap().head.to_string();
+    commit(&mut r, "mine".into(), "mine".into());
+    // many other commits land in the view before the probe
+    let others = 20;
+    for i in 0..others {
+        commit(&mut r, format!("other{i}"), format!("other-{i}"));
+    }
+    let st = r.read();
+    let mine = st
+        .change_by_nonce_since("work", "mine", &since, 10_000)
+        .unwrap();
+    assert!(mine.change.is_some() && !mine.capped, "{mine:?}");
+    // the reads grow with the commits after the head, not with the history before it
+    let after = others + 1;
+    let absent = st
+        .change_by_nonce_since("work", "none", &since, 10_000)
+        .unwrap();
+    assert_eq!((absent.change, absent.capped), (None, false));
+    assert!(
+        absent.read >= after && absent.read <= 2 * after,
+        "{absent:?}"
+    );
+    let late = st.view_head("work").unwrap().head.to_string();
+    let none_after = st
+        .change_by_nonce_since("work", "none", &late, 10_000)
+        .unwrap();
+    assert_eq!(none_after.read, 0, "{none_after:?}");
+}
+
+/// Final review M3: the walk after a head stops at its limit, so a probe never stalls the
+/// writer; a walk that stops before the head says so (`capped`), and a match within the limit is
+/// still found.
+#[test]
+fn msw11_a_nonce_lookup_since_a_head_stops_at_its_limit() {
+    let (_d, mut r) = project();
+    let commit = |r: &mut Rdy, name: String, nonce: String| {
+        let req = req(json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "D", "doc_type": "glossary"}}
+        ]));
+        let links = ChangeLinks {
+            client_nonce: Some(nonce),
+            ..Default::default()
+        };
+        r.write_linked(&agent(), req, links, None).unwrap();
+    };
+    commit(&mut r, "first".into(), "first".into());
+    let since = r.read().view_head("work").unwrap().head.to_string();
+    commit(&mut r, "mine".into(), "mine".into());
+    for i in 0..10 {
+        commit(&mut r, format!("other{i}"), format!("other-{i}"));
+    }
+    let st = r.read();
+    let stopped = st.change_by_nonce_since("work", "mine", &since, 6).unwrap();
+    assert_eq!(
+        (stopped.change, stopped.capped),
+        (None, true),
+        "{stopped:?}"
+    );
+    assert!(stopped.read <= 6, "{stopped:?}");
+    let newest = st
+        .change_by_nonce_since("work", "other-9", &since, 6)
+        .unwrap();
+    assert!(newest.change.is_some() && !newest.capped, "{newest:?}");
+    let all = st
+        .change_by_nonce_since("work", "mine", &since, 10_000)
+        .unwrap();
+    assert!(all.change.is_some(), "{all:?}");
+}
