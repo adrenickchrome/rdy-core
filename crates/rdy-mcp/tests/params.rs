@@ -174,3 +174,90 @@ fn mparm1_valid_parameters_still_parse() {
     );
     assert!(parse_params::<TagsParams>("rdy_tags", serde_json::Map::new()).is_ok());
 }
+
+/// Every key of `P`'s published input schema that serde refuses as an unknown field. serde reads
+/// a field identifier before its value, so `{key: null}` names an unknown field first whatever
+/// the type of the value is. Any other error text (a wrong type, a missing field) is fine here.
+fn schema_keys_serde_refuses<P>() -> Vec<String>
+where
+    P: serde::de::DeserializeOwned + schemars::JsonSchema + 'static,
+{
+    let schema = rmcp::handler::server::common::schema_for_input::<P>().expect("an input schema");
+    let props = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut refused = Vec::new();
+    for key in props.keys() {
+        let probe = json!({ key.as_str(): null });
+        if let Err(e) = P::deserialize(&probe)
+            && e.to_string().starts_with("unknown field")
+        {
+            refused.push(format!("{}: {e}", std::any::type_name::<P>()));
+        }
+    }
+    refused
+}
+
+#[test]
+fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
+    use rdy_mcp::alt_tools::{AltMemberParams, AltParams, AltPickParams};
+    use rdy_mcp::entity_tools::AcceptParams;
+    use rdy_mcp::intent_tools::IntentParams;
+    use rdy_mcp::search_tools::SearchParams;
+    use rdy_mcp::view_tools::LogParams;
+    let mut refused = Vec::new();
+    macro_rules! check {
+        ($($t:ty),* $(,)?) => { $( refused.extend(schema_keys_serde_refuses::<$t>()); )* };
+    }
+    // The 25 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
+    // `AltPickParams`, `DismissParams`, `DecideParams`).
+    check!(
+        AcceptParams,
+        AltMemberParams,
+        AltPickParams,
+        AltParams,
+        AssetParams,
+        BriefParams,
+        DecideParams,
+        DismissParams,
+        EditorialParams,
+        IdParams,
+        IntentParams,
+        LogParams,
+        ProposeParams,
+        ReadParams,
+        ResolveParams,
+        RevokeParams,
+        ScopeParams,
+        SchemaParams,
+        SearchParams,
+        SessionParams,
+        SupersedeParams,
+        TagsParams,
+        TensionsParams,
+        ViewParams,
+        WriteParams,
+    );
+    assert!(
+        refused.is_empty(),
+        "a documented parameter is refused as an unknown field: {refused:#?}"
+    );
+}
+
+#[test]
+fn hd7_the_serde_probe_catches_a_schema_key_serde_does_not_know() {
+    // The guard above must be able to fail: here the schema says `shown` and serde says `hidden`.
+    #[derive(serde::Deserialize, schemars::JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct Mismatch {
+        #[serde(rename = "hidden")]
+        #[schemars(rename = "shown")]
+        field: Option<String>,
+    }
+    let refused = schema_keys_serde_refuses::<Mismatch>();
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(refused[0].contains("unknown field `shown`"), "{refused:?}");
+}

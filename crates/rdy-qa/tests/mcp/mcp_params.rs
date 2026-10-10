@@ -195,11 +195,12 @@ fn hd7_every_tool_accepts_its_documented_parameters() {
             args.insert(key.clone(), serde_json::Value::Null);
             let r = c.call(&name, serde_json::Value::Object(args));
             if let Reply::ToolError(e) = &r {
+                // `unknown parameter` is the schema walk's text; `unknown field` is the serde
+                // fallback's. The serde-layer guard is `hd7_serde_accepts_every_key_each_params_
+                // schema_publishes` in rdy-mcp, which does not depend on the order of the checks.
+                let msg = e["message"].as_str().unwrap_or("");
                 assert!(
-                    !e["message"]
-                        .as_str()
-                        .unwrap_or("")
-                        .contains("unknown parameter"),
+                    !msg.contains("unknown parameter") && !msg.contains("unknown field"),
                     "{name}: documented parameter {key} is refused as unknown: {e}"
                 );
             }
