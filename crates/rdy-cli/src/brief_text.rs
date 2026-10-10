@@ -391,13 +391,58 @@ pub fn plain(v: &Value) -> String {
 }
 
 /// A write reply's extras as text to append to its one-line summary: empty when there are none,
-/// else `\nconsequences:` and one line per entry (with a line for what a cut left out), then
-/// `\nsuggestions:` and `\nrelated decisions:` in the same way.
+/// else `\nconsequences:` and one line per entry (with a line for what a cut left out), then the
+/// intents on the written blocks, the tension changes, the suggestions and the related
+/// decisions in the same way, and last a line for each part rdy could not work out.
 pub fn consequences_text(reply: &Value) -> String {
     let mut t = consequences_part(reply);
+    t.push_str(&intents_part(reply));
     t.push_str(&on_change_part(reply));
     t.push_str(&suggestions_part(reply));
     t.push_str(&related_part(reply));
+    t.push_str(&errors_part(reply));
+    t
+}
+
+/// The intents of other sessions on the blocks the write touched (M2d1).
+fn intents_part(reply: &Value) -> String {
+    let items = reply["intents"].as_array().map_or(&[][..], |a| a);
+    if items.is_empty() {
+        return String::new();
+    }
+    let mut t = String::from("\nintents on these blocks:");
+    for i in items {
+        let by = match i["run"].as_str() {
+            Some(run) => format!("{}/{run}", s(i, "actor")),
+            None => s(i, "actor").to_string(),
+        };
+        let n = i["blocks"].as_array().map_or(0, Vec::len);
+        t.push_str(&format!(
+            "\n  intent {} by {by} in {}: {} (until {}) on {n} block(s)",
+            s(i, "id"),
+            s(i, "view"),
+            one_line(s(i, "angle")),
+            s(i, "expires_at")
+        ));
+    }
+    t
+}
+
+/// The parts of the reply rdy could not work out, each with its error.
+fn errors_part(reply: &Value) -> String {
+    const PARTS: [(&str, &str); 5] = [
+        ("consequences_error", "consequences"),
+        ("consequences_tension_error", "the tension consequences"),
+        ("on_change_error", "the tension changes"),
+        ("suggestions_error", "suggestions"),
+        ("related_decisions_error", "related decisions"),
+    ];
+    let mut t = String::new();
+    for (key, what) in PARTS {
+        if let Some(e) = reply[key].as_str() {
+            t.push_str(&format!("\nnot worked out: {what} ({})", one_line(e)));
+        }
+    }
     t
 }
 
@@ -854,5 +899,33 @@ mod tests {
             .position(|l| *l == "# will go stale if this changes:")
             .unwrap();
         assert!(lineage < at && at < stale, "{h}");
+    }
+
+    #[test]
+    fn mfb6_write_text_lists_intents_after_the_consequences_and_errors_last() {
+        let v = json!({
+            "consequences": [{"id": "cq-1", "block": "c-B", "kind": "dependent",
+                "because": {"edge": "references", "changed": "c-A"}, "follow_up": "confirm"}],
+            "intents": [{"id": "in-1", "actor": "agent:a", "run": "ra", "view": "va",
+                "angle": "rewording", "expires_at": "2026-10-10T00:00:00Z", "blocks": ["c-A", "c-B"]}],
+            "suggestions": [],
+            "suggestions_error": "E_IO: index busy",
+            "on_change_error": "E_IO: tensions busy"
+        });
+        assert_eq!(
+            consequences_text(&v),
+            "\nconsequences:\n  dependent c-B: confirm (references c-A)\nintents on these blocks:\n  intent in-1 by agent:a/ra in va: rewording (until 2026-10-10T00:00:00Z) on 2 block(s)\nnot worked out: the tension changes (E_IO: tensions busy)\nnot worked out: suggestions (E_IO: index busy)"
+        );
+    }
+
+    #[test]
+    fn mfb6_no_intents_and_no_errors_print_nothing_new() {
+        assert_eq!(consequences_text(&json!({"consequences": []})), "");
+        let v = json!({"consequences": [], "intents": [{"id": "in-2", "actor": "agent:b", "view": "v",
+            "angle": "x", "expires_at": "t", "blocks": ["c-A"]}]});
+        assert_eq!(
+            consequences_text(&v),
+            "\nintents on these blocks:\n  intent in-2 by agent:b in v: x (until t) on 1 block(s)"
+        );
     }
 }
