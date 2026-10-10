@@ -720,7 +720,31 @@ fn export_import_export_is_byte_identical() {
     let out2_dir = tempfile::tempdir().unwrap();
     let out2 = out2_dir.path().join("again");
     b.read().export(&Scope::Canon, &out2).unwrap();
-    assert_eq!(files(&out2), files(out1.path()));
+    let (mut again, mut first) = (files(&out2), files(out1.path()));
+    let rows = |m: &mut std::collections::BTreeMap<String, Vec<u8>>| -> Vec<serde_yaml_ng::Value> {
+        serde_yaml_ng::from_slice(&m.remove("authors.yaml").expect("authors.yaml")).unwrap()
+    };
+    let (again_rows, first_rows) = (rows(&mut again), rows(&mut first));
+    assert_eq!(again, first);
+    // mfb3: one change per author, so each block keeps its author, run and role, and its time
+    // is its author's newest time
+    let mut newest: BTreeMap<String, i64> = BTreeMap::new();
+    for r in &first_rows {
+        let at = newest
+            .entry(r["actor"].as_str().unwrap().into())
+            .or_default();
+        *at = (*at).max(r["at_ms"].as_i64().unwrap());
+    }
+    assert_eq!(again_rows.len(), first_rows.len());
+    for (x, y) in again_rows.iter().zip(&first_rows) {
+        for key in ["id", "actor", "run", "role"] {
+            assert_eq!(x[key], y[key], "{key}");
+        }
+        assert_eq!(
+            x["at_ms"].as_i64(),
+            Some(newest[y["actor"].as_str().unwrap()])
+        );
+    }
 }
 
 #[test]

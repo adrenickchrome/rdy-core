@@ -7,7 +7,7 @@ use crate::write::{LinkInput, OpInput, TRACKING_NEEDS_REASON, WriteRequest, Writ
 use crate::{Rdy, ReadState, Scope, Session};
 use rdy_model::{
     Block, BlockId, Change, ChangeLinks, EditorialClass, FieldValue, Hash, Justification, Link, Op,
-    tree,
+    Provenance, Role, tree,
 };
 use rdy_schema::{Pack, has_errors, skeleton_gaps, validate_block, validate_prefix};
 use serde::{Deserialize, Serialize};
@@ -136,6 +136,87 @@ struct Manifest {
     format: u32,
     pack: String,
     scope: String,
+}
+
+/// The export file that names each block's author (per-block authorship). Optional on import.
+pub const AUTHORS_FILE: &str = "authors.yaml";
+
+/// One row of `authors.yaml`: who last wrote a block, from its producing change, and when it landed.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthorYaml {
+    id: String,
+    actor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run: Option<String>,
+    role: String,
+    at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    landed_ms: Option<i64>,
+}
+
+fn role_of(text: &str) -> Option<Role> {
+    match text {
+        "reader" => Some(Role::Reader),
+        "writer" => Some(Role::Writer),
+        "reviewer" => Some(Role::Reviewer),
+        "approver" => Some(Role::Approver),
+        _ => None,
+    }
+}
+
+fn bad_authors(what: String) -> RdyError {
+    RdyError::new(
+        E_BAD_INPUT,
+        format!("authors.yaml: {what}"),
+        "export the project again, or delete authors.yaml to import every block as yours",
+    )
+}
+
+/// `authors.yaml` of export `dir`, checked against the import's blocks: by id. No file is no
+/// rows.
+fn read_authors(dir: &Path, blocks: &[Block]) -> Result<BTreeMap<BlockId, Provenance>, RdyError> {
+    let path = dir.join(AUTHORS_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(bad_authors(e.to_string())),
+    };
+    let rows: Vec<AuthorYaml> = serde_yaml_ng::from_str(&text).map_err(|e| {
+        crate::did_you_mean::unknown_field_error(AUTHORS_FILE, &e.to_string())
+            .unwrap_or_else(|| bad_authors(e.to_string()))
+    })?;
+    let known: BTreeSet<&BlockId> = blocks.iter().map(|b| &b.id).collect();
+    let mut out = BTreeMap::new();
+    for row in rows {
+        let id = BlockId::parse(&row.id)
+            .map_err(|_| bad_authors(format!("{} is not a block id", row.id)))?;
+        if !known.contains(&id) {
+            return Err(bad_authors(format!("{id} is not a block of this export")));
+        }
+        if row.actor.trim().is_empty() {
+            return Err(bad_authors(format!("{id} has a blank actor")));
+        }
+        if row.run.as_deref().is_some_and(|r| r.trim().is_empty()) {
+            return Err(bad_authors(format!("{id} has a blank run")));
+        }
+        let role = role_of(&row.role).ok_or_else(|| {
+            bad_authors(format!(
+                "{id} has role {:?}; a role is reader, writer, reviewer or approver",
+                row.role
+            ))
+        })?;
+        let prov = Provenance {
+            actor: row.actor,
+            run: row.run,
+            role,
+            at_ms: row.at_ms,
+        };
+        if out.insert(id.clone(), prov).is_some() {
+            return Err(bad_authors(format!("{id} appears more than once")));
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -724,6 +805,28 @@ impl ReadState {
             Scope::At(h) => format!("landing:{h}"),
             Scope::Inflight => crate::INFLIGHT_SCOPE.to_string(),
         };
+        // per-block authorship: who last wrote each block, and when it landed; an in-flight
+        // scope has no one chain, so it carries none
+        if !matches!(scope, Scope::Inflight) {
+            let ids: Vec<BlockId> = m.iter().map(|b| b.id.clone()).collect();
+            let rows: Vec<AuthorYaml> = self
+                .last_changes(scope, &ids)?
+                .into_iter()
+                .map(|(id, h)| AuthorYaml {
+                    id: id.to_string(),
+                    actor: h.author.actor,
+                    run: h.author.run,
+                    role: h.author.role,
+                    at_ms: h.author.at_ms,
+                    landed_ms: h.landing.map(|l| l.at_ms),
+                })
+                .collect();
+            std::fs::write(
+                out.join(AUTHORS_FILE),
+                serde_yaml_ng::to_string(&rows).expect("authors"),
+            )
+            .map_err(io_err)?;
+        }
         let manifest = Manifest {
             format: 3,
             pack: self.pack().name.clone(),
@@ -749,7 +852,7 @@ impl Rdy {
         }
         crate::write::check_view_access(&self.read(), view, s, crate::views::Action::Commit)?;
         // sym1: the export's own root entries are never followed either
-        for root in ["rdy-export.yaml", "docs", "blobs"] {
+        for root in ["rdy-export.yaml", "docs", "blobs", AUTHORS_FILE] {
             refuse_symlink(&dir.join(root))?;
         }
         let manifest_path = dir.join("rdy-export.yaml");
@@ -850,6 +953,7 @@ impl Rdy {
             }
         }
         drop(ids);
+        let authors = read_authors(dir, &blocks)?;
         assign_missing_names(&mut blocks, &existing);
         check_import_names(&blocks, &existing)?;
         resolve_import_keys(&mut blocks, keyed, &existing)?;
@@ -1031,38 +1135,114 @@ impl Rdy {
             self.store.put_blob(bytes)?;
         }
         let warnings = import_skeleton_gaps(&self.pack, &blocks);
-        let ops: Vec<Op> = blocks
-            .into_iter()
-            .map(|block| Op::Create { block })
+        // one change per author (grouped by actor), oldest first; blocks with no author row are
+        // the importer's, last. Each change takes the run, role and time of its newest block
+        // (largest at_ms, then id).
+        struct Group {
+            /// The newest block: its time, then its id.
+            newest: (i64, BlockId),
+            provenance: Provenance,
+            ops: Vec<Op>,
+        }
+        let mut groups: BTreeMap<String, Group> = BTreeMap::new();
+        let mut mine: Vec<Op> = vec![];
+        for block in blocks {
+            match authors.get(&block.id) {
+                Some(p) => {
+                    let newest = (p.at_ms, block.id.clone());
+                    let g = groups.entry(p.actor.clone()).or_insert_with(|| Group {
+                        newest: newest.clone(),
+                        provenance: p.clone(),
+                        ops: vec![],
+                    });
+                    if newest > g.newest {
+                        g.newest = newest;
+                        g.provenance = p.clone();
+                    }
+                    g.ops.push(Op::Create { block });
+                }
+                None => mine.push(Op::Create { block }),
+            }
+        }
+        let mut order: Vec<(Provenance, Vec<Op>)> = groups
+            .into_values()
+            .map(|g| (g.provenance, g.ops))
             .collect();
-        let change = Change {
-            view: view.into(),
-            ops: ops.clone(),
-            deps: vec![],
-            provenance: s.provenance(),
-            justification: None,
-            message: format!("import from {}", dir.display()),
-            links: ChangeLinks::default(),
-        };
-        let id = self.store.commit_to_view_resolving(
-            view,
-            change,
-            &|id| existing.version_of(id),
-            &conflicts,
-            claim,
-        )?;
-        self.publish(crate::Delta::Commit {
-            view: view.to_string(),
-            change: id,
-            ops: ops.clone(),
-        })?;
-        let created = ops
+        order.sort_by(|a, b| (a.0.at_ms, &a.0.actor).cmp(&(b.0.at_ms, &b.0.actor)));
+        let mut planned: Vec<(Provenance, Vec<Op>, String)> = order
+            .into_iter()
+            .map(|(p, ops)| {
+                let message = format!(
+                    "import from {}: {} block(s) by {}, imported by {}",
+                    dir.display(),
+                    ops.len(),
+                    p.actor,
+                    s.actor
+                );
+                (p, ops, message)
+            })
+            .collect();
+        // an export with no blocks still writes the importer's (empty) change, as before
+        if !mine.is_empty() || planned.is_empty() {
+            planned.push((
+                s.provenance(),
+                mine,
+                format!("import from {}", dir.display()),
+            ));
+        }
+        // the view stays the importer's: create it as the importer before any author's change.
+        // `claim` (from `commit_claim`, which ran first and refused a closed view) claims an
+        // existing unowned view with the first change only.
+        let mut claim = claim;
+        if self.read().view_head(view).is_none() {
+            let base = self.read().canon_head();
+            self.store.view_create(
+                view,
+                base,
+                Some(crate::views::owner_of(s)),
+                false,
+                &s.provenance(),
+            )?;
+            self.publish(crate::Delta::View {
+                view: view.to_string(),
+            })?;
+            claim = None;
+        }
+        let mut ids = vec![];
+        let mut all_ops = vec![];
+        for (provenance, ops, message) in planned {
+            let change = Change {
+                view: view.into(),
+                ops: ops.clone(),
+                deps: vec![],
+                provenance,
+                justification: None,
+                message,
+                links: ChangeLinks::default(),
+            };
+            let id = self.store.commit_to_view_resolving(
+                view,
+                change,
+                &|id| existing.version_of(id),
+                &conflicts,
+                claim.take(),
+            )?;
+            self.publish(crate::Delta::Commit {
+                view: view.to_string(),
+                change: id,
+                ops: ops.clone(),
+            })?;
+            ids.push(id.to_string());
+            all_ops.extend(ops);
+        }
+        let created = all_ops
             .iter()
             .enumerate()
             .map(|(i, op)| (format!("op{i}"), op.block_id().to_string()))
             .collect();
         Ok(WriteResult {
-            change: id.to_string(),
+            change: ids.last().cloned().unwrap_or_default(),
+            changes: ids,
             created,
             names: BTreeMap::new(),
             keys,
