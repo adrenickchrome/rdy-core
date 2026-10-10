@@ -84,12 +84,12 @@ fn dia1_a_d2_diagram_shows_its_source_and_caption_only() {
 /// `interactive`, so the init must wait for DOMContentLoaded, not start at once.
 #[test]
 fn dia1_the_init_waits_for_a_library_loaded_after_it_by_a_later_deferred_script() {
-    if std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("node is not installed: the load-order harness is skipped");
+    if !rdy_qa::skip::node_available() {
+        rdy_qa::skip::skip(
+            "dia1_the_init_waits_for_a_library_loaded_after_it_by_a_later_deferred_script",
+            rdy_qa::skip::Why::Prerequisite,
+            "node is not installed",
+        );
         return;
     }
     let init = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

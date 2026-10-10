@@ -476,10 +476,18 @@ fn case_insensitive(s: &Served) -> bool {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "needs a case-insensitive filesystem; Linux filesystems are case-sensitive"
+)]
 fn wccm1_a_case_only_rename_from_the_store_survives_the_write_back() {
     let (s, seed) = seeded();
     if !case_insensitive(&s) {
-        eprintln!("skipped: the filesystem is case-sensitive");
+        rdy_qa::skip::skip(
+            "wccm1_a_case_only_rename_from_the_store_survives_the_write_back",
+            rdy_qa::skip::Why::Prerequisite,
+            "the filesystem is case-sensitive",
+        );
         return;
     }
     ok(&s, &["checkout"]);
@@ -785,4 +793,76 @@ fn msw11_a_repeated_editorial_is_refused() {
     );
     assert!(!okk && v["code"] == E_BAD_INPUT, "{v}");
     assert_eq!(store_block(&s, "work", &seed.note).body, "Note.");
+}
+
+#[test]
+fn hd8_commit_refuses_a_misspelt_key_and_writes_nothing() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let orig = read(&s, "notes.yaml");
+    let text = format!(
+        "{orig}- type: prose\n  parnet: {}\n  body: Added.\n",
+        seed.notes
+    );
+    std::fs::write(at(&s, "notes.yaml"), &text).unwrap();
+    ok(&s, &["add", "notes.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "x"]);
+    assert!(!okk && v["code"] == E_WC_INVALID, "{v}");
+    let d = &v["diagnostics"][0];
+    assert_eq!(d["file"], "notes.yaml", "{v}");
+    assert_eq!(d["code"], "E_FILE_FORMAT", "{v}");
+    assert_eq!(
+        d["line"].as_u64().unwrap() as usize,
+        orig.lines().count() + 2,
+        "{v}"
+    );
+    assert_eq!(d["fix"], "did you mean \"parent\"? rename it", "{v}");
+    assert_eq!(read(&s, "notes.yaml"), text, "the file is not rewritten");
+}
+
+#[test]
+fn hd8_a_misspelt_folder_key_keeps_its_line_and_did_you_mean() {
+    let (s, _seed) = seeded();
+    ok(&s, &["checkout"]);
+    let orig = read(&s, "guides/_folder.yaml");
+    let text = if orig.lines().any(|l| l.starts_with("order:")) {
+        orig.lines()
+            .map(|l| l.replacen("order:", "ordr:", 1) + "\n")
+            .collect::<String>()
+    } else {
+        format!("{orig}ordr: a1\n")
+    };
+    let line = text.lines().position(|l| l.starts_with("ordr:")).unwrap() + 1;
+    std::fs::write(at(&s, "guides/_folder.yaml"), &text).unwrap();
+    let fix = "did you mean \"order\"? rename it";
+
+    let (okk, v) = json(&s, &["add", "guides/_folder.yaml"]);
+    assert!(!okk && v["code"] == E_WC_INVALID, "{v}");
+    assert_eq!(
+        v["message"],
+        format!("guides/_folder.yaml: line {line}: unknown key \"ordr\" in a block entry"),
+        "{v}"
+    );
+    assert_eq!(v["fix"], fix, "{v}");
+
+    let o = s.rdy(&["--json", "check", "guides/_folder.yaml"]);
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    let d = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["file"] == "guides/_folder.yaml")
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(d["code"], W_WC_UNTRACKED, "{v}");
+    assert_eq!(d["line"].as_u64().unwrap() as usize, line, "{v}");
+    assert_eq!(d["fix"], fix, "{v}");
+
+    let (_, v) = json(&s, &["status"]);
+    let u = v["working_copy"]["untracked"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["path"] == "guides/_folder.yaml")
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(u["hint"], fix, "{v}");
 }

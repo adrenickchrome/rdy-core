@@ -593,7 +593,29 @@ where
     R: AsyncRead + Send + Unpin + 'static,
     W: AsyncWrite + Send + Unpin + 'static,
 {
-    serve(RdyServer::new(engine, Some(sid)), r, w).await
+    let (to_server, from_pump) = tokio::io::duplex(1 << 16);
+    // a daemon log line (`<unix ms> rdy serve: <text>`); a failed write loses the line, never
+    // the session
+    let mut dropped = |n: usize, why: Dropped| {
+        use std::io::Write as _;
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "{ms} rdy serve: mcp session {sid} dropped a {n}-byte request line: {why}"
+        );
+    };
+    let pump = pump_lines(r, to_server, tools::MAX_REQUEST_BYTES, &mut dropped);
+    let served = serve(RdyServer::new(engine, Some(sid)), from_pump, w);
+    tokio::pin!(served);
+    // the session ends when `serve` does (the peer closed, or the session failed to start);
+    // when the pump ends first (the peer closed its side), `serve` reads EOF and ends after it
+    tokio::select! {
+        out = &mut served => out,
+        _ = pump => served.await,
+    }
 }
 
 #[cfg(test)]

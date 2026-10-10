@@ -953,3 +953,59 @@ fn a_duplicated_doc_is_reported_as_a_duplicate_id_not_a_name_clash() {
     std::fs::write(out.path().join("docs/copy.yaml"), doc).unwrap();
     assert_import_fails(out.path(), "E_ALREADY_EXISTS");
 }
+
+/// hd3 fix round 1: a link `part` that is not text (YAML `.nan`, `.inf`, a number, a bool) is
+/// refused with the link-forms text, never dropped; a null part is no part.
+#[test]
+fn hd3_a_yaml_link_part_that_is_not_text_is_refused_not_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = rich_project(dir.path());
+    let blocks = r.read().materialized(&Scope::Canon).unwrap();
+    let term = blocks.iter().find(|x| x.block_type == "term").unwrap();
+    let target = blocks
+        .iter()
+        .find(|x| x.block_type == "claim")
+        .unwrap()
+        .id
+        .to_string();
+    let yaml = |part: &str| {
+        format!(
+            "id: {}\ntype: term\norder: {}\nlinks:\n  refines:\n  - target: {target}\n    part: {part}\n",
+            term.id, term.order
+        )
+    };
+    for part in [".nan", ".inf", "-.inf", "1", "true"] {
+        let e = block_from_yaml(&yaml(part)).unwrap_err();
+        assert_eq!(e.code, "E_BAD_INPUT", "{part}: {e}");
+        assert!(
+            e.message.contains("refines: a link kind takes"),
+            "{part}: {e}"
+        );
+    }
+    let b = block_from_yaml(&yaml("~")).unwrap();
+    assert_eq!(b.links["refines"][0].part, None, "a null part is no part");
+    let b = block_from_yaml(&yaml("w")).unwrap();
+    assert_eq!(b.links["refines"][0].part.as_deref(), Some("w"));
+}
+
+#[test]
+fn hd8_block_from_yaml_refuses_a_misspelt_key() {
+    let e = block_from_yaml("id: p-AAAAA\ntype: prose\norder: a1\nparnet: d-AAAAA\n").unwrap_err();
+    assert_eq!(e.code, "E_FILE_FORMAT");
+    assert_eq!(e.message, "line 4: unknown key \"parnet\" in the block");
+    assert_eq!(e.fix, "did you mean \"parent\"? rename it");
+    assert_eq!(
+        block_from_yaml("id: [").unwrap_err().code,
+        "E_BAD_INPUT",
+        "syntax stays E_BAD_INPUT"
+    );
+}
+
+#[test]
+fn hd8_block_from_yaml_refuses_a_misspelt_link_key() {
+    let yaml = "id: p-AAAAA\ntype: prose\norder: a1\nlinks:\n  refines:\n  - target: c-AAAAA\n    prat: x\n";
+    let e = block_from_yaml(yaml).unwrap_err();
+    assert_eq!(e.code, "E_FILE_FORMAT");
+    assert_eq!(e.message, "line 7: unknown key \"prat\" in a refines link");
+    assert_eq!(e.fix, "did you mean \"part\"? rename it");
+}

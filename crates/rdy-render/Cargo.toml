@@ -17,3 +17,6 @@ rdy-schema.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 rdy-store.workspace = true
+
+[lints]
+workspace = true

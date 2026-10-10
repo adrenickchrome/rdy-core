@@ -41,6 +41,14 @@ regex = "1.13.1"
 imbl = "7"
 arc-swap = "1"
 
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+dbg_macro = "deny"
+todo = "deny"
+
 [profile.dev]
 # Line tables keep backtraces with file:line but drop full debug info: test binaries link
 # much faster (an outside review measured a one-line-edit rebuild going from 3m13s to 1m08s).

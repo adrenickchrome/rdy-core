@@ -62,6 +62,120 @@ impl Diagnostic {
     }
 }
 
+/// The keys of a block entry.
+const BLOCK_KEYS: [&str; 8] = [
+    "id", "type", "parent", "order", "fields", "body", "links", "pins",
+];
+
+/// The keys of a link object.
+const LINK_OBJECT_KEYS: [&str; 2] = ["target", "part"];
+
+/// A key an entry does not take (FW-HD1, ruling Q2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct KeyFault {
+    /// The keys and indexes from the entry to the mapping that holds the key: empty for the
+    /// entry itself, `["links", kind, "0"]` for the first object of a link kind.
+    pub path: Vec<String>,
+    pub key: String,
+    /// The known key it is closest to.
+    pub near: Option<&'static str>,
+    /// The link kind, when the key sits in a link object.
+    pub in_link: Option<String>,
+}
+
+impl KeyFault {
+    /// Where the key sits, in words: `block` for the entry itself.
+    pub(crate) fn place(&self, block: &str) -> String {
+        match &self.in_link {
+            Some(kind) => format!("a {kind} link"),
+            None => block.to_string(),
+        }
+    }
+
+    pub(crate) fn fix(&self) -> String {
+        match (self.near, &self.in_link) {
+            (_, Some(_)) => crate::write::link_key_fix(&self.key),
+            (Some(y), None) => format!("did you mean \"{y}\"? rename it"),
+            (None, None) => {
+                "remove it, or use id, type, parent, order, fields, body, links or pins".to_string()
+            }
+        }
+    }
+
+    /// The path of the key in a YAML text, from the root of the entry.
+    pub(crate) fn segs(&self) -> Vec<Seg> {
+        let mut v: Vec<Seg> = self
+            .path
+            .iter()
+            .enumerate()
+            .map(|(i, p)| match (i, p.parse::<usize>()) {
+                (2, Ok(n)) => Seg::Index(n),
+                _ => Seg::Key(p.clone()),
+            })
+            .collect();
+        v.push(Seg::Key(self.key.clone()));
+        v
+    }
+}
+
+fn key_name(k: &serde_yaml_ng::Value) -> String {
+    match k {
+        serde_yaml_ng::Value::String(s) => s.clone(),
+        other => serde_yaml_ng::to_string(other)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+    }
+}
+
+/// Every key of a block entry that the entry does not take, in file order: the entry's own keys
+/// against `BLOCK_KEYS`, and the keys of each object in `links.<kind>` against `target` and `part`.
+/// Nothing inside `fields` or `pins` (the pack checks fields).
+pub(crate) fn key_faults(value: &serde_yaml_ng::Value) -> Vec<KeyFault> {
+    use serde_yaml_ng::Value;
+    let Value::Mapping(m) = value else {
+        return vec![];
+    };
+    let mut out = vec![];
+    for (k, v) in m {
+        let name = key_name(k);
+        if !BLOCK_KEYS.contains(&name.as_str()) {
+            out.push(KeyFault {
+                near: crate::did_you_mean::nearest(&name, &BLOCK_KEYS),
+                path: vec![],
+                key: name,
+                in_link: None,
+            });
+        } else if name == "links"
+            && let Value::Mapping(kinds) = v
+        {
+            for (kind, list) in kinds {
+                let kind = key_name(kind);
+                let Value::Sequence(items) = list else {
+                    continue;
+                };
+                for (i, item) in items.iter().enumerate() {
+                    let Value::Mapping(o) = item else {
+                        continue;
+                    };
+                    for ok in o.keys() {
+                        let ok = key_name(ok);
+                        if !LINK_OBJECT_KEYS.contains(&ok.as_str()) {
+                            out.push(KeyFault {
+                                near: crate::did_you_mean::nearest(&ok, &LINK_OBJECT_KEYS),
+                                path: vec!["links".into(), kind.clone(), i.to_string()],
+                                key: ok,
+                                in_link: Some(kind.clone()),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// One block read from a file, with where it was found.
 pub(crate) struct Loaded {
     pub block: Block,
@@ -440,6 +554,9 @@ impl Reader<'_> {
                 [Seg::Key(f), Seg::Key(k)] if f == "fields" => {
                     keys.insert(format!("fields.{k}"), *xy);
                 }
+                [Seg::Key(f), Seg::Key(kind), Seg::Index(i), Seg::Key(k)] if f == "links" => {
+                    keys.insert(format!("links.{kind}.{i}.{k}"), *xy);
+                }
                 _ => {}
             }
         }
@@ -533,9 +650,6 @@ impl Reader<'_> {
         shown: &str,
     ) -> bool {
         use serde_yaml_ng::Value;
-        const KNOWN: [&str; 8] = [
-            "id", "type", "parent", "order", "fields", "body", "links", "pins",
-        ];
         let Value::Mapping(m) = value else {
             return true; // not a mapping: from_value says so
         };
@@ -554,17 +668,16 @@ impl Reader<'_> {
             .collect();
         let at = |k: &str| keys.get(k).copied().unwrap_or(here);
         let mut ok = true;
-        for (k, _) in &entries {
-            if !KNOWN.contains(&k.as_str()) {
-                ok = false;
-                self.diags.push(Diagnostic::error(
-                    shown,
-                    at(k),
-                    E_FILE_FORMAT,
-                    format!("unknown key \"{k}\" in a block entry"),
-                    "use id, type, parent, order, fields, body and links",
-                ));
-            }
+        for f in key_faults(value) {
+            ok = false;
+            let lookup = f.path.iter().chain([&f.key]).cloned().collect::<Vec<_>>();
+            self.diags.push(Diagnostic::error(
+                shown,
+                at(&lookup.join(".")),
+                E_FILE_FORMAT,
+                format!("unknown key \"{}\" in {}", f.key, f.place("a block entry")),
+                f.fix(),
+            ));
         }
         for (k, v) in &entries {
             if ["id", "type", "parent", "body"].contains(&k.as_str())
@@ -876,9 +989,27 @@ impl Reader<'_> {
 
     fn untrack(&mut self, path: String, reason: impl Into<String>) {
         self.untracked.push(Untracked {
+            fix: format!("rdy check {path}"),
             path,
             reason: reason.into(),
+            at: None,
         });
+    }
+
+    /// Untracks `path` for the first diagnostic pushed since `before` (its message, place and
+    /// fix), or for `otherwise` when there is none; the diagnostics since `before` are dropped.
+    fn untrack_for(&mut self, path: String, before: usize, otherwise: &str) {
+        let first = self.diags.get(before).cloned();
+        self.diags.truncate(before);
+        match first {
+            Some(d) => self.untracked.push(Untracked {
+                path,
+                reason: d.message,
+                at: Some((d.line, d.column)),
+                fix: d.fix,
+            }),
+            None => self.untrack(path, otherwise),
+        }
     }
 
     /// The ignore matcher's state at the root read.
@@ -1092,15 +1223,7 @@ impl Reader<'_> {
                 );
                 self.wc_dir(dir, here, Some(&id), depth, &inner);
             }
-            None => {
-                let reason = self
-                    .diags
-                    .get(before)
-                    .map(|d| d.message.clone())
-                    .unwrap_or_else(|| "not a folder entry".into());
-                self.diags.truncate(before);
-                self.untrack(ff_rel, reason);
-            }
+            None => self.untrack_for(ff_rel, before, "not a folder entry"),
         }
     }
 
@@ -1123,13 +1246,7 @@ impl Reader<'_> {
         }
         let before = self.diags.len();
         let Some((value, pos)) = self.parse(path, here) else {
-            let reason = self
-                .diags
-                .get(before)
-                .map(|d| d.message.clone())
-                .unwrap_or_else(|| "cannot read the file".into());
-            self.diags.truncate(before);
-            self.untrack(here.to_string(), reason);
+            self.untrack_for(here.to_string(), before, "cannot read the file");
             return;
         };
         let items = match value {
@@ -1172,13 +1289,7 @@ impl Reader<'_> {
                 }
                 // no id to keep: untracked, as a _folder.yaml that does not load is
                 None => {
-                    let reason = self
-                        .diags
-                        .get(before)
-                        .map(|d| d.message.clone())
-                        .unwrap_or_else(|| "the doc entry does not load".into());
-                    self.diags.truncate(before);
-                    self.untrack(here.to_string(), reason);
+                    self.untrack_for(here.to_string(), before, "the doc entry does not load");
                     return;
                 }
             },

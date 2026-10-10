@@ -73,6 +73,11 @@ pub enum FileKind {
 pub struct Untracked {
     pub path: String,
     pub reason: String,
+    /// Where in the file the reason is (line, column); `None` when it is the whole file.
+    pub at: Option<(usize, usize)>,
+    /// What to do about it: the fix of the diagnostic that untracked the file (a did-you-mean,
+    /// say), else `rdy check <path>`.
+    pub fix: String,
 }
 
 /// Reads the working tree under `root`. Never fails: what cannot be read is untracked or a

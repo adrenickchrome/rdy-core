@@ -2,8 +2,8 @@
 use super::*;
 use rdy_engine::consequence::write_and_report;
 use rdy_engine::{
-    E_BAD_INPUT, E_IO, E_LIMIT, E_NOT_FOUND, E_PERMISSION, E_WC_OCCUPIED, OpInput, RdyError,
-    ReadState, Scope, WriteRequest, parse_justification,
+    E_BAD_INPUT, E_IO, E_LIMIT, E_NOT_FOUND, E_PERMISSION, E_WC_OCCUPIED, RdyError, ReadState,
+    Scope, WriteRequest, parse_justification,
 };
 use rdy_mcp::tools::MAX_ASSET_BYTES;
 use rdy_model::ChangeLinks;
@@ -333,20 +333,7 @@ pub(super) fn wc_commit(cx: &OpContext, a: WcCommitArgs) -> Result<Value, RdyErr
             a.editorial.map(|e| (e.class, e.reason)),
         )?
     };
-    let ops: Vec<OpInput> = a
-        .ops
-        .into_iter()
-        .enumerate()
-        .map(|(i, v)| {
-            serde_json::from_value(v).map_err(|e| {
-                RdyError::new(
-                    E_BAD_INPUT,
-                    format!("op {i}: {e}"),
-                    "each op needs \"op\" (rdy_schema lists them under \"ops\"); create needs \"type\"",
-                )
-            })
-        })
-        .collect::<Result<_, _>>()?;
+    let ops = rdy_engine::parse_ops(a.ops)?;
     let req = WriteRequest {
         view: view.clone(),
         ops,

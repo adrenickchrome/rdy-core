@@ -299,13 +299,11 @@ console.log(JSON.stringify(out));
 
 #[test]
 fn rv1_show_changes_hides_and_shows_the_markers_and_remembers_for_the_session() {
-    if std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!(
-            "node is not installed: the toggle harness is skipped (the visual review presses it)"
+    if !rdy_qa::skip::node_available() {
+        rdy_qa::skip::skip(
+            "rv1_show_changes_hides_and_shows_the_markers_and_remembers_for_the_session",
+            rdy_qa::skip::Why::Prerequisite,
+            "node is not installed",
         );
         return;
     }

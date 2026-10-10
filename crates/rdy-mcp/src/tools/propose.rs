@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ProposeParams {
     pub view: Option<String>,
     pub title: String,

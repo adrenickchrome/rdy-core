@@ -603,3 +603,63 @@ fn msw11_a_wc_nonce_since_the_seen_head_finds_the_commit_behind_many_others() {
     .unwrap();
     assert!(none["change"].is_null(), "{none}");
 }
+
+#[test]
+fn hd3_wc_commit_refuses_an_op_with_an_unknown_field() {
+    use rdy_engine::engine::Engine as _;
+    let (d, e) = project();
+    let s = human();
+    let err = dispatch(
+        &cx(&e, &s, d.path()),
+        "wc_commit",
+        json!({
+            "view": "work", "nonce": "n1", "rewrite": [], "message": "m",
+            "ops": [{"op": "create", "type": "doc", "id": "$d", "prent": "x",
+                     "fields": {"name": "a", "title": "D", "doc_type": "glossary"}}]
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert_eq!(err.message, "op 0: unknown field \"prent\"");
+    assert!(
+        err.fix
+            .starts_with("did you mean \"parent\"? the fields are "),
+        "{err}"
+    );
+    assert!(e.read().view_head("work").is_none(), "nothing written");
+}
+
+#[test]
+fn hd3_an_op_arg_typo_gets_a_did_you_mean() {
+    let (d, e) = project();
+    let s = human();
+    let err = dispatch(&cx(&e, &s, d.path()), "status", json!({"verbos": true})).unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert_eq!(err.message, "status: unknown field \"verbos\"");
+    assert_eq!(err.fix, "remove \"verbos\"; it takes no fields");
+    let err = dispatch(&cx(&e, &s, d.path()), "log", json!({"limt": 5})).unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert_eq!(err.message, "log: unknown field \"limt\"");
+    assert_eq!(
+        err.fix,
+        "did you mean \"limit\"? the fields are limit, since"
+    );
+}
+
+#[test]
+fn hd3_an_alt_member_with_an_unknown_field_is_refused() {
+    let (d, e) = project();
+    let s = human();
+    let err = dispatch(
+        &cx(&e, &s, d.path()),
+        "alt",
+        json!({"op": "create", "title": "t", "members": [
+            {"label": "a", "view": "v", "viw": 1},
+            {"label": "b", "view": "w"}
+        ]}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert_eq!(err.message, "alt: unknown field \"members[0].viw\"");
+    assert_eq!(err.fix, "did you mean \"view\"? the fields are label, view");
+}

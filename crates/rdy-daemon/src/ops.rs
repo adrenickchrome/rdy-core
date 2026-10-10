@@ -114,19 +114,23 @@ pub(crate) fn view_of(s: &Session, view: Option<String>) -> String {
     }
 }
 
-/// Deserializes `args` as `T`; a failure is `E_BAD_INPUT` naming the op and its shape.
+/// Deserializes `args` as `T`; a failure is `E_BAD_INPUT` naming the op and its shape (an
+/// unknown field by its path in `args`).
 fn parse<T: serde::de::DeserializeOwned>(
     op: &str,
     args: Value,
     shape: &str,
 ) -> Result<T, RdyError> {
     let args = if args.is_null() { json!({}) } else { args };
-    serde_json::from_value(args).map_err(|e| {
-        RdyError::new(
-            E_BAD_INPUT,
-            format!("{op}: {e}"),
-            format!("args for {op}: {shape}"),
-        )
+    T::deserialize(&args).map_err(|e| {
+        let msg = e.to_string();
+        rdy_engine::did_you_mean::unknown_field_error_in(op, &msg, &args).unwrap_or_else(|| {
+            RdyError::new(
+                E_BAD_INPUT,
+                format!("{op}: {msg}"),
+                format!("args for {op}: {shape}"),
+            )
+        })
     })
 }
 

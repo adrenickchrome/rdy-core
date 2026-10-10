@@ -32,8 +32,46 @@ pub struct Verdict {
     pub p95_ms: f64,
     pub baseline_ms: Option<f64>,
     pub delta_pct: Option<f64>,
+    pub runs: usize,
+    pub status: Status,
     pub pass: bool,
     pub spec_target: Option<String>,
+}
+
+/// What a perf run found for one op. Only `Pass` and `Recorded` count as a pass.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Status {
+    Pass,
+    Regressed,
+    OverCeiling,
+    Unbaselined,
+    Recorded,
+    NotCompared,
+}
+
+impl Status {
+    pub fn label(self) -> &'static str {
+        match self {
+            Status::Pass => "PASS",
+            Status::Regressed => "REGRESSED",
+            Status::OverCeiling => "OVER CEILING",
+            Status::Unbaselined => "UNBASELINED",
+            Status::Recorded => "RECORDED",
+            Status::NotCompared => "RECORDED, NOT COMPARED",
+        }
+    }
+
+    pub fn passes(self) -> bool {
+        matches!(self, Status::Pass | Status::Recorded)
+    }
+}
+
+/// Whether a run checks the measures against a baseline or writes them as the new baseline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Compare,
+    Record,
 }
 
 /// The absolute floor of an fsync-bound op: its median moves with the disk, so a rise of less
@@ -273,30 +311,107 @@ fn fsync_bound(op: &str) -> bool {
         || op.starts_with("mcp_write")
 }
 
-pub fn compare(baseline: Option<&Baseline>, measured: &[Measure]) -> Vec<Verdict> {
+/// The verdicts of one run. The spec ceiling is checked first in every mode. In `Record` mode
+/// the rest is `Recorded`. In `Compare` mode an op in the baseline is `Pass` or `Regressed`,
+/// and an op not in it is `Unbaselined`, which fails.
+pub fn compare(baseline: Option<&Baseline>, measured: &[Measure], mode: Mode) -> Vec<Verdict> {
     measured
         .iter()
         .map(|m| {
             let base = baseline.and_then(|b| b.ops.get(&m.op)).map(|b| b.median_ms);
-            let margin = if fsync_bound(&m.op) { 0.50 } else { 0.25 };
-            let regressed = base.is_some_and(|b| {
-                m.median_ms > b * (1.0 + margin) && m.median_ms - b > floor_ms(&m.op)
-            });
-            let over_ceiling = spec_ceiling_ms(&m.op).is_some_and(|c| m.p95_ms > c);
-            let pass = !regressed && !over_ceiling;
-            Verdict {
-                op: m.op.clone(),
-                median_ms: m.median_ms,
-                p95_ms: m.p95_ms,
-                baseline_ms: base,
-                delta_pct: base
-                    .filter(|b| *b > 0.0)
-                    .map(|b| (m.median_ms - b) / b * 100.0),
-                pass,
-                spec_target: spec_target(&m.op),
-            }
+            let status = if over_ceiling(m) {
+                Status::OverCeiling
+            } else if mode == Mode::Record {
+                Status::Recorded
+            } else {
+                match base {
+                    None => Status::Unbaselined,
+                    Some(b) => {
+                        let margin = if fsync_bound(&m.op) { 0.50 } else { 0.25 };
+                        if m.median_ms > b * (1.0 + margin) && m.median_ms - b > floor_ms(&m.op) {
+                            Status::Regressed
+                        } else {
+                            Status::Pass
+                        }
+                    }
+                }
+            };
+            verdict(m, base, status)
         })
         .collect()
+}
+
+/// The verdicts of a run on a machine class with no baseline: nothing was compared, so nothing
+/// passes. An op over its spec ceiling is still named as such.
+pub fn not_compared(measured: &[Measure]) -> Vec<Verdict> {
+    measured
+        .iter()
+        .map(|m| {
+            let status = if over_ceiling(m) {
+                Status::OverCeiling
+            } else {
+                Status::NotCompared
+            };
+            verdict(m, None, status)
+        })
+        .collect()
+}
+
+/// The report note for a run on machine class `machine`, which has no baseline. Perf compares
+/// only on a class the baseline holds, so the note says that before it names a rebaseline.
+pub fn not_compared_note(machine: &str) -> String {
+    format!(
+        "No baseline for `{machine}`: recorded, not compared. Run perf on a machine class that crates/rdy-qa/qa-baseline.json holds, or pass --skip-perf. Add a machine class only when the project decides to: two runs within 10%, then cargo qa --rebaseline, then commit the file."
+    )
+}
+
+/// What the gate does with a perf run, decided from two facts: the machine class has no baseline
+/// entry, and `--rebaseline` was given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TierDecision {
+    /// A missing class without `--rebaseline`: nothing is compared, nothing is written, the gate fails.
+    NotCompared,
+    /// `--rebaseline`: the measures are written as the class's baseline.
+    Rebaseline,
+    /// A known class: the measures are compared against its baseline.
+    Compare,
+}
+
+impl TierDecision {
+    /// Whether this decision rewrites `qa-baseline.json`.
+    pub fn writes_baseline(self) -> bool {
+        self == TierDecision::Rebaseline
+    }
+}
+
+pub fn tier_decision(missing_class: bool, rebaseline: bool) -> TierDecision {
+    if rebaseline {
+        TierDecision::Rebaseline
+    } else if missing_class {
+        TierDecision::NotCompared
+    } else {
+        TierDecision::Compare
+    }
+}
+
+fn over_ceiling(m: &Measure) -> bool {
+    spec_ceiling_ms(&m.op).is_some_and(|c| m.p95_ms > c)
+}
+
+fn verdict(m: &Measure, base: Option<f64>, status: Status) -> Verdict {
+    Verdict {
+        op: m.op.clone(),
+        median_ms: m.median_ms,
+        p95_ms: m.p95_ms,
+        baseline_ms: base,
+        delta_pct: base
+            .filter(|b| *b > 0.0)
+            .map(|b| (m.median_ms - b) / b * 100.0),
+        runs: m.runs,
+        status,
+        pass: status.passes(),
+        spec_target: spec_target(&m.op),
+    }
 }
 
 /// Suffix of the large tier's ops (about 50k blocks, `RDY_QA_DEEP=1` only).
@@ -2689,16 +2804,17 @@ mod tests {
                 m("write_single", 29.0),
                 m("propose_land_500_flat", 29.0),
             ],
+            Mode::Compare,
         );
         assert!(v[0].pass, "+400% but under 2 ms absolute");
         assert!(!v[1].pass, "+26% and +26 ms");
         assert!(v[2].pass, "writes get a 50% margin");
         assert!(v[3].pass, "proposals fsync too, so they get it as well");
-        let v = compare(Some(&base), &[m("write_single", 31.0)]);
+        let v = compare(Some(&base), &[m("write_single", 31.0)], Mode::Compare);
         assert!(!v[0].pass);
         assert!(
-            compare(None, &[m("log_full", 1e9)])[0].pass,
-            "no baseline and no spec ceiling passes"
+            !compare(None, &[m("log_full", 1e9)], Mode::Compare)[0].pass,
+            "no baseline and no spec ceiling is unbaselined, and fails (hd6)"
         );
     }
 
@@ -2720,6 +2836,7 @@ mod tests {
                 m("brief_doc", 0.22),
                 m("write_single", 2.4),
             ],
+            Mode::Compare,
         );
         assert!(
             !v[0].pass,
@@ -2742,7 +2859,7 @@ mod tests {
             runs: 20,
         };
         assert!(
-            !compare(None, std::slice::from_ref(&over))[0].pass,
+            !compare(None, std::slice::from_ref(&over), Mode::Compare)[0].pass,
             "p95 over the 5 ms ceiling, no baseline"
         );
         let base = Baseline {
@@ -2757,9 +2874,85 @@ mod tests {
             .into(),
         };
         assert!(
-            !compare(Some(&base), &[over])[0].pass,
+            !compare(Some(&base), &[over], Mode::Compare)[0].pass,
             "+5% is inside the margin but over the ceiling"
         );
+    }
+
+    #[test]
+    fn hd6_an_op_with_no_baseline_fails_unless_it_is_being_recorded() {
+        let base = Baseline {
+            machine: "x".into(),
+            ops: [("write_single".to_string(), m("write_single", 0.6))].into(),
+        };
+        let v = compare(
+            Some(&base),
+            &[m("write_single", 0.6), m("log_full", 1.0)],
+            Mode::Compare,
+        );
+        assert_eq!((v[0].status, v[0].pass), (Status::Pass, true));
+        assert_eq!((v[1].status, v[1].pass), (Status::Unbaselined, false));
+        let v = compare(Some(&base), &[m("log_full", 1.0)], Mode::Record);
+        assert_eq!((v[0].status, v[0].pass), (Status::Recorded, true));
+    }
+
+    #[test]
+    fn hd6_an_unknown_machine_class_is_recorded_not_compared_and_fails() {
+        let v = not_compared(&[m("log_full", 1.0)]);
+        assert_eq!((v[0].status, v[0].pass), (Status::NotCompared, false));
+        assert_eq!(Status::NotCompared.label(), "RECORDED, NOT COMPARED");
+    }
+
+    #[test]
+    fn hd6_the_not_compared_note_sends_perf_to_a_baselined_class_first() {
+        assert_eq!(
+            not_compared_note("macos-arm64"),
+            "No baseline for `macos-arm64`: recorded, not compared. Run perf on a machine class that crates/rdy-qa/qa-baseline.json holds, or pass --skip-perf. Add a machine class only when the project decides to: two runs within 10%, then cargo qa --rebaseline, then commit the file."
+        );
+    }
+
+    #[test]
+    fn hd6_a_missing_machine_class_without_rebaseline_writes_nothing() {
+        let d = tier_decision(true, false);
+        assert_eq!(d, TierDecision::NotCompared);
+        assert!(
+            !d.writes_baseline(),
+            "a missing class never writes the file"
+        );
+        assert_eq!(tier_decision(true, true), TierDecision::Rebaseline);
+        assert_eq!(tier_decision(false, true), TierDecision::Rebaseline);
+        assert!(TierDecision::Rebaseline.writes_baseline());
+        let d = tier_decision(false, false);
+        assert_eq!(d, TierDecision::Compare);
+        assert!(!d.writes_baseline());
+    }
+
+    #[test]
+    fn hd6_a_spec_ceiling_fails_in_every_mode() {
+        let over = Measure {
+            op: "tree_full".into(),
+            median_ms: 4.2,
+            p95_ms: 5.5,
+            runs: 20,
+        };
+        for v in [
+            compare(None, std::slice::from_ref(&over), Mode::Compare),
+            compare(None, std::slice::from_ref(&over), Mode::Record),
+            not_compared(std::slice::from_ref(&over)),
+        ] {
+            assert_eq!((v[0].status, v[0].pass), (Status::OverCeiling, false));
+        }
+    }
+
+    #[test]
+    fn hd6_a_regression_is_named() {
+        let base = Baseline {
+            machine: "x".into(),
+            ops: [("brief_doc".to_string(), m("brief_doc", 0.20))].into(),
+        };
+        let v = compare(Some(&base), &[m("brief_doc", 0.40)], Mode::Compare);
+        assert_eq!((v[0].status, v[0].pass), (Status::Regressed, false));
+        assert_eq!(Status::Regressed.label(), "REGRESSED");
     }
 
     #[test]

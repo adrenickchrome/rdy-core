@@ -8,3 +8,6 @@ version.workspace = true
 imbl.workspace = true
 rdy-model.workspace = true
 serde.workspace = true
+
+[lints]
+workspace = true

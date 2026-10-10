@@ -113,3 +113,97 @@ fn mparm1_the_founders_case_is_an_rdy_error_through_the_daemon_too() {
     assert_eq!(e["fix"], "pass \"title\" as a string");
     c.alive();
 }
+
+#[test]
+fn hd7_an_unknown_parameter_is_refused_with_a_did_you_mean() {
+    let (dir, r) = project();
+    drop(r);
+    let mut c = McpClient::start(dir.path());
+    c.call(
+        "rdy_session",
+        json!({"actor": "agent:qa", "run": "qa", "role": "writer"}),
+    )
+    .ok();
+    let e = tool_error(c.call("rdy_write", json!({"ops": [], "mesage": "m"})));
+    assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
+    assert_eq!(e["message"], "rdy_write: unknown parameter \"mesage\"");
+    assert!(
+        e["fix"]
+            .as_str()
+            .unwrap()
+            .starts_with("did you mean \"message\"? the parameters here are "),
+        "{e}"
+    );
+    let e = tool_error(c.call("rdy_search", json!({"query": "x", "type": ["claim"]})));
+    assert_eq!(
+        e["message"], "rdy_search: unknown parameter \"type\"",
+        "a read tool is strict too"
+    );
+    let e = tool_error(c.call(
+        "rdy_write",
+        json!({"ops": [], "editorial": {"clas": "typo", "reason": "r"}}),
+    ));
+    assert_eq!(
+        e["message"], "rdy_write: unknown parameter \"editorial.clas\"",
+        "a nested key names its path"
+    );
+    let e = tool_error(c.call("rdy_tags", json!({"x": 1})));
+    assert_eq!(e["fix"], "remove \"x\"; rdy_tags takes no parameters");
+    let e = tool_error(c.call(
+        "rdy_write",
+        json!({"ops": [{"op": "move", "id": "x", "parent_id": "y"}]}),
+    ));
+    assert_eq!(
+        e["message"], "op 0: unknown field \"parent_id\"",
+        "an op inside is Task 3's text"
+    );
+    c.alive(); // panics when the server no longer answers
+}
+
+#[test]
+fn hd7_every_tool_publishes_a_closed_schema() {
+    let (dir, r) = project();
+    drop(r);
+    let mut c = McpClient::start(dir.path());
+    for t in c.tools() {
+        assert_eq!(
+            t["inputSchema"]["additionalProperties"], false,
+            "{}",
+            t["name"]
+        );
+    }
+}
+
+#[test]
+fn hd7_every_tool_accepts_its_documented_parameters() {
+    let (dir, r) = project();
+    drop(r);
+    let mut c = McpClient::start(dir.path());
+    c.call(
+        "rdy_session",
+        json!({"actor": "agent:qa", "run": "qa", "role": "writer"}),
+    )
+    .ok();
+    for t in c.tools() {
+        let name = t["name"].as_str().unwrap().to_string();
+        let props = t["inputSchema"]["properties"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        for key in props.keys() {
+            let mut args = serde_json::Map::new();
+            args.insert(key.clone(), serde_json::Value::Null);
+            let r = c.call(&name, serde_json::Value::Object(args));
+            if let Reply::ToolError(e) = &r {
+                // `unknown parameter` is the schema walk's text; `unknown field` is the serde
+                // fallback's. The serde-layer guard is `hd7_serde_accepts_every_key_each_params_
+                // schema_publishes` in rdy-mcp, which does not depend on the order of the checks.
+                let msg = e["message"].as_str().unwrap_or("");
+                assert!(
+                    !msg.contains("unknown parameter") && !msg.contains("unknown field"),
+                    "{name}: documented parameter {key} is refused as unknown: {e}"
+                );
+            }
+        }
+    }
+}

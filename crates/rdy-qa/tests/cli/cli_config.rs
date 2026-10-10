@@ -1,7 +1,7 @@
 //! cfgl1: settings come from four levels (FW-X5, D-C5955) minus the file move: .rdy/local.yaml,
 //! the project config (.rdy/config.yaml until M2f-b), the user config and the defaults; the most
-//! specific wins; a key at the wrong level is E_CONFIG naming the right one; rdy config
-//! --show-origin prints each value's file.
+//! specific wins; a key at the wrong level is a W_CONFIG_UNKNOWN warning naming the right file,
+//! and rdy ignores it; rdy config --show-origin prints each value's file.
 use rdy_engine::config_levels::*;
 use rdy_engine::*;
 use rdy_qa::daemon::Served;
@@ -67,33 +67,40 @@ fn cfgl1_the_most_specific_level_wins() {
 }
 
 #[test]
-fn cfgl1_a_key_at_the_wrong_level_is_e_config_naming_the_level() {
+fn cfgl1_a_key_at_the_wrong_level_warns_naming_the_right_file() {
     let (_d, p) = proj();
     append(&p, PROJECT_FILE, "actor: human:all\n");
-    let e = effective(&p, None).unwrap_err();
-    assert_eq!(e.code, E_CONFIG);
+    let e = effective(&p, None).expect("a wrong-file key is a warning");
+    assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
+    assert_eq!(e.warnings[0].code, "W_CONFIG_UNKNOWN");
     assert!(
-        e.message.contains("actor")
-            && e.fix.contains(".rdy/local.yaml")
-            && e.fix.contains("user config"),
-        "{e}"
+        e.warnings[0].message.contains("actor")
+            && e.warnings[0].fix.contains(".rdy/local.yaml")
+            && e.warnings[0].fix.contains("user config"),
+        "{:?}",
+        e.warnings[0]
     );
-    assert_eq!(
-        Rdy::open(&p).err().map(|e| e.code),
-        Some(E_CONFIG),
-        "open refuses it too"
-    );
+    assert!(Rdy::open(&p).is_ok(), "open accepts it too");
     let (_d, p) = proj();
     append(&p, LOCAL_FILE, "pack: other\n");
-    let e = effective(&p, None).unwrap_err();
+    let e = effective(&p, None).expect("a wrong-file key is a warning");
+    assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
     assert!(
-        e.message.contains("pack") && e.fix.contains("project config"),
-        "{e}"
+        e.warnings[0].message.contains("pack") && e.warnings[0].fix.contains(".rdy/config.yaml"),
+        "{:?}",
+        e.warnings[0]
     );
+    assert!(Rdy::open(&p).is_ok(), "open accepts it too");
     let (_d, p) = proj();
     let (_u, uf) = user("decisions:\n  home: x\n");
-    let e = effective(&p, Some(&uf)).unwrap_err();
-    assert!(e.message.contains("decisions.home"), "{e}");
+    let e = effective(&p, Some(&uf)).expect("a wrong-file key is a warning");
+    assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
+    assert!(
+        e.warnings[0].message.contains("decisions.home")
+            && e.warnings[0].fix.contains(".rdy/config.yaml"),
+        "{:?}",
+        e.warnings[0]
+    );
 }
 
 #[test]

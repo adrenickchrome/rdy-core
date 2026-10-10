@@ -600,3 +600,52 @@ mod msw8_conflicts {
         assert_eq!(body_of(&r, &view("a"), &c), "resolved");
     }
 }
+
+#[test]
+fn hd8_rdy_edit_refuses_a_misspelt_key_and_keeps_the_buffer() {
+    let s = Served::new();
+    let id = new_doc(&s);
+    let ed = script(
+        &s,
+        "typo.sh",
+        "sed -i.bak 's/title: Before/title: After/' \"$1\"\nprintf 'bdoy: x\\n' >> \"$1\"\n",
+    );
+    let out = edit(&s, &ed, &id, true);
+    assert!(
+        !out.status.success(),
+        "a misspelt key is refused, not dropped"
+    );
+    let e: Value = serde_json::from_str(
+        String::from_utf8_lossy(&out.stderr)
+            .trim()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(e["code"], "E_FILE_FORMAT", "{e}");
+    assert!(
+        e["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("unknown key \"bdoy\" in the block"),
+        "{e}"
+    );
+    assert!(
+        e["fix"]
+            .as_str()
+            .unwrap()
+            .starts_with("did you mean \"body\"? rename it"),
+        "{e}"
+    );
+    let saved = e["saved_edit"].as_str().expect("the buffer is kept");
+    let kept = std::fs::read_to_string(saved).unwrap();
+    assert!(
+        kept.contains("bdoy: x") && kept.contains("title: After"),
+        "{kept}"
+    );
+    std::fs::remove_file(saved).unwrap();
+    let (ok, v) = s.json(&["--json", "show", &id, "--scope", "work"]);
+    assert!(ok, "{v}");
+    assert_eq!(v["fields"]["title"], "Before", "nothing written");
+}

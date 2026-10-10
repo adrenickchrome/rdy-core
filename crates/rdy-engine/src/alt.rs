@@ -29,6 +29,7 @@ const LIST_SETS: &str = "list the sets with rdy alt ls (MCP: rdy_alternatives li
 
 /// A member as create and add take it: a label and the view that holds the alternative.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AltMemberInput {
     pub label: String,
     pub view: String,

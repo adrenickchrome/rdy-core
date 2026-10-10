@@ -401,11 +401,15 @@ impl ServeHandler {
     fn open_session(&self, info: &SessionInfo, args: Value) -> Result<Value, ErrorReply> {
         let args = if args.is_null() { json!({}) } else { args };
         let a: SessionArgs = serde_json::from_value(args).map_err(|e| {
-            ErrorReply::new(
-                E_BAD_INPUT,
-                format!("session: {e}"),
-                "args for session: {actor?, run?}",
-            )
+            let msg = e.to_string();
+            match rdy_engine::did_you_mean::unknown_field_error("session", &msg) {
+                Some(err) => ErrorReply::from(err),
+                None => ErrorReply::new(
+                    E_BAD_INPUT,
+                    format!("session: {msg}"),
+                    "args for session: {actor?, run?}",
+                ),
+            }
         })?;
         let human = self
             .human

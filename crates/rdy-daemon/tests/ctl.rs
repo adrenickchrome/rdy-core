@@ -73,7 +73,6 @@ async fn ctl1_a_malformed_line_gets_a_bad_input_reply_and_the_connection_lives()
         r#"{"id":true,"op":"echo"}"#,
         "[1,2]",
         "{not json",
-        r#"{"id":1}"#,
     ] {
         let v = roundtrip(&mut c, bad).await;
         assert_eq!(v["id"], Value::Null, "{bad}");
@@ -86,6 +85,17 @@ async fn ctl1_a_malformed_line_gets_a_bad_input_reply_and_the_connection_lives()
             "{bad}"
         );
     }
+    // ruling Q13: a line that has an id keeps it in the reply
+    let v = roundtrip(&mut c, r#"{"id":1}"#).await;
+    assert_eq!(v["id"], 1, "{v}");
+    assert_eq!(v["error"]["code"], "E_BAD_INPUT", "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("a ctl request is one JSON object per line"),
+        "{v}"
+    );
     let v = roundtrip(&mut c, r#"{"id":2,"op":"echo"}"#).await;
     assert_eq!(v["id"], 2, "still served after bad lines");
 }
@@ -297,4 +307,22 @@ async fn reload1_a_reply_carries_the_handlers_notice() {
         assert!(v.get("ok").is_some(), "{v}");
         assert!(v.get("notice").is_none(), "no notice key by default: {v}");
     }
+}
+
+#[tokio::test]
+async fn hd3_a_ctl_request_with_an_unknown_field_is_refused_with_its_id() {
+    let (mut c, _h) = serve(info());
+    let v = roundtrip(&mut c, r#"{"id":4,"op":"echo","arg":{"x":1}}"#).await;
+    assert_eq!(v["id"], 4, "the reply keeps the request's id: {v}");
+    assert_eq!(v["error"]["code"], "E_BAD_INPUT", "{v}");
+    assert_eq!(v["error"]["message"], "ctl request: unknown field \"arg\"");
+    assert_eq!(
+        v["error"]["fix"],
+        "did you mean \"args\"? the fields are id, op, args"
+    );
+    assert_eq!(
+        roundtrip(&mut c, r#"{"id":5,"op":"echo"}"#).await["id"],
+        5,
+        "the connection lives"
+    );
 }

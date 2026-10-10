@@ -1,14 +1,15 @@
 //! Settings come from four levels (FW-X5, D-C5955), minus the file move: `.rdy/local.yaml`,
 //! the project config (`.rdy/config.yaml` until M2f-b), the user config and the defaults. The
 //! most specific level that sets a key wins. Each key of [`KEY_LEVELS`] names the levels that may
-//! set it (R-P6); a key in a file of another level is `E_CONFIG` naming the right file. Keys
-//! outside the table are kept as they are and never shown; each one is a `W_CONFIG_UNKNOWN`
-//! warning naming the key, the file and the level (R-P6). A mapping key that holds a `.` is never
-//! known: rdy reads only nested keys. An unknown key meant as a review setting gets its own
-//! warning text (#832): one under `reviews` or nearest to a `reviews` key, a dotted `reviews.` key,
-//! and one anywhere whose last segment is (or is within 2 edits of) a `reviews` leaf. The text says
-//! that the review gate would stay off. Founder ruling (config typos warn): it is a warning, never
-//! `E_CONFIG`, and the project opens.
+//! set it (R-P6); a key in a file of another level is a `W_CONFIG_UNKNOWN` warning that names the
+//! file it belongs in, and rdy ignores its value. Keys outside the table are kept as they are and
+//! never shown; each one is a `W_CONFIG_UNKNOWN` warning naming the key, the file and the level
+//! (R-P6). A mapping key that holds a `.` is never known: rdy reads only nested keys. An unknown
+//! key meant as a review setting gets its own warning text (#832): a dotted `reviews.` key, one
+//! under `reviews`, and one nearest to a `reviews` key. The text says that the review gate would
+//! stay off. Founder ruling (config typos warn): every config mistake is a warning, never
+//! `E_CONFIG`, and the project opens. Only a wrong value type on a known key in a file that
+//! allows it is `E_CONFIG`.
 
 use crate::{E_CONFIG, E_IO, E_NO_PROJECT, RdyError};
 use rdy_schema::{Issue, Severity};
@@ -273,17 +274,6 @@ fn file_name(level: Level, user_file: Option<&Path>) -> String {
     }
 }
 
-/// How the fix of a wrong-level key names a file.
-fn file_fix_name(level: Level, user_file: Option<&Path>) -> String {
-    match level {
-        Level::Local => format!("\"{LOCAL_FILE}\""),
-        Level::Project => format!("\"the project config ({PROJECT_FILE})\""),
-        Level::User | Level::Default => {
-            format!("\"the user config ({})\"", file_name(level, user_file))
-        }
-    }
-}
-
 fn path_of(project: &Path, level: Level, user_file: Option<&Path>) -> Option<PathBuf> {
     match level {
         Level::Local => Some(project.join(LOCAL_FILE)),
@@ -337,9 +327,9 @@ fn parse_file(text: &str, shown: &str) -> Result<Mapping, RdyError> {
     }
 }
 
-/// The settings of the project at `project` with the user config at `user_file`; refuses a key in
-/// a file of a level that does not allow it, a file that is not a mapping and a project that has
-/// no config.
+/// The settings of the project at `project` with the user config at `user_file`; refuses a wrong
+/// value type, a file that is not a mapping and a project that has no config. A key in a file of a
+/// level that does not allow it is a warning, and rdy ignores it.
 pub fn effective(project: &Path, user_file: Option<&Path>) -> Result<Effective, RdyError> {
     build(project, user_file, false, None)
 }
@@ -362,8 +352,8 @@ pub fn effective_from(
     build(project, user_file, false, Some(given))
 }
 
-/// `effective` that never fails: a key at the wrong level, or a file that does not read, is
-/// left out, so a client can still start a daemon that then reports the error.
+/// `effective` that never fails: a wrong value type, or a file that does not read, is left out,
+/// so a client can still start a daemon that then reports the error.
 pub fn effective_lenient(project: &Path, user_file: Option<&Path>) -> Effective {
     build(project, user_file, true, None).unwrap_or_else(|_| Effective {
         origins: Vec::new(),
@@ -457,44 +447,51 @@ fn nested_fix(path: &str, value: &Value, home: &str) -> String {
     format!("write it nested{home}: {} {next}", lines.join(" then "))
 }
 
-fn edit_distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut prev = row[0];
-        row[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let cur = row[j + 1];
-            row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
-            prev = cur;
+/// The rule of the table whose key is nearest to `path` by the closed did-you-mean rule, over
+/// every key of the table.
+fn nearest_key(path: &str) -> Option<&'static KeyRule> {
+    let keys: Vec<&'static str> = KEY_LEVELS.iter().map(|r| r.key).collect();
+    let k = crate::did_you_mean::nearest(path, &keys)?;
+    KEY_LEVELS.iter().find(|r| r.key == k)
+}
+
+/// The files that may set a key, as a message names them: the project config, `.rdy/local.yaml`
+/// and the user config, joined with ` or `.
+fn home_name(levels: &[Level], user_file: Option<&Path>) -> String {
+    [Level::Project, Level::Local, Level::User]
+        .into_iter()
+        .filter(|l| levels.contains(l))
+        .map(|l| match l {
+            Level::Project => PROJECT_FILE.to_string(),
+            Level::Local => LOCAL_FILE.to_string(),
+            _ => user_file.map_or_else(
+                || "the user config".to_string(),
+                |f| format!("the user config ({})", f.display()),
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
+
+/// The fix text of an unknown key: the nearest known key, else remove it. A nearest key that
+/// `level` may not set is in another file, so the fix names it.
+fn unknown_fix(path: &str, level: Level, file: &str, user_file: Option<&Path>) -> String {
+    match nearest_key(path) {
+        Some(r) if r.levels.contains(&level) => {
+            format!("did you mean {}? rename {path} in {file}", r.key)
         }
-    }
-    row[b.len()]
-}
-
-/// The key of the table `level` allows that is nearest to `path`, if it is within 2 edits.
-fn nearest_key(path: &str, level: Level) -> Option<&'static str> {
-    KEY_LEVELS
-        .iter()
-        .filter(|r| r.levels.contains(&level))
-        .map(|r| (edit_distance(path, r.key), r.key))
-        .filter(|(d, _)| *d <= 2)
-        .min_by_key(|(d, _)| *d)
-        .map(|(_, k)| k)
-}
-
-/// The fix text of an unknown key: the nearest known key, else remove it.
-fn unknown_fix(path: &str, level: Level, file: &str) -> String {
-    match nearest_key(path, level) {
-        Some(k) => format!("did you mean {k}? rename {path} in {file}"),
+        Some(r) => format!(
+            "did you mean {}? set it in {} and remove {path} from {file}",
+            r.key,
+            home_name(r.levels, user_file)
+        ),
         None => format!("remove {path} from {file}, or check its spelling"),
     }
 }
 
 /// The `W_CONFIG_UNKNOWN` warnings of `map`, one per unknown path. A key meant as a review
 /// setting gets the review texts (#832): the review gate would stay off. That is a dotted key under
-/// `reviews`, an unknown key under `reviews` or nearest to a `reviews` key, and a key anywhere
-/// whose last segment is (or is within 2 edits of) the leaf of a `reviews` key. Founder ruling
+/// `reviews`, an unknown key under `reviews`, and one nearest to a `reviews` key. Founder ruling
 /// (config typos warn): a warning, never `E_CONFIG`, so the project opens.
 fn unknown_warnings(level: Level, map: &Mapping, user_file: Option<&Path>) -> Vec<Issue> {
     let mut paths = Vec::new();
@@ -503,32 +500,30 @@ fn unknown_warnings(level: Level, map: &Mapping, user_file: Option<&Path>) -> Ve
     paths
         .into_iter()
         .map(|u| {
-            let (message, fix) = unknown_text(level, &file, &u);
-            Issue {
-                severity: Severity::Warning,
-                code: "W_CONFIG_UNKNOWN",
-                block: None,
-                message,
-                fix,
-            }
+            let (message, fix) = unknown_text(level, &file, user_file, &u);
+            config_warning(message, fix)
         })
         .collect()
 }
 
-/// The leaf of the `reviews` key whose leaf `segment` is, or is within 2 edits of.
-fn review_leaf(segment: &str) -> Option<&'static str> {
-    KEY_LEVELS
-        .iter()
-        .filter_map(|r| r.key.strip_prefix("reviews."))
-        .map(|leaf| (edit_distance(segment, leaf), leaf))
-        .filter(|(d, _)| *d <= 2)
-        .min_by_key(|(d, _)| *d)
-        .map(|(_, leaf)| leaf)
+fn config_warning(message: String, fix: String) -> Issue {
+    Issue {
+        severity: Severity::Warning,
+        code: "W_CONFIG_UNKNOWN",
+        block: None,
+        message,
+        fix,
+    }
 }
 
 /// The message and fix of unknown path `u` in `file` (`level`): the review texts for a key meant
 /// as a review setting, else the plain ones.
-fn unknown_text(level: Level, file: &str, u: &Unknown) -> (String, String) {
+fn unknown_text(
+    level: Level,
+    file: &str,
+    user_file: Option<&Path>,
+    u: &Unknown,
+) -> (String, String) {
     let path = &u.path;
     // review settings are project-only: a fix in another file names the project config
     let home = if level == Level::Project {
@@ -545,27 +540,13 @@ fn unknown_text(level: Level, file: &str, u: &Unknown) -> (String, String) {
             nested_fix(path, v, &home),
         );
     }
-    let unknown = || {
-        (
-            format!("unknown review setting {path} in {file}; the review gate would stay off"),
-            unknown_fix(path, level, file),
-        )
-    };
-    if path.starts_with("reviews.") {
-        return unknown();
-    }
-    let last = path.rsplit('.').next().unwrap_or(path);
-    if let Some(leaf) = review_leaf(last) {
+    if path.starts_with("reviews.")
+        || nearest_key(path).is_some_and(|r| r.key.starts_with("reviews."))
+    {
         return (
-            format!(
-                "unknown review setting {path} in {file}; the review gate would stay off; did you \
-                 mean reviews.{leaf}?"
-            ),
-            format!("move it under `reviews:`{home}"),
+            format!("unknown review setting {path} in {file}; the review gate would stay off"),
+            unknown_fix(path, level, file, user_file),
         );
-    }
-    if nearest_key(path, level).is_some_and(|k| k.starts_with("reviews.")) {
-        return unknown();
     }
     (
         format!(
@@ -574,9 +555,54 @@ fn unknown_text(level: Level, file: &str, u: &Unknown) -> (String, String) {
         ),
         match &u.dotted {
             Some(v) => nested_fix(path, v, ""),
-            None => unknown_fix(path, level, file),
+            None => unknown_fix(path, level, file, user_file),
         },
     )
+}
+
+/// The `W_CONFIG_UNKNOWN` warnings of the known keys that `map` (the file of `level`) holds and
+/// `level` may not set, each key removed from `map` so that rdy ignores it. A project-only key's
+/// section that is not a mapping counts too (`reviews: 5`); an empty section does not.
+fn wrong_file_warnings(level: Level, map: &mut Mapping, user_file: Option<&Path>) -> Vec<Issue> {
+    let file = file_name(level, user_file);
+    let mut out = Vec::new();
+    for rule in KEY_LEVELS {
+        if rule.levels.contains(&level) {
+            continue;
+        }
+        let head = rule.key.split('.').next().unwrap_or(rule.key);
+        // the key to name: the whole key, or the section when it holds a scalar or a list
+        let named = if get_path(map, rule.key).is_some() {
+            remove_path(map, rule.key);
+            rule.key
+        } else if rule.key != head
+            && map
+                .get(head)
+                .is_some_and(|v| !v.is_mapping() && !v.is_null())
+        {
+            map.remove(head);
+            if out.iter().any(|(k, _): &(&str, Issue)| *k == head) {
+                continue;
+            }
+            head
+        } else {
+            continue;
+        };
+        let home = home_name(rule.levels, user_file);
+        let gate = if named == "reviews" || named.starts_with("reviews.") {
+            ", so the review gate would stay off"
+        } else {
+            ""
+        };
+        out.push((
+            named,
+            config_warning(
+                format!("{named} in {file} belongs in {home}; rdy ignores it here{gate}"),
+                format!("move {named} to {home}"),
+            ),
+        ));
+    }
+    out.into_iter().map(|(_, w)| w).collect()
 }
 
 /// Why the value `rule.key` has in `map` is of the wrong type, or `None` when it has the type or
@@ -635,33 +661,12 @@ fn build(
             Err(e) => return Err(e),
         }
     }
-    let warnings: Vec<Issue> = files
-        .iter()
-        .flat_map(|(level, map)| unknown_warnings(*level, map, user_file))
-        .collect();
+    // per file in precedence order: its unknown keys, then its keys that belong in another file
+    // (removed here, so they never reach the type check)
+    let mut warnings: Vec<Issue> = Vec::new();
     for (level, map) in &mut files {
-        for rule in KEY_LEVELS {
-            if rule.levels.contains(level) || get_path(map, rule.key).is_none() {
-                continue;
-            }
-            if !lenient {
-                let allowed: Vec<String> = rule
-                    .levels
-                    .iter()
-                    .map(|l| file_fix_name(*l, user_file))
-                    .collect();
-                return Err(RdyError::new(
-                    E_CONFIG,
-                    format!(
-                        "{} is not allowed in {}",
-                        rule.key,
-                        file_name(*level, user_file)
-                    ),
-                    format!("set {} in {}", rule.key, allowed.join(" or ")),
-                ));
-            }
-            remove_path(map, rule.key);
-        }
+        warnings.extend(unknown_warnings(*level, map, user_file));
+        warnings.extend(wrong_file_warnings(*level, map, user_file));
     }
     for (level, map) in &mut files {
         for rule in KEY_LEVELS {
@@ -931,13 +936,14 @@ mod tests {
         let d = project("pack: p\n", Some("require_up_to_date: true\n"));
         let w = effective(d.path(), None).unwrap().warnings;
         assert_eq!(w.len(), 1, "{w:?}");
-        assert!(
-            w[0].message
-                .contains("did you mean reviews.require_up_to_date?"),
-            "{}",
-            w[0].message
+        assert_eq!(
+            w[0].message,
+            "unknown key require_up_to_date in .rdy/local.yaml (local level); rdy ignores it"
         );
-        assert_eq!(w[0].fix, "move it under `reviews:` in .rdy/config.yaml");
+        assert_eq!(
+            w[0].fix,
+            "remove require_up_to_date from .rdy/local.yaml, or check its spelling"
+        );
         let d = project("pack: p\n", Some("reviews.require_up_to_date: true\n"));
         let w = effective(d.path(), None).unwrap().warnings;
         assert_eq!(w.len(), 1, "{w:?}");
@@ -961,12 +967,16 @@ mod tests {
     }
 
     #[test]
-    fn cfgw1_a_known_key_at_the_wrong_level_is_still_e_config() {
+    fn cfgw1_a_known_key_at_the_wrong_level_warns_naming_the_right_file() {
         let d = project("pack: p\n", Some("pack: x\n"));
-        let e = effective(d.path(), None).unwrap_err();
-        assert_eq!(e.code, E_CONFIG);
+        let e = effective(d.path(), None).expect("a wrong-file key is a warning");
+        assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
+        assert_eq!(e.warnings[0].code, "W_CONFIG_UNKNOWN");
+        assert_eq!(e.warnings[0].fix, "move pack to .rdy/config.yaml");
         let d = project("pack: p\n", Some("decisions:\n  home: x\n"));
-        assert_eq!(effective(d.path(), None).unwrap_err().code, E_CONFIG);
+        let e = effective(d.path(), None).expect("a wrong-file key is a warning");
+        assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
+        assert_eq!(e.warnings[0].fix, "move decisions.home to .rdy/config.yaml");
     }
 
     #[test]
@@ -994,6 +1004,139 @@ mod tests {
             w[0].message
         );
         assert!(w[0].fix.contains("did you mean actor"), "{}", w[0].fix);
+    }
+
+    #[test]
+    fn hd9_a_review_setting_in_local_yaml_warns_naming_the_project_config_and_is_ignored() {
+        let d = project("pack: p\n", Some("reviews:\n  require_up_to_date: true\n"));
+        let e = effective(d.path(), None).expect("a wrong-file key is a warning");
+        assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
+        let w = &e.warnings[0];
+        assert_eq!(w.code, "W_CONFIG_UNKNOWN");
+        assert_eq!(
+            w.message,
+            "reviews.require_up_to_date in .rdy/local.yaml belongs in .rdy/config.yaml; rdy ignores it here, so the review gate would stay off"
+        );
+        assert_eq!(w.fix, "move reviews.require_up_to_date to .rdy/config.yaml");
+        let o = e
+            .origins
+            .iter()
+            .find(|o| o.key == "reviews.require_up_to_date")
+            .unwrap();
+        assert_eq!(
+            (o.level, o.value.as_bool()),
+            (Level::Default, Some(false)),
+            "not applied"
+        );
+        assert_eq!(
+            effective_lenient(d.path(), None).warnings,
+            e.warnings,
+            "every read warns"
+        );
+    }
+
+    #[test]
+    fn hd9_a_review_setting_in_the_user_config_warns_naming_the_project_config() {
+        let d = project("pack: p\n", None);
+        let u = tempfile::tempdir().unwrap();
+        let uf = u.path().join("config.yaml");
+        std::fs::write(&uf, "reviews:\n  require_up_to_date: true\n").unwrap();
+        let e = effective(d.path(), Some(&uf)).expect("a wrong-file key is a warning");
+        assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
+        assert!(
+            e.warnings[0].message.contains(&uf.display().to_string()),
+            "{}",
+            e.warnings[0].message
+        );
+        assert_eq!(
+            e.warnings[0].fix,
+            "move reviews.require_up_to_date to .rdy/config.yaml"
+        );
+    }
+
+    #[test]
+    fn hd9_a_misspelt_review_key_in_local_yaml_names_the_project_config() {
+        let d = project("pack: p\n", Some("reviews:\n  require_uptodate: true\n"));
+        let w = effective(d.path(), None).unwrap().warnings;
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(
+            w[0].message,
+            "unknown review setting reviews.require_uptodate in .rdy/local.yaml; the review gate would stay off"
+        );
+        assert_eq!(
+            w[0].fix,
+            "did you mean reviews.require_up_to_date? set it in .rdy/config.yaml and remove reviews.require_uptodate from .rdy/local.yaml"
+        );
+    }
+
+    #[test]
+    fn hd9_actor_in_the_project_config_warns_naming_the_person_files() {
+        let d = project("pack: p\nactor: human:all\n", None);
+        let e = effective(d.path(), None).expect("warning, not E_CONFIG");
+        assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
+        assert_eq!(
+            e.warnings[0].message,
+            "actor in .rdy/config.yaml belongs in .rdy/local.yaml or the user config; rdy ignores it here"
+        );
+        assert_eq!(
+            e.warnings[0].fix,
+            "move actor to .rdy/local.yaml or the user config"
+        );
+    }
+
+    #[test]
+    fn hd9_the_home_names_the_user_file_when_it_is_known() {
+        let d = project("pack: p\nactor: human:all\n", None);
+        let u = tempfile::tempdir().unwrap();
+        let uf = u.path().join("config.yaml");
+        let w = effective(d.path(), Some(&uf)).unwrap().warnings;
+        assert_eq!(w.len(), 1, "{w:?}");
+        let home = format!(".rdy/local.yaml or the user config ({})", uf.display());
+        assert_eq!(
+            w[0].message,
+            format!("actor in .rdy/config.yaml belongs in {home}; rdy ignores it here")
+        );
+        assert_eq!(w[0].fix, format!("move actor to {home}"));
+    }
+
+    #[test]
+    fn hd9_the_wrong_file_wins_over_a_wrong_type_and_a_bad_section() {
+        for (local, named) in [
+            (
+                "reviews:\n  require_up_to_date: maybe\n",
+                "reviews.require_up_to_date",
+            ),
+            ("reviews: 5\n", "reviews"),
+        ] {
+            let d = project("pack: p\n", Some(local));
+            let w = effective(d.path(), None)
+                .unwrap_or_else(|e| panic!("{local:?}: {e}"))
+                .warnings;
+            assert_eq!(w.len(), 1, "{local:?}: {w:?}");
+            assert_eq!(w[0].code, "W_CONFIG_UNKNOWN");
+            assert_eq!(
+                w[0].message,
+                format!(
+                    "{named} in .rdy/local.yaml belongs in .rdy/config.yaml; rdy ignores it here, so the review gate would stay off"
+                ),
+                "{local:?}"
+            );
+            assert_eq!(w[0].fix, format!("move {named} to .rdy/config.yaml"));
+        }
+        let d = project("pack: p\n", Some("reviews: {}\n"));
+        assert!(
+            effective(d.path(), None).unwrap().warnings.is_empty(),
+            "an empty section stays silent"
+        );
+    }
+
+    /// guard: a wrong type on a known key in its own file is still E_CONFIG.
+    #[test]
+    fn hd9_a_wrong_type_in_the_right_file_stays_e_config() {
+        let d = project("pack: p\nreviews:\n  require_up_to_date: maybe\n", None);
+        assert_eq!(effective(d.path(), None).unwrap_err().code, E_CONFIG);
+        let d = project("pack: p\n", Some("serve:\n  idle_timeout: soon\n"));
+        assert_eq!(effective(d.path(), None).unwrap_err().code, E_CONFIG);
     }
 
     #[test]

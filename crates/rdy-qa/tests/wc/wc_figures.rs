@@ -164,3 +164,117 @@ fn msw11_commit_never_writes_a_blob_through_a_link_at_its_temp_name() {
     assert!(std::fs::symlink_metadata(&blob).unwrap().is_file());
     assert_eq!(std::fs::read(&blob).unwrap(), b"\x89PNG chart");
 }
+
+#[test]
+fn hd5_a_custom_asset_types_image_path_becomes_a_blob_hash() {
+    let (s, seed) = seeded();
+    rdy_qa::packs::use_pack(
+        s.dir.path(),
+        "blobs",
+        rdy_qa::packs::BLOB_PACK,
+        "serve:\n  idle_timeout: 60\n",
+    );
+    ok(&s, &["checkout"]);
+    std::fs::create_dir_all(at(&s, "guides/img")).unwrap();
+    std::fs::write(at(&s, "guides/img/shot.png"), b"\x89PNG shot").unwrap();
+    let mut text = read(&s, "guides/intro.yaml");
+    text.push_str(&format!(
+        "- type: shot\n  parent: {}\n  fields:\n    blob: img/shot.png\n",
+        seed.section
+    ));
+    std::fs::write(at(&s, "guides/intro.yaml"), text).unwrap();
+    ok(&s, &["add", "guides/intro.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "a shot"]);
+    assert!(okk, "{v}");
+    let shot = entries(&s, "guides/intro.yaml")
+        .into_iter()
+        .find(|e| e["type"].as_str() == Some("shot"))
+        .unwrap();
+    let hash = shot["fields"]["blob"].as_str().unwrap().to_string();
+    assert_eq!(hash.len(), 64, "{shot:?}");
+    assert_eq!(shot["fields"]["media_type"].as_str(), Some("image/png"));
+    assert_eq!(
+        std::fs::read(at(&s, &format!("_blobs/{hash}.png"))).unwrap(),
+        b"\x89PNG shot"
+    );
+}
+
+/// guard: a type without the asset trait keeps a path in `blob` as text: no blob is stored and
+/// nothing is written to `_blobs/`.
+#[test]
+fn hd5_a_non_asset_types_blob_path_stays_text() {
+    let (s, seed) = seeded();
+    rdy_qa::packs::use_pack(
+        s.dir.path(),
+        "blobs",
+        rdy_qa::packs::BLOB_PACK,
+        "serve:\n  idle_timeout: 60\n",
+    );
+    ok(&s, &["checkout"]);
+    std::fs::create_dir_all(at(&s, "guides/img")).unwrap();
+    std::fs::write(at(&s, "guides/img/chart.png"), b"\x89PNG chart").unwrap();
+    add_figure(
+        &s,
+        &seed.section,
+        "img/chart.png",
+        "    media_type: image/png\n",
+    );
+    let (okk, v) = json(&s, &["commit", "-m", "a figure without the asset trait"]);
+    assert!(okk, "{v}");
+    let fig = entries(&s, "guides/intro.yaml")
+        .into_iter()
+        .find(|e| e["type"].as_str() == Some("figure"))
+        .unwrap();
+    assert_eq!(fig["fields"]["blob"].as_str(), Some("img/chart.png"));
+    let blobs = std::fs::read_dir(at(&s, "_blobs"))
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(blobs, 0, "nothing in _blobs/");
+}
+
+/// The image diagnostics name the entry's type: a custom asset type gets its own name, and the
+/// media_type fix speaks of the entry, not of a figure.
+#[test]
+fn hd5_image_diagnostics_name_the_entrys_type() {
+    let (s, seed) = seeded();
+    rdy_qa::packs::use_pack(
+        s.dir.path(),
+        "blobs",
+        rdy_qa::packs::BLOB_PACK,
+        "serve:\n  idle_timeout: 60\n",
+    );
+    ok(&s, &["checkout"]);
+    std::fs::create_dir_all(at(&s, "guides/img")).unwrap();
+    std::fs::write(at(&s, "guides/img/shot.raw"), b"raw").unwrap();
+    let mut text = read(&s, "guides/intro.yaml");
+    text.push_str(&format!(
+        "- type: shot\n  parent: {sec}\n  fields:\n    blob: img/none.png\n\
+         - type: shot\n  parent: {sec}\n  fields:\n    blob: img/shot.raw\n",
+        sec = seed.section
+    ));
+    std::fs::write(at(&s, "guides/intro.yaml"), text).unwrap();
+    ok(&s, &["add", "guides/intro.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "two shots"]);
+    assert!(!okk && v["code"] == E_WC_INVALID, "{v}");
+    let diags = v["diagnostics"].as_array().unwrap();
+    let find = |tail: &str| {
+        diags
+            .iter()
+            .find(|d| d["message"].as_str().unwrap().ends_with(tail))
+            .unwrap_or_else(|| panic!("no diagnostic ending {tail:?}: {v}"))
+    };
+    let missing = find(": no image at img/none.png");
+    assert!(
+        missing["message"].as_str().unwrap().starts_with("shot sh-"),
+        "{missing}"
+    );
+    let untyped = find(": set media_type for img/shot.raw");
+    assert!(
+        untyped["message"].as_str().unwrap().starts_with("shot sh-"),
+        "{untyped}"
+    );
+    assert_eq!(
+        untyped["fix"], "add media_type, e.g. image/png, to the entry's fields",
+        "{untyped}"
+    );
+}

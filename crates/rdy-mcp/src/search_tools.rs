@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SearchParams {
     /// The text to find; with regex: true, a pattern (Rust regex syntax, at most 1024 bytes).
     pub query: String,

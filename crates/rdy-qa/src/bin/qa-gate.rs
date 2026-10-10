@@ -25,6 +25,10 @@ struct Args {
     /// Rewrite this machine class's perf baseline (after an intended performance change).
     #[arg(long)]
     rebaseline: bool,
+    /// Fail a test whose prerequisite is missing (Node, a case-insensitive filesystem, a
+    /// non-root user) instead of letting it skip. Sets `RDY_QA_REQUIRE_ALL=1` on the test runs.
+    #[arg(long)]
+    require_all: bool,
 }
 
 fn root() -> PathBuf {
@@ -51,6 +55,14 @@ fn step(name: &str, mut cmd: Command) -> (bool, String) {
 fn cargo(args: &[&str]) -> Command {
     let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     c.args(args);
+    c
+}
+
+/// Sets `RDY_QA_REQUIRE_ALL=1` on a test command when the gate runs with `--require-all`.
+fn with_require_all(mut c: Command, args: &Args) -> Command {
+    if args.require_all {
+        c.env(rdy_qa::skip::REQUIRE_ALL, "1");
+    }
     c
 }
 
@@ -140,8 +152,13 @@ fn perf_tier(
     let missing = !classes.contains_key(machine);
     let verdicts;
     let note;
-    if missing || rebaseline {
-        verdicts = perf::compare(None, &measures);
+    let decision = perf::tier_decision(missing, rebaseline);
+    if decision == perf::TierDecision::NotCompared {
+        // nothing is written: a machine class needs two runs within 10%, then --rebaseline
+        verdicts = perf::not_compared(&measures);
+        note = perf::not_compared_note(machine);
+    } else if decision.writes_baseline() {
+        verdicts = perf::compare(None, &measures, perf::Mode::Record);
         // the measured ops replace their entries and every other op is kept, so a typical-tier
         // rebaseline never deletes the `_50k` baseline
         let merged = perf::merge_baseline(classes.get(machine), machine, &measures);
@@ -153,13 +170,8 @@ fn perf_tier(
                 false,
             );
         }
-        note = if missing {
-            format!(
-                "No baseline for `{machine}`: recorded one in crates/rdy-qa/qa-baseline.json (commit it)."
-            )
-        } else {
-            format!("Rebaselined `{machine}` in crates/rdy-qa/qa-baseline.json (commit the diff).")
-        };
+        note =
+            format!("Rebaselined `{machine}` in crates/rdy-qa/qa-baseline.json (commit the diff).");
     } else {
         // a typical run does not measure the `_50k` ops: their absence is not drift
         let base = classes.get(machine).map(|b| {
@@ -172,7 +184,7 @@ fn perf_tier(
         if let Some(b) = &base {
             notes.extend(report::baseline_drift(b, &measures));
         }
-        verdicts = perf::compare(base.as_ref(), &measures);
+        verdicts = perf::compare(base.as_ref(), &measures, perf::Mode::Compare);
         note = format!("Compared against the baseline for `{machine}`.");
     }
     let ok = verdicts.iter().all(|v| v.pass);
@@ -254,13 +266,19 @@ fn main() {
 
         let (ok, out) = step(
             "workspace tests",
-            cargo(&["test", "--workspace", "--exclude", "rdy-qa"]),
+            with_require_all(
+                cargo(&["test", "--workspace", "--exclude", "rdy-qa"]),
+                &args,
+            ),
         );
         let run = report::parse_cargo_test(&out);
         seeds.extend(report::failing_seeds(&out));
         let mut detail = format!(
-            "{} passed, {} failed, {} ignored",
-            run.passed, run.failed, run.ignored
+            "{} passed, {} failed, {} ignored, {} skipped",
+            run.passed,
+            run.failed,
+            run.ignored,
+            run.skipped.len()
         );
         if !run.failures.is_empty() {
             detail += &format!("; failing: {}", run.failures.join(", "));
@@ -292,7 +310,10 @@ fn main() {
     // The hardening suite, one test binary at a time; each area reports as one row (an area
     // of two binaries, `engine` and `engine_read`, sums them).
     for binary in &plan.files {
-        let mut c = cargo(&["test", "-p", "rdy-qa", "--release", "--test", binary]);
+        let mut c = with_require_all(
+            cargo(&["test", "-p", "rdy-qa", "--release", "--test", binary]),
+            &args,
+        );
         if args.deep {
             c.env("RDY_QA_DEEP", "1");
         }
@@ -308,7 +329,10 @@ fn main() {
     if plan.lib {
         let (ok, out) = step(
             "rdy-qa unit tests",
-            cargo(&["test", "-p", "rdy-qa", "--release", "--lib"]),
+            with_require_all(
+                cargo(&["test", "-p", "rdy-qa", "--release", "--lib"]),
+                &args,
+            ),
         );
         let run = report::parse_cargo_test(&out);
         seeds.extend(report::failing_seeds(&out));
@@ -320,6 +344,8 @@ fn main() {
             passed: run.passed,
             failed: run.failed,
             ignored: run.ignored,
+            skipped: run.skipped.len(),
+            skip_lines: run.skipped,
             ok,
             failures: run.failures,
             panics: run.panics,

@@ -25,3 +25,6 @@ regex.workspace = true
 
 [dev-dependencies]
 rdy-graph.workspace = true
+
+[lints]
+workspace = true

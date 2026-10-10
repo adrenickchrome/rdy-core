@@ -9,7 +9,7 @@ use rdy_model::{
     Block, BlockId, Change, ChangeLinks, EditorialClass, FieldValue, Hash, Justification, Link, Op,
     tree,
 };
-use rdy_schema::{has_errors, skeleton_gaps, validate_block, validate_prefix};
+use rdy_schema::{Pack, has_errors, skeleton_gaps, validate_block, validate_prefix};
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,6 +23,7 @@ pub(crate) struct LinkYaml {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct BlockYaml {
     pub(crate) id: BlockId,
     #[serde(rename = "type")]
@@ -130,6 +131,7 @@ pub(crate) fn place_keyed(
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Manifest {
     format: u32,
     pack: String,
@@ -154,6 +156,7 @@ fn export_level(
     dir: &Path,
     summary: &mut ExportSummary,
     blobs: &mut BTreeMap<Hash, BlockId>,
+    pack: &Pack,
 ) -> Result<(), RdyError> {
     // `level` folders are above this one; a damaged store may nest deeper than writes allow,
     // and what lies below the limit is left out (the caller reports the missing blocks)
@@ -189,7 +192,7 @@ fn export_level(
             )
             .map_err(io_err)?;
             summary.folders += 1;
-            export_level(m, Some(&b.id), level + 1, &sub, summary, blobs)?;
+            export_level(m, Some(&b.id), level + 1, &sub, summary, blobs, pack)?;
             continue;
         }
         if b.field_str("name").is_none() {
@@ -203,7 +206,9 @@ fn export_level(
         stack.reverse();
         while let Some(c) = stack.pop() {
             list.push(to_yaml_struct(c));
-            if let Some(h) = c.field_str("blob").and_then(|s| s.parse::<Hash>().ok()) {
+            if pack.is_asset(&c.block_type)
+                && let Some(h) = c.field_str("blob").and_then(|s| s.parse::<Hash>().ok())
+            {
                 blobs.entry(h).or_insert_with(|| c.id.clone());
             }
             let mut kids = m.children(Some(&c.id));
@@ -581,7 +586,26 @@ pub fn block_from_yaml(text: &str) -> Result<Block, RdyError> {
     Ok(block)
 }
 
+/// A YAML syntax error is `E_BAD_INPUT`; a key the block does not take is `E_FILE_FORMAT` with a
+/// did-you-mean, as import and commit report it (hd8, ruling Q14).
 fn parse_yaml(text: &str) -> Result<(Block, Vec<KeyedLink>), RdyError> {
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(text)
+        .map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "fix the YAML and retry"))?;
+    if let Some(f) = tree_io::key_faults(&value).into_iter().next() {
+        let line = crate::yaml_pos::positions(text)
+            .ok()
+            .and_then(|p| p.get(&f.segs()).map(|at| at.0))
+            .unwrap_or(1);
+        return Err(RdyError::new(
+            E_FILE_FORMAT,
+            format!(
+                "line {line}: unknown key \"{}\" in {}",
+                f.key,
+                f.place("the block")
+            ),
+            f.fix(),
+        ));
+    }
     let y: BlockYaml = serde_yaml_ng::from_str(text)
         .map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "fix the YAML and retry"))?;
     from_yaml_struct(y)
@@ -653,7 +677,15 @@ impl ReadState {
         };
         // each blob, with the first figure that names it
         let mut blobs = BTreeMap::new();
-        export_level(&m, None, 0, &out.join("docs"), &mut summary, &mut blobs)?;
+        export_level(
+            &m,
+            None,
+            0,
+            &out.join("docs"),
+            &mut summary,
+            &mut blobs,
+            self.pack(),
+        )?;
         if summary.blocks != m.len() {
             let missing = m.len() - summary.blocks.min(m.len());
             return Err(RdyError::new(
@@ -729,11 +761,14 @@ impl Rdy {
             )
         })?;
         let manifest: Manifest = serde_yaml_ng::from_str(&manifest_text).map_err(|e| {
-            RdyError::new(
-                E_BAD_INPUT,
-                format!("rdy-export.yaml: {e}"),
-                "re-export the project",
-            )
+            crate::did_you_mean::unknown_field_error("rdy-export.yaml", &e.to_string())
+                .unwrap_or_else(|| {
+                    RdyError::new(
+                        E_BAD_INPUT,
+                        format!("rdy-export.yaml: {e}"),
+                        "re-export the project",
+                    )
+                })
         })?;
         // lpin1: format 3 pins hold content hashes; import recomputes every pin, so a format-2
         // tree reads the same way
@@ -929,12 +964,9 @@ impl Rdy {
             }
             // blob2: an asset block's blob must be in the export's blobs/ or a blob in this
             // project; non-asset types may have a field named blob that is not an asset
-            let is_asset = self
-                .pack
-                .block_types
-                .get(&b.block_type)
-                .is_some_and(|d| d.traits.contains(&rdy_schema::Trait::Asset));
-            if is_asset && let Some(v) = b.fields.get("blob") {
+            if self.pack.is_asset(&b.block_type)
+                && let Some(v) = b.fields.get("blob")
+            {
                 let known = match v.as_str().and_then(|s| s.parse::<Hash>().ok()) {
                     Some(h) => imported_blobs.contains(&h) || self.store.has_blob(&h)?,
                     None => false,

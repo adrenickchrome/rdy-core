@@ -263,6 +263,27 @@ fn raw_entries(text: &str, kind: FileKind) -> Result<Vec<Value>, String> {
     }
 }
 
+/// One entry of rdy's own copy (a base copy or the store's) as a `BlockYaml`, leniently (ruling
+/// Q12): a key the entry does not take, at the top level or inside a link object, is dropped
+/// first, so a copy written by another build still reads. `raw` keeps what is read. A person's
+/// file never comes here: it keeps the strict parse and its did-you-mean.
+fn parse_rdy_copy(raw: &mut Value) -> Result<BlockYaml, serde_yaml_ng::Error> {
+    for f in crate::tree_io::key_faults(raw) {
+        let holder = match f.path.as_slice() {
+            [] => Some(&mut *raw),
+            [links, kind, i] => raw
+                .get_mut(links.as_str())
+                .and_then(|l| l.get_mut(kind.as_str()))
+                .and_then(|l| l.get_mut(i.parse::<usize>().ok()?)),
+            _ => None,
+        };
+        if let Some(Value::Mapping(m)) = holder {
+            m.remove(f.key.as_str());
+        }
+    }
+    serde_yaml_ng::from_value(raw.clone())
+}
+
 /// The entries of a text rdy wrote: a base copy or the store's.
 fn written_entries(path: &str, text: &str, kind: FileKind) -> Result<Vec<Entry>, RdyError> {
     let bad = |e: String| {
@@ -276,9 +297,8 @@ fn written_entries(path: &str, text: &str, kind: FileKind) -> Result<Vec<Entry>,
         .map_err(bad)?
         .into_iter()
         .enumerate()
-        .map(|(i, raw)| {
-            let y: BlockYaml =
-                serde_yaml_ng::from_value(raw.clone()).map_err(|e| bad(e.to_string()))?;
+        .map(|(i, mut raw)| {
+            let y = parse_rdy_copy(&mut raw).map_err(|e| bad(e.to_string()))?;
             let (block, keyed) = from_yaml_struct(y).map_err(|e| bad(e.message))?;
             Ok(Entry {
                 id: Some(block.id.clone()),

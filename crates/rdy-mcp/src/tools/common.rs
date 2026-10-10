@@ -14,7 +14,7 @@ pub const E_NO_SESSION: &str = "E_NO_SESSION";
 /// The most ops one `rdy_write` may carry.
 pub const MAX_OPS_PER_WRITE: usize = 5_000;
 
-/// The longest JSON-RPC request line the stdio server passes on.
+/// The longest JSON-RPC request line rdy reads, on every transport: stdio, the proxy and the daemon's MCP socket.
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
 /// The largest asset (decoded bytes) `rdy_asset` accepts.
@@ -82,6 +82,7 @@ impl McpState {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScopeParams {
     /// "canon", a view name (an existing view, or your session's), "tag:<version>", "landing:<id>" or "view:<name>". Defaults to the session view.
     pub scope: Option<String>,
@@ -89,6 +90,7 @@ pub struct ScopeParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IdParams {
     /// A block id or a path. rdy_context also takes `id@version` or a whole ref line `[id@version] …`, and reads under that version.
     pub id: String,

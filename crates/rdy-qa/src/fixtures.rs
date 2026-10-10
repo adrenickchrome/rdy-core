@@ -53,9 +53,15 @@ pub fn project() -> (tempfile::TempDir, Rdy) {
     (dir, r)
 }
 
-pub fn write(r: &mut Rdy, view: &str, ops: serde_json::Value) -> Result<WriteResult, RdyError> {
-    let ops = serde_json::from_value(ops)
+/// A test's ops, parsed as agents' ops are (`rdy_engine::parse_ops`): a JSON array of ops.
+pub fn parse_test_ops(ops: serde_json::Value) -> Result<Vec<rdy_engine::OpInput>, RdyError> {
+    let ops: Vec<serde_json::Value> = serde_json::from_value(ops)
         .map_err(|e| RdyError::new(rdy_engine::E_BAD_INPUT, e.to_string(), "fix the test's ops"))?;
+    rdy_engine::parse_ops(ops)
+}
+
+pub fn write(r: &mut Rdy, view: &str, ops: serde_json::Value) -> Result<WriteResult, RdyError> {
+    let ops = parse_test_ops(ops)?;
     r.write(
         &writer(),
         WriteRequest {
@@ -73,8 +79,7 @@ pub fn write_as(
     view: &str,
     ops: serde_json::Value,
 ) -> Result<WriteResult, RdyError> {
-    let ops = serde_json::from_value(ops)
-        .map_err(|e| RdyError::new(rdy_engine::E_BAD_INPUT, e.to_string(), "fix the test's ops"))?;
+    let ops = parse_test_ops(ops)?;
     r.write(
         s,
         WriteRequest {

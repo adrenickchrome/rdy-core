@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TensionsParams {
     /// inflight (default: every tension), canon (only tensions whose sides are all canon) or a
     /// view name (tensions with a change side in that view).
@@ -37,6 +38,7 @@ pub struct TensionsParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResolveParams {
     /// The tension to dismiss: tn-<12 hex> from rdy_tensions (a unique prefix works).
     pub tension: String,
@@ -45,6 +47,7 @@ pub struct ResolveParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DismissParams {
     /// Why the tension needs no action, in a few words (at most 2000 characters).
     pub reason: String,

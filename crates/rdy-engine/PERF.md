@@ -886,6 +886,10 @@ Linux bench rows: (bench: the orchestrator fills these rows from two cargo qa --
 
 Deep gate (bench): <orchestrator fills in>
 
+M2 hardening (hd1): a briefing builds and measures only the tension rows its page can show.
+Before, every row that involved a briefed block was built and serialized, and the cut then showed
+a few (brief_doc_50k: 1.16 ms median on the bench, of which about 0.6 ms was rows).
+
 ## Agent ergonomics 2: search (2026-10-06)
 
 The `qa-perf` tier gained one op for block-text search (FW-PR1). It runs in `tier_reads`, after

@@ -129,3 +129,84 @@ fn lbr1_an_escaped_brace_round_trips_through_export_and_import() {
         "Write \\{{id}} for a reference."
     );
 }
+
+#[test]
+fn hd8_import_names_a_misspelt_key_with_a_did_you_mean() {
+    let t = tree(&format!(
+        "{HEAD}- id: p-AAAAA\n  type: prose\n  parnet: d-AAAAA\n  order: a1\n  body: Hi.\n"
+    ));
+    let d = check_path(&pack(), None, t.path()).unwrap();
+    let k = d
+        .iter()
+        .find(|d| d.message == "unknown key \"parnet\" in a block entry")
+        .unwrap_or_else(|| panic!("{d:?}"));
+    assert_eq!((k.code.as_str(), k.line), ("E_FILE_FORMAT", 9), "{k:?}");
+    assert_eq!(k.fix, "did you mean \"parent\"? rename it");
+    let (_d, mut r) = project();
+    let e = r.import(&approver(), "work", t.path()).unwrap_err();
+    assert_eq!(e.code, E_FILE_FORMAT, "{e}");
+    assert!(e.message.contains("unknown key \"parnet\""), "{e}");
+}
+
+#[test]
+fn hd8_import_names_a_misspelt_key_in_a_link_object() {
+    let t = tree(&format!(
+        "{HEAD}- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: S\n- id: c-AAAAA\n  type: claim\n  parent: s-AAAAA\n  order: a1\n  body: One.\n- id: c-BBBBB\n  type: claim\n  parent: s-AAAAA\n  order: a2\n  body: Two.\n  links:\n    refines:\n    - target: c-AAAAA\n      prat: x\n"
+    ));
+    let d = check_path(&pack(), None, t.path()).unwrap();
+    let k = d
+        .iter()
+        .find(|d| d.message == "unknown key \"prat\" in a refines link")
+        .unwrap_or_else(|| panic!("{d:?}"));
+    assert_eq!((k.code.as_str(), k.line), ("E_FILE_FORMAT", 26), "{k:?}");
+    assert_eq!(k.fix, "did you mean \"part\"? rename it");
+}
+
+#[test]
+fn hd8_an_unknown_key_with_no_near_key_lists_every_key() {
+    let t = tree(&format!(
+        "{HEAD}- id: p-AAAAA\n  type: prose\n  parent: d-AAAAA\n  order: a1\n  body: Hi.\n  colour: red\n"
+    ));
+    let d = check_path(&pack(), None, t.path()).unwrap();
+    let k = d
+        .iter()
+        .find(|d| d.message == "unknown key \"colour\" in a block entry")
+        .unwrap_or_else(|| panic!("{d:?}"));
+    assert_eq!(
+        k.fix,
+        "remove it, or use id, type, parent, order, fields, body, links or pins"
+    );
+}
+
+/// guard: an unknown key inside `fields` still goes to the pack check.
+#[test]
+fn hd8_an_unknown_field_still_goes_to_the_pack() {
+    let t = tree(&format!(
+        "{HEAD}- id: s-AAAAA\n  type: section\n  parent: d-AAAAA\n  order: a1\n  fields:\n    title: S\n    titel: X\n"
+    ));
+    let (_d, mut r) = project();
+    let e = r.import(&approver(), "work", t.path()).unwrap_err();
+    assert_eq!(e.code, E_VALIDATION, "{e}");
+    assert!(
+        e.issues.iter().any(|i| i.code == "E_FIELD_UNKNOWN"),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn hd8_a_misspelt_manifest_key_is_refused() {
+    let t = tree(HEAD);
+    std::fs::write(
+        t.path().join("rdy-export.yaml"),
+        "format: 3\npack: rdy-standard\nscpoe: canon\n",
+    )
+    .unwrap();
+    let (_d, mut r) = project();
+    let e = r.import(&approver(), "work", t.path()).unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT, "{e}");
+    assert_eq!(e.message, "rdy-export.yaml: unknown field \"scpoe\"");
+    assert_eq!(
+        e.fix,
+        "did you mean \"scope\"? the fields are format, pack, scope"
+    );
+}

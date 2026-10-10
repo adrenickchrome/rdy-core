@@ -1,6 +1,6 @@
 //! The gate report: cargo-test output parsing, guarded defect ids, and the markdown / JSON
 //! rendering that `cargo qa` writes to `target/qa/`.
-use crate::perf::{Baseline, Measure, Verdict};
+use crate::perf::{Baseline, Measure, Status, Verdict};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -12,6 +12,8 @@ pub struct TestRun {
     pub passed: usize,
     pub failed: usize,
     pub ignored: usize,
+    /// One entry per skip line (`skip::SKIP_MARK`), `<test>: <reason>`.
+    pub skipped: Vec<String>,
     pub failures: Vec<String>,
     /// Each failing test's first panic, `<location>: <message>`, cut to `PANIC_CHARS`.
     pub panics: BTreeMap<String, String>,
@@ -20,7 +22,7 @@ pub struct TestRun {
 /// The most characters of a panic message the report keeps.
 const PANIC_CHARS: usize = 300;
 
-/// Sums every `test result:` line, collects the names of `test <name> ... FAILED` lines, and
+/// Sums every `test result:` line, collects the skip lines (`skip::SKIP_MARK`), collects the names of `test <name> ... FAILED` lines, and
 /// keeps each failing test's first panic: in a `---- <name> stdout ----` block, the line after
 /// `thread '<thread>' panicked at <location>:` is the message (`panic_location`).
 pub fn parse_cargo_test(output: &str) -> TestRun {
@@ -29,6 +31,10 @@ pub fn parse_cargo_test(output: &str) -> TestRun {
     let mut block: Option<String> = None;
     let mut panic_at: Option<String> = None;
     for line in output.lines() {
+        if let Some(i) = line.find(crate::skip::SKIP_MARK) {
+            let rest = &line[i + crate::skip::SKIP_MARK.len()..];
+            run.skipped.push(rest.trim().to_string());
+        }
         if let Some(at) = panic_at.take() {
             if let Some(name) = &block
                 && !run.panics.contains_key(name)
@@ -322,6 +328,10 @@ pub struct Area {
     pub passed: usize,
     pub failed: usize,
     pub ignored: usize,
+    /// Tests that ran no check because a prerequisite is missing (`TestRun::skipped`).
+    pub skipped: usize,
+    /// The skip lines, `<test>: <reason>`.
+    pub skip_lines: Vec<String>,
     /// False when a test binary exited non-zero, even if no test is named as failing
     /// (a compile error, a crash).
     pub ok: bool,
@@ -339,6 +349,8 @@ pub fn add_run(areas: &mut Vec<Area>, binary: &str, ok: bool, run: TestRun) {
             a.passed += run.passed;
             a.failed += run.failed;
             a.ignored += run.ignored;
+            a.skipped += run.skipped.len();
+            a.skip_lines.extend(run.skipped);
             a.ok &= ok;
             a.failures.extend(run.failures);
             for (name, panic) in run.panics {
@@ -350,6 +362,8 @@ pub fn add_run(areas: &mut Vec<Area>, binary: &str, ok: bool, run: TestRun) {
             passed: run.passed,
             failed: run.failed,
             ignored: run.ignored,
+            skipped: run.skipped.len(),
+            skip_lines: run.skipped,
             ok,
             failures: run.failures,
             panics: run.panics,
@@ -386,6 +400,9 @@ pub fn failing_seeds(output: &str) -> Vec<String> {
         .collect()
 }
 
+/// What the perf table's tail column is.
+pub const TAIL_NOTE: &str = "p95 is the run at index floor(0.95 x runs) in sorted order (the slowest run when there are 20 runs or fewer). A spec target stated as p99 is checked against this column.";
+
 fn mark(pass: bool) -> &'static str {
     if pass { "PASS" } else { "FAIL" }
 }
@@ -414,18 +431,25 @@ pub fn markdown(r: &Report) -> String {
 
     let _ = writeln!(
         s,
-        "\n## Areas\n\n| Area | Result | Passed | Failed | Ignored |\n|---|---|---|---|---|"
+        "\n## Areas\n\n| Area | Result | Passed | Failed | Ignored | Skipped |\n|---|---|---|---|---|---|"
     );
     for a in &r.areas {
         let _ = writeln!(
             s,
-            "| {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} |",
             a.name,
             mark(area_ok(a)),
             a.passed,
             a.failed,
-            a.ignored
+            a.ignored,
+            a.skipped
         );
+    }
+    for a in r.areas.iter().filter(|a| !a.skip_lines.is_empty()) {
+        let _ = writeln!(s, "\nSkipped in `{}`:", a.name);
+        for l in &a.skip_lines {
+            let _ = writeln!(s, "- {l}");
+        }
     }
     for a in r.areas.iter().filter(|a| !a.failures.is_empty() || !a.ok) {
         let _ = writeln!(s, "\nFailing in `{}`:", a.name);
@@ -451,21 +475,33 @@ pub fn markdown(r: &Report) -> String {
     if !r.perf.is_empty() {
         let _ = writeln!(
             s,
-            "| Op | Median ms | p95 ms | Baseline ms | Delta | Result | Spec target |\n|---|---|---|---|---|---|---|"
+            "| Op | Median ms | p95 ms | Runs | Baseline ms | Delta | Result | Spec target |\n|---|---|---|---|---|---|---|---|"
         );
         for v in &r.perf {
             let _ = writeln!(
                 s,
-                "| {} | {:.3} | {:.3} | {} | {} | {} | {} |",
+                "| {} | {:.3} | {:.3} | {} | {} | {} | {} | {} |",
                 v.op,
                 v.median_ms,
                 v.p95_ms,
+                v.runs,
                 v.baseline_ms.map_or("-".into(), |b| format!("{b:.3}")),
                 v.delta_pct.map_or("-".into(), |d| format!("{d:+.0}%")),
-                mark(v.pass),
+                v.status.label(),
                 v.spec_target.as_deref().unwrap_or("-")
             );
         }
+        let n = |st: Status| r.perf.iter().filter(|v| v.status == st).count();
+        let _ = writeln!(
+            s,
+            "\n{TAIL_NOTE}\n\n{} pass, {} recorded, {} unbaselined, {} not compared, {} regressed, {} over a ceiling.",
+            n(Status::Pass),
+            n(Status::Recorded),
+            n(Status::Unbaselined),
+            n(Status::NotCompared),
+            n(Status::Regressed),
+            n(Status::OverCeiling),
+        );
     }
 
     if !r.notes.is_empty() {
@@ -652,6 +688,7 @@ mod tests {
             ignored,
             failures: failures.iter().map(|f| f.to_string()).collect(),
             panics: Default::default(),
+            skipped: vec![],
         };
         add_run(&mut rows, "engine", true, run(134, 0, 0, &[]));
         add_run(
@@ -910,7 +947,146 @@ mod tests {
     }
 
     #[test]
+    fn hd6_the_perf_table_names_each_status_and_the_tail() {
+        use crate::perf::{Measure, Mode, compare, not_compared};
+        let mk = |op: &str| Measure {
+            op: op.into(),
+            median_ms: 1.0,
+            p95_ms: 1.0,
+            runs: 20,
+        };
+        let mut perf = compare(None, &[mk("log_full")], Mode::Compare);
+        perf.extend(not_compared(&[mk("history_100")]));
+        let r = Report {
+            revision: "r".into(),
+            dirty: false,
+            machine: "m".into(),
+            mode: "full".into(),
+            duration_secs: 0.0,
+            pass: false,
+            gates: vec![],
+            areas: vec![],
+            perf,
+            perf_note: String::new(),
+            failing_seeds: vec![],
+            notes: vec![],
+            guarded: BTreeMap::new(),
+        };
+        let md = markdown(&r);
+        assert!(
+            md.contains("| log_full | 1.000 | 1.000 | 20 | - | - | UNBASELINED |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| history_100 | 1.000 | 1.000 | 20 | - | - | RECORDED, NOT COMPARED |"),
+            "{md}"
+        );
+        assert!(md.contains(TAIL_NOTE), "{md}");
+        assert!(
+            md.contains(
+                "0 pass, 0 recorded, 1 unbaselined, 1 not compared, 0 regressed, 0 over a ceiling."
+            ),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn hd6_b_the_tail_note_states_the_rule_the_code_uses() {
+        // measure_timed takes index floor(0.95 * runs), capped at the last run. That is not the
+        // nearest-rank rule (ceil(0.95 * runs)), so the note must not claim it.
+        assert!(!TAIL_NOTE.contains("nearest"), "{TAIL_NOTE}");
+        assert!(
+            TAIL_NOTE.contains("index floor(0.95 x runs) in sorted order"),
+            "{TAIL_NOTE}"
+        );
+        assert!(
+            TAIL_NOTE.contains("the slowest run when there are 20 runs or fewer"),
+            "{TAIL_NOTE}"
+        );
+        assert!(TAIL_NOTE.contains("p99"), "{TAIL_NOTE}");
+    }
+
+    #[test]
+    fn hd10_skip_lines_are_counted_per_area() {
+        let out = "running 2 tests\nRDY-QA-SKIP dia1_x: node is not installed\ntest dia1_x ... ok\n\
+                   test other ... ok\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n";
+        let run = parse_cargo_test(out);
+        assert_eq!(
+            run.skipped,
+            vec!["dia1_x: node is not installed".to_string()]
+        );
+        let mut areas = vec![];
+        add_run(&mut areas, "render", true, run);
+        assert_eq!(areas[0].skipped, 1);
+        let r = Report {
+            revision: "r".into(),
+            dirty: false,
+            machine: "m".into(),
+            mode: "full".into(),
+            duration_secs: 0.0,
+            pass: true,
+            gates: vec![],
+            areas,
+            perf: vec![],
+            perf_note: String::new(),
+            failing_seeds: vec![],
+            notes: vec![],
+            guarded: BTreeMap::new(),
+        };
+        let md = markdown(&r);
+        assert!(
+            md.contains("| Passed | Failed | Ignored | Skipped |"),
+            "{md}"
+        );
+        assert!(md.contains("| render | PASS | 2 | 0 | 0 | 1 |"), "{md}");
+        assert!(
+            md.contains("Skipped in `render`:\n- dia1_x: node is not installed\n"),
+            "{md}"
+        );
+    }
+
+    #[test]
     fn tail_keeps_the_last_lines() {
         assert_eq!(tail("a\n\nb\nc\n", 2), "b\nc");
+    }
+
+    #[test]
+    fn hd12_ci_runs_the_fast_gate_as_a_user_with_node() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let text = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("ci.yml");
+        let toolchain = std::fs::read_to_string(root.join("rust-toolchain.toml")).unwrap();
+        let ci: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).unwrap();
+        let steps = ci["jobs"]["fast"]["steps"]
+            .as_sequence()
+            .expect("jobs.fast.steps");
+        let runs: Vec<&str> = steps.iter().filter_map(|s| s["run"].as_str()).collect();
+        let uses: Vec<&str> = steps.iter().filter_map(|s| s["uses"].as_str()).collect();
+        assert!(
+            uses.iter().any(|u| u.starts_with("actions/setup-node@")),
+            "{uses:?}"
+        );
+        assert!(
+            runs.iter().any(|r| r.contains("test \"$(id -u)\" -ne 0")),
+            "a non-root check: {runs:?}"
+        );
+        assert!(
+            runs.iter()
+                .any(|r| r.contains("cargo qa --skip-perf --require-all")),
+            "{runs:?}"
+        );
+        let channel = toolchain
+            .lines()
+            .find_map(|l| l.strip_prefix("channel = "))
+            .unwrap()
+            .trim_matches('"');
+        assert!(
+            runs.iter()
+                .any(|r| r.contains(&format!("rustup toolchain install {channel}"))),
+            "{runs:?}"
+        );
+        assert!(
+            !text.contains("--deep") && !text.contains("--only perf"),
+            "deep and perf stay off CI"
+        );
     }
 }

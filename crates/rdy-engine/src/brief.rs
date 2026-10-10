@@ -10,7 +10,7 @@ use crate::keys;
 use crate::query::summary_in;
 use crate::related::{RELATED_CAP, RelatedDecision};
 use crate::suggest::MentionedBy;
-use crate::tensions::info::{InfoCache, SideInfo, row_bytes, rows_bytes};
+use crate::tensions::info::{InfoCache, SideInfo, TensionInfo, row_bytes, rows_bytes};
 use crate::tensions::{Tension, TensionSeverity};
 use crate::write::OpInput;
 use crate::{Materialized, ReadState, Scope};
@@ -18,6 +18,7 @@ use rdy_graph::{DerivedStatus, EdgeKind, IMPACT_LINKS, IMPACT_SHOWN, SUSPECT_LIN
 use rdy_model::{Block, BlockId, FieldValue, Hash, decision};
 use rdy_schema::{Issue, Pack, Severity, Trait};
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -37,6 +38,20 @@ pub const BRIEF_REGISTRY_ENTRIES: usize = 1_000_000;
 pub const MAX_BRIEF_BLOCKS: usize = 5_000;
 /// A briefing's size budget when none is given, in tokens (4 bytes of JSON each).
 pub const BRIEF_DEFAULT_TOKENS: usize = 4_000;
+
+thread_local! {
+    /// Test switch: `page` builds every tension row before it measures (see
+    /// `build_every_row_for_tests`).
+    static EVERY_ROW: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Test hook: while `on`, a briefing on this thread builds every tension row before its page
+/// measures, as before rows were built on demand. A test compares the two to check that
+/// building rows on demand changes no page.
+#[doc(hidden)]
+pub fn build_every_row_for_tests(on: bool) {
+    EVERY_ROW.with(|c| c.set(on));
+}
 
 /// What to brief: blocks by id (or key or path), and a doc or folder path whose whole subtree is
 /// covered. The coverage is their union.
@@ -405,19 +420,30 @@ pub struct Briefing {
     pub scope: String,
     #[serde(skip)]
     pub record: Arc<BriefRecord>,
-    /// While a page has not read them: the tensions `inflight.tensions` lists, row for row,
-    /// whose sides are still to read. `page` reads them only for the rows it can show with
-    /// their sides, and empties this.
+    /// Every tension row of the briefing, in row order (blocking first). `inflight.tensions`
+    /// holds the rows built so far, always a prefix of this: `page` builds a row only when the
+    /// page can need it (`fill`), so a cut briefing costs the rows it shows, not every row on
+    /// its blocks.
     #[serde(skip)]
-    unsided: Vec<Arc<Tension>>,
-    /// The JSON size of each `inflight.tensions` row, row for row, once measured (`bytes`
-    /// measures a row once, not once per measure of the briefing).
+    rows: Vec<Arc<Tension>>,
+    /// The JSON size of each built row (`inflight.tensions`), row for row, once measured
+    /// (`bytes` measures a row once, not once per measure of the briefing).
     #[serde(skip)]
     row_sizes: Vec<Option<usize>>,
+    /// Whether the built rows' sides are settled: read (`read_sides`), or dropped for good by
+    /// the detail cut (`cut_tensions`).
+    #[serde(skip)]
+    sides_read: bool,
 }
 
 fn is_zero(n: &usize) -> bool {
     *n == 0
+}
+
+/// The most bytes a briefing of `max` tokens (4 bytes each, rounded down) can take. It
+/// saturates: an engine caller may pass any `usize`, and a budget past the byte range is no cut.
+fn budget_bytes(max: usize) -> usize {
+    max.saturating_mul(4).saturating_add(3)
 }
 
 impl Briefing {
@@ -431,23 +457,69 @@ impl Briefing {
         self.bytes() / 4
     }
 
-    /// The JSON size in bytes: the briefing without its tension rows, and each row (measured
-    /// once while it does not change) with the comma between rows.
+    /// The JSON size in bytes: the briefing without its tension rows, and each built row
+    /// (measured once while it does not change) with the comma between rows. A row not built
+    /// yet counts nothing.
     fn bytes(&mut self) -> usize {
+        self.frame_bytes() + self.built_rows_bytes()
+    }
+
+    /// The JSON size in bytes of the briefing without its tension rows.
+    fn frame_bytes(&mut self) -> usize {
         let rows = std::mem::take(&mut self.inflight.tensions);
         let frame = serde_json::to_string(self)
             .expect("a briefing serializes: strings, numbers and string-keyed maps only")
             .len();
-        if self.row_sizes.len() != rows.len() {
-            self.row_sizes = vec![None; rows.len()];
-        }
+        self.inflight.tensions = rows;
+        frame
+    }
+
+    /// The JSON size in bytes of the built rows as array elements, each row measured once.
+    fn built_rows_bytes(&mut self) -> usize {
+        let rows = &self.inflight.tensions;
+        self.row_sizes.resize(rows.len(), None);
         let total: usize = rows
             .iter()
             .zip(&mut self.row_sizes)
             .map(|(row, size)| *size.get_or_insert_with(|| row_bytes(row)))
             .sum();
-        self.inflight.tensions = rows;
-        frame + rows_bytes(total, self.inflight.tensions.len())
+        rows_bytes(total, rows.len())
+    }
+
+    /// Builds the next unbuilt tension row (without its sides). `false` when every row is built.
+    fn build_next(&mut self, bare: &dyn Fn(&Tension) -> TensionInfo) -> bool {
+        let Some(t) = self.rows.get(self.inflight.tensions.len()) else {
+            return false;
+        };
+        let row = bare(t);
+        self.inflight.tensions.push(row);
+        true
+    }
+
+    /// Builds the tension rows this page can need: every blocking row (the cut never collapses
+    /// one), then the next advisory row while the briefing is within `max` tokens and rows
+    /// remain. After it, either every row is built, or the built rows alone put the briefing
+    /// over `max`, so every unbuilt row is collapsed by the cut (rows are a prefix: the cut
+    /// collapses advisory rows from the end, and halving keeps a prefix).
+    fn fill(&mut self, max: usize, bare: &dyn Fn(&Tension) -> TensionInfo) {
+        while self
+            .rows
+            .get(self.inflight.tensions.len())
+            .is_some_and(|t| t.severity != TensionSeverity::Advisory)
+        {
+            self.build_next(bare);
+        }
+        if self.inflight.tensions.len() == self.rows.len() {
+            return;
+        }
+        // the frame does not change while rows are built: measure it once
+        let frame = self.frame_bytes();
+        while frame + self.built_rows_bytes() <= budget_bytes(max) && self.build_next(bare) {}
+    }
+
+    /// Builds every tension row left unbuilt.
+    fn build_all(&mut self, bare: &dyn Fn(&Tension) -> TensionInfo) {
+        while self.build_next(bare) {}
     }
 
     /// The first `DIGEST_HEX` hex digits of `digest`, as a cursor carries them.
@@ -466,7 +538,7 @@ impl Briefing {
             self.inflight.views.len(),
             self.inflight.proposals.len(),
             self.inflight.intents.len(),
-            self.inflight.tensions.len(),
+            self.rows.len(),
             self.base.blocks.len(),
         ]
     }
@@ -484,13 +556,9 @@ impl Briefing {
         drop(&mut self.inflight.views, skip[5]);
         drop(&mut self.inflight.proposals, skip[6]);
         drop(&mut self.inflight.intents, skip[7]);
+        drop(&mut self.rows, skip[8]);
         drop(&mut self.inflight.tensions, skip[8]);
-        if !self.unsided.is_empty() {
-            drop(&mut self.unsided, skip[8]);
-        }
-        if !self.row_sizes.is_empty() {
-            drop(&mut self.row_sizes, skip[8]);
-        }
+        drop(&mut self.row_sizes, skip[8]);
         drop(&mut self.base.blocks, skip[9]);
     }
 
@@ -503,10 +571,11 @@ impl Briefing {
     /// (`E_PAGE_STALE`) when an offset is past the end of any other section: the sections are no
     /// longer the ones the cursor counted in.
     ///
-    /// The tension rows' sides (`sides` reads them) are read only for the rows this page can
-    /// show with them: a row's sides only add to its size, so a briefing whose rows are over
-    /// `max` without them loses them to the detail cut (Q15) anyway. The outcome is the one of
-    /// a briefing assembled with every side read.
+    /// The tension rows (`bare` builds one without its sides) are built only when the page
+    /// can need them (`fill`), and their sides (`sides` reads them) are read only for the rows
+    /// this page can show with them: a row's sides only add to its size, so a briefing whose
+    /// rows are over `max` without them loses them to the detail cut (Q15) anyway. The outcome
+    /// is the one of a briefing assembled with every row built and every side read.
     fn page(
         &mut self,
         mut skip: [usize; PAGE_SECTIONS.len()],
@@ -514,7 +583,11 @@ impl Briefing {
         floor: bool,
         docs: impl FnOnce(&Briefing) -> Vec<DocCounts>,
         sides: &mut dyn FnMut(&Tension) -> Vec<SideInfo>,
+        bare: &dyn Fn(&Tension) -> TensionInfo,
     ) -> Result<(), RdyError> {
+        if EVERY_ROW.with(Cell::get) {
+            self.build_all(bare);
+        }
         let totals = self.lens();
         for (i, s) in skip.iter_mut().enumerate() {
             if is_advisory(i) {
@@ -524,18 +597,33 @@ impl Briefing {
             }
         }
         let skips = skip.iter().any(|s| *s > 0);
-        let mut tokens = self.tokens();
-        // uncut without the sides: whether it is cut with them depends on them
-        if !skips && tokens <= max && self.read_sides(sides) {
-            tokens = self.tokens();
-        }
-        let cut = skips || tokens > max;
+        // a later page is cut whatever its size
+        let cut = skips || {
+            self.fill(max, bare);
+            let mut tokens = self.tokens();
+            // uncut without the sides: whether it is cut with them depends on them
+            if tokens <= max && self.read_sides(sides) {
+                tokens = self.tokens();
+            }
+            tokens > max
+        };
         if cut {
             self.docs = docs(self);
         }
         self.drop_first(&skip);
+        if skips {
+            self.fill(max, bare);
+        }
         self.settle(&skip, &totals);
         if cut {
+            // `settle` only grows the frame (the cursor, `truncated`), so the `fill` above
+            // already built every row this page can need: a second one would build nothing
+            #[cfg(debug_assertions)]
+            {
+                let built = self.inflight.tensions.len();
+                self.fill(max, bare);
+                debug_assert_eq!(self.inflight.tensions.len(), built, "settle built no room");
+            }
             let mut tokens = self.tokens();
             // within `max` without the sides: whether the detail cut drops them depends on them
             if tokens <= max && self.read_sides(sides) {
@@ -547,6 +635,8 @@ impl Briefing {
             while self.tokens() > max && self.halve(floor) {
                 self.settle(&skip, &totals);
             }
+            // a row the cut could not collapse (a page shows at least one entry) is shown
+            self.build_all(bare);
         }
         Ok(())
     }
@@ -561,18 +651,21 @@ impl Briefing {
     fn cut_tensions(&mut self, max: usize, floor: bool) -> bool {
         let mut changed = false;
         // rows whose sides are unread have sides (every tension has one), which the cut drops
-        let unsided = !self.unsided.is_empty();
-        self.unsided.clear();
-        if unsided || self.inflight.tensions.iter().any(|t| !t.sides.is_empty()) {
-            for t in &mut self.inflight.tensions {
-                t.sides.clear();
+        let unsided = !self.sides_read && !self.rows.is_empty();
+        self.sides_read = true;
+        let sided = self.inflight.tensions.iter().any(|t| !t.sides.is_empty());
+        if unsided || sided {
+            if sided {
+                for t in &mut self.inflight.tensions {
+                    t.sides.clear();
+                }
+                self.row_sizes.clear();
             }
-            self.row_sizes.clear();
             self.inflight.tensions_detail_cut = true;
             changed = true;
         }
         let mut bytes = self.bytes();
-        while bytes > max * 4 + 3 {
+        while bytes > budget_bytes(max) {
             match self.collapse_last(floor) {
                 Some(n) => bytes = bytes.saturating_sub(n),
                 None => break,
@@ -586,16 +679,18 @@ impl Briefing {
         changed
     }
 
-    /// Reads the sides of every tension row whose sides are unread; `true` if there was one.
+    /// Reads the sides of every built tension row when they are not settled yet; `true` if
+    /// there was a row. It runs only when the briefing fits without the sides, and then every
+    /// row is built (`fill`).
     fn read_sides(&mut self, sides: &mut dyn FnMut(&Tension) -> Vec<SideInfo>) -> bool {
-        let any = !self.unsided.is_empty();
-        for (row, t) in self
-            .inflight
-            .tensions
-            .iter_mut()
-            .zip(self.unsided.drain(..))
-        {
-            row.sides = sides(&t);
+        if self.sides_read {
+            return false;
+        }
+        self.sides_read = true;
+        debug_assert_eq!(self.inflight.tensions.len(), self.rows.len());
+        let any = !self.inflight.tensions.is_empty();
+        for (row, t) in self.inflight.tensions.iter_mut().zip(&self.rows) {
+            row.sides = sides(t);
         }
         if any {
             self.row_sizes.clear();
@@ -605,22 +700,31 @@ impl Briefing {
 
     /// Collapses the last listed tension when it is advisory (and, with `floor`, more than one
     /// entry is shown): it leaves the list and is counted in `tensions_collapsed` and
-    /// `omitted`. Its JSON size with its comma, or `None`.
+    /// `omitted`. Its JSON size with its comma (0 for a row not built: `bytes` never counted
+    /// it), or `None`.
     fn collapse_last(&mut self, floor: bool) -> Option<usize> {
         if floor && self.lens().iter().sum::<usize>() <= 1 {
             return None;
         }
         let t = self
-            .inflight
-            .tensions
+            .rows
             .pop_if(|t| t.severity == TensionSeverity::Advisory)?;
-        let size = if self.row_sizes.len() == self.inflight.tensions.len() + 1 {
-            self.row_sizes.pop().flatten()
+        let n = if self.inflight.tensions.len() > self.rows.len() {
+            let row = self
+                .inflight
+                .tensions
+                .pop()
+                .expect("a built row is in the list");
+            let size = if self.row_sizes.len() == self.inflight.tensions.len() + 1 {
+                self.row_sizes.pop().flatten()
+            } else {
+                self.row_sizes.clear();
+                None
+            };
+            size.unwrap_or_else(|| row_bytes(&row)) + 1
         } else {
-            self.row_sizes.clear();
-            None
+            0
         };
-        let n = size.unwrap_or_else(|| row_bytes(&t)) + 1;
         *self
             .inflight
             .tensions_collapsed
@@ -684,6 +788,7 @@ impl Briefing {
             6 => self.inflight.proposals.truncate(keep),
             7 => self.inflight.intents.truncate(keep),
             8 => {
+                self.rows.truncate(keep);
                 self.inflight.tensions.truncate(keep);
                 self.row_sizes.truncate(keep);
             }
@@ -915,6 +1020,7 @@ impl ReadState {
             false,
             |b| doc_counts(&m, b),
             &mut |t| self.sides_info(t, &mut cache),
+            &|t| self.tension_info_bare(t),
         )?;
         Ok(briefing)
     }
@@ -961,6 +1067,7 @@ impl ReadState {
             true,
             |b| doc_counts(&m, b),
             &mut |t| self.sides_info(t, &mut cache),
+            &|t| self.tension_info_bare(t),
         )?;
         Ok(briefing)
     }
@@ -1095,7 +1202,7 @@ impl ReadState {
             suspects.extend(found);
         }
         suspects.sort_by(|a, b| (&a.block, &a.target).cmp(&(&b.block, &b.target)));
-        let (inflight, unsided) = self.inflight_unsided(scope, ids)?;
+        let (inflight, rows) = self.inflight_unsided(scope, ids)?;
         let coverage = self.graph_coverage(scope, Some(ids))?;
         let (mentioned_by, mentioned_by_omitted) = self.mentioned_by(scope, ids)?;
         let decisions: Vec<BlockId> = ids.iter().cloned().collect();
@@ -1160,8 +1267,9 @@ impl ReadState {
                 covers: ids.clone(),
                 recorded,
             }),
-            unsided,
+            rows,
             row_sizes: vec![],
+            sides_read: false,
         })
     }
 }

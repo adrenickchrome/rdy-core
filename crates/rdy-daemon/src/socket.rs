@@ -80,6 +80,7 @@ fn write_pid_file(run: &RunDir) -> io::Result<()> {
 }
 
 /// The effective uid of the process at the other end of `stream`.
+#[allow(unsafe_code)]
 pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
     let fd = stream.as_raw_fd();
     #[cfg(target_os = "linux")]
@@ -120,6 +121,7 @@ pub fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
 }
 
 /// This process's effective uid.
+#[allow(unsafe_code)]
 pub fn own_uid() -> u32 {
     // SAFETY: geteuid has no preconditions and cannot fail.
     unsafe { libc::geteuid() }

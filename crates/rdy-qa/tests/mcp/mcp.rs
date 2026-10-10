@@ -267,3 +267,48 @@ fn mcp_pipelined_requests_are_all_answered_in_time() {
         assert_eq!(v["id"], *id, "reply {n} out of order: {v}");
     }
 }
+
+#[test]
+fn hd3_rdy_write_keeps_the_did_you_mean_for_an_unknown_op_field() {
+    let (_d, mut c) = server();
+    session(&mut c);
+    let w = c
+        .call(
+            "rdy_write",
+            json!({"ops": [
+                {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "f", "title": "F"}},
+                {"op": "create", "type": "doc", "id": "$d", "parent": "$f",
+                 "fields": {"name": "d", "title": "D", "doc_type": "glossary"}}
+            ]}),
+        )
+        .ok();
+    let (f, d) = (w["created"]["$f"].clone(), w["created"]["$d"].clone());
+    let Reply::ToolError(e) = c.call(
+        "rdy_write",
+        json!({"ops": [{"op": "move", "id": d, "parent_id": f}]}),
+    ) else {
+        panic!("a move with parent_id is an isError reply")
+    };
+    assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
+    assert_eq!(e["message"], "op 0: unknown field \"parent_id\"", "{e}");
+    assert!(
+        e["fix"]
+            .as_str()
+            .unwrap()
+            .starts_with("did you mean \"parent\"?"),
+        "{e}"
+    );
+    let Reply::ToolError(e) = c.call(
+        "rdy_write",
+        json!({"ops": [{"op": "create", "type": "doc", "parent": f,
+            "links": {"refines": [{"target": d, "prat": "x"}]}}]}),
+    ) else {
+        panic!("a link object with prat is an isError reply")
+    };
+    assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
+    assert_eq!(
+        e["message"], "op 0: refines: unknown field \"prat\" in a link",
+        "{e}"
+    );
+    assert_eq!(e["fix"], "did you mean \"part\"? rename it", "{e}");
+}

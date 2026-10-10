@@ -289,6 +289,11 @@ fn kill2_clients_reconnect_and_exactly_one_successor_replaces_the_dead_daemon() 
 #[test]
 fn kill2_a_kill_in_the_checkpoint_window_is_catch_up_not_reindex() {
     if !deep() {
+        rdy_qa::skip::skip(
+            "kill2_a_kill_in_the_checkpoint_window_is_catch_up_not_reindex",
+            rdy_qa::skip::Why::DeepOnly,
+            "runs in a deep gate only (RDY_QA_DEEP=1)",
+        );
         return;
     }
     let s = Served::new();

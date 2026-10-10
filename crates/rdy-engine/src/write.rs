@@ -15,19 +15,34 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LinkInput {
     pub target: String,
     #[serde(default)]
     pub part: Option<String>,
 }
 
-/// llst1: one entry of a link kind's list: a target string or a `{target, part?}` object.
+/// llst1: one entry of a link kind's list: a target string or a `{target, part?}` object (its
+/// keys are checked against `LINK_KEYS` before it becomes a `LinkInput`).
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum LinkEntry {
     Text(String),
-    Full(LinkInput),
+    Full(BTreeMap<String, LinkScalar>),
 }
+
+/// One value in a link object. It is not a `serde_json::Value`: that turns a YAML `.nan` or
+/// `.inf` into null, which would read as "no part" and drop the input (hd3 fix round 1).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LinkScalar {
+    Text(String),
+    Unit(()),
+    Other(serde::de::IgnoredAny),
+}
+
+/// Ruling Q2: the keys a link object takes (a closed set).
+const LINK_KEYS: [&str; 2] = ["target", "part"];
 
 /// llst1: a link kind's value: one target string, or a list of entries.
 #[derive(Deserialize)]
@@ -60,13 +75,54 @@ where
             let links = entries
                 .into_iter()
                 .map(|e| match e {
-                    LinkEntry::Text(target) => LinkInput { target, part: None },
-                    LinkEntry::Full(l) => l,
+                    LinkEntry::Text(target) => Ok(LinkInput { target, part: None }),
+                    LinkEntry::Full(o) => link_object(&kind, o),
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             Ok((kind, links))
         })
         .collect()
+}
+
+/// How the refusal of a key outside `LINK_KEYS` ends: `<kind>: unknown field "<key>" in a link`.
+pub const LINK_KEY_TAIL: &str = " in a link";
+
+/// The fix for a link object's unknown key `key` (ruling Q2): its did-you-mean, else the keys.
+pub(crate) fn link_key_fix(key: &str) -> String {
+    match crate::did_you_mean::nearest(key, &LINK_KEYS) {
+        Some(y) => format!("did you mean \"{y}\"? rename it"),
+        None => "remove it; a link takes target and part".to_string(),
+    }
+}
+
+/// The unknown key a link-object refusal (see `link_object`) names, from its text.
+fn link_key(msg: &str) -> Option<&str> {
+    let (_, rest) = msg.split_once(": unknown field \"")?;
+    rest.strip_suffix(LINK_KEY_TAIL)?.strip_suffix('"')
+}
+
+/// A link object of kind `kind` as a `LinkInput`: a key outside `LINK_KEYS` is refused (its fix
+/// is `link_key_fix`, ruling Q2); a missing or non-string target is the generic `LINK_FORMS` text.
+fn link_object<E: serde::de::Error>(
+    kind: &str,
+    mut o: BTreeMap<String, LinkScalar>,
+) -> Result<LinkInput, E> {
+    if let Some(k) = o.keys().find(|k| !LINK_KEYS.contains(&k.as_str())) {
+        return Err(E::custom(format!(
+            "{kind}: unknown field \"{k}\"{LINK_KEY_TAIL}"
+        )));
+    }
+    let bad = || E::custom(format!("{kind}: {LINK_FORMS}"));
+    let target = match o.remove("target") {
+        Some(LinkScalar::Text(t)) => t,
+        _ => return Err(bad()),
+    };
+    let part = match o.remove("part") {
+        None | Some(LinkScalar::Unit(())) => None,
+        Some(LinkScalar::Text(p)) => Some(p),
+        Some(LinkScalar::Other(_)) => return Err(bad()),
+    };
+    Ok(LinkInput { target, part })
 }
 
 /// `link_map` for an optional map (an update that names no links keeps them).
@@ -79,8 +135,9 @@ where
     Ok(Option::<Wrap>::deserialize(d)?.map(|w| w.0))
 }
 
+/// FW-HD1: an op refuses a field it does not take (the `op` tag is not one).
 #[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OpInput {
     Create {
         #[serde(rename = "type")]
@@ -151,6 +208,32 @@ pub enum OpInput {
         #[serde(default)]
         targets: Vec<String>,
     },
+}
+
+/// The fix for an op that does not parse (and names no unknown field).
+pub const OP_FIX: &str =
+    "each op needs \"op\" (rdy_schema lists them under \"ops\"); create needs \"type\"";
+
+/// Op `i` of a write, parsed: an unknown field is `E_BAD_INPUT` with a did-you-mean, named by its
+/// path in the op (FW-HD1); an unknown key in a link object gets `link_key_fix`; any other
+/// failure is `E_BAD_INPUT` with `OP_FIX`.
+pub fn parse_op(i: usize, v: serde_json::Value) -> Result<OpInput, RdyError> {
+    OpInput::deserialize(&v).map_err(|e| {
+        let msg = e.to_string();
+        if let Some(k) = link_key(&msg) {
+            return RdyError::new(E_BAD_INPUT, format!("op {i}: {msg}"), link_key_fix(k));
+        }
+        crate::did_you_mean::unknown_field_error_in(&format!("op {i}"), &msg, &v)
+            .unwrap_or_else(|| RdyError::new(E_BAD_INPUT, format!("op {i}: {msg}"), OP_FIX))
+    })
+}
+
+/// A write's ops, parsed in order (see `parse_op`); the first failure is the error.
+pub fn parse_ops(ops: Vec<serde_json::Value>) -> Result<Vec<OpInput>, RdyError> {
+    ops.into_iter()
+        .enumerate()
+        .map(|(i, v)| parse_op(i, v))
+        .collect()
 }
 
 /// wcmv1: where an update moves its block: the same keys as a `move` (no parent: the top level).
@@ -1015,10 +1098,7 @@ fn check_name(
 /// blob2: an asset block's `blob` must parse as a hash naming a blob (a manifest) in the store.
 /// The check keys on the type's `asset` trait, not on any field named `blob`.
 fn check_asset_blob(pack: &Pack, store: &rdy_store::Store, block: &Block) -> Result<(), RdyError> {
-    let is_asset = pack
-        .block_types
-        .get(&block.block_type)
-        .is_some_and(|d| d.traits.contains(&rdy_schema::Trait::Asset));
+    let is_asset = pack.is_asset(&block.block_type);
     let Some(v) = block.fields.get("blob").filter(|_| is_asset) else {
         return Ok(());
     };

@@ -790,3 +790,90 @@ fn msw11_a_nonce_lookup_since_a_head_stops_at_its_limit() {
         .unwrap();
     assert!(all.change.is_some(), "{all:?}");
 }
+
+#[test]
+fn hd3_the_op_tag_and_every_documented_field_still_parse() {
+    let v = ops(json!([
+        {"op": "create", "type": "claim", "id": "$c", "parent": "p", "after": "a", "fields": {"any": 1},
+         "body": "b", "links": {"k": "t", "j": ["t"], "m": [{"target": "t", "part": "w"}, "u"]}},
+        {"op": "create", "type": "claim", "before": "b"},
+        {"op": "update", "id": "x", "base": "v", "fields": {}, "unset": ["f"], "body": "b",
+         "links": {"k": [{"target": "t"}]}, "type": "note", "move_to": {"parent": "p", "after": "a"}},
+        {"op": "update", "id": "x", "move_to": {"parent": "p", "before": "b"}},
+        {"op": "move", "id": "x", "base": "v", "parent": "p", "before": "b"},
+        {"op": "move", "id": "x", "after": "a"},
+        {"op": "delete", "id": "x", "base": "v"},
+        {"op": "rebalance"},
+        {"op": "rebalance", "parent": "p"},
+        {"op": "repin", "id": "x", "base": "v", "targets": ["t"]}
+    ]));
+    assert_eq!(v.len(), 10);
+}
+
+#[test]
+fn hd3_parse_ops_names_the_op_and_the_nearest_field() {
+    let e = parse_ops(vec![
+        json!({"op": "rebalance"}),
+        json!({"op": "delete", "id": "x", "bse": "v"}),
+    ])
+    .unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT);
+    assert_eq!(e.message, "op 1: unknown field \"bse\"");
+    assert_eq!(e.fix, "did you mean \"base\"? the fields are id, base");
+}
+
+#[test]
+fn hd3_a_link_key_typo_gets_a_link_fix() {
+    let link = |key: &str| {
+        let mut o = json!({"target": "t"});
+        o[key] = json!("x");
+        parse_ops(vec![
+            json!({"op": "create", "type": "claim", "links": {"refines": [o]}}),
+        ])
+        .unwrap_err()
+    };
+    let e = link("prat");
+    assert_eq!(e.code, E_BAD_INPUT);
+    assert_eq!(e.message, "op 0: refines: unknown field \"prat\" in a link");
+    assert_eq!(e.fix, "did you mean \"part\"? rename it");
+    let e = link("zzz");
+    assert_eq!(e.message, "op 0: refines: unknown field \"zzz\" in a link");
+    assert_eq!(e.fix, "remove it; a link takes target and part");
+}
+
+#[test]
+fn hd3_a_nested_unknown_field_names_its_path() {
+    let e = parse_ops(vec![
+        json!({"op": "update", "id": "x", "move_to": {"parent_id": "p"}}),
+    ])
+    .unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT);
+    assert_eq!(e.message, "op 0: unknown field \"move_to.parent_id\"");
+    assert_eq!(
+        e.fix,
+        "did you mean \"parent\"? the fields are parent, after, before"
+    );
+    // a key of the op itself keeps its plain name, even when a nested object has one like it
+    let e = parse_ops(vec![
+        json!({"op": "update", "id": "x", "parent_id": "p", "fields": {"parent_id": 1}}),
+    ])
+    .unwrap_err();
+    assert_eq!(e.message, "op 0: unknown field \"parent_id\"");
+}
+
+#[test]
+fn hd3_nearest_is_the_closed_rule() {
+    use rdy_engine::did_you_mean::nearest;
+    assert_eq!(
+        nearest("parent_id", &["id", "base", "parent", "after", "before"]),
+        Some("parent")
+    );
+    assert_eq!(nearest("prent", &["id", "parent"]), Some("parent"));
+    assert_eq!(nearest("arg", &["id", "op", "args"]), Some("args"));
+    assert_eq!(nearest("zzz", &["id", "op", "args"]), None);
+    assert_eq!(
+        nearest("id_xyz", &["id"]),
+        None,
+        "a prefix under 3 characters never matches"
+    );
+}

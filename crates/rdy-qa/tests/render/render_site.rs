@@ -129,13 +129,16 @@ fn ren1_a_symlinked_out_is_refused_untouched() {
     assert_eq!(names.len(), 2, "no staging left beside the link: {names:?}");
 }
 
+#[cfg(unix)]
+const READ_ONLY_REASON: &str = "a read-only directory takes writes here (running as root?)";
 /// A parent that cannot be written (a mount point's parent, `/var/www` over a user-owned site).
 /// Restores the mode on drop so the temporary directory can be removed.
 #[cfg(unix)]
 struct ReadOnly(std::path::PathBuf);
 #[cfg(unix)]
 impl ReadOnly {
-    fn new(dir: &std::path::Path) -> Option<ReadOnly> {
+    /// `test` is the calling test's name, for the skip line when the mode has no effect.
+    fn new(test: &str, dir: &std::path::Path) -> Option<ReadOnly> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
         let guard = ReadOnly(dir.to_path_buf());
@@ -143,6 +146,8 @@ impl ReadOnly {
         let probe = dir.join(".probe");
         if std::fs::write(&probe, "").is_ok() {
             std::fs::remove_file(probe).unwrap();
+            drop(guard);
+            rdy_qa::skip::skip(test, rdy_qa::skip::Why::Prerequisite, READ_ONLY_REASON);
             return None;
         }
         Some(guard)
@@ -164,7 +169,10 @@ fn ren1_an_empty_out_under_an_unwritable_parent_is_rendered_into() {
     let ro = parent.path().join("ro");
     let site = ro.join("site");
     std::fs::create_dir_all(&site).unwrap();
-    let Some(_guard) = ReadOnly::new(&ro) else {
+    let Some(_guard) = ReadOnly::new(
+        "ren1_an_empty_out_under_an_unwritable_parent_is_rendered_into",
+        &ro,
+    ) else {
         return;
     };
     rdy_render::render_site(&r.read(), &Scope::Canon, &site).unwrap();
@@ -198,7 +206,10 @@ fn ren1_a_rerender_under_an_unwritable_parent_replaces_the_site() {
     )
     .unwrap();
     land(&mut r, "work").unwrap();
-    let Some(_guard) = ReadOnly::new(&ro) else {
+    let Some(_guard) = ReadOnly::new(
+        "ren1_a_rerender_under_an_unwritable_parent_replaces_the_site",
+        &ro,
+    ) else {
         return;
     };
     rdy_render::render_site(&r.read(), &Scope::Canon, &site).unwrap();
@@ -227,7 +238,7 @@ fn ren1_an_unwritable_new_out_names_the_path() {
     let parent = tempfile::tempdir().unwrap();
     let ro = parent.path().join("readonly-parent");
     std::fs::create_dir(&ro).unwrap();
-    let Some(_guard) = ReadOnly::new(&ro) else {
+    let Some(_guard) = ReadOnly::new("ren1_an_unwritable_new_out_names_the_path", &ro) else {
         return;
     };
     let site = ro.join("site");
@@ -259,7 +270,8 @@ fn ren1_a_refused_swap_falls_back_to_replacing_in_place() {
     let old = parent.path().join(".site.rdy-render-old");
     std::fs::create_dir(&old).unwrap();
     std::fs::write(old.join("x"), "x").unwrap();
-    let Some(_guard) = ReadOnly::new(&old) else {
+    let Some(_guard) = ReadOnly::new("ren1_a_refused_swap_falls_back_to_replacing_in_place", &old)
+    else {
         return;
     };
     rdy_render::render_site(&r.read(), &Scope::Canon, &site).unwrap();
@@ -437,7 +449,10 @@ fn ren1_an_old_copy_that_cannot_be_removed_is_a_warning() {
     let locked = site.join("locked");
     std::fs::create_dir(&locked).unwrap();
     std::fs::write(locked.join("f"), "x").unwrap();
-    let Some(guard) = ReadOnly::new(&locked) else {
+    let Some(guard) = ReadOnly::new(
+        "ren1_an_old_copy_that_cannot_be_removed_is_a_warning",
+        &locked,
+    ) else {
         return;
     };
     let second = rdy_render::render_site(&r.read(), &Scope::Canon, &site).unwrap();
