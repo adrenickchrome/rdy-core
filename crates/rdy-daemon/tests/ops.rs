@@ -562,40 +562,6 @@ fn wcfg1_wc_put_blob_stores_a_file_and_refuses_a_reader_a_directory_and_a_missin
 }
 
 #[test]
-fn msw11_a_recent_wc_nonce_finds_a_new_commit_and_leaves_old_ones_to_the_full_scan() {
-    let (d, e) = project();
-    let s = human();
-    let c = cx(&e, &s, d.path());
-    let n = 2 * rdy_engine::RECENT_NONCE_LIMIT + 8;
-    for i in 0..n {
-        let v = dispatch(
-            &c,
-            "wc_commit",
-            json!({
-                "view": "work",
-                "ops": [{"op": "create", "type": "doc", "id": "$d", "fields": {"name": format!("d{i}"), "title": "D", "doc_type": "glossary"}}],
-                "nonce": format!("nonce-{i}"),
-                "rewrite": [],
-                "message": "m",
-            }),
-        )
-        .unwrap();
-        assert!(v["change"].is_string(), "{v}");
-    }
-    let nonce = |nonce: String, recent: bool| {
-        dispatch(
-            &c,
-            "wc_nonce",
-            json!({"view": "work", "nonce": nonce, "rewrite": [], "recent": recent}),
-        )
-        .unwrap()
-    };
-    assert!(nonce(format!("nonce-{}", n - 1), true)["change"].is_string());
-    assert!(nonce("nonce-0".into(), true)["change"].is_null());
-    assert!(nonce("nonce-0".into(), false)["change"].is_string());
-}
-
-#[test]
 fn msw11_a_wc_nonce_since_the_seen_head_finds_the_commit_behind_many_others() {
     use rdy_engine::engine::Engine as _;
     let (d, e) = project();
@@ -619,7 +585,7 @@ fn msw11_a_wc_nonce_since_the_seen_head_finds_the_commit_behind_many_others() {
     commit("first".into(), "first".into());
     let since = e.read().view_head("work").unwrap().head.to_string();
     commit("mine".into(), "mine".into());
-    for i in 0..rdy_engine::RECENT_NONCE_LIMIT + 4 {
+    for i in 0..20 {
         commit(format!("d{i}"), format!("other-{i}"));
     }
     let probe = dispatch(

@@ -638,6 +638,13 @@ fn place(
     }
 }
 
+/// The conflicts of the view a write goes to, and the changes it includes: an `E_FROZEN` hint
+/// names a side's change only when the view includes it (msw1).
+pub(crate) struct ViewConflicts<'a> {
+    pub list: &'a [Conflict],
+    pub included: &'a [Hash],
+}
+
 /// The block an update, move, delete or repin of `id` starts from, and the base its op records.
 ///
 /// cres1: a block with a recorded conflict reads as the conflict's base, and an edit of it must
@@ -652,7 +659,7 @@ fn current_for_edit<'b>(
     id: &BlockId,
     base: &Option<String>,
     touched: &BTreeSet<BlockId>,
-    conflicts: &[Conflict],
+    conflicts: &ViewConflicts<'_>,
     store: &rdy_store::Store,
     update: bool,
 ) -> Result<(Hash, Cow<'b, Block>), RdyError> {
@@ -662,8 +669,8 @@ fn current_for_edit<'b>(
             "combine the edits into one op",
         ));
     }
-    if let Some(c) = conflicts.iter().find(|c| c.block == *id) {
-        let (b, cur) = conflicted_for_edit(ov, id, base, c, store)?;
+    if let Some(c) = conflicts.list.iter().find(|c| c.block == *id) {
+        let (b, cur) = conflicted_for_edit(ov, id, base, c, store, conflicts.included)?;
         check_not_frozen(id, &cur)?;
         return Ok((b, cur));
     }
@@ -701,10 +708,11 @@ fn conflicted_for_edit<'b>(
     base: &Option<String>,
     c: &Conflict,
     store: &rdy_store::Store,
+    included: &[Hash],
 ) -> Result<(Hash, Cow<'b, Block>), RdyError> {
     let cid = c.id.short();
     let sides: Vec<Hash> = c.sides.iter().filter_map(|s| s.version).collect();
-    frozen_in_conflict(id, c, store)?;
+    frozen_in_conflict(id, c, store, included)?;
     let Some(b) = parse_base(base)? else {
         let side_list = sides
             .iter()
@@ -748,13 +756,15 @@ fn conflicted_for_edit<'b>(
 /// cres1: a conflict whose base or any side is a frozen decision cannot be resolved by an edit,
 /// from any version: the edit would change or drop an accepted or rejected decision. The way out
 /// is to drop a side's change from the view or to supersede the decision. msw1 (#1165): the hint
-/// names only the sides' changes the view can exclude, the ones that have not landed (a landed
-/// change is not in the view), frozen or not. The check reads the blocks first and the landings
+/// names only the sides' changes the view can exclude, the ones it includes (`included`), frozen
+/// or not. A landed change is in a view only when the view is pinned (a pinned view is never
+/// rebased), and then it can be excluded too. The check reads the blocks first and the landings
 /// only when something is frozen, so a plain conflict never reads the landed index.
 fn frozen_in_conflict(
     id: &BlockId,
     c: &Conflict,
     store: &rdy_store::Store,
+    included: &[Hash],
 ) -> Result<(), RdyError> {
     // first pass: the base's and the sides' blocks decide whether anything is frozen
     let frozen_base = match c.base {
@@ -792,7 +802,9 @@ fn frozen_in_conflict(
                 (None, _) => "a side in canon".to_string(),
             };
         }
-        if let (Some(ch), None) = (s.change, landing) {
+        if let Some(ch) = s.change
+            && included.contains(&ch)
+        {
             excludable.push(ch.to_string());
         }
     }
@@ -1224,7 +1236,7 @@ fn build_ops(
     base: &Materialized,
     session: &Session,
     inputs: Vec<OpInput>,
-    conflicts: &[Conflict],
+    conflicts: &ViewConflicts<'_>,
     justification: Option<&Justification>,
     rdy_keys: &BTreeSet<BlockId>,
 ) -> Result<Built, RdyError> {
@@ -1318,7 +1330,7 @@ fn build_ops(
                 }
                 // msw1 (#1160): a create/create conflict has no base, so the view reads the
                 // block as absent; a create under its id would silently resolve the conflict
-                if let Some(c) = conflicts.iter().find(|c| c.block == new_id) {
+                if let Some(c) = conflicts.list.iter().find(|c| c.block == new_id) {
                     return Err(RdyError::new(
                         E_ALREADY_EXISTS,
                         format!(
@@ -1712,7 +1724,7 @@ fn build_ops(
         &mut ops,
         &mut prior,
         &touched,
-        conflicts,
+        conflicts.list,
         &mut assigned,
     );
     touched.extend(followed.iter().cloned());
@@ -2090,6 +2102,7 @@ impl Rdy {
             });
         }
         let conflicts = st.conflicts(&scope)?;
+        let included = st.included(&req.view);
         let m = st.materialized(&scope)?;
         let brief_warnings = crate::brief::check(&self.pack, &self.briefs, &m, &req.ops, brief)?;
         let (ops, created, touched, names, keys) = build_ops(
@@ -2098,7 +2111,10 @@ impl Rdy {
             &m,
             session,
             req.ops,
-            &conflicts,
+            &ViewConflicts {
+                list: &conflicts,
+                included: &included,
+            },
             req.justification.as_ref(),
             rdy_keys,
         )?;
@@ -2242,16 +2258,6 @@ fn own_view_fix(view: &str, s: &Session) -> String {
 /// `tag:` and `landing:`; legacy M1 views with `:` stay readable and proposable via `view:<name>`).
 pub(crate) fn writable_view(name: &str) -> Result<(), RdyError> {
     non_empty_view(name)?;
-    if name.chars().count() > MAX_VIEW_NAME {
-        return Err(RdyError::new(
-            E_LIMIT,
-            format!(
-                "a view name is longer than {MAX_VIEW_NAME} characters ({})",
-                views::clip(name)
-            ),
-            "use a shorter view name",
-        ));
-    }
     if name == "canon" {
         return Err(RdyError::new(
             E_RESERVED_VIEW,
@@ -2281,13 +2287,24 @@ pub(crate) fn writable_view(name: &str) -> Result<(), RdyError> {
 /// A view name has at most this many characters.
 pub(crate) const MAX_VIEW_NAME: usize = 256;
 
-/// `E_BAD_INPUT` for the empty view name, which no write or proposal may target.
+/// The checks every view name a write or proposal targets passes: `E_BAD_INPUT` for the empty
+/// name, `E_LIMIT` for one longer than `MAX_VIEW_NAME` characters (R10).
 fn non_empty_view(name: &str) -> Result<(), RdyError> {
     if name.is_empty() {
         return Err(RdyError::new(
             E_BAD_INPUT,
             "a view name is empty",
             "name a view, e.g. work",
+        ));
+    }
+    if name.chars().count() > MAX_VIEW_NAME {
+        return Err(RdyError::new(
+            E_LIMIT,
+            format!(
+                "a view name is longer than {MAX_VIEW_NAME} characters ({})",
+                views::clip(name)
+            ),
+            "use a shorter view name",
         ));
     }
     Ok(())

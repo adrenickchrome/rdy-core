@@ -89,7 +89,8 @@ impl Place {
 
     /// The worktree place `dir`'s pointer file names (`dir` holds the pointer itself; nothing is
     /// walked); `None` when the file is missing, does not parse or names an unsafe name. A
-    /// relative `project` is joined to `dir`.
+    /// relative `project` is joined to `dir` and normalised (`.` and `..` segments are taken out
+    /// lexically), so the project path, and the daemon socket path under it, does not grow.
     pub fn from_pointer(dir: &Path) -> Option<Place> {
         let text = fs::read_to_string(dir.join(POINTER_FILE)).ok()?;
         let ptr: Pointer = serde_yaml_ng::from_str(&text).ok()?;
@@ -98,7 +99,7 @@ impl Place {
         if !plain {
             return None;
         }
-        let project = dir.join(&ptr.project);
+        let project = normalise(&dir.join(&ptr.project));
         Some(Place {
             root: dir.to_path_buf(),
             state: project.join(WORKTREES_DIR).join(&ptr.name),
@@ -111,8 +112,11 @@ impl Place {
     /// this same worktree. Otherwise `None`, and `root` is the worktree: when the recorded
     /// directory is gone, holds no such pointer, or `dir.txt` is missing (the worktree moved, or
     /// `rdy worktree add` stopped before it wrote `dir.txt`), `dir.txt` is rewritten to `root`.
-    /// The main place, and a worktree whose state directory is gone, are always `None`. Call it
-    /// with the working copy's lock held.
+    /// The main place, and a worktree whose state directory is gone, are always `None`. So a
+    /// copy takes the worktree over when the real directory's pointer is missing or damaged (it
+    /// no longer names this worktree): `dir.txt` then names the copy, and the real directory is
+    /// no longer the worktree (ruling: a different live holder refuses, anything else is a
+    /// move). Call it with the working copy's lock held.
     pub fn copy_of(&self) -> Result<Option<String>, RdyError> {
         if self.state == self.project.join(WC_DIR) || !self.state.is_dir() {
             return Ok(None);
@@ -174,6 +178,26 @@ impl Place {
     pub fn conflict_file(&self, rel: &str) -> PathBuf {
         self.state.join("conflicts").join(rel)
     }
+}
+
+/// `path` with its `.` segments dropped and each `..` taking out the segment before it, without
+/// reading the file system. A `..` with no segment before it stays.
+fn normalise(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                } else {
+                    out.push(c);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// The project the pointer file directly in `dir` names: for a directory that holds a regular
@@ -614,4 +638,28 @@ pub fn new_nonce() -> String {
         std::thread::current().id()
     );
     Hash::of(seed.as_bytes()).to_string()[..32].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Final review M10: a relative pointer is joined and normalised, so `..` segments never
+    /// lengthen the project path (and the daemon socket path under it).
+    #[test]
+    fn msw16_a_relative_pointer_names_the_project_without_dot_segments() {
+        let d = tempfile::tempdir().unwrap();
+        let wt = d.path().join("trees/wt1");
+        fs::create_dir_all(&wt).unwrap();
+        fs::write(wt.join(POINTER_FILE), "project: ../../proj/./\nname: wt1\n").unwrap();
+        let p = Place::from_pointer(&wt).unwrap();
+        assert_eq!(p.project, d.path().join("proj"));
+        assert_eq!(
+            p.state,
+            d.path().join("proj").join(WORKTREES_DIR).join("wt1")
+        );
+        // an absolute pointer stays as written
+        fs::write(wt.join(POINTER_FILE), "project: /a/b\nname: wt1\n").unwrap();
+        assert_eq!(Place::from_pointer(&wt).unwrap().project, Path::new("/a/b"));
+    }
 }

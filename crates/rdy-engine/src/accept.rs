@@ -3,13 +3,16 @@ use crate::error::*;
 use crate::lexicon::link_kind_for;
 use crate::write::{LinkInput, OpInput, WriteRequest, WriteResult};
 use crate::{Rdy, Scope, Session};
-use rdy_model::BlockId;
+use rdy_model::{BlockId, decision};
 use rdy_schema::Trait;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The most suggestions one accept takes.
 pub const MAX_ACCEPT: usize = 500;
+
+/// The most skips the all-skipped refusal lists; the rest are counted.
+const SKIPS_LISTED: usize = 10;
 
 /// One suggestion, as a write or search response gave it (keys it does not use are ignored).
 #[derive(Clone, Debug, Deserialize)]
@@ -191,6 +194,12 @@ impl Rdy {
                         continue;
                     };
                     match link_kind_for(&self.pack, b) {
+                        None if decision::is_frozen(b) => skipped.push(Skipped {
+                            index: i,
+                            reason: format!(
+                                "{block} is an accepted or rejected decision and cannot change"
+                            ),
+                        }),
                         None => skipped.push(Skipped {
                             index: i,
                             reason: format!("{block} cannot link to an entity"),
@@ -322,10 +331,14 @@ impl Rdy {
             }
             // some skips have another reason (a frozen decision, a deleted block): say each one,
             // so a caller does not read the refusal as "the links are there"
-            let reasons: Vec<String> = skipped
+            let mut reasons: Vec<String> = skipped
                 .iter()
+                .take(SKIPS_LISTED)
                 .map(|s| format!("suggestion {}: {}", s.index, s.reason))
                 .collect();
+            if skipped.len() > SKIPS_LISTED {
+                reasons.push(format!("and {} more", skipped.len() - SKIPS_LISTED));
+            }
             return Err(bad(
                 format!(
                     "nothing to accept: every suggestion was skipped; {}",

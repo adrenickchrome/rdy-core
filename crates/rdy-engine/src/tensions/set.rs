@@ -582,6 +582,24 @@ impl ReadState {
         self.landing_tensions_applied(view, changes, &read, &applied)
     }
 
+    /// FW-JU1 in a view listing: the tensions of the kinds judged on the net change
+    /// ([`super::judged_on_the_net_change`]) in their landing form over every change view `view`
+    /// includes, which is what proposing the whole view lists. By id; none for a view with no
+    /// changes. A listing scoped to the view shows these in place of the in-flight forms of
+    /// those kinds, so it never shows another view's unjustified change that the view's own
+    /// proposal does not judge.
+    pub fn view_net_tensions(&self, view: &str) -> Result<Vec<Arc<Tension>>, RdyError> {
+        let included = self.included(view);
+        if included.is_empty() {
+            return Ok(vec![]);
+        }
+        Ok(self
+            .landing_tensions(view, &included)?
+            .into_iter()
+            .filter(|t| super::judged_on_the_net_change(t.kind))
+            .collect())
+    }
+
     /// The order the landing of `read` applies its changes in: the merge's onto canon, or the
     /// list order when the merge refuses (the gate reports that refusal itself).
     pub(crate) fn landing_order(&self, read: &[Change]) -> Vec<usize> {

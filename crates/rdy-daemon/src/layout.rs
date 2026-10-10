@@ -59,15 +59,20 @@ impl RunDir {
     }
 
     fn ignore_self(&self) -> io::Result<()> {
-        self.ignore_self_with(|f| f.write_all(b"*\n"))
+        self.ignore_self_with(|f| f.write_all(b"*\n"), |a, b| fs::hard_link(a, b))
     }
 
     /// Writes the `.gitignore` atomically and without clobbering: the content goes to a unique
-    /// temp file, which is synced and then hard-linked to the name. A failed write or a crash
+    /// temp file, which is synced and then hard-linked to the name (`link`). On a file system
+    /// without hard links there is no `.gitignore`: it is best effort. A failed write or a crash
     /// never leaves a partial `.gitignore` that later calls would take as present. `link` fails
     /// with `EEXIST` when anything (a link included) stands at the name, and never follows it.
     /// The temp file is removed on every path.
-    fn ignore_self_with(&self, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
+    fn ignore_self_with(
+        &self,
+        write: impl FnOnce(&mut File) -> io::Result<()>,
+        link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    ) -> io::Result<()> {
         let path = self.0.join(GITIGNORE_FILE);
         if fs::symlink_metadata(&path).is_ok() {
             return Ok(());
@@ -77,9 +82,12 @@ impl RunDir {
         write(&mut f)?;
         f.sync_all()?;
         drop(f);
-        match fs::hard_link(&temp, &path) {
+        match link(&temp, &path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            // a file system without hard links: the .gitignore is best effort, so there is none,
+            // never a non-atomic write
+            Err(e) if no_hard_links(&e) => Ok(()),
             Err(e) => Err(e),
         }
     }
@@ -153,6 +161,14 @@ fn not_a_dir(path: &Path) -> io::Error {
     io::Error::other(format!("{} exists and is not a directory", path.display()))
 }
 
+/// Whether `e` says the file system has no hard links (`EPERM`, `ENOTSUP`, `EOPNOTSUPP`).
+fn no_hard_links(e: &io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(n) if n == libc::EPERM || n == libc::ENOTSUP || n == libc::EOPNOTSUPP
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,7 +188,10 @@ mod tests {
         let run = RunDir::of_project(d.path());
         run.ensure_dir().unwrap();
         let err = run
-            .ignore_self_with(|_| Err(io::Error::from_raw_os_error(libc::ENOSPC)))
+            .ignore_self_with(
+                |_| Err(io::Error::from_raw_os_error(libc::ENOSPC)),
+                |a, b| fs::hard_link(a, b),
+            )
             .unwrap_err();
         assert_eq!(err.raw_os_error(), Some(libc::ENOSPC), "{err}");
         assert!(
@@ -191,6 +210,32 @@ mod tests {
             "*\n"
         );
         assert_eq!(names_in(run.path()), vec![GITIGNORE_FILE.to_string()]);
+    }
+
+    /// Final review M9: on a file system without hard links, the .gitignore is best effort:
+    /// ensure succeeds with no .gitignore and no temp file, never a non-atomic write.
+    #[test]
+    fn msw15_a_file_system_without_hard_links_has_no_gitignore_and_still_ensures() {
+        let d = tempfile::tempdir().unwrap();
+        let run = RunDir::of_project(d.path());
+        run.ensure_dir().unwrap();
+        for errno in [libc::EPERM, libc::ENOTSUP, libc::EOPNOTSUPP] {
+            run.ignore_self_with(
+                |f| f.write_all(b"*\n"),
+                |_, _| Err(io::Error::from_raw_os_error(errno)),
+            )
+            .unwrap_or_else(|e| panic!("errno {errno}: {e}"));
+            assert_eq!(names_in(run.path()), Vec::<String>::new(), "errno {errno}");
+        }
+        // any other link error still fails
+        let err = run
+            .ignore_self_with(
+                |f| f.write_all(b"*\n"),
+                |_, _| Err(io::Error::from_raw_os_error(libc::EIO)),
+            )
+            .unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EIO), "{err}");
+        assert_eq!(names_in(run.path()), Vec::<String>::new());
     }
 
     #[test]

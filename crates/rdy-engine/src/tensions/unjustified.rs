@@ -56,7 +56,10 @@ impl UnjustifiedChange {
         }
         let canon = cx.canon_m()?;
         let canon_version = canon.version_of(b);
-        // a decision canon holds as proposed: every edit of it is part of its making
+        // a decision canon holds as proposed: every edit of it is part of its making. The gate
+        // accepts every proposed decision a landing writes, so canon holds one as proposed only
+        // when it landed outside the gate (a store-level landing, as tests make); the rule is
+        // kept so such a decision is judged as one canon does not hold yet
         if canon
             .get(b)
             .is_some_and(|d| decision::status(d) == Some(DecisionStatus::Proposed))
@@ -91,6 +94,8 @@ impl UnjustifiedChange {
                             .is_some_and(|f| f.deps.contains(&w.change))
                 })
             };
+            // FW-JU1 Q3: a live write that gives canon's version back (the view wrote canon's
+            // text again) is no change of the block
             let live: Vec<&Arc<Write>> = in_v
                 .iter()
                 .filter(|w| !overwritten(w) && w.version != canon_version)

@@ -707,39 +707,6 @@ fn questions_cannot_be_deleted() {
 }
 
 #[test]
-fn msw11_a_recent_nonce_lookup_reads_only_the_newest_changes() {
-    let (_d, mut r) = project();
-    let n = 2 * RECENT_NONCE_LIMIT + 8;
-    for i in 0..n {
-        let req = req(json!([
-            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": format!("doc{i}"), "title": format!("Doc {i}"), "doc_type": "glossary"}}
-        ]));
-        let links = ChangeLinks {
-            client_nonce: Some(format!("nonce-{i}")),
-            ..Default::default()
-        };
-        r.write_linked(&agent(), req, links, None).unwrap();
-    }
-    let st = r.read();
-    // a refused commit's probe: the nonce is in no change, and only the recent set is read
-    let absent = st.change_by_recent_nonce("work", "nonce-none").unwrap();
-    assert_eq!(absent.change, None);
-    assert!(absent.read <= 2 * RECENT_NONCE_LIMIT, "{absent:?}");
-    assert!(absent.read >= RECENT_NONCE_LIMIT, "{absent:?}");
-    // the newest change is the first one read
-    let newest = st
-        .change_by_recent_nonce("work", &format!("nonce-{}", n - 1))
-        .unwrap();
-    assert!(newest.change.is_some() && newest.read == 1, "{newest:?}");
-    // an old change is outside the recent set; the full scan (recover) still finds it
-    let old = st.change_by_recent_nonce("work", "nonce-0").unwrap();
-    assert_eq!(old.change, None);
-    assert!(old.read <= 2 * RECENT_NONCE_LIMIT, "{old:?}");
-    let full = st.change_by_nonce("work", "nonce-0", 10_000).unwrap();
-    assert!(full.change.is_some() && full.read >= n, "{full:?}");
-}
-
-#[test]
 fn msw11_a_nonce_lookup_since_a_head_reads_only_the_changes_after_it() {
     let (_d, mut r) = project();
     let commit = |r: &mut Rdy, name: String, nonce: String| {
@@ -757,27 +724,69 @@ fn msw11_a_nonce_lookup_since_a_head_reads_only_the_changes_after_it() {
     }
     let since = r.read().view_head("work").unwrap().head.to_string();
     commit(&mut r, "mine".into(), "mine".into());
-    // more than RECENT_NONCE_LIMIT other commits land in the view before the probe
-    let others = RECENT_NONCE_LIMIT + 4;
+    // many other commits land in the view before the probe
+    let others = 20;
     for i in 0..others {
         commit(&mut r, format!("other{i}"), format!("other-{i}"));
     }
     let st = r.read();
-    assert_eq!(
-        st.change_by_recent_nonce("work", "mine").unwrap().change,
-        None
-    );
-    let mine = st.change_by_nonce_since("work", "mine", &since).unwrap();
-    assert!(mine.change.is_some(), "{mine:?}");
+    let mine = st
+        .change_by_nonce_since("work", "mine", &since, 10_000)
+        .unwrap();
+    assert!(mine.change.is_some() && !mine.capped, "{mine:?}");
     // the reads grow with the commits after the head, not with the history before it
     let after = others + 1;
-    let absent = st.change_by_nonce_since("work", "none", &since).unwrap();
-    assert_eq!(absent.change, None);
+    let absent = st
+        .change_by_nonce_since("work", "none", &since, 10_000)
+        .unwrap();
+    assert_eq!((absent.change, absent.capped), (None, false));
     assert!(
         absent.read >= after && absent.read <= 2 * after,
         "{absent:?}"
     );
     let late = st.view_head("work").unwrap().head.to_string();
-    let none_after = st.change_by_nonce_since("work", "none", &late).unwrap();
+    let none_after = st
+        .change_by_nonce_since("work", "none", &late, 10_000)
+        .unwrap();
     assert_eq!(none_after.read, 0, "{none_after:?}");
+}
+
+/// Final review M3: the walk after a head stops at its limit, so a probe never stalls the
+/// writer; a walk that stops before the head says so (`capped`), and a match within the limit is
+/// still found.
+#[test]
+fn msw11_a_nonce_lookup_since_a_head_stops_at_its_limit() {
+    let (_d, mut r) = project();
+    let commit = |r: &mut Rdy, name: String, nonce: String| {
+        let req = req(json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": name, "title": "D", "doc_type": "glossary"}}
+        ]));
+        let links = ChangeLinks {
+            client_nonce: Some(nonce),
+            ..Default::default()
+        };
+        r.write_linked(&agent(), req, links, None).unwrap();
+    };
+    commit(&mut r, "first".into(), "first".into());
+    let since = r.read().view_head("work").unwrap().head.to_string();
+    commit(&mut r, "mine".into(), "mine".into());
+    for i in 0..10 {
+        commit(&mut r, format!("other{i}"), format!("other-{i}"));
+    }
+    let st = r.read();
+    let stopped = st.change_by_nonce_since("work", "mine", &since, 6).unwrap();
+    assert_eq!(
+        (stopped.change, stopped.capped),
+        (None, true),
+        "{stopped:?}"
+    );
+    assert!(stopped.read <= 6, "{stopped:?}");
+    let newest = st
+        .change_by_nonce_since("work", "other-9", &since, 6)
+        .unwrap();
+    assert!(newest.change.is_some() && !newest.capped, "{newest:?}");
+    let all = st
+        .change_by_nonce_since("work", "mine", &since, 10_000)
+        .unwrap();
+    assert!(all.change.is_some(), "{all:?}");
 }

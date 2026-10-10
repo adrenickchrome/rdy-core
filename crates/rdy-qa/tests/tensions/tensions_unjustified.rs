@@ -245,3 +245,73 @@ fn msw21_another_views_unjustified_change_is_not_cleared_by_this_views_justifica
     let pa = r.propose(&writer(), "a", "a").unwrap();
     assert_eq!(unjustified(&pa), 1, "{:?}", pa.tensions);
 }
+
+/// FW-JU1 in a view listing (final review I2): a listing scoped to a view judges an unjustified
+/// change on the view's net change, as its proposal does. View b includes a's unjustified change
+/// and justifies its own rewrite: b's listing shows no unjustified_change; a's shows it.
+#[test]
+fn msw21_a_view_listing_judges_an_unjustified_change_on_the_views_net_change() {
+    use rdy_engine::engine::Local;
+    use rdy_engine::tensions::api::{TensionsRequest, run_tensions};
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    let c1 = change_of(&put_j(&mut r, "a", upd(&s.c, "C changed."), None));
+    r.view_include(&ag("b"), "b", &[c1.to_string()]).unwrap();
+    put_j(
+        &mut r,
+        "b",
+        upd(&s.c, "C, as D says."),
+        j_implements(&s.decision),
+    );
+    let engine = Local::new(r);
+    let unjustified = |view: &str| -> Vec<serde_json::Value> {
+        run_tensions(
+            &engine,
+            &writer(),
+            TensionsRequest {
+                view: Some(view.into()),
+                kind: Some("unjustified_change".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap()["tensions"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    assert!(unjustified("b").is_empty(), "{:#?}", unjustified("b"));
+    assert_eq!(unjustified("a").len(), 1, "{:#?}", unjustified("a"));
+    // the in-flight listing still shows a's tension
+    let all = run_tensions(
+        &engine,
+        &writer(),
+        TensionsRequest {
+            kind: Some("unjustified_change".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(all["tensions"].as_array().unwrap().len(), 1, "{all:#}");
+}
+
+/// FW-JU1 Q3 (final review M16): a view that writes canon's text back no longer changes the
+/// block, so its earlier unjustified edit leaves no tension.
+#[test]
+fn msw21_writing_canons_text_back_in_the_view_leaves_no_unjustified_change() {
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    let canon_body = r.read().block(&Scope::Canon, &s.c).unwrap().body;
+    put_j(&mut r, "a", upd(&s.c, "C changed."), None);
+    one(&r, TensionKind::UnjustifiedChange);
+    put_j(&mut r, "a", upd(&s.c, &canon_body), None);
+    assert_eq!(
+        r.read()
+            .block(&Scope::View("a".into()), &s.c)
+            .unwrap()
+            .version_hash(),
+        r.read().block(&Scope::Canon, &s.c).unwrap().version_hash(),
+        "the view holds canon's version again"
+    );
+    let found = of_kind(&r, TensionKind::UnjustifiedChange);
+    assert!(found.is_empty(), "{found:#?}");
+}

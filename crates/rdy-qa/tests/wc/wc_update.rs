@@ -1179,6 +1179,12 @@ fn msw16_a_folder_taken_under_the_store_name_waits_for_its_moved_theirs_file() {
                 .contains("handbook/_folder.theirs.yaml"),
         "{v}"
     );
+    // final review M11: the fix names the place that blocked, not the old one (gone now)
+    let fix = v["fix"].as_str().unwrap();
+    assert!(
+        fix.contains("then rdy add handbook") && !fix.contains("manuals"),
+        "{v}"
+    );
     std::fs::remove_file(at(&s, "handbook/_folder.theirs.yaml")).unwrap();
     let (okk, v) = json(&s, &["add", "handbook"]);
     assert!(okk && v["resolved"] == json!(["manuals"]), "{v}");

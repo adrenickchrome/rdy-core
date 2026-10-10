@@ -83,7 +83,8 @@ pub struct AltCompareRow {
     pub label: String,
     pub view: String,
     pub compare: Compare,
-    /// The event-derived tensions with a change side in the member view, by id.
+    /// The event-derived tensions with a change side in the member view, by id; an
+    /// unjustified_change in the landing form of the whole view (FW-JU1).
     pub tensions: Vec<TensionInfo>,
 }
 
@@ -393,17 +394,27 @@ impl ReadState {
     }
 
     /// The event-derived tensions with a change side among the changes view `view` includes,
-    /// by id.
+    /// by id. FW-JU1: a kind judged on the net change is the view's own landing form
+    /// (`view_net_tensions`), as the view's proposal lists it, never another view's in-flight
+    /// form that the view holds.
     fn view_tensions(&self, view: &str) -> Result<Vec<TensionInfo>, RdyError> {
         let set = self.tensions()?;
         let mut found = BTreeMap::new();
         let mut cache = crate::tensions::info::InfoCache::default();
         for c in self.included(view).iter() {
             for t in set.involving_change(c) {
+                if crate::tensions::judged_on_the_net_change(t.kind) {
+                    continue;
+                }
                 found
                     .entry(t.id)
                     .or_insert_with(|| self.tension_info_with(&t, &mut cache));
             }
+        }
+        for t in self.view_net_tensions(view)? {
+            found
+                .entry(t.id)
+                .or_insert_with(|| self.tension_info_with(&t, &mut cache));
         }
         Ok(found.into_values().collect())
     }

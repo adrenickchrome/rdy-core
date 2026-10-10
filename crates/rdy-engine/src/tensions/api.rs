@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// `rdy_schema`'s paragraph on tensions.
-pub const TENSIONS_DOC: &str = "rdy_tensions {scope?, kind?, severity?, status?, view?, area?, involving?, reviews?, max_tokens?} lists tensions: disagreements between in-flight changes, between a change and canon, or inside canon. Kinds: edit_collision, fork, premise_shift, area_overlap, duplicate_definition, unjustified_change, deprecated_reference. scope: inflight (default, every tension), canon (tensions whose sides are all canon) or a view. status: open (default) or dismissed. A side is a change id or canon@<landing>; intent overlaps (read_time) have an intent side and are resolved through their intent, never dismissed. The listing also shows the landing form of an open proposal (proposal: P-x@n) when it differs from the in-flight one: the gate judges that form, and a refusal names it. A fork, duplicate definition or deprecated reference (from content that is not itself deprecated) stays open in canon after its last change lands, until its trigger stops; the other kinds end when their last change lands (a stale pin in canon is a suspect, not a tension). Members of one alternative set never raise edit_collision with each other. A duplicate_definition is one tension per group: every block that defines one name, or every normative block with one text, is a member. An unjustified_change is one tension per block that a view changes: a stable normative block with no implements or editorial on any change of the view that writes it. Its sides are the view's latest changes on the block; creating a decision, or editing one still proposed, never counts. A proposal and its landing judge the proposal's net change. Normative text duplicates need at least duplicate_text_min_words words (a pack setting, default 3). A blocking tension refuses a landing only when a side is in the proposal and every side would be in canon after it (E_BLOCKING_TENSION); a tension whose sides are all canon already never refuses. Resolve a tension with a change (edit or repin a side); dismiss one with rdy_resolve {tension, dismiss: {reason}}: anyone who writes may dismiss an advisory one; a blocking one needs the reviewer role or a human, of another actor than every side's author (E_PERMISSION, E_SELF_REVIEW). A dismissal stays with the tension (status dismissed) until a side's content changes; for a duplicate_definition, also until the group's membership changes (a member added, edited away or removed).";
+pub const TENSIONS_DOC: &str = "rdy_tensions {scope?, kind?, severity?, status?, view?, area?, involving?, reviews?, max_tokens?} lists tensions: disagreements between in-flight changes, between a change and canon, or inside canon. Kinds: edit_collision, fork, premise_shift, area_overlap, duplicate_definition, unjustified_change, deprecated_reference. scope: inflight (default, every tension), canon (tensions whose sides are all canon) or a view. status: open (default) or dismissed. A side is a change id or canon@<landing>; intent overlaps (read_time) have an intent side and are resolved through their intent, never dismissed. The listing also shows the landing form of an open proposal (proposal: P-x@n) when it differs from the in-flight one: the gate judges that form, and a refusal names it. A fork, duplicate definition or deprecated reference (from content that is not itself deprecated) stays open in canon after its last change lands, until its trigger stops; the other kinds end when their last change lands (a stale pin in canon is a suspect, not a tension). Members of one alternative set never raise edit_collision with each other. A duplicate_definition is one tension per group: every block that defines one name, or every normative block with one text, is a member. An unjustified_change is one tension per block that a view changes: a stable normative block with no implements or editorial on any change of the view that writes it. Its sides are the view's latest changes on the block; creating a decision, or editing one still proposed, never counts. A proposal and its landing judge the proposal's net change, and a listing scoped to a view judges the view's net change. Normative text duplicates need at least duplicate_text_min_words words (a pack setting, default 3). A blocking tension refuses a landing only when a side is in the proposal and every side would be in canon after it (E_BLOCKING_TENSION); a tension whose sides are all canon already never refuses. Resolve a tension with a change (edit or repin a side); dismiss one with rdy_resolve {tension, dismiss: {reason}}: anyone who writes may dismiss an advisory one; a blocking one needs the reviewer role or a human, of another actor than every side's author (E_PERMISSION, E_SELF_REVIEW). A dismissal stays with the tension (status dismissed) until a side's content changes; for a duplicate_definition, also until the group's membership changes (a member added, edited away or removed).";
 
 /// One tensions request: which tensions to list. Every filter given must match.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -32,7 +32,9 @@ pub struct TensionsRequest {
     pub severity: Option<String>,
     /// `open` (default) or `dismissed`.
     pub status: Option<String>,
-    /// Only tensions with a change side in this view's included set.
+    /// Only tensions with a change side in this view's included set. A kind judged on the net
+    /// change (unjustified_change) is listed in the landing form of the whole view, as the
+    /// view's proposal lists it.
     pub view: Option<String>,
     /// Only tensions that involve a block in this pack area.
     pub area: Option<String>,
@@ -417,8 +419,30 @@ pub fn run_tensions(
         .map(|v| st.included(v).iter().copied().collect())
         .unwrap_or_default();
     let listed = candidates(&st)?;
+    // FW-JU1: a view listing judges a net-change kind on the view's own net change, as the view's
+    // proposal does: its landing form, never another view's in-flight form that the view holds
+    let (own, extra) = match f.view.as_deref() {
+        Some(v) => {
+            let net = st.view_net_tensions(v)?;
+            let own: BTreeSet<Hash> = net.iter().map(|t| t.id).collect();
+            let ids: BTreeSet<Hash> = listed.iter().map(|c| c.t.id).collect();
+            let extra: Vec<Candidate> = net
+                .into_iter()
+                .filter(|t| !ids.contains(&t.id))
+                .map(|t| Candidate { t, proposal: None })
+                .collect();
+            (Some(own), extra)
+        }
+        None => (None, vec![]),
+    };
     let mut kept = vec![];
-    for c in &listed {
+    for c in listed.iter().chain(&extra) {
+        if let Some(own) = &own
+            && super::judged_on_the_net_change(c.t.kind)
+            && !own.contains(&c.t.id)
+        {
+            continue;
+        }
         if f.keeps(&st, &c.t, &in_view)? {
             kept.push(c);
         }

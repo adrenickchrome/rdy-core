@@ -40,6 +40,10 @@ pub(crate) struct EditArgs {
 }
 
 pub(crate) fn new(env: &Env, what: NewCmd) -> Result<(Value, String), ErrorReply> {
+    let named = match &what {
+        NewCmd::Folder { view, .. } | NewCmd::Doc { view, .. } => view.clone(),
+    };
+    wc::new_files::refuse_in_copy(env, named.as_deref())?;
     let (kind, path, v) = match what {
         NewCmd::Folder { path, view } => {
             let v = call(env, "new_folder", json!({"path": path, "view": view}))?;

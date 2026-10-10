@@ -106,8 +106,17 @@ impl Session {
             role,
             kind: SessionKind::Agent,
         };
-        // The default view is the run, else work-<actor>; it must be a writable name.
-        if session.default_view().chars().count() > crate::write::MAX_VIEW_NAME {
+        // The default view is the run, else work-<actor>; it must be a writable name: not too
+        // long, and not a reserved view (`:` becomes `-`, and work-<actor> is never reserved)
+        let view = session.default_view();
+        if view == "canon" || view == INFLIGHT_SCOPE {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("the run {view:?} names a reserved view, which an agent cannot write"),
+                "pass another run name: canon and inflight are reserved",
+            ));
+        }
+        if view.chars().count() > crate::write::MAX_VIEW_NAME {
             return Err(RdyError::new(
                 E_BAD_INPUT,
                 format!(

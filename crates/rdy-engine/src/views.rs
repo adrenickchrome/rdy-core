@@ -582,7 +582,10 @@ pub(crate) fn missing_deps_rooted(
 /// parent a block of theirs is created or moved under that neither the view nor the include
 /// has, the unlanded change that creates it, with that change's own closure, until nothing is
 /// missing. A parent no unlanded change creates (one that landed after a pinned base, say)
-/// refuses the include with `E_DEPS_MISSING`, one issue per parent.
+/// refuses the include with `E_DEPS_MISSING`, one issue per parent. A dep that landed after a
+/// pinned base is brought along: an include is an explicit act, so it may bring landed work into
+/// a pinned view, which an undo never does on its own (`E_UNDO_LANDING` sends the agent here;
+/// final review I3, kept as built pending the founder's ruling).
 fn include_closure(
     st: &ReadState,
     view: &str,

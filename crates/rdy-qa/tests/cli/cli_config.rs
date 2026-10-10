@@ -251,8 +251,10 @@ fn msw19_a_dotted_key_that_is_not_a_review_setting_warns() {
     assert_eq!(idle.level, Level::Default, "the dotted key is not read");
 }
 
+/// Founder ruling (config typos warn): a dotted review key is a warning; `rdy config` and
+/// `rdy status` run and show it.
 #[test]
-fn msw19_a_dotted_review_key_fails_rdy_config_and_rdy_status() {
+fn msw19_a_dotted_review_key_warns_in_rdy_config_and_rdy_status() {
     let s = Served::new();
     append(
         s.dir.path(),
@@ -266,13 +268,11 @@ fn msw19_a_dotted_review_key_fails_rdy_config_and_rdy_status() {
             String::from_utf8_lossy(&o.stdout),
             String::from_utf8_lossy(&o.stderr)
         );
+        assert!(o.status.success(), "{args:?}: {out}");
         assert!(
-            out.contains("E_CONFIG") && out.contains("is written as one dotted key"),
+            out.contains("W_CONFIG_UNKNOWN") && out.contains("is written as one dotted key"),
             "{args:?}: {out}"
         );
-        assert!(
-            !out.contains("require_up_to_date = false"),
-            "{args:?}: {out}"
-        );
+        assert!(!out.contains("E_CONFIG"), "{args:?}: {out}");
     }
 }

@@ -161,16 +161,15 @@ fn msw10_a_relative_project_in_the_pointer_is_joined_to_its_directory() {
     std::fs::write(w.join(POINTER_FILE), "project: ../proj\nname: side\n").unwrap();
     let place = Place::locate(&w.join("sub")).unwrap();
     assert_eq!(place.root, w);
-    assert_eq!(place.project, w.join("../proj"));
+    // final review M10: joined and normalised, so `..` never lengthens the path
+    assert_eq!(place.project, p);
     assert!(place.project.join(".rdy").is_dir());
-    assert_eq!(
-        place.state,
-        w.join("../proj").join(WORKTREES_DIR).join("side")
-    );
+    assert_eq!(place.state, p.join(WORKTREES_DIR).join("side"));
 }
 
-/// A damaged pointer's fix points at repair only: a worktree whose pointer is deleted is an
-/// orphan that `rdy worktree rm` refuses, so the fix never offers deleting it.
+/// A damaged pointer's fix points at repair only, and never offers deleting the directory (it
+/// holds the person's files). `rdy worktree rm` takes the directory `rdy worktree ls` shows, so
+/// the worktree can still be removed (final review M2).
 #[test]
 fn msw10_a_damaged_pointer_fix_points_at_repair_only() {
     let top = tempfile::tempdir().unwrap();

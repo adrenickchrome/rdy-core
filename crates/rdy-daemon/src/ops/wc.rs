@@ -48,10 +48,8 @@ pub(super) struct WcNonceArgs {
     view: String,
     nonce: String,
     rewrite: Vec<String>,
-    /// Search only the recent changes (msw11).
-    recent: Option<bool>,
     /// Search the changes after this view head (msw11): the probe after a refused commit, with
-    /// the head the working copy last saw. It wins over `recent`.
+    /// the head the working copy last saw.
     since: Option<String>,
 }
 
@@ -379,23 +377,24 @@ pub(super) fn wc_commit(cx: &OpContext, a: WcCommitArgs) -> Result<Value, RdyErr
 /// runs in this daemon (`{change: null, pending: true}` when it still runs after `NONCE_WAIT`),
 /// then reads on the writer, after every write queued before it. With `since` (a view head), it
 /// reads only the changes the view gained after that head (`change_by_nonce_since`): the probe a
-/// commit makes after an error reply, which must not stall the writer with a full scan and must
-/// still find its write behind any number of later ones. Without `since`, `recent` reads only the
-/// view's newest changes and canon's newest landing (`change_by_recent_nonce`).
+/// commit makes after an error reply, which finds its write behind later ones. Every search
+/// stops at `NONCE_SCAN_LIMIT` frames, so it never stalls the writer; a `since` walk that stops
+/// there answers `{change: null, pending: true}`, so the client keeps its journal (it cannot
+/// tell whether the write happened).
 pub(super) fn wc_nonce(cx: &OpContext, a: WcNonceArgs) -> Result<Value, RdyError> {
     if !wait_not_in_flight(&a.nonce) {
         return Ok(json!({"change": null, "pending": true}));
     }
     let view = view_of(cx.session, Some(a.view));
-    let (nonce, rewrite, recent, since) = (a.nonce, a.rewrite, a.recent == Some(true), a.since);
+    let (nonce, rewrite, since) = (a.nonce, a.rewrite, a.since);
     cx.engine.write(Box::new(move |r| {
         let st = r.read();
         let found = match &since {
-            Some(since) => st.change_by_nonce_since(&view, &nonce, since)?,
-            None if recent => st.change_by_recent_nonce(&view, &nonce)?,
+            Some(since) => st.change_by_nonce_since(&view, &nonce, since, NONCE_SCAN_LIMIT)?,
             None => st.change_by_nonce(&view, &nonce, NONCE_SCAN_LIMIT)?,
         };
         match found.change {
+            None if since.is_some() && found.capped => Ok(json!({"change": null, "pending": true})),
             None => Ok(json!({"change": null})),
             Some(h) => {
                 let mut out = json!({"change": h.to_string()});

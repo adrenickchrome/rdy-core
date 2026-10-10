@@ -226,18 +226,33 @@ fn rm(env: &Env, dir: &Path, force: bool) -> Result<(Value, String), ErrorReply>
             "name a directory that rdy worktree ls shows",
         )
     };
-    let place = fs::symlink_metadata(dir.join(POINTER_FILE))
-        .ok()
-        .filter(|m| m.is_file())
-        .and_then(|_| Place::from_pointer(&dir))
-        .ok_or_else(not_a_worktree)?;
     let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
     };
-    if !same(&place.project, &env.project) {
-        return Err(not_a_worktree());
-    }
+    let pointed = fs::symlink_metadata(dir.join(POINTER_FILE))
+        .ok()
+        .filter(|m| m.is_file())
+        .and_then(|_| Place::from_pointer(&dir));
+    let place = match pointed {
+        Some(p) => {
+            if !same(&p.project, &env.project) {
+                return Err(not_a_worktree());
+            }
+            p
+        }
+        // a missing or damaged pointer: the directory `rdy worktree ls` shows for a worktree
+        // (its dir.txt) still names it
+        None => worktrees(&env.project)
+            .into_iter()
+            .find(|w| !w.dir.is_empty() && same(Path::new(&w.dir), &dir))
+            .map(|w| Place {
+                root: dir.clone(),
+                state: env.project.join(WORKTREES_DIR).join(&w.name),
+                project: env.project.clone(),
+            })
+            .ok_or_else(not_a_worktree)?,
+    };
     let name = place
         .state
         .file_name()
@@ -275,7 +290,10 @@ fn rm(env: &Env, dir: &Path, force: bool) -> Result<(Value, String), ErrorReply>
     }
     let removed = remove_tracked(&place, &state)?;
     let ptr = place.root.join(POINTER_FILE);
-    fs::remove_file(&ptr).map_err(|e| io_err(&ptr, "remove", e))?;
+    match fs::remove_file(&ptr) {
+        Err(e) if e.kind() != ErrorKind::NotFound => return Err(io_err(&ptr, "remove", e)),
+        _ => {}
+    }
     fs::remove_dir_all(&place.state).map_err(|e| io_err(&place.state, "remove", e))?;
     drop(lock);
     let _ = fs::remove_dir(&place.root); // only when empty

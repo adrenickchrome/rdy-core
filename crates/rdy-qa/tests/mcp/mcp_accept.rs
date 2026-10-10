@@ -348,7 +348,8 @@ fn msw18_a_stale_link_item_is_skipped_and_the_rest_are_accepted() {
     assert_eq!(a.skipped.len(), 1, "{:?}", a.skipped);
     assert_eq!(a.skipped[0].index, 0);
     assert!(
-        a.skipped[0].reason.contains("cannot link to an entity"),
+        a.skipped[0].reason
+            == format!("{dec} is an accepted or rejected decision and cannot change"),
         "{:?}",
         a.skipped
     );
@@ -400,7 +401,7 @@ fn msw18_every_item_skipped_on_a_frozen_decision_says_why() {
         (
             "E_BAD_INPUT",
             format!(
-                "nothing to accept: every suggestion was skipped; suggestion 0: {dec} cannot link to an entity"
+                "nothing to accept: every suggestion was skipped; suggestion 0: {dec} is an accepted or rejected decision and cannot change"
             )
             .as_str(),
             "re-run the suggestions and accept the ones that still apply"
@@ -427,6 +428,33 @@ fn msw18_every_item_skipped_on_a_deleted_block_says_why() {
             "re-run the suggestions and accept the ones that still apply".to_string()
         )
     );
+}
+
+/// Final review M13: the all-skipped refusal lists the first skips and counts the rest, so a
+/// batch of up to MAX_ACCEPT items never gives an error of tens of KB.
+#[test]
+fn msw18_every_item_skipped_lists_the_first_ten_and_counts_the_rest() {
+    let (_d, mut st, s, e) = books();
+    let v = claim(&mut st, &s, "The ledger is append-only.");
+    let c = v["created"]["$c"].as_str().unwrap().to_string();
+    rdy_write(&mut st, p(json!({"ops": [{"op": "delete", "id": c}]}))).unwrap();
+    let item = json!({"kind": "link", "block": c, "link": "describes", "target": e});
+    let items: Vec<_> = (0..14).map(|_| item.clone()).collect();
+    let err = rdy_accept(&mut st, p(json!({"suggestions": items}))).unwrap_err();
+    assert_eq!(err.code, "E_BAD_INPUT");
+    assert_eq!(
+        err.message.matches("suggestion ").count(),
+        11,
+        "{}",
+        err.message
+    );
+    assert!(
+        err.message.contains("suggestion 9: no block"),
+        "{}",
+        err.message
+    );
+    assert!(!err.message.contains("suggestion 10:"), "{}", err.message);
+    assert!(err.message.ends_with("; and 4 more"), "{}", err.message);
 }
 
 #[test]

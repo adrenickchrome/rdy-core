@@ -6,7 +6,7 @@ use clap::Subcommand;
 use rdy_daemon::ErrorReply;
 use rdy_engine::wc::ignore::Ignore;
 use rdy_engine::wc::layout::{WcTree, read_tree};
-use rdy_engine::wc::state::{LOCK_WAIT, Place, WcLock, WcState};
+use rdy_engine::wc::state::{LOCK_WAIT, Place, WC_DIR, WcLock, WcState};
 use rdy_engine::{E_BAD_INPUT, project_pack};
 use rdy_schema::Pack;
 use serde_json::Value;
@@ -120,23 +120,7 @@ pub(crate) fn open_with(
 ) -> Result<Open, ErrorReply> {
     let lock = WcLock::take(&place.state, LOCK_WAIT)?;
     if let Some(real) = place.copy_of()? {
-        let name = place
-            .state
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-        let fix = copy_fix.map_or_else(
-            || format!("run the command in {real}; delete a copied directory by hand"),
-            String::from,
-        );
-        return Err(ErrorReply::new(
-            E_BAD_INPUT,
-            format!(
-                "{} is not a worktree of this project: its pointer names worktree {name}, which is at {real}",
-                place.root.display()
-            ),
-            fix,
-        ));
+        return Err(copy_error(&place, &real, copy_fix));
     }
     let mut state = WcState::load(&place)?;
     commit::recover(env, &place, &mut state)?;
@@ -144,6 +128,41 @@ pub(crate) fn open_with(
         state.require_bound()?;
     }
     Ok(Open { place, lock, state })
+}
+
+/// msw16: the refusal of a command run in `place`, a copy of the worktree at `real`
+/// (`Place::copy_of`), with the given fix (default: work in the real directory).
+fn copy_error(place: &Place, real: &str, copy_fix: Option<&str>) -> ErrorReply {
+    let name = place
+        .state
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let fix = copy_fix.map_or_else(
+        || format!("run the command in {real}; delete a copied directory by hand"),
+        String::from,
+    );
+    ErrorReply::new(
+        E_BAD_INPUT,
+        format!(
+            "{} is not a worktree of this project: its pointer names worktree {name}, which is at {real}",
+            place.root.display()
+        ),
+        fix,
+    )
+}
+
+/// msw16: the refusal `open` gives in `place` when it is a copied worktree directory, checked
+/// under the working copy's lock and released; `None` for the main place, a worktree, or a
+/// moved worktree (which records its new directory). A command that writes to the store before
+/// it opens the working copy checks this first.
+pub(crate) fn copy_refusal(place: &Place) -> Result<Option<ErrorReply>, ErrorReply> {
+    // the main place is never a copy, and the lock must not create a state directory
+    if place.state == place.project.join(WC_DIR) || !place.state.is_dir() {
+        return Ok(None);
+    }
+    let _lock = WcLock::take(&place.state, LOCK_WAIT)?;
+    Ok(place.copy_of()?.map(|real| copy_error(place, &real, None)))
 }
 
 /// The project's pack and the working tree under the place's root, read with its `.rdyignore`.

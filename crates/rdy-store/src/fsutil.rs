@@ -57,7 +57,8 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
 ///
 /// The temp name is predictable, so whatever stands there is removed first, and the temp file is
 /// created with `create_new` (`O_EXCL`): a link planted at the temp name is never followed, and
-/// one raced in after the removal fails the write.
+/// one raced in after the removal fails the write. Something that cannot be removed there (a
+/// directory) fails the write with an error that names the temp path.
 pub fn write_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
@@ -71,7 +72,16 @@ pub fn write_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
     tmp_name.push(".tmp");
     let tmp = parent.join(tmp_name);
     match std::fs::remove_file(&tmp) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        // a directory (or anything else rdy cannot remove) at the temp name: the person moves it
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            return Err(io::Error::new(
+                e.kind(),
+                format!(
+                    "cannot remove {} to write through it ({e}); move it aside",
+                    tmp.display()
+                ),
+            ));
+        }
         _ => {}
     }
     let mut f = std::fs::OpenOptions::new()
@@ -133,5 +143,23 @@ mod tests {
         assert!(std::fs::symlink_metadata(&path).unwrap().is_file());
         assert_eq!(std::fs::read(&path).unwrap(), b"new bytes");
         assert!(std::fs::symlink_metadata(dir.path().join(".blob.png.tmp")).is_err());
+    }
+
+    /// Final review M6: a directory at the temp name fails the write with an error that names
+    /// the temp path, so a person knows what to move aside; the directory is kept.
+    #[test]
+    fn msw11_a_directory_at_the_temp_name_is_named_in_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.png");
+        let tmp = dir.path().join(".blob.png.tmp");
+        std::fs::create_dir(&tmp).unwrap();
+        std::fs::write(tmp.join("kept.txt"), b"mine").unwrap();
+        let e = write_durable(&path, b"new bytes").unwrap_err();
+        assert!(
+            e.to_string().contains(&tmp.display().to_string()),
+            "the error names the temp path: {e}"
+        );
+        assert_eq!(std::fs::read(tmp.join("kept.txt")).unwrap(), b"mine");
+        assert!(std::fs::symlink_metadata(&path).is_err());
     }
 }

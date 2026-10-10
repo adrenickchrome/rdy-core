@@ -55,9 +55,9 @@ pub struct ProposalInfo {
     pub blocking: Vec<ConflictInfo>,
     /// The tensions that involve one of the version's changes, each with `refuses`: the
     /// refusing ones first (they refuse its landing, `E_BLOCKING_TENSION`; read from what the
-    /// version lands, `ReadState::refusing_tensions`), then by id; at most
-    /// `PROPOSAL_TENSIONS_MAX`. A tension whose blocks all carry a blocking conflict is left
-    /// out: the conflict reports it.
+    /// version lands, its landing form), then by id; at most `PROPOSAL_TENSIONS_MAX`. A kind
+    /// judged on the net change (unjustified_change, FW-JU1) is listed only in its landing form.
+    /// A tension whose blocks all carry a blocking conflict is left out: the conflict reports it.
     pub tensions: Vec<TensionInfo>,
     /// The tensions left out past `PROPOSAL_TENSIONS_MAX`.
     #[serde(skip_serializing_if = "is_zero")]
@@ -618,24 +618,15 @@ fn is_zero(n: &usize) -> bool {
 
 impl ReadState {
     /// The tensions that refuse landing `changes` (one version's changes, proposed from view
-    /// `view`): of [`ReadState::landing_tensions`], each blocking, not dismissed, and with every
-    /// side canon or one of `changes`, so that landing them would put it into canon. By id.
+    /// `view`), of `tensions` (their [`ReadState::landing_tensions`]): each blocking, not
+    /// dismissed, and with every side canon or one of `changes`, so that landing them would put
+    /// it into canon. By id.
     ///
     /// The gate judges what lands (tgat1): a change that another view also holds, or a write the
     /// view overwrites later but a subset leaves out, is read as the landing set has it, not as
     /// the in-flight set does. A tension whose sides are all canon (a fork, duplicate definition
     /// or deprecated reference standing in canon; FW-CH6, D-CRTJG) has no change side, so it
     /// never refuses a landing.
-    pub fn refusing_tensions(
-        &self,
-        view: &str,
-        changes: &[Hash],
-    ) -> Result<Vec<Arc<Tension>>, RdyError> {
-        let tensions = self.landing_tensions(view, changes)?;
-        Ok(self.refusing_among(changes, tensions))
-    }
-
-    /// The refusing ones of `tensions` (the landing tensions of `changes`).
     fn refusing_among(&self, changes: &[Hash], tensions: Vec<Arc<Tension>>) -> Vec<Arc<Tension>> {
         let mine: BTreeSet<&Hash> = changes.iter().collect();
         tensions
@@ -654,8 +645,10 @@ impl ReadState {
 
     /// The tensions a version of view `view` with changes `changes` lists: the event-derived
     /// tensions that involve one of `changes` (informational), and the refusing ones
-    /// ([`ReadState::refusing_tensions`]), each with `refuses` (true exactly for the refusing
-    /// ones, so it agrees with what landing does). The refusing ones come first, then by id. A
+    /// (`refusing_among` the landing forms), each with `refuses` (true exactly for the refusing
+    /// ones, so it agrees with what landing does). A kind judged on the net change
+    /// (unjustified_change, FW-JU1) is listed only in its landing form, never in another view's
+    /// in-flight form. The refusing ones come first, then by id. A
     /// tension whose involved blocks all carry one of the version's blocking conflicts
     /// (`conflicted`) is left out: the conflict reports it. At most `max` are listed, built
     /// with their sides; the rest are only counted (the second value).

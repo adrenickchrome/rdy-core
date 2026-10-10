@@ -274,3 +274,44 @@ fn msw13_a_write_or_proposal_to_the_empty_view_name_is_refused() {
     assert!(err.message.contains("empty"), "{err}");
     e.close().unwrap();
 }
+
+/// Final review M8: a proposal names a view under the same length cap as a write (R10).
+#[test]
+fn msw13_a_proposal_to_an_over_long_view_name_is_e_limit() {
+    let (d, r) = project();
+    let e = Local::new(r);
+    let h = writer();
+    let cx = OpContext {
+        engine: &e,
+        session: &h,
+        cwd: d.path(),
+    };
+    let err = dispatch(
+        &cx,
+        "propose",
+        json!({"title": "t", "view": "v".repeat(300)}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_LIMIT, "{err}");
+    e.close().unwrap();
+}
+
+/// Final review M8: an agent's default view must be a writable name, so a run that names a
+/// reserved view is refused when the session starts, not at its first write.
+#[test]
+fn msw13_an_agent_session_whose_run_names_a_reserved_view_is_refused() {
+    for run in ["canon", "inflight"] {
+        let e = Session::agent("agent:a".into(), Some(run.into()), rdy_model::Role::Writer)
+            .unwrap_err();
+        assert_eq!(e.code, E_BAD_INPUT, "{run}: {e}");
+        assert!(e.message.contains(run), "{e}");
+    }
+    assert!(
+        Session::agent(
+            "agent:a".into(),
+            Some("canon2".into()),
+            rdy_model::Role::Writer
+        )
+        .is_ok()
+    );
+}

@@ -14,16 +14,14 @@ use rdy_store::{MergeChange, merge_on_blocks};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-/// The most changes `change_by_recent_nonce` reads from the view, and from canon's newest
-/// landing (msw11).
-pub const RECENT_NONCE_LIMIT: usize = 16;
-
-/// The answer of a nonce lookup: the change that carries the nonce, if any, and how many change
-/// frames the lookup read.
+/// The answer of a nonce lookup: the change that carries the nonce, if any, how many frames the
+/// lookup read, and whether it stopped at its limit before it read everything it searches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NonceLookup {
     pub change: Option<Hash>,
     pub read: usize,
+    /// The lookup reached its limit with no match: the change may still be further back.
+    pub capped: bool,
 }
 
 /// One row of `rdy view ls`.
@@ -331,79 +329,11 @@ impl ReadState {
 
     /// The change whose `links.client_nonce` is `nonce` (wccm1, R-I6): view `view`'s included
     /// changes newest first, then canon's landings newest first (each landing's changes last
-    /// first); not found once `limit` changes are read without a match.
+    /// first); not found (`capped`) once `limit` changes are read without a match.
     pub fn change_by_nonce(
         &self,
         view: &str,
         nonce: &str,
-        limit: usize,
-    ) -> Result<NonceLookup, RdyError> {
-        self.nonce_scan(view, nonce, usize::MAX, usize::MAX, limit)
-    }
-
-    /// `change_by_nonce` over the recent changes only (msw11): view `view`'s newest
-    /// `RECENT_NONCE_LIMIT` included changes, then the newest `RECENT_NONCE_LIMIT` changes of
-    /// canon's newest landing. It reads at most `2 * RECENT_NONCE_LIMIT` change frames, so a
-    /// commit refused before its write asks cheaply whether the write happened.
-    pub fn change_by_recent_nonce(&self, view: &str, nonce: &str) -> Result<NonceLookup, RdyError> {
-        self.nonce_scan(view, nonce, RECENT_NONCE_LIMIT, 1, usize::MAX)
-    }
-
-    /// `change_by_nonce` over the changes view `view` gained after the head `since` (msw11): the
-    /// probe a working-copy commit makes after an error reply, with `since` the view head the
-    /// copy last saw. It walks the view's op chain from its head back to `since` and checks the
-    /// change of every op on the way (a commit's, an include's or a fork's). There is no fixed
-    /// cap: the reads grow with the ops after `since`, so the commit is found however many other
-    /// writes came after it. The commit's own op is always on that walk, also when the view was
-    /// rebased onto a landing meanwhile, since the chain keeps every op. A `since` that is not a
-    /// view op hash (`canon:<hash>`, for a view that had no head) walks the whole chain.
-    pub fn change_by_nonce_since(
-        &self,
-        view: &str,
-        nonce: &str,
-        since: &str,
-    ) -> Result<NonceLookup, RdyError> {
-        let stop = since.parse::<Hash>().ok();
-        let reader = self.reader();
-        let mut read = 0usize;
-        let mut seen: HashSet<Hash> = HashSet::new();
-        let mut cur = self.view_head(view).map(|h| h.head);
-        while let Some(h) = cur {
-            if Some(h) == stop {
-                break;
-            }
-            read += 1;
-            let op = reader.view_op(&h)?;
-            cur = op.prev;
-            let changes = match op.op {
-                ViewOpKind::Commit { change } => vec![change],
-                ViewOpKind::Include { changes } | ViewOpKind::Fork { changes, .. } => changes,
-                _ => vec![],
-            };
-            for c in changes.iter().rev() {
-                if !seen.insert(*c) {
-                    continue;
-                }
-                read += 1;
-                if reader.change(c)?.links.client_nonce.as_deref() == Some(nonce) {
-                    return Ok(NonceLookup {
-                        change: Some(*c),
-                        read,
-                    });
-                }
-            }
-        }
-        Ok(NonceLookup { change: None, read })
-    }
-
-    /// The nonce search: at most `per_source` changes of the view and of each landing, at most
-    /// `landings` landings, and at most `limit` change frames in all.
-    fn nonce_scan(
-        &self,
-        view: &str,
-        nonce: &str,
-        per_source: usize,
-        landings: usize,
         limit: usize,
     ) -> Result<NonceLookup, RdyError> {
         let reader = self.reader();
@@ -422,27 +352,34 @@ impl ReadState {
             Ok(Some(c.links.client_nonce.as_deref() == Some(nonce)))
         };
         let mut found = None;
+        let mut capped = false;
         'scan: {
-            for h in self.included(view).iter().rev().take(per_source) {
+            for h in self.included(view).iter().rev() {
                 match check(h)? {
                     Some(true) => {
                         found = Some(*h);
                         break 'scan;
                     }
                     Some(false) => {}
-                    None => break 'scan,
+                    None => {
+                        capped = true;
+                        break 'scan;
+                    }
                 }
             }
-            for landing in self.landing_walk().take(landings) {
+            for landing in self.landing_walk() {
                 let (_, rec) = landing?;
-                for h in rec.changes.iter().rev().take(per_source) {
+                for h in rec.changes.iter().rev() {
                     match check(h)? {
                         Some(true) => {
                             found = Some(*h);
                             break 'scan;
                         }
                         Some(false) => {}
-                        None => break 'scan,
+                        None => {
+                            capped = true;
+                            break 'scan;
+                        }
                     }
                 }
             }
@@ -450,6 +387,72 @@ impl ReadState {
         Ok(NonceLookup {
             change: found,
             read,
+            capped,
+        })
+    }
+
+    /// `change_by_nonce` over the changes view `view` gained after the head `since` (msw11): the
+    /// probe a working-copy commit makes after an error reply, with `since` the view head the
+    /// copy last saw. It walks the view's op chain from its head back to `since` and checks the
+    /// change of every op on the way (a commit's, an include's or a fork's). The commit's own op
+    /// is always on that walk, also when the view was rebased onto a landing meanwhile, since the
+    /// chain keeps every op. A `since` that is not a view op hash (`canon:<hash>`, for a view that
+    /// had no head) walks the whole chain. The probe runs on the daemon's writer, so the walk
+    /// stops (`capped`) once it has read `limit` frames (ops and changes) with no match: the
+    /// caller cannot tell then whether the commit was written.
+    pub fn change_by_nonce_since(
+        &self,
+        view: &str,
+        nonce: &str,
+        since: &str,
+        limit: usize,
+    ) -> Result<NonceLookup, RdyError> {
+        let stop = since.parse::<Hash>().ok();
+        let reader = self.reader();
+        let mut read = 0usize;
+        let mut seen: HashSet<Hash> = HashSet::new();
+        let mut cur = self.view_head(view).map(|h| h.head);
+        let capped = |read| NonceLookup {
+            change: None,
+            read,
+            capped: true,
+        };
+        while let Some(h) = cur {
+            if Some(h) == stop {
+                break;
+            }
+            if read >= limit {
+                return Ok(capped(read));
+            }
+            read += 1;
+            let op = reader.view_op(&h)?;
+            cur = op.prev;
+            let changes = match op.op {
+                ViewOpKind::Commit { change } => vec![change],
+                ViewOpKind::Include { changes } | ViewOpKind::Fork { changes, .. } => changes,
+                _ => vec![],
+            };
+            for c in changes.iter().rev() {
+                if !seen.insert(*c) {
+                    continue;
+                }
+                if read >= limit {
+                    return Ok(capped(read));
+                }
+                read += 1;
+                if reader.change(c)?.links.client_nonce.as_deref() == Some(nonce) {
+                    return Ok(NonceLookup {
+                        change: Some(*c),
+                        read,
+                        capped: false,
+                    });
+                }
+            }
+        }
+        Ok(NonceLookup {
+            change: None,
+            read,
+            capped: false,
         })
     }
 

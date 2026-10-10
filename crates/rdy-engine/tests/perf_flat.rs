@@ -1,5 +1,6 @@
 //! Flat (M1-shaped) projects: name checks must not be O(touched × siblings).
-//! The bounded tests run in debug builds; the ignored one measures in release:
+//! Every test here times wall clock, so each is ignored (correctness tests assert no speed); run
+//! them on demand in release:
 //! cargo test -p rdy-engine --release --test perf_flat -- --ignored --nocapture
 use rdy_engine::*;
 use rdy_model::*;
@@ -110,7 +111,11 @@ fn nameless(n: usize, lookups: usize) -> (Duration, Duration) {
     (propose, t.elapsed())
 }
 
+// A correctness test asserts no wall-clock time (global constraint; it failed at 11.9 s under
+// load). The budgets stay as a manual check: the bench op propose_land_500_flat times flat
+// write, propose and land.
 #[test]
+#[ignore = "wall-clock budget: run on demand with --ignored; the bench op propose_land_500_flat times it"]
 fn flat_two_thousand_docs_write_propose_land_is_fast() {
     let (write, propose, land) = flat(2000);
     println!("flat 2000: write {write:?}, propose {propose:?}, land {land:?}");
@@ -121,6 +126,7 @@ fn flat_two_thousand_docs_write_propose_land_is_fast() {
 }
 
 #[test]
+#[ignore = "wall-clock budget: run on demand with --ignored; correctness tests assert no speed"]
 fn nameless_legacy_docs_propose_and_lookup_are_fast() {
     let (propose, lookups) = nameless(1000, 200);
     println!("nameless 1000: propose {propose:?}, 200 lookups {lookups:?}");

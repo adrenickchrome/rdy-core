@@ -1126,7 +1126,8 @@ impl Rdy {
         let now = self.read().conflict_on(&scope, id)?.map(|c| c.id);
         // msw8 fix round 1: a stale buffer never resolves a conflict; the view reads the
         // conflict's base, and a side may be the editor's own old version, which cres1 accepts
-        if !current && now.is_some() {
+        if let (false, Some(n)) = (current, now) {
+            // the edit token is the base and the conflict: a retry needs both
             return Err(RdyError::new(
                 E_STALE_BASE,
                 format!(
@@ -1134,7 +1135,9 @@ impl Rdy {
                     short(&base),
                     short(&cur_hash)
                 ),
-                format!("re-read {id} (rdy_context) and retry with base={cur_hash}"),
+                format!(
+                    "re-read {id} (rdy_context lists its conflict's sides) and retry with base={cur_hash} and conflict={n}"
+                ),
             ));
         }
         // msw8 fix round 1 (ruling): the edit token carries the conflict the editor read; a

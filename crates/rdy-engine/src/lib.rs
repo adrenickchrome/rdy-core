@@ -83,8 +83,7 @@ pub use version::{
     AS_OF_CACHE_ENTRIES, VersionInfo, VersionPosition, VersionRef, ViewPosition, parse_version,
 };
 pub use view_query::{
-    ChangeSummary, Compare, CompareEntry, NonceLookup, OpSummary, RECENT_NONCE_LIMIT, ViewDetail,
-    ViewSummary,
+    ChangeSummary, Compare, CompareEntry, NonceLookup, OpSummary, ViewDetail, ViewSummary,
 };
 pub use views::{ConflictInfo, ConflictSide, OwnerInfo, ViewHeadInfo, ViewOpResult};
 pub use wc::project::Projection;

@@ -505,6 +505,96 @@ fn msw1_a_frozen_conflict_names_only_changes_the_view_can_exclude() {
     assert!(r.read().conflicts(&view("b")).unwrap().is_empty());
 }
 
+/// Final review M7: a pinned view is never rebased, so it still includes a side change that
+/// landed after its pin; the E_FROZEN hint names it too, since the view can exclude it.
+#[test]
+fn msw1_a_frozen_conflict_in_a_pinned_view_names_a_landed_side_it_includes() {
+    use rdy_model::{Change, ChangeLinks, FieldValue, Op};
+    fn store_land(r: &mut Rdy, v: &str) {
+        let p = r.store_mut().propose(v, v, writer().provenance()).unwrap();
+        r.store_mut()
+            .land_atomic(rdy_store::LandRequest {
+                proposal: p,
+                accept: None,
+                approver: approver().provenance(),
+                alt: None,
+                relay: None,
+                evidence: None,
+            })
+            .unwrap();
+        r.invalidate();
+    }
+    let (_d, mut r) = project();
+    let seeded = write(&mut r, "seed", json!([
+        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "log", "title": "Log", "doc_type": "decisions-log"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Decisions"}},
+        {"op": "create", "type": "decision", "id": "$x", "parent": "$s", "fields": {"statement": "D", "status": "proposed"}}
+    ])).unwrap();
+    let d = seeded.created["$x"].clone();
+    let id = rdy_model::BlockId::parse(&d).unwrap();
+    store_land(&mut r, "seed"); // canon holds d, proposed
+    let vd = version_of(&r, &Scope::Canon, &d);
+    r.view_create(&writer(), "b", None, true).unwrap(); // pinned
+    // b accepts d through the store (only the gate writes status: accepted)
+    let mut acc = r.read().block(&Scope::Canon, &id).unwrap();
+    acc.fields
+        .insert("status".into(), FieldValue::Str("accepted".into()));
+    let cb = r
+        .store_mut()
+        .commit_to_view(
+            "b",
+            Change {
+                view: "b".into(),
+                ops: vec![Op::Update {
+                    base: vd.parse().unwrap(),
+                    block: acc,
+                }],
+                deps: vec![],
+                provenance: writer().provenance(),
+                justification: None,
+                message: "accept".into(),
+                links: ChangeLinks::default(),
+            },
+        )
+        .unwrap()
+        .to_string();
+    r.invalidate();
+    // a edits d's statement from vd; b includes it, then it lands; b is pinned, so it keeps it
+    let x = write(
+        &mut r,
+        "a",
+        json!([{"op": "update", "id": d, "base": vd, "fields": {"statement": "D by a"}}]),
+    )
+    .unwrap()
+    .change;
+    r.view_include(&writer(), "b", std::slice::from_ref(&x))
+        .unwrap();
+    store_land(&mut r, "a");
+    assert!(
+        r.read().included("b").iter().any(|h| h.to_string() == x),
+        "the pinned view still includes x"
+    );
+    assert!(
+        r.read().conflict_info(&view("b"), &id).unwrap().is_some(),
+        "d conflicted in b"
+    );
+    let e = write(
+        &mut r,
+        "b",
+        json!([{"op": "update", "id": d, "base": vd, "fields": {"statement": "D merged"}}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, E_FROZEN, "{e}");
+    assert!(e.fix.contains(&cb), "{e}");
+    assert!(
+        e.fix.contains(&x),
+        "x landed, but b includes it and can exclude it: {e}"
+    );
+    r.view_exclude(&writer(), "b", std::slice::from_ref(&x), false)
+        .unwrap();
+    assert!(r.read().conflicts(&view("b")).unwrap().is_empty());
+}
+
 /// msw1 (#1160, fix round 1): an import is a second way to create a block. A create/create
 /// conflict has no base, so the view reads the block as absent; the import must still refuse it,
 /// as a write does, and leave the conflict in place.

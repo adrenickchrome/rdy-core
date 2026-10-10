@@ -373,24 +373,32 @@ fn msw19_a_full_publish_over_a_broken_config_keeps_the_review_gate_on() {
     }
 }
 
+/// The one warning `Rdy::open` gives for the project config `text` appended with `bad`; the
+/// project opens and the review gate stays off (founder ruling: config typos warn).
+fn opens_with_one_warning(bad: &str) -> rdy_schema::Issue {
+    let (d, r) = project();
+    drop(r);
+    let cfg = d.path().join(".rdy/config.yaml");
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    std::fs::write(&cfg, format!("{text}{bad}")).unwrap();
+    let r = Rdy::open(d.path()).unwrap_or_else(|e| panic!("{bad:?} must open: {e}"));
+    assert!(!r.read().require_up_to_date(), "{bad:?}");
+    let w = rdy_engine::config_levels::config_warnings(d.path(), None);
+    assert_eq!(w.len(), 1, "{bad:?}: {w:?}");
+    assert_eq!(w[0].code, "W_CONFIG_UNKNOWN", "{bad:?}");
+    w[0].clone()
+}
+
 #[test]
-fn msw19_an_unknown_key_under_reviews_is_a_config_error() {
+fn msw19_an_unknown_key_under_reviews_opens_with_the_warning() {
     for bad in [
         "reviews:\n  require_uptodate: true\n",
         "review:\n  require_up_to_date: true\n",
     ] {
-        let (d, r) = project();
-        drop(r);
-        let cfg = d.path().join(".rdy/config.yaml");
-        let text = std::fs::read_to_string(&cfg).unwrap();
-        std::fs::write(&cfg, format!("{text}{bad}")).unwrap();
-        let e = Rdy::open(d.path())
-            .err()
-            .expect("an unknown review setting must not open");
-        assert_eq!(e.code, E_CONFIG, "{bad:?}: {e}");
+        let w = opens_with_one_warning(bad);
         assert!(
-            format!("{} {}", e.message, e.fix).contains("reviews.require_up_to_date"),
-            "{e}"
+            format!("{} {}", w.message, w.fix).contains("reviews.require_up_to_date"),
+            "{bad:?}: {w:?}"
         );
     }
 }
@@ -428,60 +436,39 @@ fn msw19_a_reload_whose_publish_panics_keeps_the_previous_pack_and_config() {
 }
 
 #[test]
-fn msw19_a_dotted_review_key_is_a_config_error() {
+fn msw19_a_dotted_review_key_opens_with_the_warning() {
     for bad in [
         "reviews.require_up_to_date: true\n",
         "\"reviews.require_up_to_date\": true\n",
         "'reviews.require_up_to_date': true\n",
     ] {
-        let (d, r) = project();
-        drop(r);
-        let cfg = d.path().join(".rdy/config.yaml");
-        let text = std::fs::read_to_string(&cfg).unwrap();
-        std::fs::write(&cfg, format!("{text}{bad}")).unwrap();
-        let e = Rdy::open(d.path())
-            .err()
-            .expect("a dotted review key must not open");
-        assert_eq!(e.code, E_CONFIG, "{bad:?}: {e}");
+        let w = opens_with_one_warning(bad);
         assert_eq!(
-            e.message,
+            w.message,
             ".rdy/config.yaml: `reviews.require_up_to_date` is written as one dotted key; \
              rdy reads only nested keys, so the review setting would be ignored",
             "{bad:?}"
         );
         assert_eq!(
-            e.fix, "write it nested: `reviews:` then `  require_up_to_date: true` on the next line",
+            w.fix, "write it nested: `reviews:` then `  require_up_to_date: true` on the next line",
             "{bad:?}"
         );
     }
 }
 
 #[test]
-fn msw19_a_review_setting_outside_reviews_is_a_config_error() {
-    for bad in ["require_up_to_date: true\n", "require_uptodate: true\n"] {
-        let (d, r) = project();
-        drop(r);
-        let cfg = d.path().join(".rdy/config.yaml");
-        let text = std::fs::read_to_string(&cfg).unwrap();
-        std::fs::write(&cfg, format!("{text}{bad}")).unwrap();
-        let e = Rdy::open(d.path())
-            .err()
-            .expect("a review setting outside reviews must not open");
-        assert_eq!(e.code, E_CONFIG, "{bad:?}: {e}");
+fn msw19_a_review_setting_outside_reviews_opens_with_the_warning() {
+    for bad in [
+        "require_up_to_date: true\n",
+        "require_uptodate: true\n",
+        "views:\n  require_up_to_date: true\n",
+    ] {
+        let w = opens_with_one_warning(bad);
         assert!(
-            e.message
+            w.message
                 .contains("did you mean reviews.require_up_to_date?"),
-            "{bad:?}: {e}"
+            "{bad:?}: {w:?}"
         );
-        assert_eq!(e.fix, "move it under `reviews:`", "{bad:?}");
+        assert_eq!(w.fix, "move it under `reviews:`", "{bad:?}");
     }
-    // under another section too
-    let (d, r) = project();
-    drop(r);
-    let cfg = d.path().join(".rdy/config.yaml");
-    let text = std::fs::read_to_string(&cfg).unwrap();
-    std::fs::write(&cfg, format!("{text}views:\n  require_up_to_date: true\n")).unwrap();
-    let e = Rdy::open(d.path()).err().expect("views.require_up_to_date");
-    assert_eq!(e.code, E_CONFIG, "{e}");
-    assert_eq!(e.fix, "move it under `reviews:`");
 }

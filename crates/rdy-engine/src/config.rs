@@ -91,8 +91,14 @@ pub fn serve_config(project: &Path) -> ServeConfig {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct ViewsConfig {
-    /// Days without a write after which `rdy view ls` flags an open view as idle.
+    /// Days without a write after which `rdy view ls` flags an open view as idle. Defaulted, so a
+    /// `views:` section that holds only a misspelt key opens with its warning (config typos warn).
+    #[serde(default = "default_idle_days")]
     idle_days: u32,
+}
+
+fn default_idle_days() -> u32 {
+    DEFAULT_IDLE_DAYS
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]

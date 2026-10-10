@@ -98,8 +98,10 @@ pub fn rdy_search(st: &mut McpState, p: SearchParams) -> Result<Value, RdyError>
                 .chain(e.facts.iter().map(|b| &b.id))
                 .chain(e.also_described_in.iter().map(|b| &b.id))
         });
+        // the order of first sight, de-duplicated in O(1) a step
+        let mut seen: std::collections::HashSet<&String> = std::collections::HashSet::new();
         for id in hits.chain(sheets) {
-            if !ids.contains(id) {
+            if seen.insert(id) {
                 ids.push(id.clone());
             }
         }

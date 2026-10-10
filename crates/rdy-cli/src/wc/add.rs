@@ -162,15 +162,14 @@ fn resolves(
 ) -> Result<(), ErrorReply> {
     let is_dir = rel.is_empty()
         || fs::symlink_metadata(place.root.join(rel)).is_ok_and(|m| m.file_type().is_dir());
-    let blocked = |c: &ConflictEntry, theirs: &str| -> Result<(), ErrorReply> {
+    // `at`: the place the conflict is resolved at, the local one or the store's (after a rename,
+    // the local one may be gone)
+    let blocked = |at: &str, theirs: &str| -> Result<(), ErrorReply> {
         if fs::symlink_metadata(place.root.join(theirs)).is_ok() {
             return Err(refuse(
                 E_WC_CONFLICT,
                 format!("delete {theirs} first"),
-                format!(
-                    "edit {} to the version you want, delete {theirs}, then rdy add {}",
-                    c.path, c.path
-                ),
+                format!("edit {at} to the version you want, delete {theirs}, then rdy add {at}"),
             ));
         }
         Ok(())
@@ -188,11 +187,11 @@ fn resolves(
         if !local && store.is_none() {
             continue;
         }
-        blocked(c, &theirs_path(c))?;
+        blocked(&c.path, &theirs_path(c))?;
         if let Some(at) = &store {
             let folder = c.kind == ConflictKind::FolderRename;
             blocked(
-                c,
+                at,
                 &if folder {
                     join(at, FOLDER_THEIRS)
                 } else {
@@ -217,8 +216,8 @@ fn resolves(
                 } else {
                     continue;
                 };
-                blocked(d, &theirs_path(d))?;
-                blocked(d, &theirs_beside(&moved))?;
+                blocked(&d.path, &theirs_path(d))?;
+                blocked(&moved, &theirs_beside(&moved))?;
                 out.insert(j);
             }
         }

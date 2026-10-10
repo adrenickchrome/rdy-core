@@ -41,8 +41,8 @@ pub struct Writer {
     checkpoint_failing: bool,
     /// Settling the tension set has failed and the failure was logged; cleared by a success.
     settle_failing: bool,
-    /// A clean republish after a panic panicked too: the published state may be stale, so the
-    /// next message retries it first. Cleared by a success.
+    /// A clean republish after a panic panicked too, and the failure was logged: the published
+    /// state may be stale, so the next message retries it first. Cleared by a success.
     republish_pending: bool,
 }
 
@@ -110,17 +110,24 @@ impl Writer {
 
     /// After a panic the caches may be half-updated: republishes a clean state (`invalidate`). A
     /// panic in that republish is caught and logged, and the last published state stays, so the
-    /// writer keeps serving; the next message retries the republish. `after` names what
-    /// panicked first.
+    /// writer keeps serving; the next message retries the republish. The failure is logged once,
+    /// until a retry succeeds. `after` names what panicked first.
     fn invalidate_after_panic(&mut self, rdy: &mut Rdy, after: &str) {
         match catch_unwind(AssertUnwindSafe(|| rdy.invalidate())) {
             Ok(()) => self.republish_pending = false,
             Err(p) => {
+                // logged once while it keeps failing, as settle_failing and checkpoint_failing
+                if !self.republish_pending {
+                    #[cfg(test)]
+                    if let Some(sh) = self.shared.upgrade() {
+                        sh.republish_failure_logs.fetch_add(1, Ordering::SeqCst);
+                    }
+                    log(&format!(
+                        "the clean republish after a panic in {after} panicked too ({}); the last published state stays until a retry succeeds",
+                        panic_text(&*p)
+                    ));
+                }
                 self.republish_pending = true;
-                log(&format!(
-                    "the clean republish after a panic in {after} panicked too ({}); the last published state stays until a retry succeeds",
-                    panic_text(&*p)
-                ));
             }
         }
     }
@@ -495,6 +502,29 @@ mod tests {
             "the reload succeeds and clears the error"
         );
         assert_eq!(sh.state.load().pack().name, "proj");
+        sh.shutdown().unwrap();
+    }
+
+    /// Final review M4: a clean republish that keeps failing logs once, not on every message,
+    /// until a retry succeeds.
+    #[test]
+    fn msw9_a_republish_that_keeps_failing_logs_once() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
+        // the write panics; its clean republish and the next three retries panic too
+        let out = sh.writer.run(Box::new(|rdy: &mut Rdy| {
+            rdy.panic_full_publishes_for_tests(4);
+            panic!("write test panic")
+        }));
+        assert!(out.is_err());
+        for _ in 0..4 {
+            let out = sh
+                .writer
+                .run(Box::new(|_: &mut Rdy| Ok(serde_json::Value::Null)));
+            assert!(out.is_ok(), "{out:?}");
+        }
+        assert_eq!(sh.republish_failure_logs.load(Ordering::SeqCst), 1);
         sh.shutdown().unwrap();
     }
 

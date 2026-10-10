@@ -548,6 +548,23 @@ mod msw8_conflicts {
         assert_eq!(version_of(&r, &view("a"), &c), vc);
     }
 
+    /// Final review M5: the first refusal's fix gives both parts of the edit token, so an
+    /// op-level caller that does exactly what it says is not refused again.
+    #[test]
+    fn msw8_the_stale_buffer_fix_names_the_base_and_the_conflict() {
+        let (_d, mut r, c, vc, v0) = a_conflicted_after_b_lands();
+        let cid = conflict_of(&r, "a", &c).unwrap();
+        let e = save(&mut r, &v0, None, "alpha, extended").unwrap_err();
+        assert_eq!(e.code, "E_STALE_BASE", "{e:?}");
+        let base = format!("base={vc}");
+        let conflict = format!("conflict={cid}");
+        assert!(e.fix.contains(&base) && e.fix.contains(&conflict), "{e:?}");
+        // the retry the fix names resolves the conflict
+        save(&mut r, &vc, Some(&cid), "merged").unwrap();
+        assert_eq!(conflict_of(&r, "a", &c), None);
+        assert_eq!(body_of(&r, &view("a"), &c), "merged");
+    }
+
     #[test]
     fn msw8_a_conflict_rekeyed_while_the_editor_is_open_is_stale_base() {
         let (_d, mut r, c, vc, _v0) = a_conflicted_after_b_lands();
