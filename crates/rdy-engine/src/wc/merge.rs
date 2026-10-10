@@ -1421,3 +1421,61 @@ fn finish_update(
     let jpath = place.state.join(UPDATE_FILE);
     remove_file(&jpath)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Final review M3 (guard): an update's state half writes every base copy and every conflict
+    /// copy durably, each directory flushed once.
+    #[test]
+    fn mfb5_finish_update_syncs_each_base_and_conflict_copy() {
+        let d = tempfile::tempdir().unwrap();
+        let place = Place {
+            root: d.path().join("work"),
+            state: d.path().join("state"),
+            project: d.path().join("proj"),
+        };
+        fs::create_dir_all(&place.root).unwrap();
+        fs::create_dir_all(&place.state).unwrap();
+        let pairs = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+            v.iter()
+                .map(|(p, t)| (p.to_string(), t.to_string()))
+                .collect()
+        };
+        let base = [
+            ("a.yaml", "a\n"),
+            ("b.yaml", "b\n"),
+            ("guides/c.yaml", "c\n"),
+            ("guides/d.yaml", "d\n"),
+        ];
+        let conflicts = [("guides/c.yaml", "c theirs\n"), ("e.yaml", "e theirs\n")];
+        let journal = UpdateJournal {
+            view: "v".into(),
+            head: "h".into(),
+            plan: UpdatePlan {
+                base_files: pairs(&base),
+                conflict_copies: pairs(&conflicts),
+                ..Default::default()
+            },
+            before: BTreeMap::new(),
+        };
+        let mut st = WcState::default();
+        let (r, synced) =
+            rdy_store::fsutil::record_syncs(|| finish_update(&place, &mut st, &journal, false));
+        r.unwrap();
+        for (dir, copies) in [("base/files", &base[..]), ("conflicts", &conflicts[..])] {
+            let dir = place.state.join(dir);
+            for (p, text) in copies {
+                assert!(synced.contains(&dir.join(p)), "{p} is synced: {synced:?}");
+                assert_eq!(fs::read_to_string(dir.join(p)).unwrap(), *text);
+            }
+            let dirs: Vec<&std::path::PathBuf> = synced
+                .iter()
+                .filter(|p| p.starts_with(&dir) && p.is_dir())
+                .collect();
+            let once: BTreeSet<&std::path::PathBuf> = dirs.iter().copied().collect();
+            assert_eq!(dirs.len(), once.len(), "each directory once: {synced:?}");
+        }
+    }
+}

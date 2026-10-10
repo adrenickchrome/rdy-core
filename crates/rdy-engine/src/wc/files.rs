@@ -295,14 +295,9 @@ pub(crate) fn replace_at(
     rdy_store::fsutil::write_durable(&path, text.as_bytes()).map_err(|e| io_err(&path, "write", e))
 }
 
-/// A copy rdy keeps in the working copy's state (a base copy or a conflict copy): replaced in one
-/// durable step, as the state files beside it are, so a crash never leaves a torn copy that the
-/// state names.
-pub(crate) fn write_state_copy(dir: &Path, rel: &str, text: &str) -> Result<(), RdyError> {
-    write_state_copies(dir, &[(rel, text)], false)
-}
-
-/// `write_state_copy` for many copies, durable as one batch: a copy whose bytes already stand at
+/// Copies rdy keeps in the working copy's state (base copies or conflict copies), each replaced
+/// durably, as the state files beside them are, so a crash never leaves a torn copy that the
+/// state names. Many copies are durable as one batch: a copy whose bytes already stand at
 /// its path is left alone (no write, no flush); every other copy is written to its temp file and
 /// fsynced, then each is renamed into place, then each touched directory is fsynced once. A
 /// directory this creates is made durable too (its parent is fsynced), so the state never names a
@@ -355,10 +350,8 @@ pub(crate) fn write_state_copies(
     if pending.is_empty() && new_dirs_parents.is_empty() {
         return Ok(());
     }
-    rdy_store::fsutil::write_durable_batch(&pending, &new_dirs_parents).map_err(|e| {
-        let at = pending.first().map_or(dir, |(p, _)| p.as_path());
-        io_err(at, "write", e)
-    })
+    rdy_store::fsutil::write_durable_batch(&pending, &new_dirs_parents)
+        .map_err(|(at, e)| io_err(&at, "write", e))
 }
 
 /// Makes the copies under `dir` (a base copy directory) exactly `copies`: creates `dir` durably,
@@ -583,6 +576,7 @@ pub fn add_projected(
     let root = &place.root;
     let base_dir = place.state.join("base/files");
     let mut out = Added::default();
+    let mut copies: Vec<(&str, &str)> = vec![];
     for f in &proj.files {
         // tracked ignoring case, as the update planner and a file system may
         let lower = f.path.to_lowercase();
@@ -593,9 +587,11 @@ pub fn add_projected(
             continue;
         }
         write_at(root, &f.path, &f.text, None)?;
-        write_state_copy(&base_dir, &f.path, &f.text)?;
+        copies.push((f.path.as_str(), f.text.as_str()));
         out.written.push(f.path.clone());
     }
+    // the base copies in one durable batch: each directory is flushed once
+    write_state_copies(&base_dir, &copies, false)?;
     let base = base_from(proj);
     for (id, b) in base.blocks {
         if out.written.contains(&b.file) {
@@ -912,16 +908,22 @@ pub fn apply_writeback(
         .collect();
     let mut keep: BTreeSet<(u64, u64)> = BTreeSet::new();
     let mut keep_base: BTreeSet<(u64, u64)> = BTreeSet::new();
+    let mut copies: Vec<(&str, &str)> = vec![];
     for f in proj
         .files
         .iter()
         .filter(|f| !blocked.contains(f.path.as_str()))
     {
         write_at(root, &f.path, &f.text, None)?;
-        write_state_copy(&base_dir, &f.path, &f.text)?;
-        keep.extend(identity(root, &f.path));
-        keep_base.extend(identity(&base_dir, &f.path));
+        copies.push((f.path.as_str(), f.text.as_str()));
         out.written.push(f.path.clone());
+    }
+    // the base copies in one durable batch (each directory flushed once), then the identities
+    // of what now stands at each written path
+    write_state_copies(&base_dir, &copies, false)?;
+    for (rel, _) in &copies {
+        keep.extend(identity(root, rel));
+        keep_base.extend(identity(&base_dir, rel));
     }
     let mut gone: BTreeSet<String> = BTreeSet::new();
     let mut drops: Vec<String> = vec![];
@@ -1005,7 +1007,7 @@ mod tests {
     fn mfb5_a_state_copy_is_synced_and_never_written_through_a_link() {
         let d = tempfile::tempdir().unwrap();
         let (r, synced) = rdy_store::fsutil::record_syncs(|| {
-            write_state_copy(d.path(), "guides/intro.yaml", "- id: d-AAAAA\n")
+            write_state_copies(d.path(), &[("guides/intro.yaml", "- id: d-AAAAA\n")], false)
         });
         r.unwrap();
         let at = d.path().join("guides/intro.yaml");
@@ -1018,7 +1020,7 @@ mod tests {
             std::fs::write(&target, "kept").unwrap();
             std::fs::remove_file(&at).unwrap();
             std::os::unix::fs::symlink(&target, &at).unwrap();
-            write_state_copy(d.path(), "guides/intro.yaml", "new\n").unwrap();
+            write_state_copies(d.path(), &[("guides/intro.yaml", "new\n")], false).unwrap();
             assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept");
             assert!(std::fs::symlink_metadata(&at).unwrap().is_file());
         }
@@ -1028,7 +1030,7 @@ mod tests {
     fn mfb5_a_new_nested_directory_is_made_durable_in_its_parent() {
         let d = tempfile::tempdir().unwrap();
         let (r, synced) = rdy_store::fsutil::record_syncs(|| {
-            write_state_copy(d.path(), "guides/deep/intro.yaml", "x\n")
+            write_state_copies(d.path(), &[("guides/deep/intro.yaml", "x\n")], false)
         });
         r.unwrap();
         // `guides` is new in the root, `deep` is new in `guides`: both entries need a flush
@@ -1254,5 +1256,95 @@ mod tests {
             rdy_store::fsutil::record_syncs(|| checkout(&place, &mut st, &tree, &proj, true));
         r.unwrap();
         assert!(under_base(&synced).is_empty(), "{synced:?}");
+    }
+    /// A place in a fresh temp directory, its root and base copy directory created; and a projection of
+    /// `files` (path, text).
+    fn place_and_proj(d: &Path, files: &[(&str, &str)]) -> (Place, Projection) {
+        let place = Place {
+            root: d.join("work"),
+            state: d.join("state"),
+            project: d.join("proj"),
+        };
+        std::fs::create_dir_all(&place.root).unwrap();
+        // a bound working copy has its base copy directory (checkout creates it)
+        std::fs::create_dir_all(place.state.join("base/files")).unwrap();
+        let proj = Projection {
+            view: "v".into(),
+            head: "h".into(),
+            files: files
+                .iter()
+                .enumerate()
+                .map(|(i, (path, text))| ProjectedFile {
+                    id: format!("x{i}"),
+                    kind: FileKind::Doc,
+                    path: (*path).into(),
+                    text: (*text).into(),
+                })
+                .collect(),
+            blocks: Default::default(),
+            blobs: vec![],
+            missing: vec![],
+        };
+        (place, proj)
+    }
+
+    /// The base copies of `files` were each synced, and no directory under `base` was flushed
+    /// twice (one batch, not one durable write per copy).
+    fn assert_one_batch(base: &Path, files: &[(&str, &str)], synced: &[PathBuf]) {
+        for (p, text) in files {
+            assert!(synced.contains(&base.join(p)), "{p} is synced: {synced:?}");
+            assert_eq!(std::fs::read_to_string(base.join(p)).unwrap(), *text);
+        }
+        let dirs: Vec<&PathBuf> = synced
+            .iter()
+            .filter(|p| p.starts_with(base) && p.is_dir())
+            .collect();
+        let once: BTreeSet<&PathBuf> = dirs.iter().copied().collect();
+        assert_eq!(dirs.len(), once.len(), "each directory once: {synced:?}");
+    }
+
+    const MANY: [(&str, &str); 4] = [
+        ("a.yaml", "a\n"),
+        ("b.yaml", "b\n"),
+        ("guides/c.yaml", "c\n"),
+        ("guides/d.yaml", "d\n"),
+    ];
+
+    /// Final review M2, M3: a write's new files get their base copies in one durable batch.
+    #[test]
+    fn mfb5_add_projected_writes_the_base_copies_in_one_batch() {
+        let d = tempfile::tempdir().unwrap();
+        let (place, proj) = place_and_proj(d.path(), &MANY);
+        let mut st = WcState::default();
+        let (r, synced) = rdy_store::fsutil::record_syncs(|| add_projected(&place, &mut st, &proj));
+        assert_eq!(r.unwrap().written.len(), 4);
+        assert_one_batch(&place.state.join("base/files"), &MANY, &synced);
+    }
+
+    /// Final review M2, M3: a commit's write-back writes its base copies in one durable batch.
+    #[test]
+    fn mfb5_apply_writeback_writes_the_base_copies_in_one_batch() {
+        let d = tempfile::tempdir().unwrap();
+        let (place, proj) = place_and_proj(d.path(), &MANY);
+        let mut st = WcState::default();
+        let none = BTreeSet::new();
+        let (r, synced) = rdy_store::fsutil::record_syncs(|| {
+            apply_writeback(&place, &mut st, &proj, &BTreeSet::new(), &none, &none)
+        });
+        assert_eq!(r.unwrap().written.len(), 4);
+        assert_one_batch(&place.state.join("base/files"), &MANY, &synced);
+    }
+
+    /// Final review M4: a batch that fails names the copy that failed, not the first one.
+    #[test]
+    fn mfb5_a_failed_batch_names_the_copy_that_failed() {
+        let d = tempfile::tempdir().unwrap();
+        // a directory at b.yaml's temp name fails that copy only
+        std::fs::create_dir(d.path().join(".b.yaml.tmp")).unwrap();
+        std::fs::write(d.path().join(".b.yaml.tmp/kept"), "mine").unwrap();
+        let e = write_state_copies(d.path(), &[("a.yaml", "a\n"), ("b.yaml", "b\n")], false)
+            .unwrap_err();
+        let at = format!("cannot write {}:", d.path().join("b.yaml").display());
+        assert!(e.message.starts_with(&at), "{}", e.message);
     }
 }

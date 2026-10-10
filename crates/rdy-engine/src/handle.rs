@@ -33,6 +33,16 @@ impl Rdy {
         if config.exists() {
             return Err(crate::config_levels::missing_project(project));
         }
+        // a store with no .rdy.yaml (the old layout): init never adopts it and never guesses
+        // its pack. What is not a current-format store keeps its own refusal (fmt3), read only.
+        if crate::config_levels::store_has_entry(project) {
+            rdy_store::Store::check_existing(&dot.join(layout::STORE_DIR))?;
+            return Err(RdyError::new(
+                E_ALREADY_EXISTS,
+                format!("{} has an rdy store but no .rdy.yaml", project.display()),
+                "write .rdy.yaml with this project's settings (pack, name, decisions.home); rdy init does not adopt an existing store",
+            ));
+        }
         // dur1: .rdy and .rdy/packs are fsynced into their parents (the store adds .rdy/store)
         rdy_store::fsutil::create_dir_durable(&dot.join("packs")).map_err(io)?;
         load_pack(project, pack)?;

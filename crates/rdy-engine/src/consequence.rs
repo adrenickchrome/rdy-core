@@ -99,7 +99,9 @@ pub const CONFLICT_FIX: &str = "write the block from the version you want (rdy_c
 pub const TENSION_FIX: &str = "resolve it with a change (rdy_tensions shows both sides), or ask a reviewer to dismiss it with rdy_resolve";
 
 /// The hint on an entry for a block that a refined or part-superseded decision governs (FW-LP6).
-pub const LINEAGE_FIX: &str = "a decision that governs it is refined: check that it still holds and answer confirm, or update it";
+/// The governing decision did not change, so the block already pins it: a repin is refused, and
+/// the hint never asks for one (D-M19GV).
+pub const LINEAGE_FIX: &str = "a decision that governs it was refined or partly superseded: check that it still holds, and update it if not; no repin is needed";
 
 /// FW-LP6: for each decision `ops` create, each `refines` link and each `supersedes` link with a
 /// part: (the new decision, the target, the link's name). In op order, then link order. A

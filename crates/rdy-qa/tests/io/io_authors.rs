@@ -630,3 +630,68 @@ fn mfb3_the_import_reply_reports_every_author_change() {
     assert_eq!(intents[0]["actor"], "agent:x");
     assert!(!intents[0]["blocks"].as_array().unwrap().is_empty(), "{v}");
 }
+
+/// Final review M11: one intent that two author changes of an import hear of is listed once,
+/// with the blocks of both, sorted and once each. The area intent on `payments` covers the doc
+/// `wallets` (agent:a's change) and the decisions in it (the founder's change).
+#[test]
+fn mfb3_an_intent_two_author_changes_hear_of_is_listed_once_with_both_blocks() {
+    use rdy_engine::consequence::write_and_report;
+    use rdy_engine::engine::Local;
+    let out = tempfile::tempdir().unwrap();
+    let out = out.path().join("x");
+    older_author_export(
+        &out,
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "wallets", "title": "Wallets", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Summary"}},
+            {"op": "create", "type": "entity", "id": "$e", "parent": "$s", "fields": {"name": "Ledger service"}}
+        ]),
+    );
+    let (_b_dir, mut b) = rdy_qa::packs::qa_project();
+    b.intent_post(
+        &rdy_qa::fixtures::agent("agent:x", Some("rx")),
+        None,
+        Some("payments"),
+        &[],
+        "rework payments",
+        None,
+    )
+    .unwrap();
+    let engine = Local::new(b);
+    let imp = sess("human:imp", None, Role::Approver);
+    let dir = out.clone();
+    let v = write_and_report(&engine, "import", None, move |r| {
+        r.import(&imp, "import", &dir)
+    })
+    .unwrap();
+    let intents = v["intents"].as_array().expect("intents");
+    assert_eq!(intents.len(), 1, "listed once: {v}");
+    let blocks: Vec<String> = intents[0]["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b.as_str().unwrap().to_string())
+        .collect();
+    let mut sorted = blocks.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(blocks, sorted, "sorted, once each: {v}");
+    let st = engine.read();
+    let heard: Vec<String> = v["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| {
+            let ch = st
+                .reader()
+                .change(&c.as_str().unwrap().parse::<Hash>().unwrap())
+                .unwrap();
+            ch.ops
+                .iter()
+                .any(|o| blocks.contains(&o.block_id().to_string()))
+                .then(|| ch.provenance.actor.clone())
+        })
+        .collect();
+    assert_eq!(heard, ["agent:a", "human:founder"], "{v}");
+}

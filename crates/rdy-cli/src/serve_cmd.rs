@@ -127,8 +127,8 @@ fn start_detached(env: &Env) -> Result<String, ErrorReply> {
     Ok(pid.trim().to_string())
 }
 
-/// Stops the project's daemon (never starting one): `stopped` once its socket is gone and its
-/// process has exited (so the store is released), or `no daemon running`.
+/// Stops the project's daemon (never starting one): `stopped` once it has exited ([`exited`]),
+/// or `no daemon running`.
 fn stop_daemon(env: &Env) -> Result<&'static str, ErrorReply> {
     let rt = runtime()?;
     let run = RunDir::of_project(&env.project);
@@ -166,7 +166,7 @@ fn stop_daemon(env: &Env) -> Result<&'static str, ErrorReply> {
     let Some(pid) = pid else {
         return Ok("no daemon running");
     };
-    let gone = || !run.socket().exists() && pid.is_none_or(|p| !process_alive(p));
+    let gone = || exited(pid, || run.socket().exists(), process_alive);
     let quiet = STOP_GRACE + Duration::from_secs(1);
     let said = |p: Option<u32>| {
         let who = p.map_or_else(String::new, |p| format!(" (pid {p})"));
@@ -183,6 +183,16 @@ fn stop_daemon(env: &Env) -> Result<&'static str, ErrorReply> {
         ));
     }
     Ok("stopped")
+}
+
+/// Whether the daemon `stop_daemon` asked to stop has exited. With its pid known, its process
+/// has exited (so the store is released), whatever holds the socket now: a successor may bind it
+/// at once. With no pid, its socket is gone.
+fn exited(pid: Option<u32>, socket_exists: impl Fn() -> bool, alive: impl Fn(u32) -> bool) -> bool {
+    match pid {
+        Some(p) => !alive(p),
+        None => !socket_exists(),
+    }
 }
 
 /// Polls `gone` every `poll` until it holds or `bound` has passed. Once `quiet` has passed, calls
@@ -232,19 +242,42 @@ mod tests {
     fn mfb4_a_slow_exit_waits_and_says_so_once() {
         let slow = Cell::new(0);
         let polls = Cell::new(0u32);
-        // gone only once the quiet time has passed: counted in polls, never in wall time
+        let said_at = Cell::new(None::<u32>);
+        // gone only on the third poll after the first line (counted in polls, never in wall
+        // time): two polls past the quiet time run the once-guard before the exit
         let gone = wait_gone(
             || {
                 polls.set(polls.get() + 1);
-                slow.get() > 0 && polls.get() > 3
+                said_at.get().is_some_and(|at| polls.get() >= at + 3)
             },
             MS,
             5 * MS,
             Duration::from_secs(60),
-            || slow.set(slow.get() + 1),
+            || {
+                slow.set(slow.get() + 1);
+                if said_at.get().is_none() {
+                    said_at.set(Some(polls.get()));
+                }
+            },
         );
         assert!(gone);
+        assert!(
+            polls.get() >= said_at.get().unwrap() + 3,
+            "the wait went on"
+        );
         assert_eq!(slow.get(), 1, "one line, however long the wait");
+    }
+
+    /// Final review M1: once the pid is known, its exit alone is the stop; a successor daemon
+    /// that binds the socket does not make `--stop` wait for a process that exited.
+    #[test]
+    fn mfb4_a_successor_on_the_socket_does_not_hide_the_exit() {
+        // the old daemon exited, and a successor holds the socket
+        assert!(exited(Some(7), || true, |_| false));
+        assert!(!exited(Some(7), || false, |_| true), "alive is not gone");
+        // with no pid, the socket is all there is to go by
+        assert!(!exited(None, || true, |_| false));
+        assert!(exited(None, || false, |_| true));
     }
 
     #[test]

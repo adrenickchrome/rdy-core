@@ -436,6 +436,13 @@ impl Store {
     /// that is not a directory with a `FORMAT` file naming the current store format is refused before
     /// anything in it is created, locked, opened or written.
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
+        Store::check_existing(dir)?;
+        Store::open_current_format(dir, vec![])
+    }
+
+    /// The checks [`Store::open`] makes before it creates, locks, opens or writes anything: `dir`
+    /// is a directory with a `FORMAT` file naming the current store format. Reads only.
+    pub fn check_existing(dir: &Path) -> Result<(), StoreError> {
         match std::fs::symlink_metadata(dir) {
             Ok(m) if m.file_type().is_dir() => {}
             Ok(_) => return Err(format::other_build(dir, "is not a directory")),
@@ -445,10 +452,9 @@ impl Store {
             Err(e) => return Err(e.into()),
         }
         match format::read_format_file(dir)? {
-            Some(f) => format::check_format(f, dir)?,
-            None => return Err(format::other_build(dir, "has no FORMAT file")),
+            Some(f) => format::check_format(f, dir),
+            None => Err(format::other_build(dir, "has no FORMAT file")),
         }
-        Store::open_current_format(dir, vec![])
     }
 
     /// Opens a store whose `FORMAT` names the current store format (`STORE_FORMAT`).

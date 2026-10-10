@@ -380,3 +380,197 @@ fn mfb2_the_edit_loop_doc_says_what_a_refine_reaches() {
         "{doc}"
     );
 }
+
+/// Final review M5: a target that asserts nothing live (rejected, superseded or revoked) reaches
+/// nothing, in the consequences or in the briefing.
+#[test]
+fn mfb2_a_target_that_asserts_nothing_live_reaches_nothing() {
+    for status in ["rejected", "superseded", "revoked"] {
+        let (_d, mut r) = project();
+        let s = spec_doc(&mut r);
+        let target = if status == "rejected" {
+            // an approver may write a decision with a non-proposed status
+            let res = rdy_qa::golden::write_as(
+                &approver(),
+                &mut r,
+                "d",
+                json!([{"op": "create", "type": "decision", "id": "$x", "parent": s.section.to_string(),
+                    "fields": {"statement": "C stays short", "status": "rejected",
+                               "decided_at": "2021-01-10T09:00:00Z", "recorded_at": "2021-01-10T09:00:00Z",
+                               "options": ["yes", "no"]},
+                    "links": {"affects": [{"target": s.c.to_string()}]}}]),
+            )
+            .unwrap();
+            let x = BlockId::parse(&res.created["$x"]).unwrap();
+            land(&mut r, "d").unwrap();
+            x
+        } else {
+            let d2 = landed_affecting(&mut r, &s, &s.c);
+            if status == "superseded" {
+                r.supersede(
+                    &writer(),
+                    "x",
+                    &d2.to_string(),
+                    None,
+                    DecisionInput {
+                        parent: s.section.to_string(),
+                        statement: "C may grow".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            } else {
+                r.revoke(
+                    &writer(),
+                    "x",
+                    &d2.to_string(),
+                    "not needed",
+                    &s.section.to_string(),
+                    None,
+                )
+                .unwrap();
+            }
+            land(&mut r, "x").unwrap();
+            d2
+        };
+        let res = refine(&mut r, &s, &target);
+        let c = after(&r, &res.change);
+        assert!(
+            c.items
+                .iter()
+                .all(|e| e.because.changed != target.to_string() || e.because.edge != "refines"),
+            "{status}: {c:?}"
+        );
+        assert!(entries(&c, &s.c).is_empty(), "{status}: {c:?}");
+        let new = BlockId::parse(&res.created["$decision"]).unwrap();
+        let b = brief_of(&r, &w(), &[&new]);
+        assert!(b.reaches.is_empty(), "{status}: {:?}", b.reaches);
+        assert_eq!(b.reaches_omitted, 0, "{status}");
+    }
+}
+
+/// Final review M5 (guard): a governed block that the reaching change itself writes gets no
+/// reach entry.
+#[test]
+fn mfb2_a_governed_block_the_change_writes_gets_no_reach_entry() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let res = rdy_qa::golden::write_as(
+        &approver(),
+        &mut r,
+        "w",
+        json!([
+            {"op": "create", "type": "decision", "id": "$x", "parent": s.section.to_string(),
+             "fields": {"statement": "Keep A, in short form", "status": "proposed",
+                        "decided_at": "2021-01-10T09:00:00Z", "recorded_at": "2021-01-10T09:00:00Z",
+                        "options": ["yes", "no"]},
+             "links": {"refines": [{"target": s.decision.to_string()}]}},
+            {"op": "update", "id": s.a.to_string(), "body": "A holds, in short form."}
+        ]),
+    )
+    .unwrap();
+    let c = after(&r, &res.change);
+    assert!(entries(&c, &s.a).is_empty(), "{c:?}");
+}
+
+/// `n` claims under the spec's section, each `decided_by` a decision that is landed.
+fn landed_governing(r: &mut Rdy, s: &Spec, n: usize) -> BlockId {
+    let d = landed(
+        r,
+        "g",
+        DecisionInput {
+            parent: s.section.to_string(),
+            statement: "Every rule is short".into(),
+            ..Default::default()
+        },
+    );
+    let ops: Vec<_> = (0..n)
+        .map(|i| {
+            json!({"op": "create", "type": "claim", "parent": s.section.to_string(),
+                   "body": format!("Rule {i} is short."),
+                   "links": {"decided_by": [{"target": d.to_string()}]}})
+        })
+        .collect();
+    write(r, "g", json!(ops)).unwrap();
+    land(r, "g").unwrap();
+    d
+}
+
+/// Final review M5: a briefing lists at most `REACH_CAP` blocks in all and counts the rest in
+/// `reaches_omitted`; a link past the cap is counted, never listed with no blocks.
+#[test]
+fn mfb2_reaches_stop_at_the_cap_and_count_the_rest() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let many = landed_governing(&mut r, &s, rdy_engine::brief::REACH_CAP + 5);
+    let res = r
+        .decide(
+            &writer(),
+            "w",
+            DecisionInput {
+                parent: s.section.to_string(),
+                statement: "Every rule is short, and A too".into(),
+                refines: vec![many.to_string(), s.decision.to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let new = BlockId::parse(&res.created["$decision"]).unwrap();
+    let b = brief_of(&r, &w(), &[&new]);
+    let listed: usize = b.reaches.iter().map(|x| x.blocks.len()).sum();
+    assert_eq!(listed, rdy_engine::brief::REACH_CAP, "{:?}", b.reaches);
+    // 55 rules and A: 56 reached, 50 listed
+    assert_eq!(b.reaches_omitted, 6);
+    assert!(
+        b.reaches.iter().all(|x| !x.blocks.is_empty()),
+        "{:?}",
+        b.reaches
+    );
+}
+
+/// Final review M5: over several reaching links, the entries come by target, then by block.
+#[test]
+fn mfb2_reach_entries_come_by_target_then_block() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let d2 = landed(
+        &mut r,
+        "d",
+        DecisionInput {
+            parent: s.section.to_string(),
+            statement: "B and C stay short".into(),
+            affects: vec![s.c.to_string(), s.b.to_string()],
+            ..Default::default()
+        },
+    );
+    // the links are given in the reverse of the order the entries come in
+    let mut targets = vec![s.decision.to_string(), d2.to_string()];
+    targets.sort();
+    targets.reverse();
+    let res = r
+        .decide(
+            &writer(),
+            "w",
+            DecisionInput {
+                parent: s.section.to_string(),
+                statement: "Keep A, B and C short".into(),
+                refines: targets,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let c = after(&r, &res.change);
+    let got: Vec<(String, String)> = c
+        .items
+        .iter()
+        .filter(|e| e.because.edge == "refines")
+        .map(|e| (e.because.changed.clone(), e.block.clone()))
+        .collect();
+    let mut want = vec![
+        (s.decision.to_string(), s.a.to_string()),
+        (d2.to_string(), s.b.to_string()),
+        (d2.to_string(), s.c.to_string()),
+    ];
+    want.sort();
+    assert_eq!(got, want, "{c:?}");
+}

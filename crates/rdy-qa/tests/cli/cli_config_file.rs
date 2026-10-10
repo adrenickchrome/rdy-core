@@ -291,7 +291,16 @@ fn mfb1_rdy_yaml_without_a_store_says_so() {
     let stray = tempfile::tempdir().unwrap();
     std::fs::write(stray.path().join(PROJECT_FILE), CFG).unwrap();
     std::fs::create_dir_all(stray.path().join(".rdy/run")).unwrap();
-    for dir in [d.path(), stray.path()] {
+    // final review I2: a clone with .rdy/ ignored has no custom pack (it lives in .rdy/packs/);
+    // the person still gets the store text, never a pack error about a correct pack line
+    const CUSTOM: &str = "pack: house-style\nname: Kept settings\n";
+    let custom = tempfile::tempdir().unwrap();
+    std::fs::write(custom.path().join(PROJECT_FILE), CUSTOM).unwrap();
+    for (dir, cfg) in [
+        (d.path(), CFG),
+        (stray.path(), CFG),
+        (custom.path(), CUSTOM),
+    ] {
         let runs = [
             ("status", rdy_daemon_in(dir, &["--json", "status"])),
             ("no-daemon status", rdy_in(dir, &["--json", "status"])),
@@ -311,7 +320,7 @@ fn mfb1_rdy_yaml_without_a_store_says_so() {
         }
         assert_eq!(
             std::fs::read_to_string(dir.join(PROJECT_FILE)).unwrap(),
-            CFG,
+            cfg,
             "rdy init never touches .rdy.yaml"
         );
         assert!(!dir.join(".rdy/store").exists(), "no store was created");
@@ -322,4 +331,69 @@ fn mfb1_rdy_yaml_without_a_store_says_so() {
         );
     }
     assert!(!d.path().join(".rdy").exists(), "nothing created .rdy");
+}
+
+/// Every file under `dir` with its bytes, sorted by path.
+fn snapshot(dir: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut out = vec![];
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                todo.push(p);
+            } else {
+                out.push((
+                    p.strip_prefix(dir).unwrap().to_path_buf(),
+                    std::fs::read(&p).unwrap(),
+                ));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Ruling (final review I1): `rdy init` never adopts an existing store and never guesses a
+/// pack. A directory with a store and no .rdy.yaml (the old layout) is refused, and init writes
+/// nothing.
+#[test]
+fn mfb1_init_refuses_a_store_without_rdy_yaml() {
+    const OLD: &str = "pack: rdy-standard\nname: My Project\ndecisions:\n  home: wallets/tx\n";
+    const FIX: &str = "write .rdy.yaml with this project's settings (pack, name, decisions.home); rdy init does not adopt an existing store";
+    let d = tempfile::tempdir().unwrap();
+    {
+        let mut r = Rdy::init(d.path(), "rdy-standard").unwrap();
+        rdy_qa::edit_loop::spec_doc(&mut r);
+        r.close().unwrap();
+    }
+    std::fs::remove_file(d.path().join(PROJECT_FILE)).unwrap();
+    std::fs::write(d.path().join(".rdy/config.yaml"), OLD).unwrap();
+    let store = snapshot(&d.path().join(".rdy/store"));
+    let text = format!("{} has an rdy store but no .rdy.yaml", d.path().display());
+    let e = Rdy::init(d.path(), "rdy-standard")
+        .err()
+        .expect("init does not adopt a store");
+    assert_eq!(e.code, E_ALREADY_EXISTS, "{e}");
+    assert_eq!(e.message, text);
+    assert_eq!(e.fix, FIX);
+    let out = rdy_in(d.path(), &["--json", "init"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("E_ALREADY_EXISTS"), "{err}");
+    assert!(err.contains("has an rdy store but no .rdy.yaml"), "{err}");
+    assert!(err.contains(FIX), "{err}");
+    assert!(
+        !d.path().join(PROJECT_FILE).exists(),
+        "init wrote no .rdy.yaml"
+    );
+    assert_eq!(
+        std::fs::read_to_string(d.path().join(".rdy/config.yaml")).unwrap(),
+        OLD
+    );
+    assert_eq!(
+        snapshot(&d.path().join(".rdy/store")),
+        store,
+        "the store is untouched"
+    );
 }

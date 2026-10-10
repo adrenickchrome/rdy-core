@@ -28,6 +28,16 @@ pub fn is_project(project: &Path) -> bool {
     project.join(PROJECT_FILE).exists() && std::fs::symlink_metadata(store_path(project)).is_ok()
 }
 
+/// Whether `.rdy/store` holds anything: a directory with an entry in it, or anything else
+/// that stands at that path. `rdy init` never adopts such a store.
+pub fn store_has_entry(project: &Path) -> bool {
+    let p = store_path(project);
+    match std::fs::read_dir(&p) {
+        Ok(mut d) => d.next().is_some(),
+        Err(_) => std::fs::symlink_metadata(&p).is_ok(),
+    }
+}
+
 fn store_path(project: &Path) -> PathBuf {
     project.join(".rdy").join(rdy_store::layout::STORE_DIR)
 }

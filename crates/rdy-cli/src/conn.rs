@@ -173,6 +173,9 @@ impl Conn {
     pub(crate) fn open(env: &Env) -> Result<Conn, ErrorReply> {
         let actor = std::env::var("RDY_ACTOR").ok();
         let run = std::env::var("RDY_RUN").ok();
+        // before the store or the pack is opened: one state gives one text, with or without a
+        // daemon (a missing custom pack is the clone's state, not a wrong pack line)
+        require_project(&env.project)?;
         if env.no_daemon {
             let local = Local::open(&env.project)?;
             match classify(
@@ -192,7 +195,6 @@ impl Conn {
                 }
             }
         } else {
-            require_project(&env.project)?;
             let rt = runtime()?;
             let run_dir = RunDir::of_project(&env.project);
             let opts = start_options(&env.project, &env.cwd, Proto::Ctl);

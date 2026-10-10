@@ -10,7 +10,7 @@ Documentation and the decisions behind it are stored as typed blocks in an appen
 
 ```bash
 cargo install --path crates/rdy-cli
-rdy init                      # creates .rdy/ with the rdy-standard pack
+rdy init                      # creates .rdy/ and .rdy.yaml (pack rdy-standard)
 rdy mcp                       # MCP server over stdio for your agent harness
 rdy status
 rdy propose --view run-1 --title "first pass"
