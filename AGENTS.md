@@ -75,8 +75,8 @@ Do not add a dependency that points the other way.
   - Node, for the render tests.
   - A non-root user, for the read-only directory tests.
   - git, for the code-index tests.
-  - A case-insensitive filesystem, for three working-copy tests. Only macOS has one.
-- `RDY_QA_REQUIRE_ALL=1` or `cargo qa --require-all` turns a missing prerequisite into a failure.
+  - A case-insensitive filesystem, for three working-copy tests. On Linux these tests are ignored.
+- `RDY_QA_REQUIRE_ALL=1` or `cargo qa --require-all` turns a missing prerequisite into a failure. Ignored tests do not count, so a passing `--require-all` run on Linux does not cover them.
 - `RDY_QA_DEEP=1` runs the deep cases.
 - The gate also takes `--only <area>`, `--skip-perf` and `--rebaseline`.
 - Timing belongs in perf ops. Never assert time in a correctness test.
