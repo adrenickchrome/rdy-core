@@ -32,7 +32,7 @@ pub fn lint_tree(
 ) -> Vec<Diagnostic> {
     let mut diags = tree.diags.clone();
     if let Some(root) = root {
-        diags.extend(resolve_figures(tree, root));
+        diags.extend(resolve_figures(tree, root, pack));
     }
     let tree = &*tree;
     let items: Vec<LintItem<'_>> = tree

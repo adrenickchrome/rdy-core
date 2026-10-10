@@ -155,3 +155,61 @@ fn hint1_fix_hints_name_only_tools_that_exist() {
         "{e}"
     );
 }
+
+fn blob_project() -> (tempfile::TempDir, Rdy) {
+    let dir = tempfile::tempdir().unwrap();
+    drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
+    rdy_qa::packs::use_pack(dir.path(), "blobs", rdy_qa::packs::BLOB_PACK, "");
+    let r = Rdy::open(dir.path()).unwrap();
+    (dir, r)
+}
+
+#[test]
+fn hd5_export_copies_only_asset_blobs() {
+    let (_d, mut r) = blob_project();
+    let (_doc, section, _c) = seed_doc(&mut r, "work");
+    let real = r.store_mut().put_blob(b"\x89PNG shot").unwrap().to_string();
+    let other = r
+        .store_mut()
+        .put_blob(b"not an attachment")
+        .unwrap()
+        .to_string();
+    let fake = rdy_store::Store::blob_hash(b"never stored").to_string();
+    write(&mut r, "work", json!([
+        {"op": "create", "type": "shot", "parent": section, "fields": {"blob": real, "media_type": "image/png"}},
+        {"op": "create", "type": "figure", "parent": section, "fields": {"blob": fake, "media_type": "image/png", "alt": "a"}},
+        {"op": "create", "type": "figure", "parent": section, "fields": {"blob": other, "media_type": "image/png", "alt": "b"}}
+    ])).unwrap();
+    land(&mut r, "work").unwrap();
+    let t = tempfile::tempdir().unwrap();
+    let out = t.path().join("export");
+    let s = r.read().export(&Scope::Canon, &out).unwrap();
+    assert_eq!(s.blobs, 1);
+    let names: Vec<String> = std::fs::read_dir(out.join("blobs"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec![real.clone()]);
+    let (_d2, mut r2) = blob_project();
+    r2.import(&approver(), "import", &out).unwrap();
+}
+
+#[test]
+fn hd5_the_working_copy_projects_asset_blobs_only() {
+    let (_d, mut r) = blob_project();
+    let (_doc, section, _c) = seed_doc(&mut r, "work");
+    let real = r.store_mut().put_blob(b"\x89PNG shot").unwrap().to_string();
+    let fake = rdy_store::Store::blob_hash(b"never stored").to_string();
+    write(&mut r, "work", json!([
+        {"op": "create", "type": "shot", "parent": section, "fields": {"blob": real, "media_type": "image/png"}},
+        {"op": "create", "type": "figure", "parent": section, "fields": {"blob": fake, "media_type": "image/png", "alt": "a"}}
+    ])).unwrap();
+    land(&mut r, "work").unwrap();
+    let p = r.read().wc_project(&Scope::Canon, None).unwrap();
+    let got: Vec<(String, String)> = p
+        .blobs
+        .iter()
+        .map(|b| (b.hash.clone(), b.name.clone()))
+        .collect();
+    assert_eq!(got, vec![(real.clone(), format!("{real}.png"))]);
+}

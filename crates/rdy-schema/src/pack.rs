@@ -387,6 +387,13 @@ impl Pack {
             .collect()
     }
 
+    /// Whether `block_type` is declared with the `asset` trait (an unknown type is not).
+    pub fn is_asset(&self, block_type: &str) -> bool {
+        self.block_types
+            .get(block_type)
+            .is_some_and(|t| t.traits.contains(&Trait::Asset))
+    }
+
     /// Whether `block_type` is declared with the `presentational` trait (an unknown type is not).
     pub fn is_presentational(&self, block_type: &str) -> bool {
         self.block_types

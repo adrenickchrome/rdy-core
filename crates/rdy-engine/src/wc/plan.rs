@@ -83,10 +83,10 @@ fn media_type_of(path: &str) -> Option<&'static str> {
     })
 }
 
-/// The path a figure entry names as its image: a `figure` whose `blob` is a string that is not a
-/// hash.
-fn figure_path(b: &WcBlock) -> Option<&str> {
-    if b.block.block_type != "figure" {
+/// The path an entry names as its image: an entry of an `asset` type whose `blob` is a string that
+/// is not a hash.
+fn asset_path<'a>(b: &'a WcBlock, pack: &Pack) -> Option<&'a str> {
+    if !pack.is_asset(&b.block.block_type) {
         return None;
     }
     b.block
@@ -140,13 +140,14 @@ fn figure_file(root: &Path, file: &str, rel: &str) -> Result<PathBuf, Refused> {
 /// The figure rule (wcfg1), run before the entries are validated: every figure whose `blob` is a
 /// path gets its `media_type` from the file extension when the entry gives none, and is refused
 /// when the image is outside the working copy, missing, or of a type rdy cannot name.
-pub fn resolve_figures(tree: &mut WcTree, root: &Path) -> Vec<Diagnostic> {
+pub fn resolve_figures(tree: &mut WcTree, root: &Path, pack: &Pack) -> Vec<Diagnostic> {
     let mut out = vec![];
     for b in &mut tree.blocks {
-        let Some(path) = figure_path(b).map(str::to_string) else {
+        let Some(path) = asset_path(b, pack).map(str::to_string) else {
             continue;
         };
         let id = b.block.id.clone();
+        let ty = b.block.block_type.clone();
         let diag = |message: String, fix: &str| {
             Diagnostic::error(&b.file, b.at, E_FILE_FORMAT, message, fix)
         };
@@ -155,11 +156,11 @@ pub fn resolve_figures(tree: &mut WcTree, root: &Path) -> Vec<Diagnostic> {
         match figure_file(root, &b.file, &path) {
             Ok(_) => {}
             Err(Refused::Outside) => out.push(diag(
-                format!("figure {id}: {path} is outside the working copy"),
+                format!("{ty} {id}: {path} is outside the working copy"),
                 "keep the image inside the working copy, next to the doc or below it",
             )),
             Err(Refused::Missing) => out.push(diag(
-                format!("figure {id}: no image at {path}"),
+                format!("{ty} {id}: no image at {path}"),
                 "put the image at that path, relative to the doc file's directory",
             )),
         }
@@ -171,7 +172,7 @@ pub fn resolve_figures(tree: &mut WcTree, root: &Path) -> Vec<Diagnostic> {
                         .insert("media_type".into(), FieldValue::Str(m.into()));
                 }
                 None => out.push(diag(
-                    format!("figure {id}: set media_type for {path}"),
+                    format!("{ty} {id}: set media_type for {path}"),
                     "add media_type, e.g. image/png, to the figure's fields",
                 )),
             }
@@ -716,7 +717,7 @@ impl<'a> Diff<'a> {
     /// A figure whose `blob` is a path: its image becomes an upload, and the op carries the
     /// placeholder for the hash in its `blob` field.
     fn upload(&self, b: &WcBlock, mut op: Value, plan: &mut CommitPlan) -> Value {
-        let Some(path) = figure_path(b) else {
+        let Some(path) = asset_path(b, self.pack) else {
             return op;
         };
         // the lint refused every path this cannot resolve

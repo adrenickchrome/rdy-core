@@ -284,7 +284,7 @@ impl Projector<'_> {
         for v in c.fields.values_mut() {
             self.keys_back_value(v);
         }
-        if b.block_type == "figure"
+        if self.pack.is_asset(&b.block_type)
             && let Some(h) = b.field_str("blob").and_then(|s| s.parse::<Hash>().ok())
         {
             let h = h.to_string();

@@ -164,3 +164,37 @@ fn msw11_commit_never_writes_a_blob_through_a_link_at_its_temp_name() {
     assert!(std::fs::symlink_metadata(&blob).unwrap().is_file());
     assert_eq!(std::fs::read(&blob).unwrap(), b"\x89PNG chart");
 }
+
+#[test]
+fn hd5_a_custom_asset_types_image_path_becomes_a_blob_hash() {
+    let (s, seed) = seeded();
+    rdy_qa::packs::use_pack(
+        s.dir.path(),
+        "blobs",
+        rdy_qa::packs::BLOB_PACK,
+        "serve:\n  idle_timeout: 60\n",
+    );
+    ok(&s, &["checkout"]);
+    std::fs::create_dir_all(at(&s, "guides/img")).unwrap();
+    std::fs::write(at(&s, "guides/img/shot.png"), b"\x89PNG shot").unwrap();
+    let mut text = read(&s, "guides/intro.yaml");
+    text.push_str(&format!(
+        "- type: shot\n  parent: {}\n  fields:\n    blob: img/shot.png\n",
+        seed.section
+    ));
+    std::fs::write(at(&s, "guides/intro.yaml"), text).unwrap();
+    ok(&s, &["add", "guides/intro.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "a shot"]);
+    assert!(okk, "{v}");
+    let shot = entries(&s, "guides/intro.yaml")
+        .into_iter()
+        .find(|e| e["type"].as_str() == Some("shot"))
+        .unwrap();
+    let hash = shot["fields"]["blob"].as_str().unwrap().to_string();
+    assert_eq!(hash.len(), 64, "{shot:?}");
+    assert_eq!(shot["fields"]["media_type"].as_str(), Some("image/png"));
+    assert_eq!(
+        std::fs::read(at(&s, &format!("_blobs/{hash}.png"))).unwrap(),
+        b"\x89PNG shot"
+    );
+}

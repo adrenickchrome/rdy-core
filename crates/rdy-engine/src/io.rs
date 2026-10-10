@@ -9,7 +9,7 @@ use rdy_model::{
     Block, BlockId, Change, ChangeLinks, EditorialClass, FieldValue, Hash, Justification, Link, Op,
     tree,
 };
-use rdy_schema::{has_errors, skeleton_gaps, validate_block, validate_prefix};
+use rdy_schema::{Pack, has_errors, skeleton_gaps, validate_block, validate_prefix};
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -154,6 +154,7 @@ fn export_level(
     dir: &Path,
     summary: &mut ExportSummary,
     blobs: &mut BTreeMap<Hash, BlockId>,
+    pack: &Pack,
 ) -> Result<(), RdyError> {
     // `level` folders are above this one; a damaged store may nest deeper than writes allow,
     // and what lies below the limit is left out (the caller reports the missing blocks)
@@ -189,7 +190,7 @@ fn export_level(
             )
             .map_err(io_err)?;
             summary.folders += 1;
-            export_level(m, Some(&b.id), level + 1, &sub, summary, blobs)?;
+            export_level(m, Some(&b.id), level + 1, &sub, summary, blobs, pack)?;
             continue;
         }
         if b.field_str("name").is_none() {
@@ -203,7 +204,9 @@ fn export_level(
         stack.reverse();
         while let Some(c) = stack.pop() {
             list.push(to_yaml_struct(c));
-            if let Some(h) = c.field_str("blob").and_then(|s| s.parse::<Hash>().ok()) {
+            if pack.is_asset(&c.block_type)
+                && let Some(h) = c.field_str("blob").and_then(|s| s.parse::<Hash>().ok())
+            {
                 blobs.entry(h).or_insert_with(|| c.id.clone());
             }
             let mut kids = m.children(Some(&c.id));
@@ -653,7 +656,15 @@ impl ReadState {
         };
         // each blob, with the first figure that names it
         let mut blobs = BTreeMap::new();
-        export_level(&m, None, 0, &out.join("docs"), &mut summary, &mut blobs)?;
+        export_level(
+            &m,
+            None,
+            0,
+            &out.join("docs"),
+            &mut summary,
+            &mut blobs,
+            self.pack(),
+        )?;
         if summary.blocks != m.len() {
             let missing = m.len() - summary.blocks.min(m.len());
             return Err(RdyError::new(
@@ -929,12 +940,9 @@ impl Rdy {
             }
             // blob2: an asset block's blob must be in the export's blobs/ or a blob in this
             // project; non-asset types may have a field named blob that is not an asset
-            let is_asset = self
-                .pack
-                .block_types
-                .get(&b.block_type)
-                .is_some_and(|d| d.traits.contains(&rdy_schema::Trait::Asset));
-            if is_asset && let Some(v) = b.fields.get("blob") {
+            if self.pack.is_asset(&b.block_type)
+                && let Some(v) = b.fields.get("blob")
+            {
                 let known = match v.as_str().and_then(|s| s.parse::<Hash>().ok()) {
                     Some(h) => imported_blobs.contains(&h) || self.store.has_blob(&h)?,
                     None => false,
