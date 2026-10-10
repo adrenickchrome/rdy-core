@@ -457,18 +457,48 @@ fn msw19_a_dotted_review_key_opens_with_the_warning() {
 }
 
 #[test]
-fn msw19_a_review_setting_outside_reviews_opens_with_the_warning() {
-    for bad in [
-        "require_up_to_date: true\n",
-        "require_uptodate: true\n",
-        "views:\n  require_up_to_date: true\n",
-    ] {
-        let w = opens_with_one_warning(bad);
-        assert!(
-            w.message
-                .contains("did you mean reviews.require_up_to_date?"),
-            "{bad:?}: {w:?}"
+fn msw19_a_review_like_key_outside_reviews_opens_with_a_plain_warning() {
+    for path in ["require_up_to_date", "require_uptodate"] {
+        let w = opens_with_one_warning(&format!("{path}: true\n"));
+        assert_eq!(
+            w.message,
+            format!("unknown key {path} in .rdy/config.yaml (project level); rdy ignores it"),
+            "{path}"
         );
-        assert_eq!(w.fix, "move it under `reviews:`", "{bad:?}");
+        assert_eq!(
+            w.fix,
+            format!("remove {path} from .rdy/config.yaml, or check its spelling"),
+            "{path}"
+        );
     }
+    // `views.require_up_to_date` is 2 edits from `reviews.require_up_to_date`: the closed
+    // did-you-mean rule names it, so the warning keeps the review text
+    let w = opens_with_one_warning("views:\n  require_up_to_date: true\n");
+    assert_eq!(
+        w.message,
+        "unknown review setting views.require_up_to_date in .rdy/config.yaml; the review gate would stay off"
+    );
+    assert_eq!(
+        w.fix,
+        "did you mean reviews.require_up_to_date? rename views.require_up_to_date in .rdy/config.yaml"
+    );
+}
+
+#[test]
+fn hd9_a_review_setting_in_local_yaml_opens_and_the_gate_stays_off() {
+    let (d, r) = project();
+    drop(r);
+    std::fs::write(
+        d.path().join(".rdy/local.yaml"),
+        "reviews:\n  require_up_to_date: true\n",
+    )
+    .unwrap();
+    let r = Rdy::open(d.path()).unwrap_or_else(|e| panic!("must open: {e}"));
+    assert!(
+        !r.read().require_up_to_date(),
+        "the local value is not applied"
+    );
+    let w = rdy_engine::config_levels::config_warnings(d.path(), None);
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert_eq!(w[0].code, "W_CONFIG_UNKNOWN");
 }

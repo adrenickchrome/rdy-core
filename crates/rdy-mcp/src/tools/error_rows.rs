@@ -121,7 +121,7 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "W_CONFIG_UNKNOWN",
-        "a config file (.rdy/local.yaml, the project config or the user config) holds a key rdy does not know, such as a typo; rdy ignores the key; reported by rdy config --show-origin, rdy status, every CLI command and rdy_session",
+        "a config file (.rdy/local.yaml, the project config or the user config) holds a key rdy does not know (such as a typo), or a known key in a file where rdy does not read it; the warning names the file it belongs in; rdy ignores the key; reported by rdy config --show-origin, rdy status, every CLI command and rdy_session",
         "fix the key's spelling (the fix names the nearest known key), or remove it",
     ),
     (
