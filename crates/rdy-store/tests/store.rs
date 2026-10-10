@@ -467,3 +467,30 @@ fn hd2_a_reindex_that_fails_after_a_chunk_loses_no_object() {
         );
     }
 }
+
+/// A rebuild killed part way leaves `index.redb.tmp` behind. Open holds the lock, so no rebuild
+/// can be running: it removes the leftover, and the store reads as before.
+#[test]
+fn hd2_open_removes_a_leftover_temp_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, end) = {
+        let mut s = Store::create(dir.path()).unwrap();
+        s.set_refs(vec![("canon".into(), b"A".to_vec())]).unwrap();
+        let h = s.put_blob(b"kept").unwrap();
+        (h, s.log_end())
+    };
+    let tmp = dir.path().join("index.redb.tmp");
+    // a partial rebuild, as a kill leaves it
+    rdy_store::index::Index::open(&tmp)
+        .unwrap()
+        .apply_durable(&[], end)
+        .unwrap();
+    assert!(tmp.exists());
+    let mut s = Store::open(dir.path()).unwrap();
+    assert!(!tmp.exists(), "open removes the leftover temp index");
+    assert_eq!(s.get_ref("canon").unwrap(), Some(b"A".to_vec()));
+    assert_eq!(s.get_blob(&h).unwrap(), b"kept");
+    s.reindex().unwrap();
+    assert!(!tmp.exists());
+    assert_eq!(s.get_blob(&h).unwrap(), b"kept");
+}

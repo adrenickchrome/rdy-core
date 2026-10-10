@@ -25,6 +25,9 @@ use std::time::{Duration, Instant};
 /// last process died with the store open.
 pub const INDEX_OPEN_SENTINEL: &str = "index.open";
 
+/// Where `reindex` builds the new index before it renames it over `index.redb`.
+const INDEX_TMP: &str = "index.redb.tmp";
+
 const SEGMENT_MAX: u64 = 64 * 1024 * 1024;
 const CHUNK: usize = 1024 * 1024;
 
@@ -458,6 +461,10 @@ impl Store {
             .write(true)
             .open(dir.join("lock"))?;
         let lock = HeldLock::take(lock, dir)?; // lock1
+        // A rebuild killed part way leaves its temp index (up to the size of the whole index).
+        // The lock is held, so no rebuild is running: remove it. This is best effort: a temp
+        // that cannot be removed costs only disk space, and the next reindex tries again.
+        let _ = remove_if_present(&dir.join(INDEX_TMP));
         // the sentinel of a process that died with the store open
         let unclean = std::fs::symlink_metadata(dir.join(INDEX_OPEN_SENTINEL)).is_ok();
         // seg1: a gap in the segment numbers means acknowledged frames are missing
@@ -778,22 +785,28 @@ impl Store {
     /// over `index.redb` only when it is complete and durable. A failure leaves the old index in
     /// place as the store's index, and removes the temp file. The store's reader then holds the
     /// new index; a reader cloned before keeps the old one, which stays readable through its open
-    /// file until that reader drops (Unix).
+    /// file until that reader drops (Unix). A temp that a kill leaves behind is removed by the
+    /// next open, which holds the lock.
     pub fn reindex(&mut self) -> Result<(), StoreError> {
         let path = self.dir.join("index.redb");
-        let tmp = self.dir.join("index.redb.tmp");
+        let tmp = self.dir.join(INDEX_TMP);
         // a leftover temp is an older failed rebuild; `Index::open` would reuse it
         remove_if_present(&tmp)?;
         let fail_after = self.faults.replay_after.take();
-        let ix = Index::open(&tmp)?;
-        let built = replay_into(&self.log, &ix, ORIGIN, fail_after)
+        // an error at any step, the open of the temp included, removes the temp
+        let built = Index::open(&tmp).and_then(|ix| {
+            replay_into(&self.log, &ix, ORIGIN, fail_after)?;
             // durable before it becomes the index
-            .and_then(|_| ix.checkpoint());
-        if let Err(e) = built {
-            drop(ix);
-            let _ = remove_if_present(&tmp);
-            return Err(e);
-        }
+            ix.checkpoint()?;
+            Ok(ix)
+        });
+        let ix = match built {
+            Ok(ix) => ix,
+            Err(e) => {
+                let _ = remove_if_present(&tmp);
+                return Err(e);
+            }
+        };
         if let Err(e) = std::fs::rename(&tmp, &path) {
             drop(ix);
             let _ = remove_if_present(&tmp);
