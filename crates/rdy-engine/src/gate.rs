@@ -666,16 +666,23 @@ impl ReadState {
         conflicted: &BTreeSet<BlockId>,
         max: usize,
     ) -> Result<(Vec<TensionInfo>, usize), RdyError> {
-        let refusing = self.refusing_tensions(view, changes)?;
+        let landing = self.landing_tensions(view, changes)?;
+        let net = |t: &Tension| crate::tensions::judged_on_the_net_change(t.kind);
+        let net_forms: Vec<Arc<Tension>> = landing.iter().filter(|t| net(t)).cloned().collect();
+        let refusing = self.refusing_among(changes, landing);
         let refuses: BTreeSet<Hash> = refusing.iter().map(|t| t.id).collect();
         // never the whole set: a proposal made right after a landing must not build canon's
         // part, which no tension with a change side is in
-        let mine = self.tensions_of_changes(changes)?;
+        // FW-JU1: an unjustified change is judged on the proposal's net change: its landing form, never another view's in-flight form
+        let mine = self
+            .tensions_of_changes(changes)?
+            .into_iter()
+            .filter(|t| !net(t));
         let mut seen = BTreeSet::new();
         let mut listed = vec![];
         // a refusing tension is listed in its landing form; an in-flight form with another id
         // (another severity, sides or versions) is listed beside it as information
-        let all = refusing.into_iter().chain(mine);
+        let all = refusing.into_iter().chain(net_forms).chain(mine);
         for t in all {
             if !seen.insert(t.id) {
                 continue;

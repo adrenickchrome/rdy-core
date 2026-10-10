@@ -904,3 +904,69 @@ fn tgat1_a_proposal_after_a_landing_builds_no_whole_tension_set() {
     let listed: BTreeSet<String> = pb.tensions.iter().map(|t| t.tension.clone()).collect();
     assert_eq!(listed, from_set);
 }
+
+/// FW-JU1 at propose (FW-LP3): the proposal's net change is judged. A subset that leaves out
+/// the justified rewrite lists its landing form; the whole view lists none.
+#[test]
+fn msw21_propose_judges_the_proposals_net_change() {
+    let (_d, mut r) = project();
+    let s = stable_spec(&mut r);
+    let c1 = change_of(&put_j(&mut r, "a", upd(&s.c, "C changed."), None));
+    put_j(
+        &mut r,
+        "a",
+        upd(&s.c, "C, as D says."),
+        j_implements(&s.decision),
+    );
+    let sides = |p: &ProposalInfo| -> Vec<Vec<String>> {
+        p.tensions
+            .iter()
+            .filter(|t| t.kind == TensionKind::UnjustifiedChange)
+            .map(|t| t.sides.iter().map(|x| x.side.clone()).collect())
+            .collect()
+    };
+    let sub = r
+        .propose_with(&writer(), "a", "a", Some(&[c1.to_string()]), None, None)
+        .unwrap();
+    assert_eq!(
+        sides(&sub),
+        vec![vec![c1.to_string()]],
+        "{:?}",
+        sub.tensions
+    );
+    assert!(sub.tensions.iter().all(|t| t.refuses == Some(false)));
+    let full = propose(&mut r, "a");
+    assert!(sides(&full).is_empty(), "{:?}", full.tensions);
+}
+
+/// FW-JU1, the landing: the gate judges the landing set's net change. A justified rewrite after
+/// an unjustified edit lands; a decision lands with no justification; a subset that leaves out
+/// the justified rewrite refuses (the qa pack makes the kind blocking).
+#[test]
+fn msw21_the_landing_judges_the_landing_sets_net_change() {
+    let (_d, mut r) = qa_project();
+    let s = stable_spec(&mut r);
+    put_j(&mut r, "a", upd(&s.c, "C changed."), None);
+    put_j(&mut r, "a", upd(&s.c, "C, typo fixed."), j_typo());
+    let pa = propose(&mut r, "a");
+    assert!(
+        pa.tensions.iter().all(|t| t.refuses != Some(true)),
+        "{:?}",
+        pa.tensions
+    );
+    approve(&mut r, &pa).unwrap();
+    try_decide_in(&mut r, "d", &s.section, "Keep C short").unwrap();
+    let pd = propose(&mut r, "d");
+    approve(&mut r, &pd).unwrap();
+    let c5 = change_of(&put_j(&mut r, "o", upd(&s.c, "C changed in o."), None));
+    put_j(
+        &mut r,
+        "o",
+        upd(&s.c, "C, as D says."),
+        j_implements(&s.decision),
+    );
+    let po = r
+        .propose_with(&writer(), "o", "o", Some(&[c5.to_string()]), None, None)
+        .unwrap();
+    assert_eq!(approve(&mut r, &po).unwrap_err().code, E_BLOCKING_TENSION);
+}

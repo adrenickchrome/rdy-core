@@ -3,7 +3,7 @@ use proptest::prelude::*;
 use rdy_engine::tensions::TensionKind;
 use rdy_engine::{DecisionInput, Rdy, Scope};
 use rdy_model::{BlockId, Hash};
-use rdy_qa::edit_loop::spec_doc;
+use rdy_qa::edit_loop::{spec_doc, stable_spec};
 use rdy_qa::fixtures::*;
 use rdy_qa::packs::qa_project;
 use rdy_qa::tensions::*;
@@ -429,5 +429,66 @@ proptest! {
         }
         let (carried, rebuilt) = carried_and_rebuilt(&r);
         prop_assert_eq!(carried, rebuilt, "end");
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: cases(12), ..ProptestConfig::default() })]
+    /// guard (FW-JU1): across unjustified, implementing and editorial writes, decisions and
+    /// edits of them, includes, deletes and landings on stable content, the carried set equals a
+    /// rebuild, and each view's seeded run finds what the set lists for its changes.
+    #[test]
+    fn msw21_a_carried_set_equals_a_rebuilt_one_across_justified_and_unjustified_writes(
+        steps in proptest::collection::vec((0u8..8, 0u8..3, 0u8..3), 1..12)
+    ) {
+        let (_d, mut r) = project();
+        let s = stable_spec(&mut r);
+        let names = ["a", "b", "c"];
+        let claims = [s.a.clone(), s.b.clone(), s.c.clone()];
+        let mut decisions: Vec<Option<BlockId>> = vec![None; 3];
+        for (i, (kind, v, k)) in steps.into_iter().enumerate() {
+            let vn = names[v as usize];
+            let target = &claims[k as usize];
+            let body = format!("{vn} {i}");
+            let _ok = match kind {
+                0 => try_put_j(&mut r, vn, upd(target, &body), None).is_ok(),
+                1 => try_put_j(&mut r, vn, upd(target, &body), j_implements(&s.decision)).is_ok(),
+                2 => try_put_j(&mut r, vn, upd(target, &body), j_typo()).is_ok(),
+                3 => match try_decide_in(&mut r, vn, &s.section, &format!("rule {i}")) {
+                    Ok(d) => {
+                        decisions[v as usize] = Some(d);
+                        true
+                    }
+                    Err(_) => false,
+                },
+                4 => match decisions[v as usize].clone() {
+                    Some(d) => try_put_j(&mut r, vn, upd(&d, &body), None).is_ok(),
+                    None => false,
+                },
+                5 => {
+                    let other = names[(v as usize + 1) % 3];
+                    let inc = r.read().included(other);
+                    match inc.last() {
+                        Some(c) => r.view_include(&ag(vn), vn, &[c.to_string()]).is_ok(),
+                        None => false,
+                    }
+                }
+                6 => land(&mut r, vn).is_ok(),
+                _ => try_put_j(&mut r, vn, json!([{"op": "delete", "id": target.to_string()}]), None).is_ok(),
+            };
+            let st = r.read();
+            let set = st.tensions().unwrap();
+            let carried: Vec<_> = set.iter().map(|t| t.id).collect();
+            let rebuilt: Vec<_> = st.tensions_rebuilt().unwrap().iter().map(|t| t.id).collect();
+            prop_assert_eq!(carried, rebuilt, "step {}", i);
+            for vn in names {
+                let inc = st.included(vn);
+                let mut from_set: Vec<_> = inc.iter().flat_map(|c| set.involving_change(c)).map(|t| t.id).collect();
+                from_set.sort();
+                from_set.dedup();
+                let seeded: Vec<_> = st.tensions_of_changes_seeded(&inc).unwrap().iter().map(|t| t.id).collect();
+                prop_assert_eq!(seeded, from_set, "step {} view {}", i, vn);
+            }
+        }
     }
 }

@@ -1,9 +1,10 @@
 //! Helpers for the tension tests: agents writing in their own views, a few op builders, and the
 //! event-derived tensions of the published state.
 use crate::fixtures::{as_agent, write_as};
+use rdy_engine::brief::{E_BRIEF_REQUIRED, E_BRIEF_STALE};
 use rdy_engine::tensions::{SideRef, Tension, TensionKind};
-use rdy_engine::{Rdy, RdyError, Session, WriteResult};
-use rdy_model::{BlockId, Hash};
+use rdy_engine::{DecisionInput, OpInput, Rdy, RdyError, Session, WriteRequest, WriteResult};
+use rdy_model::{BlockId, EditorialClass, Hash, Justification};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -95,4 +96,85 @@ pub fn cite(parent: &BlockId, target: &BlockId) -> Value {
 pub fn term(parent: &BlockId, name: &str) -> Value {
     json!([{"op": "create", "type": "term", "id": "$t", "parent": parent.to_string(),
             "fields": {"name": name}, "body": format!("{name} is a term.")}])
+}
+
+/// Runs `f` with no briefing. On `E_BRIEF_REQUIRED` or `E_BRIEF_STALE`, runs it once more with
+/// the fresh briefing's token for `view`. Any other result is returned as is.
+pub fn try_briefed(
+    r: &mut Rdy,
+    view: &str,
+    f: impl Fn(&mut Rdy, Option<String>) -> Result<WriteResult, RdyError>,
+) -> Result<WriteResult, RdyError> {
+    match f(r, None) {
+        Err(e) if e.code == E_BRIEF_REQUIRED || e.code == E_BRIEF_STALE => {
+            let (_, t) = crate::edit_loop::token_in(r, e, view);
+            f(r, Some(t))
+        }
+        other => other,
+    }
+}
+
+/// Writes `ops` as agent `name` into its view `name` with justification `j`, briefed as needed
+/// (see [`try_briefed`]).
+pub fn try_put_j(
+    r: &mut Rdy,
+    name: &str,
+    ops: Value,
+    j: Option<Justification>,
+) -> Result<WriteResult, RdyError> {
+    let ops: Vec<OpInput> = serde_json::from_value(ops)
+        .map_err(|e| RdyError::new(rdy_engine::E_BAD_INPUT, e.to_string(), "fix the test's ops"))?;
+    try_briefed(r, name, |r, brief| {
+        r.write_briefed(
+            &ag(name),
+            WriteRequest {
+                view: name.into(),
+                ops: ops.clone(),
+                justification: j.clone(),
+                message: String::new(),
+            },
+            brief,
+        )
+    })
+}
+
+/// `try_put_j`, which must succeed.
+pub fn put_j(r: &mut Rdy, name: &str, ops: Value, j: Option<Justification>) -> WriteResult {
+    try_put_j(r, name, ops, j).expect("write")
+}
+
+/// Decides `statement` under `parent` as agent `name` in its view `name`, briefed as needed
+/// (see [`try_briefed`]); the created decision's id.
+pub fn try_decide_in(
+    r: &mut Rdy,
+    name: &str,
+    parent: &BlockId,
+    statement: &str,
+) -> Result<BlockId, RdyError> {
+    let w = try_briefed(r, name, |r, brief| {
+        r.decide(
+            &ag(name),
+            name,
+            DecisionInput {
+                parent: parent.to_string(),
+                statement: statement.into(),
+                brief,
+                ..Default::default()
+            },
+        )
+    })?;
+    Ok(created(&w, "$decision"))
+}
+
+/// The justification `implements: [d]`.
+pub fn j_implements(d: &BlockId) -> Option<Justification> {
+    Some(Justification::Implements(vec![d.clone()]))
+}
+
+/// An editorial justification: a typo fix.
+pub fn j_typo() -> Option<Justification> {
+    Some(Justification::Editorial {
+        class: EditorialClass::Typo,
+        reason: "typo".into(),
+    })
 }

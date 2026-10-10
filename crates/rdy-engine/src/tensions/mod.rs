@@ -265,12 +265,26 @@ pub trait Detector: Sync {
     ) -> Result<BTreeSet<BlockId>, RdyError> {
         Ok(BTreeSet::new())
     }
+    /// Whether a proposal lists this kind only in its landing form: the proposal's net change is
+    /// judged, never an in-flight form of another view or of changes the proposal leaves out
+    /// (FW-JU1, FW-LP3). Default: false.
+    fn judged_on_the_net_change(&self) -> bool {
+        false
+    }
     fn detect(
         &self,
         cx: &DetectCx<'_>,
         seeds: Option<&BTreeSet<BlockId>>,
         out: &mut Vec<Found>,
     ) -> Result<(), RdyError>;
+}
+
+/// Whether a proposal lists `kind` only in its landing form (see
+/// [`Detector::judged_on_the_net_change`]).
+pub fn judged_on_the_net_change(kind: TensionKind) -> bool {
+    DETECTORS
+        .iter()
+        .any(|d| d.kind() == kind && d.judged_on_the_net_change())
 }
 
 /// The registry: one detector per kind, in `TensionKind::ALL` order.
