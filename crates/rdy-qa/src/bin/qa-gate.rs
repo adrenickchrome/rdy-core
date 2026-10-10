@@ -25,6 +25,10 @@ struct Args {
     /// Rewrite this machine class's perf baseline (after an intended performance change).
     #[arg(long)]
     rebaseline: bool,
+    /// Fail a test whose prerequisite is missing (Node, a case-insensitive filesystem, a
+    /// non-root user) instead of letting it skip. Sets `RDY_QA_REQUIRE_ALL=1` on the test runs.
+    #[arg(long)]
+    require_all: bool,
 }
 
 fn root() -> PathBuf {
@@ -51,6 +55,14 @@ fn step(name: &str, mut cmd: Command) -> (bool, String) {
 fn cargo(args: &[&str]) -> Command {
     let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     c.args(args);
+    c
+}
+
+/// Sets `RDY_QA_REQUIRE_ALL=1` on a test command when the gate runs with `--require-all`.
+fn with_require_all(mut c: Command, args: &Args) -> Command {
+    if args.require_all {
+        c.env(rdy_qa::skip::REQUIRE_ALL, "1");
+    }
     c
 }
 
@@ -256,13 +268,19 @@ fn main() {
 
         let (ok, out) = step(
             "workspace tests",
-            cargo(&["test", "--workspace", "--exclude", "rdy-qa"]),
+            with_require_all(
+                cargo(&["test", "--workspace", "--exclude", "rdy-qa"]),
+                &args,
+            ),
         );
         let run = report::parse_cargo_test(&out);
         seeds.extend(report::failing_seeds(&out));
         let mut detail = format!(
-            "{} passed, {} failed, {} ignored",
-            run.passed, run.failed, run.ignored
+            "{} passed, {} failed, {} ignored, {} skipped",
+            run.passed,
+            run.failed,
+            run.ignored,
+            run.skipped.len()
         );
         if !run.failures.is_empty() {
             detail += &format!("; failing: {}", run.failures.join(", "));
@@ -294,7 +312,10 @@ fn main() {
     // The hardening suite, one test binary at a time; each area reports as one row (an area
     // of two binaries, `engine` and `engine_read`, sums them).
     for binary in &plan.files {
-        let mut c = cargo(&["test", "-p", "rdy-qa", "--release", "--test", binary]);
+        let mut c = with_require_all(
+            cargo(&["test", "-p", "rdy-qa", "--release", "--test", binary]),
+            &args,
+        );
         if args.deep {
             c.env("RDY_QA_DEEP", "1");
         }
@@ -310,7 +331,10 @@ fn main() {
     if plan.lib {
         let (ok, out) = step(
             "rdy-qa unit tests",
-            cargo(&["test", "-p", "rdy-qa", "--release", "--lib"]),
+            with_require_all(
+                cargo(&["test", "-p", "rdy-qa", "--release", "--lib"]),
+                &args,
+            ),
         );
         let run = report::parse_cargo_test(&out);
         seeds.extend(report::failing_seeds(&out));
@@ -322,6 +346,8 @@ fn main() {
             passed: run.passed,
             failed: run.failed,
             ignored: run.ignored,
+            skipped: run.skipped.len(),
+            skip_lines: run.skipped,
             ok,
             failures: run.failures,
             panics: run.panics,

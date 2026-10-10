@@ -557,6 +557,20 @@ fn wcup1_a_folder_the_store_deleted_stays_while_a_doc_in_it_is_edited_here() {
     );
 }
 
+/// Why a test skips when a read-only directory takes writes.
+const READ_ONLY_REASON: &str = "a read-only directory takes writes here (running as root?)";
+
+/// Whether `dir` takes a write although its mode is read-only (running as root). The probe file
+/// is removed again.
+fn takes_writes_when_read_only(dir: &std::path::Path) -> bool {
+    let probe = dir.join(".hd10-probe");
+    let wrote = std::fs::write(&probe, "").is_ok();
+    if wrote {
+        let _ = std::fs::remove_file(&probe);
+    }
+    wrote
+}
+
 #[test]
 fn wcup1_an_update_that_fails_before_changing_a_file_leaves_no_marker() {
     use std::os::unix::fs::PermissionsExt;
@@ -572,6 +586,15 @@ fn wcup1_an_update_that_fails_before_changing_a_file_leaves_no_marker() {
         std::fs::set_permissions(at(&s, "guides"), std::fs::Permissions::from_mode(m)).unwrap()
     };
     mode(0o555);
+    if takes_writes_when_read_only(&at(&s, "guides")) {
+        mode(0o755);
+        rdy_qa::skip::skip(
+            "wcup1_an_update_that_fails_before_changing_a_file_leaves_no_marker",
+            rdy_qa::skip::Why::Prerequisite,
+            READ_ONLY_REASON,
+        );
+        return;
+    }
     let (okk, v) = json(&s, &["update"]);
     mode(0o755);
     assert!(!okk && v["code"] == E_IO, "{v}");
@@ -604,6 +627,15 @@ fn wcup1_an_interrupted_update_is_finished_by_rdy_update() {
     let mode =
         |m: u32| std::fs::set_permissions(&root, std::fs::Permissions::from_mode(m)).unwrap();
     mode(0o555);
+    if takes_writes_when_read_only(&root) {
+        mode(0o755);
+        rdy_qa::skip::skip(
+            "wcup1_an_interrupted_update_is_finished_by_rdy_update",
+            rdy_qa::skip::Why::Prerequisite,
+            READ_ONLY_REASON,
+        );
+        return;
+    }
     let (okk, v) = json(&s, &["update"]);
     mode(0o755);
     assert!(!okk && v["code"] == E_IO, "{v}");
@@ -897,7 +929,11 @@ fn msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes() {
     if std::fs::write(&probe, "").is_ok() {
         let _ = std::fs::remove_file(&probe);
         mode(0o755);
-        eprintln!("msw5: skipped, a read-only directory takes writes here (running as root?)");
+        rdy_qa::skip::skip(
+            "msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes",
+            rdy_qa::skip::Why::Prerequisite,
+            READ_ONLY_REASON,
+        );
         return;
     }
     let (okk, v) = json(&s, &["update"]);
@@ -919,8 +955,14 @@ fn msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes() {
 /// Stops an update midway, as `msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes`
 /// does: the claim and the note change with `extra`, the root goes read-only, so
 /// `guides/intro.yaml` is written and `notes.yaml` fails. False when a read-only directory
-/// still takes writes (running as root): the caller skips.
-fn msw5_interrupt(s: &rdy_qa::daemon::Served, seed: &Seed, extra: &[serde_json::Value]) -> bool {
+/// still takes writes (running as root): the caller skips. `test` is the caller's name, for the
+/// skip line.
+fn msw5_interrupt(
+    test: &str,
+    s: &rdy_qa::daemon::Served,
+    seed: &Seed,
+    extra: &[serde_json::Value],
+) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let mut ops = vec![
         json!({"op": "update", "id": seed.claim, "body": "Theirs claim."}),
@@ -936,7 +978,7 @@ fn msw5_interrupt(s: &rdy_qa::daemon::Served, seed: &Seed, extra: &[serde_json::
     if std::fs::write(&probe, "").is_ok() {
         let _ = std::fs::remove_file(&probe);
         mode(0o755);
-        eprintln!("msw5: skipped, a read-only directory takes writes here (running as root?)");
+        rdy_qa::skip::skip(test, rdy_qa::skip::Why::Prerequisite, READ_ONLY_REASON);
         return false;
     }
     let (okk, v) = json(s, &["update"]);
@@ -950,7 +992,12 @@ fn msw5_finishing_an_update_keeps_a_link_where_a_new_doc_goes() {
     let (s, seed) = seeded();
     ok(&s, &["checkout"]);
     let doc = json!({"op": "create", "type": "doc", "fields": {"name": "zdoc", "title": "Zdoc", "doc_type": "page"}});
-    if !msw5_interrupt(&s, &seed, &[doc]) {
+    if !msw5_interrupt(
+        "msw5_finishing_an_update_keeps_a_link_where_a_new_doc_goes",
+        &s,
+        &seed,
+        &[doc],
+    ) {
         return;
     }
     assert!(!at(&s, "zdoc.yaml").exists(), "stopped before the new doc");
@@ -979,7 +1026,12 @@ fn msw5_finishing_an_update_names_the_file_where_a_new_folder_goes() {
     ok(&s, &["checkout"]);
     let folder =
         json!({"op": "create", "type": "folder", "fields": {"name": "zfold", "title": "Zfold"}});
-    if !msw5_interrupt(&s, &seed, &[folder]) {
+    if !msw5_interrupt(
+        "msw5_finishing_an_update_names_the_file_where_a_new_folder_goes",
+        &s,
+        &seed,
+        &[folder],
+    ) {
         return;
     }
     put(&s, "zfold", "mine\n");
@@ -1019,7 +1071,12 @@ fn msw5_finishing_an_update_keeps_a_directory_or_link_where_a_removed_doc_was() 
         json!({"op": "delete", "id": w.created["$l"]}),
     ];
     // the removes come after the writes: the update stops before it reaches them
-    if !msw5_interrupt(&s, &seed, &gone) {
+    if !msw5_interrupt(
+        "msw5_finishing_an_update_keeps_a_directory_or_link_where_a_removed_doc_was",
+        &s,
+        &seed,
+        &gone,
+    ) {
         return;
     }
     // a directory and a link where the update removes a file: it leaves them, as a fresh

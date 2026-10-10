@@ -12,6 +12,8 @@ pub struct TestRun {
     pub passed: usize,
     pub failed: usize,
     pub ignored: usize,
+    /// One entry per skip line (`skip::SKIP_MARK`), `<test>: <reason>`.
+    pub skipped: Vec<String>,
     pub failures: Vec<String>,
     /// Each failing test's first panic, `<location>: <message>`, cut to `PANIC_CHARS`.
     pub panics: BTreeMap<String, String>,
@@ -20,7 +22,7 @@ pub struct TestRun {
 /// The most characters of a panic message the report keeps.
 const PANIC_CHARS: usize = 300;
 
-/// Sums every `test result:` line, collects the names of `test <name> ... FAILED` lines, and
+/// Sums every `test result:` line, collects the skip lines (`skip::SKIP_MARK`), collects the names of `test <name> ... FAILED` lines, and
 /// keeps each failing test's first panic: in a `---- <name> stdout ----` block, the line after
 /// `thread '<thread>' panicked at <location>:` is the message (`panic_location`).
 pub fn parse_cargo_test(output: &str) -> TestRun {
@@ -29,6 +31,10 @@ pub fn parse_cargo_test(output: &str) -> TestRun {
     let mut block: Option<String> = None;
     let mut panic_at: Option<String> = None;
     for line in output.lines() {
+        if let Some(i) = line.find(crate::skip::SKIP_MARK) {
+            let rest = &line[i + crate::skip::SKIP_MARK.len()..];
+            run.skipped.push(rest.trim().to_string());
+        }
         if let Some(at) = panic_at.take() {
             if let Some(name) = &block
                 && !run.panics.contains_key(name)
@@ -322,6 +328,10 @@ pub struct Area {
     pub passed: usize,
     pub failed: usize,
     pub ignored: usize,
+    /// Tests that ran no check because a prerequisite is missing (`TestRun::skipped`).
+    pub skipped: usize,
+    /// The skip lines, `<test>: <reason>`.
+    pub skip_lines: Vec<String>,
     /// False when a test binary exited non-zero, even if no test is named as failing
     /// (a compile error, a crash).
     pub ok: bool,
@@ -339,6 +349,8 @@ pub fn add_run(areas: &mut Vec<Area>, binary: &str, ok: bool, run: TestRun) {
             a.passed += run.passed;
             a.failed += run.failed;
             a.ignored += run.ignored;
+            a.skipped += run.skipped.len();
+            a.skip_lines.extend(run.skipped);
             a.ok &= ok;
             a.failures.extend(run.failures);
             for (name, panic) in run.panics {
@@ -350,6 +362,8 @@ pub fn add_run(areas: &mut Vec<Area>, binary: &str, ok: bool, run: TestRun) {
             passed: run.passed,
             failed: run.failed,
             ignored: run.ignored,
+            skipped: run.skipped.len(),
+            skip_lines: run.skipped,
             ok,
             failures: run.failures,
             panics: run.panics,
@@ -417,18 +431,25 @@ pub fn markdown(r: &Report) -> String {
 
     let _ = writeln!(
         s,
-        "\n## Areas\n\n| Area | Result | Passed | Failed | Ignored |\n|---|---|---|---|---|"
+        "\n## Areas\n\n| Area | Result | Passed | Failed | Ignored | Skipped |\n|---|---|---|---|---|---|"
     );
     for a in &r.areas {
         let _ = writeln!(
             s,
-            "| {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} |",
             a.name,
             mark(area_ok(a)),
             a.passed,
             a.failed,
-            a.ignored
+            a.ignored,
+            a.skipped
         );
+    }
+    for a in r.areas.iter().filter(|a| !a.skip_lines.is_empty()) {
+        let _ = writeln!(s, "\nSkipped in `{}`:", a.name);
+        for l in &a.skip_lines {
+            let _ = writeln!(s, "- {l}");
+        }
     }
     for a in r.areas.iter().filter(|a| !a.failures.is_empty() || !a.ok) {
         let _ = writeln!(s, "\nFailing in `{}`:", a.name);
@@ -667,6 +688,7 @@ mod tests {
             ignored,
             failures: failures.iter().map(|f| f.to_string()).collect(),
             panics: Default::default(),
+            skipped: vec![],
         };
         add_run(&mut rows, "engine", true, run(134, 0, 0, &[]));
         add_run(
@@ -982,6 +1004,45 @@ mod tests {
             "{TAIL_NOTE}"
         );
         assert!(TAIL_NOTE.contains("p99"), "{TAIL_NOTE}");
+    }
+
+    #[test]
+    fn hd10_skip_lines_are_counted_per_area() {
+        let out = "running 2 tests\nRDY-QA-SKIP dia1_x: node is not installed\ntest dia1_x ... ok\n\
+                   test other ... ok\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n";
+        let run = parse_cargo_test(out);
+        assert_eq!(
+            run.skipped,
+            vec!["dia1_x: node is not installed".to_string()]
+        );
+        let mut areas = vec![];
+        add_run(&mut areas, "render", true, run);
+        assert_eq!(areas[0].skipped, 1);
+        let r = Report {
+            revision: "r".into(),
+            dirty: false,
+            machine: "m".into(),
+            mode: "full".into(),
+            duration_secs: 0.0,
+            pass: true,
+            gates: vec![],
+            areas,
+            perf: vec![],
+            perf_note: String::new(),
+            failing_seeds: vec![],
+            notes: vec![],
+            guarded: BTreeMap::new(),
+        };
+        let md = markdown(&r);
+        assert!(
+            md.contains("| Passed | Failed | Ignored | Skipped |"),
+            "{md}"
+        );
+        assert!(md.contains("| render | PASS | 2 | 0 | 0 | 1 |"), "{md}");
+        assert!(
+            md.contains("Skipped in `render`:\n- dia1_x: node is not installed\n"),
+            "{md}"
+        );
     }
 
     #[test]

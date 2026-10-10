@@ -476,10 +476,18 @@ fn case_insensitive(s: &Served) -> bool {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "needs a case-insensitive filesystem; Linux filesystems are case-sensitive"
+)]
 fn wccm1_a_case_only_rename_from_the_store_survives_the_write_back() {
     let (s, seed) = seeded();
     if !case_insensitive(&s) {
-        eprintln!("skipped: the filesystem is case-sensitive");
+        rdy_qa::skip::skip(
+            "wccm1_a_case_only_rename_from_the_store_survives_the_write_back",
+            rdy_qa::skip::Why::Prerequisite,
+            "the filesystem is case-sensitive",
+        );
         return;
     }
     ok(&s, &["checkout"]);

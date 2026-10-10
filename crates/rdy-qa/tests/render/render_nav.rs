@@ -230,10 +230,11 @@ console.log(JSON.stringify(out));
 
 #[test]
 fn nav1_the_scroll_spy_observes_the_heading_each_toc_link_points_at() {
-    let node = std::process::Command::new("node").arg("--version").output();
-    if node.is_err() {
-        eprintln!(
-            "node is not installed: the scroll-spy harness is skipped (Task 16 reviews it in a browser)"
+    if !rdy_qa::skip::node_available() {
+        rdy_qa::skip::skip(
+            "nav1_the_scroll_spy_observes_the_heading_each_toc_link_points_at",
+            rdy_qa::skip::Why::Prerequisite,
+            "node is not installed",
         );
         return;
     }

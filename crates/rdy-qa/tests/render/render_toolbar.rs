@@ -279,13 +279,11 @@ console.log(JSON.stringify(out));
 
 #[test]
 fn tbar1_a_tap_shows_one_blocks_toolbar_and_a_tap_elsewhere_hides_it() {
-    if std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!(
-            "node is not installed: the tap harness is skipped (the visual review taps it in a browser)"
+    if !rdy_qa::skip::node_available() {
+        rdy_qa::skip::skip(
+            "tbar1_a_tap_shows_one_blocks_toolbar_and_a_tap_elsewhere_hides_it",
+            rdy_qa::skip::Why::Prerequisite,
+            "node is not installed",
         );
         return;
     }

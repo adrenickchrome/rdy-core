@@ -12,6 +12,7 @@ pub mod packs;
 pub mod perf;
 pub mod report;
 pub mod site;
+pub mod skip;
 pub mod tensions;
 pub mod wc;
 

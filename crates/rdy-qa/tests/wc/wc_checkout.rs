@@ -301,7 +301,11 @@ fn wcco1_an_interrupted_checkout_is_refused_until_forced() {
     let wc = at(&s, ".rdy/wc");
     if !read_only(&wc) {
         writable(&wc);
-        eprintln!("skipped: permissions do not refuse writes here");
+        rdy_qa::skip::skip(
+            "wcco1_an_interrupted_checkout_is_refused_until_forced",
+            rdy_qa::skip::Why::Prerequisite,
+            "a read-only directory takes writes here (running as root?)",
+        );
         return;
     }
     let (okk, v) = json(&s, &["checkout", "other"]);
@@ -366,10 +370,18 @@ fn names(s: &rdy_qa::daemon::Served, dir: &str) -> Vec<String> {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "needs a case-insensitive filesystem; Linux filesystems are case-sensitive"
+)]
 fn wcco1_a_case_only_doc_rename_checks_out_on_a_case_insensitive_filesystem() {
     let (s, seed) = seeded();
     if !case_insensitive(&s) {
-        eprintln!("skipped: the filesystem is case-sensitive");
+        rdy_qa::skip::skip(
+            "wcco1_a_case_only_doc_rename_checks_out_on_a_case_insensitive_filesystem",
+            rdy_qa::skip::Why::Prerequisite,
+            "the filesystem is case-sensitive",
+        );
         return;
     }
     ok(&s, &["checkout"]);
@@ -389,10 +401,18 @@ fn wcco1_a_case_only_doc_rename_checks_out_on_a_case_insensitive_filesystem() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "linux",
+    ignore = "needs a case-insensitive filesystem; Linux filesystems are case-sensitive"
+)]
 fn wcco1_a_case_only_folder_rename_renames_the_directory_on_a_case_insensitive_filesystem() {
     let (s, seed) = seeded();
     if !case_insensitive(&s) {
-        eprintln!("skipped: the filesystem is case-sensitive");
+        rdy_qa::skip::skip(
+            "wcco1_a_case_only_folder_rename_renames_the_directory_on_a_case_insensitive_filesystem",
+            rdy_qa::skip::Why::Prerequisite,
+            "the filesystem is case-sensitive",
+        );
         return;
     }
     ok(&s, &["checkout"]);
