@@ -184,9 +184,14 @@ pub(crate) fn run_check(
             let path = path.ok_or_else(missing)?;
             call(env, "check", json!({"path": path_arg(path)?, "pack": pack}))
         } else {
-            // a .rdy directory without .rdy.yaml is a project that lacks its config: the same
-            // error the engine's open gives, with or without --pack
-            if env.project.join(".rdy").is_dir() {
+            // a .rdy directory without .rdy.yaml, or .rdy.yaml without a store, is a project
+            // that lacks a part: the same error the engine's open gives, with or without --pack
+            if env.project.join(".rdy").is_dir()
+                || env
+                    .project
+                    .join(rdy_engine::config_levels::PROJECT_FILE)
+                    .exists()
+            {
                 return Err(rdy_engine::config_levels::missing_project(&env.project).into());
             }
             let path = path.ok_or_else(missing)?;

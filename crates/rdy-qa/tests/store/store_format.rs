@@ -234,7 +234,8 @@ fn fmt1_a_new_project_keeps_its_store_in_dot_rdy_store() {
 }
 
 /// A missing store directory under an intact .rdy is refused, not created: only init creates a
-/// store (fmt3). Init creates it durably (dur1).
+/// store (fmt3). Init creates it durably (dur1). A project with .rdy.yaml and no store is
+/// E_NO_PROJECT in the words every path uses (mfb1 ruling).
 #[test]
 fn fmt3_a_missing_store_directory_is_refused_not_created() {
     let (dir, r) = project();
@@ -243,15 +244,15 @@ fn fmt3_a_missing_store_directory_is_refused_not_created() {
     std::fs::remove_dir_all(rdy.join("store")).unwrap();
     let before = tree(&rdy);
     let e = Rdy::open(dir.path()).err().expect("no store");
-    assert_eq!(e.code, "E_STORE_FORMAT", "{e}");
-    assert!(
-        e.message.starts_with(&format!(
-            "there is no store at {}",
-            rdy.join("store").display()
-        )),
-        "{e}"
+    assert_eq!(e.code, "E_NO_PROJECT", "{e}");
+    assert_eq!(
+        e.message,
+        format!("{} has .rdy.yaml but no store", dir.path().display())
     );
-    assert_eq!(e.fix, "re-create it with this rdy");
+    assert_eq!(
+        e.fix,
+        "move .rdy.yaml aside, run rdy init, then copy your settings back into the new .rdy.yaml"
+    );
     assert_eq!(tree(&rdy), before);
     let fresh = tempfile::tempdir().unwrap();
     let (r, synced) = rdy_store::fsutil::record_syncs(|| Rdy::init(fresh.path(), "rdy-standard"));

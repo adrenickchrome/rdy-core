@@ -21,12 +21,17 @@ impl Rdy {
     pub fn init(project: &Path, pack: &str) -> Result<Rdy, RdyError> {
         let dot = project.join(".rdy");
         let config = project.join(crate::config_levels::PROJECT_FILE);
-        if config.exists() {
+        // init never touches an existing .rdy.yaml: without a store beside it, the refusal is
+        // the text every other path gives for that state
+        if crate::config_levels::is_project(project) {
             return Err(RdyError::new(
                 E_ALREADY_EXISTS,
                 format!("{} is already an rdy project", project.display()),
                 "open the existing project, or init a different directory",
             ));
+        }
+        if config.exists() {
+            return Err(crate::config_levels::missing_project(project));
         }
         // dur1: .rdy and .rdy/packs are fsynced into their parents (the store adds .rdy/store)
         rdy_store::fsutil::create_dir_durable(&dot.join("packs")).map_err(io)?;
@@ -63,6 +68,9 @@ impl Rdy {
         let cfg = parse_config(project, &sources.config, sources.local.as_deref())?;
         let fingerprint = sources.fingerprint;
         let (pack, lineage) = load_pack_from(&sources.packs, &cfg.pack)?;
+        // .rdy.yaml with no store is refused in the words every path uses, after the config's
+        // and the pack's own errors
+        crate::config_levels::require_project(project)?;
         let mut store = layout::open_project_store(&project.join(".rdy"))?;
         // trk1: the freeze checks and every content hash use the pack's tracking fields
         store.set_tracking(pack.tracking());

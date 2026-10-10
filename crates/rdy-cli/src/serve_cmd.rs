@@ -26,6 +26,8 @@ pub(crate) struct ServeArgs {
 }
 
 pub(crate) fn mcp(env: &Env) -> Result<(Value, String), ErrorReply> {
+    // before the proxy creates .rdy/run and starts a daemon that would fail at open
+    require_project(&env.project)?;
     if !env.no_daemon {
         // the proxy; the runtime is not waited on at exit (a stdin read may be pending)
         let rt = runtime()?;

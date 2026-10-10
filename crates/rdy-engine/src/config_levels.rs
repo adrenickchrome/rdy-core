@@ -22,10 +22,36 @@ use std::path::{Path, PathBuf};
 /// project file (D-W7RBV).
 pub const PROJECT_FILE: &str = ".rdy.yaml";
 
-/// The error for `project` when it has no project config: a directory with no `.rdy` directory
-/// is not a project; one with `.rdy` and no `.rdy.yaml` names the missing file.
+/// Whether `project` is a project: it has `.rdy.yaml` and an entry at `.rdy/store` (the store
+/// checks that entry when it opens).
+pub fn is_project(project: &Path) -> bool {
+    project.join(PROJECT_FILE).exists() && std::fs::symlink_metadata(store_path(project)).is_ok()
+}
+
+fn store_path(project: &Path) -> PathBuf {
+    project.join(".rdy").join(rdy_store::layout::STORE_DIR)
+}
+
+/// `E_NO_PROJECT` unless `project` is a project ([`is_project`]), in the words of
+/// [`missing_project`]: the engine's open and the CLI check this before they open a store.
+pub fn require_project(project: &Path) -> Result<(), RdyError> {
+    if is_project(project) {
+        return Ok(());
+    }
+    Err(missing_project(project))
+}
+
+/// The error for `project` when it is not a project. A directory with `.rdy.yaml` and no store
+/// says so, and `rdy init` gives the same text there. Otherwise, a directory with no `.rdy`
+/// directory is not a project, and one with `.rdy` and no `.rdy.yaml` names the missing file.
 pub fn missing_project(project: &Path) -> RdyError {
-    if std::fs::metadata(project.join(".rdy")).is_ok_and(|m| m.is_dir()) {
+    if project.join(PROJECT_FILE).exists() {
+        RdyError::new(
+            E_NO_PROJECT,
+            format!("{} has .rdy.yaml but no store", project.display()),
+            "move .rdy.yaml aside, run rdy init, then copy your settings back into the new .rdy.yaml",
+        )
+    } else if std::fs::metadata(project.join(".rdy")).is_ok_and(|m| m.is_dir()) {
         RdyError::new(
             E_NO_PROJECT,
             format!("{} has no .rdy.yaml, the project config", project.display()),

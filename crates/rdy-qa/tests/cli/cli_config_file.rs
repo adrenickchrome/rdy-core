@@ -10,6 +10,24 @@ use std::process::Command;
 
 const NO_RDY_YAML_FIX: &str = "create .rdy.yaml in the project directory with the line `pack: rdy-standard` (or the pack this project uses)";
 
+const NO_STORE_FIX: &str =
+    "move .rdy.yaml aside, run rdy init, then copy your settings back into the new .rdy.yaml";
+
+/// `rdy <args>` run in `cwd` with no --project flag, as human:qa, with daemons allowed (stdin
+/// is closed, so `rdy mcp` ends at once).
+fn rdy_daemon_in(cwd: &Path, args: &[&str]) -> std::process::Output {
+    let (_cfg, env) = human_env("human:qa");
+    Command::new(rdy_bin())
+        .args(args)
+        .env_remove("RDY_ACTOR")
+        .env_remove("RDY_RUN")
+        .env_remove("RDY_NO_DAEMON")
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .current_dir(cwd)
+        .output()
+        .expect("run rdy")
+}
+
 /// `rdy <args>` run in `cwd` with no --project flag, as human:qa, with no daemon.
 fn rdy_in(cwd: &Path, args: &[&str]) -> std::process::Output {
     let (_cfg, env) = human_env("human:qa");
@@ -101,10 +119,9 @@ fn mfb1_the_cli_names_the_missing_rdy_yaml_before_starting_a_daemon() {
         err.contains("has no .rdy.yaml, the project config"),
         "{err}"
     );
-    assert!(
-        !d.path().join(".rdy/run/rdy.sock").exists(),
-        "no daemon was started"
-    );
+    assert!(!err.contains("E_DAEMON_START"), "{err}");
+    // a client creates .rdy/run before it spawns a daemon (`RunDir::ensure`); init creates none
+    assert!(!d.path().join(".rdy/run").exists(), "no daemon was started");
 }
 
 #[test]
@@ -214,4 +231,95 @@ fn mfb1_check_in_an_old_layout_names_rdy_yaml() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("not inside an rdy project"), "{err}");
+}
+
+/// Finding 1 (review of mfb1): `rdy mcp` checks for a project before it starts a daemon, as
+/// every other command does. An old layout gets the E_NO_PROJECT text naming .rdy.yaml, and a
+/// directory that is no project gets "not an rdy project"; neither gets a .rdy/run directory.
+#[test]
+fn mfb1_mcp_in_an_old_layout_names_rdy_yaml_and_starts_no_daemon() {
+    let d = tempfile::tempdir().unwrap();
+    drop(Rdy::init(d.path(), "rdy-standard").unwrap());
+    std::fs::remove_file(d.path().join(PROJECT_FILE)).unwrap();
+    std::fs::write(d.path().join(".rdy/config.yaml"), "pack: rdy-standard\n").unwrap();
+    let out = rdy_daemon_in(d.path(), &["mcp"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("E_NO_PROJECT"), "{err}");
+    assert!(
+        err.contains("has no .rdy.yaml, the project config"),
+        "{err}"
+    );
+    assert!(err.contains(NO_RDY_YAML_FIX), "{err}");
+    assert!(!err.contains("E_DAEMON_START"), "{err}");
+    assert!(!d.path().join(".rdy/run").exists(), "no daemon was started");
+
+    let bare = tempfile::tempdir().unwrap();
+    let out = rdy_daemon_in(bare.path(), &["mcp"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("E_NO_PROJECT"), "{err}");
+    assert!(err.contains("is not an rdy project"), "{err}");
+    assert!(!err.contains("E_DAEMON_START"), "{err}");
+    assert!(!bare.path().join(".rdy").exists(), "rdy mcp created .rdy");
+}
+
+/// Ruling (task 1, finding 2): a directory with .rdy.yaml and no store gets one text from the
+/// CLI's project check, the engine's open and rdy init, which leaves .rdy.yaml as it is. With a
+/// stray .rdy/run directory the text is the same, and no daemon is started.
+#[test]
+fn mfb1_rdy_yaml_without_a_store_says_so() {
+    const CFG: &str = "pack: rdy-standard\nname: Kept settings\nviews:\n  idle_days: 4\n";
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join(PROJECT_FILE), CFG).unwrap();
+    let text = format!("{} has .rdy.yaml but no store", d.path().display());
+    let e = Rdy::open(d.path()).err().expect("no store");
+    assert_eq!(e.code, E_NO_PROJECT, "{e}");
+    assert_eq!(e.message, text);
+    assert_eq!(e.fix, NO_STORE_FIX);
+    let e = Rdy::init(d.path(), "rdy-standard")
+        .err()
+        .expect("init keeps .rdy.yaml");
+    assert_eq!(e.code, E_NO_PROJECT, "{e}");
+    assert_eq!(e.message, text);
+    assert_eq!(e.fix, NO_STORE_FIX);
+    assert!(
+        !d.path().join(".rdy").exists(),
+        "a refused init creates nothing"
+    );
+
+    let stray = tempfile::tempdir().unwrap();
+    std::fs::write(stray.path().join(PROJECT_FILE), CFG).unwrap();
+    std::fs::create_dir_all(stray.path().join(".rdy/run")).unwrap();
+    for dir in [d.path(), stray.path()] {
+        let runs = [
+            ("status", rdy_daemon_in(dir, &["--json", "status"])),
+            ("no-daemon status", rdy_in(dir, &["--json", "status"])),
+            ("init", rdy_in(dir, &["--json", "init"])),
+            (
+                "check",
+                rdy_in(dir, &["--json", "check", "a.md", "--pack", "rdy-standard"]),
+            ),
+        ];
+        for (what, out) in runs {
+            assert!(!out.status.success(), "{what}");
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(err.contains("E_NO_PROJECT"), "{what}: {err}");
+            assert!(err.contains("has .rdy.yaml but no store"), "{what}: {err}");
+            assert!(err.contains(NO_STORE_FIX), "{what}: {err}");
+            assert!(!err.contains("E_DAEMON_START"), "{what}: {err}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join(PROJECT_FILE)).unwrap(),
+            CFG,
+            "rdy init never touches .rdy.yaml"
+        );
+        assert!(!dir.join(".rdy/store").exists(), "no store was created");
+        assert!(!dir.join(".rdy/run/rdy.sock").exists());
+        assert!(
+            !dir.join(".rdy/run/daemon.log").exists(),
+            "no daemon was started"
+        );
+    }
+    assert!(!d.path().join(".rdy").exists(), "nothing created .rdy");
 }

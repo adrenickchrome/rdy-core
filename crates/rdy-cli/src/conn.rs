@@ -39,18 +39,15 @@ pub(crate) fn find_project(start: &Path) -> PathBuf {
     start.to_path_buf()
 }
 
-/// A project: a `.rdy` directory and the project config beside it.
+/// A project: the project config and the store under `.rdy`, as the engine's open checks it.
 pub(crate) fn is_project(dir: &Path) -> bool {
-    has_rdy_dir(dir) && dir.join(rdy_engine::config_levels::PROJECT_FILE).exists()
+    rdy_engine::config_levels::is_project(dir)
 }
 
 /// `E_NO_PROJECT` for `dir` unless it is a project, in the words the engine's open uses: checked
 /// before a daemon is started there.
 pub(crate) fn require_project(dir: &Path) -> Result<(), ErrorReply> {
-    if is_project(dir) {
-        return Ok(());
-    }
-    Err(rdy_engine::config_levels::missing_project(dir).into())
+    rdy_engine::config_levels::require_project(dir).map_err(Into::into)
 }
 
 /// A path argument as the JSON string an op takes; a path that is not UTF-8 cannot be sent.
