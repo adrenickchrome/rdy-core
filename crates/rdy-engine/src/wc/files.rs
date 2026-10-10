@@ -448,6 +448,8 @@ fn make_dirs(
 /// behind one is kept); writes every projected file, giving existing directories the projected
 /// spelling; replaces `base` and its file copies; clears the stage, the conflicts and the
 /// briefings; binds to the projection's view and head; saves, which removes the marker last.
+/// A run that finds a marker already standing (an interrupted checkout) also flushes the
+/// directory of each copy it skips as equal.
 /// `_tree` is the working tree as read before the checkout; the occupied check reads the disk
 /// itself, so ignored files count too.
 pub fn checkout(
@@ -488,6 +490,9 @@ pub fn checkout(
             "move them, or pass --force",
         ));
     }
+    // a marker already standing means an earlier run was interrupted: its renames may not have
+    // reached the disk, so this run flushes the directories of the copies it skips
+    let resumed = st.checkout.is_some();
     st.mark_checkout(
         place,
         CheckoutMark {
@@ -538,7 +543,7 @@ pub fn checkout(
         .iter()
         .map(|f| (f.path.as_str(), f.text.as_str()))
         .collect();
-    sync_state_copies(&base_dir, &copies, false)?;
+    sync_state_copies(&base_dir, &copies, resumed)?;
     st.base = base_from(proj);
     remove_tree(&place.state.join("stage/files"))?;
     st.stage = Stage::default();
@@ -994,6 +999,7 @@ pub fn apply_writeback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wc::project::ProjectedFile;
 
     #[test]
     fn mfb5_a_state_copy_is_synced_and_never_written_through_a_link() {
@@ -1166,5 +1172,87 @@ mod tests {
         let mut dirs: Vec<_> = synced.iter().filter(|p| p.is_dir()).cloned().collect();
         dirs.sort();
         assert_eq!(dirs, vec![base.clone(), base.join("guides")], "{synced:?}");
+    }
+
+    #[test]
+    fn mfb5_a_checkout_rerun_over_a_marker_flushes_the_directories_of_equal_copies() {
+        let d = tempfile::tempdir().unwrap();
+        let place = Place {
+            root: d.path().join("work"),
+            state: d.path().join("state"),
+            project: d.path().join("proj"),
+        };
+        std::fs::create_dir_all(&place.root).unwrap();
+        std::fs::create_dir_all(&place.state).unwrap();
+        let file = |path: &str, text: &str| ProjectedFile {
+            id: "x".into(),
+            kind: FileKind::Doc,
+            path: path.into(),
+            text: text.into(),
+        };
+        let proj = Projection {
+            view: "v".into(),
+            head: "h".into(),
+            files: vec![
+                file("a.yaml", "a\n"),
+                file("guides/b.yaml", "b\n"),
+                file("notes/c.yaml", "c\n"),
+            ],
+            blocks: Default::default(),
+            blobs: vec![],
+            missing: vec![],
+        };
+        let tree = WcTree {
+            blocks: vec![],
+            files: Default::default(),
+            untracked: vec![],
+            theirs: vec![],
+            blobs: vec![],
+            diags: vec![],
+        };
+        let base = place.state.join("base/files");
+        let under_base = |synced: &[PathBuf]| -> Vec<PathBuf> {
+            let mut v: Vec<_> = synced
+                .iter()
+                .filter(|p| p.starts_with(&base))
+                .cloned()
+                .collect();
+            v.sort();
+            v
+        };
+        // a fresh checkout: every copy written and synced, each directory once
+        let mut st = WcState::default();
+        let (r, synced) =
+            rdy_store::fsutil::record_syncs(|| checkout(&place, &mut st, &tree, &proj, true));
+        r.unwrap();
+        let mine = under_base(&synced);
+        assert_eq!(mine.iter().filter(|p| !p.is_dir()).count(), 3, "{synced:?}");
+        // an interrupted re-run: the marker stands, every copy is equal, and the person runs
+        // `rdy checkout --force` again; no file is synced, each copy's directory is, once
+        st.mark_checkout(
+            &place,
+            CheckoutMark {
+                view: "v".into(),
+                head: "h".into(),
+                at_ms: 0,
+                update: false,
+            },
+        )
+        .unwrap();
+        let (r, synced) =
+            rdy_store::fsutil::record_syncs(|| checkout(&place, &mut st, &tree, &proj, true));
+        r.unwrap();
+        let mine = under_base(&synced);
+        assert!(mine.iter().all(|p| p.is_dir()), "{synced:?}");
+        assert_eq!(
+            mine,
+            vec![base.clone(), base.join("guides"), base.join("notes")],
+            "{synced:?}"
+        );
+        // a clean re-run (no marker) over equal copies flushes nothing under base
+        let (r, synced) =
+            rdy_store::fsutil::record_syncs(|| checkout(&place, &mut st, &tree, &proj, true));
+        r.unwrap();
+        assert!(under_base(&synced).is_empty(), "{synced:?}");
     }
 }
