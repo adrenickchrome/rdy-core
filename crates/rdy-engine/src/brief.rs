@@ -440,6 +440,12 @@ fn is_zero(n: &usize) -> bool {
     *n == 0
 }
 
+/// The most bytes a briefing of `max` tokens (4 bytes each, rounded down) can take. It
+/// saturates: an engine caller may pass any `usize`, and a budget past the byte range is no cut.
+fn budget_bytes(max: usize) -> usize {
+    max.saturating_mul(4).saturating_add(3)
+}
+
 impl Briefing {
     /// Makes this briefing's token known to `reg`.
     pub fn register(&self, reg: &BriefRegistry) {
@@ -508,7 +514,7 @@ impl Briefing {
         }
         // the frame does not change while rows are built: measure it once
         let frame = self.frame_bytes();
-        while frame + self.built_rows_bytes() <= max * 4 + 3 && self.build_next(bare) {}
+        while frame + self.built_rows_bytes() <= budget_bytes(max) && self.build_next(bare) {}
     }
 
     /// Builds every tension row left unbuilt.
@@ -653,7 +659,7 @@ impl Briefing {
             changed = true;
         }
         let mut bytes = self.bytes();
-        while bytes > max * 4 + 3 {
+        while bytes > budget_bytes(max) {
             match self.collapse_last(floor) {
                 Some(n) => bytes = bytes.saturating_sub(n),
                 None => break,

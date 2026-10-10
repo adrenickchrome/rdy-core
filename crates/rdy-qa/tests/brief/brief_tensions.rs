@@ -372,44 +372,105 @@ fn hd1_rows_built_on_demand_give_the_same_briefing_at_every_budget() {
     }
 }
 
-/// Perf (brief_doc_50k): a cut briefing builds and measures the rows it can show, not every
-/// row that involves its blocks. 400 terms in 200 name pairs give 200 advisory duplicate rows.
-#[test]
-fn hd1_a_cut_briefing_builds_only_the_rows_it_can_show() {
-    use rdy_engine::tensions::info::info_counts;
-    use rdy_engine::tensions::set::full_builds;
-    let (_d, mut r) = project();
-    let s = spec_doc(&mut r);
+/// `n` terms under `s`'s section in view `b`, in name pairs (`fee 0`, `fee 0`, `fee 1`, ...):
+/// each pair is one advisory duplicate row. Their ids, in creation order.
+fn fee_pairs(r: &mut Rdy, s: &rdy_qa::edit_loop::Spec, n: usize) -> Vec<String> {
     let mut ops = vec![];
-    for i in 0..400 {
+    for i in 0..n {
         ops.push(
             serde_json::json!({"op": "create", "type": "term", "id": format!("$f{i}"),
             "parent": s.section.to_string(), "fields": {"name": format!("fee {}", i / 2)},
             "body": format!("Fee number {i} is a term.")}),
         );
     }
-    let w = put(&mut r, "b", serde_json::Value::Array(ops));
-    let ids: Vec<String> = (0..400)
+    let w = put(r, "b", serde_json::Value::Array(ops));
+    (0..n)
         .map(|i| created(&w, &format!("$f{i}")).to_string())
-        .collect();
+        .collect()
+}
+
+/// What one steady-state brief of `c` in view `b` costs at the default budget: (rows shown,
+/// rows in all, rows built, row serializations). The first brief builds the tension set.
+fn cut_cost(r: &Rdy, c: &Coverage) -> (u64, u64, u64, u64) {
+    use rdy_engine::tensions::info::info_counts;
+    use rdy_engine::tensions::set::full_builds;
+    let scope = Scope::View("b".into());
+    let st = r.read();
+    st.brief(&scope, c, None).unwrap(); // builds the tension set once
+    let (rows0, (s0, b0), f0) = (bare_rows_built(), info_counts(), full_builds());
+    let b = st.brief(&scope, c, None).unwrap();
+    let shown = b.inflight.tensions.len() as u64;
+    let all = shown + b.omitted.get("inflight.tensions").copied().unwrap_or(0) as u64;
+    let built = bare_rows_built() - rows0;
+    let (s1, b1) = info_counts();
+    assert_eq!(b1 - b0, 0, "the detail cut reads no side");
+    assert_eq!(full_builds(), f0, "no whole tension set is built");
+    (shown, all, built, s1 - s0)
+}
+
+/// Perf (brief_doc_50k): a cut briefing builds and measures the rows it can show, not every
+/// row that involves its blocks. 400 terms in 200 name pairs give 200 advisory duplicate rows.
+/// The 400 covered blocks alone put the briefing over the budget, so no row is shown.
+#[test]
+fn hd1_a_cut_briefing_builds_only_the_rows_it_can_show() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let ids = fee_pairs(&mut r, &s, 400);
+    let (shown, all, built, serialized) = cut_cost(&r, &Coverage { ids, path: None });
+    assert_eq!(all, 200, "every duplicate pair is counted");
+    assert!(shown < all, "the page is cut: {shown} of {all}");
+    assert!(built <= shown + 1, "{built} rows built for {shown} shown");
+    assert!(
+        serialized <= 6 * (shown + 1),
+        "{serialized} row serializations for {shown} shown"
+    );
+}
+
+/// Perf (brief_doc_50k, the bench's setup): the briefing without its rows fits the budget, so
+/// the page shows some rows and collapses the rest. 100 name pairs, one term of each pair
+/// covered: 100 advisory duplicate rows, of which about a fifth fit. The rows built follow the
+/// rows shown, with a small margin: the first measure comes before the per-doc counts, the
+/// cursor and the cut's own counts join the briefing, and the last row built is the one that
+/// crosses the budget, so the cut collapses a few built rows (2 of 23 built at this commit).
+#[test]
+fn hd1_a_cut_briefing_that_shows_rows_builds_about_the_rows_it_shows() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let ids = fee_pairs(&mut r, &s, 200);
+    let covered = ids.into_iter().step_by(2).collect();
+    let (shown, all, built, serialized) = cut_cost(
+        &r,
+        &Coverage {
+            ids: covered,
+            path: None,
+        },
+    );
+    assert_eq!(all, 100, "every duplicate pair is counted");
+    assert!(shown > 0, "the page shows rows: {shown} of {all}");
+    assert!(shown < all, "the page is cut: {shown} of {all}");
+    assert!(built <= shown + 3, "{built} rows built for {shown} shown");
+    assert!(
+        serialized <= shown + 3,
+        "{serialized} row serializations for {shown} shown"
+    );
+}
+
+/// A budget so large that `max * 4` wraps (an engine caller may pass any `usize`) is no cut:
+/// every row is shown, and the briefing is the uncut one.
+#[test]
+fn hd1_a_budget_past_the_byte_range_shows_every_row() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let ids = fee_pairs(&mut r, &s, 20);
     let c = Coverage { ids, path: None };
     let scope = Scope::View("b".into());
     let st = r.read();
-    st.brief(&scope, &c, None).unwrap(); // builds the tension set once
-    let (rows0, (s0, b0), f0) = (bare_rows_built(), info_counts(), full_builds());
-    let b = st.brief(&scope, &c, None).unwrap();
-    let shown = b.inflight.tensions.len() as u64;
-    let all = shown + b.omitted.get("inflight.tensions").copied().unwrap_or(0) as u64;
-    assert_eq!(all, 200, "every duplicate pair is counted");
-    assert!(shown < all, "the page is cut: {shown} of {all}");
-    let built = bare_rows_built() - rows0;
-    assert!(built <= shown + 1, "{built} rows built for {shown} shown");
-    let (s1, b1) = info_counts();
-    assert!(
-        s1 - s0 <= 6 * (shown + 1),
-        "{} row serializations for {shown} shown",
-        s1 - s0
-    );
-    assert_eq!(b1 - b0, 0, "the detail cut reads no side");
-    assert_eq!(full_builds(), f0, "no whole tension set is built");
+    let uncut = serde_json::to_value(st.brief(&scope, &c, Some(1_000_000)).unwrap()).unwrap();
+    for max in [1usize << 62, usize::MAX / 2, usize::MAX] {
+        let b = st.brief(&scope, &c, Some(max)).unwrap();
+        assert_eq!(b.inflight.tensions.len(), 10, "max {max}: every row");
+        assert!(!b.truncated, "max {max}: not cut");
+        assert!(b.omitted.is_empty(), "max {max}: {:?}", b.omitted);
+        assert_eq!(serde_json::to_value(&b).unwrap(), uncut, "max {max}");
+    }
 }
