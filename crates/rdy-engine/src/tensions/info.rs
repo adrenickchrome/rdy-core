@@ -13,6 +13,16 @@ use std::collections::HashMap;
 thread_local! {
     /// This thread's counts: tension rows serialized, and rows built with their sides.
     static COUNTS: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+    /// This thread's count of tension rows built without their sides (`tension_info_bare`).
+    static BARE_ROWS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// This thread's count so far of tension rows built without their sides
+/// (`ReadState::tension_info_bare`). A test reads the difference over a briefing to check that
+/// it builds the rows its page can show, not every row that involves its blocks.
+#[doc(hidden)]
+pub fn bare_rows_built() -> u64 {
+    BARE_ROWS.with(Cell::get)
 }
 
 /// This thread's counts so far: how many tension rows were serialized (whole or inside a
@@ -196,6 +206,7 @@ impl ReadState {
     /// `tension_info` without the sides (`sides` empty): what a budget cut that drops the
     /// detail keeps. It reads no change.
     pub fn tension_info_bare(&self, t: &Tension) -> TensionInfo {
+        BARE_ROWS.with(|c| c.set(c.get() + 1));
         let (status, dismissal) = match self.tension_status(t) {
             TensionStatus::Open => ("open", None),
             TensionStatus::Dismissed(review) => ("dismissed", self.dismissal_info(&review)),

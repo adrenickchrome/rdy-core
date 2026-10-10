@@ -170,15 +170,16 @@ impl ReadState {
     pub fn inflight(&self, scope: &Scope, ids: &BTreeSet<BlockId>) -> Result<Inflight, RdyError> {
         let (mut out, rows) = self.inflight_unsided(scope, ids)?;
         let mut cache = crate::tensions::info::InfoCache::default();
-        for (info, t) in out.tensions.iter_mut().zip(&rows) {
-            info.sides = self.sides_info(t, &mut cache);
-        }
+        out.tensions = rows
+            .iter()
+            .map(|t| self.tension_info_with(t, &mut cache))
+            .collect();
         Ok(out)
     }
 
-    /// [`ReadState::inflight`] with every tension row's `sides` left empty, and the tensions
-    /// the rows show, in row order: a briefing reads the sides only for the rows a page can
-    /// show with them (a side reads the store).
+    /// [`ReadState::inflight`] with `tensions` empty, and the tensions its rows show, in row
+    /// order: a briefing builds a row only when its page can need it, and reads the sides only
+    /// for the rows a page can show with them (a side reads the store).
     pub(crate) fn inflight_unsided(
         &self,
         scope: &Scope,
@@ -232,13 +233,12 @@ impl ReadState {
             Ok(t) => (t, None),
             Err(e) => (vec![], Some(format!("{}: {}", e.code, e.message))),
         };
-        let tensions = rows.iter().map(|t| self.tension_info_bare(t)).collect();
         Ok((
             Inflight {
                 views,
                 proposals,
                 intents,
-                tensions,
+                tensions: vec![],
                 tensions_error,
                 ..Inflight::default()
             },

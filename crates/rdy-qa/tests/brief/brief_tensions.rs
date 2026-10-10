@@ -1,5 +1,7 @@
 //! tbrf1: a briefing's inflight lists the tensions on its blocks (amendment §6).
+use rdy_engine::brief::build_every_row_for_tests;
 use rdy_engine::brief::{BRIEF_DEFAULT_TOKENS, Briefing, Coverage, PAGE_SECTIONS};
+use rdy_engine::tensions::info::bare_rows_built;
 use rdy_engine::tensions::*;
 use rdy_engine::{DecisionInput, Rdy, RdyError, Scope, Session};
 use rdy_model::{BlockId, Role};
@@ -323,4 +325,91 @@ fn tbrf1_a_briefing_after_commits_builds_no_whole_tension_set() {
         "uncut: the sides are shown"
     );
     assert!(!b.inflight.tensions_detail_cut);
+}
+
+/// Every page at `max`, from the first, as JSON: rows built on demand, or every row built
+/// before the page measures (`every_row`, the 1d0c1da behaviour).
+fn pages_at(r: &Rdy, c: &Coverage, max: usize, every_row: bool) -> Vec<serde_json::Value> {
+    build_every_row_for_tests(every_row);
+    let st = r.read();
+    let first = st.brief(&Scope::Canon, c, Some(max)).unwrap();
+    first.register(&r.briefs());
+    let mut next = first.next.clone();
+    let mut out = vec![serde_json::to_value(&first).unwrap()];
+    while let Some(cursor) = next {
+        let p = st
+            .brief_page(&Scope::Canon, &r.briefs(), &cursor, Some(max))
+            .unwrap();
+        next = p.next.clone();
+        out.push(serde_json::to_value(&p).unwrap());
+        assert!(out.len() < 500, "paging ends");
+    }
+    build_every_row_for_tests(false);
+    out
+}
+
+/// Perf (brief_doc_50k): building rows on demand changes no page. 190 blocking edit collisions
+/// and 20 advisory overlaps, paged at budgets from tiny to uncut.
+#[test]
+fn hd1_rows_built_on_demand_give_the_same_briefing_at_every_budget() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    r.set_detectors_for_tests(&MIXED);
+    for i in 0..20 {
+        put(
+            &mut r,
+            &format!("v{i:02}"),
+            upd(&s.a, &format!("A in v{i}.")),
+        );
+    }
+    for max in [60, 300, 1_000, 2_500, BRIEF_DEFAULT_TOKENS, 20_000, 400_000] {
+        let lazy = pages_at(&r, &cov(&s.a), max, false);
+        let eager = pages_at(&r, &cov(&s.a), max, true);
+        assert_eq!(lazy.len(), eager.len(), "max {max}: page count");
+        for (i, (l, e)) in lazy.iter().zip(&eager).enumerate() {
+            assert_eq!(l, e, "max {max}, page {i}");
+        }
+    }
+}
+
+/// Perf (brief_doc_50k): a cut briefing builds and measures the rows it can show, not every
+/// row that involves its blocks. 400 terms in 200 name pairs give 200 advisory duplicate rows.
+#[test]
+fn hd1_a_cut_briefing_builds_only_the_rows_it_can_show() {
+    use rdy_engine::tensions::info::info_counts;
+    use rdy_engine::tensions::set::full_builds;
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let mut ops = vec![];
+    for i in 0..400 {
+        ops.push(
+            serde_json::json!({"op": "create", "type": "term", "id": format!("$f{i}"),
+            "parent": s.section.to_string(), "fields": {"name": format!("fee {}", i / 2)},
+            "body": format!("Fee number {i} is a term.")}),
+        );
+    }
+    let w = put(&mut r, "b", serde_json::Value::Array(ops));
+    let ids: Vec<String> = (0..400)
+        .map(|i| created(&w, &format!("$f{i}")).to_string())
+        .collect();
+    let c = Coverage { ids, path: None };
+    let scope = Scope::View("b".into());
+    let st = r.read();
+    st.brief(&scope, &c, None).unwrap(); // builds the tension set once
+    let (rows0, (s0, b0), f0) = (bare_rows_built(), info_counts(), full_builds());
+    let b = st.brief(&scope, &c, None).unwrap();
+    let shown = b.inflight.tensions.len() as u64;
+    let all = shown + b.omitted.get("inflight.tensions").copied().unwrap_or(0) as u64;
+    assert_eq!(all, 200, "every duplicate pair is counted");
+    assert!(shown < all, "the page is cut: {shown} of {all}");
+    let built = bare_rows_built() - rows0;
+    assert!(built <= shown + 1, "{built} rows built for {shown} shown");
+    let (s1, b1) = info_counts();
+    assert!(
+        s1 - s0 <= 6 * (shown + 1),
+        "{} row serializations for {shown} shown",
+        s1 - s0
+    );
+    assert_eq!(b1 - b0, 0, "the detail cut reads no side");
+    assert_eq!(full_builds(), f0, "no whole tension set is built");
 }
