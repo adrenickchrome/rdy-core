@@ -70,7 +70,9 @@ pub use query::{
     Context, ImpactItem, ImpactVia, code_lines, compact_summary, field_json, summary, summary_in,
 };
 pub use rdy_store::Relay;
-pub use read_state::{CoordHeads, Delta, InflightSet, OpenIntent, ReadState};
+pub use read_state::{
+    AltBinds, AltChosenBy, CoordHeads, Delta, InflightSet, OpenIntent, ReadState,
+};
 pub use search::{SearchQuery, SearchResult};
 pub use session::{
     HUMAN_RUN, INFLIGHT_SCOPE, PinnedClock, Scope, Session, SessionKind, classify, human_actor,

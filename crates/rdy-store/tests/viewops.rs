@@ -575,3 +575,37 @@ fn vop1_undo_of_an_undo_of_own_sets_the_owner_again() {
         rdy_store::ResolvedOp::SetOwner(Some(owner("agent:a")))
     );
 }
+
+#[test]
+fn msw20_included_before_reads_a_views_set_as_the_log_held_it_when_an_object_was_written() {
+    let (_d, mut s) = store();
+    let by = prov("agent:a");
+    let c1 = create(&mut s, "a", "c-00001", &by);
+    let mark = s
+        .put_alt_set(&AltSet {
+            stable: None,
+            prev: None,
+            title: "T".into(),
+            question: None,
+            members: vec![],
+            status: AltStatus::Open,
+            provenance: by.clone(),
+        })
+        .unwrap();
+    let c2 = create(&mut s, "a", "c-00002", &by);
+    s.view_append("a", vec![ViewOpKind::Exclude { changes: vec![c1] }], &by)
+        .unwrap();
+    create(&mut s, "b", "c-00003", &by);
+    assert_eq!(s.included("a").unwrap().as_ref(), &vec![c2]);
+    assert_eq!(s.included_before("a", &mark).unwrap().as_ref(), &vec![c1]);
+    assert_eq!(
+        s.included("a").unwrap().as_ref(),
+        &vec![c2],
+        "the cache still serves the head"
+    );
+    assert!(
+        s.included_before("b", &mark).unwrap().is_empty(),
+        "b had no op then"
+    );
+    assert!(s.included_before("none", &mark).unwrap().is_empty());
+}

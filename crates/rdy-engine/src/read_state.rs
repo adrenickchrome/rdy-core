@@ -223,6 +223,27 @@ pub struct CoordHeads {
     /// member of an abandoned set, every other member of a chosen one), mapped to those sets'
     /// stable ids. A version of such a view that chose nothing can no longer land (altg1).
     pub lost_members: BTreeMap<String, Vec<Hash>>,
+    /// Each open or chosen set's bindings, by stable id (msw20). An abandoned set has no entry.
+    pub alt_binds: BTreeMap<Hash, Arc<AltBinds>>,
+}
+
+/// The bindings of one alternative set (msw20, FW-AL1): what each change is bound to, fixed when
+/// it entered the set, and for a chosen set, the choice.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AltBinds {
+    /// Each bound change, mapped to the member view it is bound to.
+    pub bound: BTreeMap<Hash, String>,
+    /// The choice, when the set is chosen.
+    pub chosen: Option<AltChosenBy>,
+}
+
+/// The member a chosen set chose, the landing that chose it, and the decisions that landing's
+/// changes created (sorted).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AltChosenBy {
+    pub member: String,
+    pub landing: Hash,
+    pub decisions: Vec<BlockId>,
 }
 
 impl CoordHeads {
@@ -291,6 +312,20 @@ impl CoordHeads {
                 alt_members.entry(m.view.clone()).or_insert(*stable);
             }
         }
+        // msw20: each open and each chosen set's bindings; history does not change, so a set
+        // whose latest version is unchanged keeps `prev`'s entry
+        let mut alt_binds = BTreeMap::new();
+        for (stable, (version, set)) in open_alts.iter().chain(&settled_alts) {
+            if prev.alt_sets.get(stable) == Some(version)
+                && let Some(entry) = prev.alt_binds.get(stable)
+            {
+                alt_binds.insert(*stable, Arc::clone(entry));
+                continue;
+            }
+            if let Some(b) = crate::alt::alt_binds(reader, version, set)? {
+                alt_binds.insert(*stable, Arc::new(b));
+            }
+        }
         let mut lost_members: BTreeMap<String, Vec<Hash>> = BTreeMap::new();
         for (stable, (_, set)) in &settled_alts {
             let chosen = match &set.status {
@@ -316,6 +351,7 @@ impl CoordHeads {
             alt_members,
             settled_alts,
             lost_members,
+            alt_binds,
         })
     }
 }

@@ -65,6 +65,8 @@ pub const E_PAGE_STALE: &str = "E_PAGE_STALE";
 pub const E_ALT_UNCHOSEN: &str = "E_ALT_UNCHOSEN";
 /// A view is not a member of the alternative set, or a member names another member (plan M2d1).
 pub const E_ALT_MEMBER: &str = "E_ALT_MEMBER";
+/// A proposal carries a change of a member that lost a chosen alternative set, and records no decision that supersedes or refines the choice (FW-AL1).
+pub const E_ALT_CHOSEN: &str = "E_ALT_CHOSEN";
 /// The intent has expired: it takes no renewal and no withdrawal (plan M2d1).
 pub const E_INTENT_EXPIRED: &str = "E_INTENT_EXPIRED";
 /// The fix of every `E_PAGE_STALE`, for a briefing, read and search cursor alike.

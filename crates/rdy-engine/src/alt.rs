@@ -2,17 +2,25 @@
 //! answer one question; a view is a member of at most one open set. Create, add, remove and
 //! abandon each write a new version of the set; abandon also closes every open member view in
 //! the same batch. Changes written in a member view record the set (`write_linked`).
+//!
+//! msw20 (FW-AL1): bindings are fixed when a change enters the set. A change that exactly one
+//! member held when the set was created (or when that member joined it) stays bound to that
+//! member, whatever any view includes or excludes later; one that two or more members held then
+//! is common ground. A chosen set keeps its losers bound: their changes land only with a decision
+//! that supersedes or refines the choice. An abandoned set binds nothing (`alt_binds`).
 use crate::engine::{Engine, write_typed};
 use crate::error::*;
+use crate::read_state::{AltBinds, AltChosenBy};
 use crate::session::rfc3339;
 use crate::tensions::info::TensionInfo;
 use crate::views::OwnerInfo;
 use crate::write::not_humans_view;
 use crate::{Compare, Delta, Rdy, ReadState, Scope, Session};
-use rdy_model::{AltMember, AltSet, AltStatus, BlockId, Hash, Provenance};
+use rdy_model::{AltMember, AltSet, AltStatus, BlockId, Hash, Op, Provenance, decision};
+use rdy_store::StoreReader;
 use rdy_store::coord::abandoned_reason;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub use crate::coord_graph::alt_label;
 
@@ -171,6 +179,88 @@ fn need_open(stable: &Hash, set: &AltSet) -> Result<(), RdyError> {
             "only an open set changes; list the open sets with rdy alt ls (MCP: rdy_alternatives list)",
         )),
     }
+}
+
+/// The bindings of set `set`, whose latest version is `latest` (msw20, FW-AL1); `None` for an
+/// abandoned set. They are fixed when a change enters the set, read from history alone:
+/// - The versions are read oldest first. At each version, a member it no longer lists releases
+///   its bindings (a change it shared stays common ground; a later re-add snapshots again).
+/// - At each version that adds members (every member, at the first), each change a joiner held
+///   just before that version was written, and that the set does not bind or share yet, is
+///   counted among the version's members as they held it then: one holder binds it to that
+///   member, two or more make it common ground. Bindings fixed earlier never change.
+/// - A chosen set also carries its choice: the member, the landing, and the decision blocks the
+///   landing's changes created.
+///
+/// The log is a total order of writes and each version is written in a batch of its own, so a
+/// member's holdings then are `included_before(member, version)`: the same after a reindex.
+pub(crate) fn alt_binds(
+    reader: &StoreReader,
+    latest: &Hash,
+    set: &AltSet,
+) -> Result<Option<AltBinds>, RdyError> {
+    if matches!(set.status, AltStatus::Abandoned { .. }) {
+        return Ok(None);
+    }
+    // the versions, newest first, then oldest first
+    let mut versions: Vec<(Hash, AltSet)> = vec![(*latest, set.clone())];
+    while let Some(prev) = versions.last().and_then(|(_, v)| v.prev) {
+        versions.push((prev, reader.alt_set(&prev)?));
+    }
+    versions.reverse();
+    let mut bound: BTreeMap<Hash, String> = BTreeMap::new();
+    let mut shared: BTreeSet<Hash> = BTreeSet::new();
+    let mut listed: BTreeSet<&str> = BTreeSet::new();
+    for (vh, v) in &versions {
+        let members: BTreeSet<&str> = v.members.iter().map(|m| m.view.as_str()).collect();
+        bound.retain(|_, m| members.contains(m.as_str()));
+        let joined: Vec<&str> = members.difference(&listed).copied().collect();
+        if !joined.is_empty() {
+            let mut held: BTreeMap<&str, BTreeSet<Hash>> = BTreeMap::new();
+            for m in &members {
+                let set = reader.included_before(m, vh)?;
+                held.insert(m, set.iter().copied().collect());
+            }
+            for j in &joined {
+                for c in &held[j] {
+                    if bound.contains_key(c) || shared.contains(c) {
+                        continue;
+                    }
+                    let mut holders = held.iter().filter(|(_, h)| h.contains(c)).map(|(m, _)| *m);
+                    match (holders.next(), holders.next()) {
+                        (Some(only), None) => {
+                            bound.insert(*c, only.to_string());
+                        }
+                        _ => {
+                            shared.insert(*c);
+                        }
+                    }
+                }
+            }
+        }
+        listed = members;
+    }
+    let chosen = match &set.status {
+        AltStatus::Chosen { member, landing } => {
+            let mut decisions = BTreeSet::new();
+            for h in &reader.landing(landing)?.changes {
+                for op in reader.change(h)?.ops {
+                    if let Op::Create { block } = op
+                        && block.block_type == decision::DECISION
+                    {
+                        decisions.insert(block.id);
+                    }
+                }
+            }
+            Some(AltChosenBy {
+                member: member.clone(),
+                landing: *landing,
+                decisions: decisions.into_iter().collect(),
+            })
+        }
+        _ => None,
+    };
+    Ok(Some(AltBinds { bound, chosen }))
 }
 
 impl ReadState {

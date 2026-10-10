@@ -76,8 +76,13 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_ALT_MEMBER",
-        "a view in two open sets, a member that is not an open view, a chosen member that is not the proposing view's, or a set that is no longer open",
-        "propose from the chosen member's view",
+        "a view in two open sets, a member that is not an open view, a chosen member that is not the proposing view's, a set that is no longer open, a change bound to another member (it alone held it when it joined the set), or a change bound in two open sets",
+        "propose from the bound member's view with its pick; for a change bound in two open sets, exclude it and propose without it",
+    ),
+    (
+        "E_ALT_CHOSEN",
+        "a proposal carries a change of a member that lost a chosen set, and records no decision that supersedes or refines the choice",
+        "land it with a decision that supersedes or refines the choice decision (rdy_supersede, or rdy_decide with refines)",
     ),
     (
         "E_DAEMON_START",

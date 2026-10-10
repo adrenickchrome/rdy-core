@@ -895,13 +895,27 @@ fn not_lost(st: &ReadState, view: &str, what: impl Fn(&str) -> String) -> Result
     }
 }
 
-/// altg1: a change written in a member view of an open set (its `links.alternative`) is that
-/// member's alternative: it lands only in a version proposed from that member's view that chose
-/// that member (`chosen`). A link binds while its set is open and still lists the member. A
-/// change with no binding link (written before the set was made, or linked to a set that is
-/// settled or dropped the member) is bound by its holders instead, whichever view wrote it: in
-/// each open set exactly one of whose members holds it, it is that member's alternative, and
-/// every such binding applies (msw2; see `sole_holders`).
+/// altg1, msw20 (FW-AL1): the bindings of a proposal's changes.
+///
+/// 1. **Bindings are fixed when a change enters the set.** A change written in a member view of
+///    an open set (its `links.alternative`) is that member's alternative while the set is open
+///    and still lists the member. A change that exactly one member held when the set was created
+///    stays bound to that member, whatever any view includes or excludes later; one that two or
+///    more members held then is common ground; one that no member held then is not bound
+///    (`CoordHeads::alt_binds`). A member added later is snapshotted at its join the same way;
+///    bindings fixed earlier never change. A removed member releases its bindings (only an open
+///    set changes members), and a change it shared stays common ground. Every binding applies:
+///    a bound change lands only in a version proposed from its member's view that chose that
+///    member.
+/// 2. **A chosen set keeps its losers bound.** A change bound to a member the set did not choose
+///    (by its link or by rule 1) lands only in a proposal that records a decision superseding or
+///    refining a decision the choosing landing created (`E_ALT_CHOSEN`), whichever view proposes.
+///    When that landing created no decision, any decision the proposal writes releases it. An
+///    abandoned set binds nothing.
+/// 3. **Two open sets.** A change bound in more than one open set can never land: one proposal
+///    chooses in one set only, so the refusal names every set and says to exclude the change.
+///
+/// Open-set checks run before chosen-set checks.
 fn linked_alts(
     st: &ReadState,
     view: &str,
@@ -909,75 +923,164 @@ fn linked_alts(
     ids: &[Hash],
     changes: &[Change],
 ) -> Result<(), RdyError> {
-    let open = &st.coord_heads().open_alts;
-    // read only when a change has no binding link, and then once for all of `ids`
-    let mut held: Option<HashMap<Hash, Vec<AltChoice>>> = None;
+    let heads = st.coord_heads();
+    let open = &heads.open_alts;
     for (id, c) in ids.iter().zip(changes) {
-        let linked = c.links.alternative.as_ref().filter(|a| {
-            open.get(&a.set)
+        // the open-set bindings, in stable-id order: the live link and each set's fixed binding
+        let mut bindings: BTreeSet<AltChoice> = BTreeSet::new();
+        if let Some(a) = &c.links.alternative
+            && open
+                .get(&a.set)
                 .is_some_and(|(_, set)| set.members.iter().any(|m| m.view == a.member))
-        });
-        let bindings: &[AltChoice] = match linked {
-            Some(a) => std::slice::from_ref(a),
-            None => held
-                .get_or_insert_with(|| sole_holders(st, ids))
-                .get(id)
-                .map_or(&[], Vec::as_slice),
-        };
-        for a in bindings {
-            let Some((_, set)) = open.get(&a.set) else {
-                continue;
-            };
-            if a.member == view && chosen == Some(a) {
-                continue;
+        {
+            bindings.insert(a.clone());
+        }
+        for stable in open.keys() {
+            if let Some(member) = heads.alt_binds.get(stable).and_then(|b| b.bound.get(id)) {
+                bindings.insert(AltChoice {
+                    set: *stable,
+                    member: member.clone(),
+                });
             }
+        }
+        let Some(broken) = bindings
+            .iter()
+            .find(|a| !(a.member == view && chosen == Some(*a)))
+        else {
+            continue;
+        };
+        let label = |a: &AltChoice| {
+            open.get(&a.set)
+                .map_or(a.member.as_str(), |(_, set)| member_label(set, &a.member))
+                .to_string()
+        };
+        if bindings.len() == 1 {
             return Err(RdyError::new(
                 E_ALT_MEMBER,
                 format!(
                     "change {} is {} member {}'s alternative",
                     id.short(),
-                    alt_label(&a.set),
-                    member_label(set, &a.member)
+                    alt_label(&broken.set),
+                    label(broken)
                 ),
-                format!("propose from {} to choose it", a.member),
+                format!("propose from {} to choose it", broken.member),
             ));
+        }
+        let named: Vec<String> = bindings
+            .iter()
+            .map(|a| format!("{} member {}", alt_label(&a.set), label(a)))
+            .collect();
+        return Err(RdyError::new(
+            E_ALT_MEMBER,
+            format!(
+                "change {} is bound in {} open sets: {}; one proposal chooses in one set only",
+                id.short(),
+                bindings.len(),
+                named.join(", ")
+            ),
+            format!(
+                "exclude {} from view {view} (rdy view exclude) and propose without it; it can land once only one of these sets is open",
+                id.short()
+            ),
+        ));
+    }
+    // the decisions the proposal writes, and what they supersede or refine: read once, when a
+    // chosen-set binding first needs them
+    let mut released: Option<(bool, BTreeSet<BlockId>)> = None;
+    for (id, c) in ids.iter().zip(changes) {
+        for (stable, (_, set)) in &heads.settled_alts {
+            let Some(ch) = heads.alt_binds.get(stable).and_then(|b| b.chosen.as_ref()) else {
+                continue;
+            };
+            let binds = &heads.alt_binds[stable];
+            let linked = c
+                .links
+                .alternative
+                .as_ref()
+                .filter(|a| a.set == *stable)
+                .map(|a| a.member.as_str());
+            let fixed = binds.bound.get(id).map(String::as_str);
+            for loser in [linked, fixed].into_iter().flatten() {
+                if loser == ch.member || !set.members.iter().any(|m| m.view == loser) {
+                    continue;
+                }
+                let (writes, targets) =
+                    released.get_or_insert_with(|| decisions_written(st, changes));
+                let ok = if ch.decisions.is_empty() {
+                    *writes
+                } else {
+                    ch.decisions.iter().any(|d| targets.contains(d))
+                };
+                if ok {
+                    continue;
+                }
+                let at = format!(
+                    "change {} belongs to member {}, which lost set {}",
+                    id.short(),
+                    member_label(set, loser),
+                    alt_label(stable)
+                );
+                return Err(if ch.decisions.is_empty() {
+                    RdyError::new(
+                        E_ALT_CHOSEN,
+                        format!(
+                            "{at} (chosen by landing {}, which recorded no decision)",
+                            ch.landing.short()
+                        ),
+                        "land it with a new decision that records the revisit",
+                    )
+                } else {
+                    let d = ch
+                        .decisions
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    RdyError::new(
+                        E_ALT_CHOSEN,
+                        format!("{at} (chosen by {d})"),
+                        format!("land it with a decision that supersedes or refines {d}"),
+                    )
+                });
+            }
         }
     }
     Ok(())
 }
 
-/// For each of `ids` that some open set's members hold: the open sets, by stable id, exactly one
-/// of whose members holds it, each as that member's alternative. A change that more than one
-/// member of a set holds (a view forked from another member, an include) is common ground in
-/// that set: no member's alternative there, so it lands with any member and chooses nothing.
-/// One that no member of a set holds is not bound by that set. Reads only the open sets'
-/// member views.
-fn sole_holders(st: &ReadState, ids: &[Hash]) -> HashMap<Hash, Vec<AltChoice>> {
-    let wanted: BTreeSet<&Hash> = ids.iter().collect();
-    let mut out: HashMap<Hash, Vec<AltChoice>> = HashMap::new();
-    for (stable, (_, set)) in &st.coord_heads().open_alts {
-        // each wanted change any member holds: its first holder and whether another holds it
-        let mut holders: BTreeMap<Hash, (&str, bool)> = BTreeMap::new();
-        for m in &set.members {
-            let included = st.included(&m.view);
-            let mine: BTreeSet<&Hash> = included.iter().filter(|h| wanted.contains(h)).collect();
-            for h in mine {
-                holders
-                    .entry(*h)
-                    .and_modify(|(_, shared)| *shared = true)
-                    .or_insert((m.view.as_str(), false));
-            }
-        }
-        for (h, (member, shared)) in holders {
-            if !shared {
-                out.entry(h).or_default().push(AltChoice {
-                    set: *stable,
-                    member: member.to_string(),
-                });
+/// msw20: whether `changes` write a decision, and the blocks those decisions supersede or refine.
+/// The decision blocks are folded in landing order: the last `Create` or `Update` of each block
+/// wins, and a `Delete` drops it.
+fn decisions_written(st: &ReadState, changes: &[Change]) -> (bool, BTreeSet<BlockId>) {
+    let mut last: BTreeMap<&BlockId, Option<&Block>> = BTreeMap::new();
+    for i in st.landing_order(changes) {
+        for op in &changes[i].ops {
+            match op {
+                Op::Create { block } | Op::Update { block, .. } => {
+                    last.insert(&block.id, Some(block));
+                }
+                Op::Delete { id, .. } => {
+                    last.insert(id, None);
+                }
             }
         }
     }
-    out
+    let decisions: Vec<&Block> = last
+        .into_values()
+        .flatten()
+        .filter(|b| b.block_type == decision::DECISION)
+        .collect();
+    let targets = decisions
+        .iter()
+        .flat_map(|b| {
+            [decision::SUPERSEDES, decision::REFINES]
+                .into_iter()
+                .filter_map(|k| b.links.get(k))
+                .flatten()
+                .map(|l| l.target.clone())
+        })
+        .collect();
+    (!decisions.is_empty(), targets)
 }
 
 /// The canon that would result from landing `changes` on `st`'s canon, and each applied change's
