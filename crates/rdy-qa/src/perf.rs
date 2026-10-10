@@ -357,6 +357,35 @@ pub fn not_compared(measured: &[Measure]) -> Vec<Verdict> {
         .collect()
 }
 
+/// What the gate does with a perf run, decided from two facts: the machine class has no baseline
+/// entry, and `--rebaseline` was given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TierDecision {
+    /// A missing class without `--rebaseline`: nothing is compared, nothing is written, the gate fails.
+    NotCompared,
+    /// `--rebaseline`: the measures are written as the class's baseline.
+    Rebaseline,
+    /// A known class: the measures are compared against its baseline.
+    Compare,
+}
+
+impl TierDecision {
+    /// Whether this decision rewrites `qa-baseline.json`.
+    pub fn writes_baseline(self) -> bool {
+        self == TierDecision::Rebaseline
+    }
+}
+
+pub fn tier_decision(missing_class: bool, rebaseline: bool) -> TierDecision {
+    if rebaseline {
+        TierDecision::Rebaseline
+    } else if missing_class {
+        TierDecision::NotCompared
+    } else {
+        TierDecision::Compare
+    }
+}
+
 fn over_ceiling(m: &Measure) -> bool {
     spec_ceiling_ms(&m.op).is_some_and(|c| m.p95_ms > c)
 }
@@ -2864,6 +2893,22 @@ mod tests {
         let v = not_compared(&[m("log_full", 1.0)]);
         assert_eq!((v[0].status, v[0].pass), (Status::NotCompared, false));
         assert_eq!(Status::NotCompared.label(), "RECORDED, NOT COMPARED");
+    }
+
+    #[test]
+    fn hd6_a_missing_machine_class_without_rebaseline_writes_nothing() {
+        let d = tier_decision(true, false);
+        assert_eq!(d, TierDecision::NotCompared);
+        assert!(
+            !d.writes_baseline(),
+            "a missing class never writes the file"
+        );
+        assert_eq!(tier_decision(true, true), TierDecision::Rebaseline);
+        assert_eq!(tier_decision(false, true), TierDecision::Rebaseline);
+        assert!(TierDecision::Rebaseline.writes_baseline());
+        let d = tier_decision(false, false);
+        assert_eq!(d, TierDecision::Compare);
+        assert!(!d.writes_baseline());
     }
 
     #[test]

@@ -960,6 +960,12 @@ mod tests {
             "{md}"
         );
         assert!(md.contains(TAIL_NOTE), "{md}");
+        assert!(
+            md.contains(
+                "0 pass, 0 recorded, 1 unbaselined, 1 not compared, 0 regressed, 0 over a ceiling."
+            ),
+            "{md}"
+        );
     }
 
     #[test]

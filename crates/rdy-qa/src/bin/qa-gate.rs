@@ -140,13 +140,14 @@ fn perf_tier(
     let missing = !classes.contains_key(machine);
     let verdicts;
     let note;
-    if missing && !rebaseline {
+    let decision = perf::tier_decision(missing, rebaseline);
+    if decision == perf::TierDecision::NotCompared {
         // nothing is written: a machine class needs two runs within 10%, then --rebaseline
         verdicts = perf::not_compared(&measures);
         note = format!(
             "No baseline for `{machine}`: recorded, not compared. Rebaseline this machine class (two runs within 10%, then cargo qa --rebaseline) and commit crates/rdy-qa/qa-baseline.json."
         );
-    } else if rebaseline {
+    } else if decision.writes_baseline() {
         verdicts = perf::compare(None, &measures, perf::Mode::Record);
         // the measured ops replace their entries and every other op is kept, so a typical-tier
         // rebaseline never deletes the `_50k` baseline
