@@ -61,7 +61,7 @@ Do not add a dependency that points the other way.
 - Run `cargo fmt --all` before each commit.
 - Run `cargo clippy -p <crate> --all-targets -- -D warnings` for each crate you touch.
 - Run the focused tests of the change.
-- The gate is the authority. Run `cargo qa --skip-perf` for the fast gate and `cargo qa --deep --skip-perf` at milestones.
+- The gate is the authority. Run `cargo qa --skip-perf` for the fast gate. The deep gate, `cargo qa --deep`, runs on the bench at milestones.
 - Perf runs only on the bench machine. Its machine class is the only class in `crates/rdy-qa/qa-baseline.json`.
 - On any other machine, a perf run has no baseline and fails. Do not add a machine class to the file.
 - Do not trust a summary of a run, because a summary can hide skips. Read the skip count.
