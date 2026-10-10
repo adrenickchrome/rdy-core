@@ -104,8 +104,8 @@ pub const TENSION_FIX: &str = "resolve it with a change (rdy_tensions shows both
 pub const LINEAGE_FIX: &str = "a decision that governs it was refined or partly superseded: check that it still holds, and update it if not; no repin is needed";
 
 /// FW-LP6: for each decision `ops` create, each `refines` link and each `supersedes` link with a
-/// part: (the new decision, the target, the link's name). In op order, then link order. A
-/// decision that fully supersedes another reaches nothing, not even through its `refines` links.
+/// part: (the new decision, the target, the link's name). In op order, then link order. The
+/// refines links a full supersede copied are dropped later, with the graph ([`refines_copied`]).
 pub(crate) fn reached_targets(ops: &[Op]) -> Vec<(BlockId, BlockId, &'static str)> {
     let mut out = vec![];
     for op in ops {
@@ -113,17 +113,8 @@ pub(crate) fn reached_targets(ops: &[Op]) -> Vec<(BlockId, BlockId, &'static str
         if block.block_type != DECISION {
             continue;
         }
-        // a full supersede does not reach, through the refines links it copied either (Q5, Q6)
-        let full = block
-            .links
-            .get(SUPERSEDES)
-            .into_iter()
-            .flatten()
-            .any(|l| l.part.is_none());
-        if !full {
-            for l in block.links.get(REFINES).into_iter().flatten() {
-                out.push((block.id.clone(), l.target.clone(), REFINES));
-            }
+        for l in block.links.get(REFINES).into_iter().flatten() {
+            out.push((block.id.clone(), l.target.clone(), REFINES));
         }
         for l in block.links.get(SUPERSEDES).into_iter().flatten() {
             if l.part.is_some() {
@@ -132,6 +123,27 @@ pub(crate) fn reached_targets(ops: &[Op]) -> Vec<(BlockId, BlockId, &'static str
         }
     }
     out
+}
+
+/// Whether decision `id`'s refines links are the ones a full supersede copied (sup1): it fully
+/// supersedes a decision whose refines targets are exactly its own. Those do not reach (FW-LP6a
+/// is M3); refines given to rdy_supersede differ from the old ones, and reach as any refine
+/// does (final review 2, finding 10).
+pub(crate) fn refines_copied(g: &Graph, id: &BlockId) -> bool {
+    let refines = |b: &BlockId| -> BTreeSet<BlockId> {
+        g.outgoing(b)
+            .iter()
+            .filter(|e| matches!(&e.kind, EdgeKind::Link(n) if n == REFINES))
+            .map(|e| e.to.clone())
+            .collect()
+    };
+    let mine = refines(id);
+    !mine.is_empty()
+        && g.outgoing(id).iter().any(|e| {
+            matches!(&e.kind, EdgeKind::Link(n) if n == SUPERSEDES)
+                && e.part.is_none()
+                && refines(&e.to) == mine
+        })
 }
 
 /// `cq-` and the first 16 hex characters of the hash of the batch, kind and target.
@@ -256,6 +268,8 @@ impl ReadState {
             });
         }
         let g = self.graph(scope)?;
+        // a full supersede does not reach through the refines links it copied (Q5, Q6)
+        reach.retain(|(new, _, via)| *via != REFINES || !refines_copied(&g, new));
         let m = self.materialized(scope)?;
         let view = match scope {
             Scope::View(v) => Some(v.as_str()),
@@ -726,6 +740,29 @@ pub fn write_and_report<T: Serialize + 'static>(
     max_tokens: Option<usize>,
     f: impl FnOnce(&mut Rdy) -> Result<T, RdyError> + Send + 'static,
 ) -> Result<serde_json::Value, RdyError> {
+    report(engine, None, view, max_tokens, f)
+}
+
+/// [`write_and_report`], with every change of the write read as `reader`'s session: an import's
+/// reply is the importer's, whoever wrote the blocks (final review 2, finding 11). An intent of
+/// `reader`'s own session is not listed; an author's intent is.
+pub fn write_and_report_as<T: Serialize + 'static>(
+    engine: &dyn Engine,
+    reader: &crate::Session,
+    view: &str,
+    max_tokens: Option<usize>,
+    f: impl FnOnce(&mut Rdy) -> Result<T, RdyError> + Send + 'static,
+) -> Result<serde_json::Value, RdyError> {
+    report(engine, Some(reader), view, max_tokens, f)
+}
+
+fn report<T: Serialize + 'static>(
+    engine: &dyn Engine,
+    reader: Option<&crate::Session>,
+    view: &str,
+    max_tokens: Option<usize>,
+    f: impl FnOnce(&mut Rdy) -> Result<T, RdyError> + Send + 'static,
+) -> Result<serde_json::Value, RdyError> {
     // the states before and after the write, captured on the writer: a deleted or moved block's
     // old areas, and what the write did to the tensions
     type States = (Arc<ReadState>, Arc<ReadState>);
@@ -773,7 +810,7 @@ pub fn write_and_report<T: Serialize + 'static>(
     let st = engine.read();
     let c = st.consequences_of(&scope, &changes, max_tokens);
     attach(&mut v, c);
-    if let Some(notes) = intent_notes_of(&st, before, view, &changes)
+    if let Some(notes) = intent_notes_of(&st, before, view, &changes, reader)
         && !notes.is_empty()
     {
         v["intents"] = serde_json::to_value(&notes).expect("intent notes serialize");
@@ -843,14 +880,16 @@ fn attach_related(v: &mut serde_json::Value, engine: &dyn Engine, view: &str, ch
 
 /// iwr1: other sessions' open intents on the blocks `changes` wrote, in `view`, with each block's
 /// areas taken after the write and, when given, `before` it; `None` when they cannot be read (the
-/// write stands and the reply has no `intents`). Each change is read as its author's: an intent
-/// of a change's own session is not listed for that change's blocks. An intent several changes
-/// hear of is listed once, with the blocks of all of them; by id.
+/// write stands and the reply has no `intents`). Each change is read as `reader`'s session when
+/// given (an import: the importer's), else as its author's: an intent of that session is not
+/// listed for the change's blocks. An intent several changes hear of is listed once, with the
+/// blocks of all of them; by id.
 fn intent_notes_of(
     st: &ReadState,
     before: Option<&ReadState>,
     view: &str,
     changes: &[Hash],
+    reader: Option<&crate::Session>,
 ) -> Option<Vec<IntentNote>> {
     if st.coord_heads().open_intents.is_empty() {
         return Some(vec![]);
@@ -861,8 +900,10 @@ fn intent_notes_of(
     for h in changes {
         let change = st.reader().change(h).ok()?;
         let touched: BTreeSet<BlockId> = change.ops.iter().map(|o| o.block_id().clone()).collect();
-        let prov = &change.provenance;
-        let (actor, run) = (&prov.actor, prov.run.as_deref());
+        let (actor, run) = match reader {
+            Some(s) => (&s.actor, s.run.as_deref()),
+            None => (&change.provenance.actor, change.provenance.run.as_deref()),
+        };
         let notes = match before {
             Some(b) => st.intent_notes_since(b, &scope, actor, run, &touched, now),
             None => st.intent_notes(&scope, actor, run, &touched, now),

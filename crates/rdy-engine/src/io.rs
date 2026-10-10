@@ -173,6 +173,9 @@ fn bad_authors(what: String) -> RdyError {
     )
 }
 
+/// How far after now an `at_ms` in `authors.yaml` may be: 24 h, for clocks that differ.
+const AUTHORS_FUTURE_MS: i64 = 24 * 60 * 60 * 1000;
+
 /// `authors.yaml` of export `dir`, checked against the import's blocks: by id. No file is no
 /// rows.
 fn read_authors(dir: &Path, blocks: &[Block]) -> Result<BTreeMap<BlockId, Provenance>, RdyError> {
@@ -187,6 +190,7 @@ fn read_authors(dir: &Path, blocks: &[Block]) -> Result<BTreeMap<BlockId, Proven
             .unwrap_or_else(|| bad_authors(e.to_string()))
     })?;
     let known: BTreeSet<&BlockId> = blocks.iter().map(|b| &b.id).collect();
+    let now = crate::now_ms();
     let mut out = BTreeMap::new();
     for row in rows {
         let id = BlockId::parse(&row.id)
@@ -206,6 +210,17 @@ fn read_authors(dir: &Path, blocks: &[Block]) -> Result<BTreeMap<BlockId, Proven
                 row.role
             ))
         })?;
+        // FW-HD1: a person may edit authors.yaml, so a time outside 0 .. now + 24 h is refused
+        if row.at_ms < 0 || row.at_ms > now + AUTHORS_FUTURE_MS {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!(
+                    "{AUTHORS_FILE}: {} has at_ms {}, outside 0 .. now + 24 h",
+                    row.actor, row.at_ms
+                ),
+                "fix at_ms in authors.yaml (milliseconds since 1970)",
+            ));
+        }
         let prov = Provenance {
             actor: row.actor,
             run: row.run,

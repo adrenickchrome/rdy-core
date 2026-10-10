@@ -695,3 +695,104 @@ fn mfb3_an_intent_two_author_changes_hear_of_is_listed_once_with_both_blocks() {
         .collect();
     assert_eq!(heard, ["agent:a", "human:founder"], "{v}");
 }
+
+/// Final review 2, finding 11: an import's reply is read as the importer's session, for every
+/// change of the import. An author's own intent is listed, with the blocks of that author's
+/// change; the importer's own intent is not.
+#[test]
+fn mfb3_the_import_reply_is_read_as_the_importers_session() {
+    use rdy_engine::consequence::write_and_report_as;
+    use rdy_engine::engine::Local;
+    let out = tempfile::tempdir().unwrap();
+    let out = out.path().join("x");
+    older_author_export(
+        &out,
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "wallets", "title": "Wallets", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Summary"}},
+            {"op": "create", "type": "entity", "id": "$e", "parent": "$s", "fields": {"name": "Ledger service"}}
+        ]),
+    );
+    let (_b_dir, mut b) = rdy_qa::packs::qa_project();
+    let imp = rdy_qa::fixtures::agent("agent:imp", Some("ri"));
+    let imp = Session {
+        role: Role::Approver,
+        ..imp
+    };
+    for s in [rdy_qa::fixtures::agent("agent:a", Some("r1")), imp.clone()] {
+        b.intent_post(&s, None, Some("payments"), &[], "rework payments", None)
+            .unwrap();
+    }
+    let engine = Local::new(b);
+    let dir = out.clone();
+    let who = imp.clone();
+    let v = write_and_report_as(&engine, &who, "import", None, move |r| {
+        r.import(&imp, "import", &dir)
+    })
+    .unwrap();
+    let intents = v["intents"].as_array().expect("intents");
+    let actors: Vec<&str> = intents.iter().filter_map(|i| i["actor"].as_str()).collect();
+    assert_eq!(actors, ["agent:a"], "only the author's intent: {v}");
+    let st = engine.read();
+    let first = st
+        .reader()
+        .change(&v["changes"][0].as_str().unwrap().parse::<Hash>().unwrap())
+        .unwrap();
+    assert_eq!(first.provenance.actor, "agent:a", "{v}");
+    let doc = first
+        .ops
+        .iter()
+        .find(|o| matches!(o, Op::Create { block } if block.block_type == "doc"))
+        .map(|o| o.block_id().to_string())
+        .expect("agent:a's change creates the doc");
+    assert!(
+        intents[0]["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b.as_str() == Some(doc.as_str())),
+        "the author's own change's blocks: {v}"
+    );
+}
+
+/// Final review 2, finding 12: `at_ms` in authors.yaml is refused below 0 and more than 24 h
+/// after now; 0 and now are accepted.
+#[test]
+fn mfb3_an_at_ms_outside_its_range_is_refused() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let (r, d, p) = two_authors(a_dir.path());
+    let out = tempfile::tempdir().unwrap();
+    let out = out.path().join("x");
+    r.read().export(&Scope::Canon, &out).unwrap();
+    let day = 24 * 60 * 60 * 1000;
+    let now = now_ms();
+    let file = |at: i64| {
+        format!(
+            "- id: {d}\n  actor: agent:a\n  run: r1\n  role: writer\n  at_ms: {at}\n\
+             - id: {p}\n  actor: agent:b\n  run: r2\n  role: writer\n  at_ms: 5\n"
+        )
+    };
+    for bad in [-1, now + 2 * day] {
+        std::fs::write(out.join("authors.yaml"), file(bad)).unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+        let e = b
+            .import(&founder(), "import", &out)
+            .err()
+            .unwrap_or_else(|| panic!("at_ms {bad}: accepted"));
+        assert_eq!(e.code, E_BAD_INPUT, "{bad}: {e:?}");
+        assert_eq!(
+            e.message,
+            format!("authors.yaml: agent:a has at_ms {bad}, outside 0 .. now + 24 h")
+        );
+        assert_eq!(e.fix, "fix at_ms in authors.yaml (milliseconds since 1970)");
+        assert!(b.read().view_head("import").is_none(), "{bad}: a view");
+    }
+    for good in [0, now] {
+        std::fs::write(out.join("authors.yaml"), file(good)).unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+        b.import(&founder(), "import", &out)
+            .unwrap_or_else(|e| panic!("at_ms {good}: {e:?}"));
+    }
+}

@@ -349,7 +349,7 @@ pub struct Lineage {
 /// FW-LP6: a covered decision (`decision`) that refines or part-supersedes `target` (`via` is
 /// `refines` or `supersedes`) reaches `blocks`, the uncovered blocks `target` governs: never a
 /// deleted block or a decision that asserts nothing live. A decision that fully supersedes
-/// another reaches nothing through its `refines` links.
+/// another reaches nothing through the `refines` links it copied from it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Reach {
     pub decision: String,
@@ -1203,14 +1203,11 @@ impl ReadState {
         let mut reaches_omitted = 0;
         let mut room = REACH_CAP;
         for id in ids {
-            // a full supersede does not reach, through the refines links it copied either
-            let full = g.outgoing(id).iter().any(|e| {
-                matches!(&e.kind, EdgeKind::Link(n) if n == decision::SUPERSEDES)
-                    && e.part.is_none()
-            });
+            // a full supersede does not reach through the refines links it copied
+            let copied = crate::consequence::refines_copied(&g, id);
             for e in g.outgoing(id) {
                 let via = match &e.kind {
-                    EdgeKind::Link(n) if n == decision::REFINES && !full => decision::REFINES,
+                    EdgeKind::Link(n) if n == decision::REFINES && !copied => decision::REFINES,
                     EdgeKind::Link(n) if n == decision::SUPERSEDES && e.part.is_some() => {
                         decision::SUPERSEDES
                     }
