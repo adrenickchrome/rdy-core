@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ViewParams {
     /// create, fork, include, exclude, compare, list, show, close, undo (own is the human's: E_PERMISSION here).
     pub op: String,
@@ -49,6 +50,7 @@ pub struct ViewParams {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LogParams {
     /// At most this many landings, newest first.
     pub limit: Option<usize>,

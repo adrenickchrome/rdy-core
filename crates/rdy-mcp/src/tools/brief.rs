@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BriefParams {
     /// Blocks to brief on (ids, keys or paths).
     pub ids: Option<Vec<String>>,

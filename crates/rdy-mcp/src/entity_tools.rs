@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AcceptParams {
     /// Suggestions to accept, unchanged from a write or search response (each an object with kind "link" or "entity"). An entity suggestion may add name, type (any entity type; default entity), entity_kind, value, unit, body (a term needs one) and parent. A link suggestion's target must be an entity.
     pub suggestions: Vec<Value>,

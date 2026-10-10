@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ReadParams {
     /// A block id, key or path (wallets/transactions); <doc>#<heading-slug> reads one section of a doc; id@version or a ref line [id@version] … reads under that version; P-<id>@<n> reads a proposal version. Required unless page is given.
     pub id: Option<String>,

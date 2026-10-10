@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct IntentParams {
     /// post, renew, withdraw or list.
     pub op: String,

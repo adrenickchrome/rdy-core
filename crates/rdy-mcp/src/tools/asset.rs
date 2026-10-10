@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AssetParams {
     pub data_base64: String,
 }

@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SessionParams {
     /// Who is acting, e.g. "agent:designer" or "human:nick".
     pub actor: String,
@@ -164,6 +165,7 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TagsParams {}
 
 pub fn rdy_tags(st: &mut McpState, _p: TagsParams) -> Result<Value, RdyError> {

@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DecideParams {
     pub view: Option<String>,
     /// The doc or section to record the decision in (id, key or path). Omit to record it in the project's decision home (decisions.home).
@@ -38,6 +39,7 @@ pub struct DecideParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SupersedeParams {
     pub old: String,
     /// The words of the old decision that this one retires; omit to supersede all of it.
@@ -49,6 +51,7 @@ pub struct SupersedeParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RevokeParams {
     pub view: Option<String>,
     pub target: String,

@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EditorialParams {
     /// typo, restructure or clarify.
     pub class: String,
@@ -23,6 +24,7 @@ pub enum OneOrMany {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WriteParams {
     pub view: Option<String>,
     /// Ops, each a JSON object (rdy_schema lists them under "ops"):

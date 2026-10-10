@@ -10,6 +10,7 @@ use serde_json::Value;
 
 /// One member of a set: a label and the open view that holds the alternative.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AltMemberParams {
     /// A short name for the alternative (x, y, "fixed fee").
     pub label: String,
@@ -19,6 +20,7 @@ pub struct AltMemberParams {
 
 /// `rdy_propose`'s `alternatives`: the set, and the proposing view's own member.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AltPickParams {
     /// The set id (as-<12 hex>).
     pub set: String,
@@ -36,6 +38,7 @@ impl From<AltPickParams> for AltPick {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AltParams {
     /// create, add, remove, list, compare or abandon.
     pub op: String,
