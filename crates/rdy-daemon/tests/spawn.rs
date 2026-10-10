@@ -14,6 +14,7 @@ fn env_lock() -> MutexGuard<'static, ()> {
 }
 
 #[test]
+#[allow(unsafe_code)]
 fn spawn1_the_serve_command_has_the_right_shape_and_no_rdy_env() {
     let dir = short_tempdir();
     let run = RunDir::of_project(dir.path());
@@ -66,6 +67,8 @@ fn spawn1_the_serve_command_has_the_right_shape_and_no_rdy_env() {
             & 0o777,
         0o600
     );
+    // SAFETY: the test holds `_env`, so no other test of this binary runs and nothing else in this
+    // process reads the environment meanwhile
     unsafe {
         std::env::remove_var("RDY_TEST_HOOKS");
         std::env::remove_var("RDY_QA_DEEP");

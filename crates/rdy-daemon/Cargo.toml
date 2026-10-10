@@ -21,3 +21,6 @@ arc-swap.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 rdy-schema.workspace = true
+
+[lints]
+workspace = true

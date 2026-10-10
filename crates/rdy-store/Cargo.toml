@@ -20,3 +20,6 @@ fjall = "3"
 [[bench]]
 name = "index_choice"
 harness = false
+
+[lints]
+workspace = true

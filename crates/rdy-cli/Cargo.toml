@@ -27,3 +27,6 @@ rdy-model.workspace = true
 [[bin]]
 name = "rdy"
 path = "src/main.rs"
+
+[lints]
+workspace = true

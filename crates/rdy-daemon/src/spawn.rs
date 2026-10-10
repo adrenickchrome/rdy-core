@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 /// created, rather than spawning a daemon that would only die at its bind. A relative `project`
 /// is made absolute against the caller's working directory too: the child runs in the project,
 /// where the relative path would name `<project>/<project>`.
+#[allow(unsafe_code)]
 pub fn serve_command(rdy_bin: &Path, project: &Path, run: &RunDir) -> io::Result<Command> {
     let run = run.absolute()?;
     check_socket_path(&run)?;
@@ -98,6 +99,7 @@ pub fn spawn_serve(cmd: &mut Command) -> io::Result<Spawned> {
 }
 
 /// Whether a process `pid` exists (`kill(pid, 0)`; a process of another user counts).
+#[allow(unsafe_code)]
 pub fn process_alive(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
@@ -112,6 +114,7 @@ pub fn process_alive(pid: u32) -> bool {
 /// Leaves the caller's session (`setsid`). `EPERM` means the caller already leads a process
 /// group (a child of `serve_command` already leads its own session), and is `Ok`. Called by
 /// `rdy serve --detach` after its argument parsing and before it opens the store.
+#[allow(unsafe_code)]
 pub fn detach() -> io::Result<()> {
     // SAFETY: `setsid` takes no arguments and touches no memory of ours.
     if unsafe { libc::setsid() } == -1 {
@@ -125,6 +128,7 @@ pub fn detach() -> io::Result<()> {
 
 /// The caller's process group id (`getpgid(0)`), for the tests.
 #[doc(hidden)]
+#[allow(unsafe_code)]
 pub fn own_pgid() -> i32 {
     // SAFETY: `getpgid(0)` asks about the caller and touches no memory of ours.
     unsafe { libc::getpgid(0) }
@@ -132,6 +136,7 @@ pub fn own_pgid() -> i32 {
 
 /// The caller's session id (`getsid(0)`), for the tests.
 #[doc(hidden)]
+#[allow(unsafe_code)]
 pub fn own_sid() -> i32 {
     // SAFETY: `getsid(0)` asks about the caller and touches no memory of ours.
     unsafe { libc::getsid(0) }
