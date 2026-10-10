@@ -23,6 +23,7 @@ pub(crate) struct LinkYaml {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct BlockYaml {
     pub(crate) id: BlockId,
     #[serde(rename = "type")]
@@ -130,6 +131,7 @@ pub(crate) fn place_keyed(
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Manifest {
     format: u32,
     pack: String,
@@ -584,7 +586,26 @@ pub fn block_from_yaml(text: &str) -> Result<Block, RdyError> {
     Ok(block)
 }
 
+/// A YAML syntax error is `E_BAD_INPUT`; a key the block does not take is `E_FILE_FORMAT` with a
+/// did-you-mean, as import and commit report it (hd8, ruling Q14).
 fn parse_yaml(text: &str) -> Result<(Block, Vec<KeyedLink>), RdyError> {
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(text)
+        .map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "fix the YAML and retry"))?;
+    if let Some(f) = tree_io::key_faults(&value).into_iter().next() {
+        let line = crate::yaml_pos::positions(text)
+            .ok()
+            .and_then(|p| p.get(&f.segs()).map(|at| at.0))
+            .unwrap_or(1);
+        return Err(RdyError::new(
+            E_FILE_FORMAT,
+            format!(
+                "line {line}: unknown key \"{}\" in {}",
+                f.key,
+                f.place("the block")
+            ),
+            f.fix(),
+        ));
+    }
     let y: BlockYaml = serde_yaml_ng::from_str(text)
         .map_err(|e| RdyError::new(E_BAD_INPUT, e.to_string(), "fix the YAML and retry"))?;
     from_yaml_struct(y)
@@ -740,11 +761,14 @@ impl Rdy {
             )
         })?;
         let manifest: Manifest = serde_yaml_ng::from_str(&manifest_text).map_err(|e| {
-            RdyError::new(
-                E_BAD_INPUT,
-                format!("rdy-export.yaml: {e}"),
-                "re-export the project",
-            )
+            crate::did_you_mean::unknown_field_error("rdy-export.yaml", &e.to_string())
+                .unwrap_or_else(|| {
+                    RdyError::new(
+                        E_BAD_INPUT,
+                        format!("rdy-export.yaml: {e}"),
+                        "re-export the project",
+                    )
+                })
         })?;
         // lpin1: format 3 pins hold content hashes; import recomputes every pin, so a format-2
         // tree reads the same way

@@ -786,3 +786,28 @@ fn msw11_a_repeated_editorial_is_refused() {
     assert!(!okk && v["code"] == E_BAD_INPUT, "{v}");
     assert_eq!(store_block(&s, "work", &seed.note).body, "Note.");
 }
+
+#[test]
+fn hd8_commit_refuses_a_misspelt_key_and_writes_nothing() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let orig = read(&s, "notes.yaml");
+    let text = format!(
+        "{orig}- type: prose\n  parnet: {}\n  body: Added.\n",
+        seed.notes
+    );
+    std::fs::write(at(&s, "notes.yaml"), &text).unwrap();
+    ok(&s, &["add", "notes.yaml"]);
+    let (okk, v) = json(&s, &["commit", "-m", "x"]);
+    assert!(!okk && v["code"] == E_WC_INVALID, "{v}");
+    let d = &v["diagnostics"][0];
+    assert_eq!(d["file"], "notes.yaml", "{v}");
+    assert_eq!(d["code"], "E_FILE_FORMAT", "{v}");
+    assert_eq!(
+        d["line"].as_u64().unwrap() as usize,
+        orig.lines().count() + 2,
+        "{v}"
+    );
+    assert_eq!(d["fix"], "did you mean \"parent\"? rename it", "{v}");
+    assert_eq!(read(&s, "notes.yaml"), text, "the file is not rewritten");
+}

@@ -987,3 +987,16 @@ fn hd3_a_yaml_link_part_that_is_not_text_is_refused_not_dropped() {
     let b = block_from_yaml(&yaml("w")).unwrap();
     assert_eq!(b.links["refines"][0].part.as_deref(), Some("w"));
 }
+
+#[test]
+fn hd8_block_from_yaml_refuses_a_misspelt_key() {
+    let e = block_from_yaml("id: p-AAAAA\ntype: prose\norder: a1\nparnet: d-AAAAA\n").unwrap_err();
+    assert_eq!(e.code, "E_FILE_FORMAT");
+    assert_eq!(e.message, "line 4: unknown key \"parnet\" in the block");
+    assert_eq!(e.fix, "did you mean \"parent\"? rename it");
+    assert_eq!(
+        block_from_yaml("id: [").unwrap_err().code,
+        "E_BAD_INPUT",
+        "syntax stays E_BAD_INPUT"
+    );
+}

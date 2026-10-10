@@ -12,9 +12,10 @@ pub(crate) enum Seg {
 
 pub(crate) type Positions = BTreeMap<Vec<Seg>, (usize, usize)>;
 
-/// Readers only look up paths of at most this many segments ([Index, Key, Key, Key]); deeper
-/// nodes are tracked but not recorded, which keeps hostile deeply nested input linear.
-const MAX_DEPTH: usize = 4;
+/// Readers only look up paths of at most this many segments ([Index, Key, Key, Index, Key], a key
+/// in a link object); deeper nodes are tracked but not recorded, which keeps hostile deeply
+/// nested input linear.
+const MAX_DEPTH: usize = 5;
 
 enum Frame {
     Seq(usize),
