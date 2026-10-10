@@ -1528,12 +1528,17 @@ fn tier_coord(out: &mut Vec<Measure>, parent: &std::path::Path, sfx: &str, runs:
     tier_coord_chosen(out, parent, sfx, runs, n);
 }
 
-/// msw20 (fix round 1): `n / 10` chosen alternative sets, each {w: w<i>, l: l<i>} chosen for w,
-/// whose winner view wrote `n / 20` (at least 5) changes after the set was created, in a fresh
-/// small project. `open_chosen_alts_100` reopens it: `CoordHeads::read` derives every chosen
-/// set's bindings from history, and each member's walk runs from its head back to the set's
-/// creation. `propose_chosen_alts_100` proposes a view of the same number of changes there: the
-/// gate checks each change against every settled set.
+/// msw20 (fix rounds 1 and 2): `n / 10` chosen alternative sets, each {w: w<i>, l: l<i>} chosen
+/// for w, whose winner view wrote `n / 20` (at least 5) changes after the set was created, in a
+/// fresh small project. The last `sets / 10` (at least 1) sets are heavy: before the set was
+/// created, their loser view wrote the same number of new claims (bound to it: a long pre-set
+/// chain); a third member j<i> joined with `alt_add` holding as many of its own (the joiner reads);
+/// and the winner recorded a choice decision. They come last, so few landings rebase their views.
+/// `open_chosen_alts_100` reopens the project: `CoordHeads::read` derives every chosen set's
+/// bindings from history (each member's walk from its head back to the set's creation, and the
+/// set built there). `propose_chosen_alts_100` proposes a view of the same number of changes plus
+/// one loser change of a heavy set and a decision that refines that set's choice decision: the
+/// gate checks each change against every settled set and folds the proposal's decisions.
 fn tier_coord_chosen(
     out: &mut Vec<Measure>,
     parent: &std::path::Path,
@@ -1542,9 +1547,11 @@ fn tier_coord_chosen(
     n: usize,
 ) {
     let (sets, chain) = (n / 10, (n / 20).max(5));
+    let heavy = (sets / 10).max(1);
     let (proj, mut r, fx) = coord_project(parent, "coord-chosen");
     let o = crate::fixtures::agent("agent:o", Some("o"));
     let claim = fx.claim.to_string();
+    let section = fx.section.to_string();
     let edit = |r: &mut Rdy, view: &str, body: String| -> String {
         write(
             r,
@@ -1554,28 +1561,63 @@ fn tier_coord_chosen(
         .expect("a member write")
         .change
     };
+    let create = |r: &mut Rdy, view: &str, body: String| -> String {
+        write(
+            r,
+            view,
+            json!([{"op": "create", "type": "claim", "parent": section, "body": body}]),
+        )
+        .expect("a member claim")
+        .change
+    };
+    let member = |label: &str, view: &str| rdy_engine::alt::AltMemberInput {
+        label: label.into(),
+        view: view.into(),
+    };
+    // (a loser change, the choice decision) of the last heavy set
+    let mut release: Option<(String, String)> = None;
     for i in 0..sets {
-        let (w, l) = (format!("w{i}"), format!("l{i}"));
+        let is_heavy = i >= sets - heavy;
+        let (w, l, j) = (format!("w{i}"), format!("l{i}"), format!("j{i}"));
         for v in [&w, &l] {
             r.view_create(&writer(), v, None, false)
                 .expect("a member view");
         }
-        let members = [
-            rdy_engine::alt::AltMemberInput {
-                label: "w".into(),
-                view: w.clone(),
-            },
-            rdy_engine::alt::AltMemberInput {
-                label: "l".into(),
-                view: l,
-            },
-        ];
+        let mut lost = vec![];
+        if is_heavy {
+            for k in 0..chain {
+                lost.push(create(&mut r, &l, format!("Loser {i}.{k}.")));
+                create(&mut r, &j, format!("Joiner {i}.{k}."));
+            }
+        }
         let set = r
-            .alt_create(&o, &format!("chosen {i}"), None, &members)
+            .alt_create(
+                &o,
+                &format!("chosen {i}"),
+                None,
+                &[member("w", &w), member("l", &l)],
+            )
             .expect("a set");
+        if is_heavy {
+            r.alt_add(&o, &set.id, &member("j", &j)).expect("a joiner");
+        }
         for k in 0..chain {
             edit(&mut r, &w, format!("Winner {i}.{k}."));
         }
+        let decision = is_heavy.then(|| {
+            r.decide(
+                &writer(),
+                &w,
+                rdy_engine::DecisionInput {
+                    parent: section.clone(),
+                    statement: format!("Pick w{i}"),
+                    ..Default::default()
+                },
+            )
+            .expect("a choice decision")
+            .created["$decision"]
+                .clone()
+        });
         let pick = rdy_engine::alt::AltPick {
             set: set.id.clone(),
             chosen: "w".into(),
@@ -1584,18 +1626,28 @@ fn tier_coord_chosen(
             .propose_with(&writer(), &w, &w, None, None, Some(&pick))
             .expect("a choosing proposal");
         r.land(&approver(), &p.id).expect("the choosing landing");
+        if let (Some(d), Some(c)) = (decision, lost.first()) {
+            release = Some((c.clone(), d));
+        }
     }
-    let source: Vec<String> = (0..chain)
+    let (loser, decision) = release.expect("a heavy set");
+    let mut source: Vec<String> = (0..chain)
         .map(|k| edit(&mut r, "ps", format!("Proposed {k}.")))
         .collect();
-    let chosen = r
-        .read()
-        .coord_heads()
-        .alt_binds
-        .values()
-        .filter(|b| b.chosen.is_some())
-        .count();
-    assert_eq!(chosen, sets, "every set is chosen");
+    source.push(loser);
+    let st = r.read();
+    let binds = &st.coord_heads().alt_binds;
+    assert_eq!(
+        binds.values().filter(|b| b.chosen.is_some()).count(),
+        sets,
+        "every set is chosen"
+    );
+    assert_eq!(
+        binds.values().map(|b| b.bound.len()).sum::<usize>(),
+        heavy * 2 * chain,
+        "each heavy set binds its loser's and its joiner's changes"
+    );
+    drop(st);
     drop(r);
     out.push(measure(
         &format!("open_chosen_alts_100{sfx}"),
@@ -1613,8 +1665,20 @@ fn tier_coord_chosen(
             let name = format!("pp{i}");
             r.view_include(&writer(), &name, &source)
                 .expect("include the proposal's changes");
+            r.decide(
+                &writer(),
+                &name,
+                rdy_engine::DecisionInput {
+                    parent: section.clone(),
+                    statement: format!("Revisit {i}"),
+                    refines: vec![decision.clone()],
+                    ..Default::default()
+                },
+            )
+            .expect("the release decision");
             let s = Instant::now();
-            r.propose(&writer(), &name, &name).expect("propose");
+            r.propose(&writer(), &name, &name)
+                .expect("propose: the decision releases the loser change");
             s.elapsed()
         },
     ));

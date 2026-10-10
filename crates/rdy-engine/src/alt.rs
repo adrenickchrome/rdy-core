@@ -191,6 +191,8 @@ fn need_open(stable: &Hash, set: &AltSet) -> Result<(), RdyError> {
 ///   member, two or more make it common ground. Bindings fixed earlier never change. A change
 ///   linked to this set and to a member the version lists (`links.alternative`) is skipped: its
 ///   link binds it already, so a joiner that holds it never binds it a second time.
+///   If the linked member is removed later, the change ends up unbound: removing a member
+///   releases its bindings (FW-AL1a Q3), and the link was this change's binding.
 /// - A chosen set also carries its choice: the member, the landing, and the decision blocks the
 ///   landing's changes created.
 ///

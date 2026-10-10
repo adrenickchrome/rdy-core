@@ -1237,3 +1237,66 @@ fn msw20_two_holders_when_a_member_joins_make_common_ground() {
     r.land(&approver(), &p.id).unwrap();
     assert!(canon_bodies(&r).iter().any(|b| b == "K"));
 }
+
+/// msw20 fix round 2 (Group 8 ruling): a losing alternative never releases itself. The loser's
+/// own decision refining the choice decision, written in its member view before the choice,
+/// does not release B2.
+#[test]
+fn msw20_a_losers_own_refine_of_the_choice_decision_does_not_release_it() {
+    let (_d, mut r) = project();
+    let (_doc, section, _claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    claim_in(&mut r, "a", &section, "alt A");
+    claim_in(&mut r, "b", &section, "alt B");
+    let set = r
+        .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap()
+        .id;
+    let b2 = claim_in(&mut r, "b", &section, "B2");
+    let da = r
+        .decide(
+            &writer(),
+            "a",
+            DecisionInput {
+                parent: section.clone(),
+                statement: "Pick A".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let dec = da.created["$decision"].clone();
+    r.view_include(&writer(), "b", std::slice::from_ref(&da.change))
+        .unwrap();
+    let refine = r
+        .decide(
+            &writer(),
+            "b",
+            DecisionInput {
+                parent: section.clone(),
+                statement: "B refines".into(),
+                refines: vec![dec.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .change;
+    let p = r
+        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .unwrap();
+    r.land(&approver(), &p.id).unwrap();
+    // control: B2 alone is refused
+    r.view_include(&writer(), "e", std::slice::from_ref(&b2))
+        .unwrap();
+    assert_eq!(
+        r.propose(&writer(), "e", "e").unwrap_err().code,
+        E_ALT_CHOSEN
+    );
+    r.view_include(&writer(), "d", &[b2, refine]).unwrap();
+    let e = r
+        .propose(&writer(), "d", "d")
+        .and_then(|p| r.land(&approver(), &p.id))
+        .unwrap_err();
+    assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);
+    assert!(e.message.contains(&dec), "{}", e.message);
+    assert!(!canon_bodies(&r).iter().any(|x| x == "B2"));
+}

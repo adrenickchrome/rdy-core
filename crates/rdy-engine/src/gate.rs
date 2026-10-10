@@ -910,6 +910,8 @@ fn not_lost(st: &ReadState, view: &str, what: impl Fn(&str) -> String) -> Result
 /// 2. **A chosen set keeps its losers bound.** A change bound to a member the set did not choose
 ///    (by its link or by rule 1) lands only in a proposal that records a decision superseding or
 ///    refining a decision the choosing landing created (`E_ALT_CHOSEN`), whichever view proposes.
+///    A losing alternative never releases itself: the release must come from a change that has
+///    no losing binding.
 ///    When that landing created no decision, only a decision the proposal creates releases it,
 ///    in a change that is not itself bound to a losing member: an `Update` never releases, and
 ///    neither does a loser's own decision. An abandoned set binds nothing.
@@ -1068,42 +1070,48 @@ fn linked_alts(
 }
 
 /// msw20: whether `changes` create a decision that releases a loser when the choice recorded
-/// none (RULING Q1, Group 8), and the blocks the proposal's decisions supersede or refine.
+/// none (RULING Q1, Group 8), and the blocks the proposal's decisions supersede or refine. One
+/// principle covers both: a losing alternative never releases itself. A change marked `free`
+/// has no losing binding in a chosen set.
 /// The decision blocks are folded in landing order: the last `Create` or `Update` of each block
-/// wins, and a `Delete` drops it. Only a decision that survives the fold and that a `Create` in a
-/// change marked `free` (not bound to a losing member of a chosen set) made counts as created:
-/// an `Update`, tracking-only or not, never releases, and neither does a loser's own decision.
+/// wins, and a `Delete` drops it. A block counts as created only when a `Create` in a free change
+/// made it (an `Update`, tracking-only or not, never creates). Its supersede and refine targets
+/// count only when a free change wrote its surviving version (a free change's `Update` that adds
+/// a refine counts; a loser's own decision never does).
 fn decisions_written(
     st: &ReadState,
     changes: &[Change],
     free: &[bool],
 ) -> (bool, BTreeSet<BlockId>) {
-    // per block: the last version, and whether a free change created it
-    let mut last: BTreeMap<&BlockId, (Option<&Block>, bool)> = BTreeMap::new();
+    // per block: the surviving version, whether a free change created it, and whether a free
+    // change wrote the surviving version
+    let mut last: BTreeMap<&BlockId, (Option<&Block>, bool, bool)> = BTreeMap::new();
     for i in st.landing_order(changes) {
         for op in &changes[i].ops {
             match op {
                 Op::Create { block } => {
-                    last.insert(&block.id, (Some(block), free[i]));
+                    last.insert(&block.id, (Some(block), free[i], free[i]));
                 }
                 Op::Update { block, .. } => {
-                    let e = last.entry(&block.id).or_insert((None, false));
+                    let e = last.entry(&block.id).or_insert((None, false, false));
                     e.0 = Some(block);
+                    e.2 = free[i];
                 }
                 Op::Delete { id, .. } => {
-                    last.insert(id, (None, false));
+                    last.insert(id, (None, false, false));
                 }
             }
         }
     }
-    let decisions: Vec<(&Block, bool)> = last
+    let decisions: Vec<(&Block, bool, bool)> = last
         .into_values()
-        .filter_map(|(b, created)| b.map(|b| (b, created)))
-        .filter(|(b, _)| b.block_type == decision::DECISION)
+        .filter_map(|(b, created, wrote)| b.map(|b| (b, created, wrote)))
+        .filter(|(b, _, _)| b.block_type == decision::DECISION)
         .collect();
     let targets = decisions
         .iter()
-        .flat_map(|(b, _)| {
+        .filter(|(_, _, wrote)| *wrote)
+        .flat_map(|(b, _, _)| {
             [decision::SUPERSEDES, decision::REFINES]
                 .into_iter()
                 .filter_map(|k| b.links.get(k))
@@ -1111,7 +1119,7 @@ fn decisions_written(
                 .map(|l| l.target.clone())
         })
         .collect();
-    (decisions.iter().any(|(_, created)| *created), targets)
+    (decisions.iter().any(|(_, created, _)| *created), targets)
 }
 
 /// The canon that would result from landing `changes` on `st`'s canon, and each applied change's
