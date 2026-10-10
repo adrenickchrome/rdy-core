@@ -140,8 +140,14 @@ fn perf_tier(
     let missing = !classes.contains_key(machine);
     let verdicts;
     let note;
-    if missing || rebaseline {
-        verdicts = perf::compare(None, &measures);
+    if missing && !rebaseline {
+        // nothing is written: a machine class needs two runs within 10%, then --rebaseline
+        verdicts = perf::not_compared(&measures);
+        note = format!(
+            "No baseline for `{machine}`: recorded, not compared. Rebaseline this machine class (two runs within 10%, then cargo qa --rebaseline) and commit crates/rdy-qa/qa-baseline.json."
+        );
+    } else if rebaseline {
+        verdicts = perf::compare(None, &measures, perf::Mode::Record);
         // the measured ops replace their entries and every other op is kept, so a typical-tier
         // rebaseline never deletes the `_50k` baseline
         let merged = perf::merge_baseline(classes.get(machine), machine, &measures);
@@ -153,13 +159,8 @@ fn perf_tier(
                 false,
             );
         }
-        note = if missing {
-            format!(
-                "No baseline for `{machine}`: recorded one in crates/rdy-qa/qa-baseline.json (commit it)."
-            )
-        } else {
-            format!("Rebaselined `{machine}` in crates/rdy-qa/qa-baseline.json (commit the diff).")
-        };
+        note =
+            format!("Rebaselined `{machine}` in crates/rdy-qa/qa-baseline.json (commit the diff).");
     } else {
         // a typical run does not measure the `_50k` ops: their absence is not drift
         let base = classes.get(machine).map(|b| {
@@ -172,7 +173,7 @@ fn perf_tier(
         if let Some(b) = &base {
             notes.extend(report::baseline_drift(b, &measures));
         }
-        verdicts = perf::compare(base.as_ref(), &measures);
+        verdicts = perf::compare(base.as_ref(), &measures, perf::Mode::Compare);
         note = format!("Compared against the baseline for `{machine}`.");
     }
     let ok = verdicts.iter().all(|v| v.pass);

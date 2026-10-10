@@ -1,6 +1,6 @@
 //! The gate report: cargo-test output parsing, guarded defect ids, and the markdown / JSON
 //! rendering that `cargo qa` writes to `target/qa/`.
-use crate::perf::{Baseline, Measure, Verdict};
+use crate::perf::{Baseline, Measure, Status, Verdict};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -386,6 +386,9 @@ pub fn failing_seeds(output: &str) -> Vec<String> {
         .collect()
 }
 
+/// What the perf table's tail column is.
+pub const TAIL_NOTE: &str = "p95 is the nearest-rank 95th percentile of an op's runs: with 20 runs or fewer it is the slowest run. A spec target stated as p99 is checked against this column.";
+
 fn mark(pass: bool) -> &'static str {
     if pass { "PASS" } else { "FAIL" }
 }
@@ -451,21 +454,33 @@ pub fn markdown(r: &Report) -> String {
     if !r.perf.is_empty() {
         let _ = writeln!(
             s,
-            "| Op | Median ms | p95 ms | Baseline ms | Delta | Result | Spec target |\n|---|---|---|---|---|---|---|"
+            "| Op | Median ms | p95 ms | Runs | Baseline ms | Delta | Result | Spec target |\n|---|---|---|---|---|---|---|---|"
         );
         for v in &r.perf {
             let _ = writeln!(
                 s,
-                "| {} | {:.3} | {:.3} | {} | {} | {} | {} |",
+                "| {} | {:.3} | {:.3} | {} | {} | {} | {} | {} |",
                 v.op,
                 v.median_ms,
                 v.p95_ms,
+                v.runs,
                 v.baseline_ms.map_or("-".into(), |b| format!("{b:.3}")),
                 v.delta_pct.map_or("-".into(), |d| format!("{d:+.0}%")),
-                mark(v.pass),
+                v.status.label(),
                 v.spec_target.as_deref().unwrap_or("-")
             );
         }
+        let n = |st: Status| r.perf.iter().filter(|v| v.status == st).count();
+        let _ = writeln!(
+            s,
+            "\n{TAIL_NOTE}\n\n{} pass, {} recorded, {} unbaselined, {} not compared, {} regressed, {} over a ceiling.",
+            n(Status::Pass),
+            n(Status::Recorded),
+            n(Status::Unbaselined),
+            n(Status::NotCompared),
+            n(Status::Regressed),
+            n(Status::OverCeiling),
+        );
     }
 
     if !r.notes.is_empty() {
@@ -907,6 +922,44 @@ mod tests {
             "{}",
             markdown(&r)
         );
+    }
+
+    #[test]
+    fn hd6_the_perf_table_names_each_status_and_the_tail() {
+        use crate::perf::{Measure, Mode, compare, not_compared};
+        let mk = |op: &str| Measure {
+            op: op.into(),
+            median_ms: 1.0,
+            p95_ms: 1.0,
+            runs: 20,
+        };
+        let mut perf = compare(None, &[mk("log_full")], Mode::Compare);
+        perf.extend(not_compared(&[mk("history_100")]));
+        let r = Report {
+            revision: "r".into(),
+            dirty: false,
+            machine: "m".into(),
+            mode: "full".into(),
+            duration_secs: 0.0,
+            pass: false,
+            gates: vec![],
+            areas: vec![],
+            perf,
+            perf_note: String::new(),
+            failing_seeds: vec![],
+            notes: vec![],
+            guarded: BTreeMap::new(),
+        };
+        let md = markdown(&r);
+        assert!(
+            md.contains("| log_full | 1.000 | 1.000 | 20 | - | - | UNBASELINED |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| history_100 | 1.000 | 1.000 | 20 | - | - | RECORDED, NOT COMPARED |"),
+            "{md}"
+        );
+        assert!(md.contains(TAIL_NOTE), "{md}");
     }
 
     #[test]
