@@ -387,7 +387,7 @@ pub fn failing_seeds(output: &str) -> Vec<String> {
 }
 
 /// What the perf table's tail column is.
-pub const TAIL_NOTE: &str = "p95 is the nearest-rank 95th percentile of an op's runs: with 20 runs or fewer it is the slowest run. A spec target stated as p99 is checked against this column.";
+pub const TAIL_NOTE: &str = "p95 is the run at index floor(0.95 x runs) in sorted order (the slowest run when there are 20 runs or fewer). A spec target stated as p99 is checked against this column.";
 
 fn mark(pass: bool) -> &'static str {
     if pass { "PASS" } else { "FAIL" }
@@ -966,6 +966,22 @@ mod tests {
             ),
             "{md}"
         );
+    }
+
+    #[test]
+    fn hd6_b_the_tail_note_states_the_rule_the_code_uses() {
+        // measure_timed takes index floor(0.95 * runs), capped at the last run. That is not the
+        // nearest-rank rule (ceil(0.95 * runs)), so the note must not claim it.
+        assert!(!TAIL_NOTE.contains("nearest"), "{TAIL_NOTE}");
+        assert!(
+            TAIL_NOTE.contains("index floor(0.95 x runs) in sorted order"),
+            "{TAIL_NOTE}"
+        );
+        assert!(
+            TAIL_NOTE.contains("the slowest run when there are 20 runs or fewer"),
+            "{TAIL_NOTE}"
+        );
+        assert!(TAIL_NOTE.contains("p99"), "{TAIL_NOTE}");
     }
 
     #[test]
