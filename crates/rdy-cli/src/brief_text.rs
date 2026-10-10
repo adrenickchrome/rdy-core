@@ -126,6 +126,30 @@ pub fn header(briefing: &Value) -> String {
             }
         }),
     );
+    // FW-LP6: printed only when there are reaches, so a header without them is unchanged
+    let mut reaches: Vec<String> = list("reaches")
+        .map(|x| {
+            let blocks: Vec<&str> = x["blocks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            format!(
+                "{} {} {}: {}",
+                s(x, "decision"),
+                s(x, "via"),
+                s(x, "target"),
+                blocks.join(", ")
+            )
+        })
+        .collect();
+    if let Some(n) = briefing["reaches_omitted"].as_u64().filter(|n| *n > 0) {
+        reaches.push(format!("and {n} more"));
+    }
+    if !reaches.is_empty() {
+        section(&mut out, "reaches", reaches.into_iter());
+    }
     section(
         &mut out,
         "will go stale if this changes",
@@ -805,5 +829,30 @@ mod tests {
             "{h}"
         );
         assert!(!h.contains("(out refines c-B)"), "{h}");
+    }
+
+    #[test]
+    fn mfb2_the_header_lists_reaches_only_when_there_are_some() {
+        let base = json!({"token": "0123456789abcdef", "blocks": [{"id": "D-2", "version": "ff"}], "depends": 0});
+        let none = header(&json!({"base": base}));
+        assert!(!none.contains("reaches"), "{none}");
+        let h = header(&json!({
+            "base": base,
+            "reaches": [{"decision": "D-2", "via": "refines", "target": "D-1", "blocks": ["c-A", "c-C"]}],
+            "reaches_omitted": 3
+        }));
+        let lines: Vec<&str> = h.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| *l == "# reaches:")
+            .expect("a reaches section");
+        assert_eq!(lines[at + 1], "#   D-2 refines D-1: c-A, c-C");
+        assert_eq!(lines[at + 2], "#   and 3 more");
+        let lineage = lines.iter().position(|l| *l == "# Lineage:").unwrap();
+        let stale = lines
+            .iter()
+            .position(|l| *l == "# will go stale if this changes:")
+            .unwrap();
+        assert!(lineage < at && at < stale, "{h}");
     }
 }

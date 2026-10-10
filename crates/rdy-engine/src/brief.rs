@@ -346,6 +346,19 @@ pub struct Lineage {
     pub summary: String,
 }
 
+/// FW-LP6: a covered decision (`decision`) that refines or part-supersedes `target` (`via` is
+/// `refines` or `supersedes`) reaches `blocks`, the uncovered blocks `target` governs.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Reach {
+    pub decision: String,
+    pub via: String,
+    pub target: String,
+    pub blocks: Vec<String>,
+}
+
+/// The most blocks `reaches` lists in all; `reaches_omitted` counts the rest.
+pub const REACH_CAP: usize = 50;
+
 /// An uncovered block that pins a covered one (`on`) and goes suspect when it changes.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct WillGoStale {
@@ -396,6 +409,12 @@ pub struct Briefing {
     pub related_decisions: Vec<RelatedDecision>,
     #[serde(skip_serializing_if = "is_zero")]
     pub related_decisions_omitted: usize,
+    /// What the covered decisions reach (FW-LP6), at most `REACH_CAP` blocks in all. Not paged
+    /// or cut, and not in the digest.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reaches: Vec<Reach>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub reaches_omitted: usize,
     pub base: Base,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
@@ -1176,6 +1195,54 @@ impl ReadState {
                 on: on.to_string(),
             })
             .collect();
+        // FW-LP6: what each covered decision reaches through a refines link or a part
+        // supersedes link, at most `REACH_CAP` blocks in all
+        let mut reaches = vec![];
+        let mut reaches_omitted = 0;
+        let mut room = REACH_CAP;
+        for id in ids {
+            for e in g.outgoing(id) {
+                let via = match &e.kind {
+                    EdgeKind::Link(n) if n == decision::REFINES => decision::REFINES,
+                    EdgeKind::Link(n) if n == decision::SUPERSEDES && e.part.is_some() => {
+                        decision::SUPERSEDES
+                    }
+                    _ => continue,
+                };
+                if matches!(
+                    g.status(&e.to),
+                    Some(
+                        DerivedStatus::Rejected
+                            | DerivedStatus::Superseded { .. }
+                            | DerivedStatus::Revoked { .. }
+                    )
+                ) {
+                    continue;
+                }
+                let all: Vec<String> = g
+                    .governed_by(&e.to)
+                    .into_iter()
+                    .filter(|b| !ids.contains(b))
+                    .map(|b| b.to_string())
+                    .collect();
+                if all.is_empty() {
+                    continue;
+                }
+                let shown = all.len().min(room);
+                reaches_omitted += all.len() - shown;
+                room -= shown;
+                // past the cap: counted, never listed with no blocks
+                if shown == 0 {
+                    continue;
+                }
+                reaches.push(Reach {
+                    decision: id.to_string(),
+                    via: via.to_string(),
+                    target: e.to.to_string(),
+                    blocks: all.into_iter().take(shown).collect(),
+                });
+            }
+        }
         let dependents: Vec<Dependent> = dependents
             .into_keys()
             .map(|(on, block, kind)| Dependent {
@@ -1254,6 +1321,8 @@ impl ReadState {
             mentioned_by_omitted,
             related_decisions,
             related_decisions_omitted,
+            reaches,
+            reaches_omitted,
             base,
             truncated: false,
             omitted: BTreeMap::new(),

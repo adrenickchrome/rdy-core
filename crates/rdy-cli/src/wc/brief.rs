@@ -169,15 +169,17 @@ pub(super) struct Cited {
     pub briefing: Option<Value>,
 }
 
-/// Whether a briefing names anything: a governing decision, a dependent, lineage, a block that
-/// would go stale, an open suspect, work in flight, a related decision, a mention, or something a
-/// cut left out. A briefing of drafts that names nothing is not printed in full on commit.
+/// Whether a briefing names anything: a governing decision, a dependent, lineage, a block a
+/// refined decision governs, a block that would go stale, an open suspect, work in flight, a
+/// related decision, a mention, or something a cut left out. A briefing of drafts that names
+/// nothing is not printed in full on commit.
 pub(super) fn says_something(b: &Value) -> bool {
     let any = |v: &Value| v.as_array().is_some_and(|a| !a.is_empty());
     [
         "governs",
         "dependents",
         "lineage",
+        "reaches",
         "will_go_stale",
         "suspects",
         "related_decisions",

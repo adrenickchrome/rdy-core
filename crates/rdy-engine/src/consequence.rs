@@ -11,8 +11,8 @@ use crate::tensions::{SideRef, Tension, tension_label};
 use crate::tensions::{TensionDelta, tension_delta};
 use crate::views::{UndoResult, ViewOpResult};
 use crate::{Materialized, Rdy, ReadState, Scope, now_ms};
-use rdy_graph::{Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, Suspect};
-use rdy_model::decision::{DECISION, REVOKES, SUPERSEDES};
+use rdy_graph::{DerivedStatus, Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, Suspect};
+use rdy_model::decision::{DECISION, REFINES, REVOKES, SUPERSEDES};
 use rdy_model::{BlockId, Hash, Op};
 use serde::Serialize;
 use std::cell::OnceCell;
@@ -97,6 +97,30 @@ pub const CONFLICT_FIX: &str = "write the block from the version you want (rdy_c
 /// The hint on a `tension` entry.
 pub const TENSION_FIX: &str = "resolve it with a change (rdy_tensions shows both sides), or ask a reviewer to dismiss it with rdy_resolve";
 
+/// The hint on an entry for a block that a refined or part-superseded decision governs (FW-LP6).
+pub const LINEAGE_FIX: &str = "a decision that governs it is refined: check that it still holds and answer confirm, or update it";
+
+/// FW-LP6: for each decision `ops` create, each `refines` link and each `supersedes` link with a
+/// part: (the new decision, the target, the link's name). In op order, then link order.
+pub(crate) fn reached_targets(ops: &[Op]) -> Vec<(BlockId, BlockId, &'static str)> {
+    let mut out = vec![];
+    for op in ops {
+        let Op::Create { block } = op else { continue };
+        if block.block_type != DECISION {
+            continue;
+        }
+        for l in block.links.get(REFINES).into_iter().flatten() {
+            out.push((block.id.clone(), l.target.clone(), REFINES));
+        }
+        for l in block.links.get(SUPERSEDES).into_iter().flatten() {
+            if l.part.is_some() {
+                out.push((block.id.clone(), l.target.clone(), SUPERSEDES));
+            }
+        }
+    }
+    out
+}
+
 /// `cq-` and the first 16 hex characters of the hash of the batch, kind and target.
 /// For a write, `batch` is the change hash; for a view op, the view op's hash.
 pub fn consequence_id(batch: &Hash, kind: &str, target: &BlockId) -> String {
@@ -165,6 +189,9 @@ impl ReadState {
     ) -> Result<Consequences, RdyError> {
         let ch = self.reader().change(change)?;
         let (touched, changed) = changed_by_ops(&ch.ops);
+        // FW-LP6: the reaching links, by new decision, then target
+        let mut reach = reached_targets(&ch.ops);
+        reach.sort();
         let mine = |s: &SideRef| matches!(s, SideRef::Change(c) if c == change);
         // a tension set that cannot be built never fails the other entries
         let (tensions, tensions_error): (Vec<Consequence>, _) = match self.tensions() {
@@ -179,7 +206,7 @@ impl ReadState {
         };
         // nothing can point at a block that did not exist: no graph to read
         let only_creates = ch.ops.iter().all(|o| matches!(o, Op::Create { .. }));
-        if only_creates && changed == touched {
+        if only_creates && changed == touched && reach.is_empty() {
             return Ok(Consequences {
                 tensions_error,
                 ..cut(tensions, max_tokens)
@@ -203,6 +230,7 @@ impl ReadState {
                 &written,
                 vec![],
                 tensions,
+                &reach,
                 max_tokens,
             )
         })
@@ -310,7 +338,16 @@ impl ReadState {
         let g = self.graph(&scope)?;
         let written = self.written_in(Some(view));
         Ok(self.consequences_in(
-            &g, &m, batch, &touched, &changed, &written, conflicts, tensions, max_tokens,
+            &g,
+            &m,
+            batch,
+            &touched,
+            &changed,
+            &written,
+            conflicts,
+            tensions,
+            &[],
+            max_tokens,
         ))
     }
 
@@ -364,14 +401,18 @@ impl ReadState {
             &|_| false,
             vec![],
             vec![],
+            &[],
             max_tokens,
         ))
     }
 
     /// The entries for `changed` in graph `g` over `m`: for each changed block, each block
     /// outside `touched` that points at it. `conflicts` (by block id) come first, then
-    /// `tensions` (as given), then suspect entries, then dependent ones, each by block id;
-    /// `written` marks `already_written`. The list is cut
+    /// `tensions` (as given), then suspect entries, then dependent ones, each by block id, then
+    /// the FW-LP6 entries of `reach` (a `dependent` entry with follow-up `confirm` for each block
+    /// a reached target governs, in the order of `reach`, never a block `touched` holds, the new
+    /// decision itself, or a block the list already holds; none for a target that is rejected,
+    /// superseded or revoked); `written` marks `already_written`. The list is cut
     /// from the end to `max_tokens` (default `BRIEF_DEFAULT_TOKENS`), counting what it drops in
     /// `omitted`.
     #[allow(clippy::too_many_arguments)]
@@ -385,6 +426,7 @@ impl ReadState {
         written: &dyn Fn(&BlockId) -> bool,
         mut conflicts: Vec<Consequence>,
         tensions: Vec<Consequence>,
+        reach: &[(BlockId, BlockId, &'static str)],
         max_tokens: Option<usize>,
     ) -> Consequences {
         let mut suspects_of: BTreeMap<BlockId, Vec<Suspect>> = BTreeMap::new();
@@ -473,6 +515,43 @@ impl ReadState {
         conflicts.extend(tensions);
         conflicts.extend(suspect_items);
         conflicts.extend(dependent_items);
+        // FW-LP6: what a refined or part-superseded target governs, once per block, never a
+        // block this change touched or one the list already holds
+        let mut listed: BTreeSet<String> = conflicts.iter().map(|c| c.block.clone()).collect();
+        for (decision, target, via) in reach {
+            if matches!(
+                g.status(target),
+                Some(
+                    DerivedStatus::Rejected
+                        | DerivedStatus::Superseded { .. }
+                        | DerivedStatus::Revoked { .. }
+                )
+            ) {
+                continue;
+            }
+            for block in g.governed_by(target) {
+                if touched.contains(&block) || block == *decision || m.get(&block).is_none() {
+                    continue;
+                }
+                if !listed.insert(block.to_string()) {
+                    continue;
+                }
+                conflicts.push(Consequence {
+                    id: consequence_id(batch, ConsequenceKind::Dependent.as_str(), &block),
+                    block: block.to_string(),
+                    kind: ConsequenceKind::Dependent,
+                    because: Because {
+                        edge: (*via).to_string(),
+                        changed: target.to_string(),
+                    },
+                    follow_up: FollowUp::Confirm,
+                    conflict: None,
+                    tension: None,
+                    fix: Some(LINEAGE_FIX.to_string()),
+                    already_written: written(&block),
+                });
+            }
+        }
         cut(conflicts, max_tokens)
     }
 }
