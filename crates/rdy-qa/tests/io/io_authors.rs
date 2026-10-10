@@ -755,6 +755,46 @@ fn mfb3_the_import_reply_is_read_as_the_importers_session() {
     );
 }
 
+/// Final review 3: the daemon's import op reads its reply as the importer's session (the op path
+/// passes the importer to `write_and_report_as`): an author's intent is listed, the importer's
+/// own is not.
+#[test]
+fn mfb3_the_daemon_import_reply_is_read_as_the_importer() {
+    use rdy_daemon::{OpContext, dispatch};
+    use rdy_engine::engine::Local;
+    let out = tempfile::tempdir().unwrap();
+    let out = out.path().join("x");
+    older_author_export(
+        &out,
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "wallets", "title": "Wallets", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Summary"}},
+            {"op": "create", "type": "entity", "id": "$e", "parent": "$s", "fields": {"name": "Ledger service"}}
+        ]),
+    );
+    let (b_dir, mut b) = rdy_qa::packs::qa_project();
+    let imp = sess("human:imp", Some("ri"), Role::Approver);
+    for s in [rdy_qa::fixtures::agent("agent:a", Some("r1")), imp.clone()] {
+        b.intent_post(&s, None, Some("payments"), &[], "rework payments", None)
+            .unwrap();
+    }
+    let engine = Local::new(b);
+    let cx = OpContext {
+        engine: &engine,
+        session: &imp,
+        cwd: b_dir.path(),
+    };
+    let v = dispatch(
+        &cx,
+        "import",
+        json!({"dir": out.to_string_lossy(), "view": "import"}),
+    )
+    .unwrap();
+    let intents = v["intents"].as_array().expect("intents");
+    let actors: Vec<&str> = intents.iter().filter_map(|i| i["actor"].as_str()).collect();
+    assert_eq!(actors, ["agent:a"], "only the author's intent: {v}");
+}
+
 /// Final review 2, finding 12: `at_ms` in authors.yaml is refused below 0 and more than 24 h
 /// after now; 0 and now are accepted.
 #[test]

@@ -587,7 +587,10 @@ impl ReadState {
             ) {
                 continue;
             }
-            for block in g.governed_by(target) {
+            // by id, whatever the iteration order of the graph
+            let mut governed = g.governed_by(target);
+            governed.sort();
+            for block in governed {
                 if touched.contains(&block) || block == *decision {
                     continue;
                 }

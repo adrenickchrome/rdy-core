@@ -1,7 +1,7 @@
 //! mfb2: FW-LP6 (D-SCJGF). A decision that refines or part-supersedes another reaches what the
 //! other governs: a `dependent` entry with follow-up `confirm` per governed block, and a `reaches`
 //! section in the new decision's briefing.
-use rdy_engine::brief::FollowUp;
+use rdy_engine::brief::{FollowUp, Reach};
 use rdy_engine::consequence::*;
 use rdy_engine::*;
 use rdy_model::{BlockId, Hash};
@@ -380,10 +380,22 @@ fn mfb2_an_explicit_refines_on_a_full_supersede_reaches() {
     }
     let new = BlockId::parse(&res.created["$decision"]).unwrap();
     let b = brief_of(&r, &w(), &[&new]);
-    let targets: Vec<&str> = b.reaches.iter().map(|x| x.target.as_str()).collect();
-    let mut want = vec![s.decision.to_string(), d3.to_string()];
+    // sorted by target id (then decision, then via), whatever the graph's iteration order
+    let mut want = vec![
+        (s.decision.to_string(), s.a.to_string()),
+        (d3.to_string(), s.c.to_string()),
+    ];
     want.sort();
-    assert_eq!(targets, want, "{:?}", b.reaches);
+    let want: Vec<Reach> = want
+        .into_iter()
+        .map(|(target, block)| Reach {
+            decision: new.to_string(),
+            via: "refines".into(),
+            target,
+            blocks: vec![block],
+        })
+        .collect();
+    assert_eq!(b.reaches, want);
 }
 
 /// P8: a block deleted in the view is not reached, in the consequences or in the briefing.
@@ -419,7 +431,7 @@ fn mfb2_the_edit_loop_doc_says_what_a_refine_reaches() {
     let doc = rdy_mcp::tools::EDIT_LOOP_DOC;
     assert!(
         doc.contains(
-            "A write that records a decision with refines, or a supersedes with a part, also lists each block the refined or partly superseded decision governs (decided_by, implements, its affects): kind dependent, follow_up confirm (a governed decision gets reaffirm, or update while proposed, and no entry when it asserts nothing live), because.edge refines or supersedes. A full supersede reaches only through the refines passed to rdy_supersede, not through the ones it copies."
+            "A write that records a decision with refines, or a supersedes with a part, also lists each block the refined or partly superseded decision governs (decided_by, implements, its affects): kind dependent, follow_up confirm (a governed decision gets reaffirm, or update while proposed, and no entry when it asserts nothing live), because.edge refines or supersedes. A full supersede reaches only through the refines passed to rdy_supersede, not through the ones it copies (a refines list equal to the old decision's counts as copied)."
         ),
         "{doc}"
     );

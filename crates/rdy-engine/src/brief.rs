@@ -348,8 +348,10 @@ pub struct Lineage {
 
 /// FW-LP6: a covered decision (`decision`) that refines or part-supersedes `target` (`via` is
 /// `refines` or `supersedes`) reaches `blocks`, the uncovered blocks `target` governs: never a
-/// deleted block or a decision that asserts nothing live. A decision that fully supersedes
-/// another reaches nothing through the `refines` links it copied from it.
+/// deleted block or a decision that asserts nothing live. The list is sorted by target, then
+/// decision, then via; `blocks` is sorted by id. A decision that fully supersedes
+/// another reaches nothing through the `refines` links it copied from it (a refines list equal
+/// to the old decision's counts as copied).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Reach {
     pub decision: String,
@@ -1199,9 +1201,7 @@ impl ReadState {
             .collect();
         // FW-LP6: what each covered decision reaches through a refines link or a part
         // supersedes link, at most `REACH_CAP` blocks in all
-        let mut reaches = vec![];
-        let mut reaches_omitted = 0;
-        let mut room = REACH_CAP;
+        let mut found: Vec<(String, String, &str, Vec<String>)> = vec![];
         for id in ids {
             // a full supersede does not reach through the refines links it copied
             let copied = crate::consequence::refines_copied(&g, id);
@@ -1223,7 +1223,7 @@ impl ReadState {
                 ) {
                     continue;
                 }
-                let all: Vec<String> = g
+                let mut all: Vec<String> = g
                     .governed_by(&e.to)
                     .into_iter()
                     // as the consequences do: never a block deleted here, or a decision that
@@ -1239,20 +1239,30 @@ impl ReadState {
                 if all.is_empty() {
                     continue;
                 }
-                let shown = all.len().min(room);
-                reaches_omitted += all.len() - shown;
-                room -= shown;
-                // past the cap: counted, never listed with no blocks
-                if shown == 0 {
-                    continue;
-                }
-                reaches.push(Reach {
-                    decision: id.to_string(),
-                    via: via.to_string(),
-                    target: e.to.to_string(),
-                    blocks: all.into_iter().take(shown).collect(),
-                });
+                all.sort();
+                found.push((e.to.to_string(), id.to_string(), via, all));
             }
+        }
+        // a stable order, whatever the iteration order of the graph: target, decision, via; the
+        // cap then cuts the same entries every time
+        found.sort();
+        let mut reaches = vec![];
+        let mut reaches_omitted = 0;
+        let mut room = REACH_CAP;
+        for (target, decision, via, all) in found {
+            let shown = all.len().min(room);
+            reaches_omitted += all.len() - shown;
+            room -= shown;
+            // past the cap: counted, never listed with no blocks
+            if shown == 0 {
+                continue;
+            }
+            reaches.push(Reach {
+                decision,
+                via: via.to_string(),
+                target,
+                blocks: all.into_iter().take(shown).collect(),
+            });
         }
         let dependents: Vec<Dependent> = dependents
             .into_keys()
