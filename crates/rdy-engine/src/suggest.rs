@@ -127,11 +127,25 @@ impl ReadState {
         scope: &Scope,
         change: &Hash,
     ) -> Result<(Vec<Suggestion>, usize), RdyError> {
-        let ch = self.reader().change(change)?;
-        let m = self.materialized(scope)?;
-        let ids: BTreeSet<&BlockId> = ch
-            .ops
+        self.suggestions_of(scope, std::slice::from_ref(change))
+    }
+
+    /// [`ReadState::suggestions`] for `changes` written together (an import writes one change
+    /// per author): the written blocks are those any of them wrote, and the cut applies to the
+    /// whole list.
+    pub fn suggestions_of(
+        &self,
+        scope: &Scope,
+        changes: &[Hash],
+    ) -> Result<(Vec<Suggestion>, usize), RdyError> {
+        let chs = changes
             .iter()
+            .map(|h| self.reader().change(h))
+            .collect::<Result<Vec<_>, _>>()?;
+        let m = self.materialized(scope)?;
+        let ids: BTreeSet<&BlockId> = chs
+            .iter()
+            .flat_map(|ch| &ch.ops)
             .filter(|o| matches!(o, Op::Create { .. } | Op::Update { .. }))
             .map(Op::block_id)
             .collect();

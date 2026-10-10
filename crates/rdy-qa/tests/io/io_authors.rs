@@ -511,3 +511,122 @@ fn mfb3_a_failed_import_leaves_no_change() {
     }
     assert!(failed > 0, "no write of the import failed");
 }
+
+/// Project A (rdy-qa pack): agent:a writes `ops` in canon, then decides twice on what `$e`
+/// (an entity of `ops`) names; agent:b then writes a plain doc. The export.
+fn older_author_export(out: &Path, ops: serde_json::Value) {
+    let (_a_dir, mut r) = rdy_qa::packs::qa_project();
+    let a = sess("agent:a", Some("r1"), Role::Writer);
+    let w = put(&mut r, &a, "va", ops);
+    let (s, e) = (w.created["$s"].clone(), w.created["$e"].clone());
+    for statement in ["The ledger is append-only", "Entries are kept forever"] {
+        r.decide(
+            &a,
+            "va",
+            DecisionInput {
+                parent: s.clone(),
+                statement: statement.into(),
+                affects: vec![e.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let p = r.propose(&a, "va", "a").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    let b = sess("agent:b", Some("r2"), Role::Writer);
+    put(
+        &mut r,
+        &b,
+        "vb",
+        json!([
+            {"op": "create", "type": "doc", "fields": {"name": "plain", "title": "Plain", "doc_type": "overview"}}
+        ]),
+    );
+    let p = r.propose(&b, "vb", "b").unwrap();
+    r.land(&founder(), &p.id).unwrap();
+    r.read().export(&Scope::Canon, out).unwrap();
+}
+
+/// Fix round 2 (finding 1): the import reply reports what every author change gives, not only
+/// the newest change. The oldest change (agent:a) has a tension (two terms named fee), a
+/// suggestion (a claim that names the Ledger entity) and an intent on its blocks (an area
+/// intent on `payments`, which holds the doc `wallets`); the middle change (human:founder, who
+/// accepted the decisions at the landing) has related decisions (two decisions on that entity);
+/// the newest change (agent:b) is one plain doc.
+#[test]
+fn mfb3_the_import_reply_reports_every_author_change() {
+    use rdy_engine::consequence::write_and_report;
+    use rdy_engine::engine::Local;
+    let out = tempfile::tempdir().unwrap();
+    let out = out.path().join("x");
+    older_author_export(
+        &out,
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "wallets", "title": "Wallets", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Summary"}},
+            {"op": "create", "type": "entity", "id": "$e", "parent": "$s", "fields": {"name": "Ledger service", "aliases": ["ledger"]}},
+            {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "The Ledger keeps every entry."},
+            {"op": "create", "type": "term", "id": "$t1", "parent": "$s", "fields": {"name": "fee"}, "body": "A fee is a charge."},
+            {"op": "create", "type": "term", "id": "$t2", "parent": "$s", "fields": {"name": "fee"}, "body": "A fee is a cost."}
+        ]),
+    );
+    let (_b_dir, mut b) = rdy_qa::packs::qa_project();
+    b.intent_post(
+        &rdy_qa::fixtures::agent("agent:x", Some("rx")),
+        None,
+        Some("payments"),
+        &[],
+        "rework payments",
+        None,
+    )
+    .unwrap();
+    let engine = Local::new(b);
+    let imp = sess("human:imp", None, Role::Approver);
+    let dir = out.clone();
+    let v = write_and_report(&engine, "import", None, move |r| {
+        r.import(&imp, "import", &dir)
+    })
+    .unwrap();
+    let changes: Vec<String> = v["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect();
+    let actors: Vec<String> = changes
+        .iter()
+        .map(|c| {
+            let st = engine.read();
+            let ch = st.reader().change(&c.parse::<Hash>().unwrap()).unwrap();
+            ch.provenance.actor.clone()
+        })
+        .collect();
+    // the landing accepted the decisions, so their newest author is the founder
+    assert_eq!(actors, ["agent:a", "human:founder", "agent:b"], "{v}");
+    let kinds: Vec<&str> = v["consequences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["kind"].as_str())
+        .collect();
+    assert!(
+        kinds.contains(&"tension"),
+        "the older change's tension: {v}"
+    );
+    let sugg = v["suggestions"].as_array().unwrap();
+    assert!(
+        sugg.iter()
+            .any(|s| s["kind"] == "link" && s["link"] == "describes"),
+        "the older change's suggestion: {v}"
+    );
+    let rel = v["related_decisions"]
+        .as_array()
+        .expect("related_decisions");
+    assert_eq!(rel.len(), 2, "each decision relates to the other: {v}");
+    assert!(rel.iter().all(|r| r["relation"] == "same_entity"), "{v}");
+    let intents = v["intents"].as_array().expect("intents");
+    assert_eq!(intents.len(), 1, "{v}");
+    assert_eq!(intents[0]["actor"], "agent:x");
+    assert!(!intents[0]["blocks"].as_array().unwrap().is_empty(), "{v}");
+}
