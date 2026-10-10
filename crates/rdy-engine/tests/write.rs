@@ -799,13 +799,15 @@ fn hd3_the_op_tag_and_every_documented_field_still_parse() {
         {"op": "create", "type": "claim", "before": "b"},
         {"op": "update", "id": "x", "base": "v", "fields": {}, "unset": ["f"], "body": "b",
          "links": {"k": [{"target": "t"}]}, "type": "note", "move_to": {"parent": "p", "after": "a"}},
+        {"op": "update", "id": "x", "move_to": {"parent": "p", "before": "b"}},
         {"op": "move", "id": "x", "base": "v", "parent": "p", "before": "b"},
+        {"op": "move", "id": "x", "after": "a"},
         {"op": "delete", "id": "x", "base": "v"},
         {"op": "rebalance"},
         {"op": "rebalance", "parent": "p"},
         {"op": "repin", "id": "x", "base": "v", "targets": ["t"]}
     ]));
-    assert_eq!(v.len(), 8);
+    assert_eq!(v.len(), 10);
 }
 
 #[test]

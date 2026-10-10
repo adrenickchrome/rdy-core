@@ -645,3 +645,21 @@ fn hd3_an_op_arg_typo_gets_a_did_you_mean() {
         "did you mean \"limit\"? the fields are limit, since"
     );
 }
+
+#[test]
+fn hd3_an_alt_member_with_an_unknown_field_is_refused() {
+    let (d, e) = project();
+    let s = human();
+    let err = dispatch(
+        &cx(&e, &s, d.path()),
+        "alt",
+        json!({"op": "create", "title": "t", "members": [
+            {"label": "a", "view": "v", "viw": 1},
+            {"label": "b", "view": "w"}
+        ]}),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT, "{err}");
+    assert_eq!(err.message, "alt: unknown field \"viw\"");
+    assert_eq!(err.fix, "did you mean \"view\"? the fields are label, view");
+}

@@ -28,7 +28,17 @@ pub struct LinkInput {
 #[serde(untagged)]
 enum LinkEntry {
     Text(String),
-    Full(BTreeMap<String, serde_json::Value>),
+    Full(BTreeMap<String, LinkScalar>),
+}
+
+/// One value in a link object. It is not a `serde_json::Value`: that turns a YAML `.nan` or
+/// `.inf` into null, which would read as "no part" and drop the input (hd3 fix round 1).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LinkScalar {
+    Text(String),
+    Unit(()),
+    Other(serde::de::IgnoredAny),
 }
 
 /// Ruling Q2: the keys a link object takes (a closed set).
@@ -78,7 +88,7 @@ where
 /// did-you-mean (ruling Q2); a missing or non-string target is the generic `LINK_FORMS` text.
 fn link_object<E: serde::de::Error>(
     kind: &str,
-    o: BTreeMap<String, serde_json::Value>,
+    mut o: BTreeMap<String, LinkScalar>,
 ) -> Result<LinkInput, E> {
     if let Some(k) = o.keys().find(|k| !LINK_KEYS.contains(&k.as_str())) {
         let hint = match crate::did_you_mean::nearest(k, &LINK_KEYS) {
@@ -89,11 +99,15 @@ fn link_object<E: serde::de::Error>(
             "{kind}: unknown field \"{k}\" in a link; {hint}a link takes target and part"
         )));
     }
-    let text = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_str()).map(String::from);
-    let target = text(o.get("target")).ok_or_else(|| E::custom(format!("{kind}: {LINK_FORMS}")))?;
-    let part = match o.get("part") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(v) => Some(text(Some(v)).ok_or_else(|| E::custom(format!("{kind}: {LINK_FORMS}")))?),
+    let bad = || E::custom(format!("{kind}: {LINK_FORMS}"));
+    let target = match o.remove("target") {
+        Some(LinkScalar::Text(t)) => t,
+        _ => return Err(bad()),
+    };
+    let part = match o.remove("part") {
+        None | Some(LinkScalar::Unit(())) => None,
+        Some(LinkScalar::Text(p)) => Some(p),
+        Some(LinkScalar::Other(_)) => return Err(bad()),
     };
     Ok(LinkInput { target, part })
 }
