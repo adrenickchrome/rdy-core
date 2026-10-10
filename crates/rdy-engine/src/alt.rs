@@ -188,7 +188,9 @@ fn need_open(stable: &Hash, set: &AltSet) -> Result<(), RdyError> {
 /// - At each version that adds members (every member, at the first), each change a joiner held
 ///   just before that version was written, and that the set does not bind or share yet, is
 ///   counted among the version's members as they held it then: one holder binds it to that
-///   member, two or more make it common ground. Bindings fixed earlier never change.
+///   member, two or more make it common ground. Bindings fixed earlier never change. A change
+///   linked to this set and to a member the version lists (`links.alternative`) is skipped: its
+///   link binds it already, so a joiner that holds it never binds it a second time.
 /// - A chosen set also carries its choice: the member, the landing, and the decision blocks the
 ///   landing's changes created.
 ///
@@ -208,6 +210,7 @@ pub(crate) fn alt_binds(
         versions.push((prev, reader.alt_set(&prev)?));
     }
     versions.reverse();
+    let stable = versions[0].0;
     let mut bound: BTreeMap<Hash, String> = BTreeMap::new();
     let mut shared: BTreeSet<Hash> = BTreeSet::new();
     let mut listed: BTreeSet<&str> = BTreeSet::new();
@@ -224,6 +227,15 @@ pub(crate) fn alt_binds(
             for j in &joined {
                 for c in &held[j] {
                     if bound.contains_key(c) || shared.contains(c) {
+                        continue;
+                    }
+                    // already bound to this set by its live link to a member this version lists
+                    if reader
+                        .change(c)?
+                        .links
+                        .alternative
+                        .is_some_and(|a| a.set == stable && members.contains(a.member.as_str()))
+                    {
                         continue;
                     }
                     let mut holders = held.iter().filter(|(_, h)| h.contains(c)).map(|(m, _)| *m);

@@ -1028,3 +1028,212 @@ fn msw20_alt_remove_on_a_chosen_set_is_refused_so_losers_stay_bound() {
     assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);
     assert!(e.message.contains("member y"), "{}", e.message);
 }
+
+/// msw20 fix round 1 (Group 8 ruling, Q1): when the choice recorded no decision, only a decision
+/// the proposal creates in a change that is not itself bound to a loser releases it. The loser's
+/// own decision, written in its member view after the set was created, never does.
+#[test]
+fn msw20_a_losers_own_decision_does_not_release_it_when_the_choice_recorded_none() {
+    let (_d, mut r) = project();
+    let (_doc, section, _claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    claim_in(&mut r, "a", &section, "alt A");
+    let b = claim_in(&mut r, "b", &section, "alt B");
+    let set = r
+        .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap()
+        .id;
+    let use_b = r
+        .decide(
+            &writer(),
+            "b",
+            DecisionInput {
+                parent: section.clone(),
+                statement: "Use B".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .change;
+    let p = r
+        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .unwrap();
+    r.land(&approver(), &p.id).unwrap();
+    r.view_include(&writer(), "d", &[b, use_b]).unwrap();
+    let e = r
+        .propose(&writer(), "d", "d")
+        .and_then(|p| r.land(&approver(), &p.id))
+        .unwrap_err();
+    assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);
+    assert!(e.message.contains("member y"), "{}", e.message);
+    let bodies = canon_bodies(&r);
+    assert!(!bodies.iter().any(|x| x == "alt B"), "{bodies:?}");
+}
+
+/// msw20 fix round 1 (Group 8 ruling, Q1): an Update of a decision never releases a loser, not
+/// even a tracking-only one; only a decision the proposal creates does.
+#[test]
+fn msw20_an_update_only_proposal_does_not_release_a_losers_change() {
+    const TRK_PACK: &str = "\
+name: trk
+version: \"1\"
+extends: rdy-standard
+block_types:
+  decision:
+    prefix: D
+    traits: [normative]
+    fields:
+      disposition: { kind: str }
+    tracking: [disposition]
+";
+    let d = tempfile::tempdir().unwrap();
+    drop(Rdy::init(d.path(), "rdy-standard").unwrap());
+    std::fs::write(d.path().join(".rdy/packs/trk.yaml"), TRK_PACK).unwrap();
+    std::fs::write(d.path().join(".rdy/config.yaml"), "pack: trk\n").unwrap();
+    let mut r = Rdy::open(d.path()).unwrap();
+    let (_doc, section, _claim) = seed_doc(&mut r, "seed");
+    let old = r
+        .decide(
+            &writer(),
+            "seed",
+            DecisionInput {
+                parent: section.clone(),
+                statement: "Old".into(),
+                fields: [("disposition".to_string(), json!("M2"))]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"]
+        .clone();
+    land(&mut r, "seed").unwrap();
+    claim_in(&mut r, "a", &section, "alt A");
+    let b = claim_in(&mut r, "b", &section, "alt B");
+    let set = r
+        .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap()
+        .id;
+    let p = r
+        .propose_with(&writer(), "a", "x", None, None, Some(&pick(&set, "x")))
+        .unwrap();
+    r.land(&approver(), &p.id).unwrap();
+    r.view_include(&writer(), "d", std::slice::from_ref(&b))
+        .unwrap();
+    r.write(
+        &writer(),
+        WriteRequest {
+            view: "d".into(),
+            ops: serde_json::from_value(
+                json!([{"op": "update", "id": old, "fields": {"disposition": "M3"}}]),
+            )
+            .unwrap(),
+            justification: Some(rdy_model::Justification::Editorial {
+                class: rdy_model::EditorialClass::Clarify,
+                reason: "moved to M3".into(),
+            }),
+            message: String::new(),
+        },
+    )
+    .unwrap();
+    let e = r
+        .propose(&writer(), "d", "d")
+        .and_then(|p| r.land(&approver(), &p.id))
+        .unwrap_err();
+    assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);
+    assert!(
+        e.message.contains("which recorded no decision"),
+        "{}",
+        e.message
+    );
+}
+
+/// msw20 fix round 1: a change linked to a listed member of a set is not bound a second time in
+/// the same set when another member joins holding it; the gate names its one binding.
+#[test]
+fn msw20_a_change_linked_to_a_member_is_not_bound_again_when_another_member_joins() {
+    let (_d, mut r) = project();
+    let (_doc, section, _claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    claim_in(&mut r, "a", &section, "alt A");
+    claim_in(&mut r, "b", &section, "alt B");
+    let info = r
+        .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap();
+    let set = info.id.clone();
+    let h = claim_in(&mut r, "b", &section, "H");
+    r.view_exclude(&writer(), "b", std::slice::from_ref(&h), false)
+        .unwrap();
+    r.view_include(&writer(), "c", std::slice::from_ref(&h))
+        .unwrap();
+    r.alt_add(&writer(), &set, &m("z", "c")).unwrap();
+    let stable: Hash = info.set.parse().unwrap();
+    let h_hash: Hash = h.parse().unwrap();
+    assert_eq!(
+        r.read().coord_heads().alt_binds[&stable].bound.get(&h_hash),
+        None,
+        "H keeps its link to y only"
+    );
+    let e = r
+        .propose_with(&writer(), "c", "z", None, None, Some(&pick(&set, "z")))
+        .unwrap_err();
+    assert_eq!(e.code, E_ALT_MEMBER, "{}", e.message);
+    assert!(e.message.contains("member y"), "{}", e.message);
+    assert!(!e.message.contains("open sets"), "{}", e.message);
+}
+
+/// msw20 fix round 1: with a choice decision, a decision that neither supersedes nor refines it
+/// does not release a loser's change.
+#[test]
+fn msw20_an_unrelated_decision_does_not_release_a_losers_change() {
+    let (_d, mut r) = project();
+    let (_set, section, b, _b2, dec) = chosen_a(&mut r);
+    r.view_include(&writer(), "d", std::slice::from_ref(&b))
+        .unwrap();
+    r.decide(
+        &writer(),
+        "d",
+        DecisionInput {
+            parent: section.clone(),
+            statement: "Unrelated".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let e = r
+        .propose(&writer(), "d", "d")
+        .and_then(|p| r.land(&approver(), &p.id))
+        .unwrap_err();
+    assert_eq!(e.code, E_ALT_CHOSEN, "{}", e.message);
+    assert!(e.message.contains(&dec), "{}", e.message);
+    assert!(!canon_bodies(&r).iter().any(|x| x == "alt B"));
+}
+
+/// msw20 fix round 1: two members that hold a change when one of them joins make it common
+/// ground; any view lands it after the joiner excludes it.
+#[test]
+fn msw20_two_holders_when_a_member_joins_make_common_ground() {
+    let (_d, mut r) = project();
+    let (_doc, section, _claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    claim_in(&mut r, "a", &section, "alt A");
+    claim_in(&mut r, "b", &section, "alt B");
+    let set = r
+        .alt_create(&writer(), "T", None, &[m("x", "a"), m("y", "b")])
+        .unwrap()
+        .id;
+    let k = claim_in(&mut r, "n", &section, "K");
+    r.view_include(&writer(), "a", std::slice::from_ref(&k))
+        .unwrap();
+    r.view_include(&writer(), "c", std::slice::from_ref(&k))
+        .unwrap();
+    r.alt_add(&writer(), &set, &m("z", "c")).unwrap();
+    r.view_exclude(&writer(), "c", std::slice::from_ref(&k), false)
+        .unwrap();
+    r.view_include(&writer(), "d", std::slice::from_ref(&k))
+        .unwrap();
+    let p = r.propose(&writer(), "d", "d").unwrap();
+    r.land(&approver(), &p.id).unwrap();
+    assert!(canon_bodies(&r).iter().any(|b| b == "K"));
+}

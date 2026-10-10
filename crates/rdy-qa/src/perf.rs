@@ -59,7 +59,11 @@ pub fn spec_ceiling_ms(op: &str) -> Option<f64> {
         "tree_full" | "tree_full_memo" | "brief_doc" | "version_position" => 5.0,
         "view_materialize_cold" | "view_cold" => 50.0,
         "view_materialize_incremental" | "view_incremental" => 1.0,
-        "render" | "cold_open" | "cold_open_lagging" | "daemon_cold_start" => 2000.0,
+        "render"
+        | "cold_open"
+        | "cold_open_lagging"
+        | "daemon_cold_start"
+        | "open_chosen_alts_100" => 2000.0,
         _ => return None,
     })
 }
@@ -89,6 +93,9 @@ fn spec_target(op: &str) -> Option<String> {
             "< 5 ms p99 on Linux NVMe; one durable flush + < 1 ms on macOS (spec 11, restated per hardware class)"
         }
         "brief_doc" => "< 5 ms p99 at 10k with the view's graph carried (the read budget, spec 11)",
+        "open_chosen_alts_100" => {
+            "< 2 s (the cold-open budget, spec 11): open with 100 chosen alternative sets whose winner views wrote 50 changes each after the set was created"
+        }
         "brief_expired_intents_1k" => {
             "< 5 ms p99 (the read budget, spec 11): a briefing with 1,000 expired intents and 5 open ones in the project"
         }
@@ -1514,6 +1521,101 @@ fn tier_coord(out: &mut Vec<Measure>, parent: &std::path::Path, sfx: &str, runs:
         runs.write,
         |i| {
             reported_write(&engine, &b, "rb", &fx.claim, format!("Settled {i}."));
+        },
+    ));
+    drop(engine);
+
+    tier_coord_chosen(out, parent, sfx, runs, n);
+}
+
+/// msw20 (fix round 1): `n / 10` chosen alternative sets, each {w: w<i>, l: l<i>} chosen for w,
+/// whose winner view wrote `n / 20` (at least 5) changes after the set was created, in a fresh
+/// small project. `open_chosen_alts_100` reopens it: `CoordHeads::read` derives every chosen
+/// set's bindings from history, and each member's walk runs from its head back to the set's
+/// creation. `propose_chosen_alts_100` proposes a view of the same number of changes there: the
+/// gate checks each change against every settled set.
+fn tier_coord_chosen(
+    out: &mut Vec<Measure>,
+    parent: &std::path::Path,
+    sfx: &str,
+    runs: &Runs,
+    n: usize,
+) {
+    let (sets, chain) = (n / 10, (n / 20).max(5));
+    let (proj, mut r, fx) = coord_project(parent, "coord-chosen");
+    let o = crate::fixtures::agent("agent:o", Some("o"));
+    let claim = fx.claim.to_string();
+    let edit = |r: &mut Rdy, view: &str, body: String| -> String {
+        write(
+            r,
+            view,
+            json!([{"op": "update", "id": claim, "body": body}]),
+        )
+        .expect("a member write")
+        .change
+    };
+    for i in 0..sets {
+        let (w, l) = (format!("w{i}"), format!("l{i}"));
+        for v in [&w, &l] {
+            r.view_create(&writer(), v, None, false)
+                .expect("a member view");
+        }
+        let members = [
+            rdy_engine::alt::AltMemberInput {
+                label: "w".into(),
+                view: w.clone(),
+            },
+            rdy_engine::alt::AltMemberInput {
+                label: "l".into(),
+                view: l,
+            },
+        ];
+        let set = r
+            .alt_create(&o, &format!("chosen {i}"), None, &members)
+            .expect("a set");
+        for k in 0..chain {
+            edit(&mut r, &w, format!("Winner {i}.{k}."));
+        }
+        let pick = rdy_engine::alt::AltPick {
+            set: set.id.clone(),
+            chosen: "w".into(),
+        };
+        let p = r
+            .propose_with(&writer(), &w, &w, None, None, Some(&pick))
+            .expect("a choosing proposal");
+        r.land(&approver(), &p.id).expect("the choosing landing");
+    }
+    let source: Vec<String> = (0..chain)
+        .map(|k| edit(&mut r, "ps", format!("Proposed {k}.")))
+        .collect();
+    let chosen = r
+        .read()
+        .coord_heads()
+        .alt_binds
+        .values()
+        .filter(|b| b.chosen.is_some())
+        .count();
+    assert_eq!(chosen, sets, "every set is chosen");
+    drop(r);
+    out.push(measure(
+        &format!("open_chosen_alts_100{sfx}"),
+        runs.materialize_cold,
+        |_| {
+            let r = Rdy::open(&proj).expect("open");
+            assert_eq!(r.read().coord_heads().alt_binds.len(), sets);
+        },
+    ));
+    let mut r = Rdy::open(&proj).expect("open");
+    out.push(measure_timed(
+        &format!("propose_chosen_alts_100{sfx}"),
+        runs.write,
+        |i| {
+            let name = format!("pp{i}");
+            r.view_include(&writer(), &name, &source)
+                .expect("include the proposal's changes");
+            let s = Instant::now();
+            r.propose(&writer(), &name, &name).expect("propose");
+            s.elapsed()
         },
     ));
 }
@@ -2977,13 +3079,21 @@ mod tests {
             [
                 "write_expired_intents_1k",
                 "brief_expired_intents_1k",
-                "write_settled_alts_1k"
+                "write_settled_alts_1k",
+                "open_chosen_alts_100",
+                "propose_chosen_alts_100"
             ]
         );
         for op in names {
             let target = spec_target(op).unwrap_or_else(|| panic!("{op} has no target"));
-            assert!(target.contains("< 5 ms p99"), "{op}: {target}");
+            let budget = if op.starts_with("open_") {
+                "< 2 s"
+            } else {
+                "< 5 ms p99"
+            };
+            assert!(target.contains(budget), "{op}: {target}");
         }
+        assert!(fsync_bound("propose_chosen_alts_100") && !fsync_bound("open_chosen_alts_100"));
         assert!(
             fsync_bound("write_expired_intents_1k") && !fsync_bound("brief_expired_intents_1k")
         );
@@ -3005,6 +3115,8 @@ mod tests {
             "write_expired_intents_1k",
             "brief_expired_intents_1k",
             "write_settled_alts_1k",
+            "open_chosen_alts_100",
+            "propose_chosen_alts_100",
         ];
         for op in ops {
             assert!(spec_target(op).is_some(), "{op} has no target");

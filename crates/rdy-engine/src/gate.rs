@@ -910,8 +910,9 @@ fn not_lost(st: &ReadState, view: &str, what: impl Fn(&str) -> String) -> Result
 /// 2. **A chosen set keeps its losers bound.** A change bound to a member the set did not choose
 ///    (by its link or by rule 1) lands only in a proposal that records a decision superseding or
 ///    refining a decision the choosing landing created (`E_ALT_CHOSEN`), whichever view proposes.
-///    When that landing created no decision, any decision the proposal writes releases it. An
-///    abandoned set binds nothing.
+///    When that landing created no decision, only a decision the proposal creates releases it,
+///    in a change that is not itself bound to a losing member: an `Update` never releases, and
+///    neither does a loser's own decision. An abandoned set binds nothing.
 /// 3. **Two open sets.** A change bound in more than one open set can never land: one proposal
 ///    chooses in one set only, so the refusal names every set and says to exclude the change.
 ///
@@ -984,95 +985,125 @@ fn linked_alts(
             ),
         ));
     }
-    // the decisions the proposal writes, and what they supersede or refine: read once, when a
-    // chosen-set binding first needs them
-    let mut released: Option<(bool, BTreeSet<BlockId>)> = None;
-    for (id, c) in ids.iter().zip(changes) {
-        for (stable, (_, set)) in &heads.settled_alts {
-            let Some(ch) = heads.alt_binds.get(stable).and_then(|b| b.chosen.as_ref()) else {
-                continue;
-            };
-            let binds = &heads.alt_binds[stable];
-            let linked = c
-                .links
-                .alternative
-                .as_ref()
-                .filter(|a| a.set == *stable)
-                .map(|a| a.member.as_str());
-            let fixed = binds.bound.get(id).map(String::as_str);
-            for loser in [linked, fixed].into_iter().flatten() {
-                if loser == ch.member || !set.members.iter().any(|m| m.view == loser) {
+    // each change's losing bindings in chosen sets: (set, losing member)
+    let losers: Vec<Vec<(&Hash, &AltSet, &str)>> = ids
+        .iter()
+        .zip(changes)
+        .map(|(id, c)| {
+            let mut out = Vec::new();
+            for (stable, (_, set)) in &heads.settled_alts {
+                let Some(binds) = heads.alt_binds.get(stable) else {
                     continue;
-                }
-                let (writes, targets) =
-                    released.get_or_insert_with(|| decisions_written(st, changes));
-                let ok = if ch.decisions.is_empty() {
-                    *writes
-                } else {
-                    ch.decisions.iter().any(|d| targets.contains(d))
                 };
-                if ok {
+                let Some(ch) = binds.chosen.as_ref() else {
                     continue;
+                };
+                let linked = c
+                    .links
+                    .alternative
+                    .as_ref()
+                    .filter(|a| a.set == *stable)
+                    .map(|a| a.member.as_str());
+                let fixed = binds.bound.get(id).map(String::as_str);
+                for loser in [linked, fixed].into_iter().flatten() {
+                    if loser != ch.member && set.members.iter().any(|m| m.view == loser) {
+                        out.push((stable, set, loser));
+                    }
                 }
-                let at = format!(
-                    "change {} belongs to member {}, which lost set {}",
-                    id.short(),
-                    member_label(set, loser),
-                    alt_label(stable)
-                );
-                return Err(if ch.decisions.is_empty() {
-                    RdyError::new(
-                        E_ALT_CHOSEN,
-                        format!(
-                            "{at} (chosen by landing {}, which recorded no decision)",
-                            ch.landing.short()
-                        ),
-                        "land it with a new decision that records the revisit",
-                    )
-                } else {
-                    let d = ch
-                        .decisions
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    RdyError::new(
-                        E_ALT_CHOSEN,
-                        format!("{at} (chosen by {d})"),
-                        format!("land it with a decision that supersedes or refines {d}"),
-                    )
-                });
             }
+            out
+        })
+        .collect();
+    if losers.iter().all(Vec::is_empty) {
+        return Ok(());
+    }
+    // the decisions the proposal writes: read once, only when a chosen-set binding needs them
+    let free: Vec<bool> = losers.iter().map(Vec::is_empty).collect();
+    let (created, targets) = decisions_written(st, changes, &free);
+    for (id, bound) in ids.iter().zip(&losers) {
+        for &(stable, set, loser) in bound {
+            let ch = heads.alt_binds[stable]
+                .chosen
+                .as_ref()
+                .expect("a losing binding is in a chosen set");
+            let ok = if ch.decisions.is_empty() {
+                created
+            } else {
+                ch.decisions.iter().any(|d| targets.contains(d))
+            };
+            if ok {
+                continue;
+            }
+            let at = format!(
+                "change {} belongs to member {}, which lost set {}",
+                id.short(),
+                member_label(set, loser),
+                alt_label(stable)
+            );
+            return Err(if ch.decisions.is_empty() {
+                RdyError::new(
+                    E_ALT_CHOSEN,
+                    format!(
+                        "{at} (chosen by landing {}, which recorded no decision)",
+                        ch.landing.short()
+                    ),
+                    "land it with a new decision that records the revisit",
+                )
+            } else {
+                let d = ch
+                    .decisions
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                RdyError::new(
+                    E_ALT_CHOSEN,
+                    format!("{at} (chosen by {d})"),
+                    format!("land it with a decision that supersedes or refines {d}"),
+                )
+            });
         }
     }
     Ok(())
 }
 
-/// msw20: whether `changes` write a decision, and the blocks those decisions supersede or refine.
+/// msw20: whether `changes` create a decision that releases a loser when the choice recorded
+/// none (RULING Q1, Group 8), and the blocks the proposal's decisions supersede or refine.
 /// The decision blocks are folded in landing order: the last `Create` or `Update` of each block
-/// wins, and a `Delete` drops it.
-fn decisions_written(st: &ReadState, changes: &[Change]) -> (bool, BTreeSet<BlockId>) {
-    let mut last: BTreeMap<&BlockId, Option<&Block>> = BTreeMap::new();
+/// wins, and a `Delete` drops it. Only a decision that survives the fold and that a `Create` in a
+/// change marked `free` (not bound to a losing member of a chosen set) made counts as created:
+/// an `Update`, tracking-only or not, never releases, and neither does a loser's own decision.
+fn decisions_written(
+    st: &ReadState,
+    changes: &[Change],
+    free: &[bool],
+) -> (bool, BTreeSet<BlockId>) {
+    // per block: the last version, and whether a free change created it
+    let mut last: BTreeMap<&BlockId, (Option<&Block>, bool)> = BTreeMap::new();
     for i in st.landing_order(changes) {
         for op in &changes[i].ops {
             match op {
-                Op::Create { block } | Op::Update { block, .. } => {
-                    last.insert(&block.id, Some(block));
+                Op::Create { block } => {
+                    last.insert(&block.id, (Some(block), free[i]));
+                }
+                Op::Update { block, .. } => {
+                    let e = last.entry(&block.id).or_insert((None, false));
+                    e.0 = Some(block);
                 }
                 Op::Delete { id, .. } => {
-                    last.insert(id, None);
+                    last.insert(id, (None, false));
                 }
             }
         }
     }
-    let decisions: Vec<&Block> = last
+    let decisions: Vec<(&Block, bool)> = last
         .into_values()
-        .flatten()
-        .filter(|b| b.block_type == decision::DECISION)
+        .filter_map(|(b, created)| b.map(|b| (b, created)))
+        .filter(|(b, _)| b.block_type == decision::DECISION)
         .collect();
     let targets = decisions
         .iter()
-        .flat_map(|b| {
+        .flat_map(|(b, _)| {
             [decision::SUPERSEDES, decision::REFINES]
                 .into_iter()
                 .filter_map(|k| b.links.get(k))
@@ -1080,7 +1111,7 @@ fn decisions_written(st: &ReadState, changes: &[Change]) -> (bool, BTreeSet<Bloc
                 .map(|l| l.target.clone())
         })
         .collect();
-    (!decisions.is_empty(), targets)
+    (decisions.iter().any(|(_, created)| *created), targets)
 }
 
 /// The canon that would result from landing `changes` on `st`'s canon, and each applied change's
