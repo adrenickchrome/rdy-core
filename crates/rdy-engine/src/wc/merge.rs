@@ -10,7 +10,7 @@ use crate::now_ms;
 use crate::tree_io::FOLDER_FILE;
 use crate::wc::files::{
     base_from, behind_link, blocking_ancestor, changed_since_staged, identity, inside, prune_dirs,
-    remove_file, remove_tree, replace_at, write_state_copy,
+    remove_file, replace_at, sync_state_copies, write_state_copies,
 };
 use crate::wc::layout::{FOLDER_THEIRS, FileKind, THEIRS_SUFFIX, WcBlock, WcTree};
 use crate::wc::project::Projection;
@@ -1375,16 +1375,21 @@ fn apply_files(root: &Path, plan: &UpdatePlan) -> Result<(), RdyError> {
 fn finish_update(place: &Place, st: &mut WcState, journal: &UpdateJournal) -> Result<(), RdyError> {
     let plan = &journal.plan;
     let conflicts_dir = place.state.join("conflicts");
-    fs::create_dir_all(&conflicts_dir).map_err(|e| state_err(&conflicts_dir, "create", e))?;
-    for (p, text) in &plan.conflict_copies {
-        write_state_copy(&conflicts_dir, p, text)?;
-    }
-    let base_dir = place.state.join("base/files");
-    remove_tree(&base_dir)?;
-    fs::create_dir_all(&base_dir).map_err(|e| state_err(&base_dir, "create", e))?;
-    for (p, text) in &plan.base_files {
-        write_state_copy(&base_dir, p, text)?;
-    }
+    rdy_store::fsutil::create_dir_durable(&conflicts_dir)
+        .map_err(|e| state_err(&conflicts_dir, "create", e))?;
+    let conflict_copies: Vec<(&str, &str)> = plan
+        .conflict_copies
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    write_state_copies(&conflicts_dir, &conflict_copies)?;
+    // only the copies that differ are written and flushed; a copy whose file left the tree goes
+    let base_copies: Vec<(&str, &str)> = plan
+        .base_files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    sync_state_copies(&place.state.join("base/files"), &base_copies)?;
     st.base = plan.base.clone();
     for p in &plan.stage_drops {
         stage_clear(place, p)?;
