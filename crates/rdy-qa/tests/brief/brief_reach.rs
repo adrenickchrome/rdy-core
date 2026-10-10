@@ -200,13 +200,178 @@ fn mfb2_the_refining_decisions_briefing_lists_what_it_reaches() {
     assert!(v["reaches"].is_array(), "{v}");
 }
 
+/// A decision made in view `view` from `d` and landed there.
+fn landed(r: &mut Rdy, view: &str, d: DecisionInput) -> BlockId {
+    let res = r.decide(&writer(), view, d).unwrap();
+    let id = BlockId::parse(&res.created["$decision"]).unwrap();
+    land(r, view).unwrap();
+    id
+}
+
+/// P2: a governed decision that is accepted keeps what the walk gives it (reaffirm), never a
+/// confirm that a repin of a frozen decision refuses.
+#[test]
+fn mfb2_a_governed_accepted_decision_gets_reaffirm() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let d2 = landed_affecting(&mut r, &s, &s.decision);
+    let res = refine(&mut r, &s, &d2);
+    let c = after(&r, &res.change);
+    let e = entries(&c, &s.decision);
+    assert_eq!(e.len(), 1, "{c:?}");
+    assert_eq!(e[0].kind, ConsequenceKind::Dependent);
+    assert_eq!(e[0].follow_up, FollowUp::Reaffirm);
+    assert_eq!(e[0].fix.as_deref(), Some(REAFFIRM_FIX));
+    assert_eq!(e[0].because.edge, "refines");
+    assert_eq!(e[0].because.changed, d2.to_string());
+}
+
+/// P5: a governed decision that asserts nothing live (fully superseded) gets no entry, and the
+/// briefing does not list it.
+#[test]
+fn mfb2_a_governed_superseded_decision_gets_no_entry() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let d2 = landed_affecting(&mut r, &s, &s.decision);
+    r.supersede(
+        &writer(),
+        "x",
+        &s.decision.to_string(),
+        None,
+        DecisionInput {
+            parent: s.section.to_string(),
+            statement: "Keep A, firmly".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    land(&mut r, "x").unwrap();
+    let res = refine(&mut r, &s, &d2);
+    let c = after(&r, &res.change);
+    assert!(entries(&c, &s.decision).is_empty(), "{c:?}");
+    let new = BlockId::parse(&res.created["$decision"]).unwrap();
+    let b = brief_of(&r, &w(), &[&new]);
+    assert!(
+        b.reaches
+            .iter()
+            .all(|x| !x.blocks.contains(&s.decision.to_string())),
+        "{:?}",
+        b.reaches
+    );
+}
+
+/// A governed decision that is only proposed keeps what the walk gives it: update, no fix.
+#[test]
+fn mfb2_a_governed_proposed_decision_gets_update() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let p = r
+        .decide(
+            &writer(),
+            "w",
+            DecisionInput {
+                parent: s.section.to_string(),
+                statement: "C is short".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let p = BlockId::parse(&p.created["$decision"]).unwrap();
+    let d2 = r
+        .decide(
+            &writer(),
+            "w",
+            DecisionInput {
+                parent: s.section.to_string(),
+                statement: "C stays short".into(),
+                affects: vec![p.to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let d2 = BlockId::parse(&d2.created["$decision"]).unwrap();
+    let res = refine(&mut r, &s, &d2);
+    let c = after(&r, &res.change);
+    let e = entries(&c, &p);
+    assert_eq!(e.len(), 1, "{c:?}");
+    assert_eq!(e[0].kind, ConsequenceKind::Dependent);
+    assert_eq!(e[0].follow_up, FollowUp::Update);
+    assert_eq!(e[0].fix, None);
+    assert_eq!(e[0].because.edge, "refines");
+}
+
+/// P3: a full supersede copies the old decision's refines links (sup1), but it does not reach
+/// through them (Q5, Q6): no entry for what the refined decision governs, and no reaches in the
+/// new decision's briefing.
+#[test]
+fn mfb2_a_full_supersede_of_a_refining_decision_reaches_nothing() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let d2 = landed(
+        &mut r,
+        "d",
+        DecisionInput {
+            parent: s.section.to_string(),
+            statement: "Keep A, in short form".into(),
+            refines: vec![s.decision.to_string()],
+            ..Default::default()
+        },
+    );
+    let res = r
+        .supersede(
+            &writer(),
+            "w",
+            &d2.to_string(),
+            None,
+            DecisionInput {
+                parent: s.section.to_string(),
+                statement: "Keep A, in long form".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let c = after(&r, &res.change);
+    assert!(entries(&c, &s.a).is_empty(), "{c:?}");
+    let new = BlockId::parse(&res.created["$decision"]).unwrap();
+    let b = brief_of(&r, &w(), &[&new]);
+    assert!(b.reaches.is_empty(), "{:?}", b.reaches);
+    assert_eq!(b.reaches_omitted, 0);
+}
+
+/// P8: a block deleted in the view is not reached, in the consequences or in the briefing.
+#[test]
+fn mfb2_a_block_deleted_in_the_view_is_not_reached() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let d2 = landed_affecting(&mut r, &s, &s.c);
+    write(
+        &mut r,
+        "w",
+        json!([{"op": "delete", "id": s.c.to_string()}]),
+    )
+    .unwrap();
+    let res = refine(&mut r, &s, &d2);
+    let c = after(&r, &res.change);
+    assert!(entries(&c, &s.c).is_empty(), "{c:?}");
+    let new = BlockId::parse(&res.created["$decision"]).unwrap();
+    let b = brief_of(&r, &w(), &[&new]);
+    assert!(
+        b.reaches
+            .iter()
+            .all(|x| !x.blocks.contains(&s.c.to_string())),
+        "{:?}",
+        b.reaches
+    );
+    assert_eq!(b.reaches_omitted, 0);
+}
+
 /// Agents learn through tools only: the edit-loop doc in `rdy_schema` says what a refine reaches.
 #[test]
 fn mfb2_the_edit_loop_doc_says_what_a_refine_reaches() {
     let doc = rdy_mcp::tools::EDIT_LOOP_DOC;
     assert!(
         doc.contains(
-            "A write that records a decision with refines, or a supersedes with a part, also lists each block the refined or partly superseded decision governs (decided_by, implements, its affects): kind dependent, follow_up confirm, because.edge refines or supersedes."
+            "A write that records a decision with refines, or a supersedes with a part, also lists each block the refined or partly superseded decision governs (decided_by, implements, its affects): kind dependent, follow_up confirm (a governed decision gets reaffirm, or update while proposed, and no entry when it asserts nothing live), because.edge refines or supersedes. A full supersede reaches nothing."
         ),
         "{doc}"
     );

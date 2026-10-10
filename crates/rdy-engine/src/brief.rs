@@ -347,7 +347,9 @@ pub struct Lineage {
 }
 
 /// FW-LP6: a covered decision (`decision`) that refines or part-supersedes `target` (`via` is
-/// `refines` or `supersedes`) reaches `blocks`, the uncovered blocks `target` governs.
+/// `refines` or `supersedes`) reaches `blocks`, the uncovered blocks `target` governs: never a
+/// deleted block or a decision that asserts nothing live. A decision that fully supersedes
+/// another reaches nothing through its `refines` links.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Reach {
     pub decision: String,
@@ -1201,9 +1203,14 @@ impl ReadState {
         let mut reaches_omitted = 0;
         let mut room = REACH_CAP;
         for id in ids {
+            // a full supersede does not reach, through the refines links it copied either
+            let full = g.outgoing(id).iter().any(|e| {
+                matches!(&e.kind, EdgeKind::Link(n) if n == decision::SUPERSEDES)
+                    && e.part.is_none()
+            });
             for e in g.outgoing(id) {
                 let via = match &e.kind {
-                    EdgeKind::Link(n) if n == decision::REFINES => decision::REFINES,
+                    EdgeKind::Link(n) if n == decision::REFINES && !full => decision::REFINES,
                     EdgeKind::Link(n) if n == decision::SUPERSEDES && e.part.is_some() => {
                         decision::SUPERSEDES
                     }
@@ -1222,7 +1229,14 @@ impl ReadState {
                 let all: Vec<String> = g
                     .governed_by(&e.to)
                     .into_iter()
-                    .filter(|b| !ids.contains(b))
+                    // as the consequences do: never a block deleted here, or a decision that
+                    // asserts nothing live
+                    .filter(|b| {
+                        !ids.contains(b)
+                            && m.get(b).is_some_and(|src| {
+                                follow_up(pack, src, g.status(b).as_ref(), false, false).is_some()
+                            })
+                    })
                     .map(|b| b.to_string())
                     .collect();
                 if all.is_empty() {

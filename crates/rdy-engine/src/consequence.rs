@@ -101,7 +101,8 @@ pub const TENSION_FIX: &str = "resolve it with a change (rdy_tensions shows both
 pub const LINEAGE_FIX: &str = "a decision that governs it is refined: check that it still holds and answer confirm, or update it";
 
 /// FW-LP6: for each decision `ops` create, each `refines` link and each `supersedes` link with a
-/// part: (the new decision, the target, the link's name). In op order, then link order.
+/// part: (the new decision, the target, the link's name). In op order, then link order. A
+/// decision that fully supersedes another reaches nothing, not even through its `refines` links.
 pub(crate) fn reached_targets(ops: &[Op]) -> Vec<(BlockId, BlockId, &'static str)> {
     let mut out = vec![];
     for op in ops {
@@ -109,8 +110,17 @@ pub(crate) fn reached_targets(ops: &[Op]) -> Vec<(BlockId, BlockId, &'static str
         if block.block_type != DECISION {
             continue;
         }
-        for l in block.links.get(REFINES).into_iter().flatten() {
-            out.push((block.id.clone(), l.target.clone(), REFINES));
+        // a full supersede does not reach, through the refines links it copied either (Q5, Q6)
+        let full = block
+            .links
+            .get(SUPERSEDES)
+            .into_iter()
+            .flatten()
+            .any(|l| l.part.is_none());
+        if !full {
+            for l in block.links.get(REFINES).into_iter().flatten() {
+                out.push((block.id.clone(), l.target.clone(), REFINES));
+            }
         }
         for l in block.links.get(SUPERSEDES).into_iter().flatten() {
             if l.part.is_some() {
@@ -409,12 +419,13 @@ impl ReadState {
     /// The entries for `changed` in graph `g` over `m`: for each changed block, each block
     /// outside `touched` that points at it. `conflicts` (by block id) come first, then
     /// `tensions` (as given), then suspect entries, then dependent ones, each by block id, then
-    /// the FW-LP6 entries of `reach` (a `dependent` entry with follow-up `confirm` for each block
-    /// a reached target governs, in the order of `reach`, never a block `touched` holds, the new
-    /// decision itself, or a block the list already holds; none for a target that is rejected,
-    /// superseded or revoked); `written` marks `already_written`. The list is cut
-    /// from the end to `max_tokens` (default `BRIEF_DEFAULT_TOKENS`), counting what it drops in
-    /// `omitted`.
+    /// the FW-LP6 entries of `reach` (a `dependent` entry for each block a reached target
+    /// governs, in the order of `reach`, never a block `touched` holds, the new decision itself,
+    /// or a block the list already holds; none for a target that is rejected, superseded or
+    /// revoked; follow-up `confirm` for a block that is not a decision, and for a decision what
+    /// `follow_up` gives it, none for one that asserts nothing live); `written` marks
+    /// `already_written`. The list is cut from the end to `max_tokens` (default
+    /// `BRIEF_DEFAULT_TOKENS`), counting what it drops in `omitted`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn consequences_in(
         &self,
@@ -530,12 +541,27 @@ impl ReadState {
                 continue;
             }
             for block in g.governed_by(target) {
-                if touched.contains(&block) || block == *decision || m.get(&block).is_none() {
+                if touched.contains(&block) || block == *decision {
                     continue;
                 }
-                if !listed.insert(block.to_string()) {
+                if listed.contains(&block.to_string()) {
                     continue;
                 }
+                // the walk's rule for a governed decision: none for one that asserts nothing
+                // live, reaffirm for an accepted one, update for a proposed one
+                let Some(src) = m.get(&block) else { continue };
+                let status = g.status(&block);
+                let Some(walk) = follow_up(self.pack(), src, status.as_ref(), false, false) else {
+                    continue;
+                };
+                let (follow, fix) = match status {
+                    Some(_) => (
+                        walk,
+                        (walk == FollowUp::Reaffirm).then(|| REAFFIRM_FIX.to_string()),
+                    ),
+                    None => (FollowUp::Confirm, Some(LINEAGE_FIX.to_string())),
+                };
+                listed.insert(block.to_string());
                 conflicts.push(Consequence {
                     id: consequence_id(batch, ConsequenceKind::Dependent.as_str(), &block),
                     block: block.to_string(),
@@ -544,10 +570,10 @@ impl ReadState {
                         edge: (*via).to_string(),
                         changed: target.to_string(),
                     },
-                    follow_up: FollowUp::Confirm,
+                    follow_up: follow,
                     conflict: None,
                     tension: None,
-                    fix: Some(LINEAGE_FIX.to_string()),
+                    fix,
                     already_written: written(&block),
                 });
             }
