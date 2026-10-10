@@ -70,7 +70,7 @@ fn area1_a_project_pack_with_areas_loads_through_the_engine() {
         "name: team\nversion: \"1\"\nextends: rdy-standard\nareas:\n  payments: { paths: [wallets] }\ntensions: { fork: advisory }\n",
     )
     .unwrap();
-    std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: team\n").unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: team\n").unwrap();
     let r = rdy_engine::Rdy::open(dir.path()).unwrap();
     assert_eq!(r.pack().areas_for_path("wallets/x"), vec!["payments"]);
     assert_eq!(
@@ -88,7 +88,7 @@ fn area1_a_project_pack_with_a_bad_area_does_not_open_and_names_it() {
         "name: team\nversion: \"1\"\nextends: rdy-standard\nareas:\n  Payments: { paths: [wallets] }\n",
     )
     .unwrap();
-    std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: team\n").unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: team\n").unwrap();
     let e = rdy_engine::Rdy::open(dir.path()).err().expect("refused");
     assert_eq!(e.code, "E_CONFIG", "{e}");
     assert!(

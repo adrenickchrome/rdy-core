@@ -350,7 +350,7 @@ fn bwr1_a_create_is_exempt_by_its_parents_type_not_its_own() {
         .replace("body: required }", "body: required, children: [claim] }");
     std::fs::write(dir.path().join(".rdy/packs/p.yaml"), pack).unwrap();
     std::fs::write(
-        dir.path().join(".rdy/config.yaml"),
+        dir.path().join(".rdy.yaml"),
         "pack: p\nname: Presentational\n",
     )
     .unwrap();

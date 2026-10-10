@@ -320,7 +320,7 @@ fn vcreate1_a_fork_of_a_closed_view_is_open_and_owned_by_the_forker() {
 fn hb1_require_up_to_date_is_read_from_the_project_config_on_a_full_publish() {
     let (d, mut r) = project();
     assert!(!r.read().require_up_to_date(), "off by default");
-    let cfg = d.path().join(".rdy/config.yaml");
+    let cfg = d.path().join(".rdy.yaml");
     let text = std::fs::read_to_string(&cfg).unwrap();
     std::fs::write(
         &cfg,
@@ -350,7 +350,7 @@ fn hb1_require_up_to_date_is_read_from_the_project_config_on_a_full_publish() {
 #[test]
 fn msw19_a_full_publish_over_a_broken_config_keeps_the_review_gate_on() {
     let (d, mut r) = project();
-    let cfg = d.path().join(".rdy/config.yaml");
+    let cfg = d.path().join(".rdy.yaml");
     let text = std::fs::read_to_string(&cfg).unwrap();
     std::fs::write(
         &cfg,
@@ -378,7 +378,7 @@ fn msw19_a_full_publish_over_a_broken_config_keeps_the_review_gate_on() {
 fn opens_with_one_warning(bad: &str) -> rdy_schema::Issue {
     let (d, r) = project();
     drop(r);
-    let cfg = d.path().join(".rdy/config.yaml");
+    let cfg = d.path().join(".rdy.yaml");
     let text = std::fs::read_to_string(&cfg).unwrap();
     std::fs::write(&cfg, format!("{text}{bad}")).unwrap();
     let r = Rdy::open(d.path()).unwrap_or_else(|e| panic!("{bad:?} must open: {e}"));
@@ -414,7 +414,7 @@ fn msw19_a_reload_whose_publish_panics_keeps_the_previous_pack_and_config() {
     )
     .unwrap();
     std::fs::write(
-        d.path().join(".rdy/config.yaml"),
+        d.path().join(".rdy.yaml"),
         "pack: soft\nreviews:\n  require_up_to_date: true\n",
     )
     .unwrap();
@@ -445,7 +445,7 @@ fn msw19_a_dotted_review_key_opens_with_the_warning() {
         let w = opens_with_one_warning(bad);
         assert_eq!(
             w.message,
-            ".rdy/config.yaml: `reviews.require_up_to_date` is written as one dotted key; \
+            ".rdy.yaml: `reviews.require_up_to_date` is written as one dotted key; \
              rdy reads only nested keys, so the review setting would be ignored",
             "{bad:?}"
         );
@@ -462,12 +462,12 @@ fn msw19_a_review_like_key_outside_reviews_opens_with_a_plain_warning() {
         let w = opens_with_one_warning(&format!("{path}: true\n"));
         assert_eq!(
             w.message,
-            format!("unknown key {path} in .rdy/config.yaml (project level); rdy ignores it"),
+            format!("unknown key {path} in .rdy.yaml (project level); rdy ignores it"),
             "{path}"
         );
         assert_eq!(
             w.fix,
-            format!("remove {path} from .rdy/config.yaml, or check its spelling"),
+            format!("remove {path} from .rdy.yaml, or check its spelling"),
             "{path}"
         );
     }
@@ -476,11 +476,11 @@ fn msw19_a_review_like_key_outside_reviews_opens_with_a_plain_warning() {
     let w = opens_with_one_warning("views:\n  require_up_to_date: true\n");
     assert_eq!(
         w.message,
-        "unknown review setting views.require_up_to_date in .rdy/config.yaml; the review gate would stay off"
+        "unknown review setting views.require_up_to_date in .rdy.yaml; the review gate would stay off"
     );
     assert_eq!(
         w.fix,
-        "did you mean reviews.require_up_to_date? rename views.require_up_to_date in .rdy/config.yaml"
+        "did you mean reviews.require_up_to_date? rename views.require_up_to_date in .rdy.yaml"
     );
 }
 

@@ -1,4 +1,4 @@
-//! Whether the pack-defining files (`.rdy/config.yaml` and `.rdy/packs/*.yaml`) changed since
+//! Whether the pack-defining files (`.rdy.yaml` and `.rdy/packs/*.yaml`) changed since
 //! they were last seen, cheaply: a `stat` of each file and a listing of `.rdy/packs/`, and their
 //! bytes only when a stat or the set of files differs, or a file is racily clean.
 //!
@@ -183,7 +183,7 @@ mod tests {
     fn project() -> (tempfile::TempDir, PathBuf) {
         let d = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(d.path().join(".rdy/packs")).unwrap();
-        std::fs::write(d.path().join(".rdy/config.yaml"), "pack: p\n").unwrap();
+        std::fs::write(d.path().join(".rdy.yaml"), "pack: p\n").unwrap();
         let pack = d.path().join(".rdy/packs/p.yaml");
         std::fs::write(&pack, A).unwrap();
         (d, pack)
@@ -209,6 +209,19 @@ mod tests {
     fn set_mtime(p: &Path, t: SystemTime) {
         let f = std::fs::File::options().write(true).open(p).unwrap();
         f.set_modified(t).unwrap();
+    }
+
+    #[test]
+    fn mfb1_the_watch_sees_rdy_yaml_and_local_yaml() {
+        let (d, _pack) = project();
+        let w = watch(d.path(), LONG);
+        assert!(!w.changed());
+        std::fs::write(d.path().join(PROJECT_FILE), "pack: p\nname: N\n").unwrap();
+        assert!(w.changed(), "an edit of .rdy.yaml is a change");
+        let w = watch(d.path(), LONG);
+        std::fs::write(d.path().join(LOCAL_FILE), "views:\n  idle_days: 2\n").unwrap();
+        assert!(w.changed(), "a new .rdy/local.yaml is a change");
+        assert_eq!(PROJECT_FILE, ".rdy.yaml");
     }
 
     #[test]

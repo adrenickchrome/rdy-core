@@ -129,7 +129,7 @@ impl Rdy {
             return Err(RdyError::new(
                 E_BAD_INPUT,
                 "no parent given, and the project names no decision home",
-                "pass parent (the doc or section to record the decision in), or set decisions.home in .rdy/config.yaml to a doc's path, key or id",
+                "pass parent (the doc or section to record the decision in), or set decisions.home in .rdy.yaml to a doc's path, key or id",
             ));
         };
         let scope = Scope::View(view.to_string());
@@ -143,7 +143,7 @@ impl Rdy {
                     "decisions.home {home:?} names no block in view {view}: {}",
                     e.message
                 ),
-                "set decisions.home in .rdy/config.yaml to an existing doc's path, key or id",
+                "set decisions.home in .rdy.yaml to an existing doc's path, key or id",
             )
         })?;
         if block.block_type != "doc" {

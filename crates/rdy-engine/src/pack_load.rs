@@ -3,7 +3,7 @@
 use crate::config::{Config, parse_config, read_config};
 use crate::config_levels;
 use crate::handle::io;
-use crate::{Delta, E_CONFIG, E_NO_PROJECT, Rdy, RdyError, ServeConfig};
+use crate::{Delta, E_CONFIG, Rdy, RdyError, ServeConfig};
 use rdy_schema::{AreaMatcher, Pack, PackSet};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
@@ -45,7 +45,7 @@ impl FileStamp {
     }
 }
 
-/// What the pack-defining files looked like at one moment: `.rdy/config.yaml`, then
+/// What the pack-defining files looked like at one moment: `.rdy.yaml`, then
 /// `.rdy/local.yaml` when it exists, and every `.rdy/packs/*.yaml` (and `.yml`), sorted by path, each with the [`FileStamp`] taken just before
 /// its bytes were read; `hash` is BLAKE3 over each file's path bytes, a NUL, its contents and a
 /// NUL, in that order. Equal hashes mean equal bytes whatever the stamps say. `at` is this
@@ -82,14 +82,14 @@ pub(crate) struct Sources {
     pub(crate) packs: Vec<(PathBuf, Vec<u8>)>,
 }
 
-/// Reads `.rdy/config.yaml`, `.rdy/local.yaml` when it exists, and the pack files, each stat'ed just before its bytes are read.
+/// Reads `.rdy.yaml`, `.rdy/local.yaml` when it exists, and the pack files, each stat'ed just before its bytes are read.
 /// No config file is `E_NO_PROJECT`; any other failure is an I/O error.
 pub(crate) fn read_sources(project: &Path) -> Result<Sources, RdyError> {
     SOURCE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let at = std::time::SystemTime::now();
     let cfg_path = project.join(config_levels::PROJECT_FILE);
     if !cfg_path.exists() {
-        return Err(no_project(project));
+        return Err(config_levels::missing_project(project));
     }
     let mut paths = vec![cfg_path];
     let local = project.join(config_levels::LOCAL_FILE);
@@ -130,14 +130,6 @@ pub(crate) fn read_sources(project: &Path) -> Result<Sources, RdyError> {
     })
 }
 
-fn no_project(root: &Path) -> RdyError {
-    RdyError::new(
-        E_NO_PROJECT,
-        format!("{} is not an rdy project", root.display()),
-        "run rdy init in the project directory",
-    )
-}
-
 /// What `Rdy::reload_pack` did.
 #[derive(Debug)]
 pub enum ReloadOutcome {
@@ -160,7 +152,7 @@ pub fn resolve_pack(project: &Path, name: &str) -> Result<Pack, RdyError> {
     Ok(load_pack(project, name)?.0)
 }
 
-/// The pack the project at `project` names in `.rdy/config.yaml`, resolved without opening its
+/// The pack the project at `project` names in `.rdy.yaml`, resolved without opening its
 /// store (so it works while another process holds the store). A missing or unreadable config is
 /// the same error `Rdy::open` gives.
 pub fn project_pack(project: &Path) -> Result<Pack, RdyError> {
@@ -218,7 +210,7 @@ pub(crate) fn load_pack_from(
         rdy_schema::SchemaError::UnknownPack(_) => RdyError::new(
             E_CONFIG,
             e.to_string(),
-            "set `pack:` in .rdy/config.yaml to an available pack (rdy-standard is built in)",
+            "set `pack:` in .rdy.yaml to an available pack (rdy-standard is built in)",
         ),
         e => RdyError::new(E_CONFIG, e.to_string(), "fix the pack file"),
     };

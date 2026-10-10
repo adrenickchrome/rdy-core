@@ -1,5 +1,5 @@
-//! cfgl1: settings come from four levels (FW-X5, D-C5955) minus the file move: .rdy/local.yaml,
-//! the project config (.rdy/config.yaml until M2f-b), the user config and the defaults; the most
+//! cfgl1: settings come from four levels (FW-X5, D-C5955): .rdy/local.yaml,
+//! the project config (.rdy.yaml), the user config and the defaults; the most
 //! specific wins; a key at the wrong level is a W_CONFIG_UNKNOWN warning naming the right file,
 //! and rdy ignores it; rdy config --show-origin prints each value's file.
 use rdy_engine::config_levels::*;
@@ -86,7 +86,7 @@ fn cfgl1_a_key_at_the_wrong_level_warns_naming_the_right_file() {
     let e = effective(&p, None).expect("a wrong-file key is a warning");
     assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
     assert!(
-        e.warnings[0].message.contains("pack") && e.warnings[0].fix.contains(".rdy/config.yaml"),
+        e.warnings[0].message.contains("pack") && e.warnings[0].fix.contains(".rdy.yaml"),
         "{:?}",
         e.warnings[0]
     );
@@ -96,8 +96,7 @@ fn cfgl1_a_key_at_the_wrong_level_warns_naming_the_right_file() {
     let e = effective(&p, Some(&uf)).expect("a wrong-file key is a warning");
     assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
     assert!(
-        e.warnings[0].message.contains("decisions.home")
-            && e.warnings[0].fix.contains(".rdy/config.yaml"),
+        e.warnings[0].message.contains("decisions.home") && e.warnings[0].fix.contains(".rdy.yaml"),
         "{:?}",
         e.warnings[0]
     );
@@ -154,7 +153,7 @@ fn cfgl1_a_wrong_typed_value_names_the_file_it_is_in() {
         "{e}"
     );
     assert!(
-        e.fix.contains(".rdy/local.yaml") && !e.fix.contains("config.yaml"),
+        e.fix.contains(".rdy/local.yaml") && !e.fix.contains(PROJECT_FILE),
         "{e}"
     );
     let e = Rdy::open(&p).err().expect("open refuses it");

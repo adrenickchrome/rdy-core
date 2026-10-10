@@ -36,7 +36,7 @@ fn racy1_a_cold_start_reads_the_pack_files_once_and_the_watch_reads_none_while_t
         "name: proj\nversion: '1'\nextends: rdy-standard\n",
     )
     .unwrap();
-    std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: proj\n").unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: proj\n").unwrap();
     // past the racy window, so the watch may trust the stamps the open took (a ctime cannot be
     // set back, so wait it out)
     std::thread::sleep(rdy_daemon::watch::RACY + std::time::Duration::from_millis(500));

@@ -296,7 +296,7 @@ fn trk1_rdy_edit_moves_a_tracking_field_with_a_reason() {
     use rdy_qa::fixtures::{land, seed_doc, writer};
     let s = Served::new();
     std::fs::write(s.dir.path().join(".rdy/packs/trk.yaml"), TRK_PACK).unwrap();
-    std::fs::write(s.dir.path().join(".rdy/config.yaml"), "pack: trk\n").unwrap();
+    std::fs::write(s.dir.path().join(".rdy.yaml"), "pack: trk\n").unwrap();
     s.stop();
     let dec = {
         let mut r = Rdy::open(s.dir.path()).unwrap();

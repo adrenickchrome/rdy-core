@@ -15,7 +15,7 @@ fn state(design: bool) -> (tempfile::TempDir, McpState) {
     if design {
         drop(r);
         std::fs::write(dir.path().join(".rdy/packs/ae-design.yaml"), DESIGN_PACK).unwrap();
-        std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: ae-design\n").unwrap();
+        std::fs::write(dir.path().join(".rdy.yaml"), "pack: ae-design\n").unwrap();
         r = Rdy::open(dir.path()).unwrap();
     }
     let mut st = McpState::new(std::sync::Arc::new(Local::new(r)));

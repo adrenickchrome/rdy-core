@@ -23,7 +23,7 @@ pub fn qa_project() -> (tempfile::TempDir, Rdy) {
     let r = Rdy::init(dir.path(), "rdy-standard").expect("init");
     drop(r);
     std::fs::write(dir.path().join(".rdy/packs/rdy-qa.yaml"), QA_PACK_YAML).expect("pack");
-    std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: rdy-qa\n").expect("config");
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: rdy-qa\n").expect("config");
     let r = Rdy::open(dir.path()).expect("open");
     (dir, r)
 }
@@ -57,7 +57,7 @@ block_types:
 pub fn use_pack(dir: &std::path::Path, name: &str, yaml: &str, extra_config: &str) {
     std::fs::write(dir.join(format!(".rdy/packs/{name}.yaml")), yaml).expect("pack");
     std::fs::write(
-        dir.join(".rdy/config.yaml"),
+        dir.join(".rdy.yaml"),
         format!("pack: {name}\n{extra_config}"),
     )
     .expect("config");

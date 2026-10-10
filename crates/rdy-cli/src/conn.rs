@@ -5,7 +5,7 @@ use rdy_daemon::{
 use rdy_engine::engine::Local;
 use rdy_engine::wc::state::{POINTER_FILE, Place, WcState, pointer_project};
 use rdy_engine::{
-    E_BAD_INPUT, E_IO, E_NO_PROJECT, RdyError, Session, classify, human_actor_for_env, serve_config,
+    E_BAD_INPUT, E_IO, RdyError, Session, classify, human_actor_for_env, serve_config,
 };
 use rdy_model::Role;
 use serde_json::{Value, json};
@@ -16,16 +16,22 @@ use std::path::{Path, PathBuf};
 /// This binary's version: the hello's `version`, so a client only talks to a daemon of its own.
 pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Whether `dir` holds a `.rdy` directory: the main place of a project, as the working copy
+/// finds it (`Place::try_locate`).
+fn has_rdy_dir(dir: &Path) -> bool {
+    fs::metadata(dir.join(".rdy")).is_ok_and(|m| m.is_dir())
+}
+
 pub(crate) fn find_project(start: &Path) -> PathBuf {
     let mut cur = Some(start);
     while let Some(dir) = cur {
-        // a worktree's pointer file names its project; it is checked before the config file at
-        // each level. A damaged pointer stops the walk at its directory, so `Place::try_locate`
-        // reports it instead of the walk reaching the main working copy.
+        // a worktree's pointer file names its project; it is checked before the .rdy directory
+        // at each level. A damaged pointer stops the walk at its directory, so
+        // `Place::try_locate` reports it instead of the walk reaching the main working copy.
         if fs::symlink_metadata(dir.join(POINTER_FILE)).is_ok_and(|m| m.is_file()) {
             return pointer_project(dir).unwrap_or_else(|| dir.to_path_buf());
         }
-        if dir.join(".rdy/config.yaml").exists() {
+        if has_rdy_dir(dir) {
             return dir.to_path_buf();
         }
         cur = dir.parent();
@@ -33,8 +39,9 @@ pub(crate) fn find_project(start: &Path) -> PathBuf {
     start.to_path_buf()
 }
 
+/// A project: a `.rdy` directory and the project config beside it.
 pub(crate) fn is_project(dir: &Path) -> bool {
-    dir.join(".rdy/config.yaml").exists()
+    has_rdy_dir(dir) && dir.join(rdy_engine::config_levels::PROJECT_FILE).exists()
 }
 
 /// `E_NO_PROJECT` for `dir` unless it is a project, in the words the engine's open uses: checked
@@ -43,12 +50,7 @@ pub(crate) fn require_project(dir: &Path) -> Result<(), ErrorReply> {
     if is_project(dir) {
         return Ok(());
     }
-    Err(RdyError::new(
-        E_NO_PROJECT,
-        format!("{} is not an rdy project", dir.display()),
-        "run rdy init in the project directory",
-    )
-    .into())
+    Err(rdy_engine::config_levels::missing_project(dir).into())
 }
 
 /// A path argument as the JSON string an op takes; a path that is not UTF-8 cannot be sent.

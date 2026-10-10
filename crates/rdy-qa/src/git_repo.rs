@@ -15,11 +15,11 @@ pub fn lines(n: usize, tag: &str) -> String {
     (0..n).map(|i| format!("{tag} line {i}\n")).collect()
 }
 
-/// Appends `text` to the project's `.rdy/config.yaml`.
+/// Appends `text` to the project's `.rdy.yaml`.
 pub fn append_config(project: &Path, text: &str) {
     let mut f = std::fs::OpenOptions::new()
         .append(true)
-        .open(project.join(".rdy/config.yaml"))
+        .open(project.join(".rdy.yaml"))
         .expect("open the project config");
     f.write_all(text.as_bytes())
         .expect("append to the project config");
@@ -190,7 +190,7 @@ impl GitRepo {
         self.run(&["rev-parse", "HEAD"])
     }
 
-    /// Appends `code_repos: [<this repository>]` to the project's `.rdy/config.yaml`.
+    /// Appends `code_repos: [<this repository>]` to the project's `.rdy.yaml`.
     pub fn link(&self, project: &Path) {
         link_repos(project, &[&self.configured()]);
     }

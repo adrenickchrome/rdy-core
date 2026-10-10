@@ -20,7 +20,8 @@ pub(crate) fn io(e: std::io::Error) -> RdyError {
 impl Rdy {
     pub fn init(project: &Path, pack: &str) -> Result<Rdy, RdyError> {
         let dot = project.join(".rdy");
-        if dot.join("config.yaml").exists() {
+        let config = project.join(crate::config_levels::PROJECT_FILE);
+        if config.exists() {
             return Err(RdyError::new(
                 E_ALREADY_EXISTS,
                 format!("{} is already an rdy project", project.display()),
@@ -43,7 +44,7 @@ impl Rdy {
             serve: ServeSection::default(),
         })
         .expect("config yaml");
-        rdy_store::fsutil::write_durable(&dot.join("config.yaml"), cfg.as_bytes()).map_err(io)?;
+        rdy_store::fsutil::write_durable(&config, cfg.as_bytes()).map_err(io)?;
         Rdy::open(project)
     }
 

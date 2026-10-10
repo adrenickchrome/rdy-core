@@ -1962,7 +1962,7 @@ fn tier_code(out: &mut Vec<Measure>, r: &Rdy, fx: &Fixture, _dir: &std::path::Pa
             .collect()
     };
     let g = crate::git_repo::GitRepo::synthetic(2000, 400, &cite);
-    let config = r.root().join(".rdy/config.yaml");
+    let config = r.root().join(".rdy.yaml");
     let saved = std::fs::read(&config).expect("read the project config");
     g.link(r.root());
     let repo = code_repos(r.root()).expect("code_repos")[0].clone();

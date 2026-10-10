@@ -104,7 +104,7 @@ fn eng1_serve_config_defaults_and_reads_the_serve_section() {
     assert_eq!(ServeConfig::DEFAULT.idle_timeout, Duration::from_secs(600));
     drop(r);
     std::fs::write(
-        d.path().join(".rdy/config.yaml"),
+        d.path().join(".rdy.yaml"),
         "pack: rdy-standard\nserve:\n  start_timeout: 5\n  idle_timeout: 7\n",
     )
     .unwrap();
@@ -115,10 +115,10 @@ fn eng1_serve_config_defaults_and_reads_the_serve_section() {
     assert_eq!(r.serve_config(), c);
     drop(r);
     // a broken config still yields defaults for the client that has to start the daemon
-    std::fs::write(d.path().join(".rdy/config.yaml"), "pack: [\n").unwrap();
+    std::fs::write(d.path().join(".rdy.yaml"), "pack: [\n").unwrap();
     assert_eq!(serve_config(d.path()), ServeConfig::DEFAULT);
     std::fs::write(
-        d.path().join(".rdy/config.yaml"),
+        d.path().join(".rdy.yaml"),
         "pack: rdy-standard\nserve:\n  idle_timeout: 9\n",
     )
     .unwrap();
@@ -139,7 +139,7 @@ fn eng1_reload_pack_is_unchanged_reloaded_or_invalid_and_keeps_the_old_pack_on_i
     assert!(matches!(r.reload_pack().unwrap(), ReloadOutcome::Unchanged));
     // a project pack appears and the config points at it
     std::fs::write(d.path().join(".rdy/packs/proj.yaml"), PACK_A).unwrap();
-    std::fs::write(d.path().join(".rdy/config.yaml"), "pack: proj\n").unwrap();
+    std::fs::write(d.path().join(".rdy.yaml"), "pack: proj\n").unwrap();
     assert!(matches!(r.reload_pack().unwrap(), ReloadOutcome::Reloaded));
     assert_eq!(r.pack().name, "proj");
     assert_eq!(
@@ -173,7 +173,7 @@ fn eng1_an_invalid_reload_carries_the_fingerprint_of_the_bytes_it_evaluated() {
     let (d, mut r) = project();
     let loaded = r.pack_fingerprint().clone();
     std::fs::write(d.path().join(".rdy/packs/proj.yaml"), PACK_BAD).unwrap();
-    std::fs::write(d.path().join(".rdy/config.yaml"), "pack: proj\n").unwrap();
+    std::fs::write(d.path().join(".rdy.yaml"), "pack: proj\n").unwrap();
     let on_disk = rdy_engine::pack_fingerprint(d.path()).unwrap();
     let out = r.reload_pack().unwrap();
     let ReloadOutcome::Invalid { error, fingerprint } = out else {
@@ -192,7 +192,7 @@ fn eng1_an_invalid_reload_carries_the_fingerprint_of_the_bytes_it_evaluated() {
 fn eng1_the_fingerprint_hashes_contents_not_only_mtimes() {
     let (d, r) = project();
     let fp0 = rdy_engine::pack_fingerprint(d.path()).unwrap();
-    let cfg = d.path().join(".rdy/config.yaml");
+    let cfg = d.path().join(".rdy.yaml");
     let text = std::fs::read_to_string(&cfg).unwrap();
     std::fs::write(&cfg, &text).unwrap();
     let fp1 = rdy_engine::pack_fingerprint(d.path()).unwrap();

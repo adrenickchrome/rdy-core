@@ -224,7 +224,7 @@ pub fn project() -> (tempfile::TempDir, Rdy, Ids) {
     // `name` and `description` are the site's; the engine reads them from a later task on and
     // ignores unknown keys until then
     std::fs::write(
-        dir.path().join(".rdy/config.yaml"),
+        dir.path().join(".rdy.yaml"),
         format!("pack: rdy-standard\nname: {SITE_NAME:?}\ndescription: {SITE_DESCRIPTION:?}\n"),
     )
     .expect("config");
@@ -518,7 +518,7 @@ fn named_project(name: &str) -> (tempfile::TempDir, Rdy) {
     let dir = tempfile::tempdir().expect("tempdir");
     drop(Rdy::init(dir.path(), "rdy-standard").expect("init"));
     std::fs::write(
-        dir.path().join(".rdy/config.yaml"),
+        dir.path().join(".rdy.yaml"),
         format!("pack: rdy-standard\nname: {name:?}\n"),
     )
     .expect("config");
@@ -987,7 +987,7 @@ pub fn presentational_site() -> (tempfile::TempDir, Rdy, PresentationalIds) {
     drop(Rdy::init(dir.path(), "rdy-standard").expect("init"));
     std::fs::write(dir.path().join(".rdy/packs/p.yaml"), PRESENTATIONAL_PACK).expect("pack");
     std::fs::write(
-        dir.path().join(".rdy/config.yaml"),
+        dir.path().join(".rdy.yaml"),
         "pack: p\nname: Presentational\n",
     )
     .expect("config");

@@ -180,7 +180,7 @@ fn mbrf1_the_overview_names_the_project_and_the_schema_and_tools_document_the_ed
     let (dir, r) = project();
     r.close().unwrap();
     std::fs::write(
-        dir.path().join(".rdy/config.yaml"),
+        dir.path().join(".rdy.yaml"),
         "pack: rdy-standard\nname: Edit loop\ndescription: One line about it.\n",
     )
     .unwrap();

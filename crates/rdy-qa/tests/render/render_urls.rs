@@ -91,13 +91,13 @@ fn url1_the_permalink_link_text_sits_in_a_content_zone() {
 }
 
 /// The name and description are parsed when a state is published: a held state is a snapshot
-/// and never re-reads `.rdy/config.yaml` (orchestrator ruling 2).
+/// and never re-reads `.rdy.yaml` (orchestrator ruling 2).
 #[test]
 fn url1_the_site_name_is_read_when_the_state_is_published_not_when_it_is_asked() {
     let dir = tempfile::tempdir().unwrap();
     let proj = dir.path().join("p");
     drop(Rdy::init(&proj, "rdy-standard").unwrap());
-    let cfg = proj.join(".rdy/config.yaml");
+    let cfg = proj.join(".rdy.yaml");
     std::fs::write(&cfg, "pack: rdy-standard\nname: First\ndescription: One.\n").unwrap();
     let mut r = Rdy::open(&proj).unwrap();
     let held = r.read();
@@ -130,7 +130,7 @@ fn url1_the_site_name_comes_from_config_then_the_directory() {
     assert_eq!(r.read().project_name(), "My design docs");
     drop(r);
     std::fs::write(
-        proj.join(".rdy/config.yaml"),
+        proj.join(".rdy.yaml"),
         "pack: rdy-standard\nname: Wallets\ndescription: The wallet service.\n",
     )
     .unwrap();

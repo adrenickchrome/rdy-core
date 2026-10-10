@@ -2,7 +2,7 @@
 //! read from their `Implements:` trailers and keyed by the files those commits touched.
 //!
 //! It is derived from git and never stored: a project lists its code checkouts under
-//! `code_repos` in `.rdy/config.yaml`, and the index is rebuilt from `git log` whenever the
+//! `code_repos` in `.rdy.yaml`, and the index is rebuilt from `git log` whenever the
 //! checkout's HEAD moves (cached per process while it stays). Core only reads git: it runs
 //! `git rev-parse`, `git log` and `git ls-tree`, always through [`git_command`] (FW-C2). Counts
 //! are reported as they are; nothing here ranks or cuts (FW-C6).
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
-/// The `.rdy/config.yaml` key listing the linked code checkouts.
+/// The `.rdy.yaml` key listing the linked code checkouts.
 pub const CODE_REPOS_KEY: &str = "code_repos";
 /// At most this many linked code checkouts.
 pub const MAX_CODE_REPOS: usize = 16;
@@ -52,10 +52,11 @@ pub struct CodeRepo {
 /// The project's linked code checkouts, in config order, each canonical root once. No key, a
 /// null value and an empty list all link none.
 pub fn code_repos(project: &Path) -> Result<Vec<CodeRepo>, RdyError> {
-    let text = std::fs::read_to_string(project.join(".rdy/config.yaml"))
+    let file = crate::config_levels::PROJECT_FILE;
+    let text = std::fs::read_to_string(project.join(file))
         .map_err(|e| RdyError::new(E_IO, e.to_string(), "check file permissions"))?;
     let cfg: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text)
-        .map_err(|e| RdyError::new(E_CONFIG, e.to_string(), "fix .rdy/config.yaml"))?;
+        .map_err(|e| RdyError::new(E_CONFIG, e.to_string(), format!("fix {file}")))?;
     let entries = match cfg.get(CODE_REPOS_KEY) {
         None | Some(serde_yaml_ng::Value::Null) => return Ok(vec![]),
         Some(v) => v,
@@ -66,7 +67,10 @@ pub fn code_repos(project: &Path) -> Result<Vec<CodeRepo>, RdyError> {
             format!(
                 "{CODE_REPOS_KEY} must be a list of paths to git checkouts (at most {MAX_CODE_REPOS})"
             ),
-            "fix code_repos in .rdy/config.yaml, e.g. code_repos: [../app]",
+            format!(
+                "fix code_repos in {}, e.g. code_repos: [../app]",
+                crate::config_levels::PROJECT_FILE
+            ),
         )
     };
     let seq = entries.as_sequence().ok_or_else(bad)?;

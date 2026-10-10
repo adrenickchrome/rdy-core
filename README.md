@@ -62,7 +62,7 @@ rdy serve --stop       # stop it ("no daemon running" if there is none)
 
 Its files live in `.rdy/run/`: `rdy.sock` (the socket), `daemon.pid`, `daemon.log` (a
 background daemon's output; an `E_DAEMON_START` error quotes its last lines) and `start.lock`
-(held by the one client that starts the daemon). Two settings in `.rdy/config.yaml`, in seconds:
+(held by the one client that starts the daemon). Two settings in `.rdy.yaml`, in seconds:
 
 ```yaml
 serve:
@@ -72,8 +72,7 @@ serve:
 
 The same file links the code that implements the docs: `code_repos: [<path to a git checkout's
 top folder>, …]` (absolute or relative to the project; full clones; at most 16).
-`rdy brief --code <file>` reads their `Implements:` trailers with `git log`. The key moves to
-`.rdy.yaml` with M2f.
+`rdy brief --code <file>` reads their `Implements:` trailers with `git log`.
 
 `--no-daemon` (or `RDY_NO_DAEMON=1`) opens the store in the command's own process instead. Only
 one process can hold a store: a `--no-daemon` command while the daemon runs fails with
