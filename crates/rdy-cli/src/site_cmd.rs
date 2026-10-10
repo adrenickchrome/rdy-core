@@ -72,6 +72,10 @@ pub(crate) fn import(env: &Env, a: ImportArgs) -> Result<(Value, String), ErrorR
     let v = call(env, "import", json!({"dir": path_arg(&dir)?, "view": view}))?;
     let n = v["created"].as_object().map_or(0, |m| m.len());
     let mut t = format!("imported {n} blocks into view {view}");
+    let k = v["changes"].as_array().map_or(0, Vec::len);
+    if k > 1 {
+        t.push_str(&format!(" in {k} changes, one per author"));
+    }
     for w in v["warnings"].as_array().into_iter().flatten() {
         let doc = w["block"]
             .as_str()

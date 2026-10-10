@@ -18,7 +18,7 @@ fn home(r: &mut Rdy) -> (String, String) {
 
 /// Appends `decisions: {home: <home>}` to the project config and reloads it.
 fn configure(r: &mut Rdy, home: &str) {
-    let cfg = r.root().join(".rdy/config.yaml");
+    let cfg = r.root().join(".rdy.yaml");
     let text = std::fs::read_to_string(&cfg).unwrap() + &format!("decisions:\n  home: {home}\n");
     std::fs::write(&cfg, text).unwrap();
     r.reload_pack().unwrap();
@@ -72,7 +72,7 @@ fn dhome1_no_home_is_a_clear_error() {
     );
     assert_eq!(
         e.fix,
-        "pass parent (the doc or section to record the decision in), or set decisions.home in .rdy/config.yaml to a doc's path, key or id"
+        "pass parent (the doc or section to record the decision in), or set decisions.home in .rdy.yaml to a doc's path, key or id"
     );
 }
 
@@ -98,6 +98,6 @@ fn dhome1_a_home_that_is_a_folder_or_missing_is_e_config() {
     );
     assert_eq!(
         e.fix,
-        "set decisions.home in .rdy/config.yaml to an existing doc's path, key or id"
+        "set decisions.home in .rdy.yaml to an existing doc's path, key or id"
     );
 }

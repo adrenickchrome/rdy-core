@@ -343,7 +343,7 @@ impl Drop for Hosted {
 }
 
 /// A fresh `rdy-standard` project whose commands run the real `rdy` binary as a client of its
-/// daemon: `.rdy/config.yaml` sets `serve.idle_timeout: 60`, the human actor is `human:qa` (a
+/// daemon: `.rdy.yaml` sets `serve.idle_timeout: 60`, the human actor is `human:qa` (a
 /// user config under `XDG_CONFIG_HOME`), and dropping it runs `rdy serve --stop`.
 pub struct Served {
     pub dir: tempfile::TempDir,
@@ -378,7 +378,7 @@ impl Served {
         drop(Rdy::init(dir.path(), "rdy-standard").expect("init the served project"));
         let mut cfg = OpenOptions::new()
             .append(true)
-            .open(dir.path().join(".rdy/config.yaml"))
+            .open(dir.path().join(".rdy.yaml"))
             .expect("open the project config");
         io::Write::write_all(&mut cfg, b"serve:\n  idle_timeout: 60\n")
             .expect("append the serve section");
@@ -450,7 +450,7 @@ impl Served {
     pub fn set_start_timeout(&self, secs: u64) {
         let mut cfg = OpenOptions::new()
             .append(true)
-            .open(self.dir.path().join(".rdy/config.yaml"))
+            .open(self.dir.path().join(".rdy.yaml"))
             .expect("open the project config");
         io::Write::write_all(&mut cfg, format!("  start_timeout: {secs}\n").as_bytes())
             .expect("append the start timeout");

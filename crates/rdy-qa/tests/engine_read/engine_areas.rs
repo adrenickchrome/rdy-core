@@ -117,17 +117,13 @@ fn pkfix1_an_invalid_pack_file_says_fix_the_file_and_an_unknown_pack_says_set_th
         "name: bad\nversion: \"1\"\nextends: rdy-standard\nareas:\n  Pay:\n    paths: [x]\n",
     )
     .unwrap();
-    std::fs::write(d.path().join(".rdy/config.yaml"), "pack: bad\n").unwrap();
+    std::fs::write(d.path().join(".rdy.yaml"), "pack: bad\n").unwrap();
     let e = Rdy::open(d.path()).err().expect("the pack is refused");
     assert_eq!(e.code, E_CONFIG);
     assert_eq!(e.fix, "fix the pack file");
-    std::fs::write(d.path().join(".rdy/config.yaml"), "pack: nowhere\n").unwrap();
+    std::fs::write(d.path().join(".rdy.yaml"), "pack: nowhere\n").unwrap();
     let e = Rdy::open(d.path()).err().expect("the pack is refused");
-    assert!(
-        e.fix.contains("set `pack:` in .rdy/config.yaml"),
-        "{}",
-        e.fix
-    );
+    assert!(e.fix.contains("set `pack:` in .rdy.yaml"), "{}", e.fix);
 }
 
 #[test]

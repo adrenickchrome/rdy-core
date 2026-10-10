@@ -271,7 +271,7 @@ fn cmp1_compare_lists_added_deleted_changed_moved_and_conflicted_blocks() {
 fn vls1_idle_days_is_read_from_the_config_on_open_and_survives_every_publish() {
     let (d, r) = project();
     drop(r);
-    let cfg = d.path().join(".rdy/config.yaml");
+    let cfg = d.path().join(".rdy.yaml");
     let text = std::fs::read_to_string(&cfg).unwrap();
     std::fs::write(&cfg, format!("{text}views:\n  idle_days: 3\n")).unwrap();
     let mut r = Rdy::open(d.path()).unwrap();

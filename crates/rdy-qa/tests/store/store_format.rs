@@ -234,7 +234,8 @@ fn fmt1_a_new_project_keeps_its_store_in_dot_rdy_store() {
 }
 
 /// A missing store directory under an intact .rdy is refused, not created: only init creates a
-/// store (fmt3). Init creates it durably (dur1).
+/// store (fmt3). Init creates it durably (dur1). A project with .rdy.yaml and no store is
+/// E_NO_PROJECT in the words every path uses (mfb1 ruling).
 #[test]
 fn fmt3_a_missing_store_directory_is_refused_not_created() {
     let (dir, r) = project();
@@ -243,15 +244,15 @@ fn fmt3_a_missing_store_directory_is_refused_not_created() {
     std::fs::remove_dir_all(rdy.join("store")).unwrap();
     let before = tree(&rdy);
     let e = Rdy::open(dir.path()).err().expect("no store");
-    assert_eq!(e.code, "E_STORE_FORMAT", "{e}");
-    assert!(
-        e.message.starts_with(&format!(
-            "there is no store at {}",
-            rdy.join("store").display()
-        )),
-        "{e}"
+    assert_eq!(e.code, "E_NO_PROJECT", "{e}");
+    assert_eq!(
+        e.message,
+        format!("{} has .rdy.yaml but no store", dir.path().display())
     );
-    assert_eq!(e.fix, "re-create it with this rdy");
+    assert_eq!(
+        e.fix,
+        "move .rdy.yaml aside, run rdy init, then copy your settings back into the new .rdy.yaml"
+    );
     assert_eq!(tree(&rdy), before);
     let fresh = tempfile::tempdir().unwrap();
     let (r, synced) = rdy_store::fsutil::record_syncs(|| Rdy::init(fresh.path(), "rdy-standard"));
@@ -278,12 +279,12 @@ fn m1_store(dir: &Path, frames: &[(u8, &[u8])]) {
     std::fs::write(dir.join("segments/seg-000000.log"), seg).unwrap();
 }
 
-/// An M1 project: `.rdy/config.yaml`, `.rdy/packs/` and an M1 store at `.rdy/store`.
+/// An M1 project: `.rdy.yaml`, `.rdy/packs/` and an M1 store at `.rdy/store`.
 fn m1_project(frames: &[(u8, &[u8])]) -> tempfile::TempDir {
     let p = tempfile::tempdir().unwrap();
     let rdy = p.path().join(".rdy");
     std::fs::create_dir_all(rdy.join("packs")).unwrap();
-    std::fs::write(rdy.join("config.yaml"), "pack: rdy-standard\n").unwrap();
+    std::fs::write(p.path().join(".rdy.yaml"), "pack: rdy-standard\n").unwrap();
     m1_store(&rdy.join("store"), frames);
     p
 }
@@ -413,7 +414,7 @@ fn fmt3_init_over_a_non_store_directory_is_refused() {
     std::fs::write(store.join("index.redb"), b"not ours").unwrap();
     let e = Rdy::init(p.path(), "rdy-standard").err().expect("refused");
     assert_refused_as_another_build(e, &store);
-    assert!(!p.path().join(".rdy/config.yaml").exists());
+    assert!(!p.path().join(".rdy.yaml").exists());
     assert!(!store.join("FORMAT").exists());
 }
 

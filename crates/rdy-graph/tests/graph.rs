@@ -336,3 +336,49 @@ fn cgr1_coord_edges_are_kept_once_and_indexed_both_ways() {
     assert_eq!(g.outgoing(&b)[0].from, b);
     assert_eq!(g.outgoing(&b)[0].to, c);
 }
+
+/// mfb2: claim A decided_by D; claim B implements D; D affects C; claim E references D.
+fn governed_fixture() -> (Graph, BlockId, BlockId, BlockId, BlockId, BlockId) {
+    let mut a = b("c-AAAAA", "claim", Some("s-SSSSS"));
+    link(&mut a, "decided_by", "D-DDDDD", None);
+    let mut bb = b("c-BBBBB", "claim", Some("s-SSSSS"));
+    link(&mut bb, "implements", "D-DDDDD", None);
+    let c = b("c-CCCCC", "claim", Some("s-SSSSS"));
+    let mut d = dec("D-DDDDD", "accepted");
+    link(&mut d, "affects", "c-CCCCC", None);
+    let mut e = b("c-EEEEE", "claim", Some("s-SSSSS"));
+    e.body = "Per {{D-DDDDD}}.".into();
+    let g = Graph::build_from(
+        map(vec![
+            a,
+            bb,
+            c,
+            d,
+            e,
+            b("s-SSSSS", "section", Some("d-DDDDD")),
+        ])
+        .values(),
+    );
+    let id = |s: &str| BlockId::parse(s).unwrap();
+    (
+        g,
+        id("c-AAAAA"),
+        id("c-BBBBB"),
+        id("c-CCCCC"),
+        id("D-DDDDD"),
+        id("c-EEEEE"),
+    )
+}
+
+#[test]
+fn mfb2_governed_by_lists_decided_by_implements_and_affects_once() {
+    // build, with the file's helper: claim A decided_by D; claim B implements D; D affects C;
+    // claim E references D (not a governing link)
+    let (g, a, b, c, d, e) = governed_fixture();
+    assert_eq!(g.governed_by(&d), {
+        let mut v = vec![a, b, c];
+        v.sort();
+        v
+    });
+    assert!(!g.governed_by(&d).contains(&e));
+}

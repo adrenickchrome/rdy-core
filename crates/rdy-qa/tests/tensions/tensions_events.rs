@@ -214,7 +214,7 @@ fn tevt1_a_pack_reload_settles_its_events_without_a_by() {
         "name: soft\nversion: \"1\"\nextends: rdy-standard\ntensions:\n  edit_collision: advisory\n",
     )
     .unwrap();
-    std::fs::write(d.path().join(".rdy/config.yaml"), "pack: soft\n").unwrap();
+    std::fs::write(d.path().join(".rdy.yaml"), "pack: soft\n").unwrap();
     assert!(matches!(
         r.reload_pack().unwrap(),
         rdy_engine::ReloadOutcome::Reloaded

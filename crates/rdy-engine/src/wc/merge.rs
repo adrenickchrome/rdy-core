@@ -10,7 +10,7 @@ use crate::now_ms;
 use crate::tree_io::FOLDER_FILE;
 use crate::wc::files::{
     base_from, behind_link, blocking_ancestor, changed_since_staged, identity, inside, prune_dirs,
-    remove_file, remove_tree, replace_at, write_at,
+    remove_file, replace_at, sync_state_copies, write_state_copies,
 };
 use crate::wc::layout::{FOLDER_THEIRS, FileKind, THEIRS_SUFFIX, WcBlock, WcTree};
 use crate::wc::project::Projection;
@@ -1257,7 +1257,7 @@ pub fn apply_update(
         }
         return Err(update_err(e));
     }
-    finish_update(place, st, &journal)
+    finish_update(place, st, &journal, false)
 }
 
 /// Finishes an interrupted update from its record (`UPDATE_FILE`): refuses with `E_WC_DIRTY`
@@ -1338,7 +1338,7 @@ pub fn resume_update(place: &Place, st: &mut WcState) -> Result<UpdateJournal, R
         ));
     }
     apply_files(root, &journal.plan).map_err(update_err)?;
-    finish_update(place, st, &journal)?;
+    finish_update(place, st, &journal, true)?;
     Ok(journal)
 }
 
@@ -1371,20 +1371,32 @@ fn apply_files(root: &Path, plan: &UpdatePlan) -> Result<(), RdyError> {
     Ok(())
 }
 
-/// The state half of an update, then the record goes.
-fn finish_update(place: &Place, st: &mut WcState, journal: &UpdateJournal) -> Result<(), RdyError> {
+/// The state half of an update, then the record goes. `resumed` is true when `resume_update`
+/// re-runs it: a copy already in place is not rewritten, but its directory is fsynced, since the
+/// run that renamed it may have died before the directory reached the disk.
+fn finish_update(
+    place: &Place,
+    st: &mut WcState,
+    journal: &UpdateJournal,
+    resumed: bool,
+) -> Result<(), RdyError> {
     let plan = &journal.plan;
     let conflicts_dir = place.state.join("conflicts");
-    fs::create_dir_all(&conflicts_dir).map_err(|e| state_err(&conflicts_dir, "create", e))?;
-    for (p, text) in &plan.conflict_copies {
-        write_at(&conflicts_dir, p, text, None)?;
-    }
-    let base_dir = place.state.join("base/files");
-    remove_tree(&base_dir)?;
-    fs::create_dir_all(&base_dir).map_err(|e| state_err(&base_dir, "create", e))?;
-    for (p, text) in &plan.base_files {
-        write_at(&base_dir, p, text, None)?;
-    }
+    rdy_store::fsutil::create_dir_durable(&conflicts_dir)
+        .map_err(|e| state_err(&conflicts_dir, "create", e))?;
+    let conflict_copies: Vec<(&str, &str)> = plan
+        .conflict_copies
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    write_state_copies(&conflicts_dir, &conflict_copies, resumed)?;
+    // only the copies that differ are written and flushed; a copy whose file left the tree goes
+    let base_copies: Vec<(&str, &str)> = plan
+        .base_files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    sync_state_copies(&place.state.join("base/files"), &base_copies, resumed)?;
     st.base = plan.base.clone();
     for p in &plan.stage_drops {
         stage_clear(place, p)?;
@@ -1408,4 +1420,62 @@ fn finish_update(place: &Place, st: &mut WcState, journal: &UpdateJournal) -> Re
     st.save(place)?;
     let jpath = place.state.join(UPDATE_FILE);
     remove_file(&jpath)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Final review M3 (guard): an update's state half writes every base copy and every conflict
+    /// copy durably, each directory flushed once.
+    #[test]
+    fn mfb5_finish_update_syncs_each_base_and_conflict_copy() {
+        let d = tempfile::tempdir().unwrap();
+        let place = Place {
+            root: d.path().join("work"),
+            state: d.path().join("state"),
+            project: d.path().join("proj"),
+        };
+        fs::create_dir_all(&place.root).unwrap();
+        fs::create_dir_all(&place.state).unwrap();
+        let pairs = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+            v.iter()
+                .map(|(p, t)| (p.to_string(), t.to_string()))
+                .collect()
+        };
+        let base = [
+            ("a.yaml", "a\n"),
+            ("b.yaml", "b\n"),
+            ("guides/c.yaml", "c\n"),
+            ("guides/d.yaml", "d\n"),
+        ];
+        let conflicts = [("guides/c.yaml", "c theirs\n"), ("e.yaml", "e theirs\n")];
+        let journal = UpdateJournal {
+            view: "v".into(),
+            head: "h".into(),
+            plan: UpdatePlan {
+                base_files: pairs(&base),
+                conflict_copies: pairs(&conflicts),
+                ..Default::default()
+            },
+            before: BTreeMap::new(),
+        };
+        let mut st = WcState::default();
+        let (r, synced) =
+            rdy_store::fsutil::record_syncs(|| finish_update(&place, &mut st, &journal, false));
+        r.unwrap();
+        for (dir, copies) in [("base/files", &base[..]), ("conflicts", &conflicts[..])] {
+            let dir = place.state.join(dir);
+            for (p, text) in copies {
+                assert!(synced.contains(&dir.join(p)), "{p} is synced: {synced:?}");
+                assert_eq!(fs::read_to_string(dir.join(p)).unwrap(), *text);
+            }
+            let dirs: Vec<&std::path::PathBuf> = synced
+                .iter()
+                .filter(|p| p.starts_with(&dir) && p.is_dir())
+                .collect();
+            let once: BTreeSet<&std::path::PathBuf> = dirs.iter().copied().collect();
+            assert_eq!(dirs.len(), once.len(), "each directory once: {synced:?}");
+        }
+    }
 }

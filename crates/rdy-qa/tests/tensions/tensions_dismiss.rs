@@ -472,7 +472,7 @@ fn tdis1_a_repin_or_tracking_edit_keeps_a_dismissal() {
     let dir = tempfile::tempdir().unwrap();
     drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
     std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), TRK_PACK).unwrap();
-    std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: trk\n").unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: trk\n").unwrap();
     let mut r = Rdy::open(dir.path()).unwrap();
     let (_doc, section, _c) = seed_doc(&mut r, "seed");
     let dec = r

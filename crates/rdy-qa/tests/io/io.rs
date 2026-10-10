@@ -19,8 +19,17 @@ fn files(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
             }
         }
     }
-    let mut out = Default::default();
+    let mut out: std::collections::BTreeMap<String, Vec<u8>> = Default::default();
     walk(root, root, &mut out);
+    // a re-export lands again: its landing times are new, the rest of authors.yaml is not
+    if let Some(a) = out.get_mut("authors.yaml") {
+        let kept: String = String::from_utf8_lossy(a)
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("landed_ms:"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        *a = kept.into_bytes();
+    }
     out
 }
 

@@ -127,7 +127,7 @@ fn presentational_project() -> (tempfile::TempDir, Rdy) {
         rdy_qa::golden::PRESENTATIONAL_PACK,
     )
     .unwrap();
-    std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: p\n").unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: p\n").unwrap();
     let r = Rdy::open(dir.path()).unwrap();
     (dir, r)
 }

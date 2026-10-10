@@ -169,8 +169,9 @@ pub(super) struct Cited {
     pub briefing: Option<Value>,
 }
 
-/// Whether a briefing names anything: a governing decision, a dependent, lineage, a block that
-/// would go stale, an open suspect, work in flight, a related decision, a mention, or something a
+/// Whether a briefing names anything: a governing decision, a dependent, lineage, a block a
+/// refined decision governs, a block that would go stale, an open suspect, work in flight (a view,
+/// a proposal, an intent or an in-flight tension), a related decision, a mention, or something a
 /// cut left out. A briefing of drafts that names nothing is not printed in full on commit.
 pub(super) fn says_something(b: &Value) -> bool {
     let any = |v: &Value| v.as_array().is_some_and(|a| !a.is_empty());
@@ -178,6 +179,7 @@ pub(super) fn says_something(b: &Value) -> bool {
         "governs",
         "dependents",
         "lineage",
+        "reaches",
         "will_go_stale",
         "suspects",
         "related_decisions",
@@ -185,7 +187,7 @@ pub(super) fn says_something(b: &Value) -> bool {
     ]
     .iter()
     .any(|k| any(&b[*k]))
-        || ["views", "proposals", "intents"]
+        || ["views", "proposals", "intents", "tensions"]
             .iter()
             .any(|k| any(&b["inflight"][*k]))
         || b["omitted"].as_object().is_some_and(|m| !m.is_empty())
@@ -250,4 +252,18 @@ pub(super) fn for_commit(
         token,
         briefing: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn mfb6_an_in_flight_tension_is_something_to_say() {
+        assert!(says_something(
+            &json!({"inflight": {"tensions": [{"id": "tn-1"}]}})
+        ));
+        assert!(!says_something(&json!({"inflight": {"tensions": []}})));
+    }
 }

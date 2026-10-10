@@ -83,7 +83,8 @@ enum Cmd {
     Tensions(tension_cmd::TensionsArgs),
     /// Dismiss a tension with a reason. A tension is otherwise resolved by a change.
     Resolve(tension_cmd::ResolveArgs),
-    /// Undo the newest op of this session on a view, or the named op.
+    /// Undo the newest op of this session on a view, or the named op. The commits of one
+    /// import undo and redo together; rdy view exclude takes out one change.
     Undo(view_cmd::UndoArgs),
     /// Name a landing (default: canon's head) as a version, e.g. v1.2.0. Approver only.
     Tag(land_cmd::TagArgs),

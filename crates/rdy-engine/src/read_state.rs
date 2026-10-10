@@ -534,14 +534,14 @@ pub struct ReadState {
     pub(crate) areas: Arc<AreaMatcher>,
     /// The project directory.
     pub(crate) root: Arc<std::path::Path>,
-    /// The site's name and description, parsed from `.rdy/config.yaml` by a full publish.
+    /// The site's name and description, parsed from `.rdy.yaml` by a full publish.
     pub(crate) name: Arc<str>,
     pub(crate) description: Option<Arc<str>>,
-    /// `reviews.require_up_to_date` in `.rdy/config.yaml`, read by a full publish (FW-HB1).
+    /// `reviews.require_up_to_date` in `.rdy.yaml`, read by a full publish (FW-HB1).
     pub(crate) require_up_to_date: bool,
-    /// `views.idle_days` in `.rdy/config.yaml` (default 14), read by a full publish.
+    /// `views.idle_days` in `.rdy.yaml` (default 14), read by a full publish.
     pub(crate) idle_days: u32,
-    /// `decisions.home` in `.rdy/config.yaml`, read by a full publish (FW-PR2).
+    /// `decisions.home` in `.rdy.yaml`, read by a full publish (FW-PR2).
     pub(crate) decisions_home: Option<Arc<str>>,
     pub(crate) reader: StoreReader,
     pub(crate) as_of: Arc<AsOfCache>,

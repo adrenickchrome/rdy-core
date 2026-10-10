@@ -1,4 +1,4 @@
-//! reload1: a long-lived daemon follows .rdy/config.yaml and .rdy/packs; an invalid pack is kept
+//! reload1: a long-lived daemon follows .rdy.yaml and .rdy/packs; an invalid pack is kept
 //! out and reported on every reply until fixed.
 use rdy_qa::daemon::Hosted;
 use serde_json::json;
@@ -8,7 +8,7 @@ const PACK_BAD: &str = "name: proj\nversion: '1'\nextends: no-such-pack\n";
 
 fn switch_to(h: &Hosted, pack: &str) {
     std::fs::write(h.dir.path().join(".rdy/packs/proj.yaml"), pack).unwrap();
-    std::fs::write(h.dir.path().join(".rdy/config.yaml"), "pack: proj\n").unwrap();
+    std::fs::write(h.dir.path().join(".rdy.yaml"), "pack: proj\n").unwrap();
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn reload1_the_cli_prints_a_standing_pack_error_on_stderr() {
     assert!(s.json(&["--json", "status"]).0);
     std::fs::write(s.dir.path().join(".rdy/packs/proj.yaml"), PACK_BAD).unwrap();
     std::fs::write(
-        s.dir.path().join(".rdy/config.yaml"),
+        s.dir.path().join(".rdy.yaml"),
         "pack: proj\nserve:\n  idle_timeout: 60\n",
     )
     .unwrap();

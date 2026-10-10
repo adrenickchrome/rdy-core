@@ -186,20 +186,20 @@ fn dur2_init_makes_the_config_and_its_directory_entry_durable() {
     let (r, synced) =
         rdy_store::fsutil::record_syncs(|| rdy_engine::Rdy::init(dir.path(), "rdy-standard"));
     r.unwrap();
-    let rdy = dir.path().join(".rdy");
+    let cfg_path = dir.path().join(".rdy.yaml");
     let cfg = synced
         .iter()
-        .position(|p| *p == rdy.join("config.yaml"))
-        .unwrap_or_else(|| panic!("config.yaml was not fsynced: {synced:?}"));
+        .position(|p| *p == cfg_path)
+        .unwrap_or_else(|| panic!(".rdy.yaml was not fsynced: {synced:?}"));
     assert!(
-        synced[cfg + 1..].contains(&rdy),
-        ".rdy was not fsynced after config.yaml was written: {synced:?}"
+        synced[cfg + 1..].contains(&dir.path().to_path_buf()),
+        "the project directory was not fsynced after .rdy.yaml was written: {synced:?}"
     );
     assert_eq!(
-        std::fs::read_to_string(rdy.join("config.yaml")).unwrap(),
+        std::fs::read_to_string(&cfg_path).unwrap(),
         "pack: rdy-standard\n"
     );
-    assert!(!rdy.join(".config.yaml.tmp").exists());
+    assert!(!dir.path().join("..rdy.yaml.tmp").exists());
 }
 
 #[test]

@@ -243,7 +243,7 @@ fn dfu1_fixing_a_broken_pack_sends_pack_changed() {
     rt.block_on(async {
         let mut a = h.client(None, None).await;
         std::fs::write(h.dir.path().join(".rdy/packs/proj.yaml"), PACK_A).unwrap();
-        std::fs::write(h.dir.path().join(".rdy/config.yaml"), "pack: proj\n").unwrap();
+        std::fs::write(h.dir.path().join(".rdy.yaml"), "pack: proj\n").unwrap();
         a.ctl("new_doc", json!({"path": "d1", "view": null}))
             .await
             .unwrap();

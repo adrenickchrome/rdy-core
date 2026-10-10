@@ -20,11 +20,27 @@ pub(crate) fn io(e: std::io::Error) -> RdyError {
 impl Rdy {
     pub fn init(project: &Path, pack: &str) -> Result<Rdy, RdyError> {
         let dot = project.join(".rdy");
-        if dot.join("config.yaml").exists() {
+        let config = project.join(crate::config_levels::PROJECT_FILE);
+        // init never touches an existing .rdy.yaml: without a store beside it, the refusal is
+        // the text every other path gives for that state
+        if crate::config_levels::is_project(project) {
             return Err(RdyError::new(
                 E_ALREADY_EXISTS,
                 format!("{} is already an rdy project", project.display()),
                 "open the existing project, or init a different directory",
+            ));
+        }
+        if config.exists() {
+            return Err(crate::config_levels::missing_project(project));
+        }
+        // a store with no .rdy.yaml (the old layout): init never adopts it and never guesses
+        // its pack. What is not a current-format store keeps its own refusal (fmt3), read only.
+        if crate::config_levels::store_has_entry(project) {
+            rdy_store::Store::check_existing(&dot.join(layout::STORE_DIR))?;
+            return Err(RdyError::new(
+                E_ALREADY_EXISTS,
+                format!("{} has an rdy store but no .rdy.yaml", project.display()),
+                "write .rdy.yaml with this project's settings (pack, name, decisions.home); rdy init does not adopt an existing store",
             ));
         }
         // dur1: .rdy and .rdy/packs are fsynced into their parents (the store adds .rdy/store)
@@ -43,7 +59,7 @@ impl Rdy {
             serve: ServeSection::default(),
         })
         .expect("config yaml");
-        rdy_store::fsutil::write_durable(&dot.join("config.yaml"), cfg.as_bytes()).map_err(io)?;
+        rdy_store::fsutil::write_durable(&config, cfg.as_bytes()).map_err(io)?;
         Rdy::open(project)
     }
 
@@ -62,6 +78,9 @@ impl Rdy {
         let cfg = parse_config(project, &sources.config, sources.local.as_deref())?;
         let fingerprint = sources.fingerprint;
         let (pack, lineage) = load_pack_from(&sources.packs, &cfg.pack)?;
+        // .rdy.yaml with no store is refused in the words every path uses, after the config's
+        // and the pack's own errors
+        crate::config_levels::require_project(project)?;
         let mut store = layout::open_project_store(&project.join(".rdy"))?;
         // trk1: the freeze checks and every content hash use the pack's tracking fields
         store.set_tracking(pack.tracking());

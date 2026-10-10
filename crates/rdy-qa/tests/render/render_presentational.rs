@@ -31,7 +31,7 @@ fn pres1_a_presentational_note_has_no_marker() {
     );
     std::fs::write(dir.path().join(".rdy/packs/p.yaml"), pack).unwrap();
     std::fs::write(
-        dir.path().join(".rdy/config.yaml"),
+        dir.path().join(".rdy.yaml"),
         "pack: p\nname: Presentational\n",
     )
     .unwrap();
@@ -75,7 +75,7 @@ fn pres1_asides_and_notes_get_no_trail_or_copy_ref() {
     );
     std::fs::write(dir.path().join(".rdy/packs/p.yaml"), pack).unwrap();
     std::fs::write(
-        dir.path().join(".rdy/config.yaml"),
+        dir.path().join(".rdy.yaml"),
         "pack: p\nname: Presentational\n",
     )
     .unwrap();

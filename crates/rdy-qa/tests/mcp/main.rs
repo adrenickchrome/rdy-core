@@ -15,6 +15,7 @@ mod mcp_people;
 mod mcp_pool;
 mod mcp_proposal;
 mod mcp_proxy;
+mod mcp_reach;
 mod mcp_read;
 mod mcp_read_paging;
 mod mcp_ref;

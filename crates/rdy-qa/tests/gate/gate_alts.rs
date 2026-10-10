@@ -1089,7 +1089,7 @@ block_types:
     let d = tempfile::tempdir().unwrap();
     drop(Rdy::init(d.path(), "rdy-standard").unwrap());
     std::fs::write(d.path().join(".rdy/packs/trk.yaml"), TRK_PACK).unwrap();
-    std::fs::write(d.path().join(".rdy/config.yaml"), "pack: trk\n").unwrap();
+    std::fs::write(d.path().join(".rdy.yaml"), "pack: trk\n").unwrap();
     let mut r = Rdy::open(d.path()).unwrap();
     let (_doc, section, _claim) = seed_doc(&mut r, "seed");
     let old = r

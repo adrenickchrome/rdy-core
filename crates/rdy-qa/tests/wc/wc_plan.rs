@@ -146,6 +146,27 @@ fn wcdf1_an_edited_body_is_one_update_with_its_checked_out_base() {
     assert!(p.rewrite.iter().any(|r| r.to_string() == seed.intro));
 }
 
+/// The base is the files `base.files` names: a stray file under `base/files` (a stale copy that a
+/// power loss brought back) is not part of it, so it is not planned as a deletion.
+#[test]
+fn wcdf1_a_stray_file_in_base_files_is_not_part_of_the_base() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let place = Place::locate(s.dir.path()).unwrap();
+    let stray = place.state.join("base/files/stray.yaml");
+    std::fs::write(
+        &stray,
+        "- id: d-KAAAA\n  type: doc\n  order: a1\n  fields:\n    title: Stray\n    doc_type: page\n",
+    )
+    .unwrap();
+    set_body(&s, "guides/intro.yaml", &seed.prose, "Changed.");
+    stage(&s, &["guides/intro.yaml"]);
+    let p = plan(&s).unwrap();
+    assert_eq!(p.ops.len(), 1, "{:?}", p.ops);
+    op(&p, "update", &seed.prose);
+    assert!(stray.exists(), "planning removed the stray file");
+}
+
 #[test]
 fn wcdf1_removing_every_reader_link_keeps_decided_by() {
     let (s, seed) = seeded();

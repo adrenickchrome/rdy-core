@@ -304,6 +304,21 @@ impl StoreReader {
         self.get_typed(kinds::VIEW_OP, h)
     }
 
+    /// Whether view op `b`'s frame directly follows view op `a`'s frame in the log, so that one
+    /// write wrote them, in that order: a write's frames are contiguous and a batch marker ends
+    /// each write. `commit_many` writes its commits in a row; undo treats them as one (mfb3).
+    /// `NotFound` for an op the index does not hold.
+    pub fn view_ops_in_a_row(&self, a: &Hash, b: &Hash) -> Result<bool, StoreError> {
+        let at = |h: &Hash| {
+            self.index()
+                .typed(kinds::VIEW_OP, h)?
+                .ok_or(StoreError::NotFound(*h))
+        };
+        let (la, lb) = (at(a)?, at(b)?);
+        let len = crate::segment::HEADER + encode(&self.view_op(a)?).len() as u64;
+        Ok(la.segment == lb.segment && la.offset + len == lb.offset)
+    }
+
     /// The ids of every op of view `name`'s chain that the index holds, in ascending hash order.
     pub fn view_op_ids(&self, name: &str) -> Result<Vec<Hash>, StoreError> {
         self.index().view_ops(name)

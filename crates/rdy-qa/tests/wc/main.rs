@@ -9,6 +9,7 @@ mod wc_ignore;
 mod wc_layout;
 mod wc_new_check;
 mod wc_plan;
+mod wc_reply;
 mod wc_state;
 mod wc_status;
 mod wc_update;

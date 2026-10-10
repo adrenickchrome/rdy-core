@@ -32,7 +32,7 @@ fn dhome1_rdy_decide_and_rdy_revoke_without_parent_record_in_the_home() {
         .clone();
     land(&mut r, "work").unwrap();
     drop(r);
-    let cfg = dir.path().join(".rdy/config.yaml");
+    let cfg = dir.path().join(".rdy.yaml");
     let text = std::fs::read_to_string(&cfg).unwrap() + "decisions:\n  home: decisions/register\n";
     std::fs::write(&cfg, text).unwrap();
     let mut c = McpClient::start(dir.path());

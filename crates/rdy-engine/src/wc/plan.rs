@@ -184,6 +184,7 @@ pub fn resolve_figures(tree: &mut WcTree, root: &Path, pack: &Pack) -> Vec<Diagn
 /// Where the commit tree is built, under the state directory.
 const TMP_DIR: &str = "tmp";
 const COMMIT_DIR: &str = "commit";
+const BASE_DIR: &str = "base";
 
 /// Plans the commit of the staged files (wcdf1). The commit tree, every base file not staged plus
 /// every staged copy less every staged deletion, is linted and diffed against the base tree.
@@ -191,9 +192,15 @@ pub fn plan_commit(place: &Place, st: &WcState, pack: &Pack) -> Result<CommitPla
     let staged = stage_paths(place);
     let tmp = place.state.join(TMP_DIR);
     let dir = tmp.join(COMMIT_DIR);
+    let base_dir = tmp.join(BASE_DIR);
     let built = build_commit_tree(place, st, &staged, &dir);
     let commit = built.map(|()| read_tree(&dir, &Ignore::empty(), pack));
+    // The base is the copies `st.base.files` names, not whatever `base/files` holds: a stale copy
+    // that a power loss brought back is not part of it.
+    let base = build_base_tree(place, st, &base_dir)
+        .map(|()| read_tree(&base_dir, &Ignore::empty(), pack));
     let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&base_dir);
     let _ = fs::remove_dir(&tmp); // only when nothing else is in it
     let commit = commit.map_err(|diags| WcInvalid { diags })?;
     let mut commit = commit;
@@ -203,7 +210,7 @@ pub fn plan_commit(place: &Place, st: &WcState, pack: &Pack) -> Result<CommitPla
     if diags.iter().any(|d| d.severity == Severity::Error) {
         return Err(WcInvalid { diags });
     }
-    let base = read_tree(&place.state.join("base/files"), &Ignore::empty(), pack);
+    let base = base.map_err(|diags| WcInvalid { diags })?;
     let committed: BTreeSet<String> = staged
         .iter()
         .chain(st.stage.deleted.iter())
@@ -372,6 +379,24 @@ fn build_commit_tree(
             }
             Err(e) => return Err(one(io_diag(rel, "link the staged copy", e))),
         }
+    }
+    Ok(())
+}
+
+/// Rebuilds `dir` with every base copy `st.base.files` names, each linked from its base copy.
+/// Nothing else under `base/files` is read.
+fn build_base_tree(place: &Place, st: &WcState, dir: &Path) -> Result<(), Vec<Diagnostic>> {
+    let shown = dir.display().to_string();
+    match fs::remove_dir_all(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(vec![io_diag(&shown, "clear the base tree", e)]),
+    }
+    fs::create_dir_all(dir).map_err(|e| vec![io_diag(&shown, "create the base tree", e)])?;
+    for rel in st.base.files.keys() {
+        let to = under(dir, rel).map_err(|e| vec![e])?;
+        link_in(&place.base_file(rel), &to)
+            .map_err(|e| vec![io_diag(rel, "link the base copy", e)])?;
     }
     Ok(())
 }

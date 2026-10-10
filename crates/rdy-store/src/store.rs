@@ -266,6 +266,8 @@ impl Drop for HeldLock {
 #[derive(Default)]
 struct Faults {
     index_apply: bool,
+    /// The index update of the write after this many more successful writes fails.
+    index_apply_after: Option<u32>,
     rollback: bool,
     checkpoint: bool,
     /// The next replay fails before it indexes this frame (counting from 0).
@@ -434,6 +436,13 @@ impl Store {
     /// that is not a directory with a `FORMAT` file naming the current store format is refused before
     /// anything in it is created, locked, opened or written.
     pub fn open(dir: &Path) -> Result<Store, StoreError> {
+        Store::check_existing(dir)?;
+        Store::open_current_format(dir, vec![])
+    }
+
+    /// The checks [`Store::open`] makes before it creates, locks, opens or writes anything: `dir`
+    /// is a directory with a `FORMAT` file naming the current store format. Reads only.
+    pub fn check_existing(dir: &Path) -> Result<(), StoreError> {
         match std::fs::symlink_metadata(dir) {
             Ok(m) if m.file_type().is_dir() => {}
             Ok(_) => return Err(format::other_build(dir, "is not a directory")),
@@ -443,10 +452,9 @@ impl Store {
             Err(e) => return Err(e.into()),
         }
         match format::read_format_file(dir)? {
-            Some(f) => format::check_format(f, dir)?,
-            None => return Err(format::other_build(dir, "has no FORMAT file")),
+            Some(f) => format::check_format(f, dir),
+            None => Err(format::other_build(dir, "has no FORMAT file")),
         }
-        Store::open_current_format(dir, vec![])
     }
 
     /// Opens a store whose `FORMAT` names the current store format (`STORE_FORMAT`).
@@ -881,7 +889,15 @@ impl Store {
         self.log.crash_point(CrashPoint::BeforeSync);
         self.log.sync()?;
         self.log.crash_point(CrashPoint::AfterSync);
-        if std::mem::take(&mut self.faults.index_apply) {
+        let after = match self.faults.index_apply_after {
+            Some(0) => self.faults.index_apply_after.take().is_some(),
+            Some(n) => {
+                self.faults.index_apply_after = Some(n - 1);
+                false
+            }
+            None => false,
+        };
+        if std::mem::take(&mut self.faults.index_apply) || after {
             return Err(StoreError::Db("injected index failure".into()));
         }
         self.index().apply(&entries, self.log.end())?;
@@ -1019,6 +1035,13 @@ impl Store {
     #[doc(hidden)]
     pub fn fail_next_index_apply(&mut self) {
         self.faults.index_apply = true;
+    }
+
+    /// Test hook: the index update of a later write fails after its frames are appended: the
+    /// write after `writes` more successful (non-empty) writes.
+    #[doc(hidden)]
+    pub fn fail_index_apply_after(&mut self, writes: u32) {
+        self.faults.index_apply_after = Some(writes);
     }
 
     /// Test hook: the next replay (a catch-up or a reindex) fails with "injected replay failure"

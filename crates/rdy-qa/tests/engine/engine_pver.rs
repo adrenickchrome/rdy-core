@@ -270,7 +270,7 @@ fn hb1_strict_and_require_up_to_date_refuse_any_moved_base() {
         e.message.contains("1 landing(s)") && e.fix.contains("--strict"),
         "{e}"
     );
-    let cfg = d.path().join(".rdy/config.yaml");
+    let cfg = d.path().join(".rdy.yaml");
     let text = std::fs::read_to_string(&cfg).unwrap();
     std::fs::write(
         &cfg,

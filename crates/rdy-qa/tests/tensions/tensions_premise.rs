@@ -242,7 +242,7 @@ fn trk_project() -> (tempfile::TempDir, rdy_engine::Rdy) {
     let dir = tempfile::tempdir().unwrap();
     drop(rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap());
     std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), TRK_PACK).unwrap();
-    std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: trk\n").unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: trk\n").unwrap();
     let r = rdy_engine::Rdy::open(dir.path()).unwrap();
     (dir, r)
 }

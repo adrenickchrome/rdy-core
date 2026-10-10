@@ -1,5 +1,5 @@
-//! Settings come from four levels (FW-X5, D-C5955), minus the file move: `.rdy/local.yaml`,
-//! the project config (`.rdy/config.yaml` until M2f-b), the user config and the defaults. The
+//! Settings come from four levels (FW-X5, D-C5955): `.rdy/local.yaml`, the project config
+//! (`.rdy.yaml` at the project root), the user config and the defaults. The
 //! most specific level that sets a key wins. Each key of [`KEY_LEVELS`] names the levels that may
 //! set it (R-P6); a key in a file of another level is a `W_CONFIG_UNKNOWN` warning that names the
 //! file it belongs in, and rdy ignores its value. Keys outside the table are kept as they are and
@@ -17,9 +17,64 @@ use serde::Serialize;
 use serde_yaml_ng::{Mapping, Value};
 use std::path::{Path, PathBuf};
 
-/// The project config, read by `read_config`, `parse_config`, `serve_config` and
-/// `pack_fingerprint`. M2f-b changes this constant.
-pub const PROJECT_FILE: &str = ".rdy/config.yaml";
+/// The project config at the project root (FW-X5, D-C5955), read by `read_config`,
+/// `parse_config`, `serve_config`, `pack_fingerprint` and `code_repos`. rdy reads no other
+/// project file (D-W7RBV).
+pub const PROJECT_FILE: &str = ".rdy.yaml";
+
+/// Whether `project` is a project: it has `.rdy.yaml` and an entry at `.rdy/store` (the store
+/// checks that entry when it opens).
+pub fn is_project(project: &Path) -> bool {
+    project.join(PROJECT_FILE).exists() && std::fs::symlink_metadata(store_path(project)).is_ok()
+}
+
+/// Whether `.rdy/store` holds anything: a directory with an entry in it, or anything else
+/// that stands at that path. `rdy init` never adopts such a store.
+pub fn store_has_entry(project: &Path) -> bool {
+    let p = store_path(project);
+    match std::fs::read_dir(&p) {
+        Ok(mut d) => d.next().is_some(),
+        Err(_) => std::fs::symlink_metadata(&p).is_ok(),
+    }
+}
+
+fn store_path(project: &Path) -> PathBuf {
+    project.join(".rdy").join(rdy_store::layout::STORE_DIR)
+}
+
+/// `E_NO_PROJECT` unless `project` is a project ([`is_project`]), in the words of
+/// [`missing_project`]: the engine's open and the CLI check this before they open a store.
+pub fn require_project(project: &Path) -> Result<(), RdyError> {
+    if is_project(project) {
+        return Ok(());
+    }
+    Err(missing_project(project))
+}
+
+/// The error for `project` when it is not a project. A directory with `.rdy.yaml` and no store
+/// says so, and `rdy init` gives the same text there. Otherwise, a directory with no `.rdy`
+/// directory is not a project, and one with `.rdy` and no `.rdy.yaml` names the missing file.
+pub fn missing_project(project: &Path) -> RdyError {
+    if project.join(PROJECT_FILE).exists() {
+        RdyError::new(
+            E_NO_PROJECT,
+            format!("{} has .rdy.yaml but no store", project.display()),
+            "move .rdy.yaml aside, run rdy init, then copy your settings back into the new .rdy.yaml",
+        )
+    } else if std::fs::metadata(project.join(".rdy")).is_ok_and(|m| m.is_dir()) {
+        RdyError::new(
+            E_NO_PROJECT,
+            format!("{} has no .rdy.yaml, the project config", project.display()),
+            "create .rdy.yaml in the project directory with the line `pack: rdy-standard` (or the pack this project uses)",
+        )
+    } else {
+        RdyError::new(
+            E_NO_PROJECT,
+            format!("{} is not an rdy project", project.display()),
+            "run rdy init in the project directory",
+        )
+    }
+}
 
 /// The settings of this checkout only, never committed.
 pub const LOCAL_FILE: &str = ".rdy/local.yaml";
@@ -636,11 +691,7 @@ fn build(
     given: Option<GivenFiles<'_>>,
 ) -> Result<Effective, RdyError> {
     if !lenient && given.is_none() && !project.join(PROJECT_FILE).exists() {
-        return Err(RdyError::new(
-            E_NO_PROJECT,
-            format!("{} is not an rdy project", project.display()),
-            "run rdy init in the project directory",
-        ));
+        return Err(missing_project(project));
     }
     // each file's mapping, in precedence order
     let mut files: Vec<(Level, Mapping)> = Vec::new();
@@ -833,14 +884,13 @@ mod tests {
         let e = effective(d.path(), None).unwrap_err();
         assert!(
             e.message
-                .starts_with("reviews.require_up_to_date in .rdy/config.yaml: "),
+                .starts_with("reviews.require_up_to_date in .rdy.yaml: "),
             "{e}"
         );
         let d = project("pack: p\nserve: 5\n", None);
         let e = effective(d.path(), None).unwrap_err();
         assert!(
-            e.message
-                .starts_with("serve.start_timeout in .rdy/config.yaml: "),
+            e.message.starts_with("serve.start_timeout in .rdy.yaml: "),
             "{e}"
         );
         // an empty optional value and an empty section are fine
@@ -872,7 +922,7 @@ mod tests {
         assert_eq!(w.severity, rdy_schema::Severity::Warning);
         assert!(
             w.message.contains("later")
-                && w.message.contains(".rdy/config.yaml")
+                && w.message.contains(".rdy.yaml")
                 && w.message.contains("project"),
             "{}",
             w.message
@@ -901,7 +951,7 @@ mod tests {
             assert_eq!(w[0].code, "W_CONFIG_UNKNOWN");
             assert_eq!(
                 w[0].message,
-                "unknown review setting reviews.require_uptodate in .rdy/config.yaml; the review gate would stay off"
+                "unknown review setting reviews.require_uptodate in .rdy.yaml; the review gate would stay off"
             );
             assert!(
                 w[0].fix
@@ -949,7 +999,7 @@ mod tests {
         assert_eq!(w.len(), 1, "{w:?}");
         assert_eq!(
             w[0].fix,
-            "write it nested in .rdy/config.yaml: `reviews:` then `  require_up_to_date: true` on the next line"
+            "write it nested in .rdy.yaml: `reviews:` then `  require_up_to_date: true` on the next line"
         );
     }
 
@@ -972,11 +1022,11 @@ mod tests {
         let e = effective(d.path(), None).expect("a wrong-file key is a warning");
         assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
         assert_eq!(e.warnings[0].code, "W_CONFIG_UNKNOWN");
-        assert_eq!(e.warnings[0].fix, "move pack to .rdy/config.yaml");
+        assert_eq!(e.warnings[0].fix, "move pack to .rdy.yaml");
         let d = project("pack: p\n", Some("decisions:\n  home: x\n"));
         let e = effective(d.path(), None).expect("a wrong-file key is a warning");
         assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
-        assert_eq!(e.warnings[0].fix, "move decisions.home to .rdy/config.yaml");
+        assert_eq!(e.warnings[0].fix, "move decisions.home to .rdy.yaml");
     }
 
     #[test]
@@ -1015,9 +1065,9 @@ mod tests {
         assert_eq!(w.code, "W_CONFIG_UNKNOWN");
         assert_eq!(
             w.message,
-            "reviews.require_up_to_date in .rdy/local.yaml belongs in .rdy/config.yaml; rdy ignores it here, so the review gate would stay off"
+            "reviews.require_up_to_date in .rdy/local.yaml belongs in .rdy.yaml; rdy ignores it here, so the review gate would stay off"
         );
-        assert_eq!(w.fix, "move reviews.require_up_to_date to .rdy/config.yaml");
+        assert_eq!(w.fix, "move reviews.require_up_to_date to .rdy.yaml");
         let o = e
             .origins
             .iter()
@@ -1050,7 +1100,7 @@ mod tests {
         );
         assert_eq!(
             e.warnings[0].fix,
-            "move reviews.require_up_to_date to .rdy/config.yaml"
+            "move reviews.require_up_to_date to .rdy.yaml"
         );
     }
 
@@ -1065,7 +1115,7 @@ mod tests {
         );
         assert_eq!(
             w[0].fix,
-            "did you mean reviews.require_up_to_date? set it in .rdy/config.yaml and remove reviews.require_uptodate from .rdy/local.yaml"
+            "did you mean reviews.require_up_to_date? set it in .rdy.yaml and remove reviews.require_uptodate from .rdy/local.yaml"
         );
     }
 
@@ -1076,7 +1126,7 @@ mod tests {
         assert_eq!(e.warnings.len(), 1, "{:?}", e.warnings);
         assert_eq!(
             e.warnings[0].message,
-            "actor in .rdy/config.yaml belongs in .rdy/local.yaml or the user config; rdy ignores it here"
+            "actor in .rdy.yaml belongs in .rdy/local.yaml or the user config; rdy ignores it here"
         );
         assert_eq!(
             e.warnings[0].fix,
@@ -1094,7 +1144,7 @@ mod tests {
         let home = format!(".rdy/local.yaml or the user config ({})", uf.display());
         assert_eq!(
             w[0].message,
-            format!("actor in .rdy/config.yaml belongs in {home}; rdy ignores it here")
+            format!("actor in .rdy.yaml belongs in {home}; rdy ignores it here")
         );
         assert_eq!(w[0].fix, format!("move actor to {home}"));
     }
@@ -1117,11 +1167,11 @@ mod tests {
             assert_eq!(
                 w[0].message,
                 format!(
-                    "{named} in .rdy/local.yaml belongs in .rdy/config.yaml; rdy ignores it here, so the review gate would stay off"
+                    "{named} in .rdy/local.yaml belongs in .rdy.yaml; rdy ignores it here, so the review gate would stay off"
                 ),
                 "{local:?}"
             );
-            assert_eq!(w[0].fix, format!("move {named} to .rdy/config.yaml"));
+            assert_eq!(w[0].fix, format!("move {named} to .rdy.yaml"));
         }
         let d = project("pack: p\n", Some("reviews: {}\n"));
         assert!(

@@ -230,11 +230,7 @@ fn type1_a_bodyless_type_without_its_own_rendering_keeps_its_wrapper_and_shows_i
     drop(r);
     let pack = "name: p\nversion: '1'\nextends: rdy-standard\nblock_types:\n  person: { prefix: pe, body: forbidden, fields: { name: { kind: str, required: true } } }\n  section:\n    prefix: s\n    traits: [structural]\n    fields:\n      title: { kind: str, required: true }\n    children: [section, prose, person]\n";
     std::fs::write(dir.path().join(".rdy/packs/p.yaml"), pack).unwrap();
-    std::fs::write(
-        dir.path().join(".rdy/config.yaml"),
-        "pack: p\nname: People\n",
-    )
-    .unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: p\nname: People\n").unwrap();
     let mut r = rdy_engine::Rdy::open(dir.path()).unwrap();
     let res = write(&mut r, "work", serde_json::json!([
         {"op":"create","type":"doc","id":"$d","fields":{"name":"people","title":"People","doc_type":"glossary"}},

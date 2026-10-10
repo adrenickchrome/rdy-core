@@ -22,7 +22,7 @@ fn init_then_open() {
         let r = Rdy::init(dir.path(), "rdy-standard").unwrap();
         assert_eq!(r.pack().name, "rdy-standard");
     }
-    assert!(dir.path().join(".rdy/config.yaml").exists());
+    assert!(dir.path().join(".rdy.yaml").exists());
     let r = Rdy::open(dir.path()).unwrap();
     assert_eq!(r.pack().name, "rdy-standard");
 }
@@ -55,7 +55,7 @@ fn custom_pack_files_are_loaded() {
         "name: team\nversion: \"1\"\nextends: rdy-standard\n",
     )
     .unwrap();
-    std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: team\n").unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: team\n").unwrap();
     assert_eq!(Rdy::open(dir.path()).unwrap().pack().name, "team");
 }
 

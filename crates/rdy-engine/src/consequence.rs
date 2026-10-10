@@ -11,11 +11,12 @@ use crate::tensions::{SideRef, Tension, tension_label};
 use crate::tensions::{TensionDelta, tension_delta};
 use crate::views::{UndoResult, ViewOpResult};
 use crate::{Materialized, Rdy, ReadState, Scope, now_ms};
-use rdy_graph::{Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, Suspect};
-use rdy_model::decision::{DECISION, REVOKES, SUPERSEDES};
+use rdy_graph::{DerivedStatus, Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, Suspect};
+use rdy_model::decision::{DECISION, REFINES, REVOKES, SUPERSEDES};
 use rdy_model::{BlockId, Hash, Op};
 use serde::Serialize;
 use std::cell::OnceCell;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
@@ -97,6 +98,54 @@ pub const CONFLICT_FIX: &str = "write the block from the version you want (rdy_c
 /// The hint on a `tension` entry.
 pub const TENSION_FIX: &str = "resolve it with a change (rdy_tensions shows both sides), or ask a reviewer to dismiss it with rdy_resolve";
 
+/// The hint on an entry for a block that a refined or part-superseded decision governs (FW-LP6).
+/// The governing decision did not change, so the block already pins it: a repin is refused, and
+/// the hint never asks for one (D-M19GV).
+pub const LINEAGE_FIX: &str = "a decision that governs it was refined or partly superseded: check that it still holds, and update it if not; no repin is needed";
+
+/// FW-LP6: for each decision `ops` create, each `refines` link and each `supersedes` link with a
+/// part: (the new decision, the target, the link's name). In op order, then link order. The
+/// refines links a full supersede copied are dropped later, with the graph ([`refines_copied`]).
+pub(crate) fn reached_targets(ops: &[Op]) -> Vec<(BlockId, BlockId, &'static str)> {
+    let mut out = vec![];
+    for op in ops {
+        let Op::Create { block } = op else { continue };
+        if block.block_type != DECISION {
+            continue;
+        }
+        for l in block.links.get(REFINES).into_iter().flatten() {
+            out.push((block.id.clone(), l.target.clone(), REFINES));
+        }
+        for l in block.links.get(SUPERSEDES).into_iter().flatten() {
+            if l.part.is_some() {
+                out.push((block.id.clone(), l.target.clone(), SUPERSEDES));
+            }
+        }
+    }
+    out
+}
+
+/// Whether decision `id`'s refines links are the ones a full supersede copied (sup1): it fully
+/// supersedes a decision whose refines targets are exactly its own. Those do not reach (FW-LP6a
+/// is M3); refines given to rdy_supersede differ from the old ones, and reach as any refine
+/// does (final review 2, finding 10).
+pub(crate) fn refines_copied(g: &Graph, id: &BlockId) -> bool {
+    let refines = |b: &BlockId| -> BTreeSet<BlockId> {
+        g.outgoing(b)
+            .iter()
+            .filter(|e| matches!(&e.kind, EdgeKind::Link(n) if n == REFINES))
+            .map(|e| e.to.clone())
+            .collect()
+    };
+    let mine = refines(id);
+    !mine.is_empty()
+        && g.outgoing(id).iter().any(|e| {
+            matches!(&e.kind, EdgeKind::Link(n) if n == SUPERSEDES)
+                && e.part.is_none()
+                && refines(&e.to) == mine
+        })
+}
+
 /// `cq-` and the first 16 hex characters of the hash of the batch, kind and target.
 /// For a write, `batch` is the change hash; for a view op, the view op's hash.
 pub fn consequence_id(batch: &Hash, kind: &str, target: &BlockId) -> String {
@@ -163,29 +212,64 @@ impl ReadState {
         change: &Hash,
         max_tokens: Option<usize>,
     ) -> Result<Consequences, RdyError> {
-        let ch = self.reader().change(change)?;
-        let (touched, changed) = changed_by_ops(&ch.ops);
-        let mine = |s: &SideRef| matches!(s, SideRef::Change(c) if c == change);
+        self.consequences_of(scope, std::slice::from_ref(change), max_tokens)
+    }
+
+    /// The consequences of `changes` written together (an import writes one change per author):
+    /// the blocks any of them touched are the touched blocks, the tensions that involve any of
+    /// them are listed once each, in change order, and each entry's id takes the last change
+    /// (the write's `change`) as its batch. For one change, this is [`ReadState::consequences`].
+    pub fn consequences_of(
+        &self,
+        scope: &Scope,
+        changes: &[Hash],
+        max_tokens: Option<usize>,
+    ) -> Result<Consequences, RdyError> {
+        let Some(change) = changes.last() else {
+            return Ok(Consequences::default());
+        };
+        let chs = changes
+            .iter()
+            .map(|h| self.reader().change(h))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (mut touched, mut changed) = (BTreeSet::new(), BTreeSet::new());
+        for ch in &chs {
+            let (t, c) = changed_by_ops(&ch.ops);
+            touched.extend(t);
+            changed.extend(c);
+        }
+        // FW-LP6: the reaching links, by new decision, then target
+        let mut reach: Vec<_> = chs.iter().flat_map(|ch| reached_targets(&ch.ops)).collect();
+        reach.sort();
+        let mine = |s: &SideRef| matches!(s, SideRef::Change(c) if changes.contains(c));
         // a tension set that cannot be built never fails the other entries
         let (tensions, tensions_error): (Vec<Consequence>, _) = match self.tensions() {
-            Ok(set) => (
-                set.involving_change(change)
+            Ok(set) => {
+                let mut seen = BTreeSet::new();
+                let tensions = changes
                     .iter()
-                    .map(|t| tension_entry(change, t, &mine))
-                    .collect(),
-                None,
-            ),
+                    .flat_map(|h| set.involving_change(h))
+                    .filter(|t| seen.insert(t.id))
+                    .map(|t| tension_entry(change, &t, &mine))
+                    .collect();
+                (tensions, None)
+            }
             Err(e) => (vec![], Some(format!("{}: {}", e.code, e.message))),
         };
         // nothing can point at a block that did not exist: no graph to read
-        let only_creates = ch.ops.iter().all(|o| matches!(o, Op::Create { .. }));
-        if only_creates && changed == touched {
+        let only_creates = chs
+            .iter()
+            .flat_map(|ch| &ch.ops)
+            .all(|o| matches!(o, Op::Create { .. }));
+        if only_creates && changed == touched && reach.is_empty() {
             return Ok(Consequences {
                 tensions_error,
                 ..cut(tensions, max_tokens)
             });
         }
         let g = self.graph(scope)?;
+        // a full supersede does not reach through the refines links it copied (Q5, Q6)
+        reach.retain(|(new, _, via)| *via != REFINES || !refines_copied(&g, new));
         let m = self.materialized(scope)?;
         let view = match scope {
             Scope::View(v) => Some(v.as_str()),
@@ -203,6 +287,7 @@ impl ReadState {
                 &written,
                 vec![],
                 tensions,
+                &reach,
                 max_tokens,
             )
         })
@@ -310,7 +395,16 @@ impl ReadState {
         let g = self.graph(&scope)?;
         let written = self.written_in(Some(view));
         Ok(self.consequences_in(
-            &g, &m, batch, &touched, &changed, &written, conflicts, tensions, max_tokens,
+            &g,
+            &m,
+            batch,
+            &touched,
+            &changed,
+            &written,
+            conflicts,
+            tensions,
+            &[],
+            max_tokens,
         ))
     }
 
@@ -364,16 +458,21 @@ impl ReadState {
             &|_| false,
             vec![],
             vec![],
+            &[],
             max_tokens,
         ))
     }
 
     /// The entries for `changed` in graph `g` over `m`: for each changed block, each block
     /// outside `touched` that points at it. `conflicts` (by block id) come first, then
-    /// `tensions` (as given), then suspect entries, then dependent ones, each by block id;
-    /// `written` marks `already_written`. The list is cut
-    /// from the end to `max_tokens` (default `BRIEF_DEFAULT_TOKENS`), counting what it drops in
-    /// `omitted`.
+    /// `tensions` (as given), then suspect entries, then dependent ones, each by block id, then
+    /// the FW-LP6 entries of `reach` (a `dependent` entry for each block a reached target
+    /// governs, in the order of `reach`, never a block `touched` holds, the new decision itself,
+    /// or a block the list already holds; none for a target that is rejected, superseded or
+    /// revoked; follow-up `confirm` for a block that is not a decision, and for a decision what
+    /// `follow_up` gives it, none for one that asserts nothing live); `written` marks
+    /// `already_written`. The list is cut from the end to `max_tokens` (default
+    /// `BRIEF_DEFAULT_TOKENS`), counting what it drops in `omitted`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn consequences_in(
         &self,
@@ -385,6 +484,7 @@ impl ReadState {
         written: &dyn Fn(&BlockId) -> bool,
         mut conflicts: Vec<Consequence>,
         tensions: Vec<Consequence>,
+        reach: &[(BlockId, BlockId, &'static str)],
         max_tokens: Option<usize>,
     ) -> Consequences {
         let mut suspects_of: BTreeMap<BlockId, Vec<Suspect>> = BTreeMap::new();
@@ -473,6 +573,61 @@ impl ReadState {
         conflicts.extend(tensions);
         conflicts.extend(suspect_items);
         conflicts.extend(dependent_items);
+        // FW-LP6: what a refined or part-superseded target governs, once per block, never a
+        // block this change touched or one the list already holds
+        let mut listed: BTreeSet<String> = conflicts.iter().map(|c| c.block.clone()).collect();
+        for (decision, target, via) in reach {
+            if matches!(
+                g.status(target),
+                Some(
+                    DerivedStatus::Rejected
+                        | DerivedStatus::Superseded { .. }
+                        | DerivedStatus::Revoked { .. }
+                )
+            ) {
+                continue;
+            }
+            // by id, whatever the iteration order of the graph
+            let mut governed = g.governed_by(target);
+            governed.sort();
+            for block in governed {
+                if touched.contains(&block) || block == *decision {
+                    continue;
+                }
+                if listed.contains(&block.to_string()) {
+                    continue;
+                }
+                // the walk's rule for a governed decision: none for one that asserts nothing
+                // live, reaffirm for an accepted one, update for a proposed one
+                let Some(src) = m.get(&block) else { continue };
+                let status = g.status(&block);
+                let Some(walk) = follow_up(self.pack(), src, status.as_ref(), false, false) else {
+                    continue;
+                };
+                let (follow, fix) = match status {
+                    Some(_) => (
+                        walk,
+                        (walk == FollowUp::Reaffirm).then(|| REAFFIRM_FIX.to_string()),
+                    ),
+                    None => (FollowUp::Confirm, Some(LINEAGE_FIX.to_string())),
+                };
+                listed.insert(block.to_string());
+                conflicts.push(Consequence {
+                    id: consequence_id(batch, ConsequenceKind::Dependent.as_str(), &block),
+                    block: block.to_string(),
+                    kind: ConsequenceKind::Dependent,
+                    because: Because {
+                        edge: (*via).to_string(),
+                        changed: target.to_string(),
+                    },
+                    follow_up: follow,
+                    conflict: None,
+                    tension: None,
+                    fix,
+                    already_written: written(&block),
+                });
+            }
+        }
         cut(conflicts, max_tokens)
     }
 }
@@ -580,9 +735,33 @@ fn attach_on_change(
 /// sessions' open intents cover blocks the change wrote (iwr1), then `on_change` (the tensions
 /// the write opened or resolved in the view; `on_change_error` when they could not be read),
 /// and the write's suggestions (FW-EN3), which never fail the write; on a briefing refusal
-/// the error carries a fresh briefing for exactly the blocks the write touches.
+/// the error carries a fresh briefing for exactly the blocks the write touches. A write that
+/// lists its `changes` (an import: one change per author) is reported over all of them.
 pub fn write_and_report<T: Serialize + 'static>(
     engine: &dyn Engine,
+    view: &str,
+    max_tokens: Option<usize>,
+    f: impl FnOnce(&mut Rdy) -> Result<T, RdyError> + Send + 'static,
+) -> Result<serde_json::Value, RdyError> {
+    report(engine, None, view, max_tokens, f)
+}
+
+/// [`write_and_report`], with every change of the write read as `reader`'s session: an import's
+/// reply is the importer's, whoever wrote the blocks (final review 2, finding 11). An intent of
+/// `reader`'s own session is not listed; an author's intent is.
+pub fn write_and_report_as<T: Serialize + 'static>(
+    engine: &dyn Engine,
+    reader: &crate::Session,
+    view: &str,
+    max_tokens: Option<usize>,
+    f: impl FnOnce(&mut Rdy) -> Result<T, RdyError> + Send + 'static,
+) -> Result<serde_json::Value, RdyError> {
+    report(engine, Some(reader), view, max_tokens, f)
+}
+
+fn report<T: Serialize + 'static>(
+    engine: &dyn Engine,
+    reader: Option<&crate::Session>,
     view: &str,
     max_tokens: Option<usize>,
     f: impl FnOnce(&mut Rdy) -> Result<T, RdyError> + Send + 'static,
@@ -612,63 +791,68 @@ pub fn write_and_report<T: Serialize + 'static>(
     };
     let states = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
     let before = states.as_ref().map(|s| &*s.0);
+    // the write's changes: an import lists one per author in `changes` (oldest first, the last
+    // is `change`); every other write has the one `change`
     let change = v
         .get("change")
         .and_then(|c| c.as_str())
         .and_then(|c| c.parse::<Hash>().ok());
-    match change {
-        Some(h) => {
-            let st = engine.read();
-            let c = st.consequences(&Scope::View(view.into()), &h, max_tokens);
-            attach(&mut v, c);
-            if let Some(notes) = intent_notes_of(&st, before, view, &h)
-                && !notes.is_empty()
-            {
-                v["intents"] = serde_json::to_value(&notes).expect("intent notes serialize");
-            }
-            if let Some((b, a)) = &states {
-                let r = tension_delta(b, a, Some(&[h]))
-                    .and_then(|d| on_change(b, a, view, max_tokens, &d));
-                attach_on_change(&mut v, r);
+    let changes: Vec<Hash> = match v.get("changes").and_then(|c| c.as_array()) {
+        Some(list) if !list.is_empty() => list
+            .iter()
+            .filter_map(|c| c.as_str()?.parse::<Hash>().ok())
+            .collect(),
+        _ => change.into_iter().collect(),
+    };
+    let scope = Scope::View(view.into());
+    if changes.is_empty() {
+        v["consequences"] = serde_json::json!([]);
+        v["suggestions"] = serde_json::json!([]);
+        return Ok(v);
+    }
+    let st = engine.read();
+    let c = st.consequences_of(&scope, &changes, max_tokens);
+    attach(&mut v, c);
+    if let Some(notes) = intent_notes_of(&st, before, view, &changes, reader)
+        && !notes.is_empty()
+    {
+        v["intents"] = serde_json::to_value(&notes).expect("intent notes serialize");
+    }
+    if let Some((b, a)) = &states {
+        let r =
+            tension_delta(b, a, Some(&changes)).and_then(|d| on_change(b, a, view, max_tokens, &d));
+        attach_on_change(&mut v, r);
+    }
+    match engine.read().suggestions_of(&scope, &changes) {
+        Ok((s, n)) => {
+            v["suggestions"] =
+                serde_json::to_value(&s).expect("suggestions serialize: strings only");
+            if n > 0 {
+                v["suggestions_omitted"] = n.into();
             }
         }
-        None => v["consequences"] = serde_json::json!([]),
+        Err(e) => {
+            v["suggestions"] = serde_json::json!([]);
+            v["suggestions_error"] = format!("{}: {}", e.code, e.message).into();
+        }
     }
-    match change {
-        Some(h) => match engine.read().suggestions(&Scope::View(view.into()), &h) {
-            Ok((s, n)) => {
-                v["suggestions"] =
-                    serde_json::to_value(&s).expect("suggestions serialize: strings only");
-                if n > 0 {
-                    v["suggestions_omitted"] = n.into();
-                }
-            }
-            Err(e) => {
-                v["suggestions"] = serde_json::json!([]);
-                v["suggestions_error"] = format!("{}: {}", e.code, e.message).into();
-            }
-        },
-        None => v["suggestions"] = serde_json::json!([]),
-    }
-    if let Some(h) = change {
-        attach_related(&mut v, engine, view, &h);
-    }
+    attach_related(&mut v, engine, view, &changes);
     Ok(v)
 }
 
-/// FW-EN5: when the change creates decisions, `related_decisions` lists the decisions related
+/// FW-EN5: when the changes create decisions, `related_decisions` lists the decisions related
 /// to them (with `related_decisions_omitted` when a cap dropped some), or `[]` and
-/// `related_decisions_error` when they could not be read; the write stands. A change that
-/// creates no decision adds no key.
-fn attach_related(v: &mut serde_json::Value, engine: &dyn Engine, view: &str, change: &Hash) {
+/// `related_decisions_error` when they could not be read; the write stands. Changes that
+/// create no decision add no key.
+fn attach_related(v: &mut serde_json::Value, engine: &dyn Engine, view: &str, changes: &[Hash]) {
     let st = engine.read();
-    let ids: Result<Vec<BlockId>, RdyError> = st
-        .reader()
-        .change(change)
-        .map_err(RdyError::from)
-        .map(|ch| {
-            ch.ops
-                .iter()
+    let ids: Result<Vec<BlockId>, RdyError> = changes
+        .iter()
+        .map(|h| st.reader().change(h).map_err(RdyError::from))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|chs| {
+            chs.iter()
+                .flat_map(|ch| &ch.ops)
                 .filter_map(|o| match o {
                     Op::Create { block } if block.block_type == DECISION => Some(block.id.clone()),
                     _ => None,
@@ -697,28 +881,52 @@ fn attach_related(v: &mut serde_json::Value, engine: &dyn Engine, view: &str, ch
     }
 }
 
-/// iwr1: other sessions' open intents on the blocks change `h` wrote, in `view`, with each block's
+/// iwr1: other sessions' open intents on the blocks `changes` wrote, in `view`, with each block's
 /// areas taken after the write and, when given, `before` it; `None` when they cannot be read (the
-/// write stands and the reply has no `intents`).
+/// write stands and the reply has no `intents`). Each change is read as `reader`'s session when
+/// given (an import: the importer's), else as its author's: an intent of that session is not
+/// listed for the change's blocks. An intent several changes hear of is listed once, with the
+/// blocks of all of them; by id.
 fn intent_notes_of(
     st: &ReadState,
     before: Option<&ReadState>,
     view: &str,
-    h: &Hash,
+    changes: &[Hash],
+    reader: Option<&crate::Session>,
 ) -> Option<Vec<IntentNote>> {
     if st.coord_heads().open_intents.is_empty() {
         return Some(vec![]);
     }
-    let change = st.reader().change(h).ok()?;
-    let touched: BTreeSet<BlockId> = change.ops.iter().map(|o| o.block_id().clone()).collect();
-    let prov = &change.provenance;
     let scope = Scope::View(view.into());
-    let (actor, run, now) = (&prov.actor, prov.run.as_deref(), now_ms());
-    match before {
-        Some(b) => st.intent_notes_since(b, &scope, actor, run, &touched, now),
-        None => st.intent_notes(&scope, actor, run, &touched, now),
+    let now = now_ms();
+    let mut by_id: BTreeMap<String, IntentNote> = BTreeMap::new();
+    for h in changes {
+        let change = st.reader().change(h).ok()?;
+        let touched: BTreeSet<BlockId> = change.ops.iter().map(|o| o.block_id().clone()).collect();
+        let (actor, run) = match reader {
+            Some(s) => (&s.actor, s.run.as_deref()),
+            None => (&change.provenance.actor, change.provenance.run.as_deref()),
+        };
+        let notes = match before {
+            Some(b) => st.intent_notes_since(b, &scope, actor, run, &touched, now),
+            None => st.intent_notes(&scope, actor, run, &touched, now),
+        }
+        .ok()?;
+        for n in notes {
+            match by_id.entry(n.id.clone()) {
+                Entry::Vacant(e) => {
+                    e.insert(n);
+                }
+                Entry::Occupied(mut e) => {
+                    let blocks = &mut e.get_mut().blocks;
+                    blocks.extend(n.blocks);
+                    blocks.sort();
+                    blocks.dedup();
+                }
+            }
+        }
     }
-    .ok()
+    Some(by_id.into_values().collect())
 }
 
 /// What a view op did, for its consequences: the op (`batch`), the changes it put in or took

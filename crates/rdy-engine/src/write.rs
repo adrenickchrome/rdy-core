@@ -270,6 +270,9 @@ pub struct WriteResult {
     /// sup1: links rdy_supersede copied from the old decision, by kind.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub inherited: BTreeMap<String, Vec<String>>,
+    /// Every change an import wrote, oldest first (one per author); empty for every other write.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<String>,
     pub warnings: Vec<Issue>,
 }
 
@@ -2245,6 +2248,7 @@ impl Rdy {
             names,
             keys,
             inherited: BTreeMap::new(),
+            changes: vec![],
             warnings,
         })
     }

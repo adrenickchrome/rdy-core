@@ -425,7 +425,7 @@ mod tests {
         let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
         let pack = dir.path().join(".rdy/packs/proj.yaml");
         std::fs::write(&pack, PACK_A).unwrap();
-        std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: proj\n").unwrap();
+        std::fs::write(dir.path().join(".rdy.yaml"), "pack: proj\n").unwrap();
         let out = sh.writer.reload().unwrap();
         assert!(matches!(out, ReloadOutcome::Reloaded), "{out:?}");
         // the reload reads the invalid file, then the file is fixed before anything is recorded
@@ -453,7 +453,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
         std::fs::write(dir.path().join(".rdy/packs/proj.yaml"), PACK_A).unwrap();
-        std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: proj\n").unwrap();
+        std::fs::write(dir.path().join(".rdy.yaml"), "pack: proj\n").unwrap();
         *sh.after_reload.lock().unwrap() = Some(Box::new(|| panic!("reload test panic")));
         let out = sh
             .writer
@@ -474,7 +474,7 @@ mod tests {
         }));
         assert!(out.is_ok(), "{out:?}");
         std::fs::write(dir.path().join(".rdy/packs/proj.yaml"), PACK_A).unwrap();
-        std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: proj\n").unwrap();
+        std::fs::write(dir.path().join(".rdy.yaml"), "pack: proj\n").unwrap();
         let out = sh
             .writer
             .run(Box::new(|_: &mut Rdy| Ok(serde_json::Value::Null)));

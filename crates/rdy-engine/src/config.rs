@@ -1,4 +1,4 @@
-//! The project config (`.rdy/config.yaml`) as rdy reads it.
+//! The project config (`.rdy.yaml`) as rdy reads it.
 
 use crate::config_levels;
 use crate::{E_CONFIG, RdyError};
@@ -28,7 +28,7 @@ pub(crate) struct Config {
     pub(crate) serve: ServeSection,
 }
 
-/// The `serve:` section of `.rdy/config.yaml`, in seconds.
+/// The `serve:` section of `.rdy.yaml`, in seconds.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ServeSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]

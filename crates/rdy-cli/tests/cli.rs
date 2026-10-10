@@ -194,7 +194,7 @@ fn init_honours_the_project_flag() {
         cwd.path(),
         &["--project", target.path().to_str().unwrap(), "init"],
     );
-    assert!(target.path().join(".rdy/config.yaml").exists());
+    assert!(target.path().join(".rdy.yaml").exists());
     assert!(!cwd.path().join(".rdy").exists());
 }
 

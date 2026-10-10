@@ -637,7 +637,7 @@ fn tgat1_a_landing_only_fork_is_dismissable_by_its_id() {
     let dir = tempfile::tempdir().unwrap();
     drop(Rdy::init(dir.path(), "rdy-standard").unwrap());
     std::fs::write(dir.path().join(".rdy/packs/trk.yaml"), TRK_PACK).unwrap();
-    std::fs::write(dir.path().join(".rdy/config.yaml"), "pack: trk\n").unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: trk\n").unwrap();
     let mut r = Rdy::open(dir.path()).unwrap();
     let s = spec_doc(&mut r);
     let supersede = |r: &mut Rdy, who: &str| {

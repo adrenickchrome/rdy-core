@@ -1,6 +1,6 @@
 //! The site ops: render, export and import.
 use super::*;
-use rdy_engine::consequence::write_and_report;
+use rdy_engine::consequence::write_and_report_as;
 use rdy_engine::{RdyError, Scope};
 use serde::Deserialize;
 use serde_json::Value;
@@ -38,7 +38,11 @@ pub(super) fn import(cx: &OpContext, a: ImportArgs) -> Result<Value, RdyError> {
     let dir = resolve_path(cx.cwd, &a.dir);
     let scope = Scope::View(view.clone());
     let target = view.clone();
-    let mut v = write_and_report(cx.engine, &target, None, move |r| r.import(&s, &view, &dir))?;
+    // the reply is the importer's: every author change is read as this session (finding 11)
+    let reader = s.clone();
+    let mut v = write_and_report_as(cx.engine, &reader, &target, None, move |r| {
+        r.import(&s, &view, &dir)
+    })?;
     // each warning names its doc: the title as imported, then the id (the CLI prints it)
     let st = cx.engine.read();
     let docs: serde_json::Map<String, Value> = v["warnings"]

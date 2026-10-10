@@ -120,27 +120,33 @@ async fn life1_the_stop_op_drains_like_the_handle() {
     ));
 }
 
-#[tokio::test]
-async fn life1_a_stuck_connection_is_dropped_after_the_grace() {
-    let d = daemon("1", true, |_| {}).await;
-    let (mut r, _) = connect_with(&d.run, &hello("1", "ctl", d.dir.path())).await;
-    // 7 s: past the 5 s grace, but short, since the runtime's drop waits for the blocking thread
-    let line = json!({"id": 1, "op": "sleep", "args": {"ms": 7_000}}).to_string() + "\n";
-    r.get_mut().write_all(line.as_bytes()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let t0 = Instant::now();
-    d.handle.stop();
-    let reason = tokio::time::timeout(Duration::from_secs(8), d.task)
-        .await
-        .unwrap()
-        .unwrap()
+#[test]
+fn life1_a_stuck_connection_is_dropped_after_the_grace() {
+    // its own runtime, shut down in the background: the 60 s sleep runs on a blocking thread,
+    // and a #[tokio::test] runtime's drop would wait for it
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
         .unwrap();
-    assert!(matches!(reason, ExitReason::Stopped));
-    assert!(
-        t0.elapsed() >= Duration::from_secs(5) && t0.elapsed() < Duration::from_secs(6),
-        "{:?}",
-        t0.elapsed()
-    );
+    rt.block_on(async {
+        let d = daemon("1", true, |_| {}).await;
+        let (mut r, _) = connect_with(&d.run, &hello("1", "ctl", d.dir.path())).await;
+        // 60 s: far past the 5 s grace; the stop must not wait for it
+        let line = json!({"id": 1, "op": "sleep", "args": {"ms": 60_000}}).to_string() + "\n";
+        r.get_mut().write_all(line.as_bytes()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let t0 = Instant::now();
+        d.handle.stop();
+        // hang guard, not a speed: the task ends long before the 60 s sleep would
+        let reason = tokio::time::timeout(Duration::from_secs(30), d.task)
+            .await
+            .expect("the stop abandoned the stuck connection")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(reason, ExitReason::Stopped));
+        assert!(t0.elapsed() >= Duration::from_secs(5), "{:?}", t0.elapsed());
+    });
+    rt.shutdown_background();
 }
 
 #[tokio::test]

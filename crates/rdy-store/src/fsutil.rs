@@ -60,30 +60,8 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
 /// one raced in after the removal fails the write. Something that cannot be removed there (a
 /// directory) fails the write with an error that names the temp path.
 pub fn write_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
-    let name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
-    let mut tmp_name = std::ffi::OsString::from(".");
-    tmp_name.push(name);
-    tmp_name.push(".tmp");
-    let tmp = parent.join(tmp_name);
-    match std::fs::remove_file(&tmp) {
-        // a directory (or anything else rdy cannot remove) at the temp name: the person moves it
-        Err(e) if e.kind() != io::ErrorKind::NotFound => {
-            return Err(io::Error::new(
-                e.kind(),
-                format!(
-                    "cannot remove {} to write through it ({e}); move it aside",
-                    tmp.display()
-                ),
-            ));
-        }
-        _ => {}
-    }
+    let parent = parent_of(path);
+    let tmp = temp_beside(path)?;
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -94,6 +72,88 @@ pub fn write_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
     std::fs::rename(&tmp, path)?;
     record(path);
     sync_dir(parent)
+}
+
+/// As [`write_durable`] for many files at once, with the same temp-name rules and the same crash
+/// rule (each path ends with its old bytes or its new bytes, never a part). Every temp file is
+/// written and fsynced first, then each is renamed into place, then each directory is fsynced
+/// once: the parent of every path, and each of `extra_dirs` (a directory the caller just created).
+/// A directory that holds many files costs one directory flush, not one per file. Records every
+/// path after its rename, then each directory, in the sync recorder. The parents must exist.
+/// On an error, the temp files not yet renamed are removed, and the error comes with the path
+/// that failed: the file whose temp write or rename failed, or the directory whose flush failed.
+pub fn write_durable_batch(
+    items: &[(PathBuf, &[u8])],
+    extra_dirs: &[PathBuf],
+) -> Result<(), (PathBuf, io::Error)> {
+    let mut staged: Vec<(PathBuf, PathBuf)> = vec![]; // (temp, final)
+    let result = stage_all(items, &mut staged).and_then(|()| {
+        let mut dirs: std::collections::BTreeSet<PathBuf> = extra_dirs.iter().cloned().collect();
+        for (tmp, path) in &staged {
+            std::fs::rename(tmp, path).map_err(|e| (path.clone(), e))?;
+            record(path);
+            dirs.insert(parent_of(path).to_path_buf());
+        }
+        staged.clear();
+        for d in &dirs {
+            sync_dir(d).map_err(|e| (d.clone(), e))?;
+        }
+        Ok(())
+    });
+    for (tmp, _) in &staged {
+        let _ = std::fs::remove_file(tmp);
+    }
+    result
+}
+
+fn parent_of(path: &Path) -> &Path {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    }
+}
+
+/// The temp path beside `path`, with whatever stood there removed (see [`write_durable`]).
+fn temp_beside(path: &Path) -> io::Result<PathBuf> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(".tmp");
+    let tmp = parent_of(path).join(tmp_name);
+    match std::fs::remove_file(&tmp) {
+        // a directory (or anything else rdy cannot remove) at the temp name: the person moves it
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(io::Error::new(
+            e.kind(),
+            format!(
+                "cannot remove {} to write through it ({e}); move it aside",
+                tmp.display()
+            ),
+        )),
+        _ => Ok(tmp),
+    }
+}
+
+fn stage_all(
+    items: &[(PathBuf, &[u8])],
+    staged: &mut Vec<(PathBuf, PathBuf)>,
+) -> Result<(), (PathBuf, io::Error)> {
+    for (path, bytes) in items {
+        stage_one(path, bytes, staged).map_err(|e| (path.clone(), e))?;
+    }
+    Ok(())
+}
+
+fn stage_one(path: &Path, bytes: &[u8], staged: &mut Vec<(PathBuf, PathBuf)>) -> io::Result<()> {
+    let tmp = temp_beside(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    staged.push((tmp, path.to_path_buf()));
+    f.write_all(bytes)?;
+    f.sync_all()
 }
 
 /// Creates `dir` and any missing ancestors, then fsyncs the parent of each directory it created,
@@ -161,5 +221,41 @@ mod tests {
         );
         assert_eq!(std::fs::read(tmp.join("kept.txt")).unwrap(), b"mine");
         assert!(std::fs::symlink_metadata(&path).is_err());
+    }
+
+    #[test]
+    fn mfb5_a_batch_flushes_each_directory_once_and_replaces_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("old.txt"), b"old").unwrap();
+        let items: Vec<(PathBuf, &[u8])> = vec![
+            (dir.path().join("a.txt"), b"a"),
+            (dir.path().join("b.txt"), b"b"),
+            (sub.join("old.txt"), b"new"),
+            (sub.join("c.txt"), b"c"),
+        ];
+        let (r, synced) = record_syncs(|| write_durable_batch(&items, &[]));
+        r.unwrap();
+        for (p, b) in &items {
+            assert_eq!(&std::fs::read(p).unwrap(), b);
+        }
+        let dirs: Vec<_> = synced.iter().filter(|p| p.is_dir()).collect();
+        assert_eq!(dirs.len(), 2, "{synced:?}");
+        assert_eq!(synced.len(), 6, "four files, two directories: {synced:?}");
+        assert!(
+            std::fs::read_dir(&sub)
+                .unwrap()
+                .all(|e| { !e.unwrap().file_name().to_string_lossy().ends_with(".tmp") })
+        );
+        // a failure leaves no temp file behind and the earlier files unchanged
+        let bad: Vec<(PathBuf, &[u8])> = vec![
+            (dir.path().join("x.txt"), b"x"),
+            (dir.path().join("missing/y.txt"), b"y"),
+        ];
+        let (at, _) = write_durable_batch(&bad, &[]).unwrap_err();
+        assert_eq!(at, dir.path().join("missing/y.txt"), "the path that failed");
+        assert!(!dir.path().join(".x.txt.tmp").exists());
+        assert!(!dir.path().join("x.txt").exists());
     }
 }

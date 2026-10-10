@@ -375,11 +375,7 @@ fn rec1_a_doc_type_with_nav_false_is_rendered_but_left_out_of_nav_folder_index_h
     drop(r);
     let pack = "name: p\nversion: '1'\nextends: rdy-standard\ndoc_types:\n  record: { nav: false, skeleton: [] }\n";
     std::fs::write(dir.path().join(".rdy/packs/p.yaml"), pack).unwrap();
-    std::fs::write(
-        dir.path().join(".rdy/config.yaml"),
-        "pack: p\nname: Records\n",
-    )
-    .unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: p\nname: Records\n").unwrap();
     let mut r = rdy_engine::Rdy::open(dir.path()).unwrap();
     let doc = |id: &str, parent: Option<&str>, name: &str, title: &str, ty: &str| {
         let mut d = serde_json::json!({"op": "create", "type": "doc", "id": id,
@@ -518,11 +514,7 @@ fn rec1_a_folder_whose_docs_are_all_nav_false_is_left_out_of_nav_home_folder_ind
     drop(r);
     let pack = "name: p\nversion: '1'\nextends: rdy-standard\ndoc_types:\n  record: { nav: false, skeleton: [] }\n";
     std::fs::write(dir.path().join(".rdy/packs/p.yaml"), pack).unwrap();
-    std::fs::write(
-        dir.path().join(".rdy/config.yaml"),
-        "pack: p\nname: Records\n",
-    )
-    .unwrap();
+    std::fs::write(dir.path().join(".rdy.yaml"), "pack: p\nname: Records\n").unwrap();
     let mut r = rdy_engine::Rdy::open(dir.path()).unwrap();
     let folder = |id: &str, parent: Option<&str>, name: &str, title: &str| {
         let mut f = serde_json::json!({"op": "create", "type": "folder", "id": id,

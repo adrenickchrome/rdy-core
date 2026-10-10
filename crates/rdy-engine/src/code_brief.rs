@@ -166,7 +166,7 @@ fn normalise(
             return Err(RdyError::new(
                 E_BAD_INPUT,
                 "no code repo is linked",
-                "add code_repos: [<path to the repo>] to .rdy/config.yaml",
+                "add code_repos: [<path to the repo>] to .rdy.yaml",
             ));
         }
         return inside(repos, code_path, given).unwrap_or_else(|| {

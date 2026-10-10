@@ -19,7 +19,7 @@ fn mint1_cli_post_list_withdraw() {
         rdy_qa::packs::QA_PACK_YAML,
     )
     .unwrap();
-    std::fs::write(s.dir.path().join(".rdy/config.yaml"), "pack: rdy-qa\n").unwrap();
+    std::fs::write(s.dir.path().join(".rdy.yaml"), "pack: rdy-qa\n").unwrap();
     s.stop();
     let (ok, v) = s.json_as(
         "agent:a",
