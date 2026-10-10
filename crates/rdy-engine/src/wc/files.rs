@@ -295,6 +295,13 @@ pub(crate) fn replace_at(
     rdy_store::fsutil::write_durable(&path, text.as_bytes()).map_err(|e| io_err(&path, "write", e))
 }
 
+/// A copy rdy keeps in the working copy's state (a base copy or a conflict copy): replaced in one
+/// durable step, as the state files beside it are, so a crash never leaves a torn copy that the
+/// state names.
+pub(crate) fn write_state_copy(dir: &Path, rel: &str, text: &str) -> Result<(), RdyError> {
+    replace_at(dir, rel, text, None)
+}
+
 /// Creates the directories between the root and `p`'s file (what stands in the way and is not a
 /// directory is removed first); with `cases`, see `write_at`. Callers run an occupied check first
 /// (`occupied`, `behind_link`), so what is removed is never a file a person keeps.
@@ -417,7 +424,7 @@ pub fn checkout(
     remove_tree(&base_dir)?;
     fs::create_dir_all(&base_dir).map_err(|e| io_err(&base_dir, "create", e))?;
     for f in &proj.files {
-        write_at(&base_dir, &f.path, &f.text, None)?;
+        write_state_copy(&base_dir, &f.path, &f.text)?;
     }
     st.base = base_from(proj);
     remove_tree(&place.state.join("stage/files"))?;
@@ -468,7 +475,7 @@ pub fn add_projected(
             continue;
         }
         write_at(root, &f.path, &f.text, None)?;
-        write_at(&base_dir, &f.path, &f.text, None)?;
+        write_state_copy(&base_dir, &f.path, &f.text)?;
         out.written.push(f.path.clone());
     }
     let base = base_from(proj);
@@ -793,7 +800,7 @@ pub fn apply_writeback(
         .filter(|f| !blocked.contains(f.path.as_str()))
     {
         write_at(root, &f.path, &f.text, None)?;
-        write_at(&base_dir, &f.path, &f.text, None)?;
+        write_state_copy(&base_dir, &f.path, &f.text)?;
         keep.extend(identity(root, &f.path));
         keep_base.extend(identity(&base_dir, &f.path));
         out.written.push(f.path.clone());
@@ -869,4 +876,32 @@ pub fn apply_writeback(
     }
     out.removed.sort();
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mfb5_a_state_copy_is_synced_and_never_written_through_a_link() {
+        let d = tempfile::tempdir().unwrap();
+        let (r, synced) = rdy_store::fsutil::record_syncs(|| {
+            write_state_copy(d.path(), "guides/intro.yaml", "- id: d-AAAAA\n")
+        });
+        r.unwrap();
+        let at = d.path().join("guides/intro.yaml");
+        assert!(synced.contains(&at), "{synced:?}");
+        assert_eq!(std::fs::read_to_string(&at).unwrap(), "- id: d-AAAAA\n");
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            let target = outside.path().join("kept.txt");
+            std::fs::write(&target, "kept").unwrap();
+            std::fs::remove_file(&at).unwrap();
+            std::os::unix::fs::symlink(&target, &at).unwrap();
+            write_state_copy(d.path(), "guides/intro.yaml", "new\n").unwrap();
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept");
+            assert!(std::fs::symlink_metadata(&at).unwrap().is_file());
+        }
+    }
 }

@@ -10,7 +10,7 @@ use crate::now_ms;
 use crate::tree_io::FOLDER_FILE;
 use crate::wc::files::{
     base_from, behind_link, blocking_ancestor, changed_since_staged, identity, inside, prune_dirs,
-    remove_file, remove_tree, replace_at, write_at,
+    remove_file, remove_tree, replace_at, write_state_copy,
 };
 use crate::wc::layout::{FOLDER_THEIRS, FileKind, THEIRS_SUFFIX, WcBlock, WcTree};
 use crate::wc::project::Projection;
@@ -1377,13 +1377,13 @@ fn finish_update(place: &Place, st: &mut WcState, journal: &UpdateJournal) -> Re
     let conflicts_dir = place.state.join("conflicts");
     fs::create_dir_all(&conflicts_dir).map_err(|e| state_err(&conflicts_dir, "create", e))?;
     for (p, text) in &plan.conflict_copies {
-        write_at(&conflicts_dir, p, text, None)?;
+        write_state_copy(&conflicts_dir, p, text)?;
     }
     let base_dir = place.state.join("base/files");
     remove_tree(&base_dir)?;
     fs::create_dir_all(&base_dir).map_err(|e| state_err(&base_dir, "create", e))?;
     for (p, text) in &plan.base_files {
-        write_at(&base_dir, p, text, None)?;
+        write_state_copy(&base_dir, p, text)?;
     }
     st.base = plan.base.clone();
     for p in &plan.stage_drops {
