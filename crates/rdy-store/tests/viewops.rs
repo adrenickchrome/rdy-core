@@ -609,3 +609,127 @@ fn msw20_included_before_reads_a_views_set_as_the_log_held_it_when_an_object_was
     );
     assert!(s.included_before("none", &mark).unwrap().is_empty());
 }
+
+fn author(actor: &str, run: Option<&str>, at_ms: i64) -> Provenance {
+    Provenance {
+        actor: actor.into(),
+        run: run.map(str::to_string),
+        role: Role::Writer,
+        at_ms,
+    }
+}
+
+/// mfb3 fix round 1: `commit_many` commits several changes to one view in one write, all or
+/// nothing. Each change keeps its author's provenance; every view op it writes (the implicit
+/// create, the commits) and the head's last write are the committer's.
+#[test]
+fn mfb3_commit_many_is_one_write_with_the_committers_view_ops() {
+    let (_d, mut s) = store();
+    let a = author("agent:a", Some("r1"), 5);
+    let b = author("agent:b", Some("r2"), 6);
+    let imp = author("human:imp", None, 1000);
+    let changes = || {
+        vec![
+            change(
+                "v",
+                vec![Op::Create {
+                    block: block("c-00001", "one"),
+                }],
+                &a,
+            ),
+            change(
+                "v",
+                vec![Op::Create {
+                    block: block("c-00002", "two"),
+                }],
+                &b,
+            ),
+        ]
+    };
+    // a failed write leaves nothing: no view, no change
+    s.fail_next_index_apply();
+    let e = s
+        .commit_many("v", changes(), &|_| None, &[], None, &imp)
+        .unwrap_err();
+    assert!(matches!(e, StoreError::Db(_)), "{e}");
+    assert!(s.view_head("v").unwrap().is_none());
+    s.verify().unwrap();
+    // the retry commits both
+    let ids = s
+        .commit_many("v", changes(), &|_| None, &[], None, &imp)
+        .unwrap();
+    assert_eq!(ids.len(), 2);
+    assert_eq!(s.included("v").unwrap().as_ref(), &ids);
+    assert_eq!(s.change(&ids[0]).unwrap().provenance, a);
+    assert_eq!(s.change(&ids[1]).unwrap().provenance, b);
+    let head = s.view_head("v").unwrap().unwrap();
+    assert_eq!(
+        (head.len, head.last_write_ms, head.owner.clone()),
+        (
+            2,
+            1000,
+            Some(Owner {
+                actor: "human:imp".into(),
+                run: None
+            })
+        )
+    );
+    let mut chain = vec![];
+    let mut cur = Some(head.head);
+    while let Some(h) = cur {
+        let op = s.view_op(&h).unwrap();
+        cur = op.prev;
+        chain.push((h, op));
+    }
+    assert_eq!(chain.len(), 3, "create, commit, commit: {chain:?}");
+    for (_, op) in &chain {
+        assert_eq!(
+            (op.actor.as_str(), op.run.as_deref(), op.at_ms),
+            ("human:imp", None, 1000),
+            "{op:?}"
+        );
+    }
+    assert_eq!(chain[0].1.op, ViewOpKind::Commit { change: ids[1] });
+    assert_eq!(chain[1].1.op, ViewOpKind::Commit { change: ids[0] });
+    // the two commits are one write's ops in a row; two commits of two writes are not
+    assert!(s.view_ops_in_a_row(&chain[1].0, &chain[0].0).unwrap());
+    assert!(!s.view_ops_in_a_row(&chain[0].0, &chain[1].0).unwrap());
+    let c3 = create(&mut s, "v", "c-00003", &a);
+    let c4 = create(&mut s, "v", "c-00004", &a);
+    let head = s.view_head("v").unwrap().unwrap();
+    let last = s.view_op(&head.head).unwrap();
+    assert_eq!(last.op, ViewOpKind::Commit { change: c4 });
+    let before = last.prev.unwrap();
+    assert_eq!(
+        s.view_op(&before).unwrap().op,
+        ViewOpKind::Commit { change: c3 }
+    );
+    assert!(!s.view_ops_in_a_row(&before, &head.head).unwrap());
+    s.verify().unwrap();
+}
+
+/// mfb3 fix round 1: the changes of one `commit_many` write disjoint blocks; a block in two of
+/// them is refused before anything is written.
+#[test]
+fn mfb3_commit_many_refuses_a_block_in_two_changes() {
+    let (_d, mut s) = store();
+    let a = author("agent:a", Some("r1"), 5);
+    let imp = author("human:imp", None, 1000);
+    let one = change(
+        "v",
+        vec![Op::Create {
+            block: block("c-00001", "one"),
+        }],
+        &a,
+    );
+    let mut two = one.clone();
+    two.message = "again".into();
+    let e = s
+        .commit_many("v", vec![one, two], &|_| None, &[], None, &imp)
+        .unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Conflict { id } if id.as_str() == "c-00001"),
+        "{e}"
+    );
+    assert!(s.view_head("v").unwrap().is_none());
+}

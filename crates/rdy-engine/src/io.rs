@@ -1190,51 +1190,46 @@ impl Rdy {
                 format!("import from {}", dir.display()),
             ));
         }
-        // the view stays the importer's: create it as the importer before any author's change.
-        // `claim` (from `commit_claim`, which ran first and refused a closed view) claims an
-        // existing unowned view with the first change only.
-        let mut claim = claim;
-        if self.read().view_head(view).is_none() {
-            let base = self.read().canon_head();
-            self.store.view_create(
-                view,
-                base,
-                Some(crate::views::owner_of(s)),
-                false,
-                &s.provenance(),
-            )?;
-            self.publish(crate::Delta::View {
-                view: view.to_string(),
-            })?;
-            claim = None;
-        }
-        let mut ids = vec![];
+        // one write for every change (all or nothing). Each change keeps its author's
+        // provenance; the view ops (the implicit create, a claim, the commits) and the view's
+        // last write are the importer's, so the view stays the importer's, `rdy undo` by the
+        // importer finds the import, and the view is not idle after old author times.
         let mut all_ops = vec![];
-        for (provenance, ops, message) in planned {
-            let change = Change {
-                view: view.into(),
-                ops: ops.clone(),
-                deps: vec![],
-                provenance,
-                justification: None,
-                message,
-                links: ChangeLinks::default(),
-            };
-            let id = self.store.commit_to_view_resolving(
-                view,
-                change,
-                &|id| existing.version_of(id),
-                &conflicts,
-                claim.take(),
-            )?;
-            self.publish(crate::Delta::Commit {
+        let changes: Vec<Change> = planned
+            .into_iter()
+            .map(|(provenance, ops, message)| {
+                all_ops.extend(ops.iter().cloned());
+                Change {
+                    view: view.into(),
+                    ops,
+                    deps: vec![],
+                    provenance,
+                    justification: None,
+                    message,
+                    links: ChangeLinks::default(),
+                }
+            })
+            .collect();
+        let committed = self.store.commit_many(
+            view,
+            changes,
+            &|id| existing.version_of(id),
+            &conflicts,
+            claim,
+            &s.provenance(),
+        )?;
+        // one change carries the build forward as a commit; several are read again
+        match committed.as_slice() {
+            [one] => self.publish(crate::Delta::Commit {
                 view: view.to_string(),
-                change: id,
-                ops: ops.clone(),
-            })?;
-            ids.push(id.to_string());
-            all_ops.extend(ops);
+                change: *one,
+                ops: all_ops.clone(),
+            })?,
+            _ => self.publish(crate::Delta::View {
+                view: view.to_string(),
+            })?,
         }
+        let ids: Vec<String> = committed.iter().map(ToString::to_string).collect();
         let created = all_ops
             .iter()
             .enumerate()

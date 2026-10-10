@@ -343,6 +343,44 @@ impl Store {
         conflicts: &[Conflict],
         claim: Option<Owner>,
     ) -> Result<Hash, StoreError> {
+        let committer = change.provenance.clone();
+        let ids = self.commit_many(name, vec![change], current, conflicts, claim, &committer)?;
+        Ok(ids[0])
+    }
+
+    /// `commit_to_view_resolving` for several changes in one durable write, all or nothing
+    /// (mfb3: an import writes one change per author). Every change is checked against
+    /// `current`, the view's state before the write, so the changes must write disjoint blocks: a
+    /// block in two of them is `Conflict` naming it, and the same change twice is refused, before
+    /// anything is written. Each change keeps its own provenance. The view ops the write adds
+    /// (the implicit create, the float catch-up, the claim and one `Commit` per change, in
+    /// order) carry `committer`'s actor, run and time, the implicit create's owner is
+    /// `committer`, and the head's last write is `committer.at_ms`. Returns the changes' ids, in
+    /// order; no changes write nothing.
+    pub fn commit_many(
+        &mut self,
+        name: &str,
+        changes: Vec<Change>,
+        current: &dyn Fn(&BlockId) -> Option<Hash>,
+        conflicts: &[Conflict],
+        claim: Option<Owner>,
+        committer: &Provenance,
+    ) -> Result<Vec<Hash>, StoreError> {
+        if changes.is_empty() {
+            return Ok(vec![]);
+        }
+        // 0. the changes write disjoint blocks: each is checked against the state before them
+        if changes.len() > 1 {
+            let mut seen: BTreeSet<&BlockId> = BTreeSet::new();
+            for change in &changes {
+                let mine: BTreeSet<&BlockId> = change.ops.iter().map(Op::block_id).collect();
+                for id in mine {
+                    if !seen.insert(id) {
+                        return Err(StoreError::Conflict { id: id.clone() });
+                    }
+                }
+            }
+        }
         // 1. the head; a closed view takes no commit
         let head = self.view_head(name)?;
         if head.as_ref().is_some_and(|h| h.closed) {
@@ -356,7 +394,7 @@ impl Store {
             .is_some_and(|h| !h.pinned && h.len == 0 && canon.is_some() && canon != h.base);
         if catch_up {
             let canon_state = self.state_of(canon)?;
-            for op in &change.ops {
+            for op in changes.iter().flat_map(|c| &c.ops) {
                 let id = op.block_id();
                 let actual = canon_state.blocks.get(id).copied();
                 if current(id) != actual {
@@ -371,9 +409,127 @@ impl Store {
                 }
             }
         }
-        // 2. the ops. apply_op only reads and writes the ids the ops name, so seed a small state
-        // with those; an op on a conflicted block, first in this change to touch it, checks its
-        // base against the conflict's base and sides instead
+        // 2. the ops of each change. apply_op only reads and writes the ids the ops name, so seed
+        // a small state with those; an op on a conflicted block, first in its change to touch
+        // it, checks its base against the conflict's base and sides instead
+        for change in &changes {
+            self.check_ops(change, current, conflicts)?;
+        }
+        // 3. each change's frames; a commit op names the change id, which depends on deps, so
+        // the changes, their view ops and the view's head land in one write
+        let mut items = vec![];
+        let mut placed: Vec<(Hash, usize)> = vec![];
+        for mut change in changes {
+            let (frames, pos) = self.change_frames(&mut change, Some(name), conflicts)?;
+            let cid = Hash::of(&frames[pos].1);
+            if placed.iter().any(|(c, _)| *c == cid) {
+                return Err(StoreError::Decode(format!(
+                    "change {cid} is committed twice in one write"
+                )));
+            }
+            placed.push((cid, items.len() + pos));
+            items.extend(frames);
+        }
+        let p = committer;
+        let view_op = |prev: Option<Hash>, op: ViewOpKind| ViewOp {
+            view: name.to_string(),
+            prev,
+            op,
+            actor: p.actor.clone(),
+            run: p.run.clone(),
+            at_ms: p.at_ms,
+        };
+        // 4. the view ops before the commits: the implicit create, or the float catch-up and the
+        // claim, each op's prev the one before it
+        let (mut prev, mut base, len0, mut owner, pinned) = match head {
+            Some(head) => (head.head, head.base, head.len, head.owner, head.pinned),
+            None => {
+                let base = canon;
+                // M2b's rule: the implicit create's owner is the committer (a single commit's
+                // committer is its change's provenance; the engine's claim for a new view is that
+                // same owner)
+                let first = Some(Owner {
+                    actor: p.actor.clone(),
+                    run: p.run.clone(),
+                });
+                let create = encode(&view_op(
+                    None,
+                    ViewOpKind::Create {
+                        base,
+                        owner: first.clone(),
+                        pinned: false,
+                    },
+                ));
+                let id = Hash::of(&create);
+                items.push((kinds::VIEW_OP, create));
+                (id, base, 0, first, false)
+            }
+        };
+        if catch_up && let Some(landing) = canon {
+            let rebase = encode(&view_op(
+                Some(prev),
+                ViewOpKind::Rebase {
+                    landing,
+                    dropped: vec![],
+                    remaining: vec![],
+                    conflicts: vec![],
+                },
+            ));
+            prev = Hash::of(&rebase);
+            base = canon;
+            items.push((kinds::VIEW_OP, rebase));
+        }
+        if owner.is_none()
+            && let Some(o) = claim
+        {
+            let own = encode(&view_op(
+                Some(prev),
+                ViewOpKind::Own {
+                    owner: Some(o.clone()),
+                },
+            ));
+            prev = Hash::of(&own);
+            owner = Some(o);
+            items.push((kinds::VIEW_OP, own));
+        }
+        // 5. one commit op per change, in order: one write's commits sit in a row in the log
+        for (cid, _) in &placed {
+            let commit = encode(&view_op(Some(prev), ViewOpKind::Commit { change: *cid }));
+            prev = Hash::of(&commit);
+            items.push((kinds::VIEW_OP, commit));
+        }
+        let new_head = ViewHead {
+            head: prev,
+            base,
+            len: len0 + placed.len() as u64,
+            owner,
+            pinned,
+            closed: false,
+            last_write_ms: p.at_ms,
+        };
+        items.extend(self.ref_items_pub(vec![(view_ref(name), encode(&new_head))]));
+        let written = self.write(items)?;
+        let mut ids = Vec::with_capacity(placed.len());
+        for (cid, pos) in placed {
+            let id = written[pos];
+            if id != cid {
+                return Err(StoreError::Decode(format!(
+                    "change id mismatch: view names {cid}, written {id}"
+                )));
+            }
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    /// Step 2 of `commit_many` for one change: its ops against `current`, or for a block with a
+    /// recorded conflict (first touched in this change) against the conflict's base and sides.
+    fn check_ops(
+        &self,
+        change: &Change,
+        current: &dyn Fn(&BlockId) -> Option<Hash>,
+        conflicts: &[Conflict],
+    ) -> Result<(), StoreError> {
         let mut state = StateSnapshot::default();
         for op in &change.ops {
             let id = op.block_id();
@@ -422,91 +578,7 @@ impl Store {
                 _ => apply_op(self, &mut state, op)?,
             }
         }
-        // 3. The commit op names the change id, which depends on deps, so the change, its view
-        // ops and the view's head land in one write.
-        let mut change = change;
-        let (mut items, change_pos) = self.change_frames(&mut change, Some(name), conflicts)?;
-        let cid = Hash::of(&items[change_pos].1);
-        let p = &change.provenance;
-        let view_op = |prev: Option<Hash>, op: ViewOpKind| ViewOp {
-            view: name.to_string(),
-            prev,
-            op,
-            actor: p.actor.clone(),
-            run: p.run.clone(),
-            at_ms: p.at_ms,
-        };
-        // 4. the view ops before the commit: the implicit create, or the float catch-up and the
-        // claim, each op's prev the one before it
-        let (mut prev, mut base, len0, mut owner, pinned) = match head {
-            Some(head) => (head.head, head.base, head.len, head.owner, head.pinned),
-            None => {
-                let base = canon;
-                // M2b's rule: the implicit create's owner is the change's provenance (the
-                // engine's claim for a new view is that same owner)
-                let first = Some(Owner {
-                    actor: p.actor.clone(),
-                    run: p.run.clone(),
-                });
-                let create = encode(&view_op(
-                    None,
-                    ViewOpKind::Create {
-                        base,
-                        owner: first.clone(),
-                        pinned: false,
-                    },
-                ));
-                let id = Hash::of(&create);
-                items.push((kinds::VIEW_OP, create));
-                (id, base, 0, first, false)
-            }
-        };
-        if catch_up && let Some(landing) = canon {
-            let rebase = encode(&view_op(
-                Some(prev),
-                ViewOpKind::Rebase {
-                    landing,
-                    dropped: vec![],
-                    remaining: vec![],
-                    conflicts: vec![],
-                },
-            ));
-            prev = Hash::of(&rebase);
-            base = canon;
-            items.push((kinds::VIEW_OP, rebase));
-        }
-        if owner.is_none()
-            && let Some(o) = claim
-        {
-            let own = encode(&view_op(
-                Some(prev),
-                ViewOpKind::Own {
-                    owner: Some(o.clone()),
-                },
-            ));
-            prev = Hash::of(&own);
-            owner = Some(o);
-            items.push((kinds::VIEW_OP, own));
-        }
-        let commit = encode(&view_op(Some(prev), ViewOpKind::Commit { change: cid }));
-        let new_head = ViewHead {
-            head: Hash::of(&commit),
-            base,
-            len: len0 + 1,
-            owner,
-            pinned,
-            closed: false,
-            last_write_ms: p.at_ms,
-        };
-        items.push((kinds::VIEW_OP, commit));
-        items.extend(self.ref_items_pub(vec![(view_ref(name), encode(&new_head))]));
-        let id = self.write(items)?[change_pos];
-        if id != cid {
-            return Err(StoreError::Decode(format!(
-                "change id mismatch: view names {cid}, written {id}"
-            )));
-        }
-        Ok(id)
+        Ok(())
     }
 
     /// Proposes view `view`'s included changes as a new proposal: the proposal, its ref

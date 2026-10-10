@@ -266,6 +266,8 @@ impl Drop for HeldLock {
 #[derive(Default)]
 struct Faults {
     index_apply: bool,
+    /// The index update of the write after this many more successful writes fails.
+    index_apply_after: Option<u32>,
     rollback: bool,
     checkpoint: bool,
     /// The next replay fails before it indexes this frame (counting from 0).
@@ -881,7 +883,15 @@ impl Store {
         self.log.crash_point(CrashPoint::BeforeSync);
         self.log.sync()?;
         self.log.crash_point(CrashPoint::AfterSync);
-        if std::mem::take(&mut self.faults.index_apply) {
+        let after = match self.faults.index_apply_after {
+            Some(0) => self.faults.index_apply_after.take().is_some(),
+            Some(n) => {
+                self.faults.index_apply_after = Some(n - 1);
+                false
+            }
+            None => false,
+        };
+        if std::mem::take(&mut self.faults.index_apply) || after {
             return Err(StoreError::Db("injected index failure".into()));
         }
         self.index().apply(&entries, self.log.end())?;
@@ -1019,6 +1029,13 @@ impl Store {
     #[doc(hidden)]
     pub fn fail_next_index_apply(&mut self) {
         self.faults.index_apply = true;
+    }
+
+    /// Test hook: the index update of a later write fails after its frames are appended: the
+    /// write after `writes` more successful (non-empty) writes.
+    #[doc(hidden)]
+    pub fn fail_index_apply_after(&mut self, writes: u32) {
+        self.faults.index_apply_after = Some(writes);
     }
 
     /// Test hook: the next replay (a catch-up or a reindex) fails with "injected replay failure"

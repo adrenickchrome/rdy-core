@@ -352,3 +352,162 @@ fn mfb3_an_empty_export_imports_as_the_importers_one_change() {
         .unwrap();
     assert_eq!(c.provenance.actor, "human:imp");
 }
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+fn included(r: &Rdy, view: &str) -> std::collections::BTreeSet<String> {
+    r.read()
+        .included(view)
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// Fix round 1 (findings 1 and 4): the import's view ops are the importer's, so a plain
+/// `rdy undo` by the importer undoes the whole import (every author's change), not the
+/// importer's earlier write; the next undo then takes that earlier write; undoing the undo
+/// brings the whole import back.
+#[test]
+fn mfb3_undo_after_import_undoes_the_whole_import() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let (r, _d, _p) = two_authors(a_dir.path());
+    let out = tempfile::tempdir().unwrap();
+    let out = out.path().join("x");
+    r.read().export(&Scope::Canon, &out).unwrap();
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    let imp = sess("human:imp", None, Role::Approver);
+    let mine = put(
+        &mut b,
+        &imp,
+        "import",
+        json!([
+            {"op": "create", "type": "doc", "id": "$x", "fields": {"name": "mine", "title": "Mine", "doc_type": "page"}}
+        ]),
+    );
+    let res = b.import(&imp, "import", &out).unwrap();
+    assert_eq!(res.changes.len(), 2, "{res:?}");
+    let imported: std::collections::BTreeSet<String> = res.changes.iter().cloned().collect();
+    // every op the import added to the view is the importer's
+    let detail = b.read().view_show("import").unwrap();
+    for op in detail.ops.iter().take(2) {
+        assert_eq!(op.kind, "commit", "{op:?}");
+        assert_eq!(
+            (op.actor.as_str(), op.run.as_deref()),
+            ("human:imp", None),
+            "{op:?}"
+        );
+    }
+    let u = b.undo(&imp, "import", None, false).unwrap();
+    let excluded: std::collections::BTreeSet<String> = u.excluded.iter().cloned().collect();
+    assert_eq!(excluded, imported, "{u:?}");
+    assert_eq!(
+        included(&b, "import"),
+        [mine.change.clone()].into_iter().collect(),
+        "only the importer's own write is left"
+    );
+    // both import commits read as undone
+    let detail = b.read().view_show("import").unwrap();
+    let undone = detail
+        .ops
+        .iter()
+        .filter(|o| o.kind == "commit" && o.undone)
+        .count();
+    assert_eq!(undone, 2, "{:?}", detail.ops);
+    // the next undo takes the importer's earlier write
+    let u2 = b.undo(&imp, "import", None, false).unwrap();
+    assert_eq!(u2.excluded, vec![mine.change.clone()], "{u2:?}");
+    b.undo(&imp, "import", Some(&u2.op), false).unwrap();
+    // undoing the import's undo brings every author's change back
+    let redo = b.undo(&imp, "import", Some(&u.op), false).unwrap();
+    let back: std::collections::BTreeSet<String> = redo.included.iter().cloned().collect();
+    assert_eq!(back, imported, "{redo:?}");
+    let all: std::collections::BTreeSet<String> =
+        imported.iter().cloned().chain([mine.change]).collect();
+    assert_eq!(included(&b, "import"), all);
+}
+
+/// Fix round 1 (finding 2): the view's last write is the import's time, not the authors'. An
+/// import of blocks whose authors wrote them 20 days ago is not idle, and `close --stale 14`
+/// keeps it.
+#[test]
+fn mfb3_an_import_is_not_idle_after_old_author_times() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let (r, _d, _p) = two_authors(a_dir.path());
+    let out = tempfile::tempdir().unwrap();
+    let out = out.path().join("x");
+    r.read().export(&Scope::Canon, &out).unwrap();
+    let old = now() - 20 * 86_400_000;
+    let mut rows = authors(&out);
+    for row in &mut rows {
+        row["at_ms"] = serde_yaml_ng::Value::from(old);
+    }
+    std::fs::write(
+        out.join("authors.yaml"),
+        serde_yaml_ng::to_string(&rows).unwrap(),
+    )
+    .unwrap();
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    let imp = sess("human:imp", None, Role::Approver);
+    let before = now();
+    let res = b.import(&imp, "import", &out).unwrap();
+    assert_eq!(res.changes.len(), 2, "{res:?}");
+    {
+        let st = b.read();
+        let head = st.view_head("import").expect("the view exists");
+        assert!(head.last_write_ms >= before, "{head:?}");
+        // the changes keep their authors' time
+        let c = st
+            .reader()
+            .change(&res.changes[0].parse::<Hash>().unwrap())
+            .unwrap();
+        assert_eq!(c.provenance.at_ms, old);
+    }
+    let t = now();
+    let list = b.read().view_list(false, 14, t).unwrap();
+    let v = list.iter().find(|v| v.name == "import").expect("listed");
+    assert!(!v.idle, "{v:?}");
+    let closed = b.view_close_stale(&imp, 14, t).unwrap();
+    assert!(
+        closed.closed.iter().all(|c| c.view != "import"),
+        "{:?}",
+        closed.closed
+    );
+    let st = b.read();
+    assert!(!st.view_head("import").unwrap().closed);
+}
+
+/// Fix round 1 (finding 4): the import is one store write. A store failure at any write of
+/// the import leaves no view and no change, and a retry imports everything.
+#[test]
+fn mfb3_a_failed_import_leaves_no_change() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let (r, _d, _p) = two_authors(a_dir.path());
+    let out = tempfile::tempdir().unwrap();
+    let out = out.path().join("x");
+    r.read().export(&Scope::Canon, &out).unwrap();
+    let imp = sess("human:imp", None, Role::Approver);
+    let mut failed = 0;
+    for k in 0..3 {
+        let b_dir = tempfile::tempdir().unwrap();
+        let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+        b.store_mut().fail_index_apply_after(k);
+        if b.import(&imp, "import", &out).is_err() {
+            failed += 1;
+            assert!(
+                b.read().view_head("import").is_none(),
+                "write {k} failed: the import left a view behind"
+            );
+            let res = b.import(&imp, "import", &out).unwrap();
+            assert_eq!(res.changes.len(), 2, "{res:?}");
+            assert_eq!(included(&b, "import").len(), 2);
+        }
+    }
+    assert!(failed > 0, "no write of the import failed");
+}

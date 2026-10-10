@@ -8,8 +8,8 @@ use crate::error::*;
 use crate::read_state::ReadState;
 use crate::{Delta, Rdy, Scope, Session};
 use rdy_model::Hash;
-use rdy_store::StoreError;
 use rdy_store::view::{ResolvedOp, ViewOp, ViewOpKind};
+use rdy_store::{StoreError, StoreReader};
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -178,12 +178,80 @@ fn is_op_prefix(text: &str) -> bool {
     (7..=64).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// mfb3: the ops one write wrote in a row with `chain[i]` (newest first), when it is a `Commit`
+/// or an `Undo`: the commits of one `commit_many` (an import's changes, one per author) and the
+/// undos of one undo of them. An undo takes them as one: the members not yet undone (`chain[i]`
+/// first, then newest first) and their joint effect, oldest change first. Any other op, an op
+/// written alone, or members whose effects do not join is `chain[i]` alone with its own effect.
+fn write_group(
+    reader: &StoreReader,
+    view: &str,
+    chain: &[(Hash, ViewOp)],
+    i: usize,
+    undone: &HashMap<Hash, Hash>,
+) -> Result<(Vec<Hash>, ResolvedOp), RdyError> {
+    let target = chain[i].0;
+    let alone = || -> Result<(Vec<Hash>, ResolvedOp), RdyError> {
+        Ok((vec![target], reader.undo_effect(view, &target)?))
+    };
+    let kind = |k: &ViewOpKind| match k {
+        ViewOpKind::Commit { .. } => Some(true),
+        ViewOpKind::Undo { .. } => Some(false),
+        _ => None,
+    };
+    let Some(mine) = kind(&chain[i].1.op) else {
+        return alone();
+    };
+    let (mut newest, mut oldest) = (i, i);
+    while newest > 0
+        && kind(&chain[newest - 1].1.op) == Some(mine)
+        && reader.view_ops_in_a_row(&chain[newest].0, &chain[newest - 1].0)?
+    {
+        newest -= 1;
+    }
+    while oldest + 1 < chain.len()
+        && kind(&chain[oldest + 1].1.op) == Some(mine)
+        && reader.view_ops_in_a_row(&chain[oldest + 1].0, &chain[oldest].0)?
+    {
+        oldest += 1;
+    }
+    if newest == oldest {
+        return alone();
+    }
+    let mut members = vec![target];
+    members.extend(
+        chain[newest..=oldest]
+            .iter()
+            .map(|(h, _)| *h)
+            .filter(|h| *h != target && !undone.contains_key(h)),
+    );
+    let (mut excluded, mut included) = (vec![], vec![]);
+    for (h, _) in chain[newest..=oldest].iter().rev() {
+        if !members.contains(h) {
+            continue;
+        }
+        match reader.undo_effect(view, h)? {
+            ResolvedOp::Exclude(cs) => excluded.extend(cs),
+            ResolvedOp::Include(cs) => included.extend(cs),
+            _ => return alone(),
+        }
+    }
+    let effect = match (excluded.is_empty(), included.is_empty()) {
+        (_, true) => ResolvedOp::Exclude(excluded),
+        (true, false) => ResolvedOp::Include(included),
+        (false, false) => return alone(),
+    };
+    Ok((members, effect))
+}
+
 impl Rdy {
     /// undo1: undoes op `target` of `view`'s chain (by id or unique prefix), or without a target
     /// the session's newest undoable op not yet undone, by appending an `Undo` with the ops its
     /// inverse needs: the excluded changes' dependents (`cascade`, else `E_UNDO_BLOCKED`), a
     /// re-include's missing deps, or a rebase onto canon when it reopens a view. A rebase, and
-    /// an undo that would bring back or remove landed work, is `E_UNDO_LANDING`.
+    /// an undo that would bring back or remove landed work, is `E_UNDO_LANDING`. The commits one
+    /// write wrote in a row (an import's changes, one per author) are undone as one, and so are
+    /// the undos of one such undo (`write_group`): one `Undo` per member, the target's first.
     pub fn undo(
         &mut self,
         s: &Session,
@@ -209,7 +277,7 @@ impl Rdy {
         let included_list = st.included(view);
         let included: BTreeSet<Hash> = included_list.iter().copied().collect();
         // 3 and 4. the target, its effect, and the rules on it
-        let (target, target_op, effect, deps) = match target {
+        let (members, target_op, effect, deps) = match target {
             Some(text) => {
                 if !is_op_prefix(text) {
                     return Err(RdyError::new(
@@ -221,8 +289,9 @@ impl Rdy {
                 let prefix = text.to_ascii_lowercase();
                 let mut found = chain
                     .iter()
-                    .filter(|(h, _)| h.to_string().starts_with(&prefix));
-                let (h, op) = match (found.next(), found.next()) {
+                    .enumerate()
+                    .filter(|(_, (h, _))| h.to_string().starts_with(&prefix));
+                let (at, h, op) = match (found.next(), found.next()) {
                     (None, _) => {
                         return Err(RdyError::new(
                             E_NOT_FOUND,
@@ -237,7 +306,7 @@ impl Rdy {
                             "use more characters",
                         ));
                     }
-                    (Some((h, op)), None) => (*h, op.clone()),
+                    (Some((at, (h, op))), None) => (at, *h, op.clone()),
                 };
                 if let ViewOpKind::Rebase { landing, .. } = &op.op {
                     return Err(undo_landing(format!(
@@ -256,7 +325,7 @@ impl Rdy {
                         ),
                     ));
                 }
-                let effect = reader.undo_effect(view, &h)?;
+                let (members, effect) = write_group(reader, view, &chain, at, &undone)?;
                 let deps = match landed_refusal(&st, view, &h.short(), &effect, &included)? {
                     Landed::Refused(e) => return Err(e),
                     Landed::Clear(deps) => deps,
@@ -265,11 +334,11 @@ impl Rdy {
                 if head.closed && effect != ResolvedOp::Reopen {
                     return Err(StoreError::ViewClosed(view.into()).into());
                 }
-                (h, op, effect, deps)
+                (members, op, effect, deps)
             }
             None => {
                 let mut pick = None;
-                for (h, op) in &chain {
+                for (i, (h, op)) in chain.iter().enumerate() {
                     if op.actor != s.actor
                         || op.run != s.run
                         || !matches!(
@@ -284,14 +353,14 @@ impl Rdy {
                     {
                         continue;
                     }
-                    let effect = reader.undo_effect(view, h)?;
+                    let (members, effect) = write_group(reader, view, &chain, i, &undone)?;
                     if head.closed && effect != ResolvedOp::Reopen {
                         continue;
                     }
                     if let Landed::Clear(deps) =
                         landed_refusal(&st, view, &h.short(), &effect, &included)?
                     {
-                        pick = Some((*h, op.clone(), effect, deps));
+                        pick = Some((members, op.clone(), effect, deps));
                         break;
                     }
                 }
@@ -314,7 +383,12 @@ impl Rdy {
             }
         };
         // 5. the ops: the undo, then what its inverse needs
-        let mut ops = vec![ViewOpKind::Undo { target }];
+        // one undo per member of the target's write group, the target's first
+        let target = members[0];
+        let mut ops: Vec<ViewOpKind> = members
+            .iter()
+            .map(|t| ViewOpKind::Undo { target: *t })
+            .collect();
         let mut put_back: Vec<Hash> = vec![];
         let mut taken_out: Vec<Hash> = vec![];
         let mut cascaded: Vec<Hash> = vec![];

@@ -9,7 +9,7 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-const HEADER: u64 = 4 + 1 + 32;
+pub(crate) const HEADER: u64 = 4 + 1 + 32;
 /// An upper bound on the encoded `BatchCommit` payload, used to size a batch before it is written.
 const MARKER_MAX: u64 = 64;
 
