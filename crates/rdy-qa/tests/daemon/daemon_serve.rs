@@ -381,3 +381,35 @@ fn msw13_the_session_op_refuses_an_empty_actor_or_run() {
         }
     });
 }
+
+#[test]
+fn hd3_the_session_op_gets_a_did_you_mean_for_a_misspelt_key() {
+    let h = Hosted::new();
+    let rt = Hosted::rt();
+    rt.block_on(async {
+        let hello = Hello {
+            rdy: PROTO_VERSION,
+            version: "t".into(),
+            proto: Proto::Ctl,
+            cwd: h.dir.path().into(),
+        };
+        let rdy_daemon::Attempt::Ready(mut c) =
+            connect(&RunDir::of_project(h.dir.path()), &hello).await
+        else {
+            panic!("not ready")
+        };
+        // the first request after the hello: {"id":1,"op":"session","args":{"actr":"agent:x"}}
+        let e = c
+            .ctl("session", json!({"actr": "agent:x"}))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, E_BAD_INPUT, "{e}");
+        assert_eq!(e.message, "session: unknown field \"actr\"");
+        assert!(e.fix.starts_with("did you mean \"actor\"?"), "{e}");
+        let v = c
+            .ctl("session", json!({"actor": "agent:x", "run": null}))
+            .await
+            .unwrap();
+        assert_eq!(v["kind"], "agent", "the connection lives");
+    });
+}
