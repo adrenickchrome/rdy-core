@@ -473,8 +473,9 @@ fn hd3_an_unknown_key_in_a_link_object_is_refused() {
     )
     .unwrap_err();
     assert_eq!(e.code, E_BAD_INPUT, "{e}");
-    assert!(
-        e.message.contains("refines: unknown field \"prat\" in a link; did you mean \"part\"? a link takes target and part"),
+    assert_eq!(
+        e.message, "op 0: refines: unknown field \"prat\" in a link",
         "{e}"
     );
+    assert_eq!(e.fix, "did you mean \"part\"? rename it", "{e}");
 }

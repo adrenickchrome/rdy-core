@@ -82,8 +82,10 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
             let bad_links = v.get("links").is_some_and(|l| !links_shape_ok(l));
             parse_op(i, v).map_err(|mut e| {
                 // an unknown field keeps its did-you-mean (FW-HD1); otherwise doc1: a malformed
-                // links value gets the shape, not the generic hint
-                if e.fix == OP_FIX {
+                // links value gets the shape, not the generic hint (a link object with no
+                // target string, whatever key it holds, included)
+                let link_fault = e.message.ends_with(LINK_KEY_TAIL);
+                if e.fix == OP_FIX || (link_fault && bad_links) {
                     e.fix = if bad_links {
                         format!("write {LINK_SHAPE}, e.g. {LINK_EXAMPLE}")
                     } else {

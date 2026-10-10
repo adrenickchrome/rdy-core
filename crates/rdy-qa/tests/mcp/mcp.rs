@@ -298,4 +298,17 @@ fn hd3_rdy_write_keeps_the_did_you_mean_for_an_unknown_op_field() {
             .starts_with("did you mean \"parent\"?"),
         "{e}"
     );
+    let Reply::ToolError(e) = c.call(
+        "rdy_write",
+        json!({"ops": [{"op": "create", "type": "doc", "parent": f,
+            "links": {"refines": [{"target": d, "prat": "x"}]}}]}),
+    ) else {
+        panic!("a link object with prat is an isError reply")
+    };
+    assert_eq!(e["code"], "E_BAD_INPUT", "{e}");
+    assert_eq!(
+        e["message"], "op 0: refines: unknown field \"prat\" in a link",
+        "{e}"
+    );
+    assert_eq!(e["fix"], "did you mean \"part\"? rename it", "{e}");
 }

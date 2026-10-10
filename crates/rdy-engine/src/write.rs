@@ -84,19 +84,32 @@ where
         .collect()
 }
 
-/// A link object of kind `kind` as a `LinkInput`: a key outside `LINK_KEYS` is refused with a
-/// did-you-mean (ruling Q2); a missing or non-string target is the generic `LINK_FORMS` text.
+/// How the refusal of a key outside `LINK_KEYS` ends: `<kind>: unknown field "<key>" in a link`.
+pub const LINK_KEY_TAIL: &str = " in a link";
+
+/// The fix for a link object's unknown key `key` (ruling Q2): its did-you-mean, else the keys.
+pub(crate) fn link_key_fix(key: &str) -> String {
+    match crate::did_you_mean::nearest(key, &LINK_KEYS) {
+        Some(y) => format!("did you mean \"{y}\"? rename it"),
+        None => "remove it; a link takes target and part".to_string(),
+    }
+}
+
+/// The unknown key a link-object refusal (see `link_object`) names, from its text.
+fn link_key(msg: &str) -> Option<&str> {
+    let (_, rest) = msg.split_once(": unknown field \"")?;
+    rest.strip_suffix(LINK_KEY_TAIL)?.strip_suffix('"')
+}
+
+/// A link object of kind `kind` as a `LinkInput`: a key outside `LINK_KEYS` is refused (its fix
+/// is `link_key_fix`, ruling Q2); a missing or non-string target is the generic `LINK_FORMS` text.
 fn link_object<E: serde::de::Error>(
     kind: &str,
     mut o: BTreeMap<String, LinkScalar>,
 ) -> Result<LinkInput, E> {
     if let Some(k) = o.keys().find(|k| !LINK_KEYS.contains(&k.as_str())) {
-        let hint = match crate::did_you_mean::nearest(k, &LINK_KEYS) {
-            Some(y) => format!("did you mean \"{y}\"? "),
-            None => String::new(),
-        };
         return Err(E::custom(format!(
-            "{kind}: unknown field \"{k}\" in a link; {hint}a link takes target and part"
+            "{kind}: unknown field \"{k}\"{LINK_KEY_TAIL}"
         )));
     }
     let bad = || E::custom(format!("{kind}: {LINK_FORMS}"));
@@ -201,12 +214,16 @@ pub enum OpInput {
 pub const OP_FIX: &str =
     "each op needs \"op\" (rdy_schema lists them under \"ops\"); create needs \"type\"";
 
-/// Op `i` of a write, parsed: an unknown field is `E_BAD_INPUT` with a did-you-mean (FW-HD1);
-/// any other failure is `E_BAD_INPUT` with `OP_FIX`.
+/// Op `i` of a write, parsed: an unknown field is `E_BAD_INPUT` with a did-you-mean, named by its
+/// path in the op (FW-HD1); an unknown key in a link object gets `link_key_fix`; any other
+/// failure is `E_BAD_INPUT` with `OP_FIX`.
 pub fn parse_op(i: usize, v: serde_json::Value) -> Result<OpInput, RdyError> {
-    serde_json::from_value(v).map_err(|e| {
+    OpInput::deserialize(&v).map_err(|e| {
         let msg = e.to_string();
-        crate::did_you_mean::unknown_field_error(&format!("op {i}"), &msg)
+        if let Some(k) = link_key(&msg) {
+            return RdyError::new(E_BAD_INPUT, format!("op {i}: {msg}"), link_key_fix(k));
+        }
+        crate::did_you_mean::unknown_field_error_in(&format!("op {i}"), &msg, &v)
             .unwrap_or_else(|| RdyError::new(E_BAD_INPUT, format!("op {i}: {msg}"), OP_FIX))
     })
 }
@@ -1081,10 +1098,7 @@ fn check_name(
 /// blob2: an asset block's `blob` must parse as a hash naming a blob (a manifest) in the store.
 /// The check keys on the type's `asset` trait, not on any field named `blob`.
 fn check_asset_blob(pack: &Pack, store: &rdy_store::Store, block: &Block) -> Result<(), RdyError> {
-    let is_asset = pack
-        .block_types
-        .get(&block.block_type)
-        .is_some_and(|d| d.traits.contains(&rdy_schema::Trait::Asset));
+    let is_asset = pack.is_asset(&block.block_type);
     let Some(v) = block.fields.get("blob").filter(|_| is_asset) else {
         return Ok(());
     };

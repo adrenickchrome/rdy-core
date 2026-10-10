@@ -616,8 +616,14 @@ impl Briefing {
         }
         self.settle(&skip, &totals);
         if cut {
-            // the cursor `settle` set counts against the budget
-            self.fill(max, bare);
+            // `settle` only grows the frame (the cursor, `truncated`), so the `fill` above
+            // already built every row this page can need: a second one would build nothing
+            #[cfg(debug_assertions)]
+            {
+                let built = self.inflight.tensions.len();
+                self.fill(max, bare);
+                debug_assert_eq!(self.inflight.tensions.len(), built, "settle built no room");
+            }
             let mut tokens = self.tokens();
             // within `max` without the sides: whether the detail cut drops them depends on them
             if tokens <= max && self.read_sides(sides) {

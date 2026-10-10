@@ -173,7 +173,7 @@ pub fn resolve_figures(tree: &mut WcTree, root: &Path, pack: &Pack) -> Vec<Diagn
                 }
                 None => out.push(diag(
                     format!("{ty} {id}: set media_type for {path}"),
-                    "add media_type, e.g. image/png, to the figure's fields",
+                    "add media_type, e.g. image/png, to the entry's fields",
                 )),
             }
         }
@@ -402,10 +402,10 @@ fn unread(commit: &WcTree, st: &WcState, staged: &[String]) -> Vec<Diagnostic> {
         .map(|u| {
             Diagnostic::error(
                 &u.path,
-                (1, 1),
+                u.at.unwrap_or((1, 1)),
                 E_WC_INVALID,
                 format!("{} is not read: {}", u.path, u.reason),
-                format!("rdy check {}", u.path),
+                u.fix.clone(),
             )
         })
         .collect();

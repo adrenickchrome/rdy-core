@@ -89,8 +89,8 @@ pub use view_query::{
 pub use views::{ConflictInfo, ConflictSide, OwnerInfo, ViewHeadInfo, ViewOpResult};
 pub use wc::project::Projection;
 pub use write::{
-    LinkInput, OP_FIX, OpInput, WriteRequest, WriteResult, editorial_class, json_to_field,
-    parse_justification, parse_op, parse_ops,
+    LINK_KEY_TAIL, LinkInput, OP_FIX, OpInput, WriteRequest, WriteResult, editorial_class,
+    json_to_field, parse_justification, parse_op, parse_ops,
 };
 
 pub use config::{ServeConfig, serve_config};

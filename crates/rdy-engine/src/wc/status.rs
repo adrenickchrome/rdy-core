@@ -289,7 +289,7 @@ pub fn compute(place: &Place, st: &WcState, tree: &WcTree) -> WcStatus {
         .map(|u| UntrackedEntry {
             path: u.path.clone(),
             reason: u.reason.clone(),
-            hint: format!("rdy check {}", u.path),
+            hint: u.fix.clone(),
         })
         .collect();
 

@@ -94,8 +94,8 @@ impl KeyFault {
 
     pub(crate) fn fix(&self) -> String {
         match (self.near, &self.in_link) {
-            (Some(y), _) => format!("did you mean \"{y}\"? rename it"),
-            (None, Some(_)) => "remove it; a link takes target and part".to_string(),
+            (_, Some(_)) => crate::write::link_key_fix(&self.key),
+            (Some(y), None) => format!("did you mean \"{y}\"? rename it"),
             (None, None) => {
                 "remove it, or use id, type, parent, order, fields, body, links or pins".to_string()
             }
@@ -989,9 +989,27 @@ impl Reader<'_> {
 
     fn untrack(&mut self, path: String, reason: impl Into<String>) {
         self.untracked.push(Untracked {
+            fix: format!("rdy check {path}"),
             path,
             reason: reason.into(),
+            at: None,
         });
+    }
+
+    /// Untracks `path` for the first diagnostic pushed since `before` (its message, place and
+    /// fix), or for `otherwise` when there is none; the diagnostics since `before` are dropped.
+    fn untrack_for(&mut self, path: String, before: usize, otherwise: &str) {
+        let first = self.diags.get(before).cloned();
+        self.diags.truncate(before);
+        match first {
+            Some(d) => self.untracked.push(Untracked {
+                path,
+                reason: d.message,
+                at: Some((d.line, d.column)),
+                fix: d.fix,
+            }),
+            None => self.untrack(path, otherwise),
+        }
     }
 
     /// The ignore matcher's state at the root read.
@@ -1205,15 +1223,7 @@ impl Reader<'_> {
                 );
                 self.wc_dir(dir, here, Some(&id), depth, &inner);
             }
-            None => {
-                let reason = self
-                    .diags
-                    .get(before)
-                    .map(|d| d.message.clone())
-                    .unwrap_or_else(|| "not a folder entry".into());
-                self.diags.truncate(before);
-                self.untrack(ff_rel, reason);
-            }
+            None => self.untrack_for(ff_rel, before, "not a folder entry"),
         }
     }
 
@@ -1236,13 +1246,7 @@ impl Reader<'_> {
         }
         let before = self.diags.len();
         let Some((value, pos)) = self.parse(path, here) else {
-            let reason = self
-                .diags
-                .get(before)
-                .map(|d| d.message.clone())
-                .unwrap_or_else(|| "cannot read the file".into());
-            self.diags.truncate(before);
-            self.untrack(here.to_string(), reason);
+            self.untrack_for(here.to_string(), before, "cannot read the file");
             return;
         };
         let items = match value {
@@ -1285,13 +1289,7 @@ impl Reader<'_> {
                 }
                 // no id to keep: untracked, as a _folder.yaml that does not load is
                 None => {
-                    let reason = self
-                        .diags
-                        .get(before)
-                        .map(|d| d.message.clone())
-                        .unwrap_or_else(|| "the doc entry does not load".into());
-                    self.diags.truncate(before);
-                    self.untrack(here.to_string(), reason);
+                    self.untrack_for(here.to_string(), before, "the doc entry does not load");
                     return;
                 }
             },

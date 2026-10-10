@@ -61,7 +61,9 @@ Do not add a dependency that points the other way.
 - Run `cargo fmt --all` before each commit.
 - Run `cargo clippy -p <crate> --all-targets -- -D warnings` for each crate you touch.
 - Run the focused tests of the change.
-- The gate is the authority. Run `cargo qa` for the fast gate and `cargo qa --deep` at milestones.
+- The gate is the authority. Run `cargo qa --skip-perf` for the fast gate and `cargo qa --deep --skip-perf` at milestones.
+- Perf runs only on the bench machine. Its machine class is the only class in `crates/rdy-qa/qa-baseline.json`.
+- On any other machine, a perf run has no baseline and fails. Do not add a machine class to the file.
 - Do not trust a summary of a run, because a summary can hide skips. Read the skip count.
 - A merge records the base and the verified commit in its message.
 - Write conventional commits, such as `fix(<area>): ...` and `perf(<area>): ...`.
@@ -80,7 +82,7 @@ Do not add a dependency that points the other way.
 - `RDY_QA_DEEP=1` runs the deep cases.
 - The gate also takes `--only <area>`, `--skip-perf` and `--rebaseline`.
 - Timing belongs in perf ops. Never assert time in a correctness test.
-- Change a perf baseline only with `--rebaseline`, after two runs that agree within 10%.
+- Change a perf baseline only on the bench, with `--rebaseline`, after two runs that agree within 10%.
 - CI (`.github/workflows/ci.yml`) runs the fast gate on `main`. It is a cheap check and not the merge authority.
 
 ## Shared engine modules

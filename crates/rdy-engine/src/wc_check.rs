@@ -19,13 +19,14 @@ pub fn check_wc(
     let mut tree = read_tree(root, &ignore, pack);
     let mut diags = wc::lint::lint_tree(&mut tree, pack, Some(view), Some(root));
     for u in &tree.untracked {
+        let (line, column) = u.at.unwrap_or((1, 1));
         diags.push(Diagnostic {
             file: u.path.clone(),
-            line: 1,
-            column: 1,
+            line,
+            column,
             code: W_WC_UNTRACKED.into(),
             message: format!("{}: {}", u.path, u.reason),
-            fix: format!("rdy check {}", u.path),
+            fix: u.fix.clone(),
             severity: rdy_schema::Severity::Warning,
         });
     }

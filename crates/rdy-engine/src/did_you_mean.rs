@@ -114,11 +114,73 @@ pub fn fields_fix(field: &str, known: &[&str]) -> String {
 /// `E_BAD_INPUT` for serde's unknown-field error `serde_msg`, named after `context`; `None` when
 /// `serde_msg` is no unknown-field error.
 pub fn unknown_field_error(context: &str, serde_msg: &str) -> Option<RdyError> {
+    unknown_field_error_in(context, serde_msg, &serde_json::Value::Null)
+}
+
+/// Where unknown field `field` sits in `input`, as a path from its top (`parent_id`,
+/// `move_to.parent_id`, `members[0].viw`): the first object, outer objects first, that holds it
+/// and whose other keys are all among `known` (or the `op` tag); else the first object that
+/// holds it. The open maps (`fields`, `links`, `pins`) are not searched. `None` when no object
+/// holds it.
+pub fn field_path(input: &serde_json::Value, field: &str, known: &[&str]) -> Option<String> {
+    use serde_json::Value;
+    let fits = |o: &serde_json::Map<String, Value>| {
+        o.contains_key(field)
+            && o.keys()
+                .all(|k| k == field || k == "op" || known.contains(&k.as_str()))
+    };
+    let mut level: Vec<(String, &Value)> = vec![(String::new(), input)];
+    let mut first_holder: Option<String> = None;
+    while !level.is_empty() {
+        let mut next = vec![];
+        for (at, v) in level {
+            let join = |k: &str| {
+                if at.is_empty() {
+                    k.to_string()
+                } else {
+                    format!("{at}.{k}")
+                }
+            };
+            match v {
+                Value::Object(o) => {
+                    if o.contains_key(field) {
+                        if fits(o) {
+                            return Some(join(field));
+                        }
+                        first_holder.get_or_insert_with(|| join(field));
+                    }
+                    for (k, child) in o {
+                        if !["fields", "links", "pins"].contains(&k.as_str()) {
+                            next.push((join(k), child));
+                        }
+                    }
+                }
+                Value::Array(items) => {
+                    for (i, child) in items.iter().enumerate() {
+                        next.push((format!("{at}[{i}]"), child));
+                    }
+                }
+                _ => {}
+            }
+        }
+        level = next;
+    }
+    first_holder
+}
+
+/// `unknown_field_error` with the field named by its path in `input` (see `field_path`): an
+/// unknown field in a nested object reads `move_to.parent_id`, not `parent_id`.
+pub fn unknown_field_error_in(
+    context: &str,
+    serde_msg: &str,
+    input: &serde_json::Value,
+) -> Option<RdyError> {
     let (field, expected) = unknown_field(serde_msg)?;
     let known: Vec<&str> = expected.iter().map(String::as_str).collect();
+    let shown = field_path(input, &field, &known).unwrap_or_else(|| field.clone());
     Some(RdyError::new(
         E_BAD_INPUT,
-        format!("{context}: unknown field \"{field}\""),
+        format!("{context}: unknown field \"{shown}\""),
         fields_fix(&field, &known),
     ))
 }
@@ -130,6 +192,29 @@ mod tests {
 
     fn own(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn hd3_field_path_names_the_object_that_holds_the_field() {
+        let v = serde_json::json!({"op": "update", "id": "x", "move_to": {"parent_id": "p"}});
+        assert_eq!(
+            field_path(&v, "parent_id", &["parent", "after", "before"]).as_deref(),
+            Some("move_to.parent_id")
+        );
+        let v = serde_json::json!({"op": "create", "members": [
+            {"label": "a", "view": "v"}, {"label": "b", "viw": 1}
+        ]});
+        assert_eq!(
+            field_path(&v, "viw", &["label", "view"]).as_deref(),
+            Some("members[1].viw")
+        );
+        let v = serde_json::json!({"op": "update", "id": "x", "parent_id": "p",
+            "fields": {"parent_id": 1}});
+        assert_eq!(
+            field_path(&v, "parent_id", &["id", "base", "fields"]).as_deref(),
+            Some("parent_id")
+        );
+        assert_eq!(field_path(&v, "nowhere", &["id"]), None);
     }
 
     #[test]

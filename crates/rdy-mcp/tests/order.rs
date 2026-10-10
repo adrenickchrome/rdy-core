@@ -136,3 +136,28 @@ async fn hd4_serve_on_answers_an_oversized_line_with_the_limit_error_and_lives()
     send(&mut cw, call(10, "rdy_overview", json!({}))).await;
     assert_eq!(recv(&mut cr).await["id"], 10, "the session lives");
 }
+
+/// A session whose first message is not `initialize` ends at once: the serve side stops, and
+/// `serve_on` returns without waiting for the client to write again or close.
+#[tokio::test]
+async fn hd4_serve_on_ends_when_the_session_fails_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine: Arc<dyn Engine> =
+        Arc::new(Local::new(Rdy::init(dir.path(), "rdy-standard").unwrap()));
+    let (client, server) = tokio::io::duplex(1 << 20);
+    let (sr, sw) = tokio::io::split(server);
+    let session = tokio::spawn(serve_on(engine, 1, sr, sw));
+    let (_cr, mut cw) = tokio::io::split(client);
+    send(
+        &mut cw,
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    )
+    .await;
+    // the client's write half stays open
+    let ended = tokio::time::timeout(Duration::from_secs(30), session).await;
+    assert!(
+        ended.is_ok(),
+        "serve_on still runs after the session failed to start"
+    );
+    drop(cw);
+}

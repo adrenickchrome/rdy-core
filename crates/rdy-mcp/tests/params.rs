@@ -208,8 +208,12 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
     use rdy_mcp::search_tools::SearchParams;
     use rdy_mcp::view_tools::LogParams;
     let mut refused = Vec::new();
+    let mut checked: Vec<&str> = Vec::new();
     macro_rules! check {
-        ($($t:ty),* $(,)?) => { $( refused.extend(schema_keys_serde_refuses::<$t>()); )* };
+        ($($t:ident),* $(,)?) => { $(
+            refused.extend(schema_keys_serde_refuses::<$t>());
+            checked.push(stringify!($t));
+        )* };
     }
     // The 25 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
     // `AltPickParams`, `DismissParams`, `DecideParams`).
@@ -244,6 +248,41 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         refused.is_empty(),
         "a documented parameter is refused as an unknown field: {refused:#?}"
     );
+    // every `struct *Params` in the crate's source is in the list above
+    let declared = params_structs(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
+    let unchecked: Vec<&String> = declared
+        .iter()
+        .filter(|n| !checked.contains(&n.as_str()))
+        .collect();
+    assert!(
+        unchecked.is_empty(),
+        "add these *Params types to the check above: {unchecked:?}"
+    );
+    assert_eq!(declared.len(), checked.len(), "{declared:?}");
+}
+
+/// The name of every `struct <Name>Params` declared in the `.rs` files under `dir`.
+fn params_structs(dir: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            out.extend(params_structs(&path));
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            let text = std::fs::read_to_string(&path).unwrap();
+            for rest in text.split("struct ").skip(1) {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if name.ends_with("Params") {
+                    out.push(name);
+                }
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 #[test]

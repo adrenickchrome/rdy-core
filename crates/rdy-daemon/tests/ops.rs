@@ -660,6 +660,6 @@ fn hd3_an_alt_member_with_an_unknown_field_is_refused() {
     )
     .unwrap_err();
     assert_eq!(err.code, E_BAD_INPUT, "{err}");
-    assert_eq!(err.message, "alt: unknown field \"viw\"");
+    assert_eq!(err.message, "alt: unknown field \"members[0].viw\"");
     assert_eq!(err.fix, "did you mean \"view\"? the fields are label, view");
 }

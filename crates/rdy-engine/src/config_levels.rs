@@ -1101,13 +1101,27 @@ mod tests {
 
     #[test]
     fn hd9_the_wrong_file_wins_over_a_wrong_type_and_a_bad_section() {
-        for local in ["reviews:\n  require_up_to_date: maybe\n", "reviews: 5\n"] {
+        for (local, named) in [
+            (
+                "reviews:\n  require_up_to_date: maybe\n",
+                "reviews.require_up_to_date",
+            ),
+            ("reviews: 5\n", "reviews"),
+        ] {
             let d = project("pack: p\n", Some(local));
             let w = effective(d.path(), None)
                 .unwrap_or_else(|e| panic!("{local:?}: {e}"))
                 .warnings;
             assert_eq!(w.len(), 1, "{local:?}: {w:?}");
             assert_eq!(w[0].code, "W_CONFIG_UNKNOWN");
+            assert_eq!(
+                w[0].message,
+                format!(
+                    "{named} in .rdy/local.yaml belongs in .rdy/config.yaml; rdy ignores it here, so the review gate would stay off"
+                ),
+                "{local:?}"
+            );
+            assert_eq!(w[0].fix, format!("move {named} to .rdy/config.yaml"));
         }
         let d = project("pack: p\n", Some("reviews: {}\n"));
         assert!(

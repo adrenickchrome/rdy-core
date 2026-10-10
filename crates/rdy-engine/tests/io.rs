@@ -1000,3 +1000,12 @@ fn hd8_block_from_yaml_refuses_a_misspelt_key() {
         "syntax stays E_BAD_INPUT"
     );
 }
+
+#[test]
+fn hd8_block_from_yaml_refuses_a_misspelt_link_key() {
+    let yaml = "id: p-AAAAA\ntype: prose\norder: a1\nlinks:\n  refines:\n  - target: c-AAAAA\n    prat: x\n";
+    let e = block_from_yaml(yaml).unwrap_err();
+    assert_eq!(e.code, "E_FILE_FORMAT");
+    assert_eq!(e.message, "line 7: unknown key \"prat\" in a refines link");
+    assert_eq!(e.fix, "did you mean \"part\"? rename it");
+}

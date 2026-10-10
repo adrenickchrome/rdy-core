@@ -89,9 +89,10 @@ run's view, else `work-<actor>` (`:` becomes `-`, e.g. `work-agent-x`), and appr
 and importing are refused with `E_PERMISSION`.
 
 rdy checks the user config as it checks the project's. If the file does not parse, is not a
-mapping of settings, or sets a key at the wrong level, every command in every project fails with
-`E_CONFIG`, and the error names the file. rdy never skips the file, because that would change
-who the human is.
+mapping of settings, or gives a known key a value of the wrong type, every command in every
+project fails with `E_CONFIG`, and the error names the file. rdy never skips the file, because
+that would change who the human is. A misspelt key, or a key that belongs in another config file,
+is a `W_CONFIG_UNKNOWN` warning that names the file. rdy ignores that key and keeps going.
 
 View ownership: the first commit into a view records its owner (the actor and run that made it),
 and `rdy status` shows each view's owner. An agent session may write only into a view it owns or
@@ -129,11 +130,11 @@ rdy worktree add ../review work-review   # a second folder, bound to its own vie
   `.theirs.yaml` file, then run `rdy add` on the file.
 - **New docs.** `rdy new doc` and `rdy new folder` also write the file into a folder bound to
   the same view. A file already at that path is never overwritten: rdy warns and leaves it.
-- **Figures.** Name an image file in the `blob` field of a `figure` entry, as a path from the
-  doc file's folder. Commit stores the image and copies it to `_blobs/<hash>.<ext>`. Checkout
-  and update write the view's images into `_blobs/` first, so a checkout or update that is then
-  refused can leave images there. Each name is the image's hash, so such a file is never wrong
-  and the next checkout uses it.
+- **Images.** Name an image file in the `blob` field of an entry whose type is an asset type
+  (such as `figure`), as a path from the doc file's folder. Commit stores the image and copies
+  it to `_blobs/<hash>.<ext>`. Checkout and update write the view's images into `_blobs/`
+  first, so a checkout or update that is then refused can leave images there. Each name is the
+  image's hash, so such a file is never wrong and the next checkout uses it.
 - **Ignored files.** `.rdyignore` (a subset of the gitignore patterns) keeps files out of the working copy.
 - **Where it lives.** The state is local, in `.rdy/wc/` (a worktree has its own). It is never
   part of the project's history.

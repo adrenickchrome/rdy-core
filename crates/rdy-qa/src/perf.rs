@@ -357,6 +357,14 @@ pub fn not_compared(measured: &[Measure]) -> Vec<Verdict> {
         .collect()
 }
 
+/// The report note for a run on machine class `machine`, which has no baseline. Perf compares
+/// only on a class the baseline holds, so the note says that before it names a rebaseline.
+pub fn not_compared_note(machine: &str) -> String {
+    format!(
+        "No baseline for `{machine}`: recorded, not compared. Run perf on a machine class that crates/rdy-qa/qa-baseline.json holds, or pass --skip-perf. Add a machine class only when the project decides to: two runs within 10%, then cargo qa --rebaseline, then commit the file."
+    )
+}
+
 /// What the gate does with a perf run, decided from two facts: the machine class has no baseline
 /// entry, and `--rebaseline` was given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2893,6 +2901,14 @@ mod tests {
         let v = not_compared(&[m("log_full", 1.0)]);
         assert_eq!((v[0].status, v[0].pass), (Status::NotCompared, false));
         assert_eq!(Status::NotCompared.label(), "RECORDED, NOT COMPARED");
+    }
+
+    #[test]
+    fn hd6_the_not_compared_note_sends_perf_to_a_baselined_class_first() {
+        assert_eq!(
+            not_compared_note("macos-arm64"),
+            "No baseline for `macos-arm64`: recorded, not compared. Run perf on a machine class that crates/rdy-qa/qa-baseline.json holds, or pass --skip-perf. Add a machine class only when the project decides to: two runs within 10%, then cargo qa --rebaseline, then commit the file."
+        );
     }
 
     #[test]

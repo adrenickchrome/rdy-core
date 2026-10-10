@@ -925,9 +925,7 @@ fn msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes() {
         |m: u32| std::fs::set_permissions(&root, std::fs::Permissions::from_mode(m)).unwrap();
     mode(0o555);
     // as root a read-only directory still takes writes: the update cannot be stopped here
-    let probe = root.join(".msw5-probe");
-    if std::fs::write(&probe, "").is_ok() {
-        let _ = std::fs::remove_file(&probe);
+    if takes_writes_when_read_only(&root) {
         mode(0o755);
         rdy_qa::skip::skip(
             "msw5_finishing_an_update_keeps_a_file_where_a_new_folder_goes",
@@ -974,9 +972,7 @@ fn msw5_interrupt(
     let mode =
         |m: u32| std::fs::set_permissions(&root, std::fs::Permissions::from_mode(m)).unwrap();
     mode(0o555);
-    let probe = root.join(".msw5-probe");
-    if std::fs::write(&probe, "").is_ok() {
-        let _ = std::fs::remove_file(&probe);
+    if takes_writes_when_read_only(&root) {
         mode(0o755);
         rdy_qa::skip::skip(test, rdy_qa::skip::Why::Prerequisite, READ_ONLY_REASON);
         return false;
@@ -1335,4 +1331,76 @@ fn msw16_a_folder_taken_under_the_store_name_takes_its_docs_conflicts() {
         Some("handbook")
     );
     assert_eq!(store_block(&s, "work", &seed.prose).body, "Resolved.");
+}
+
+/// Ruling Q12: rdy's own copies stay lenient. A base copy that holds a key this build does not
+/// know (as one written by another build would), at the top level and inside a link object,
+/// still merges; the same keys in a person's file are still refused.
+#[test]
+fn hd8_a_base_copy_with_unknown_keys_still_merges() {
+    let (s, seed) = seeded();
+    ok(&s, &["checkout"]);
+    let place = rdy_engine::wc::state::Place::locate(s.dir.path()).unwrap();
+    let base = place.state.join("base/files/guides/intro.yaml");
+    let mut entries_: Vec<serde_yaml_ng::Value> =
+        serde_yaml_ng::from_str(&std::fs::read_to_string(&base).unwrap()).unwrap();
+    let claim = entries_
+        .iter_mut()
+        .find(|e| e["id"].as_str() == Some(seed.claim.as_str()))
+        .unwrap();
+    let m = claim.as_mapping_mut().unwrap();
+    m.insert("remark".into(), "from another build".into());
+    let link = m
+        .get_mut("links")
+        .and_then(|l| l.get_mut("describes"))
+        .and_then(|d| d.get_mut(0))
+        .and_then(|o| o.as_mapping_mut())
+        .expect("the claim's describes link is an object");
+    link.insert("weight".into(), 1.into());
+    std::fs::write(&base, serde_yaml_ng::to_string(&entries_).unwrap()).unwrap();
+
+    set_body(&s, "guides/intro.yaml", &seed.prose, "Local.");
+    store_write(
+        &s,
+        "work",
+        json!([{"op": "update", "id": seed.claim, "body": "Theirs claim."}]),
+    );
+    let (okk, v) = json(&s, &["update"]);
+    assert!(okk, "{v}");
+    assert!(v["conflicts"].as_array().unwrap().is_empty(), "{v}");
+    let prose = entry(&s, "guides/intro.yaml", &seed.prose);
+    assert_eq!(prose["body"].as_str(), Some("Local."), "kept");
+    let claim = entry(&s, "guides/intro.yaml", &seed.claim);
+    assert_eq!(claim["body"].as_str(), Some("Theirs claim."), "merged");
+    assert!(claim.get("remark").is_none(), "{claim:?}");
+
+    // guard: the same keys in a person's file are refused
+    edit(&s, "guides/intro.yaml", |l| {
+        let c = l
+            .iter_mut()
+            .find(|e| e["id"].as_str() == Some(seed.claim.as_str()))
+            .unwrap();
+        let m = c.as_mapping_mut().unwrap();
+        m.insert("remark".into(), "mine".into());
+        m.get_mut("links")
+            .and_then(|l| l.get_mut("describes"))
+            .and_then(|d| d.get_mut(0))
+            .and_then(|o| o.as_mapping_mut())
+            .unwrap()
+            .insert("weight".into(), 1.into());
+    });
+    let o = s.rdy(&["--json", "check", "guides/intro.yaml"]);
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    let faults: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["code"] == "E_FILE_FORMAT")
+        .map(|d| d["message"].as_str().unwrap())
+        .collect();
+    assert!(
+        faults.iter().any(|m| m.contains("unknown key \"remark\""))
+            && faults.iter().any(|m| m.contains("unknown key \"weight\"")),
+        "{v}"
+    );
 }

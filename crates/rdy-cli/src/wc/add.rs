@@ -120,11 +120,17 @@ fn plan_one(
             } else if let Some(u) = wt.untracked.iter().find(|u| u.path == rel)
                 && rel.ends_with(".yaml")
             {
-                Err(refuse(
-                    E_WC_INVALID,
-                    format!("{typed}: {}", u.reason),
-                    format!("rdy check {typed}"),
-                ))
+                // a reason with a place carries its own fix (a did-you-mean, say)
+                let (message, fix) = match u.at {
+                    Some((line, _)) => {
+                        (format!("{typed}: line {line}: {}", u.reason), u.fix.clone())
+                    }
+                    None => (
+                        format!("{typed}: {}", u.reason),
+                        format!("rdy check {typed}"),
+                    ),
+                };
+                Err(refuse(E_WC_INVALID, message, fix))
             } else {
                 Err(not_in_tree(typed))
             }

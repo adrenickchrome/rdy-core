@@ -823,6 +823,45 @@ fn hd3_parse_ops_names_the_op_and_the_nearest_field() {
 }
 
 #[test]
+fn hd3_a_link_key_typo_gets_a_link_fix() {
+    let link = |key: &str| {
+        let mut o = json!({"target": "t"});
+        o[key] = json!("x");
+        parse_ops(vec![
+            json!({"op": "create", "type": "claim", "links": {"refines": [o]}}),
+        ])
+        .unwrap_err()
+    };
+    let e = link("prat");
+    assert_eq!(e.code, E_BAD_INPUT);
+    assert_eq!(e.message, "op 0: refines: unknown field \"prat\" in a link");
+    assert_eq!(e.fix, "did you mean \"part\"? rename it");
+    let e = link("zzz");
+    assert_eq!(e.message, "op 0: refines: unknown field \"zzz\" in a link");
+    assert_eq!(e.fix, "remove it; a link takes target and part");
+}
+
+#[test]
+fn hd3_a_nested_unknown_field_names_its_path() {
+    let e = parse_ops(vec![
+        json!({"op": "update", "id": "x", "move_to": {"parent_id": "p"}}),
+    ])
+    .unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT);
+    assert_eq!(e.message, "op 0: unknown field \"move_to.parent_id\"");
+    assert_eq!(
+        e.fix,
+        "did you mean \"parent\"? the fields are parent, after, before"
+    );
+    // a key of the op itself keeps its plain name, even when a nested object has one like it
+    let e = parse_ops(vec![
+        json!({"op": "update", "id": "x", "parent_id": "p", "fields": {"parent_id": 1}}),
+    ])
+    .unwrap_err();
+    assert_eq!(e.message, "op 0: unknown field \"parent_id\"");
+}
+
+#[test]
 fn hd3_nearest_is_the_closed_rule() {
     use rdy_engine::did_you_mean::nearest;
     assert_eq!(

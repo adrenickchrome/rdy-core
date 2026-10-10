@@ -156,9 +156,7 @@ fn perf_tier(
     if decision == perf::TierDecision::NotCompared {
         // nothing is written: a machine class needs two runs within 10%, then --rebaseline
         verdicts = perf::not_compared(&measures);
-        note = format!(
-            "No baseline for `{machine}`: recorded, not compared. Rebaseline this machine class (two runs within 10%, then cargo qa --rebaseline) and commit crates/rdy-qa/qa-baseline.json."
-        );
+        note = perf::not_compared_note(machine);
     } else if decision.writes_baseline() {
         verdicts = perf::compare(None, &measures, perf::Mode::Record);
         // the measured ops replace their entries and every other op is kept, so a typical-tier
