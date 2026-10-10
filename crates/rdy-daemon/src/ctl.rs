@@ -29,11 +29,25 @@ fn id_number_or_string<'de, D: Deserializer<'de>>(d: D) -> Result<Value, D::Erro
     }
 }
 
+/// The id of a request line that did not parse, read leniently: a number or a string, else null.
+fn request_id(line: &[u8]) -> Value {
+    match serde_json::from_slice::<Value>(line) {
+        Ok(Value::Object(o)) => o
+            .get("id")
+            .filter(|v| v.is_number() || v.is_string())
+            .cloned()
+            .unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
+
 fn empty_args() -> Value {
     json!({})
 }
 
+/// FW-HD1: a request refuses a key it does not take.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CtlRequest {
     #[serde(deserialize_with = "id_number_or_string")]
     pub id: Value,
@@ -263,12 +277,18 @@ pub async fn serve_ctl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         let request: CtlRequest = match serde_json::from_slice(&line) {
             Ok(r) => r,
             Err(e) => {
-                let e = ErrorReply::new(
-                    E_BAD_INPUT,
-                    format!("a ctl request is one JSON object per line with id, op and args: {e}"),
-                    r#"send {"id":1,"op":"ping","args":{}}"#,
-                );
-                write_reply(&mut w, &CtlReply::error(Value::Null, e)).await?;
+                let msg = e.to_string();
+                let e = match rdy_engine::did_you_mean::unknown_field_error("ctl request", &msg) {
+                    Some(e) => ErrorReply::new(e.code, e.message, e.fix),
+                    None => ErrorReply::new(
+                        E_BAD_INPUT,
+                        format!(
+                            "a ctl request is one JSON object per line with id, op and args: {msg}"
+                        ),
+                        r#"send {"id":1,"op":"ping","args":{}}"#,
+                    ),
+                };
+                write_reply(&mut w, &CtlReply::error(request_id(&line), e)).await?;
                 continue;
             }
         };

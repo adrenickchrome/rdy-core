@@ -122,8 +122,7 @@ pub fn try_put_j(
     ops: Value,
     j: Option<Justification>,
 ) -> Result<WriteResult, RdyError> {
-    let ops: Vec<OpInput> = serde_json::from_value(ops)
-        .map_err(|e| RdyError::new(rdy_engine::E_BAD_INPUT, e.to_string(), "fix the test's ops"))?;
+    let ops: Vec<OpInput> = crate::fixtures::parse_test_ops(ops)?;
     try_briefed(r, name, |r, brief| {
         r.write_briefed(
             &ag(name),

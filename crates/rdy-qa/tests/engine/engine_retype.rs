@@ -426,3 +426,55 @@ fn rtyp1_import_refuses_a_presentational_prefix_on_a_normative_type() {
     assert_eq!(e.code, E_VALIDATION, "{e}");
     assert!(prefix_issue(&e, "as-AAAAA"), "{e:?}");
 }
+
+#[test]
+fn hd3_a_move_with_parent_id_is_refused_and_names_parent() {
+    let (_d, mut r) = project();
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "f", "title": "F"}},
+            {"op": "create", "type": "doc", "id": "$d", "parent": "$f",
+             "fields": {"name": "d", "title": "D", "doc_type": "glossary"}}
+        ]),
+    )
+    .unwrap();
+    let (f, d) = (w.created["$f"].clone(), w.created["$d"].clone());
+    let e = write(
+        &mut r,
+        "work",
+        json!([{"op": "move", "id": d, "parent_id": f}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT, "{e}");
+    assert_eq!(e.message, "op 0: unknown field \"parent_id\"");
+    assert!(
+        e.fix
+            .starts_with("did you mean \"parent\"? the fields are "),
+        "{e}"
+    );
+    assert_eq!(
+        block(&r, &d).parent.map(|p| p.to_string()),
+        Some(f),
+        "nothing moved"
+    );
+}
+
+#[test]
+fn hd3_an_unknown_key_in_a_link_object_is_refused() {
+    let (_d, mut r) = project();
+    let (_doc, s, c) = seed_doc(&mut r, "work");
+    let e = write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "claim", "parent": s,
+        "body": "Two.", "links": {"refines": [{"target": c, "prat": "x"}]}}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT, "{e}");
+    assert!(
+        e.message.contains("refines: unknown field \"prat\" in a link; did you mean \"part\"? a link takes target and part"),
+        "{e}"
+    );
+}

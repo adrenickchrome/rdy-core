@@ -790,3 +790,49 @@ fn msw11_a_nonce_lookup_since_a_head_stops_at_its_limit() {
         .unwrap();
     assert!(all.change.is_some(), "{all:?}");
 }
+
+#[test]
+fn hd3_the_op_tag_and_every_documented_field_still_parse() {
+    let v = ops(json!([
+        {"op": "create", "type": "claim", "id": "$c", "parent": "p", "after": "a", "fields": {"any": 1},
+         "body": "b", "links": {"k": "t", "j": ["t"], "m": [{"target": "t", "part": "w"}, "u"]}},
+        {"op": "create", "type": "claim", "before": "b"},
+        {"op": "update", "id": "x", "base": "v", "fields": {}, "unset": ["f"], "body": "b",
+         "links": {"k": [{"target": "t"}]}, "type": "note", "move_to": {"parent": "p", "after": "a"}},
+        {"op": "move", "id": "x", "base": "v", "parent": "p", "before": "b"},
+        {"op": "delete", "id": "x", "base": "v"},
+        {"op": "rebalance"},
+        {"op": "rebalance", "parent": "p"},
+        {"op": "repin", "id": "x", "base": "v", "targets": ["t"]}
+    ]));
+    assert_eq!(v.len(), 8);
+}
+
+#[test]
+fn hd3_parse_ops_names_the_op_and_the_nearest_field() {
+    let e = parse_ops(vec![
+        json!({"op": "rebalance"}),
+        json!({"op": "delete", "id": "x", "bse": "v"}),
+    ])
+    .unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT);
+    assert_eq!(e.message, "op 1: unknown field \"bse\"");
+    assert_eq!(e.fix, "did you mean \"base\"? the fields are id, base");
+}
+
+#[test]
+fn hd3_nearest_is_the_closed_rule() {
+    use rdy_engine::did_you_mean::nearest;
+    assert_eq!(
+        nearest("parent_id", &["id", "base", "parent", "after", "before"]),
+        Some("parent")
+    );
+    assert_eq!(nearest("prent", &["id", "parent"]), Some("parent"));
+    assert_eq!(nearest("arg", &["id", "op", "args"]), Some("args"));
+    assert_eq!(nearest("zzz", &["id", "op", "args"]), None);
+    assert_eq!(
+        nearest("id_xyz", &["id"]),
+        None,
+        "a prefix under 3 characters never matches"
+    );
+}

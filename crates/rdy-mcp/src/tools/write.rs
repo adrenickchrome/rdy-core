@@ -77,14 +77,18 @@ pub fn rdy_write(st: &mut McpState, p: WriteParams) -> Result<Value, RdyError> {
         .into_iter()
         .enumerate()
         .map(|(i, v)| {
-            serde_json::from_value(v.clone()).map_err(|e| {
-                // doc1: a malformed links value gets the shape, not the generic hint
-                let fix = if v.get("links").is_some_and(|l| !links_shape_ok(l)) {
-                    format!("write {LINK_SHAPE}, e.g. {LINK_EXAMPLE}")
-                } else {
-                    "each op needs \"op\" (rdy_schema lists them under \"ops\"); create needs \"type\"; see rdy_schema for fields".to_string()
-                };
-                RdyError::new(E_BAD_INPUT, format!("op {i}: {e}"), fix)
+            let bad_links = v.get("links").is_some_and(|l| !links_shape_ok(l));
+            parse_op(i, v).map_err(|mut e| {
+                // an unknown field keeps its did-you-mean (FW-HD1); otherwise doc1: a malformed
+                // links value gets the shape, not the generic hint
+                if e.fix == OP_FIX {
+                    e.fix = if bad_links {
+                        format!("write {LINK_SHAPE}, e.g. {LINK_EXAMPLE}")
+                    } else {
+                        format!("{OP_FIX}; see rdy_schema for fields")
+                    };
+                }
+                e
             })
         })
         .collect::<Result<_, _>>()?;

@@ -122,11 +122,14 @@ fn parse<T: serde::de::DeserializeOwned>(
 ) -> Result<T, RdyError> {
     let args = if args.is_null() { json!({}) } else { args };
     serde_json::from_value(args).map_err(|e| {
-        RdyError::new(
-            E_BAD_INPUT,
-            format!("{op}: {e}"),
-            format!("args for {op}: {shape}"),
-        )
+        let msg = e.to_string();
+        rdy_engine::did_you_mean::unknown_field_error(op, &msg).unwrap_or_else(|| {
+            RdyError::new(
+                E_BAD_INPUT,
+                format!("{op}: {msg}"),
+                format!("args for {op}: {shape}"),
+            )
+        })
     })
 }
 
