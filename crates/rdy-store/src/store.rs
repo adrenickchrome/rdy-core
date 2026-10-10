@@ -201,6 +201,14 @@ fn rebuild_index(path: &Path, repaired: bool) -> Result<OpenedIndex, StoreError>
     })
 }
 
+/// Removes the file at `path`; a file that is not there is no error.
+fn remove_if_present(path: &Path) -> Result<(), StoreError> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
 /// Moves `path` to the first free `<path>.damaged-<n>`, never overwriting an existing file.
 fn set_aside(path: &Path) -> Result<(), StoreError> {
     for n in 0u32.. {
@@ -257,6 +265,8 @@ struct Faults {
     index_apply: bool,
     rollback: bool,
     checkpoint: bool,
+    /// The next replay fails before it indexes this frame (counting from 0).
+    replay_after: Option<u64>,
 }
 
 /// Frames for one `write`: `(kind, payload)` pairs, in write order.
@@ -348,6 +358,41 @@ pub const CATCH_UP_CHUNK: usize = 1000;
 struct CatchUp {
     frames: u64,
     commits: u32,
+}
+
+/// Replays the frames of `log` from `from` to its end into `index`, applying their entries every
+/// `CATCH_UP_CHUNK` frames, so it never holds more than one chunk. The commits are not durable.
+/// `fail_after` is a test fault: the replay fails before it indexes that frame (counting from 0).
+fn replay_into(
+    log: &SegmentLog,
+    index: &Index,
+    from: Location,
+    fail_after: Option<u64>,
+) -> Result<CatchUp, StoreError> {
+    let end = log.end();
+    let mut done = CatchUp::default();
+    let mut entries = vec![];
+    let mut in_chunk = 0usize;
+    log.for_each_from(from, |loc, kind, hash, payload, next| {
+        if fail_after == Some(done.frames) {
+            return Err(StoreError::Db("injected replay failure".into()));
+        }
+        entries.extend(entries_for_frame(kind, hash, loc, payload)?);
+        done.frames += 1;
+        in_chunk += 1;
+        if in_chunk == CATCH_UP_CHUNK {
+            index.apply(&entries, next)?;
+            done.commits += 1;
+            entries.clear();
+            in_chunk = 0;
+        }
+        Ok::<(), StoreError>(())
+    })?;
+    if in_chunk > 0 || done.commits == 0 {
+        index.apply(&entries, end)?;
+        done.commits += 1;
+    }
+    Ok(done)
 }
 
 /// Frames (data frames and batch markers) since the last checkpoint that make the next write
@@ -550,9 +595,11 @@ impl Store {
 
     /// Makes the log hold the store's format, which `FORMAT` (already checked) says. The log's
     /// ref is the truth: any other number there is refused, and so is a log with frames and no
-    /// number. A new store (an empty log; `create` wrote `FORMAT` first) gets the ref as one
-    /// marked batch, then a checkpoint. A crash before that leaves `FORMAT` and an empty log,
-    /// which the next open finishes.
+    /// number. An index with no number over a log with frames may have lost it (an old partial
+    /// rebuild), so the index is first rebuilt from the log and asked again. A new store (an
+    /// empty log; `create` wrote `FORMAT` first) gets the ref as one marked batch, then a
+    /// checkpoint. A crash before that leaves `FORMAT` and an empty log, which the next open
+    /// finishes.
     fn ensure_format(&mut self) -> Result<(), StoreError> {
         let held_frames = self.log.end()
             != Location {
@@ -562,10 +609,19 @@ impl Store {
         match self.format_ref()? {
             Some(n) => format::check_format(Format { store_format: n }, &self.dir)?,
             None if held_frames => {
-                return Err(format::other_build(
-                    &self.dir,
-                    "has a log with no store format",
-                ));
+                // an index that lost the ref (an old partial rebuild) is rebuilt from the log;
+                // a log that really has no format ref is still refused
+                self.reindex()?;
+                self.report.index_rebuilt = true;
+                match self.format_ref()? {
+                    Some(n) => format::check_format(Format { store_format: n }, &self.dir)?,
+                    None => {
+                        return Err(format::other_build(
+                            &self.dir,
+                            "has a log with no store format",
+                        ));
+                    }
+                }
             }
             None => {
                 self.set_refs(vec![(
@@ -693,27 +749,8 @@ impl Store {
     }
 
     fn replay_from(&mut self, from: Location) -> Result<CatchUp, StoreError> {
-        let end = self.log.end();
-        let (log, index) = (&self.log, self.index());
-        let mut done = CatchUp::default();
-        let mut entries = vec![];
-        let mut in_chunk = 0usize;
-        log.for_each_from(from, |loc, kind, hash, payload, next| {
-            entries.extend(entries_for_frame(kind, hash, loc, payload)?);
-            done.frames += 1;
-            in_chunk += 1;
-            if in_chunk == CATCH_UP_CHUNK {
-                index.apply(&entries, next)?;
-                done.commits += 1;
-                entries.clear();
-                in_chunk = 0;
-            }
-            Ok::<(), StoreError>(())
-        })?;
-        if in_chunk > 0 || done.commits == 0 {
-            index.apply(&entries, end)?;
-            done.commits += 1;
-        }
+        let fail_after = self.faults.replay_after.take();
+        let done = replay_into(&self.log, self.index(), from, fail_after)?;
         // the replayed frames are in the log, not yet in the durable index
         self.checkpoint()?;
         Ok(done)
@@ -737,28 +774,42 @@ impl Store {
         self.index().put_raw_producer_for_tests(key)
     }
 
-    /// Rebuilds the index from the log in a new database at the same path. The store's reader
-    /// then holds the new index; a reader cloned before keeps the old one, which stays readable
-    /// through its unlinked file until that reader drops (Unix).
+    /// Rebuilds the index from the log. The new index is built in `index.redb.tmp` and is renamed
+    /// over `index.redb` only when it is complete and durable. A failure leaves the old index in
+    /// place as the store's index, and removes the temp file. The store's reader then holds the
+    /// new index; a reader cloned before keeps the old one, which stays readable through its open
+    /// file until that reader drops (Unix).
     pub fn reindex(&mut self) -> Result<(), StoreError> {
+        let path = self.dir.join("index.redb");
+        let tmp = self.dir.join("index.redb.tmp");
+        // a leftover temp is an older failed rebuild; `Index::open` would reuse it
+        remove_if_present(&tmp)?;
+        let fail_after = self.faults.replay_after.take();
+        let ix = Index::open(&tmp)?;
+        let built = replay_into(&self.log, &ix, ORIGIN, fail_after)
+            // durable before it becomes the index
+            .and_then(|_| ix.checkpoint());
+        if let Err(e) = built {
+            drop(ix);
+            let _ = remove_if_present(&tmp);
+            return Err(e);
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            drop(ix);
+            let _ = remove_if_present(&tmp);
+            return Err(e.into());
+        }
+        // the handle opened on the temp path keeps working after the rename
+        let keep = (Arc::clone(&self.shared), Arc::clone(&self.tracking));
+        self.set_index(keep, ix);
         self.shared
             .sets
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
-        let path = self.dir.join("index.redb");
-        let tmp = self.dir.join("index.redb.tmp");
-        // drop the store's old database before deleting its file
-        let scratch = Index::open(&tmp)?;
-        let keep = (Arc::clone(&self.shared), Arc::clone(&self.tracking));
-        self.set_index(keep.clone(), scratch);
-        if path.exists() {
-            std::fs::remove_file(&path)?;
-        }
-        let fresh = Index::open(&path)?;
-        self.set_index(keep, fresh);
-        let _ = std::fs::remove_file(&tmp);
-        self.catch_up().map(|_| ())
+        self.pending = 0;
+        fsutil::sync_dir(&self.dir)?;
+        Ok(())
     }
 
     pub fn write(&mut self, items: Vec<(u8, Vec<u8>)>) -> Result<Vec<Hash>, StoreError> {
@@ -955,6 +1006,13 @@ impl Store {
     #[doc(hidden)]
     pub fn fail_next_index_apply(&mut self) {
         self.faults.index_apply = true;
+    }
+
+    /// Test hook: the next replay (a catch-up or a reindex) fails with "injected replay failure"
+    /// before it indexes frame number `frames`, counting from 0.
+    #[doc(hidden)]
+    pub fn fail_next_replay_after(&mut self, frames: u64) {
+        self.faults.replay_after = Some(frames);
     }
 
     /// Test hook: the next rollback of a failed write fails, poisoning the store.

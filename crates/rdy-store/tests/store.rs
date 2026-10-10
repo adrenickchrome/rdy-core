@@ -396,3 +396,74 @@ fn a_partial_append_leaves_no_bytes_past_the_end() {
     assert_eq!(s.verify().unwrap(), frames_before + 1);
     assert!(!s.has(&torn.version_hash()).unwrap());
 }
+
+#[test]
+fn hd2_a_failed_reindex_keeps_the_old_index_and_removes_its_temp() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
+    let v1 = block("b-AAAAA", "one");
+    s.commit_change(
+        change(vec![Op::Create { block: v1.clone() }]),
+        vec![("canon".into(), b"A".to_vec())],
+    )
+    .unwrap();
+    let h = s.put_blob(b"kept").unwrap();
+    let before = s.index_dump_for_tests().unwrap();
+    s.fail_next_replay_after(1);
+    let e = s.reindex().unwrap_err();
+    assert!(e.to_string().contains("injected replay failure"), "{e}");
+    assert!(
+        !dir.path().join("index.redb.tmp").exists(),
+        "the temp index is removed"
+    );
+    assert_eq!(
+        s.index_dump_for_tests().unwrap(),
+        before,
+        "the old index is still the store's"
+    );
+    assert_eq!(s.get_ref("canon").unwrap(), Some(b"A".to_vec()));
+    assert_eq!(s.get_blob(&h).unwrap(), b"kept");
+    drop(s);
+    let s = Store::open(dir.path()).unwrap();
+    assert_eq!(s.index_dump_for_tests().unwrap(), before);
+}
+
+/// The outside review's repro: a reindex fails in its first chunk, a write follows, and the
+/// store reopens with everything.
+#[test]
+fn hd2_a_write_after_a_failed_reindex_loses_nothing_on_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
+    s.set_refs(vec![("canon".into(), b"A".to_vec())]).unwrap();
+    let early = s.put_blob(b"early").unwrap();
+    s.fail_next_replay_after(1);
+    assert!(s.reindex().is_err());
+    let late = s.put_blob(b"late").unwrap();
+    drop(s);
+    let s = Store::open(dir.path()).expect("reopen after a failed reindex and a write");
+    assert_eq!(s.get_ref("canon").unwrap(), Some(b"A".to_vec()));
+    assert_eq!(s.get_blob(&early).unwrap(), b"early");
+    assert_eq!(s.get_blob(&late).unwrap(), b"late");
+}
+
+/// A failure after the first chunk: today the store opens with objects missing.
+#[test]
+fn hd2_a_reindex_that_fails_after_a_chunk_loses_no_object() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::create(dir.path()).unwrap();
+    let hs: Vec<_> = (0..rdy_store::CATCH_UP_CHUNK + 10)
+        .map(|i| s.put_blob(format!("blob {i}").as_bytes()).unwrap())
+        .collect();
+    s.fail_next_replay_after(rdy_store::CATCH_UP_CHUNK as u64 + 5);
+    assert!(s.reindex().is_err());
+    s.put_blob(b"after").unwrap();
+    drop(s);
+    let s = Store::open(dir.path()).unwrap();
+    for (i, h) in hs.iter().enumerate() {
+        assert_eq!(
+            s.get_blob(h).unwrap(),
+            format!("blob {i}").as_bytes(),
+            "blob {i}"
+        );
+    }
+}

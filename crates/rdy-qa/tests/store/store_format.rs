@@ -3,6 +3,7 @@
 use rdy_engine::{Rdy, RdyError};
 use rdy_qa::fixtures::*;
 use rdy_store::format::{REF_STORE_FORMAT, STORE_FORMAT};
+use rdy_store::index::Index;
 use rdy_store::segment::SegmentLog;
 use rdy_store::{Store, StoreError, kinds};
 use std::collections::BTreeMap;
@@ -437,4 +438,28 @@ fn fmt3_the_cli_shows_re_create_it_for_an_m1_project() {
     assert!(err.contains("has no FORMAT file"), "{err}");
     assert!(err.contains("fix: re-create it with this rdy"), "{err}");
     assert_eq!(tree(&rdy), before);
+}
+
+/// An index that lost the format ref over a log that has it (an old partial reindex): open
+/// rebuilds the index from the log and finds it.
+#[test]
+fn hd2_an_index_without_the_format_ref_is_rebuilt_at_open() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("s");
+    let (h, end) = {
+        let mut s = Store::create(&dir).unwrap();
+        let h = s.put_blob(b"x").unwrap();
+        (h, s.log_end())
+    };
+    std::fs::remove_file(dir.join("index.redb")).unwrap();
+    Index::open(&dir.join("index.redb"))
+        .unwrap()
+        .apply_durable(&[], end)
+        .unwrap();
+    let s = Store::open(&dir).expect("open rebuilds the index");
+    assert_eq!(
+        s.get_ref(REF_STORE_FORMAT).unwrap(),
+        Some(STORE_FORMAT.to_string().into_bytes())
+    );
+    assert_eq!(s.get_blob(&h).unwrap(), b"x");
 }
