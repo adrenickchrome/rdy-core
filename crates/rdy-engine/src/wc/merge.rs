@@ -1257,7 +1257,7 @@ pub fn apply_update(
         }
         return Err(update_err(e));
     }
-    finish_update(place, st, &journal)
+    finish_update(place, st, &journal, false)
 }
 
 /// Finishes an interrupted update from its record (`UPDATE_FILE`): refuses with `E_WC_DIRTY`
@@ -1338,7 +1338,7 @@ pub fn resume_update(place: &Place, st: &mut WcState) -> Result<UpdateJournal, R
         ));
     }
     apply_files(root, &journal.plan).map_err(update_err)?;
-    finish_update(place, st, &journal)?;
+    finish_update(place, st, &journal, true)?;
     Ok(journal)
 }
 
@@ -1371,8 +1371,15 @@ fn apply_files(root: &Path, plan: &UpdatePlan) -> Result<(), RdyError> {
     Ok(())
 }
 
-/// The state half of an update, then the record goes.
-fn finish_update(place: &Place, st: &mut WcState, journal: &UpdateJournal) -> Result<(), RdyError> {
+/// The state half of an update, then the record goes. `resumed` is true when `resume_update`
+/// re-runs it: a copy already in place is not rewritten, but its directory is fsynced, since the
+/// run that renamed it may have died before the directory reached the disk.
+fn finish_update(
+    place: &Place,
+    st: &mut WcState,
+    journal: &UpdateJournal,
+    resumed: bool,
+) -> Result<(), RdyError> {
     let plan = &journal.plan;
     let conflicts_dir = place.state.join("conflicts");
     rdy_store::fsutil::create_dir_durable(&conflicts_dir)
@@ -1382,14 +1389,14 @@ fn finish_update(place: &Place, st: &mut WcState, journal: &UpdateJournal) -> Re
         .iter()
         .map(|(p, t)| (p.as_str(), t.as_str()))
         .collect();
-    write_state_copies(&conflicts_dir, &conflict_copies)?;
+    write_state_copies(&conflicts_dir, &conflict_copies, resumed)?;
     // only the copies that differ are written and flushed; a copy whose file left the tree goes
     let base_copies: Vec<(&str, &str)> = plan
         .base_files
         .iter()
         .map(|(p, t)| (p.as_str(), t.as_str()))
         .collect();
-    sync_state_copies(&place.state.join("base/files"), &base_copies)?;
+    sync_state_copies(&place.state.join("base/files"), &base_copies, resumed)?;
     st.base = plan.base.clone();
     for p in &plan.stage_drops {
         stage_clear(place, p)?;

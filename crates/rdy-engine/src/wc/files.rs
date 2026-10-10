@@ -299,7 +299,7 @@ pub(crate) fn replace_at(
 /// durable step, as the state files beside it are, so a crash never leaves a torn copy that the
 /// state names.
 pub(crate) fn write_state_copy(dir: &Path, rel: &str, text: &str) -> Result<(), RdyError> {
-    write_state_copies(dir, &[(rel, text)])
+    write_state_copies(dir, &[(rel, text)], false)
 }
 
 /// `write_state_copy` for many copies, durable as one batch: a copy whose bytes already stand at
@@ -308,7 +308,16 @@ pub(crate) fn write_state_copy(dir: &Path, rel: &str, text: &str) -> Result<(), 
 /// directory this creates is made durable too (its parent is fsynced), so the state never names a
 /// copy whose directory entry a power loss can drop. After a crash a copy holds its old bytes or
 /// its new bytes, never a part.
-pub(crate) fn write_state_copies(dir: &Path, copies: &[(&str, &str)]) -> Result<(), RdyError> {
+///
+/// With `flush_skipped` (a re-run of an interrupted step, see `resume_update`) the directory of
+/// each skipped copy is fsynced too, once, with no file sync: the bytes stand, but the rename that
+/// put them there may not be durable yet. A fresh run passes `false` and an unchanged copy costs
+/// nothing.
+pub(crate) fn write_state_copies(
+    dir: &Path,
+    copies: &[(&str, &str)],
+    flush_skipped: bool,
+) -> Result<(), RdyError> {
     let mut pending: Vec<(PathBuf, &[u8])> = vec![];
     let mut new_dirs_parents: Vec<PathBuf> = vec![];
     for (rel, text) in copies {
@@ -326,6 +335,14 @@ pub(crate) fn write_state_copies(dir: &Path, copies: &[(&str, &str)]) -> Result<
         match fs::symlink_metadata(&path) {
             Ok(m) if m.file_type().is_file() => {
                 if fs::read(&path).is_ok_and(|b| b == text.as_bytes()) {
+                    // on a re-run the rename that put these bytes there may not have reached the
+                    // disk: flush the directory entry, not the file
+                    if flush_skipped
+                        && let Some(parent) = path.parent()
+                        && !new_dirs_parents.iter().any(|x| x == parent)
+                    {
+                        new_dirs_parents.push(parent.to_path_buf());
+                    }
                     continue;
                 }
                 fix_case(&path)?;
@@ -335,7 +352,7 @@ pub(crate) fn write_state_copies(dir: &Path, copies: &[(&str, &str)]) -> Result<
         }
         pending.push((path, text.as_bytes()));
     }
-    if pending.is_empty() {
+    if pending.is_empty() && new_dirs_parents.is_empty() {
         return Ok(());
     }
     rdy_store::fsutil::write_durable_batch(&pending, &new_dirs_parents).map_err(|e| {
@@ -348,11 +365,15 @@ pub(crate) fn write_state_copies(dir: &Path, copies: &[(&str, &str)]) -> Result<
 /// removes each copy whose file left the tree and each directory that leaves empty, then writes
 /// the copies that differ (`write_state_copies`). A copy that already holds the right bytes costs
 /// nothing, so an update that changes one file in a project of many flushes one file.
-pub(crate) fn sync_state_copies(dir: &Path, copies: &[(&str, &str)]) -> Result<(), RdyError> {
+pub(crate) fn sync_state_copies(
+    dir: &Path,
+    copies: &[(&str, &str)],
+    flush_skipped: bool,
+) -> Result<(), RdyError> {
     rdy_store::fsutil::create_dir_durable(dir).map_err(|e| io_err(dir, "create", e))?;
     let wanted: BTreeSet<&str> = copies.iter().map(|(p, _)| *p).collect();
     remove_stale(dir, "", &wanted)?;
-    write_state_copies(dir, copies)
+    write_state_copies(dir, copies, flush_skipped)
 }
 
 /// Removes what stands under `dir/rel` and is not in `wanted` (a path relative to `dir`, `/`
@@ -517,7 +538,7 @@ pub fn checkout(
         .iter()
         .map(|f| (f.path.as_str(), f.text.as_str()))
         .collect();
-    sync_state_copies(&base_dir, &copies)?;
+    sync_state_copies(&base_dir, &copies, false)?;
     st.base = base_from(proj);
     remove_tree(&place.state.join("stage/files"))?;
     st.stage = Stage::default();
@@ -1020,13 +1041,14 @@ mod tests {
             ("guides/c.yaml", "c\n"),
             ("old/gone.yaml", "gone\n"),
         ];
-        sync_state_copies(&base, &before).unwrap();
+        sync_state_copies(&base, &before, false).unwrap();
         let after = [
             ("a.yaml", "a\n"),
             ("guides/b.yaml", "b changed\n"),
             ("guides/c.yaml", "c\n"),
         ];
-        let (r, synced) = rdy_store::fsutil::record_syncs(|| sync_state_copies(&base, &after));
+        let (r, synced) =
+            rdy_store::fsutil::record_syncs(|| sync_state_copies(&base, &after, false));
         r.unwrap();
         assert_eq!(
             synced,
@@ -1044,7 +1066,8 @@ mod tests {
         // a copy whose file left the tree goes, with the directory it leaves empty
         assert!(!base.join("old").exists());
         // nothing changed: no write and no flush at all
-        let (r, synced) = rdy_store::fsutil::record_syncs(|| sync_state_copies(&base, &after));
+        let (r, synced) =
+            rdy_store::fsutil::record_syncs(|| sync_state_copies(&base, &after, false));
         r.unwrap();
         assert!(synced.is_empty(), "{synced:?}");
     }
@@ -1061,7 +1084,7 @@ mod tests {
             ("guides/deep/e.yaml", "e\n"),
             ("notes/f.yaml", "f\n"),
         ];
-        let (r, synced) = rdy_store::fsutil::record_syncs(|| sync_state_copies(&base, &all));
+        let (r, synced) = rdy_store::fsutil::record_syncs(|| sync_state_copies(&base, &all, false));
         r.unwrap();
         let (dirs, files): (Vec<_>, Vec<_>) = synced.iter().partition(|p| p.is_dir());
         assert_eq!(files.len(), 6, "{synced:?}");
@@ -1084,13 +1107,64 @@ mod tests {
     fn mfb5_a_stale_copy_in_the_way_of_a_directory_is_replaced() {
         let d = tempfile::tempdir().unwrap();
         let base = d.path().join("base/files");
-        sync_state_copies(&base, &[("a", "file\n")]).unwrap();
-        sync_state_copies(&base, &[("a/b.yaml", "inner\n")]).unwrap();
+        sync_state_copies(&base, &[("a", "file\n")], false).unwrap();
+        sync_state_copies(&base, &[("a/b.yaml", "inner\n")], false).unwrap();
         assert_eq!(
             std::fs::read_to_string(base.join("a/b.yaml")).unwrap(),
             "inner\n"
         );
-        sync_state_copies(&base, &[("a", "file\n")]).unwrap();
+        sync_state_copies(&base, &[("a", "file\n")], false).unwrap();
         assert_eq!(std::fs::read_to_string(base.join("a")).unwrap(), "file\n");
+    }
+
+    #[test]
+    fn mfb5_a_resumed_run_flushes_the_directories_of_copies_it_skips() {
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().join("base/files");
+        let all = [
+            ("a.yaml", "a\n"),
+            ("guides/b.yaml", "b\n"),
+            ("guides/c.yaml", "c\n"),
+            ("notes/d.yaml", "d\n"),
+        ];
+        sync_state_copies(&base, &all, false).unwrap();
+        // every copy is equal: a fresh run records nothing
+        let (r, synced) = rdy_store::fsutil::record_syncs(|| sync_state_copies(&base, &all, false));
+        r.unwrap();
+        assert!(synced.is_empty(), "{synced:?}");
+        // a resumed run cannot know the earlier rename reached the disk: each directory once, no file
+        let (r, synced) = rdy_store::fsutil::record_syncs(|| sync_state_copies(&base, &all, true));
+        r.unwrap();
+        let mut want = vec![base.clone(), base.join("guides"), base.join("notes")];
+        let mut got = synced.clone();
+        want.sort();
+        got.sort();
+        assert_eq!(got, want, "directories once each, no file: {synced:?}");
+        assert!(synced.iter().all(|p| p.is_dir()), "{synced:?}");
+    }
+
+    #[test]
+    fn mfb5_a_resumed_run_writes_the_changed_copy_and_flushes_each_directory_once() {
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().join("base/files");
+        let before = [
+            ("a.yaml", "a\n"),
+            ("guides/b.yaml", "b\n"),
+            ("guides/c.yaml", "c\n"),
+        ];
+        sync_state_copies(&base, &before, false).unwrap();
+        let after = [
+            ("a.yaml", "a\n"),
+            ("guides/b.yaml", "b2\n"),
+            ("guides/c.yaml", "c\n"),
+        ];
+        let (r, synced) =
+            rdy_store::fsutil::record_syncs(|| sync_state_copies(&base, &after, true));
+        r.unwrap();
+        let files: Vec<_> = synced.iter().filter(|p| !p.is_dir()).collect();
+        assert_eq!(files, vec![&base.join("guides/b.yaml")], "{synced:?}");
+        let mut dirs: Vec<_> = synced.iter().filter(|p| p.is_dir()).cloned().collect();
+        dirs.sort();
+        assert_eq!(dirs, vec![base.clone(), base.join("guides")], "{synced:?}");
     }
 }
