@@ -37,7 +37,7 @@ fn cflt1_rdy_search_prints_totals_and_takes_filter_flags() {
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim_end(),
         format!(
-            "3 matching blocks\nby doc: a 2, b 1\nby type: code 2, prose 1\na  {ak} (code)\n  body:1: port = 8080\n  also: b {bk}\na  {ap} (prose)\n  body:1: port = 8080"
+            "3 matching blocks\nby doc: a 2, b 1\nby type: code 2, prose 1\na  {ak} (code)  coverage 75  issues 1  low\n  body:1: port = 8080\n  also: b {bk}\na  {ap} (prose)  coverage 75  issues 1  low\n  body:1: port = 8080"
         )
     );
     let (ok, v) = s.json(&["--json", "search", "8080", "--type", "code", "--path", "b"]);

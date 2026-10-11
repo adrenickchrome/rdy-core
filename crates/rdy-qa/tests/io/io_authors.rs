@@ -836,3 +836,83 @@ fn mfb3_an_at_ms_outside_its_range_is_refused() {
             .unwrap_or_else(|e| panic!("at_ms {good}: {e:?}"));
     }
 }
+
+/// cc1 (FW-F7b, D-JCVPD): every change an import writes stores the importer, actor and run.
+/// Each change keeps its author's provenance, and its message still names the importer.
+#[test]
+fn cc1_import_stores_the_importer_on_each_change() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let (r, _d, _p) = two_authors(a_dir.path());
+    let out = tempfile::tempdir().unwrap();
+    let out = out.path().join("x");
+    r.read().export(&Scope::Canon, &out).unwrap();
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    let imp = sess("human:imp", Some("imp-run"), Role::Approver);
+    let res = b.import(&imp, "import", &out).unwrap();
+    assert_eq!(res.changes.len(), 2, "{res:?}");
+    let st = b.read();
+    let want = Some(ActorRun {
+        actor: "human:imp".into(),
+        run: Some("imp-run".into()),
+    });
+    for h in &res.changes {
+        let c = st.reader().change(&h.parse::<Hash>().unwrap()).unwrap();
+        assert_eq!(c.links.imported_by, want, "{h}");
+        assert_ne!(
+            c.provenance.actor, "human:imp",
+            "the author keeps the change"
+        );
+        assert!(
+            c.message.ends_with(", imported by human:imp"),
+            "{}",
+            c.message
+        );
+    }
+}
+
+/// cc1: the importer's own change (no authors.yaml) stores the importer too.
+#[test]
+fn cc1_the_importers_own_change_stores_the_importer() {
+    let a_dir = tempfile::tempdir().unwrap();
+    let (r, _d, _p) = two_authors(a_dir.path());
+    let out = tempfile::tempdir().unwrap();
+    let out = out.path().join("x");
+    r.read().export(&Scope::Canon, &out).unwrap();
+    std::fs::remove_file(out.join("authors.yaml")).unwrap();
+    let b_dir = tempfile::tempdir().unwrap();
+    let mut b = Rdy::init(b_dir.path(), "rdy-standard").unwrap();
+    let imp = sess("human:imp", None, Role::Approver);
+    let res = b.import(&imp, "import", &out).unwrap();
+    let c = b
+        .read()
+        .reader()
+        .change(&res.change.parse::<Hash>().unwrap())
+        .unwrap();
+    assert_eq!(
+        c.links.imported_by,
+        Some(ActorRun {
+            actor: "human:imp".into(),
+            run: None
+        })
+    );
+}
+
+/// cc1: a change that is not an import stores no importer.
+#[test]
+fn cc1_a_write_stores_no_importer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    let w = put(
+        &mut r,
+        &founder(),
+        "w",
+        json!([{"op": "create", "type": "doc", "id": "$d", "fields": {"name": "intro", "title": "Intro", "doc_type": "page"}}]),
+    );
+    let c = r
+        .read()
+        .reader()
+        .change(&w.change.parse::<Hash>().unwrap())
+        .unwrap();
+    assert_eq!(c.links.imported_by, None);
+}

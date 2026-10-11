@@ -938,7 +938,7 @@ gives every op that starts with `write` the write budget, and `fsync_bound` wide
 | `lexicon_build` | `lexicon(ve)` after the engine caches are dropped (outside the timer): the materialization, the graph and one pass over the text of the scope | `runs.read` | no spec target: a cold build of the entity lexicon over a 10k view (recorded for FW-EN1) |
 | `entity_search` | `search(ve, "Entity 7", first page, 4000 tokens)` with the lexicon and graph warm: the entity resolves, its fact sheet is built and the match list is filtered | `runs.read` | < 5 ms p99 (a read, spec 11): an entity search with its fact sheet, first page |
 | `suggestions_after_write` | `suggestions(ve, change)` for the change of a one-claim write. The write is outside the timer. The write carries the lexicon over its own blocks | `runs.write` | no spec target: the suggestions of a one-claim write over a carried lexicon (recorded for FW-EN3; they ride on every write response) |
-| `coverage_all` | `graph_coverage(ve, None)` after the engine caches are dropped (outside the timer): the materialization, the graph, the lexicon and one pass over every block | `runs.read` | no spec target: cold graph coverage over a 10k view (recorded for FW-EN4 and FW-EN1a; rdy status and rdy_overview) |
+| `coverage_all` | `coverage_issues(ve)` after the engine caches are dropped (outside the timer): the materialization, the graph, the lexicon, the structural layer and the state layer, in every dimension | `runs.read` | no spec target: the cold coverage issues over a 10k view, every dimension (recorded for FW-PF2 D-V3JSY; rdy coverage, rdy status) |
 
 What each cost grows with:
 
@@ -951,10 +951,12 @@ What each cost grows with:
 - `suggestions_after_write` grows with the text of the written blocks and with the holders of
   each code literal they contain. It does not grow with the project. Every write response
   computes it, so it adds to the write path (`write_and_report`) but not to the durable flush.
-- `coverage_all` grows with the number of blocks: it checks every block for ties and every
-  linkable block for mentions. It runs for `rdy status` and for `rdy_overview`, not on a write.
-  The whole scope's coverage is memoised in the scope's build, so a warm `rdy_overview` or
-  `rdy status` pays it once per build (a write gives a new build); the op times the cold pass.
+- `coverage_all` grows with the number of blocks: it checks every block in all six dimensions
+  and reads the tension set and the suspects. It runs for `rdy status` and for `rdy_overview`.
+  A write carries the structural layer (see Coverage and confidence below), so the op times the
+  cold pass. The write response reads the coverage change from two memoised rollups (the score
+  and dimensions, no entity kinds) and the touched pages' own blocks (`write_consequences` and
+  `propose` do this work; cc16).
 
 No laptop figures are recorded here: the first timing of these ops is the Linux bench's.
 
@@ -1012,6 +1014,158 @@ The `qa-perf` typical tier gained two ops in `tier_wc`. It runs after `tier_code
 
 `wc_plan_one_doc` grows with the size of the checkout, not of the commit: the planner builds the
 commit tree from the base files and the staged copies, then lints and diffs the whole tree.
+
+Baseline: `qa-baseline.json` is not changed here.
+
+Deep gate (bench): <orchestrator fills in>
+
+## Coverage and confidence (2026-10)
+
+Coverage has two layers. The structural layer holds the Grounded, Connected, Complete and
+Governed checks of each scored block. The state layer adds the dismissed mentions, the tensions
+and the suspects. Before this work, the structural layer was memoised per build and never
+carried, so the first coverage read after a write paid a full pass over the scope (about 105 ms
+at 10k blocks). The write response carries the coverage change (D-C6HHV), so every write would
+pay it.
+
+The structural layer is now carried across a write (`coverage::carry`, called from
+`Built::after`) when the graph, the lexicon and the layer are built. The carry recomputes only
+the blocks in the dirty set, each with the same per-block function a full build uses
+(`entry_of`). The other blocks keep their entries.
+
+The dirty set (closed):
+
+1. every block an op touches, its parent, and its doc, before and after the ops;
+2. every target of an outgoing edge of a touched block, old or new, and that target's doc;
+3. for a touched block that appears, goes, changes type or (a decision) changes status: every
+   source of an incoming edge to it in the new graph (refs that dangle or stop dangling;
+   decisions applied or not; questions answered; decisions that become live or stop being
+   live). A body or other field edit changes nothing a pointing block reads of its target, so
+   it adds none of them (final review I1);
+4. for a touched decision whose status or whose `affects`, `supersedes` and `revokes` edges
+   change (or that appears or goes): the targets of its `affects` edges, old and new, and the
+   sources of their incoming `describes` edges; the targets of its `supersedes` and `revokes`
+   edges, with the sources of their incoming `decided_by` and `implements` edges, the targets
+   of their `affects` edges and the sources of those targets' incoming `describes` edges. A
+   statement edit adds none of them (final review I1);
+5. for a touched entity that starts or stops being deprecated (the deprecated reference rule): every
+   block whose text names it. An unlinked mention of a deprecated entity is no Grounded check
+   (final review I4).
+
+"Its doc" is every doc above the block, so a doc nested in a doc is reached too. A deleted
+block leaves the map. The entity-to-blocks map drops each touched block from the entities its
+old text named and adds it back under those its new text names.
+
+The carry gives up, and the next read rebuilds, when an op:
+
+- creates, deletes or renames an entity (its raw `name` or `aliases` field changes): every
+  block's mentions can change, and an unlinked mention's fix names the raw name, so a rename
+  that keeps the phrase ("Ledger" to "LEDGER") gives up too;
+- changes the `lifecycle` of a block that has children, or moves a block that has children;
+- deletes a block and leaves children under it;
+- changes a doc's `doc_type`;
+- creates, deletes, renames or moves a doc or a folder: the paths of other docs can change, and
+  an unlinked-doc issue names its path.
+
+The carry also does not run when the graph or the lexicon of the build was not carried.
+
+Equality with a rebuild is pinned by `cc11_carried_equals_rebuilt_over_random_writes` (300
+random writes, among them body edits of the term and of proposed decisions and moves of the
+term in and out of a deprecated section), `cc11_dangling_refs_and_landed_decisions_carry_exactly`,
+`cc11_a_rename_that_keeps_the_phrase_equals_a_rebuild` and
+`cc11_tree_writes_and_doc_type_changes_rebuild` (a folder rename, a move of a section with
+children, a `doc_type` change, a doc created and a doc moved). The counter `structural_builds`
+pins that a plain write builds nothing in full and that those writes give up.
+
+The `qa-perf` typical tier gained two ops in `tier_entities`, after `coverage_all`, on view
+`ve`:
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `coverage_carry` | What a write reply reads for its coverage after one single-claim write: the carry of the structural layer, then `coverage_change(ve → ve)` for the written blocks, as `write_and_report` calls it: the score on the state before (memoised), the score on the state after (its coverage issues carried from the state before), and the written doc's page rollup before and after. Outside the timer: the view's score on the state before the write (the previous reply read it), the write, and its ops read back. Timed: `coverage::carry_for_perf`, the call `Built::after` makes (`cc11_the_perf_hook_carries_as_a_write_does` pins that they give the same layer), and `coverage_change` | `runs.write` | < 5 ms p95: a write reply's coverage change after one write: the carry, the scores before and after, the touched page's rollups (FW-PF2; reference/performance tb-XBXR4 read budget) |
+| `coverage_report_cold` | `coverage_report(ve)` after the engine caches are dropped (outside the timer): the materialization, the graph, the lexicon, the structural layer and the state layer | `runs.read` | no spec target: the cold coverage report over a 10k view, recorded (FW-PF2; rdy coverage) |
+
+`coverage_carry` grows with the dirty set (the written blocks, their neighbours and their docs),
+with the tensions and suspects the write changed, with the scope's rollup after the write, which
+reads every scored block, and with the blocks of the written doc's page, read twice for its
+rollups. The write goes to the fixture's first doc, which this tier fills with 250 more blocks,
+so the doc's `linked_from_outside` walk of its whole subtree is in the timed path.
+It rebuilds neither the structural layer nor the state layer: the coverage issues are carried
+from the state before (fix round 2), and only the entries of the blocks whose structural entry,
+counted tensions or suspects changed are rebuilt. It counts no entity kinds: the kinds are a
+summary's (`rdy status`, `rdy_overview`), and a write reply reads only the rollup (fix round 3;
+`kinds_builds` pins it in the op and in
+`cc11_fix3_a_write_replys_coverage_change_counts_no_kinds`). `rdy coverage` (the full report) is
+`coverage_report_cold`'s, not a write reply's.
+
+No laptop figures are recorded here: the first timing of these ops is the Linux bench's.
+
+Baseline: `qa-baseline.json` is not changed here.
+
+Deep gate (bench): <orchestrator fills in>
+
+
+### Final review fix round 1: hub entities and the canon drift history
+
+**Hub entities (I1).** Before this round a body edit of an entity that N blocks describe made
+all N describers dirty (rule 3 took every incoming source), and each describer's Governed check
+scanned the entity's N incoming edges again, so the carry cost O(N²) on the writer. Measured on
+the final review's MCP probe: 22, 45 and 130 ms per hub edit at 2,000, 4,000 and 8,000
+describers. Two changes:
+
+- rule 3 and rule 4 take the pointing blocks only when what they read can change (above);
+- whether an entity has a live incoming `affects` is read once per build or carry and kept per
+  entity (`EntryCx::affected_live`), so a cold build is linear in the edges too.
+
+`cc11_a_body_edit_of_a_hub_recomputes_o1_entries` pins the count (the test hook
+`carried_entries`): a body edit of a term that 1,000 claims describe, and a statement edit of a
+proposed decision that affects it, each recompute at most 4 entries, and the landing that
+accepts the decision still reaches every describer. `cc11_a_cold_build_reads_a_hubs_governance_once`
+pins one scan of the hub per build (`governed_scans`).
+
+Mac figures (indicative, release, in process; the write and the coverage read after it): 5.8,
+7.0 and 10.4 ms at 2,000, 4,000 and 8,000 describers; a cold structural build 6.0, 10.4 and
+25.3 ms.
+
+**The canon form of restatement drift against history (I2).** Each canon build walked back
+through every version of every edited long block down to the oldest newest-landing among the
+long blocks, reading each version's step (the change that wrote it, its landing, its base) from
+the store with a memo that lived for one build. The cost was one store step per version, not
+per block, so it grew with the project's history on every landing reply. Measured on the final
+review's engine probe: 400 blocks with unique text went from 4.3 to 50 ms over 60 landings.
+
+The steps are now kept across canon builds (`history::StepCache`, shared by every state one
+handle publishes, like `vpos`). A version's step is the change chosen among its producers: of
+those landed at or before canon's head, the one landed last. History is append-only, so a later
+landing changes the step only of a version that one of its changes writes again (a revert). The
+cache holds the steps for one canon head; on a newer head it drops the steps of every version
+the landings since then write (walking back at most 64 landings), and on any other head it
+starts again empty. Only a step whose change has landed is kept, and a step whose change the
+walk has already taken (a block written back to an earlier text) is read from the store. The
+cache is bounded at 2^18 steps and cleared by a reindex.
+
+`cc7_a_canon_build_after_a_landing_reads_only_the_new_versions` pins the reads (the test hook
+`canon_step_reads`): after a warm build, one landing that edits 20 of 21 long blocks, 10
+landings deep, costs at most 25 store steps (241 before).
+`cc7_kept_canon_steps_equal_a_fresh_read_through_a_revert` pins that a revert drops the kept
+step: a fresh handle reads the same drift.
+
+Mac figures (indicative, release; the first canon build after each landing, the final review's
+shape): 400 blocks with unique text 3.9 ms after 1 landing, 4.7 ms after 30, 5.9 ms after 60;
+400 blocks with shared phrases 5.3, 6.3 and 7.3 ms. The walk is still one in-memory step per
+version, so a small linear term in history depth stays.
+
+Two `qa-perf` ops cover these shapes, each on a project of its own:
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `coverage_carry_hub` | As `coverage_carry`, after a body edit of a term that 2,000 claims in a stable section describe (each governed through it by a live decision): `carry_for_perf` and `coverage_change` for the written block; it asserts the carry recomputed at most 8 entries | `runs.write` | < 5 ms p95: a write reply's coverage change after a body edit of a term 2,000 claims describe (FW-PF2; tb-XBXR4 read budget; final review I1) |
+| `tensions_canon_drift_deep` | The canon-scope build of the tensions after one more edit landing (untimed) of `n / 2` prose blocks in one controlled-English pattern, 50 edit landings deep, with one long block that never changes (it keeps every edited block's history in reach); it asserts the build read at most two store steps per edited block | `runs.materialize_cold` | no spec target: the D-SES4J budget check of the canon form against history; compare with `tensions_canon_drift`. If the bench shows the canon form over its budget, the founder's D-SES4J fallback applies (drop the canon form; keep the in-flight and landing forms) |
+
+`tension_value_1k` and `tension_drift_1k` time the tension delta and its `on_change` report,
+not the whole write; their target text now says so (final review M6).
+
+No laptop figures are judged here: the first timing of these ops is the Linux bench's.
 
 Baseline: `qa-baseline.json` is not changed here.
 

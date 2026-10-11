@@ -6,8 +6,8 @@ use crate::tree_io::{self, FOLDER_FILE};
 use crate::write::{LinkInput, OpInput, TRACKING_NEEDS_REASON, WriteRequest, WriteResult};
 use crate::{Rdy, ReadState, Scope, Session};
 use rdy_model::{
-    Block, BlockId, Change, ChangeLinks, EditorialClass, FieldValue, Hash, Justification, Link, Op,
-    Provenance, Role, tree,
+    ActorRun, Block, BlockId, Change, ChangeLinks, EditorialClass, FieldValue, Hash, Justification,
+    Link, Op, Provenance, Role, tree,
 };
 use rdy_schema::{Pack, has_errors, skeleton_gaps, validate_block, validate_prefix};
 use serde::{Deserialize, Serialize};
@@ -301,6 +301,10 @@ fn export_level(
         let mut stack = m.children(Some(&b.id));
         stack.reverse();
         while let Some(c) = stack.pop() {
+            // a damaged store may loop: never list more blocks than there are
+            if list.len() > m.len() {
+                break;
+            }
             list.push(to_yaml_struct(c));
             if pack.is_asset(&c.block_type)
                 && let Some(h) = c.field_str("blob").and_then(|s| s.parse::<Hash>().ok())
@@ -1208,7 +1212,12 @@ impl Rdy {
         // one write for every change (all or nothing). Each change keeps its author's
         // provenance; the view ops (the implicit create, a claim, the commits) and the view's
         // last write are the importer's, so the view stays the importer's, `rdy undo` by the
-        // importer finds the import, and the view is not idle after old author times.
+        // importer finds the import, and the view is not idle after old author times. Every
+        // change stores the importer (FW-F7b).
+        let importer = ActorRun {
+            actor: s.actor.clone(),
+            run: s.run.clone(),
+        };
         let mut all_ops = vec![];
         let changes: Vec<Change> = planned
             .into_iter()
@@ -1221,7 +1230,10 @@ impl Rdy {
                     provenance,
                     justification: None,
                     message,
-                    links: ChangeLinks::default(),
+                    links: ChangeLinks {
+                        imported_by: Some(importer.clone()),
+                        ..ChangeLinks::default()
+                    },
                 }
             })
             .collect();

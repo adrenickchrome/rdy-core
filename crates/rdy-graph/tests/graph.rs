@@ -382,3 +382,88 @@ fn mfb2_governed_by_lists_decided_by_implements_and_affects_once() {
     });
     assert!(!g.governed_by(&d).contains(&e));
 }
+
+/// perf4: `suspects_of` every candidate `suspect_candidates` gives, with `prev`'s suspects of
+/// every other block, equals `g`'s suspects.
+fn carried_suspects_equal(prev: &Graph, g: &Graph, what: &str) -> usize {
+    let cand = g.suspect_candidates(prev);
+    let mut s: Vec<Suspect> = prev
+        .suspects()
+        .into_iter()
+        .filter(|x| !cand.contains(&x.block))
+        .collect();
+    for c in &cand {
+        s.extend(g.suspects_of(c));
+    }
+    s.sort_by(|a, b| (&a.block, &a.target).cmp(&(&b.block, &b.target)));
+    assert_eq!(s, g.suspects(), "{what}");
+    cand.len()
+}
+
+/// perf4: a graph carried across a write finds the blocks whose suspects can change by diffing
+/// its maps with the graph before: a content edit, a superseder accepted, made proposed and
+/// made a revoker, a target deleted, a reference dropped, a decision that names what it
+/// supersedes. Unrelated blocks are never candidates, and a graph with no change has none.
+#[test]
+fn perf4_suspect_candidates_cover_every_suspect_that_can_change() {
+    let target = dec("D-AAAAA", "accepted");
+    let claim = claim_pinned("c-CHAMP", &target);
+    let mut gov = b("c-GAVRN", "claim", Some("s-SSSSS"));
+    link(&mut gov, "decided_by", "D-AAAAA", None);
+    let bystanders: Vec<Block> = (0..20)
+        .map(|i| {
+            let mut c = b(&format!("c-BY{:03}", i), "claim", Some("s-SSSSS"));
+            c.body = format!("Unrelated {i}.");
+            c
+        })
+        .collect();
+    let mut all = vec![target.clone(), claim.clone(), gov.clone()];
+    all.extend(bystanders.clone());
+    let mut g = Graph::build_from(map(all).values());
+    assert!(g.clone().suspect_candidates(&g).is_empty(), "no change");
+
+    let mut step = |old: Vec<Block>, new: Vec<Block>, what: &str| {
+        let next = g.with_changes(old.iter(), new.iter());
+        let n = carried_suspects_equal(&g, &next, what);
+        assert!(n < 10, "{what}: {n} candidates");
+        g = next;
+    };
+    let mut edited = target.clone();
+    edited
+        .fields
+        .insert("statement".into(), FieldValue::Str("different".into()));
+    step(vec![target.clone()], vec![edited.clone()], "a content edit");
+    let mut sup = dec("D-BBBBB", "accepted");
+    link(&mut sup, "supersedes", "D-AAAAA", None);
+    step(vec![], vec![sup.clone()], "a superseder accepted");
+    let mut sup_proposed = sup.clone();
+    sup_proposed
+        .fields
+        .insert("status".into(), FieldValue::Str("proposed".into()));
+    step(
+        vec![sup.clone()],
+        vec![sup_proposed.clone()],
+        "made proposed",
+    );
+    let mut revoker = dec("D-BBBBB", "accepted");
+    link(&mut revoker, "revokes", "D-AAAAA", None);
+    step(vec![sup_proposed], vec![revoker.clone()], "made a revoker");
+    let mut namer = dec("D-NAMER", "accepted");
+    namer.fields.insert(
+        "statement".into(),
+        FieldValue::Str("replaces {{D-AAAAA}}".into()),
+    );
+    link(&mut namer, "supersedes", "D-AAAAA", None);
+    namer.pins.insert(target.id.clone(), target.content_hash());
+    step(
+        vec![],
+        vec![namer],
+        "a decision that names what it supersedes",
+    );
+    step(vec![edited], vec![], "the target deleted");
+    let mut dropped = claim.clone();
+    dropped.body = "No reference now.".into();
+    dropped.pins.clear();
+    step(vec![claim], vec![dropped], "a reference dropped");
+    step(vec![gov], vec![], "a governed claim deleted");
+}

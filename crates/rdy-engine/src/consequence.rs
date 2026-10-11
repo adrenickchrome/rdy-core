@@ -2,8 +2,9 @@
 //! changed, read from the state it published, and the conflicts it recorded. Each entry has a
 //! stable id (`cq-<16 hex>`).
 use crate::brief::{BRIEF_DEFAULT_TOKENS, FollowUp, expand_error, follow_up};
+use crate::coverage::{coverage_change, coverage_error_text};
 use crate::engine::{Engine, write_typed};
-use crate::error::RdyError;
+use crate::error::{E_INTERNAL, RdyError};
 use crate::gate::{LandInfo, ProposalInfo, applied_ops, changes_of, landed_as};
 use crate::intent::IntentNote;
 use crate::tensions::delta::on_change;
@@ -440,7 +441,7 @@ impl ReadState {
                 reader.merge_checked(&reader.state_of(self.canon_head())?, &changes)?;
             let next = self
                 .built(&Scope::Canon)?
-                .after(&applied_ops(&changes, &applied));
+                .after(&applied_ops(&changes, &applied), self.pack());
             let g = Arc::clone(next.graph.get_or_init(|| {
                 Arc::new(Graph::build_with(
                     next.m.iter(),
@@ -734,7 +735,8 @@ fn attach_on_change(
 /// `consequences_error` when they could not be read; the write stands), then `intents` when other
 /// sessions' open intents cover blocks the change wrote (iwr1), then `on_change` (the tensions
 /// the write opened or resolved in the view; `on_change_error` when they could not be read),
-/// and the write's suggestions (FW-EN3), which never fail the write; on a briefing refusal
+/// then `coverage` (the change in the view's coverage and its pages, FW-CH3; `coverage_error`
+/// when it could not be read), and the write's suggestions (FW-EN3), which never fail the write; on a briefing refusal
 /// the error carries a fresh briefing for exactly the blocks the write touches. A write that
 /// lists its `changes` (an import: one change per author) is reported over all of them.
 pub fn write_and_report<T: Serialize + 'static>(
@@ -822,6 +824,7 @@ fn report<T: Serialize + 'static>(
         let r =
             tension_delta(b, a, Some(&changes)).and_then(|d| on_change(b, a, view, max_tokens, &d));
         attach_on_change(&mut v, r);
+        attach_coverage(&mut v, b, a, &scope, &changes);
     }
     match engine.read().suggestions_of(&scope, &changes) {
         Ok((s, n)) => {
@@ -838,6 +841,37 @@ fn report<T: Serialize + 'static>(
     }
     attach_related(&mut v, engine, view, &changes);
     Ok(v)
+}
+
+/// cc16 (FW-CH3): `coverage: {before, after, pages}`, the change `changes` made to the coverage
+/// of `scope`, from the two states the write was captured between; or `coverage_error` (the
+/// error text) when it could not be read. The write stands either way. A `coverage` key the
+/// write already carries is kept.
+fn attach_coverage(
+    v: &mut serde_json::Value,
+    before: &ReadState,
+    after: &ReadState,
+    scope: &Scope,
+    changes: &[Hash],
+) {
+    if v.get("coverage").is_some() {
+        return;
+    }
+    let change = changes_of(after, changes).and_then(|cs| {
+        let touched: BTreeSet<BlockId> = cs
+            .iter()
+            .flat_map(|c| &c.ops)
+            .map(|o| o.block_id().clone())
+            .collect();
+        coverage_change(before, scope, after, scope, &touched)
+    });
+    match change {
+        Ok(c) => {
+            v["coverage"] = serde_json::to_value(&c)
+                .expect("coverage change serializes: numbers and strings only");
+        }
+        Err(e) => v["coverage_error"] = coverage_error_text(&e).into(),
+    }
 }
 
 /// FW-EN5: when the changes create decisions, `related_decisions` lists the decisions related
@@ -1021,7 +1055,58 @@ pub fn propose_and_report(
 ) -> Result<serde_json::Value, RdyError> {
     let mut v = write_typed(engine, f)?;
     report_landing(engine, &mut v, "id", max_tokens);
+    attach_proposal_coverage(engine, &mut v);
     Ok(v)
+}
+
+/// cc16 (FW-CH3): the proposal's `coverage: {before, after, pages}`, canon's score against its
+/// view's and the pages its changes touch, read from the stored version after the write, off
+/// the writer (as a write's is). A read error leaves `coverage` out and sets `coverage_error`
+/// (an earlier text is kept, also when the read works: the unapplied-decision pass sets one
+/// that does not stop coverage): the proposal stands. When the propose could not read the
+/// tensions (`tensions_error`), coverage cannot be worked out either: the reply is left as is.
+fn attach_proposal_coverage(engine: &dyn Engine, v: &mut serde_json::Value) {
+    if v.get("tensions_error").is_some() {
+        return;
+    }
+    let st = engine.read();
+    let read = v
+        .get("id")
+        .and_then(|h| h.as_str())
+        .and_then(|h| h.parse::<Hash>().ok())
+        .ok_or_else(|| {
+            RdyError::new(
+                E_INTERNAL,
+                "the propose reply has no proposal id",
+                "report this",
+            )
+        })
+        .and_then(|id| Ok(st.reader().proposal(&id)?))
+        .and_then(|p| {
+            let touched: BTreeSet<BlockId> = changes_of(&st, &p.changes)?
+                .iter()
+                .flat_map(|c| &c.ops)
+                .map(|o| o.block_id().clone())
+                .collect();
+            coverage_change(
+                &st,
+                &Scope::Canon,
+                &st,
+                &Scope::View(p.view.clone()),
+                &touched,
+            )
+        });
+    match read {
+        Ok(c) => {
+            v["coverage"] = serde_json::to_value(&c)
+                .expect("coverage change serializes: numbers and strings only");
+        }
+        Err(e) => {
+            if v.get("coverage_error").is_none() {
+                v["coverage_error"] = coverage_error_text(&e).into();
+            }
+        }
+    }
 }
 
 /// `write_typed` for an approval (`f` returns its `LandInfo`), then the consequences of the
@@ -1053,5 +1138,62 @@ fn report_landing(
             attach(v, c);
         }
         None => v["consequences"] = serde_json::json!([]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Local, Session, SessionKind, WriteRequest};
+    use rdy_model::Role;
+    use serde_json::json;
+
+    /// A reply for a stored proposal of view `work`, as `propose` builds it.
+    fn proposed() -> (tempfile::TempDir, Local, serde_json::Value) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let s = Session {
+            actor: "agent:designer".into(),
+            run: Some("run-1".into()),
+            role: Role::Writer,
+            kind: SessionKind::Human,
+        };
+        r.write(
+            &s,
+            WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(json!([
+                    {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Ops", "doc_type": "overview"}}
+                ]))
+                .unwrap(),
+                justification: None,
+                message: "doc".into(),
+            },
+        )
+        .unwrap();
+        let info = r.propose(&s, "work", "work").unwrap();
+        let v = serde_json::to_value(&info).unwrap();
+        (dir, Local::new(r), v)
+    }
+
+    /// cc16 fix 1: a coverage_error the unapplied-decision pass left does not stop the coverage
+    /// read: the reply gains `coverage` and keeps the error text.
+    #[test]
+    fn cc16_a_warning_pass_error_still_yields_the_coverage() {
+        let (_d, e, mut v) = proposed();
+        v["coverage_error"] = "E_INTERNAL: warning pass".into();
+        attach_proposal_coverage(&e, &mut v);
+        assert!(v["coverage"]["before"].is_u64(), "{v:#}");
+        assert_eq!(v["coverage_error"], "E_INTERNAL: warning pass", "{v:#}");
+    }
+
+    /// A tension read error means the coverage cannot be worked out: the reply is left as it is.
+    #[test]
+    fn cc16_a_tension_read_error_leaves_the_coverage_out() {
+        let (_d, e, mut v) = proposed();
+        v["tensions_error"] = "E_INTERNAL: boom".into();
+        v["coverage_error"] = "E_INTERNAL: boom".into();
+        attach_proposal_coverage(&e, &mut v);
+        assert!(v.get("coverage").is_none(), "{v:#}");
     }
 }

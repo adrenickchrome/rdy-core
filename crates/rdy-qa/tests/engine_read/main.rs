@@ -5,8 +5,11 @@
 //! (`tlay1_` checks). Keep the list sorted.
 mod engine_areas;
 mod engine_before;
+mod engine_confidence;
 mod engine_coord;
-mod engine_coverage;
+mod engine_coverage_carry;
+mod engine_coverage_issues;
+mod engine_coverage_score;
 mod engine_entity_search;
 mod engine_events;
 mod engine_graph;
@@ -16,11 +19,13 @@ mod engine_inflight;
 mod engine_intents;
 mod engine_lexicon;
 mod engine_links;
+mod engine_mention_reviews;
 mod engine_pmap;
 mod engine_proposal_show;
 mod engine_related;
 mod engine_scope;
 mod engine_search;
+mod engine_search_coverage;
 mod engine_search_filters;
 mod engine_search_mentions;
 mod engine_search_results;

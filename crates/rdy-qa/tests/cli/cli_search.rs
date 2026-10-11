@@ -30,7 +30,7 @@ fn csrch1_rdy_search_prints_matches_and_takes_flags() {
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim_end(),
         format!(
-            "2 matching blocks\nby doc: guide 2\nby type: code 1, prose 1\nguide  {p} (prose)\n  body:2: Run rdy init to start.\nguide  {c} (code)\n  body:1: rdy init"
+            "2 matching blocks\nby doc: guide 2\nby type: code 1, prose 1\nguide  {p} (prose)  coverage 75  issues 1  low\n  body:2: Run rdy init to start.\nguide  {c} (code)  coverage 75  issues 1  low\n  body:1: rdy init"
         )
     );
     let (ok, v) = s.json(&["--json", "search", "RDY.INIT", "--regex", "-i"]);

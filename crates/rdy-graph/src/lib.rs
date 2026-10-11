@@ -116,6 +116,14 @@ pub struct Graph {
 
 const EMPTY: &[Edge] = &[];
 
+/// The key of one difference between two maps.
+fn key_of<'a, V>(item: imbl::ordmap::DiffItem<'a, 'a, BlockId, V>) -> &'a BlockId {
+    match item {
+        imbl::ordmap::DiffItem::Add(k, _) | imbl::ordmap::DiffItem::Remove(k, _) => k,
+        imbl::ordmap::DiffItem::Update { old, .. } => old.0,
+    }
+}
+
 /// Whether `a` and `b` differ only in their pins and derived fields.
 pub fn same_content(a: &Block, b: &Block) -> bool {
     a.content_hash() == b.content_hash()
@@ -474,6 +482,44 @@ impl Graph {
                 .flatten()
                 .filter_map(|e| self.edge_suspect(e)),
         )
+    }
+
+    /// perf4: the blocks whose suspects can differ between `prev` and this graph; every other
+    /// block's suspects (`suspects_of`) are the same in both. A suspect of block X on target T
+    /// reads X's outgoing edges, T's content hash and T's status, which reads T's decision status
+    /// and its incoming edges from decisions with theirs. So: each block whose outgoing edges
+    /// differ, and each block with an edge (in either graph) to a target whose content hash,
+    /// decision status or incoming edges differ, or to which a decision whose status differs
+    /// has an edge. Found by diffing the graphs' maps, which skips the structure a graph
+    /// carried across a write (`with_changes`) shares with the one it came from: the cost
+    /// follows what changed, not the size of the graph.
+    pub fn suspect_candidates(&self, prev: &Graph) -> BTreeSet<BlockId> {
+        let mut out: BTreeSet<BlockId> = BTreeSet::new();
+        let mut targets: BTreeSet<BlockId> = BTreeSet::new();
+        for item in prev.out.diff(&self.out) {
+            // (an edge that came or went is in its target's incoming edges too)
+            out.insert(key_of(item).clone());
+        }
+        for item in prev.inc.diff(&self.inc) {
+            targets.insert(key_of(item).clone());
+        }
+        for item in prev.contents.diff(&self.contents) {
+            targets.insert(key_of(item).clone());
+        }
+        for item in prev.decision_status.diff(&self.decision_status) {
+            let d = key_of(item);
+            targets.insert(d.clone());
+            // its status decides whether its links move its targets' status
+            for g in [prev, self] {
+                targets.extend(g.outgoing(d).iter().map(|e| e.to.clone()));
+            }
+        }
+        for t in &targets {
+            for g in [prev, self] {
+                out.extend(g.incoming(t).iter().map(|e| e.from.clone()));
+            }
+        }
+        out
     }
 
     /// The suspects whose `block` is `id`: checks only that block's own outgoing edges.

@@ -236,6 +236,7 @@ impl From<StoreError> for RdyError {
                 ),
             ),
             StoreError::Format { message, fix } => RdyError::new(E_STORE_FORMAT, message, fix),
+            StoreError::ParentCycle { message, fix } => RdyError::new(E_BAD_INPUT, message, fix),
             StoreError::UndoTooDeep { view, op } => RdyError::new(
                 E_LIMIT,
                 format!(

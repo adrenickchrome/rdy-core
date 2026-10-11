@@ -7,6 +7,10 @@ use rdy_qa::fixtures::*;
 use rdy_qa::mcp::McpClient;
 use serde_json::{Value, json};
 
+/// The token budget the cut briefings are made at: the coverage section (never cut) takes about
+/// 300 tokens of it, and 60 dependents still do not fit.
+const BUDGET: usize = 1200;
+
 /// Doc `hub` with claim H; doc `many` with `n` claims that each reference H; landed.
 fn hub(r: &mut Rdy, n: usize) -> (BlockId, BlockId) {
     let w = write(r, "work", json!([
@@ -41,7 +45,10 @@ fn cov(h: &BlockId) -> Coverage {
 fn bpag1_a_cut_briefing_carries_a_cursor_and_per_doc_counts() {
     let (_d, mut r) = project();
     let (hub_doc, h) = hub(&mut r, 60);
-    let b = r.read().brief(&Scope::Canon, &cov(&h), Some(400)).unwrap();
+    let b = r
+        .read()
+        .brief(&Scope::Canon, &cov(&h), Some(BUDGET))
+        .unwrap();
     assert!(b.truncated && b.next.is_some(), "{:?}", b.next);
     assert_eq!(b.docs.len(), 1, "{:?}", b.docs);
     let d = &b.docs[0];
@@ -65,7 +72,10 @@ fn bpag1_paging_through_shows_every_entry_once() {
         .read()
         .brief(&Scope::Canon, &cov(&h), Some(100_000))
         .unwrap();
-    let first = r.read().brief(&Scope::Canon, &cov(&h), Some(400)).unwrap();
+    let first = r
+        .read()
+        .brief(&Scope::Canon, &cov(&h), Some(BUDGET))
+        .unwrap();
     first.register(&r.briefs());
     let (mut deps, mut stale) = (first.dependents.clone(), first.will_go_stale.clone());
     let mut next = first.next.clone();
@@ -73,7 +83,7 @@ fn bpag1_paging_through_shows_every_entry_once() {
     while let Some(cursor) = next {
         let p = r
             .read()
-            .brief_page(&Scope::Canon, &r.briefs(), &cursor, Some(400))
+            .brief_page(&Scope::Canon, &r.briefs(), &cursor, Some(BUDGET))
             .unwrap();
         assert_eq!(p.base.token, first.base.token);
         deps.extend(p.dependents.clone());
@@ -115,7 +125,10 @@ fn bpag1_paging_ends_even_when_the_budget_fits_nothing() {
 fn bpag1_a_page_of_a_briefing_that_moved_is_stale() {
     let (_d, mut r) = project();
     let (_hub_doc, h) = hub(&mut r, 60);
-    let first = r.read().brief(&Scope::Canon, &cov(&h), Some(400)).unwrap();
+    let first = r
+        .read()
+        .brief(&Scope::Canon, &cov(&h), Some(BUDGET))
+        .unwrap();
     first.register(&r.briefs());
     let cursor = first.next.clone().unwrap();
     write(
@@ -127,7 +140,7 @@ fn bpag1_a_page_of_a_briefing_that_moved_is_stale() {
     land(&mut r, "work").unwrap();
     let e = r
         .read()
-        .brief_page(&Scope::Canon, &r.briefs(), &cursor, Some(400))
+        .brief_page(&Scope::Canon, &r.briefs(), &cursor, Some(BUDGET))
         .unwrap_err();
     assert_eq!(e.code, E_PAGE_STALE, "{e}");
     let unknown = format!("{}:0,0,0,0,0,0,0", "0".repeat(64));
@@ -161,14 +174,14 @@ fn bpag1_rdy_brief_pages_over_mcp_and_page_stands_alone() {
     let b = c
         .call(
             "rdy_brief",
-            json!({"ids": [h.to_string()], "scope": "canon", "max_tokens": 400}),
+            json!({"ids": [h.to_string()], "scope": "canon", "max_tokens": BUDGET}),
         )
         .ok();
     let cursor = b["next"].as_str().unwrap().to_string();
     let p = c
         .call(
             "rdy_brief",
-            json!({"page": cursor, "scope": "canon", "max_tokens": 400}),
+            json!({"page": cursor, "scope": "canon", "max_tokens": BUDGET}),
         )
         .ok();
     assert_eq!(p["base"]["token"], b["base"]["token"]);
@@ -190,7 +203,10 @@ fn bpag1_a_page_after_a_new_dependent_landed_is_stale() {
     // dependent of H leaves it as it was; the entries it sorts among still shifted
     let (_d, mut r) = project();
     let (_hub_doc, h) = hub(&mut r, 60);
-    let first = r.read().brief(&Scope::Canon, &cov(&h), Some(400)).unwrap();
+    let first = r
+        .read()
+        .brief(&Scope::Canon, &cov(&h), Some(BUDGET))
+        .unwrap();
     first.register(&r.briefs());
     let cursor = first.next.clone().unwrap();
     write(
@@ -204,11 +220,14 @@ fn bpag1_a_page_after_a_new_dependent_landed_is_stale() {
     )
     .unwrap();
     land(&mut r, "work").unwrap();
-    let again = r.read().brief(&Scope::Canon, &cov(&h), Some(400)).unwrap();
+    let again = r
+        .read()
+        .brief(&Scope::Canon, &cov(&h), Some(BUDGET))
+        .unwrap();
     assert_eq!(again.base.token, first.base.token, "the token did not move");
     let e = r
         .read()
-        .brief_page(&Scope::Canon, &r.briefs(), &cursor, Some(400))
+        .brief_page(&Scope::Canon, &r.briefs(), &cursor, Some(BUDGET))
         .unwrap_err();
     assert_eq!(e.code, E_PAGE_STALE, "{e}");
 }
@@ -217,7 +236,10 @@ fn bpag1_a_page_after_a_new_dependent_landed_is_stale() {
 fn bpag1_an_offset_past_the_end_of_its_section_is_stale_not_malformed() {
     let (_d, mut r) = project();
     let (_hub_doc, h) = hub(&mut r, 60);
-    let first = r.read().brief(&Scope::Canon, &cov(&h), Some(400)).unwrap();
+    let first = r
+        .read()
+        .brief(&Scope::Canon, &cov(&h), Some(BUDGET))
+        .unwrap();
     first.register(&r.briefs());
     let cursor = first.next.clone().unwrap();
     // the same cursor, digest kept, with the dependents offset far past the 60 entries there are
@@ -228,7 +250,7 @@ fn bpag1_an_offset_past_the_end_of_its_section_is_stale_not_malformed() {
     let forged = format!("{token}:{}:{digest}", parts.join(","));
     let e = r
         .read()
-        .brief_page(&Scope::Canon, &r.briefs(), &forged, Some(400))
+        .brief_page(&Scope::Canon, &r.briefs(), &forged, Some(BUDGET))
         .unwrap_err();
     assert_eq!(e.code, E_PAGE_STALE, "{e}");
     // a cursor without its digest is malformed, not stale
@@ -238,7 +260,7 @@ fn bpag1_an_offset_past_the_end_of_its_section_is_stale_not_malformed() {
             &Scope::Canon,
             &r.briefs(),
             &format!("{token}:{offsets}"),
-            Some(400),
+            Some(BUDGET),
         )
         .unwrap_err();
     assert_eq!(e.code, E_BAD_INPUT, "{e}");
@@ -266,12 +288,15 @@ fn json_tokens(b: &Briefing) -> usize {
 fn bfit1_a_cut_briefing_with_its_cursor_fits_every_budget() {
     let (_d, mut r) = project();
     let (_hub_doc, h) = hub(&mut r, 60);
-    let wide = r.read().brief(&Scope::Canon, &cov(&h), Some(400)).unwrap();
+    let wide = r
+        .read()
+        .brief(&Scope::Canon, &cov(&h), Some(BUDGET))
+        .unwrap();
     wide.register(&r.briefs());
     let cursor = wide
         .next
         .clone()
-        .expect("60 dependents do not fit 400 tokens");
+        .expect("60 dependents do not fit the budget");
     for max in 1..=1500 {
         let b = r.read().brief(&Scope::Canon, &cov(&h), Some(max)).unwrap();
         assert!(
@@ -295,7 +320,7 @@ fn bfit1_a_cut_briefing_with_its_cursor_fits_every_budget() {
     }
 }
 
-/// A canon briefing of H (60 dependents) cut to 400 tokens and registered, with view `other`'s
+/// A canon briefing of H (60 dependents) cut to `BUDGET` tokens and registered, with view `other`'s
 /// unlanded write to H listed in its `inflight.views`.
 fn listed_other(r: &mut Rdy, h: &BlockId) -> Briefing {
     write(
@@ -304,9 +329,12 @@ fn listed_other(r: &mut Rdy, h: &BlockId) -> Briefing {
         json!([{"op": "update", "id": h.to_string(), "body": "H, in other."}]),
     )
     .unwrap();
-    let first = r.read().brief(&Scope::Canon, &cov(h), Some(400)).unwrap();
+    let first = r
+        .read()
+        .brief(&Scope::Canon, &cov(h), Some(BUDGET))
+        .unwrap();
     first.register(&r.briefs());
-    assert!(first.next.is_some(), "60 dependents do not fit 400 tokens");
+    assert!(first.next.is_some(), "60 dependents do not fit the budget");
     assert_eq!(
         first
             .inflight
@@ -325,7 +353,7 @@ fn page_to_end(r: &Rdy, scope: &Scope, cursor: String) -> usize {
     while let Some(c) = next {
         let p = r
             .read()
-            .brief_page(scope, &r.briefs(), &c, Some(400))
+            .brief_page(scope, &r.briefs(), &c, Some(BUDGET))
             .unwrap_or_else(|e| panic!("page {pages}: {e}"));
         next = p.next.clone();
         pages += 1;
@@ -356,7 +384,10 @@ fn bpag1_a_listed_views_write_to_an_uncovered_block_keeps_the_cursor_valid() {
         )
         .unwrap();
     }
-    let again = r.read().brief(&Scope::Canon, &cov(&h), Some(400)).unwrap();
+    let again = r
+        .read()
+        .brief(&Scope::Canon, &cov(&h), Some(BUDGET))
+        .unwrap();
     assert_ne!(
         again.inflight.views[0].last_write_ms,
         first.inflight.views[0].last_write_ms
@@ -370,7 +401,10 @@ fn bpag1_a_view_that_starts_changing_a_covered_block_keeps_the_cursor_valid() {
     // the new inflight entry may shift an advisory page
     let (_d, mut r) = project();
     let (_hub_doc, h) = hub(&mut r, 60);
-    let first = r.read().brief(&Scope::Canon, &cov(&h), Some(400)).unwrap();
+    let first = r
+        .read()
+        .brief(&Scope::Canon, &cov(&h), Some(BUDGET))
+        .unwrap();
     first.register(&r.briefs());
     assert!(first.inflight.views.is_empty());
     write(
@@ -408,7 +442,7 @@ fn bpag1_a_page_in_another_scope_is_bad_input_naming_both() {
             &Scope::View("other".into()),
             &r.briefs(),
             first.next.as_deref().unwrap(),
-            Some(400),
+            Some(BUDGET),
         )
         .unwrap_err();
     assert_eq!(e.code, E_BAD_INPUT, "{e}");

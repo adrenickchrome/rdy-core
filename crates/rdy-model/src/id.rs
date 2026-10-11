@@ -51,6 +51,10 @@ pub enum IdError {
 pub struct BlockId(String);
 
 impl BlockId {
+    /// The least id in order (it is not a valid id): the lower bound of a range read of a map
+    /// keyed by (BlockId, ...).
+    pub const MIN: BlockId = BlockId(String::new());
+
     pub fn new(prefix: &str) -> BlockId {
         assert!(valid_prefix(prefix), "invalid id prefix {prefix:?}");
         let body: String = (0..5).map(|_| CROCKFORD[next_digit()] as char).collect();

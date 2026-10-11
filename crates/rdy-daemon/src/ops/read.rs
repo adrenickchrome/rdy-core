@@ -14,6 +14,14 @@ pub(super) struct LogArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct CoverageArgs {
+    scope: Option<String>,
+    path: Option<String>,
+    max_tokens: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ShowArgs {
     id: String,
     scope: Option<String>,
@@ -95,18 +103,31 @@ pub(super) fn status(cx: &OpContext) -> Result<Value, RdyError> {
         warnings.push(format!("{}: {}; {}", w.code, w.message, w.fix));
     }
     let suspects = st.suspects(&Scope::Canon)?.len();
-    Ok(json!({
+    // cc15 (FW-CH3a): the current score, its dimensions, the issue count and the kinds, from
+    // the memoised summary; the pages, areas and issues are `rdy coverage`'s. A coverage read
+    // error never fails the status: `coverage_error` says why the coverage is left out.
+    let (coverage, coverage_error) = match st.coverage_summary(&Scope::Canon) {
+        Ok(s) => (Some(to_json(&*s)), None),
+        Err(e) => (None, Some(rdy_engine::coverage::coverage_error_text(&e))),
+    };
+    let mut v = json!({
         "pack": st.pack().name,
         "landings": landings,
         "suspects": suspects,
-        "coverage": st.graph_coverage(&Scope::Canon, None)?,
         "version_position": canon,
         "views": views,
         "warnings": warnings,
         "seq": st.seq(),
         "open_report": open_report_json(&cx.engine.open_report()),
         "quarantine": quarantine(&cx.engine.root()),
-    }))
+    });
+    if let Some(c) = coverage {
+        v["coverage"] = c;
+    }
+    if let Some(e) = coverage_error {
+        v["coverage_error"] = Value::String(e);
+    }
+    Ok(v)
 }
 
 pub(super) fn show(cx: &OpContext, a: ShowArgs) -> Result<Value, RdyError> {
@@ -181,6 +202,15 @@ pub(super) fn suspects(cx: &OpContext, a: ScopeArgs) -> Result<Value, RdyError> 
     let st = cx.engine.read();
     let scope = scope_of(&st, cx, a.scope.as_deref())?;
     Ok(json!({"items": st.suspects(&scope)?}))
+}
+
+/// The coverage report of a scope (default canon) or a path, cut to `max_tokens` as the MCP
+/// tool cuts it. A read: nothing is written.
+pub(super) fn coverage(cx: &OpContext, a: CoverageArgs) -> Result<Value, RdyError> {
+    check_max_tokens(a.max_tokens)?;
+    let st = cx.engine.read();
+    let scope = scope_of(&st, cx, a.scope.as_deref())?;
+    rdy_mcp::tools::coverage_reply(&st, &scope, a.path.as_deref(), a.max_tokens)
 }
 
 pub(super) fn tags(cx: &OpContext) -> Result<Value, RdyError> {

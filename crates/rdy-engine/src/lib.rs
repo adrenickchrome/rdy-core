@@ -26,6 +26,7 @@ mod keys;
 pub mod lexicon;
 mod lint;
 mod materialize;
+pub mod mention_review;
 mod pack_load;
 mod paths;
 pub mod proposal_show;
@@ -52,6 +53,7 @@ pub use areas::by_area;
 pub use brief::{
     BriefRegistry, Briefing, Coverage, E_BRIEF_REQUIRED, E_BRIEF_STALE, W_BRIEF_STALE,
 };
+pub use coverage::{CoverageIssue, CoverageIssues, IssueCode};
 pub use decide::DecisionInput;
 pub use error::*;
 pub use events::{Event, EventKind, Events};
@@ -59,10 +61,13 @@ pub use gate::{
     LandInfo, LandOptions, LandingRow, PROPOSAL_TENSIONS_MAX, ProposalInfo, ProposalRef,
     RebasedInfo, RelayedByRow,
 };
-pub use history::{Author, HISTORY_MAX, History, HistoryEntry, JustificationInfo, LandingRef};
+pub use history::{
+    Author, HISTORY_MAX, History, HistoryEntry, JustificationInfo, LandingRef, canon_step_reads,
+};
 pub use io::{EditBase, ExportSummary, block_from_yaml, block_to_yaml, refuse_inflight_export};
 pub use lint::check_path;
 pub use materialize::{Materialized, PathMiss};
+pub use mention_review::{MentionReviewInfo, MentionVerdict};
 pub use paths::TreeNode;
 pub use proposal_show::{
     ProposalChangeRow, ProposalShow, ProposalVersionRow, is_proposal_ref, proposal_text,
@@ -72,7 +77,7 @@ pub use query::{
 };
 pub use rdy_store::Relay;
 pub use read_state::{
-    AltBinds, AltChosenBy, CoordHeads, Delta, InflightSet, OpenIntent, ReadState,
+    AltBinds, AltChosenBy, CoordHeads, Delta, InflightSet, OpenIntent, ReadState, inflight_builds,
 };
 pub use search::{SearchQuery, SearchResult};
 pub use session::{
@@ -124,6 +129,8 @@ pub struct Rdy {
     vpos: Arc<Mutex<version::VposCache>>,
     /// The blocks each proposal version writes; shared with every published state.
     proposal_touched: inflight::ProposalTouched,
+    /// Canon's version steps kept across canon builds; shared with every published state.
+    canon_step_cache: Arc<history::StepCache>,
     /// The in-process event bus (evt1); `publish` feeds it.
     events: Events,
     /// The end of the last batch whose events were published to `events` (or whose events could

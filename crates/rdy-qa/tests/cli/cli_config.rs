@@ -127,6 +127,11 @@ fn cfgl1_rdy_config_show_origin() {
             .any(|l| l == "serve.start_timeout = 30  # default"),
         "{text}"
     );
+    // cc17: coverage.target is a project key with the default 80
+    assert!(
+        text.lines().any(|l| l == "coverage.target = 80  # default"),
+        "{text}"
+    );
 }
 
 #[test]

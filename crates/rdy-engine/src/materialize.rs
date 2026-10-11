@@ -241,6 +241,12 @@ impl Materialized {
         d
     }
 
+    /// Whether a doc or a folder directly under `parent` has no stored name: its effective name
+    /// is derived against its siblings' names.
+    pub(crate) fn has_nameless_under(&self, parent: Option<&BlockId>) -> bool {
+        self.nameless.get(&parent.cloned()).copied().unwrap_or(0) > 0
+    }
+
     /// The name of every doc and folder directly under `parent`: its stored name or, for a doc
     /// from M1 without one, its effective name (default name, de-duplicated in id order).
     pub fn names_under(&self, parent: Option<&BlockId>) -> BTreeMap<BlockId, String> {

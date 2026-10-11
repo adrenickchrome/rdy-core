@@ -5,7 +5,7 @@ use crate::read_state::{self, CoordHeads, Entry, InflightCell};
 use crate::tensions::SideRef;
 use crate::tensions::set::TensionCell;
 use crate::{Delta, Event, EventKind, Rdy, RdyError, ReadState, events};
-use rdy_model::{Hash, Op};
+use rdy_model::{Hash, Op, Verdict};
 use rdy_store::kinds;
 use rdy_store::segment::Location;
 use rdy_store::view::ViewOpKind;
@@ -65,16 +65,20 @@ impl Rdy {
                     description: prev.description.clone(),
                     require_up_to_date: prev.require_up_to_date,
                     idle_days: prev.idle_days,
+                    coverage_target: prev.coverage_target,
                     decisions_home: prev.decisions_home.clone(),
                     reader: self.store.reader(),
                     as_of: Arc::clone(&self.as_of),
                     vpos: Arc::clone(&self.vpos),
                     proposal_touched: Arc::clone(&self.proposal_touched),
+                    canon_step_cache: Arc::clone(&self.canon_step_cache),
                     inflight_cell: Arc::clone(&prev.inflight_cell),
                     coord_heads: Arc::clone(&prev.coord_heads),
                     coord: OnceLock::new(),
                     tensions: Arc::default(),
                     dismissals: Arc::clone(&prev.dismissals),
+                    mention_dismissals: Arc::clone(&prev.mention_dismissals),
+                    coverage_memo: Default::default(),
                     detectors: self.detectors,
                     error: Some(e.clone()),
                 }));
@@ -152,30 +156,39 @@ impl Rdy {
     fn next_state(&self, prev: &ReadState, delta: Delta) -> Result<ReadState, RdyError> {
         let seq = self.store.log_end();
         let canon_head = self.store.canon_head()?;
+        // fix round 2 (FW-PF2): a first coverage read may carry the coverage the state before
+        // memoised (the carry checks what it read); a full publish starts over
+        let coverage_memo = match delta {
+            Delta::Full => crate::coverage::CoverageMemo::default(),
+            _ => crate::coverage::CoverageMemo::after(&prev.coverage_memo),
+        };
         // a full publish (open, invalidate, reindex, a pack reload) takes the name, description
         // and review rules from the config loaded at open or by the last successful reload, never
         // from the files again: a broken file must not turn the review gate off (#832). Every
         // other publish carries them from the previous state.
-        let (name, description, require_up_to_date, idle_days, decisions_home) = match delta {
-            Delta::Full => {
-                let cfg = &self.config;
-                let (name, description) = site_identity(&prev.root, cfg);
-                (
-                    name,
-                    description,
-                    cfg.require_up_to_date(),
-                    cfg.idle_days(),
-                    cfg.decisions_home(),
-                )
-            }
-            _ => (
-                Arc::clone(&prev.name),
-                prev.description.clone(),
-                prev.require_up_to_date,
-                prev.idle_days,
-                prev.decisions_home.clone(),
-            ),
-        };
+        let (name, description, require_up_to_date, idle_days, coverage_target, decisions_home) =
+            match delta {
+                Delta::Full => {
+                    let cfg = &self.config;
+                    let (name, description) = site_identity(&prev.root, cfg);
+                    (
+                        name,
+                        description,
+                        cfg.require_up_to_date(),
+                        cfg.idle_days(),
+                        cfg.coverage_target(),
+                        cfg.decisions_home(),
+                    )
+                }
+                _ => (
+                    Arc::clone(&prev.name),
+                    prev.description.clone(),
+                    prev.require_up_to_date,
+                    prev.idle_days,
+                    prev.coverage_target,
+                    prev.decisions_home.clone(),
+                ),
+            };
         // the coordination refs: re-read by a publish that may have moved them, else carried. A
         // landing moves them only when it closed members of a set or chose an alternative (its
         // record says so; altg1)
@@ -194,7 +207,9 @@ impl Rdy {
         // the tension set reads canon, the in-flight changes and the open alternative sets
         // (edit collision skips members of one set): a publish that moves none keeps it
         let tensions = match &delta {
-            Delta::Seq | Delta::Tags | Delta::Dismissed { .. } => Arc::clone(&prev.tensions),
+            Delta::Seq | Delta::Tags | Delta::Dismissed { .. } | Delta::MentionReviewed { .. } => {
+                Arc::clone(&prev.tensions)
+            }
             Delta::Coord { closed }
                 if closed.is_empty() && coord_heads.alt_members == prev.coord_heads.alt_members =>
             {
@@ -219,6 +234,33 @@ impl Rdy {
             Delta::Full => Arc::new(self.store.dismissals()?.into_iter().collect()),
             Delta::Dismissed { vkey, review } => Arc::new(prev.dismissals.update(*vkey, *review)),
             _ => Arc::clone(&prev.dismissals),
+        };
+        // the dismissed mentions: re-read by a full publish (only the pairs whose latest review
+        // dismisses), one changed by a mention review, else carried
+        let mention_dismissals = match &delta {
+            Delta::Full => {
+                let mut map = imbl::OrdMap::new();
+                for (block, entity, review) in self.store.mention_reviews()? {
+                    if self.store.review(&review)?.verdict == Verdict::Dismiss {
+                        map.insert((block, entity), review);
+                    }
+                }
+                Arc::new(map)
+            }
+            Delta::MentionReviewed {
+                block,
+                entity,
+                review,
+                dismissed,
+            } => {
+                let key = (block.clone(), entity.clone());
+                Arc::new(if *dismissed {
+                    prev.mention_dismissals.update(key, *review)
+                } else {
+                    prev.mention_dismissals.without(&key)
+                })
+            }
+            _ => Arc::clone(&prev.mention_dismissals),
         };
         let (canon, views, tags, inflight_cell) = match delta {
             Delta::Full => {
@@ -265,7 +307,7 @@ impl Rdy {
                         if let Some(b) = pred.filter(|b| b.conflicts.is_empty())
                             && !self.store.ever_deleted(recreates)?
                         {
-                            next.seed(b.after(&ops));
+                            next.seed(b.after(&ops, self.pack()));
                         }
                         views.insert(view.clone(), Arc::new(next));
                     }
@@ -291,7 +333,7 @@ impl Rdy {
             } => {
                 let mut canon = Entry::new(None, Some(landing), None, Arc::new(vec![]));
                 if let Some(b) = prev.canon.built_ok() {
-                    canon.seed(b.after(&ops));
+                    canon.seed(b.after(&ops, self.pack()));
                 }
                 // the proposing view and every view the landing rebased (it is one of them) start
                 // unbuilt, on the landing: a stale entry would seed the next commit into it from
@@ -353,7 +395,7 @@ impl Rdy {
                 Arc::new(self.version_tags()?),
                 Arc::clone(&prev.inflight_cell),
             ),
-            Delta::Seq | Delta::Dismissed { .. } => (
+            Delta::Seq | Delta::Dismissed { .. } | Delta::MentionReviewed { .. } => (
                 Arc::clone(&prev.canon),
                 prev.views.clone(),
                 Arc::clone(&prev.tags),
@@ -373,16 +415,20 @@ impl Rdy {
             description,
             require_up_to_date,
             idle_days,
+            coverage_target,
             decisions_home,
             reader: self.store.reader(),
             as_of: Arc::clone(&self.as_of),
             vpos: Arc::clone(&self.vpos),
             proposal_touched: Arc::clone(&self.proposal_touched),
+            canon_step_cache: Arc::clone(&self.canon_step_cache),
             inflight_cell,
             coord_heads,
             coord: OnceLock::new(),
             tensions,
             dismissals,
+            mention_dismissals,
+            coverage_memo,
             detectors: self.detectors,
             error: None,
         })
@@ -624,10 +670,13 @@ impl Rdy {
     /// insc1: the in-flight cell after `change` (with `ops`) was committed to `view`. When the
     /// previous set was computed and `view` is open, the set is the previous one plus `change`
     /// (held by `view` alone). The previous build is carried, with `ops` applied, when it is
-    /// computed and has no conflicts, every op applies cleanly to its materialization, no op
-    /// creates an id that was ever deleted, and the change depends on the last writer (in the merge's order) of every block it writes: a new
-    /// change is depended on by none, so it then merges after every writer of its blocks and a
-    /// rebuild equals the carry. Anything else starts unbuilt.
+    /// computed, no op writes a block its merge holds a conflict on, every op applies cleanly to
+    /// its materialization, no op creates an id that was ever deleted, and the change depends on
+    /// the last writer (in the merge's order) of every block it writes: a new change is depended
+    /// on by none, so it then merges after every writer of its blocks and a rebuild equals the
+    /// carry. The merge settles each block on its own, so a conflict on a block the change does
+    /// not write stays as it was (perf3: one open conflict made every commit merge the whole
+    /// in-flight set again). Anything else starts unbuilt.
     fn inflight_after_commit(
         &self,
         prev: &ReadState,
@@ -656,7 +705,7 @@ impl Rdy {
             // a create of an id that was ever deleted merges against the delete that removed
             // it, not cleanly: such a commit (or a failed index read) rebuilds the set
             (Some(b), Some(last))
-                if b.conflicts.is_empty()
+                if !writes_a_conflict(&b.conflicts, ops)
                     && read_state::applies_cleanly(&b.m, ops)
                     && !self
                         .store
@@ -673,7 +722,7 @@ impl Rdy {
         if let Some((b, last)) = carry {
             let set = cell.set_ok().expect("set above");
             let mut entry = read_state::inflight_entry(canon_head, set);
-            entry.seed(b.after(ops));
+            entry.seed(b.after(ops, self.pack()));
             let _ = cell.entry.set(Ok(Arc::new(entry)));
             let mut last = last.as_ref().clone();
             for op in ops {
@@ -762,6 +811,17 @@ impl Rdy {
     /// Rebuilds the store's index from its log and republishes the state on the new index.
     pub fn reindex(&mut self) -> Result<(), RdyError> {
         self.store.reindex()?;
+        self.canon_step_cache.clear();
         self.publish(Delta::Full)
     }
+}
+
+/// Whether one of `ops` writes a block that `conflicts` (a merge's, in block-id order) holds a
+/// conflict on.
+fn writes_a_conflict(conflicts: &[rdy_store::merge::Conflict], ops: &[rdy_model::Op]) -> bool {
+    ops.iter().any(|op| {
+        conflicts
+            .binary_search_by(|c| c.block.cmp(op.block_id()))
+            .is_ok()
+    })
 }

@@ -187,11 +187,23 @@ fn spec_target(op: &str) -> Option<String> {
         "entity_search" => {
             "< 5 ms p99 (a read, spec 11): an entity search with its fact sheet, first page"
         }
+        "search_coverage_sort" => {
+            "< 5 ms p95 (the read budget, reference/performance tb-XBXR4): search_literal's query with sort: coverage, first page"
+        }
         "suggestions_after_write" => {
             "no spec target: the suggestions of a one-claim write over a carried lexicon (recorded for FW-EN3; they ride on every write response)"
         }
         "coverage_all" => {
-            "no spec target: cold graph coverage over a 10k view (recorded for FW-EN4 and FW-EN1a; rdy status and rdy_overview)"
+            "no spec target: the cold coverage issues over a 10k view, every dimension (recorded for FW-PF2 D-V3JSY; rdy coverage, rdy status)"
+        }
+        "coverage_carry" => {
+            "< 5 ms p95: a write reply's coverage change after one write: the carry, the scores before and after, the touched page's rollups (FW-PF2; reference/performance tb-XBXR4 read budget)"
+        }
+        "coverage_carry_hub" => {
+            "< 5 ms p95: a write reply's coverage change after a body edit of a term 2,000 claims describe: the carry, the scores before and after, the touched page's rollups (FW-PF2; reference/performance tb-XBXR4 read budget; final review I1)"
+        }
+        "coverage_report_cold" => {
+            "no spec target: the cold coverage report over a 10k view, recorded (FW-PF2; rdy coverage)"
         }
         "context_inflight_1k" | "impact_inflight_1k" | "context_view_1k" | "impact_view_1k" => {
             "< 5 ms p99 with 1k in-flight changes (spec 15.1; the overlays must not regress them)"
@@ -203,6 +215,9 @@ fn spec_target(op: &str) -> Option<String> {
         "tension_carry_1k" | "tension_on_change_1k" => {
             "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change and tension detection, included in the write response)"
         }
+        "tension_value_1k" | "tension_drift_1k" => {
+            "< 10 ms p95: the tension delta and on_change report of one write, the part tension detection adds to the write reply, with 1k in-flight changes (reference/performance tb-XBXR4)"
+        }
         "tension_on_change_delete_1k" | "tension_on_change_view_op_1k" => {
             "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change, included in the response); a delete and a view op never carry, so this is the in-flight build plus a diff that skips the shared canon part"
         }
@@ -212,8 +227,14 @@ fn spec_target(op: &str) -> Option<String> {
         "tensions_full_1k" => {
             "no spec target: the cold build of every tension at 1k in-flight changes, once per landing or structural update (recorded for M2d2)"
         }
+        "tensions_canon_drift" => {
+            "no spec target: the canon-scope build of the tensions over landed prose that shares phrases, half of it edited in a later landing, once per landing (restatement drift's canon form, the D-SES4J budget check; compare with tensions_canon)"
+        }
         "tensions_canon" => {
             "no spec target: the canon-scope build of the tensions (FW-CH6), once per landing; recorded for Coverage and confidence"
+        }
+        "tensions_canon_drift_deep" => {
+            "no spec target: the canon-scope build of the tensions after one more edit landing of prose 50 edit landings deep, the version steps kept across builds, once per landing (restatement drift's canon form against history, final review I2; the D-SES4J budget check: compare with tensions_canon_drift)"
         }
         "gate_tensions_1k" => {
             "recorded: the land message's tension check on a built set (inside the landing budget, M2 spec 15.1)"
@@ -838,7 +859,9 @@ fn prepare_rebased_view(r: &mut Rdy, fx: &Fixture, runs: &Runs) {
 /// FW-EN1, FW-EN3, FW-EN4: the entity ops on view `ve`: the fixture's canon plus 50 entities and
 /// 200 claims that name them and share ten code literals. Run after `tier_views`: the view it
 /// leaves behind would change the numbers of the ops before it. Run before `tier_inflight`,
-/// which closes every open view (`ve` too) and adds 1k in-flight changes.
+/// which closes every open view (`ve` too) and adds 1k in-flight changes. cc11 adds the carry
+/// of the structural layer across one write with the coverage report over it, and the cold
+/// coverage report.
 fn tier_entities(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs: &Runs) {
     let ve = Scope::View("ve".into());
     let section = fx.section.to_string();
@@ -867,6 +890,24 @@ fn tier_entities(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, r
     out.push(measure(&format!("entity_search{sfx}"), runs.read, |_| {
         r.read().search(&ve, &q, None, Some(4000)).expect("search");
     }));
+    // cc14 (FW-SR1, FW-CV2): search_literal's query, every hit scored and sorted lowest first
+    let by_coverage = rdy_engine::SearchQuery {
+        text: "Claim".into(),
+        filters: rdy_engine::search::SearchFilters {
+            sort: Some("coverage".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    out.push(measure(
+        &format!("search_coverage_sort{sfx}"),
+        runs.read,
+        |_| {
+            r.read()
+                .search(&ve, &by_coverage, None, Some(4000))
+                .expect("search");
+        },
+    ));
     out.push(measure_timed(
         &format!("suggestions_after_write{sfx}"),
         runs.write,
@@ -884,11 +925,143 @@ fn tier_entities(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, r
         runs.read,
         |_| {
             cold(r, |r| {
-                r.read().graph_coverage(&ve, None).expect("coverage");
+                r.read().coverage_issues(&ve).expect("coverage issues");
             })
             .1
         },
     ));
+    // cc11 (FW-PF2 D-V3JSY: the carry stays inside the read budget): what a write reply reads
+    // for its coverage (`coverage_change`, cc16). Outside the timer: the view's coverage on the
+    // state before, as the previous reply read it (its score; no touched pages), one
+    // single-claim write to the fixture's first doc (its subtree holds this tier's 250 entities
+    // and claims and more, so the doc's `linked_from_outside` walk is in the timed path), and
+    // the write's ops read back. Timed: the carry `Built::after` made for that write
+    // (`carry_for_perf`, the same call), then `coverage_change` from the state before to the
+    // state after for the written blocks: the score before (memoised), the score after (the
+    // coverage issues carried from the state before, fix round 2) and the touched page's
+    // rollup before and after. It counts no entity kinds (fix round 3).
+    out.push(measure_timed(
+        &format!("coverage_carry{sfx}"),
+        runs.write,
+        |i| {
+            let prev = r.read();
+            rdy_engine::coverage::coverage_change(&prev, &ve, &prev, &ve, &BTreeSet::new())
+                .expect("coverage");
+            let w = write(r, "ve", json!([{"op": "create", "type": "claim", "parent": section, "body": format!("Entity {} is checked ({i}).", i % 50)}]))
+                .expect("write");
+            let next = r.read();
+            let change: Hash = w.change.parse().expect("change");
+            let ops = next.reader().change(&change).expect("change").ops;
+            let touched: BTreeSet<BlockId> = ops.iter().map(|o| o.block_id().clone()).collect();
+            let builds = rdy_engine::coverage::state_layer_builds();
+            let kinds = rdy_engine::coverage::kinds_builds();
+            let s = Instant::now();
+            let carried =
+                rdy_engine::coverage::carry_for_perf(&prev, &next, &ve, &ops).expect("carry");
+            let got = rdy_engine::coverage::coverage_change(&prev, &ve, &next, &ve, &touched)
+                .expect("coverage change");
+            let t = s.elapsed();
+            std::hint::black_box(&got);
+            assert!(carried.is_some(), "a single-claim write carries the layer");
+            assert_eq!(got.pages.len(), 1, "the written doc's page");
+            assert_eq!(
+                rdy_engine::coverage::state_layer_builds(),
+                builds,
+                "the score after reads carried coverage issues"
+            );
+            assert_eq!(
+                rdy_engine::coverage::kinds_builds(),
+                kinds,
+                "a write reply counts no entity kinds"
+            );
+            t
+        },
+    ));
+    out.push(measure_timed(
+        &format!("coverage_report_cold{sfx}"),
+        runs.read,
+        |_| {
+            cold(r, |r| {
+                r.read()
+                    .coverage_report(&ve, None)
+                    .expect("coverage report");
+            })
+            .1
+        },
+    ));
+    out.push(coverage_hub(
+        &format!("coverage_carry_hub{sfx}"),
+        runs,
+        COVERAGE_HUB_DESCRIBERS,
+    ));
+}
+
+/// Claims that describe the hub term in `coverage_carry_hub`.
+pub const COVERAGE_HUB_DESCRIBERS: usize = 2000;
+
+/// What a write reply reads for its coverage after a body edit of a hub entity (final review
+/// I1), on a project of its own: a term (in a draft section, so its edit needs no briefing)
+/// that `describers` claims in a stable section describe, each governed through it by a live
+/// decision that affects it, lands. Each run edits the
+/// term's body in view `hv` (untimed, with the view's score before it, as the previous reply
+/// read it); the timed part is the call `coverage_carry` times: the carry `Built::after` made
+/// (`carry_for_perf`), then `coverage_change` for the written block. A body edit changes no
+/// entry of the blocks that point at the term, so the carry recomputes O(1) entries, not one
+/// per describer (`cc11_a_body_edit_of_a_hub_recomputes_o1_entries` pins the count).
+fn coverage_hub(op: &str, runs: &Runs, describers: usize) -> Measure {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut r = Rdy::init(dir.path(), "rdy-standard").expect("init");
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$o", "fields": {"name": "hub", "title": "Hub", "doc_type": "page"}}),
+        json!({"op": "create", "type": "section", "id": "$terms", "parent": "$o", "fields": {"title": "Terms"}}),
+        json!({"op": "create", "type": "section", "id": "$s", "parent": "$o", "fields": {"title": "Rules", "lifecycle": "stable"}}),
+        json!({"op": "create", "type": "term", "id": "$t", "parent": "$terms", "fields": {"name": "Hub"}, "body": "The centre."}),
+        json!({"op": "create", "type": "decision", "parent": "$s",
+            "fields": {"statement": "The hub is audited", "status": "proposed"},
+            "links": {"affects": [{"target": "$t"}]}}),
+    ];
+    ops.extend((0..describers).map(|k| {
+        json!({"op": "create", "type": "claim", "parent": "$s", "body": format!("Rule {k} holds."),
+            "links": {"describes": [{"target": "$t"}]}})
+    }));
+    let w = write(&mut r, "seed", serde_json::Value::Array(ops)).expect("the hub");
+    land(&mut r, "seed").expect("land the hub");
+    let term = w.created.get("$t").expect("the term").to_string();
+    let hv = Scope::View("hv".into());
+    write(
+        &mut r,
+        "hv",
+        json!([{"op": "update", "id": term, "fields": {"name": "Hub"}, "body": "The centre, 0."}]),
+    )
+    .expect("seed the view");
+    measure_timed(op, runs.write, |i| {
+        let prev = r.read();
+        rdy_engine::coverage::coverage_change(&prev, &hv, &prev, &hv, &BTreeSet::new())
+            .expect("coverage");
+        let w = write(
+            &mut r,
+            "hv",
+            json!([{"op": "update", "id": term, "fields": {"name": "Hub"}, "body": format!("The centre, {}.", i + 1)}]),
+        )
+        .expect("a body edit of the hub");
+        let next = r.read();
+        let change: Hash = w.change.parse().expect("change");
+        let ops = next.reader().change(&change).expect("change").ops;
+        let touched: BTreeSet<BlockId> = ops.iter().map(|o| o.block_id().clone()).collect();
+        let entries = rdy_engine::coverage::carried_entries();
+        let s = Instant::now();
+        let carried = rdy_engine::coverage::carry_for_perf(&prev, &next, &hv, &ops).expect("carry");
+        let got = rdy_engine::coverage::coverage_change(&prev, &hv, &next, &hv, &touched)
+            .expect("coverage change");
+        let t = s.elapsed();
+        std::hint::black_box(&got);
+        assert!(carried.is_some(), "a body edit carries the layer");
+        assert!(
+            rdy_engine::coverage::carried_entries() - entries <= 8,
+            "a body edit recomputes O(1) entries"
+        );
+        t
+    })
 }
 
 /// The view ops on a project whose `vr` is an unpinned view a landing has rebased: the cold
@@ -1499,6 +1672,269 @@ fn tier_tensions(
             s.elapsed()
         },
     ));
+    // value disagreement (cc5): a value with a unit is written once into `inf1` (untimed); each
+    // run then writes a claim that describes it and states another number in its unit, and the
+    // timed part is the tension delta and report of that write, as in `tension_on_change_1k`
+    let v = write(
+        r,
+        "inf1",
+        json!([{"op": "create", "type": "value", "id": "$v", "parent": section,
+            "fields": {"name": "Perf retry limit", "value": "5", "unit": "s"}}]),
+    )
+    .expect("a value");
+    let value = v.created.get("$v").expect("the value id").to_string();
+    out.push(measure_timed(
+        &format!("tension_value_1k{sfx}"),
+        runs.incremental,
+        |i| {
+            let before = r.read();
+            before.tensions().expect("warm tensions");
+            let w = write(
+                r,
+                "inf1",
+                json!([{"op": "create", "type": "claim", "parent": section,
+                    "body": format!("A job retries for {} s.", i + 10),
+                    "links": {"describes": [{"target": value}]}}]),
+            )
+            .expect("a describing write");
+            let change: Hash = w.change.parse().expect("change");
+            let after = r.read();
+            let s = Instant::now();
+            let delta = rdy_engine::tensions::tension_delta(&before, &after, Some(&[change]))
+                .expect("delta");
+            rdy_engine::tensions::delta::on_change(&before, &after, "inf1", None, &delta)
+                .expect("on_change");
+            let took = s.elapsed();
+            assert!(
+                delta
+                    .opened
+                    .iter()
+                    .any(|t| t.kind == rdy_engine::tensions::TensionKind::ValueDisagreement),
+                "the write opened a value disagreement"
+            );
+            took
+        },
+    ));
+    // restatement drift (cc7): one 20-word prose block per run and 50 blocks that restate it are
+    // written once and landed (untimed; the run blocks restate each other too; a drift judges a
+    // view's net edit, so the edited text must be one the view started from); each run then
+    // edits its block inside the shared text in view `tdrift`, and the timed part is the tension
+    // delta and report of that write, as in `tension_on_change_1k`. The 1k in-flight changes stay.
+    const SAID: &str = "Every queued job retries for five seconds and then reports one failure to its owner through the shared alert channel.";
+    let mut ops: Vec<serde_json::Value> = (0..runs.incremental)
+        .map(|k| {
+            json!({"op": "create", "type": "prose", "id": format!("$x{k}"), "parent": section,
+                "body": SAID})
+        })
+        .collect();
+    ops.extend((0..50).map(|k| {
+        json!({"op": "create", "type": "prose", "parent": section,
+            "body": format!("Restated {k}: {SAID}")})
+    }));
+    let d = write(r, "tdset", serde_json::Value::Array(ops)).expect("restated blocks");
+    land(r, "tdset").expect("land the restated blocks");
+    let edited: Vec<String> = (0..runs.incremental)
+        .map(|k| {
+            d.created
+                .get(&format!("$x{k}"))
+                .expect("a restated block")
+                .to_string()
+        })
+        .collect();
+    out.push(measure_timed(
+        &format!("tension_drift_1k{sfx}"),
+        runs.incremental,
+        |i| {
+            let before = r.read();
+            before.tensions().expect("warm tensions");
+            let w = write(
+                r,
+                "tdrift",
+                json!([{"op": "update", "id": edited[i], "body": SAID.replace("five", "ten")}]),
+            )
+            .expect("an edit of restated text");
+            let change: Hash = w.change.parse().expect("change");
+            let after = r.read();
+            let s = Instant::now();
+            let delta = rdy_engine::tensions::tension_delta(&before, &after, Some(&[change]))
+                .expect("delta");
+            rdy_engine::tensions::delta::on_change(&before, &after, "tdrift", None, &delta)
+                .expect("on_change");
+            let took = s.elapsed();
+            assert!(
+                delta
+                    .opened
+                    .iter()
+                    .any(|t| t.kind == rdy_engine::tensions::TensionKind::RestatementDrift),
+                "the write opened a restatement drift"
+            );
+            took
+        },
+    ));
+    out.push(drift_canon(
+        &format!("tensions_canon_drift{sfx}"),
+        runs,
+        2 * n,
+    ));
+    out.push(drift_canon_deep(
+        &format!("tensions_canon_drift_deep{sfx}"),
+        runs,
+        n / 2,
+    ));
+}
+
+/// Edit landings under `tensions_canon_drift_deep`'s timed build.
+pub const DRIFT_DEEP_LANDINGS: usize = 50;
+
+/// The canon form of restatement drift against deep history (final review I2; the D-SES4J
+/// budget check), on a project of its own: `blocks` prose blocks in one controlled-English
+/// pattern (so they share phrases) and one long block that never changes (it holds the oldest
+/// landing a restating block can have, so every edited block's history down to it is in
+/// reach) land; then every pattern block is edited in each of [`DRIFT_DEEP_LANDINGS`] landings,
+/// and a canon build follows each (as the writer builds the tension set after each landing).
+/// Each run lands one more such edit (untimed); the timed part is the canon-scope build of the
+/// tensions that follows, with the version steps kept across builds: it reads from the store
+/// only the versions the last landing wrote.
+fn drift_canon_deep(op: &str, runs: &Runs, blocks: usize) -> Measure {
+    fn said(i: usize, round: usize) -> String {
+        format!(
+            "In this system, the queue {i} service checks the record {i} before it is used by the worker {i} in round {round}."
+        )
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut r = Rdy::init(dir.path(), "rdy-standard").expect("init");
+    let d = write(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "rules", "title": "Rules", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+            {"op": "create", "type": "prose", "parent": "$s",
+             "body": "The weekly report lists every open incident with its owner and its status."}
+        ]),
+    )
+    .expect("doc");
+    let section = d.created.get("$s").expect("the section").to_string();
+    let mut ids: Vec<String> = vec![];
+    let bodies: Vec<String> = (0..blocks).map(|i| said(i, 0)).collect();
+    for chunk in bodies.chunks(500) {
+        let ops: Vec<serde_json::Value> = chunk
+            .iter()
+            .enumerate()
+            .map(|(k, b)| {
+                json!({"op": "create", "type": "prose", "id": format!("$b{k}"), "parent": section, "body": b})
+            })
+            .collect();
+        let w = write(&mut r, "seed", serde_json::Value::Array(ops)).expect("prose");
+        ids.extend(
+            (0..chunk.len()).map(|k| w.created.get(&format!("$b{k}")).expect("id").to_string()),
+        );
+    }
+    land(&mut r, "seed").expect("land the prose");
+    let edit = |r: &mut Rdy, round: usize| {
+        let ops: Vec<serde_json::Value> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| json!({"op": "update", "id": id, "body": said(i, round)}))
+            .collect();
+        let view = format!("deep{round}");
+        write(r, &view, serde_json::Value::Array(ops)).expect("the edits");
+        land(r, &view).expect("land the edits");
+        r.read().canon_tensions_rebuilt().expect("canon tensions");
+    };
+    for round in 1..=DRIFT_DEEP_LANDINGS {
+        edit(&mut r, round);
+    }
+    let mut round = DRIFT_DEEP_LANDINGS;
+    measure_timed(op, runs.materialize_cold, |_| {
+        round += 1;
+        let ops: Vec<serde_json::Value> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| json!({"op": "update", "id": id, "body": said(i, round)}))
+            .collect();
+        let view = format!("deep{round}");
+        write(&mut r, &view, serde_json::Value::Array(ops)).expect("the edits");
+        land(&mut r, &view).expect("land the edits");
+        let st = r.read();
+        let reads = rdy_engine::canon_step_reads();
+        let s = Instant::now();
+        let set = st.canon_tensions_rebuilt().expect("canon tensions");
+        let took = s.elapsed();
+        std::hint::black_box(&set);
+        let read = rdy_engine::canon_step_reads() - reads;
+        assert!(
+            read <= 2 * blocks as u64 + 2,
+            "the build read {read} version steps for {blocks} edited blocks"
+        );
+        took
+    })
+}
+
+/// The canon form of restatement drift (cc7; the D-SES4J canon budget), on a project of its own:
+/// `blocks` prose blocks in one controlled-English pattern (so they share phrases) and 10 that
+/// restate the first 10 land; then half of the blocks are edited inside the shared phrases in a
+/// later landing. The timed part is the cold canon-scope build of the tensions, as
+/// `tensions_canon`; it opens one drift per restating block.
+fn drift_canon(op: &str, runs: &Runs, blocks: usize) -> Measure {
+    fn said(i: usize, how: &str) -> String {
+        format!(
+            "In this system, the queue {i} service checks the record {i} before it is used by the worker {i} on every {how} request."
+        )
+    }
+    const RESTATED: usize = 10;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut r = Rdy::init(dir.path(), "rdy-standard").expect("init");
+    let d = write(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "rules", "title": "Rules", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}}
+        ]),
+    )
+    .expect("doc");
+    let section = d.created.get("$s").expect("the section").to_string();
+    let mut ids: Vec<String> = vec![];
+    let bodies: Vec<String> = (0..blocks)
+        .map(|i| said(i, "single"))
+        .chain((0..RESTATED).map(|i| format!("In short: {}", said(i, "single"))))
+        .collect();
+    for chunk in bodies.chunks(500) {
+        let ops: Vec<serde_json::Value> = chunk
+            .iter()
+            .enumerate()
+            .map(|(k, b)| {
+                json!({"op": "create", "type": "prose", "id": format!("$b{k}"), "parent": section, "body": b})
+            })
+            .collect();
+        let w = write(&mut r, "seed", serde_json::Value::Array(ops)).expect("prose");
+        ids.extend(
+            (0..chunk.len()).map(|k| w.created.get(&format!("$b{k}")).expect("id").to_string()),
+        );
+    }
+    land(&mut r, "seed").expect("land the prose");
+    let ops: Vec<serde_json::Value> = (0..blocks / 2)
+        .map(|i| json!({"op": "update", "id": ids[i], "body": said(i, "double")}))
+        .collect();
+    write(&mut r, "edits", serde_json::Value::Array(ops)).expect("the edits");
+    land(&mut r, "edits").expect("land the edits");
+    measure_timed(op, runs.materialize_cold, |_| {
+        let (found, took) = cold(&mut r, |r| {
+            r.read()
+                .canon_tensions_rebuilt()
+                .expect("canon tensions")
+                .iter()
+                .filter(|t| t.kind == rdy_engine::tensions::TensionKind::RestatementDrift)
+                .count()
+        });
+        assert_eq!(
+            found,
+            RESTATED.min(blocks / 2),
+            "one drift per restating block"
+        );
+        took
+    })
 }
 
 /// Intents and alternative sets ever made in the coordination ops' projects: none is ever
@@ -3206,7 +3642,11 @@ mod tests {
                 "tension_settle_1k",
                 "tensions_full_1k",
                 "tensions_canon",
-                "gate_tensions_1k"
+                "gate_tensions_1k",
+                "tension_value_1k",
+                "tension_drift_1k",
+                "tensions_canon_drift",
+                "tensions_canon_drift_deep"
             ]
         );
         assert!(r.read().tensions().expect("tensions").len() >= 10);
@@ -3223,8 +3663,21 @@ mod tests {
             "tensions_full_1k",
             "tensions_canon",
             "gate_tensions_1k",
+            "tension_value_1k",
+            "tension_drift_1k",
+            "tensions_canon_drift",
+            "tensions_canon_drift_deep",
         ] {
             assert!(spec_target(op).is_some(), "{op} has no target");
+        }
+        // final review M6: the value and drift ops time the tension delta and its report, not
+        // the whole write, and their targets say so
+        for op in ["tension_value_1k", "tension_drift_1k"] {
+            let t = spec_target(op).unwrap();
+            assert!(
+                t.contains("the tension delta and on_change report of one write"),
+                "{op}: {t}"
+            );
         }
         assert!(
             spec_target("tension_carry_1k")
@@ -3411,8 +3864,12 @@ mod tests {
             vec![
                 "lexicon_build",
                 "entity_search",
+                "search_coverage_sort",
                 "suggestions_after_write",
-                "coverage_all"
+                "coverage_all",
+                "coverage_carry",
+                "coverage_report_cold",
+                "coverage_carry_hub"
             ]
         );
         for op in ops {
@@ -3428,8 +3885,12 @@ mod tests {
         for op in [
             "lexicon_build",
             "entity_search",
+            "search_coverage_sort",
             "suggestions_after_write",
             "coverage_all",
+            "coverage_carry",
+            "coverage_report_cold",
+            "coverage_carry_hub",
         ] {
             let m = ms
                 .iter()

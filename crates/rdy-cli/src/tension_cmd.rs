@@ -39,10 +39,19 @@ pub(crate) struct TensionsArgs {
 #[derive(clap::Args)]
 pub(crate) struct ResolveArgs {
     /// The tension: tn-<hex>, or a unique prefix of at least 6 hex digits.
-    tension: String,
-    /// Dismiss the tension, and why.
+    tension: Option<String>,
+    /// A passing mention instead of a tension: the block and the entity it names.
+    #[arg(long, num_args = 2, value_names = ["BLOCK", "ENTITY"], conflicts_with = "tension")]
+    mention: Option<Vec<String>>,
+    /// Dismiss the tension or the mention, and why.
+    #[arg(long, conflicts_with = "restore")]
+    dismiss: Option<String>,
+    /// Restore a dismissed mention, and why.
     #[arg(long)]
-    dismiss: String,
+    restore: Option<String>,
+    /// Where the mention is checked (default: your view), e.g. view:work.
+    #[arg(long, requires = "mention")]
+    scope: Option<String>,
 }
 
 /// `<id>  <severity>  <kind>  <status>  <summary>`, then the sides, the proposal of a landing
@@ -173,17 +182,45 @@ pub(crate) fn tensions(env: &Env, a: TensionsArgs) -> Result<(Value, String), Er
 }
 
 pub(crate) fn resolve(env: &Env, a: ResolveArgs) -> Result<(Value, String), ErrorReply> {
-    let ResolveArgs { tension, dismiss } = a;
+    let ResolveArgs {
+        tension,
+        mention,
+        dismiss,
+        restore,
+        scope,
+    } = a;
+    let mention = mention.map(|m| json!({"block": m[0], "entity": m[1]}));
+    let reason = |r: Option<String>| r.map(|r| json!({"reason": r}));
     let v = call(
         env,
         "resolve",
-        json!({"tension": tension, "dismiss": {"reason": dismiss}}),
+        json!({
+            "tension": tension,
+            "mention": mention,
+            "dismiss": reason(dismiss),
+            "restore": reason(restore),
+            "scope": scope,
+        }),
     )?;
-    let t = format!(
-        "dismissed {} (review {})",
-        text(&v["id"]),
-        hash_short(text(&v["review"]))
-    );
+    let t = if v["entity"].is_string() {
+        let did = if text(&v["verdict"]) == "restore" {
+            "restored"
+        } else {
+            "dismissed"
+        };
+        format!(
+            "{did} the mention of {} in {} (review {})",
+            text(&v["entity"]),
+            text(&v["block"]),
+            hash_short(text(&v["review"]))
+        )
+    } else {
+        format!(
+            "dismissed {} (review {})",
+            text(&v["id"]),
+            hash_short(text(&v["review"]))
+        )
+    };
     Ok((v, t))
 }
 

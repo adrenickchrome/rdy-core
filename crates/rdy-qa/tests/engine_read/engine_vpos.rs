@@ -93,6 +93,7 @@ fn clink1_links_are_stored_on_the_change_and_part_of_its_id() {
         intent: Some(intent),
         alternative: None,
         client_nonce: Some("nonce-7".into()),
+        imported_by: None,
     };
     let req = |title: &str| WriteRequest {
         view: "work".into(),

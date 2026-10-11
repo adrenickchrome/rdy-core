@@ -1,5 +1,6 @@
 //! cbrf1: the text `rdy edit` shows. The briefing becomes `#` comment lines above the YAML
 //! (the YAML parser drops them on save), and a write's consequences become a short list.
+use rdy_schema::CoverageDimension;
 use serde_json::Value;
 
 /// A string field of `v`, empty when absent.
@@ -53,6 +54,45 @@ fn related_line(r: &Value) -> String {
         s(r, "relation"),
         s(r, "statement")
     )
+}
+
+/// The coverage lines of a briefing (FW-CV1, FW-CV2): the score with its dimensions and the
+/// confidence level, one line per reason, and the count of reasons left out. Nothing when the
+/// briefing covers no scored block.
+fn coverage_lines(out: &mut Vec<String>, c: &Value) {
+    let Some(score) = c["score"].as_u64() else {
+        return;
+    };
+    let dims: Vec<String> = CoverageDimension::ALL
+        .iter()
+        .filter_map(|d| {
+            c["dimensions"][d.name()]
+                .as_u64()
+                .map(|n| format!("{} {n}", d.name()))
+        })
+        .collect();
+    if dims.is_empty() {
+        return;
+    }
+    out.push(format!(
+        "# coverage: {score} ({}); confidence {}",
+        dims.join(", "),
+        one_line(s(c, "confidence"))
+    ));
+    for r in c["reasons"].as_array().into_iter().flatten() {
+        out.push(format!(
+            "#   {}",
+            one_line(&format!(
+                "{} {}: {}",
+                s(r, "code"),
+                s(r, "block"),
+                s(r, "fix")
+            ))
+        ));
+    }
+    if let Some(n) = c["reasons_omitted"].as_u64().filter(|n| *n > 0) {
+        out.push(format!("#   … {n} more"));
+    }
 }
 
 /// The briefing as `#` comment lines, one section per list, ending in a bare `#` line.
@@ -285,18 +325,9 @@ pub fn header(briefing: &Value) -> String {
     if !mentions.is_empty() {
         section(&mut out, "mentioned by", mentions.into_iter());
     }
-    let g = &briefing["coverage"]["grounded"];
-    let n = |k: &str| g[k].as_u64().unwrap_or(0);
-    if g.is_object() && n("facts") + n("content") + n("mentions") > 0 {
-        out.push(format!(
-            "# coverage: {}/{} facts tied, {}/{} content tied, {}/{} mentions linked",
-            n("facts_tied"),
-            n("facts"),
-            n("content_tied"),
-            n("content"),
-            n("mentions_linked"),
-            n("mentions")
-        ));
+    coverage_lines(&mut out, &briefing["coverage"]);
+    if let Some(e) = briefing["coverage_error"].as_str() {
+        out.push(format!("# coverage not read: {}", one_line(e)));
     }
     if let Some(m) = briefing["omitted"].as_object().filter(|m| !m.is_empty()) {
         let mut names: Vec<_> = m.iter().collect();
@@ -392,12 +423,13 @@ pub fn plain(v: &Value) -> String {
 
 /// A write reply's extras as text to append to its one-line summary: empty when there are none,
 /// else `\nconsequences:` and one line per entry (with a line for what a cut left out), then the
-/// intents on the written blocks, the tension changes, the suggestions and the related
-/// decisions in the same way, and last a line for each part rdy could not work out.
+/// intents on the written blocks, the tension changes, the coverage change, the suggestions and
+/// the related decisions in the same way, and last a line for each part rdy could not work out.
 pub fn consequences_text(reply: &Value) -> String {
     let mut t = consequences_part(reply);
     t.push_str(&intents_part(reply));
     t.push_str(&on_change_part(reply));
+    t.push_str(&coverage_part(reply));
     t.push_str(&suggestions_part(reply));
     t.push_str(&related_part(reply));
     t.push_str(&errors_part(reply));
@@ -428,12 +460,50 @@ fn intents_part(reply: &Value) -> String {
     t
 }
 
+/// The coverage change a write made (FW-CH3): `coverage: <before> → <after>` and, per page that
+/// moved, `  <path>: <before> → <after>`. Nothing when every number is unchanged, or when the
+/// reply's `coverage` is not a change (an import reply's is the baseline report).
+fn coverage_part(reply: &Value) -> String {
+    let c = &reply["coverage"];
+    let (Some(before), Some(after)) = (c["before"].as_u64(), c["after"].as_u64()) else {
+        return String::new();
+    };
+    let moved: Vec<&Value> = c["pages"]
+        .as_array()
+        .map_or(&[][..], |a| a)
+        .iter()
+        .filter(|p| p["before"] != p["after"])
+        .collect();
+    if before == after && moved.is_empty() {
+        return String::new();
+    }
+    let mut t = format!("\ncoverage: {before} → {after}");
+    let all_moved = moved.len() == c["pages"].as_array().map_or(0, Vec::len);
+    for p in moved {
+        t.push_str(&format!(
+            "\n  {}: {} → {}",
+            s(p, "path"),
+            p["before"],
+            p["after"]
+        ));
+    }
+    // pages sort moved first, then the cut: the omitted count can name a moved page only when
+    // every page listed moved
+    if let Some(n) = c["pages_omitted"].as_u64().filter(|n| *n > 0 && all_moved) {
+        t.push_str(&format!("\n  and {n} more pages"));
+    }
+    t
+}
+
 /// The parts of the reply rdy could not work out, each with its error.
 fn errors_part(reply: &Value) -> String {
-    const PARTS: [(&str, &str); 5] = [
+    const PARTS: [(&str, &str); 7] = [
         ("consequences_error", "consequences"),
         ("consequences_tension_error", "the tension consequences"),
         ("on_change_error", "the tension changes"),
+        // a propose reply's tensions (gate `ProposalInfo`)
+        ("tensions_error", "the tensions"),
+        ("coverage_error", "the coverage change"),
         ("suggestions_error", "suggestions"),
         ("related_decisions_error", "related decisions"),
     ];
@@ -773,6 +843,70 @@ mod tests {
     }
 
     #[test]
+    fn cc16_the_consequences_text_prints_the_change() {
+        let reply = json!({
+            "coverage": {"before": 80, "after": 85, "pages": [
+                {"doc": "d-1", "path": "ops", "before": 70, "after": 90},
+                {"doc": "d-2", "path": "fees", "before": 100, "after": 100}
+            ]}
+        });
+        assert_eq!(
+            consequences_text(&reply),
+            "\ncoverage: 80 → 85\n  ops: 70 → 90"
+        );
+        // nothing when every number is unchanged
+        let same = json!({"coverage": {"before": 80, "after": 80, "pages": [
+            {"doc": "d-1", "path": "ops", "before": 70, "after": 70}
+        ]}});
+        assert_eq!(consequences_text(&same), "");
+        // an import reply's coverage is the baseline report: no before or after, nothing printed
+        let baseline = json!({"coverage": {"score": 60, "dimensions": {}}});
+        assert_eq!(consequences_text(&baseline), "");
+        // a page that moved under an unchanged corpus score still prints
+        let page = json!({"coverage": {"before": 80, "after": 80, "pages": [
+            {"doc": "d-1", "path": "ops", "before": 70, "after": 71}
+        ]}});
+        assert_eq!(
+            consequences_text(&page),
+            "\ncoverage: 80 → 80\n  ops: 70 → 71"
+        );
+        // a cut page list says how many pages it left out
+        let cut = json!({"coverage": {"before": 80, "after": 85, "pages_omitted": 3, "pages": [
+            {"doc": "d-1", "path": "ops", "before": 70, "after": 90}
+        ]}});
+        assert_eq!(
+            consequences_text(&cut),
+            "\ncoverage: 80 → 85\n  ops: 70 → 90\n  and 3 more pages"
+        );
+        // two moved pages and omitted unchanged pages: the count would read as moved pages, so
+        // it is not printed (the cut sorts moved pages first)
+        let unchanged_cut = json!({"coverage": {"before": 80, "after": 85, "pages_omitted": 10, "pages": [
+            {"doc": "d-1", "path": "ops", "before": 70, "after": 90},
+            {"doc": "d-3", "path": "audit", "before": 50, "after": 60},
+            {"doc": "d-2", "path": "fees", "before": 100, "after": 100}
+        ]}});
+        assert_eq!(
+            consequences_text(&unchanged_cut),
+            "\ncoverage: 80 → 85\n  ops: 70 → 90\n  audit: 50 → 60"
+        );
+        let err = json!({"coverage_error": "E_INTERNAL: boom"});
+        assert_eq!(
+            consequences_text(&err),
+            "\nnot worked out: the coverage change (E_INTERNAL: boom)"
+        );
+    }
+
+    #[test]
+    fn cc15_the_edit_header_says_when_the_coverage_was_not_read() {
+        let h = header(&json!({
+            "governs": [], "dependents": [], "will_go_stale": [], "suspects": [],
+            "base": {"token": "t", "blocks": []},
+            "coverage_error": "E_INTERNAL: boom"
+        }));
+        assert!(h.contains("# coverage not read: E_INTERNAL: boom\n"), "{h}");
+    }
+
+    #[test]
     fn infl1_free_text_with_line_breaks_stays_inside_the_comment() {
         // libyaml (under serde_yaml_ng) also breaks lines at NEL, U+2028 and U+2029.
         let b = json!({
@@ -811,7 +945,7 @@ mod tests {
             "base": {"token": "abcdef0123456789", "blocks": [{"id": "D-2", "version": "x"}]},
             "related_decisions": [{"for": "D-2", "decision": "D-1", "status": "live", "statement": "Ledger first", "relation": "same_entity", "entities": ["en-1"]}],
             "mentioned_by": [{"doc": "d-1", "block": "c-1", "field": "body", "mention": "Archive"}],
-            "coverage": {"scope": "covered", "grounded": {"facts": 2, "facts_tied": 1, "facts_tied_pct": 50, "content": 3, "content_tied": 1, "content_tied_pct": 33, "mentions": 2, "mentions_linked": 1, "mentions_linked_pct": 50}, "connected": {"docs": 0, "unlinked_docs": []}, "entities": 0, "kinds": [], "similar_kinds": []}
+            "coverage": {"score": 70, "dimensions": {"grounded": 50, "complete": 100}, "pages": [], "issues": [], "confidence": "high", "reasons": []}
         });
         let h = header(&b);
         assert!(
@@ -823,7 +957,7 @@ mod tests {
             "{h}"
         );
         assert!(
-            h.contains("# coverage: 1/2 facts tied, 1/3 content tied, 1/2 mentions linked\n"),
+            h.contains("# coverage: 70 (grounded 50, complete 100); confidence high\n"),
             "{h}"
         );
         assert!(h.ends_with("\n#\n"), "the closing # stays last: {h}");
@@ -836,6 +970,48 @@ mod tests {
                 && !quiet.contains("coverage"),
             "{quiet}"
         );
+    }
+
+    #[test]
+    fn cc13_the_coverage_line_and_reasons_print() {
+        let b = json!({
+            "governs": [], "dependents": [], "will_go_stale": [], "suspects": [],
+            "base": {"token": "abcdef0123456789", "blocks": [{"id": "c-1", "version": "x"}]},
+            "coverage": {
+                "score": 62,
+                "dimensions": {"complete": 75, "grounded": 50, "governed": 100},
+                "pages": [{"doc": "d-1", "path": "ops", "score": 62}],
+                "issues": [],
+                "confidence": "low",
+                "reasons": [
+                    {"block": "c-1", "dimension": "current", "code": "open_suspect", "subject": "c-9", "fix": "Review c-1 against c-9."},
+                    {"block": "c-2", "dimension": "complete", "code": "untied_content", "subject": null, "fix": "Link c-2 to an entity."}
+                ],
+                "reasons_omitted": 3
+            }
+        });
+        let h = header(&b);
+        let lines: Vec<&str> = h.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with("# coverage:"))
+            .expect(&h);
+        assert_eq!(
+            &lines[at..at + 4],
+            [
+                "# coverage: 62 (grounded 50, complete 75, governed 100); confidence low",
+                "#   open_suspect c-1: Review c-1 against c-9.",
+                "#   untied_content c-2: Link c-2 to an entity.",
+                "#   … 3 more",
+            ]
+        );
+        // a briefing that covers no scored block prints nothing
+        let none = header(&json!({
+            "governs": [], "dependents": [], "will_go_stale": [], "suspects": [],
+            "base": {"token": "t", "blocks": []},
+            "coverage": {"score": 100, "dimensions": {}, "pages": [], "issues": [], "confidence": "high", "reasons": []}
+        }));
+        assert!(!none.contains("coverage"), "{none}");
     }
 
     #[test]

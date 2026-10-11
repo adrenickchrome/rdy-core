@@ -28,7 +28,7 @@ use edit::{edit_block, keys_assign, new_doc, new_folder};
 use land::{approve, propose, tag};
 pub use project::{Cleaned, clean_quarantine, quarantine};
 use project::{check, fsck, reindex};
-use read::{block, impact, log, ls, show, status, suspects, tags};
+use read::{block, coverage, impact, log, ls, show, status, suspects, tags};
 use search::search;
 use site::{export, import, render};
 pub use wc::wc_in_flight;
@@ -77,6 +77,7 @@ pub const OPS: &[&str] = &[
     "tensions",
     "resolve",
     "wc_put_blob",
+    "coverage",
 ];
 
 #[derive(Deserialize)]
@@ -195,7 +196,7 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
             parse(
                 op,
                 args,
-                "{query, regex?, ignore_case?, scope?, max_tokens?, page?, types?, traits?, path?, lifecycle?, changed_since?, exclude_history?, governed_by?, describes?, linked_to?, mentions?, suspect?, tension?}",
+                "{query, regex?, ignore_case?, scope?, max_tokens?, page?, types?, traits?, path?, lifecycle?, changed_since?, exclude_history?, governed_by?, describes?, linked_to?, mentions?, suspect?, tension?, coverage_below?, sort?}",
             )?,
         ),
         "render" => render(cx, parse(op, args, "{out, scope?}")?),
@@ -284,9 +285,10 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "resolve" => run_resolve(
             cx.engine,
             cx.session,
-            parse(op, args, "{tension, dismiss?}")?,
+            parse(op, args, "{tension?, mention?, dismiss?, restore?, scope?}")?,
         ),
         "wc_put_blob" => wc_put_blob(cx, parse(op, args, "{path}")?),
+        "coverage" => coverage(cx, parse(op, args, "{scope?, path?, max_tokens?}")?),
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),

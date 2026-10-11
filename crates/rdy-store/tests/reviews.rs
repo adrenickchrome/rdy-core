@@ -32,9 +32,9 @@ fn review(vkey: Hash, reason: &str) -> Review {
 }
 
 #[test]
-fn rvw1_kind_17_and_format_7() {
+fn rvw1_kind_17_and_format_8() {
     assert_eq!(kinds::REVIEW, 17);
-    assert_eq!(rdy_store::format::STORE_FORMAT, 7);
+    assert_eq!(rdy_store::format::STORE_FORMAT, 8);
 }
 
 #[test]
@@ -183,4 +183,213 @@ fn rvw1_fsck_refuses_a_malformed_dismiss_key() {
     )]);
     assert!(m.contains("dismiss/not-a-vkey"), "{m}");
     assert!(m.contains("tension vkey"), "{m}");
+}
+
+use rdy_store::review::{MENTION_REF, mention_ref};
+
+fn mention(block: &str, entity: &str, verdict: Verdict, at_ms: i64) -> Review {
+    Review {
+        subject: ReviewSubject::Mention {
+            block: BlockId::parse(block).unwrap(),
+            entity: BlockId::parse(entity).unwrap(),
+        },
+        case_hash: None,
+        verdict,
+        reason: "an everyday word here".into(),
+        findings: vec![],
+        provenance: Provenance {
+            actor: "agent:a".into(),
+            run: Some("r".into()),
+            role: Role::Writer,
+            at_ms,
+        },
+    }
+}
+
+#[test]
+fn cc1_format_8() {
+    assert_eq!(rdy_store::format::STORE_FORMAT, 8);
+}
+
+#[test]
+fn cc1_a_mention_review_sets_its_ref_and_the_latest_wins() {
+    let (_d, mut s) = store();
+    let (b, e) = ("c-AAAAA", "t-BBBBB");
+    let h1 = s
+        .put_mention_review(&mention(b, e, Verdict::Dismiss, 1))
+        .unwrap();
+    let key = mention_ref(&BlockId::parse(b).unwrap(), &BlockId::parse(e).unwrap());
+    assert_eq!(key, format!("{MENTION_REF}{b}/{e}"));
+    assert_eq!(s.get_ref(&key).unwrap().unwrap(), h1.0.to_vec());
+    let h2 = s
+        .put_mention_review(&mention(b, e, Verdict::Restore, 2))
+        .unwrap();
+    assert_ne!(h1, h2);
+    assert_eq!(
+        s.mention_reviews().unwrap(),
+        vec![(BlockId::parse(b).unwrap(), BlockId::parse(e).unwrap(), h2)]
+    );
+    assert_eq!(
+        s.review(&h1).unwrap().verdict,
+        Verdict::Dismiss,
+        "the older review stays stored"
+    );
+    assert_eq!(s.review(&h2).unwrap().vkey(), None);
+}
+
+#[test]
+fn cc1_the_same_review_again_writes_nothing() {
+    let (_d, mut s) = store();
+    let r = mention("c-AAAAA", "t-BBBBB", Verdict::Dismiss, 1);
+    let h = s.put_mention_review(&r).unwrap();
+    let writes = s.write_count();
+    assert_eq!(s.put_mention_review(&r).unwrap(), h);
+    assert_eq!(s.write_count(), writes, "a retry writes nothing");
+}
+
+#[test]
+fn cc1_a_tension_review_is_not_a_mention_review_and_the_reverse() {
+    let (_d, mut s) = store();
+    assert!(s.put_mention_review(&review(Hash([5; 32]), "x")).is_err());
+    assert!(
+        s.put_dismissal(&mention("c-AAAAA", "t-BBBBB", Verdict::Dismiss, 1))
+            .is_err()
+    );
+}
+
+#[test]
+fn cc1_mention_reviews_survive_reindex_and_fsck_checks_them() {
+    let (_d, mut s) = store();
+    s.put_mention_review(&mention("c-AAAAA", "t-BBBBB", Verdict::Dismiss, 1))
+        .unwrap();
+    s.reindex().unwrap();
+    assert_eq!(s.mention_reviews().unwrap().len(), 1);
+    assert_eq!(
+        s.check_objects().unwrap().reviews,
+        1,
+        "fsck counts the mention review"
+    );
+}
+
+#[test]
+fn cc1_the_general_ref_api_refuses_a_mention_ref() {
+    let (_d, mut s) = store();
+    let name = format!("{MENTION_REF}c-AAAAA/t-BBBBB");
+    assert!(s.set_refs(vec![(name, Hash([11; 32]).0.to_vec())]).is_err());
+}
+
+/// guard: existing tension reviews keep their bytes, so their hashes do not move.
+#[test]
+fn cc1_appending_variants_keeps_tension_review_hashes() {
+    let r = review(Hash([5; 32]), "fine");
+    let bytes = postcard::to_allocvec(&r).unwrap();
+    assert_eq!(bytes[0], 0, "Tension stays variant 0");
+}
+
+#[test]
+fn cc1_fsck_refuses_a_mention_ref_to_a_tension_review() {
+    let (_d, mut s) = store();
+    let h = s.put_dismissal(&review(Hash([17; 32]), "fine")).unwrap();
+    s.set_refs_unchecked_for_tests(vec![(
+        format!("{MENTION_REF}c-AAAAA/t-BBBBB"),
+        h.0.to_vec(),
+    )])
+    .unwrap();
+    match s.check_objects() {
+        Err(StoreError::Decode(m)) => assert!(
+            m.contains(&format!(
+                "mention c-AAAAA/t-BBBBB: review {h} is not a mention review"
+            )),
+            "{m}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn cc1_fsck_refuses_a_mention_ref_to_another_mentions_review() {
+    let (_d, mut s) = store();
+    let h = s
+        .put_mention_review(&mention("c-AAAAA", "t-BBBBB", Verdict::Dismiss, 1))
+        .unwrap();
+    s.set_refs_unchecked_for_tests(vec![(
+        format!("{MENTION_REF}c-CCCCC/t-BBBBB"),
+        h.0.to_vec(),
+    )])
+    .unwrap();
+    match s.check_objects() {
+        Err(StoreError::Decode(m)) => assert!(
+            m.contains(&format!(
+                "mention c-CCCCC/t-BBBBB: review {h} is for another mention"
+            )),
+            "{m}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn cc1_fsck_refuses_a_dismiss_ref_to_a_restore_review() {
+    let (_d, mut s) = store();
+    let k = Hash([18; 32]);
+    let h = s
+        .put_mention_review(&mention("c-AAAAA", "t-BBBBB", Verdict::Restore, 1))
+        .unwrap();
+    s.set_refs_unchecked_for_tests(vec![(format!("{DISMISS_REF}{k}"), h.0.to_vec())])
+        .unwrap();
+    match s.check_objects() {
+        Err(StoreError::Decode(m)) => assert!(
+            m.contains(&format!("dismissal {k}: review {h} is not a dismissal")),
+            "{m}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn cc1_fsck_refuses_a_malformed_mention_key() {
+    let m = fsck_after(vec![(
+        format!("{MENTION_REF}c-AAAAA"),
+        Hash([19; 32]).0.to_vec(),
+    )]);
+    assert!(m.contains("mention/c-AAAAA"), "{m}");
+    assert!(
+        m.contains("does not name a mention by its block and entity"),
+        "{m}"
+    );
+}
+
+#[test]
+fn cc1_fsck_refuses_a_mention_ref_to_a_missing_review() {
+    let h = Hash([7; 32]);
+    let m = fsck_after(vec![(
+        format!("{MENTION_REF}c-AAAAA/t-BBBBB"),
+        h.0.to_vec(),
+    )]);
+    assert!(
+        m.contains(&format!(
+            "mention c-AAAAA/t-BBBBB: {h} is not a stored review"
+        )),
+        "{m}"
+    );
+}
+
+#[test]
+fn cc1_fsck_refuses_a_mention_ref_to_an_object_of_another_kind() {
+    let (_d, mut s) = store();
+    let blob = s.put_blob(b"not a review").unwrap();
+    s.set_refs_unchecked_for_tests(vec![(
+        format!("{MENTION_REF}c-AAAAA/t-BBBBB"),
+        blob.0.to_vec(),
+    )])
+    .unwrap();
+    match s.check_objects() {
+        Err(StoreError::Decode(m)) => assert!(
+            m.contains(&format!(
+                "mention c-AAAAA/t-BBBBB: {blob} is not a stored review"
+            )),
+            "{m}"
+        ),
+        other => panic!("{other:?}"),
+    }
 }

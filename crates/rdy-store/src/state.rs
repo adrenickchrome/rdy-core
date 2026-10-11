@@ -100,6 +100,19 @@ impl StoreReader {
         self.get(&self.landing(landing)?.state)
     }
 
+    /// A parent loop in `state` reachable from `starts`: two blocks on it, each the other's
+    /// ancestor (`merge::find_parent_cycle`, each block's parent read from its version).
+    pub fn parent_cycle_in(
+        &self,
+        state: &StateSnapshot,
+        starts: impl IntoIterator<Item = BlockId>,
+    ) -> Result<Option<(BlockId, BlockId)>, StoreError> {
+        crate::merge::find_parent_cycle(starts, |id| match state.blocks.get(id) {
+            Some(v) => Ok(self.get_block(v)?.parent),
+            None => Ok(None),
+        })
+    }
+
     /// The state landing `landing` recorded; the empty state for None.
     pub fn state_of(&self, landing: Option<Hash>) -> Result<StateSnapshot, StoreError> {
         match landing {

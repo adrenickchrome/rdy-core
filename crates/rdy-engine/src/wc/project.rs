@@ -216,6 +216,10 @@ impl Projector<'_> {
             let mut stack = m.children(Some(&b.id));
             stack.reverse();
             while let Some(c) = stack.pop() {
+                // a damaged store may loop: never list more blocks than there are
+                if list.len() > m.len() {
+                    break;
+                }
                 if self.supporting(c) {
                     continue;
                 }

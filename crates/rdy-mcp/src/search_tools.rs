@@ -45,6 +45,10 @@ pub struct SearchParams {
     pub tension: Option<bool>,
     /// Keep blocks that name an entity by name or alias: linked (tied to it) or unlinked (not linked yet).
     pub mentions: Option<String>,
+    /// Keep hits whose block coverage score is under this (0 to 100).
+    pub coverage_below: Option<u32>,
+    /// "coverage": list the hits with the lowest coverage first. Leave out for the default order.
+    pub sort: Option<String>,
     /// Add a briefing over this page's hits and over the blocks of the entity sheets; cite its base.token to write those blocks.
     pub brief: Option<bool>,
 }
@@ -81,6 +85,8 @@ pub fn rdy_search(st: &mut McpState, p: SearchParams) -> Result<Value, RdyError>
                 suspect: p.suspect.unwrap_or(false),
                 tension: p.tension.unwrap_or(false),
                 mentions: p.mentions,
+                coverage_below: p.coverage_below,
+                sort: p.sort,
             },
         },
         p.page.as_deref(),

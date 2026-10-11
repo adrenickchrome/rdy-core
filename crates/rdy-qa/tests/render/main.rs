@@ -8,6 +8,7 @@ mod render_llms;
 mod render_markdown;
 mod render_mermaid;
 mod render_nav;
+mod render_no_coverage;
 mod render_plain;
 mod render_presentational;
 mod render_ref;

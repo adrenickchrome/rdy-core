@@ -1,15 +1,17 @@
 //! The shared index the detectors read: the in-flight writes (with their liveness and their name,
 //! text, supersede and reference indexes), a canon index memoised per canon build, and the
 //! detection context that joins them to the published state.
+use super::drift::{ShingleIndex, TextCache, restating_type};
 use super::{DetectScope, Involved, SideRef};
 use crate::brief::{effective_lifecycle, effective_stable};
+use crate::lexicon::Lexicon;
 use crate::{InflightSet, Materialized, RdyError, ReadState, Scope};
 use imbl::OrdMap;
 use rdy_graph::{DerivedStatus, Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, edges_of};
 use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Op, decision};
 use rdy_schema::{Pack, Trait};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// One in-flight change's write of one block: its base (`None` for a create), the version it
 /// writes and the block (`None` for a delete), and whether it is live: current in some view of
@@ -64,6 +66,9 @@ pub struct Writes {
     retiring: OrdMap<BlockId, Vec<Arc<Write>>>,
     /// Live writes whose block has a premise or pointing edge to a block, by that block.
     pointing: OrdMap<BlockId, Vec<(Arc<Write>, Edge)>>,
+    /// The words and shingles of the versions restatement drift has read (by version, so pure),
+    /// shared by every carry from one build.
+    texts: TextCache,
 }
 
 impl Writes {
@@ -362,6 +367,31 @@ impl Writes {
         self.by_block.values().flatten().filter(|w| w.live)
     }
 
+    /// The live writes with a block that `m` does not hold at their version: a conflicted block
+    /// (two live writes, one kept), a block a later change in another view overwrote, or a write
+    /// the materialization does not hold. Their text is in no index built from `m`. Reads no text.
+    pub fn unmaterialized(&self, m: &Materialized) -> Vec<Arc<Write>> {
+        self.live()
+            .filter(|w| w.new.is_some() && m.version_of(&w.block) != w.version)
+            .cloned()
+            .collect()
+    }
+
+    /// Every block some write (live or not) writes, by id.
+    pub fn blocks(&self) -> impl Iterator<Item = &BlockId> {
+        self.by_block.keys()
+    }
+
+    /// Every write on `b`, live or not, by change, without a copy.
+    pub fn on(&self, b: &BlockId) -> &[Arc<Write>] {
+        self.by_block.get(b).map_or(&[][..], Vec::as_slice)
+    }
+
+    /// The version text cache restatement drift reads through.
+    pub fn texts(&self) -> &TextCache {
+        &self.texts
+    }
+
     /// The live writes on `b`, by change.
     pub fn live_on(&self, b: &BlockId) -> Vec<Arc<Write>> {
         self.all_on(b).into_iter().filter(|w| w.live).collect()
@@ -393,6 +423,11 @@ impl Writes {
             (Some(x), Some(y)) => x.views.iter().any(|v| y.views.contains(v)),
             _ => false,
         }
+    }
+
+    /// The blocks of the live writes that define a name.
+    pub fn named_ids(&self) -> impl Iterator<Item = &BlockId> {
+        self.named.values().flatten().map(|w| &w.block)
     }
 
     /// The live writes whose block defines `normalized` (a [`normalize_name`] result).
@@ -505,7 +540,8 @@ impl IndexKeys {
     }
 }
 
-/// Canon's names, normative texts and supersedes, built once per canon build.
+/// Canon's names, normative texts and supersedes, built once per canon build, and canon's
+/// shingle index (restatement drift), built on first read.
 #[derive(Clone, Debug, Default)]
 pub struct CanonIndex {
     /// Blocks that define a name, by normalized name.
@@ -515,6 +551,9 @@ pub struct CanonIndex {
     /// For each target, the canon decisions that supersede it (with the part) and whose canon
     /// status is neither rejected, superseded nor revoked.
     pub supersedes: BTreeMap<BlockId, Vec<(BlockId, Option<String>)>>,
+    /// The blocks that take part in restatement drift, by shingle; lazy (see
+    /// [`DetectCx::canon_shingles`]).
+    shingles: OnceLock<Arc<ShingleIndex>>,
 }
 
 impl CanonIndex {
@@ -570,7 +609,7 @@ pub(crate) fn canon_index_of(st: &ReadState) -> Result<Arc<CanonIndex>, RdyError
 
 /// Whether `b` is normative content: its type has the `normative` trait, or it is a `table`
 /// marked `normative: true`.
-fn is_normative(pack: &Pack, b: &Block) -> bool {
+pub(crate) fn is_normative(pack: &Pack, b: &Block) -> bool {
     has_trait(pack, b, Trait::Normative)
         || (b.block_type == "table" && b.fields.get("normative") == Some(&FieldValue::Bool(true)))
 }
@@ -596,10 +635,19 @@ fn defines(pack: &Pack, b: &Block) -> bool {
     has_trait(pack, b, Trait::Defines) && b.field_str("name").is_some()
 }
 
-fn has_trait(pack: &Pack, b: &Block, t: Trait) -> bool {
+/// Whether `b`'s type has trait `t` in `pack`.
+pub(crate) fn has_trait(pack: &Pack, b: &Block, t: Trait) -> bool {
     pack.block_types
         .get(&b.block_type)
         .is_some_and(|d| d.traits.contains(&t))
+}
+
+/// A landing run's canon-to-be: its materialization and graph, and the blocks its ops touch (the
+/// lexicon of that canon is canon's with those blocks swapped).
+struct Landing {
+    m: Arc<Materialized>,
+    g: Arc<Graph>,
+    touched: BTreeSet<BlockId>,
 }
 
 /// What one detection run reads: the published state, the in-flight writes (none in the canon
@@ -611,7 +659,12 @@ pub struct DetectCx<'a> {
     scope: DetectScope,
     /// A landing's run (tgat1): the canon its landing set would give, read where the in-flight
     /// scope is read otherwise.
-    landing: Option<(Arc<Materialized>, Arc<Graph>)>,
+    landing: Option<Landing>,
+    /// The entity lexicon of the scope this run reads (see [`DetectCx::lexicon`]); lazy.
+    lexicon: OnceLock<Arc<Lexicon>>,
+    /// The blocks this run's scope moved away from canon that may take part in restatement
+    /// drift (see [`DetectCx::moved_blocks`]); lazy.
+    moved: OnceLock<Arc<Vec<(BlockId, Hash)>>>,
 }
 
 impl<'a> DetectCx<'a> {
@@ -627,22 +680,118 @@ impl<'a> DetectCx<'a> {
             canon,
             scope,
             landing: None,
+            lexicon: OnceLock::new(),
+            moved: OnceLock::new(),
         }
     }
 
     /// An in-flight run over a landing set (tgat1): `writes` are that set's writes, and `m` and
-    /// `g` the canon its landing would give, read in place of the in-flight scope.
+    /// `g` the canon its landing would give, read in place of the in-flight scope; `touched` are
+    /// the blocks the landing's ops write.
     pub(crate) fn landing(
         st: &'a ReadState,
         writes: &'a Writes,
         canon: Arc<CanonIndex>,
         m: Arc<Materialized>,
         g: Arc<Graph>,
+        touched: BTreeSet<BlockId>,
     ) -> DetectCx<'a> {
         DetectCx {
-            landing: Some((m, g)),
+            landing: Some(Landing { m, g, touched }),
             ..DetectCx::new(st, writes, canon, DetectScope::Inflight)
         }
+    }
+
+    /// The entity lexicon of the materialization this run reads: canon's in the canon scope, the
+    /// in-flight one in the in-flight scope (a landing's run: that of the canon the landing would
+    /// give). Memoised in this run, and read through the state's own lexicon where it has one.
+    pub fn lexicon(&self) -> Result<Arc<Lexicon>, RdyError> {
+        if let Some(l) = self.lexicon.get() {
+            return Ok(Arc::clone(l));
+        }
+        let l = match (&self.landing, self.scope) {
+            (_, DetectScope::Canon) => self.st.lexicon(&Scope::Canon)?,
+            // carried like the landing graph: canon's lexicon with the touched blocks swapped
+            (Some(l), DetectScope::Inflight) => {
+                let canon_m = self.canon_m()?;
+                let canon_l = self.st.lexicon(&Scope::Canon)?;
+                Arc::new(canon_l.with_changes(
+                    l.touched.iter().filter_map(|b| canon_m.get(b)),
+                    l.touched.iter().filter_map(|b| l.m.get(b)),
+                ))
+            }
+            (None, DetectScope::Inflight) => self.st.lexicon(&Scope::Inflight)?,
+        };
+        Ok(Arc::clone(self.lexicon.get_or_init(|| l)))
+    }
+
+    /// The definitions that are deprecated in the scope this run reads, by id. Found through the
+    /// names index (canon's and the live writes'), so no text is read and the cost follows the
+    /// number of definitions, not of blocks.
+    pub fn deprecated_definitions(&self) -> Result<Vec<Block>, RdyError> {
+        let m = self.current_m()?;
+        let ids: BTreeSet<&BlockId> = self
+            .canon
+            .names
+            .values()
+            .flatten()
+            .chain(self.writes.named_ids())
+            .collect();
+        let mut out = vec![];
+        for id in ids {
+            if let Some(b) = m.get(id)
+                && self.defines(b)
+                && self.deprecated(id)?
+            {
+                out.push(b.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Canon's shingle index (restatement drift): every canon block that takes part, by
+    /// shingle. Built on first read and kept in canon's index, so once per canon build.
+    pub fn canon_shingles(&self) -> Result<Arc<ShingleIndex>, RdyError> {
+        if let Some(ix) = self.canon.shingles.get() {
+            return Ok(Arc::clone(ix));
+        }
+        let m = self.canon_m()?;
+        let texts = self.writes.texts();
+        Ok(Arc::clone(self.canon.shingles.get_or_init(|| {
+            Arc::new(ShingleIndex::of(self.st.pack(), m.iter(), |b| {
+                m.version_of(&b.id).and_then(|v| texts.get(&v))
+            }))
+        })))
+    }
+
+    /// Canon's shingle index when it is already built (no build).
+    pub fn canon_shingles_if_built(&self) -> Option<Arc<ShingleIndex>> {
+        self.canon.shingles.get().cloned()
+    }
+
+    /// The blocks this run's scope moved away from canon whose type takes part in restatement
+    /// drift, with their version there: every block a write of the run writes whose version in
+    /// the scope's materialization is not canon's (every such block has a write in this run).
+    /// Reads no text. Empty in the canon scope; built on first read in this run.
+    pub fn moved_blocks(&self) -> Result<Arc<Vec<(BlockId, Hash)>>, RdyError> {
+        if let Some(v) = self.moved.get() {
+            return Ok(Arc::clone(v));
+        }
+        let mut moved = vec![];
+        if self.scope == DetectScope::Inflight {
+            let m = self.inflight_m()?;
+            let canon = self.canon_m()?;
+            let pack = self.st.pack();
+            for b in self.writes.blocks() {
+                if let Some(v) = m.version_of(b)
+                    && Some(v) != canon.version_of(b)
+                    && m.get(b).is_some_and(|block| restating_type(pack, block))
+                {
+                    moved.push((b.clone(), v));
+                }
+            }
+        }
+        Ok(Arc::clone(self.moved.get_or_init(|| Arc::new(moved))))
     }
 
     /// The scope this run detects in.
@@ -665,7 +814,7 @@ impl<'a> DetectCx<'a> {
     pub fn inflight_m(&self) -> Result<Arc<Materialized>, RdyError> {
         match (&self.landing, self.scope) {
             (_, DetectScope::Canon) => self.canon_m(),
-            (Some((m, _)), DetectScope::Inflight) => Ok(Arc::clone(m)),
+            (Some(l), DetectScope::Inflight) => Ok(Arc::clone(&l.m)),
             (None, DetectScope::Inflight) => self.st.materialized(&Scope::Inflight),
         }
     }
@@ -679,7 +828,7 @@ impl<'a> DetectCx<'a> {
     pub fn inflight_graph(&self) -> Result<Arc<Graph>, RdyError> {
         match (&self.landing, self.scope) {
             (_, DetectScope::Canon) => self.canon_graph(),
-            (Some((_, g)), DetectScope::Inflight) => Ok(Arc::clone(g)),
+            (Some(l), DetectScope::Inflight) => Ok(Arc::clone(&l.g)),
             (None, DetectScope::Inflight) => self.st.graph(&Scope::Inflight),
         }
     }
@@ -822,13 +971,11 @@ impl<'a> DetectCx<'a> {
     /// canon in the canon scope.
     pub fn deprecated(&self, b: &BlockId) -> Result<bool, RdyError> {
         let m = self.current_m()?;
+        // the lifecycle half of the rule reads no graph
         if effective_lifecycle(&m, Some(b)).as_deref() == Some("deprecated") {
             return Ok(true);
         }
-        Ok(matches!(
-            self.current_graph()?.status(b),
-            Some(DerivedStatus::Superseded { .. } | DerivedStatus::Revoked { .. })
-        ))
+        Ok(is_deprecated(&m, &*self.current_graph()?, b))
     }
 
     /// Whether `b` is normative content (a `normative` type, or a `table` with `normative: true`).
@@ -907,4 +1054,15 @@ pub fn pointing_edge(e: &Edge) -> bool {
         EdgeKind::Link(n) => IMPACT_LINKS.contains(&n.as_str()),
         EdgeKind::Contains => false,
     }
+}
+
+/// Whether `b` is deprecated in the state `m` and `g` describe: its effective lifecycle is
+/// `deprecated`, or it is a decision wholly superseded or revoked (a partial supersede does not
+/// count). The one rule the deprecated reference detector and coverage read (D-S46DE).
+pub(crate) fn is_deprecated(m: &Materialized, g: &Graph, b: &BlockId) -> bool {
+    effective_lifecycle(m, Some(b)).as_deref() == Some("deprecated")
+        || matches!(
+            g.status(b),
+            Some(DerivedStatus::Superseded { .. } | DerivedStatus::Revoked { .. })
+        )
 }

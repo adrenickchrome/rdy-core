@@ -67,8 +67,8 @@ fn owner(a: &str) -> Owner {
 }
 
 #[test]
-fn vop1_the_store_format_is_7() {
-    assert_eq!(rdy_store::format::STORE_FORMAT, 7);
+fn vop1_the_store_format_is_8() {
+    assert_eq!(rdy_store::format::STORE_FORMAT, 8);
 }
 
 #[test]

@@ -57,6 +57,10 @@ pub enum StoreError {
     /// sound, the walk refuses to follow it.
     #[error("view {view:?}: op {op} ends a chain of more than 64 undos of undos")]
     UndoTooDeep { view: String, op: Hash },
+    /// A write that combines moves from different changes (a fork's or a landing's rebase)
+    /// would make two blocks each other's ancestors; nothing was written.
+    #[error("{message}")]
+    ParentCycle { message: String, fix: String },
 }
 
 pub(crate) fn db<E: std::fmt::Display>(e: E) -> StoreError {

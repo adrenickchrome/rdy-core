@@ -689,7 +689,10 @@ fn tdis1_the_refusals_say_exactly_why() {
         severity,
         sides,
         blocks,
-    } = review.subject;
+    } = review.subject
+    else {
+        panic!("a tension dismissal reviews a tension");
+    };
     assert_eq!((id, vkey), (t.id, t.vkey));
     assert_eq!(
         (kind.as_str(), severity.as_str()),

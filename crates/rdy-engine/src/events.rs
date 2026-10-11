@@ -256,7 +256,10 @@ pub fn events_for_batch(
             }
             kinds::REVIEW => {
                 let r = reader.review(&hash)?;
-                let ReviewSubject::Tension { id, vkey, .. } = r.subject;
+                // a mention review (FW-CV4) is not a tension dismissal; no event names it yet
+                let ReviewSubject::Tension { id, vkey, .. } = r.subject else {
+                    continue;
+                };
                 out.push(Event {
                     seq,
                     at_ms: r.provenance.at_ms,

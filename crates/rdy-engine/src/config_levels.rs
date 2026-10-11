@@ -109,6 +109,9 @@ pub enum Ty {
     Bool,
     U32,
     OptU64,
+    /// A whole number (a YAML integer, any sign). A whole number outside 0 to 100 is not a wrong
+    /// type: `range_warnings` warns and drops it.
+    Percent,
     /// Not read by `Config` yet: any value.
     Any,
 }
@@ -123,6 +126,15 @@ impl Ty {
             Ty::Bool => serde_yaml_ng::from_value::<bool>(v.clone()).map(drop),
             Ty::U32 => serde_yaml_ng::from_value::<u32>(v.clone()).map(drop),
             Ty::OptU64 => serde_yaml_ng::from_value::<Option<u64>>(v.clone()).map(drop),
+            Ty::Percent => {
+                return match v {
+                    Value::Number(n) if n.is_i64() || n.is_u64() => Ok(()),
+                    other => Err(format!(
+                        "invalid type: {}, expected a whole number from 0 to 100",
+                        flow(other)
+                    )),
+                };
+            }
         };
         r.map_err(|e| e.to_string())
     }
@@ -169,6 +181,12 @@ pub const KEY_LEVELS: &[KeyRule] = &[
         levels: PROJECT_ONLY,
         ty: Ty::Any,
         default: None,
+    },
+    KeyRule {
+        key: "coverage.target",
+        levels: PROJECT_ONLY,
+        ty: Ty::Percent,
+        default: Some("80"),
     },
     KeyRule {
         key: "views.idle_days",
@@ -660,6 +678,35 @@ fn wrong_file_warnings(level: Level, map: &mut Mapping, user_file: Option<&Path>
     out.into_iter().map(|(_, w)| w).collect()
 }
 
+/// The `W_CONFIG_UNKNOWN` warnings of the percent keys of `map` that hold a whole number outside
+/// 0 to 100. Each value is removed from `map`, so the default applies and rdy keeps going (config
+/// mistakes warn).
+fn range_warnings(map: &mut Mapping) -> Vec<Issue> {
+    let mut out = Vec::new();
+    for rule in KEY_LEVELS.iter().filter(|r| r.ty == Ty::Percent) {
+        let outside = get_path(map, rule.key).is_some_and(|v| match v {
+            Value::Number(n) => n.as_i64().is_none_or(|i| !(0..=100).contains(&i)),
+            _ => false,
+        });
+        if !outside {
+            continue;
+        }
+        remove_path(map, rule.key);
+        out.push(config_warning(
+            format!(
+                "{} must be 0–100; using {}",
+                rule.key,
+                rule.default.unwrap_or("0")
+            ),
+            format!(
+                "set {} to a whole number from 0 to 100 in {PROJECT_FILE}",
+                rule.key
+            ),
+        ));
+    }
+    out
+}
+
 /// Why the value `rule.key` has in `map` is of the wrong type, or `None` when it has the type or
 /// is not set. A parent section that is not a mapping is the wrong type too.
 fn wrong_type(map: &Mapping, rule: &KeyRule) -> Option<String> {
@@ -739,6 +786,9 @@ fn build(
                 map.remove(head);
             }
         }
+    }
+    for (_, map) in &mut files {
+        warnings.extend(range_warnings(map));
     }
     let mut merged = files
         .iter()

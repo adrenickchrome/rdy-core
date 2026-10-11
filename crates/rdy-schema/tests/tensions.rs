@@ -4,7 +4,7 @@ use TensionSeverity::*;
 use rdy_schema::*;
 
 #[test]
-fn tens1_the_seven_kinds_have_the_spec_defaults_and_wire_names() {
+fn tens1_the_nine_kinds_have_the_spec_defaults_and_wire_names() {
     assert_eq!(
         TensionKind::ALL,
         [
@@ -14,7 +14,9 @@ fn tens1_the_seven_kinds_have_the_spec_defaults_and_wire_names() {
             AreaOverlap,
             DuplicateDefinition,
             UnjustifiedChange,
-            DeprecatedReference
+            DeprecatedReference,
+            ValueDisagreement,
+            RestatementDrift
         ]
     );
     let expect = [
@@ -25,6 +27,8 @@ fn tens1_the_seven_kinds_have_the_spec_defaults_and_wire_names() {
         (DuplicateDefinition, "duplicate_definition", Blocking),
         (UnjustifiedChange, "unjustified_change", Advisory),
         (DeprecatedReference, "deprecated_reference", Advisory),
+        (ValueDisagreement, "value_disagreement", Blocking),
+        (RestatementDrift, "restatement_drift", Advisory),
     ];
     for (k, name, sev) in expect {
         assert_eq!(k.name(), name);
@@ -57,7 +61,7 @@ fn tens1_a_pack_without_the_section_has_only_defaults() {
         assert_eq!(p.tension_severity(k), (k.default_severity(), false));
     }
     let t = p.tension_table();
-    assert_eq!(t.len(), 7);
+    assert_eq!(t.len(), 9);
     assert_eq!(t[0], (EditCollision, Blocking, false));
     assert_eq!(t[5], (UnjustifiedChange, Advisory, false));
 }
@@ -127,9 +131,13 @@ fn tens1_unknown_kinds_and_values_are_refused() {
 }
 
 #[test]
-fn tset1_only_duplicate_definition_softens_in_draft() {
+fn tset1_only_duplicate_definition_and_value_disagreement_soften_in_draft() {
     for k in TensionKind::ALL {
-        assert_eq!(k.softens_in_draft(), k == DuplicateDefinition, "{k}");
+        assert_eq!(
+            k.softens_in_draft(),
+            k == DuplicateDefinition || k == ValueDisagreement,
+            "{k}"
+        );
     }
 }
 

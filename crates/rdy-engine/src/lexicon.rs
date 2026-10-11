@@ -197,7 +197,7 @@ impl Lexicon {
 
     /// The (kind, phrase) pairs an entity block contributes, without repeats; empty phrases
     /// are skipped.
-    fn names_of(b: &Block) -> Vec<(NameKind, String)> {
+    pub fn names_of(b: &Block) -> Vec<(NameKind, String)> {
         let mut out: Vec<(NameKind, String)> = vec![];
         let mut push = |kind: NameKind, text: &str| {
             let p = phrase(text);

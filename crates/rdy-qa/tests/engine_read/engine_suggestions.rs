@@ -193,9 +193,13 @@ fn sug1_metadata_fields_never_mention_an_entity() {
         rs.lexicon(&scope).unwrap().literal_blocks("ops_bot"),
         vec![]
     );
-    assert_eq!(
-        rs.graph_coverage(&scope, None).unwrap().grounded.mentions,
-        0
+    // the literal is no mention: the structural layer names it in no block, and no entity is
+    // named, so the issues hold no unlinked mention
+    let issues = rs.coverage_issues(&scope).unwrap();
+    assert!(
+        issues.mentions.is_empty(),
+        "{:?}",
+        issues.mentions.iter().collect::<Vec<_>>()
     );
 }
 
@@ -278,4 +282,54 @@ fn mby1_a_new_doc_lists_the_blocks_that_mention_it() {
     )
     .unwrap();
     assert!(r.read().mentioned_by(&work, &docs).unwrap().0.is_empty());
+}
+
+#[test]
+fn cc8_a_dismissed_pair_gets_no_link_suggestion() {
+    let (_d, mut r) = project();
+    let (s, e) = books(&mut r);
+    let w = write(&mut r, "work", json!([{"op": "create", "type": "claim", "id": "$c", "parent": s, "body": "The ledger is append-only."}])).unwrap();
+    let c = w.created["$c"].clone();
+    let view = Scope::View("work".into());
+    let has_link = |r: &Rdy, w: &WriteResult| {
+        sugg(r, w).0.iter().any(
+            |x| matches!(x, Suggestion::Link { block, target, .. } if *block == c && *target == e),
+        )
+    };
+    assert!(has_link(&r, &w), "a link is suggested first");
+    r.review_mention(
+        &writer(),
+        &view,
+        &c,
+        &e,
+        rdy_engine::MentionVerdict::Dismiss,
+        "everyday word",
+    )
+    .unwrap();
+    let w2 = write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": c, "body": "The ledger is append-only, always."}]),
+    )
+    .unwrap();
+    assert!(
+        !has_link(&r, &w2),
+        "no Link suggestion for a dismissed pair"
+    );
+    r.review_mention(
+        &writer(),
+        &view,
+        &c,
+        &e,
+        rdy_engine::MentionVerdict::Restore,
+        "it is the service",
+    )
+    .unwrap();
+    let w3 = write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": c, "body": "The ledger is append-only, still."}]),
+    )
+    .unwrap();
+    assert!(has_link(&r, &w3), "the suggestion returns after a restore");
 }

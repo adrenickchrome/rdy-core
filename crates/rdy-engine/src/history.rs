@@ -13,6 +13,17 @@ use std::sync::Arc;
 /// The most versions one history call returns.
 pub const HISTORY_MAX: usize = 1000;
 
+thread_local! {
+    static CANON_STEP_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test hook: this thread's count of canon version steps read from the store (restatement
+/// drift's canon form).
+#[doc(hidden)]
+pub fn canon_step_reads() -> u64 {
+    CANON_STEP_READS.with(std::cell::Cell::get)
+}
+
 /// Who wrote a version, as the change's provenance records it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Author {
@@ -111,14 +122,26 @@ fn justification(j: &Justification) -> JustificationInfo {
     }
 }
 
-/// What one call has already decoded: changes by hash, landing refs by change and by landing
-/// hash, the view's included set, and the landing the scope reads as of. Never kept across
-/// calls, so a landing shows on the first read after it.
+/// One version of a canon block (restatement drift, FW-CH2): the version, the landing
+/// (`at_ms`, landing id) that carried it (`None` when unknown), and the version before it
+/// (`None` after a create).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VersionStep {
+    pub version: Hash,
+    pub landed_at: Option<(i64, String)>,
+    pub base: Option<Hash>,
+}
+
+/// What one call has already decoded: changes by hash (and each one's ops by block), landing
+/// refs by change and by landing hash, the view's included set, and the landing the scope reads
+/// as of. Never kept across calls, so a landing shows on the first read after it.
 struct Memo<'a> {
     reader: &'a StoreReader,
     included: Option<HashSet<Hash>>,
     head: Option<Hash>,
     changes: HashMap<Hash, Arc<Change>>,
+    /// For each change read by [`Memo::step`], its op positions by block.
+    ops: HashMap<Hash, HashMap<BlockId, Vec<usize>>>,
     landed: HashMap<Hash, Option<Hash>>,
     landings: HashMap<Hash, LandingRef>,
 }
@@ -151,6 +174,7 @@ impl<'a> Memo<'a> {
             included,
             head,
             changes: HashMap::new(),
+            ops: HashMap::new(),
             landed: HashMap::new(),
             landings: HashMap::new(),
         })
@@ -261,6 +285,63 @@ impl<'a> Memo<'a> {
         Ok((entry, prev))
     }
 
+    /// The (`at_ms`, landing id) of the landing that carried change `c`, when it landed.
+    fn landed_at(&mut self, c: &Hash) -> Result<Option<(i64, String)>, RdyError> {
+        Ok(self.landing(c)?.map(|l| (l.at_ms, l.id)))
+    }
+
+    /// The step for `version` of `id` and the change that wrote it there, never one in `used`
+    /// (see [`Memo::writer_of`]); `None` when every writer is in `used`. The change's ops are
+    /// indexed by block once, so a change that writes many blocks is scanned once.
+    fn step(
+        &mut self,
+        version: &Hash,
+        id: &BlockId,
+        used: &HashSet<Hash>,
+    ) -> Result<Option<(Hash, VersionStep)>, RdyError> {
+        let Some(c) = self.writer_of(version, id, used)? else {
+            return Ok(None);
+        };
+        let change = self.change(&c)?;
+        let by_block = self.ops.entry(c).or_insert_with(|| {
+            let mut m: HashMap<BlockId, Vec<usize>> = HashMap::new();
+            for (i, op) in change.ops.iter().enumerate() {
+                m.entry(op.block_id().clone()).or_default().push(i);
+            }
+            m
+        });
+        let base = by_block
+            .get(id)
+            .into_iter()
+            .flatten()
+            .rev()
+            .find_map(|&i| match &change.ops[i] {
+                Op::Create { block } if block.version_hash() == *version => Some(None),
+                Op::Update { base, block } if block.version_hash() == *version => Some(Some(*base)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                RdyError::new(
+                    E_IO,
+                    format!(
+                        "change {} does not write version {} of {id}",
+                        c.short(),
+                        version.short()
+                    ),
+                    "run rdy fsck",
+                )
+            })?;
+        let landed_at = self.landed_at(&c)?;
+        Ok(Some((
+            c,
+            VersionStep {
+                version: *version,
+                landed_at,
+                base,
+            },
+        )))
+    }
+
     /// The newest entry for `version` of `id`.
     fn last(&mut self, version: &Hash, id: &BlockId) -> Result<HistoryEntry, RdyError> {
         let c = self
@@ -356,5 +437,208 @@ impl ReadState {
             out.insert(id.clone(), memo.last(&version, id)?);
         }
         Ok(out)
+    }
+
+    /// Canon's history, read one version at a time with one memo (restatement drift, FW-CH2),
+    /// through the version steps kept across canon builds ([`StepCache`]).
+    pub(crate) fn canon_steps(&self) -> Result<CanonSteps<'_>, RdyError> {
+        let head = self.canon_head();
+        let kept = self.canon_step_cache.take_for(self.reader(), head);
+        Ok(CanonSteps {
+            memo: Memo::new(self, &Scope::Canon)?,
+            m: self.materialized(&Scope::Canon)?,
+            kept,
+            cache: Arc::clone(&self.canon_step_cache),
+            head,
+        })
+    }
+}
+
+/// The most version steps a [`StepCache`] keeps; past it the cache starts again empty.
+const STEP_CACHE_MAX: usize = 1 << 18;
+
+/// The most landings a [`StepCache`] walks back to catch up with a new canon head; past it the
+/// cache starts again empty.
+const STEP_CACHE_CATCH_UP: usize = 64;
+
+/// One block version's step and the change that wrote it, shared without a copy.
+pub(crate) type Step = Arc<(Hash, VersionStep)>;
+
+/// The kept steps, by version (a version hash covers the block's id, so it names one block).
+type Steps = HashMap<Hash, Step, std::hash::BuildHasherDefault<HashBits>>;
+
+/// A hasher for keys that are already uniform hashes ([`Hash`]): their first eight bytes.
+#[derive(Default)]
+struct HashBits(u64);
+
+impl std::hash::Hasher for HashBits {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        // a `Hash` writes its 32 bytes once (after its length, which `write_usize` drops)
+        for (i, b) in bytes.iter().take(8).enumerate() {
+            self.0 ^= u64::from(*b) << (8 * i);
+        }
+    }
+
+    fn write_usize(&mut self, _: usize) {}
+}
+
+/// Canon's version steps, kept across canon builds (restatement drift's canon form, final
+/// review I2). A version's step (the change that wrote it, the landing that carried it, its
+/// base) is the change chosen among the version's producers by [`Memo::writer_of`]: of those
+/// landed at or before canon's head, the one landed last. History is append-only, so a later
+/// landing changes the step only of a version one of its changes writes again (a revert, or a
+/// change landed once more). The cache holds the steps for one canon head; a newer head drops
+/// the steps of the versions the landings since then write, and any other head starts it again
+/// empty. Only a step whose change has landed is kept. Shared by every state one handle
+/// publishes.
+#[derive(Debug, Default)]
+pub(crate) struct StepCache(std::sync::Mutex<StepsAt>);
+
+#[derive(Debug, Default)]
+struct StepsAt {
+    /// The canon head the steps hold for (`None`: none yet).
+    head: Option<Option<Hash>>,
+    steps: Steps,
+}
+
+impl StepCache {
+    fn lock(&self) -> std::sync::MutexGuard<'_, StepsAt> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Drops every kept step (a reindex).
+    pub(crate) fn clear(&self) {
+        *self.lock() = StepsAt::default();
+    }
+
+    /// The steps kept for canon head `head`, taken out (a concurrent build reads without them):
+    /// caught up to `head` first when it is newer than the cache's head, else started again.
+    fn take_for(&self, reader: &StoreReader, head: Option<Hash>) -> Steps {
+        let mut at = self.lock();
+        if at.head != Some(head) {
+            let caught_up = match at.head {
+                Some(from) => catch_up(reader, &mut at.steps, from, head),
+                None => false,
+            };
+            if !caught_up {
+                at.steps.clear();
+            }
+            at.head = Some(head);
+        }
+        std::mem::take(&mut at.steps)
+    }
+
+    /// Puts back `steps` read for canon head `head`, unless the cache moved to another head.
+    fn put_back(&self, head: Option<Hash>, steps: Steps) {
+        let mut at = self.lock();
+        if at.head != Some(head) {
+            return;
+        }
+        if at.steps.len() + steps.len() > STEP_CACHE_MAX {
+            at.steps.clear();
+            if steps.len() > STEP_CACHE_MAX {
+                return;
+            }
+        }
+        at.steps.extend(steps);
+    }
+}
+
+/// Drops from `steps` every version the landings after `from` up to `to` write, walking back
+/// from `to`; `false` when `from` is not reached within [`STEP_CACHE_CATCH_UP`] landings (or a
+/// landing cannot be read), and the caller starts again.
+fn catch_up(reader: &StoreReader, steps: &mut Steps, from: Option<Hash>, to: Option<Hash>) -> bool {
+    let mut cur = to;
+    let mut written: Vec<Hash> = vec![];
+    for _ in 0..=STEP_CACHE_CATCH_UP {
+        if cur == from {
+            for k in &written {
+                steps.remove(k);
+            }
+            return true;
+        }
+        let Some(h) = cur else { return false };
+        let Ok(rec) = reader.landing(&h) else {
+            return false;
+        };
+        for c in &rec.changes {
+            let Ok(change) = reader.change(c) else {
+                return false;
+            };
+            for op in &change.ops {
+                if let Op::Create { block } | Op::Update { block, .. } = op {
+                    written.push(block.version_hash());
+                }
+            }
+        }
+        cur = rec.prev;
+    }
+    false
+}
+
+/// Canon's history, read one version at a time (restatement drift, FW-CH2). One memo is shared
+/// across calls, so a change that writes many blocks is decoded once; the steps kept across
+/// canon builds are read first, and the steps read here go back to the cache when it is dropped.
+pub(crate) struct CanonSteps<'a> {
+    memo: Memo<'a>,
+    m: Arc<Materialized>,
+    kept: Steps,
+    cache: Arc<StepCache>,
+    head: Option<Hash>,
+}
+
+impl Drop for CanonSteps<'_> {
+    fn drop(&mut self) {
+        self.cache
+            .put_back(self.head, std::mem::take(&mut self.kept));
+    }
+}
+
+impl CanonSteps<'_> {
+    /// The step for `id`'s canon version and the change that wrote it.
+    pub(crate) fn current(&mut self, id: &BlockId) -> Result<Step, RdyError> {
+        let version = version_in(&self.m, id)?;
+        self.step(&version, id, &HashSet::new())?
+            .ok_or_else(|| no_writer(&version, id))
+    }
+
+    /// The step for `version` of `id` and the change that wrote it, never one in `used`; `None`
+    /// when every writer is in `used`. The step with no change left out is kept (when its change
+    /// has landed); when its change is in `used` (a block written back to an earlier text), the
+    /// next writer is read from the store.
+    pub(crate) fn step(
+        &mut self,
+        version: &Hash,
+        id: &BlockId,
+        used: &HashSet<Hash>,
+    ) -> Result<Option<Step>, RdyError> {
+        let best = match self.kept.get(version) {
+            Some(s) => Arc::clone(s),
+            None => {
+                CANON_STEP_READS.with(|c| c.set(c.get() + 1));
+                let Some(s) = self.memo.step(version, id, &HashSet::new())? else {
+                    return Ok(None);
+                };
+                let s = Arc::new(s);
+                if s.1.landed_at.is_some() {
+                    self.kept.insert(*version, Arc::clone(&s));
+                }
+                s
+            }
+        };
+        if !used.contains(&best.0) {
+            return Ok(Some(best));
+        }
+        CANON_STEP_READS.with(|c| c.set(c.get() + 1));
+        Ok(self.memo.step(version, id, used)?.map(Arc::new))
+    }
+
+    /// The body of version `v`, read from the store.
+    pub(crate) fn body(&self, v: &Hash) -> Result<String, RdyError> {
+        Ok(self.memo.reader.get_block(v)?.body)
     }
 }

@@ -1,7 +1,7 @@
 //! Published read states (snap1): what a reader holds is an immutable `ReadState`, built lazily
 //! and shared. The writer publishes a new one after every write, before the write returns, and
 //! seeds the cells it can fill in O(ops) (the written view after a commit, canon after a landing).
-use crate::coverage::GraphCoverage;
+use crate::coverage::{CoverageMemo, Structural};
 use crate::error::*;
 use crate::lexicon::Lexicon;
 use crate::paths::TreeNode;
@@ -50,6 +50,14 @@ pub enum Delta {
     /// Review `review` dismissed the tensions of vkey `vkey`: every cell is carried, and the
     /// tension set too (a dismissal is state on a still-computed tension, FW-CH7).
     Dismissed { vkey: Hash, review: Hash },
+    /// Review `review` set the mention of `entity` in `block` to dismissed (`dismissed`) or back
+    /// to open: every cell is carried, as `Dismissed` carries them (no view content changed).
+    MentionReviewed {
+        block: BlockId,
+        entity: BlockId,
+        review: Hash,
+        dismissed: bool,
+    },
     /// Only the log moved (a proposal): no view content changed.
     Seq,
 }
@@ -64,8 +72,12 @@ pub(crate) struct Built {
     pub(crate) tree: OnceLock<Arc<Vec<TreeNode>>>,
     /// The entity lexicon (FW-EN1), memoised; carried across a write like the graph.
     pub(crate) lexicon: OnceLock<Arc<Lexicon>>,
-    /// The whole scope's graph coverage (FW-EN4), memoised; never carried.
-    pub(crate) coverage: OnceLock<Arc<GraphCoverage>>,
+    /// The structural layer of coverage (FW-CH1), memoised; carried across a write with the
+    /// graph and the lexicon (`coverage::carry`, cc11).
+    pub(crate) structural: OnceLock<Arc<Structural>>,
+    /// Fix round 2: when `structural` was carried, the layer it was carried from and the blocks
+    /// whose entries the carry recomputed (what a carry of the coverage issues reads).
+    pub(crate) structural_from: OnceLock<(Arc<Structural>, Arc<BTreeSet<BlockId>>)>,
     /// The mention scans briefings made (FW-EN3), most recent first; carried across a write.
     pub(crate) mentions: Mutex<Vec<MentionScan>>,
     /// Canon's tension index (names, texts, supersedes), memoised; never carried.
@@ -86,7 +98,8 @@ impl Built {
             graph: OnceLock::new(),
             tree: OnceLock::new(),
             lexicon: OnceLock::new(),
-            coverage: OnceLock::new(),
+            structural: OnceLock::new(),
+            structural_from: OnceLock::new(),
             mentions: Mutex::new(vec![]),
             tension_index: OnceLock::new(),
             tension_canon: OnceLock::new(),
@@ -97,9 +110,12 @@ impl Built {
     /// gcar1: this state with `ops` applied: the same conflicts and, only if this state's graph is
     /// built, that graph carried across the ops (their blocks' old edges out, their new ones in),
     /// which equals a rebuild. The lexicon is carried the same way when it is built (lex1), and
-    /// so are the mention scans (`MentionScan::carried`). The tree, the coverage and the tension
-    /// index and canon part are not carried.
-    pub(crate) fn after(&self, ops: &[Op]) -> Built {
+    /// so are the mention scans (`MentionScan::carried`). cc11: when the graph, the lexicon and
+    /// the structural layer of coverage are all built, that layer is carried too
+    /// (`coverage::carry`, under `pack`), unless the ops change entries its dirty set does not
+    /// reach; then the next read rebuilds it. The tree and the tension index and canon part are
+    /// not carried.
+    pub(crate) fn after(&self, ops: &[Op], pack: &Pack) -> Built {
         let m = Arc::new(self.m.with(ops));
         let next = Built::new(Arc::clone(&m), Arc::clone(&self.conflicts));
         {
@@ -122,7 +138,35 @@ impl Built {
         if let Some(l) = lexicon {
             let _ = next.lexicon.set(Arc::new(l.with_changes(old(), new())));
         }
+        if let Some((s, dirty)) = self.carried_structural(&next, ops, pack)
+            && let Some(from) = self.structural.get()
+        {
+            let _ = next.structural.set(Arc::new(s));
+            let _ = next
+                .structural_from
+                .set((Arc::clone(from), Arc::new(dirty)));
+        }
         next
+    }
+
+    /// cc11: this state's structural layer carried across `ops` to `next` (this state with
+    /// `ops` applied, its graph and lexicon carried), with the blocks it recomputed: `None` when
+    /// this state's layer or graph, `next`'s graph or `next`'s lexicon is not built, or the carry gives
+    /// up (`coverage::carry`). The call `after` makes, and the one the perf hook
+    /// `coverage::carry_for_perf` times.
+    pub(crate) fn carried_structural(
+        &self,
+        next: &Built,
+        ops: &[Op],
+        pack: &Pack,
+    ) -> Option<(Structural, BTreeSet<BlockId>)> {
+        let (prev, old_g, g, lex) = (
+            self.structural.get()?,
+            self.graph.get()?,
+            next.graph.get()?,
+            next.lexicon.get()?,
+        );
+        crate::coverage::carry(prev, &self.m, &next.m, old_g, g, lex, pack, ops)
     }
 }
 
@@ -359,6 +403,17 @@ impl CoordHeads {
 /// For each block an in-flight change writes, the last such change in the merge's order.
 pub(crate) type LastWriters = imbl::HashMap<BlockId, Hash>;
 
+thread_local! {
+    static INFLIGHT_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test hook: this thread's count of in-flight builds that merged in-flight changes (not
+/// carried by a commit). A test reads the difference over a call.
+#[doc(hidden)]
+pub fn inflight_builds() -> u64 {
+    INFLIGHT_BUILDS.with(std::cell::Cell::get)
+}
+
 /// The in-flight scope's cell: its set, then the entry built from it (named `inflight`, on
 /// canon's head), both computed on first read unless a publish carried them over. `last` is
 /// filled with the build (or carried with it): a commit carries the build only when its change
@@ -541,6 +596,8 @@ pub struct ReadState {
     pub(crate) require_up_to_date: bool,
     /// `views.idle_days` in `.rdy.yaml` (default 14), read by a full publish.
     pub(crate) idle_days: u32,
+    /// `coverage.target` in `.rdy.yaml` (default 80), read by a full publish.
+    pub(crate) coverage_target: u32,
     /// `decisions.home` in `.rdy.yaml`, read by a full publish (FW-PR2).
     pub(crate) decisions_home: Option<Arc<str>>,
     pub(crate) reader: StoreReader,
@@ -549,6 +606,9 @@ pub struct ReadState {
     pub(crate) vpos: Arc<Mutex<VposCache>>,
     /// The blocks each open proposal version writes, shared like `vpos` (read by `inflight`).
     pub(crate) proposal_touched: crate::inflight::ProposalTouched,
+    /// Canon's version steps, kept across canon builds and shared like `vpos` (restatement
+    /// drift's canon form, final review I2).
+    pub(crate) canon_step_cache: Arc<crate::history::StepCache>,
     /// insc1: the in-flight scope's set and build.
     pub(crate) inflight_cell: Arc<InflightCell>,
     /// The coordination refs as this state was published.
@@ -560,6 +620,11 @@ pub struct ReadState {
     pub(crate) tensions: Arc<TensionCell>,
     /// Each dismissed tension's vkey, mapped to the review that dismissed it.
     pub(crate) dismissals: Arc<imbl::OrdMap<Hash, Hash>>,
+    /// Each (block, entity) pair whose latest mention review dismisses it, mapped to that review
+    /// (FW-CV4).
+    pub(crate) mention_dismissals: Arc<imbl::OrdMap<(BlockId, BlockId), Hash>>,
+    /// The coverage issues of the scopes read in this state (FW-CH1), memoised; never carried.
+    pub(crate) coverage_memo: CoverageMemo,
     /// The tension detectors: the registry, unless a test set others.
     pub(crate) detectors: &'static [&'static dyn Detector],
     /// A `Full` publish that failed to read the heads: every read of this state returns it.
@@ -630,6 +695,12 @@ impl ReadState {
     /// read when this state was published.
     pub fn idle_days(&self) -> u32 {
         self.idle_days
+    }
+
+    /// The coverage, in percent, at which onboarding is done (`coverage.target`), as the config
+    /// read when this state was published.
+    pub fn coverage_target(&self) -> u32 {
+        self.coverage_target
     }
 
     /// The doc a decision given no parent is recorded in (`decisions.home`: a path, key or id),
@@ -819,13 +890,15 @@ impl ReadState {
     }
 
     /// The in-flight entry's build (`build_entry`'s), recording the last writer of each block
-    /// in the merge's order in the cell.
+    /// in the merge's order in the cell. A merge of in-flight changes is counted by
+    /// [`inflight_builds`].
     fn build_inflight(&self, entry: &Entry) -> Result<Built, RdyError> {
         let canon = self.canon_for(entry).map(|b| &**b);
         if entry.included.is_empty() {
             let _ = self.inflight_cell.last.set(Arc::default());
             return build_entry(&self.reader, &self.pack, canon, entry, None);
         }
+        INFLIGHT_BUILDS.with(|c| c.set(c.get() + 1));
         let list = entry
             .included
             .iter()

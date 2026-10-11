@@ -71,6 +71,15 @@ pub struct ProposalInfo {
     /// version creates that another block holds (K1, FW-PR3).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub keys: BTreeMap<String, String>,
+    /// Why the version's tensions could not be read, as `<code>: <message>`: `tensions` is then
+    /// empty and the proposal stands (a read error never fails the reply).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tensions_error: Option<String>,
+    /// Why the coverage change or the unapplied-decision warnings could not be read, as
+    /// `<code>: <message>`; the proposal stands. The coverage change itself (FW-CH3) is read
+    /// after the write, off the writer, and joins the reply in `propose_and_report`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_error: Option<String>,
 }
 
 /// One view a landing rebased: how many of its changes dropped out (they landed) and how many
@@ -483,6 +492,44 @@ pub(crate) fn changes_of(st: &ReadState, ids: &[Hash]) -> Result<Vec<Change>, Rd
     ids.iter()
         .map(|h| st.reader().change(h).map_err(RdyError::from))
         .collect()
+}
+
+/// The code of the warning for a decision a proposal lands with nothing to apply it.
+const W_UNAPPLIED_DECISION: &str = "W_UNAPPLIED_DECISION";
+
+/// cc16 (FW-CH5, D-2YCVK): one `W_UNAPPLIED_DECISION` warning per decision `changes` create that
+/// no content applies in `view` and that does not say `needs_content: false`. A warning never
+/// refuses the proposal.
+fn unapplied_warnings(
+    st: &ReadState,
+    view: &str,
+    changes: &[Change],
+) -> Result<Vec<Issue>, RdyError> {
+    let created: Vec<&BlockId> = changes
+        .iter()
+        .flat_map(|c| &c.ops)
+        .filter_map(|o| match o {
+            Op::Create { block } if block.block_type == decision::DECISION => Some(&block.id),
+            _ => None,
+        })
+        .collect();
+    if created.is_empty() {
+        return Ok(vec![]);
+    }
+    let scope = Scope::View(view.to_string());
+    let (m, g) = (st.materialized(&scope)?, st.graph(&scope)?);
+    Ok(created
+        .into_iter()
+        .filter_map(|id| m.get(id))
+        .filter(|b| crate::coverage::lands_unapplied(&m, &g, st.pack(), b))
+        .map(|b| Issue {
+            severity: Severity::Warning,
+            code: W_UNAPPLIED_DECISION,
+            block: Some(b.id.clone()),
+            message: format!("decision {} lands with no content that applies it", b.id),
+            fix: "link the content that carries it with decided_by, or set needs_content: false for a process ruling".into(),
+        })
+        .collect())
 }
 
 /// The landing that already carried any of `p`'s changes into canon: one index lookup per
@@ -1689,6 +1736,7 @@ impl Rdy {
         // a version with a blocking conflict cannot land until it is resolved, and its merge onto
         // canon would refuse at the first conflict: the gate validates it at landing (RF10)
         let mut issues = vec![];
+        let mut coverage_error: Option<String> = None;
         let mut rekey = None;
         if blocking.is_empty() {
             // K1 (FW-PR3): a key rdy derived for a block this version creates, held by another
@@ -1719,6 +1767,12 @@ impl Rdy {
             // a view with no head floats on canon
             let view_base = st.view_head(view).map_or(st.canon_head(), |h| h.base);
             issues.extend(self.rekeyed_warnings(&st, view_base, &changes)?);
+            // cc16 (FW-CH5): a decision this proposal lands with no content that applies it.
+            // It never refuses; a read error leaves the warnings out and is reported.
+            match unapplied_warnings(&st, view, &changes) {
+                Ok(w) => issues.extend(w),
+                Err(e) => coverage_error = Some(crate::coverage::coverage_error_text(&e)),
+            }
         }
         let mut ids = ids;
         let mut keys = BTreeMap::new();
@@ -1782,13 +1836,23 @@ impl Rdy {
         let stored = self.store.proposal(&id)?;
         let canon_at = stored.canon_at;
         self.publish(Delta::Seq)?;
-        // tgat1: the version's tensions, read after a re-key change (if any) was committed
-        let (tensions, tensions_omitted) = self.read().proposal_tensions(
+        // tgat1: the version's tensions, read after a re-key change (if any) was committed. The
+        // proposal is stored and published by now: a read error leaves the tensions out and is
+        // reported, as a briefing's `tensions_error` is, and the reply keeps the proposal.
+        let (tensions, tensions_omitted, tensions_error) = match self.read().proposal_tensions(
             view,
             &stored.changes,
             &conflicted,
             PROPOSAL_TENSIONS_MAX,
-        )?;
+        ) {
+            Ok((t, n)) => (t, n, None),
+            Err(e) => {
+                let text = crate::coverage::coverage_error_text(&e);
+                // coverage reads the same tension set: it is not worked out either
+                coverage_error.get_or_insert_with(|| text.clone());
+                (vec![], 0, Some(text))
+            }
+        };
         let pref = ProposalRef {
             version: id,
             stable,
@@ -1810,6 +1874,8 @@ impl Rdy {
             canon_at: canon_at.map(|h| h.to_string()),
             alternative: chosen,
             keys,
+            tensions_error,
+            coverage_error,
         })
     }
 

@@ -229,7 +229,7 @@ impl ReadState {
     }
 
     /// The dismissal review `review` as the surfaces show it, if it can be read.
-    fn dismissal_info(&self, review: &Hash) -> Option<DismissalInfo> {
+    pub(crate) fn dismissal_info(&self, review: &Hash) -> Option<DismissalInfo> {
         let r = self.reader().review(review).ok()?;
         let p = r.provenance;
         Some(DismissalInfo {

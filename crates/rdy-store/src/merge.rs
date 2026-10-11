@@ -48,6 +48,36 @@ pub struct Merged {
     pub order: Vec<Hash>,
 }
 
+/// A parent loop reachable from `starts` under `parent_of` (a block's parent, None at the top
+/// or for a block that is absent): two blocks on it, each the other's ancestor; None when every
+/// walk reaches the top. Each block is walked at most once in all, so a damaged state never
+/// loops it.
+pub fn find_parent_cycle<E>(
+    starts: impl IntoIterator<Item = BlockId>,
+    mut parent_of: impl FnMut(&BlockId) -> Result<Option<BlockId>, E>,
+) -> Result<Option<(BlockId, BlockId)>, E> {
+    let mut done: std::collections::HashSet<BlockId> = std::collections::HashSet::new();
+    for start in starts {
+        let mut path: Vec<BlockId> = vec![];
+        let mut on_path: std::collections::HashSet<BlockId> = std::collections::HashSet::new();
+        let mut cur = Some(start);
+        while let Some(c) = cur {
+            if done.contains(&c) {
+                break;
+            }
+            let p = parent_of(&c)?;
+            if !on_path.insert(c.clone()) {
+                // `c` is on the loop, and so is its parent
+                return Ok(Some((c.clone(), p.unwrap_or(c))));
+            }
+            path.push(c);
+            cur = p;
+        }
+        done.extend(path);
+    }
+    Ok(None)
+}
+
 /// A conflict's id: the hash of the postcard encoding of `(block, base, sides)`, with `sides`
 /// already sorted.
 pub fn conflict_id(block: &BlockId, base: Option<Hash>, sides: &[Side]) -> Hash {

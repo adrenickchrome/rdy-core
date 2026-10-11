@@ -26,6 +26,25 @@ pub(crate) struct Config {
     pub(crate) decisions: Option<DecisionsConfig>,
     #[serde(default, skip_serializing_if = "ServeSection::is_empty")]
     pub(crate) serve: ServeSection,
+    /// The coverage the corpus aims at (FW-CO4a).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) coverage: Option<CoverageConfig>,
+}
+
+/// The `coverage:` section of `.rdy.yaml`. Defaulted, so a section that holds only a misspelt
+/// key opens with its warning (config typos warn).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct CoverageConfig {
+    #[serde(default = "default_coverage_target")]
+    target: u32,
+}
+
+/// `coverage.target` when the config does not set it (a value outside 0 to 100 is dropped with a
+/// warning, so it gives this too).
+pub const DEFAULT_COVERAGE_TARGET: u32 = 80;
+
+fn default_coverage_target() -> u32 {
+    DEFAULT_COVERAGE_TARGET
 }
 
 /// The `serve:` section of `.rdy.yaml`, in seconds.
@@ -121,6 +140,13 @@ pub(crate) struct ReviewsConfig {
 impl Config {
     pub(crate) fn require_up_to_date(&self) -> bool {
         self.reviews.as_ref().is_some_and(|r| r.require_up_to_date)
+    }
+
+    /// `coverage.target`: the coverage, in percent, at which onboarding is done.
+    pub(crate) fn coverage_target(&self) -> u32 {
+        self.coverage
+            .as_ref()
+            .map_or(DEFAULT_COVERAGE_TARGET, |c| c.target)
     }
 
     pub(crate) fn idle_days(&self) -> u32 {

@@ -242,3 +242,69 @@ fn wrt1_session_end_hooks_run_once_per_end() {
     );
     shared.shutdown().unwrap();
 }
+
+/// Blocks while `HOLD` is set (until `HOLD` clears or a deadline passes) and counts its calls
+/// in `HELD`: a tension build the test can catch in the middle.
+struct Hold;
+static HOLD: AtomicBool = AtomicBool::new(false);
+static HELD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static HOLD_DETECTORS: [&dyn Detector; 1] = [&Hold];
+impl Detector for Hold {
+    fn kind(&self) -> TensionKind {
+        TensionKind::EditCollision
+    }
+    fn detect(
+        &self,
+        _cx: &DetectCx<'_>,
+        _seeds: Option<&BTreeSet<BlockId>>,
+        _out: &mut Vec<Found>,
+    ) -> Result<(), rdy_engine::RdyError> {
+        if HOLD.load(Ordering::SeqCst) {
+            HELD.fetch_add(1, Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while HOLD.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Perf fix (daemon_read_during_big_write): the writer builds the tension set of the state it
+/// publishes before it publishes it, so the first read after a big write never builds it.
+#[test]
+fn wrt1_the_writer_builds_the_tension_set_before_it_publishes_the_state() {
+    let (_d, mut r) = project();
+    r.set_detectors_for_tests(&HOLD_DETECTORS);
+    let shared = Shared::new(r);
+    let e = shared.engine();
+    write_typed(&*e, |r| doc(r, "work", "one")).unwrap();
+    // the reload message runs after the first write's settle: nothing is building now
+    shared.writer.reload().unwrap();
+    assert!(e.read().tensions_built());
+    HOLD.store(true, Ordering::SeqCst);
+    let e2 = Arc::clone(&e);
+    let w = std::thread::spawn(move || write_typed(&*e2, |r| doc(r, "work", "two")).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while HELD.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        HELD.load(Ordering::SeqCst) > 0,
+        "the second write built no tension set"
+    );
+    // the build is held: a state that holds the second write is published only once built
+    let st = e.read();
+    let published = st.included("work").len() == 2;
+    let built = st.tensions_built();
+    HOLD.store(false, Ordering::SeqCst);
+    w.join().unwrap();
+    assert!(
+        !published || built,
+        "the writer published a state whose tension set is not built"
+    );
+    let st = e.read();
+    assert_eq!(st.included("work").len(), 2);
+    assert!(st.tensions_built());
+    shared.shutdown().unwrap();
+}

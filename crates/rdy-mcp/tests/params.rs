@@ -215,8 +215,8 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
             checked.push(stringify!($t));
         )* };
     }
-    // The 25 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
-    // `AltPickParams`, `DismissParams`, `DecideParams`).
+    // The 27 `*Params` types, nested ones included (`EditorialParams`, `AltMemberParams`,
+    // `AltPickParams`, `DismissParams`, `DecideParams`, `MentionParams`).
     check!(
         AcceptParams,
         AltMemberParams,
@@ -224,12 +224,14 @@ fn hd7_serde_accepts_every_key_each_params_schema_publishes() {
         AltParams,
         AssetParams,
         BriefParams,
+        CoverageParams,
         DecideParams,
         DismissParams,
         EditorialParams,
         IdParams,
         IntentParams,
         LogParams,
+        MentionParams,
         ProposeParams,
         ReadParams,
         ResolveParams,

@@ -121,15 +121,22 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     let scope = scope_of(&st.view, &st_, &p.scope)?;
     let position = st_.version_position(&scope)?;
     let max = p.max_tokens.unwrap_or(4000);
-    let coverage = serde_json::to_value(st_.graph_coverage(&scope, None)?).map_err(|e| {
-        RdyError::new(
-            E_INTERNAL,
-            format!("graph coverage did not serialize: {e}"),
-            "report this as a bug in rdy",
-        )
-    })?;
+    // cc6 (FW-H7): coverage is for the current state only; a past landing is refused, and the
+    // refusal of `coverage_scope` is never caught
+    let cov_scope = st_.coverage_scope(&scope)?;
+    // cc15 (FW-CH3a): the score, its dimensions, the issue count and the kinds, from the
+    // memoised summary; the pages, areas and issues are `rdy_coverage`'s. A coverage read error
+    // never fails the overview: `coverage_error` says why the coverage is left out.
+    let (coverage, coverage_error) = match st_.coverage_summary(&cov_scope) {
+        Ok(s) => (Some(json!(&*s)), None),
+        Err(e) => (
+            None,
+            Some(json!(rdy_engine::coverage::coverage_error_text(&e))),
+        ),
+    };
     // the tree gets what the fixed parts (coverage included) leave
-    let reserve = 300 + tokens_of(&coverage);
+    let reserve =
+        300 + coverage.as_ref().map_or(0, tokens_of) + coverage_error.as_ref().map_or(0, tokens_of);
     let tree = fit_tree(st_.tree(&scope, None, None)?, max.saturating_sub(reserve));
     let views: Vec<Value> = st_
         .view_names()
@@ -146,8 +153,13 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
         "canon": {"landings": landings},
         "open_report": open_report_json(&st.engine.open_report()),
         "views": views, "tree": tree, "version_position": position,
-        "coverage": coverage,
     });
+    if let Some(c) = coverage {
+        out["coverage"] = c;
+    }
+    if let Some(e) = coverage_error {
+        out["coverage_error"] = e;
+    }
     // malt1: a session in a member view of an open set sees the set and its other members
     if let Some((stable, version, set)) = st_.alt_of_view(&st.view)? {
         let info = st_.alt_info(stable, version, &set)?;
