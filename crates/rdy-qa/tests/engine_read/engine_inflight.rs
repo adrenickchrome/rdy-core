@@ -246,15 +246,58 @@ fn perf3_a_commit_beside_an_inflight_conflict_carries() {
 
 #[derive(Clone, Debug)]
 enum Step {
-    Write { view: usize, claim: usize, body: u8 },
-    Include { from: usize, into: usize },
-    Close { view: usize },
-    Land { view: usize },
+    Write {
+        view: usize,
+        claim: usize,
+        body: u8,
+    },
+    Create {
+        view: usize,
+        slot: usize,
+        section: usize,
+    },
+    Delete {
+        view: usize,
+        claim: usize,
+    },
+    DeleteSection {
+        view: usize,
+        section: usize,
+    },
+    Move {
+        view: usize,
+        claim: usize,
+        section: usize,
+    },
+    Link {
+        view: usize,
+        from: usize,
+        to: usize,
+    },
+    Include {
+        from: usize,
+        into: usize,
+    },
+    Close {
+        view: usize,
+    },
+    Land {
+        view: usize,
+    },
 }
+
+/// The claims a step names: three seeded ones, then three that a create step may add (one id
+/// per slot, so two views that create one slot conflict).
+const CLAIMS: usize = 6;
 
 fn step() -> impl Strategy<Value = Step> {
     prop_oneof![
-        4 => (0..3usize, 0..3usize, any::<u8>()).prop_map(|(view, claim, body)| Step::Write { view, claim, body }),
+        4 => (0..3usize, 0..CLAIMS, any::<u8>()).prop_map(|(view, claim, body)| Step::Write { view, claim, body }),
+        2 => (0..3usize, 0..3usize, 0..2usize).prop_map(|(view, slot, section)| Step::Create { view, slot, section }),
+        1 => (0..3usize, 0..CLAIMS).prop_map(|(view, claim)| Step::Delete { view, claim }),
+        1 => (0..3usize, 0..2usize).prop_map(|(view, section)| Step::DeleteSection { view, section }),
+        1 => (0..3usize, 0..CLAIMS, 0..2usize).prop_map(|(view, claim, section)| Step::Move { view, claim, section }),
+        1 => (0..3usize, 0..CLAIMS, 0..CLAIMS).prop_map(|(view, from, to)| Step::Link { view, from, to }),
         2 => (0..3usize, 0..3usize).prop_map(|(from, into)| Step::Include { from, into }),
         1 => (0..3usize).prop_map(|view| Step::Close { view }),
         1 => (0..3usize).prop_map(|view| Step::Land { view }),
@@ -263,26 +306,64 @@ fn step() -> impl Strategy<Value = Step> {
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(cases(24)))]
+    /// perf3 review: beside conflicting updates, the steps create, delete and move claims,
+    /// delete a section with its claims, and link claims, so a carry meets each kind of op.
     #[test]
-    fn insc1_a_carried_inflight_state_equals_a_rebuilt_one(steps in prop::collection::vec(step(), 1..14)) {
+    fn insc1_a_carried_inflight_state_equals_a_rebuilt_one(steps in prop::collection::vec(step(), 1..18)) {
         let (_d, mut r) = project();
-        let (_doc, section, _c) = seed_doc(&mut r, "seed");
-        let claims: Vec<String> = (0..3).map(|i| format!("c-{i}AAAA")).collect();
-        let ops: Vec<serde_json::Value> = claims
-            .iter()
-            .map(|c| json!({"op": "create", "type": "claim", "parent": section, "id": c, "body": "base"}))
+        let (doc, section, _c) = seed_doc(&mut r, "seed");
+        let sections = [section.clone(), "s-2AAAA".to_string()];
+        let claims: Vec<String> = (0..3)
+            .map(|i| format!("c-{i}AAAA"))
+            .chain((0..3).map(|i| format!("c-{i}BBBB")))
             .collect();
+        let mut ops: Vec<serde_json::Value> = vec![
+            json!({"op": "create", "type": "section", "parent": doc, "id": sections[1], "fields": {"title": "T"}}),
+        ];
+        ops.extend(claims[..3].iter().map(|c| json!({"op": "create", "type": "claim", "parent": section, "id": c, "body": "base"})));
         write(&mut r, "seed", serde_json::Value::Array(ops)).unwrap();
         land(&mut r, "seed").unwrap();
         let views = ["va", "vb", "vc"];
         for s in steps {
             r.read().graph(&Scope::Inflight).unwrap(); // built, so a commit may carry it
+            let in_view = |r: &Rdy, view: usize, b: &str| {
+                r.read().materialized(&Scope::View(views[view].into())).unwrap().get(&id(b)).is_some()
+            };
             match s {
                 Step::Write { view, claim, body } => {
                     let scope = Scope::View(views[view].into());
                     let base = r.read().materialized(&scope).unwrap().version_of(&id(&claims[claim])).map(|h| h.to_string());
                     if let Some(base) = base {
                         let _ = write(&mut r, views[view], json!([{"op": "update", "id": claims[claim], "base": base, "body": format!("{body}")}]));
+                    }
+                }
+                Step::Create { view, slot, section } => {
+                    let _ = write(&mut r, views[view], json!([{"op": "create", "type": "claim", "parent": sections[section], "id": claims[3 + slot], "body": format!("new {slot}")}]));
+                }
+                Step::Delete { view, claim } => {
+                    if in_view(&r, view, &claims[claim]) {
+                        let _ = write(&mut r, views[view], json!([{"op": "delete", "id": claims[claim]}]));
+                    }
+                }
+                Step::DeleteSection { view, section } => {
+                    let kids: Vec<String> = {
+                        let m = r.read().materialized(&Scope::View(views[view].into())).unwrap();
+                        m.children(Some(&id(&sections[section]))).iter().map(|b| b.id.to_string()).collect()
+                    };
+                    if in_view(&r, view, &sections[section]) {
+                        let mut ops: Vec<serde_json::Value> = kids.iter().map(|k| json!({"op": "delete", "id": k})).collect();
+                        ops.push(json!({"op": "delete", "id": sections[section]}));
+                        let _ = write(&mut r, views[view], serde_json::Value::Array(ops));
+                    }
+                }
+                Step::Move { view, claim, section } => {
+                    if in_view(&r, view, &claims[claim]) {
+                        let _ = write(&mut r, views[view], json!([{"op": "move", "id": claims[claim], "parent": sections[section]}]));
+                    }
+                }
+                Step::Link { view, from, to } => {
+                    if from != to && in_view(&r, view, &claims[from]) && in_view(&r, view, &claims[to]) {
+                        let _ = write(&mut r, views[view], json!([{"op": "update", "id": claims[from], "links": {"depends_on": [{"target": claims[to]}]}}]));
                     }
                 }
                 Step::Include { from, into } => {
