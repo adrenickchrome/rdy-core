@@ -486,6 +486,9 @@ fn coverage_part(reply: &Value) -> String {
             p["after"]
         ));
     }
+    if let Some(n) = c["pages_omitted"].as_u64().filter(|n| *n > 0) {
+        t.push_str(&format!("\n  and {n} more pages"));
+    }
     t
 }
 
@@ -861,6 +864,14 @@ mod tests {
         assert_eq!(
             consequences_text(&page),
             "\ncoverage: 80 → 80\n  ops: 70 → 71"
+        );
+        // a cut page list says how many pages it left out
+        let cut = json!({"coverage": {"before": 80, "after": 85, "pages_omitted": 3, "pages": [
+            {"doc": "d-1", "path": "ops", "before": 70, "after": 90}
+        ]}});
+        assert_eq!(
+            consequences_text(&cut),
+            "\ncoverage: 80 → 85\n  ops: 70 → 90\n  and 3 more pages"
         );
         let err = json!({"coverage_error": "E_INTERNAL: boom"});
         assert_eq!(

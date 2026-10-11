@@ -1,6 +1,6 @@
 //! cc16: the coverage change on writes and proposals (FW-CH3); unapplied decisions warn (FW-CH5).
 use rdy_engine::consequence::{propose_and_report, write_and_report};
-use rdy_engine::{Local, Rdy};
+use rdy_engine::{Engine, Local, Rdy};
 use rdy_qa::fixtures::*;
 use rdy_qa::tensions::{j_typo, put_j, try_put_j};
 use serde_json::{Value, json};
@@ -173,4 +173,60 @@ fn cc16_a_coverage_read_error_never_fails_the_reply() {
         "{v:#}"
     );
     assert!(v["change"].is_string(), "the write stands: {v:#}");
+}
+
+/// A tension read error never fails a propose reply (the ruling of 2026-10-11): the proposal is
+/// stored and published before the tensions are read, so the reply keeps it, with no tensions,
+/// `tensions_error` and `coverage_error`, and no `coverage`.
+#[test]
+fn cc16_a_tension_read_error_never_fails_the_propose_reply() {
+    let (_d, mut r) = project();
+    let c = world(&mut r);
+    put_j(
+        &mut r,
+        "fix",
+        json!([{"op": "update", "id": c["$c1"], "body": "The Ledger is append-only."}]),
+        j_typo(),
+    );
+    r.set_detectors_for_tests(&FAILING_DETS);
+    let e = Local::new(r);
+    let p = propose_json(&e, "fix");
+    let id = p["id"].as_str().expect("the proposal id");
+    assert_eq!(p["tensions"], json!([]), "{p:#}");
+    for key in ["tensions_error", "coverage_error"] {
+        assert!(
+            p[key]
+                .as_str()
+                .is_some_and(|m| m.starts_with("E_INTERNAL: ") && m.contains("boom")),
+            "{key}: {p:#}"
+        );
+    }
+    assert!(p.get("coverage").is_none(), "{p:#}");
+    // the proposal is stored: a later read finds it
+    let found = e.read().reader().proposal(&id.parse().unwrap()).unwrap();
+    assert_eq!(found.view, "fix");
+}
+
+/// The proposal's coverage change is computed after the write, not on the writer: the
+/// `Rdy::propose` result carries none; the reply of `propose_and_report` does.
+#[test]
+fn cc16_the_proposal_coverage_is_read_after_the_write() {
+    let (_d, mut r) = project();
+    let c = world(&mut r);
+    put_j(
+        &mut r,
+        "fix",
+        json!([{"op": "update", "id": c["$c1"], "body": "The Ledger is append-only.", "links": {"describes": [{"target": c["$t"]}]}}]),
+        j_typo(),
+    );
+    let info = r.propose(&writer(), "fix", "fix").unwrap();
+    let on_writer = serde_json::to_value(&info).unwrap();
+    assert!(on_writer.get("coverage").is_none(), "{on_writer:#}");
+    let e = Local::new(r);
+    let p = propose_json(&e, "fix");
+    assert!(
+        p["coverage"]["before"].is_u64() && p["coverage"]["after"].is_u64(),
+        "{p:#}"
+    );
+    assert!(p["coverage"]["pages"].is_array(), "{p:#}");
 }

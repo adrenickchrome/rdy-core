@@ -4,7 +4,7 @@
 use crate::brief::{BRIEF_DEFAULT_TOKENS, FollowUp, expand_error, follow_up};
 use crate::coverage::{coverage_change, coverage_error_text};
 use crate::engine::{Engine, write_typed};
-use crate::error::RdyError;
+use crate::error::{E_INTERNAL, RdyError};
 use crate::gate::{LandInfo, ProposalInfo, applied_ops, changes_of, landed_as};
 use crate::intent::IntentNote;
 use crate::tensions::delta::on_change;
@@ -1055,7 +1055,52 @@ pub fn propose_and_report(
 ) -> Result<serde_json::Value, RdyError> {
     let mut v = write_typed(engine, f)?;
     report_landing(engine, &mut v, "id", max_tokens);
+    attach_proposal_coverage(engine, &mut v);
     Ok(v)
+}
+
+/// cc16 (FW-CH3): the proposal's `coverage: {before, after, pages}`, canon's score against its
+/// view's and the pages its changes touch, read from the stored version after the write, off
+/// the writer (as a write's is). A read error leaves `coverage` out and sets `coverage_error`
+/// (kept when the propose already set one): the proposal stands.
+fn attach_proposal_coverage(engine: &dyn Engine, v: &mut serde_json::Value) {
+    if v.get("coverage_error").is_some() {
+        return;
+    }
+    let st = engine.read();
+    let read = v
+        .get("id")
+        .and_then(|h| h.as_str())
+        .and_then(|h| h.parse::<Hash>().ok())
+        .ok_or_else(|| {
+            RdyError::new(
+                E_INTERNAL,
+                "the propose reply has no proposal id",
+                "report this",
+            )
+        })
+        .and_then(|id| Ok(st.reader().proposal(&id)?))
+        .and_then(|p| {
+            let touched: BTreeSet<BlockId> = changes_of(&st, &p.changes)?
+                .iter()
+                .flat_map(|c| &c.ops)
+                .map(|o| o.block_id().clone())
+                .collect();
+            coverage_change(
+                &st,
+                &Scope::Canon,
+                &st,
+                &Scope::View(p.view.clone()),
+                &touched,
+            )
+        });
+    match read {
+        Ok(c) => {
+            v["coverage"] = serde_json::to_value(&c)
+                .expect("coverage change serializes: numbers and strings only");
+        }
+        Err(e) => v["coverage_error"] = coverage_error_text(&e).into(),
+    }
 }
 
 /// `write_typed` for an approval (`f` returns its `LandInfo`), then the consequences of the

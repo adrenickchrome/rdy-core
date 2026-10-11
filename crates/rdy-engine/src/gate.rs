@@ -71,12 +71,13 @@ pub struct ProposalInfo {
     /// version creates that another block holds (K1, FW-PR3).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub keys: BTreeMap<String, String>,
-    /// The coverage change of the proposal (FW-CH3): the corpus score of canon and of the
-    /// proposal's view, and the pages its changes touch.
+    /// Why the version's tensions could not be read, as `<code>: <message>`: `tensions` is then
+    /// empty and the proposal stands (a read error never fails the reply).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub coverage: Option<crate::coverage::CoverageChange>,
+    pub tensions_error: Option<String>,
     /// Why the coverage change or the unapplied-decision warnings could not be read, as
-    /// `<code>: <message>`; the proposal stands.
+    /// `<code>: <message>`; the proposal stands. The coverage change itself (FW-CH3) is read
+    /// after the write, off the writer, and joins the reply in `propose_and_report`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage_error: Option<String>,
 }
@@ -529,27 +530,6 @@ fn unapplied_warnings(
             fix: "link the content that carries it with decided_by, or set needs_content: false for a process ruling".into(),
         })
         .collect())
-}
-
-/// cc16 (FW-CH3, D-C6HHV): the coverage change of the proposal made of `ids`: canon's score
-/// against `view`'s, and the pages the changes touch.
-fn proposal_coverage(
-    st: &ReadState,
-    view: &str,
-    ids: &[Hash],
-) -> Result<crate::coverage::CoverageChange, RdyError> {
-    let touched: BTreeSet<BlockId> = changes_of(st, ids)?
-        .iter()
-        .flat_map(|c| &c.ops)
-        .map(|o| o.block_id().clone())
-        .collect();
-    crate::coverage::coverage_change(
-        st,
-        &Scope::Canon,
-        st,
-        &Scope::View(view.to_string()),
-        &touched,
-    )
 }
 
 /// The landing that already carried any of `p`'s changes into canon: one index lookup per
@@ -1856,25 +1836,27 @@ impl Rdy {
         let stored = self.store.proposal(&id)?;
         let canon_at = stored.canon_at;
         self.publish(Delta::Seq)?;
-        // tgat1: the version's tensions, read after a re-key change (if any) was committed
-        let (tensions, tensions_omitted) = self.read().proposal_tensions(
+        // tgat1: the version's tensions, read after a re-key change (if any) was committed. The
+        // proposal is stored and published by now: a read error leaves the tensions out and is
+        // reported, as a briefing's `tensions_error` is, and the reply keeps the proposal.
+        let (tensions, tensions_omitted, tensions_error) = match self.read().proposal_tensions(
             view,
             &stored.changes,
             &conflicted,
             PROPOSAL_TENSIONS_MAX,
-        )?;
+        ) {
+            Ok((t, n)) => (t, n, None),
+            Err(e) => {
+                let text = crate::coverage::coverage_error_text(&e);
+                // coverage reads the same tension set: it is not worked out either
+                coverage_error.get_or_insert_with(|| text.clone());
+                (vec![], 0, Some(text))
+            }
+        };
         let pref = ProposalRef {
             version: id,
             stable,
             n,
-        };
-        // cc16 (FW-CH3): the change in coverage this proposal makes, canon against its view
-        let coverage = match proposal_coverage(&self.read(), view, &stored.changes) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                coverage_error.get_or_insert(crate::coverage::coverage_error_text(&e));
-                None
-            }
         };
         Ok(ProposalInfo {
             id: id.to_string(),
@@ -1892,7 +1874,7 @@ impl Rdy {
             canon_at: canon_at.map(|h| h.to_string()),
             alternative: chosen,
             keys,
-            coverage,
+            tensions_error,
             coverage_error,
         })
     }
