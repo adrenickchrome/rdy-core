@@ -71,19 +71,22 @@ fn canonical_encoding_is_frozen() {
         "3900f27b4ae5bff77eb9b5e6313e5f30b77df8fb3274ce3d56e1b8074356d71e"
     );
     // M2a1: Change gained links (three absent options, 00 00 00); the hash was recomputed
+    // cc1: ChangeLinks gained imported_by (a fourth absent option); the hash was recomputed
     assert_eq!(
         change(None).id().to_string(),
-        "28f9ecd6025c8aa5263814e2e20f299b72d7cdc73955de2df3ad8d8e3517e604"
+        "072c20746baee55920394bab70945e4d633355a06d05dd1794425fafb53d380b"
     );
     // M2c3 llst1: Justification::Implements holds a list; the hash was recomputed
+    // cc1: ChangeLinks gained imported_by (a fourth absent option); the hash was recomputed
     assert_eq!(
         change(Some(Justification::Implements(vec![
             BlockId::parse("D-W2HXR").unwrap()
         ])))
         .id()
         .to_string(),
-        "75a4e97bb2ba0c16466f8c0d3125ad8fbd37f84347b8fecff2a5d8f229d6db53"
+        "4ed4a3a527c7de49e091c77dbbdd05230dd9d66f538ebcc48528cf9ed18beda6"
     );
+    // cc1: ChangeLinks gained imported_by (a fourth absent option); the hash was recomputed
     assert_eq!(
         change(Some(Justification::Editorial {
             class: EditorialClass::Clarify,
@@ -91,6 +94,6 @@ fn canonical_encoding_is_frozen() {
         }))
         .id()
         .to_string(),
-        "d12135aab465ce3f0c596a04b4129b55b4f7507c951ed35bd64666b1aa51217a"
+        "b453311fb47f908f16c4e00923bb9cb7f63a590e6807b62082b083f9fb379b3c"
     );
 }

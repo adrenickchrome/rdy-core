@@ -28,6 +28,10 @@ fn links() -> ChangeLinks {
         intent: Some(Hash::of(b"intent")),
         alternative: Some(alt()),
         client_nonce: Some("nonce-1".into()),
+        imported_by: Some(ActorRun {
+            actor: "human:imp".into(),
+            run: Some("run-2".into()),
+        }),
     }
 }
 
@@ -92,6 +96,22 @@ fn local_landing(approved_version: Option<Hash>) -> LandingRecord {
 }
 
 /// Review Focus 1: the change encoding is the six old fields followed by the links.
+/// cc1 (FW-F7b, D-JCVPD): `imported_by` is the last field of the links.
+#[test]
+fn cc1_change_links_end_with_imported_by() {
+    let imp = ActorRun {
+        actor: "human:imp".into(),
+        run: Some("run-2".into()),
+    };
+    assert_eq!(
+        enc(&ChangeLinks {
+            imported_by: Some(imp.clone()),
+            ..ChangeLinks::default()
+        }),
+        enc(&(None::<Hash>, None::<AltChoice>, None::<String>, Some(imp)))
+    );
+}
+
 #[test]
 fn repr1_a_change_is_its_old_fields_followed_by_its_links() {
     let c = change(links());
@@ -108,15 +128,19 @@ fn repr1_a_change_is_its_old_fields_followed_by_its_links() {
     assert_eq!(c.id(), Hash::of(&want));
     assert_eq!(
         enc(&ChangeLinks::default()),
-        vec![0, 0, 0],
-        "three absent options"
+        vec![0, 0, 0, 0],
+        "four absent options"
     );
     assert_eq!(
         enc(&links()),
         enc(&(
             Some(Hash::of(b"intent")),
             Some(alt()),
-            Some("nonce-1".to_string())
+            Some("nonce-1".to_string()),
+            Some(ActorRun {
+                actor: "human:imp".into(),
+                run: Some("run-2".into()),
+            })
         ))
     );
     assert_eq!(enc(&alt()), enc(&(Hash::of(b"set"), "alt-a")));

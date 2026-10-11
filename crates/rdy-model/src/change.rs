@@ -1,4 +1,4 @@
-use crate::{Block, BlockId, Hash, hash_of};
+use crate::{ActorRun, Block, BlockId, Hash, hash_of};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,12 +73,14 @@ pub struct AltChoice {
 }
 
 /// What a change is linked to. It is the last field of `Change`, so a change without links
-/// encodes as its other fields followed by three absent options.
+/// encodes as its other fields followed by four absent options.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangeLinks {
     pub intent: Option<Hash>,
     pub alternative: Option<AltChoice>,
     pub client_nonce: Option<String>,
+    /// The importer (actor and run) of a change that rdy import wrote (FW-F7b); None on every other change.
+    pub imported_by: Option<ActorRun>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -329,7 +329,10 @@ fn review_rows(st: &ReadState, live: &BTreeSet<Hash>) -> Result<Vec<Value>, RdyE
             sides,
             blocks,
             ..
-        } = &r.subject;
+        } = &r.subject
+        else {
+            continue;
+        };
         let p = &r.provenance;
         rows.push((
             p.at_ms,
