@@ -461,3 +461,59 @@ fn se1_tension_review() -> Review {
         provenance: prov(1),
     }
 }
+
+/// A deliberate refusal of a verdict or a version is `Refused`, never `Decode`: `Decode` is a
+/// stored object or ref that does not decode (damage).
+#[test]
+fn se1_a_refused_verdict_or_version_is_refused_not_decode() {
+    use rdy_store::StoreError;
+    let refused = |e: StoreError| assert!(matches!(e, StoreError::Refused(_)), "{e:?}");
+    let (_d, mut s) = store();
+    let first = first_version(Hash([4; 32]));
+    refused(
+        s.put_tension_versions(&[accepted(&first, Hash([8; 32]))])
+            .unwrap_err(),
+    );
+    refused(
+        s.put_verdict(&verdict(Verdict::Tension, 1), None)
+            .unwrap_err(),
+    );
+    let (h, t1) = put_tension(&mut s, 2);
+    refused(
+        s.put_verdict(&verdict(Verdict::NoTension, 3), None)
+            .unwrap_err(),
+    );
+    let first = first_version(h);
+    refused(
+        s.put_tension_versions(&[accepted(&first, Hash([8; 32]))])
+            .unwrap_err(),
+    );
+    let good = accepted(&first, t1);
+    refused(
+        s.put_tension_versions(&[good.clone(), good.clone()])
+            .unwrap_err(),
+    );
+    let mut bad = good.clone();
+    bad.advice = None;
+    refused(s.put_tension_versions(&[bad]).unwrap_err());
+    let t2 = s.put_tension_versions(&[good]).unwrap();
+    refused(
+        s.put_tension_versions(&[accepted(&first, t2[0])])
+            .unwrap_err(),
+    );
+}
+
+/// A latest version whose bytes do not decode stays `Decode`: it is damage, not a refusal.
+#[test]
+fn se1_a_latest_version_that_does_not_decode_is_decode() {
+    let (_d, mut s) = store();
+    let (h, _) = put_tension(&mut s, 1);
+    let bad = s.write(vec![(kinds::TENSION, vec![0xff; 3])]).unwrap()[0];
+    let key = pair_key(&items());
+    s.set_refs_unchecked_for_tests(vec![(format!("{SEMANTIC_REF}{key}"), bad.0.to_vec())])
+        .unwrap();
+    let e = s
+        .put_tension_versions(&[accepted(&first_version(h), bad)])
+        .unwrap_err();
+    assert!(matches!(e, rdy_store::StoreError::Decode(_)), "{e:?}");
+}

@@ -56,11 +56,12 @@ impl Rdy {
     }
 }
 
-/// A store refusal (a decode error: what the store's checks return) as `code` with the store's
-/// message and `fix`; any other store error as it maps everywhere.
+/// A store refusal (`StoreError::Refused`: what the store's checks return) as `code` with the
+/// store's message and `fix`; any other store error as it maps everywhere, so a stored object
+/// that does not decode stays damage (`E_IO`).
 fn refused(e: StoreError, code: &'static str, fix: &str) -> RdyError {
     match e {
-        StoreError::Decode(message) => RdyError::new(code, message, fix),
+        StoreError::Refused(message) => RdyError::new(code, message, fix),
         e => e.into(),
     }
 }

@@ -125,14 +125,74 @@ fn se3_a_refused_record_is_e_review_stale_and_publishes_nothing() {
     let items = pair(&r, &s.a, &s.c);
     r.record_verdict(&verdict(items.clone(), Verdict::NoTension), None)
         .unwrap();
-    let seq = r.read().seq();
+    let before = r.read();
+    let seq = before.seq();
     let mut again = verdict(items, Verdict::NoTension);
     again.provenance.at_ms = 2;
     assert_eq!(
         r.record_verdict(&again, None).unwrap_err().code,
         rdy_engine::E_REVIEW_STALE
     );
+    assert!(std::sync::Arc::ptr_eq(&before, &r.read()), "no new state");
     assert_eq!(r.read().seq(), seq);
+}
+
+/// guard: a refused acceptance is `E_BAD_INPUT` with the store's message and its fix, and
+/// publishes nothing.
+#[test]
+fn se3_a_refused_acceptance_is_e_bad_input_and_publishes_nothing() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let items = pair(&r, &s.a, &s.c);
+    let rv = verdict(items.clone(), Verdict::Tension);
+    let (_, t) = r
+        .record_verdict(&rv, Some(&first(&rv, items.clone())))
+        .unwrap();
+    let mut next = first(&rv, items);
+    next.prev = t;
+    next.blocking = true;
+    let t2 = r
+        .record_tension_versions(std::slice::from_ref(&next))
+        .unwrap();
+    let before = r.read();
+    let seq = before.seq();
+    next.prev = Some(t2[0]);
+    let e = r.record_tension_versions(&[next]).unwrap_err();
+    assert_eq!(e.code, rdy_engine::E_BAD_INPUT);
+    assert!(e.message.contains("is accepted already"), "{}", e.message);
+    assert_eq!(e.fix, "read the tensions again and accept the current ones");
+    assert!(std::sync::Arc::ptr_eq(&before, &r.read()), "no new state");
+    assert_eq!(r.read().seq(), seq);
+}
+
+/// guard: a stored tension that does not decode is damage (`E_IO`), not a refusal to retry.
+#[test]
+fn se3_a_corrupt_latest_tension_is_e_io_not_e_bad_input() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let items = pair(&r, &s.a, &s.c);
+    let key = pair_key(&items);
+    let rv = verdict(items.clone(), Verdict::Tension);
+    r.record_verdict(&rv, Some(&first(&rv, items.clone())))
+        .unwrap();
+    // the latest version's bytes do not decode as a semantic tension
+    let bad = r
+        .store_mut()
+        .write(vec![(rdy_store::kinds::TENSION, vec![0xff; 3])])
+        .unwrap()[0];
+    r.store_mut()
+        .set_refs_unchecked_for_tests(vec![(
+            format!("{}{key}", rdy_store::review::SEMANTIC_REF),
+            bad.0.to_vec(),
+        )])
+        .unwrap();
+    let mut next = first(&rv, items);
+    next.prev = Some(bad);
+    next.blocking = true;
+    assert_eq!(
+        r.record_tension_versions(&[next]).unwrap_err().code,
+        rdy_engine::E_IO
+    );
 }
 
 #[test]

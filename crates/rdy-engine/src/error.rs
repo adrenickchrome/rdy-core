@@ -241,6 +241,11 @@ impl From<StoreError> for RdyError {
             ),
             StoreError::Format { message, fix } => RdyError::new(E_STORE_FORMAT, message, fix),
             StoreError::ParentCycle { message, fix } => RdyError::new(E_BAD_INPUT, message, fix),
+            StoreError::Refused(message) => RdyError::new(
+                E_BAD_INPUT,
+                message,
+                "read the current state again and retry against it",
+            ),
             StoreError::UndoTooDeep { view, op } => RdyError::new(
                 E_LIMIT,
                 format!(

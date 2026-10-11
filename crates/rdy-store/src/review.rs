@@ -30,8 +30,9 @@ pub const PAIR_REF: &str = "pair/";
 /// semantic tension.
 pub const SEMANTIC_REF: &str = "semantic/";
 
-fn decode(m: impl Into<String>) -> StoreError {
-    StoreError::Decode(m.into())
+/// A verdict or a version the store's checks refuse.
+fn refuse(m: impl Into<String>) -> StoreError {
+    StoreError::Refused(m.into())
 }
 
 /// The ref of the mention of `entity` in `block`: `mention/<block>/<entity>`.
@@ -127,19 +128,19 @@ impl Store {
                 (*key, items)
             }
             _ => {
-                return Err(decode(
+                return Err(refuse(
                     "a verdict is a review with verdict tension or no_tension of a pair",
                 ));
             }
         };
         if items.len() != 2 || items[0].block == items[1].block || key != pair_key(items) {
-            return Err(decode(format!(
+            return Err(refuse(format!(
                 "pair key {key} does not match its two items"
             )));
         }
         let tension = r.verdict == Verdict::Tension;
         if tension != t.is_some() {
-            return Err(decode(
+            return Err(refuse(
                 "a tension verdict writes the tension's first version, and only a tension verdict does",
             ));
         }
@@ -155,7 +156,7 @@ impl Store {
                     || t.relay.is_some()
                     || t.relayed_by.is_some()
                 {
-                    return Err(decode(
+                    return Err(refuse(
                         "the first version of a semantic tension names its verdict, has no prev, \
                          is not blocking and carries no relay",
                     ));
@@ -178,7 +179,7 @@ impl Store {
                 }
             }
             if held == id || !tension || self.review(&held)?.verdict != Verdict::NoTension {
-                return Err(decode(format!("pair {key} is settled by review {held}")));
+                return Err(refuse(format!("pair {key} is settled by review {held}")));
             }
         }
         let mut items = vec![(kinds::REVIEW, bytes)];
@@ -209,24 +210,24 @@ impl Store {
         for t in ts {
             let key = t.key;
             if !seen.insert(key) {
-                return Err(decode(format!(
+                return Err(refuse(format!(
                     "semantic tension {key} appears twice in one batch"
                 )));
             }
             let name = format!("{SEMANTIC_REF}{key}");
             let Some(held) = self.get_ref(&name)? else {
-                return Err(decode(format!("semantic tension {key} has no version yet")));
+                return Err(refuse(format!("semantic tension {key} has no version yet")));
             };
             let held = hash_from(&held, "semantic tension ref")?;
             if t.prev != Some(held) {
                 let prev = t.prev.map_or_else(|| "none".to_string(), |p| p.to_string());
-                return Err(decode(format!(
+                return Err(refuse(format!(
                     "semantic tension {key}: version {prev} is not the latest ({held})"
                 )));
             }
             let latest = self.semantic_tension(&held)?;
             if latest.blocking {
-                return Err(decode(format!(
+                return Err(refuse(format!(
                     "semantic tension {key} is accepted already"
                 )));
             }
@@ -237,7 +238,7 @@ impl Store {
                 || t.review != latest.review
                 || t.advice != latest.advice
             {
-                return Err(decode(format!(
+                return Err(refuse(format!(
                     "semantic tension {key}: a later version accepts the advice of the first: \
                      blocking, with the same pair, verdict and advice"
                 )));
