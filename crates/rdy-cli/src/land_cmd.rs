@@ -82,7 +82,8 @@ pub(crate) fn propose(env: &Env, a: ProposeArgs) -> Result<(Value, String), Erro
 
 /// The propose reply as text: the proposal line, its summary and alternative, the blocking
 /// conflicts and the tensions, the consequences part (coverage included) with a `not worked
-/// out:` line for each part rdy could not read, the new keys, and last the approve command.
+/// out:` line for each part rdy could not read, the new keys, the warnings, and last the
+/// approve command.
 fn propose_text(v: &Value) -> String {
     let pref = text(&v["ref"]);
     let mut t = format!("proposal {pref} ({} changes)", num(&v["changes"]));
@@ -121,6 +122,14 @@ fn propose_text(v: &Value) -> String {
     }
     t.push_str(&brief_text::consequences_text(v));
     t.push_str(&new_keys_text(v));
+    // D-2YCVK: the propose report warns (W_UNAPPLIED_DECISION), as approve prints its warnings
+    for w in v["warnings"].as_array().into_iter().flatten() {
+        t.push_str(&format!(
+            "\nwarning {}: {}",
+            text(&w["code"]),
+            text(&w["message"])
+        ));
+    }
     t.push_str(&format!("\napprove with: rdy approve {pref}"));
     t
 }
@@ -233,6 +242,22 @@ mod tests {
         assert_eq!(
             propose_text(&v),
             "proposal P-1@1 (1 changes)\nnot worked out: the tensions (E_IO: tensions busy)\nnot worked out: the coverage change (E_IO: tensions busy)\napprove with: rdy approve P-1@1"
+        );
+    }
+
+    /// Final review I3 (D-2YCVK): the propose report a person reads names each warning, as
+    /// `rdy approve` does, before the approve command; `W_UNAPPLIED_DECISION` among them.
+    #[test]
+    fn cc16_propose_text_prints_the_warnings() {
+        let v = json!({
+            "ref": "P-1@1", "changes": 1, "tensions": [],
+            "warnings": [{"severity": "warning", "code": "W_UNAPPLIED_DECISION", "block": "d-1",
+                "message": "decision d-1 lands with no content that applies it",
+                "fix": "link the content that carries it with decided_by"}]
+        });
+        assert_eq!(
+            propose_text(&v),
+            "proposal P-1@1 (1 changes)\nwarning W_UNAPPLIED_DECISION: decision d-1 lands with no content that applies it\napprove with: rdy approve P-1@1"
         );
     }
 }

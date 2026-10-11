@@ -971,13 +971,11 @@ impl<'a> DetectCx<'a> {
     /// canon in the canon scope.
     pub fn deprecated(&self, b: &BlockId) -> Result<bool, RdyError> {
         let m = self.current_m()?;
+        // the lifecycle half of the rule reads no graph
         if effective_lifecycle(&m, Some(b)).as_deref() == Some("deprecated") {
             return Ok(true);
         }
-        Ok(matches!(
-            self.current_graph()?.status(b),
-            Some(DerivedStatus::Superseded { .. } | DerivedStatus::Revoked { .. })
-        ))
+        Ok(is_deprecated(&m, &*self.current_graph()?, b))
     }
 
     /// Whether `b` is normative content (a `normative` type, or a `table` with `normative: true`).
@@ -1056,4 +1054,15 @@ pub fn pointing_edge(e: &Edge) -> bool {
         EdgeKind::Link(n) => IMPACT_LINKS.contains(&n.as_str()),
         EdgeKind::Contains => false,
     }
+}
+
+/// Whether `b` is deprecated in the state `m` and `g` describe: its effective lifecycle is
+/// `deprecated`, or it is a decision wholly superseded or revoked (a partial supersede does not
+/// count). The one rule the deprecated reference detector and coverage read (D-S46DE).
+pub(crate) fn is_deprecated(m: &Materialized, g: &Graph, b: &BlockId) -> bool {
+    effective_lifecycle(m, Some(b)).as_deref() == Some("deprecated")
+        || matches!(
+            g.status(b),
+            Some(DerivedStatus::Superseded { .. } | DerivedStatus::Revoked { .. })
+        )
 }

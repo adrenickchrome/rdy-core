@@ -1,8 +1,8 @@
 //! cc11: the structural coverage layer carried across a write equals a rebuild, and a carry
 //! builds nothing in full.
 use rdy_engine::coverage::{
-    carry_for_perf, coverage_change, issues_rebuilt_for_tests, kinds_builds, rebuilt_for_tests,
-    state_layer_builds, structural_builds, structural_for_tests,
+    carried_entries, carry_for_perf, coverage_change, governed_scans, issues_rebuilt_for_tests,
+    kinds_builds, rebuilt_for_tests, state_layer_builds, structural_builds, structural_for_tests,
 };
 use rdy_engine::mention_review::MentionVerdict;
 use rdy_engine::*;
@@ -101,16 +101,25 @@ fn cc11_carried_equals_rebuilt_over_random_writes() {
     let c = cc6_world(&mut r);
     let v = Scope::View("next".into());
     let mut seed: u64 = 0x5eed;
-    for step in 0..200 {
+    let mut written: BTreeMap<u64, usize> = BTreeMap::new();
+    for step in 0..300 {
         seed = seed
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
         let ops = random_op(&r, &v, &c, seed, step); // one of the cases below, on live ids of the view
         if write(&mut r, "next", ops).is_ok() {
+            *written.entry(seed % 15).or_default() += 1;
             r.read().coverage_issues(&v).unwrap();
             same(&r, &v);
             same_issues(&r, &v); // fix round 2: the carried issues too
         }
+    }
+    // final review I1, I4: the new cases are reached
+    for case in 10..15 {
+        assert!(
+            written.get(&case).is_some_and(|n| *n > 0),
+            "case {case}: {written:?}"
+        );
     }
 }
 
@@ -196,12 +205,14 @@ fn pick(ids: &[BlockId], seed: u64, fallback: &str) -> String {
     ids[((seed >> 24) as usize) % ids.len()].to_string()
 }
 
-/// One random write on the live ids of `scope`, chosen by `seed % 10`: create prose naming
+/// One random write on the live ids of `scope`, chosen by `seed % 15`: create prose naming
 /// Ledger under a random section; create a claim that describes Ledger; update a random content
 /// block's body; delete a random leaf block; add a `decided_by` from a random claim to a random
 /// live decision; remove all links from a random claim; create a reference from a new prose
 /// block to a random doc; create a question; create a decision that affects the term; create a
-/// decision that supersedes a random live decision.
+/// decision that supersedes a random live decision; edit the term's body; edit a proposed
+/// decision's statement; create a deprecated section; move the term under a random section
+/// (in or out of a deprecated one); delete a random section (refused while it has children).
 fn random_op(
     r: &Rdy,
     scope: &Scope,
@@ -240,9 +251,14 @@ fn random_op(
             )
         })
         .collect();
+    let proposed: Vec<BlockId> = m
+        .iter()
+        .filter(|b| b.block_type == "decision" && b.field_str("status") == Some("proposed"))
+        .map(|b| b.id.clone())
+        .collect();
     let sec = pick(&sections, seed, &c["$s"]);
     let term = c["$t"].clone();
-    match seed % 10 {
+    match seed % 15 {
         0 => json!([{"op": "create", "type": "prose", "parent": sec,
                      "body": format!("The Ledger grows at step {step}.")}]),
         1 => json!([{"op": "create", "type": "claim", "parent": sec,
@@ -267,9 +283,20 @@ fn random_op(
         8 => json!([{"op": "create", "type": "decision", "parent": sec,
                      "fields": {"statement": format!("Ledger rule {step}"), "status": "proposed"},
                      "links": {"affects": [{"target": term}]}}]),
-        _ => json!([{"op": "create", "type": "decision", "parent": sec,
+        9 => json!([{"op": "create", "type": "decision", "parent": sec,
                      "fields": {"statement": format!("A new rule at step {step}"), "status": "proposed"},
                      "links": {"supersedes": [{"target": pick(&live, seed >> 8, &c["$d2"])}]}}]),
+        // final review I1: body and field edits that reach no pointing block
+        10 => json!([{"op": "update", "id": term, "fields": {"name": "Ledger"},
+                      "body": format!("Holds balances, step {step}.")}]),
+        11 => json!([{"op": "update", "id": pick(&proposed, seed, &c["$d2"]),
+                      "fields": {"statement": format!("Restated at step {step}"), "status": "proposed"}}]),
+        // final review I4: the term moves in and out of a deprecated section
+        12 => json!([{"op": "create", "type": "section", "parent": c["$o"],
+                      "fields": {"title": format!("Retired {step}"), "lifecycle": "deprecated"}}]),
+        13 => json!([{"op": "move", "id": term, "parent": sec}]),
+        // a section deleted (a view refuses it while it has children)
+        _ => json!([{"op": "delete", "id": pick(&sections, seed, &c["$s"])}]),
     }
 }
 
@@ -725,4 +752,138 @@ fn cc11_fix3_a_suspect_the_structural_carry_misses_is_carried() {
         suspect(&r),
         "a decision that refines a superseded one is suspect"
     );
+}
+
+/// A hub: doc `hub` with a stable section holding term Hub, decision dh (affects Hub, live once
+/// landed) and `n` claims that describe Hub (each governed through it). Landed. Returns (term,
+/// decision, section).
+fn hub_world(r: &mut Rdy, n: usize) -> (String, String, String) {
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$o", "fields": {"name": "hub", "title": "Hub", "doc_type": "page"}}),
+        json!({"op": "create", "type": "section", "id": "$s", "parent": "$o", "fields": {"title": "Rules", "lifecycle": "stable"}}),
+        json!({"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Hub"}, "body": "The centre."}),
+        json!({"op": "create", "type": "decision", "id": "$d", "parent": "$s",
+            "fields": {"statement": "The hub is audited", "status": "proposed"},
+            "links": {"affects": [{"target": "$t"}]}}),
+    ];
+    ops.extend((0..n).map(|k| {
+        json!({"op": "create", "type": "claim", "parent": "$s", "body": format!("Rule {k} holds."),
+            "links": {"describes": [{"target": "$t"}]}})
+    }));
+    let w = write(r, "seed", Value::Array(ops)).unwrap().created;
+    land(r, "seed").unwrap();
+    (w["$t"].clone(), w["$d"].clone(), w["$s"].clone())
+}
+
+/// Final review I1: a body or field edit of a block changes no entry of the blocks that point
+/// at it, so the carry recomputes O(1) entries: a body edit of a term that 1,000 claims
+/// describe, and a statement edit of a proposed decision that affects it (its status and its
+/// edges unchanged). The landing that accepts that decision (a status change in canon) still
+/// reaches every describer. Each carried layer equals a rebuild.
+#[test]
+fn cc11_a_body_edit_of_a_hub_recomputes_o1_entries() {
+    let (_d, mut r) = project();
+    let (t, _d1, s) = hub_world(&mut r, 1000);
+    let v = Scope::View("next".into());
+    let d2 = write(
+        &mut r,
+        "next",
+        json!([{"op": "create", "type": "decision", "id": "$d2", "parent": s,
+            "fields": {"statement": "The hub is backed up", "status": "proposed"},
+            "links": {"affects": [{"target": t}]}}]),
+    )
+    .unwrap()
+    .created["$d2"]
+        .clone();
+    let recomputed = |r: &mut Rdy, scope: &Scope, ops: Value, landing: bool| -> u64 {
+        r.read().coverage_issues(scope).unwrap();
+        let (builds, before) = (structural_builds(), carried_entries());
+        write(r, "next", ops).unwrap();
+        if landing {
+            land(r, "next").unwrap();
+        }
+        r.read().coverage_issues(scope).unwrap();
+        assert_eq!(structural_builds(), builds, "carried, not rebuilt");
+        same(r, scope);
+        carried_entries() - before
+    };
+    let n = recomputed(
+        &mut r,
+        &v,
+        json!([{"op": "update", "id": t, "fields": {"name": "Hub"}, "body": "The centre of it all."}]),
+        false,
+    );
+    assert!(n <= 4, "a term body edit recomputed {n} entries");
+    let n = recomputed(
+        &mut r,
+        &v,
+        json!([{"op": "update", "id": d2, "fields": {"statement": "The hub is backed up daily", "status": "proposed"},
+            "links": {"affects": [{"target": t}]}}]),
+        false,
+    );
+    assert!(n <= 4, "a decision statement edit recomputed {n} entries");
+    let n = recomputed(
+        &mut r,
+        &Scope::Canon,
+        json!([{"op": "create", "type": "prose", "parent": s, "body": "Landed with the rest."}]),
+        true,
+    );
+    assert!(
+        n > 1000,
+        "the landing accepts d2, which reaches every describer: {n}"
+    );
+}
+
+/// Final review I1: whether an entity has a live incoming `affects` is read once per build (or
+/// carry), not once per block that describes it: a cold build of a hub that 1,000 claims
+/// describe scans the hub's incoming edges for governance once.
+#[test]
+fn cc11_a_cold_build_reads_a_hubs_governance_once() {
+    let (_d, mut r) = project();
+    hub_world(&mut r, 1000);
+    let st = r.read();
+    let before = governed_scans();
+    rebuilt_for_tests(&st, &Scope::Canon).unwrap();
+    assert_eq!(governed_scans() - before, 1);
+}
+
+/// Final review M8 (the carry's "deleted with children left" branch): in flight, view `a` puts
+/// a block under canon's empty section and view `b` deletes that section (empty in `b`). The
+/// in-flight state holds the delete with a child left, so the carry gives up (the perf hook
+/// gives no layer) and the next read rebuilds, equal to a rebuild.
+#[test]
+fn cc11_a_delete_with_children_left_in_flight_gives_up() {
+    let (_d, mut r) = project();
+    let c = cc6_world(&mut r);
+    let inflight = Scope::Inflight;
+    write(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "prose", "parent": c["$empty"], "body": "Now it has one."}]),
+    )
+    .unwrap();
+    let prev = r.read();
+    prev.coverage_issues(&inflight).unwrap();
+    let w = write(&mut r, "b", json!([{"op": "delete", "id": c["$empty"]}])).unwrap();
+    let next = r.read();
+    let m = next.materialized(&inflight).unwrap();
+    let empty = BlockId::parse(&c["$empty"]).unwrap();
+    assert!(
+        m.get(&empty).is_none(),
+        "guard: in flight the section is deleted"
+    );
+    assert!(
+        !m.children(Some(&empty)).is_empty(),
+        "guard: its child from view a is left"
+    );
+    let change: Hash = w.change.parse().unwrap();
+    let ops = next.reader().change(&change).unwrap().ops;
+    assert!(
+        carry_for_perf(&prev, &next, &inflight, &ops)
+            .unwrap()
+            .is_none(),
+        "the carry gives up"
+    );
+    next.coverage_issues(&inflight).unwrap();
+    same(&r, &inflight);
 }

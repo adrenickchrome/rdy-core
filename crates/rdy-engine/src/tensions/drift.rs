@@ -34,6 +34,10 @@ use std::sync::{Arc, Mutex};
 /// The fewest words a body needs to take part in restatement drift.
 pub const DRIFT_MIN_WORDS: usize = 8;
 
+/// The most removed words [`RestatementDrift::seeds_as_y`] filters an unread seed by substring
+/// before it splits the seed's body into words instead.
+const SUBSTRING_FILTER_MAX: usize = 32;
+
 /// This kind's detector.
 pub struct RestatementDrift;
 
@@ -650,8 +654,12 @@ impl RestatementDrift {
                         continue;
                     };
                     // a word of y is a substring of its lowercased body: a cheap first filter
+                    // while few words were removed (it costs removed words × body; past
+                    // SUBSTRING_FILTER_MAX the body is split once and each word looked up)
                     let lower = body.to_lowercase();
-                    if !removed.iter().any(|w| lower.contains(w.as_str())) {
+                    if removed.len() <= SUBSTRING_FILTER_MAX
+                        && !removed.iter().any(|w| lower.contains(w.as_str()))
+                    {
                         continue;
                     }
                     let words: Vec<&str> = words_of(&lower).collect();
@@ -690,14 +698,15 @@ impl RestatementDrift {
         let mut edited: Vec<(BlockId, Hash, LandedAt, Hash)> = vec![];
         let mut landings: Vec<LandedAt> = vec![];
         for b in m.iter().filter(|b| restating_type(pack, b)) {
-            let (c, step) = steps.current(&b.id)?;
+            let s = steps.current(&b.id)?;
+            let (c, step) = (s.0, &s.1);
             if text_of_len(&b.body) >= DRIFT_MIN_WORDS {
                 landings.push(step.landed_at.clone());
             }
             if let Some(base) = step.base {
                 edited.push((b.id.clone(), c, step.landed_at.clone(), base));
             }
-            newest.insert(b.id.clone(), step.landed_at);
+            newest.insert(b.id.clone(), step.landed_at.clone());
         }
         landings.sort();
         // no y can be older than the oldest landing among them
@@ -720,23 +729,27 @@ impl RestatementDrift {
             let Some(xb) = m.get(&x) else { continue };
             let n = text_of(&xb.body);
             let mut used: HashSet<Hash> = HashSet::from([c]);
-            let mut hi = x_landed;
+            // the step whose landing bounds the next interval (none yet: x's newest landing),
+            // kept without a copy of the landing
+            let mut hi_at: Option<crate::history::Step> = None;
             let mut version = Some(base);
             while let Some(v) = version {
-                let Some((c, step)) = steps.step(&v, &x, &used)? else {
+                let Some(s) = steps.step(&v, &x, &used)? else {
                     break;
                 };
+                let (c, step) = (s.0, &s.1);
                 used.insert(c);
+                let hi = hi_at.as_ref().map_or(&x_landed, |h| &h.1.landed_at);
                 // the landings p was x's text through: [its landing, hi); the first text's from
                 // before every landing
                 let lo = step.base.is_some().then_some(&step.landed_at);
-                if any_in(lo, &hi) {
+                if any_in(lo, hi) {
                     let p = older_text(cx, &steps, &v)?;
                     if p.long() {
                         for (y, yt) in restating(cx, &moved, &x, &p.set, t)? {
                             let y_landed = newest.get(&y).cloned().flatten();
                             if lo.is_none_or(|lo| &y_landed >= lo)
-                                && y_landed < hi
+                                && &y_landed < hi
                                 && drifts(&p.set, &yt.set, &n.set, t)
                             {
                                 found.push((x.clone(), y));
@@ -744,13 +757,14 @@ impl RestatementDrift {
                         }
                     }
                 }
-                if step.landed_at < hi {
-                    hi = step.landed_at;
+                let lower = &step.landed_at < hi;
+                version = step.base;
+                if lower {
+                    hi_at = Some(s);
                 }
-                if hi <= floor {
+                if hi_at.as_ref().map_or(&x_landed, |h| &h.1.landed_at) <= &floor {
                     break;
                 }
-                version = step.base;
             }
         }
         for (x, y) in found {

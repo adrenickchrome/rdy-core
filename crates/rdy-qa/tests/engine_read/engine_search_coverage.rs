@@ -406,3 +406,39 @@ fn cc14_a_plain_search_page_carries_coverage_on_each_entry_and_the_lowest_level_
         }
     }
 }
+
+/// Final review M8 (task 14.post): a plain search collapses blocks with identical matching lines
+/// into one entry, which carries its first block's coverage and the lowest level of all its
+/// blocks. Claims a and b say "Fees apply." (too short for a duplicate); a describes the term
+/// Fee (no issue, high on its own), b ties to nothing (untied text as a hit: low). The entry is
+/// a's, lists b under also, has a's issue count (0) and is low.
+#[test]
+fn cc14_a_collapsed_entry_takes_the_lowest_level_of_its_blocks() {
+    let (_d, mut r) = rdy_qa::fixtures::project();
+    let w = write(&mut r, "fees", json!([
+        {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "fees", "title": "Fees", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$o", "fields": {"title": "Rules"}},
+        {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Fee"}, "body": "A charge."},
+        {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "Fees apply.",
+         "links": {"describes": [{"target": "$t"}]}},
+        {"op": "create", "type": "claim", "id": "$b", "parent": "$s", "body": "Fees apply."}
+    ]))
+    .unwrap()
+    .created;
+    land(&mut r, "fees").unwrap();
+    let res = search(&r, "Fees apply", json!({}));
+    let entries = res["matches"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "one collapsed entry: {res}");
+    let e = &entries[0];
+    assert_eq!(e["id"], w["$a"], "{e}");
+    assert!(
+        e["also"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["id"] == w["$b"]),
+        "{e}"
+    );
+    assert_eq!(e["issues"], 0, "a's own issues: {e}");
+    assert_eq!(e["confidence"], "low", "b's level: {e}");
+}

@@ -153,6 +153,77 @@ fn cc13_an_open_suspect_on_a_dependent_makes_the_briefing_low() {
         "{citer} depends on the target and is suspect"
     );
     assert_eq!(v["coverage"]["reasons"][0]["code"], "open_suspect");
+    assert_eq!(
+        v["coverage"]["reasons"][0]["block"],
+        citer.to_string(),
+        "the issue is on the dependent"
+    );
+}
+
+/// Final review M8 (task 13, D-EEN7A): a decision that governs a covered block is in the
+/// neighbourhood. Claim c (draft, describes a term, decided by d1) has no issue of its own; d1
+/// and d2 state the same thing, an open duplicate in canon. The briefing on c is Low, and its
+/// first reason is on d1.
+#[test]
+fn cc13_an_open_issue_on_a_governing_decision_lowers_the_briefing() {
+    let (_d, mut r) = project();
+    let w = write(&mut r, "gov", json!([
+        {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "fees", "title": "Fees", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$o", "fields": {"title": "Rules", "lifecycle": "draft"}},
+        {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Fee"}, "body": "A charge."},
+        {"op": "create", "type": "decision", "id": "$d1", "parent": "$s", "fields": {"statement": "Fees are charged every month", "status": "proposed"}},
+        {"op": "create", "type": "decision", "id": "$d2", "parent": "$s", "fields": {"statement": "Fees are charged every month", "status": "proposed"}},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "A fee is billed monthly.",
+         "links": {"describes": [{"target": "$t"}], "decided_by": [{"target": "$d1"}]}}
+    ]))
+    .unwrap()
+    .created;
+    land(&mut r, "gov").unwrap();
+    let v = serde_json::to_value(brief_ids(&r, &[&w["$c"]])).unwrap();
+    assert!(
+        v["governs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["decision"] == w["$d1"]),
+        "{v}"
+    );
+    let cov = &v["coverage"];
+    assert_eq!(cov["confidence"], "low", "{cov}");
+    assert_eq!(cov["reasons"][0]["block"], w["$d1"], "{cov}");
+    assert_eq!(cov["reasons"][0]["code"], "open_tension", "{cov}");
+}
+
+/// Final review M8 (task 13, D-EEN7A): a block that will go stale when a covered block changes is
+/// in the neighbourhood. Claim c pins a citation to the term Wallet and names the term Ledger
+/// without a link; the briefing on Wallet lists c under will_go_stale, is Medium, and its first
+/// reason is c's unlinked mention.
+#[test]
+fn cc13_an_issue_on_a_will_go_stale_block_reaches_the_briefing() {
+    let (_d, mut r) = project();
+    let w = write(&mut r, "cite", json!([
+        {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "pay", "title": "Pay", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$o", "fields": {"title": "Rules"}},
+        {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Wallet"}, "body": "Holds cards."},
+        {"op": "create", "type": "term", "id": "$l", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Holds balances."},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Payment uses {{$t}} and the Ledger."}
+    ]))
+    .unwrap()
+    .created;
+    land(&mut r, "cite").unwrap();
+    let v = serde_json::to_value(brief_ids(&r, &[&w["$t"]])).unwrap();
+    assert!(
+        v["will_go_stale"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["block"] == w["$c"]),
+        "{v}"
+    );
+    let cov = &v["coverage"];
+    assert_eq!(cov["confidence"], "medium", "{cov}");
+    assert_eq!(cov["reasons"][0]["block"], w["$c"], "{cov}");
+    assert_eq!(cov["reasons"][0]["code"], "unlinked_mention", "{cov}");
 }
 
 #[test]

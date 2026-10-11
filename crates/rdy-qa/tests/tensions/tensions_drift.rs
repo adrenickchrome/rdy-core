@@ -508,3 +508,103 @@ fn cc7_a_seed_no_edit_can_match_is_not_hashed() {
     assert_eq!(drifts_on(&r, &z), 1);
     carried_equals_rebuilt(&r, "seeds");
 }
+
+/// The canon drift tensions as (x, y) pairs, from a canon build that ignores the memo.
+fn canon_drifts(r: &rdy_engine::Rdy) -> Vec<Vec<rdy_model::BlockId>> {
+    let mut v: Vec<Vec<rdy_model::BlockId>> = r
+        .read()
+        .canon_tensions_rebuilt()
+        .unwrap()
+        .iter()
+        .filter(|t| t.kind == TensionKind::RestatementDrift)
+        .map(|t| t.blocks())
+        .collect();
+    v.sort();
+    v
+}
+
+/// Final review I2: a version's step (writer, landing, base) is kept across canon builds, so a
+/// canon build after a landing reads from the store only the versions that landing wrote, not
+/// every version of every edited block down to the oldest landing. 21 long blocks land; block 0
+/// never changes (it holds the floor at the first landing); blocks 1 to 20 are edited in 10
+/// landings. After a warm build, one more edit landing of the 20 blocks costs about 20 reads.
+#[test]
+fn cc7_a_canon_build_after_a_landing_reads_only_the_new_versions() {
+    let (_d, mut r) = project();
+    let said = |i: usize, round: usize| {
+        format!("Block {i} says that queue {i} keeps record {i} for worker {i} in round {round}.")
+    };
+    let mut ops = vec![json!({"op": "create", "type": "doc", "id": "$d",
+        "fields": {"name": "deep", "title": "Deep", "doc_type": "page"}})];
+    ops.extend((0..21).map(|i| {
+        json!({"op": "create", "type": "prose", "id": format!("$b{i}"), "parent": "$d", "body": said(i, 0)})
+    }));
+    let w = put(&mut r, "seed", serde_json::Value::Array(ops));
+    land(&mut r, "seed").unwrap();
+    let ids: Vec<rdy_model::BlockId> = (0..21).map(|i| created(&w, &format!("$b{i}"))).collect();
+    let edit_all = |r: &mut rdy_engine::Rdy, round: usize| {
+        let ops: Vec<serde_json::Value> = (1..21)
+            .map(|i| json!({"op": "update", "id": ids[i].to_string(), "body": said(i, round)}))
+            .collect();
+        let view = format!("e{round}");
+        put(r, &view, serde_json::Value::Array(ops));
+        land(r, &view).unwrap();
+    };
+    for round in 1..=10 {
+        edit_all(&mut r, round);
+    }
+    canon_drifts(&r);
+    edit_all(&mut r, 11);
+    let before = rdy_engine::canon_step_reads();
+    canon_drifts(&r);
+    let n = rdy_engine::canon_step_reads() - before;
+    assert!(
+        n <= 25,
+        "a canon build after one landing read {n} version steps"
+    );
+}
+
+/// Final review I2: the kept steps equal a fresh read through a revert. x goes A (with z, which
+/// never changes), then B; y lands restating B; x goes back to A (that version's step changes:
+/// its writer is now the revert), then to C. Canon then holds the drift of x from y (x changed
+/// the text B y restates), read warm after every landing, and a fresh handle reads the same.
+#[test]
+fn cc7_kept_canon_steps_equal_a_fresh_read_through_a_revert() {
+    const A: &str = "Every job retries for five seconds and then reports a failure to the owner.";
+    const B: &str = "Every job retries for ten seconds and then reports a failure to the owner.";
+    const C: &str = "Each task waits a minute before the scheduler service starts it again later.";
+    let (d, mut r) = project();
+    let w = put(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "jobs", "title": "Jobs", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "id": "$x", "parent": "$d", "body": A},
+            {"op": "create", "type": "prose", "id": "$z", "parent": "$d",
+             "body": "The weekly report lists every open incident with its owner and its status."}
+        ]),
+    );
+    land(&mut r, "seed").unwrap();
+    let x = created(&w, "$x");
+    let doc = w.created["$d"].clone();
+    let step = |r: &mut rdy_engine::Rdy, view: &str, ops: serde_json::Value| {
+        put(r, view, ops);
+        land(r, view).unwrap();
+        canon_drifts(r);
+    };
+    canon_drifts(&r);
+    step(&mut r, "b", upd(&x, B));
+    step(
+        &mut r,
+        "y",
+        json!([{"op": "create", "type": "prose", "parent": doc, "body": format!("In short: {B}")}]),
+    );
+    step(&mut r, "back", upd(&x, A));
+    step(&mut r, "c", upd(&x, C));
+    let warm = canon_drifts(&r);
+    assert_eq!(warm.len(), 1, "x changed the text y restates: {warm:?}");
+    assert!(warm[0].contains(&x));
+    drop(r);
+    let fresh = rdy_engine::Rdy::open(d.path()).expect("open");
+    assert_eq!(canon_drifts(&fresh), warm, "a fresh handle reads the same");
+}

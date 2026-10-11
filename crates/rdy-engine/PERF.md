@@ -1037,12 +1037,20 @@ The dirty set (closed):
 
 1. every block an op touches, its parent, and its doc, before and after the ops;
 2. every target of an outgoing edge of a touched block, old or new, and that target's doc;
-3. every source of an incoming edge to a touched block in the new graph (refs that dangle or
-   stop dangling; decisions applied or not; questions answered);
-4. for a touched decision: the targets of its `affects` edges, old and new, and the sources of
-   their incoming `describes` edges; the targets of its `supersedes` and `revokes` edges, with
-   the sources of their incoming `decided_by` and `implements` edges, the targets of their
-   `affects` edges and the sources of those targets' incoming `describes` edges.
+3. for a touched block that appears, goes, changes type or (a decision) changes status: every
+   source of an incoming edge to it in the new graph (refs that dangle or stop dangling;
+   decisions applied or not; questions answered; decisions that become live or stop being
+   live). A body or other field edit changes nothing a pointing block reads of its target, so
+   it adds none of them (final review I1);
+4. for a touched decision whose status or whose `affects`, `supersedes` and `revokes` edges
+   change (or that appears or goes): the targets of its `affects` edges, old and new, and the
+   sources of their incoming `describes` edges; the targets of its `supersedes` and `revokes`
+   edges, with the sources of their incoming `decided_by` and `implements` edges, the targets
+   of their `affects` edges and the sources of those targets' incoming `describes` edges. A
+   statement edit adds none of them (final review I1);
+5. for a touched entity that starts or stops being deprecated (the deprecated reference rule): every
+   block whose text names it. An unlinked mention of a deprecated entity is no Grounded check
+   (final review I4).
 
 "Its doc" is every doc above the block, so a doc nested in a doc is reached too. A deleted
 block leaves the map. The entity-to-blocks map drops each touched block from the entities its
@@ -1061,8 +1069,9 @@ The carry gives up, and the next read rebuilds, when an op:
 
 The carry also does not run when the graph or the lexicon of the build was not carried.
 
-Equality with a rebuild is pinned by `cc11_carried_equals_rebuilt_over_random_writes` (200
-random writes), `cc11_dangling_refs_and_landed_decisions_carry_exactly`,
+Equality with a rebuild is pinned by `cc11_carried_equals_rebuilt_over_random_writes` (300
+random writes, among them body edits of the term and of proposed decisions and moves of the
+term in and out of a deprecated section), `cc11_dangling_refs_and_landed_decisions_carry_exactly`,
 `cc11_a_rename_that_keeps_the_phrase_equals_a_rebuild` and
 `cc11_tree_writes_and_doc_type_changes_rebuild` (a folder rename, a move of a section with
 children, a `doc_type` change, a doc created and a doc moved). The counter `structural_builds`
@@ -1090,6 +1099,73 @@ summary's (`rdy status`, `rdy_overview`), and a write reply reads only the rollu
 `coverage_report_cold`'s, not a write reply's.
 
 No laptop figures are recorded here: the first timing of these ops is the Linux bench's.
+
+Baseline: `qa-baseline.json` is not changed here.
+
+Deep gate (bench): <orchestrator fills in>
+
+
+### Final review fix round 1: hub entities and the canon drift history
+
+**Hub entities (I1).** Before this round a body edit of an entity that N blocks describe made
+all N describers dirty (rule 3 took every incoming source), and each describer's Governed check
+scanned the entity's N incoming edges again, so the carry cost O(N²) on the writer. Measured on
+the final review's MCP probe: 22, 45 and 130 ms per hub edit at 2,000, 4,000 and 8,000
+describers. Two changes:
+
+- rule 3 and rule 4 take the pointing blocks only when what they read can change (above);
+- whether an entity has a live incoming `affects` is read once per build or carry and kept per
+  entity (`EntryCx::affected_live`), so a cold build is linear in the edges too.
+
+`cc11_a_body_edit_of_a_hub_recomputes_o1_entries` pins the count (the test hook
+`carried_entries`): a body edit of a term that 1,000 claims describe, and a statement edit of a
+proposed decision that affects it, each recompute at most 4 entries, and the landing that
+accepts the decision still reaches every describer. `cc11_a_cold_build_reads_a_hubs_governance_once`
+pins one scan of the hub per build (`governed_scans`).
+
+Mac figures (indicative, release, in process; the write and the coverage read after it): 5.8,
+7.0 and 10.4 ms at 2,000, 4,000 and 8,000 describers; a cold structural build 6.0, 10.4 and
+25.3 ms.
+
+**The canon form of restatement drift against history (I2).** Each canon build walked back
+through every version of every edited long block down to the oldest newest-landing among the
+long blocks, reading each version's step (the change that wrote it, its landing, its base) from
+the store with a memo that lived for one build. The cost was one store step per version, not
+per block, so it grew with the project's history on every landing reply. Measured on the final
+review's engine probe: 400 blocks with unique text went from 4.3 to 50 ms over 60 landings.
+
+The steps are now kept across canon builds (`history::StepCache`, shared by every state one
+handle publishes, like `vpos`). A version's step is the change chosen among its producers: of
+those landed at or before canon's head, the one landed last. History is append-only, so a later
+landing changes the step only of a version that one of its changes writes again (a revert). The
+cache holds the steps for one canon head; on a newer head it drops the steps of every version
+the landings since then write (walking back at most 64 landings), and on any other head it
+starts again empty. Only a step whose change has landed is kept, and a step whose change the
+walk has already taken (a block written back to an earlier text) is read from the store. The
+cache is bounded at 2^18 steps and cleared by a reindex.
+
+`cc7_a_canon_build_after_a_landing_reads_only_the_new_versions` pins the reads (the test hook
+`canon_step_reads`): after a warm build, one landing that edits 20 of 21 long blocks, 10
+landings deep, costs at most 25 store steps (241 before).
+`cc7_kept_canon_steps_equal_a_fresh_read_through_a_revert` pins that a revert drops the kept
+step: a fresh handle reads the same drift.
+
+Mac figures (indicative, release; the first canon build after each landing, the final review's
+shape): 400 blocks with unique text 3.9 ms after 1 landing, 4.7 ms after 30, 5.9 ms after 60;
+400 blocks with shared phrases 5.3, 6.3 and 7.3 ms. The walk is still one in-memory step per
+version, so a small linear term in history depth stays.
+
+Two `qa-perf` ops cover these shapes, each on a project of its own:
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `coverage_carry_hub` | As `coverage_carry`, after a body edit of a term that 2,000 claims in a stable section describe (each governed through it by a live decision): `carry_for_perf` and `coverage_change` for the written block; it asserts the carry recomputed at most 8 entries | `runs.write` | < 5 ms p95: a write reply's coverage change after a body edit of a term 2,000 claims describe (FW-PF2; tb-XBXR4 read budget; final review I1) |
+| `tensions_canon_drift_deep` | The canon-scope build of the tensions after one more edit landing (untimed) of `n / 2` prose blocks in one controlled-English pattern, 50 edit landings deep, with one long block that never changes (it keeps every edited block's history in reach); it asserts the build read at most two store steps per edited block | `runs.materialize_cold` | no spec target: the D-SES4J budget check of the canon form against history; compare with `tensions_canon_drift`. If the bench shows the canon form over its budget, the founder's D-SES4J fallback applies (drop the canon form; keep the in-flight and landing forms) |
+
+`tension_value_1k` and `tension_drift_1k` time the tension delta and its `on_change` report,
+not the whole write; their target text now says so (final review M6).
+
+No laptop figures are judged here: the first timing of these ops is the Linux bench's.
 
 Baseline: `qa-baseline.json` is not changed here.
 

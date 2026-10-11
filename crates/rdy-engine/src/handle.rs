@@ -90,6 +90,7 @@ impl Rdy {
         let as_of = Arc::new(AsOfCache::default());
         let vpos: Arc<Mutex<version::VposCache>> = Default::default();
         let proposal_touched = inflight::ProposalTouched::default();
+        let canon_step_cache: Arc<crate::history::StepCache> = Arc::default();
         let (name, description) = site_identity(project, &cfg);
         let require_up_to_date = cfg.require_up_to_date();
         let idle_days = cfg.idle_days();
@@ -115,6 +116,7 @@ impl Rdy {
             as_of: Arc::clone(&as_of),
             vpos: Arc::clone(&vpos),
             proposal_touched: Arc::clone(&proposal_touched),
+            canon_step_cache: Arc::clone(&canon_step_cache),
             inflight_cell: Arc::default(),
             coord_heads: Arc::default(),
             coord: OnceLock::new(),
@@ -132,6 +134,7 @@ impl Rdy {
             as_of,
             vpos,
             proposal_touched,
+            canon_step_cache,
             events: Events::new(),
             last_emitted: store.log_end(),
             emit_error: None,

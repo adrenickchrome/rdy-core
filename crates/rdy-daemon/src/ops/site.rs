@@ -33,8 +33,8 @@ pub(super) fn export(cx: &OpContext, a: OutArgs) -> Result<Value, RdyError> {
 }
 
 /// Sets `coverage` and `onboarding` on the import reply. Set here, so it replaces any `coverage`
-/// the write reply carries. When either read fails, both keys are left out, `coverage_error`
-/// says why, and the reply stands.
+/// the write reply carries, and any `coverage_error` of that coverage change. When either read
+/// fails, both keys are left out, `coverage_error` says why, and the reply stands.
 fn attach_baseline(
     v: &mut Value,
     report: Result<rdy_engine::coverage::CoverageReport, RdyError>,
@@ -48,6 +48,10 @@ fn attach_baseline(
                 "pages": report.pages,
             });
             v["onboarding"] = to_json(&onboarding);
+            // the baseline replaces the write reply's coverage change, and its error with it
+            if let Some(o) = v.as_object_mut() {
+                o.remove("coverage_error");
+            }
         }
         (Err(e), _) | (_, Err(e)) => {
             if let Some(o) = v.as_object_mut() {
@@ -121,5 +125,23 @@ mod tests {
         assert!(v.get("coverage").is_none(), "{v}");
         assert!(v.get("onboarding").is_none(), "{v}");
         assert_eq!(v["coverage_error"], "E_INTERNAL: boom", "{v}");
+    }
+
+    /// Final review M5: a write reply whose coverage change failed carries `coverage_error`; a
+    /// good baseline replaces that coverage, so the error goes with it.
+    #[test]
+    fn cc17_a_good_baseline_clears_the_coverage_change_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let st = r.read();
+        let mut v = json!({"changes": 2, "coverage_error": "E_IO: tensions busy"});
+        attach_baseline(
+            &mut v,
+            st.coverage_report(&Scope::Canon, None),
+            st.onboarding(&Scope::Canon),
+        );
+        assert!(v.get("coverage").is_some(), "{v}");
+        assert!(v.get("onboarding").is_some(), "{v}");
+        assert!(v.get("coverage_error").is_none(), "{v}");
     }
 }

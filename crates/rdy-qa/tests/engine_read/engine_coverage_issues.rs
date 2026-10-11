@@ -474,3 +474,166 @@ fn cc6_a_briefing_at_a_past_landing_has_no_coverage_key() {
     );
     assert!(at(Scope::Canon).get("coverage").is_some());
 }
+
+/// Final review I4, orchestrator ruling (D-S46DE, D-JV4QB): a mention of an entity that is
+/// deprecated in the scope is the deprecated reference tension's job, not a linking gap. Doc
+/// `jobs` holds term Retry limit (alias "retries", in a deprecated section), and in section
+/// Rules term Ledger (live), claim a
+/// (names the retries only), claim b (names the retries and the Ledger) and claim c (names the
+/// retries and describes Retry limit). Landed. Then a and b carry the deprecated reference
+/// tension and no unlinked mention of the retired term, and no write or search suggestion links
+/// it; the live Ledger mention still counts; c, which links the retired term, keeps its check.
+#[test]
+fn cc6_a_deprecated_entity_mention_is_no_linking_gap() {
+    let (_d, mut r) = project();
+    let w = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "jobs", "title": "Jobs", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$o", "fields": {"title": "Rules"}},
+        {"op": "create", "type": "section", "id": "$retired", "parent": "$o", "fields": {"title": "Retired", "lifecycle": "deprecated"}},
+        {"op": "create", "type": "term", "id": "$old", "parent": "$retired", "fields": {"name": "Retry limit", "aliases": ["retries"]}, "body": "How often a job runs again."},
+        {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Holds balances."},
+        {"op": "create", "type": "claim", "id": "$a", "parent": "$s", "body": "The retries happen twice a day."},
+        {"op": "create", "type": "claim", "id": "$b", "parent": "$s", "body": "The Ledger keeps the retries."},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "The retries stop at noon.",
+         "links": {"describes": [{"target": "$old"}]}}
+    ]))
+    .unwrap()
+    .created;
+    land(&mut r, "work").unwrap();
+    let (old, ledger) = (w["$old"].clone(), w["$t"].clone());
+    let i = issues(&r);
+    let mentions_of = |id: &str| -> Vec<Option<String>> {
+        i.blocks[&BlockId::parse(id).unwrap()]
+            .issues
+            .iter()
+            .filter(|x| x.code == IssueCode::UnlinkedMention)
+            .map(|x| x.subject.clone())
+            .collect()
+    };
+    assert_eq!(mentions_of(&w["$a"]), Vec::<Option<String>>::new());
+    assert_eq!(
+        mentions_of(&w["$b"]),
+        vec![Some(ledger.clone())],
+        "a live entity's mention still counts"
+    );
+    let checks = |id: &str| i.blocks[&BlockId::parse(id).unwrap()].checks[0];
+    assert_eq!(checks(&w["$a"]), 1, "the content check only");
+    assert_eq!(
+        checks(&w["$b"]),
+        2,
+        "the content check and the Ledger mention"
+    );
+    assert_eq!(
+        checks(&w["$c"]),
+        2,
+        "a block that links the retired term keeps its check"
+    );
+    assert!(
+        i.mentions[&BlockId::parse(&old).unwrap()].contains(&BlockId::parse(&w["$a"]).unwrap()),
+        "the block still names the retired term"
+    );
+    // onboarding reads the same issues: the entities phase counts a's and b's untied content
+    // and b's Ledger mention, and nothing for the retired term
+    let entities = r
+        .read()
+        .onboarding(&Scope::Canon)
+        .unwrap()
+        .phases
+        .into_iter()
+        .find(|p| p.phase == rdy_engine::coverage::Phase::Entities)
+        .unwrap();
+    assert_eq!(entities.issues, 3, "{entities:?}");
+    // the deprecated reference tension carries the signal
+    let st = r.read();
+    let tensions = st.tensions().unwrap();
+    for x in [&w["$a"], &w["$b"]] {
+        let x = BlockId::parse(x).unwrap();
+        assert!(
+            tensions.iter().any(|t| t.kind
+                == rdy_engine::tensions::TensionKind::DeprecatedReference
+                && t.blocks().contains(&x)),
+            "{x} carries the deprecated reference tension"
+        );
+    }
+    // a write's suggestions link the live term only
+    let wr = write(
+        &mut r,
+        "more",
+        json!([{"op": "create", "type": "claim", "parent": w["$s"], "body": "The Ledger counts the retries."}]),
+    )
+    .unwrap();
+    let change: rdy_model::Hash = wr.change.parse().unwrap();
+    let (sugg, _) = r
+        .read()
+        .suggestions(&Scope::View("more".into()), &change)
+        .unwrap();
+    let targets: Vec<String> = sugg
+        .iter()
+        .filter_map(|s| match s {
+            rdy_engine::suggest::Suggestion::Link { target, .. } => Some(target.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(targets, vec![ledger.clone()], "{sugg:?}");
+    // a search hit gets no link suggestion to the retired term either
+    let res = r
+        .read()
+        .search(
+            &Scope::Canon,
+            &SearchQuery {
+                text: "retries".into(),
+                ..Default::default()
+            },
+            None,
+            Some(100_000),
+        )
+        .unwrap();
+    assert!(
+        res.matches.iter().any(|m| m.id == w["$a"]),
+        "guard: a is a hit"
+    );
+    assert!(
+        res.matches.iter().all(|m| m.suggestions.is_empty()),
+        "{:?}",
+        res.matches
+    );
+}
+
+/// Final review M1: a pinned citation whose target a view deletes is one Connected issue, the
+/// dangling reference; no open suspect asks to repin it to a block that does not exist. (A
+/// landing refuses this state, so only a view holds it.) In canon the target exists and the
+/// suspect of the changed target stays.
+#[test]
+fn cc6_a_deleted_pinned_target_is_a_dangling_ref_only() {
+    let (_d, mut r) = project();
+    let w = write(&mut r, "cite", json!([
+        {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "pay", "title": "Pay", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$o", "fields": {"title": "Rules"}},
+        {"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Wallet"}, "body": "Holds cards."},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Payment uses {{$t}}."}
+    ]))
+    .unwrap()
+    .created;
+    land(&mut r, "cite").unwrap();
+    let (c, t) = (w["$c"].clone(), w["$t"].clone());
+    write(
+        &mut r,
+        "edit",
+        json!([{"op": "update", "id": t, "body": "Holds cards and vouchers."}]),
+    )
+    .unwrap();
+    land(&mut r, "edit").unwrap();
+    assert!(
+        codes(&issues(&r), &c).contains(&IssueCode::OpenSuspect),
+        "guard: canon holds the suspect of the changed target"
+    );
+    write(&mut r, "gone", json!([{"op": "delete", "id": t}])).unwrap();
+    let v = r
+        .read()
+        .coverage_issues(&Scope::View("gone".into()))
+        .unwrap();
+    let mine = &v.blocks[&BlockId::parse(&c).unwrap()].issues;
+    let codes: Vec<IssueCode> = mine.iter().map(|x| x.code).collect();
+    assert!(codes.contains(&IssueCode::DanglingRef), "{mine:?}");
+    assert!(!codes.contains(&IssueCode::OpenSuspect), "{mine:?}");
+}

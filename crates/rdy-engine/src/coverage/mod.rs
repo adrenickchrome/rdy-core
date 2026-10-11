@@ -12,7 +12,7 @@ mod state;
 mod structural;
 
 pub(crate) use carry::carry;
-pub use carry::carry_for_perf;
+pub use carry::{carried_entries, carry_for_perf};
 pub use change::{CoverageChange, PageChange, coverage_change};
 pub use confidence::*;
 pub use kinds::{KindCount, kinds_builds};
@@ -27,4 +27,4 @@ pub use state::{
     CoverageSummary, coverage_error_text, issues_rebuilt_for_tests, state_layer_builds,
 };
 pub(crate) use structural::lands_unapplied;
-pub use structural::{rebuilt_for_tests, structural_builds, structural_for_tests};
+pub use structural::{governed_scans, rebuilt_for_tests, structural_builds, structural_for_tests};

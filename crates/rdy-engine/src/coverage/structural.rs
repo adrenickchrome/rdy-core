@@ -5,16 +5,17 @@
 use super::model::*;
 use crate::brief::effective_stable;
 use crate::lexicon::{Lexicon, is_content, is_tie, link_kind_for, linked_from_outside, tied};
-use crate::tensions::index::is_normative;
+use crate::tensions::index::{is_deprecated, is_normative};
 use crate::{Materialized, RdyError, ReadState, Scope};
 use rdy_graph::{DerivedStatus, EdgeKind, Graph};
 use rdy_model::{Block, BlockId, FieldValue, decision, tree};
 use rdy_schema::{Pack, TypeClass};
-use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 thread_local! {
     static STRUCTURAL_BUILDS: Cell<u64> = const { Cell::new(0) };
+    static GOVERNED_SCANS: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Test hook: this thread's count of full structural builds (`structural_of` calls).
@@ -23,12 +24,69 @@ pub fn structural_builds() -> u64 {
     STRUCTURAL_BUILDS.with(Cell::get)
 }
 
-/// What one block's structural entry reads.
+/// Test hook: this thread's count of scans of an entity's incoming edges for a live `affects`
+/// (the Governed check through the entities a block describes).
+#[doc(hidden)]
+pub fn governed_scans() -> u64 {
+    GOVERNED_SCANS.with(Cell::get)
+}
+
+/// What one block's structural entry reads, with what its entries share, memoised per entity
+/// for the life of the context (one build or one carry).
 pub(crate) struct EntryCx<'a> {
     pub m: &'a Materialized,
     pub g: &'a Graph,
     pub lex: &'a Lexicon,
     pub pack: &'a Pack,
+    /// Whether each entity read so far is deprecated in the scope.
+    deprecated: RefCell<HashMap<BlockId, bool>>,
+    /// Whether each block read so far has a live decision that affects it: read once per
+    /// context, not once per block that describes it (final review I1).
+    affected: RefCell<HashMap<BlockId, bool>>,
+}
+
+impl<'a> EntryCx<'a> {
+    pub(crate) fn new(
+        m: &'a Materialized,
+        g: &'a Graph,
+        lex: &'a Lexicon,
+        pack: &'a Pack,
+    ) -> EntryCx<'a> {
+        EntryCx {
+            m,
+            g,
+            lex,
+            pack,
+            deprecated: RefCell::default(),
+            affected: RefCell::default(),
+        }
+    }
+
+    /// Whether a live decision affects `target` (an incoming `affects` edge).
+    fn affected_live(&self, target: &BlockId) -> bool {
+        if let Some(a) = self.affected.borrow().get(target) {
+            return *a;
+        }
+        GOVERNED_SCANS.with(|c| c.set(c.get() + 1));
+        let a = self
+            .g
+            .incoming(target)
+            .iter()
+            .any(|a| is_link(a, decision::AFFECTS) && is_live(self.g, &a.from));
+        self.affected.borrow_mut().insert(target.clone(), a);
+        a
+    }
+
+    /// Whether `entity` is deprecated in the scope, by the deprecated reference rule
+    /// (`is_deprecated`, D-S46DE).
+    fn deprecated(&self, entity: &BlockId) -> bool {
+        if let Some(d) = self.deprecated.borrow().get(entity) {
+            return *d;
+        }
+        let d = is_deprecated(self.m, self.g, entity);
+        self.deprecated.borrow_mut().insert(entity.clone(), d);
+        d
+    }
 }
 
 /// Whether `id` is a live decision: accepted and not wholly superseded or revoked.
@@ -59,18 +117,14 @@ fn tied_to_entity(cx: &EntryCx<'_>, id: &BlockId) -> bool {
 /// Whether `id` has a governing decision: a live decision by `decided_by` or `implements`, or a
 /// direct `affects` (`Graph::governing`), or a live decision that affects an entity `id`
 /// describes (D-TQD4D).
-fn is_governed(g: &Graph, id: &BlockId) -> bool {
-    if !g.governing(id).is_empty() {
+fn is_governed(cx: &EntryCx<'_>, id: &BlockId) -> bool {
+    if !cx.g.governing(id).is_empty() {
         return true;
     }
-    g.outgoing(id)
+    cx.g.outgoing(id)
         .iter()
         .filter(|e| is_link(e, decision::DESCRIBES))
-        .any(|e| {
-            g.incoming(&e.to)
-                .iter()
-                .any(|a| is_link(a, decision::AFFECTS) && is_live(g, &a.from))
-        })
+        .any(|e| cx.affected_live(&e.to))
 }
 
 /// Whether decision `d` is applied (D-ET9RX): a block that is neither a decision nor of the
@@ -134,10 +188,11 @@ fn missing_sections(cx: &EntryCx<'_>, b: &Block) -> Vec<String> {
         .collect()
 }
 
-/// The entities `b`'s text names, as [`entry_of`] lists them: none for a presentational block
-/// or one that takes no link. A carry reads it for a block's version before the write.
+/// The entities `b`'s text names, as [`entry_of`] lists them, linked or not and whether or not
+/// `b` can link: none for a presentational block (not scored). A carry reads it for a block's
+/// version before the write.
 pub(crate) fn named_in(pack: &Pack, lex: &Lexicon, b: &Block) -> Vec<BlockId> {
-    if pack.is_presentational(&b.block_type) || link_kind_for(pack, b).is_none() {
+    if pack.is_presentational(&b.block_type) {
         return vec![];
     }
     lex.mentions(b)
@@ -174,13 +229,19 @@ pub(crate) fn entry_of(cx: &EntryCx<'_>, id: &BlockId) -> Option<(BlockEntry, Ve
             ));
         }
     }
-    if link_kind_for(cx.pack, b).is_some() {
-        for mention in cx.lex.mentions(b) {
-            let Ok(entity) = BlockId::parse(&mention.entity) else {
-                continue;
-            };
+    // every scored block's mentions are listed (a fact sheet's neighbourhood); only a block
+    // that can link has a Grounded check per mention
+    let can_link = link_kind_for(cx.pack, b).is_some();
+    for mention in cx.lex.mentions(b) {
+        let Ok(entity) = BlockId::parse(&mention.entity) else {
+            continue;
+        };
+        let linked = can_link && tied(cx.g, id, &entity);
+        // an unlinked mention of a deprecated entity is no linking gap: the deprecated reference
+        // tension reports it, and its fix is to reword (D-S46DE; final review I4)
+        if can_link && (linked || !cx.deprecated(&entity)) {
             e.check(Dimension::Grounded);
-            if !tied(cx.g, id, &entity) {
+            if !linked {
                 let name =
                     cx.m.get(&entity)
                         .and_then(|t| t.field_str("name"))
@@ -193,8 +254,8 @@ pub(crate) fn entry_of(cx: &EntryCx<'_>, id: &BlockId) -> Option<(BlockEntry, Ve
                     fix_unlinked_mention(&name, &entity),
                 ));
             }
-            named.push(entity);
         }
+        named.push(entity);
     }
 
     // Consistent and Current: one check each; their issues are the state layer's
@@ -286,7 +347,7 @@ pub(crate) fn entry_of(cx: &EntryCx<'_>, id: &BlockId) -> Option<(BlockEntry, Ve
         }
     } else if is_normative(cx.pack, b) && effective_stable(cx.m, Some(id)) {
         e.check(Dimension::Governed);
-        if !is_governed(cx.g, id) {
+        if !is_governed(cx, id) {
             e.issues.push(CoverageIssue::new(
                 id,
                 IssueCode::Ungrounded,
@@ -307,12 +368,7 @@ pub(crate) fn structural_of(st: &ReadState, scope: &Scope) -> Result<Structural,
     let m = st.materialized(scope)?;
     let g = st.graph(scope)?;
     let lex = st.lexicon(scope)?;
-    let cx = EntryCx {
-        m: &m,
-        g: &g,
-        lex: &lex,
-        pack: st.pack(),
-    };
+    let cx = EntryCx::new(&m, &g, &lex, st.pack());
     let mut blocks: BTreeMap<BlockId, BlockEntry> = BTreeMap::new();
     let mut mentions: BTreeMap<BlockId, BTreeSet<BlockId>> = BTreeMap::new();
     for b in m.iter() {

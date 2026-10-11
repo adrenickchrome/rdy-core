@@ -7,6 +7,7 @@ use crate::factsheet::{FactSheet, MAX_RESOLVED};
 use crate::lexicon::{link_kind_for, tied};
 use crate::materialize::Materialized;
 use crate::suggest::{Suggestion, suggestion_id};
+use crate::tensions::index::is_deprecated;
 use crate::{ReadState, Scope, now_ms};
 use rdy_graph::EdgeKind;
 use rdy_model::decision::{AFFECTS, DECIDED_BY, DECISION, DESCRIBES, IMPLEMENTS};
@@ -358,7 +359,13 @@ impl ReadState {
                     let Some(mention) = mentions.iter().find(|mn| mn.entity == e.as_str()) else {
                         continue;
                     };
-                    if h.block.id == *e || tied(&graph, &h.block.id, e) {
+                    // a dismissed pair is settled in every scope until a restore (D-E6JD1),
+                    // and a deprecated entity is reworded, never linked (D-S46DE)
+                    if h.block.id == *e
+                        || tied(&graph, &h.block.id, e)
+                        || self.mention_dismissed(&h.block.id, e).is_some()
+                        || is_deprecated(&m, &graph, e)
+                    {
                         continue;
                     }
                     let (block, target) = (h.block.id.to_string(), e.to_string());

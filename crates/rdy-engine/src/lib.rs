@@ -61,7 +61,9 @@ pub use gate::{
     LandInfo, LandOptions, LandingRow, PROPOSAL_TENSIONS_MAX, ProposalInfo, ProposalRef,
     RebasedInfo, RelayedByRow,
 };
-pub use history::{Author, HISTORY_MAX, History, HistoryEntry, JustificationInfo, LandingRef};
+pub use history::{
+    Author, HISTORY_MAX, History, HistoryEntry, JustificationInfo, LandingRef, canon_step_reads,
+};
 pub use io::{EditBase, ExportSummary, block_from_yaml, block_to_yaml, refuse_inflight_export};
 pub use lint::check_path;
 pub use materialize::{Materialized, PathMiss};
@@ -127,6 +129,8 @@ pub struct Rdy {
     vpos: Arc<Mutex<version::VposCache>>,
     /// The blocks each proposal version writes; shared with every published state.
     proposal_touched: inflight::ProposalTouched,
+    /// Canon's version steps kept across canon builds; shared with every published state.
+    canon_step_cache: Arc<history::StepCache>,
     /// The in-process event bus (evt1); `publish` feeds it.
     events: Events,
     /// The end of the last batch whose events were published to `events` (or whose events could

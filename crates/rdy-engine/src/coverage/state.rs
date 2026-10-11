@@ -83,7 +83,7 @@ pub(crate) struct Memoised {
 
 /// What a scope's coverage issues are a function of (with the pack): its structural layer, its
 /// build, the tension set and the tensions the scope counts, the dismissed tensions and
-/// mentions, and its suspects with presentational sources left out.
+/// mentions, and its suspects with presentational sources and absent targets left out.
 struct Inputs {
     structural: Arc<Structural>,
     m: Arc<Materialized>,
@@ -101,10 +101,12 @@ impl Inputs {
         let tensions = st.tensions()?;
         let m = st.materialized(scope)?;
         let g = st.graph(scope)?;
+        // a suspect whose target the scope does not hold is its citer's dangling reference
+        // (Connected), not a pin to confirm (final review M1)
         let suspects = g
             .suspects()
             .into_iter()
-            .filter(|s| !st.is_presentational_source(&m, s))
+            .filter(|s| !st.is_presentational_source(&m, s) && m.get(&s.target).is_some())
             .collect();
         Ok(Inputs {
             structural,

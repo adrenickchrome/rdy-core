@@ -82,7 +82,9 @@ enum Cmd {
     },
     /// List tensions: disagreements between in-flight changes, with canon, or inside canon.
     Tensions(tension_cmd::TensionsArgs),
-    /// Dismiss a tension with a reason. A tension is otherwise resolved by a change.
+    /// Dismiss a tension with a reason, or dismiss or restore a passing entity mention
+    /// (--mention <block> <entity> with --dismiss or --restore). A tension is otherwise resolved
+    /// by a change.
     Resolve(tension_cmd::ResolveArgs),
     /// Print the coverage report: the score per dimension, the lowest pages, and each coverage issue with its fix
     Coverage(coverage_cmd::CoverageArgs),
@@ -235,5 +237,32 @@ fn main() -> ExitCode {
             print_error(&e, as_json);
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// Final review M3: `rdy --help` names the mention form of `rdy resolve`, so a person finds
+    /// `--mention <block> <entity>` with `--dismiss` or `--restore`.
+    #[test]
+    fn cc8_the_resolve_help_names_the_mention_form() {
+        let cmd = Cli::command();
+        let resolve = cmd
+            .get_subcommands()
+            .find(|c| c.get_name() == "resolve")
+            .expect("resolve");
+        let about = resolve
+            .get_about()
+            .map(|a| a.to_string())
+            .unwrap_or_default();
+        assert!(
+            about.contains("--mention <block> <entity>")
+                && about.contains("--dismiss")
+                && about.contains("--restore"),
+            "{about}"
+        );
     }
 }

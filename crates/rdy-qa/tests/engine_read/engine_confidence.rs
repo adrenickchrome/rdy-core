@@ -289,3 +289,90 @@ fn cc14_the_level_alone_is_the_level_of_the_full_confidence() {
         );
     }
 }
+
+/// Final review M2 (the model's "linked or not"): a fact sheet's neighbourhood holds every
+/// scored block whose text names the entity, also one that cannot link to it: a section titled
+/// after it and an accepted (frozen) decision whose statement names it without `affects`. An
+/// open tension on that decision then lowers the fact sheet's confidence to Low.
+#[test]
+fn cc10_a_fact_sheet_neighbourhood_holds_mentioners_that_cannot_link() {
+    let (_d, mut r) = project();
+    let c = world(&mut r);
+    let w = write(&mut r, "more", json!([
+        {"op": "create", "type": "section", "id": "$ls", "parent": c["$o"], "fields": {"title": "Ledger rules"}},
+        {"op": "create", "type": "decision", "id": "$d4", "parent": "$ls", "fields": {"statement": "The Ledger is audited every year", "status": "proposed"}},
+        {"op": "create", "type": "decision", "id": "$d5", "parent": "$ls", "fields": {"statement": "The Ledger is audited every year", "status": "proposed"}}
+    ]))
+    .unwrap()
+    .created;
+    land(&mut r, "more").unwrap();
+    let st = r.read();
+    let t = id(&c["$t"]);
+    let n = st.fact_sheet_neighbourhood(&Scope::Canon, &t).unwrap();
+    for k in ["$ls", "$d4", "$d5"] {
+        assert!(n.contains(&id(&w[k])), "{k} names the Ledger: {n:?}");
+    }
+    let i = st.coverage_issues(&Scope::Canon).unwrap();
+    let d4 = &i.blocks[&id(&w["$d4"])];
+    assert_eq!(
+        d4.checks[0], 0,
+        "a frozen decision cannot link: no Grounded check"
+    );
+    assert!(
+        d4.issues.iter().any(|x| x.code == IssueCode::OpenTension),
+        "guard: the two decisions duplicate each other: {:?}",
+        d4.issues
+    );
+    let paths = doc_paths(&st, &i);
+    assert_eq!(
+        confidence_of(&i, &n, None, &paths).confidence,
+        Level::Low,
+        "the open tension on a mentioner lowers the fact sheet"
+    );
+}
+
+/// Final review M8 (task 10): an open (not dismissed) canon tension in the neighbourhood is Low,
+/// and the open tension leads the reasons.
+#[test]
+fn cc10_an_open_canon_tension_is_low() {
+    let (_d, mut r) = project();
+    let (a, _b, _label) = canon_duplicate_pair(&mut r);
+    let st = r.read();
+    let i = st.coverage_issues(&Scope::Canon).unwrap();
+    let paths = doc_paths(&st, &i);
+    let k = confidence_of(&i, &[a].into_iter().collect(), None, &paths);
+    assert_eq!(k.confidence, Level::Low);
+    assert_eq!(k.reasons[0].code, IssueCode::OpenTension);
+}
+
+/// Final review M8 (task 10): the JSON shape: the level in lowercase, the reasons, and
+/// `reasons_omitted` only when the cap cut some.
+#[test]
+fn cc10_the_confidence_json_shape() {
+    let cut = serde_json::to_value(confidence_of(
+        &synthetic(7),
+        &ids(&["c-AAAAA"]),
+        None,
+        &BTreeMap::new(),
+    ))
+    .unwrap();
+    assert_eq!(cut["confidence"], "medium", "{cut}");
+    assert_eq!(cut["reasons"].as_array().unwrap().len(), 5);
+    assert_eq!(cut["reasons_omitted"], 2);
+    let whole = serde_json::to_value(confidence_of(
+        &synthetic(3),
+        &ids(&["c-AAAAA"]),
+        None,
+        &BTreeMap::new(),
+    ))
+    .unwrap();
+    assert!(whole.get("reasons_omitted").is_none(), "{whole}");
+    let high = serde_json::to_value(confidence_of(
+        &synthetic(0),
+        &ids(&["c-AAAAA"]),
+        None,
+        &BTreeMap::new(),
+    ))
+    .unwrap();
+    assert_eq!(high["confidence"], "high", "{high}");
+}

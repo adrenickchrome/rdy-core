@@ -71,6 +71,7 @@ impl Rdy {
                     as_of: Arc::clone(&self.as_of),
                     vpos: Arc::clone(&self.vpos),
                     proposal_touched: Arc::clone(&self.proposal_touched),
+                    canon_step_cache: Arc::clone(&self.canon_step_cache),
                     inflight_cell: Arc::clone(&prev.inflight_cell),
                     coord_heads: Arc::clone(&prev.coord_heads),
                     coord: OnceLock::new(),
@@ -420,6 +421,7 @@ impl Rdy {
             as_of: Arc::clone(&self.as_of),
             vpos: Arc::clone(&self.vpos),
             proposal_touched: Arc::clone(&self.proposal_touched),
+            canon_step_cache: Arc::clone(&self.canon_step_cache),
             inflight_cell,
             coord_heads,
             coord: OnceLock::new(),
@@ -806,6 +808,7 @@ impl Rdy {
     /// Rebuilds the store's index from its log and republishes the state on the new index.
     pub fn reindex(&mut self) -> Result<(), RdyError> {
         self.store.reindex()?;
+        self.canon_step_cache.clear();
         self.publish(Delta::Full)
     }
 }

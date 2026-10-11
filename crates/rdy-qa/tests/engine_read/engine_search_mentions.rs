@@ -181,3 +181,54 @@ fn cc14_a_dismissed_mention_is_not_unlinked() {
         "a restore makes it unlinked again"
     );
 }
+
+/// Final review I5 (D-JV4QB, D-E6JD1): a dismissed (block, entity) pair gets no link suggestion
+/// on a search hit either, until a restore. Searching the alias `ledger` resolves the entity;
+/// the unlinked hit c2 carries a suggestion to link it before the dismissal and after the
+/// restore, and none between.
+#[test]
+fn cc14_a_dismissed_mention_gets_no_link_suggestion_on_a_search_hit() {
+    let (_d, mut r) = project();
+    let (e, _c1, c2, _p3) = seed(&mut r);
+    let suggested = |r: &Rdy| -> bool {
+        let res = r
+            .read()
+            .search(
+                &Scope::Canon,
+                &SearchQuery {
+                    text: "ledger".into(),
+                    ..Default::default()
+                },
+                None,
+                Some(100_000),
+            )
+            .unwrap();
+        let hits: Vec<_> = res.matches.iter().filter(|m| m.id == c2).collect();
+        assert_eq!(hits.len(), 1, "guard: c2 is a hit: {:?}", res.matches);
+        !hits[0].suggestions.is_empty()
+    };
+    assert!(
+        suggested(&r),
+        "guard: an unlinked mention gets a suggestion"
+    );
+    r.review_mention(
+        &writer(),
+        &Scope::Canon,
+        &c2,
+        &e,
+        rdy_engine::mention_review::MentionVerdict::Dismiss,
+        "everyday word here",
+    )
+    .unwrap();
+    assert!(!suggested(&r), "a dismissed mention is settled");
+    r.review_mention(
+        &writer(),
+        &Scope::Canon,
+        &c2,
+        &e,
+        rdy_engine::mention_review::MentionVerdict::Restore,
+        "it is the ledger service",
+    )
+    .unwrap();
+    assert!(suggested(&r), "a restore brings the suggestion back");
+}

@@ -1,6 +1,7 @@
 //! Suggestions (FW-EN3): links to the entities written text names, and new entities for literals that recur.
 use crate::error::RdyError;
 use crate::lexicon::{Mention, link_kind_for, linked_from_outside, text_in, tied};
+use crate::tensions::index::is_deprecated;
 use crate::{Materialized, ReadState, Scope};
 use rdy_model::entity::{MIN_MENTION_CHARS, code_literals, find_phrases, phrase};
 use rdy_model::tree::DOC;
@@ -186,6 +187,9 @@ impl ReadState {
                 .filter(|(target, _)| g.as_ref().is_some_and(|g| !tied(g, &b.id, target)))
                 // a dismissed pair holds in every scope, until a restore (D-E6JD1)
                 .filter(|(target, _)| self.mention_dismissed(&b.id, target).is_none())
+                // a deprecated entity is reworded, never linked: the deprecated reference
+                // tension reports the mention (D-S46DE; final review I4)
+                .filter(|(target, _)| g.as_ref().is_some_and(|g| !is_deprecated(&m, g, target)))
                 .collect();
             found.sort_by(|x, y| x.0.cmp(&y.0));
             for (target, ms) in found {

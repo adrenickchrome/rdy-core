@@ -151,7 +151,7 @@ impl Built {
 
     /// cc11: this state's structural layer carried across `ops` to `next` (this state with
     /// `ops` applied, its graph and lexicon carried), with the blocks it recomputed: `None` when
-    /// this state's layer, `next`'s graph or `next`'s lexicon is not built, or the carry gives
+    /// this state's layer or graph, `next`'s graph or `next`'s lexicon is not built, or the carry gives
     /// up (`coverage::carry`). The call `after` makes, and the one the perf hook
     /// `coverage::carry_for_perf` times.
     pub(crate) fn carried_structural(
@@ -160,12 +160,13 @@ impl Built {
         ops: &[Op],
         pack: &Pack,
     ) -> Option<(Structural, BTreeSet<BlockId>)> {
-        let (prev, g, lex) = (
+        let (prev, old_g, g, lex) = (
             self.structural.get()?,
+            self.graph.get()?,
             next.graph.get()?,
             next.lexicon.get()?,
         );
-        crate::coverage::carry(prev, &self.m, &next.m, g, lex, pack, ops)
+        crate::coverage::carry(prev, &self.m, &next.m, old_g, g, lex, pack, ops)
     }
 }
 
@@ -594,6 +595,9 @@ pub struct ReadState {
     pub(crate) vpos: Arc<Mutex<VposCache>>,
     /// The blocks each open proposal version writes, shared like `vpos` (read by `inflight`).
     pub(crate) proposal_touched: crate::inflight::ProposalTouched,
+    /// Canon's version steps, kept across canon builds and shared like `vpos` (restatement
+    /// drift's canon form, final review I2).
+    pub(crate) canon_step_cache: Arc<crate::history::StepCache>,
     /// insc1: the in-flight scope's set and build.
     pub(crate) inflight_cell: Arc<InflightCell>,
     /// The coordination refs as this state was published.

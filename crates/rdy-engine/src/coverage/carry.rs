@@ -4,23 +4,37 @@
 use super::model::Structural;
 use super::structural::{EntryCx, entry_of, named_in};
 use crate::lexicon::Lexicon;
+use crate::tensions::index::is_deprecated;
 use crate::{Materialized, RdyError, ReadState, Scope};
 use rdy_graph::{EdgeKind, Graph, edges_of};
 use rdy_model::{Block, BlockId, FieldValue, Op, decision, entity, tree};
 use rdy_schema::Pack;
+use std::cell::Cell;
 use std::collections::BTreeSet;
 
-/// `prev`, the structural layer of `old`, carried across `ops` to `new`, whose graph is `g` and
-/// whose lexicon is `lex`: equal to a rebuild. `None` when the ops can change entries the dirty
-/// set does not reach (the next read rebuilds): an entity created, deleted or renamed; a
-/// lifecycle change or a move of a block that has children; a block deleted with children left;
-/// a doc's `doc_type` changed; a doc or a folder created, deleted, renamed or moved (it changes
-/// the paths of docs other than itself). With the layer, the blocks whose entries it recomputed
-/// (every other entry is `prev`'s).
+thread_local! {
+    static CARRIED_ENTRIES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Test hook: this thread's count of block entries recomputed by carries (the dirty sets).
+#[doc(hidden)]
+pub fn carried_entries() -> u64 {
+    CARRIED_ENTRIES.with(Cell::get)
+}
+
+/// `prev`, the structural layer of `old` (whose graph is `old_g`), carried across `ops` to
+/// `new`, whose graph is `g` and whose lexicon is `lex`: equal to a rebuild. `None` when the ops
+/// can change entries the dirty set does not reach (the next read rebuilds): an entity created,
+/// deleted or renamed; a lifecycle change or a move of a block that has children; a block
+/// deleted with children left; a doc's `doc_type` changed; a doc or a folder created, deleted,
+/// renamed or moved (it changes the paths of docs other than itself). With the layer, the blocks
+/// whose entries it recomputed (every other entry is `prev`'s).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn carry(
     prev: &Structural,
     old: &Materialized,
     new: &Materialized,
+    old_g: &Graph,
     g: &Graph,
     lex: &Lexicon,
     pack: &Pack,
@@ -37,35 +51,52 @@ pub(crate) fn carry(
     let mut dirty: BTreeSet<BlockId> = BTreeSet::new();
     for id in &touched {
         dirty.insert((*id).clone());
-        for (m, b) in [(old, old.get(id)), (new, new.get(id))] {
-            let Some(b) = b else { continue };
+        let (a, b) = (old.get(id), new.get(id));
+        // what a block that points at this one reads of it: that it exists, its type and, for a
+        // decision, its status (its liveness); a body or other field edit changes none of it
+        let reshaped = a.is_some() != b.is_some()
+            || a.map(|x| &x.block_type) != b.map(|x| &x.block_type)
+            || a.and_then(decision::status) != b.and_then(decision::status);
+        // what a decision governs: its status, and its affects, supersedes and revokes edges
+        let governs_anew = reshaped || governing_edges(a) != governing_edges(b);
+        for (m, x) in [(old, a), (new, b)] {
+            let Some(x) = x else { continue };
             // 1. the block, its parent and its doc, before and after
-            if let Some(p) = &b.parent {
+            if let Some(p) = &x.parent {
                 dirty.insert(p.clone());
             }
             docs_above(m, id, &mut dirty);
             // 2. each target of an outgoing edge, old or new, and that target's doc
-            for e in edges_of(b) {
+            for e in edges_of(x) {
                 docs_above(new, &e.to, &mut dirty);
                 dirty.insert(e.to);
             }
-            // 4. a decision: what its liveness and its affects reach
-            if b.block_type == decision::DECISION {
-                decision_reach(g, b, &mut dirty);
+            // 4. a decision whose status or governing edges change: what its liveness and its
+            // affects reach
+            if x.block_type == decision::DECISION && governs_anew {
+                decision_reach(g, x, &mut dirty);
             }
         }
-        // 3. each source of an incoming edge in the new graph
-        for e in g.incoming(id) {
-            dirty.insert(e.from.clone());
+        // 3. a block that appears, goes, changes type or (a decision) changes status: each
+        // source of an incoming edge in the new graph
+        if reshaped {
+            for e in g.incoming(id) {
+                dirty.insert(e.from.clone());
+            }
+        }
+        // 5. an entity that starts or stops being deprecated: the blocks that name it (an
+        // unlinked mention of a deprecated entity is no check)
+        let is_entity = |x: Option<&Block>| x.is_some_and(|x| lex.is_entity_type(&x.block_type));
+        if (is_entity(a) || is_entity(b))
+            && is_deprecated(old, old_g, id) != is_deprecated(new, g, id)
+            && let Some(named) = prev.mentions.get(*id)
+        {
+            dirty.extend(named.iter().cloned());
         }
     }
 
-    let cx = EntryCx {
-        m: new,
-        g,
-        lex,
-        pack,
-    };
+    let cx = EntryCx::new(new, g, lex, pack);
+    CARRIED_ENTRIES.with(|c| c.set(c.get() + dirty.len() as u64));
     let mut blocks = prev.blocks.clone();
     let mut mentions = prev.mentions.clone();
     // the mentions a touched block made before the ops go; the lexicon's names did not change
@@ -187,6 +218,23 @@ fn docs_above(m: &Materialized, id: &BlockId, dirty: &mut BTreeSet<BlockId>) {
 /// Whether an edge is the link `name`.
 fn is_link(e: &rdy_graph::Edge, name: &str) -> bool {
     matches!(&e.kind, EdgeKind::Link(n) if n == name)
+}
+
+/// The edges of decision `b` that decide what it governs and whose liveness it changes: its
+/// `affects`, `supersedes` and `revokes` links (none for an absent block or another type).
+fn governing_edges(b: Option<&Block>) -> Vec<rdy_graph::Edge> {
+    b.filter(|b| b.block_type == decision::DECISION)
+        .map(|b| {
+            edges_of(b)
+                .into_iter()
+                .filter(|e| {
+                    is_link(e, decision::AFFECTS)
+                        || is_link(e, decision::SUPERSEDES)
+                        || is_link(e, decision::REVOKES)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Adds `target` and the sources of its incoming `describes` edges: the blocks governed

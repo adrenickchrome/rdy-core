@@ -199,6 +199,9 @@ fn spec_target(op: &str) -> Option<String> {
         "coverage_carry" => {
             "< 5 ms p95: a write reply's coverage change after one write: the carry, the scores before and after, the touched page's rollups (FW-PF2; reference/performance tb-XBXR4 read budget)"
         }
+        "coverage_carry_hub" => {
+            "< 5 ms p95: a write reply's coverage change after a body edit of a term 2,000 claims describe: the carry, the scores before and after, the touched page's rollups (FW-PF2; reference/performance tb-XBXR4 read budget; final review I1)"
+        }
         "coverage_report_cold" => {
             "no spec target: the cold coverage report over a 10k view, recorded (FW-PF2; rdy coverage)"
         }
@@ -213,7 +216,7 @@ fn spec_target(op: &str) -> Option<String> {
             "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change and tension detection, included in the write response)"
         }
         "tension_value_1k" | "tension_drift_1k" => {
-            "< 10 ms p95 with tension detection included in the write (reference/performance tb-XBXR4)"
+            "< 10 ms p95: the tension delta and on_change report of one write, the part tension detection adds to the write reply, with 1k in-flight changes (reference/performance tb-XBXR4)"
         }
         "tension_on_change_delete_1k" | "tension_on_change_view_op_1k" => {
             "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change, included in the response); a delete and a view op never carry, so this is the in-flight build plus a diff that skips the shared canon part"
@@ -229,6 +232,9 @@ fn spec_target(op: &str) -> Option<String> {
         }
         "tensions_canon" => {
             "no spec target: the canon-scope build of the tensions (FW-CH6), once per landing; recorded for Coverage and confidence"
+        }
+        "tensions_canon_drift_deep" => {
+            "no spec target: the canon-scope build of the tensions after one more edit landing of prose 50 edit landings deep, the version steps kept across builds, once per landing (restatement drift's canon form against history, final review I2; the D-SES4J budget check: compare with tensions_canon_drift)"
         }
         "gate_tensions_1k" => {
             "recorded: the land message's tension check on a built set (inside the landing budget, M2 spec 15.1)"
@@ -983,6 +989,79 @@ fn tier_entities(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, r
             .1
         },
     ));
+    out.push(coverage_hub(
+        &format!("coverage_carry_hub{sfx}"),
+        runs,
+        COVERAGE_HUB_DESCRIBERS,
+    ));
+}
+
+/// Claims that describe the hub term in `coverage_carry_hub`.
+pub const COVERAGE_HUB_DESCRIBERS: usize = 2000;
+
+/// What a write reply reads for its coverage after a body edit of a hub entity (final review
+/// I1), on a project of its own: a term (in a draft section, so its edit needs no briefing)
+/// that `describers` claims in a stable section describe, each governed through it by a live
+/// decision that affects it, lands. Each run edits the
+/// term's body in view `hv` (untimed, with the view's score before it, as the previous reply
+/// read it); the timed part is the call `coverage_carry` times: the carry `Built::after` made
+/// (`carry_for_perf`), then `coverage_change` for the written block. A body edit changes no
+/// entry of the blocks that point at the term, so the carry recomputes O(1) entries, not one
+/// per describer (`cc11_a_body_edit_of_a_hub_recomputes_o1_entries` pins the count).
+fn coverage_hub(op: &str, runs: &Runs, describers: usize) -> Measure {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut r = Rdy::init(dir.path(), "rdy-standard").expect("init");
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$o", "fields": {"name": "hub", "title": "Hub", "doc_type": "page"}}),
+        json!({"op": "create", "type": "section", "id": "$terms", "parent": "$o", "fields": {"title": "Terms"}}),
+        json!({"op": "create", "type": "section", "id": "$s", "parent": "$o", "fields": {"title": "Rules", "lifecycle": "stable"}}),
+        json!({"op": "create", "type": "term", "id": "$t", "parent": "$terms", "fields": {"name": "Hub"}, "body": "The centre."}),
+        json!({"op": "create", "type": "decision", "parent": "$s",
+            "fields": {"statement": "The hub is audited", "status": "proposed"},
+            "links": {"affects": [{"target": "$t"}]}}),
+    ];
+    ops.extend((0..describers).map(|k| {
+        json!({"op": "create", "type": "claim", "parent": "$s", "body": format!("Rule {k} holds."),
+            "links": {"describes": [{"target": "$t"}]}})
+    }));
+    let w = write(&mut r, "seed", serde_json::Value::Array(ops)).expect("the hub");
+    land(&mut r, "seed").expect("land the hub");
+    let term = w.created.get("$t").expect("the term").to_string();
+    let hv = Scope::View("hv".into());
+    write(
+        &mut r,
+        "hv",
+        json!([{"op": "update", "id": term, "fields": {"name": "Hub"}, "body": "The centre, 0."}]),
+    )
+    .expect("seed the view");
+    measure_timed(op, runs.write, |i| {
+        let prev = r.read();
+        rdy_engine::coverage::coverage_change(&prev, &hv, &prev, &hv, &BTreeSet::new())
+            .expect("coverage");
+        let w = write(
+            &mut r,
+            "hv",
+            json!([{"op": "update", "id": term, "fields": {"name": "Hub"}, "body": format!("The centre, {}.", i + 1)}]),
+        )
+        .expect("a body edit of the hub");
+        let next = r.read();
+        let change: Hash = w.change.parse().expect("change");
+        let ops = next.reader().change(&change).expect("change").ops;
+        let touched: BTreeSet<BlockId> = ops.iter().map(|o| o.block_id().clone()).collect();
+        let entries = rdy_engine::coverage::carried_entries();
+        let s = Instant::now();
+        let carried = rdy_engine::coverage::carry_for_perf(&prev, &next, &hv, &ops).expect("carry");
+        let got = rdy_engine::coverage::coverage_change(&prev, &hv, &next, &hv, &touched)
+            .expect("coverage change");
+        let t = s.elapsed();
+        std::hint::black_box(&got);
+        assert!(carried.is_some(), "a body edit carries the layer");
+        assert!(
+            rdy_engine::coverage::carried_entries() - entries <= 8,
+            "a body edit recomputes O(1) entries"
+        );
+        t
+    })
 }
 
 /// The view ops on a project whose `vr` is an unpinned view a landing has rebased: the cold
@@ -1697,6 +1776,99 @@ fn tier_tensions(
         runs,
         2 * n,
     ));
+    out.push(drift_canon_deep(
+        &format!("tensions_canon_drift_deep{sfx}"),
+        runs,
+        n / 2,
+    ));
+}
+
+/// Edit landings under `tensions_canon_drift_deep`'s timed build.
+pub const DRIFT_DEEP_LANDINGS: usize = 50;
+
+/// The canon form of restatement drift against deep history (final review I2; the D-SES4J
+/// budget check), on a project of its own: `blocks` prose blocks in one controlled-English
+/// pattern (so they share phrases) and one long block that never changes (it holds the oldest
+/// landing a restating block can have, so every edited block's history down to it is in
+/// reach) land; then every pattern block is edited in each of [`DRIFT_DEEP_LANDINGS`] landings,
+/// and a canon build follows each (as the writer builds the tension set after each landing).
+/// Each run lands one more such edit (untimed); the timed part is the canon-scope build of the
+/// tensions that follows, with the version steps kept across builds: it reads from the store
+/// only the versions the last landing wrote.
+fn drift_canon_deep(op: &str, runs: &Runs, blocks: usize) -> Measure {
+    fn said(i: usize, round: usize) -> String {
+        format!(
+            "In this system, the queue {i} service checks the record {i} before it is used by the worker {i} in round {round}."
+        )
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut r = Rdy::init(dir.path(), "rdy-standard").expect("init");
+    let d = write(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "rules", "title": "Rules", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+            {"op": "create", "type": "prose", "parent": "$s",
+             "body": "The weekly report lists every open incident with its owner and its status."}
+        ]),
+    )
+    .expect("doc");
+    let section = d.created.get("$s").expect("the section").to_string();
+    let mut ids: Vec<String> = vec![];
+    let bodies: Vec<String> = (0..blocks).map(|i| said(i, 0)).collect();
+    for chunk in bodies.chunks(500) {
+        let ops: Vec<serde_json::Value> = chunk
+            .iter()
+            .enumerate()
+            .map(|(k, b)| {
+                json!({"op": "create", "type": "prose", "id": format!("$b{k}"), "parent": section, "body": b})
+            })
+            .collect();
+        let w = write(&mut r, "seed", serde_json::Value::Array(ops)).expect("prose");
+        ids.extend(
+            (0..chunk.len()).map(|k| w.created.get(&format!("$b{k}")).expect("id").to_string()),
+        );
+    }
+    land(&mut r, "seed").expect("land the prose");
+    let edit = |r: &mut Rdy, round: usize| {
+        let ops: Vec<serde_json::Value> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| json!({"op": "update", "id": id, "body": said(i, round)}))
+            .collect();
+        let view = format!("deep{round}");
+        write(r, &view, serde_json::Value::Array(ops)).expect("the edits");
+        land(r, &view).expect("land the edits");
+        r.read().canon_tensions_rebuilt().expect("canon tensions");
+    };
+    for round in 1..=DRIFT_DEEP_LANDINGS {
+        edit(&mut r, round);
+    }
+    let mut round = DRIFT_DEEP_LANDINGS;
+    measure_timed(op, runs.materialize_cold, |_| {
+        round += 1;
+        let ops: Vec<serde_json::Value> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| json!({"op": "update", "id": id, "body": said(i, round)}))
+            .collect();
+        let view = format!("deep{round}");
+        write(&mut r, &view, serde_json::Value::Array(ops)).expect("the edits");
+        land(&mut r, &view).expect("land the edits");
+        let st = r.read();
+        let reads = rdy_engine::canon_step_reads();
+        let s = Instant::now();
+        let set = st.canon_tensions_rebuilt().expect("canon tensions");
+        let took = s.elapsed();
+        std::hint::black_box(&set);
+        let read = rdy_engine::canon_step_reads() - reads;
+        assert!(
+            read <= 2 * blocks as u64 + 2,
+            "the build read {read} version steps for {blocks} edited blocks"
+        );
+        took
+    })
 }
 
 /// The canon form of restatement drift (cc7; the D-SES4J canon budget), on a project of its own:
@@ -3473,7 +3645,8 @@ mod tests {
                 "gate_tensions_1k",
                 "tension_value_1k",
                 "tension_drift_1k",
-                "tensions_canon_drift"
+                "tensions_canon_drift",
+                "tensions_canon_drift_deep"
             ]
         );
         assert!(r.read().tensions().expect("tensions").len() >= 10);
@@ -3493,8 +3666,18 @@ mod tests {
             "tension_value_1k",
             "tension_drift_1k",
             "tensions_canon_drift",
+            "tensions_canon_drift_deep",
         ] {
             assert!(spec_target(op).is_some(), "{op} has no target");
+        }
+        // final review M6: the value and drift ops time the tension delta and its report, not
+        // the whole write, and their targets say so
+        for op in ["tension_value_1k", "tension_drift_1k"] {
+            let t = spec_target(op).unwrap();
+            assert!(
+                t.contains("the tension delta and on_change report of one write"),
+                "{op}: {t}"
+            );
         }
         assert!(
             spec_target("tension_carry_1k")
@@ -3685,7 +3868,8 @@ mod tests {
                 "suggestions_after_write",
                 "coverage_all",
                 "coverage_carry",
-                "coverage_report_cold"
+                "coverage_report_cold",
+                "coverage_carry_hub"
             ]
         );
         for op in ops {
@@ -3706,6 +3890,7 @@ mod tests {
             "coverage_all",
             "coverage_carry",
             "coverage_report_cold",
+            "coverage_carry_hub",
         ] {
             let m = ms
                 .iter()

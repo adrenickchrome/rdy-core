@@ -114,3 +114,12 @@ fn cc2_a_decision_takes_needs_content() {
     let f = &p.block_types["decision"].fields["needs_content"];
     assert_eq!((f.kind, f.required), (FieldKind::Bool, false));
 }
+
+/// Final review M8 (task 2): a weight has no upper bound; u32::MAX is taken as written (the
+/// rollup sums in u64, cc9_a_weight_of_u32_max_does_not_overflow).
+#[test]
+fn cc2_a_weight_of_u32_max_is_accepted() {
+    let p = pack_with("coverage:\n  weights: {grounded: 4294967295}\n");
+    assert_eq!(p.coverage_weight(CoverageDimension::Grounded), u32::MAX);
+    assert_eq!(p.coverage_weight(CoverageDimension::Consistent), 1);
+}

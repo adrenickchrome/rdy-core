@@ -87,3 +87,34 @@ fn cc12_a_small_budget_cuts_issues_and_says_so() {
         "the cut list is the issues: {v}"
     );
 }
+
+/// Final review M4 (the task-6 ruling): the tool descriptions state the past-landing rule. A
+/// briefing and a search at a past landing leave coverage out (a coverage filter or sort is
+/// refused), and the overview at a past landing is refused as a whole.
+#[test]
+fn cc6_the_tool_descriptions_state_the_past_landing_rule() {
+    let (dir, r) = rdy_qa::fixtures::project();
+    drop(r);
+    let mut c = McpClient::start(dir.path());
+    let tools = c.tools();
+    let description = |name: &str| -> String {
+        tools
+            .iter()
+            .find(|t| t["name"] == name)
+            .and_then(|t| t["description"].as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    for (tool, says) in [
+        ("rdy_brief", "at a past landing it leaves coverage out"),
+        (
+            "rdy_search",
+            "at a past landing hits carry no coverage, and coverage_below or sort is refused",
+        ),
+        ("rdy_overview", "at a past landing the overview is refused"),
+    ] {
+        let d = description(tool);
+        assert!(d.contains(says), "{tool}: {d}");
+    }
+    c.alive();
+}

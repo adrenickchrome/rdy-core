@@ -218,3 +218,64 @@ fn cc5_fix2_the_summary_shows_the_value_field_as_written() {
     claim(&mut r, "c", &n, &x, "It pauses for 5 s.");
     assert_eq!(of_kind(&r, TensionKind::ValueDisagreement).len(), 1);
 }
+
+/// Final review M8 (task 5): every tie counts as describing the value. A claim that ties by an
+/// inline reference and a proposed decision that ties by `affects`, each stating another
+/// number in the unit, raise the tension.
+#[test]
+fn cc5_a_reference_or_an_affects_tie_describes_the_value() {
+    let (_d, mut r, s, _n, v) = world();
+    let w = put_j(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "claim", "id": "$y", "parent": s.to_string(),
+            "body": format!("A job retries for 10 s, as {{{{{v}}}}} says.")}]),
+        j_typo(),
+    );
+    let y = created(&w, "$y");
+    let t = one_involving(&r, TensionKind::ValueDisagreement, &y);
+    assert!(t.blocks().contains(&v));
+    let w = put_j(
+        &mut r,
+        "b",
+        json!([{"op": "create", "type": "decision", "id": "$dd", "parent": s.to_string(),
+            "fields": {"statement": "Jobs retry for 20 s", "status": "proposed"},
+            "links": {"affects": [{"target": v.to_string()}]}}]),
+        j_typo(),
+    );
+    let dd = created(&w, "$dd");
+    let t = one_involving(&r, TensionKind::ValueDisagreement, &dd);
+    assert!(t.blocks().contains(&v));
+}
+
+/// Final review M8 (task 5): a value takes part only with a unit and a decimal value: with
+/// unit "" or value "five", a describing claim that states another number raises nothing.
+#[test]
+fn cc5_a_value_without_a_unit_or_a_decimal_takes_no_part() {
+    let (_d, mut r, s, _n, _v) = world();
+    let w = put_j(
+        &mut r,
+        "vals",
+        json!([
+            {"op": "create", "type": "value", "id": "$u", "parent": s.to_string(),
+             "fields": {"name": "Pool size", "value": "5", "unit": ""}},
+            {"op": "create", "type": "value", "id": "$f", "parent": s.to_string(),
+             "fields": {"name": "Queue depth", "value": "five", "unit": "s"}}
+        ]),
+        j_typo(),
+    );
+    let (u, f) = (created(&w, "$u"), created(&w, "$f"));
+    claim(
+        &mut r,
+        "vals",
+        &s,
+        &u,
+        "The pool holds 10 workers, 10 s each.",
+    );
+    claim(&mut r, "vals", &s, &f, "The queue waits 10 s.");
+    assert!(
+        of_kind(&r, TensionKind::ValueDisagreement).is_empty(),
+        "{:?}",
+        of_kind(&r, TensionKind::ValueDisagreement)
+    );
+}
