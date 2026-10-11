@@ -156,8 +156,9 @@ impl DeprecatedReference {
     /// and, for each seed that is a deprecated definition, the live writes whose text holds each
     /// word of one of its names (the lexicon's word index finds them; a seed that is not
     /// deprecated cannot open a mention tension, and its tensions are detected again). A full
-    /// run does the same for every deprecated definition. The lexicon is read only when a
-    /// write is to be read.
+    /// run does the same for every deprecated definition. Live writes the merged materialization
+    /// did not take are read too, as the word index holds only the merged text. The lexicon is
+    /// read only when a write is to be read.
     fn inflight_mentions(
         cx: &DetectCx<'_>,
         seeds: Option<&BTreeSet<BlockId>>,
@@ -182,6 +183,11 @@ impl DeprecatedReference {
         };
         if !searched.is_empty() {
             let lexicon = cx.lexicon()?;
+            // the word index holds one version per block: a live write the materialization did
+            // not take (a conflicted block, an overwritten one) is a candidate by itself
+            for w in cx.writes.unmaterialized(&*cx.inflight_m()?) {
+                cands.insert((w.change, w.block.clone()), w);
+            }
             for x in searched {
                 for (kind, p) in Lexicon::names_of(x) {
                     if kind == NameKind::Key {

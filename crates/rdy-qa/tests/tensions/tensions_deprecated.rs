@@ -473,3 +473,52 @@ fn cc3_deprecating_the_term_in_flight_while_a_live_write_names_it() {
     let from_set: Vec<_> = set.involving_change(&cb).into_iter().collect();
     assert_eq!(ids(&seeded), ids(&from_set));
 }
+
+/// Two views edit one canon block, and only one edit names the retired term. The merge keeps the
+/// base text of the conflicted block, so the word index over the merged text cannot find the
+/// naming write; the mention form reads the live writes the merge did not take. The carried set
+/// equals a full rebuild, and both hold the mention tension.
+#[test]
+fn cc3_a_conflicted_block_whose_one_edit_names_the_term_is_still_found() {
+    let (_d, mut r, s) = deprecated_term_world();
+    let y = created(
+        &put(
+            &mut r,
+            "base",
+            json!([{"op": "create", "type": "claim", "id": "$y", "parent": s.to_string(),
+            "body": "Each job keeps its limit small."}]),
+        ),
+        "$y",
+    );
+    land(&mut r, "base").unwrap();
+    assert!(of_kind(&r, TensionKind::DeprecatedReference).is_empty());
+    put(&mut r, "a", upd(&y, "Each job keeps its retries small."));
+    put(&mut r, "b", upd(&y, "Each job keeps its budget small."));
+    let st = r.read();
+    let set = st.tensions().unwrap();
+    let rebuilt: Vec<_> = st.tensions_rebuilt().unwrap().iter().cloned().collect();
+    let ids = |v: &[std::sync::Arc<Tension>]| -> std::collections::BTreeSet<_> {
+        v.iter().map(|t| t.id).collect()
+    };
+    let of_mention = |v: &[std::sync::Arc<Tension>]| {
+        v.iter()
+            .filter(|t| {
+                t.kind == TensionKind::DeprecatedReference
+                    && t.summary.contains("names deprecated")
+                    && t.blocks().contains(&y)
+            })
+            .count()
+    };
+    let carried: Vec<_> = set.iter().cloned().collect();
+    assert_eq!(
+        of_mention(&rebuilt),
+        1,
+        "a full rebuild finds the naming edit"
+    );
+    assert_eq!(of_mention(&carried), 1, "the carried set finds it");
+    assert_eq!(
+        ids(&carried),
+        ids(&rebuilt),
+        "the set equals a full rebuild"
+    );
+}

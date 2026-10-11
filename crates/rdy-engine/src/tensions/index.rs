@@ -363,6 +363,16 @@ impl Writes {
         self.by_block.values().flatten().filter(|w| w.live)
     }
 
+    /// The live writes with a block that `m` does not hold at their version: a conflicted block
+    /// (two live writes, one kept), a block a later change in another view overwrote, or a write
+    /// the materialization does not hold. Their text is in no index built from `m`. Reads no text.
+    pub fn unmaterialized(&self, m: &Materialized) -> Vec<Arc<Write>> {
+        self.live()
+            .filter(|w| w.new.is_some() && m.version_of(&w.block) != w.version)
+            .cloned()
+            .collect()
+    }
+
     /// The live writes on `b`, by change.
     pub fn live_on(&self, b: &BlockId) -> Vec<Arc<Write>> {
         self.all_on(b).into_iter().filter(|w| w.live).collect()
