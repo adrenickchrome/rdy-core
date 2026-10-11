@@ -1,6 +1,7 @@
 mod alt;
 mod asset;
 mod brief;
+mod coverage;
 mod decide;
 mod entity;
 mod graph;
@@ -66,7 +67,7 @@ impl RdyServer {
 
     /// The tool router of each family (`server/<family>.rs`), once. `new` registers their sum;
     /// a new family adds one line here.
-    fn family_routers() -> [ToolRouter<Self>; 15] {
+    fn family_routers() -> [ToolRouter<Self>; 16] {
         [
             Self::session_router(),
             Self::read_router(),
@@ -83,6 +84,7 @@ impl RdyServer {
             Self::intent_router(),
             Self::alt_router(),
             Self::tension_router(),
+            Self::coverage_router(),
         ]
     }
 

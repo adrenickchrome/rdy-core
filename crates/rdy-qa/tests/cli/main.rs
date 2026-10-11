@@ -6,6 +6,7 @@ mod cli_alts;
 mod cli_blame;
 mod cli_config;
 mod cli_config_file;
+mod cli_coverage;
 mod cli_daemon;
 mod cli_entities;
 mod cli_intents;

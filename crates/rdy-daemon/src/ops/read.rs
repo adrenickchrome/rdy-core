@@ -14,6 +14,14 @@ pub(super) struct LogArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct CoverageArgs {
+    scope: Option<String>,
+    path: Option<String>,
+    max_tokens: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ShowArgs {
     id: String,
     scope: Option<String>,
@@ -181,6 +189,15 @@ pub(super) fn suspects(cx: &OpContext, a: ScopeArgs) -> Result<Value, RdyError> 
     let st = cx.engine.read();
     let scope = scope_of(&st, cx, a.scope.as_deref())?;
     Ok(json!({"items": st.suspects(&scope)?}))
+}
+
+/// The coverage report of a scope (default canon) or a path, cut to `max_tokens` as the MCP
+/// tool cuts it. A read: nothing is written.
+pub(super) fn coverage(cx: &OpContext, a: CoverageArgs) -> Result<Value, RdyError> {
+    check_max_tokens(a.max_tokens)?;
+    let st = cx.engine.read();
+    let scope = scope_of(&st, cx, a.scope.as_deref())?;
+    rdy_mcp::tools::coverage_reply(&st, &scope, a.path.as_deref(), a.max_tokens)
 }
 
 pub(super) fn tags(cx: &OpContext) -> Result<Value, RdyError> {
