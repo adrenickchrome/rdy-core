@@ -77,8 +77,8 @@ fn cc14_a_fact_sheet_carries_confidence_and_reasons() {
 fn cc14_coverage_below_and_sort_coverage() {
     let (_d, mut r) = rdy_qa::fixtures::project();
     let _c = world(&mut r);
-    let all = search(&r, "the", json!({}));
-    let low = search(&r, "the", json!({"coverage_below": 60}));
+    let all = search(&r, "e", json!({}));
+    let low = search(&r, "e", json!({"coverage_below": 60}));
     assert!(
         low["matches"]
             .as_array()
@@ -86,7 +86,7 @@ fn cc14_coverage_below_and_sort_coverage() {
             .iter()
             .all(|h| h["coverage"].as_u64().unwrap() < 60)
     );
-    let sorted = search(&r, "the", json!({"sort": "coverage"}));
+    let sorted = search(&r, "e", json!({"sort": "coverage"}));
     let scores: Vec<u64> = sorted["matches"]
         .as_array()
         .unwrap()
@@ -96,12 +96,12 @@ fn cc14_coverage_below_and_sort_coverage() {
     assert!(scores.windows(2).all(|w| w[0] <= w[1]));
     assert_eq!(sorted["total"], all["total"], "a sort keeps every hit");
     assert!(
-        search_err(&r, "the", json!({"sort": "score"}))
+        search_err(&r, "e", json!({"sort": "score"}))
             .message
             .contains("sort takes coverage")
     );
     assert!(
-        search_err(&r, "the", json!({"coverage_below": 101}))
+        search_err(&r, "e", json!({"coverage_below": 101}))
             .message
             .contains("0 to 100")
     );
@@ -237,4 +237,172 @@ fn cc14_the_cli_and_mcp_take_coverage_below_and_sort() {
         .ok();
     assert_eq!(v["total"], 1, "{v}");
     c.alive();
+}
+
+/// The entry scores of a search that collapses nothing, in result order.
+fn entry_scores(v: &Value) -> Vec<(String, u64)> {
+    v["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| {
+            assert!(h.get("also").is_none(), "this query collapses nothing: {h}");
+            (
+                h["id"].as_str().unwrap().to_string(),
+                h["coverage"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn cc14_coverage_below_is_strictly_below_and_keeps_some_hits() {
+    let (_d, mut r) = rdy_qa::fixtures::project();
+    let _c = world(&mut r);
+    let all = entry_scores(&search(&r, "e", json!({})));
+    let mut distinct: Vec<u64> = all.iter().map(|(_, s)| *s).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert!(distinct.len() >= 2, "hits of different scores: {all:?}");
+    // a bound at each score but the lowest: a hit that scores the bound drops out, a lower one stays
+    for &n in &distinct[1..] {
+        let want: Vec<&(String, u64)> = all.iter().filter(|(_, s)| *s < n).collect();
+        let got = search(&r, "e", json!({"coverage_below": n}));
+        assert!(
+            !want.is_empty() && want.len() < all.len(),
+            "the bound {n} splits the hits"
+        );
+        assert_eq!(got["total"], want.len(), "bound {n}");
+        let got = entry_scores(&got);
+        assert!(got.iter().all(|(_, s)| *s < n), "bound {n}: {got:?}");
+        assert_eq!(
+            got.iter().collect::<Vec<_>>(),
+            want,
+            "bound {n} keeps the default order"
+        );
+    }
+    // the bound at the lowest score keeps nothing; the bound 100 keeps every hit under 100
+    assert_eq!(
+        search(&r, "e", json!({"coverage_below": distinct[0]}))["total"],
+        0
+    );
+    assert_eq!(
+        search(&r, "e", json!({"coverage_below": 100}))["total"],
+        all.iter().filter(|(_, s)| *s < 100).count()
+    );
+}
+
+/// A term, and `n` claims that cite it, each with its own text. Landed. The term's id.
+fn citing_world(r: &mut Rdy, n: usize) -> String {
+    citing_world_of(r, n).0
+}
+
+/// As `citing_world`, with a second term `Purse` that every claim cites too. The two term ids.
+fn citing_world_of(r: &mut Rdy, n: usize) -> (String, String) {
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$o", "fields": {"name": "pay", "title": "Pay", "doc_type": "page"}}),
+        json!({"op": "create", "type": "section", "id": "$s", "parent": "$o", "fields": {"title": "Rules"}}),
+        json!({"op": "create", "type": "term", "id": "$t", "parent": "$s", "fields": {"name": "Wallet"}, "body": "Holds cards."}),
+        json!({"op": "create", "type": "term", "id": "$u", "parent": "$s", "fields": {"name": "Purse"}, "body": "Holds coins."}),
+    ];
+    for i in 0..n {
+        ops.push(json!({"op": "create", "type": "claim", "parent": "$s",
+            "body": format!("Payment uses {{{{$t}}}} in flow number {i} with {{{{$u}}}}, which is unlike the rest.")}));
+    }
+    let w = write(r, "pay", json!(ops)).unwrap();
+    land(r, "pay").unwrap();
+    (w.created["$t"].clone(), w.created["$u"].clone())
+}
+
+fn first_page_next(r: &Rdy, filters: Value) -> String {
+    let res = r
+        .read()
+        .search(
+            &Scope::Canon,
+            &query("Payment uses", filters),
+            None,
+            Some(300),
+        )
+        .unwrap();
+    res.next.expect("a second page")
+}
+
+fn next_page(r: &Rdy, filters: Value, next: &str) -> Result<SearchResult, RdyError> {
+    r.read().search(
+        &Scope::Canon,
+        &query("Payment uses", filters),
+        Some(next),
+        Some(300),
+    )
+}
+
+#[test]
+fn cc14_a_plain_search_pages_on_after_a_write_that_moves_coverage_but_no_hit() {
+    let (_d, mut r) = rdy_qa::fixtures::project();
+    let t = citing_world(&mut r, 12);
+    let next = first_page_next(&r, json!({}));
+    let before = search(&r, "Payment uses", json!({}));
+    // an edit of the cited term opens a suspect on every citing claim: their coverage moves, no
+    // hit changes, and the matches and their order stay
+    write(
+        &mut r,
+        "edit",
+        json!([{"op": "update", "id": t, "body": "Holds cards and vouchers."}]),
+    )
+    .unwrap();
+    land(&mut r, "edit").unwrap();
+    let after = search(&r, "Payment uses", json!({}));
+    assert_ne!(
+        before["matches"][0]["confidence"], after["matches"][0]["confidence"],
+        "the write did move the hits' coverage"
+    );
+    let page = next_page(&r, json!({}), &next).expect("the cursor still holds");
+    assert!(!page.matches.is_empty());
+}
+
+#[test]
+fn cc14_a_sorted_or_bounded_search_goes_stale_when_a_write_moves_a_hit_score() {
+    for filters in [json!({"sort": "coverage"}), json!({"coverage_below": 100})] {
+        let (_d, mut r) = rdy_qa::fixtures::project();
+        let (t, u) = citing_world_of(&mut r, 12);
+        // the first edit lowers every claim's score; the cursor comes from after it
+        let edit = |r: &mut Rdy, id: &str, body: &str, name: &str| {
+            write(r, name, json!([{"op": "update", "id": id, "body": body}])).unwrap();
+            land(r, name).unwrap();
+        };
+        edit(&mut r, &t, "Holds cards and vouchers.", "e1");
+        let next = first_page_next(&r, filters.clone());
+        // the second edit opens one more suspect on every claim: no hit changes
+        edit(&mut r, &u, "Holds coins and notes.", "e2");
+        let e = next_page(&r, filters.clone(), &next).unwrap_err();
+        assert_eq!(e.code, E_PAGE_STALE, "{filters}");
+    }
+}
+
+#[test]
+fn cc14_a_plain_search_page_carries_coverage_on_each_entry_and_the_lowest_level_of_a_group() {
+    let (_d, mut r) = rdy_qa::fixtures::project();
+    let t = citing_world(&mut r, 12);
+    write(
+        &mut r,
+        "edit",
+        json!([{"op": "update", "id": t, "body": "Holds cards and vouchers."}]),
+    )
+    .unwrap();
+    land(&mut r, "edit").unwrap();
+    let plain = search(&r, "Payment uses", json!({}));
+    let sorted = search(&r, "Payment uses", json!({"sort": "coverage"}));
+    for h in plain["matches"].as_array().unwrap() {
+        assert!(h["coverage"].is_u64() && h["issues"].is_u64(), "{h}");
+        assert_eq!(h["confidence"], "low", "an open suspect: {h}");
+        let same = sorted["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == h["id"]);
+        if let Some(s) = same {
+            assert_eq!(s["coverage"], h["coverage"]);
+            assert_eq!(s["issues"], h["issues"]);
+        }
+    }
 }

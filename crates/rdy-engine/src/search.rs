@@ -1,7 +1,7 @@
 //! FW-PR1: deterministic search over block text. A literal or a regex, matched line by line in
 //! each block's body and string fields, in reading order, with lines windowed and capped per
 //! block, pages cut by a token budget and a stateless cursor that a changed match set stales.
-use crate::coverage::{CoverageIssues, Level, confidence_of, rollup};
+use crate::coverage::{CoverageIssues, Level, confidence_level_of, rollup};
 use crate::error::{E_BAD_INPUT, E_LIMIT, E_PAGE_STALE, E_UNKNOWN_BLOCK, PAGE_STALE_FIX, RdyError};
 use crate::factsheet::{FactSheet, MAX_RESOLVED};
 use crate::lexicon::{link_kind_for, tied};
@@ -378,15 +378,21 @@ impl ReadState {
         token.extend(serde_json::to_vec(&q.filters).unwrap_or_default());
         token.push(0);
         let mut hits: Vec<Hit> = phrase.into_iter().chain(all_words).collect();
-        // cc14 (FW-SR1, FW-SR4): each hit's coverage, issues and confidence; `coverage_below`
-        // drops the hits at or over the bound; `sort: coverage` lists the lowest first. A past
-        // landing has no coverage, so a search there carries none.
+        // cc14 (FW-SR1, FW-SR4): `coverage_below` drops the hits at or over the bound and
+        // `sort: coverage` lists the lowest first, so only those two need every hit's coverage
+        // before the page cut, and only they put it in the page token (membership and order
+        // depend on it). Any other search gives coverage to the entries of its page only. A
+        // past landing has no coverage, so a search there carries none.
         let wants_coverage = q.filters.coverage_below.is_some() || q.filters.sort.is_some();
-        if wants_coverage || !self.is_past_landing(scope) {
-            let issues = self.coverage_issues(scope)?;
-            let no_paths = BTreeMap::new();
+        let past = self.is_past_landing(scope);
+        let issues = if wants_coverage || !past {
+            Some(self.coverage_issues(scope)?)
+        } else {
+            None
+        };
+        if wants_coverage && let Some(issues) = &issues {
             for h in &mut hits {
-                h.cov = Some(self.hit_coverage(scope, &issues, &h.block.id, &no_paths)?);
+                h.cov = Some(self.hit_coverage(scope, issues, &h.block.id)?);
             }
         }
         if let Some(n) = q.filters.coverage_below {
@@ -511,7 +517,11 @@ impl ReadState {
         }
         let mut used = 0;
         let mut matches = vec![];
-        for entry in entries.into_iter().skip(offset) {
+        for mut entry in entries.into_iter().skip(offset) {
+            if !wants_coverage && let Some(issues) = &issues {
+                // the page's entries only: one level pass per block, the entry takes the lowest
+                self.attach_coverage(scope, issues, &mut entry)?;
+            }
             let cost = tokens_of(&entry);
             if !matches.is_empty() && used + cost > budget {
                 break;
@@ -569,13 +579,12 @@ struct HitCoverage {
 
 impl ReadState {
     /// The coverage of the hit block `id`: its score alone, its issues that are not dismissed,
-    /// and its confidence over the hit's neighbourhood.
+    /// and its confidence level over the hit's neighbourhood.
     fn hit_coverage(
         &self,
         scope: &Scope,
         issues: &CoverageIssues,
         id: &BlockId,
-        paths: &BTreeMap<String, String>,
     ) -> Result<HitCoverage, RdyError> {
         let entry = issues.blocks.get(id);
         let score = rollup(self.pack(), entry.into_iter()).score;
@@ -583,12 +592,35 @@ impl ReadState {
             e.issues.iter().filter(|i| i.dismissed.is_none()).count()
         });
         let hood = self.hit_neighbourhood(scope, id)?;
-        let level = confidence_of(issues, &hood, Some(id), paths).confidence;
+        let level = confidence_level_of(issues, &hood, Some(id));
         Ok(HitCoverage {
             score,
             issues: open,
             level,
         })
+    }
+
+    /// Give `entry` the coverage of its first block and the lowest level of all its blocks.
+    fn attach_coverage(
+        &self,
+        scope: &Scope,
+        issues: &CoverageIssues,
+        entry: &mut SearchMatch,
+    ) -> Result<(), RdyError> {
+        let first = BlockId::parse(&entry.id).map_err(|_| bad_page())?;
+        let c = self.hit_coverage(scope, issues, &first)?;
+        let mut level = c.level;
+        for a in &entry.also {
+            let id = BlockId::parse(&a.id).map_err(|_| bad_page())?;
+            let l = confidence_level_of(issues, &self.hit_neighbourhood(scope, &id)?, Some(&id));
+            if level_rank(l) > level_rank(level) {
+                level = l;
+            }
+        }
+        entry.coverage = Some(c.score);
+        entry.issues = Some(c.issues);
+        entry.confidence = Some(level);
+        Ok(())
     }
 }
 

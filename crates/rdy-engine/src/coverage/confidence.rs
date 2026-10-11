@@ -86,6 +86,40 @@ pub fn confidence_of(
     }
 }
 
+/// The level [`confidence_of`] gives, without building or sorting its reasons. Search runs it
+/// for each hit that carries a level, so it clones nothing.
+pub fn confidence_level_of(
+    issues: &CoverageIssues,
+    neighbourhood: &BTreeSet<BlockId>,
+    hit: Option<&BlockId>,
+) -> Level {
+    let mut any = false;
+    for b in neighbourhood {
+        let Some(e) = issues.blocks.get(b) else {
+            continue;
+        };
+        for i in &e.issues {
+            match i.code {
+                IssueCode::OpenTension | IssueCode::OpenSuspect => return Level::Low,
+                IssueCode::UntiedContent if hit.is_some_and(|h| i.block == h.to_string()) => {
+                    return Level::Low;
+                }
+                _ => any = true,
+            }
+        }
+    }
+    // a hit outside its own neighbourhood still counts for its text
+    if let Some(h) = hit.filter(|h| !neighbourhood.contains(*h))
+        && issues
+            .blocks
+            .get(h)
+            .is_some_and(|e| e.issues.iter().any(|i| i.code == IssueCode::UntiedContent))
+    {
+        return Level::Low;
+    }
+    if any { Level::Medium } else { Level::High }
+}
+
 impl ReadState {
     /// The neighbourhood of a fact sheet: the entity, every block with a tie edge to it, and
     /// every block whose text names it, linked or not.

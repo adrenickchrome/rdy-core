@@ -259,3 +259,33 @@ fn cc10_reasons_follow_the_closed_order_across_docs() {
     );
     assert_eq!(k.reasons_omitted, 1);
 }
+
+#[test]
+fn cc14_the_level_alone_is_the_level_of_the_full_confidence() {
+    let (_d, mut r) = project();
+    let c = world(&mut r);
+    let (citer, target) = landed_citation_then_target_changed(&mut r);
+    let st = r.read();
+    let i = st.coverage_issues(&Scope::Canon).unwrap();
+    let paths = doc_paths(&st, &i);
+    let b = |k: &str| BlockId::parse(&c[k]).unwrap();
+    let cases: Vec<(BTreeSet<BlockId>, Option<BlockId>)> = vec![
+        (ids(&[&c["$c1"]]), Some(b("$c1"))),
+        (ids(&[&c["$c1"]]), None),
+        (ids(&[&c["$c2"], &c["$t"]]), Some(b("$c2"))),
+        (ids(&[&c["$t"]]), Some(b("$c1"))),
+        (ids(&[&c["$d2"]]), None),
+        (ids(&[&c["$d3"]]), Some(b("$d3"))),
+        ([citer.clone()].into_iter().collect(), Some(citer.clone())),
+        ([target].into_iter().collect(), None),
+        (BTreeSet::new(), Some(citer)),
+        (BTreeSet::new(), None),
+    ];
+    for (hood, hit) in cases {
+        assert_eq!(
+            confidence_level_of(&i, &hood, hit.as_ref()),
+            confidence_of(&i, &hood, hit.as_ref(), &paths).confidence,
+            "{hood:?} {hit:?}"
+        );
+    }
+}
