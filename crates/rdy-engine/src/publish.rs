@@ -670,10 +670,13 @@ impl Rdy {
     /// insc1: the in-flight cell after `change` (with `ops`) was committed to `view`. When the
     /// previous set was computed and `view` is open, the set is the previous one plus `change`
     /// (held by `view` alone). The previous build is carried, with `ops` applied, when it is
-    /// computed and has no conflicts, every op applies cleanly to its materialization, no op
-    /// creates an id that was ever deleted, and the change depends on the last writer (in the merge's order) of every block it writes: a new
-    /// change is depended on by none, so it then merges after every writer of its blocks and a
-    /// rebuild equals the carry. Anything else starts unbuilt.
+    /// computed, no op writes a block its merge holds a conflict on, every op applies cleanly to
+    /// its materialization, no op creates an id that was ever deleted, and the change depends on
+    /// the last writer (in the merge's order) of every block it writes: a new change is depended
+    /// on by none, so it then merges after every writer of its blocks and a rebuild equals the
+    /// carry. The merge settles each block on its own, so a conflict on a block the change does
+    /// not write stays as it was (perf3: one open conflict made every commit merge the whole
+    /// in-flight set again). Anything else starts unbuilt.
     fn inflight_after_commit(
         &self,
         prev: &ReadState,
@@ -702,7 +705,7 @@ impl Rdy {
             // a create of an id that was ever deleted merges against the delete that removed
             // it, not cleanly: such a commit (or a failed index read) rebuilds the set
             (Some(b), Some(last))
-                if b.conflicts.is_empty()
+                if !writes_a_conflict(&b.conflicts, ops)
                     && read_state::applies_cleanly(&b.m, ops)
                     && !self
                         .store
@@ -811,4 +814,14 @@ impl Rdy {
         self.canon_step_cache.clear();
         self.publish(Delta::Full)
     }
+}
+
+/// Whether one of `ops` writes a block that `conflicts` (a merge's, in block-id order) holds a
+/// conflict on.
+fn writes_a_conflict(conflicts: &[rdy_store::merge::Conflict], ops: &[rdy_model::Op]) -> bool {
+    ops.iter().any(|op| {
+        conflicts
+            .binary_search_by(|c| c.block.cmp(op.block_id()))
+            .is_ok()
+    })
 }

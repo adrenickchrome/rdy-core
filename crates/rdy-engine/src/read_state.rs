@@ -403,6 +403,17 @@ impl CoordHeads {
 /// For each block an in-flight change writes, the last such change in the merge's order.
 pub(crate) type LastWriters = imbl::HashMap<BlockId, Hash>;
 
+thread_local! {
+    static INFLIGHT_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test hook: this thread's count of in-flight builds that merged in-flight changes (not
+/// carried by a commit). A test reads the difference over a call.
+#[doc(hidden)]
+pub fn inflight_builds() -> u64 {
+    INFLIGHT_BUILDS.with(std::cell::Cell::get)
+}
+
 /// The in-flight scope's cell: its set, then the entry built from it (named `inflight`, on
 /// canon's head), both computed on first read unless a publish carried them over. `last` is
 /// filled with the build (or carried with it): a commit carries the build only when its change
@@ -879,13 +890,15 @@ impl ReadState {
     }
 
     /// The in-flight entry's build (`build_entry`'s), recording the last writer of each block
-    /// in the merge's order in the cell.
+    /// in the merge's order in the cell. A merge of in-flight changes is counted by
+    /// [`inflight_builds`].
     fn build_inflight(&self, entry: &Entry) -> Result<Built, RdyError> {
         let canon = self.canon_for(entry).map(|b| &**b);
         if entry.included.is_empty() {
             let _ = self.inflight_cell.last.set(Arc::default());
             return build_entry(&self.reader, &self.pack, canon, entry, None);
         }
+        INFLIGHT_BUILDS.with(|c| c.set(c.get() + 1));
         let list = entry
             .included
             .iter()

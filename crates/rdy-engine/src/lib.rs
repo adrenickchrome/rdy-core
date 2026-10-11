@@ -77,7 +77,7 @@ pub use query::{
 };
 pub use rdy_store::Relay;
 pub use read_state::{
-    AltBinds, AltChosenBy, CoordHeads, Delta, InflightSet, OpenIntent, ReadState,
+    AltBinds, AltChosenBy, CoordHeads, Delta, InflightSet, OpenIntent, ReadState, inflight_builds,
 };
 pub use search::{SearchQuery, SearchResult};
 pub use session::{

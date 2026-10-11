@@ -185,6 +185,65 @@ fn insc1_a_clean_commit_carries_the_built_inflight_state() {
     assert_eq!(body(&r, &Scope::Inflight, "c-BBBBB").as_deref(), Some("B"));
 }
 
+/// perf3: a commit that writes no block the in-flight merge holds a conflict on carries the
+/// built in-flight state, as a clean commit does: no in-flight merge, and equal to a rebuild.
+/// A commit onto the conflicted block does not carry.
+#[test]
+fn perf3_a_commit_beside_an_inflight_conflict_carries() {
+    let (_d, mut r) = project();
+    let (_doc, section, claim) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let v = version_of(&r, &Scope::Canon, &claim);
+    for view in ["a", "b"] {
+        write(
+            &mut r,
+            view,
+            json!([{"op": "update", "id": claim, "base": v, "body": view}]),
+        )
+        .unwrap();
+    }
+    assert_eq!(r.read().conflicts(&Scope::Inflight).unwrap().len(), 1);
+    r.read().graph(&Scope::Inflight).unwrap();
+    let merges = inflight_builds();
+    write(
+        &mut r,
+        "c",
+        json!([{"op": "create", "type": "claim", "id": "c-CCCCC", "parent": section, "body": "C"}]),
+    )
+    .unwrap();
+    assert_eq!(
+        r.read().is_built(&Scope::Inflight),
+        (true, true),
+        "carried, graph included"
+    );
+    let carried = {
+        let st = r.read();
+        (
+            st.materialized(&Scope::Inflight).unwrap().snapshot_id(),
+            st.conflicts(&Scope::Inflight).unwrap().as_ref().clone(),
+        )
+    };
+    assert_eq!(inflight_builds(), merges, "no in-flight merge");
+    assert_eq!(body(&r, &Scope::Inflight, "c-CCCCC").as_deref(), Some("C"));
+    r.invalidate();
+    let st = r.read();
+    assert_eq!(
+        carried.0,
+        st.materialized(&Scope::Inflight).unwrap().snapshot_id()
+    );
+    assert_eq!(&carried.1, st.conflicts(&Scope::Inflight).unwrap().as_ref());
+    // onto the conflicted block: rebuilt
+    st.graph(&Scope::Inflight).unwrap();
+    let va = version_of(&r, &Scope::View("a".into()), &claim);
+    write(
+        &mut r,
+        "a",
+        json!([{"op": "update", "id": claim, "base": va, "body": "a again"}]),
+    )
+    .unwrap();
+    assert_eq!(r.read().is_built(&Scope::Inflight), (false, false));
+}
+
 #[derive(Clone, Debug)]
 enum Step {
     Write { view: usize, claim: usize, body: u8 },
