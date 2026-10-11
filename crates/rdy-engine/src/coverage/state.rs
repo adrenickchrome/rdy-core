@@ -17,7 +17,7 @@ const MEMO_SCOPES: usize = 8;
 pub(crate) type CoverageMemo = Mutex<VecDeque<(String, Arc<CoverageIssues>)>>;
 
 /// The memo key of `scope` (one `coverage_scope` gave: never a past landing).
-fn memo_label(scope: &Scope) -> String {
+pub(super) fn memo_label(scope: &Scope) -> String {
     match scope {
         Scope::Canon | Scope::At(_) => "canon".to_string(),
         Scope::View(v) => format!("view/{v}"),

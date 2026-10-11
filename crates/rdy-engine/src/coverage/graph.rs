@@ -1,11 +1,11 @@
 //! Graph coverage (FW-EN4, FW-EN1a): the entity measures that Coverage and confidence (FW-CV1) wraps as its Grounded and Connected dimensions.
+use super::kinds::{KindCount, kinds_over};
 use crate::lexicon::{is_content, is_fact, is_tie, link_kind_for, linked_from_outside, tied};
 use crate::{Materialized, RdyError, ReadState, Scope};
 use rdy_graph::Graph;
-use rdy_model::entity::{ENTITY, KIND};
 use rdy_model::{Block, BlockId, tree};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// The most unlinked docs a coverage reading lists; the rest are counted.
@@ -59,29 +59,9 @@ pub struct DocRef {
     pub path: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct KindCount {
-    pub kind: String,
-    pub entities: usize,
-}
-
 /// `part * 100 / total`, rounded down; none when there is nothing to measure.
 fn pct(part: usize, total: usize) -> Option<u32> {
     (total > 0).then(|| (part * 100 / total) as u32)
-}
-
-/// A kind's normal form: lowercase, without spaces, `-` and `_`, and without one final `s` when
-/// more than 3 characters remain.
-fn normal_kind(kind: &str) -> String {
-    let mut n: String = kind
-        .to_lowercase()
-        .chars()
-        .filter(|c| !matches!(c, ' ' | '-' | '_'))
-        .collect();
-    if n.ends_with('s') && n.chars().count() > 4 {
-        n.pop();
-    }
-    n
 }
 
 /// Whether `from` is tied to a block that exists and is an entity: one pass over its outgoing
@@ -134,18 +114,12 @@ impl ReadState {
         let mut grounded = Grounded::default();
         let mut docs: Vec<&Block> = vec![];
         let mut entities = 0;
-        let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
-        for b in blocks {
+        for &b in &blocks {
             if b.block_type == tree::DOC {
                 docs.push(b);
             }
             if is_entity(&b.block_type) {
                 entities += 1;
-            }
-            if b.block_type == ENTITY
-                && let Some(k) = b.field_str(KIND).map(str::trim).filter(|k| !k.is_empty())
-            {
-                *kinds.entry(k.to_string()).or_default() += 1;
             }
             let content = is_content(pack, b);
             let fact = is_fact(pack, b);
@@ -186,14 +160,7 @@ impl ReadState {
         let omitted = unlinked.len().saturating_sub(UNLINKED_DOCS_CAP);
         unlinked.truncate(UNLINKED_DOCS_CAP);
 
-        let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for k in kinds.keys() {
-            groups.entry(normal_kind(k)).or_default().push(k.clone());
-        }
-        // the kinds are visited in byte order, so each group is already sorted
-        let mut similar_kinds: Vec<Vec<String>> =
-            groups.into_values().filter(|g| g.len() > 1).collect();
-        similar_kinds.sort();
+        let (kinds, similar_kinds) = kinds_over(blocks.iter().copied());
 
         Ok(GraphCoverage {
             scope: if covered.is_some() { "covered" } else { "all" }.to_string(),
@@ -204,10 +171,7 @@ impl ReadState {
                 unlinked_docs_omitted: omitted,
             },
             entities,
-            kinds: kinds
-                .into_iter()
-                .map(|(kind, entities)| KindCount { kind, entities })
-                .collect(),
+            kinds,
             similar_kinds,
         })
     }
