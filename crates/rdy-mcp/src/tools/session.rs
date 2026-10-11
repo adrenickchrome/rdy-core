@@ -121,16 +121,18 @@ pub fn rdy_overview(st: &mut McpState, p: ScopeParams) -> Result<Value, RdyError
     let scope = scope_of(&st.view, &st_, &p.scope)?;
     let position = st_.version_position(&scope)?;
     let max = p.max_tokens.unwrap_or(4000);
-    // cc6 (FW-H7): coverage is for the current state only; a past landing is refused
-    let coverage_scope = st_.coverage_scope(&scope)?;
-    let coverage =
-        serde_json::to_value(st_.graph_coverage(&coverage_scope, None)?).map_err(|e| {
-            RdyError::new(
-                E_INTERNAL,
-                format!("graph coverage did not serialize: {e}"),
-                "report this as a bug in rdy",
-            )
-        })?;
+    // cc6 (FW-H7): coverage is for the current state only; a past landing is refused, and the
+    // refusal of `coverage_report` is never caught
+    let report = st_.coverage_report(&scope, None)?;
+    // cc15 (FW-CH3a): the score, its dimensions, the issue count and the kinds; the pages, areas
+    // and issues are `rdy_coverage`'s
+    let coverage = json!({
+        "score": report.score,
+        "dimensions": report.dimensions,
+        "issues_total": report.issues_total,
+        "kinds": report.kinds,
+        "similar_kinds": report.similar_kinds,
+    });
     // the tree gets what the fixed parts (coverage included) leave
     let reserve = 300 + tokens_of(&coverage);
     let tree = fit_tree(st_.tree(&scope, None, None)?, max.saturating_sub(reserve));

@@ -181,14 +181,8 @@ fn acc1_bad_input_is_refused_and_nothing_is_written() {
 fn acc1_overview_schema_and_instructions_carry_the_entity_surfaces() {
     let (_d, mut st, _s, _e) = books();
     let ov = rdy_overview(&mut st, p(json!({}))).unwrap();
-    assert_eq!(
-        (
-            ov["coverage"]["scope"].as_str(),
-            ov["coverage"]["entities"].as_u64()
-        ),
-        (Some("all"), Some(1)),
-        "{ov}"
-    );
+    assert!(ov["coverage"]["score"].is_number(), "{ov}");
+    assert!(ov["coverage"].get("grounded").is_none(), "{ov}");
     assert!(
         ov.get("health").is_none(),
         "FW-CV1: the name is coverage: {ov}"

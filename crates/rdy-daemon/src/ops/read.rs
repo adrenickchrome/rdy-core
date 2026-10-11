@@ -103,11 +103,21 @@ pub(super) fn status(cx: &OpContext) -> Result<Value, RdyError> {
         warnings.push(format!("{}: {}; {}", w.code, w.message, w.fix));
     }
     let suspects = st.suspects(&Scope::Canon)?.len();
+    let report = st.coverage_report(&Scope::Canon, None)?;
+    // cc15 (FW-CH3a): the current score, its dimensions, the issue count and the kinds; the
+    // pages, areas and issues are `rdy coverage`'s
+    let coverage = json!({
+        "score": report.score,
+        "dimensions": report.dimensions,
+        "issues_total": report.issues_total,
+        "kinds": report.kinds,
+        "similar_kinds": report.similar_kinds,
+    });
     Ok(json!({
         "pack": st.pack().name,
         "landings": landings,
         "suspects": suspects,
-        "coverage": st.graph_coverage(&Scope::Canon, None)?,
+        "coverage": coverage,
         "version_position": canon,
         "views": views,
         "warnings": warnings,

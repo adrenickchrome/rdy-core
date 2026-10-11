@@ -794,4 +794,6 @@ fn cc6_overview_at_a_past_landing_is_refused() {
     )
     .unwrap();
     assert_eq!(at_head["coverage"], canon["coverage"]);
+    assert!(canon["coverage"]["score"].is_number(), "{canon}");
+    assert_eq!(at_head["coverage"]["score"], canon["coverage"]["score"]);
 }

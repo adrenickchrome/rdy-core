@@ -2,6 +2,7 @@ use crate::conn::{Env, call};
 use crate::output::{hash_short, num, open_warnings, text, warning_lines};
 use crate::{history_text, view_cmd, wc};
 use rdy_daemon::ErrorReply;
+use rdy_schema::CoverageDimension;
 use serde_json::{Value, json};
 
 #[derive(clap::Args)]
@@ -143,24 +144,30 @@ fn ls_text(nodes: &Value, depth: usize, out: &mut Vec<String>) {
     }
 }
 
-/// The `coverage:`, `kinds:` and `similar kinds:` lines of `rdy status` (FW-EN4, FW-EN1a), each
+/// The `coverage:`, `kinds:` and `similar kinds:` lines of `rdy status` (FW-CH3a, FW-EN1a), each
 /// with its leading newline; nothing when the status carries no coverage.
 fn coverage_lines(c: &Value) -> String {
     if !c.is_object() {
         return String::new();
     }
-    let (g, d) = (&c["grounded"], &c["connected"]);
-    let unlinked =
-        d["unlinked_docs"].as_array().map_or(0, Vec::len) as u64 + num(&d["unlinked_docs_omitted"]);
+    let dims: Vec<String> = CoverageDimension::ALL
+        .iter()
+        .filter_map(|d| {
+            c["dimensions"][d.name()]
+                .as_u64()
+                .map(|s| format!("{} {s}", d.name()))
+        })
+        .collect();
+    // a project with nothing to score has no dimensions: no empty parentheses
+    let dims = if dims.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", dims.join(", "))
+    };
     let mut out = format!(
-        "\ncoverage: {}/{} facts tied, {}/{} content tied, {}/{} mentions linked, {unlinked} of {} docs unlinked",
-        num(&g["facts_tied"]),
-        num(&g["facts"]),
-        num(&g["content_tied"]),
-        num(&g["content"]),
-        num(&g["mentions_linked"]),
-        num(&g["mentions"]),
-        num(&d["docs"]),
+        "\ncoverage: {}{dims}; {} coverage issues, listed by rdy coverage",
+        num(&c["score"]),
+        num(&c["issues_total"]),
     );
     let kinds: Vec<String> = c["kinds"]
         .as_array()

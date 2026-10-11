@@ -15,7 +15,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Project overview: pack, the folder and doc tree, views, canon history and the version position. Also graph coverage: facts and content tied to entities, entity mentions linked, docs nothing links to, entity kinds."
+        description = "Project overview: pack, the folder and doc tree, views, canon history and the version position. Also coverage (the current score, its dimensions and the issue count) and the entity kinds."
     )]
     async fn rdy_overview(&self, Parameters(p): Parameters<ScopeParams>) -> CallToolResult {
         self.run("rdy_overview", p, tools::rdy_overview).await
