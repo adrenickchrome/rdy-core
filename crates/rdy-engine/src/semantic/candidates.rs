@@ -15,6 +15,17 @@ use std::sync::Arc;
 /// The most requests one change makes.
 pub const MAX_CANDIDATES: usize = 20;
 
+thread_local! {
+    static REQUEST_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test hook: this thread's count of [`ReadState::requests_from`] calls. A test reads the
+/// difference over a call, on the thread that ran it (the daemon writer's, through a write).
+#[doc(hidden)]
+pub fn request_builds() -> u64 {
+    REQUEST_BUILDS.with(std::cell::Cell::get)
+}
+
 /// Why two blocks are a pair. Declaration order is rank: the first rule that holds names the
 /// pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -116,6 +127,7 @@ impl ReadState {
     /// rank, then the subject's id, then closeness; each pair once; at most [`MAX_CANDIDATES`].
     /// A change that is not in flight makes none. Settled pairs are not removed here.
     pub fn requests_from(&self, change: &Hash) -> Result<Vec<Request>, RdyError> {
+        REQUEST_BUILDS.with(|n| n.set(n.get() + 1));
         let set = self.tensions()?;
         let writes: &Writes = set.writes();
         if writes.change(change).is_none() {

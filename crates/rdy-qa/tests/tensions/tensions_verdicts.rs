@@ -393,3 +393,115 @@ fn se7_a_verdict_is_a_review_submitted_event() {
         "{kinds:?}"
     );
 }
+
+/// The daemon resolves a lease-less submit's request on a read: the writer computes no
+/// candidate requests (global constraint; FW-PF2/SW3: write-path cost must not grow with the
+/// corpus).
+#[test]
+fn se7_a_lease_less_daemon_submit_computes_no_requests_on_the_writer() {
+    use rdy_engine::engine::{Engine, write_typed};
+    use rdy_engine::semantic::candidates::request_builds;
+    let (_d, r, _s) = edited_c();
+    let (rq, h, blocks) = take(&r);
+    assert!(r.leases().leased(0).is_empty());
+    let shared = rdy_daemon::shared::Shared::new(r);
+    let e = shared.engine();
+    let on_writer = |e: &dyn Engine| {
+        write_typed(e, |_| Ok(request_builds()))
+            .unwrap()
+            .as_u64()
+            .unwrap()
+    };
+    let (writer_before, here_before) = (on_writer(&*e), request_builds());
+    let v = rdy_engine::semantic::api::run_review_submit(
+        &*e,
+        &reviewer("agent:r"),
+        request(&rq, &h, "tension", &blocks[..1]),
+    )
+    .unwrap();
+    assert!(v["tension"].is_string(), "{v}");
+    assert_eq!(
+        on_writer(&*e),
+        writer_before,
+        "the writer computed candidate requests"
+    );
+    assert!(
+        request_builds() > here_before,
+        "the lookup ran on the caller's read"
+    );
+    shared.shutdown().unwrap();
+}
+
+/// Fails every detection once a semantic tension is recorded: the tension set of the state
+/// after a `tension` verdict cannot be built.
+struct FailsOnceATensionIsRecorded;
+impl Detector for FailsOnceATensionIsRecorded {
+    fn kind(&self) -> TensionKind {
+        TensionKind::Semantic
+    }
+    fn stored(&self) -> bool {
+        true
+    }
+    fn detect(
+        &self,
+        cx: &DetectCx<'_>,
+        _seeds: Option<&BTreeSet<BlockId>>,
+        _out: &mut Vec<Found>,
+    ) -> Result<(), rdy_engine::RdyError> {
+        if cx.st.semantic().has_tensions() {
+            return Err(rdy_engine::RdyError::new(
+                rdy_engine::E_IO,
+                "boom",
+                "a test detector",
+            ));
+        }
+        Ok(())
+    }
+}
+static FAILS_ONCE_RECORDED: FailsOnceATensionIsRecorded = FailsOnceATensionIsRecorded;
+static FAILS_ONCE_RECORDED_DETS: [&dyn Detector; 1] = [&FAILS_ONCE_RECORDED];
+
+/// The reply after the write never fails a stored verdict: a failed tension lookup gives no
+/// tension label, and the review id stands.
+#[test]
+fn se7_a_failed_lookup_after_the_write_still_answers_with_the_review() {
+    let (_d, mut r, _s) = edited_c();
+    r.set_detectors_for_tests(&FAILS_ONCE_RECORDED_DETS);
+    let (rq, h, blocks) = take(&r);
+    let info = submit(
+        &mut r,
+        &reviewer("agent:r"),
+        &rq,
+        &h,
+        "tension",
+        &blocks[..1],
+    )
+    .unwrap();
+    assert_eq!(info.tension, None, "the lookup failed");
+    assert_eq!(info.severity, None, "no tension, so no severity");
+    let review = r.store().review(&info.review.parse().unwrap()).unwrap();
+    assert_eq!(review.verdict, Verdict::Tension, "the verdict is stored");
+    assert!(r.read().tensions().is_err(), "the lookup does fail");
+}
+
+/// The writer re-proves a key found on a read: a pair that changed between the lookup and the
+/// write is refused as no longer current, and nothing is recorded.
+#[test]
+fn se7_a_pair_that_changes_after_the_lookup_is_e_review_stale() {
+    let (_d, mut r, s) = edited_c();
+    let (rq, h, blocks) = take(&r);
+    let who = reviewer("agent:r");
+    let checked = CheckedSubmit::new(&who, request(&rq, &h, "tension", &blocks[..1])).unwrap();
+    let found = r
+        .read()
+        .find_request(&r.leases(), &checked, rdy_engine::now_ms())
+        .unwrap();
+    put(&mut r, "a", upd(&s.c, "C contradicts B, rewritten."));
+    let e = r.submit_found(checked, found).unwrap_err();
+    assert_eq!(e.code, E_REVIEW_STALE);
+    assert_eq!(
+        e.message,
+        format!("request {rq} is no longer current: a side changed, landed or left every view")
+    );
+    assert!(of_kind(&r, TensionKind::Semantic).is_empty());
+}

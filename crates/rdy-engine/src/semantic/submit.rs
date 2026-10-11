@@ -3,11 +3,12 @@
 //! (D-WMCFW), which gates nothing.
 use crate::semantic::candidates::{Item, request_hex, request_label};
 use crate::semantic::case::case_hash;
+use crate::semantic::lease::LeaseRegistry;
 use crate::tensions::semantic::pair_of;
 use crate::tensions::{SideRef, TensionSeverity, tension_label};
 use crate::{
     E_BAD_INPUT, E_NOT_FOUND, E_PERMISSION, E_REVIEW_INVALID, E_REVIEW_STALE, E_SELF_REVIEW, Rdy,
-    RdyError, Session, now_ms,
+    RdyError, ReadState, Session, now_ms,
 };
 use rdy_model::{
     BlockId, Finding, Hash, PairItem, Review, ReviewSubject, Role, SemanticTension, Verdict,
@@ -56,10 +57,11 @@ pub struct SubmitInfo {
     /// The review's id (64 hex).
     pub review: String,
     pub verdict: String,
-    /// The label of the semantic tension a `tension` verdict opened.
+    /// The label of the semantic tension a `tension` verdict opened; absent when the state after
+    /// the write could not be read (the verdict is stored all the same).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tension: Option<String>,
-    /// The tension's severity: always `advisory` for a new one.
+    /// The tension's severity: always `advisory` for a new one; absent when `tension` is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub severity: Option<TensionSeverity>,
     /// The reason, when the verdict advised blocking.
@@ -90,16 +92,20 @@ fn bounded(text: &str) -> Option<&str> {
     (!t.is_empty() && t.chars().count() <= MAX_NOTE).then_some(t)
 }
 
-impl Rdy {
-    /// Records session `s`'s verdict on review request `req.request`: checks the role, the
-    /// schema, that the request is current, precedence, the case hash and actor independence,
-    /// then writes the review (and, for a `tension`, the semantic tension's first version) and
-    /// frees the request's lease.
-    pub fn submit_verdict(
-        &mut self,
-        s: &Session,
-        req: ReviewSubmitRequest,
-    ) -> Result<SubmitInfo, RdyError> {
+/// A submit's input after the checks that read no state (steps 1 to 4): the role, the verdict
+/// word, the request id and the case hash text.
+#[derive(Clone, Debug)]
+pub struct CheckedSubmit {
+    session: Session,
+    req: ReviewSubmitRequest,
+    verdict: Verdict,
+    hex: String,
+    sent_hash: Hash,
+}
+
+impl CheckedSubmit {
+    /// Checks session `s`'s submit `req` against everything but the state.
+    pub fn new(s: &Session, req: ReviewSubmitRequest) -> Result<CheckedSubmit, RdyError> {
         // 1. role
         if s.role != Role::Reviewer {
             return Err(RdyError::new(
@@ -136,20 +142,46 @@ impl Rdy {
                 "pass case_hash from rdy_review_next",
             ));
         };
-        // 5. the pair: live leases, then settled pairs, then the queue
-        let st = self.read();
-        let leases = self.leases();
-        let now = now_ms();
+        Ok(CheckedSubmit {
+            session: s.clone(),
+            req,
+            verdict,
+            hex,
+            sent_hash,
+        })
+    }
+}
+
+/// The request a submit names: its key and its pair, as (block, content).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoundRequest {
+    pub key: Hash,
+    pub pair: Vec<(BlockId, Hash)>,
+}
+
+impl ReadState {
+    /// Step 5: the request `c` names, by its key prefix: from the live leases, then the settled
+    /// pairs, and only when both find nothing, the queue. It only reads, so the daemon runs it on
+    /// a read, outside the writer (candidate requests are never computed on the writer); the
+    /// key is content-addressed, so [`Rdy::submit_found`] re-proves on the writer that the pair
+    /// is still current.
+    pub fn find_request(
+        &self,
+        leases: &LeaseRegistry,
+        c: &CheckedSubmit,
+        now: i64,
+    ) -> Result<FoundRequest, RdyError> {
+        let hex = &c.hex;
         let given = format!("rq-{}", &hex[..hex.len().min(12)]);
         let mut found: Vec<(Hash, Vec<(BlockId, Hash)>)> = leases
-            .with_prefix(&hex, now)
+            .with_prefix(hex, now)
             .into_iter()
             .map(|(k, l)| (k, l.pair))
             .collect();
         if found.is_empty() {
-            found = st
+            found = self
                 .semantic()
-                .settled_with_prefix(&hex)
+                .settled_with_prefix(hex)
                 .into_iter()
                 .map(|(k, v)| {
                     let pair = v.items.iter().map(|i| (i.block.clone(), i.content));
@@ -158,27 +190,69 @@ impl Rdy {
                 .collect();
         }
         if found.is_empty() {
-            found = st
+            found = self
                 .review_requests()?
                 .into_iter()
-                .filter(|q| q.key.to_string().starts_with(&hex))
+                .filter(|q| q.key.to_string().starts_with(hex.as_str()))
                 .map(|q| {
                     let pair = q.items.iter().map(|i| (i.block.clone(), i.content));
                     (q.key, pair.collect())
                 })
                 .collect();
         }
-        let (key, pair) = match found.len() {
-            0 => return Err(not_current(&given)),
-            1 => found.remove(0),
-            n => {
-                return Err(RdyError::new(
-                    E_NOT_FOUND,
-                    format!("{} matches {n} requests", req.request),
-                    "pass more hex digits",
-                ));
+        match found.len() {
+            0 => Err(not_current(&given)),
+            1 => {
+                let (key, pair) = found.remove(0);
+                Ok(FoundRequest { key, pair })
             }
-        };
+            n => Err(RdyError::new(
+                E_NOT_FOUND,
+                format!("{} matches {n} requests", c.req.request),
+                "pass more hex digits",
+            )),
+        }
+    }
+}
+
+impl Rdy {
+    /// Records session `s`'s verdict on review request `req.request`: checks the role, the
+    /// schema, that the request is current, precedence, the case hash and actor independence,
+    /// then writes the review (and, for a `tension`, the semantic tension's first version) and
+    /// frees the request's lease.
+    ///
+    /// In process there is no writer to keep free, so it finds the request on its own state.
+    /// The daemon finds it on a read and runs only [`Rdy::submit_found`] on the writer
+    /// (`run_review_submit`).
+    pub fn submit_verdict(
+        &mut self,
+        s: &Session,
+        req: ReviewSubmitRequest,
+    ) -> Result<SubmitInfo, RdyError> {
+        let c = CheckedSubmit::new(s, req)?;
+        let found = self.read().find_request(&self.leases(), &c, now_ms())?;
+        self.submit_found(c, found)
+    }
+
+    /// Steps 6 to 11 of a submit whose request `found` was found on a read: re-proves that the
+    /// pair is current (the items now, then the case hash), then precedence, actor independence
+    /// and the write. Computes no candidate requests.
+    pub fn submit_found(
+        &mut self,
+        c: CheckedSubmit,
+        found: FoundRequest,
+    ) -> Result<SubmitInfo, RdyError> {
+        let CheckedSubmit {
+            session,
+            req,
+            verdict,
+            sent_hash,
+            ..
+        } = c;
+        let s = &session;
+        let FoundRequest { key, pair } = found;
+        let st = self.read();
+        let leases = self.leases();
         let label = request_label(&key);
         // 6. the items now
         let mut items: Vec<Item> = vec![];
@@ -346,11 +420,14 @@ impl Rdy {
             suppressed: false,
         };
         if verdict == Verdict::Tension {
-            let st = self.read();
-            let set = st.tensions()?;
-            let t = set.iter().find(|t| pair_of(t) == Some(key));
-            info.tension = t.map(|t| tension_label(&t.id));
-            info.severity = Some(t.map_or(TensionSeverity::Advisory, |t| t.severity));
+            // the verdict is stored: a failed lookup gives no label and never fails the reply
+            let open = self.read().tensions().ok().and_then(|set| {
+                set.iter()
+                    .find(|t| pair_of(t) == Some(key))
+                    .map(|t| (tension_label(&t.id), t.severity))
+            });
+            info.tension = open.as_ref().map(|(label, _)| label.clone());
+            info.severity = open.map(|(_, severity)| severity);
             info.advice = advice;
         } else {
             info.suppressed = true;
