@@ -1,7 +1,8 @@
 //! Reviews (plan M2d2): a reviewer's verdict on a subject. A dismissal is a review with verdict
 //! `Dismiss` of a tension, named by the tension's vkey, or of a mention, named by its block and
-//! entity; a mention's latest review wins.
-use crate::{BlockId, Hash, Provenance};
+//! entity; a mention's latest review wins. A verdict is a review with verdict `Tension` or
+//! `NoTension` of a pair; ref `pair/<key>` names the one that settles it.
+use crate::{BlockId, Hash, PairItem, Provenance};
 use serde::{Deserialize, Serialize};
 
 /// A review (kind REVIEW). Field order is format.
@@ -27,6 +28,7 @@ impl Review {
         match &self.subject {
             ReviewSubject::Tension { vkey, .. } => Some(*vkey),
             ReviewSubject::Mention { .. } => None,
+            ReviewSubject::Pair { .. } => None,
         }
     }
 }
@@ -46,6 +48,8 @@ pub enum ReviewSubject {
     },
     /// A mention of an entity in a block's text, as a passing mention (FW-CV4): the block and the entity.
     Mention { block: BlockId, entity: BlockId },
+    /// A candidate pair of blocks at given contents (plan M2e1): the pair key and the two items.
+    Pair { key: Hash, items: Vec<PairItem> },
 }
 
 /// The verdict of a review. Field order is format.
@@ -55,6 +59,10 @@ pub enum Verdict {
     Dismiss,
     /// The subject needs action again: a mention restored after a dismissal (FW-CV4).
     Restore,
+    /// The pair disagrees.
+    Tension,
+    /// The pair does not disagree.
+    NoTension,
 }
 
 /// A note on one block. Field order is format.
