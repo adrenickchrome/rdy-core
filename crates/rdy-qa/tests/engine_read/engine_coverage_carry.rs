@@ -666,3 +666,63 @@ fn cc11_fix3_a_write_replys_coverage_change_counts_no_kinds() {
     assert!(kinds_builds() > kinds, "a summary still counts the kinds");
     assert_eq!(got.pages.len(), 1, "the touched page: {got:?}");
 }
+
+/// Fix round 3: a write can open a suspect on a block the structural carry does not recompute
+/// and no tension names. Decision r refines d1 (a link no structural check follows from d1's
+/// liveness, and not a pointing edge, so no deprecated reference); a landing then supersedes
+/// d1. r becomes suspect, and its entry is rebuilt only because the suspects changed: the
+/// carried issues equal a full build and name the suspect.
+#[test]
+fn cc11_fix3_a_suspect_the_structural_carry_misses_is_carried() {
+    let (_d, mut r) = project();
+    let c = cc6_world(&mut r);
+    let canon = Scope::Canon;
+    let w = write(
+        &mut r,
+        "ref",
+        json!([{"op": "create", "type": "decision", "id": "$r", "parent": c["$s"],
+        "fields": {"statement": "Balances are read from the primary store", "status": "proposed"},
+        "links": {"refines": [{"target": c["$d1"]}]}}]),
+    )
+    .unwrap();
+    land(&mut r, "ref").unwrap();
+    let refines = BlockId::parse(&w.created["$r"]).unwrap();
+    let suspect = |r: &Rdy| {
+        r.read().coverage_issues(&canon).unwrap().blocks[&refines]
+            .issues
+            .iter()
+            .any(|i| i.code == IssueCode::OpenSuspect)
+    };
+    assert!(!suspect(&r), "d1 is live: nothing to check yet");
+    let (layers, structural) = (state_layer_builds(), structural_builds());
+    write(
+        &mut r,
+        "sup",
+        json!([{"op": "create", "type": "decision", "parent": c["$s"],
+        "fields": {"statement": "Balances live in two stores", "status": "proposed"},
+        "links": {"supersedes": [{"target": c["$d1"]}]}}]),
+    )
+    .unwrap();
+    land(&mut r, "sup").unwrap();
+    r.read().coverage_issues(&canon).unwrap();
+    assert_eq!(
+        structural_builds(),
+        structural,
+        "the structural layer is carried"
+    );
+    assert_eq!(state_layer_builds(), layers, "the issues are carried");
+    assert!(
+        !r.read()
+            .tensions()
+            .unwrap()
+            .iter()
+            .any(|t| t.blocks().contains(&refines)),
+        "no tension names r (d1's deprecated reference is c2's)"
+    );
+    same(&r, &canon);
+    same_issues(&r, &canon);
+    assert!(
+        suspect(&r),
+        "a decision that refines a superseded one is suspect"
+    );
+}
