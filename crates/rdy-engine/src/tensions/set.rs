@@ -647,6 +647,7 @@ impl ReadState {
             canon_index_of(self)?,
             Arc::new(m),
             Arc::new(g),
+            touched.into_iter().cloned().collect(),
         );
         let mut out = BTreeMap::new();
         for d in self.detectors {

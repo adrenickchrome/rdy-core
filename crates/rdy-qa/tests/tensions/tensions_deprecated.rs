@@ -280,10 +280,12 @@ fn cc3_a_linked_mention_is_the_edge_form_only() {
         json!([{"op": "create", "type": "claim", "id": "$y", "parent": s.to_string(),
         "body": format!("The Retry limit {{{{{x}}}}} applies.")}]),
     );
-    assert_eq!(
-        of_kind(&r, TensionKind::DeprecatedReference).len(),
-        1,
-        "one tension, not two"
+    let ts = of_kind(&r, TensionKind::DeprecatedReference);
+    assert_eq!(ts.len(), 1, "one tension, not two");
+    assert!(
+        !ts[0].summary.contains("names deprecated"),
+        "the edge form, not the mention form: {}",
+        ts[0].summary
     );
 }
 
@@ -298,4 +300,176 @@ fn cc3_live_terms_and_keys_raise_nothing() {
         "body": "The Retry limit applies."}]),
     );
     assert!(of_kind(&r, TensionKind::DeprecatedReference).is_empty());
+}
+
+/// guard: a deprecated definition's key is not a name. A claim whose body holds only the key
+/// raises nothing, while the same claim naming the term does.
+#[test]
+fn cc3_a_key_of_a_deprecated_term_is_not_a_mention() {
+    let (_d, mut r, s) = deprecated_term_world();
+    let x = deprecated_term_id(&r);
+    // give the retired term a key (it stays deprecated), land it
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": x.to_string(), "fields": {"key": "RETRY-CAP-7"}}]),
+    )
+    .expect("the key");
+    land(&mut r, "work").expect("land the key");
+    put(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "claim", "parent": s.to_string(),
+        "body": "See RETRY-CAP-7 for the rule."}]),
+    );
+    assert!(
+        of_kind(&r, TensionKind::DeprecatedReference).is_empty(),
+        "{:#?}",
+        of_kind(&r, TensionKind::DeprecatedReference)
+    );
+    // the control: the name in the text does raise one
+    let y = created(
+        &put(
+            &mut r,
+            "b",
+            json!([{"op": "create", "type": "claim", "id": "$y", "parent": s.to_string(),
+            "body": "The Retry limit applies."}]),
+        ),
+        "$y",
+    );
+    one_involving(&r, TensionKind::DeprecatedReference, &y);
+    assert_eq!(of_kind(&r, TensionKind::DeprecatedReference).len(), 1);
+}
+
+/// An in-flight edit of a block whose base already named the term raises nothing new: the
+/// write must be the first to name it.
+#[test]
+fn cc3_an_edit_of_a_block_that_already_named_the_term_raises_nothing_in_flight() {
+    let (_d, mut r, s) = deprecated_term_world();
+    let y = created(
+        &put(
+            &mut r,
+            "a",
+            json!([{"op": "create", "type": "claim", "id": "$y", "parent": s.to_string(),
+            "body": "The Retry limit applies."}]),
+        ),
+        "$y",
+    );
+    land(&mut r, "a").unwrap();
+    assert_eq!(of_kind(&r, TensionKind::DeprecatedReference).len(), 1);
+    put(
+        &mut r,
+        "b",
+        upd(&y, "The Retry limit applies to every job."),
+    );
+    let ts = of_kind(&r, TensionKind::DeprecatedReference);
+    assert!(
+        ts.iter().all(|t| change_sides(t).is_empty()),
+        "no in-flight tension for the edit: {ts:#?}"
+    );
+    // dropping the name and then naming it again is a new naming
+    put(&mut r, "c", upd(&y, "Nothing about it."));
+    put(&mut r, "c", upd(&y, "The retries return."));
+    assert!(
+        of_kind(&r, TensionKind::DeprecatedReference)
+            .iter()
+            .any(|t| !change_sides(t).is_empty() && t.blocks().contains(&y)),
+    );
+}
+
+/// In canon, a block that is itself deprecated raises nothing for naming a deprecated term.
+#[test]
+fn cc3_a_deprecated_block_that_names_a_deprecated_term_raises_nothing_in_canon() {
+    let (_d, mut r, s) = deprecated_term_world();
+    put(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "claim", "parent": s.to_string(),
+        "body": "The Retry limit applies."}]),
+    );
+    land(&mut r, "a").unwrap();
+    assert_eq!(
+        of_kind(&r, TensionKind::DeprecatedReference).len(),
+        1,
+        "live in canon: one tension"
+    );
+    // the section holding the claim is deprecated and landed: the claim is deprecated too
+    write(
+        &mut r,
+        "work",
+        json!([{"op": "update", "id": s.to_string(), "fields": {"lifecycle": "deprecated"}}]),
+    )
+    .unwrap();
+    land(&mut r, "work").unwrap();
+    assert!(
+        of_kind(&r, TensionKind::DeprecatedReference).is_empty(),
+        "{:#?}",
+        of_kind(&r, TensionKind::DeprecatedReference)
+    );
+    assert!(
+        r.read()
+            .canon_tensions_rebuilt()
+            .unwrap()
+            .iter()
+            .all(|t| t.kind != TensionKind::DeprecatedReference)
+    );
+}
+
+/// Deprecating the term in flight (moving it into a deprecated section, so the term itself is a
+/// seed) while another live write names it: the seeded run finds the naming write through the
+/// word index, and what it finds equals what the set holds (a full build; a move does not carry).
+#[test]
+fn cc3_deprecating_the_term_in_flight_while_a_live_write_names_it() {
+    let (_d, mut r, s) = live_term_world();
+    let x = deprecated_term_id(&r);
+    let y = created(
+        &put(
+            &mut r,
+            "a",
+            json!([{"op": "create", "type": "claim", "id": "$y", "parent": s.to_string(),
+            "body": "Each job keeps its retries small."}]),
+        ),
+        "$y",
+    );
+    // a live term: nothing yet
+    assert!(of_kind(&r, TensionKind::DeprecatedReference).is_empty());
+    let doc = r
+        .read()
+        .materialized(&rdy_engine::Scope::Canon)
+        .expect("canon")
+        .iter()
+        .find(|b| b.block_type == "doc")
+        .map(|b| b.id.clone())
+        .expect("the doc");
+    let cb = change_of(&put(
+        &mut r,
+        "a",
+        json!([
+            {"op": "create", "type": "section", "id": "$old", "parent": doc.to_string(),
+             "fields": {"title": "Retired", "lifecycle": "deprecated"}},
+            {"op": "move", "id": x.to_string(), "parent": "$old"}
+        ]),
+    ));
+    let t = one_involving(&r, TensionKind::DeprecatedReference, &y);
+    assert!(t.summary.contains("names deprecated"), "{}", t.summary);
+    assert!(t.involved.iter().any(|i| i.block == x));
+    assert!(change_sides(&t).contains(&cb), "{t:#?}");
+    let ids = |v: &[std::sync::Arc<Tension>]| -> std::collections::BTreeSet<_> {
+        v.iter().map(|t| t.id).collect()
+    };
+    let st = r.read();
+    let set = st.tensions().unwrap();
+    let rebuilt: Vec<_> = st.tensions_rebuilt().unwrap().iter().cloned().collect();
+    assert_eq!(
+        set.iter()
+            .map(|t| t.id)
+            .collect::<std::collections::BTreeSet<_>>(),
+        ids(&rebuilt),
+        "the set equals a full rebuild"
+    );
+    // the seeded run around the deprecating change alone finds the tension it is a side of
+    let seeded = st.tensions_of_changes_seeded(&[cb]).unwrap();
+    assert!(seeded.iter().any(|s| s.id == t.id), "{seeded:#?}");
+    let from_set: Vec<_> = set.involving_change(&cb).into_iter().collect();
+    assert_eq!(ids(&seeded), ids(&from_set));
 }

@@ -12,10 +12,10 @@
 //! both references and names a definition gets the edge form only.
 use super::{DetectCx, DetectScope, Detector, Found, Involved, TensionKind, pointing_edge};
 use crate::RdyError;
-use crate::lexicon::tied;
+use crate::lexicon::{Lexicon, NameKind, tied};
 use rdy_graph::{Edge, edges_of};
 use rdy_model::{Block, BlockId, Hash};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// This kind's detector.
@@ -153,24 +153,53 @@ impl DeprecatedReference {
 impl DeprecatedReference {
     /// The in-flight mention form: live writes whose new block names a deprecated definition in
     /// plain text, and whose base did not. A run around `seeds` reads the writes on the seeds,
-    /// and every live write when a seed is a definition (its deprecation can change what the
-    /// other writes name).
+    /// and, for each seed that is a deprecated definition, the live writes whose text holds each
+    /// word of one of its names (the lexicon's word index finds them; a seed that is not
+    /// deprecated cannot open a mention tension, and its tensions are detected again). A full
+    /// run does the same for every deprecated definition. The lexicon is read only when a
+    /// write is to be read.
     fn inflight_mentions(
         cx: &DetectCx<'_>,
         seeds: Option<&BTreeSet<BlockId>>,
         out: &mut Vec<Found>,
     ) -> Result<(), RdyError> {
-        let m = cx.inflight_m()?;
-        let writes: Vec<Arc<crate::tensions::Write>> = match seeds {
-            Some(seeds)
-                if !seeds
-                    .iter()
-                    .any(|s| m.get(s).is_some_and(|b| cx.defines(b))) =>
-            {
-                seeds.iter().flat_map(|s| cx.writes.live_on(s)).collect()
+        // no deprecated definition: no write can name one, and no text is read
+        let retired = cx.deprecated_definitions()?;
+        if retired.is_empty() {
+            return Ok(());
+        }
+        let mut cands: BTreeMap<(Hash, BlockId), Arc<crate::tensions::Write>> = BTreeMap::new();
+        let searched: Vec<&Block> = match seeds {
+            Some(seeds) => {
+                for s in seeds {
+                    for w in cx.writes.live_on(s) {
+                        cands.insert((w.change, w.block.clone()), w);
+                    }
+                }
+                retired.iter().filter(|x| seeds.contains(&x.id)).collect()
             }
-            _ => cx.writes.live().map(Arc::clone).collect(),
+            None => retired.iter().collect(),
         };
+        if !searched.is_empty() {
+            let lexicon = cx.lexicon()?;
+            for x in searched {
+                for (kind, p) in Lexicon::names_of(x) {
+                    if kind == NameKind::Key {
+                        continue;
+                    }
+                    for id in lexicon.blocks_with_words(&p) {
+                        for w in cx.writes.live_on(&id) {
+                            cands.insert((w.change, w.block.clone()), w);
+                        }
+                    }
+                }
+            }
+        }
+        if cands.is_empty() {
+            return Ok(());
+        }
+        let m = cx.inflight_m()?;
+        let writes: Vec<Arc<crate::tensions::Write>> = cands.into_values().collect();
         let lexicon = cx.lexicon()?;
         let g = cx.inflight_graph()?;
         let mut seen: BTreeSet<(Hash, BlockId, BlockId)> = BTreeSet::new();
@@ -229,18 +258,23 @@ impl DeprecatedReference {
     /// plain text without a tie to it. Nothing is read when canon has no deprecated definition.
     fn canon_mentions(cx: &DetectCx<'_>, out: &mut Vec<Found>) -> Result<(), RdyError> {
         let m = cx.canon_m()?;
-        let mut retired: BTreeSet<BlockId> = BTreeSet::new();
-        for b in m.iter() {
-            if cx.defines(b) && cx.deprecated(&b.id)? {
-                retired.insert(b.id.clone());
-            }
-        }
-        if retired.is_empty() {
+        let defs = cx.deprecated_definitions()?;
+        if defs.is_empty() {
             return Ok(());
         }
         let lexicon = cx.lexicon()?;
+        // only a block that holds every word of a retired name can name it
+        let mut ys: BTreeSet<BlockId> = BTreeSet::new();
+        for x in &defs {
+            for (kind, p) in Lexicon::names_of(x) {
+                if kind != NameKind::Key {
+                    ys.extend(lexicon.blocks_with_words(&p));
+                }
+            }
+        }
+        let retired: BTreeSet<BlockId> = defs.into_iter().map(|b| b.id).collect();
         let g = cx.canon_graph()?;
-        for b in m.iter() {
+        for b in ys.iter().filter_map(|y| m.get(y)) {
             let mut live = None;
             for mention in lexicon.mentions(b) {
                 let Ok(xid) = BlockId::parse(&mention.entity) else {

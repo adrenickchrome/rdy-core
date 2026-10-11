@@ -396,6 +396,11 @@ impl Writes {
         }
     }
 
+    /// The blocks of the live writes that define a name.
+    pub fn named_ids(&self) -> impl Iterator<Item = &BlockId> {
+        self.named.values().flatten().map(|w| &w.block)
+    }
+
     /// The live writes whose block defines `normalized` (a [`normalize_name`] result).
     pub fn named(&self, normalized: &str) -> Vec<Arc<Write>> {
         self.named.get(normalized).cloned().unwrap_or_default()
@@ -603,6 +608,14 @@ fn has_trait(pack: &Pack, b: &Block, t: Trait) -> bool {
         .is_some_and(|d| d.traits.contains(&t))
 }
 
+/// A landing run's canon-to-be: its materialization and graph, and the blocks its ops touch (the
+/// lexicon of that canon is canon's with those blocks swapped).
+struct Landing {
+    m: Arc<Materialized>,
+    g: Arc<Graph>,
+    touched: BTreeSet<BlockId>,
+}
+
 /// What one detection run reads: the published state, the in-flight writes (none in the canon
 /// scope) and canon's index.
 pub struct DetectCx<'a> {
@@ -612,7 +625,7 @@ pub struct DetectCx<'a> {
     scope: DetectScope,
     /// A landing's run (tgat1): the canon its landing set would give, read where the in-flight
     /// scope is read otherwise.
-    landing: Option<(Arc<Materialized>, Arc<Graph>)>,
+    landing: Option<Landing>,
     /// The entity lexicon of the scope this run reads (see [`DetectCx::lexicon`]); lazy.
     lexicon: OnceLock<Arc<Lexicon>>,
 }
@@ -635,16 +648,18 @@ impl<'a> DetectCx<'a> {
     }
 
     /// An in-flight run over a landing set (tgat1): `writes` are that set's writes, and `m` and
-    /// `g` the canon its landing would give, read in place of the in-flight scope.
+    /// `g` the canon its landing would give, read in place of the in-flight scope; `touched` are
+    /// the blocks the landing's ops write.
     pub(crate) fn landing(
         st: &'a ReadState,
         writes: &'a Writes,
         canon: Arc<CanonIndex>,
         m: Arc<Materialized>,
         g: Arc<Graph>,
+        touched: BTreeSet<BlockId>,
     ) -> DetectCx<'a> {
         DetectCx {
-            landing: Some((m, g)),
+            landing: Some(Landing { m, g, touched }),
             ..DetectCx::new(st, writes, canon, DetectScope::Inflight)
         }
     }
@@ -658,12 +673,42 @@ impl<'a> DetectCx<'a> {
         }
         let l = match (&self.landing, self.scope) {
             (_, DetectScope::Canon) => self.st.lexicon(&Scope::Canon)?,
-            (Some((m, _)), DetectScope::Inflight) => {
-                Arc::new(Lexicon::build(self.st.pack(), m.iter()))
+            // carried like the landing graph: canon's lexicon with the touched blocks swapped
+            (Some(l), DetectScope::Inflight) => {
+                let canon_m = self.canon_m()?;
+                let canon_l = self.st.lexicon(&Scope::Canon)?;
+                Arc::new(canon_l.with_changes(
+                    l.touched.iter().filter_map(|b| canon_m.get(b)),
+                    l.touched.iter().filter_map(|b| l.m.get(b)),
+                ))
             }
             (None, DetectScope::Inflight) => self.st.lexicon(&Scope::Inflight)?,
         };
         Ok(Arc::clone(self.lexicon.get_or_init(|| l)))
+    }
+
+    /// The definitions that are deprecated in the scope this run reads, by id. Found through the
+    /// names index (canon's and the live writes'), so no text is read and the cost follows the
+    /// number of definitions, not of blocks.
+    pub fn deprecated_definitions(&self) -> Result<Vec<Block>, RdyError> {
+        let m = self.current_m()?;
+        let ids: BTreeSet<&BlockId> = self
+            .canon
+            .names
+            .values()
+            .flatten()
+            .chain(self.writes.named_ids())
+            .collect();
+        let mut out = vec![];
+        for id in ids {
+            if let Some(b) = m.get(id)
+                && self.defines(b)
+                && self.deprecated(id)?
+            {
+                out.push(b.clone());
+            }
+        }
+        Ok(out)
     }
 
     /// The scope this run detects in.
@@ -686,7 +731,7 @@ impl<'a> DetectCx<'a> {
     pub fn inflight_m(&self) -> Result<Arc<Materialized>, RdyError> {
         match (&self.landing, self.scope) {
             (_, DetectScope::Canon) => self.canon_m(),
-            (Some((m, _)), DetectScope::Inflight) => Ok(Arc::clone(m)),
+            (Some(l), DetectScope::Inflight) => Ok(Arc::clone(&l.m)),
             (None, DetectScope::Inflight) => self.st.materialized(&Scope::Inflight),
         }
     }
@@ -700,7 +745,7 @@ impl<'a> DetectCx<'a> {
     pub fn inflight_graph(&self) -> Result<Arc<Graph>, RdyError> {
         match (&self.landing, self.scope) {
             (_, DetectScope::Canon) => self.canon_graph(),
-            (Some((_, g)), DetectScope::Inflight) => Ok(Arc::clone(g)),
+            (Some(l), DetectScope::Inflight) => Ok(Arc::clone(&l.g)),
             (None, DetectScope::Inflight) => self.st.graph(&Scope::Inflight),
         }
     }
