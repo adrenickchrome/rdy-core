@@ -217,8 +217,10 @@ impl StoreReader {
         Ok(n)
     }
 
-    /// Every `pair/` ref is keyed by a pair key and names a stored review of that pair with
-    /// verdict `Tension` or `NoTension`. Returns how many refs there are.
+    /// Every `pair/` ref is keyed by a pair key and names a stored review of that pair (two items
+    /// with distinct blocks) with verdict `Tension` or `NoTension`; a `Tension` verdict has its
+    /// `semantic/<key>` ref, as `put_verdict` writes them in one batch. Returns how many refs
+    /// there are.
     fn check_verdicts(&self) -> Result<usize, StoreError> {
         let mut n = 0;
         for (key, value) in self.refs_with_prefix(PAIR_REF)? {
@@ -232,11 +234,22 @@ impl StoreReader {
             };
             let on_this_pair = matches!(
                 &r.subject,
-                ReviewSubject::Pair { key: k, items } if *k == key && pair_key(items) == key
+                ReviewSubject::Pair { key: k, items }
+                    if *k == key
+                        && items.len() == 2
+                        && items[0].block != items[1].block
+                        && pair_key(items) == key
             );
             if !on_this_pair || !matches!(r.verdict, Verdict::Tension | Verdict::NoTension) {
                 return Err(bad(format!(
                     "pair {key}: review {h} is not a verdict on this pair"
+                )));
+            }
+            if r.verdict == Verdict::Tension
+                && self.get_ref(&format!("{SEMANTIC_REF}{key}"))?.is_none()
+            {
+                return Err(bad(format!(
+                    "pair {key}: tension verdict {h} has no semantic tension record"
                 )));
             }
             n += 1;

@@ -387,6 +387,62 @@ fn se1_fsck_refuses_a_later_version_that_is_not_an_acceptance() {
     );
 }
 
+#[test]
+fn se1_fsck_refuses_a_tension_verdict_with_no_semantic_record() {
+    let (_d, mut s) = store();
+    let key = pair_key(&items());
+    // a tension verdict whose first version and semantic/ ref were never written
+    let h = s.put(kinds::REVIEW, &verdict(Verdict::Tension, 1)).unwrap();
+    s.set_refs_unchecked_for_tests(vec![(format!("{PAIR_REF}{key}"), h.0.to_vec())])
+        .unwrap();
+    let m = fsck_error(&s);
+    assert!(
+        m.contains(&format!(
+            "pair {key}: tension verdict {h} has no semantic tension record"
+        )),
+        "{m}"
+    );
+}
+
+#[test]
+fn se1_fsck_refuses_a_pair_review_that_is_not_two_blocks() {
+    let block = BlockId::parse("c-AAAAA").unwrap();
+    let same_block = vec![
+        PairItem {
+            block: block.clone(),
+            content: Hash([1; 32]),
+        },
+        PairItem {
+            block: block.clone(),
+            content: Hash([2; 32]),
+        },
+    ];
+    let mut three = items();
+    three.push(PairItem {
+        block: BlockId::parse("c-CCCCC").unwrap(),
+        content: Hash([3; 32]),
+    });
+    three.sort();
+    for items in [same_block, three, vec![items()[0].clone()]] {
+        let (_d, mut s) = store();
+        let key = pair_key(&items);
+        let r = Review {
+            subject: ReviewSubject::Pair { key, items },
+            ..verdict(Verdict::NoTension, 1)
+        };
+        let h = s.put(kinds::REVIEW, &r).unwrap();
+        s.set_refs_unchecked_for_tests(vec![(format!("{PAIR_REF}{key}"), h.0.to_vec())])
+            .unwrap();
+        let m = fsck_error(&s);
+        assert!(
+            m.contains(&format!(
+                "pair {key}: review {h} is not a verdict on this pair"
+            )),
+            "{m}"
+        );
+    }
+}
+
 /// A tension review over the pair's blocks, for a dismissal.
 fn se1_tension_review() -> Review {
     Review {
