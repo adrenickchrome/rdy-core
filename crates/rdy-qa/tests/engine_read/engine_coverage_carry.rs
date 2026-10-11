@@ -1,8 +1,10 @@
 //! cc11: the structural coverage layer carried across a write equals a rebuild, and a carry
 //! builds nothing in full.
 use rdy_engine::coverage::{
-    carry_for_perf, rebuilt_for_tests, structural_builds, structural_for_tests,
+    carry_for_perf, issues_rebuilt_for_tests, rebuilt_for_tests, state_layer_builds,
+    structural_builds, structural_for_tests,
 };
+use rdy_engine::mention_review::MentionVerdict;
 use rdy_engine::*;
 use rdy_graph::DerivedStatus;
 use rdy_model::{BlockId, Hash};
@@ -107,6 +109,7 @@ fn cc11_carried_equals_rebuilt_over_random_writes() {
         if write(&mut r, "next", ops).is_ok() {
             r.read().coverage_issues(&v).unwrap();
             same(&r, &v);
+            same_issues(&r, &v); // fix round 2: the carried issues too
         }
     }
 }
@@ -410,4 +413,209 @@ fn cc11_the_perf_hook_carries_as_a_write_does() {
         .is_none(),
         "a rename gives up"
     );
+}
+
+/// The memoised (possibly carried) coverage issues equal a full build of them.
+fn same_issues(r: &Rdy, scope: &Scope) {
+    let st = r.read();
+    let memo = st.coverage_issues(scope).unwrap();
+    let rebuilt = issues_rebuilt_for_tests(&st, scope).unwrap();
+    for (id, e) in rebuilt.blocks.iter() {
+        assert_eq!(memo.blocks.get(id), Some(e), "{scope:?}: block {id}");
+    }
+    assert_eq!(*memo, rebuilt, "{scope:?}");
+}
+
+/// Whether `scope` has an issue with `code`.
+fn has_issue(r: &Rdy, scope: &Scope, code: IssueCode) -> bool {
+    r.read()
+        .coverage_issues(scope)
+        .unwrap()
+        .blocks
+        .values()
+        .any(|e| e.issues.iter().any(|i| i.code == code))
+}
+
+/// Fix round 2 (FW-PF2): the first coverage read after a write carries the issues of the
+/// state before (tension and suspect issues included) instead of applying every counted
+/// tension again: a plain write in a view builds no state layer in full, for the view or for
+/// canon, and both equal a full build.
+#[test]
+fn cc11_fix2_a_write_carries_the_coverage_issues() {
+    let (_d, mut r) = project();
+    let c = cc6_world(&mut r);
+    let v = Scope::View("next".into());
+    write(
+        &mut r,
+        "next",
+        json!([{"op": "create", "type": "prose", "parent": c["$s"], "body": "One more line."}]),
+    )
+    .unwrap();
+    r.read().coverage_issues(&v).unwrap();
+    r.read().coverage_summary(&Scope::Canon).unwrap();
+    let before = state_layer_builds();
+    write(
+        &mut r,
+        "next",
+        json!([{"op": "create", "type": "prose", "parent": c["$s"], "body": "And one more."}]),
+    )
+    .unwrap();
+    r.read().coverage_issues(&v).unwrap();
+    r.read().coverage_summary(&Scope::Canon).unwrap();
+    assert_eq!(state_layer_builds(), before, "carried, not built in full");
+    same_issues(&r, &v);
+    same_issues(&r, &Scope::Canon);
+}
+
+/// Fix round 2: the carried issues equal a full build through writes that open tensions (a
+/// duplicate in a view, an edit collision between two views, which the view not written counts
+/// too), a suspect, a landing (canon carried), a tension dismissal and a mention dismissal (the
+/// last two build in full). Each scope is read before every step, as status and write replies
+/// read it.
+#[test]
+fn cc11_fix2_carried_issues_equal_a_full_build_through_tensions_and_suspects() {
+    let (_d, mut r) = project();
+    let c = cc6_world(&mut r);
+    let (canon, a, b) = (
+        Scope::Canon,
+        Scope::View("a".into()),
+        Scope::View("b".into()),
+    );
+    let scopes = [canon.clone(), a.clone(), b.clone()];
+    let read_all = |r: &Rdy| {
+        for s in &scopes {
+            r.read().coverage_issues(s).unwrap();
+        }
+    };
+    let check = |r: &Rdy, carried: &[&Scope], before: u64, what: &str| {
+        for s in carried {
+            r.read().coverage_issues(s).unwrap();
+        }
+        assert_eq!(
+            state_layer_builds(),
+            before,
+            "{what}: carried, not built in full"
+        );
+        for s in &scopes {
+            same_issues(r, s);
+        }
+    };
+    // each view starts with a change of its own
+    for view in ["a", "b", "c"] {
+        write(
+            &mut r,
+            view,
+            json!([{"op": "create", "type": "prose", "parent": c["$s"], "body": format!("Notes of {view}.")}]),
+        )
+        .unwrap();
+    }
+    read_all(&r);
+
+    // a landing: canon's layer is carried
+    let before = state_layer_builds();
+    land(&mut r, "c").unwrap();
+    check(&r, &[&canon], before, "a landing");
+    read_all(&r);
+
+    // a duplicate in view a
+    let before = state_layer_builds();
+    let w = write(&mut r, "a", json!([
+        {"op": "create", "type": "section", "id": "$x", "parent": c["$o"], "fields": {"title": "Fees", "lifecycle": "draft"}},
+        {"op": "create", "type": "claim", "parent": "$x", "body": "Fees are charged every month."},
+        {"op": "create", "type": "claim", "parent": "$x", "body": "Fees are charged every month."}
+    ]))
+    .unwrap();
+    check(&r, &[&a, &b, &canon], before, "a duplicate");
+    assert!(
+        has_issue(&r, &a, IssueCode::OpenTension),
+        "the duplicate counts in a"
+    );
+    read_all(&r);
+
+    // an edit collision: b's write opens a tension view a counts too
+    write(
+        &mut r,
+        "a",
+        json!([{"op": "update", "id": c["$c1"], "body": "The Ledger is append-only."}]),
+    )
+    .unwrap();
+    read_all(&r);
+    let collided = |r: &Rdy, s: &Scope| {
+        r.read().coverage_issues(s).unwrap().blocks[&BlockId::parse(&c["$c1"]).unwrap()]
+            .issues
+            .iter()
+            .any(|i| i.code == IssueCode::OpenTension)
+    };
+    assert!(!collided(&r, &a), "no collision yet");
+    let before = state_layer_builds();
+    write(
+        &mut r,
+        "b",
+        json!([{"op": "update", "id": c["$c1"], "body": "The Ledger only grows."}]),
+    )
+    .unwrap();
+    check(&r, &[&a, &b, &canon], before, "an edit collision");
+    assert!(collided(&r, &a), "view a counts the collision b opened");
+    read_all(&r);
+
+    // a suspect: a pinned citation, then its target edited
+    let cite = format!("Balances: {{{{{}}}}}.", c["$c2"]);
+    write(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "claim", "parent": c["$s"], "body": cite}]),
+    )
+    .unwrap();
+    read_all(&r);
+    let before = state_layer_builds();
+    write(
+        &mut r,
+        "a",
+        json!([{"op": "update", "id": c["$c2"], "body": "Balances are kept in one store."}]),
+    )
+    .unwrap();
+    check(&r, &[&a, &b, &canon], before, "a suspect");
+    assert!(
+        has_issue(&r, &a, IssueCode::OpenSuspect),
+        "the citation is suspect"
+    );
+    read_all(&r);
+
+    // a tension dismissal and a mention dismissal: built in full, still equal
+    let x = BlockId::parse(&w.created["$x"]).unwrap();
+    let st = r.read();
+    let dup = st
+        .tensions()
+        .unwrap()
+        .iter()
+        .find(|t| {
+            t.kind == tensions::TensionKind::DuplicateDefinition
+                && st
+                    .materialized(&a)
+                    .unwrap()
+                    .get(&t.blocks()[0])
+                    .is_some_and(|blk| blk.parent.as_ref() == Some(&x))
+        })
+        .map(|t| tensions::tension_label(&t.id))
+        .expect("the duplicate in a");
+    drop(st);
+    r.dismiss_tension(&writer(), &dup, "said twice on purpose")
+        .unwrap();
+    for s in &scopes {
+        same_issues(&r, s);
+    }
+    assert!(has_issue(&r, &a, IssueCode::DismissedTension));
+    read_all(&r);
+    r.review_mention(
+        &writer(),
+        &canon,
+        &c["$c1"],
+        &c["$t"],
+        MentionVerdict::Dismiss,
+        "everyday word",
+    )
+    .unwrap();
+    for s in &scopes {
+        same_issues(&r, s);
+    }
 }

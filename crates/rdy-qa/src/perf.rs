@@ -197,7 +197,7 @@ fn spec_target(op: &str) -> Option<String> {
             "no spec target: the cold coverage issues over a 10k view, every dimension (recorded for FW-PF2 D-V3JSY; rdy coverage, rdy status)"
         }
         "coverage_carry" => {
-            "< 5 ms p95: a read after one write (FW-PF2; reference/performance tb-XBXR4 read budget)"
+            "< 5 ms p95: a write reply's coverage after one write, the carry and the summaries before and after (FW-PF2; reference/performance tb-XBXR4 read budget)"
         }
         "coverage_report_cold" => {
             "no spec target: the cold coverage report over a 10k view, recorded (FW-PF2; rdy coverage)"
@@ -924,29 +924,38 @@ fn tier_entities(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, r
             .1
         },
     ));
-    // cc11 (FW-PF2 D-V3JSY: the carry stays inside the read budget): the carry itself and the
-    // report over the carried layer. Outside the timer: the view's coverage built on the state
-    // before, one single-claim write to the fixture's first doc (its subtree holds this tier's
-    // 250 entities and claims and more, so the doc's `linked_from_outside` walk is in the timed
-    // path), and the write's ops read back. Timed: the carry `Built::after` made for that write
-    // (`carry_for_perf`, the same call) and `coverage_report(ve)` over the carried layer.
+    // cc11 (FW-PF2 D-V3JSY: the carry stays inside the read budget): what a write reply reads
+    // for its coverage. Outside the timer: the view's coverage summary on the state before (the
+    // previous reply read it), one single-claim write to the fixture's first doc (its subtree
+    // holds this tier's 250 entities and claims and more, so the doc's `linked_from_outside`
+    // walk is in the timed path), and the write's ops read back. Timed: the carry `Built::after`
+    // made for that write (`carry_for_perf`, the same call), then the summary before (memoised)
+    // and the summary after (the coverage issues carried from the state before, fix round 2).
     out.push(measure_timed(
         &format!("coverage_carry{sfx}"),
         runs.write,
         |i| {
             let prev = r.read();
-            prev.coverage_issues(&ve).expect("coverage");
+            prev.coverage_summary(&ve).expect("coverage");
             let w = write(r, "ve", json!([{"op": "create", "type": "claim", "parent": section, "body": format!("Entity {} is checked ({i}).", i % 50)}]))
                 .expect("write");
             let next = r.read();
             let change: Hash = w.change.parse().expect("change");
             let ops = next.reader().change(&change).expect("change").ops;
+            let builds = rdy_engine::coverage::state_layer_builds();
             let s = Instant::now();
             let carried =
                 rdy_engine::coverage::carry_for_perf(&prev, &next, &ve, &ops).expect("carry");
-            next.coverage_report(&ve, None).expect("coverage report");
+            let before = prev.coverage_summary(&ve).expect("summary before");
+            let after = next.coverage_summary(&ve).expect("summary after");
             let t = s.elapsed();
+            std::hint::black_box((before, after));
             assert!(carried.is_some(), "a single-claim write carries the layer");
+            assert_eq!(
+                rdy_engine::coverage::state_layer_builds(),
+                builds,
+                "the summary after reads carried coverage issues"
+            );
             t
         },
     ));

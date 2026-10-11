@@ -75,6 +75,9 @@ pub(crate) struct Built {
     /// The structural layer of coverage (FW-CH1), memoised; carried across a write with the
     /// graph and the lexicon (`coverage::carry`, cc11).
     pub(crate) structural: OnceLock<Arc<Structural>>,
+    /// Fix round 2: when `structural` was carried, the layer it was carried from and the blocks
+    /// whose entries the carry recomputed (what a carry of the coverage issues reads).
+    pub(crate) structural_from: OnceLock<(Arc<Structural>, Arc<BTreeSet<BlockId>>)>,
     /// The mention scans briefings made (FW-EN3), most recent first; carried across a write.
     pub(crate) mentions: Mutex<Vec<MentionScan>>,
     /// Canon's tension index (names, texts, supersedes), memoised; never carried.
@@ -96,6 +99,7 @@ impl Built {
             tree: OnceLock::new(),
             lexicon: OnceLock::new(),
             structural: OnceLock::new(),
+            structural_from: OnceLock::new(),
             mentions: Mutex::new(vec![]),
             tension_index: OnceLock::new(),
             tension_canon: OnceLock::new(),
@@ -134,22 +138,28 @@ impl Built {
         if let Some(l) = lexicon {
             let _ = next.lexicon.set(Arc::new(l.with_changes(old(), new())));
         }
-        if let Some(s) = self.carried_structural(&next, ops, pack) {
+        if let Some((s, dirty)) = self.carried_structural(&next, ops, pack)
+            && let Some(from) = self.structural.get()
+        {
             let _ = next.structural.set(Arc::new(s));
+            let _ = next
+                .structural_from
+                .set((Arc::clone(from), Arc::new(dirty)));
         }
         next
     }
 
     /// cc11: this state's structural layer carried across `ops` to `next` (this state with
-    /// `ops` applied, its graph and lexicon carried): `None` when this state's layer, `next`'s
-    /// graph or `next`'s lexicon is not built, or the carry gives up (`coverage::carry`). The
-    /// call `after` makes, and the one the perf hook `coverage::carry_for_perf` times.
+    /// `ops` applied, its graph and lexicon carried), with the blocks it recomputed: `None` when
+    /// this state's layer, `next`'s graph or `next`'s lexicon is not built, or the carry gives
+    /// up (`coverage::carry`). The call `after` makes, and the one the perf hook
+    /// `coverage::carry_for_perf` times.
     pub(crate) fn carried_structural(
         &self,
         next: &Built,
         ops: &[Op],
         pack: &Pack,
-    ) -> Option<Structural> {
+    ) -> Option<(Structural, BTreeSet<BlockId>)> {
         let (prev, g, lex) = (
             self.structural.get()?,
             next.graph.get()?,

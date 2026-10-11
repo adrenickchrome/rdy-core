@@ -707,6 +707,30 @@ fn cc15_a_coverage_read_error_never_fails_status() {
 
 /// cc15 (perf fix): `status` reads the memoised coverage summary and never builds the full
 /// report (every issue cloned, given a path and sorted); its numbers are the report's.
+/// Fix round 2 (FW-PF2; `daemon_read_during_big_write`): a write to a view leaves canon as it
+/// was, so the next status carries canon's coverage from the state before and builds no state
+/// layer; its numbers still agree with the report.
+#[test]
+fn cc15_status_after_a_view_write_carries_canons_coverage() {
+    let (d, e) = project();
+    let s = human();
+    doc(&e, "a");
+    let c = cx(&e, &s, d.path());
+    dispatch(&c, "status", json!({})).unwrap();
+    let before = rdy_engine::coverage::state_layer_builds();
+    doc(&e, "b");
+    let v = dispatch(&c, "status", json!({})).unwrap();
+    assert_eq!(
+        rdy_engine::coverage::state_layer_builds(),
+        before,
+        "carried, not built in full: {v:#}"
+    );
+    let report = dispatch(&c, "coverage", json!({})).unwrap();
+    for k in ["score", "dimensions", "issues_total", "kinds"] {
+        assert_eq!(v["coverage"][k], report[k], "{k}: {v:#} vs {report:#}");
+    }
+}
+
 #[test]
 fn cc15_status_builds_no_coverage_report_and_agrees_with_it() {
     let (d, e) = project();

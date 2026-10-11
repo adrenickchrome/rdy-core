@@ -1072,14 +1072,17 @@ The `qa-perf` typical tier gained two ops in `tier_entities`, after `coverage_al
 
 | op | what it times | runs | target |
 |---|---|---|---|
-| `coverage_carry` | The carry of the structural layer across one single-claim write, then `coverage_report(ve)` over the carried layer. Outside the timer: the view's coverage built on the state before the write, the write, and its ops read back. Timed: `coverage::carry_for_perf`, the call `Built::after` makes (`cc11_the_perf_hook_carries_as_a_write_does` pins that they give the same layer), and the report | `runs.write` | < 5 ms p95: a read after one write (FW-PF2; reference/performance tb-XBXR4 read budget) |
+| `coverage_carry` | What a write reply reads for its coverage after one single-claim write: the carry of the structural layer, then `coverage_summary(ve)` on the state before (memoised) and on the state after (its coverage issues carried from the state before). Outside the timer: the view's summary on the state before the write (the previous reply read it), the write, and its ops read back. Timed: `coverage::carry_for_perf`, the call `Built::after` makes (`cc11_the_perf_hook_carries_as_a_write_does` pins that they give the same layer), and the two summaries | `runs.write` | < 5 ms p95: a write reply's coverage after one write, the carry and the summaries before and after (FW-PF2; reference/performance tb-XBXR4 read budget) |
 | `coverage_report_cold` | `coverage_report(ve)` after the engine caches are dropped (outside the timer): the materialization, the graph, the lexicon, the structural layer and the state layer | `runs.read` | no spec target: the cold coverage report over a 10k view, recorded (FW-PF2; rdy coverage) |
 
-`coverage_carry` grows with the dirty set (the written blocks, their neighbours and their docs)
-and with the state layer and the report, which read every scored block. The write goes to the
-fixture's first doc, which this tier fills with 250 more blocks, so the doc's
-`linked_from_outside` walk of its whole subtree is in the timed path. It does not rebuild the
-structural layer.
+`coverage_carry` grows with the dirty set (the written blocks, their neighbours and their docs),
+with the tensions and suspects the write changed, and with the summary's rollup, which reads
+every scored block. The write goes to the fixture's first doc, which this tier fills with 250
+more blocks, so the doc's `linked_from_outside` walk of its whole subtree is in the timed path.
+It rebuilds neither the structural layer nor the state layer: the coverage issues are carried
+from the state before (fix round 2), and only the entries of the blocks whose structural entry,
+counted tensions or suspects changed are rebuilt. `rdy coverage` (the full report) is
+`coverage_report_cold`'s, not a write reply's.
 
 No laptop figures are recorded here: the first timing of these ops is the Linux bench's.
 

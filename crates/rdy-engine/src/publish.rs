@@ -155,6 +155,12 @@ impl Rdy {
     fn next_state(&self, prev: &ReadState, delta: Delta) -> Result<ReadState, RdyError> {
         let seq = self.store.log_end();
         let canon_head = self.store.canon_head()?;
+        // fix round 2 (FW-PF2): a first coverage read may carry the coverage the state before
+        // memoised (the carry checks what it read); a full publish starts over
+        let coverage_memo = match delta {
+            Delta::Full => crate::coverage::CoverageMemo::default(),
+            _ => crate::coverage::CoverageMemo::after(&prev.coverage_memo),
+        };
         // a full publish (open, invalidate, reindex, a pack reload) takes the name, description
         // and review rules from the config loaded at open or by the last successful reload, never
         // from the files again: a broken file must not turn the review gate off (#832). Every
@@ -420,7 +426,7 @@ impl Rdy {
             tensions,
             dismissals,
             mention_dismissals,
-            coverage_memo: Default::default(),
+            coverage_memo,
             detectors: self.detectors,
             error: None,
         })

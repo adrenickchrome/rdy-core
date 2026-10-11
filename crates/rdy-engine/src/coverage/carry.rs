@@ -15,7 +15,8 @@ use std::collections::BTreeSet;
 /// set does not reach (the next read rebuilds): an entity created, deleted or renamed; a
 /// lifecycle change or a move of a block that has children; a block deleted with children left;
 /// a doc's `doc_type` changed; a doc or a folder created, deleted, renamed or moved (it changes
-/// the paths of docs other than itself).
+/// the paths of docs other than itself). With the layer, the blocks whose entries it recomputed
+/// (every other entry is `prev`'s).
 pub(crate) fn carry(
     prev: &Structural,
     old: &Materialized,
@@ -24,7 +25,7 @@ pub(crate) fn carry(
     lex: &Lexicon,
     pack: &Pack,
     ops: &[Op],
-) -> Option<Structural> {
+) -> Option<(Structural, BTreeSet<BlockId>)> {
     let touched: BTreeSet<&BlockId> = ops.iter().map(Op::block_id).collect();
     if touched
         .iter()
@@ -79,22 +80,22 @@ pub(crate) fn carry(
             }
         }
     }
-    for id in dirty {
-        match entry_of(&cx, &id) {
+    for id in &dirty {
+        match entry_of(&cx, id) {
             Some((entry, named)) => {
-                if touched.contains(&id) {
+                if touched.contains(id) {
                     for entity in named {
                         mentions.entry(entity).or_default().insert(id.clone());
                     }
                 }
-                blocks.insert(id, entry);
+                blocks.insert(id.clone(), entry);
             }
             None => {
-                blocks.remove(&id);
+                blocks.remove(id);
             }
         }
     }
-    Some(Structural { blocks, mentions })
+    Some((Structural { blocks, mentions }, dirty))
 }
 
 /// Perf hook (cc11, FW-PF2; what the `qa-perf` op `coverage_carry` times): the structural layer
@@ -111,7 +112,9 @@ pub fn carry_for_perf(
 ) -> Result<Option<Structural>, RdyError> {
     let scope = prev.coverage_scope(scope)?;
     let (old, new) = (prev.built(&scope)?, next.built(&scope)?);
-    Ok(old.carried_structural(&new, ops, next.pack()))
+    Ok(old
+        .carried_structural(&new, ops, next.pack())
+        .map(|(s, _)| s))
 }
 
 /// Whether one op's block, `a` before and `b` after, changes entries the dirty set does not
