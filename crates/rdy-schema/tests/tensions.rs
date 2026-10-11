@@ -4,7 +4,7 @@ use TensionSeverity::*;
 use rdy_schema::*;
 
 #[test]
-fn tens1_the_nine_kinds_have_the_spec_defaults_and_wire_names() {
+fn tens1_the_kinds_have_the_spec_defaults_and_wire_names() {
     assert_eq!(
         TensionKind::ALL,
         [
@@ -16,7 +16,8 @@ fn tens1_the_nine_kinds_have_the_spec_defaults_and_wire_names() {
             UnjustifiedChange,
             DeprecatedReference,
             ValueDisagreement,
-            RestatementDrift
+            RestatementDrift,
+            Semantic
         ]
     );
     let expect = [
@@ -29,6 +30,7 @@ fn tens1_the_nine_kinds_have_the_spec_defaults_and_wire_names() {
         (DeprecatedReference, "deprecated_reference", Advisory),
         (ValueDisagreement, "value_disagreement", Blocking),
         (RestatementDrift, "restatement_drift", Advisory),
+        (Semantic, "semantic", Advisory),
     ];
     for (k, name, sev) in expect {
         assert_eq!(k.name(), name);
@@ -61,7 +63,7 @@ fn tens1_a_pack_without_the_section_has_only_defaults() {
         assert_eq!(p.tension_severity(k), (k.default_severity(), false));
     }
     let t = p.tension_table();
-    assert_eq!(t.len(), 9);
+    assert_eq!(t.len(), 10);
     assert_eq!(t[0], (EditCollision, Blocking, false));
     assert_eq!(t[5], (UnjustifiedChange, Advisory, false));
 }
@@ -157,5 +159,19 @@ fn tset1_duplicate_text_needs_three_words_unless_a_pack_says_otherwise() {
         set.resolve("child").unwrap().duplicate_text_min_words(),
         5,
         "kept from the parent"
+    );
+}
+
+#[test]
+fn se5_a_pack_cannot_set_the_severity_of_semantic() {
+    let mut set = PackSet::with_builtin();
+    set.add_yaml(
+        "name: team\nversion: \"1\"\nextends: rdy-standard\ntensions: { semantic: blocking }\n",
+    )
+    .unwrap();
+    let e = set.resolve("team").unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        "invalid pack: pack team cannot set the severity of semantic tensions; a person accepts a reviewer's advice to block"
     );
 }

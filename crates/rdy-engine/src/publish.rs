@@ -239,8 +239,13 @@ impl Rdy {
                     _ => Arc::default(),
                 }
             }
-            // a verdict or an acceptance: the set builds again on the next read
-            Delta::Verdict { .. } => Arc::default(),
+            // a verdict or an acceptance: a built set (or one the state before can carry to)
+            // is carried, its stored kinds re-detected around the pairs' blocks; else the next
+            // read builds in full
+            Delta::Verdict { blocks, .. } => match prev.tensions_without_build() {
+                Some(set) => Arc::new(TensionCell::after_verdict(set, blocks.clone())),
+                None => Arc::default(),
+            },
             _ => Arc::default(),
         };
         // the verdicts and semantic tensions: re-read by a full publish, the written pairs re-read

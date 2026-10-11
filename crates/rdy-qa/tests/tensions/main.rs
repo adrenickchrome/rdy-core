@@ -13,6 +13,7 @@ mod tensions_events;
 mod tensions_fork;
 mod tensions_overlap;
 mod tensions_premise;
+mod tensions_semantic;
 mod tensions_unjustified;
 mod tensions_value;
 mod tensions_write;

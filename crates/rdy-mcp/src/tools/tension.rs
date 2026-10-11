@@ -17,7 +17,8 @@ pub struct TensionsParams {
     /// view name (tensions with a change side in that view).
     pub scope: Option<String>,
     /// Only this kind: edit_collision, fork, premise_shift, area_overlap, duplicate_definition,
-    /// unjustified_change, deprecated_reference, value_disagreement or restatement_drift.
+    /// unjustified_change, deprecated_reference, value_disagreement, restatement_drift or
+    /// semantic.
     pub kind: Option<String>,
     /// Only this severity: blocking or advisory.
     pub severity: Option<String>,

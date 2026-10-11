@@ -36,6 +36,40 @@ impl CanonPart {
         }
         part
     }
+
+    /// This part with `tensions` added (a repeated id keeps the first; structure shared).
+    fn with(&self, tensions: impl IntoIterator<Item = Arc<Tension>>) -> CanonPart {
+        let mut part = self.clone();
+        for t in tensions {
+            if part.tensions.contains_key(&t.id) {
+                continue;
+            }
+            for b in t.blocks() {
+                part.by_block.entry(b).or_default().insert(t.id);
+            }
+            part.tensions.insert(t.id, t);
+        }
+        part
+    }
+
+    /// This part less the tensions with an id in `ids` (structure shared).
+    fn without(&self, ids: &BTreeSet<Hash>) -> CanonPart {
+        let mut part = self.clone();
+        for id in ids {
+            let Some(t) = part.tensions.remove(id) else {
+                continue;
+            };
+            for b in t.blocks() {
+                if let Some(set) = part.by_block.get_mut(&b) {
+                    set.remove(id);
+                    if set.is_empty() {
+                        part.by_block.remove(&b);
+                    }
+                }
+            }
+        }
+        part
+    }
 }
 
 /// The event-derived tensions of one state, by id: the canon part (shared) and the in-flight
@@ -434,12 +468,15 @@ pub fn full_builds() -> u64 {
 }
 
 /// A state's tension set, built on first read: carried from the state before when `carry` is
-/// set (a commit), else a full build.
+/// set (a commit) or `verdict` is (a verdict or an acceptance), else a full build.
 #[derive(Default)]
 pub(crate) struct TensionCell {
     pub(crate) set: OnceLock<Result<Arc<TensionSet>, RdyError>>,
     /// The state before's set, the change committed and its view: the first read carries.
     pub(crate) carry: Option<(Arc<TensionSet>, Hash, String)>,
+    /// The state before's set and the blocks of the pairs a verdict or an acceptance wrote:
+    /// the first read re-detects the stored kinds around them ([`verdict_carry`]).
+    verdict: Option<(Arc<TensionSet>, Vec<BlockId>)>,
     /// Whether the set was carried; set before `set` is.
     carried: OnceLock<bool>,
     /// The blocks a carry re-detected around (its seeds and every detector's reach); set
@@ -454,6 +491,27 @@ impl TensionCell {
             carry: Some((prev, change, view)),
             ..TensionCell::default()
         }
+    }
+
+    /// An unbuilt cell whose first read carries `prev` across a verdict or an acceptance on
+    /// pairs of `blocks` ([`verdict_carry`]).
+    pub(crate) fn after_verdict(prev: Arc<TensionSet>, blocks: Vec<BlockId>) -> TensionCell {
+        TensionCell {
+            verdict: Some((prev, blocks)),
+            ..TensionCell::default()
+        }
+    }
+
+    /// The set this cell's first read carries to, or `None` when it has no carry or its carry
+    /// cannot run (another in-flight set) or fails; with the blocks a commit's carry re-detected
+    /// around (none for a verdict's).
+    fn carried(&self, st: &ReadState) -> Option<(TensionSet, Option<BTreeSet<BlockId>>)> {
+        if let Some((prev, change, view)) = &self.carry {
+            let (set, around) = carry(st, prev, *change, view).ok()??;
+            return Some((set, Some(around)));
+        }
+        let (prev, blocks) = self.verdict.as_ref()?;
+        Some((verdict_carry(st, prev, blocks).ok()??, None))
     }
 }
 
@@ -535,41 +593,138 @@ fn carry(
         }
         let mut around = seeds.clone();
         around.extend(reach);
-        let mut found = vec![];
-        d.detect(&cx, Some(&around), &mut found)?;
-        for t in found
-            .into_iter()
-            .filter_map(|f| tension_from(st.pack(), f, false, DetectScope::Inflight))
-            .filter(|t| t.involved.iter().any(|i| around.contains(&i.block)))
-        {
-            next.insert(Arc::new(t));
+        for t in detect_kept(st, &cx, *d, Some(&around))? {
+            next.insert(t);
         }
         around_all.extend(around);
     }
     Ok(Some((next, around_all)))
 }
 
-/// The canon part for `detectors`: each run in the canon scope (always a full run), kept when
-/// every side is canon, by id (a repeated id keeps the first).
+/// The tensions `d` finds in the scope `cx` reads (with `seeds`, those that involve a seed), as
+/// the core keeps them in that scope.
+fn detect_kept(
+    st: &ReadState,
+    cx: &DetectCx<'_>,
+    d: &dyn Detector,
+    seeds: Option<&BTreeSet<BlockId>>,
+) -> Result<Vec<Arc<Tension>>, RdyError> {
+    let mut found = vec![];
+    d.detect(cx, seeds, &mut found)?;
+    Ok(found
+        .into_iter()
+        .filter_map(|f| tension_from(st.pack(), d.own_severity(cx, &f), f, false, cx.scope()))
+        .filter(|t| seeds.is_none_or(|s| t.involved.iter().any(|i| s.contains(&i.block))))
+        .map(Arc::new)
+        .collect())
+}
+
+/// Whether `writes` were built from exactly the in-flight set `set`: the same changes, each in
+/// the same views.
+fn built_from(writes: &Writes, set: &crate::InflightSet) -> bool {
+    set.changes.len() == writes.changes().count()
+        && writes
+            .changes()
+            .all(|f| set.views_of.get(&f.id) == Some(&f.views))
+}
+
+/// The verdict carry (plan M2e1): after a verdict or an acceptance on pairs of `blocks`,
+/// `prev` (whose in-flight writes must be the state's, else `None`: a full build) less the
+/// tensions of the stored kinds ([`Detector::stored`]) that involve one of `blocks`, in both
+/// parts, plus what each stored detector finds around them in each scope. The canon part stays
+/// shared when no all-canon tension of a stored kind involves those blocks, before or after.
+/// Its cost follows the records on those blocks, not the size of the set.
+fn verdict_carry(
+    st: &ReadState,
+    prev: &TensionSet,
+    blocks: &[BlockId],
+) -> Result<Option<TensionSet>, RdyError> {
+    if let Some(e) = &st.error {
+        return Err(e.clone());
+    }
+    if !built_from(&prev.writes, &*st.inflight_set()?) {
+        return Ok(None);
+    }
+    let stored: Vec<&dyn Detector> = st
+        .detectors
+        .iter()
+        .copied()
+        .filter(|d| d.stored())
+        .collect();
+    let mut next = prev.clone();
+    if stored.is_empty() || blocks.is_empty() {
+        return Ok(Some(next));
+    }
+    let kinds: BTreeSet<_> = stored.iter().map(|d| d.kind()).collect();
+    let seeds: BTreeSet<BlockId> = blocks.iter().cloned().collect();
+    let of_stored = |t: Option<&Arc<Tension>>| t.is_some_and(|t| kinds.contains(&t.kind));
+    let mut canon_gone = BTreeSet::new();
+    for b in &seeds {
+        for id in prev.by_block.get(b).into_iter().flatten() {
+            if of_stored(prev.tensions.get(id)) {
+                next.remove(id);
+            }
+        }
+        for id in prev.canon.by_block.get(b).into_iter().flatten() {
+            if of_stored(prev.canon.tensions.get(id)) {
+                canon_gone.insert(*id);
+            }
+        }
+    }
+    let index = canon_index_of(st)?;
+    let cx = DetectCx::new(st, &prev.writes, Arc::clone(&index), DetectScope::Inflight);
+    let empty = Writes::empty();
+    let canon_cx = DetectCx::new(st, &empty, index, DetectScope::Canon);
+    let mut canon_found = vec![];
+    for d in &stored {
+        for t in detect_kept(st, &cx, *d, Some(&seeds))? {
+            next.insert(t);
+        }
+        canon_found.extend(detect_kept(st, &canon_cx, *d, Some(&seeds))?);
+    }
+    if !canon_gone.is_empty() || !canon_found.is_empty() {
+        next.canon = Arc::new(prev.canon.without(&canon_gone).with(canon_found));
+    }
+    Ok(Some(next))
+}
+
+/// The canon part for the detectors of `detectors` that are not stored (each run in the canon
+/// scope, always a full run), kept when every side is canon, by id (a repeated id keeps the
+/// first). What canon's memo holds: a stored kind's all-canon tensions follow its records, not
+/// canon, so [`stored_canon`] gives them per build.
 fn canon_part(st: &ReadState, detectors: &[&dyn Detector]) -> Result<CanonPart, RdyError> {
     let writes = Writes::empty();
     let cx = DetectCx::new(st, &writes, canon_index_of(st)?, DetectScope::Canon);
     let mut out = vec![];
-    for d in detectors {
-        let mut found = vec![];
-        d.detect(&cx, None, &mut found)?;
-        out.extend(
-            found
-                .into_iter()
-                .filter_map(|f| tension_from(st.pack(), f, false, DetectScope::Canon))
-                .map(Arc::new),
-        );
+    for d in detectors.iter().filter(|d| !d.stored()) {
+        out.extend(detect_kept(st, &cx, *d, None)?);
     }
     Ok(CanonPart::of(out))
 }
 
+/// The all-canon tensions of the stored detectors of `detectors` (D-VA8DA: a semantic tension
+/// stays open in canon), each run in the canon scope; none, at no cost, when no such detector
+/// has a record.
+fn stored_canon(
+    st: &ReadState,
+    detectors: &[&dyn Detector],
+) -> Result<Vec<Arc<Tension>>, RdyError> {
+    let mut stored = detectors.iter().filter(|d| d.stored()).peekable();
+    if stored.peek().is_none() {
+        return Ok(vec![]);
+    }
+    let writes = Writes::empty();
+    let cx = DetectCx::new(st, &writes, canon_index_of(st)?, DetectScope::Canon);
+    let mut out = vec![];
+    for d in stored {
+        out.extend(detect_kept(st, &cx, *d, None)?);
+    }
+    Ok(out)
+}
+
 /// The full build for `detectors`: the canon part (canon's memo when `memo`, shared, not
-/// copied) and the in-flight part.
+/// copied, joined with the stored kinds' all-canon tensions when there are any) and the
+/// in-flight part.
 fn build(st: &ReadState, detectors: &[&dyn Detector], memo: bool) -> Result<TensionSet, RdyError> {
     if let Some(e) = &st.error {
         return Err(e.clone());
@@ -583,19 +738,18 @@ fn build(st: &ReadState, detectors: &[&dyn Detector], memo: bool) -> Result<Tens
     } else {
         Arc::new(canon_part(st, detectors)?)
     };
+    let stored = stored_canon(st, detectors)?;
+    let canon = if stored.is_empty() {
+        canon
+    } else {
+        Arc::new(canon.with(stored))
+    };
     let set = st.inflight_set()?;
     let writes = Arc::new(Writes::build(st, &set)?);
     let cx = DetectCx::new(st, &writes, canon_index_of(st)?, DetectScope::Inflight);
     let mut inflight = vec![];
     for d in detectors {
-        let mut found = vec![];
-        d.detect(&cx, None, &mut found)?;
-        inflight.extend(
-            found
-                .into_iter()
-                .filter_map(|f| tension_from(st.pack(), f, false, DetectScope::Inflight))
-                .map(Arc::new),
-        );
+        inflight.extend(detect_kept(st, &cx, *d, None)?);
     }
     Ok(TensionSet::of(canon, inflight, writes))
 }
@@ -695,14 +849,8 @@ impl ReadState {
         );
         let mut out = BTreeMap::new();
         for d in self.detectors {
-            let mut found = vec![];
-            d.detect(&cx, Some(&seeds), &mut found)?;
-            for t in found
-                .into_iter()
-                .filter_map(|f| tension_from(self.pack(), f, false, DetectScope::Inflight))
-                .filter(|t| t.involved.iter().any(|i| seeds.contains(&i.block)))
-            {
-                out.entry(t.id).or_insert_with(|| Arc::new(t));
+            for t in detect_kept(self, &cx, *d, Some(&seeds))? {
+                out.entry(t.id).or_insert(t);
             }
         }
         Ok(out.into_values().collect())
@@ -718,10 +866,10 @@ impl ReadState {
         cell.set
             .get_or_init(|| {
                 // a carry that cannot run (another in-flight set) or fails falls back to a build
-                if let Some((prev, change, view)) = &cell.carry
-                    && let Ok(Some((set, around))) = carry(self, prev, *change, view)
-                {
-                    let _ = cell.around.set(around);
+                if let Some((set, around)) = cell.carried(self) {
+                    if let Some(around) = around {
+                        let _ = cell.around.set(around);
+                    }
                     let _ = cell.carried.set(true);
                     return Ok(Arc::new(set));
                 }
@@ -743,12 +891,13 @@ impl ReadState {
         if let Some(r) = cell.set.get() {
             return r.as_ref().ok().cloned();
         }
-        let (prev, change, view) = cell.carry.as_ref()?;
-        let (set, around) = carry(self, prev, *change, view).ok()??;
+        let (set, around) = cell.carried(self)?;
         // another reader may have built the cell meanwhile: its set is the same
         cell.set
             .get_or_init(|| {
-                let _ = cell.around.set(around);
+                if let Some(around) = around {
+                    let _ = cell.around.set(around);
+                }
                 let _ = cell.carried.set(true);
                 Ok(Arc::new(set))
             })
@@ -804,18 +953,15 @@ impl ReadState {
         for d in self.detectors {
             let mut around = seeds.clone();
             around.extend(d.reach(&cx, &seeds)?);
-            let mut found = vec![];
-            d.detect(&cx, Some(&around), &mut found)?;
-            for t in found
+            for t in detect_kept(self, &cx, *d, Some(&around))?
                 .into_iter()
-                .filter_map(|f| tension_from(self.pack(), f, false, DetectScope::Inflight))
                 .filter(|t| {
                     t.sides
                         .iter()
                         .any(|s| matches!(s, SideRef::Change(c) if wanted.contains(c)))
                 })
             {
-                out.entry(t.id).or_insert_with(|| Arc::new(t));
+                out.entry(t.id).or_insert(t);
             }
         }
         Ok(out.into_values().collect())
@@ -839,11 +985,9 @@ impl ReadState {
         if let Some(e) = &self.error {
             return Err(e.clone());
         }
-        Ok(canon_part(self, self.detectors)?
-            .tensions
-            .into_iter()
-            .map(|(_, t)| t)
-            .collect())
+        let part = canon_part(self, self.detectors)?;
+        let part = part.with(stored_canon(self, self.detectors)?);
+        Ok(part.tensions.into_iter().map(|(_, t)| t).collect())
     }
 
     /// Every block involved in an open tension: the event-derived set (all-canon tensions
