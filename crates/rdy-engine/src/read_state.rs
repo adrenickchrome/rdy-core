@@ -137,13 +137,28 @@ impl Built {
         if let Some(l) = lexicon {
             let _ = next.lexicon.set(Arc::new(l.with_changes(old(), new())));
         }
-        if let (Some(prev), Some(g), Some(lex)) =
-            (self.structural.get(), next.graph.get(), next.lexicon.get())
-            && let Some(s) = crate::coverage::carry(prev, &self.m, &m, g, lex, pack, ops)
-        {
+        if let Some(s) = self.carried_structural(&next, ops, pack) {
             let _ = next.structural.set(Arc::new(s));
         }
         next
+    }
+
+    /// cc11: this state's structural layer carried across `ops` to `next` (this state with
+    /// `ops` applied, its graph and lexicon carried): `None` when this state's layer, `next`'s
+    /// graph or `next`'s lexicon is not built, or the carry gives up (`coverage::carry`). The
+    /// call `after` makes, and the one the perf hook `coverage::carry_for_perf` times.
+    pub(crate) fn carried_structural(
+        &self,
+        next: &Built,
+        ops: &[Op],
+        pack: &Pack,
+    ) -> Option<Structural> {
+        let (prev, g, lex) = (
+            self.structural.get()?,
+            next.graph.get()?,
+            next.lexicon.get()?,
+        );
+        crate::coverage::carry(prev, &self.m, &next.m, g, lex, pack, ops)
     }
 }
 

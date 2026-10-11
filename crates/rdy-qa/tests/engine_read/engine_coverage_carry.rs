@@ -1,9 +1,11 @@
 //! cc11: the structural coverage layer carried across a write equals a rebuild, and a carry
 //! builds nothing in full.
-use rdy_engine::coverage::{rebuilt_for_tests, structural_builds, structural_for_tests};
+use rdy_engine::coverage::{
+    carry_for_perf, rebuilt_for_tests, structural_builds, structural_for_tests,
+};
 use rdy_engine::*;
 use rdy_graph::DerivedStatus;
-use rdy_model::BlockId;
+use rdy_model::{BlockId, Hash};
 use rdy_qa::fixtures::*;
 use rdy_qa::tensions::{j_typo, try_put_j};
 use serde_json::{Value, json};
@@ -266,4 +268,146 @@ fn random_op(
                      "fields": {"statement": format!("A new rule at step {step}"), "status": "proposed"},
                      "links": {"supersedes": [{"target": pick(&live, seed >> 8, &c["$d2"])}]}}]),
     }
+}
+
+/// Fix round 1: an entity rename that keeps the name's phrase ("Ledger" to "LEDGER" or to
+/// "Ledger.") finds the same mentions, but an unlinked mention's fix names the entity's raw
+/// name, and the mentioning blocks are not in the dirty set. So the carry gives up: in a view,
+/// and in a rename landed on canon, the layer equals a rebuild.
+#[test]
+fn cc11_a_rename_that_keeps_the_phrase_equals_a_rebuild() {
+    let (_d, mut r) = project();
+    let c = cc6_world(&mut r);
+    let v = Scope::View("next".into());
+    write(
+        &mut r,
+        "next",
+        json!([{"op": "create", "type": "prose", "parent": c["$s"], "body": "One more line."}]),
+    )
+    .unwrap();
+    for name in ["LEDGER", "Ledger."] {
+        r.read().coverage_issues(&v).unwrap();
+        write(
+            &mut r,
+            "next",
+            json!([{"op": "update", "id": c["$t"], "fields": {"name": name}, "body": "Holds balances."}]),
+        )
+        .unwrap();
+        r.read().coverage_issues(&v).unwrap();
+        same(&r, &v);
+    }
+
+    let canon = Scope::Canon;
+    r.read().coverage_issues(&canon).unwrap();
+    write(
+        &mut r,
+        "case",
+        json!([{"op": "update", "id": c["$t"], "fields": {"name": "LEDGER"}, "body": "Holds balances."}]),
+    )
+    .unwrap();
+    land(&mut r, "case").unwrap();
+    r.read().coverage_issues(&canon).unwrap();
+    same(&r, &canon);
+}
+
+/// Fix round 1: writes that change entries outside the dirty set give up, so the next read
+/// builds the layer in full and it equals a rebuild: a folder renamed with a doc under it (the
+/// doc's path changes); a section with children moved to another doc (the children's doc
+/// changes); a doc's `doc_type` changed; a doc created in a folder; a doc moved into a folder.
+#[test]
+fn cc11_tree_writes_and_doc_type_changes_rebuild() {
+    let (_d, mut r) = project();
+    let c = cc6_world(&mut r);
+    let v = Scope::View("next".into());
+    let w = write(
+        &mut r,
+        "next",
+        json!([
+            {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "area", "title": "Area"}},
+            {"op": "create", "type": "doc", "id": "$fd", "parent": "$f", "fields": {"name": "inner", "title": "Inner", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "parent": "$fd", "body": "The Ledger is inside."},
+            {"op": "create", "type": "section", "id": "$m", "parent": c["$o"], "fields": {"title": "Moving"}},
+            {"op": "create", "type": "prose", "parent": "$m", "body": "The Ledger moves along."},
+            {"op": "create", "type": "claim", "parent": "$m", "body": "Moves keep the Ledger."}
+        ]),
+    )
+    .unwrap()
+    .created;
+    let rebuilds = |r: &mut Rdy, ops: Value| {
+        r.read().coverage_issues(&v).unwrap();
+        let before = structural_builds();
+        write(r, "next", ops.clone()).unwrap();
+        r.read().coverage_issues(&v).unwrap();
+        assert!(structural_builds() > before, "gave up and rebuilt: {ops}");
+        same(r, &v);
+    };
+    rebuilds(
+        &mut r,
+        json!([{"op": "update", "id": w["$f"], "fields": {"name": "area-two", "title": "Area"}}]),
+    );
+    rebuilds(
+        &mut r,
+        json!([{"op": "move", "id": w["$m"], "parent": c["$l"]}]),
+    );
+    rebuilds(
+        &mut r,
+        json!([{"op": "update", "id": c["$l"], "fields": {"name": "lone", "title": "Lone", "doc_type": "overview"}}]),
+    );
+    rebuilds(
+        &mut r,
+        json!([{"op": "create", "type": "doc", "parent": w["$f"], "fields": {"name": "second", "title": "Second", "doc_type": "page"}}]),
+    );
+    rebuilds(
+        &mut r,
+        json!([{"op": "move", "id": c["$l"], "parent": w["$f"]}]),
+    );
+}
+
+/// Fix round 1: the perf hook `carry_for_perf` (what `coverage_carry` times) makes the call
+/// `Built::after` makes: for the ops of one write, from the state before it to the state after,
+/// it returns the layer the write carried, builds nothing in full, and gives up where the write
+/// gave up.
+#[test]
+fn cc11_the_perf_hook_carries_as_a_write_does() {
+    let (_d, mut r) = project();
+    let c = cc6_world(&mut r);
+    let v = Scope::View("next".into());
+    write(
+        &mut r,
+        "next",
+        json!([{"op": "create", "type": "prose", "parent": c["$s"], "body": "One more line."}]),
+    )
+    .unwrap();
+    let hooked = |r: &mut Rdy, ops: Value| {
+        let prev = r.read();
+        prev.coverage_issues(&v).unwrap();
+        let w = write(r, "next", ops).unwrap();
+        let next = r.read();
+        let change: Hash = w.change.parse().unwrap();
+        let ops = next.reader().change(&change).unwrap().ops;
+        let before = structural_builds();
+        let out = carry_for_perf(&prev, &next, &v, &ops).unwrap();
+        assert_eq!(
+            structural_builds(),
+            before,
+            "the hook builds nothing in full"
+        );
+        out.map(|s| (s, structural_for_tests(&next, &v).unwrap()))
+    };
+    let (carried, written) = hooked(
+        &mut r,
+        json!([{"op": "create", "type": "claim", "parent": c["$s"], "body": "The Ledger is checked.",
+                "links": {"describes": [{"target": c["$t"]}]}}]),
+    )
+    .expect("a plain write carries");
+    assert_eq!(carried, *written, "the hook's layer is the write's");
+    same(&r, &v);
+    assert!(
+        hooked(
+            &mut r,
+            json!([{"op": "update", "id": c["$t"], "fields": {"name": "Book"}, "body": "Holds balances."}]),
+        )
+        .is_none(),
+        "a rename gives up"
+    );
 }

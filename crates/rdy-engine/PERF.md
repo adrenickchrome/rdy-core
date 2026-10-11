@@ -1048,8 +1048,9 @@ old text named and adds it back under those its new text names.
 
 The carry gives up, and the next read rebuilds, when an op:
 
-- creates, deletes or renames an entity (a name or an alias changes): every block's mentions
-  can change;
+- creates, deletes or renames an entity (its raw `name` or `aliases` field changes): every
+  block's mentions can change, and an unlinked mention's fix names the raw name, so a rename
+  that keeps the phrase ("Ledger" to "LEDGER") gives up too;
 - changes the `lifecycle` of a block that has children, or moves a block that has children;
 - deletes a block and leaves children under it;
 - changes a doc's `doc_type`;
@@ -1059,19 +1060,24 @@ The carry gives up, and the next read rebuilds, when an op:
 The carry also does not run when the graph or the lexicon of the build was not carried.
 
 Equality with a rebuild is pinned by `cc11_carried_equals_rebuilt_over_random_writes` (200
-random writes) and `cc11_dangling_refs_and_landed_decisions_carry_exactly`. The counter
-`structural_builds` pins that a plain write builds nothing in full.
+random writes), `cc11_dangling_refs_and_landed_decisions_carry_exactly`,
+`cc11_a_rename_that_keeps_the_phrase_equals_a_rebuild` and
+`cc11_tree_writes_and_doc_type_changes_rebuild` (a folder rename, a move of a section with
+children, a `doc_type` change, a doc created and a doc moved). The counter `structural_builds`
+pins that a plain write builds nothing in full and that those writes give up.
 
 The `qa-perf` typical tier gained two ops in `tier_entities`, after `coverage_all`, on view
 `ve`:
 
 | op | what it times | runs | target |
 |---|---|---|---|
-| `coverage_carry` | `coverage_report(ve)` after one single-claim write. The view's coverage is built first and the write runs, both outside the timer. The write carries the structural layer | `runs.write` | < 5 ms p95: a read after one write (FW-PF2; reference/performance tb-XBXR4 read budget) |
+| `coverage_carry` | The carry of the structural layer across one single-claim write, then `coverage_report(ve)` over the carried layer. Outside the timer: the view's coverage built on the state before the write, the write, and its ops read back. Timed: `coverage::carry_for_perf`, the call `Built::after` makes (`cc11_the_perf_hook_carries_as_a_write_does` pins that they give the same layer), and the report | `runs.write` | < 5 ms p95: a read after one write (FW-PF2; reference/performance tb-XBXR4 read budget) |
 | `coverage_report_cold` | `coverage_report(ve)` after the engine caches are dropped (outside the timer): the materialization, the graph, the lexicon, the structural layer and the state layer | `runs.read` | no spec target: the cold coverage report over a 10k view, recorded (FW-PF2; rdy coverage) |
 
 `coverage_carry` grows with the dirty set (the written blocks, their neighbours and their docs)
-and with the state layer and the report, which read every scored block. It does not rebuild the
+and with the state layer and the report, which read every scored block. The write goes to the
+fixture's first doc, which this tier fills with 250 more blocks, so the doc's
+`linked_from_outside` walk of its whole subtree is in the timed path. It does not rebuild the
 structural layer.
 
 No laptop figures are recorded here: the first timing of these ops is the Linux bench's.

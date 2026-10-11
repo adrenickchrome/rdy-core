@@ -3,10 +3,10 @@
 //! that can change entries the dirty set does not reach gives up, and the next read rebuilds.
 use super::model::Structural;
 use super::structural::{EntryCx, entry_of, named_in};
-use crate::Materialized;
 use crate::lexicon::Lexicon;
+use crate::{Materialized, RdyError, ReadState, Scope};
 use rdy_graph::{EdgeKind, Graph, edges_of};
-use rdy_model::{Block, BlockId, Op, decision, tree};
+use rdy_model::{Block, BlockId, FieldValue, Op, decision, entity, tree};
 use rdy_schema::Pack;
 use std::collections::BTreeSet;
 
@@ -97,6 +97,23 @@ pub(crate) fn carry(
     Some(Structural { blocks, mentions })
 }
 
+/// Perf hook (cc11, FW-PF2; what the `qa-perf` op `coverage_carry` times): the structural layer
+/// of `scope` in `prev`, carried across `ops` to `next`, by the call `Built::after` makes
+/// (`Built::carried_structural`). `next` is the state the write of `ops` published on `prev`.
+/// `None` when `prev`'s layer is not built or the carry gives up. It never builds the layer in
+/// full; it reads both states' builds of `scope`, built first if they are not.
+#[doc(hidden)]
+pub fn carry_for_perf(
+    prev: &ReadState,
+    next: &ReadState,
+    scope: &Scope,
+    ops: &[Op],
+) -> Result<Option<Structural>, RdyError> {
+    let scope = prev.coverage_scope(scope)?;
+    let (old, new) = (prev.built(&scope)?, next.built(&scope)?);
+    Ok(old.carried_structural(&new, ops, next.pack()))
+}
+
 /// Whether one op's block, `a` before and `b` after, changes entries the dirty set does not
 /// reach.
 fn gives_up<'a>(
@@ -109,11 +126,13 @@ fn gives_up<'a>(
     let Some(id) = a.or(b).map(|x| &x.id) else {
         return false;
     };
-    // an entity created, deleted or renamed: the mentions of every block can change
+    // an entity created, deleted or renamed: the mentions of every block can change, and so
+    // can the fix of every unlinked mention, which names the raw name (a rename that keeps the
+    // phrase, "Ledger" to "LEDGER", finds the same mentions but changes those fixes)
     let entity = |x: Option<&'a Block>| x.filter(|x| lex.is_entity_type(&x.block_type));
     match (entity(a), entity(b)) {
         (None, None) => {}
-        (Some(x), Some(y)) if spoken_names(x) == spoken_names(y) => {}
+        (Some(x), Some(y)) if raw_names(x) == raw_names(y) => {}
         _ => return true,
     }
     // a doc or a folder created, deleted, renamed or moved: the paths under and beside it
@@ -144,12 +163,10 @@ fn gives_up<'a>(
     }
 }
 
-/// The name and alias phrases of entity `b`: what its mentions are found by (a key never is).
-fn spoken_names(b: &Block) -> Vec<(crate::lexicon::NameKind, String)> {
-    Lexicon::names_of(b)
-        .into_iter()
-        .filter(|(k, _)| *k != crate::lexicon::NameKind::Key)
-        .collect()
+/// The raw `name` and `aliases` fields of entity `b`, as written: its mentions are found by
+/// their phrases, and an unlinked mention's fix names the raw name.
+fn raw_names(b: &Block) -> (Option<&FieldValue>, Option<&FieldValue>) {
+    (b.fields.get("name"), b.fields.get(entity::ALIASES))
 }
 
 /// Adds `id` (when it is a doc) and every doc above it in `m`.

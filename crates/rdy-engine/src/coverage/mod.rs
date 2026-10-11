@@ -11,6 +11,7 @@ mod state;
 mod structural;
 
 pub(crate) use carry::carry;
+pub use carry::carry_for_perf;
 pub use confidence::*;
 pub use graph::*;
 pub use kinds::KindCount;

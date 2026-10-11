@@ -850,8 +850,9 @@ fn prepare_rebased_view(r: &mut Rdy, fx: &Fixture, runs: &Runs) {
 /// FW-EN1, FW-EN3, FW-EN4: the entity ops on view `ve`: the fixture's canon plus 50 entities and
 /// 200 claims that name them and share ten code literals. Run after `tier_views`: the view it
 /// leaves behind would change the numbers of the ops before it. Run before `tier_inflight`,
-/// which closes every open view (`ve` too) and adds 1k in-flight changes. cc11 adds the coverage
-/// report after one write (the structural layer carried) and the cold coverage report.
+/// which closes every open view (`ve` too) and adds 1k in-flight changes. cc11 adds the carry
+/// of the structural layer across one write with the coverage report over it, and the cold
+/// coverage report.
 fn tier_entities(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs: &Runs) {
     let ve = Scope::View("ve".into());
     let section = fx.section.to_string();
@@ -902,18 +903,30 @@ fn tier_entities(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, r
             .1
         },
     ));
-    // cc11: the view's coverage built, one single-claim write (outside the timer), then the
-    // report over the structural layer the write carried
+    // cc11 (FW-PF2 D-V3JSY: the carry stays inside the read budget): the carry itself and the
+    // report over the carried layer. Outside the timer: the view's coverage built on the state
+    // before, one single-claim write to the fixture's first doc (its subtree holds this tier's
+    // 250 entities and claims and more, so the doc's `linked_from_outside` walk is in the timed
+    // path), and the write's ops read back. Timed: the carry `Built::after` made for that write
+    // (`carry_for_perf`, the same call) and `coverage_report(ve)` over the carried layer.
     out.push(measure_timed(
         &format!("coverage_carry{sfx}"),
         runs.write,
         |i| {
-            r.read().coverage_issues(&ve).expect("coverage");
-            write(r, "ve", json!([{"op": "create", "type": "claim", "parent": section, "body": format!("Entity {} is checked ({i}).", i % 50)}]))
+            let prev = r.read();
+            prev.coverage_issues(&ve).expect("coverage");
+            let w = write(r, "ve", json!([{"op": "create", "type": "claim", "parent": section, "body": format!("Entity {} is checked ({i}).", i % 50)}]))
                 .expect("write");
+            let next = r.read();
+            let change: Hash = w.change.parse().expect("change");
+            let ops = next.reader().change(&change).expect("change").ops;
             let s = Instant::now();
-            r.read().coverage_report(&ve, None).expect("coverage report");
-            s.elapsed()
+            let carried =
+                rdy_engine::coverage::carry_for_perf(&prev, &next, &ve, &ops).expect("carry");
+            next.coverage_report(&ve, None).expect("coverage report");
+            let t = s.elapsed();
+            assert!(carried.is_some(), "a single-claim write carries the layer");
+            t
         },
     ));
     out.push(measure_timed(
