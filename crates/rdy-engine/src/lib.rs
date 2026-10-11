@@ -26,6 +26,7 @@ mod keys;
 pub mod lexicon;
 mod lint;
 mod materialize;
+pub mod mention_review;
 mod pack_load;
 mod paths;
 pub mod proposal_show;
@@ -63,6 +64,7 @@ pub use history::{Author, HISTORY_MAX, History, HistoryEntry, JustificationInfo,
 pub use io::{EditBase, ExportSummary, block_from_yaml, block_to_yaml, refuse_inflight_export};
 pub use lint::check_path;
 pub use materialize::{Materialized, PathMiss};
+pub use mention_review::{MentionReviewInfo, MentionVerdict};
 pub use paths::TreeNode;
 pub use proposal_show::{
     ProposalChangeRow, ProposalShow, ProposalVersionRow, is_proposal_ref, proposal_text,

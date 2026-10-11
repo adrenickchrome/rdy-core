@@ -117,6 +117,7 @@ impl Rdy {
             coord: OnceLock::new(),
             tensions: Arc::default(),
             dismissals: Arc::default(),
+            mention_dismissals: Arc::default(),
             detectors: &tensions::DETECTORS,
             error: None,
         });

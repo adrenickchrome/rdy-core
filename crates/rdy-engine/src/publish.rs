@@ -5,7 +5,7 @@ use crate::read_state::{self, CoordHeads, Entry, InflightCell};
 use crate::tensions::SideRef;
 use crate::tensions::set::TensionCell;
 use crate::{Delta, Event, EventKind, Rdy, RdyError, ReadState, events};
-use rdy_model::{Hash, Op};
+use rdy_model::{Hash, Op, Verdict};
 use rdy_store::kinds;
 use rdy_store::segment::Location;
 use rdy_store::view::ViewOpKind;
@@ -75,6 +75,7 @@ impl Rdy {
                     coord: OnceLock::new(),
                     tensions: Arc::default(),
                     dismissals: Arc::clone(&prev.dismissals),
+                    mention_dismissals: Arc::clone(&prev.mention_dismissals),
                     detectors: self.detectors,
                     error: Some(e.clone()),
                 }));
@@ -194,7 +195,9 @@ impl Rdy {
         // the tension set reads canon, the in-flight changes and the open alternative sets
         // (edit collision skips members of one set): a publish that moves none keeps it
         let tensions = match &delta {
-            Delta::Seq | Delta::Tags | Delta::Dismissed { .. } => Arc::clone(&prev.tensions),
+            Delta::Seq | Delta::Tags | Delta::Dismissed { .. } | Delta::MentionReviewed { .. } => {
+                Arc::clone(&prev.tensions)
+            }
             Delta::Coord { closed }
                 if closed.is_empty() && coord_heads.alt_members == prev.coord_heads.alt_members =>
             {
@@ -219,6 +222,33 @@ impl Rdy {
             Delta::Full => Arc::new(self.store.dismissals()?.into_iter().collect()),
             Delta::Dismissed { vkey, review } => Arc::new(prev.dismissals.update(*vkey, *review)),
             _ => Arc::clone(&prev.dismissals),
+        };
+        // the dismissed mentions: re-read by a full publish (only the pairs whose latest review
+        // dismisses), one changed by a mention review, else carried
+        let mention_dismissals = match &delta {
+            Delta::Full => {
+                let mut map = imbl::OrdMap::new();
+                for (block, entity, review) in self.store.mention_reviews()? {
+                    if self.store.review(&review)?.verdict == Verdict::Dismiss {
+                        map.insert((block, entity), review);
+                    }
+                }
+                Arc::new(map)
+            }
+            Delta::MentionReviewed {
+                block,
+                entity,
+                review,
+                dismissed,
+            } => {
+                let key = (block.clone(), entity.clone());
+                Arc::new(if *dismissed {
+                    prev.mention_dismissals.update(key, *review)
+                } else {
+                    prev.mention_dismissals.without(&key)
+                })
+            }
+            _ => Arc::clone(&prev.mention_dismissals),
         };
         let (canon, views, tags, inflight_cell) = match delta {
             Delta::Full => {
@@ -353,7 +383,7 @@ impl Rdy {
                 Arc::new(self.version_tags()?),
                 Arc::clone(&prev.inflight_cell),
             ),
-            Delta::Seq | Delta::Dismissed { .. } => (
+            Delta::Seq | Delta::Dismissed { .. } | Delta::MentionReviewed { .. } => (
                 Arc::clone(&prev.canon),
                 prev.views.clone(),
                 Arc::clone(&prev.tags),
@@ -383,6 +413,7 @@ impl Rdy {
             coord: OnceLock::new(),
             tensions,
             dismissals,
+            mention_dismissals,
             detectors: self.detectors,
             error: None,
         })

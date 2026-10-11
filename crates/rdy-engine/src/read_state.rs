@@ -50,6 +50,14 @@ pub enum Delta {
     /// Review `review` dismissed the tensions of vkey `vkey`: every cell is carried, and the
     /// tension set too (a dismissal is state on a still-computed tension, FW-CH7).
     Dismissed { vkey: Hash, review: Hash },
+    /// Review `review` set the mention of `entity` in `block` to dismissed (`dismissed`) or back
+    /// to open: every cell is carried, as `Dismissed` carries them (no view content changed).
+    MentionReviewed {
+        block: BlockId,
+        entity: BlockId,
+        review: Hash,
+        dismissed: bool,
+    },
     /// Only the log moved (a proposal): no view content changed.
     Seq,
 }
@@ -560,6 +568,9 @@ pub struct ReadState {
     pub(crate) tensions: Arc<TensionCell>,
     /// Each dismissed tension's vkey, mapped to the review that dismissed it.
     pub(crate) dismissals: Arc<imbl::OrdMap<Hash, Hash>>,
+    /// Each (block, entity) pair whose latest mention review dismisses it, mapped to that review
+    /// (FW-CV4).
+    pub(crate) mention_dismissals: Arc<imbl::OrdMap<(BlockId, BlockId), Hash>>,
     /// The tension detectors: the registry, unless a test set others.
     pub(crate) detectors: &'static [&'static dyn Detector],
     /// A `Full` publish that failed to read the heads: every read of this state returns it.
