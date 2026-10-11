@@ -1,6 +1,7 @@
 //! FW-PR1: deterministic search over block text. A literal or a regex, matched line by line in
 //! each block's body and string fields, in reading order, with lines windowed and capped per
 //! block, pages cut by a token budget and a stateless cursor that a changed match set stales.
+use crate::coverage::{CoverageIssues, Level, confidence_of, rollup};
 use crate::error::{E_BAD_INPUT, E_LIMIT, E_PAGE_STALE, E_UNKNOWN_BLOCK, PAGE_STALE_FIX, RdyError};
 use crate::factsheet::{FactSheet, MAX_RESOLVED};
 use crate::lexicon::{link_kind_for, tied};
@@ -99,6 +100,12 @@ pub struct SearchFilters {
     /// linked or unlinked: blocks that name an entity (by name or alias, whole words) and are tied to it (linked), or that name one they are not tied to yet (unlinked). Only blocks that can link to an entity count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mentions: Option<String>,
+    /// Only blocks whose coverage score is below this (0 to 100). The current state only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_below: Option<u32>,
+    /// `coverage`: list the lowest block score first, the default order between equal scores.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -154,6 +161,17 @@ pub struct SearchMatch {
     /// the entity yet.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub suggestions: Vec<Suggestion>,
+    /// cc14 (FW-SR1): the block's coverage score, 0 to 100. Absent at a past landing, where
+    /// coverage is not computed (FW-H7). A collapsed entry shows its first block's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<u32>,
+    /// cc14: the block's coverage issues that are not dismissed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issues: Option<usize>,
+    /// cc14 (FW-CV2): how far rdy vouches for the hit; a collapsed entry takes the lowest level
+    /// of its blocks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<Level>,
 }
 
 /// A hit folded into an earlier entry. It keeps its own suggestions.
@@ -270,6 +288,8 @@ impl ReadState {
                         lines,
                         more_lines,
                         history: early.unwrap_or_else(|| history_of(b)),
+                        all_words: words,
+                        cov: None,
                         suggestions: vec![],
                     };
                     if words {
@@ -294,7 +314,12 @@ impl ReadState {
             // the entity that one of its lists shows (a history decision is not listed, and a
             // list's cut is not shown). A filtered search keeps every hit: a sheet shows no
             // suspect, change or filter target.
-            if q.filters == SearchFilters::default() {
+            // (a sort changes the order only, so it does not count as a filter)
+            let unfiltered = SearchFilters {
+                sort: None,
+                ..q.filters.clone()
+            };
+            if unfiltered == SearchFilters::default() {
                 let mut held: BTreeSet<BlockId> = BTreeSet::new();
                 for ((e, _), sheet) in resolved.iter().zip(&sheets) {
                     held.insert(e.clone());
@@ -352,11 +377,28 @@ impl ReadState {
         token.push(u8::from(q.ignore_case));
         token.extend(serde_json::to_vec(&q.filters).unwrap_or_default());
         token.push(0);
-        let words_from = phrase.len();
-        let hits: Vec<Hit> = phrase.into_iter().chain(all_words).collect();
+        let mut hits: Vec<Hit> = phrase.into_iter().chain(all_words).collect();
+        // cc14 (FW-SR1, FW-SR4): each hit's coverage, issues and confidence; `coverage_below`
+        // drops the hits at or over the bound; `sort: coverage` lists the lowest first. A past
+        // landing has no coverage, so a search there carries none.
+        let wants_coverage = q.filters.coverage_below.is_some() || q.filters.sort.is_some();
+        if wants_coverage || !self.is_past_landing(scope) {
+            let issues = self.coverage_issues(scope)?;
+            let no_paths = BTreeMap::new();
+            for h in &mut hits {
+                h.cov = Some(self.hit_coverage(scope, &issues, &h.block.id, &no_paths)?);
+            }
+        }
+        if let Some(n) = q.filters.coverage_below {
+            hits.retain(|h| h.cov.as_ref().is_some_and(|c| c.score < n));
+        }
+        if q.filters.sort.is_some() {
+            // stable: equal scores keep the default order
+            hits.sort_by_key(|h| h.cov.as_ref().map_or(100, |c| c.score));
+        }
         // every collapse-key input the version does not cover goes in too: `history` comes from
         // other decisions, so a supersede can regroup the entries without moving any version
-        for (i, h) in hits.iter().enumerate() {
+        for h in &hits {
             let version = m
                 .version_of(&h.block.id)
                 .unwrap_or_else(|| h.block.version_hash());
@@ -364,7 +406,13 @@ impl ReadState {
             token.push(0);
             token.extend_from_slice(&version.0);
             token.push(u8::from(h.history));
-            token.push(u8::from(i >= words_from));
+            token.push(u8::from(h.all_words));
+            // coverage moves with other blocks' tensions and suspects, not with this version
+            if let Some(c) = &h.cov {
+                token.extend_from_slice(&c.score.to_le_bytes());
+                token.extend_from_slice(&(c.issues as u64).to_le_bytes());
+                token.push(c.level as u8);
+            }
         }
         if !resolved.is_empty() {
             token.extend_from_slice(b"entities\0");
@@ -389,7 +437,7 @@ impl ReadState {
         let mut seen: HashMap<EntryKey, usize> = HashMap::new();
         let mut types: BTreeMap<String, usize> = BTreeMap::new();
         let mut docs: HashMap<Option<String>, usize> = HashMap::new();
-        for (i, h) in hits.into_iter().enumerate() {
+        for h in hits {
             let path = m.path_of(&h.block.id);
             *types.entry(h.block.block_type.clone()).or_default() += 1;
             *docs.entry(path.clone()).or_default() += 1;
@@ -397,10 +445,16 @@ impl ReadState {
                 block_type: h.block.block_type.clone(),
                 lines: h.lines,
                 more_lines: h.more_lines,
-                all_words: i >= words_from,
+                all_words: h.all_words,
                 history: h.history,
             };
             if let Some(&at) = seen.get(&key) {
+                if let (Some(have), Some(c)) = (&mut entries[at].confidence, &h.cov) {
+                    // the entry takes the lowest level of its blocks
+                    if level_rank(c.level) > level_rank(*have) {
+                        *have = c.level;
+                    }
+                }
                 entries[at].also.push(SearchAlso {
                     id: h.block.id.to_string(),
                     path,
@@ -418,6 +472,9 @@ impl ReadState {
                 all_words: key.all_words,
                 also: vec![],
                 suggestions: h.suggestions,
+                coverage: h.cov.as_ref().map(|c| c.score),
+                issues: h.cov.as_ref().map(|c| c.issues),
+                confidence: h.cov.as_ref().map(|c| c.level),
             });
             seen.insert(key, entries.len() - 1);
         }
@@ -486,8 +543,53 @@ struct Hit<'a> {
     lines: Vec<SearchLine>,
     more_lines: usize,
     history: bool,
+    /// sord1: no line holds the phrase; the block holds every word of it.
+    all_words: bool,
+    /// cc14: the block's coverage; none at a past landing.
+    cov: Option<HitCoverage>,
     /// esrch1: link suggestions; not part of the collapse key.
     suggestions: Vec<Suggestion>,
+}
+
+/// The order of confidence levels, the lowest level last.
+fn level_rank(l: Level) -> u8 {
+    match l {
+        Level::High => 0,
+        Level::Medium => 1,
+        Level::Low => 2,
+    }
+}
+
+/// The coverage a hit carries.
+struct HitCoverage {
+    score: u32,
+    issues: usize,
+    level: Level,
+}
+
+impl ReadState {
+    /// The coverage of the hit block `id`: its score alone, its issues that are not dismissed,
+    /// and its confidence over the hit's neighbourhood.
+    fn hit_coverage(
+        &self,
+        scope: &Scope,
+        issues: &CoverageIssues,
+        id: &BlockId,
+        paths: &BTreeMap<String, String>,
+    ) -> Result<HitCoverage, RdyError> {
+        let entry = issues.blocks.get(id);
+        let score = rollup(self.pack(), entry.into_iter()).score;
+        let open = entry.map_or(0, |e| {
+            e.issues.iter().filter(|i| i.dismissed.is_none()).count()
+        });
+        let hood = self.hit_neighbourhood(scope, id)?;
+        let level = confidence_of(issues, &hood, Some(id), paths).confidence;
+        Ok(HitCoverage {
+            score,
+            issues: open,
+            level,
+        })
+    }
 }
 
 /// What two hits share to share an entry.
@@ -725,14 +827,40 @@ impl ReadState {
                 if link_kind_for(pack, b).is_none() {
                     continue;
                 }
+                // unlinked: neither tied nor dismissed for this block (D-E6JD1, FW-CV4)
                 let hit = lex.mentions(b).iter().any(|ms| {
-                    BlockId::parse(&ms.entity).is_ok_and(|e| tied(&g, &b.id, &e) == linked)
+                    BlockId::parse(&ms.entity).is_ok_and(|e| {
+                        let tied = tied(&g, &b.id, &e);
+                        if linked {
+                            tied
+                        } else {
+                            !tied && self.mention_dismissed(&b.id, &e).is_none()
+                        }
+                    })
                 });
                 if hit {
                     set.insert(b.id.clone());
                 }
             }
             allowed.push(set);
+        }
+        if let Some(s) = &f.sort
+            && s != "coverage"
+        {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("sort takes coverage, not {s}"),
+                "pass sort: coverage, or leave sort out for the default order",
+            ));
+        }
+        if let Some(n) = f.coverage_below
+            && n > 100
+        {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("coverage_below is {n}; it must be 0 to 100"),
+                "pass a score from 0 to 100",
+            ));
         }
         let pack_traits = pack
             .block_types

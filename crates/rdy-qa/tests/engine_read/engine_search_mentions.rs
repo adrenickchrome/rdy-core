@@ -142,3 +142,42 @@ fn smen1_rdy_search_takes_mentions_on_the_cli() {
     assert_eq!(v["code"], "E_BAD_INPUT", "{v}");
     s.stop();
 }
+
+#[test]
+fn cc14_a_dismissed_mention_is_not_unlinked() {
+    let (_d, mut r) = project();
+    let (e, c1, c2, _p3) = seed(&mut r);
+    assert_eq!(ids(&find(&r, Some("unlinked")).unwrap()), vec![c2.clone()]);
+    r.review_mention(
+        &writer(),
+        &Scope::Canon,
+        &c2,
+        &e,
+        rdy_engine::mention_review::MentionVerdict::Dismiss,
+        "everyday word here",
+    )
+    .unwrap();
+    assert!(
+        find(&r, Some("unlinked")).unwrap().matches.is_empty(),
+        "a dismissed mention is settled"
+    );
+    assert_eq!(
+        ids(&find(&r, Some("linked")).unwrap()),
+        vec![c1],
+        "linked is unchanged"
+    );
+    r.review_mention(
+        &writer(),
+        &Scope::Canon,
+        &c2,
+        &e,
+        rdy_engine::mention_review::MentionVerdict::Restore,
+        "it is the ledger service",
+    )
+    .unwrap();
+    assert_eq!(
+        ids(&find(&r, Some("unlinked")).unwrap()),
+        vec![c2],
+        "a restore makes it unlinked again"
+    );
+}

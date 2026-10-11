@@ -26,6 +26,8 @@ pub(super) struct SearchArgs {
     suspect: Option<bool>,
     tension: Option<bool>,
     mentions: Option<String>,
+    coverage_below: Option<u32>,
+    sort: Option<String>,
 }
 
 /// msrch1: the blocks whose text matches, in canon unless a scope is named.
@@ -52,6 +54,8 @@ pub(super) fn search(cx: &OpContext, a: SearchArgs) -> Result<Value, RdyError> {
                 suspect: a.suspect.unwrap_or(false),
                 tension: a.tension.unwrap_or(false),
                 mentions: a.mentions,
+                coverage_below: a.coverage_below,
+                sort: a.sort,
             },
         },
         a.page.as_deref(),

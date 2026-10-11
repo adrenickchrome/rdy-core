@@ -187,6 +187,9 @@ fn spec_target(op: &str) -> Option<String> {
         "entity_search" => {
             "< 5 ms p99 (a read, spec 11): an entity search with its fact sheet, first page"
         }
+        "search_coverage_sort" => {
+            "< 5 ms p95 (the read budget, reference/performance tb-XBXR4): search_literal's query with sort: coverage, first page"
+        }
         "suggestions_after_write" => {
             "no spec target: the suggestions of a one-claim write over a carried lexicon (recorded for FW-EN3; they ride on every write response)"
         }
@@ -881,6 +884,24 @@ fn tier_entities(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, r
     out.push(measure(&format!("entity_search{sfx}"), runs.read, |_| {
         r.read().search(&ve, &q, None, Some(4000)).expect("search");
     }));
+    // cc14 (FW-SR1, FW-CV2): search_literal's query, every hit scored and sorted lowest first
+    let by_coverage = rdy_engine::SearchQuery {
+        text: "Claim".into(),
+        filters: rdy_engine::search::SearchFilters {
+            sort: Some("coverage".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    out.push(measure(
+        &format!("search_coverage_sort{sfx}"),
+        runs.read,
+        |_| {
+            r.read()
+                .search(&ve, &by_coverage, None, Some(4000))
+                .expect("search");
+        },
+    ));
     out.push(measure_timed(
         &format!("suggestions_after_write{sfx}"),
         runs.write,
@@ -3639,6 +3660,7 @@ mod tests {
             vec![
                 "lexicon_build",
                 "entity_search",
+                "search_coverage_sort",
                 "suggestions_after_write",
                 "coverage_all",
                 "coverage_carry",
@@ -3658,6 +3680,7 @@ mod tests {
         for op in [
             "lexicon_build",
             "entity_search",
+            "search_coverage_sort",
             "suggestions_after_write",
             "coverage_all",
             "coverage_carry",

@@ -26,6 +26,7 @@ mod engine_proposal_show;
 mod engine_related;
 mod engine_scope;
 mod engine_search;
+mod engine_search_coverage;
 mod engine_search_filters;
 mod engine_search_mentions;
 mod engine_search_results;

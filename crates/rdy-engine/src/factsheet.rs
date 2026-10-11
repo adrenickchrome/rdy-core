@@ -1,4 +1,5 @@
 //! An entity's fact sheet (FW-EN1, FW-EN1a).
+use crate::coverage::{Confidence, confidence_of};
 use crate::error::{E_BAD_INPUT, E_UNKNOWN_BLOCK, RdyError};
 use crate::lexicon::{NameKind, is_content, is_fact};
 use crate::query::body_in;
@@ -50,6 +51,11 @@ pub struct FactSheet {
     /// decisions' `on`, and `definition` counts the characters cut from the definition.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub omitted: BTreeMap<String, usize>,
+    /// cc14 (FW-CV2, D-XZXCE): how far rdy vouches for the sheet, over the entity, the blocks
+    /// tied to it and the blocks that name it, with the coverage issues behind the level. Absent
+    /// at a past landing, where coverage is not computed (FW-H7).
+    #[serde(flatten)]
+    pub confidence: Option<Confidence>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -325,6 +331,23 @@ impl ReadState {
             Some(doc) => m.path_of(&doc.id),
             None => m.path_of(id),
         };
+        let confidence = if self.is_past_landing(scope) {
+            None
+        } else {
+            let issues = self.coverage_issues(scope)?;
+            let hood = self.fact_sheet_neighbourhood(scope, id)?;
+            // the doc path of every block with an issue, for the closed order of the reasons
+            let mut paths: BTreeMap<String, String> = BTreeMap::new();
+            for b in &hood {
+                if let Some(entry) = issues.blocks.get(b)
+                    && !entry.issues.is_empty()
+                    && let Some(p) = entry.doc.as_ref().and_then(|d| m.path_of(d))
+                {
+                    paths.insert(b.to_string(), p);
+                }
+            }
+            Some(confidence_of(&issues, &hood, None, &paths))
+        };
         Ok(FactSheet {
             id: id.to_string(),
             block_type: e.block_type.clone(),
@@ -345,6 +368,7 @@ impl ReadState {
             decisions,
             dependents,
             omitted,
+            confidence,
         })
     }
 }

@@ -58,6 +58,12 @@ pub(crate) struct SearchArgs {
     /// Keep only blocks involved in an open tension (rdy tensions lists them).
     #[arg(long)]
     tension: bool,
+    /// Keep hits whose block coverage score is under this (0 to 100).
+    #[arg(long = "coverage-below")]
+    coverage_below: Option<u32>,
+    /// coverage: list the hits with the lowest coverage first.
+    #[arg(long)]
+    sort: Option<String>,
 }
 
 pub(crate) fn search(env: &Env, a: SearchArgs) -> Result<(Value, String), ErrorReply> {
@@ -80,6 +86,8 @@ pub(crate) fn search(env: &Env, a: SearchArgs) -> Result<(Value, String), ErrorR
         mentions,
         suspect,
         tension,
+        coverage_below,
+        sort,
     } = a;
     // Empty lists and false flags are sent as absent.
     let list = |v: Vec<String>| (!v.is_empty()).then_some(v);
@@ -90,7 +98,8 @@ pub(crate) fn search(env: &Env, a: SearchArgs) -> Result<(Value, String), ErrorR
         json!({"query": query, "regex": regex, "ignore_case": ignore_case, "scope": scope, "max_tokens": max_tokens, "page": page,
                 "types": list(types), "traits": list(traits), "path": path, "lifecycle": lifecycle, "changed_since": changed_since,
                 "exclude_history": flag(exclude_history), "governed_by": governed_by, "describes": describes, "linked_to": linked_to,
-                "mentions": mentions, "suspect": flag(suspect), "tension": flag(tension)}),
+                "mentions": mentions, "suspect": flag(suspect), "tension": flag(tension),
+                "coverage_below": coverage_below, "sort": sort}),
     )?;
     let t = search_text(&v);
     Ok((v, t))
@@ -112,6 +121,9 @@ fn sheet_lines(sheet: &Value, out: &mut Vec<String>) {
         head.push_str(&format!(" [{kind}]"));
     }
     head.push_str(&format!(", matched by {}", text(&sheet["matched_by"])));
+    if let Some(level) = sheet["confidence"].as_str() {
+        head.push_str(&format!("  confidence {level}"));
+    }
     out.push(head);
     let first = text(&sheet["definition"]).lines().next().unwrap_or("");
     if !first.is_empty() {
@@ -213,6 +225,12 @@ fn search_text(v: &Value) -> String {
         }
         if m["history"].as_bool() == Some(true) {
             head.push_str(" [history]");
+        }
+        if let (Some(coverage), Some(level)) = (m["coverage"].as_u64(), m["confidence"].as_str()) {
+            head.push_str(&format!(
+                "  coverage {coverage}  issues {}  {level}",
+                num(&m["issues"])
+            ));
         }
         out.push(head);
         for l in m["lines"].as_array().into_iter().flatten() {
