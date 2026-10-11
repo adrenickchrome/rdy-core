@@ -497,10 +497,12 @@ fn coverage_part(reply: &Value) -> String {
 
 /// The parts of the reply rdy could not work out, each with its error.
 fn errors_part(reply: &Value) -> String {
-    const PARTS: [(&str, &str); 6] = [
+    const PARTS: [(&str, &str); 7] = [
         ("consequences_error", "consequences"),
         ("consequences_tension_error", "the tension consequences"),
         ("on_change_error", "the tension changes"),
+        // a propose reply's tensions (gate `ProposalInfo`)
+        ("tensions_error", "the tensions"),
         ("coverage_error", "the coverage change"),
         ("suggestions_error", "suggestions"),
         ("related_decisions_error", "related decisions"),
