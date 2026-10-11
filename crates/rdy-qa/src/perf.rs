@@ -4,8 +4,8 @@ use crate::fixtures::{approver, land, write, writer};
 use rdy_daemon::{Attempt, Client, Hello, PROTO_VERSION, Proto, RunDir, ServeOptions, ServeRun};
 use rdy_engine::brief::Coverage;
 use rdy_engine::consequence::ConsequenceKind;
-use rdy_engine::{Materialized, Rdy, Scope, now_ms, testkit};
-use rdy_model::{Block, BlockId, Hash, Op};
+use rdy_engine::{Materialized, Rdy, Scope, Session, now_ms, testkit};
+use rdy_model::{Block, BlockId, Hash, Op, Role};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -235,6 +235,18 @@ fn spec_target(op: &str) -> Option<String> {
         }
         "tensions_canon_drift_deep" => {
             "no spec target: the canon-scope build of the tensions after one more edit landing of prose 50 edit landings deep, the version steps kept across builds, once per landing (restatement drift's canon form against history, final review I2; the D-SES4J budget check: compare with tensions_canon_drift)"
+        }
+        "review_requests_all_1k" => {
+            "recorded, no spec target: every review request at 1k in-flight changes, cold (the worst case of a queue scan; plan M2e1)"
+        }
+        "review_next_1k" => {
+            "recorded, no spec target: the first rdy_review_next on a state at 1k in-flight changes, its case file and hash included (plan M2e1)"
+        }
+        "review_submit_1k" => {
+            "< 10 ms p99 with 1k in-flight changes (proposed: the tension-detection budget of M2 spec 15.1, applied to a verdict, carry and settle included)"
+        }
+        "review_accept_1k" => {
+            "recorded, no spec target: a person's acceptance of one advised tension of a proposal at 1k in-flight changes, carry and settle included (plan M2e1)"
         }
         "gate_tensions_1k" => {
             "recorded: the land message's tension check on a built set (inside the landing budget, M2 spec 15.1)"
@@ -1783,6 +1795,162 @@ fn tier_tensions(
     ));
 }
 
+/// The review ops (M2e1): the queue of review requests, the first request with its case file and
+/// hash, a reviewer's verdict with its carry and settle, and a person's acceptance of the advice
+/// it carried, with `1k` in-flight changes in 20 views (the names say `1k` as in [`tier_inflight`]).
+/// Run right after `tier_tensions`, on the same project. The writer is `human:qa`; the reviewer
+/// is `agent:perf-reviewer` with the reviewer role. The submit runs come first and each advises
+/// blocking; each accept run then accepts the tension one submit run opened.
+fn tier_reviews(out: &mut Vec<Measure>, r: &mut Rdy, sfx: &str, runs: &Runs) {
+    use rdy_engine::semantic::accept_advice::AcceptInfo;
+    use rdy_engine::semantic::candidates::request_label;
+    use rdy_engine::semantic::case::case_hash;
+    use rdy_engine::semantic::submit::{FindingRequest, ReviewSubmitRequest};
+    use rdy_engine::tensions::api::AcceptRequest;
+    use rdy_engine::tensions::{TensionKind, TensionSeverity, tension_label};
+    let actor = "agent:perf-reviewer";
+    let reviewer = Session::agent(actor.into(), Some("perf".into()), Role::Reviewer)
+        .expect("a reviewer session");
+    let human = writer();
+    let semantic_held = |st: &rdy_engine::ReadState| {
+        st.tensions()
+            .expect("tensions")
+            .iter()
+            .filter(|t| t.kind == TensionKind::Semantic)
+            .count()
+    };
+    // the queue: the state's tension set is built outside the timer
+    let st = r.read();
+    st.tensions().expect("warm tensions");
+    out.push(measure_timed(
+        &format!("review_requests_all_1k{sfx}"),
+        runs.read,
+        |_| {
+            let s = Instant::now();
+            let all = st.review_requests().expect("review requests");
+            let took = s.elapsed();
+            assert!(!all.is_empty(), "the in-flight changes ask for reviews");
+            took
+        },
+    ));
+    out.push(measure_timed(
+        &format!("review_next_1k{sfx}"),
+        runs.read,
+        |_| {
+            let s = Instant::now();
+            let q = st
+                .next_request(actor, &BTreeSet::new())
+                .expect("next request")
+                .expect("a request to take");
+            let case = st.case_of(&q.key, &q.items).expect("case file");
+            case_hash(&case);
+            s.elapsed()
+        },
+    ));
+    drop(st);
+    // the verdict: the request, its case hash and the state's tension set are read outside the
+    // timer; the timed part is the submit, the read of the set it carried and the settle
+    r.settle_tensions().expect("settle before the verdicts");
+    let mut opened: Vec<(String, String)> = vec![];
+    out.push(measure_timed(
+        &format!("review_submit_1k{sfx}"),
+        runs.incremental,
+        |_| {
+            let st = r.read();
+            let q = st
+                .next_request(actor, &BTreeSet::new())
+                .expect("next request")
+                .expect("a request to take");
+            let hash = case_hash(&st.case_of(&q.key, &q.items).expect("case file"));
+            let before = semantic_held(&st);
+            let view = q
+                .items
+                .iter()
+                .find_map(|i| match i.side {
+                    rdy_engine::tensions::SideRef::Change(c) => st
+                        .inflight_set()
+                        .expect("inflight set")
+                        .views_of
+                        .get(&c)
+                        .and_then(|v| v.first().cloned()),
+                    _ => None,
+                })
+                .expect("a change side held by a view");
+            let req = ReviewSubmitRequest {
+                request: request_label(&q.key),
+                case_hash: hash.to_string(),
+                verdict: "tension".into(),
+                findings: vec![FindingRequest {
+                    block: q.items[0].block.to_string(),
+                    note: "These two blocks cannot both hold.".into(),
+                }],
+                severity: Some("blocking".into()),
+                reason: Some("The reviewer advises that this pair blocks a landing.".into()),
+            };
+            drop(st);
+            let builds = rdy_engine::tensions::set::full_builds();
+            let s = Instant::now();
+            let info = r.submit_verdict(&reviewer, req).expect("a verdict");
+            let after = r.read();
+            after.tensions().expect("tensions");
+            r.settle_tensions().expect("settle");
+            let took = s.elapsed();
+            assert_eq!(
+                rdy_engine::tensions::set::full_builds(),
+                builds,
+                "the verdict carried the tension set"
+            );
+            assert_eq!(
+                semantic_held(&after),
+                before + 1,
+                "the verdict opened one semantic tension"
+            );
+            opened.push((info.tension.expect("the opened tension"), view));
+            took
+        },
+    ));
+    // the acceptance: the view of the change the tension was advised on is proposed (untimed);
+    // the timed part is the person's answer for that tension, the read of the set and the settle
+    let mut next = opened.iter();
+    out.push(measure_timed(
+        &format!("review_accept_1k{sfx}"),
+        runs.incremental,
+        |_| {
+            let (label, view) = next.next().expect("a tension a submit run opened");
+            let p = r
+                .propose(&human, view, "Perf review")
+                .expect("propose the view");
+            r.read().tensions().expect("tensions");
+            let req = AcceptRequest {
+                proposal: p.r#ref.clone(),
+                advised_digest: p.advised_digest.clone().expect("an advised set"),
+                tensions: vec![label.clone()],
+                ..Default::default()
+            };
+            let builds = rdy_engine::tensions::set::full_builds();
+            let s = Instant::now();
+            let info: AcceptInfo = r.accept_advice(&human, req).expect("an acceptance");
+            let after = r.read();
+            after.tensions().expect("tensions");
+            r.settle_tensions().expect("settle");
+            let took = s.elapsed();
+            assert_eq!(
+                rdy_engine::tensions::set::full_builds(),
+                builds,
+                "the acceptance carried the tension set"
+            );
+            let accepted = &info.accepted[0].id;
+            assert!(
+                after.tensions().expect("tensions").iter().any(|t| {
+                    &tension_label(&t.id) == accepted && t.severity == TensionSeverity::Blocking
+                }),
+                "the accepted tension blocks"
+            );
+            took
+        },
+    ));
+}
+
 /// Edit landings under `tensions_canon_drift_deep`'s timed build.
 pub const DRIFT_DEEP_LANDINGS: usize = 50;
 
@@ -2658,6 +2826,7 @@ pub fn run_workload() -> Vec<Measure> {
         INFLIGHT_N,
         TENSION_CITING,
     );
+    tier_reviews(&mut out, &mut r, "", &TYPICAL_RUNS);
     drop(r);
     // on projects of their own: the records they add move nothing above
     tier_coord(&mut out, dir.path(), "", &TYPICAL_RUNS, COORD_N);
@@ -3183,6 +3352,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
         INFLIGHT_N,
         TENSION_CITING,
     );
+    tier_reviews(&mut out, &mut r, sfx, &LARGE_RUNS);
     out
 }
 
@@ -3650,6 +3820,68 @@ mod tests {
             ]
         );
         assert!(r.read().tensions().expect("tensions").len() >= 10);
+    }
+
+    /// The review ops run end to end on a small tree, after the in-flight and tension ops.
+    #[test]
+    fn seperf1_the_review_ops_run_on_a_small_tree() {
+        rdy_model::seed_ids_for_tests(0x7365_6570);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let fx = fixture(&r, &docs);
+        let runs = Runs {
+            write: 1,
+            read: 2,
+            tree: 1,
+            materialize_cold: 2,
+            incremental: 2,
+            view_ops: 2,
+            landing: 2,
+            view_changes: 12,
+            landing_views: 8,
+        };
+        let mut scratch = vec![];
+        tier_inflight(&mut scratch, &mut r, &fx, "", &runs, 40);
+        tier_tensions(&mut scratch, &mut r, &fx, "", &runs, 40, 10);
+        let mut out = vec![];
+        tier_reviews(&mut out, &mut r, "", &runs);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "review_requests_all_1k",
+                "review_next_1k",
+                "review_submit_1k",
+                "review_accept_1k"
+            ]
+        );
+    }
+
+    #[test]
+    fn seperf1_the_review_ops_state_their_targets() {
+        for op in [
+            "review_requests_all_1k",
+            "review_next_1k",
+            "review_submit_1k",
+            "review_accept_1k",
+        ] {
+            assert!(spec_target(op).is_some(), "{op} has no target");
+        }
+        assert!(
+            spec_target("review_submit_1k")
+                .unwrap()
+                .contains("< 10 ms p99")
+        );
+        assert!(
+            spec_target("review_next_1k_50k")
+                .unwrap()
+                .contains("no spec target")
+        );
     }
 
     #[test]

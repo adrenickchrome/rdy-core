@@ -1170,3 +1170,40 @@ No laptop figures are judged here: the first timing of these ops is the Linux be
 Baseline: `qa-baseline.json` is not changed here.
 
 Deep gate (bench): <orchestrator fills in>
+
+## M2e1: semantic tensions (2026-10-11)
+
+The `qa-perf` tier gained `tier_reviews`, run right after `tier_tensions` in both tiers, on the
+same project: the 1,000 in-flight changes in 20 views (`inf0` to `inf19`), the citing claims, and
+the tension set `tier_tensions` leaves behind. The writer is `human:qa`. The reviewer is
+`agent:perf-reviewer` with the reviewer role. Each large-tier twin carries a `_50k` suffix. The op
+names keep `1k` whatever the fixture's size.
+
+Four ops:
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `review_requests_all_1k` | `review_requests()` on a state whose tension set is built (outside the timer): every request of every in-flight change, cold. Asserts at least one request | `runs.read` | recorded, no spec target: the worst case of a queue scan |
+| `review_next_1k` | `next_request` for the reviewer, then `case_of` and `case_hash` of that request: the first `rdy_review_next` | `runs.read` | recorded, no spec target |
+| `review_submit_1k` | `submit_verdict` with a `tension` verdict, one finding and `severity: blocking` with a reason, then the read of the new state's tension set, then `settle_tensions()`. The request, its case hash and the built tension set are read outside the timer. Asserts that `full_builds()` did not move (the verdict carried the set) and that the state holds one more semantic tension | `runs.incremental` | < 10 ms p99 with 1k in-flight changes (the tension-detection budget of M2 spec 15.1, applied to a verdict, carry and settle included) |
+| `review_accept_1k` | `accept_advice` as `human:qa` with no relay, for the one tension a submit run opened, then the read of the tension set, then `settle_tensions()`. The view of the advised change is proposed outside the timer. Asserts that `full_builds()` did not move and that the accepted tension blocks. Each run accepts a tension a submit run opened | `runs.incremental` | recorded, no spec target: a person's acceptance of one advised tension of a proposal |
+
+What each cost grows with:
+
+- The semantic detector costs nothing measurable when the project holds no records. It returns at
+  once, so `tension_carry_1k`, `tension_on_change_1k`, `tensions_full_1k` and `tensions_canon`
+  stay where they were. With records it is O(seeds) on the writer's pre-publish build: it reads
+  `SemanticState::involving(seed)` for each seed block and walks only the open records.
+- `review_requests_all_1k` grows with the in-flight changes and the candidate pairs of each. The
+  daemon never computes requests on the writer; they run on reads only.
+- `review_next_1k` reads the requests of a change only when the walk reaches that change, and
+  stops at the first request the reviewer may take. It also builds the case file of that request
+  from the in-flight state.
+- `review_submit_1k` and `review_accept_1k` pay for the verdict carry: the new tension set is
+  carried from the state before, with the pair's tension re-detected around its blocks.
+
+No laptop figures are judged here: the first timing of these ops is the Linux bench's.
+
+Baseline: `qa-baseline.json` is not changed here.
+
+Deep gate (bench): <orchestrator fills in>
