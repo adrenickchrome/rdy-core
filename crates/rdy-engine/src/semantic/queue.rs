@@ -2,8 +2,8 @@
 use crate::semantic::candidates::{Item, Request, request_label};
 use crate::tensions::SideRef;
 use crate::{E_SELF_REVIEW, RdyError, ReadState};
-use rdy_model::Hash;
-use std::collections::BTreeSet;
+use rdy_model::{Block, Hash};
+use std::collections::{BTreeSet, VecDeque};
 use std::ops::ControlFlow;
 
 impl ReadState {
@@ -42,10 +42,14 @@ impl ReadState {
         Ok(found)
     }
 
-    /// The actors who wrote item `i`: a change item's change's actor; for a canon item, the
-    /// actors of the changes [`ReadState::canon_item_writers`] names. A canon item that names
-    /// none fails closed (`E_SELF_REVIEW`); the message names the item's pair as `its pair`, so
-    /// a caller that knows the request uses [`ReadState::item_authors_of`].
+    /// The actors who wrote the text item `i` carries (Review Focus 4, D-TF2W6). A change
+    /// item: its change, and every other live write of the block that holds the item's content.
+    /// A canon item: the changes [`ReadState::canon_item_writers`] names; none fails closed
+    /// (`E_SELF_REVIEW`). From those writes the walk goes back while a write's base holds the
+    /// same content (a repin or a tracking-field edit keeps the text): the base's writers count
+    /// too, up to the first write that changed the content. An intent item: the intent's actor.
+    /// The refusal names the item's pair as `its pair`, so a caller that knows the request uses
+    /// [`ReadState::item_authors_of`].
     pub fn item_authors(&self, i: &Item) -> Result<Vec<String>, RdyError> {
         self.authors_of(i, "its pair")
     }
@@ -58,19 +62,19 @@ impl ReadState {
 
     fn authors_of(&self, i: &Item, label: &str) -> Result<Vec<String>, RdyError> {
         let reader = self.reader();
-        let mut out: Vec<String> = vec![];
-        let mut add = |a: String| {
-            if !out.contains(&a) {
-                out.push(a);
-            }
-        };
-        match &i.side {
+        let seeds: Vec<Hash> = match &i.side {
             SideRef::Change(c) => {
-                let known = self.tensions()?.writes().change(c).map(|f| f.actor.clone());
-                match known {
-                    Some(a) => add(a),
-                    None => add(reader.change(c)?.provenance.actor),
+                let set = self.tensions()?;
+                let mut seeds = vec![*c];
+                for w in set.writes().live_on(&i.block) {
+                    if let Some(b) = w.new.as_deref()
+                        && self.text_content(b) == i.content
+                        && !seeds.contains(&w.change)
+                    {
+                        seeds.push(w.change);
+                    }
                 }
+                seeds
             }
             SideRef::Canon { .. } => {
                 let writers = self.canon_item_writers(&i.block, Some(i.version))?;
@@ -85,13 +89,42 @@ impl ReadState {
                         "run rdy fsck; ask a person to look at the pair",
                     ));
                 }
-                for c in writers {
-                    add(reader.change(&c)?.provenance.actor);
-                }
+                writers
             }
-            SideRef::Intent { version, .. } => add(reader.intent(version)?.actor),
+            SideRef::Intent { version, .. } => return Ok(vec![reader.intent(version)?.actor]),
+        };
+        let mut out: Vec<String> = vec![];
+        let mut seen: BTreeSet<Hash> = BTreeSet::new();
+        // breadth first, so the item's own change's actor comes first
+        let mut todo: VecDeque<Hash> = seeds.into();
+        while let Some(c) = todo.pop_front() {
+            if !seen.insert(c) {
+                continue;
+            }
+            let change = reader.change(&c)?;
+            if !out.contains(&change.provenance.actor) {
+                out.push(change.provenance.actor.clone());
+            }
+            // the change's first op on the block names the version it started from
+            let Some(base) = change
+                .ops
+                .iter()
+                .find(|op| op.block_id() == &i.block)
+                .and_then(|op| op.base())
+            else {
+                continue;
+            };
+            if self.text_content(&reader.get_block(&base)?) == i.content {
+                todo.extend(self.canon_item_writers(&i.block, Some(base))?);
+            }
         }
         Ok(out)
+    }
+
+    /// The content hash of `b` as an item carries it: tracking fields, pins and derived fields
+    /// left out.
+    fn text_content(&self, b: &Block) -> Hash {
+        b.content_hash_with(self.reader().tracking())
     }
 
     /// Visits the requests in queue order until `visit` breaks. Each change's requests are

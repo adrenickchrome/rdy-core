@@ -27,6 +27,8 @@ fn next(e: &Local, s: &Session, owner: u64) -> serde_json::Value {
 fn se6_the_queue_runs_oldest_change_first() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
+    // the pinned clock moves a millisecond per read, so c1 is older than c2 on every run
+    let _c = pin_clock(1_000);
     let c1 = change_of(&put(&mut r, "a", upd(&s.c, "C changed.")));
     let c2 = change_of(&put(&mut r, "b", upd(&s.a, "A changed.")));
     let q = r.read().review_requests().unwrap();
@@ -187,4 +189,125 @@ fn se6_next_needs_the_reviewer_role_and_kind_tension() {
         k.message,
         "kind \"check\" is not a review kind; the only kind is tension"
     );
+}
+
+#[test]
+fn se6_a_repin_keeps_the_text_writer_as_an_author() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    // agent:w writes X (it cites A) and X lands
+    let x = created(&put(&mut r, "w", cite(&s.section, &s.a)), "$y");
+    land(&mut r, "w").unwrap();
+    // A changes and lands; agent:p only repins X, so X's text stays agent:w's
+    put(&mut r, "q", upd(&s.a, "A changed."));
+    land(&mut r, "q").unwrap();
+    let cp = change_of(&put(
+        &mut r,
+        "p",
+        serde_json::json!([{"op": "repin", "id": x.to_string()}]),
+    ));
+    let st = r.read();
+    let all = st.review_requests().unwrap();
+    assert!(!all.is_empty(), "the repin makes requests");
+    for q in &all {
+        let i = q
+            .items
+            .iter()
+            .find(|i| i.block == x)
+            .expect("every pair holds X");
+        assert_eq!(i.side, rdy_engine::tensions::SideRef::Change(cp));
+        let authors = st.item_authors_of(&q.key, i).unwrap();
+        assert!(authors.contains(&"agent:p".to_string()), "{authors:?}");
+        assert!(authors.contains(&"agent:w".to_string()), "{authors:?}");
+    }
+    assert_eq!(
+        st.next_request("agent:w", &BTreeSet::new()).unwrap(),
+        None,
+        "agent:w wrote X's text"
+    );
+    assert_eq!(st.next_request("agent:p", &BTreeSet::new()).unwrap(), None);
+    assert!(
+        st.next_request("agent:r", &BTreeSet::new())
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn se6_identical_text_by_a_second_actor_adds_both_authors() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "u", upd(&s.c, "C changed."));
+    put(&mut r, "v", upd(&s.c, "C changed."));
+    let st = r.read();
+    let all = st.review_requests().unwrap();
+    assert!(!all.is_empty());
+    for q in &all {
+        let i = q
+            .items
+            .iter()
+            .find(|i| i.block == s.c)
+            .expect("every pair holds C");
+        let authors = st.item_authors_of(&q.key, i).unwrap();
+        assert!(authors.contains(&"agent:u".to_string()), "{authors:?}");
+        assert!(authors.contains(&"agent:v".to_string()), "{authors:?}");
+    }
+    for a in ["agent:u", "agent:v"] {
+        assert_eq!(
+            st.next_request(a, &BTreeSet::new()).unwrap(),
+            None,
+            "{a} wrote C's text"
+        );
+    }
+    assert!(
+        st.next_request("agent:r", &BTreeSet::new())
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn se6_a_landed_repin_keeps_the_text_writer_as_a_canon_author() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    // agent:w writes X (it cites A) and X lands; A changes; agent:p's repin of X lands
+    let x = created(&put(&mut r, "w", cite(&s.section, &s.a)), "$y");
+    land(&mut r, "w").unwrap();
+    put(&mut r, "q", upd(&s.a, "A changed."));
+    land(&mut r, "q").unwrap();
+    put(
+        &mut r,
+        "p",
+        serde_json::json!([{"op": "repin", "id": x.to_string()}]),
+    );
+    land(&mut r, "p").unwrap();
+    // A changes again: its pairs with X hold X's canon item, which agent:p's landing carried
+    put(&mut r, "t", upd(&s.a, "A changed again."));
+    let st = r.read();
+    let with_x: Vec<_> = st
+        .review_requests()
+        .unwrap()
+        .into_iter()
+        .filter(|q| q.items.iter().any(|i| i.block == x))
+        .collect();
+    assert!(!with_x.is_empty(), "A pairs with X");
+    for q in &with_x {
+        let i = q.items.iter().find(|i| i.block == x).unwrap();
+        assert!(matches!(
+            i.side,
+            rdy_engine::tensions::SideRef::Canon { .. }
+        ));
+        let authors = st.item_authors_of(&q.key, i).unwrap();
+        assert!(authors.contains(&"agent:p".to_string()), "{authors:?}");
+        assert!(authors.contains(&"agent:w".to_string()), "{authors:?}");
+    }
+    // walk every request agent:w is offered: none holds X
+    let mut leased = BTreeSet::new();
+    while let Some(q) = st.next_request("agent:w", &leased).unwrap() {
+        assert!(
+            q.items.iter().all(|i| i.block != x),
+            "agent:w wrote X's text"
+        );
+        leased.insert(q.key);
+    }
 }
