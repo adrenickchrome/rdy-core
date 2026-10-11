@@ -4,7 +4,7 @@
 use super::kinds::{KindCount, kinds_of};
 use super::model::*;
 use super::score::{Rollup, RollupSums};
-use super::structural::{EntryCx, entry_of, structural_of};
+use super::structural::{CxMemo, EntryCx, entry_of, structural_of};
 use crate::error::E_BAD_INPUT;
 use crate::tensions::set::TensionSet;
 use crate::tensions::{SideRef, Tension, TensionStatus, tension_label};
@@ -20,6 +20,14 @@ thread_local! {
     static STATE_LAYER_BUILDS: Cell<u64> = const { Cell::new(0) };
     static ROLLUP_WALKS: Cell<u64> = const { Cell::new(0) };
     static SUSPECT_WALKS: Cell<u64> = const { Cell::new(0) };
+    static DISMISSALS_VISITED: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Test hook: this thread's count of dismissed mentions the state layer visited. A layer
+/// applied to some blocks visits only the dismissals of those blocks.
+#[doc(hidden)]
+pub fn mention_dismissals_visited() -> u64 {
+    DISMISSALS_VISITED.with(Cell::get)
 }
 
 /// Test hook: this thread's count of coverage inputs that read the suspects of every edge of a
@@ -607,11 +615,20 @@ impl ReadState {
         let wanted = |b: &BlockId| only.is_none_or(|o| o.contains(b));
         let mut touched: BTreeSet<BlockId> = BTreeSet::new();
 
-        // a dismissed mention is settled: its check stays, its issue goes (D-E6JD1)
-        for ((block, entity), _) in inputs.mention_dismissals.iter() {
-            if !wanted(block) {
-                continue;
-            }
+        // a dismissed mention is settled: its check stays, its issue goes (D-E6JD1); for some
+        // blocks, only their own dismissals, read by range (the map is keyed by block first)
+        let dismissed: Box<dyn Iterator<Item = &(BlockId, BlockId)>> = match only {
+            Some(o) => Box::new(o.iter().flat_map(|b| {
+                inputs
+                    .mention_dismissals
+                    .range((b.clone(), BlockId::MIN)..)
+                    .map(|(k, _)| k)
+                    .take_while(move |(x, _)| x == b)
+            })),
+            None => Box::new(inputs.mention_dismissals.keys()),
+        };
+        for (block, entity) in dismissed {
+            DISMISSALS_VISITED.with(|c| c.set(c.get() + 1));
             if let Some(e) = blocks.get_mut(block) {
                 let subject = entity.to_string();
                 e.issues.retain(|i| {
@@ -711,6 +728,9 @@ pub fn local_entries() -> u64 {
 pub(crate) struct ScopedEntries {
     memo: Option<Arc<CoverageIssues>>,
     local: LocalEntries,
+    /// What the batches worked out so far share, for the scope (by memo label) they read:
+    /// the tensions it counts and the entry context's memo, built once per briefing.
+    shared: Option<(String, Arc<Counted>, CxMemo)>,
 }
 
 impl ScopedEntries {
@@ -732,6 +752,7 @@ impl ReadState {
         Ok(ScopedEntries {
             memo: self.coverage_issues_if_cheap(scope)?,
             local: BTreeMap::new(),
+            shared: None,
         })
     }
 
@@ -779,7 +800,11 @@ impl ReadState {
         let g = self.graph(scope)?;
         let lex = self.lexicon(scope)?;
         let tensions = self.tensions()?;
-        let cx = EntryCx::new(&m, &g, &lex, self.pack());
+        let (counted, memo) = match entries.shared.take() {
+            Some((l, counted, memo)) if l == label => (counted, memo),
+            _ => (Arc::new(Counted::of(self, scope)), CxMemo::default()),
+        };
+        let cx = EntryCx::resume(&m, &g, &lex, self.pack(), memo);
         let mut blocks: imbl::OrdMap<BlockId, BlockEntry> = imbl::OrdMap::new();
         let mut suspects: Vec<Suspect> = vec![];
         for id in &new {
@@ -792,7 +817,7 @@ impl ReadState {
                 }));
             }
         }
-        let counted = Counted::of(self, scope);
+        entries.shared = Some((label.clone(), Arc::clone(&counted), cx.into_memo()));
         let layer = Layer {
             tensions: &tensions,
             counted: &counted,

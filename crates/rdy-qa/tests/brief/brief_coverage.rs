@@ -542,3 +542,59 @@ fn perf4_a_briefing_after_a_read_and_a_write_carries_the_coverage() {
         (layers, states, local)
     );
 }
+
+/// perf4 fix: a briefing that works out its own entries reads the dismissed mentions of its
+/// blocks only: with dismissals on other pages, it visits none of them.
+#[test]
+fn perf4_a_briefing_visits_no_dismissed_mention_of_another_page() {
+    use rdy_engine::coverage::{local_entries, mention_dismissals_visited};
+    let (_d, mut r) = project();
+    let c = world(&mut r);
+    let n = 5;
+    let ops: Vec<Value> = (0..n)
+        .map(|i| json!({"op": "create", "type": "claim", "id": format!("$m{i}"), "parent": c["$empty"], "body": format!("The Ledger holds entry {i}.")}))
+        .collect();
+    let m = write(&mut r, "more", Value::Array(ops)).unwrap().created;
+    land(&mut r, "more").unwrap();
+    for i in 0..n {
+        r.review_mention(
+            &writer(),
+            &Scope::Canon,
+            &m[&format!("$m{i}")],
+            &c["$t"],
+            rdy_engine::mention_review::MentionVerdict::Dismiss,
+            "everyday word",
+        )
+        .unwrap();
+    }
+    assert_eq!(r.read().mention_dismissals().len(), n);
+    let st = r.read();
+    let (visited, local) = (mention_dismissals_visited(), local_entries());
+    let b = st.brief(&Scope::Canon, &by_path("lone"), None).unwrap();
+    assert!(local_entries() > local, "the entries were worked out");
+    assert!(b.covers > 0);
+    assert_eq!(
+        mention_dismissals_visited(),
+        visited,
+        "no dismissal of another page visited"
+    );
+    // a briefing of the page that holds them still settles them, visiting each once per read
+    let visited = mention_dismissals_visited();
+    let b = st.brief(&Scope::Canon, &by_path("ops"), None).unwrap();
+    let cov = serde_json::to_value(&b.coverage).unwrap();
+    let issues = cov["issues"].as_array().unwrap();
+    assert!(
+        issues.iter().any(|i| i["code"] == "unlinked_mention"),
+        "c1's mention stays: {cov}"
+    );
+    for i in 0..n {
+        assert!(
+            !issues
+                .iter()
+                .any(|x| x["block"] == m[&format!("$m{i}")].as_str()
+                    && x["code"] == "unlinked_mention"),
+            "{cov}"
+        );
+    }
+    assert!(mention_dismissals_visited() > visited);
+}

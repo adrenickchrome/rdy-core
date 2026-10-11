@@ -45,6 +45,14 @@ pub(crate) struct EntryCx<'a> {
     affected: RefCell<HashMap<BlockId, bool>>,
 }
 
+/// What an [`EntryCx`] memoised, kept between contexts on the same scope of the same state
+/// (a briefing's batches of entries).
+#[derive(Default)]
+pub(crate) struct CxMemo {
+    deprecated: HashMap<BlockId, bool>,
+    affected: HashMap<BlockId, bool>,
+}
+
 impl<'a> EntryCx<'a> {
     pub(crate) fn new(
         m: &'a Materialized,
@@ -52,13 +60,33 @@ impl<'a> EntryCx<'a> {
         lex: &'a Lexicon,
         pack: &'a Pack,
     ) -> EntryCx<'a> {
+        EntryCx::resume(m, g, lex, pack, CxMemo::default())
+    }
+
+    /// A context that starts from `memo`, which an earlier context on the same scope of the
+    /// same state left ([`EntryCx::into_memo`]).
+    pub(crate) fn resume(
+        m: &'a Materialized,
+        g: &'a Graph,
+        lex: &'a Lexicon,
+        pack: &'a Pack,
+        memo: CxMemo,
+    ) -> EntryCx<'a> {
         EntryCx {
             m,
             g,
             lex,
             pack,
-            deprecated: RefCell::default(),
-            affected: RefCell::default(),
+            deprecated: RefCell::new(memo.deprecated),
+            affected: RefCell::new(memo.affected),
+        }
+    }
+
+    /// What this context memoised, for the next context on the same scope of the same state.
+    pub(crate) fn into_memo(self) -> CxMemo {
+        CxMemo {
+            deprecated: self.deprecated.into_inner(),
+            affected: self.affected.into_inner(),
         }
     }
 
