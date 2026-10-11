@@ -1,6 +1,6 @@
-//! cyc1: no path that combines moves from different changes (include, fork, landing and the
-//! landing's rebase of other views) may leave two blocks each other's ancestors; and a parent
-//! loop in a damaged store never hangs a write.
+//! cyc1: an include, a fork and a landing that would make two blocks each other's ancestors are
+//! refused; a parent loop a landing's rebase leaves in a view, or one in a damaged store, never
+//! hangs a write.
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
 use serde_json::json;
@@ -72,18 +72,34 @@ fn cyc1_an_include_that_would_make_two_blocks_each_others_ancestors_is_refused_a
     r.fsck().unwrap();
 }
 
+/// A landing rebases every open view onto it and is not refused for a view it leaves looping
+/// (the gate refuses that view's proposal: `the_gate_refuses_a_parent_cycle_made_by_two_views`);
+/// a move into the loop in that view errors instead of hanging the writer.
 #[test]
-fn cyc1_a_landing_whose_rebase_would_make_a_view_cyclic_is_refused_and_writes_nothing() {
+fn cyc1_a_move_into_a_loop_a_landing_left_in_a_view_errors_and_does_not_hang() {
     let (_d, mut r) = project();
     let (a, b) = seed_ab(&mut r);
     write(&mut r, "x", mv(&a, &b)).unwrap();
+    let c = write(
+        &mut r,
+        "x",
+        json!([{"op": "create", "type": "claim", "id": "$c", "parent": b, "body": "c"}]),
+    )
+    .unwrap()
+    .created["$c"]
+        .clone();
     write(&mut r, "y", mv(&b, &a)).unwrap();
-    let canon = r.read().canon_head();
-    let e = land(&mut r, "y").unwrap_err();
-    cycle_refusal(&e, &a, &b);
-    assert!(e.message.contains("\"x\""), "names the view: {e}");
-    assert_eq!(r.read().canon_head(), canon, "nothing landed");
-    r.fsck().unwrap();
+    land(&mut r, "y").unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let res = write(&mut r, "x", mv(&c, &a));
+        let _ = tx.send(res.map(|_| ()).map_err(|e| e.to_string()));
+    });
+    let res = rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the write hung in a parent loop");
+    let e = res.unwrap_err();
+    assert!(e.contains("loop"), "{e}");
 }
 
 #[test]
