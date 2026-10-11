@@ -442,6 +442,83 @@ fn perf3_a_named_new_doc_carries() {
     carries(&mut r, None);
 }
 
+/// perf3 review: a named doc created beside a nameless one (an M1 doc without a stored name,
+/// committed raw) gives up (`!has_nameless_under`), and the next read equals a rebuild. The
+/// guard is kept although no write reaches a divergence: a write refuses a name that any
+/// sibling's effective name holds (`E_PATH_CLASH`), and a nameless doc's effective name is the
+/// first free one of its candidates, so a name no sibling holds changes no derived name.
+#[test]
+fn perf3_a_named_doc_beside_a_nameless_one_rebuilds() {
+    let (_d, mut r) = project();
+    cc6_world(&mut r);
+    // committed raw in a view of its own and landed raw (no write takes a nameless doc)
+    raw_commit(
+        &mut r,
+        "raw",
+        vec![
+            raw(
+                "d-NNNNN",
+                "doc",
+                None,
+                "W",
+                &[("title", "Legacy"), ("doc_type", "page")],
+                "",
+            ),
+            raw(
+                "p-NNNNN",
+                "prose",
+                Some("d-NNNNN"),
+                "V",
+                &[],
+                "The Ledger was here.",
+            ),
+        ],
+    );
+    let p = r
+        .store_mut()
+        .propose("raw", "raw", writer().provenance())
+        .unwrap();
+    r.store_mut().land(&p, approver().provenance()).unwrap();
+    r.invalidate();
+    let v = Scope::View("next".into());
+    write(
+        &mut r,
+        "next",
+        json!([{"op": "create", "type": "prose", "parent": "d-NNNNN", "body": "One more line."}]),
+    )
+    .unwrap();
+    r.read().coverage_issues(&v).unwrap();
+    // the effective name is held: the write is refused
+    let clash = write(
+        &mut r,
+        "next",
+        json!([{"op": "create", "type": "doc", "fields": {"name": "LEGACY", "title": "Clash", "doc_type": "page"}}]),
+    )
+    .unwrap_err();
+    assert_eq!(clash.code, E_PATH_CLASH);
+    for (name, title) in [("legacy-2", "Legacy"), ("fresh", "Legacy")] {
+        r.read().coverage_issues(&v).unwrap();
+        let before = structural_builds();
+        write(
+            &mut r,
+            "next",
+            json!([{"op": "create", "type": "doc", "fields": {"name": name, "title": title, "doc_type": "page"}}]),
+        )
+        .unwrap();
+        r.read().coverage_issues(&v).unwrap();
+        assert!(structural_builds() > before, "{name}: the carry gave up");
+        same(&r, &v);
+        same_issues(&r, &v);
+    }
+    assert_eq!(
+        r.read()
+            .materialized(&v)
+            .unwrap()
+            .name_of(&BlockId::parse("d-NNNNN").unwrap()),
+        Some("legacy".to_string())
+    );
+}
+
 /// Fix round 1: the perf hook `carry_for_perf` (what `coverage_carry` times) makes the call
 /// `Built::after` makes: for the ops of one write, from the state before it to the state after,
 /// it returns the layer the write carried, builds nothing in full, and gives up where the write
