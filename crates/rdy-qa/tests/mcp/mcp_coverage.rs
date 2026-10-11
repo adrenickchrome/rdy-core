@@ -74,4 +74,9 @@ fn cc12_a_small_budget_cuts_issues_and_says_so() {
     assert_eq!(v["truncated"], true, "{v}");
     assert!(v["omitted"].as_u64().unwrap() > 0, "{v}");
     assert!(v["issues_total"].as_u64().unwrap() >= 8, "{v}");
+    assert_eq!(
+        v["issues"].as_array().unwrap().len() as u64 + v["omitted"].as_u64().unwrap(),
+        v["issues_total"].as_u64().unwrap(),
+        "the cut list is the issues: {v}"
+    );
 }

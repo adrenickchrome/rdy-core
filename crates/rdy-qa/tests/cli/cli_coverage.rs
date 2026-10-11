@@ -108,3 +108,51 @@ fn cc12_a_path_narrows_the_report() {
     assert!(!out.status.success());
     s.stop();
 }
+
+/// A landed doc with `n` claims that each name the Ledger term without a link: `n` issues.
+fn many_mentions(s: &Served, n: usize) {
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    let mut ops = vec![
+        json!({"op": "create", "type": "doc", "id": "$o", "fields": {"name": "ops", "title": "Ops", "doc_type": "overview"}}),
+        json!({"op": "create", "type": "section", "id": "$s", "parent": "$o", "fields": {"title": "Summary"}}),
+        json!({"op": "create", "type": "term", "parent": "$s", "fields": {"name": "Ledger"}, "body": "Holds balances."}),
+    ];
+    for i in 0..n {
+        ops.push(json!({"op": "create", "type": "claim", "parent": "$s",
+            "body": format!("The Ledger is append-only, rule {i}.")}));
+    }
+    write(&mut r, "work", json!(ops)).unwrap();
+    land(&mut r, "work").unwrap();
+    r.close().unwrap();
+}
+
+const MORE: &str = "(pass --max-tokens for more)";
+
+#[test]
+fn cc12_max_tokens_shows_more_issues() {
+    let s = Served::new();
+    many_mentions(&s, 150);
+    let cut = s.rdy(&["coverage"]);
+    assert!(cut.status.success());
+    let cut = String::from_utf8_lossy(&cut.stdout).into_owned();
+    let line = cut
+        .lines()
+        .find(|l| l.contains("more"))
+        .unwrap_or_else(|| panic!("a cut report says so: {cut}"));
+    assert!(line.starts_with("  … ") && line.ends_with(MORE), "{line}");
+    let shown = |t: &str| t.lines().filter(|l| l.contains("unlinked_mention")).count();
+    let (ok, j) = s.json(&["--json", "coverage", "--max-tokens", "100000"]);
+    assert!(ok, "{j}");
+    let all = String::from_utf8_lossy(&s.rdy(&["coverage", "--max-tokens", "100000"]).stdout)
+        .into_owned();
+    assert!(shown(&all) > shown(&cut), "a larger budget shows more");
+    assert!(!all.contains(MORE), "nothing is cut, no hint: {all}");
+    assert_eq!(
+        j["issues"].as_array().unwrap().len() as u64,
+        j["issues_total"].as_u64().unwrap()
+    );
+    assert!(j.get("omitted").is_none(), "{j}");
+    let (_, small) = s.json(&["--json", "coverage", "--max-tokens", "300"]);
+    assert_eq!(small["truncated"], true, "{small}");
+    s.stop();
+}

@@ -13,6 +13,9 @@ pub(crate) struct CoverageArgs {
     scope: Option<String>,
     /// Only the docs at or under this path.
     path: Option<String>,
+    /// The budget for the report; issues that do not fit are left out from the end.
+    #[arg(long = "max-tokens")]
+    max_tokens: Option<usize>,
 }
 
 /// The text of a `coverage` reply: the score, the dimensions, the lowest pages, the areas and
@@ -81,14 +84,22 @@ fn coverage_text(v: &Value) -> String {
     }
     let cut = total.saturating_sub(issues.len() as u64);
     if cut > 0 {
-        out.push(format!("  … {cut} more"));
+        out.push(format!("  … {cut} more (pass --max-tokens for more)"));
     }
     out.join("\n")
 }
 
 pub(crate) fn coverage(env: &Env, a: CoverageArgs) -> Result<(Value, String), ErrorReply> {
-    let CoverageArgs { scope, path } = a;
-    let v = call(env, "coverage", json!({"scope": scope, "path": path}))?;
+    let CoverageArgs {
+        scope,
+        path,
+        max_tokens,
+    } = a;
+    let v = call(
+        env,
+        "coverage",
+        json!({"scope": scope, "path": path, "max_tokens": max_tokens}),
+    )?;
     let t = coverage_text(&v);
     Ok((v, t))
 }
@@ -110,7 +121,7 @@ mod tests {
         });
         assert_eq!(
             coverage_text(&v),
-            "coverage 80 (canon)\n  grounded 70  governed 100\nlowest pages:\n  70  ops\n  … 2 more\nareas:\n  75  ops\nissues (3):\n  c-1  consistent  dismissed_tension  do it  (dismissed by human:a: fine)\n  … 2 more"
+            "coverage 80 (canon)\n  grounded 70  governed 100\nlowest pages:\n  70  ops\n  … 2 more\nareas:\n  75  ops\nissues (3):\n  c-1  consistent  dismissed_tension  do it  (dismissed by human:a: fine)\n  … 2 more (pass --max-tokens for more)"
         );
     }
 }
