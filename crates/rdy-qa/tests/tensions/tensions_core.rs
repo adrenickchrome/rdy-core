@@ -358,7 +358,7 @@ fn tset1_no_code_outside_the_detectors_names_a_kind() {
     // a kind; only rdy-schema and the detector files (each holds `impl Detector for`) do
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../rdy-engine/src");
     let variant = regex::Regex::new(
-        r"TensionKind::(EditCollision|Fork|PremiseShift|AreaOverlap|DuplicateDefinition|UnjustifiedChange|DeprecatedReference|ValueDisagreement)\b",
+        r"TensionKind::(EditCollision|Fork|PremiseShift|AreaOverlap|DuplicateDefinition|UnjustifiedChange|DeprecatedReference|ValueDisagreement|RestatementDrift)\b",
     )
     .unwrap();
     let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(src.join("tensions"))

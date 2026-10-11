@@ -111,14 +111,25 @@ fn justification(j: &Justification) -> JustificationInfo {
     }
 }
 
-/// What one call has already decoded: changes by hash, landing refs by change and by landing
-/// hash, the view's included set, and the landing the scope reads as of. Never kept across
-/// calls, so a landing shows on the first read after it.
+/// A canon block's text before its newest edit (restatement drift, FW-CH2): the body of the
+/// version the newest `update` replaced, and the landing (`at_ms`, landing id) that carried the
+/// newest version, when known.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviousText {
+    pub body: String,
+    pub landed_at: Option<(i64, String)>,
+}
+
+/// What one call has already decoded: changes by hash (and each one's ops by block), landing
+/// refs by change and by landing hash, the view's included set, and the landing the scope reads
+/// as of. Never kept across calls, so a landing shows on the first read after it.
 struct Memo<'a> {
     reader: &'a StoreReader,
     included: Option<HashSet<Hash>>,
     head: Option<Hash>,
     changes: HashMap<Hash, Arc<Change>>,
+    /// For each change read by [`Memo::previous`], its op positions by block.
+    ops: HashMap<Hash, HashMap<BlockId, Vec<usize>>>,
     landed: HashMap<Hash, Option<Hash>>,
     landings: HashMap<Hash, LandingRef>,
 }
@@ -151,6 +162,7 @@ impl<'a> Memo<'a> {
             included,
             head,
             changes: HashMap::new(),
+            ops: HashMap::new(),
             landed: HashMap::new(),
             landings: HashMap::new(),
         })
@@ -261,6 +273,69 @@ impl<'a> Memo<'a> {
         Ok((entry, prev))
     }
 
+    /// The (`at_ms`, landing id) of the landing that carried change `c`, when it landed.
+    fn landed_at(&mut self, c: &Hash) -> Result<Option<(i64, String)>, RdyError> {
+        Ok(self.landing(c)?.map(|l| (l.at_ms, l.id)))
+    }
+
+    /// The newest landing of `version` of `id`: that of the change that wrote it.
+    fn newest_landing(
+        &mut self,
+        version: &Hash,
+        id: &BlockId,
+    ) -> Result<Option<(i64, String)>, RdyError> {
+        let c = self
+            .writer_of(version, id, &HashSet::new())?
+            .ok_or_else(|| no_writer(version, id))?;
+        self.landed_at(&c)
+    }
+
+    /// The `previous` step: when the newest entry for `version` of `id` is an `update`, the body
+    /// of its base and the newest version's landing; `None` after a create. The change's ops are
+    /// indexed by block once, so a change that writes many blocks is scanned once.
+    fn previous(&mut self, version: &Hash, id: &BlockId) -> Result<Option<PreviousText>, RdyError> {
+        let c = self
+            .writer_of(version, id, &HashSet::new())?
+            .ok_or_else(|| no_writer(version, id))?;
+        let change = self.change(&c)?;
+        let by_block = self.ops.entry(c).or_insert_with(|| {
+            let mut m: HashMap<BlockId, Vec<usize>> = HashMap::new();
+            for (i, op) in change.ops.iter().enumerate() {
+                m.entry(op.block_id().clone()).or_default().push(i);
+            }
+            m
+        });
+        let base = by_block
+            .get(id)
+            .into_iter()
+            .flatten()
+            .rev()
+            .find_map(|&i| match &change.ops[i] {
+                Op::Create { block } if block.version_hash() == *version => Some(None),
+                Op::Update { base, block } if block.version_hash() == *version => Some(Some(*base)),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                RdyError::new(
+                    E_IO,
+                    format!(
+                        "change {} does not write version {} of {id}",
+                        c.short(),
+                        version.short()
+                    ),
+                    "run rdy fsck",
+                )
+            })?;
+        let Some(base) = base else {
+            return Ok(None);
+        };
+        let body = self.reader.get_block(&base)?.body;
+        Ok(Some(PreviousText {
+            body,
+            landed_at: self.landed_at(&c)?,
+        }))
+    }
+
     /// The newest entry for `version` of `id`.
     fn last(&mut self, version: &Hash, id: &BlockId) -> Result<HistoryEntry, RdyError> {
         let c = self
@@ -354,6 +429,47 @@ impl ReadState {
             }
             let version = version_in(&m, id)?;
             out.insert(id.clone(), memo.last(&version, id)?);
+        }
+        Ok(out)
+    }
+
+    /// For each canon block in `ids` whose newest version is an `update`, the body of the version
+    /// before it and the landing of the newest one (restatement drift, FW-CH2). A block whose
+    /// newest version is a create is left out. One memo is shared across the ids.
+    pub fn previous_texts(
+        &self,
+        ids: &[BlockId],
+    ) -> Result<BTreeMap<BlockId, PreviousText>, RdyError> {
+        let m = self.materialized(&Scope::Canon)?;
+        let mut memo = Memo::new(self, &Scope::Canon)?;
+        let mut out = BTreeMap::new();
+        for id in ids {
+            if out.contains_key(id) {
+                continue;
+            }
+            let version = version_in(&m, id)?;
+            if let Some(p) = memo.previous(&version, id)? {
+                out.insert(id.clone(), p);
+            }
+        }
+        Ok(out)
+    }
+
+    /// For each canon block in `ids`, the (`at_ms`, landing id) of the landing that carried its
+    /// canon version (`None` when that change has not landed). One memo is shared across the ids.
+    pub fn canon_landed_at(
+        &self,
+        ids: &[BlockId],
+    ) -> Result<BTreeMap<BlockId, Option<(i64, String)>>, RdyError> {
+        let m = self.materialized(&Scope::Canon)?;
+        let mut memo = Memo::new(self, &Scope::Canon)?;
+        let mut out = BTreeMap::new();
+        for id in ids {
+            if out.contains_key(id) {
+                continue;
+            }
+            let version = version_in(&m, id)?;
+            out.insert(id.clone(), memo.newest_landing(&version, id)?);
         }
         Ok(out)
     }

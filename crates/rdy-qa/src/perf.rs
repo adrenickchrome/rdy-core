@@ -203,7 +203,7 @@ fn spec_target(op: &str) -> Option<String> {
         "tension_carry_1k" | "tension_on_change_1k" => {
             "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change and tension detection, included in the write response)"
         }
-        "tension_value_1k" => {
+        "tension_value_1k" | "tension_drift_1k" => {
             "< 10 ms p95 with tension detection included in the write (reference/performance tb-XBXR4)"
         }
         "tension_on_change_delete_1k" | "tension_on_change_view_op_1k" => {
@@ -1541,6 +1541,60 @@ fn tier_tensions(
                     .iter()
                     .any(|t| t.kind == rdy_engine::tensions::TensionKind::ValueDisagreement),
                 "the write opened a value disagreement"
+            );
+            took
+        },
+    ));
+    // restatement drift (cc7): one 20-word prose block per run and 50 blocks that restate it are
+    // written once into `inf1` (untimed; the run blocks restate each other too); each run then
+    // edits its block inside the shared text, and the timed part is the tension delta and report
+    // of that write, as in `tension_on_change_1k`
+    const SAID: &str = "Every queued job retries for five seconds and then reports one failure to its owner through the shared alert channel.";
+    let mut ops: Vec<serde_json::Value> = (0..runs.incremental)
+        .map(|k| {
+            json!({"op": "create", "type": "prose", "id": format!("$x{k}"), "parent": section,
+                "body": SAID})
+        })
+        .collect();
+    ops.extend((0..50).map(|k| {
+        json!({"op": "create", "type": "prose", "parent": section,
+            "body": format!("Restated {k}: {SAID}")})
+    }));
+    let d = write(r, "inf1", serde_json::Value::Array(ops)).expect("restated blocks");
+    let edited: Vec<String> = (0..runs.incremental)
+        .map(|k| {
+            d.created
+                .get(&format!("$x{k}"))
+                .expect("a restated block")
+                .to_string()
+        })
+        .collect();
+    out.push(measure_timed(
+        &format!("tension_drift_1k{sfx}"),
+        runs.incremental,
+        |i| {
+            let before = r.read();
+            before.tensions().expect("warm tensions");
+            let w = write(
+                r,
+                "inf1",
+                json!([{"op": "update", "id": edited[i], "body": SAID.replace("five", "ten")}]),
+            )
+            .expect("an edit of restated text");
+            let change: Hash = w.change.parse().expect("change");
+            let after = r.read();
+            let s = Instant::now();
+            let delta = rdy_engine::tensions::tension_delta(&before, &after, Some(&[change]))
+                .expect("delta");
+            rdy_engine::tensions::delta::on_change(&before, &after, "inf1", None, &delta)
+                .expect("on_change");
+            let took = s.elapsed();
+            assert!(
+                delta
+                    .opened
+                    .iter()
+                    .any(|t| t.kind == rdy_engine::tensions::TensionKind::RestatementDrift),
+                "the write opened a restatement drift"
             );
             took
         },
@@ -3253,7 +3307,8 @@ mod tests {
                 "tensions_full_1k",
                 "tensions_canon",
                 "gate_tensions_1k",
-                "tension_value_1k"
+                "tension_value_1k",
+                "tension_drift_1k"
             ]
         );
         assert!(r.read().tensions().expect("tensions").len() >= 10);
@@ -3271,6 +3326,7 @@ mod tests {
             "tensions_canon",
             "gate_tensions_1k",
             "tension_value_1k",
+            "tension_drift_1k",
         ] {
             assert!(spec_target(op).is_some(), "{op} has no target");
         }

@@ -10,10 +10,10 @@
 //! live in-flight writes; a `Found` is kept only when it has a change side) and in
 //! [`DetectScope::Canon`] (it sees no in-flight write; a `Found` is kept only when every side is
 //! canon). The tension set is the union of both, by id. A kind reports a canon form only when it
-//! describes a standing condition of canon (fork, duplicate definition, deprecated reference and
-//! value disagreement; Coverage and confidence adds restatement drift), and does so when
-//! `cx.scope()` is `DetectScope::Canon`. The canon part is memoised per canon build, so a
-//! canon-scope run must read canon only: there `cx.writes` is empty, `DetectCx::inflight_m` and
+//! describes a standing condition of canon (fork, duplicate definition, deprecated reference,
+//! value disagreement and restatement drift), and does so when `cx.scope()` is
+//! `DetectScope::Canon`. The canon part is memoised per canon build, so a canon-scope run must
+//! read canon only: there `cx.writes` is empty, `DetectCx::inflight_m` and
 //! `DetectCx::inflight_graph` return canon's, and a detector must not read the published
 //! state's in-flight set, views or coordination refs through `cx.st`. The canon part is always
 //! a full run (no seeds). An index a new kind adds to `DetectCx` is lazy (a `OnceLock`), so the
@@ -23,6 +23,7 @@ pub mod collision;
 pub mod delta;
 pub mod deprecated;
 pub mod dismiss;
+pub mod drift;
 pub mod duplicate;
 pub mod fork;
 pub mod index;
@@ -289,7 +290,7 @@ pub fn judged_on_the_net_change(kind: TensionKind) -> bool {
 }
 
 /// The registry: one detector per kind, in `TensionKind::ALL` order.
-pub static DETECTORS: [&dyn Detector; 8] = [
+pub static DETECTORS: [&dyn Detector; 9] = [
     &collision::EditCollision,
     &fork::Fork,
     &premise::PremiseShift,
@@ -298,4 +299,5 @@ pub static DETECTORS: [&dyn Detector; 8] = [
     &unjustified::UnjustifiedChange,
     &deprecated::DeprecatedReference,
     &value::ValueDisagreement,
+    &drift::RestatementDrift,
 ];

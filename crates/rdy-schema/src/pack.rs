@@ -234,10 +234,11 @@ pub enum TensionKind {
     UnjustifiedChange,
     DeprecatedReference,
     ValueDisagreement,
+    RestatementDrift,
 }
 
 impl TensionKind {
-    pub const ALL: [TensionKind; 8] = [
+    pub const ALL: [TensionKind; 9] = [
         TensionKind::EditCollision,
         TensionKind::Fork,
         TensionKind::PremiseShift,
@@ -246,6 +247,7 @@ impl TensionKind {
         TensionKind::UnjustifiedChange,
         TensionKind::DeprecatedReference,
         TensionKind::ValueDisagreement,
+        TensionKind::RestatementDrift,
     ];
 
     /// The wire name.
@@ -259,6 +261,7 @@ impl TensionKind {
             TensionKind::UnjustifiedChange => "unjustified_change",
             TensionKind::DeprecatedReference => "deprecated_reference",
             TensionKind::ValueDisagreement => "value_disagreement",
+            TensionKind::RestatementDrift => "restatement_drift",
         }
     }
 
@@ -266,7 +269,8 @@ impl TensionKind {
         match self {
             TensionKind::AreaOverlap
             | TensionKind::UnjustifiedChange
-            | TensionKind::DeprecatedReference => TensionSeverity::Advisory,
+            | TensionKind::DeprecatedReference
+            | TensionKind::RestatementDrift => TensionSeverity::Advisory,
             _ => TensionSeverity::Blocking,
         }
     }
