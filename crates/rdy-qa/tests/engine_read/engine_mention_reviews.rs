@@ -122,3 +122,108 @@ fn cc4_refusals_name_their_fix() {
         .unwrap_err();
     assert!(e.message.contains("already dismissed"), "{}", e.message);
 }
+
+fn ids(c: &str, t: &str) -> (rdy_model::BlockId, rdy_model::BlockId) {
+    (
+        rdy_model::BlockId::parse(c).unwrap(),
+        rdy_model::BlockId::parse(t).unwrap(),
+    )
+}
+
+#[test]
+fn cc4_a_restore_holds_across_a_reopen_and_a_later_dismissal_too() {
+    let (d, mut r, c, t) = world();
+    let (cb, tb) = ids(&c, &t);
+    r.review_mention(&writer(), &w(), &c, &t, MentionVerdict::Dismiss, "passing")
+        .unwrap();
+    r.review_mention(
+        &writer(),
+        &w(),
+        &c,
+        &t,
+        MentionVerdict::Restore,
+        "it is the service",
+    )
+    .unwrap();
+    drop(r);
+    // the full publish at open keeps only the pairs whose latest review dismisses
+    let mut r = Rdy::open(d.path()).unwrap();
+    assert!(
+        r.read().mention_dismissed(&cb, &tb).is_none(),
+        "a restored mention stays open after a reopen"
+    );
+    r.review_mention(
+        &writer(),
+        &w(),
+        &c,
+        &t,
+        MentionVerdict::Dismiss,
+        "passing again",
+    )
+    .unwrap();
+    drop(r);
+    let r = Rdy::open(d.path()).unwrap();
+    assert!(
+        r.read().mention_dismissed(&cb, &tb).is_some(),
+        "a later dismissal wins after a reopen"
+    );
+}
+
+#[test]
+fn cc4_a_linked_mention_is_refused_and_a_bad_id_is_bad_input() {
+    let (_d, mut r) = project();
+    let wr = write(&mut r, "work", json!([
+        {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "ops", "title": "Ops", "doc_type": "page"}},
+        {"op": "create", "type": "term", "id": "$t", "parent": "$o", "fields": {"name": "Ledger"}, "body": "Holds balances."},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$o", "body": "Every write passes the Ledger ({{$t}})."}
+    ])).unwrap();
+    let (c, t) = (wr.created["$c"].clone(), wr.created["$t"].clone());
+    let e = r
+        .review_mention(&writer(), &w(), &c, &t, MentionVerdict::Dismiss, "x")
+        .unwrap_err();
+    assert_eq!(e.code, E_BAD_INPUT);
+    assert!(e.message.contains("does not name"), "{}", e.message);
+    assert!(
+        e.fix.contains("a linked mention needs no review"),
+        "{}",
+        e.fix
+    );
+    let (cb, tb) = ids(&c, &t);
+    assert!(r.read().mention_dismissed(&cb, &tb).is_none());
+    for (b, en) in [("not-an-id", t.as_str()), (c.as_str(), "not-an-id")] {
+        let e = r
+            .review_mention(&writer(), &w(), b, en, MentionVerdict::Dismiss, "x")
+            .unwrap_err();
+        assert_eq!(e.code, E_BAD_INPUT);
+        assert!(e.fix.contains("pass the block id"), "{}", e.fix);
+    }
+}
+
+#[test]
+fn cc4_a_blank_or_overlong_reason_says_what_a_reason_is() {
+    let (_d, mut r, c, t) = world();
+    for reason in ["  ".to_string(), "x".repeat(2001)] {
+        let e = r
+            .review_mention(&writer(), &w(), &c, &t, MentionVerdict::Dismiss, &reason)
+            .unwrap_err();
+        assert_eq!(e.code, E_BAD_INPUT);
+        assert_eq!(
+            e.message,
+            "a mention review needs a reason of 1 to 2000 characters"
+        );
+        assert_eq!(
+            e.fix,
+            "say in a few words why the mention is passing, or why it needs a link again"
+        );
+    }
+    // the largest allowed reason passes
+    r.review_mention(
+        &writer(),
+        &w(),
+        &c,
+        &t,
+        MentionVerdict::Dismiss,
+        &"x".repeat(2000),
+    )
+    .unwrap();
+}
