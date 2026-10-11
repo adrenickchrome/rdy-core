@@ -126,19 +126,30 @@ fn synthetic(n: usize) -> CoverageIssues {
     out
 }
 
+/// The doc path of each block with an issue, as a caller builds it for the briefing.
+fn doc_paths(st: &ReadState, i: &CoverageIssues) -> BTreeMap<String, String> {
+    let m = st.materialized(&Scope::Canon).unwrap();
+    i.blocks
+        .iter()
+        .filter(|(_, e)| !e.issues.is_empty())
+        .filter_map(|(id, e)| Some((id.to_string(), m.path_of(e.doc.as_ref()?)?)))
+        .collect()
+}
+
 #[test]
 fn cc10_the_level_follows_the_closed_rule() {
     let (_d, mut r) = project();
     let c = world(&mut r);
     let st = r.read();
     let i = st.coverage_issues(&Scope::Canon).unwrap();
+    let paths = doc_paths(&st, &i);
     // d1: no issue
     assert_eq!(
-        confidence_of(&i, &ids(&[&c["$d1"]]), None).confidence,
+        confidence_of(&i, &ids(&[&c["$d1"]]), None, &paths).confidence,
         Level::High
     );
     // c1: completeness issues only
-    let k = confidence_of(&i, &ids(&[&c["$c1"]]), None);
+    let k = confidence_of(&i, &ids(&[&c["$c1"]]), None, &paths);
     assert_eq!(k.confidence, Level::Medium);
     assert_eq!(k.reasons[0].code, IssueCode::UntiedContent);
     // the same block as a search hit: text with no entity behind it
@@ -146,7 +157,8 @@ fn cc10_the_level_follows_the_closed_rule() {
         confidence_of(
             &i,
             &ids(&[&c["$c1"]]),
-            Some(&BlockId::parse(&c["$c1"]).unwrap())
+            Some(&BlockId::parse(&c["$c1"]).unwrap()),
+            &paths
         )
         .confidence,
         Level::Low
@@ -159,7 +171,13 @@ fn cc10_an_open_suspect_anywhere_in_the_neighbourhood_is_low_and_leads_the_reaso
     let (citer, target) = landed_citation_then_target_changed(&mut r);
     let st = r.read();
     let i = st.coverage_issues(&Scope::Canon).unwrap();
-    let k = confidence_of(&i, &[citer.clone(), target].into_iter().collect(), None);
+    let paths = doc_paths(&st, &i);
+    let k = confidence_of(
+        &i,
+        &[citer.clone(), target].into_iter().collect(),
+        None,
+        &paths,
+    );
     assert_eq!(k.confidence, Level::Low);
     assert_eq!(k.reasons[0].code, IssueCode::OpenSuspect);
 }
@@ -169,10 +187,12 @@ fn cc10_a_dismissed_tension_alone_is_medium() {
     let (_d, mut r) = project();
     let (a, _b, label) = canon_duplicate_pair(&mut r);
     r.dismiss_tension(&writer(), &label, "on purpose").unwrap();
-    let i = r.read().coverage_issues(&Scope::Canon).unwrap();
+    let st = r.read();
+    let i = st.coverage_issues(&Scope::Canon).unwrap();
+    let paths = doc_paths(&st, &i);
     let only_tension: CoverageIssues = keep_codes(&i, &[IssueCode::DismissedTension]);
     assert_eq!(
-        confidence_of(&only_tension, &[a].into_iter().collect(), None).confidence,
+        confidence_of(&only_tension, &[a].into_iter().collect(), None, &paths).confidence,
         Level::Medium
     );
 }
@@ -180,7 +200,7 @@ fn cc10_a_dismissed_tension_alone_is_medium() {
 #[test]
 fn cc10_reasons_are_capped_at_five() {
     let i = synthetic(7); // one block with seven unlinked-mention issues
-    let k = confidence_of(&i, &ids(&["c-AAAAA"]), None);
+    let k = confidence_of(&i, &ids(&["c-AAAAA"]), None, &BTreeMap::new());
     assert_eq!((k.reasons.len(), k.reasons_omitted), (5, 2));
 }
 
@@ -209,4 +229,33 @@ fn cc10_a_hit_neighbourhood_holds_the_block_and_the_entities_it_ties_to() {
         .hit_neighbourhood(&Scope::Canon, &BlockId::parse(&c["$c1"]).unwrap())
         .unwrap();
     assert_eq!(n, ids(&[&c["$c1"]]));
+}
+
+#[test]
+fn cc10_reasons_follow_the_closed_order_across_docs() {
+    // two blocks whose block-id order is the reverse of their docs' path order
+    let (a, b) = (id("c-AAAAA"), id("c-BBBBB"));
+    let mut i = synthetic(3); // c-AAAAA holds three unlinked mentions
+    let mut e = i.blocks.get(&a).unwrap().clone();
+    e.issues.iter_mut().for_each(|x| x.block = b.to_string());
+    i.blocks.insert(b.clone(), e); // c-BBBBB holds three as well
+    let paths: BTreeMap<String, String> = [
+        (a.to_string(), "z/last.md".to_string()),
+        (b.to_string(), "a/first.md".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let k = confidence_of(
+        &i,
+        &[a.clone(), b.clone()].into_iter().collect(),
+        None,
+        &paths,
+    );
+    let blocks: Vec<&str> = k.reasons.iter().map(|x| x.block.as_str()).collect();
+    // the path order puts all of c-BBBBB first; the cap of five drops one of c-AAAAA
+    assert_eq!(
+        blocks,
+        ["c-BBBBB", "c-BBBBB", "c-BBBBB", "c-AAAAA", "c-AAAAA"]
+    );
+    assert_eq!(k.reasons_omitted, 1);
 }

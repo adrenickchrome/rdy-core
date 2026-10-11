@@ -5,7 +5,7 @@ use crate::lexicon::is_tie;
 use crate::{RdyError, ReadState, Scope};
 use rdy_model::BlockId;
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The most reasons a confidence lists; the rest are counted in `reasons_omitted`.
 pub const REASONS_CAP: usize = 5;
@@ -36,11 +36,13 @@ fn is_zero(n: &usize) -> bool {
 /// The confidence of an answer drawn from `neighbourhood`. Low when a block of the neighbourhood
 /// has an open tension or an open suspect, or when `hit` is given and has an `untied_content`
 /// issue (text with no entity behind it). Medium when any other issue is on the neighbourhood.
-/// High when none is.
+/// High when none is. `paths` maps a block id to the path of its doc, as for [`sort_issues`]; the
+/// reasons follow the closed issue order with it.
 pub fn confidence_of(
     issues: &CoverageIssues,
     neighbourhood: &BTreeSet<BlockId>,
     hit: Option<&BlockId>,
+    paths: &BTreeMap<String, String>,
 ) -> Confidence {
     let sets_low = |i: &CoverageIssue| match i.code {
         IssueCode::OpenTension | IssueCode::OpenSuspect => true,
@@ -72,9 +74,8 @@ pub fn confidence_of(
     } else {
         Level::High
     };
-    let no_paths = Default::default();
-    sort_issues(&mut first, &no_paths);
-    sort_issues(&mut rest, &no_paths);
+    sort_issues(&mut first, paths);
+    sort_issues(&mut rest, paths);
     first.extend(rest);
     let reasons_omitted = first.len().saturating_sub(REASONS_CAP);
     first.truncate(REASONS_CAP);
