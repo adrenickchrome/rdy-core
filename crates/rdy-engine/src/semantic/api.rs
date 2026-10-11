@@ -1,6 +1,8 @@
 //! The review dispatchers MCP shares (rdy_review_next, rdy_review_submit) and the reviews paragraph of rdy_schema.
+use crate::engine::write_typed;
 use crate::semantic::candidates::request_label;
 use crate::semantic::case::case_hash;
+use crate::semantic::submit::ReviewSubmitRequest;
 use crate::{E_BAD_INPUT, E_PERMISSION, Engine, RdyError, Session, now_ms, rfc3339};
 use rdy_model::Role;
 use serde::Deserialize;
@@ -74,4 +76,16 @@ pub fn run_review_next(
         }));
     }
     Ok(json!({"request": null, "leased": leases.leased(now).len()}))
+}
+
+/// Records session `s`'s verdict (`Rdy::submit_verdict`) on the writer and returns its
+/// `SubmitInfo`: `{request, review, verdict}`, with `tension`, `severity` and `advice` for a
+/// `tension`, and `suppressed: true` for a `no_tension`.
+pub fn run_review_submit(
+    engine: &dyn Engine,
+    s: &Session,
+    req: ReviewSubmitRequest,
+) -> Result<Value, RdyError> {
+    let s = s.clone();
+    write_typed(engine, move |r| r.submit_verdict(&s, req))
 }

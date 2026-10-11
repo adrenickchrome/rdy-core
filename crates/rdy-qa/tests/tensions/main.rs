@@ -16,4 +16,5 @@ mod tensions_premise;
 mod tensions_semantic;
 mod tensions_unjustified;
 mod tensions_value;
+mod tensions_verdicts;
 mod tensions_write;

@@ -1,0 +1,360 @@
+//! rdy_review_submit (spec §9.3 step 4): a reviewer's verdict on a review request. The schema,
+//! the case hash, precedence (D-TF2W6, D-RF315), actor independence, and the advice to block
+//! (D-WMCFW), which gates nothing.
+use crate::semantic::candidates::{Item, request_hex, request_label};
+use crate::semantic::case::case_hash;
+use crate::tensions::semantic::pair_of;
+use crate::tensions::{SideRef, TensionSeverity, tension_label};
+use crate::{
+    E_BAD_INPUT, E_NOT_FOUND, E_PERMISSION, E_REVIEW_INVALID, E_REVIEW_STALE, E_SELF_REVIEW, Rdy,
+    RdyError, Session, now_ms,
+};
+use rdy_model::{
+    BlockId, Finding, Hash, PairItem, Review, ReviewSubject, Role, SemanticTension, Verdict,
+    hash_of,
+};
+use serde::{Deserialize, Serialize};
+
+/// The most findings one verdict takes.
+pub const MAX_FINDINGS: usize = 20;
+/// The most characters a finding's note, or the advice's reason, takes after trimming.
+pub const MAX_NOTE: usize = 2000;
+
+/// `rdy_review_submit`'s input.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewSubmitRequest {
+    /// The request from `rdy_review_next` (`rq-` and hex digits).
+    pub request: String,
+    /// The case hash from `rdy_review_next` (64 hex).
+    pub case_hash: String,
+    /// `tension` or `no_tension`.
+    pub verdict: String,
+    #[serde(default)]
+    pub findings: Vec<FindingRequest>,
+    /// `advisory` (the default) or `blocking`: advice to a person; it gates nothing.
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// With severity `blocking` only: why the tension should block.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// One finding of a verdict: a block of the case and what in it disagrees.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FindingRequest {
+    pub block: String,
+    pub note: String,
+}
+
+/// What a submit recorded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SubmitInfo {
+    /// The request's label.
+    pub request: String,
+    /// The review's id (64 hex).
+    pub review: String,
+    pub verdict: String,
+    /// The label of the semantic tension a `tension` verdict opened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tension: Option<String>,
+    /// The tension's severity: always `advisory` for a new one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<TensionSeverity>,
+    /// The reason, when the verdict advised blocking.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advice: Option<String>,
+    /// True when a `no_tension` verdict suppressed the pair.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub suppressed: bool,
+}
+
+fn invalid(message: impl Into<String>, fix: &str) -> RdyError {
+    RdyError::new(E_REVIEW_INVALID, message, fix)
+}
+
+fn stale(message: impl Into<String>) -> RdyError {
+    RdyError::new(E_REVIEW_STALE, message, "call rdy_review_next again")
+}
+
+fn not_current(label: &str) -> RdyError {
+    stale(format!(
+        "request {label} is no longer current: a side changed, landed or left every view"
+    ))
+}
+
+/// The trimmed text when it has 1 to [`MAX_NOTE`] characters.
+fn bounded(text: &str) -> Option<&str> {
+    let t = text.trim();
+    (!t.is_empty() && t.chars().count() <= MAX_NOTE).then_some(t)
+}
+
+impl Rdy {
+    /// Records session `s`'s verdict on review request `req.request`: checks the role, the
+    /// schema, that the request is current, precedence, the case hash and actor independence,
+    /// then writes the review (and, for a `tension`, the semantic tension's first version) and
+    /// frees the request's lease.
+    pub fn submit_verdict(
+        &mut self,
+        s: &Session,
+        req: ReviewSubmitRequest,
+    ) -> Result<SubmitInfo, RdyError> {
+        // 1. role
+        if s.role != Role::Reviewer {
+            return Err(RdyError::new(
+                E_PERMISSION,
+                "rdy_review_submit needs the reviewer role",
+                "start a session with role reviewer",
+            ));
+        }
+        // 2. verdict word
+        let verdict = match req.verdict.as_str() {
+            "tension" => Verdict::Tension,
+            "no_tension" => Verdict::NoTension,
+            v => {
+                return Err(invalid(
+                    format!("verdict {v:?} is not tension or no_tension"),
+                    "send the corrected payload: verdict tension or no_tension",
+                ));
+            }
+        };
+        // 3. request id
+        let Some(hex) = request_hex(&req.request) else {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("{:?} is not a review request id", req.request),
+                "pass the request from rdy_review_next: rq- and 12 hex digits",
+            ));
+        };
+        // 4. case hash text
+        let case_text = req.case_hash.to_ascii_lowercase();
+        let Ok(sent_hash) = case_text.parse::<Hash>() else {
+            return Err(RdyError::new(
+                E_BAD_INPUT,
+                "case_hash must be 64 hex digits",
+                "pass case_hash from rdy_review_next",
+            ));
+        };
+        // 5. the pair: live leases, then settled pairs, then the queue
+        let st = self.read();
+        let leases = self.leases();
+        let now = now_ms();
+        let given = format!("rq-{}", &hex[..hex.len().min(12)]);
+        let mut found: Vec<(Hash, Vec<(BlockId, Hash)>)> = leases
+            .with_prefix(&hex, now)
+            .into_iter()
+            .map(|(k, l)| (k, l.pair))
+            .collect();
+        if found.is_empty() {
+            found = st
+                .semantic()
+                .settled_with_prefix(&hex)
+                .into_iter()
+                .map(|(k, v)| {
+                    let pair = v.items.iter().map(|i| (i.block.clone(), i.content));
+                    (k, pair.collect())
+                })
+                .collect();
+        }
+        if found.is_empty() {
+            found = st
+                .review_requests()?
+                .into_iter()
+                .filter(|q| q.key.to_string().starts_with(&hex))
+                .map(|q| {
+                    let pair = q.items.iter().map(|i| (i.block.clone(), i.content));
+                    (q.key, pair.collect())
+                })
+                .collect();
+        }
+        let (key, pair) = match found.len() {
+            0 => return Err(not_current(&given)),
+            1 => found.remove(0),
+            n => {
+                return Err(RdyError::new(
+                    E_NOT_FOUND,
+                    format!("{} matches {n} requests", req.request),
+                    "pass more hex digits",
+                ));
+            }
+        };
+        let label = request_label(&key);
+        // 6. the items now
+        let mut items: Vec<Item> = vec![];
+        for (block, content) in &pair {
+            match st.item_now(block, *content)? {
+                Some(i) => items.push(i),
+                None => return Err(not_current(&label)),
+            }
+        }
+        items.sort();
+        if !items.iter().any(|i| matches!(i.side, SideRef::Change(_))) {
+            return Err(stale(format!(
+                "request {label} ended: both blocks are in canon now"
+            )));
+        }
+        // 7. findings
+        if req.findings.len() > MAX_FINDINGS {
+            return Err(invalid(
+                "a verdict takes at most 20 findings",
+                "keep the 20 findings that matter most",
+            ));
+        }
+        if verdict == Verdict::Tension && req.findings.is_empty() {
+            return Err(invalid(
+                "a tension verdict needs at least one finding",
+                "add a finding that says what in a block disagrees",
+            ));
+        }
+        let mut findings = vec![];
+        for (n, f) in req.findings.iter().enumerate() {
+            let i = n + 1;
+            let block = BlockId::parse(&f.block)
+                .ok()
+                .filter(|b| items.iter().any(|it| &it.block == b));
+            let Some(block) = block else {
+                let names: Vec<String> = items.iter().map(|it| it.block.to_string()).collect();
+                return Err(invalid(
+                    format!(
+                        "finding {i}: block {} is not one of {}",
+                        f.block,
+                        names.join(" and ")
+                    ),
+                    "cite one of the two blocks of the case",
+                ));
+            };
+            let Some(note) = bounded(&f.note) else {
+                return Err(invalid(
+                    format!("finding {i}: a note needs 1 to 2000 characters"),
+                    "say in a few words what disagrees",
+                ));
+            };
+            findings.push(Finding {
+                block,
+                note: note.to_string(),
+            });
+        }
+        // 7b. advice (D-WMCFW)
+        let advice = match req.severity.as_deref() {
+            None | Some("advisory") => {
+                if req.reason.is_some() {
+                    return Err(invalid(
+                        "reason goes with severity blocking: it says why the tension should block",
+                        "drop reason, or pass severity blocking",
+                    ));
+                }
+                None
+            }
+            Some("blocking") => {
+                if verdict == Verdict::NoTension {
+                    return Err(invalid(
+                        "severity applies to a tension verdict only",
+                        "drop severity",
+                    ));
+                }
+                let Some(reason) = req.reason.as_deref().and_then(bounded) else {
+                    return Err(invalid(
+                        "advice to block needs a reason of 1 to 2000 characters",
+                        "say in a few words why a landing should wait",
+                    ));
+                };
+                Some(reason.to_string())
+            }
+            Some(other) => {
+                return Err(invalid(
+                    format!("severity {other:?} is not advisory or blocking"),
+                    "pass severity advisory or blocking",
+                ));
+            }
+        };
+        // 8. precedence (D-TF2W6, D-RF315): a tension wins; only a tension overrides a no_tension
+        if let Some(settled) = st.semantic().settled(&key) {
+            let found = match (settled.verdict, verdict) {
+                (Verdict::Tension, _) => Some("found a tension"),
+                (Verdict::NoTension, Verdict::NoTension) => Some("found no tension"),
+                _ => None,
+            };
+            if let Some(found) = found {
+                return Err(stale(format!(
+                    "request {label} is settled: review {} by {} {found}",
+                    settled.review.short(),
+                    settled.actor
+                )));
+            }
+        }
+        // 9. case hash
+        if case_hash(&st.case_of(&key, &items)?) != sent_hash {
+            return Err(stale(format!(
+                "the case of {label} changed since you read it"
+            )));
+        }
+        // 10. actor independence
+        for i in &items {
+            if st.item_authors_of(&key, i)?.contains(&s.actor) {
+                return Err(RdyError::new(
+                    E_SELF_REVIEW,
+                    format!(
+                        "actor {} wrote block {} of {label}; another run of the same actor is not independent",
+                        s.actor, i.block
+                    ),
+                    "a reviewer of another actor judges it",
+                ));
+            }
+        }
+        drop(st);
+        // 11. write
+        let pair_items: Vec<PairItem> = items
+            .iter()
+            .map(|i| PairItem {
+                block: i.block.clone(),
+                content: i.content,
+            })
+            .collect();
+        let provenance = s.provenance();
+        let review = Review {
+            subject: ReviewSubject::Pair {
+                key,
+                items: pair_items.clone(),
+            },
+            case_hash: Some(sent_hash),
+            verdict,
+            reason: String::new(),
+            findings,
+            provenance: provenance.clone(),
+        };
+        let first = (verdict == Verdict::Tension).then(|| SemanticTension {
+            key,
+            items: pair_items,
+            review: hash_of(&review),
+            advice: advice.clone(),
+            blocking: false,
+            relay: None,
+            relayed_by: None,
+            prev: None,
+            provenance,
+        });
+        let (id, _) = self.record_verdict(&review, first.as_ref())?;
+        leases.release(&key);
+        let mut info = SubmitInfo {
+            request: label,
+            review: id.to_string(),
+            verdict: req.verdict,
+            tension: None,
+            severity: None,
+            advice: None,
+            suppressed: false,
+        };
+        if verdict == Verdict::Tension {
+            let st = self.read();
+            let set = st.tensions()?;
+            let t = set.iter().find(|t| pair_of(t) == Some(key));
+            info.tension = t.map(|t| tension_label(&t.id));
+            info.severity = Some(t.map_or(TensionSeverity::Advisory, |t| t.severity));
+            info.advice = advice;
+        } else {
+            info.suppressed = true;
+        }
+        Ok(info)
+    }
+}
