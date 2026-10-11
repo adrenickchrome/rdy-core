@@ -39,6 +39,8 @@ pub struct ChangeFacts {
     pub views: Vec<String>,
     /// The blocks the change writes, sorted.
     pub blocks: Vec<BlockId>,
+    /// The change's provenance time, in ms.
+    pub at_ms: i64,
 }
 
 /// A live decision write that supersedes a target, with the part it names (`None`: the whole).
@@ -146,6 +148,7 @@ impl Writes {
                     justified: change.justification.is_some(),
                     views: views.clone(),
                     blocks,
+                    at_ms: change.provenance.at_ms,
                 },
             );
         }
@@ -198,6 +201,7 @@ impl Writes {
                 justified: read.justification.is_some(),
                 views,
                 blocks: mine.keys().cloned().collect(),
+                at_ms: read.provenance.at_ms,
             },
         );
         let mut own = Vec::with_capacity(mine.len());
