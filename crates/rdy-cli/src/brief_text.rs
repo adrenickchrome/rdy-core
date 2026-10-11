@@ -478,6 +478,7 @@ fn coverage_part(reply: &Value) -> String {
         return String::new();
     }
     let mut t = format!("\ncoverage: {before} → {after}");
+    let all_moved = moved.len() == c["pages"].as_array().map_or(0, Vec::len);
     for p in moved {
         t.push_str(&format!(
             "\n  {}: {} → {}",
@@ -486,7 +487,9 @@ fn coverage_part(reply: &Value) -> String {
             p["after"]
         ));
     }
-    if let Some(n) = c["pages_omitted"].as_u64().filter(|n| *n > 0) {
+    // pages sort moved first, then the cut: the omitted count can name a moved page only when
+    // every page listed moved
+    if let Some(n) = c["pages_omitted"].as_u64().filter(|n| *n > 0 && all_moved) {
         t.push_str(&format!("\n  and {n} more pages"));
     }
     t
@@ -872,6 +875,17 @@ mod tests {
         assert_eq!(
             consequences_text(&cut),
             "\ncoverage: 80 → 85\n  ops: 70 → 90\n  and 3 more pages"
+        );
+        // two moved pages and omitted unchanged pages: the count would read as moved pages, so
+        // it is not printed (the cut sorts moved pages first)
+        let unchanged_cut = json!({"coverage": {"before": 80, "after": 85, "pages_omitted": 10, "pages": [
+            {"doc": "d-1", "path": "ops", "before": 70, "after": 90},
+            {"doc": "d-3", "path": "audit", "before": 50, "after": 60},
+            {"doc": "d-2", "path": "fees", "before": 100, "after": 100}
+        ]}});
+        assert_eq!(
+            consequences_text(&unchanged_cut),
+            "\ncoverage: 80 → 85\n  ops: 70 → 90\n  audit: 50 → 60"
         );
         let err = json!({"coverage_error": "E_INTERNAL: boom"});
         assert_eq!(

@@ -1062,9 +1062,11 @@ pub fn propose_and_report(
 /// cc16 (FW-CH3): the proposal's `coverage: {before, after, pages}`, canon's score against its
 /// view's and the pages its changes touch, read from the stored version after the write, off
 /// the writer (as a write's is). A read error leaves `coverage` out and sets `coverage_error`
-/// (kept when the propose already set one): the proposal stands.
+/// (an earlier text is kept, also when the read works: the unapplied-decision pass sets one
+/// that does not stop coverage): the proposal stands. When the propose could not read the
+/// tensions (`tensions_error`), coverage cannot be worked out either: the reply is left as is.
 fn attach_proposal_coverage(engine: &dyn Engine, v: &mut serde_json::Value) {
-    if v.get("coverage_error").is_some() {
+    if v.get("tensions_error").is_some() {
         return;
     }
     let st = engine.read();
@@ -1099,7 +1101,11 @@ fn attach_proposal_coverage(engine: &dyn Engine, v: &mut serde_json::Value) {
             v["coverage"] = serde_json::to_value(&c)
                 .expect("coverage change serializes: numbers and strings only");
         }
-        Err(e) => v["coverage_error"] = coverage_error_text(&e).into(),
+        Err(e) => {
+            if v.get("coverage_error").is_none() {
+                v["coverage_error"] = coverage_error_text(&e).into();
+            }
+        }
     }
 }
 
@@ -1132,5 +1138,62 @@ fn report_landing(
             attach(v, c);
         }
         None => v["consequences"] = serde_json::json!([]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Local, Session, SessionKind, WriteRequest};
+    use rdy_model::Role;
+    use serde_json::json;
+
+    /// A reply for a stored proposal of view `work`, as `propose` builds it.
+    fn proposed() -> (tempfile::TempDir, Local, serde_json::Value) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let s = Session {
+            actor: "agent:designer".into(),
+            run: Some("run-1".into()),
+            role: Role::Writer,
+            kind: SessionKind::Human,
+        };
+        r.write(
+            &s,
+            WriteRequest {
+                view: "work".into(),
+                ops: serde_json::from_value(json!([
+                    {"op": "create", "type": "doc", "id": "$d", "fields": {"title": "Ops", "doc_type": "overview"}}
+                ]))
+                .unwrap(),
+                justification: None,
+                message: "doc".into(),
+            },
+        )
+        .unwrap();
+        let info = r.propose(&s, "work", "work").unwrap();
+        let v = serde_json::to_value(&info).unwrap();
+        (dir, Local::new(r), v)
+    }
+
+    /// cc16 fix 1: a coverage_error the unapplied-decision pass left does not stop the coverage
+    /// read: the reply gains `coverage` and keeps the error text.
+    #[test]
+    fn cc16_a_warning_pass_error_still_yields_the_coverage() {
+        let (_d, e, mut v) = proposed();
+        v["coverage_error"] = "E_INTERNAL: warning pass".into();
+        attach_proposal_coverage(&e, &mut v);
+        assert!(v["coverage"]["before"].is_u64(), "{v:#}");
+        assert_eq!(v["coverage_error"], "E_INTERNAL: warning pass", "{v:#}");
+    }
+
+    /// A tension read error means the coverage cannot be worked out: the reply is left as it is.
+    #[test]
+    fn cc16_a_tension_read_error_leaves_the_coverage_out() {
+        let (_d, e, mut v) = proposed();
+        v["tensions_error"] = "E_INTERNAL: boom".into();
+        v["coverage_error"] = "E_INTERNAL: boom".into();
+        attach_proposal_coverage(&e, &mut v);
+        assert!(v.get("coverage").is_none(), "{v:#}");
     }
 }
