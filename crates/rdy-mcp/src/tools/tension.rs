@@ -3,7 +3,7 @@
 //! `tensions` and `resolve` ops share; `rdy_schema`'s paragraph is `TENSIONS_DOC`.
 use super::*;
 use rdy_engine::tensions::api::{
-    DismissRequest, ResolveRequest, TensionsRequest, run_resolve, run_tensions,
+    DismissRequest, MentionRequest, ResolveRequest, TensionsRequest, run_resolve, run_tensions,
 };
 use rdy_engine::*;
 use schemars::JsonSchema;
@@ -40,10 +40,28 @@ pub struct TensionsParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResolveParams {
-    /// The tension to dismiss: tn-<12 hex> from rdy_tensions (a unique prefix works).
-    pub tension: String,
-    /// Dismiss the tension, with a reason. A tension is otherwise resolved by a change.
+    /// The tension to dismiss: tn-<12 hex> from rdy_tensions (a unique prefix works). Pass this
+    /// or mention.
+    pub tension: Option<String>,
+    /// A passing mention to dismiss or restore: the block and the entity a suggestion names.
+    /// Pass this or tension.
+    pub mention: Option<MentionParams>,
+    /// Dismiss the tension or the mention, with a reason. A tension is otherwise resolved by a
+    /// change.
     pub dismiss: Option<DismissParams>,
+    /// Restore a dismissed mention, with a reason. A tension is not restored.
+    pub restore: Option<DismissParams>,
+    /// Where the mention is checked: canon or a view. Defaults to your view.
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MentionParams {
+    /// The block that names the entity (c-… from a suggestion's block).
+    pub block: String,
+    /// The entity it names (from a suggestion's target).
+    pub entity: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -74,7 +92,8 @@ pub fn rdy_tensions(st: &mut McpState, p: TensionsParams) -> Result<Value, RdyEr
     )
 }
 
-/// `rdy_resolve`: dismisses a tension with a reason (a review).
+/// `rdy_resolve`: dismisses a tension, or dismisses or restores a passing mention, with a reason
+/// (a review).
 pub fn rdy_resolve(st: &mut McpState, p: ResolveParams) -> Result<Value, RdyError> {
     let s = session(st)?;
     run_resolve(
@@ -82,7 +101,13 @@ pub fn rdy_resolve(st: &mut McpState, p: ResolveParams) -> Result<Value, RdyErro
         &s,
         ResolveRequest {
             tension: p.tension,
+            mention: p.mention.map(|m| MentionRequest {
+                block: m.block,
+                entity: m.entity,
+            }),
             dismiss: p.dismiss.map(|d| DismissRequest { reason: d.reason }),
+            restore: p.restore.map(|d| DismissRequest { reason: d.reason }),
+            scope: p.scope,
         },
     )
 }

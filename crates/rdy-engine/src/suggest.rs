@@ -184,6 +184,8 @@ impl ReadState {
                 .into_iter()
                 .filter_map(|ms| Some((BlockId::parse(&ms.entity).ok()?, ms)))
                 .filter(|(target, _)| g.as_ref().is_some_and(|g| !tied(g, &b.id, target)))
+                // a dismissed pair holds in every scope, until a restore (D-E6JD1)
+                .filter(|(target, _)| self.mention_dismissed(&b.id, target).is_none())
                 .collect();
             found.sort_by(|x, y| x.0.cmp(&y.0));
             for (target, ms) in found {

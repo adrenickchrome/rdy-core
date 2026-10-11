@@ -10,6 +10,7 @@ mod mcp_history;
 mod mcp_instructions;
 mod mcp_intents;
 mod mcp_log;
+mod mcp_mentions;
 mod mcp_params;
 mod mcp_people;
 mod mcp_pool;

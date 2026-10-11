@@ -10,7 +10,7 @@ use crate::gate::open_proposals;
 use crate::history::role_str;
 use crate::session::{now_ms, rfc3339};
 use crate::views::no_view;
-use crate::{RdyError, ReadState, Scope, Session};
+use crate::{MentionVerdict, RdyError, ReadState, Scope, Session};
 use rdy_model::{BlockId, Hash};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -46,13 +46,29 @@ pub struct TensionsRequest {
     pub max_tokens: Option<usize>,
 }
 
-/// One resolve request: the tension, and the dismissal (the only way to resolve one here).
+/// One resolve request: either a tension and its dismissal (the only way to resolve one here),
+/// or a passing mention and its dismissal or restore (FW-CV4).
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolveRequest {
     /// `tn-<hex>` or a unique prefix of at least 6 hex digits.
-    pub tension: String,
+    pub tension: Option<String>,
+    /// A block that names an entity without a link.
+    pub mention: Option<MentionRequest>,
+    /// Dismiss the tension or the mention.
     pub dismiss: Option<DismissRequest>,
+    /// Restore a dismissed mention.
+    pub restore: Option<DismissRequest>,
+    /// Where a mention is checked: a scope text. Defaults to the session's view.
+    pub scope: Option<String>,
+}
+
+/// A passing mention: the block and the entity it names.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MentionRequest {
+    pub block: String,
+    pub entity: String,
 }
 
 /// Why a tension needs no action.
@@ -524,23 +540,67 @@ pub fn run_tensions(
     Ok(out)
 }
 
-/// Dismisses the tension `req` names with its reason: `{id, tension, kind, severity, review,
-/// status}`. Without `dismiss` it is `E_BAD_INPUT`: a tension is resolved by a change.
+/// Resolves what `req` names. A tension is dismissed with its reason: `{id, tension, kind,
+/// severity, review, status}`. Without `dismiss` it is `E_BAD_INPUT`: a tension is resolved by a
+/// change. A mention is dismissed or restored with a reason: `{block, entity, verdict, review,
+/// status}`.
 pub fn run_resolve(
     engine: &dyn Engine,
     s: &Session,
     req: ResolveRequest,
 ) -> Result<Value, RdyError> {
-    let Some(d) = req.dismiss else {
-        return Err(bad(
-            "a tension is resolved by a change; pass dismiss: {reason} to dismiss it".to_string(),
-            "edit or repin a side of the tension, or pass dismiss: {reason}",
-        ));
-    };
-    let s = s.clone();
-    write_typed(engine, move |r| {
-        r.dismiss_tension(&s, &req.tension, &d.reason)
-    })
+    let ResolveRequest {
+        tension,
+        mention,
+        dismiss,
+        restore,
+        scope,
+    } = req;
+    match (tension, mention) {
+        (Some(tension), None) => {
+            if restore.is_some() {
+                return Err(bad(
+                    "a tension dismissal holds until a side changes; it is not restored"
+                        .to_string(),
+                    "edit a side of the tension to reopen it",
+                ));
+            }
+            let Some(d) = dismiss else {
+                return Err(bad(
+                    "a tension is resolved by a change; pass dismiss: {reason} to dismiss it"
+                        .to_string(),
+                    "edit or repin a side of the tension, or pass dismiss: {reason}",
+                ));
+            };
+            let s = s.clone();
+            write_typed(engine, move |r| r.dismiss_tension(&s, &tension, &d.reason))
+        }
+        (None, Some(m)) => {
+            let (verdict, d) = match (dismiss, restore) {
+                (Some(d), None) => (MentionVerdict::Dismiss, d),
+                (None, Some(d)) => (MentionVerdict::Restore, d),
+                _ => {
+                    return Err(bad(
+                        "pass dismiss: {reason} or restore: {reason} for a mention".to_string(),
+                        "dismiss a passing mention, or restore one that needs a link",
+                    ));
+                }
+            };
+            let s = s.clone();
+            write_typed(engine, move |r| {
+                let view = s.default_view();
+                let scope = match scope.as_deref() {
+                    Some(text) => r.read().resolve_read_scope(text, Some(&view))?,
+                    None => Scope::View(view),
+                };
+                r.review_mention(&s, &scope, &m.block, &m.entity, verdict, &d.reason)
+            })
+        }
+        _ => Err(bad(
+            "pass either tension or mention".to_string(),
+            "name the tension (tn-…) or the mention ({block, entity}) to resolve",
+        )),
+    }
 }
 
 #[cfg(test)]

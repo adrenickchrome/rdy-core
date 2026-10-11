@@ -84,3 +84,61 @@ fn cten1_rdy_tensions_and_rdy_resolve_from_the_command_line() {
     );
     s.stop();
 }
+
+#[test]
+fn cc8_rdy_resolve_mention_dismiss_and_restore() {
+    let s = Served::new();
+    let mut r = Rdy::open(s.dir.path()).unwrap();
+    let w = rdy_qa::fixtures::write(&mut r, "work", serde_json::json!([
+        {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "ops", "title": "Ops", "doc_type": "page"}},
+        {"op": "create", "type": "term", "id": "$t", "parent": "$o", "fields": {"name": "Ledger"}, "body": "Holds balances."},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$o", "body": "Every write passes the Ledger."}
+    ])).unwrap();
+    let (c, t) = (w.created["$c"].clone(), w.created["$t"].clone());
+    r.close().unwrap();
+    let out = s.rdy(&[
+        "resolve",
+        "--mention",
+        &c,
+        &t,
+        "--dismiss",
+        "everyday word",
+        "--scope",
+        "view:work",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let (first, rest) = text.trim_end().split_once(" (review ").expect(&text);
+    assert_eq!(
+        first,
+        format!("dismissed the mention of {t} in {c}"),
+        "{text}"
+    );
+    assert!(rest.ends_with(')'), "{text}");
+    let out = s.rdy(&[
+        "resolve",
+        "--mention",
+        &c,
+        &t,
+        "--restore",
+        "it is the service",
+        "--scope",
+        "view:work",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let (first, _) = text.trim_end().split_once(" (review ").expect(&text);
+    assert_eq!(
+        first,
+        format!("restored the mention of {t} in {c}"),
+        "{text}"
+    );
+}
