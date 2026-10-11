@@ -562,9 +562,22 @@ impl Store {
                 .iter()
                 .map(|c| self.change(c))
                 .collect::<Result<Vec<_>, _>>()?;
-            let conflicts = self
-                .merge_onto(canon, &self.state_of(canon)?, &rest)?
-                .conflicts;
+            let merged = self.merge_onto(canon, &self.state_of(canon)?, &rest)?;
+            // the rebase combines the view's moves with canon's: refuse a parent loop
+            let touched = rest
+                .iter()
+                .flat_map(|c| c.ops.iter().map(|op| op.block_id().clone()));
+            if let Some((a, b)) = self.parent_cycle_in(&merged.state, touched)? {
+                return Err(StoreError::ParentCycle {
+                    message: format!(
+                        "forking view {from:?} onto canon would make {a} and {b} each other's ancestors"
+                    ),
+                    fix: format!(
+                        "fork a view that does not move them, or move one of them out of the other in view {from} first"
+                    ),
+                });
+            }
+            let conflicts = merged.conflicts;
             head.base = canon;
             head.len = remaining.len() as u64;
             let rebase = ViewOpKind::Rebase {

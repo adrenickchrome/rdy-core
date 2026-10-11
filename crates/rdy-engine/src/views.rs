@@ -694,6 +694,62 @@ fn include_closure(
     }
 }
 
+/// cyc1: refuses an include whose changes, merged with what `view` already includes, would make
+/// two blocks each other's ancestors (each change alone moves one block, so neither write saw
+/// the loop). Only an include that moves a block can make one, so the merge is read only then.
+fn refuse_parent_cycle(
+    st: &ReadState,
+    view: &str,
+    base: Option<Hash>,
+    added: &[Hash],
+    added_deps: &[Hash],
+) -> Result<(), RdyError> {
+    let reader = st.reader();
+    let new: Vec<(Hash, Change)> = added
+        .iter()
+        .chain(added_deps)
+        .map(|h| Ok((*h, reader.change(h)?)))
+        .collect::<Result<_, RdyError>>()?;
+    // the blocks the new changes move: an update whose parent differs from its base version's
+    let mut moved: Vec<(Hash, BlockId)> = vec![];
+    for (h, c) in &new {
+        for op in &c.ops {
+            if let Op::Update { base, block } = op
+                && reader.get_block(base)?.parent != block.parent
+            {
+                moved.push((*h, block.id.clone()));
+            }
+        }
+    }
+    if moved.is_empty() {
+        return Ok(());
+    }
+    let mut list: Vec<Change> = st
+        .included(view)
+        .iter()
+        .map(|h| reader.change(h))
+        .collect::<Result<_, _>>()?;
+    list.extend(new.into_iter().map(|(_, c)| c));
+    let merged = reader.merge_onto(base, &reader.state_of(base)?, &list)?;
+    let Some((a, b)) =
+        reader.parent_cycle_in(&merged.state, moved.iter().map(|(_, id)| id.clone()))?
+    else {
+        return Ok(());
+    };
+    let by = moved
+        .iter()
+        .find(|(_, id)| *id == a || *id == b)
+        .map_or(added[0], |(h, _)| *h);
+    Err(RdyError::new(
+        E_BAD_INPUT,
+        format!(
+            "including {} would make {a} and {b} each other's ancestors",
+            by.short()
+        ),
+        "exclude the change that moves one of them, or move one of them out first",
+    ))
+}
+
 /// The requested ids, parsed, duplicates collapsed, in request order.
 fn parse_changes(changes: &[String]) -> Result<Vec<Hash>, RdyError> {
     let mut seen = BTreeSet::new();
@@ -790,6 +846,7 @@ impl Rdy {
             return op_result(&st, view, &[], &[], &[], &[]);
         }
         let added_deps = include_closure(&st, view, base, &included, &added)?;
+        refuse_parent_cycle(&st, view, base, &added, &added_deps)?;
         // 5. the writes: a new view is created first (its own batch and publish)
         let exists = st.has_view(view);
         drop(st);

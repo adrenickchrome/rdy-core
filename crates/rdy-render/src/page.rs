@@ -282,7 +282,9 @@ impl Shared<'_> {
             .map(|d| self.site.label(d))
             .unwrap_or_default();
         let mut cur = Some(b);
-        while let Some(c) = cur {
+        // a damaged store may loop: never walk more steps than there are blocks
+        for _ in 0..=self.m.len() {
+            let Some(c) = cur else { break };
             if c.block_type == "section" {
                 return format!("{doc} › {}", self.site.label(c));
             }
@@ -731,7 +733,9 @@ fn whereabouts(sh: &Shared, b: &Block) -> (String, String) {
             .map(|d| sh.site.label(d))
             .unwrap_or_default();
     let mut cur = b.parent.as_ref().and_then(|p| sh.m.get(p));
-    while let Some(p) = cur {
+    // a damaged store may loop: never walk more steps than there are blocks
+    for _ in 0..=sh.m.len() {
+        let Some(p) = cur else { break };
         if p.block_type == "section" {
             return (doc, sh.site.label(p));
         }

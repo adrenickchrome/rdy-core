@@ -1260,12 +1260,23 @@ fn relocate(
                 "check the parent id",
             ));
         }
+        // a damaged store may hold a parent loop: never walk more steps than there are blocks
         let mut walk = Some(p.clone());
+        let mut steps = 0;
         while let Some(w) = walk {
             if w == *id {
                 return Err(bad(
                     format!("cannot move {id} under itself or one of its descendants"),
                     "choose a parent outside the subtree being moved",
+                ));
+            }
+            steps += 1;
+            if steps > ov.base.len() + ov.pending.len() {
+                return Err(bad(
+                    format!("the parents above {p} loop back on themselves"),
+                    format!(
+                        "move {p} or one of its parents out of the loop first; rdy fsck lists it"
+                    ),
                 ));
             }
             walk = ov.get(&w).and_then(|b| b.parent.clone());

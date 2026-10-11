@@ -301,6 +301,10 @@ fn export_level(
         let mut stack = m.children(Some(&b.id));
         stack.reverse();
         while let Some(c) = stack.pop() {
+            // a damaged store may loop: never list more blocks than there are
+            if list.len() > m.len() {
+                break;
+            }
             list.push(to_yaml_struct(c));
             if pack.is_asset(&c.block_type)
                 && let Some(h) = c.field_str("blob").and_then(|s| s.parse::<Hash>().ok())

@@ -12,7 +12,7 @@ use crate::state::{open_ref, proposal_ref, view_ref};
 use crate::store::encode;
 use crate::view::{ViewHead, ViewOp, ViewOpKind, decode_head};
 use rdy_model::{
-    ActorRun, AltChoice, AltSet, AltStatus, ApprovalEvidence, Assurance, BlockId, Change,
+    ActorRun, AltChoice, AltSet, AltStatus, ApprovalEvidence, Assurance, Block, BlockId, Change,
     EvidenceKind, Hash, LandingRecord, Op, Proposal, Provenance, RelayEvidence,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -296,6 +296,38 @@ impl Store {
             removed.extend(self.removers(rows, h)?);
         }
         let deleter = |b: &BlockId| removed.get(b).copied();
+        // the blocks the landing moves (a parent other than the previous canon's): a rebased
+        // view that moves another block can loop with them (cyc1). The acceptance change's
+        // versions are not stored yet, so they are read from its ops.
+        let fresh: HashMap<Hash, &Block> = accept_change
+            .iter()
+            .flat_map(|a| a.ops.iter())
+            .filter_map(|op| match op {
+                Op::Create { block } | Op::Update { block, .. } => {
+                    Some((block.version_hash(), block))
+                }
+                Op::Delete { .. } => None,
+            })
+            .collect();
+        let parent_in =
+            |s: &rdy_model::StateSnapshot, id: &BlockId| -> Result<Option<BlockId>, StoreError> {
+                match s.blocks.get(id) {
+                    Some(v) => match fresh.get(v) {
+                        Some(b) => Ok(b.parent.clone()),
+                        None => Ok(self.get_block(v)?.parent),
+                    },
+                    None => Ok(None),
+                }
+            };
+        let mut moved_l: Vec<BlockId> = vec![];
+        for id in &touched_l {
+            if state.blocks.contains_key(*id)
+                && prev_state.blocks.contains_key(*id)
+                && parent_in(&state, id)? != parent_in(&prev_state, id)?
+            {
+                moved_l.push((*id).clone());
+            }
+        }
         let mut rebased = vec![];
         let mut closed = vec![];
         let mut view_refs = vec![];
@@ -329,6 +361,44 @@ impl Store {
             };
             let (dropped, remaining): (Vec<Hash>, Vec<Hash>) =
                 vincluded.into_iter().partition(|c| landed.contains(c));
+            if !moved_l.is_empty() && !remaining.is_empty() {
+                // the view's own parent of each block it writes and the landing does not:
+                // the last write wins (a delete: absent)
+                let mut own: HashMap<BlockId, Option<BlockId>> = HashMap::new();
+                for c in &remaining {
+                    for op in self.change(c)?.ops {
+                        if touched_l.contains(op.block_id()) {
+                            continue;
+                        }
+                        match op {
+                            Op::Create { block } | Op::Update { block, .. } => {
+                                own.insert(block.id, block.parent);
+                            }
+                            Op::Delete { id, .. } => {
+                                own.insert(id, None);
+                            }
+                        }
+                    }
+                }
+                if !own.is_empty()
+                    && let Some((a, b)) =
+                        crate::merge::find_parent_cycle(moved_l.iter().cloned(), |id| {
+                            match own.get(id) {
+                                Some(p) => Ok(p.clone()),
+                                None => parent_in(&state, id),
+                            }
+                        })?
+                {
+                    return Err(StoreError::ParentCycle {
+                        message: format!(
+                            "landing would make {a} and {b} each other's ancestors in view {name:?}"
+                        ),
+                        fix: format!(
+                            "exclude the change that moves one of them from view {name}, or move one of them out first"
+                        ),
+                    });
+                }
+            }
             let conflicts = self.rebase_conflicts(
                 &state,
                 &remaining,

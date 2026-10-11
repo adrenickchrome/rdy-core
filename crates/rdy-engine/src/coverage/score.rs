@@ -73,6 +73,10 @@ pub(crate) fn page_blocks(m: &crate::Materialized, doc: &BlockId) -> Vec<BlockId
     let mut out = vec![];
     let mut stack = vec![doc.clone()];
     while let Some(id) = stack.pop() {
+        // a damaged store may loop: never walk more blocks than there are
+        if out.len() > m.len() {
+            break;
+        }
         stack.extend(
             m.children(Some(&id))
                 .into_iter()
