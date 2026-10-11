@@ -396,3 +396,81 @@ fn cc6_names_say_coverage_issue() {
         assert!(!text.contains("finding"), "{}", p.display());
     }
 }
+
+/// A draft duplicate pair landed at L1, then another doc landed at L2: the pair and L1, L2.
+fn duplicate_then_another_landing(r: &mut Rdy) -> (BlockId, rdy_model::Hash, rdy_model::Hash) {
+    let (a, _b, _label) = canon_duplicate_pair(r);
+    let l1 = r.read().canon_head().unwrap();
+    write(r, "more", json!([
+        {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "later", "title": "Later", "doc_type": "page"}},
+        {"op": "create", "type": "prose", "parent": "$o", "body": "Added later."}
+    ]))
+    .unwrap();
+    land(r, "more").unwrap();
+    let l2 = r.read().canon_head().unwrap();
+    assert_ne!(l1, l2);
+    (a, l1, l2)
+}
+
+#[test]
+fn cc6_coverage_at_a_past_landing_is_refused() {
+    let (_d, mut r) = project();
+    let (a, l1, _l2) = duplicate_then_another_landing(&mut r);
+    let canon = issues(&r);
+    assert!(
+        canon.blocks[&a]
+            .issues
+            .iter()
+            .any(|x| x.code == IssueCode::OpenTension),
+        "canon counts the duplicate"
+    );
+    let e = r.read().coverage_issues(&Scope::At(l1)).unwrap_err();
+    assert_eq!(e.code, "E_BAD_INPUT");
+    assert_eq!(
+        e.message,
+        format!("coverage is computed for the current state only, not at landing:{l1}")
+    );
+    assert_eq!(
+        e.fix,
+        "ask for canon or a view; coverage over time is not part of rdy core"
+    );
+}
+
+#[test]
+fn cc6_coverage_at_canons_head_is_canon() {
+    let (_d, mut r) = project();
+    let (_a, _l1, l2) = duplicate_then_another_landing(&mut r);
+    let canon = issues(&r);
+    let head = r.read().coverage_issues(&Scope::At(l2)).unwrap();
+    assert_eq!(*head, *canon);
+    assert!(
+        std::sync::Arc::ptr_eq(&head, &canon),
+        "canon's head is canon: one memoised result, not a second one"
+    );
+}
+
+#[test]
+fn cc6_a_briefing_at_a_past_landing_has_no_coverage_key() {
+    let (_d, mut r) = project();
+    let (a, l1, l2) = duplicate_then_another_landing(&mut r);
+    let cov = brief::Coverage {
+        ids: vec![a.to_string()],
+        path: None,
+    };
+    let at =
+        |scope: Scope| serde_json::to_value(r.read().brief(&scope, &cov, None).unwrap()).unwrap();
+    let past = at(Scope::At(l1));
+    assert!(
+        past.get("coverage").is_none(),
+        "no coverage at a past landing: {past}"
+    );
+    assert!(
+        past["base"].is_object(),
+        "the briefing itself still works: {past}"
+    );
+    assert!(
+        at(Scope::At(l2)).get("coverage").is_some(),
+        "canon's head is canon"
+    );
+    assert!(at(Scope::Canon).get("coverage").is_some());
+}

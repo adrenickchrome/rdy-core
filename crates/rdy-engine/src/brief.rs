@@ -401,7 +401,9 @@ pub struct Briefing {
     /// Other views and open proposals that change a covered block (not part of the token).
     pub inflight: Inflight,
     /// Graph coverage of the covered blocks (FW-EN4). Not paged or cut: every page carries it.
-    pub coverage: GraphCoverage,
+    /// Left out at a past landing: coverage describes the current state only (FW-H7).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<GraphCoverage>,
     /// Blocks in other docs that name a covered new doc (FW-EN3). Not paged or cut.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mentioned_by: Vec<MentionedBy>,
@@ -1291,7 +1293,11 @@ impl ReadState {
         }
         suspects.sort_by(|a, b| (&a.block, &a.target).cmp(&(&b.block, &b.target)));
         let (inflight, rows) = self.inflight_unsided(scope, ids)?;
-        let coverage = self.graph_coverage(scope, Some(ids))?;
+        let coverage = if self.is_past_landing(scope) {
+            None
+        } else {
+            Some(self.graph_coverage(scope, Some(ids))?)
+        };
         let (mentioned_by, mentioned_by_omitted) = self.mentioned_by(scope, ids)?;
         let decisions: Vec<BlockId> = ids.iter().cloned().collect();
         let (mut related_decisions, mut related_decisions_omitted) =

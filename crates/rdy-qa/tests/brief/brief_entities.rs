@@ -59,7 +59,10 @@ fn bent1_a_briefing_carries_coverage_for_what_it_covers() {
         &[w.created["$c1"].as_str(), w.created["$c2"].as_str()],
         None,
     );
-    let c = &b.coverage;
+    let c = b
+        .coverage
+        .as_ref()
+        .expect("a briefing in a view carries coverage");
     let g = &c.grounded;
     assert_eq!(
         (

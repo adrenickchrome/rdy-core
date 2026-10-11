@@ -3,6 +3,7 @@
 //! and the Current issues of its suspects.
 use super::model::*;
 use super::structural::structural_of;
+use crate::error::E_BAD_INPUT;
 use crate::tensions::{SideRef, Tension, TensionStatus, tension_label};
 use crate::{RdyError, ReadState, Scope};
 use rdy_model::{BlockId, Hash};
@@ -15,35 +16,32 @@ const MEMO_SCOPES: usize = 8;
 /// The coverage issues a state memoised, by scope label, oldest first.
 pub(crate) type CoverageMemo = Mutex<VecDeque<(String, Arc<CoverageIssues>)>>;
 
-/// The memo key of `scope`.
+/// The memo key of `scope` (one `coverage_scope` gave: never a past landing).
 fn memo_label(scope: &Scope) -> String {
     match scope {
-        Scope::Canon => "canon".to_string(),
+        Scope::Canon | Scope::At(_) => "canon".to_string(),
         Scope::View(v) => format!("view/{v}"),
-        Scope::At(h) => format!("at/{h}"),
         Scope::Inflight => "inflight".to_string(),
     }
 }
 
 /// Which tensions a scope counts (ledger Q5): canon counts those whose sides are all canon; a
 /// view counts those too, plus those with a change side in its set; the in-flight scope counts
-/// every tension. A past landing counts none: the set describes the current state. Intent and
-/// read-time tensions are never counted.
+/// every tension. Intent and read-time tensions are never counted.
 enum Counted {
     Canon,
     View(BTreeSet<Hash>),
     All,
-    None,
 }
 
 impl Counted {
+    /// The tensions `scope` counts; `scope` is one `coverage_scope` gave, so a landing in it is
+    /// canon's head.
     fn of(st: &ReadState, scope: &Scope) -> Counted {
         match scope {
-            Scope::Canon => Counted::Canon,
+            Scope::Canon | Scope::At(_) => Counted::Canon,
             Scope::View(v) => Counted::View(st.included(v).iter().copied().collect()),
             Scope::Inflight => Counted::All,
-            Scope::At(h) if Some(*h) == st.canon_head() => Counted::Canon,
-            Scope::At(_) => Counted::None,
         }
     }
 
@@ -60,15 +58,37 @@ impl Counted {
                         .any(|s| matches!(s, SideRef::Change(c) if set.contains(c)))
             }
             Counted::All => true,
-            Counted::None => false,
         }
     }
 }
 
 impl ReadState {
+    /// True when `scope` is a landing other than canon's head: a past state, which coverage is
+    /// not computed for (FW-H7).
+    pub(crate) fn is_past_landing(&self, scope: &Scope) -> bool {
+        matches!(scope, Scope::At(h) if Some(*h) != self.canon_head())
+    }
+
+    /// The scope coverage is computed in for `scope`: canon's head is canon. `E_BAD_INPUT` for a
+    /// past landing: coverage describes the current state only, and coverage over time belongs
+    /// to rdyhub (FW-H7).
+    pub(crate) fn coverage_scope(&self, scope: &Scope) -> Result<Scope, RdyError> {
+        match scope {
+            Scope::At(h) if self.is_past_landing(scope) => Err(RdyError::new(
+                E_BAD_INPUT,
+                format!("coverage is computed for the current state only, not at landing:{h}"),
+                "ask for canon or a view; coverage over time is not part of rdy core",
+            )),
+            Scope::At(_) => Ok(Scope::Canon),
+            other => Ok(other.clone()),
+        }
+    }
+
     /// The coverage issues of `scope` in all six dimensions, per scored block, each block's
-    /// issues in the closed order. Memoised per state and scope.
+    /// issues in the closed order. Memoised per state and scope. Canon's head is canon;
+    /// `E_BAD_INPUT` for a past landing (`coverage_scope`).
     pub fn coverage_issues(&self, scope: &Scope) -> Result<Arc<CoverageIssues>, RdyError> {
+        let scope = &self.coverage_scope(scope)?;
         let label = memo_label(scope);
         {
             let memo = self.coverage_memo.lock().unwrap_or_else(|e| e.into_inner());
