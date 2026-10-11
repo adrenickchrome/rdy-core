@@ -118,6 +118,7 @@ impl Rdy {
             tensions: Arc::default(),
             dismissals: Arc::default(),
             mention_dismissals: Arc::default(),
+            coverage_memo: Default::default(),
             detectors: &tensions::DETECTORS,
             error: None,
         });

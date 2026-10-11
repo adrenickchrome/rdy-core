@@ -1,7 +1,7 @@
 //! Published read states (snap1): what a reader holds is an immutable `ReadState`, built lazily
 //! and shared. The writer publishes a new one after every write, before the write returns, and
 //! seeds the cells it can fill in O(ops) (the written view after a commit, canon after a landing).
-use crate::coverage::GraphCoverage;
+use crate::coverage::{CoverageMemo, GraphCoverage, Structural};
 use crate::error::*;
 use crate::lexicon::Lexicon;
 use crate::paths::TreeNode;
@@ -74,6 +74,8 @@ pub(crate) struct Built {
     pub(crate) lexicon: OnceLock<Arc<Lexicon>>,
     /// The whole scope's graph coverage (FW-EN4), memoised; never carried.
     pub(crate) coverage: OnceLock<Arc<GraphCoverage>>,
+    /// The structural layer of coverage (FW-CH1), memoised; never carried.
+    pub(crate) structural: OnceLock<Arc<Structural>>,
     /// The mention scans briefings made (FW-EN3), most recent first; carried across a write.
     pub(crate) mentions: Mutex<Vec<MentionScan>>,
     /// Canon's tension index (names, texts, supersedes), memoised; never carried.
@@ -95,6 +97,7 @@ impl Built {
             tree: OnceLock::new(),
             lexicon: OnceLock::new(),
             coverage: OnceLock::new(),
+            structural: OnceLock::new(),
             mentions: Mutex::new(vec![]),
             tension_index: OnceLock::new(),
             tension_canon: OnceLock::new(),
@@ -571,6 +574,8 @@ pub struct ReadState {
     /// Each (block, entity) pair whose latest mention review dismisses it, mapped to that review
     /// (FW-CV4).
     pub(crate) mention_dismissals: Arc<imbl::OrdMap<(BlockId, BlockId), Hash>>,
+    /// The coverage issues of the scopes read in this state (FW-CH1), memoised; never carried.
+    pub(crate) coverage_memo: CoverageMemo,
     /// The tension detectors: the registry, unless a test set others.
     pub(crate) detectors: &'static [&'static dyn Detector],
     /// A `Full` publish that failed to read the heads: every read of this state returns it.

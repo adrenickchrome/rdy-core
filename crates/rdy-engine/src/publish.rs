@@ -76,6 +76,7 @@ impl Rdy {
                     tensions: Arc::default(),
                     dismissals: Arc::clone(&prev.dismissals),
                     mention_dismissals: Arc::clone(&prev.mention_dismissals),
+                    coverage_memo: Default::default(),
                     detectors: self.detectors,
                     error: Some(e.clone()),
                 }));
@@ -414,6 +415,7 @@ impl Rdy {
             tensions,
             dismissals,
             mention_dismissals,
+            coverage_memo: Default::default(),
             detectors: self.detectors,
             error: None,
         })

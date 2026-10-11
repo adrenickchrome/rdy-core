@@ -53,6 +53,7 @@ pub use areas::by_area;
 pub use brief::{
     BriefRegistry, Briefing, Coverage, E_BRIEF_REQUIRED, E_BRIEF_STALE, W_BRIEF_STALE,
 };
+pub use coverage::{CoverageIssue, CoverageIssues, IssueCode};
 pub use decide::DecisionInput;
 pub use error::*;
 pub use events::{Event, EventKind, Events};
