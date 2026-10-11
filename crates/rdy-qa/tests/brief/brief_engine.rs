@@ -242,7 +242,7 @@ fn brf1_a_max_tokens_cut_drops_detail_and_never_coverage() {
                 ids: vec![s.a.to_string()],
                 path: None,
             },
-            Some(300),
+            Some(800),
         )
         .unwrap();
     assert!(
@@ -250,7 +250,7 @@ fn brf1_a_max_tokens_cut_drops_detail_and_never_coverage() {
         "{:?}",
         a.omitted
     );
-    assert!(serde_json::to_string(&a).unwrap().len() / 4 <= 300);
+    assert!(serde_json::to_string(&a).unwrap().len() / 4 <= 800);
     assert!(a.record.covers(&s.a));
     let doc = r
         .read()

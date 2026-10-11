@@ -3,7 +3,9 @@
 //! or every block under a doc or folder path); its token changes when, and only when, a covered
 //! block or one of their dependencies changes version. Registered briefings live in memory
 //! (`BriefRegistry`), one registry per open project.
-use crate::coverage::GraphCoverage;
+use crate::coverage::{
+    Confidence, CoverageIssue, Dimension, PageScore, confidence_of, sort_issues,
+};
 use crate::error::*;
 use crate::inflight::Inflight;
 use crate::keys;
@@ -388,6 +390,26 @@ pub struct BaseBlock {
     pub version: String,
 }
 
+/// The most coverage issues a briefing lists; the rest are counted in `issues_omitted`.
+pub const BRIEF_ISSUES_CAP: usize = 20;
+
+/// The coverage section of a briefing (D-KE84J, D-C6HHV, D-XZXCE): the score and dimensions of the
+/// covered blocks, the score of each page that holds one, their issues in the closed order, and
+/// the confidence of the briefing with its reasons. The confidence follows the covered blocks,
+/// the decisions that govern them and the blocks that depend on them or will go stale (D-EEN7A),
+/// taken before the page cut.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct BriefCoverage {
+    pub score: u32,
+    pub dimensions: BTreeMap<Dimension, u32>,
+    pub pages: Vec<PageScore>,
+    pub issues: Vec<CoverageIssue>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub issues_omitted: usize,
+    #[serde(flatten)]
+    pub confidence: Confidence,
+}
+
 /// One briefing over a set of blocks. Registering it (`register`) makes its token citable.
 #[derive(Clone, Debug, Serialize)]
 pub struct Briefing {
@@ -400,10 +422,11 @@ pub struct Briefing {
     pub suspects: Vec<Suspect>,
     /// Other views and open proposals that change a covered block (not part of the token).
     pub inflight: Inflight,
-    /// Graph coverage of the covered blocks (FW-EN4). Not paged or cut: every page carries it.
-    /// Left out at a past landing: coverage describes the current state only (FW-H7).
+    /// The coverage of the covered blocks and the confidence of this briefing (FW-CV1, FW-CV2).
+    /// Not paged or cut: every page carries it. Left out at a past landing: coverage describes
+    /// the current state only (FW-H7).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub coverage: Option<GraphCoverage>,
+    pub coverage: Option<BriefCoverage>,
     /// Blocks in other docs that name a covered new doc (FW-EN3). Not paged or cut.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mentioned_by: Vec<MentionedBy>,
@@ -1097,6 +1120,76 @@ impl ReadState {
         Ok(briefing)
     }
 
+    /// The coverage section of the briefing of `ids`: the rollup of the covered blocks, one score
+    /// per page that holds one, their issues (at most [`BRIEF_ISSUES_CAP`]) and the confidence
+    /// of the neighbourhood (D-EEN7A). The lists are those before any page cut.
+    fn brief_coverage(
+        &self,
+        scope: &Scope,
+        ids: &BTreeSet<BlockId>,
+        governs: &[Governs],
+        dependents: &[Dependent],
+        will_go_stale: &[WillGoStale],
+    ) -> Result<BriefCoverage, RdyError> {
+        let issues = self.coverage_issues(scope)?;
+        let m = self.materialized(scope)?;
+        let rolled = self.coverage_rollup(scope, ids)?;
+
+        let mut neighbourhood = ids.clone();
+        let named = governs
+            .iter()
+            .map(|g| &g.decision)
+            .chain(dependents.iter().map(|d| &d.block))
+            .chain(will_go_stale.iter().map(|w| &w.block));
+        neighbourhood.extend(named.filter_map(|b| BlockId::parse(b).ok()));
+
+        // the doc path of every block with an issue, for the closed order
+        let mut paths: BTreeMap<String, String> = BTreeMap::new();
+        for id in &neighbourhood {
+            if let Some(e) = issues.blocks.get(id)
+                && !e.issues.is_empty()
+                && let Some(p) = e.doc.as_ref().and_then(|d| m.path_of(d))
+            {
+                paths.insert(id.to_string(), p);
+            }
+        }
+
+        let covered_docs: BTreeSet<&BlockId> = ids
+            .iter()
+            .filter_map(|id| issues.blocks.get(id)?.doc.as_ref())
+            .collect();
+        let page_scores = self.page_rollups(scope)?;
+        let mut pages: Vec<PageScore> = covered_docs
+            .into_iter()
+            .filter_map(|d| {
+                Some(PageScore {
+                    doc: d.to_string(),
+                    path: m.path_of(d)?,
+                    score: page_scores.get(d)?.score,
+                })
+            })
+            .collect();
+        pages.sort_by(|a, b| (&a.path, &a.doc).cmp(&(&b.path, &b.doc)));
+
+        let mut listed: Vec<CoverageIssue> = ids
+            .iter()
+            .filter_map(|id| issues.blocks.get(id))
+            .flat_map(|e| e.issues.iter().cloned())
+            .collect();
+        sort_issues(&mut listed, &paths);
+        let issues_omitted = listed.len().saturating_sub(BRIEF_ISSUES_CAP);
+        listed.truncate(BRIEF_ISSUES_CAP);
+
+        Ok(BriefCoverage {
+            score: rolled.score,
+            dimensions: rolled.dimensions,
+            pages,
+            issues: listed,
+            issues_omitted,
+            confidence: confidence_of(&issues, &neighbourhood, None, &paths),
+        })
+    }
+
     /// The whole briefing of `ids` in `scope`, uncut, without its per-doc counts (`page`
     /// computes them for a cut briefing only).
     fn assemble(&self, scope: &Scope, ids: &BTreeSet<BlockId>) -> Result<Briefing, RdyError> {
@@ -1296,7 +1389,7 @@ impl ReadState {
         let coverage = if self.is_past_landing(scope) {
             None
         } else {
-            Some(self.graph_coverage(scope, Some(ids))?)
+            Some(self.brief_coverage(scope, ids, &governs, &dependents, &will_go_stale)?)
         };
         let (mentioned_by, mentioned_by_omitted) = self.mentioned_by(scope, ids)?;
         let decisions: Vec<BlockId> = ids.iter().cloned().collect();

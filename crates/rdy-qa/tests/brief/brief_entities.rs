@@ -1,5 +1,5 @@
 //! bent1: briefings carry the entity work (FW-EN3, FW-EN4, FW-EN5): the blocks that mention a new
-//! doc, graph coverage for what they cover, and related decisions for a covered decision.
+//! doc, coverage for what they cover, and related decisions for a covered decision.
 use rdy_engine::brief::{Briefing, Coverage};
 use rdy_engine::*;
 use rdy_qa::fixtures::*;
@@ -63,22 +63,19 @@ fn bent1_a_briefing_carries_coverage_for_what_it_covers() {
         .coverage
         .as_ref()
         .expect("a briefing in a view carries coverage");
-    let g = &c.grounded;
-    assert_eq!(
-        (
-            c.scope.as_str(),
-            g.facts,
-            g.facts_tied,
-            g.content,
-            g.content_tied,
-            g.mentions,
-            g.mentions_linked
+    assert!(c.score < 100, "c2 names the ledger and does not link it");
+    assert!(
+        c.issues.iter().any(
+            |i| i.block == w.created["$c2"] && i.code == rdy_engine::IssueCode::UnlinkedMention
         ),
-        ("covered", 2, 1, 2, 1, 2, 1)
+        "{:?}",
+        c.issues
     );
     let v = json_of(&b);
     assert!(
-        v["coverage"]["grounded"].is_object() && v.get("health").is_none(),
+        v["coverage"]["score"].is_number()
+            && v["coverage"].get("grounded").is_none()
+            && v.get("health").is_none(),
         "FW-CV1: {v}"
     );
 }

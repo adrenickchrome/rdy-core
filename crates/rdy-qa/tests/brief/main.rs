@@ -4,6 +4,7 @@
 mod brief_carry;
 mod brief_cli;
 mod brief_consequences;
+mod brief_coverage;
 mod brief_engine;
 mod brief_entities;
 mod brief_inflight;
