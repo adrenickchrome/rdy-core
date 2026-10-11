@@ -52,15 +52,48 @@ fn cc2_a_pack_sets_weights_and_the_two_numbers() {
 }
 
 #[test]
-fn cc2_out_of_range_and_unknown_keys_are_refused() {
+fn cc2_out_of_range_numbers_are_refused_with_the_exact_text() {
+    for (bad, text) in [
+        (
+            "coverage:\n  dismissed_weight: 101\n",
+            "coverage.dismissed_weight is 101; it must be 0 to 100",
+        ),
+        (
+            "coverage:\n  drift_threshold: 0\n",
+            "coverage.drift_threshold is 0; it must be 1 to 100",
+        ),
+        (
+            "coverage:\n  weights: {grounded: 0, consistent: 0, current: 0, connected: 0, complete: 0, governed: 0}\n",
+            "coverage.weights are all 0; at least one dimension needs a weight",
+        ),
+    ] {
+        match try_pack_with(bad) {
+            Err(SchemaError::Invalid(msg)) => assert_eq!(msg, text, "{bad}"),
+            other => panic!("{bad}: expected SchemaError::Invalid, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn cc2_unknown_keys_are_refused() {
     for bad in [
-        "coverage:\n  dismissed_weight: 101\n",
-        "coverage:\n  drift_threshold: 0\n",
-        "coverage:\n  weights: {grounded: 0, consistent: 0, current: 0, connected: 0, complete: 0, governed: 0}\n",
         "coverage:\n  weights: {groundd: 1}\n",
         "coverage:\n  dismised_weight: 10\n",
     ] {
         assert!(try_pack_with(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn cc2_boundary_values_are_accepted() {
+    for ok in [
+        "coverage:\n  dismissed_weight: 0\n",
+        "coverage:\n  dismissed_weight: 100\n",
+        "coverage:\n  drift_threshold: 1\n",
+        "coverage:\n  drift_threshold: 100\n",
+        "coverage:\n  weights: {grounded: 0, consistent: 0, current: 0, connected: 0, complete: 0, governed: 1}\n",
+    ] {
+        assert!(try_pack_with(ok).is_ok(), "{ok}");
     }
 }
 
