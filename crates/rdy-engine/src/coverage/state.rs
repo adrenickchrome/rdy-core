@@ -72,7 +72,7 @@ impl ReadState {
     /// The scope coverage is computed in for `scope`: canon's head is canon. `E_BAD_INPUT` for a
     /// past landing: coverage describes the current state only, and coverage over time belongs
     /// to rdyhub (FW-H7).
-    pub(crate) fn coverage_scope(&self, scope: &Scope) -> Result<Scope, RdyError> {
+    pub fn coverage_scope(&self, scope: &Scope) -> Result<Scope, RdyError> {
         match scope {
             Scope::At(h) if self.is_past_landing(scope) => Err(RdyError::new(
                 E_BAD_INPUT,

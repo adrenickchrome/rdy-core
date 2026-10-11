@@ -746,3 +746,52 @@ fn rpag1_a_cut_block_names_itself_and_the_bytes_cut() {
     assert_eq!(v["truncated"], true, "{v}");
     assert!(v.get("omitted").is_none(), "{v}");
 }
+
+/// cc6 (FW-H7): coverage is for the current state only, so `rdy_overview` at a past landing is
+/// refused with `E_BAD_INPUT`; at canon's head it serves canon's coverage.
+#[test]
+fn cc6_overview_at_a_past_landing_is_refused() {
+    let (_d, mut st) = state();
+    start(&mut st);
+    let first = land_and_tag(&mut st);
+    rdy_write(&mut st, serde_json::from_value(json!({"ops": [
+        {"op": "create", "type": "doc", "id": "$d2", "fields": {"title": "Later", "doc_type": "glossary"}}
+    ]})).unwrap())
+    .unwrap();
+    let p = rdy_propose(
+        &mut st,
+        serde_json::from_value(json!({"title": "later"})).unwrap(),
+    )
+    .unwrap();
+    let pid = p["id"].as_str().unwrap().to_string();
+    let head = write_typed(&*st.engine, move |r| r.land(&approver(), &pid)).unwrap();
+    let head = head.as_str().unwrap().to_string();
+    for scope in ["tag:v0.1.0".to_string(), format!("landing:{first}")] {
+        let e = rdy_overview(
+            &mut st,
+            serde_json::from_value(json!({"scope": scope})).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, "E_BAD_INPUT", "{scope}");
+        assert_eq!(
+            e.message,
+            format!("coverage is computed for the current state only, not at landing:{first}"),
+            "{scope}"
+        );
+        assert_eq!(
+            e.fix,
+            "ask for canon or a view; coverage over time is not part of rdy core"
+        );
+    }
+    let at_head = rdy_overview(
+        &mut st,
+        serde_json::from_value(json!({"scope": format!("landing:{head}")})).unwrap(),
+    )
+    .unwrap();
+    let canon = rdy_overview(
+        &mut st,
+        serde_json::from_value(json!({"scope": "canon"})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(at_head["coverage"], canon["coverage"]);
+}
