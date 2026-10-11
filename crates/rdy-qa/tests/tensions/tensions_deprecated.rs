@@ -179,3 +179,123 @@ fn tdep1_canon_content_referencing_deprecated_canon_content_is_an_all_canon_tens
             .all(|x| !x.blocks().contains(&s.decision))
     );
 }
+
+// cc3 (FW-CH2): a plain-text mention of a deprecated definition's name or alias.
+
+/// A doc with a live section `Rules` and a section `Glossary`, which holds the term `Retry limit`
+/// (alias `retries`). The glossary is deprecated when `deprecate` is set. Landed. Returns the
+/// live section, for new content.
+fn term_world(deprecate: bool) -> (tempfile::TempDir, rdy_engine::Rdy, rdy_model::BlockId) {
+    let (d, mut r) = project();
+    let w = write(
+        &mut r,
+        "work",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d",
+             "fields": {"name": "spec", "title": "Spec", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d",
+             "fields": {"title": "Rules"}},
+            {"op": "create", "type": "section", "id": "$g", "parent": "$d",
+             "fields": {"title": "Glossary"}},
+            {"op": "create", "type": "term", "id": "$t", "parent": "$g",
+             "fields": {"name": "Retry limit", "aliases": ["retries"]},
+             "body": "How many times a job runs again."}
+        ]),
+    )
+    .expect("the glossary");
+    land(&mut r, "work").expect("land the glossary");
+    if deprecate {
+        write(
+            &mut r,
+            "work",
+            json!([{"op": "update", "id": created(&w, "$g").to_string(),
+                    "fields": {"lifecycle": "deprecated"}}]),
+        )
+        .expect("deprecate the glossary");
+        land(&mut r, "work").expect("land the deprecation");
+    }
+    let s = created(&w, "$s");
+    (d, r, s)
+}
+
+fn deprecated_term_world() -> (tempfile::TempDir, rdy_engine::Rdy, rdy_model::BlockId) {
+    term_world(true)
+}
+
+fn live_term_world() -> (tempfile::TempDir, rdy_engine::Rdy, rdy_model::BlockId) {
+    term_world(false)
+}
+
+/// The id of the one term in canon.
+fn deprecated_term_id(r: &rdy_engine::Rdy) -> rdy_model::BlockId {
+    let m = r
+        .read()
+        .materialized(&rdy_engine::Scope::Canon)
+        .expect("canon");
+    let mut ts = m.iter().filter(|b| b.block_type == "term");
+    let t = ts.next().expect("a term");
+    assert!(ts.next().is_none(), "one term");
+    t.id.clone()
+}
+
+#[test]
+fn cc3_a_new_plain_mention_of_a_deprecated_term_is_a_tension() {
+    let (_d, mut r, s) = deprecated_term_world();
+    let w = put(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "claim", "id": "$y", "parent": s.to_string(),
+        "body": "Each job keeps its retries small."}]),
+    );
+    let y = created(&w, "$y");
+    let t = one_involving(&r, TensionKind::DeprecatedReference, &y);
+    assert!(t.summary.contains("names deprecated"), "{}", t.summary);
+    assert_eq!(t.severity, TensionSeverity::Advisory);
+}
+
+#[test]
+fn cc3_a_landed_mention_stays_open_in_canon() {
+    let (_d, mut r, s) = deprecated_term_world();
+    put(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "claim", "id": "$y", "parent": s.to_string(),
+        "body": "The Retry limit applies."}]),
+    );
+    land(&mut r, "a").unwrap();
+    let ts = of_kind(&r, TensionKind::DeprecatedReference);
+    assert_eq!(ts.len(), 1);
+    assert!(has_canon(&ts[0]) && change_sides(&ts[0]).is_empty());
+}
+
+/// guard (pre-flight): passes before the change, because the edge form already gives one
+/// tension; it pins that the mention form never adds a second one for the same pair.
+#[test]
+fn cc3_a_linked_mention_is_the_edge_form_only() {
+    let (_d, mut r, s) = deprecated_term_world();
+    let x = deprecated_term_id(&r);
+    put(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "claim", "id": "$y", "parent": s.to_string(),
+        "body": format!("The Retry limit {{{{{x}}}}} applies.")}]),
+    );
+    assert_eq!(
+        of_kind(&r, TensionKind::DeprecatedReference).len(),
+        1,
+        "one tension, not two"
+    );
+}
+
+/// guard: a mention of a live term raises nothing; a key match is not a mention.
+#[test]
+fn cc3_live_terms_and_keys_raise_nothing() {
+    let (_d, mut r, s) = live_term_world();
+    put(
+        &mut r,
+        "a",
+        json!([{"op": "create", "type": "claim", "parent": s.to_string(),
+        "body": "The Retry limit applies."}]),
+    );
+    assert!(of_kind(&r, TensionKind::DeprecatedReference).is_empty());
+}

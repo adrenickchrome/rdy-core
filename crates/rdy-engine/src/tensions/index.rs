@@ -3,13 +3,14 @@
 //! detection context that joins them to the published state.
 use super::{DetectScope, Involved, SideRef};
 use crate::brief::{effective_lifecycle, effective_stable};
+use crate::lexicon::Lexicon;
 use crate::{InflightSet, Materialized, RdyError, ReadState, Scope};
 use imbl::OrdMap;
 use rdy_graph::{DerivedStatus, Edge, EdgeKind, Graph, IMPACT_LINKS, SUSPECT_LINKS, edges_of};
 use rdy_model::{Block, BlockId, Change, FieldValue, Hash, Op, decision};
 use rdy_schema::{Pack, Trait};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// One in-flight change's write of one block: its base (`None` for a create), the version it
 /// writes and the block (`None` for a delete), and whether it is live: current in some view of
@@ -570,7 +571,7 @@ pub(crate) fn canon_index_of(st: &ReadState) -> Result<Arc<CanonIndex>, RdyError
 
 /// Whether `b` is normative content: its type has the `normative` trait, or it is a `table`
 /// marked `normative: true`.
-fn is_normative(pack: &Pack, b: &Block) -> bool {
+pub(crate) fn is_normative(pack: &Pack, b: &Block) -> bool {
     has_trait(pack, b, Trait::Normative)
         || (b.block_type == "table" && b.fields.get("normative") == Some(&FieldValue::Bool(true)))
 }
@@ -612,6 +613,8 @@ pub struct DetectCx<'a> {
     /// A landing's run (tgat1): the canon its landing set would give, read where the in-flight
     /// scope is read otherwise.
     landing: Option<(Arc<Materialized>, Arc<Graph>)>,
+    /// The entity lexicon of the scope this run reads (see [`DetectCx::lexicon`]); lazy.
+    lexicon: OnceLock<Arc<Lexicon>>,
 }
 
 impl<'a> DetectCx<'a> {
@@ -627,6 +630,7 @@ impl<'a> DetectCx<'a> {
             canon,
             scope,
             landing: None,
+            lexicon: OnceLock::new(),
         }
     }
 
@@ -643,6 +647,23 @@ impl<'a> DetectCx<'a> {
             landing: Some((m, g)),
             ..DetectCx::new(st, writes, canon, DetectScope::Inflight)
         }
+    }
+
+    /// The entity lexicon of the materialization this run reads: canon's in the canon scope, the
+    /// in-flight one in the in-flight scope (a landing's run: that of the canon the landing would
+    /// give). Memoised in this run, and read through the state's own lexicon where it has one.
+    pub fn lexicon(&self) -> Result<Arc<Lexicon>, RdyError> {
+        if let Some(l) = self.lexicon.get() {
+            return Ok(Arc::clone(l));
+        }
+        let l = match (&self.landing, self.scope) {
+            (_, DetectScope::Canon) => self.st.lexicon(&Scope::Canon)?,
+            (Some((m, _)), DetectScope::Inflight) => {
+                Arc::new(Lexicon::build(self.st.pack(), m.iter()))
+            }
+            (None, DetectScope::Inflight) => self.st.lexicon(&Scope::Inflight)?,
+        };
+        Ok(Arc::clone(self.lexicon.get_or_init(|| l)))
     }
 
     /// The scope this run detects in.

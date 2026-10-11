@@ -1,11 +1,18 @@
-//! Deprecated reference: content references or links to deprecated content.
+//! Deprecated reference: content references or links to deprecated content, or names it in plain
+//! text.
 //!
 //! In flight: a live write adds a reference or an impact link to deprecated content. In canon
 //! (FW-CH6a): live canon content that references deprecated canon content is a standing
 //! condition, so a reference that lands keeps its vkey (it is re-keyed to canon). Deprecated
 //! content that references deprecated content raises nothing in canon.
+//!
+//! The mention form (FW-CH2): a block that names a deprecated definition by its name or an alias
+//! in its text, without a tie to it, is the same tension as a reference to it. In flight, the
+//! write must be the first to name it; in canon, the naming block must be live. A block that
+//! both references and names a definition gets the edge form only.
 use super::{DetectCx, DetectScope, Detector, Found, Involved, TensionKind, pointing_edge};
 use crate::RdyError;
+use crate::lexicon::tied;
 use rdy_graph::{Edge, edges_of};
 use rdy_model::{Block, BlockId, Hash};
 use std::collections::BTreeSet;
@@ -27,6 +34,25 @@ fn found(y: Involved, x: Involved, who: &str) -> Found {
         summary,
         stable: true,
     }
+}
+
+/// The summary of the mention form: `y` names the deprecated definition `x` in its text.
+fn found_mention(y: Involved, x: Involved, who: &str, name: &str) -> Found {
+    let summary = format!(
+        "{} ({who}) names deprecated {} ({name}) in its text",
+        y.block, x.block
+    );
+    Found {
+        kind: TensionKind::DeprecatedReference,
+        involved: vec![y, x],
+        summary,
+        stable: true,
+    }
+}
+
+/// Whether `b` has a pointing edge to `x`: the edge form reports that pair.
+fn points_at(b: &Block, x: &BlockId) -> bool {
+    edges_of(b).iter().any(|e| pointing_edge(e) && e.to == *x)
 }
 
 impl DeprecatedReference {
@@ -124,6 +150,128 @@ impl DeprecatedReference {
     }
 }
 
+impl DeprecatedReference {
+    /// The in-flight mention form: live writes whose new block names a deprecated definition in
+    /// plain text, and whose base did not. A run around `seeds` reads the writes on the seeds,
+    /// and every live write when a seed is a definition (its deprecation can change what the
+    /// other writes name).
+    fn inflight_mentions(
+        cx: &DetectCx<'_>,
+        seeds: Option<&BTreeSet<BlockId>>,
+        out: &mut Vec<Found>,
+    ) -> Result<(), RdyError> {
+        let m = cx.inflight_m()?;
+        let writes: Vec<Arc<crate::tensions::Write>> = match seeds {
+            Some(seeds)
+                if !seeds
+                    .iter()
+                    .any(|s| m.get(s).is_some_and(|b| cx.defines(b))) =>
+            {
+                seeds.iter().flat_map(|s| cx.writes.live_on(s)).collect()
+            }
+            _ => cx.writes.live().map(Arc::clone).collect(),
+        };
+        let lexicon = cx.lexicon()?;
+        let g = cx.inflight_graph()?;
+        let mut seen: BTreeSet<(Hash, BlockId, BlockId)> = BTreeSet::new();
+        for w in writes {
+            let Some(b) = w.new.as_deref() else {
+                continue;
+            };
+            let mut base_names: Option<Vec<String>> = None;
+            for mention in lexicon.mentions(b) {
+                let Ok(xid) = BlockId::parse(&mention.entity) else {
+                    continue;
+                };
+                let Some(xb) = m.get(&xid) else {
+                    continue;
+                };
+                if !cx.defines(xb)
+                    || tied(&g, &w.block, &xid)
+                    || points_at(b, &xid)
+                    || !cx.deprecated(&xid)?
+                {
+                    continue;
+                }
+                let key = (w.change, w.block.clone(), xid.clone());
+                if seen.contains(&key) {
+                    continue;
+                }
+                if base_names.is_none() {
+                    base_names = Some(match w.base {
+                        Some(v) => lexicon
+                            .mentions(&cx.st.reader().get_block(&v)?)
+                            .into_iter()
+                            .map(|x| x.entity)
+                            .collect(),
+                        None => vec![],
+                    });
+                }
+                if base_names.iter().flatten().any(|e| *e == mention.entity) {
+                    continue;
+                }
+                let Some((side, version)) = cx.side_at(&xid)? else {
+                    continue;
+                };
+                seen.insert(key);
+                out.push(found_mention(
+                    cx.of_write(&w),
+                    cx.involved(side, &xid, version)?,
+                    &format!("change {}", w.change.short()),
+                    xb.field_str("name").unwrap_or_default(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The canon mention form: live canon blocks that name a deprecated canon definition in
+    /// plain text without a tie to it. Nothing is read when canon has no deprecated definition.
+    fn canon_mentions(cx: &DetectCx<'_>, out: &mut Vec<Found>) -> Result<(), RdyError> {
+        let m = cx.canon_m()?;
+        let mut retired: BTreeSet<BlockId> = BTreeSet::new();
+        for b in m.iter() {
+            if cx.defines(b) && cx.deprecated(&b.id)? {
+                retired.insert(b.id.clone());
+            }
+        }
+        if retired.is_empty() {
+            return Ok(());
+        }
+        let lexicon = cx.lexicon()?;
+        let g = cx.canon_graph()?;
+        for b in m.iter() {
+            let mut live = None;
+            for mention in lexicon.mentions(b) {
+                let Ok(xid) = BlockId::parse(&mention.entity) else {
+                    continue;
+                };
+                if !retired.contains(&xid) || tied(&g, &b.id, &xid) || points_at(b, &xid) {
+                    continue;
+                }
+                if !*live.get_or_insert(!cx.deprecated(&b.id)?) {
+                    break;
+                }
+                if let (Some((ys, yv)), Some((xs, xv))) =
+                    (cx.canon_side(&b.id)?, cx.canon_side(&xid)?)
+                {
+                    let name = m
+                        .get(&xid)
+                        .and_then(|x| x.field_str("name"))
+                        .unwrap_or_default();
+                    out.push(found_mention(
+                        cx.involved(ys, &b.id, Some(yv))?,
+                        cx.involved(xs, &xid, Some(xv))?,
+                        "canon",
+                        name,
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Detector for DeprecatedReference {
     fn kind(&self) -> TensionKind {
         TensionKind::DeprecatedReference
@@ -136,8 +284,14 @@ impl Detector for DeprecatedReference {
         out: &mut Vec<Found>,
     ) -> Result<(), RdyError> {
         match cx.scope() {
-            DetectScope::Inflight => Self::inflight(cx, seeds, out),
-            DetectScope::Canon => Self::canon(cx, out),
+            DetectScope::Inflight => {
+                Self::inflight(cx, seeds, out)?;
+                Self::inflight_mentions(cx, seeds, out)
+            }
+            DetectScope::Canon => {
+                Self::canon(cx, out)?;
+                Self::canon_mentions(cx, out)
+            }
         }
     }
 }
