@@ -41,8 +41,18 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "E_SELF_REVIEW",
-        "rdy_resolve dismisses a blocking tension, and the session's actor wrote a side of it (another run of the same actor is not independent)",
+        "rdy_resolve dismisses a blocking tension, or rdy_review_submit judges a pair, and the session's actor wrote a side of it (another run of the same actor is not independent)",
         "a reviewer of another actor, or a human, dismisses it",
+    ),
+    (
+        "E_REVIEW_INVALID",
+        "rdy_review_submit: the verdict fails its schema (a verdict other than tension or no_tension, a finding on another block, an empty or over-long note, a tension with no finding, more than 20 findings, a severity other than advisory or blocking, advice on a no_tension, advice to block without a reason)",
+        "send the corrected payload",
+    ),
+    (
+        "E_REVIEW_STALE",
+        "rdy_review_submit: the case hash is no longer current (a side changed, landed or left every view), or a verdict already settled the request (the message names it)",
+        "call rdy_review_next again",
     ),
     (
         "E_PROPOSAL_MOVED",

@@ -127,6 +127,9 @@ pub(crate) struct DecisionsConfig {
     home: Option<String>,
 }
 
+/// `reviews.lease_ttl` when the config does not set it, in minutes.
+pub const DEFAULT_LEASE_TTL_MINUTES: u32 = 10;
+
 /// `views.idle_days` when the config does not set it.
 const DEFAULT_IDLE_DAYS: u32 = 14;
 
@@ -135,11 +138,24 @@ pub(crate) struct ReviewsConfig {
     /// A proposal lands only on the canon head it was proposed on.
     #[serde(default)]
     require_up_to_date: bool,
+    /// Minutes a claimed review request stays leased (plan M2e1); 0 means no lease.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease_ttl: Option<u32>,
 }
 
 impl Config {
     pub(crate) fn require_up_to_date(&self) -> bool {
         self.reviews.as_ref().is_some_and(|r| r.require_up_to_date)
+    }
+
+    /// `reviews.lease_ttl`: the minutes a claimed review request stays leased (0 means no lease).
+    // read by the review queue (plan M2e1, a later task)
+    #[allow(dead_code)]
+    pub(crate) fn lease_ttl_minutes(&self) -> u32 {
+        self.reviews
+            .as_ref()
+            .and_then(|r| r.lease_ttl)
+            .unwrap_or(DEFAULT_LEASE_TTL_MINUTES)
     }
 
     /// `coverage.target`: the coverage, in percent, at which onboarding is done.

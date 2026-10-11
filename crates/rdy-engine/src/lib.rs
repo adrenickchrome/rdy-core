@@ -35,6 +35,7 @@ mod query;
 mod read_state;
 pub mod related;
 pub mod search;
+pub mod semantic;
 mod session;
 pub mod suggest;
 pub mod tensions;
@@ -98,7 +99,7 @@ pub use write::{
     json_to_field, parse_justification, parse_op, parse_ops,
 };
 
-pub use config::{ServeConfig, serve_config};
+pub use config::{DEFAULT_LEASE_TTL_MINUTES, ServeConfig, serve_config};
 pub use engine::{Engine, Local, WriteFn};
 pub use fsck::FsckReport;
 pub use pack_load::{
@@ -153,6 +154,8 @@ pub struct Rdy {
     serve: ServeConfig,
     /// The registered briefings (in memory; one registry per open project).
     briefs: Arc<brief::BriefRegistry>,
+    /// The leases on review requests (in memory; one registry per open project).
+    leases: Arc<semantic::lease::LeaseRegistry>,
     /// The tension detectors every published state runs: the registry, unless a test set others.
     detectors: &'static [&'static dyn tensions::Detector],
     /// The tension set the last `settle_tensions` recorded, and the publish (`publish_gen`) of

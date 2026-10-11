@@ -5,6 +5,7 @@ use crate::watch::PackWatch;
 use crate::writer::{Writer, WriterHandle};
 use arc_swap::ArcSwap;
 use rdy_engine::engine::{Engine, WriteFn};
+use rdy_engine::semantic::lease::LeaseRegistry;
 use rdy_engine::{BriefRegistry, OpenReport, Rdy, RdyError, ReadState};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -29,6 +30,8 @@ pub struct Shared {
     pub pack_error: Mutex<Option<String>>,
     /// The project's briefing registry, taken from the `Rdy` before the writer owns it.
     pub briefs: Arc<BriefRegistry>,
+    /// The project's lease registry for review requests, taken from the `Rdy` the same way.
+    pub leases: Arc<LeaseRegistry>,
     session_end: Mutex<Vec<SessionEndHook>>,
     /// Test hook: run once by the writer right after `reload_pack` returns.
     #[cfg(test)]
@@ -46,6 +49,8 @@ impl Shared {
         let state = ArcSwap::new(rdy.read());
         let watch = PackWatch::new(&root, rdy.pack_fingerprint());
         let briefs = rdy.briefs();
+        let leases = rdy.leases();
+        let owned = Arc::clone(&leases);
         Arc::new_cyclic(|weak| Shared {
             state,
             open_report,
@@ -55,7 +60,10 @@ impl Shared {
             pack_gen: AtomicU64::new(0),
             pack_error: Mutex::new(None),
             briefs,
-            session_end: Mutex::new(Vec::new()),
+            leases,
+            session_end: Mutex::new(vec![Box::new(move |id: SessionId| {
+                owned.release_owner(id.0);
+            })]),
             #[cfg(test)]
             after_reload: Mutex::new(None),
             #[cfg(test)]
@@ -125,6 +133,10 @@ impl Engine for DaemonEngine {
 
     fn briefs(&self) -> Arc<BriefRegistry> {
         Arc::clone(&self.0.briefs)
+    }
+
+    fn leases(&self) -> Arc<LeaseRegistry> {
+        Arc::clone(&self.0.leases)
     }
 
     fn pack_generation(&self) -> u64 {

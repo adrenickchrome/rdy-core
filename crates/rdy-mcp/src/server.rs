@@ -645,6 +645,9 @@ mod tests {
         fn briefs(&self) -> Arc<rdy_engine::BriefRegistry> {
             self.0.briefs()
         }
+        fn leases(&self) -> Arc<rdy_engine::semantic::lease::LeaseRegistry> {
+            Default::default()
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -9,6 +9,10 @@ pub const E_CONFIG: &str = "E_CONFIG";
 pub const E_PERMISSION: &str = "E_PERMISSION";
 /// A dismissal of a blocking tension by the actor who wrote one of its sides (plan M2d2).
 pub const E_SELF_REVIEW: &str = "E_SELF_REVIEW";
+/// A review verdict fails its schema (plan M2e1).
+pub const E_REVIEW_INVALID: &str = "E_REVIEW_INVALID";
+/// A review's case hash is no longer current, or a verdict already settled the request (plan M2e1).
+pub const E_REVIEW_STALE: &str = "E_REVIEW_STALE";
 /// An agent session wrote into a view another session owns.
 pub const E_VIEW_OWNER: &str = "E_VIEW_OWNER";
 pub const E_BAD_INPUT: &str = "E_BAD_INPUT";
