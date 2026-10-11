@@ -111,13 +111,14 @@ fn justification(j: &Justification) -> JustificationInfo {
     }
 }
 
-/// A canon block's text before its newest edit (restatement drift, FW-CH2): the body of the
-/// version the newest `update` replaced, and the landing (`at_ms`, landing id) that carried the
-/// newest version, when known.
+/// One version of a canon block (restatement drift, FW-CH2): the version, the landing
+/// (`at_ms`, landing id) that carried it (`None` when unknown), and the version before it
+/// (`None` after a create).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PreviousText {
-    pub body: String,
+pub struct VersionStep {
+    pub version: Hash,
     pub landed_at: Option<(i64, String)>,
+    pub base: Option<Hash>,
 }
 
 /// What one call has already decoded: changes by hash (and each one's ops by block), landing
@@ -128,7 +129,7 @@ struct Memo<'a> {
     included: Option<HashSet<Hash>>,
     head: Option<Hash>,
     changes: HashMap<Hash, Arc<Change>>,
-    /// For each change read by [`Memo::previous`], its op positions by block.
+    /// For each change read by [`Memo::step`], its op positions by block.
     ops: HashMap<Hash, HashMap<BlockId, Vec<usize>>>,
     landed: HashMap<Hash, Option<Hash>>,
     landings: HashMap<Hash, LandingRef>,
@@ -278,25 +279,18 @@ impl<'a> Memo<'a> {
         Ok(self.landing(c)?.map(|l| (l.at_ms, l.id)))
     }
 
-    /// The newest landing of `version` of `id`: that of the change that wrote it.
-    fn newest_landing(
+    /// The step for `version` of `id` and the change that wrote it there, never one in `used`
+    /// (see [`Memo::writer_of`]); `None` when every writer is in `used`. The change's ops are
+    /// indexed by block once, so a change that writes many blocks is scanned once.
+    fn step(
         &mut self,
         version: &Hash,
         id: &BlockId,
-    ) -> Result<Option<(i64, String)>, RdyError> {
-        let c = self
-            .writer_of(version, id, &HashSet::new())?
-            .ok_or_else(|| no_writer(version, id))?;
-        self.landed_at(&c)
-    }
-
-    /// The `previous` step: when the newest entry for `version` of `id` is an `update`, the body
-    /// of its base and the newest version's landing; `None` after a create. The change's ops are
-    /// indexed by block once, so a change that writes many blocks is scanned once.
-    fn previous(&mut self, version: &Hash, id: &BlockId) -> Result<Option<PreviousText>, RdyError> {
-        let c = self
-            .writer_of(version, id, &HashSet::new())?
-            .ok_or_else(|| no_writer(version, id))?;
+        used: &HashSet<Hash>,
+    ) -> Result<Option<(Hash, VersionStep)>, RdyError> {
+        let Some(c) = self.writer_of(version, id, used)? else {
+            return Ok(None);
+        };
         let change = self.change(&c)?;
         let by_block = self.ops.entry(c).or_insert_with(|| {
             let mut m: HashMap<BlockId, Vec<usize>> = HashMap::new();
@@ -326,14 +320,15 @@ impl<'a> Memo<'a> {
                     "run rdy fsck",
                 )
             })?;
-        let Some(base) = base else {
-            return Ok(None);
-        };
-        let body = self.reader.get_block(&base)?.body;
-        Ok(Some(PreviousText {
-            body,
-            landed_at: self.landed_at(&c)?,
-        }))
+        let landed_at = self.landed_at(&c)?;
+        Ok(Some((
+            c,
+            VersionStep {
+                version: *version,
+                landed_at,
+                base,
+            },
+        )))
     }
 
     /// The newest entry for `version` of `id`.
@@ -433,44 +428,44 @@ impl ReadState {
         Ok(out)
     }
 
-    /// For each canon block in `ids` whose newest version is an `update`, the body of the version
-    /// before it and the landing of the newest one (restatement drift, FW-CH2). A block whose
-    /// newest version is a create is left out. One memo is shared across the ids.
-    pub fn previous_texts(
-        &self,
-        ids: &[BlockId],
-    ) -> Result<BTreeMap<BlockId, PreviousText>, RdyError> {
-        let m = self.materialized(&Scope::Canon)?;
-        let mut memo = Memo::new(self, &Scope::Canon)?;
-        let mut out = BTreeMap::new();
-        for id in ids {
-            if out.contains_key(id) {
-                continue;
-            }
-            let version = version_in(&m, id)?;
-            if let Some(p) = memo.previous(&version, id)? {
-                out.insert(id.clone(), p);
-            }
-        }
-        Ok(out)
+    /// Canon's history, read one version at a time with one memo (restatement drift, FW-CH2).
+    pub(crate) fn canon_steps(&self) -> Result<CanonSteps<'_>, RdyError> {
+        Ok(CanonSteps {
+            memo: Memo::new(self, &Scope::Canon)?,
+            m: self.materialized(&Scope::Canon)?,
+        })
+    }
+}
+
+/// Canon's history, read one version at a time (restatement drift, FW-CH2). One memo is shared
+/// across calls, so a change that writes many blocks is decoded once.
+pub(crate) struct CanonSteps<'a> {
+    memo: Memo<'a>,
+    m: Arc<Materialized>,
+}
+
+impl CanonSteps<'_> {
+    /// The step for `id`'s canon version and the change that wrote it.
+    pub(crate) fn current(&mut self, id: &BlockId) -> Result<(Hash, VersionStep), RdyError> {
+        let version = version_in(&self.m, id)?;
+        self.memo
+            .step(&version, id, &HashSet::new())?
+            .ok_or_else(|| no_writer(&version, id))
     }
 
-    /// For each canon block in `ids`, the (`at_ms`, landing id) of the landing that carried its
-    /// canon version (`None` when that change has not landed). One memo is shared across the ids.
-    pub fn canon_landed_at(
-        &self,
-        ids: &[BlockId],
-    ) -> Result<BTreeMap<BlockId, Option<(i64, String)>>, RdyError> {
-        let m = self.materialized(&Scope::Canon)?;
-        let mut memo = Memo::new(self, &Scope::Canon)?;
-        let mut out = BTreeMap::new();
-        for id in ids {
-            if out.contains_key(id) {
-                continue;
-            }
-            let version = version_in(&m, id)?;
-            out.insert(id.clone(), memo.newest_landing(&version, id)?);
-        }
-        Ok(out)
+    /// The step for `version` of `id` and the change that wrote it, never one in `used`; `None`
+    /// when every writer is in `used`.
+    pub(crate) fn step(
+        &mut self,
+        version: &Hash,
+        id: &BlockId,
+        used: &HashSet<Hash>,
+    ) -> Result<Option<(Hash, VersionStep)>, RdyError> {
+        self.memo.step(version, id, used)
+    }
+
+    /// The body of version `v`, read from the store.
+    pub(crate) fn body(&self, v: &Hash) -> Result<String, RdyError> {
+        Ok(self.memo.reader.get_block(v)?.body)
     }
 }

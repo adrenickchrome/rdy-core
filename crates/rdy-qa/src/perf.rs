@@ -215,6 +215,9 @@ fn spec_target(op: &str) -> Option<String> {
         "tensions_full_1k" => {
             "no spec target: the cold build of every tension at 1k in-flight changes, once per landing or structural update (recorded for M2d2)"
         }
+        "tensions_canon_drift" => {
+            "no spec target: the canon-scope build of the tensions over landed prose that shares phrases, half of it edited in a later landing, once per landing (restatement drift's canon form, the D-SES4J budget check; compare with tensions_canon)"
+        }
         "tensions_canon" => {
             "no spec target: the canon-scope build of the tensions (FW-CH6), once per landing; recorded for Coverage and confidence"
         }
@@ -1546,9 +1549,10 @@ fn tier_tensions(
         },
     ));
     // restatement drift (cc7): one 20-word prose block per run and 50 blocks that restate it are
-    // written once into `inf1` (untimed; the run blocks restate each other too); each run then
-    // edits its block inside the shared text, and the timed part is the tension delta and report
-    // of that write, as in `tension_on_change_1k`
+    // written once and landed (untimed; the run blocks restate each other too; a drift judges a
+    // view's net edit, so the edited text must be one the view started from); each run then
+    // edits its block inside the shared text in view `tdrift`, and the timed part is the tension
+    // delta and report of that write, as in `tension_on_change_1k`. The 1k in-flight changes stay.
     const SAID: &str = "Every queued job retries for five seconds and then reports one failure to its owner through the shared alert channel.";
     let mut ops: Vec<serde_json::Value> = (0..runs.incremental)
         .map(|k| {
@@ -1560,7 +1564,8 @@ fn tier_tensions(
         json!({"op": "create", "type": "prose", "parent": section,
             "body": format!("Restated {k}: {SAID}")})
     }));
-    let d = write(r, "inf1", serde_json::Value::Array(ops)).expect("restated blocks");
+    let d = write(r, "tdset", serde_json::Value::Array(ops)).expect("restated blocks");
+    land(r, "tdset").expect("land the restated blocks");
     let edited: Vec<String> = (0..runs.incremental)
         .map(|k| {
             d.created
@@ -1577,7 +1582,7 @@ fn tier_tensions(
             before.tensions().expect("warm tensions");
             let w = write(
                 r,
-                "inf1",
+                "tdrift",
                 json!([{"op": "update", "id": edited[i], "body": SAID.replace("five", "ten")}]),
             )
             .expect("an edit of restated text");
@@ -1586,7 +1591,7 @@ fn tier_tensions(
             let s = Instant::now();
             let delta = rdy_engine::tensions::tension_delta(&before, &after, Some(&[change]))
                 .expect("delta");
-            rdy_engine::tensions::delta::on_change(&before, &after, "inf1", None, &delta)
+            rdy_engine::tensions::delta::on_change(&before, &after, "tdrift", None, &delta)
                 .expect("on_change");
             let took = s.elapsed();
             assert!(
@@ -1599,6 +1604,77 @@ fn tier_tensions(
             took
         },
     ));
+    out.push(drift_canon(
+        &format!("tensions_canon_drift{sfx}"),
+        runs,
+        2 * n,
+    ));
+}
+
+/// The canon form of restatement drift (cc7; the D-SES4J canon budget), on a project of its own:
+/// `blocks` prose blocks in one controlled-English pattern (so they share phrases) and 10 that
+/// restate the first 10 land; then half of the blocks are edited inside the shared phrases in a
+/// later landing. The timed part is the cold canon-scope build of the tensions, as
+/// `tensions_canon`; it opens one drift per restating block.
+fn drift_canon(op: &str, runs: &Runs, blocks: usize) -> Measure {
+    fn said(i: usize, how: &str) -> String {
+        format!(
+            "In this system, the queue {i} service checks the record {i} before it is used by the worker {i} on every {how} request."
+        )
+    }
+    const RESTATED: usize = 10;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut r = Rdy::init(dir.path(), "rdy-standard").expect("init");
+    let d = write(
+        &mut r,
+        "seed",
+        json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "rules", "title": "Rules", "doc_type": "page"}},
+            {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}}
+        ]),
+    )
+    .expect("doc");
+    let section = d.created.get("$s").expect("the section").to_string();
+    let mut ids: Vec<String> = vec![];
+    let bodies: Vec<String> = (0..blocks)
+        .map(|i| said(i, "single"))
+        .chain((0..RESTATED).map(|i| format!("In short: {}", said(i, "single"))))
+        .collect();
+    for chunk in bodies.chunks(500) {
+        let ops: Vec<serde_json::Value> = chunk
+            .iter()
+            .enumerate()
+            .map(|(k, b)| {
+                json!({"op": "create", "type": "prose", "id": format!("$b{k}"), "parent": section, "body": b})
+            })
+            .collect();
+        let w = write(&mut r, "seed", serde_json::Value::Array(ops)).expect("prose");
+        ids.extend(
+            (0..chunk.len()).map(|k| w.created.get(&format!("$b{k}")).expect("id").to_string()),
+        );
+    }
+    land(&mut r, "seed").expect("land the prose");
+    let ops: Vec<serde_json::Value> = (0..blocks / 2)
+        .map(|i| json!({"op": "update", "id": ids[i], "body": said(i, "double")}))
+        .collect();
+    write(&mut r, "edits", serde_json::Value::Array(ops)).expect("the edits");
+    land(&mut r, "edits").expect("land the edits");
+    measure_timed(op, runs.materialize_cold, |_| {
+        let (found, took) = cold(&mut r, |r| {
+            r.read()
+                .canon_tensions_rebuilt()
+                .expect("canon tensions")
+                .iter()
+                .filter(|t| t.kind == rdy_engine::tensions::TensionKind::RestatementDrift)
+                .count()
+        });
+        assert_eq!(
+            found,
+            RESTATED.min(blocks / 2),
+            "one drift per restating block"
+        );
+        took
+    })
 }
 
 /// Intents and alternative sets ever made in the coordination ops' projects: none is ever
@@ -3308,7 +3384,8 @@ mod tests {
                 "tensions_canon",
                 "gate_tensions_1k",
                 "tension_value_1k",
-                "tension_drift_1k"
+                "tension_drift_1k",
+                "tensions_canon_drift"
             ]
         );
         assert!(r.read().tensions().expect("tensions").len() >= 10);
@@ -3327,6 +3404,7 @@ mod tests {
             "gate_tensions_1k",
             "tension_value_1k",
             "tension_drift_1k",
+            "tensions_canon_drift",
         ] {
             assert!(spec_target(op).is_some(), "{op} has no target");
         }

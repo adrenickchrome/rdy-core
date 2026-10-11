@@ -1,7 +1,7 @@
 //! The shared index the detectors read: the in-flight writes (with their liveness and their name,
 //! text, supersede and reference indexes), a canon index memoised per canon build, and the
 //! detection context that joins them to the published state.
-use super::drift::ShingleIndex;
+use super::drift::{ShingleIndex, TextCache, restating_type};
 use super::{DetectScope, Involved, SideRef};
 use crate::brief::{effective_lifecycle, effective_stable};
 use crate::lexicon::Lexicon;
@@ -66,6 +66,9 @@ pub struct Writes {
     retiring: OrdMap<BlockId, Vec<Arc<Write>>>,
     /// Live writes whose block has a premise or pointing edge to a block, by that block.
     pointing: OrdMap<BlockId, Vec<(Arc<Write>, Edge)>>,
+    /// The words and shingles of the versions restatement drift has read (by version, so pure),
+    /// shared by every carry from one build.
+    texts: TextCache,
 }
 
 impl Writes {
@@ -379,6 +382,24 @@ impl Writes {
         self.by_block.keys()
     }
 
+    /// Every write on `b`, live or not, by change, without a copy.
+    pub fn on(&self, b: &BlockId) -> &[Arc<Write>] {
+        self.by_block.get(b).map_or(&[][..], Vec::as_slice)
+    }
+
+    /// Whether a live write of change `c` writes `b` (no copy: a change's writes are by block).
+    pub fn live_write_of(&self, c: &Hash, b: &BlockId) -> bool {
+        self.by_change.get(c).is_some_and(|ws| {
+            ws.binary_search_by(|w| w.block.cmp(b))
+                .is_ok_and(|i| ws[i].live)
+        })
+    }
+
+    /// The version text cache restatement drift reads through.
+    pub fn texts(&self) -> &TextCache {
+        &self.texts
+    }
+
     /// The live writes on `b`, by change.
     pub fn live_on(&self, b: &BlockId) -> Vec<Arc<Write>> {
         self.all_on(b).into_iter().filter(|w| w.live).collect()
@@ -637,15 +658,6 @@ struct Landing {
     touched: BTreeSet<BlockId>,
 }
 
-/// The shingle index of the blocks a run's scope moved away from canon (restatement drift): every
-/// block a write of the run writes whose version there is not canon's, and the index of those of
-/// them that take part. Empty in the canon scope.
-#[derive(Debug, Default)]
-pub struct MovedShingles {
-    pub blocks: BTreeSet<BlockId>,
-    pub index: ShingleIndex,
-}
-
 /// What one detection run reads: the published state, the in-flight writes (none in the canon
 /// scope) and canon's index.
 pub struct DetectCx<'a> {
@@ -658,9 +670,9 @@ pub struct DetectCx<'a> {
     landing: Option<Landing>,
     /// The entity lexicon of the scope this run reads (see [`DetectCx::lexicon`]); lazy.
     lexicon: OnceLock<Arc<Lexicon>>,
-    /// The shingle index of the blocks this run's scope moved (see
-    /// [`DetectCx::moved_shingles`]); lazy.
-    moved: OnceLock<Arc<MovedShingles>>,
+    /// The blocks this run's scope moved away from canon that may take part in restatement
+    /// drift (see [`DetectCx::moved_blocks`]); lazy.
+    moved: OnceLock<Arc<Vec<(BlockId, Hash)>>>,
 }
 
 impl<'a> DetectCx<'a> {
@@ -752,31 +764,40 @@ impl<'a> DetectCx<'a> {
             return Ok(Arc::clone(ix));
         }
         let m = self.canon_m()?;
+        let texts = self.writes.texts();
         Ok(Arc::clone(self.canon.shingles.get_or_init(|| {
-            Arc::new(ShingleIndex::of(self.st.pack(), m.iter()))
+            Arc::new(ShingleIndex::of(self.st.pack(), m.iter(), |b| {
+                m.version_of(&b.id).and_then(|v| texts.get(&v))
+            }))
         })))
     }
 
-    /// The shingle index of the blocks this run's scope moved away from canon: with
-    /// [`DetectCx::canon_shingles`], the inverted index over the scope's materialization. Every
-    /// block whose version there differs from canon's has a write in this run, so the blocks the
-    /// writes name are enough. Empty in the canon scope; built on first read in this run.
-    pub fn moved_shingles(&self) -> Result<Arc<MovedShingles>, RdyError> {
-        if let Some(ix) = self.moved.get() {
-            return Ok(Arc::clone(ix));
+    /// Canon's shingle index when it is already built (no build).
+    pub fn canon_shingles_if_built(&self) -> Option<Arc<ShingleIndex>> {
+        self.canon.shingles.get().cloned()
+    }
+
+    /// The blocks this run's scope moved away from canon whose type takes part in restatement
+    /// drift, with their version there: every block a write of the run writes whose version in
+    /// the scope's materialization is not canon's (every such block has a write in this run).
+    /// Reads no text. Empty in the canon scope; built on first read in this run.
+    pub fn moved_blocks(&self) -> Result<Arc<Vec<(BlockId, Hash)>>, RdyError> {
+        if let Some(v) = self.moved.get() {
+            return Ok(Arc::clone(v));
         }
-        let mut moved = MovedShingles::default();
+        let mut moved = vec![];
         if self.scope == DetectScope::Inflight {
             let m = self.inflight_m()?;
             let canon = self.canon_m()?;
-            moved.blocks = self
-                .writes
-                .blocks()
-                .filter(|b| m.version_of(b) != canon.version_of(b))
-                .cloned()
-                .collect();
-            moved.index =
-                ShingleIndex::of(self.st.pack(), moved.blocks.iter().filter_map(|b| m.get(b)));
+            let pack = self.st.pack();
+            for b in self.writes.blocks() {
+                if let Some(v) = m.version_of(b)
+                    && Some(v) != canon.version_of(b)
+                    && m.get(b).is_some_and(|block| restating_type(pack, block))
+                {
+                    moved.push((b.clone(), v));
+                }
+            }
         }
         Ok(Arc::clone(self.moved.get_or_init(|| Arc::new(moved))))
     }
