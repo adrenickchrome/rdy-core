@@ -158,7 +158,65 @@ pub struct Pack {
     /// Named areas of the tree, by area name.
     #[serde(default)]
     pub areas: BTreeMap<String, AreaDef>,
+    /// How the pack weights the coverage dimensions and its two coverage numbers.
+    #[serde(default)]
+    pub coverage: Option<CoverageSettings>,
 }
+
+/// The six dimensions a coverage score measures, in report order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageDimension {
+    Grounded,
+    Consistent,
+    Current,
+    Connected,
+    Complete,
+    Governed,
+}
+
+impl CoverageDimension {
+    pub const ALL: [CoverageDimension; 6] = [
+        CoverageDimension::Grounded,
+        CoverageDimension::Consistent,
+        CoverageDimension::Current,
+        CoverageDimension::Connected,
+        CoverageDimension::Complete,
+        CoverageDimension::Governed,
+    ];
+
+    /// The wire name: the same word the pack file uses.
+    pub fn name(&self) -> &'static str {
+        match self {
+            CoverageDimension::Grounded => "grounded",
+            CoverageDimension::Consistent => "consistent",
+            CoverageDimension::Current => "current",
+            CoverageDimension::Connected => "connected",
+            CoverageDimension::Complete => "complete",
+            CoverageDimension::Governed => "governed",
+        }
+    }
+}
+
+/// The pack's `coverage:` section. Every part is optional; a missing part takes its default.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoverageSettings {
+    /// A whole-number weight per dimension. A missing dimension weighs 1; 0 leaves it out.
+    #[serde(default)]
+    pub weights: BTreeMap<CoverageDimension, u32>,
+    /// Percent of one a dismissed tension costs, 0 to 100 (default 50).
+    #[serde(default)]
+    pub dismissed_weight: Option<u32>,
+    /// Percent of shared text a restatement must match to count as drift, 1 to 100 (default 60).
+    #[serde(default)]
+    pub drift_threshold: Option<u32>,
+}
+
+/// The percent of one a dismissed tension costs, when the pack does not set `dismissed_weight`.
+pub const DEFAULT_DISMISSED_WEIGHT: u32 = 50;
+/// The drift match percent, when the pack does not set `drift_threshold`.
+pub const DEFAULT_DRIFT_THRESHOLD: u32 = 60;
 
 /// The fewest words a normative text needs before two equal texts are a duplicate definition,
 /// when the pack does not set `duplicate_text_min_words`.
@@ -373,6 +431,32 @@ impl Pack {
     pub fn duplicate_text_min_words(&self) -> usize {
         self.duplicate_text_min_words
             .unwrap_or(DUPLICATE_TEXT_MIN_WORDS)
+    }
+
+    /// The weight of coverage dimension `d`: the pack's, else 1. A weight of 0 leaves the
+    /// dimension out of every score.
+    pub fn coverage_weight(&self, d: CoverageDimension) -> u32 {
+        self.coverage
+            .as_ref()
+            .and_then(|c| c.weights.get(&d).copied())
+            .unwrap_or(1)
+    }
+
+    /// The percent of one a dismissed tension costs: the pack's, else
+    /// [`DEFAULT_DISMISSED_WEIGHT`].
+    pub fn dismissed_weight(&self) -> u32 {
+        self.coverage
+            .as_ref()
+            .and_then(|c| c.dismissed_weight)
+            .unwrap_or(DEFAULT_DISMISSED_WEIGHT)
+    }
+
+    /// The drift match percent: the pack's, else [`DEFAULT_DRIFT_THRESHOLD`].
+    pub fn drift_threshold(&self) -> u32 {
+        self.coverage
+            .as_ref()
+            .and_then(|c| c.drift_threshold)
+            .unwrap_or(DEFAULT_DRIFT_THRESHOLD)
     }
 
     /// Every kind in `TensionKind::ALL` order with its severity and whether

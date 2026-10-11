@@ -191,6 +191,16 @@ impl PackSet {
             out.duplicate_text_min_words = child.duplicate_text_min_words;
         }
         out.areas.extend(child.areas);
+        if let Some(c) = child.coverage {
+            let o = out.coverage.get_or_insert_with(CoverageSettings::default);
+            o.weights.extend(c.weights);
+            if c.dismissed_weight.is_some() {
+                o.dismissed_weight = c.dismissed_weight;
+            }
+            if c.drift_threshold.is_some() {
+                o.drift_threshold = c.drift_threshold;
+            }
+        }
         Ok(out)
     }
 }
@@ -274,6 +284,7 @@ fn inject_engine_types(pack: &mut Pack) {
         ("review_by", f(FieldKind::Str, false, &[])),
         ("kind", f(FieldKind::Str, false, &[])),
         ("placeholders", f(FieldKind::List, false, &[])),
+        ("needs_content", f(FieldKind::Bool, false, &[])),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -444,6 +455,37 @@ fn check(pack: &Pack) -> Result<(), SchemaError> {
         )));
     }
     check_areas(pack)?;
+    check_coverage(pack)?;
+    Ok(())
+}
+
+/// The ranges of the pack's `coverage:` numbers, and at least one dimension with a weight.
+fn check_coverage(pack: &Pack) -> Result<(), SchemaError> {
+    let Some(c) = &pack.coverage else {
+        return Ok(());
+    };
+    if let Some(n) = c.dismissed_weight
+        && n > 100
+    {
+        return Err(SchemaError::Invalid(format!(
+            "coverage.dismissed_weight is {n}; it must be 0 to 100"
+        )));
+    }
+    if let Some(n) = c.drift_threshold
+        && !(1..=100).contains(&n)
+    {
+        return Err(SchemaError::Invalid(format!(
+            "coverage.drift_threshold is {n}; it must be 1 to 100"
+        )));
+    }
+    if CoverageDimension::ALL
+        .iter()
+        .all(|d| pack.coverage_weight(*d) == 0)
+    {
+        return Err(SchemaError::Invalid(
+            "coverage.weights are all 0; at least one dimension needs a weight".to_string(),
+        ));
+    }
     Ok(())
 }
 
