@@ -119,6 +119,26 @@ fn propose_text(v: &Value) -> String {
                 format!(": {}", refusing.join(", "))
             }
         ));
+        // D-WMCFW: each advised semantic tension not yet accepted, and how to accept the advice
+        let mut advised = false;
+        for tn in tensions {
+            let j = &tn["judged"];
+            if let Some(advice) = j["advice"].as_str()
+                && !j["accepted"].is_object()
+            {
+                advised = true;
+                t.push_str(&format!(
+                    "\nadvised to block: {} by {}: {advice}",
+                    text(&tn["id"]),
+                    text(&j["actor"])
+                ));
+            }
+        }
+        if advised {
+            t.push_str(&format!(
+                "\naccept the advice with: rdy resolve --accept {pref}"
+            ));
+        }
     }
     t.push_str(&brief_text::consequences_text(v));
     t.push_str(&new_keys_text(v));
@@ -258,6 +278,26 @@ mod tests {
         assert_eq!(
             propose_text(&v),
             "proposal P-1@1 (1 changes)\nwarning W_UNAPPLIED_DECISION: decision d-1 lands with no content that applies it\napprove with: rdy approve P-1@1"
+        );
+    }
+
+    /// D-WMCFW: the propose report names each advised semantic tension not yet accepted, and
+    /// the command that accepts the advice; an accepted one is not named again.
+    #[test]
+    fn se8_propose_text_names_the_advice_and_how_to_accept_it() {
+        let v = json!({
+            "ref": "P-1@1", "changes": 1,
+            "tensions": [
+                {"id": "tn-aaaaaaaaaaaa", "refuses": false,
+                    "judged": {"actor": "agent:r", "advice": "it contradicts the gate rule"}},
+                {"id": "tn-bbbbbbbbbbbb", "refuses": true,
+                    "judged": {"actor": "agent:s", "advice": "x", "accepted": {"actor": "human:qa"}}},
+                {"id": "tn-cccccccccccc", "refuses": false, "judged": {"actor": "agent:r"}}
+            ]
+        });
+        assert_eq!(
+            propose_text(&v),
+            "proposal P-1@1 (1 changes)\ntensions: 3 (1 would refuse the landing: tn-bbbbbbbbbbbb)\nadvised to block: tn-aaaaaaaaaaaa by agent:r: it contradicts the gate rule\naccept the advice with: rdy resolve --accept P-1@1\napprove with: rdy approve P-1@1"
         );
     }
 }

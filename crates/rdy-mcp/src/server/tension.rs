@@ -15,7 +15,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Dismiss a tension with a reason (tension, dismiss), or dismiss or restore a passing entity mention (mention: {block, entity}, dismiss or restore). A tension is otherwise resolved by a change."
+        description = "Dismiss a tension with a reason (tension, dismiss), dismiss or restore a passing entity mention (mention: {block, entity}, dismiss or restore), or relay a person's acceptance of the reviewers' advice to block on a proposal's semantic tensions (accept: {proposal: P-x@n, evidence, question?, session_ref?, tensions?}). A tension is otherwise resolved by a change."
     )]
     async fn rdy_resolve(&self, Parameters(p): Parameters<ResolveParams>) -> CallToolResult {
         self.run("rdy_resolve", p, tools::rdy_resolve).await

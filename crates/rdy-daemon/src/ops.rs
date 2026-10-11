@@ -285,7 +285,11 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         "resolve" => run_resolve(
             cx.engine,
             cx.session,
-            parse(op, args, "{tension?, mention?, dismiss?, restore?, scope?}")?,
+            parse(
+                op,
+                args,
+                "{tension?, mention?, dismiss?, restore?, scope?, accept?}",
+            )?,
         ),
         "wc_put_blob" => wc_put_blob(cx, parse(op, args, "{path}")?),
         "coverage" => coverage(cx, parse(op, args, "{scope?, path?, max_tokens?}")?),

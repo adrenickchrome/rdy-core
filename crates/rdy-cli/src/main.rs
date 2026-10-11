@@ -82,9 +82,10 @@ enum Cmd {
     },
     /// List tensions: disagreements between in-flight changes, with canon, or inside canon.
     Tensions(tension_cmd::TensionsArgs),
-    /// Dismiss a tension with a reason, or dismiss or restore a passing entity mention
-    /// (--mention <block> <entity> with --dismiss or --restore). A tension is otherwise resolved
-    /// by a change.
+    /// Dismiss a tension with a reason, dismiss or restore a passing entity mention
+    /// (--mention <block> <entity> with --dismiss or --restore), or accept the reviewers' advice
+    /// to block on a proposal version's semantic tensions (--accept P-x@n). A tension is
+    /// otherwise resolved by a change.
     Resolve(tension_cmd::ResolveArgs),
     /// Print the coverage report: the score per dimension, the lowest pages, and each coverage issue with its fix
     Coverage(coverage_cmd::CoverageArgs),

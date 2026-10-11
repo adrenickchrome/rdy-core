@@ -19,6 +19,7 @@ mod cli_ref;
 mod cli_relay;
 mod cli_search;
 mod cli_search_filters;
+mod cli_semantic;
 mod cli_state;
 mod cli_suspects;
 mod cli_tensions;

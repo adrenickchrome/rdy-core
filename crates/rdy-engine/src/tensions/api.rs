@@ -61,6 +61,9 @@ pub struct ResolveRequest {
     pub restore: Option<DismissRequest>,
     /// Where a mention is checked: a scope text. Defaults to the session's view.
     pub scope: Option<String>,
+    /// A person's acceptance of the reviewers' advice on a proposal version's semantic
+    /// tensions. It goes alone.
+    pub accept: Option<AcceptRequest>,
 }
 
 /// A passing mention: the block and the entity it names.
@@ -76,6 +79,26 @@ pub struct MentionRequest {
 #[serde(deny_unknown_fields)]
 pub struct DismissRequest {
     pub reason: String,
+}
+
+/// A person's answer to the advice on the semantic tensions of one exact proposal version
+/// (D-WMCFW): accept it, given at the command line or relayed with the person's words (FW-B9).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptRequest {
+    /// `P-<id>@<n>` or a version hash: the version the person was shown.
+    pub proposal: String,
+    /// Only these advised tensions (`tn-<hex>` or a hex prefix); empty: every advised one.
+    #[serde(default)]
+    pub tensions: Vec<String>,
+    /// The person's words, quoted, when an agent relays them.
+    pub evidence: Option<String>,
+    /// The question the person was asked.
+    pub question: Option<String>,
+    /// Where the person said it (default: `mcp` for an agent session, `cli` for a human one).
+    pub session_ref: Option<String>,
+    /// The agent that relays the answer at the command line, as `actor[/run]`.
+    pub relayed_by: Option<String>,
 }
 
 fn bad(message: String, fix: &str) -> RdyError {
@@ -543,7 +566,8 @@ pub fn run_tensions(
 /// Resolves what `req` names. A tension is dismissed with its reason: `{id, tension, kind,
 /// severity, review, status}`. Without `dismiss` it is `E_BAD_INPUT`: a tension is resolved by a
 /// change. A mention is dismissed or restored with a reason: `{block, entity, verdict, review,
-/// status}`.
+/// status}`. An acceptance of the advice on a proposal version's semantic tensions goes alone:
+/// `{proposal, accepted: [{id, was, version}], severity}`.
 pub fn run_resolve(
     engine: &dyn Engine,
     s: &Session,
@@ -555,7 +579,23 @@ pub fn run_resolve(
         dismiss,
         restore,
         scope,
+        accept,
     } = req;
+    if let Some(a) = accept {
+        if tension.is_some()
+            || mention.is_some()
+            || dismiss.is_some()
+            || restore.is_some()
+            || scope.is_some()
+        {
+            return Err(bad(
+                "accept names its proposal and tensions itself; pass it alone".to_string(),
+                "pass accept: {proposal, evidence, …} with nothing else",
+            ));
+        }
+        let s = s.clone();
+        return write_typed(engine, move |r| r.accept_advice(&s, a));
+    }
     match (tension, mention) {
         (Some(tension), None) => {
             if scope.is_some() {
