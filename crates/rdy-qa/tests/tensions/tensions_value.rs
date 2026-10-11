@@ -176,3 +176,45 @@ fn cc5_the_carried_set_equals_a_rebuild_across_edits_of_the_value_and_the_descri
     );
     carried_equals_rebuilt(&r, "the describer is deleted");
 }
+
+/// A value in the draft section Notes, landed, so a describer there is advisory and needs no justification.
+fn draft_value(
+    r: &mut rdy_engine::Rdy,
+    view: &str,
+    n: &rdy_model::BlockId,
+    value: &str,
+) -> rdy_model::BlockId {
+    let w = put(
+        r,
+        view,
+        json!([{"op": "create", "type": "value", "id": "$x", "parent": n.to_string(),
+        "fields": {"name": "Pause", "value": value, "unit": "s"}}]),
+    );
+    land(r, view).unwrap();
+    created(&w, "$x")
+}
+
+#[test]
+fn cc5_fix1_a_value_field_with_a_plus_does_not_take_part() {
+    let (_d, mut r, _s, n, _v) = world();
+    for (i, field) in ["+5", "+-5", " +5 "].into_iter().enumerate() {
+        let x = draft_value(&mut r, &format!("p{i}"), &n, field);
+        claim(&mut r, &format!("q{i}"), &n, &x, "It pauses for 10 s.");
+    }
+    assert!(
+        of_kind(&r, TensionKind::ValueDisagreement).is_empty(),
+        "a `+` is not in -?[0-9]+(\\.[0-9]+)?"
+    );
+}
+
+#[test]
+fn cc5_fix2_the_summary_shows_the_value_field_as_written() {
+    let (_d, mut r, _s, n, _v) = world();
+    let x = draft_value(&mut r, "a", &n, " 05.0 ");
+    let y = claim(&mut r, "b", &n, &x, "It pauses for 10 s.");
+    let t = one_involving(&r, TensionKind::ValueDisagreement, &y);
+    assert!(t.summary.ends_with("which is 05.0 s"), "{}", t.summary);
+    // the comparison still uses the normal form: 05.0 is 5
+    claim(&mut r, "c", &n, &x, "It pauses for 5 s.");
+    assert_eq!(of_kind(&r, TensionKind::ValueDisagreement).len(), 1);
+}

@@ -4,7 +4,7 @@
 //! A value takes part when it has a unit and a decimal `value`. A block describes it when it
 //! ties to it (a reference, a `describes` link or an `affects` link). A stated number counts
 //! when the unit text follows it directly or after one space, exactly as written: there are no
-//! unit aliases and no conversion. One tension per (describing block, value), involving both.
+//! unit aliases and no conversion. One tension per (describing block, value), involving both; its summary shows the value as written.
 //! In flight it is reported when either side is a live write; in canon (FW-CH6a) it is a
 //! standing condition, so it stays open after its last change lands, until the numbers agree or
 //! a tie goes. It is advisory in draft content and blocking in stable content.
@@ -121,8 +121,28 @@ pub fn stated_numbers(text: &str, unit: &str) -> Vec<String> {
     out
 }
 
-/// A value's unit (trimmed) and normalized number, when it takes part.
-fn participant(b: &Block) -> Option<(String, String)> {
+/// The normal form of a value's `value` field: the trimmed field must be exactly
+/// `-?[0-9]+(\.[0-9]+)?`, so a leading `+` (which `normalize_decimal` drops for numbers read from
+/// text) refuses it.
+fn field_decimal(field: &str) -> Option<String> {
+    let field = field.trim();
+    if field.starts_with('+') {
+        return None;
+    }
+    normalize_decimal(field)
+}
+
+/// What a value that takes part gives the comparison.
+struct Participant {
+    unit: String,
+    /// The `value` field, trimmed, as written.
+    written: String,
+    /// Its normal form, for the comparison only.
+    number: String,
+}
+
+/// A value's unit (trimmed), its field as written and its normalized number, when it takes part.
+fn participant(b: &Block) -> Option<Participant> {
     if b.block_type != VALUE {
         return None;
     }
@@ -130,8 +150,13 @@ fn participant(b: &Block) -> Option<(String, String)> {
     if unit.is_empty() {
         return None;
     }
-    let number = normalize_decimal(b.field_str("value")?.trim())?;
-    Some((unit.to_string(), number))
+    let written = b.field_str("value")?.trim();
+    let number = field_decimal(written)?;
+    Some(Participant {
+        unit: unit.to_string(),
+        written: written.to_string(),
+        number,
+    })
 }
 
 /// The first number `y` states in `unit` that differs from `number`.
@@ -242,7 +267,12 @@ impl Detector for ValueDisagreement {
             let (Some(yb), Some(vb)) = (m.get(&y), m.get(&v)) else {
                 continue;
             };
-            let Some((unit, number)) = participant(vb) else {
+            let Some(Participant {
+                unit,
+                written,
+                number,
+            }) = participant(vb)
+            else {
                 continue;
             };
             let Some(stated) = first_difference(yb, &unit, &number) else {
@@ -255,7 +285,7 @@ impl Detector for ValueDisagreement {
             out.push(Found {
                 kind: TensionKind::ValueDisagreement,
                 summary: format!(
-                    "{y} states {stated} {unit} for {name} ({v}), which is {number} {unit}"
+                    "{y} states {stated} {unit} for {name} ({v}), which is {written} {unit}"
                 ),
                 stable: cx.stable(&y)?,
                 involved: vec![cx.involved(ys, &y, yv)?, cx.involved(vs, &v, vv)?],
@@ -282,5 +312,15 @@ mod tests {
         assert_eq!(stated_numbers("50% of 200 %", "%"), vec!["50", "200"]);
         assert_eq!(stated_numbers("10 msec", "ms"), Vec::<String>::new());
         assert_eq!(stated_numbers("-0 s and +3 s", "s"), vec!["0", "3"]);
+    }
+
+    #[test]
+    fn cc5_fix1_a_value_field_is_a_strict_decimal() {
+        assert_eq!(field_decimal("5"), Some("5".into()));
+        assert_eq!(field_decimal(" -05.50 "), Some("-5.5".into()));
+        assert_eq!(field_decimal("+5"), None);
+        assert_eq!(field_decimal("+-5"), None);
+        assert_eq!(field_decimal("5."), None);
+        assert_eq!(field_decimal(""), None);
     }
 }
