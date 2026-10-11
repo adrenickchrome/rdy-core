@@ -11,7 +11,10 @@
 //! credited to the change that carried it into canon last (as of canon's head), so writing a
 //! block back to an earlier text makes the writer its author; the actor whose landed change
 //! deleted a block is an author of that block's absent canon item; and an item that names no
-//! author fails closed. A read-time intent overlap is never dismissed: its intent resolves it.
+//! author fails closed. An item's authors are everyone who wrote the text it carries: a repin
+//! or a tracking-field edit (landed or not) keeps the text, so its writer stays an author, as
+//! in the review queue (one walk, `text_authors`). A read-time intent overlap is never
+//! dismissed: its intent resolves it.
 //!
 //! A dismissal binds to the vkey, which covers the severity: one made while a tension was
 //! advisory does not hold once it is blocking, and the blocking tension needs its own review.
@@ -21,10 +24,10 @@ use crate::error::*;
 use crate::gate::open_proposals;
 use crate::session::now_ms;
 use crate::{Delta, Rdy, RdyError, ReadState, Session};
-use rdy_model::Hash;
+use rdy_model::{Block, BlockId, Hash};
 use rdy_model::{Review, ReviewSubject, Role, Verdict};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 /// The longest reason a dismissal takes, in characters (after trimming).
@@ -102,41 +105,108 @@ impl ReadState {
         }
     }
 
-    /// Every actor who wrote an item of `t`, with the side of the item, in item order: a change
-    /// side's change; for each canon item, the changes `canon_item_writers` names; an intent
-    /// side's intent. A canon side groups the items one landing carried, which several actors
-    /// can have written, so every item counts, not one per side. An author that cannot be read
-    /// fails closed: a store error is returned, and a canon item that names no writer is
-    /// refused with `E_SELF_REVIEW`.
-    fn authors(&self, t: &Tension, label: &str) -> Result<Vec<(SideRef, String)>, RdyError> {
+    /// The actors who wrote the text an item carries (Review Focus 4, D-TF2W6): the item on
+    /// `side` of `block` at `version`, whose content (tracking fields, pins and derived fields
+    /// left out) is `content`, `None` for an absent item. A change item: its change, and every
+    /// other live write of the block that holds the same content. A canon item: the changes
+    /// [`ReadState::canon_item_writers`] names; none fails closed with `E_SELF_REVIEW`, whose
+    /// message names `label` and whose fix is `fix`. From those writes the walk goes back while
+    /// a write's base holds the same content (a repin or a tracking-field edit keeps the text):
+    /// the base's writers count too, up to the first write that changed the content. An intent
+    /// item: the intent's actor. The item's own change's actor comes first.
+    pub(crate) fn text_authors(
+        &self,
+        side: &SideRef,
+        block: &BlockId,
+        version: Option<Hash>,
+        content: Option<Hash>,
+        label: &str,
+        fix: &str,
+    ) -> Result<Vec<String>, RdyError> {
         let reader = self.reader();
-        let mut out: Vec<(SideRef, String)> = vec![];
-        let mut add = |side: &SideRef, actor: String| {
-            if !out.iter().any(|(s, a)| s == side && *a == actor) {
-                out.push((side.clone(), actor));
-            }
-        };
-        for i in &t.involved {
-            match &i.side {
-                SideRef::Change(c) => add(&i.side, reader.change(c)?.provenance.actor),
-                SideRef::Canon { .. } => {
-                    let writers = self.canon_item_writers(&i.block, i.version)?;
-                    if writers.is_empty() {
-                        return Err(RdyError::new(
-                            E_SELF_REVIEW,
-                            format!(
-                                "the author of block {} on side {} of {label} cannot be read, so no session is shown independent of it",
-                                i.block,
-                                i.side.short()
-                            ),
-                            "run rdy fsck; resolve the tension with a change instead",
-                        ));
-                    }
-                    for c in writers {
-                        add(&i.side, reader.change(&c)?.provenance.actor);
+        let seeds: Vec<Hash> = match side {
+            SideRef::Change(c) => {
+                let set = self.tensions()?;
+                let mut seeds = vec![*c];
+                for w in set.writes().live_on(block) {
+                    if w.new.as_deref().map(|b| self.text_content(b)) == content
+                        && !seeds.contains(&w.change)
+                    {
+                        seeds.push(w.change);
                     }
                 }
-                SideRef::Intent { version, .. } => add(&i.side, reader.intent(version)?.actor),
+                seeds
+            }
+            SideRef::Canon { .. } => {
+                let writers = self.canon_item_writers(block, version)?;
+                if writers.is_empty() {
+                    return Err(RdyError::new(
+                        E_SELF_REVIEW,
+                        format!(
+                            "the author of block {block} on side {} of {label} cannot be read, so no session is shown independent of it",
+                            side.short()
+                        ),
+                        fix,
+                    ));
+                }
+                writers
+            }
+            SideRef::Intent { version, .. } => return Ok(vec![reader.intent(version)?.actor]),
+        };
+        let mut out: Vec<String> = vec![];
+        let mut seen: BTreeSet<Hash> = BTreeSet::new();
+        // breadth first, so the item's own change's actor comes first
+        let mut todo: VecDeque<Hash> = seeds.into();
+        while let Some(c) = todo.pop_front() {
+            if !seen.insert(c) {
+                continue;
+            }
+            let change = reader.change(&c)?;
+            if !out.contains(&change.provenance.actor) {
+                out.push(change.provenance.actor.clone());
+            }
+            // the change's first op on the block names the version it started from
+            let Some(base) = change
+                .ops
+                .iter()
+                .find(|op| op.block_id() == block)
+                .and_then(|op| op.base())
+            else {
+                continue;
+            };
+            if Some(self.text_content(&reader.get_block(&base)?)) == content {
+                todo.extend(self.canon_item_writers(block, Some(base))?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The content hash of `b` as an item carries it: tracking fields, pins and derived fields
+    /// left out.
+    fn text_content(&self, b: &Block) -> Hash {
+        b.content_hash_with(self.reader().tracking())
+    }
+
+    /// Every actor who wrote an item of `t`, with the side of the item, in item order: for each
+    /// item, the actors [`ReadState::text_authors`] names (the writers of its text, through
+    /// repins and tracking-field edits). A canon side groups the items one landing carried,
+    /// which several actors can have written, so every item counts, not one per side. An author
+    /// that cannot be read fails closed: a store error is returned, and a canon item that names
+    /// no writer is refused with `E_SELF_REVIEW`.
+    fn authors(&self, t: &Tension, label: &str) -> Result<Vec<(SideRef, String)>, RdyError> {
+        let mut out: Vec<(SideRef, String)> = vec![];
+        for i in &t.involved {
+            for actor in self.text_authors(
+                &i.side,
+                &i.block,
+                i.version,
+                i.content,
+                label,
+                "run rdy fsck; resolve the tension with a change instead",
+            )? {
+                if !out.iter().any(|(s, a)| *s == i.side && *a == actor) {
+                    out.push((i.side.clone(), actor));
+                }
             }
         }
         Ok(out)
