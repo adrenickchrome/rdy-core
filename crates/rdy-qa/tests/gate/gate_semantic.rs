@@ -1,0 +1,184 @@
+//! se11: the semantic gate end to end. Pending requests never block; advice gates nothing; an
+//! accepted tension refuses (D-KJ71P, D-2K8Q5, D-WMCFW); a landed one stays in canon (F6).
+use rdy_engine::semantic::candidates::request_label;
+use rdy_engine::semantic::case::case_hash;
+use rdy_engine::semantic::submit::{FindingRequest, ReviewSubmitRequest};
+use rdy_engine::tensions::api::AcceptRequest;
+use rdy_engine::tensions::*;
+use rdy_engine::*;
+use rdy_model::{BlockId, Role};
+use rdy_qa::edit_loop::spec_doc;
+use rdy_qa::fixtures::*;
+use rdy_qa::tensions::*;
+use std::collections::BTreeSet;
+
+fn propose(r: &mut Rdy, view: &str) -> ProposalInfo {
+    r.propose(&writer(), view, view).unwrap()
+}
+fn approve(r: &mut Rdy, p: &ProposalInfo) -> Result<String, RdyError> {
+    r.land(&approver(), &p.id)
+}
+fn reviewer(actor: &str) -> Session {
+    Session::agent(actor.into(), Some("rr".into()), Role::Reviewer).unwrap()
+}
+
+/// Submits agent:r's `tension` verdict on the request whose blocks are `pair` (the first one
+/// agent:r may take when `pair` is `None`), with advice to block and a reason when `advise`.
+fn judge_pair(r: &mut Rdy, pair: Option<(&BlockId, &BlockId)>, advise: bool) {
+    let st = r.read();
+    let q = match pair {
+        None => st
+            .next_request("agent:r", &BTreeSet::new())
+            .unwrap()
+            .expect("a request"),
+        Some((x, y)) => st
+            .review_requests()
+            .unwrap()
+            .into_iter()
+            .find(|q| {
+                let b: BTreeSet<_> = q.items.iter().map(|i| &i.block).collect();
+                b == BTreeSet::from([x, y])
+            })
+            .expect("the request for the pair"),
+    };
+    let hash = case_hash(&st.case_of(&q.key, &q.items).unwrap()).to_string();
+    let label = request_label(&q.key);
+    let on = q.items[0].block.to_string();
+    drop(st);
+    r.submit_verdict(
+        &reviewer("agent:r"),
+        ReviewSubmitRequest {
+            request: label,
+            case_hash: hash,
+            verdict: "tension".into(),
+            findings: vec![FindingRequest {
+                block: on,
+                note: "these two cannot both hold".into(),
+            }],
+            severity: advise.then(|| "blocking".into()),
+            reason: advise.then(|| "it contradicts the gate rule".into()),
+        },
+    )
+    .unwrap();
+}
+fn judge(r: &mut Rdy, advise: bool) {
+    judge_pair(r, None, advise);
+}
+/// A person's acceptance of the advice shown on `p`.
+fn accept(r: &mut Rdy, p: &ProposalInfo) {
+    r.accept_advice(
+        &writer(),
+        AcceptRequest {
+            proposal: p.r#ref.clone(),
+            advised_digest: p.advised_digest.clone().expect("advised digest"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn se11_pending_requests_never_block_a_landing() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.c, "C changed."));
+    assert!(!r.read().review_requests().unwrap().is_empty());
+    let p = propose(&mut r, "a");
+    approve(&mut r, &p).unwrap();
+}
+
+#[test]
+fn se11_an_advised_semantic_tension_never_refuses_and_an_accepted_one_does() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.c, "C contradicts B."));
+    judge(&mut r, true);
+    let p = propose(&mut r, "a");
+    let t = p
+        .tensions
+        .iter()
+        .find(|t| t.kind == TensionKind::Semantic)
+        .unwrap_or_else(|| panic!("{:?}", p.tensions));
+    assert_eq!(t.refuses, Some(false), "advice gates nothing");
+    assert!(t.judged.as_ref().unwrap().advice.is_some());
+    accept(&mut r, &p);
+    let p = propose(&mut r, "a");
+    let t = p
+        .tensions
+        .iter()
+        .find(|t| t.kind == TensionKind::Semantic)
+        .unwrap();
+    assert_eq!(t.refuses, Some(true), "an accepted tension refuses");
+    let id = t.id.clone();
+    let e = approve(&mut r, &p).unwrap_err();
+    assert_eq!(e.code, E_BLOCKING_TENSION);
+    assert!(
+        e.issues
+            .iter()
+            .any(|i| i.code == E_BLOCKING_TENSION && i.message.contains(&id)),
+        "{e:?}"
+    );
+    r.dismiss_tension(&reviewer("agent:d"), &id, "B and C agree after all")
+        .unwrap();
+    let p = propose(&mut r, "a");
+    approve(&mut r, &p).unwrap();
+}
+
+#[test]
+fn se11_an_accepted_tension_between_two_views_refuses_neither_until_one_lands() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.b, "B changed."));
+    put(&mut r, "b", upd(&s.c, "C contradicts B."));
+    judge_pair(&mut r, Some((&s.b, &s.c)), true);
+    let pb = propose(&mut r, "b");
+    accept(&mut r, &pb);
+    let (pa, pb) = (propose(&mut r, "a"), propose(&mut r, "b"));
+    for p in [&pa, &pb] {
+        let t = p
+            .tensions
+            .iter()
+            .find(|t| t.kind == TensionKind::Semantic)
+            .unwrap_or_else(|| panic!("{:?}", p.tensions));
+        assert_eq!(t.refuses, Some(false), "a canon side is missing");
+    }
+    approve(&mut r, &pa).unwrap();
+    let pb = propose(&mut r, "b");
+    let t = pb
+        .tensions
+        .iter()
+        .find(|t| t.kind == TensionKind::Semantic)
+        .unwrap();
+    assert_eq!(
+        t.refuses,
+        Some(true),
+        "the re-keyed tension has a canon side"
+    );
+}
+
+/// F6 (RULING, D-VA8DA): a landed semantic tension stays in canon, and an all-canon one never
+/// refuses a landing.
+#[test]
+fn se11_a_landed_semantic_tension_stays_in_canon() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.c, "C contradicts B."));
+    judge(&mut r, false);
+    let p = propose(&mut r, "a");
+    approve(&mut r, &p).unwrap();
+    let set = r.read().tensions().unwrap();
+    let t = set
+        .iter()
+        .find(|t| t.kind == TensionKind::Semantic)
+        .expect("the semantic tension");
+    assert!(set.from_canon(&t.id), "every side is canon");
+    put(
+        &mut r,
+        "c",
+        serde_json::json!([{"op": "create", "type": "claim", "id": "$n",
+            "parent": s.section.to_string(), "body": "Unrelated."}]),
+    );
+    let p = propose(&mut r, "c");
+    approve(&mut r, &p).unwrap();
+    assert_eq!(one(&r, TensionKind::Semantic).id, t.id, "still there");
+}
