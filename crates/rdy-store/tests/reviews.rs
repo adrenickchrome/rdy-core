@@ -345,3 +345,51 @@ fn cc1_fsck_refuses_a_dismiss_ref_to_a_restore_review() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn cc1_fsck_refuses_a_malformed_mention_key() {
+    let m = fsck_after(vec![(
+        format!("{MENTION_REF}c-AAAAA"),
+        Hash([19; 32]).0.to_vec(),
+    )]);
+    assert!(m.contains("mention/c-AAAAA"), "{m}");
+    assert!(
+        m.contains("does not name a mention by its block and entity"),
+        "{m}"
+    );
+}
+
+#[test]
+fn cc1_fsck_refuses_a_mention_ref_to_a_missing_review() {
+    let h = Hash([7; 32]);
+    let m = fsck_after(vec![(
+        format!("{MENTION_REF}c-AAAAA/t-BBBBB"),
+        h.0.to_vec(),
+    )]);
+    assert!(
+        m.contains(&format!(
+            "mention c-AAAAA/t-BBBBB: {h} is not a stored review"
+        )),
+        "{m}"
+    );
+}
+
+#[test]
+fn cc1_fsck_refuses_a_mention_ref_to_an_object_of_another_kind() {
+    let (_d, mut s) = store();
+    let blob = s.put_blob(b"not a review").unwrap();
+    s.set_refs_unchecked_for_tests(vec![(
+        format!("{MENTION_REF}c-AAAAA/t-BBBBB"),
+        blob.0.to_vec(),
+    )])
+    .unwrap();
+    match s.check_objects() {
+        Err(StoreError::Decode(m)) => assert!(
+            m.contains(&format!(
+                "mention c-AAAAA/t-BBBBB: {blob} is not a stored review"
+            )),
+            "{m}"
+        ),
+        other => panic!("{other:?}"),
+    }
+}
