@@ -12,7 +12,9 @@
 //! edit of `x` keeps it (orchestrator ruling, 2026-10-10). In flight the view's net edit is
 //! judged: `p` is `x`'s text where the view's chain of changes on `x` started (the first base
 //! among them), `n` the live write's body, and `y` any block of the in-flight materialization
-//! that no live write of the same change touches; one tension per (change, `x`, `y`). In canon
+//! that no live write of the view touches (of the change or a change that shares a view with
+//! it: a view that edits both opens no drift between them, as in canon, where they land
+//! together); one tension per (change, `x`, `y`). In canon
 //! (FW-CH6a, D-84QSN) `p` is `x`'s text when `y` last changed (as of `y`'s newest landing; `x`'s
 //! first text when `x` is younger), `n` its canon body, and `y` a canon block whose newest
 //! landing is strictly earlier than `x`'s. It is advisory by default and never softens.
@@ -53,27 +55,33 @@ impl Text {
 }
 
 /// The [`Text`] of each version drift has read, by version (a version's text never changes),
-/// shared by the clones that hold it.
+/// and the words each edit took out ([`removed_words`]), by (from, to) version; shared by the
+/// clones that hold it.
 #[derive(Clone, Debug, Default)]
-pub struct TextCache(Arc<Mutex<HashMap<Hash, Arc<Text>>>>);
+pub struct TextCache(Arc<Mutex<Cached>>);
+
+#[derive(Debug, Default)]
+struct Cached {
+    texts: HashMap<Hash, Arc<Text>>,
+    removed: HashMap<(Hash, Hash), Arc<Vec<String>>>,
+}
 
 impl TextCache {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Cached> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether version `v`'s text was read (hashed) and kept.
+    pub fn holds(&self, v: &Hash) -> bool {
+        self.get(v).is_some()
+    }
+
     pub(crate) fn get(&self, v: &Hash) -> Option<Arc<Text>> {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(v)
-            .cloned()
+        self.lock().texts.get(v).cloned()
     }
 
     fn put(&self, v: Hash, t: Text) -> Arc<Text> {
-        Arc::clone(
-            self.0
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .entry(v)
-                .or_insert_with(|| Arc::new(t)),
-        )
+        Arc::clone(self.lock().texts.entry(v).or_insert_with(|| Arc::new(t)))
     }
 }
 
@@ -81,10 +89,19 @@ impl TextCache {
 /// empty words dropped; each run of three consecutive words is one shingle.
 pub fn text_of(body: &str) -> Text {
     let lower = body.to_lowercase();
-    let words: Vec<&str> = lower
+    let words: Vec<&str> = words_of(&lower).collect();
+    text_of_words(&words)
+}
+
+/// The words of `lower` (a lowercased body), as [`text_of`] splits them.
+fn words_of(lower: &str) -> impl Iterator<Item = &str> {
+    lower
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
-        .collect();
+}
+
+/// The [`Text`] of a body split into `words` (see [`text_of`]).
+fn text_of_words(words: &[&str]) -> Text {
     let mut buf = Vec::with_capacity(64);
     let mut set: Vec<u64> = words
         .windows(3)
@@ -257,16 +274,23 @@ fn version_text(cx: &DetectCx<'_>, b: &BlockId, v: &Hash) -> Result<Arc<Text>, R
     if let Some(t) = cache.get(v) {
         return Ok(t);
     }
+    if cx.canon_m()?.version_of(b) == Some(*v)
+        && let Some(ix) = cx.canon_shingles_if_built()
+        && let Some(t) = ix.text_of(b)
+    {
+        return Ok(Arc::clone(t));
+    }
+    Ok(cache.put(*v, text_of(&version_body(cx, b, v)?)))
+}
+
+/// The body of version `v` of block `b`: from canon's materialization when `v` is canon's
+/// version, else from a write of `v`, else from the store.
+fn version_body(cx: &DetectCx<'_>, b: &BlockId, v: &Hash) -> Result<String, RdyError> {
     let canon = cx.canon_m()?;
-    if canon.version_of(b) == Some(*v) {
-        if let Some(ix) = cx.canon_shingles_if_built()
-            && let Some(t) = ix.text_of(b)
-        {
-            return Ok(Arc::clone(t));
-        }
-        if let Some(block) = canon.get(b) {
-            return Ok(cache.put(*v, text_of(&block.body)));
-        }
+    if canon.version_of(b) == Some(*v)
+        && let Some(block) = canon.get(b)
+    {
+        return Ok(block.body.clone());
     }
     if let Some(block) = cx
         .writes
@@ -275,23 +299,54 @@ fn version_text(cx: &DetectCx<'_>, b: &BlockId, v: &Hash) -> Result<Arc<Text>, R
         .find(|w| w.version == Some(*v))
         .and_then(|w| w.new.as_deref())
     {
-        return Ok(cache.put(*v, text_of(&block.body)));
+        return Ok(block.body.clone());
     }
-    let body = cx.st.reader().get_block(v)?.body;
-    Ok(cache.put(*v, text_of(&body)))
+    Ok(cx.st.reader().get_block(v)?.body)
 }
 
-/// `y`'s text in the scope's materialization, when it takes part there.
-fn scope_text(cx: &DetectCx<'_>, y: &BlockId) -> Result<Option<Arc<Text>>, RdyError> {
-    let m = cx.inflight_m()?;
-    let (Some(block), Some(v)) = (m.get(y), m.version_of(y)) else {
-        return Ok(None);
+/// The words edit `e` took out: for each shingle of `p` that is not in `n`, its longest word
+/// (the first when two tie), each once. Every `y` that `e` drifts from holds a removed shingle,
+/// so it holds one of these words (barring a 64-bit hash collision). Kept by (start, version).
+fn removed_words(cx: &DetectCx<'_>, e: &Edit) -> Result<Arc<Vec<String>>, RdyError> {
+    let Some(v) = e.w.version else {
+        return Ok(Arc::default());
     };
-    if !restating_type(cx.st.pack(), block) {
-        return Ok(None);
+    let key = (e.start, v);
+    let cache = cx.writes.texts();
+    if let Some(r) = cache.lock().removed.get(&key) {
+        return Ok(Arc::clone(r));
     }
-    let t = version_text(cx, y, &v)?;
-    Ok(t.long().then_some(t))
+    let gone: Vec<u64> =
+        e.p.set
+            .iter()
+            .copied()
+            .filter(|s| e.n.set.binary_search(s).is_err())
+            .collect();
+    let mut out: Vec<String> = vec![];
+    if !gone.is_empty() {
+        let lower = version_body(cx, &e.w.block, &e.start)?.to_lowercase();
+        let words: Vec<&str> = words_of(&lower).collect();
+        let mut buf = Vec::with_capacity(64);
+        for w in words.windows(3) {
+            if gone
+                .binary_search(&shingle(&mut buf, w[0], w[1], w[2]))
+                .is_ok()
+            {
+                let mut longest = w[0];
+                for word in &w[1..] {
+                    if word.len() > longest.len() {
+                        longest = word;
+                    }
+                }
+                out.push(longest.to_string());
+            }
+        }
+        out.sort();
+        out.dedup();
+    }
+    let out = Arc::new(out);
+    cache.lock().removed.insert(key, Arc::clone(&out));
+    Ok(out)
 }
 
 /// The blocks the scope moved away from canon that take part, with their texts, and, for a run
@@ -398,12 +453,33 @@ fn chain_start(cx: &DetectCx<'_>, w: &Write) -> Option<Hash> {
     }
 }
 
-/// One live edit as drift judges it: the write, its view's starting text `p` (8 words or more)
-/// and its new text `n`.
+/// One live edit as drift judges it: the write, the version its view started from, that
+/// version's text `p` (8 words or more) and the new text `n`.
 struct Edit {
     w: Arc<Write>,
+    start: Hash,
     p: Arc<Text>,
     n: Arc<Text>,
+}
+
+impl Edit {
+    /// Whether the edit took out a shingle of `p` (else it drifts from nothing).
+    fn removes(&self) -> bool {
+        self.p
+            .set
+            .iter()
+            .any(|s| self.n.set.binary_search(s).is_err())
+    }
+}
+
+/// Whether a live write of change `c`, or of a change that shares a view with `c`, writes `y`:
+/// the view edited `y` too, so its edit of another block opens no drift with `y` (in canon they
+/// land together, and a drift needs `y`'s landing strictly before `x`'s).
+fn view_wrote(cx: &DetectCx<'_>, c: &Hash, y: &BlockId) -> bool {
+    cx.writes
+        .on(y)
+        .iter()
+        .any(|o| o.live && (o.change == *c || cx.writes.common_view(&o.change, c)))
 }
 
 /// `w` as an [`Edit`], when it is a live update of a type that takes part whose view started
@@ -425,9 +501,28 @@ fn edit_of(cx: &DetectCx<'_>, w: &Arc<Write>) -> Result<Option<Edit>, RdyError> 
     let n = version_text(cx, &w.block, &v)?;
     Ok(Some(Edit {
         w: Arc::clone(w),
+        start,
         p,
         n,
     }))
+}
+
+/// A seed that takes part, as the seeds-as-`y` pass first sees it: its text when it was read,
+/// else its body (not hashed yet).
+enum Seed<'b> {
+    Read(Arc<Text>),
+    Unread(&'b str),
+}
+
+/// Whether `body` has at least [`DRIFT_MIN_WORDS`] words (see [`text_of`]), counting no further.
+/// An ASCII body splits the same before and after lowercasing, so it is not lowercased.
+fn long_enough(body: &str) -> bool {
+    let nth = |lower: &str| words_of(lower).nth(DRIFT_MIN_WORDS - 1).is_some();
+    if body.is_ascii() {
+        nth(body)
+    } else {
+        nth(&body.to_lowercase())
+    }
 }
 
 /// The drifts found, by (`x`, change, `y`), each with its write.
@@ -470,37 +565,13 @@ impl RestatementDrift {
         };
         for e in &as_x {
             for (y, yt) in restating(cx, &moved, &e.w.block, &e.p.set, t)? {
-                if !cx.writes.live_write_of(&e.w.change, &y)
-                    && drifts(&e.p.set, &yt.set, &e.n.set, t)
-                {
+                if !view_wrote(cx, &e.w.change, &y) && drifts(&e.p.set, &yt.set, &e.n.set, t) {
                     pairs.insert((e.w.block.clone(), e.w.change, y), Arc::clone(&e.w));
                 }
             }
         }
-        // the seeds as y, against every live edit
         if let Some(seeds) = seeds {
-            let mut edits: Option<Vec<Edit>> = None;
-            for y in seeds {
-                let Some(yt) = scope_text(cx, y)? else {
-                    continue;
-                };
-                if edits.is_none() {
-                    let mut all = vec![];
-                    for w in cx.writes.live() {
-                        all.extend(edit_of(cx, w)?);
-                    }
-                    edits = Some(all);
-                }
-                for e in edits.iter().flatten() {
-                    if e.w.block != *y
-                        && !cx.writes.live_write_of(&e.w.change, y)
-                        && may_match(&e.p.set, &yt.set, t)
-                        && drifts(&e.p.set, &yt.set, &e.n.set, t)
-                    {
-                        pairs.insert((e.w.block.clone(), e.w.change, y.clone()), Arc::clone(&e.w));
-                    }
-                }
-            }
+            Self::seeds_as_y(cx, seeds, t, &mut pairs)?;
         }
         for ((x, change, y), w) in pairs {
             let Some((side, version)) = cx.side_at(&y)? else {
@@ -515,6 +586,93 @@ impl RestatementDrift {
                 stable: cx.stable(&y)?,
                 involved: vec![cx.of_write(&w), cx.involved(side, &y, version)?],
             });
+        }
+        Ok(())
+    }
+
+    /// The seeds as `y`, against every live edit that took out a shingle. A seed's text is
+    /// hashed only when some such edit may drift from it: the seed takes part, it has enough
+    /// words to share the shingles the smallest match needs, and it holds a word some edit took
+    /// out ([`removed_words`]). Nothing is hashed when no seed takes part or no edit qualifies.
+    fn seeds_as_y(
+        cx: &DetectCx<'_>,
+        seeds: &BTreeSet<BlockId>,
+        t: u32,
+        pairs: &mut Pairs,
+    ) -> Result<(), RdyError> {
+        let m = cx.inflight_m()?;
+        let cache = cx.writes.texts();
+        // the seeds that take part: their text when it was read, else their body (at most 8
+        // words are counted; nothing is lowercased for an ASCII body, nothing is hashed)
+        let mut cands: Vec<(&BlockId, Hash, Seed<'_>)> = vec![];
+        for y in seeds {
+            let (Some(block), Some(v)) = (m.get(y), m.version_of(y)) else {
+                continue;
+            };
+            if !restating_type(cx.st.pack(), block) {
+                continue;
+            }
+            match cache.get(&v) {
+                Some(yt) if yt.long() => cands.push((y, v, Seed::Read(yt))),
+                Some(_) => {}
+                None if long_enough(&block.body) => cands.push((y, v, Seed::Unread(&block.body))),
+                None => {}
+            }
+        }
+        if cands.is_empty() {
+            return Ok(());
+        }
+        let mut edits = vec![];
+        for w in cx.writes.live() {
+            edits.extend(edit_of(cx, w)?.filter(Edit::removes));
+        }
+        // a match shares at least this many shingles with some edit's p (and a drift at least 1)
+        let Some(need) = edits
+            .iter()
+            .map(|e| (e.p.set.len() * t as usize).div_ceil(100).max(1))
+            .min()
+        else {
+            return Ok(());
+        };
+        let mut removed: Option<BTreeSet<String>> = None;
+        for (y, v, seen) in cands {
+            let yt = match seen {
+                Seed::Read(yt) => yt,
+                Seed::Unread(body) => {
+                    if removed.is_none() {
+                        let mut r = BTreeSet::new();
+                        for e in &edits {
+                            r.extend(removed_words(cx, e)?.iter().cloned());
+                        }
+                        removed = Some(r);
+                    }
+                    let Some(removed) = &removed else {
+                        continue;
+                    };
+                    // a word of y is a substring of its lowercased body: a cheap first filter
+                    let lower = body.to_lowercase();
+                    if !removed.iter().any(|w| lower.contains(w.as_str())) {
+                        continue;
+                    }
+                    let words: Vec<&str> = words_of(&lower).collect();
+                    // y has at most words - 2 shingles
+                    if words.len().saturating_sub(2) < need
+                        || !words.iter().any(|w| removed.contains(*w))
+                    {
+                        continue;
+                    }
+                    cache.put(v, text_of_words(&words))
+                }
+            };
+            for e in &edits {
+                if e.w.block != *y
+                    && !view_wrote(cx, &e.w.change, y)
+                    && may_match(&e.p.set, &yt.set, t)
+                    && drifts(&e.p.set, &yt.set, &e.n.set, t)
+                {
+                    pairs.insert((e.w.block.clone(), e.w.change, y.clone()), Arc::clone(&e.w));
+                }
+            }
         }
         Ok(())
     }
@@ -615,10 +773,7 @@ impl RestatementDrift {
 
 /// The number of words in `body` (see [`text_of`]), without hashing.
 fn text_of_len(body: &str) -> usize {
-    body.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .count()
+    words_of(&body.to_lowercase()).count()
 }
 
 /// The text of an older canon version `v`: from the cache, else read with `steps`.

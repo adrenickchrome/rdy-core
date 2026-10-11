@@ -387,14 +387,6 @@ impl Writes {
         self.by_block.get(b).map_or(&[][..], Vec::as_slice)
     }
 
-    /// Whether a live write of change `c` writes `b` (no copy: a change's writes are by block).
-    pub fn live_write_of(&self, c: &Hash, b: &BlockId) -> bool {
-        self.by_change.get(c).is_some_and(|ws| {
-            ws.binary_search_by(|w| w.block.cmp(b))
-                .is_ok_and(|i| ws[i].live)
-        })
-    }
-
     /// The version text cache restatement drift reads through.
     pub fn texts(&self) -> &TextCache {
         &self.texts

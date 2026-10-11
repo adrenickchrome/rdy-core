@@ -420,3 +420,91 @@ fn cc7_a_younger_x_drifts_from_its_first_text_in_canon() {
     land(&mut r, "b").unwrap();
     assert_eq!(drifts_between(&r, &x, &y), 1, "second edit");
 }
+
+/// Fix round 2 (ruling: the view's net edit): a view that edits y as well as x has no drift
+/// between them, in flight as in canon (they land together). The first write edits x inside the
+/// shared text and appends to y; the second appends to x. The reverse order (x first, then y)
+/// resolves the drift the first write opened.
+#[test]
+fn cc7_a_view_that_also_edits_y_has_no_drift_with_it() {
+    let (_d, mut r, x, y) = world();
+    put(
+        &mut r,
+        "a",
+        json!([
+            {"op": "update", "id": x.to_string(), "body": EDITED},
+            {"op": "update", "id": y.to_string(), "body": format!("In short: {SAID} Today.")}
+        ]),
+    );
+    carried_equals_rebuilt(&r, "x and y edited");
+    assert_eq!(drifts_between(&r, &x, &y), 0, "x and y edited");
+    put(
+        &mut r,
+        "a",
+        upd(&x, &format!("{EDITED} Owners may silence it.")),
+    );
+    carried_equals_rebuilt(&r, "x edited again");
+    assert_eq!(drifts_between(&r, &x, &y), 0, "x edited again");
+    land(&mut r, "a").unwrap();
+    assert_eq!(drifts_between(&r, &x, &y), 0, "landed");
+
+    let (_d, mut r, x, y) = world();
+    put(&mut r, "a", upd(&x, EDITED));
+    carried_equals_rebuilt(&r, "x edited");
+    assert_eq!(drifts_between(&r, &x, &y), 1, "x edited");
+    put(&mut r, "a", upd(&y, &format!("In short: {SAID} Today.")));
+    carried_equals_rebuilt(&r, "y edited after x");
+    assert_eq!(drifts_between(&r, &x, &y), 0, "y edited after x");
+    land(&mut r, "a").unwrap();
+    assert_eq!(drifts_between(&r, &x, &y), 0, "landed after");
+}
+
+/// Whether the carried set's text cache holds `y`'s version in view `view` (drift hashed it).
+/// The set must have come from a carry (a seeded run).
+fn hashed(r: &rdy_engine::Rdy, view: &str, y: &rdy_model::BlockId) -> bool {
+    let st = r.read();
+    st.tensions().unwrap();
+    assert_eq!(
+        st.tensions_carried(),
+        Some(true),
+        "the write carried the set"
+    );
+    let v = st
+        .materialized(&rdy_engine::Scope::View(view.into()))
+        .unwrap()
+        .version_of(y)
+        .expect("y's version");
+    st.tensions().unwrap().writes().texts().holds(&v)
+}
+
+/// Fix round 2 (cost): a seed is hashed as y only when some live edit may drift from it. With
+/// no live edit, a long new block is not hashed; with an edit, a long block that holds none of
+/// the words the edit took out is not hashed either; one that restates the edited text is.
+#[test]
+fn cc7_a_seed_no_edit_can_match_is_not_hashed() {
+    let lorem = "lorem ipsum dolor sit amet ".repeat(20);
+    let (_d, mut r, x, _y) = world();
+    let doc = r
+        .read()
+        .materialized(&rdy_engine::Scope::Canon)
+        .unwrap()
+        .get(&x)
+        .and_then(|b| b.parent.clone())
+        .expect("x's doc");
+    let create = |body: &str| json!([{"op": "create", "type": "prose", "id": "$z", "parent": doc.to_string(), "body": body}]);
+    // each write carries a built set: the seeded run is the one that reads the seeds as y
+    r.read().tensions().unwrap();
+    let w = put(&mut r, "c", create(&lorem));
+    let z = created(&w, "$z");
+    assert!(!hashed(&r, "c", &z), "no live edit");
+    put(&mut r, "a", upd(&x, EDITED));
+    assert_eq!(drifts_on(&r, &x), 1);
+    let w = put(&mut r, "c", create(&format!("Other: {lorem}")));
+    let z = created(&w, "$z");
+    assert!(!hashed(&r, "c", &z), "no word the edit took out");
+    let w = put(&mut r, "c", create(&format!("Note: {SAID}")));
+    let z = created(&w, "$z");
+    assert!(hashed(&r, "c", &z), "restates the edited text");
+    assert_eq!(drifts_on(&r, &z), 1);
+    carried_equals_rebuilt(&r, "seeds");
+}
