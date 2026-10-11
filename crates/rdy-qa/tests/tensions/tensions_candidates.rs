@@ -230,3 +230,63 @@ fn se4_item_now_finds_the_in_flight_write_else_canon() {
         "no version of A has that content"
     );
 }
+
+/// Every item of every request equals what `item_now` returns for its block and content.
+fn assert_items_current(r: &Rdy, change: &rdy_model::Hash) {
+    let rs = r.read().requests_from(change).unwrap();
+    for q in &rs {
+        for i in &q.items {
+            assert_eq!(
+                r.read().item_now(&i.block, i.content).unwrap().as_ref(),
+                Some(i),
+                "request {} item {} must be what item_now returns",
+                request_label(&q.key),
+                i.block
+            );
+        }
+    }
+}
+
+/// Two views write B with one text and different pins: a conflicted block (two live writes
+/// with equal content and two versions). Which write the in-flight scope keeps follows the
+/// change ids, which are random, so the scenario runs on several projects.
+#[test]
+fn se4_the_other_item_is_what_item_now_returns_or_the_pair_is_skipped() {
+    for _ in 0..12 {
+        let (_d, mut r) = project();
+        let s = spec_doc(&mut r);
+        let text = format!("B is the same, built on {{{{{}}}}}.", s.a);
+        // view c also edits A and re-pins B to it, so B's pins (and version) differ from view b's
+        let w1 = put(&mut r, "c", upd(&s.b, &text));
+        put(&mut r, "c", upd(&s.a, "A holds, mostly."));
+        put(
+            &mut r,
+            "c",
+            json!([{"op": "repin", "id": s.b.to_string(), "targets": [s.a.to_string()]}]),
+        );
+        let w2 = put(&mut r, "b", upd(&s.b, &text));
+        // C changes in a third view: A and B are its section neighbours
+        let w = put(&mut r, "a", upd(&s.c, "C changed."));
+        let on_b = r.read().tensions().unwrap().writes().live_on(&s.b);
+        assert_eq!(on_b.len(), 2, "two live writes on B");
+        assert_ne!(on_b[0].version, on_b[1].version, "two versions");
+        let got = r.read().requests_from(&change_of(&w)).unwrap();
+        assert!(
+            got.iter().any(|q| q.items.iter().any(|i| i.block == s.a)),
+            "C still pairs with A by section"
+        );
+        for c in [change_of(&w), change_of(&w1), change_of(&w2)] {
+            assert_items_current(&r, &c);
+        }
+    }
+}
+
+#[test]
+fn se4_items_are_current_after_an_earlier_change_in_the_same_view_rewrote_the_block() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.c, "C first."));
+    put(&mut r, "a", upd(&s.c, "C second."));
+    let w = put(&mut r, "a", upd(&s.a, "A holds, mostly."));
+    assert_items_current(&r, &change_of(&w));
+}

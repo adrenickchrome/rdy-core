@@ -377,17 +377,15 @@ impl Builder<'_, '_> {
         self.push(rule, s, x)
     }
 
-    /// Adds the pair (`s`, `x`) under `rule`, with `x` as it is now.
+    /// Adds the pair (`s`, `x`) under `rule`, with `x` as `item_now` names it: the item of the
+    /// content `x` has in the in-flight scope. Skipped when that item does not resolve.
     fn push(&mut self, rule: Rule, s: &Subject, x: &BlockId) -> Result<(), RdyError> {
         let cx = &self.ctx.cx;
-        let (Some((side, Some(version))), Some(block)) = (cx.side_at(x)?, self.ctx.m.get(x)) else {
+        let Some(block) = self.ctx.m.get(x) else {
             return Ok(());
         };
-        let theirs = Item {
-            block: x.clone(),
-            side,
-            version,
-            content: cx.content_of(block),
+        let Some(theirs) = item_now_in(cx, x, cx.content_of(block))? else {
+            return Ok(());
         };
         let mut items = vec![s.item.clone(), theirs];
         items.sort();
