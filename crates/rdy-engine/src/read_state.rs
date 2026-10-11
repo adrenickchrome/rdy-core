@@ -5,6 +5,7 @@ use crate::coverage::{CoverageMemo, Structural};
 use crate::error::*;
 use crate::lexicon::Lexicon;
 use crate::paths::TreeNode;
+use crate::semantic::state::SemanticState;
 use crate::suggest::MentionScan;
 use crate::tensions::Detector;
 use crate::tensions::index::CanonIndex;
@@ -57,6 +58,11 @@ pub enum Delta {
         entity: BlockId,
         review: Hash,
         dismissed: bool,
+    },
+    /// A verdict, or an acceptance's semantic tension versions, was written for pair keys `keys`; `blocks` are their pairs' blocks, sorted and distinct. Every cell is carried; the semantic state re-reads those pairs; the tension set re-detects around the blocks (plan M2e1).
+    Verdict {
+        keys: Vec<Hash>,
+        blocks: Vec<BlockId>,
     },
     /// Only the log moved (a proposal): no view content changed.
     Seq,
@@ -623,6 +629,11 @@ pub struct ReadState {
     /// Each (block, entity) pair whose latest mention review dismisses it, mapped to that review
     /// (FW-CV4).
     pub(crate) mention_dismissals: Arc<imbl::OrdMap<(BlockId, BlockId), Hash>>,
+    /// The verdicts and semantic tensions (plan M2e1): re-read by a full publish, the written
+    /// pairs re-read by a verdict, else carried.
+    pub(crate) semantic: Arc<SemanticState>,
+    /// `reviews.lease_ttl` in `.rdy.yaml`, in milliseconds, read by a full publish.
+    pub(crate) lease_ttl_ms: i64,
     /// The coverage issues of the scopes read in this state (FW-CH1), memoised; never carried.
     pub(crate) coverage_memo: CoverageMemo,
     /// The tension detectors: the registry, unless a test set others.
@@ -701,6 +712,17 @@ impl ReadState {
     /// read when this state was published.
     pub fn coverage_target(&self) -> u32 {
         self.coverage_target
+    }
+
+    /// The verdicts and semantic tensions of this state (plan M2e1).
+    pub fn semantic(&self) -> &Arc<SemanticState> {
+        &self.semantic
+    }
+
+    /// How long a claimed review request stays leased (`reviews.lease_ttl`, minutes × 60 000; 0
+    /// means no lease), as the config read when this state was published.
+    pub fn lease_ttl_ms(&self) -> i64 {
+        self.lease_ttl_ms
     }
 
     /// The doc a decision given no parent is recorded in (`decisions.home`: a path, key or id),

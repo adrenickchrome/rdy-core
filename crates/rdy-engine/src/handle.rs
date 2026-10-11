@@ -96,6 +96,7 @@ impl Rdy {
         let idle_days = cfg.idle_days();
         let coverage_target = cfg.coverage_target();
         let decisions_home = cfg.decisions_home();
+        let lease_ttl_ms = i64::from(cfg.lease_ttl_minutes()) * 60_000;
         // a placeholder until the first publish below, which replaces all of it
         let state = ArcSwap::from_pointee(ReadState {
             seq: store.log_end(),
@@ -123,6 +124,8 @@ impl Rdy {
             tensions: Arc::default(),
             dismissals: Arc::default(),
             mention_dismissals: Arc::default(),
+            semantic: Arc::default(),
+            lease_ttl_ms,
             coverage_memo: Default::default(),
             detectors: &tensions::DETECTORS,
             error: None,

@@ -2,6 +2,7 @@
 
 use crate::config::site_identity;
 use crate::read_state::{self, CoordHeads, Entry, InflightCell};
+use crate::semantic::state::SemanticState;
 use crate::tensions::SideRef;
 use crate::tensions::set::TensionCell;
 use crate::{Delta, Event, EventKind, Rdy, RdyError, ReadState, events};
@@ -78,6 +79,8 @@ impl Rdy {
                     tensions: Arc::default(),
                     dismissals: Arc::clone(&prev.dismissals),
                     mention_dismissals: Arc::clone(&prev.mention_dismissals),
+                    semantic: Arc::clone(&prev.semantic),
+                    lease_ttl_ms: prev.lease_ttl_ms,
                     coverage_memo: Default::default(),
                     detectors: self.detectors,
                     error: Some(e.clone()),
@@ -166,29 +169,38 @@ impl Rdy {
         // and review rules from the config loaded at open or by the last successful reload, never
         // from the files again: a broken file must not turn the review gate off (#832). Every
         // other publish carries them from the previous state.
-        let (name, description, require_up_to_date, idle_days, coverage_target, decisions_home) =
-            match delta {
-                Delta::Full => {
-                    let cfg = &self.config;
-                    let (name, description) = site_identity(&prev.root, cfg);
-                    (
-                        name,
-                        description,
-                        cfg.require_up_to_date(),
-                        cfg.idle_days(),
-                        cfg.coverage_target(),
-                        cfg.decisions_home(),
-                    )
-                }
-                _ => (
-                    Arc::clone(&prev.name),
-                    prev.description.clone(),
-                    prev.require_up_to_date,
-                    prev.idle_days,
-                    prev.coverage_target,
-                    prev.decisions_home.clone(),
-                ),
-            };
+        let (
+            name,
+            description,
+            require_up_to_date,
+            idle_days,
+            coverage_target,
+            decisions_home,
+            lease_ttl_ms,
+        ) = match delta {
+            Delta::Full => {
+                let cfg = &self.config;
+                let (name, description) = site_identity(&prev.root, cfg);
+                (
+                    name,
+                    description,
+                    cfg.require_up_to_date(),
+                    cfg.idle_days(),
+                    cfg.coverage_target(),
+                    cfg.decisions_home(),
+                    i64::from(cfg.lease_ttl_minutes()) * 60_000,
+                )
+            }
+            _ => (
+                Arc::clone(&prev.name),
+                prev.description.clone(),
+                prev.require_up_to_date,
+                prev.idle_days,
+                prev.coverage_target,
+                prev.decisions_home.clone(),
+                prev.lease_ttl_ms,
+            ),
+        };
         // the coordination refs: re-read by a publish that may have moved them, else carried. A
         // landing moves them only when it closed members of a set or chose an alternative (its
         // record says so; altg1)
@@ -227,7 +239,18 @@ impl Rdy {
                     _ => Arc::default(),
                 }
             }
+            // a verdict or an acceptance: the set builds again on the next read
+            Delta::Verdict { .. } => Arc::default(),
             _ => Arc::default(),
+        };
+        // the verdicts and semantic tensions: re-read by a full publish, the written pairs re-read
+        // by a verdict, else carried
+        let semantic = match &delta {
+            Delta::Full => Arc::new(SemanticState::read(&self.store.reader())?),
+            Delta::Verdict { keys, .. } => {
+                Arc::new(prev.semantic.reread(&self.store.reader(), keys)?)
+            }
+            _ => Arc::clone(&prev.semantic),
         };
         // the dismissals: re-read by a full publish, one added by a dismissal, else carried
         let dismissals = match &delta {
@@ -395,7 +418,10 @@ impl Rdy {
                 Arc::new(self.version_tags()?),
                 Arc::clone(&prev.inflight_cell),
             ),
-            Delta::Seq | Delta::Dismissed { .. } | Delta::MentionReviewed { .. } => (
+            Delta::Seq
+            | Delta::Dismissed { .. }
+            | Delta::MentionReviewed { .. }
+            | Delta::Verdict { .. } => (
                 Arc::clone(&prev.canon),
                 prev.views.clone(),
                 Arc::clone(&prev.tags),
@@ -428,6 +454,8 @@ impl Rdy {
             tensions,
             dismissals,
             mention_dismissals,
+            semantic,
+            lease_ttl_ms,
             coverage_memo,
             detectors: self.detectors,
             error: None,
