@@ -19,7 +19,8 @@
 //! a full run (no seeds). An index a new kind adds to `DetectCx` is lazy (a `OnceLock`), so the
 //! kinds that do not read it pay nothing. A kind whose tensions come from stored records (the
 //! semantic kind) says so with `Detector::stored` and may give its own severity with
-//! `Detector::own_severity`.
+//! `Detector::own_severity`. A kind that a repin or a change of the usual kind does not resolve
+//! names what does with `Detector::resolve_hint`, which a landing refusal's fix reads.
 pub mod api;
 pub mod collision;
 pub mod delta;
@@ -285,6 +286,11 @@ pub trait Detector: Sync {
     fn own_severity(&self, _cx: &DetectCx<'_>, _f: &Found) -> Option<TensionSeverity> {
         None
     }
+    /// What resolves a tension of this kind, as a landing refusal's fix names it. A refusal
+    /// never names an action that does not help (FW-LP6b). Default: [`RESOLVE_HINT`].
+    fn resolve_hint(&self) -> &'static str {
+        RESOLVE_HINT
+    }
     /// Whether this kind's tensions come from stored records rather than from the content alone. Such a kind is re-detected after a verdict or an acceptance, and its all-canon tensions are computed per build, never memoised per canon build.
     fn stored(&self) -> bool {
         false
@@ -295,6 +301,18 @@ pub trait Detector: Sync {
         seeds: Option<&BTreeSet<BlockId>>,
         out: &mut Vec<Found>,
     ) -> Result<(), RdyError>;
+}
+
+/// What resolves a tension of most kinds: a change, a repin or a dismissal (see
+/// [`Detector::resolve_hint`]).
+pub const RESOLVE_HINT: &str = "resolve each with a change, repin the citation, or dismiss it";
+
+/// What resolves a tension of `kind` (see [`Detector::resolve_hint`]).
+pub fn resolve_hint(kind: TensionKind) -> &'static str {
+    DETECTORS
+        .iter()
+        .find(|d| d.kind() == kind)
+        .map_or(RESOLVE_HINT, |d| d.resolve_hint())
 }
 
 /// Whether a proposal lists `kind` only in its landing form (see

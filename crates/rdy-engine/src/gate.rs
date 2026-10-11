@@ -750,15 +750,30 @@ impl ReadState {
     }
 }
 
-/// `E_BLOCKING_TENSION` for the refusing tensions of version `pref`: one issue per tension.
+/// `E_BLOCKING_TENSION` for the refusing tensions of version `pref`: one issue per tension. The
+/// fix names what resolves each refusing kind ([`crate::tensions::resolve_hint`]), each distinct
+/// hint once, in the order the tensions come.
 fn blocking_tensions(pref: &ProposalRef, refusing: &[TensionInfo]) -> RdyError {
+    let mut hints: Vec<&str> = vec![];
+    for t in refusing {
+        let h = crate::tensions::resolve_hint(t.kind);
+        if !hints.contains(&h) {
+            hints.push(h);
+        }
+    }
+    if hints.is_empty() {
+        hints.push(crate::tensions::RESOLVE_HINT);
+    }
     let mut e = RdyError::new(
         E_BLOCKING_TENSION,
         format!(
             "landing {pref} would put {} blocking tension(s) into canon",
             refusing.len()
         ),
-        "resolve each with a change, repin the citation, or dismiss it (rdy resolve <tn-…> --dismiss <reason>; a reviewer of another actor or a human); rdy tensions --involving <change> lists them, a form only this landing gives with its proposal",
+        format!(
+            "{} (rdy resolve <tn-…> --dismiss <reason>; a reviewer of another actor or a human); rdy tensions --involving <change> lists them, a form only this landing gives with its proposal",
+            hints.join("; ")
+        ),
     );
     e.issues = refusing
         .iter()
@@ -772,7 +787,10 @@ fn blocking_tensions(pref: &ProposalRef, refusing: &[TensionInfo]) -> RdyError {
                 .and_then(|side| side.blocks.first())
                 .and_then(|b| BlockId::parse(&b.block).ok()),
             message: format!("{} {}: {}", t.id, t.kind, t.summary),
-            fix: format!("resolve, repin or dismiss {}", t.id),
+            fix: match crate::tensions::resolve_hint(t.kind) {
+                crate::tensions::RESOLVE_HINT => format!("resolve, repin or dismiss {}", t.id),
+                h => format!("{}: {h}", t.id),
+            },
         })
         .collect();
     e
