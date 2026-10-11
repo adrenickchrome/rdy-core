@@ -90,7 +90,7 @@ fn cent1_rdy_search_prints_the_fact_sheet_before_the_matches() {
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
         text.starts_with(&format!(
-            "1 matching blocks\nby doc: ops 1\nby type: prose 1\nentity Ledger service (entity, {e}) [service], matched by alias\n  definition: Keeps the books.\n  facts:\n    {c} (describes) The ledger is append-only.\nops  {p} (prose)\n  body:1: Restart the ledger nightly.\n  suggest: describes {e}"
+            "1 matching blocks\nby doc: ops 1\nby type: prose 1\nentity Ledger service (entity, {e}) [service], matched by alias  confidence medium\n  definition: Keeps the books.\n  facts:\n    {c} (describes) The ledger is append-only.\nops  {p} (prose)  coverage 75  issues 2  low\n  body:1: Restart the ledger nightly.\n  suggest: describes {e}"
         )),
         "totals, then the fact sheet, then the matches: {text}"
     );
