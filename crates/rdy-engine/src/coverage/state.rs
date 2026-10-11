@@ -3,7 +3,7 @@
 //! and the Current issues of its suspects.
 use super::kinds::{KindCount, kinds_of};
 use super::model::*;
-use super::score::rollup;
+use super::score::{Rollup, rollup};
 use super::structural::structural_of;
 use crate::error::E_BAD_INPUT;
 use crate::tensions::set::TensionSet;
@@ -72,10 +72,11 @@ impl CoverageMemo {
     }
 }
 
-/// One scope's memoised coverage: its issues, the summary of them once read, and what the
-/// issues were computed from.
+/// One scope's memoised coverage: its issues, their rollup and summary once read, and what
+/// the issues were computed from.
 pub(crate) struct Memoised {
     issues: Arc<CoverageIssues>,
+    rollup: OnceLock<Arc<Rollup>>,
     summary: OnceLock<Arc<CoverageSummary>>,
     inputs: Inputs,
 }
@@ -220,6 +221,18 @@ impl ReadState {
         Ok(Arc::clone(&self.memoised(scope)?.issues))
     }
 
+    /// The score and dimensions of `scope`'s coverage, read from the memoised issues: what a
+    /// write reply's coverage change reads (no entity kinds, fix round 3). Memoised per state
+    /// and scope. `E_BAD_INPUT` for a past landing.
+    pub fn scope_rollup(&self, scope: &Scope) -> Result<Arc<Rollup>, RdyError> {
+        let memo = self.memoised(scope)?;
+        if let Some(r) = memo.rollup.get() {
+            return Ok(Arc::clone(r));
+        }
+        let r = Arc::new(rollup(&self.pack, memo.issues.blocks.values()));
+        Ok(Arc::clone(memo.rollup.get_or_init(|| r)))
+    }
+
     /// The summary of `scope`'s coverage: what its report gives for the score, the dimensions,
     /// the issue count and the kinds, read from the memoised issues without cloning, placing or
     /// sorting any of them. Memoised per state and scope. `E_BAD_INPUT` for a past landing.
@@ -229,13 +242,13 @@ impl ReadState {
         if let Some(s) = memo.summary.get() {
             return Ok(Arc::clone(s));
         }
-        let whole = rollup(&self.pack, memo.issues.blocks.values());
+        let whole = self.scope_rollup(scope)?;
         let issues_total = memo.issues.blocks.values().map(|e| e.issues.len()).sum();
         let m = self.materialized(scope)?;
         let (kinds, similar_kinds) = kinds_of(&m);
         let s = Arc::new(CoverageSummary {
             score: whole.score,
-            dimensions: whole.dimensions,
+            dimensions: whole.dimensions.clone(),
             issues_total,
             kinds,
             similar_kinds,
@@ -268,11 +281,13 @@ impl ReadState {
             Some(Carried::Same) => Arc::clone(prev.expect("a carry needs the entry before")),
             Some(Carried::Issues(issues)) => Arc::new(Memoised {
                 issues: Arc::new(issues),
+                rollup: OnceLock::new(),
                 summary: OnceLock::new(),
                 inputs,
             }),
             None => Arc::new(Memoised {
                 issues: Arc::new(self.full_issues(&inputs)),
+                rollup: OnceLock::new(),
                 summary: OnceLock::new(),
                 inputs,
             }),

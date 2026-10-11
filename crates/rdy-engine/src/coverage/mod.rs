@@ -15,7 +15,7 @@ pub(crate) use carry::carry;
 pub use carry::carry_for_perf;
 pub use change::{CoverageChange, PageChange, coverage_change};
 pub use confidence::*;
-pub use kinds::KindCount;
+pub use kinds::{KindCount, kinds_builds};
 pub use model::{
     BlockEntry, CoverageIssue, CoverageIssues, Dimension, Dismissal, IssueCode, Structural,
     sort_issues,

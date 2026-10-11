@@ -54,7 +54,20 @@ pub(crate) fn kinds_over<'a>(
     (counts, similar)
 }
 
-/// The kinds of every block of `m` and the groups of similar kinds.
+thread_local! {
+    static KINDS_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test hook: this thread's count of whole-scope kind counts (`kinds_of` calls). A write
+/// reply's coverage change must leave it unchanged.
+#[doc(hidden)]
+pub fn kinds_builds() -> u64 {
+    KINDS_BUILDS.with(std::cell::Cell::get)
+}
+
+/// The kinds of every block of `m` and the groups of similar kinds. Counted by
+/// [`kinds_builds`].
 pub(crate) fn kinds_of(m: &Materialized) -> (Vec<KindCount>, Vec<Vec<String>>) {
+    KINDS_BUILDS.with(|c| c.set(c.get() + 1));
     kinds_over(m.iter())
 }

@@ -1,8 +1,8 @@
 //! cc11: the structural coverage layer carried across a write equals a rebuild, and a carry
 //! builds nothing in full.
 use rdy_engine::coverage::{
-    carry_for_perf, issues_rebuilt_for_tests, rebuilt_for_tests, state_layer_builds,
-    structural_builds, structural_for_tests,
+    carry_for_perf, coverage_change, issues_rebuilt_for_tests, kinds_builds, rebuilt_for_tests,
+    state_layer_builds, structural_builds, structural_for_tests,
 };
 use rdy_engine::mention_review::MentionVerdict;
 use rdy_engine::*;
@@ -11,7 +11,7 @@ use rdy_model::{BlockId, Hash};
 use rdy_qa::fixtures::*;
 use rdy_qa::tensions::{j_typo, try_put_j};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Every write of this file goes through `put_j` with `j_typo()`, so stable content takes it;
 /// the agent is named after the view. An op the engine refuses is an error, never a panic.
@@ -618,4 +618,51 @@ fn cc11_fix2_carried_issues_equal_a_full_build_through_tensions_and_suspects() {
     for s in &scopes {
         same_issues(&r, s);
     }
+}
+
+/// Fix round 3 (FW-PF2): a write reply's coverage change reads the carry, the scores before
+/// and after and the touched pages' rollups. It counts no entity kinds (a summary's part,
+/// for status and overview) and builds no state layer in full; its scores are the summaries'.
+#[test]
+fn cc11_fix3_a_write_replys_coverage_change_counts_no_kinds() {
+    let (_d, mut r) = project();
+    let c = cc6_world(&mut r);
+    let v = Scope::View("next".into());
+    write(
+        &mut r,
+        "next",
+        json!([{"op": "create", "type": "prose", "parent": c["$s"], "body": "One more line."}]),
+    )
+    .unwrap();
+    let prev = r.read();
+    // the previous reply read the state before
+    coverage_change(&prev, &v, &prev, &v, &BTreeSet::new()).unwrap();
+    let w = write(
+        &mut r,
+        "next",
+        json!([{"op": "create", "type": "claim", "parent": c["$s"], "body": "The Ledger is checked."}]),
+    )
+    .unwrap();
+    let next = r.read();
+    let change: Hash = w.change.parse().unwrap();
+    let touched: BTreeSet<BlockId> = next
+        .reader()
+        .change(&change)
+        .unwrap()
+        .ops
+        .iter()
+        .map(|o| o.block_id().clone())
+        .collect();
+    let (kinds, layers) = (kinds_builds(), state_layer_builds());
+    let got = coverage_change(&prev, &v, &next, &v, &touched).unwrap();
+    assert_eq!(
+        kinds_builds(),
+        kinds,
+        "a write reply counts no entity kinds"
+    );
+    assert_eq!(state_layer_builds(), layers, "the issues after are carried");
+    assert_eq!(got.before, prev.coverage_summary(&v).unwrap().score);
+    assert_eq!(got.after, next.coverage_summary(&v).unwrap().score);
+    assert!(kinds_builds() > kinds, "a summary still counts the kinds");
+    assert_eq!(got.pages.len(), 1, "the touched page: {got:?}");
 }

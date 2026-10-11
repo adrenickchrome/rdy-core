@@ -1,7 +1,7 @@
 //! The coverage change a write or a proposal makes (FW-CH3, D-C6HHV): the corpus score of the
 //! scope before and after, and the score of each page the change touched. Read from two
-//! memoised summaries and the pages' own blocks: it never builds a full report and stores
-//! nothing (D-NMGD2).
+//! memoised rollups and the pages' own blocks: it never builds a full report, counts no entity
+//! kinds and stores nothing (D-NMGD2).
 use super::score::PAGES_CAP;
 use crate::{RdyError, ReadState, Scope};
 use rdy_model::BlockId;
@@ -43,8 +43,8 @@ pub fn coverage_change(
     after_scope: &Scope,
     touched: &BTreeSet<BlockId>,
 ) -> Result<CoverageChange, RdyError> {
-    let b_score = before.coverage_summary(before_scope)?.score;
-    let a_score = after.coverage_summary(after_scope)?.score;
+    let b_score = before.scope_rollup(before_scope)?.score;
+    let a_score = after.scope_rollup(after_scope)?.score;
     let b_issues = before.coverage_issues(before_scope)?;
     let a_issues = after.coverage_issues(after_scope)?;
     let mut docs: BTreeSet<&BlockId> = BTreeSet::new();

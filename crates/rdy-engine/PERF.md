@@ -954,8 +954,9 @@ What each cost grows with:
 - `coverage_all` grows with the number of blocks: it checks every block in all six dimensions
   and reads the tension set and the suspects. It runs for `rdy status` and for `rdy_overview`.
   A write carries the structural layer (see Coverage and confidence below), so the op times the
-  cold pass. The write response reads the coverage change from two memoised summaries and the
-  touched pages' own blocks (`write_consequences` and `propose` do this work; cc16).
+  cold pass. The write response reads the coverage change from two memoised rollups (the score
+  and dimensions, no entity kinds) and the touched pages' own blocks (`write_consequences` and
+  `propose` do this work; cc16).
 
 No laptop figures are recorded here: the first timing of these ops is the Linux bench's.
 
@@ -1072,16 +1073,20 @@ The `qa-perf` typical tier gained two ops in `tier_entities`, after `coverage_al
 
 | op | what it times | runs | target |
 |---|---|---|---|
-| `coverage_carry` | What a write reply reads for its coverage after one single-claim write: the carry of the structural layer, then `coverage_summary(ve)` on the state before (memoised) and on the state after (its coverage issues carried from the state before). Outside the timer: the view's summary on the state before the write (the previous reply read it), the write, and its ops read back. Timed: `coverage::carry_for_perf`, the call `Built::after` makes (`cc11_the_perf_hook_carries_as_a_write_does` pins that they give the same layer), and the two summaries | `runs.write` | < 5 ms p95: a write reply's coverage after one write, the carry and the summaries before and after (FW-PF2; reference/performance tb-XBXR4 read budget) |
+| `coverage_carry` | What a write reply reads for its coverage after one single-claim write: the carry of the structural layer, then `coverage_change(ve → ve)` for the written blocks, as `write_and_report` calls it: the score on the state before (memoised), the score on the state after (its coverage issues carried from the state before), and the written doc's page rollup before and after. Outside the timer: the view's score on the state before the write (the previous reply read it), the write, and its ops read back. Timed: `coverage::carry_for_perf`, the call `Built::after` makes (`cc11_the_perf_hook_carries_as_a_write_does` pins that they give the same layer), and `coverage_change` | `runs.write` | < 5 ms p95: a write reply's coverage change after one write: the carry, the scores before and after, the touched page's rollups (FW-PF2; reference/performance tb-XBXR4 read budget) |
 | `coverage_report_cold` | `coverage_report(ve)` after the engine caches are dropped (outside the timer): the materialization, the graph, the lexicon, the structural layer and the state layer | `runs.read` | no spec target: the cold coverage report over a 10k view, recorded (FW-PF2; rdy coverage) |
 
 `coverage_carry` grows with the dirty set (the written blocks, their neighbours and their docs),
-with the tensions and suspects the write changed, and with the summary's rollup, which reads
-every scored block. The write goes to the fixture's first doc, which this tier fills with 250
-more blocks, so the doc's `linked_from_outside` walk of its whole subtree is in the timed path.
+with the tensions and suspects the write changed, with the scope's rollup after the write, which
+reads every scored block, and with the blocks of the written doc's page, read twice for its
+rollups. The write goes to the fixture's first doc, which this tier fills with 250 more blocks,
+so the doc's `linked_from_outside` walk of its whole subtree is in the timed path.
 It rebuilds neither the structural layer nor the state layer: the coverage issues are carried
 from the state before (fix round 2), and only the entries of the blocks whose structural entry,
-counted tensions or suspects changed are rebuilt. `rdy coverage` (the full report) is
+counted tensions or suspects changed are rebuilt. It counts no entity kinds: the kinds are a
+summary's (`rdy status`, `rdy_overview`), and a write reply reads only the rollup (fix round 3;
+`kinds_builds` pins it in the op and in
+`cc11_fix3_a_write_replys_coverage_change_counts_no_kinds`). `rdy coverage` (the full report) is
 `coverage_report_cold`'s, not a write reply's.
 
 No laptop figures are recorded here: the first timing of these ops is the Linux bench's.
