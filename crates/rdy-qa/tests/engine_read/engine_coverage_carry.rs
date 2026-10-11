@@ -343,7 +343,8 @@ fn cc11_a_rename_that_keeps_the_phrase_equals_a_rebuild() {
 /// Fix round 1: writes that change entries outside the dirty set give up, so the next read
 /// builds the layer in full and it equals a rebuild: a folder renamed with a doc under it (the
 /// doc's path changes); a section with children moved to another doc (the children's doc
-/// changes); a doc's `doc_type` changed; a doc created in a folder; a doc moved into a folder.
+/// changes); a doc's `doc_type` changed; a doc moved into a folder. (perf3: a doc created with
+/// a stored name carries; `perf3_a_named_new_doc_carries`.)
 #[test]
 fn cc11_tree_writes_and_doc_type_changes_rebuild() {
     let (_d, mut r) = project();
@@ -385,12 +386,60 @@ fn cc11_tree_writes_and_doc_type_changes_rebuild() {
     );
     rebuilds(
         &mut r,
-        json!([{"op": "create", "type": "doc", "parent": w["$f"], "fields": {"name": "second", "title": "Second", "doc_type": "page"}}]),
-    );
-    rebuilds(
-        &mut r,
         json!([{"op": "move", "id": c["$l"], "parent": w["$f"]}]),
     );
+}
+
+/// perf3: a doc or a folder created with a stored name, beside no nameless doc, moves no other
+/// block's path, so the layer and the coverage issues carry (a `new_doc` reply reads its
+/// coverage change from them): no full build of either, and both equal a rebuild. A doc in a
+/// new folder, a doc at the root, and a doc by `new_doc` with its skeleton.
+#[test]
+fn perf3_a_named_new_doc_carries() {
+    let (_d, mut r) = project();
+    let c = cc6_world(&mut r);
+    let v = Scope::View("next".into());
+    write(
+        &mut r,
+        "next",
+        json!([{"op": "create", "type": "prose", "parent": c["$s"], "body": "One more line."}]),
+    )
+    .unwrap();
+    let carries = |r: &mut Rdy, ops: Option<Value>| {
+        r.read().coverage_issues(&v).unwrap();
+        let (layers, states) = (structural_builds(), state_layer_builds());
+        match &ops {
+            Some(ops) => {
+                write(r, "next", ops.clone()).unwrap();
+            }
+            None => {
+                r.new_doc(&writer(), "next", "made/by-new-doc", None, None)
+                    .unwrap();
+            }
+        }
+        r.read().coverage_issues(&v).unwrap();
+        assert_eq!(structural_builds(), layers, "the layer carried: {ops:?}");
+        assert_eq!(state_layer_builds(), states, "the issues carried: {ops:?}");
+        same(r, &v);
+        same_issues(r, &v);
+    };
+    carries(
+        &mut r,
+        Some(json!([
+            {"op": "create", "type": "folder", "id": "$f", "fields": {"name": "area", "title": "Area"}},
+            {"op": "create", "type": "doc", "id": "$fd", "parent": "$f", "fields": {"name": "inner", "title": "Inner", "doc_type": "page"}},
+            {"op": "create", "type": "prose", "parent": "$fd", "body": "The Ledger is inside."}
+        ])),
+    );
+    carries(
+        &mut r,
+        Some(json!([
+            {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "second", "title": "Second", "doc_type": "overview"}},
+            {"op": "create", "type": "section", "parent": "$d", "fields": {"title": "Summary"}},
+            {"op": "create", "type": "claim", "parent": c["$s"], "body": "See the second page.", "links": {"depends_on": [{"target": "$d"}]}}
+        ])),
+    );
+    carries(&mut r, None);
 }
 
 /// Fix round 1: the perf hook `carry_for_perf` (what `coverage_carry` times) makes the call

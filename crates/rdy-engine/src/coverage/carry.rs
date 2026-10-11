@@ -26,9 +26,10 @@ pub fn carried_entries() -> u64 {
 /// `new`, whose graph is `g` and whose lexicon is `lex`: equal to a rebuild. `None` when the ops
 /// can change entries the dirty set does not reach (the next read rebuilds): an entity created,
 /// deleted or renamed; a lifecycle change or a move of a block that has children; a block
-/// deleted with children left; a doc's `doc_type` changed; a doc or a folder created, deleted,
-/// renamed or moved (it changes the paths of docs other than itself). With the layer, the blocks
-/// whose entries it recomputed (every other entry is `prev`'s).
+/// deleted with children left; a doc's `doc_type` changed; a doc or a folder deleted, renamed or
+/// moved, or created without a stored name or beside a nameless one (it changes the paths of
+/// docs other than itself). With the layer, the blocks whose entries it recomputed (every other
+/// entry is `prev`'s).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn carry(
     prev: &Structural,
@@ -169,19 +170,27 @@ fn gives_up<'a>(
         (Some(x), Some(y)) if raw_names(x) == raw_names(y) => {}
         _ => return true,
     }
-    // a doc or a folder created, deleted, renamed or moved: the paths under and beside it
+    // a doc or a folder created, deleted, renamed or moved: the paths under and beside it. A
+    // new one with a stored name, under a parent with no nameless doc or folder, moves no other
+    // path: nothing was under it, and only a nameless sibling's name reads the siblings' names
+    // (perf3: a `new_doc` reply rebuilt the whole layer)
     let tree_type = |x: Option<&Block>| x.is_some_and(|x| tree::is_tree_type(&x.block_type));
+    let named_new = a.is_none()
+        && b.is_some_and(|y| {
+            y.field_str("name").is_some() && !new.has_nameless_under(y.parent.as_ref())
+        });
     if (tree_type(a) || tree_type(b))
+        && !named_new
         && (old.name_of(id) != new.name_of(id) || a.map(|x| &x.parent) != b.map(|x| &x.parent))
     {
         return true;
     }
-    // a doc's doc_type changed
+    // a doc's doc_type changed (a new doc's blocks are all new: each is touched)
     let doc_type = |x: Option<&'a Block>| {
         x.filter(|x| x.block_type == tree::DOC)
             .and_then(|x| x.field_str("doc_type"))
     };
-    if doc_type(a) != doc_type(b) {
+    if !named_new && doc_type(a) != doc_type(b) {
         return true;
     }
     let has_children = !old.children(Some(id)).is_empty() || !new.children(Some(id)).is_empty();
