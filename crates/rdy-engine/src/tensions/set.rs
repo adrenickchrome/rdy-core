@@ -182,6 +182,21 @@ impl TensionSet {
         )
     }
 
+    /// The tensions that involve any of `blocks`, each once, by id.
+    pub(crate) fn involving_blocks<'a>(
+        &self,
+        blocks: impl IntoIterator<Item = &'a BlockId>,
+    ) -> Vec<Arc<Tension>> {
+        let mut ids: BTreeSet<&Hash> = BTreeSet::new();
+        for b in blocks {
+            ids.extend(self.canon.by_block.get(b).into_iter().flatten());
+            ids.extend(self.by_block.get(b).into_iter().flatten());
+        }
+        ids.into_iter()
+            .filter_map(|id| self.get(id).cloned())
+            .collect()
+    }
+
     /// The tensions with change `c` as a side, by id (in-flight ones only).
     pub fn involving_change(&self, c: &Hash) -> Vec<Arc<Tension>> {
         self.by_ids(self.by_change.get(c).into_iter().flatten())
@@ -226,6 +241,32 @@ impl TensionSet {
         d
     }
 
+    /// The tensions this set and `newer` differ in, as (here, in `newer`) pairs: one opened
+    /// (`None`, `Some`), one resolved (`Some`, `None`), or one id whose tension differs (both).
+    /// As in `diff`, the structure the two sets share is skipped, and so is a canon part they
+    /// share (perf4: a carry of the coverage issues reads it).
+    pub(crate) fn changed<'a>(&'a self, newer: &'a TensionSet) -> Vec<TensionChange<'a>> {
+        let mut parts = vec![(&self.tensions, &newer.tensions)];
+        if !self.shares_canon(newer) {
+            parts.push((&self.canon.tensions, &newer.canon.tensions));
+        }
+        let mut out = vec![];
+        for (old, new) in parts {
+            for item in old.diff(new) {
+                match item {
+                    DiffItem::Add(_, t) => out.push((None, Some(t))),
+                    DiffItem::Remove(_, t) => out.push((Some(t), None)),
+                    DiffItem::Update { old, new } => {
+                        if !Arc::ptr_eq(old.1, new.1) && old.1 != new.1 {
+                            out.push((Some(old.1), Some(new.1)));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// The same opened and resolved lists as `diff`, found from what a step can touch: the
     /// tensions with one of `changes` as a side and those that involve one of `blocks`, in
     /// either set, each checked against the other. Exact only when every tension the step
@@ -263,6 +304,9 @@ impl TensionSet {
         delta
     }
 }
+
+/// One tension two sets differ in: (in the older set, in the newer one).
+pub(crate) type TensionChange<'a> = (Option<&'a Arc<Tension>>, Option<&'a Arc<Tension>>);
 
 /// What a step did to the tension set: the tensions it opened and those it resolved, by id.
 #[derive(Clone, Debug, Default)]

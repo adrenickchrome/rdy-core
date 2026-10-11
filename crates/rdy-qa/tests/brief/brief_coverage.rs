@@ -348,3 +348,197 @@ fn cc13_a_briefing_with_few_pages_omits_the_count() {
     let v = serde_json::to_value(brief_ids(&r, &[&c["$c1"]])).unwrap();
     assert!(v["coverage"].get("pages_omitted").is_none(), "{v}");
 }
+
+/// The briefing on `cov` in `scope`, as JSON: once from a state that memoises no coverage (the
+/// briefing works out its own blocks' entries), then from the same state once its coverage is
+/// built in full. The two must be equal (perf4).
+fn local_then_memo(r: &Rdy, scope: &Scope, cov: &Coverage) -> (Value, Value) {
+    use rdy_engine::coverage::{local_entries, state_layer_builds, structural_builds};
+    let st = r.read();
+    let (layers, states, local) = (structural_builds(), state_layer_builds(), local_entries());
+    let first = serde_json::to_value(st.brief(scope, cov, None).unwrap()).unwrap();
+    assert_eq!(structural_builds(), layers, "no structural layer built");
+    assert_eq!(state_layer_builds(), states, "no state layer built");
+    assert!(local_entries() > local, "the entries were worked out");
+    st.coverage_issues(scope).unwrap();
+    let local = local_entries();
+    let second = serde_json::to_value(st.brief(scope, cov, None).unwrap()).unwrap();
+    assert_eq!(local_entries(), local, "the memoised issues are read");
+    (first, second)
+}
+
+fn by_path(p: &str) -> Coverage {
+    Coverage {
+        ids: vec![],
+        path: Some(p.to_string()),
+    }
+}
+
+/// perf4: a briefing on a state that memoises no coverage builds neither the structural layer
+/// nor the state layer of the scope, and its coverage section equals the one read from the full
+/// build: unlinked mentions, a dismissed mention, an open question, unapplied decisions, a stub
+/// section, a suspect, open and dismissed tensions, in canon and in a view.
+#[test]
+fn perf4_a_briefing_without_memoised_coverage_equals_one_with_it() {
+    let (d, mut r) = project();
+    let c = world(&mut r);
+    let (citer, target) = landed_citation_then_target_changed(&mut r);
+    // an open duplicate in canon on governing decisions, and a duplicate in a view
+    let g = write(&mut r, "gov", json!([
+        {"op": "create", "type": "doc", "id": "$o", "fields": {"name": "fees", "title": "Fees", "doc_type": "page"}},
+        {"op": "create", "type": "section", "id": "$s", "parent": "$o", "fields": {"title": "Rules", "lifecycle": "draft"}},
+        {"op": "create", "type": "decision", "id": "$d1", "parent": "$s", "fields": {"statement": "Fees are charged every month", "status": "proposed"}},
+        {"op": "create", "type": "decision", "id": "$d2", "parent": "$s", "fields": {"statement": "Fees are charged every month", "status": "proposed"}},
+        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "A fee is billed monthly.",
+         "links": {"decided_by": [{"target": "$d1"}]}}
+    ]))
+    .unwrap()
+    .created;
+    land(&mut r, "gov").unwrap();
+    r.review_mention(
+        &writer(),
+        &Scope::Canon,
+        &c["$c1"],
+        &c["$t"],
+        rdy_engine::mention_review::MentionVerdict::Dismiss,
+        "everyday word",
+    )
+    .unwrap();
+    write(&mut r, "v", json!([
+        {"op": "create", "type": "claim", "parent": c["$empty"], "body": "Refunds are paid within a week."},
+        {"op": "create", "type": "claim", "parent": c["$empty"], "body": "Refunds are paid within a week."},
+        {"op": "create", "type": "claim", "parent": c["$empty"], "body": "The Ledger is audited."}
+    ]))
+    .unwrap();
+    let dup = {
+        let st = r.read();
+        st.tensions()
+            .unwrap()
+            .iter()
+            .find(|t| {
+                t.kind == tensions::TensionKind::DuplicateDefinition
+                    && t.blocks().iter().any(|b| b.to_string() == g["$d1"])
+            })
+            .map(|t| tensions::tension_label(&t.id))
+            .expect("the duplicate decisions")
+    };
+    r.dismiss_tension(&writer(), &dup, "said twice on purpose")
+        .unwrap();
+
+    drop(r);
+    let view = Scope::View("v".into());
+    let mut codes = std::collections::BTreeSet::new();
+    for (scope, cov) in [
+        (Scope::Canon, by_path("ops")),
+        (Scope::Canon, by_path("fees")),
+        (Scope::Canon, by_path("pay")),
+        (
+            Scope::Canon,
+            Coverage {
+                ids: vec![target.to_string()],
+                path: None,
+            },
+        ),
+        (
+            Scope::Canon,
+            Coverage {
+                ids: vec![c["$c1"].clone(), g["$c"].clone()],
+                path: None,
+            },
+        ),
+        (view.clone(), by_path("ops")),
+        (
+            view,
+            Coverage {
+                ids: vec![citer.to_string()],
+                path: None,
+            },
+        ),
+    ] {
+        // reopened: a state that memoises no coverage
+        let r = Rdy::open(d.path()).unwrap();
+        let (local, memo) = local_then_memo(&r, &scope, &cov);
+        assert_eq!(local["coverage"], memo["coverage"], "{scope:?} {cov:?}");
+        assert_eq!(local, memo, "{scope:?} {cov:?}");
+        for key in ["issues", "reasons"] {
+            for i in local["coverage"][key].as_array().unwrap() {
+                codes.insert(i["code"].as_str().unwrap().to_string());
+            }
+        }
+    }
+    for code in [
+        "unlinked_mention",
+        "open_question",
+        "unapplied_decision",
+        "open_suspect",
+        "open_tension",
+        "dismissed_tension",
+        "untied_content",
+    ] {
+        assert!(codes.contains(code), "{code} not exercised: {codes:?}");
+    }
+}
+
+/// perf4: with no memoised coverage, a briefing on one doc works out the entries of that doc's
+/// blocks only (its neighbourhood here is the doc itself): not the project's other docs. The
+/// state keeps what it worked out for the next briefing of it.
+#[test]
+fn perf4_a_cold_briefing_works_out_its_own_blocks_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let docs = rdy_engine::testkit::generate_tree(dir.path(), 3, 4, 10);
+    let mut r = Rdy::open(dir.path()).unwrap();
+    land(&mut r, "work").unwrap();
+    let total = r.read().materialized(&Scope::Canon).unwrap().len();
+    let before = rdy_engine::coverage::local_entries();
+    let b = r
+        .read()
+        .brief(&Scope::Canon, &by_path(&docs[0]), None)
+        .unwrap();
+    let worked = rdy_engine::coverage::local_entries() - before;
+    assert_eq!(
+        worked, b.covers as u64,
+        "one entry per covered block, each once"
+    );
+    assert!(worked * 10 < total as u64, "{worked} of {total} blocks");
+    // the state keeps them: a second briefing of it works out none again
+    let before = rdy_engine::coverage::local_entries();
+    let again = r
+        .read()
+        .brief(&Scope::Canon, &by_path(&docs[0]), None)
+        .unwrap();
+    assert_eq!(rdy_engine::coverage::local_entries(), before);
+    assert_eq!(
+        serde_json::to_value(&again.coverage).unwrap(),
+        serde_json::to_value(&b.coverage).unwrap()
+    );
+}
+
+/// perf4: after a write, a briefing in a view whose coverage was read before the write carries
+/// it (the write reply's path): it works out no entry and builds nothing in full.
+#[test]
+fn perf4_a_briefing_after_a_read_and_a_write_carries_the_coverage() {
+    use rdy_engine::coverage::{local_entries, state_layer_builds, structural_builds};
+    let (_d, mut r) = project();
+    let c = world(&mut r);
+    let v = Scope::View("next".into());
+    write(
+        &mut r,
+        "next",
+        json!([{"op": "create", "type": "prose", "parent": c["$empty"], "body": "One."}]),
+    )
+    .unwrap();
+    r.read().coverage_issues(&v).unwrap();
+    write(
+        &mut r,
+        "next",
+        json!([{"op": "create", "type": "prose", "parent": c["$empty"], "body": "Two."}]),
+    )
+    .unwrap();
+    let (layers, states, local) = (structural_builds(), state_layer_builds(), local_entries());
+    let b = r.read().brief(&v, &by_path("ops"), None).unwrap();
+    assert!(b.coverage.is_some());
+    assert_eq!(
+        (structural_builds(), state_layer_builds(), local_entries()),
+        (layers, states, local)
+    );
+}

@@ -145,16 +145,45 @@ fn mentions_map<S: serde::Serializer>(
 /// Sorts `issues` by the closed order: the path of the block's doc (from `paths`, by block id;
 /// empty when absent), the block id, the dimension, the code and the subject.
 pub fn sort_issues(issues: &mut [CoverageIssue], paths: &BTreeMap<String, String>) {
-    let path = |i: &CoverageIssue| paths.get(&i.block).cloned().unwrap_or_default();
-    issues.sort_by(|a, b| {
-        (path(a), &a.block, a.dimension, a.code, &a.subject).cmp(&(
-            path(b),
+    issues.sort_by(|a, b| issue_order(a, b, paths));
+}
+
+/// [`sort_issues`] over borrowed issues: the same order, and nothing is cloned (a caller that
+/// lists only the first few clones those).
+pub(crate) fn sort_issue_refs(issues: &mut [&CoverageIssue], paths: &BTreeMap<String, String>) {
+    // each issue's path looked up once, not once per comparison
+    let mut keyed: Vec<(&str, &CoverageIssue)> = issues
+        .iter()
+        .map(|i| (paths.get(&i.block).map_or("", String::as_str), *i))
+        .collect();
+    keyed.sort_by(|(pa, a), (pb, b)| {
+        (*pa, &a.block, a.dimension, a.code, &a.subject).cmp(&(
+            *pb,
             &b.block,
             b.dimension,
             b.code,
             &b.subject,
         ))
     });
+    for (slot, (_, i)) in issues.iter_mut().zip(keyed) {
+        *slot = i;
+    }
+}
+
+/// The closed issue order of `a` and `b`, the doc paths read from `paths` without a copy.
+fn issue_order(
+    a: &CoverageIssue,
+    b: &CoverageIssue,
+    paths: &BTreeMap<String, String>,
+) -> std::cmp::Ordering {
+    let path = |i: &CoverageIssue| paths.get(&i.block).map_or("", String::as_str);
+    (path(a), &a.block, a.dimension, a.code, &a.subject).cmp(&(
+        path(b),
+        &b.block,
+        b.dimension,
+        b.code,
+        &b.subject,
+    ))
 }
 
 /// The fix of `untied_content`.

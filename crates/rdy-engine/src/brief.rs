@@ -4,8 +4,8 @@
 //! block or one of their dependencies changes version. Registered briefings live in memory
 //! (`BriefRegistry`), one registry per open project.
 use crate::coverage::{
-    Confidence, CoverageIssue, Dimension, PAGES_CAP, PageScore, confidence_of, coverage_error_text,
-    sort_issues,
+    Confidence, CoverageIssue, Dimension, PAGES_CAP, PageScore, confidence_in, coverage_error_text,
+    page_blocks, rollup, sort_issue_refs,
 };
 use crate::error::*;
 use crate::inflight::Inflight;
@@ -1131,7 +1131,10 @@ impl ReadState {
 
     /// The coverage section of the briefing of `ids`: the rollup of the covered blocks, one score
     /// per page that holds one, their issues (at most [`BRIEF_ISSUES_CAP`]) and the confidence
-    /// of the neighbourhood (D-EEN7A). The lists are those before any page cut.
+    /// of the neighbourhood (D-EEN7A). The lists are those before any page cut. It reads the
+    /// scope's memoised coverage when that is cheap to have, else works out the entries of the
+    /// blocks it reads (the covered blocks, the neighbourhood and the covered pages); it never
+    /// builds the coverage of the whole scope (perf4).
     fn brief_coverage(
         &self,
         scope: &Scope,
@@ -1140,9 +1143,10 @@ impl ReadState {
         dependents: &[Dependent],
         will_go_stale: &[WillGoStale],
     ) -> Result<BriefCoverage, RdyError> {
-        let issues = self.coverage_issues(scope)?;
+        let mut cov = self.scoped_entries(scope)?;
         let m = self.materialized(scope)?;
-        let rolled = self.coverage_rollup(scope, ids)?;
+        self.fill_entries(scope, &mut cov, ids)?;
+        let rolled = rollup(self.pack(), ids.iter().filter_map(|id| cov.get(id)));
 
         let mut neighbourhood = ids.clone();
         let named = governs
@@ -1151,46 +1155,56 @@ impl ReadState {
             .chain(dependents.iter().map(|d| &d.block))
             .chain(will_go_stale.iter().map(|w| &w.block));
         neighbourhood.extend(named.filter_map(|b| BlockId::parse(b).ok()));
+        self.fill_entries(scope, &mut cov, &neighbourhood)?;
 
-        // the doc path of every block with an issue, for the closed order
+        // the doc path of every block with an issue, for the closed order; one path per doc
+        let mut doc_paths: BTreeMap<&BlockId, Option<String>> = BTreeMap::new();
         let mut paths: BTreeMap<String, String> = BTreeMap::new();
         for id in &neighbourhood {
-            if let Some(e) = issues.blocks.get(id)
+            if let Some(e) = cov.get(id)
                 && !e.issues.is_empty()
-                && let Some(p) = e.doc.as_ref().and_then(|d| m.path_of(d))
+                && let Some(d) = e.doc.as_ref()
+                && let Some(p) = doc_paths.entry(d).or_insert_with(|| m.path_of(d))
             {
-                paths.insert(id.to_string(), p);
+                paths.insert(id.to_string(), p.clone());
             }
         }
 
-        let covered_docs: BTreeSet<&BlockId> = ids
+        let covered_docs: BTreeSet<BlockId> = ids
             .iter()
-            .filter_map(|id| issues.blocks.get(id)?.doc.as_ref())
+            .filter_map(|id| cov.get(id)?.doc.clone())
             .collect();
-        let page_scores = self.doc_rollups(scope, &covered_docs)?;
-        let mut pages: Vec<PageScore> = covered_docs
-            .into_iter()
-            .filter_map(|d| {
-                Some(PageScore {
+        let mut pages: Vec<PageScore> = vec![];
+        for d in &covered_docs {
+            let blocks = page_blocks(&m, d);
+            self.fill_entries(scope, &mut cov, &blocks)?;
+            let mut entries = blocks.iter().filter_map(|id| cov.get(id)).peekable();
+            if entries.peek().is_none() {
+                continue;
+            }
+            let score = rollup(self.pack(), entries).score;
+            if let Some(path) = m.path_of(d) {
+                pages.push(PageScore {
                     doc: d.to_string(),
-                    path: m.path_of(d)?,
-                    score: page_scores.get(d)?.score,
-                })
-            })
-            .collect();
+                    path,
+                    score,
+                });
+            }
+        }
         // lowest score first, then by path, as the coverage report lists its pages
         pages.sort_by(|a, b| (a.score, &a.path, &a.doc).cmp(&(b.score, &b.path, &b.doc)));
         let pages_omitted = pages.len().saturating_sub(PAGES_CAP);
         pages.truncate(PAGES_CAP);
 
-        let mut listed: Vec<CoverageIssue> = ids
+        let mut listed: Vec<&CoverageIssue> = ids
             .iter()
-            .filter_map(|id| issues.blocks.get(id))
-            .flat_map(|e| e.issues.iter().cloned())
+            .filter_map(|id| cov.get(id))
+            .flat_map(|e| e.issues.iter())
             .collect();
-        sort_issues(&mut listed, &paths);
+        sort_issue_refs(&mut listed, &paths);
         let issues_omitted = listed.len().saturating_sub(BRIEF_ISSUES_CAP);
-        listed.truncate(BRIEF_ISSUES_CAP);
+        let listed: Vec<CoverageIssue> =
+            listed.into_iter().take(BRIEF_ISSUES_CAP).cloned().collect();
 
         Ok(BriefCoverage {
             score: rolled.score,
@@ -1199,7 +1213,7 @@ impl ReadState {
             pages_omitted,
             issues: listed,
             issues_omitted,
-            confidence: confidence_of(&issues, &neighbourhood, None, &paths),
+            confidence: confidence_in(|b| cov.get(b), &neighbourhood, None, &paths),
         })
     }
 

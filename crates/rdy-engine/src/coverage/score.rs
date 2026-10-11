@@ -67,12 +67,61 @@ pub struct CoverageReport {
     pub similar_kinds: Vec<Vec<String>>,
 }
 
+/// The blocks of page `doc` in `m`: the doc and the blocks under it, not crossing into a doc
+/// under it (a doc under a doc is its own page).
+pub(crate) fn page_blocks(m: &crate::Materialized, doc: &BlockId) -> Vec<BlockId> {
+    let mut out = vec![];
+    let mut stack = vec![doc.clone()];
+    while let Some(id) = stack.pop() {
+        stack.extend(
+            m.children(Some(&id))
+                .into_iter()
+                .filter(|b| b.block_type != tree::DOC)
+                .map(|b| b.id.clone()),
+        );
+        out.push(id);
+    }
+    out
+}
+
 /// The rollup of `entries` under `pack`'s weights, in hundredths of a check.
 pub fn rollup<'a>(pack: &Pack, entries: impl Iterator<Item = &'a BlockEntry>) -> Rollup {
-    let dismissed = u64::from(pack.dismissed_weight().min(100));
-    let mut checks = [0u64; 6];
-    let mut cost = [0u64; 6];
+    let mut sums = RollupSums::new(pack);
     for e in entries {
+        sums.add(e);
+    }
+    sums.rollup(pack)
+}
+
+/// What a rollup adds up, per dimension: the checks and their cost in hundredths of a check.
+/// Each entry adds its own part, so a carry of the coverage issues takes the parts of the
+/// entries it replaced out and puts the new ones in, instead of adding up every entry again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RollupSums {
+    /// The pack's weight of a dismissed issue, in hundredths, that the costs were added under.
+    dismissed: u64,
+    checks: [u64; 6],
+    cost: [u64; 6],
+}
+
+impl RollupSums {
+    /// No entry, under `pack`'s weight of a dismissed issue.
+    pub(crate) fn new(pack: &Pack) -> RollupSums {
+        RollupSums {
+            dismissed: u64::from(pack.dismissed_weight().min(100)),
+            checks: [0; 6],
+            cost: [0; 6],
+        }
+    }
+
+    /// Whether these sums were added under `pack`'s weight of a dismissed issue.
+    pub(crate) fn fits(&self, pack: &Pack) -> bool {
+        self.dismissed == u64::from(pack.dismissed_weight().min(100))
+    }
+
+    /// The checks and the cost `e` adds, per dimension.
+    fn part(&self, e: &BlockEntry) -> ([u64; 6], [u64; 6]) {
+        let (mut checks, mut cost) = ([0u64; 6], [0u64; 6]);
         for (i, d) in Dimension::ALL.iter().enumerate() {
             let n = u64::from(e.checks[i]);
             let c: u64 = e
@@ -81,7 +130,7 @@ pub fn rollup<'a>(pack: &Pack, entries: impl Iterator<Item = &'a BlockEntry>) ->
                 .filter(|x| x.dimension == *d)
                 .map(|x| {
                     if x.dismissed.is_some() || x.code == IssueCode::DismissedTension {
-                        dismissed
+                        self.dismissed
                     } else {
                         100
                     }
@@ -93,26 +142,49 @@ pub fn rollup<'a>(pack: &Pack, entries: impl Iterator<Item = &'a BlockEntry>) ->
             } else {
                 100u64.min(100 * n)
             };
-            checks[i] += n;
-            cost[i] += c.min(cap);
+            checks[i] = n;
+            cost[i] = c.min(cap);
+        }
+        (checks, cost)
+    }
+
+    /// Adds entry `e`.
+    pub(crate) fn add(&mut self, e: &BlockEntry) {
+        let (checks, cost) = self.part(e);
+        for i in 0..6 {
+            self.checks[i] += checks[i];
+            self.cost[i] += cost[i];
         }
     }
-    let mut dimensions = BTreeMap::new();
-    let (mut weighed, mut total) = (0u64, 0u64);
-    for (i, d) in Dimension::ALL.iter().enumerate() {
-        if checks[i] == 0 {
-            continue;
+
+    /// Takes entry `e` out again (it was added before).
+    pub(crate) fn sub(&mut self, e: &BlockEntry) {
+        let (checks, cost) = self.part(e);
+        for i in 0..6 {
+            self.checks[i] -= checks[i];
+            self.cost[i] -= cost[i];
         }
-        let whole = 100 * checks[i];
-        let s = (whole - cost[i]) * 100 / whole;
-        dimensions.insert(*d, s as u32);
-        let w = u64::from(pack.coverage_weight(*d));
-        weighed += w * s;
-        total += w;
     }
-    // no dimension present, or all weighted 0: nothing to fix
-    let score = weighed.checked_div(total).map_or(100, |s| s as u32);
-    Rollup { score, dimensions }
+
+    /// The rollup these sums give under `pack`'s dimension weights.
+    pub(crate) fn rollup(&self, pack: &Pack) -> Rollup {
+        let mut dimensions = BTreeMap::new();
+        let (mut weighed, mut total) = (0u64, 0u64);
+        for (i, d) in Dimension::ALL.iter().enumerate() {
+            if self.checks[i] == 0 {
+                continue;
+            }
+            let whole = 100 * self.checks[i];
+            let s = (whole - self.cost[i]) * 100 / whole;
+            dimensions.insert(*d, s as u32);
+            let w = u64::from(pack.coverage_weight(*d));
+            weighed += w * s;
+            total += w;
+        }
+        // no dimension present, or all weighted 0: nothing to fix
+        let score = weighed.checked_div(total).map_or(100, |s| s as u32);
+        Rollup { score, dimensions }
+    }
 }
 
 impl ReadState {
@@ -157,20 +229,10 @@ impl ReadState {
         let m = self.materialized(scope)?;
         let mut out = BTreeMap::new();
         for d in docs {
-            let mut entries: Vec<&BlockEntry> = vec![];
-            let mut stack = vec![(*d).clone()];
-            while let Some(id) = stack.pop() {
-                if let Some(e) = issues.blocks.get(&id) {
-                    entries.push(e);
-                }
-                // a doc under a doc is its own page
-                stack.extend(
-                    m.children(Some(&id))
-                        .into_iter()
-                        .filter(|b| b.block_type != tree::DOC)
-                        .map(|b| b.id.clone()),
-                );
-            }
+            let entries: Vec<&BlockEntry> = page_blocks(&m, d)
+                .iter()
+                .filter_map(|id| issues.blocks.get(id))
+                .collect();
             if !entries.is_empty() {
                 out.insert((*d).clone(), rollup(&self.pack, entries.into_iter()));
             }

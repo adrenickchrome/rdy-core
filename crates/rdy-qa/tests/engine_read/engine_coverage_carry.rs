@@ -1013,3 +1013,68 @@ fn cc11_a_delete_with_children_left_in_flight_gives_up() {
     next.coverage_issues(&inflight).unwrap();
     same(&r, &inflight);
 }
+
+/// perf4: a scope's rollup read after a write takes the old entries of the blocks the carry
+/// rebuilt out and their new ones in: it adds up no scope in full, and it equals the rollup of
+/// a full build. The carry reads the suspects of no graph edge by edge. Through a plain write, a write that opens a duplicate (tension issues), and
+/// one that resolves it.
+#[test]
+fn perf4_a_carried_rollup_adds_up_only_the_rebuilt_entries() {
+    use rdy_engine::coverage::rollup_walks;
+    let (_d, mut r) = project();
+    let c = cc6_world(&mut r);
+    let v = Scope::View("next".into());
+    write(
+        &mut r,
+        "next",
+        json!([{"op": "create", "type": "prose", "parent": c["$s"], "body": "One more line."}]),
+    )
+    .unwrap();
+    r.read().scope_rollup(&v).unwrap();
+    let steps = [
+        json!([{"op": "create", "type": "prose", "parent": c["$s"], "body": "And one more."}]),
+        json!([
+            {"op": "create", "type": "claim", "id": "$a", "parent": c["$empty"], "body": "Fees are charged every month."},
+            {"op": "create", "type": "claim", "parent": c["$empty"], "body": "Fees are charged every month."}
+        ]),
+    ];
+    let mut dup = None;
+    for (i, ops) in steps.into_iter().enumerate() {
+        let w = write(&mut r, "next", ops).unwrap();
+        if i == 1 {
+            dup = Some(w.created["$a"].clone());
+        }
+        check_rollup(&r, &v, rollup_walks());
+    }
+    write(
+        &mut r,
+        "next",
+        json!([{"op": "update", "id": dup.unwrap(), "body": "Fees are charged once a year."}]),
+    )
+    .unwrap();
+    check_rollup(&r, &v, rollup_walks());
+    same_issues(&r, &v);
+}
+
+/// The rollup of `scope` is read without adding up the scope (`walks` unchanged) or reading the
+/// suspects edge by edge, and equals the rollup of a full build.
+fn check_rollup(r: &Rdy, scope: &Scope, walks: u64) {
+    let st = r.read();
+    let suspects = rdy_engine::coverage::suspect_walks();
+    let got = st.scope_rollup(scope).unwrap();
+    assert_eq!(
+        rdy_engine::coverage::rollup_walks(),
+        walks,
+        "carried, not added up"
+    );
+    assert_eq!(
+        rdy_engine::coverage::suspect_walks(),
+        suspects,
+        "the suspects carried, not read edge by edge"
+    );
+    let full = issues_rebuilt_for_tests(&st, scope).unwrap();
+    assert_eq!(
+        *got,
+        rdy_engine::coverage::rollup(st.pack(), full.blocks.values())
+    );
+}

@@ -1,6 +1,6 @@
 //! Confidence (FW-CV2, D-XZXCE, D-EEN7A): every assertion rdy gives an agent carries a level and
 //! its reasons, drawn from the coverage issues of the answer's neighbourhood. It never blocks.
-use super::model::{CoverageIssue, CoverageIssues, IssueCode, sort_issues};
+use super::model::{BlockEntry, CoverageIssue, CoverageIssues, IssueCode, sort_issue_refs};
 use crate::lexicon::is_tie;
 use crate::{RdyError, ReadState, Scope};
 use rdy_model::BlockId;
@@ -44,26 +44,37 @@ pub fn confidence_of(
     hit: Option<&BlockId>,
     paths: &BTreeMap<String, String>,
 ) -> Confidence {
+    confidence_in(|b| issues.blocks.get(b), neighbourhood, hit, paths)
+}
+
+/// [`confidence_of`] over the entries `get` gives (the memoised issues, or a briefing's own
+/// entries): it clones only the reasons it lists.
+pub(crate) fn confidence_in<'a>(
+    get: impl Fn(&BlockId) -> Option<&'a BlockEntry>,
+    neighbourhood: &BTreeSet<BlockId>,
+    hit: Option<&BlockId>,
+    paths: &BTreeMap<String, String>,
+) -> Confidence {
+    let hit_text = hit.map(BlockId::to_string);
     let sets_low = |i: &CoverageIssue| match i.code {
         IssueCode::OpenTension | IssueCode::OpenSuspect => true,
-        IssueCode::UntiedContent => hit.is_some_and(|h| i.block == h.to_string()),
+        IssueCode::UntiedContent => hit_text.as_deref() == Some(i.block.as_str()),
         _ => false,
     };
-    let mut all: Vec<CoverageIssue> = Vec::new();
+    let mut all: Vec<&'a CoverageIssue> = Vec::new();
     for b in neighbourhood {
-        if let Some(e) = issues.blocks.get(b) {
-            all.extend(e.issues.iter().cloned());
+        if let Some(e) = get(b) {
+            all.extend(e.issues.iter());
         }
     }
     // a hit outside its own neighbourhood still counts for its text
     if let Some(h) = hit.filter(|h| !neighbourhood.contains(*h))
-        && let Some(e) = issues.blocks.get(h)
+        && let Some(e) = get(h)
     {
         all.extend(
             e.issues
                 .iter()
-                .filter(|i| i.code == IssueCode::UntiedContent)
-                .cloned(),
+                .filter(|i| i.code == IssueCode::UntiedContent),
         );
     }
     let (mut first, mut rest): (Vec<_>, Vec<_>) = all.into_iter().partition(|i| sets_low(i));
@@ -74,15 +85,19 @@ pub fn confidence_of(
     } else {
         Level::High
     };
-    sort_issues(&mut first, paths);
-    sort_issues(&mut rest, paths);
-    first.extend(rest);
-    let reasons_omitted = first.len().saturating_sub(REASONS_CAP);
-    first.truncate(REASONS_CAP);
+    sort_issue_refs(&mut first, paths);
+    sort_issue_refs(&mut rest, paths);
+    let total = first.len() + rest.len();
+    let reasons: Vec<CoverageIssue> = first
+        .into_iter()
+        .chain(rest)
+        .take(REASONS_CAP)
+        .cloned()
+        .collect();
     Confidence {
         confidence: level,
-        reasons: first,
-        reasons_omitted,
+        reasons,
+        reasons_omitted: total.saturating_sub(REASONS_CAP),
     }
 }
 
