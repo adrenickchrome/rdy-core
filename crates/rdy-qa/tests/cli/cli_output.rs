@@ -191,9 +191,9 @@ fn relay1_propose_text_names_the_ref_the_approver_approves() {
     let (ok, text, err) = rdy(&s, &["propose", "--title", "t"]);
     assert!(ok, "{err}");
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(
-        lines.len(),
-        2,
+    // cc16 (FW-CH3) prints the proposal's coverage between the two lines this test pins
+    assert!(
+        !lines.iter().any(|l| l.starts_with("blocking")),
         "no blocking line without a conflict: {text}"
     );
     let pref = lines[0]
@@ -201,5 +201,9 @@ fn relay1_propose_text_names_the_ref_the_approver_approves() {
         .and_then(|l| l.strip_suffix(" (1 changes)"))
         .unwrap();
     assert!(pref.starts_with("P-") && pref.ends_with("@1"), "{text}");
-    assert_eq!(lines[1], format!("approve with: rdy approve {pref}"));
+    assert_eq!(
+        lines.last().copied(),
+        Some(format!("approve with: rdy approve {pref}").as_str()),
+        "{text}"
+    );
 }
