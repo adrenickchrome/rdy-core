@@ -64,6 +64,8 @@ pub struct ResolveParams {
 pub struct AcceptAdviceParams {
     /// The exact proposal version the person was shown: P-x@n.
     pub proposal: String,
+    /// The advised_digest rdy_propose or rdy_read P-x@n gave with the advised tensions the person was shown.
+    pub advised_digest: String,
     /// Only these advised tensions (tn-…); leave out to accept every advised one of the version.
     pub tensions: Option<Vec<String>>,
     /// The person's words, quoted (needed: your session relays them).
@@ -130,6 +132,7 @@ pub fn rdy_resolve(st: &mut McpState, p: ResolveParams) -> Result<Value, RdyErro
             scope: p.scope,
             accept: p.accept.map(|a| AcceptRequest {
                 proposal: a.proposal,
+                advised_digest: a.advised_digest,
                 tensions: a.tensions.unwrap_or_default(),
                 evidence: a.evidence,
                 question: a.question,

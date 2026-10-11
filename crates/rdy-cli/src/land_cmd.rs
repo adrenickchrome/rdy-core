@@ -119,12 +119,14 @@ fn propose_text(v: &Value) -> String {
                 format!(": {}", refusing.join(", "))
             }
         ));
-        // D-WMCFW: each advised semantic tension not yet accepted, and how to accept the advice
+        // D-WMCFW: each open advised semantic tension not yet accepted (a dismissed one is not
+        // advised), those past the cut, and how to accept the advice for the set shown
         let mut advised = false;
         for tn in tensions {
             let j = &tn["judged"];
             if let Some(advice) = j["advice"].as_str()
                 && !j["accepted"].is_object()
+                && tn["status"].as_str() == Some("open")
             {
                 advised = true;
                 t.push_str(&format!(
@@ -134,9 +136,18 @@ fn propose_text(v: &Value) -> String {
                 ));
             }
         }
-        if advised {
+        let more = num(&v["advised_omitted"]);
+        if more > 0 {
+            advised = true;
             t.push_str(&format!(
-                "\naccept the advice with: rdy resolve --accept {pref}"
+                "\nand {more} more advised to block (rdy show {pref} lists them)"
+            ));
+        }
+        if let Some(d) = v["advised_digest"].as_str()
+            && advised
+        {
+            t.push_str(&format!(
+                "\naccept the advice with: rdy resolve --accept {pref} --digest {d}"
             ));
         }
     }
@@ -286,18 +297,31 @@ mod tests {
     #[test]
     fn se8_propose_text_names_the_advice_and_how_to_accept_it() {
         let v = json!({
-            "ref": "P-1@1", "changes": 1,
+            "ref": "P-1@1", "changes": 1, "tensions_omitted": 2,
+            "advised_digest": "0123456789ab", "advised_omitted": 2,
             "tensions": [
-                {"id": "tn-aaaaaaaaaaaa", "refuses": false,
+                {"id": "tn-aaaaaaaaaaaa", "refuses": false, "status": "open",
                     "judged": {"actor": "agent:r", "advice": "it contradicts the gate rule"}},
-                {"id": "tn-bbbbbbbbbbbb", "refuses": true,
+                {"id": "tn-bbbbbbbbbbbb", "refuses": true, "status": "open",
                     "judged": {"actor": "agent:s", "advice": "x", "accepted": {"actor": "human:qa"}}},
-                {"id": "tn-cccccccccccc", "refuses": false, "judged": {"actor": "agent:r"}}
+                {"id": "tn-cccccccccccc", "refuses": false, "status": "open", "judged": {"actor": "agent:r"}},
+                {"id": "tn-dddddddddddd", "refuses": false, "status": "dismissed",
+                    "judged": {"actor": "agent:r", "advice": "y"}}
             ]
         });
         assert_eq!(
             propose_text(&v),
-            "proposal P-1@1 (1 changes)\ntensions: 3 (1 would refuse the landing: tn-bbbbbbbbbbbb)\nadvised to block: tn-aaaaaaaaaaaa by agent:r: it contradicts the gate rule\naccept the advice with: rdy resolve --accept P-1@1\napprove with: rdy approve P-1@1"
+            "proposal P-1@1 (1 changes)\ntensions: 6 (1 would refuse the landing: tn-bbbbbbbbbbbb)\nadvised to block: tn-aaaaaaaaaaaa by agent:r: it contradicts the gate rule\nand 2 more advised to block (rdy show P-1@1 lists them)\naccept the advice with: rdy resolve --accept P-1@1 --digest 0123456789ab\napprove with: rdy approve P-1@1"
+        );
+        // FR1 finding 3: a dismissed tension is not advised, so nothing asks to accept it
+        let v = json!({
+            "ref": "P-1@1", "changes": 1,
+            "tensions": [{"id": "tn-dddddddddddd", "refuses": false, "status": "dismissed",
+                "judged": {"actor": "agent:r", "advice": "y"}}]
+        });
+        assert_eq!(
+            propose_text(&v),
+            "proposal P-1@1 (1 changes)\ntensions: 1 (0 would refuse the landing)\napprove with: rdy approve P-1@1"
         );
     }
 }

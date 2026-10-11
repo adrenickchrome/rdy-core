@@ -63,7 +63,8 @@ fn se8_rdy_resolve_accept_and_the_listings_show_the_advice() {
     };
     r.record_verdict(&review, Some(&first)).unwrap();
     let tn = tension_label(&one(&r, TensionKind::Semantic).id);
-    let pref = r.propose(&writer(), "a", "a").unwrap().r#ref;
+    let p = r.propose(&writer(), "a", "a").unwrap();
+    let (pref, digest) = (p.r#ref, p.advised_digest.unwrap());
     r.close().unwrap();
 
     let out = s.rdy(&["show", &pref]);
@@ -74,22 +75,64 @@ fn se8_rdy_resolve_accept_and_the_listings_show_the_advice() {
         )),
         "{shown}"
     );
-    // --evidence needs --relayed-by; --accept goes alone
-    let out = s.rdy(&["resolve", "--accept", &pref, "--evidence", "yes"]);
-    assert_eq!(
-        out.status.code(),
-        Some(2),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+    // FR1 (ruling 1): show prints the command with the digest of the advised tensions it lists
+    assert!(
+        shown.contains(&format!(
+            "accept the advice with: rdy resolve --accept {pref} --digest {digest}"
+        )),
+        "{shown}"
     );
-    let out = s.rdy(&["resolve", &tn, "--accept", &pref]);
-    assert_eq!(
-        out.status.code(),
-        Some(2),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    // --accept needs --digest; --evidence needs --relayed-by; --accept goes alone
     let out = s.rdy(&["resolve", "--accept", &pref]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = s.rdy(&[
+        "resolve",
+        "--accept",
+        &pref,
+        "--digest",
+        &digest,
+        "--evidence",
+        "yes",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = s.rdy(&["resolve", &tn, "--accept", &pref, "--digest", &digest]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // FR1 (finding 4): the relay's texts are capped as the engine caps them
+    let long = format!("agent:{}", "w".repeat(251));
+    let out = s.rdy(&[
+        "resolve",
+        "--accept",
+        &pref,
+        "--digest",
+        &digest,
+        "--evidence",
+        "yes",
+        "--relayed-by",
+        &long,
+    ]);
+    assert!(
+        !out.status.success()
+            && String::from_utf8_lossy(&out.stderr)
+                .contains("relayed_by takes at most 256 characters"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = s.rdy(&["resolve", "--accept", &pref, "--digest", &digest]);
     assert!(
         out.status.success(),
         "{}",
@@ -103,6 +146,12 @@ fn se8_rdy_resolve_accept_and_the_listings_show_the_advice() {
         String::from_utf8_lossy(&out.stdout).contains(&format!(
             "accepted {new} (was {tn}); it blocks until a side's content changes"
         )),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains(&format!("now blocking in view a ({pref}): {new}")),
         "{}",
         String::from_utf8_lossy(&out.stdout)
     );

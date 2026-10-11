@@ -6,6 +6,7 @@ use crate::gate::{
     RelayedByRow, blocking_conflicts, changes_of, landed_as, latest_version, resolve_in,
     version_number,
 };
+use crate::semantic::accept_advice::advised_digest;
 use crate::session::rfc3339;
 use crate::tensions::info::FindingInfo;
 use crate::tensions::tension_label;
@@ -78,6 +79,9 @@ pub struct ProposalShow {
     /// `<code>: <message>` when the tensions could not be read; the rest of the show stands.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub advised_error: Option<String>,
+    /// The digest of `advised`, which an acceptance passes back (as the propose reply's).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advised_digest: Option<String>,
 }
 
 /// An advised semantic tension of a proposal version: the reviewer, the advice and findings,
@@ -182,13 +186,13 @@ impl ReadState {
                 conflicts.len()
             ));
         }
-        let (advised, advised_error) = if state == "open" {
+        let (advised, advised_digest, advised_error) = if state == "open" {
             match self.advised_rows(&p.changes) {
-                Ok(rows) => (rows, None),
-                Err(e) => (vec![], Some(format!("{}: {}", e.code, e.message))),
+                Ok((rows, digest)) => (rows, digest, None),
+                Err(e) => (vec![], None, Some(format!("{}: {}", e.code, e.message))),
             }
         } else {
-            (vec![], None)
+            (vec![], None, None)
         };
         Ok(ProposalShow {
             r#ref: format!("P-{stable_short}@{}", pref.n),
@@ -213,13 +217,19 @@ impl ReadState {
             versions,
             advised,
             advised_error,
+            advised_digest,
         })
     }
 
-    /// The advised semantic tensions of `changes` as `rdy show P-x@n` lists them: the reviewer
-    /// and findings from each verdict's review.
-    fn advised_rows(&self, changes: &[Hash]) -> Result<Vec<AdvisedRow>, RdyError> {
-        self.advised_of(changes)?
+    /// The advised semantic tensions of `changes` as `rdy show P-x@n` lists them, every one: the
+    /// reviewer and findings from each verdict's review; and the digest of the set.
+    fn advised_rows(
+        &self,
+        changes: &[Hash],
+    ) -> Result<(Vec<AdvisedRow>, Option<String>), RdyError> {
+        let advised = self.advised_of(changes)?;
+        let digest = advised_digest(&advised);
+        let rows = advised
             .into_iter()
             .map(|a| {
                 let rec = &a.open.record;
@@ -239,7 +249,8 @@ impl ReadState {
                     accepted: rec.blocking,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, RdyError>>()?;
+        Ok((rows, digest))
     }
 }
 
@@ -333,6 +344,19 @@ pub fn proposal_text(v: &Value) -> String {
             }
         ));
     }
+    let open = v["advised"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|a| a.get("accepted").and_then(Value::as_bool) != Some(true));
+    if let Some(d) = v["advised_digest"].as_str()
+        && open
+    {
+        out.push_str(&format!(
+            "accept the advice with: rdy resolve --accept {} --digest {d}\n",
+            s(&v["ref"])
+        ));
+    }
     if let Some(e) = v["advised_error"].as_str() {
         out.push_str(&format!("advised: not read ({e})\n"));
     }
@@ -412,13 +436,20 @@ mod tests {
             "advised": [
                 {"tension": "tn-aaaaaaaaaaaa", "reviewer": "agent:r", "advice": "no", "findings": [], "accepted": false},
                 {"tension": "tn-bbbbbbbbbbbb", "reviewer": "agent:s", "advice": "yes", "findings": [], "accepted": true}
-            ]
+            ],
+            "advised_digest": "0123456789ab"
         });
         assert!(proposal_text(&v).ends_with(
             "approve with: rdy approve P-111111111111@1\n\
              advised: tn-aaaaaaaaaaaa by agent:r: no\n\
-             advised: tn-bbbbbbbbbbbb by agent:s: yes (accepted)\n"
+             advised: tn-bbbbbbbbbbbb by agent:s: yes (accepted)\n\
+             accept the advice with: rdy resolve --accept P-111111111111@1 --digest 0123456789ab\n"
         ));
+        // every advised tension accepted: nothing left to accept
+        v["advised"][0]["accepted"] = json!(true);
+        assert!(
+            proposal_text(&v).ends_with("advised: tn-bbbbbbbbbbbb by agent:s: yes (accepted)\n")
+        );
         v["advised"] = json!([]);
         v["advised_error"] = json!("E_IO: busy");
         assert!(proposal_text(&v).ends_with("advised: not read (E_IO: busy)\n"));

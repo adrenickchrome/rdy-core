@@ -41,8 +41,11 @@ pub(crate) struct ResolveArgs {
     /// The tension: tn-<hex>, or a unique prefix of at least 6 hex digits.
     tension: Option<String>,
     /// Accept the reviewers' advice to block on this exact proposal version (P-x@n): every advised semantic tension of it, or those --tensions names.
-    #[arg(long, value_name = "PROPOSAL", conflicts_with_all = ["tension", "mention", "dismiss", "restore", "scope"])]
+    #[arg(long, value_name = "PROPOSAL", requires = "digest", conflicts_with_all = ["tension", "mention", "dismiss", "restore", "scope"])]
     accept: Option<String>,
+    /// With --accept: the advised digest rdy propose or rdy show printed with the tensions the person was shown.
+    #[arg(long, value_name = "DIGEST", requires = "accept")]
+    digest: Option<String>,
     /// With --accept: only these tensions.
     #[arg(
         long,
@@ -235,10 +238,35 @@ pub(crate) fn tensions(env: &Env, a: TensionsArgs) -> Result<(Value, String), Er
     Ok((v, t))
 }
 
+/// The text of an acceptance: one line per accepted tension, then one per tension that now
+/// blocks in a view (other views' forms of the same two texts included).
+fn accept_text(v: &Value) -> String {
+    let accepted = v["accepted"].as_array().into_iter().flatten().map(|r| {
+        format!(
+            "accepted {} (was {}); it blocks until a side's content changes",
+            text(&r["id"]),
+            text(&r["was"])
+        )
+    });
+    let blocking = v["now_blocking"].as_array().into_iter().flatten().map(|r| {
+        let proposal = r["proposal"]
+            .as_str()
+            .map(|p| format!(" ({p})"))
+            .unwrap_or_default();
+        format!(
+            "now blocking in view {}{proposal}: {}",
+            text(&r["view"]),
+            text(&r["tension"])
+        )
+    });
+    accepted.chain(blocking).collect::<Vec<_>>().join("\n")
+}
+
 pub(crate) fn resolve(env: &Env, a: ResolveArgs) -> Result<(Value, String), ErrorReply> {
     let ResolveArgs {
         tension,
         accept,
+        digest,
         tensions,
         evidence,
         relayed_by,
@@ -256,6 +284,7 @@ pub(crate) fn resolve(env: &Env, a: ResolveArgs) -> Result<(Value, String), Erro
             json!({
                 "accept": {
                     "proposal": proposal,
+                    "advised_digest": digest.unwrap_or_default(),
                     "tensions": tensions.unwrap_or_default(),
                     "evidence": evidence,
                     "question": question,
@@ -264,19 +293,7 @@ pub(crate) fn resolve(env: &Env, a: ResolveArgs) -> Result<(Value, String), Erro
                 },
             }),
         )?;
-        let t = v["accepted"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|r| {
-                format!(
-                    "accepted {} (was {}); it blocks until a side's content changes",
-                    text(&r["id"]),
-                    text(&r["was"])
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let t = accept_text(&v);
         return Ok((v, t));
     }
     let mention = mention.map(|m| json!({"block": m[0], "entity": m[1]}));
@@ -318,6 +335,24 @@ pub(crate) fn resolve(env: &Env, a: ResolveArgs) -> Result<(Value, String), Erro
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// FR1 (ruling 2): the acceptance text names each accepted tension, then every tension
+    /// that now blocks, with its view and the view's open proposal, other views' forms included.
+    #[test]
+    fn se8_accept_text_names_every_tension_that_now_blocks() {
+        let v = json!({
+            "proposal": "P-1@1", "severity": "blocking",
+            "accepted": [{"id": "tn-111111111111", "was": "tn-000000000000", "version": "ab"}],
+            "now_blocking": [
+                {"tension": "tn-111111111111", "view": "a", "proposal": "P-1@1"},
+                {"tension": "tn-222222222222", "view": "b"}
+            ]
+        });
+        assert_eq!(
+            accept_text(&v),
+            "accepted tn-111111111111 (was tn-000000000000); it blocks until a side's content changes\nnow blocking in view a (P-1@1): tn-111111111111\nnow blocking in view b: tn-222222222222"
+        );
+    }
 
     #[test]
     fn cten1_a_landing_form_names_its_proposal() {
