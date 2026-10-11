@@ -23,6 +23,7 @@ mod engine_mention_reviews;
 mod engine_pmap;
 mod engine_proposal_show;
 mod engine_related;
+mod engine_review_queue;
 mod engine_scope;
 mod engine_search;
 mod engine_search_coverage;
