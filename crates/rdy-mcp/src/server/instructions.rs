@@ -18,6 +18,8 @@ pub const INSTRUCTION_SENTENCES: &[&str] = &[
     "Record decisions in the project's decision home (rdy_decide without parent records there; rdy_schema names it) and link content to them with decided_by; don't put decisions inside content docs.",
     "Search a thing's name, key or alias with rdy_search to get its fact sheet.",
     "Write responses carry suggestions (links to the entities your text names, new entities for literals that recur): accept the right ones with one rdy_accept call; they never block.",
+    "Answers carry a confidence level: act on high; on medium or low, widen the search, fix the coverage issues you can, or ask the person before you act.",
+    "Link every entity a normative statement names, and elsewhere the entities a block is about; dismiss a passing mention of an everyday word with rdy_resolve (mention, dismiss).",
 ];
 
 /// What the server tells a host about rdy: [`INSTRUCTION_SENTENCES`] joined with one space.

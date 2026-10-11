@@ -31,3 +31,17 @@ fn sinst1_instructions_name_reading_before_editing_and_partial_supersession() {
         "{d}"
     );
 }
+
+#[test]
+fn cc18_the_instructions_carry_confidence_and_linking() {
+    let s = rdy_mcp::server::INSTRUCTION_SENTENCES;
+    let n = s.len();
+    assert_eq!(
+        s[n - 2],
+        "Answers carry a confidence level: act on high; on medium or low, widen the search, fix the coverage issues you can, or ask the person before you act."
+    );
+    assert_eq!(
+        s[n - 1],
+        "Link every entity a normative statement names, and elsewhere the entities a block is about; dismiss a passing mention of an everyday word with rdy_resolve (mention, dismiss)."
+    );
+}
