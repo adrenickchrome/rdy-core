@@ -203,6 +203,9 @@ fn spec_target(op: &str) -> Option<String> {
         "tension_carry_1k" | "tension_on_change_1k" => {
             "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change and tension detection, included in the write response)"
         }
+        "tension_value_1k" => {
+            "< 10 ms p95 with tension detection included in the write (reference/performance tb-XBXR4)"
+        }
         "tension_on_change_delete_1k" | "tension_on_change_view_op_1k" => {
             "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change, included in the response); a delete and a view op never carry, so this is the in-flight build plus a diff that skips the shared canon part"
         }
@@ -1497,6 +1500,49 @@ fn tier_tensions(
             )
             .expect("proposal tensions");
             s.elapsed()
+        },
+    ));
+    // value disagreement (cc5): a value with a unit is written once into `inf1` (untimed); each
+    // run then writes a claim that describes it and states another number in its unit, and the
+    // timed part is the tension delta and report of that write, as in `tension_on_change_1k`
+    let v = write(
+        r,
+        "inf1",
+        json!([{"op": "create", "type": "value", "id": "$v", "parent": section,
+            "fields": {"name": "Perf retry limit", "value": "5", "unit": "s"}}]),
+    )
+    .expect("a value");
+    let value = v.created.get("$v").expect("the value id").to_string();
+    out.push(measure_timed(
+        &format!("tension_value_1k{sfx}"),
+        runs.incremental,
+        |i| {
+            let before = r.read();
+            before.tensions().expect("warm tensions");
+            let w = write(
+                r,
+                "inf1",
+                json!([{"op": "create", "type": "claim", "parent": section,
+                    "body": format!("A job retries for {} s.", i + 10),
+                    "links": {"describes": [{"target": value}]}}]),
+            )
+            .expect("a describing write");
+            let change: Hash = w.change.parse().expect("change");
+            let after = r.read();
+            let s = Instant::now();
+            let delta = rdy_engine::tensions::tension_delta(&before, &after, Some(&[change]))
+                .expect("delta");
+            rdy_engine::tensions::delta::on_change(&before, &after, "inf1", None, &delta)
+                .expect("on_change");
+            let took = s.elapsed();
+            assert!(
+                delta
+                    .opened
+                    .iter()
+                    .any(|t| t.kind == rdy_engine::tensions::TensionKind::ValueDisagreement),
+                "the write opened a value disagreement"
+            );
+            took
         },
     ));
 }
@@ -3206,7 +3252,8 @@ mod tests {
                 "tension_settle_1k",
                 "tensions_full_1k",
                 "tensions_canon",
-                "gate_tensions_1k"
+                "gate_tensions_1k",
+                "tension_value_1k"
             ]
         );
         assert!(r.read().tensions().expect("tensions").len() >= 10);
@@ -3223,6 +3270,7 @@ mod tests {
             "tensions_full_1k",
             "tensions_canon",
             "gate_tensions_1k",
+            "tension_value_1k",
         ] {
             assert!(spec_target(op).is_some(), "{op} has no target");
         }

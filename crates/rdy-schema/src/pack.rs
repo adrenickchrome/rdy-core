@@ -233,10 +233,11 @@ pub enum TensionKind {
     DuplicateDefinition,
     UnjustifiedChange,
     DeprecatedReference,
+    ValueDisagreement,
 }
 
 impl TensionKind {
-    pub const ALL: [TensionKind; 7] = [
+    pub const ALL: [TensionKind; 8] = [
         TensionKind::EditCollision,
         TensionKind::Fork,
         TensionKind::PremiseShift,
@@ -244,6 +245,7 @@ impl TensionKind {
         TensionKind::DuplicateDefinition,
         TensionKind::UnjustifiedChange,
         TensionKind::DeprecatedReference,
+        TensionKind::ValueDisagreement,
     ];
 
     /// The wire name.
@@ -256,6 +258,7 @@ impl TensionKind {
             TensionKind::DuplicateDefinition => "duplicate_definition",
             TensionKind::UnjustifiedChange => "unjustified_change",
             TensionKind::DeprecatedReference => "deprecated_reference",
+            TensionKind::ValueDisagreement => "value_disagreement",
         }
     }
 
@@ -270,9 +273,12 @@ impl TensionKind {
 
     /// Whether a tension of this kind is advisory in draft content when the pack does not set
     /// its severity: blocking in stable content, advisory in draft. True for
-    /// `duplicate_definition` only.
+    /// `duplicate_definition` and `value_disagreement`.
     pub fn softens_in_draft(&self) -> bool {
-        matches!(self, TensionKind::DuplicateDefinition)
+        matches!(
+            self,
+            TensionKind::DuplicateDefinition | TensionKind::ValueDisagreement
+        )
     }
 }
 
