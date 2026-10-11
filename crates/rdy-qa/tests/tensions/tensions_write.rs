@@ -561,6 +561,15 @@ fn tonc1_a_tension_read_error_never_fails_the_consequences_or_a_briefing() {
         "{:?}",
         b.inflight
     );
+    // coverage reads the tension set too: its error leaves the section out and says why
+    assert!(b.coverage.is_none(), "{:?}", b.coverage);
+    assert!(
+        b.coverage_error
+            .as_deref()
+            .is_some_and(|m| m.starts_with("E_INTERNAL: ") && m.contains("boom")),
+        "{:?}",
+        b.coverage_error
+    );
 }
 
 /// The cite of A (in view b, one blocking premise shift once view a changed A) and `n` pairs of

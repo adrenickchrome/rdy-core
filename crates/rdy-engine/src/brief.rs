@@ -4,7 +4,8 @@
 //! block or one of their dependencies changes version. Registered briefings live in memory
 //! (`BriefRegistry`), one registry per open project.
 use crate::coverage::{
-    Confidence, CoverageIssue, Dimension, PAGES_CAP, PageScore, confidence_of, sort_issues,
+    Confidence, CoverageIssue, Dimension, PAGES_CAP, PageScore, confidence_of, coverage_error_text,
+    sort_issues,
 };
 use crate::error::*;
 use crate::inflight::Inflight;
@@ -431,6 +432,10 @@ pub struct Briefing {
     /// the current state only (FW-H7).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage: Option<BriefCoverage>,
+    /// Why the coverage could not be read, as `<code>: <message>` (the rest of the briefing
+    /// stands, and `coverage` is left out).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_error: Option<String>,
     /// Blocks in other docs that name a covered new doc (FW-EN3). Not paged or cut.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mentioned_by: Vec<MentionedBy>,
@@ -1394,10 +1399,14 @@ impl ReadState {
         }
         suspects.sort_by(|a, b| (&a.block, &a.target).cmp(&(&b.block, &b.target)));
         let (inflight, rows) = self.inflight_unsided(scope, ids)?;
-        let coverage = if self.is_past_landing(scope) {
-            None
+        // a coverage read error never fails a briefing (a briefing gates writes): it is reported
+        let (coverage, coverage_error) = if self.is_past_landing(scope) {
+            (None, None)
         } else {
-            Some(self.brief_coverage(scope, ids, &governs, &dependents, &will_go_stale)?)
+            match self.brief_coverage(scope, ids, &governs, &dependents, &will_go_stale) {
+                Ok(c) => (Some(c), None),
+                Err(e) => (None, Some(coverage_error_text(&e))),
+            }
         };
         let (mentioned_by, mentioned_by_omitted) = self.mentioned_by(scope, ids)?;
         let decisions: Vec<BlockId> = ids.iter().cloned().collect();
@@ -1445,6 +1454,7 @@ impl ReadState {
             suspects,
             inflight,
             coverage,
+            coverage_error,
             mentioned_by,
             mentioned_by_omitted,
             related_decisions,

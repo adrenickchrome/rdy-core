@@ -33,7 +33,8 @@ pub(super) fn export(cx: &OpContext, a: OutArgs) -> Result<Value, RdyError> {
 }
 
 /// Sets `coverage` and `onboarding` on the import reply. Set here, so it replaces any `coverage`
-/// the write reply carries. When either read fails, both keys are left out and the reply stands.
+/// the write reply carries. When either read fails, both keys are left out, `coverage_error`
+/// says why, and the reply stands.
 fn attach_baseline(
     v: &mut Value,
     report: Result<rdy_engine::coverage::CoverageReport, RdyError>,
@@ -48,10 +49,14 @@ fn attach_baseline(
             });
             v["onboarding"] = to_json(&onboarding);
         }
-        _ => {
+        (Err(e), _) | (_, Err(e)) => {
             if let Some(o) = v.as_object_mut() {
                 o.remove("coverage");
                 o.remove("onboarding");
+                o.insert(
+                    "coverage_error".into(),
+                    Value::String(rdy_engine::coverage::coverage_error_text(&e)),
+                );
             }
         }
     }
@@ -115,5 +120,6 @@ mod tests {
         assert_eq!(v["changes"], 2, "the import reply stays");
         assert!(v.get("coverage").is_none(), "{v}");
         assert!(v.get("onboarding").is_none(), "{v}");
+        assert_eq!(v["coverage_error"], "E_INTERNAL: boom", "{v}");
     }
 }

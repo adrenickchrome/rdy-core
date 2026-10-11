@@ -103,28 +103,31 @@ pub(super) fn status(cx: &OpContext) -> Result<Value, RdyError> {
         warnings.push(format!("{}: {}; {}", w.code, w.message, w.fix));
     }
     let suspects = st.suspects(&Scope::Canon)?.len();
-    let report = st.coverage_report(&Scope::Canon, None)?;
-    // cc15 (FW-CH3a): the current score, its dimensions, the issue count and the kinds; the
-    // pages, areas and issues are `rdy coverage`'s
-    let coverage = json!({
-        "score": report.score,
-        "dimensions": report.dimensions,
-        "issues_total": report.issues_total,
-        "kinds": report.kinds,
-        "similar_kinds": report.similar_kinds,
-    });
-    Ok(json!({
+    // cc15 (FW-CH3a): the current score, its dimensions, the issue count and the kinds, from
+    // the memoised summary; the pages, areas and issues are `rdy coverage`'s. A coverage read
+    // error never fails the status: `coverage_error` says why the coverage is left out.
+    let (coverage, coverage_error) = match st.coverage_summary(&Scope::Canon) {
+        Ok(s) => (Some(to_json(&*s)), None),
+        Err(e) => (None, Some(rdy_engine::coverage::coverage_error_text(&e))),
+    };
+    let mut v = json!({
         "pack": st.pack().name,
         "landings": landings,
         "suspects": suspects,
-        "coverage": coverage,
         "version_position": canon,
         "views": views,
         "warnings": warnings,
         "seq": st.seq(),
         "open_report": open_report_json(&cx.engine.open_report()),
         "quarantine": quarantine(&cx.engine.root()),
-    }))
+    });
+    if let Some(c) = coverage {
+        v["coverage"] = c;
+    }
+    if let Some(e) = coverage_error {
+        v["coverage_error"] = Value::String(e);
+    }
+    Ok(v)
 }
 
 pub(super) fn show(cx: &OpContext, a: ShowArgs) -> Result<Value, RdyError> {

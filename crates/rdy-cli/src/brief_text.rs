@@ -326,6 +326,9 @@ pub fn header(briefing: &Value) -> String {
         section(&mut out, "mentioned by", mentions.into_iter());
     }
     coverage_lines(&mut out, &briefing["coverage"]);
+    if let Some(e) = briefing["coverage_error"].as_str() {
+        out.push(format!("# coverage not read: {}", one_line(e)));
+    }
     if let Some(m) = briefing["omitted"].as_object().filter(|m| !m.is_empty()) {
         let mut names: Vec<_> = m.iter().collect();
         names.sort_by_key(|(k, _)| k.as_str());
@@ -798,6 +801,16 @@ mod tests {
             "{h}"
         );
         assert!(h.contains("  tensions not read: E_INTERNAL: boom\n"), "{h}");
+    }
+
+    #[test]
+    fn cc15_the_edit_header_says_when_the_coverage_was_not_read() {
+        let h = header(&json!({
+            "governs": [], "dependents": [], "will_go_stale": [], "suspects": [],
+            "base": {"token": "t", "blocks": []},
+            "coverage_error": "E_INTERNAL: boom"
+        }));
+        assert!(h.contains("# coverage not read: E_INTERNAL: boom\n"), "{h}");
     }
 
     #[test]

@@ -1,20 +1,47 @@
 //! The state layer of coverage (FW-CH1, FW-CV4, FW-CH6, FW-CH7): the structural layer with
 //! the dismissed mentions settled, plus the Consistent issues of the tensions the scope counts
 //! and the Current issues of its suspects.
+use super::kinds::{KindCount, kinds_of};
 use super::model::*;
+use super::score::rollup;
 use super::structural::structural_of;
 use crate::error::E_BAD_INPUT;
 use crate::tensions::{SideRef, Tension, TensionStatus, tension_label};
 use crate::{RdyError, ReadState, Scope};
 use rdy_model::{BlockId, Hash};
-use std::collections::{BTreeSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// The most scopes a state memoises coverage issues for; the oldest is dropped first.
 const MEMO_SCOPES: usize = 8;
 
-/// The coverage issues a state memoised, by scope label, oldest first.
-pub(crate) type CoverageMemo = Mutex<VecDeque<(String, Arc<CoverageIssues>)>>;
+/// The coverage a state memoised, by scope label, oldest first.
+pub(crate) type CoverageMemo = Mutex<VecDeque<(String, Arc<Memoised>)>>;
+
+/// One scope's memoised coverage: its issues, and the summary of them once read.
+pub(crate) struct Memoised {
+    issues: Arc<CoverageIssues>,
+    summary: OnceLock<Arc<CoverageSummary>>,
+}
+
+/// The summary of a scope's coverage that `rdy status` and `rdy_overview` show: the score, its
+/// dimensions, the issue count and the open entity kinds. The same numbers as the scope's
+/// [`super::CoverageReport`], without its pages, areas and issue list.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CoverageSummary {
+    pub score: u32,
+    pub dimensions: BTreeMap<Dimension, u32>,
+    pub issues_total: usize,
+    pub kinds: Vec<KindCount>,
+    pub similar_kinds: Vec<Vec<String>>,
+}
+
+/// A coverage read error as a reply's `coverage_error` gives it: `<code>: <message>`. A
+/// coverage read error never fails a reply; the coverage is left out and this says why.
+pub fn coverage_error_text(e: &RdyError) -> String {
+    format!("{}: {}", e.code, e.message)
+}
 
 /// The memo key of `scope` (one `coverage_scope` gave: never a past landing).
 pub(super) fn memo_label(scope: &Scope) -> String {
@@ -88,6 +115,34 @@ impl ReadState {
     /// issues in the closed order. Memoised per state and scope. Canon's head is canon;
     /// `E_BAD_INPUT` for a past landing (`coverage_scope`).
     pub fn coverage_issues(&self, scope: &Scope) -> Result<Arc<CoverageIssues>, RdyError> {
+        Ok(Arc::clone(&self.memoised(scope)?.issues))
+    }
+
+    /// The summary of `scope`'s coverage: what its report gives for the score, the dimensions,
+    /// the issue count and the kinds, read from the memoised issues without cloning, placing or
+    /// sorting any of them. Memoised per state and scope. `E_BAD_INPUT` for a past landing.
+    pub fn coverage_summary(&self, scope: &Scope) -> Result<Arc<CoverageSummary>, RdyError> {
+        let scope = &self.coverage_scope(scope)?;
+        let memo = self.memoised(scope)?;
+        if let Some(s) = memo.summary.get() {
+            return Ok(Arc::clone(s));
+        }
+        let whole = rollup(&self.pack, memo.issues.blocks.values());
+        let issues_total = memo.issues.blocks.values().map(|e| e.issues.len()).sum();
+        let m = self.materialized(scope)?;
+        let (kinds, similar_kinds) = kinds_of(&m);
+        let s = Arc::new(CoverageSummary {
+            score: whole.score,
+            dimensions: whole.dimensions,
+            issues_total,
+            kinds,
+            similar_kinds,
+        });
+        Ok(Arc::clone(memo.summary.get_or_init(|| s)))
+    }
+
+    /// The memo entry of `scope`, built on first read.
+    fn memoised(&self, scope: &Scope) -> Result<Arc<Memoised>, RdyError> {
         let scope = &self.coverage_scope(scope)?;
         let label = memo_label(scope);
         {
@@ -96,16 +151,19 @@ impl ReadState {
                 return Ok(Arc::clone(hit));
             }
         }
-        let issues = Arc::new(self.coverage_issues_of(scope)?);
+        let built = Arc::new(Memoised {
+            issues: Arc::new(self.coverage_issues_of(scope)?),
+            summary: OnceLock::new(),
+        });
         let mut memo = self.coverage_memo.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((_, hit)) = memo.iter().find(|(l, _)| *l == label) {
             return Ok(Arc::clone(hit));
         }
-        memo.push_back((label, Arc::clone(&issues)));
+        memo.push_back((label, Arc::clone(&built)));
         while memo.len() > MEMO_SCOPES {
             memo.pop_front();
         }
-        Ok(issues)
+        Ok(built)
     }
 
     /// The structural layer of `scope`, memoised on its build.

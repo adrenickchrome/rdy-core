@@ -16,6 +16,17 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The most pages a report lists, lowest score first; the rest are counted.
 pub const PAGES_CAP: usize = 20;
 
+thread_local! {
+    static REPORT_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test hook: this thread's count of full coverage reports built (`coverage_report` calls that
+/// got past the scope check). A summary reader must leave it unchanged.
+#[doc(hidden)]
+pub fn report_builds() -> u64 {
+    REPORT_BUILDS.with(std::cell::Cell::get)
+}
+
 /// The score of a set of blocks: overall, and per dimension. A dimension with no check is
 /// absent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -177,6 +188,7 @@ impl ReadState {
         path: Option<&str>,
     ) -> Result<CoverageReport, RdyError> {
         let scope = self.coverage_scope(scope)?;
+        REPORT_BUILDS.with(|c| c.set(c.get() + 1));
         let issues = self.coverage_issues(&scope)?;
         let m = self.materialized(&scope)?;
         let under = match path {

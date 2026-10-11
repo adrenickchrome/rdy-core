@@ -236,6 +236,8 @@ impl Writer {
             }
             Err(e) => log(&format!("pack check failed: {e}")),
         }
+        // a reload publishes a state with its tension set built, as a write does
+        build_tensions(rdy);
         sh.state.store(rdy.read());
         out
     }
@@ -312,6 +314,9 @@ impl Writer {
                             ))
                         }
                     };
+                    // the first read after a big write must not build the tension set: it is
+                    // built here, before the state is published (the reply waits for it)
+                    build_tensions(&rdy);
                     let published = self.publish(&rdy);
                     let _ = reply.send(out);
                     // the tension events follow the reply, before the next message
@@ -345,6 +350,15 @@ impl Writer {
             log(&format!("closing the store failed ({e})"));
         }
     }
+}
+
+/// Builds the tension set of `rdy`'s current state, so a read of the state, once published,
+/// never builds it (a big write's set takes seconds). An error is memoised in the state and
+/// read as the state's tension error. A panic is caught and left to the settle after the reply,
+/// which builds the set again and logs and republishes as it does for any panic there.
+fn build_tensions(rdy: &Rdy) {
+    let st = rdy.read();
+    let _ = catch_unwind(AssertUnwindSafe(|| st.tensions()));
 }
 
 impl WriterHandle {

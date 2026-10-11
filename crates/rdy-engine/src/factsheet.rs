@@ -1,9 +1,9 @@
 //! An entity's fact sheet (FW-EN1, FW-EN1a).
-use crate::coverage::{Confidence, confidence_of};
+use crate::coverage::{Confidence, confidence_of, coverage_error_text};
 use crate::error::{E_BAD_INPUT, E_UNKNOWN_BLOCK, RdyError};
 use crate::lexicon::{NameKind, is_content, is_fact};
 use crate::query::body_in;
-use crate::{ReadState, Scope, summary_in};
+use crate::{Materialized, ReadState, Scope, summary_in};
 use rdy_graph::{EdgeKind, Graph};
 use rdy_model::decision::{AFFECTS, DECIDED_BY, DECISION, DESCRIBES, IMPLEMENTS};
 use rdy_model::entity::{KIND, aliases, value_text};
@@ -56,6 +56,10 @@ pub struct FactSheet {
     /// at a past landing, where coverage is not computed (FW-H7).
     #[serde(flatten)]
     pub confidence: Option<Confidence>,
+    /// Why the coverage behind `confidence` could not be read, as `<code>: <message>` (the rest
+    /// of the sheet stands, and `confidence` is left out).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -331,22 +335,14 @@ impl ReadState {
             Some(doc) => m.path_of(&doc.id),
             None => m.path_of(id),
         };
-        let confidence = if self.is_past_landing(scope) {
-            None
+        // a coverage read error never fails a fact sheet: it is reported
+        let (confidence, coverage_error) = if self.is_past_landing(scope) {
+            (None, None)
         } else {
-            let issues = self.coverage_issues(scope)?;
-            let hood = self.fact_sheet_neighbourhood(scope, id)?;
-            // the doc path of every block with an issue, for the closed order of the reasons
-            let mut paths: BTreeMap<String, String> = BTreeMap::new();
-            for b in &hood {
-                if let Some(entry) = issues.blocks.get(b)
-                    && !entry.issues.is_empty()
-                    && let Some(p) = entry.doc.as_ref().and_then(|d| m.path_of(d))
-                {
-                    paths.insert(b.to_string(), p);
-                }
+            match self.sheet_confidence(scope, id, &m) {
+                Ok(c) => (Some(c), None),
+                Err(e) => (None, Some(coverage_error_text(&e))),
             }
-            Some(confidence_of(&issues, &hood, None, &paths))
         };
         Ok(FactSheet {
             id: id.to_string(),
@@ -369,6 +365,7 @@ impl ReadState {
             dependents,
             omitted,
             confidence,
+            coverage_error,
         })
     }
 }
@@ -379,4 +376,29 @@ fn name_of(b: &Block) -> String {
         .or_else(|| b.field_str("title"))
         .unwrap_or_default()
         .to_string()
+}
+
+impl ReadState {
+    /// The confidence of the fact sheet of entity `id`: over the entity, the blocks tied to it
+    /// and the blocks that name it, with the coverage issues behind the level.
+    fn sheet_confidence(
+        &self,
+        scope: &Scope,
+        id: &BlockId,
+        m: &Materialized,
+    ) -> Result<Confidence, RdyError> {
+        let issues = self.coverage_issues(scope)?;
+        let hood = self.fact_sheet_neighbourhood(scope, id)?;
+        // the doc path of every block with an issue, for the closed order of the reasons
+        let mut paths: BTreeMap<String, String> = BTreeMap::new();
+        for b in &hood {
+            if let Some(entry) = issues.blocks.get(b)
+                && !entry.issues.is_empty()
+                && let Some(p) = entry.doc.as_ref().and_then(|d| m.path_of(d))
+            {
+                paths.insert(b.to_string(), p);
+            }
+        }
+        Ok(confidence_of(&issues, &hood, None, &paths))
+    }
 }

@@ -797,3 +797,69 @@ fn cc6_overview_at_a_past_landing_is_refused() {
     assert!(canon["coverage"]["score"].is_number(), "{canon}");
     assert_eq!(at_head["coverage"]["score"], canon["coverage"]["score"]);
 }
+
+/// A tension detector that always fails: every tension read of the state errs.
+struct Failing;
+static FAILING_DETS: [&dyn rdy_engine::tensions::Detector; 1] = [&Failing];
+impl rdy_engine::tensions::Detector for Failing {
+    fn kind(&self) -> rdy_engine::tensions::TensionKind {
+        rdy_engine::tensions::TensionKind::EditCollision
+    }
+    fn detect(
+        &self,
+        _cx: &rdy_engine::tensions::DetectCx<'_>,
+        _seeds: Option<&std::collections::BTreeSet<rdy_model::BlockId>>,
+        _out: &mut Vec<rdy_engine::tensions::Found>,
+    ) -> Result<(), rdy_engine::RdyError> {
+        Err(rdy_engine::RdyError::new(
+            rdy_engine::E_INTERNAL,
+            "boom",
+            "a test detector",
+        ))
+    }
+}
+
+/// cc15: a coverage read error never fails `rdy_overview`: the coverage is left out and
+/// `coverage_error` says why. A past landing is still refused.
+#[test]
+fn cc15_a_coverage_read_error_never_fails_the_overview() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut rdy = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    rdy.set_detectors_for_tests(&FAILING_DETS);
+    let mut st = McpState::new(std::sync::Arc::new(Local::new(rdy)));
+    start(&mut st);
+    let ov = rdy_overview(&mut st, serde_json::from_value(json!({})).unwrap()).unwrap();
+    assert!(ov.get("coverage").is_none(), "{ov:#}");
+    assert!(
+        ov["coverage_error"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("E_INTERNAL: ") && m.contains("boom")),
+        "{ov:#}"
+    );
+    assert_eq!(
+        ov["pack"], "rdy-standard",
+        "the rest of the overview stands"
+    );
+}
+
+/// cc15 (perf fix): `rdy_overview` reads the memoised coverage summary and never builds the
+/// full report; its numbers are `rdy_coverage`'s.
+#[test]
+fn cc15_overview_builds_no_coverage_report_and_agrees_with_it() {
+    let (_d, mut st) = state();
+    start(&mut st);
+    seed(&mut st);
+    let before = rdy_engine::coverage::report_builds();
+    let ov = rdy_overview(&mut st, serde_json::from_value(json!({})).unwrap()).unwrap();
+    assert_eq!(rdy_engine::coverage::report_builds(), before, "{ov:#}");
+    let report = rdy_coverage(&mut st, serde_json::from_value(json!({})).unwrap()).unwrap();
+    for k in [
+        "score",
+        "dimensions",
+        "issues_total",
+        "kinds",
+        "similar_kinds",
+    ] {
+        assert_eq!(ov["coverage"][k], report[k], "{k}: {ov:#} vs {report:#}");
+    }
+}

@@ -663,3 +663,68 @@ fn hd3_an_alt_member_with_an_unknown_field_is_refused() {
     assert_eq!(err.message, "alt: unknown field \"members[0].viw\"");
     assert_eq!(err.fix, "did you mean \"view\"? the fields are label, view");
 }
+
+/// A tension detector that always fails: every tension read of the state errs.
+struct Failing;
+static FAILING_DETS: [&dyn rdy_engine::tensions::Detector; 1] = [&Failing];
+impl rdy_engine::tensions::Detector for Failing {
+    fn kind(&self) -> rdy_engine::tensions::TensionKind {
+        rdy_engine::tensions::TensionKind::EditCollision
+    }
+    fn detect(
+        &self,
+        _cx: &rdy_engine::tensions::DetectCx<'_>,
+        _seeds: Option<&std::collections::BTreeSet<rdy_model::BlockId>>,
+        _out: &mut Vec<rdy_engine::tensions::Found>,
+    ) -> Result<(), RdyError> {
+        Err(RdyError::new(
+            rdy_engine::E_INTERNAL,
+            "boom",
+            "a test detector",
+        ))
+    }
+}
+
+/// cc15: a coverage read error never fails `status`: the coverage is left out and
+/// `coverage_error` says why.
+#[test]
+fn cc15_a_coverage_read_error_never_fails_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Rdy::init(dir.path(), "rdy-standard").unwrap();
+    r.set_detectors_for_tests(&FAILING_DETS);
+    let e = Local::new(r);
+    let s = human();
+    let v = dispatch(&cx(&e, &s, dir.path()), "status", json!({})).unwrap();
+    assert!(v.get("coverage").is_none(), "{v:#}");
+    assert!(
+        v["coverage_error"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("E_INTERNAL: ") && m.contains("boom")),
+        "{v:#}"
+    );
+    assert_eq!(v["landings"], 0, "the rest of the status stands");
+}
+
+/// cc15 (perf fix): `status` reads the memoised coverage summary and never builds the full
+/// report (every issue cloned, given a path and sorted); its numbers are the report's.
+#[test]
+fn cc15_status_builds_no_coverage_report_and_agrees_with_it() {
+    let (d, e) = project();
+    let s = human();
+    doc(&e, "a");
+    let c = cx(&e, &s, d.path());
+    let before = rdy_engine::coverage::report_builds();
+    let v = dispatch(&c, "status", json!({})).unwrap();
+    assert_eq!(rdy_engine::coverage::report_builds(), before, "{v:#}");
+    assert!(v.get("coverage_error").is_none(), "{v:#}");
+    let report = dispatch(&c, "coverage", json!({})).unwrap();
+    for k in [
+        "score",
+        "dimensions",
+        "issues_total",
+        "kinds",
+        "similar_kinds",
+    ] {
+        assert_eq!(v["coverage"][k], report[k], "{k}: {v:#} vs {report:#}");
+    }
+}

@@ -21,6 +21,7 @@ pub use model::{
     sort_issues,
 };
 pub use onboarding::*;
-pub use score::{AreaScore, CoverageReport, PAGES_CAP, PageScore, Rollup, rollup};
+pub use score::{AreaScore, CoverageReport, PAGES_CAP, PageScore, Rollup, report_builds, rollup};
 pub(crate) use state::CoverageMemo;
+pub use state::{CoverageSummary, coverage_error_text};
 pub use structural::{rebuilt_for_tests, structural_builds, structural_for_tests};

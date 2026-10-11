@@ -219,6 +219,9 @@ fn status_text(v: &Value) -> String {
         num(&v["suspects"]),
         coverage_lines(&v["coverage"]),
     );
+    if let Some(e) = v["coverage_error"].as_str() {
+        out.push_str(&format!("\ncoverage not read: {e}"));
+    }
     let caught_up = num(&v["open_report"]["caught_up_frames"]);
     if caught_up > 0 {
         out.push_str(&format!("\nopen: caught up {caught_up} frames"));
@@ -435,8 +438,21 @@ fn tags_text(v: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{log_text, show_text};
+    use super::{log_text, show_text, status_text};
     use serde_json::json;
+
+    /// cc15: a coverage read error is printed in place of the coverage lines.
+    #[test]
+    fn cc15_status_text_says_when_the_coverage_was_not_read() {
+        let v = json!({
+            "pack": "p", "landings": 0, "suspects": 0, "views": [],
+            "version_position": {"label": "v0"}, "warnings": [],
+            "coverage_error": "E_INTERNAL: boom"
+        });
+        let t = status_text(&v);
+        assert!(t.contains("\ncoverage not read: E_INTERNAL: boom"), "{t}");
+        assert!(!t.contains("coverage: "), "{t}");
+    }
 
     /// Final-review fix round 1: `rdy log` prints the alternative a landing chose, as `rdy
     /// approve` does.
