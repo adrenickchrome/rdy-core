@@ -938,7 +938,7 @@ gives every op that starts with `write` the write budget, and `fsync_bound` wide
 | `lexicon_build` | `lexicon(ve)` after the engine caches are dropped (outside the timer): the materialization, the graph and one pass over the text of the scope | `runs.read` | no spec target: a cold build of the entity lexicon over a 10k view (recorded for FW-EN1) |
 | `entity_search` | `search(ve, "Entity 7", first page, 4000 tokens)` with the lexicon and graph warm: the entity resolves, its fact sheet is built and the match list is filtered | `runs.read` | < 5 ms p99 (a read, spec 11): an entity search with its fact sheet, first page |
 | `suggestions_after_write` | `suggestions(ve, change)` for the change of a one-claim write. The write is outside the timer. The write carries the lexicon over its own blocks | `runs.write` | no spec target: the suggestions of a one-claim write over a carried lexicon (recorded for FW-EN3; they ride on every write response) |
-| `coverage_all` | `graph_coverage(ve, None)` after the engine caches are dropped (outside the timer): the materialization, the graph, the lexicon and one pass over every block | `runs.read` | no spec target: cold graph coverage over a 10k view (recorded for FW-EN4 and FW-EN1a; rdy status and rdy_overview) |
+| `coverage_all` | `coverage_issues(ve)` after the engine caches are dropped (outside the timer): the materialization, the graph, the lexicon, the structural layer and the state layer, in every dimension | `runs.read` | no spec target: the cold coverage issues over a 10k view, every dimension (recorded for FW-PF2 D-V3JSY; rdy coverage, rdy status) |
 
 What each cost grows with:
 
@@ -951,10 +951,11 @@ What each cost grows with:
 - `suggestions_after_write` grows with the text of the written blocks and with the holders of
   each code literal they contain. It does not grow with the project. Every write response
   computes it, so it adds to the write path (`write_and_report`) but not to the durable flush.
-- `coverage_all` grows with the number of blocks: it checks every block for ties and every
-  linkable block for mentions. It runs for `rdy status` and for `rdy_overview`, not on a write.
-  The whole scope's coverage is memoised in the scope's build, so a warm `rdy_overview` or
-  `rdy status` pays it once per build (a write gives a new build); the op times the cold pass.
+- `coverage_all` grows with the number of blocks: it checks every block in all six dimensions
+  and reads the tension set and the suspects. It runs for `rdy status` and for `rdy_overview`.
+  A write carries the structural layer (see Coverage and confidence below), so the op times the
+  cold pass. The write response reads the coverage change from two memoised summaries and the
+  touched pages' own blocks (`write_consequences` and `propose` do this work; cc16).
 
 No laptop figures are recorded here: the first timing of these ops is the Linux bench's.
 

@@ -1,7 +1,7 @@
 //! Published read states (snap1): what a reader holds is an immutable `ReadState`, built lazily
 //! and shared. The writer publishes a new one after every write, before the write returns, and
 //! seeds the cells it can fill in O(ops) (the written view after a commit, canon after a landing).
-use crate::coverage::{CoverageMemo, GraphCoverage, Structural};
+use crate::coverage::{CoverageMemo, Structural};
 use crate::error::*;
 use crate::lexicon::Lexicon;
 use crate::paths::TreeNode;
@@ -72,8 +72,6 @@ pub(crate) struct Built {
     pub(crate) tree: OnceLock<Arc<Vec<TreeNode>>>,
     /// The entity lexicon (FW-EN1), memoised; carried across a write like the graph.
     pub(crate) lexicon: OnceLock<Arc<Lexicon>>,
-    /// The whole scope's graph coverage (FW-EN4), memoised; never carried.
-    pub(crate) coverage: OnceLock<Arc<GraphCoverage>>,
     /// The structural layer of coverage (FW-CH1), memoised; carried across a write with the
     /// graph and the lexicon (`coverage::carry`, cc11).
     pub(crate) structural: OnceLock<Arc<Structural>>,
@@ -97,7 +95,6 @@ impl Built {
             graph: OnceLock::new(),
             tree: OnceLock::new(),
             lexicon: OnceLock::new(),
-            coverage: OnceLock::new(),
             structural: OnceLock::new(),
             mentions: Mutex::new(vec![]),
             tension_index: OnceLock::new(),
@@ -112,8 +109,8 @@ impl Built {
     /// so are the mention scans (`MentionScan::carried`). cc11: when the graph, the lexicon and
     /// the structural layer of coverage are all built, that layer is carried too
     /// (`coverage::carry`, under `pack`), unless the ops change entries its dirty set does not
-    /// reach; then the next read rebuilds it. The tree, the graph coverage and the tension index
-    /// and canon part are not carried.
+    /// reach; then the next read rebuilds it. The tree and the tension index and canon part are
+    /// not carried.
     pub(crate) fn after(&self, ops: &[Op], pack: &Pack) -> Built {
         let m = Arc::new(self.m.with(ops));
         let next = Built::new(Arc::clone(&m), Arc::clone(&self.conflicts));

@@ -76,22 +76,20 @@ fn is_governed(g: &Graph, id: &BlockId) -> bool {
 /// Whether decision `d` is applied (D-ET9RX): a block that is neither a decision nor of the
 /// supporting class links to it by `decided_by`, `implements` or a reference, or `d` affects a
 /// block that is not a decision.
-fn is_applied(cx: &EntryCx<'_>, d: &BlockId) -> bool {
-    let carries = cx.g.incoming(d).iter().any(|e| {
+fn is_applied(m: &Materialized, g: &Graph, pack: &Pack, d: &BlockId) -> bool {
+    let carries = g.incoming(d).iter().any(|e| {
         (e.kind == EdgeKind::References
             || is_link(e, decision::DECIDED_BY)
             || is_link(e, decision::IMPLEMENTS))
-            && cx.m.get(&e.from).is_some_and(|f| {
+            && m.get(&e.from).is_some_and(|f| {
                 f.block_type != decision::DECISION
-                    && cx.pack.class_of(&f.block_type) != TypeClass::Supporting
+                    && pack.class_of(&f.block_type) != TypeClass::Supporting
             })
     });
     carries
-        || cx.g.outgoing(d).iter().any(|e| {
+        || g.outgoing(d).iter().any(|e| {
             is_link(e, decision::AFFECTS)
-                && cx
-                    .m
-                    .get(&e.to)
+                && m.get(&e.to)
                     .is_some_and(|t| t.block_type != decision::DECISION)
         })
 }
@@ -99,6 +97,23 @@ fn is_applied(cx: &EntryCx<'_>, d: &BlockId) -> bool {
 /// Whether decision `b` says it needs no content (`needs_content: false`).
 fn needs_no_content(b: &Block) -> bool {
     b.fields.get("needs_content") == Some(&FieldValue::Bool(false))
+}
+
+/// Whether decision `b`, once it is live, would be unapplied (cc16, FW-CH5): no content applies
+/// it and it does not say it needs none. A proposed decision counts, as a landing accepts it; a
+/// rejected, superseded or revoked one does not.
+pub(crate) fn lands_unapplied(m: &Materialized, g: &Graph, pack: &Pack, b: &Block) -> bool {
+    b.block_type == decision::DECISION
+        && matches!(
+            g.status(&b.id),
+            Some(
+                DerivedStatus::Proposed
+                    | DerivedStatus::Live
+                    | DerivedStatus::PartiallySuperseded { .. }
+            )
+        )
+        && !needs_no_content(b)
+        && !is_applied(m, g, pack, &b.id)
 }
 
 /// The required skeleton sections doc `b` lacks, by title, in skeleton order.
@@ -260,7 +275,7 @@ pub(crate) fn entry_of(cx: &EntryCx<'_>, id: &BlockId) -> Option<(BlockEntry, Ve
     if b.block_type == decision::DECISION {
         if is_live(cx.g, id) && !needs_no_content(b) {
             e.check(Dimension::Governed);
-            if !is_applied(cx, id) {
+            if !is_applied(cx.m, cx.g, cx.pack, id) {
                 e.issues.push(CoverageIssue::new(
                     id,
                     IssueCode::UnappliedDecision,

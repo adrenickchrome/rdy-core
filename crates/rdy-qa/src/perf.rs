@@ -194,7 +194,7 @@ fn spec_target(op: &str) -> Option<String> {
             "no spec target: the suggestions of a one-claim write over a carried lexicon (recorded for FW-EN3; they ride on every write response)"
         }
         "coverage_all" => {
-            "no spec target: cold graph coverage over a 10k view (recorded for FW-EN4 and FW-EN1a; rdy status and rdy_overview)"
+            "no spec target: the cold coverage issues over a 10k view, every dimension (recorded for FW-PF2 D-V3JSY; rdy coverage, rdy status)"
         }
         "coverage_carry" => {
             "< 5 ms p95: a read after one write (FW-PF2; reference/performance tb-XBXR4 read budget)"
@@ -919,7 +919,7 @@ fn tier_entities(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, r
         runs.read,
         |_| {
             cold(r, |r| {
-                r.read().graph_coverage(&ve, None).expect("coverage");
+                r.read().coverage_issues(&ve).expect("coverage issues");
             })
             .1
         },

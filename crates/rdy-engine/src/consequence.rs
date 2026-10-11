@@ -2,6 +2,7 @@
 //! changed, read from the state it published, and the conflicts it recorded. Each entry has a
 //! stable id (`cq-<16 hex>`).
 use crate::brief::{BRIEF_DEFAULT_TOKENS, FollowUp, expand_error, follow_up};
+use crate::coverage::{coverage_change, coverage_error_text};
 use crate::engine::{Engine, write_typed};
 use crate::error::RdyError;
 use crate::gate::{LandInfo, ProposalInfo, applied_ops, changes_of, landed_as};
@@ -734,7 +735,8 @@ fn attach_on_change(
 /// `consequences_error` when they could not be read; the write stands), then `intents` when other
 /// sessions' open intents cover blocks the change wrote (iwr1), then `on_change` (the tensions
 /// the write opened or resolved in the view; `on_change_error` when they could not be read),
-/// and the write's suggestions (FW-EN3), which never fail the write; on a briefing refusal
+/// then `coverage` (the change in the view's coverage and its pages, FW-CH3; `coverage_error`
+/// when it could not be read), and the write's suggestions (FW-EN3), which never fail the write; on a briefing refusal
 /// the error carries a fresh briefing for exactly the blocks the write touches. A write that
 /// lists its `changes` (an import: one change per author) is reported over all of them.
 pub fn write_and_report<T: Serialize + 'static>(
@@ -822,6 +824,7 @@ fn report<T: Serialize + 'static>(
         let r =
             tension_delta(b, a, Some(&changes)).and_then(|d| on_change(b, a, view, max_tokens, &d));
         attach_on_change(&mut v, r);
+        attach_coverage(&mut v, b, a, &scope, &changes);
     }
     match engine.read().suggestions_of(&scope, &changes) {
         Ok((s, n)) => {
@@ -838,6 +841,37 @@ fn report<T: Serialize + 'static>(
     }
     attach_related(&mut v, engine, view, &changes);
     Ok(v)
+}
+
+/// cc16 (FW-CH3): `coverage: {before, after, pages}`, the change `changes` made to the coverage
+/// of `scope`, from the two states the write was captured between; or `coverage_error` (the
+/// error text) when it could not be read. The write stands either way. A `coverage` key the
+/// write already carries is kept.
+fn attach_coverage(
+    v: &mut serde_json::Value,
+    before: &ReadState,
+    after: &ReadState,
+    scope: &Scope,
+    changes: &[Hash],
+) {
+    if v.get("coverage").is_some() {
+        return;
+    }
+    let change = changes_of(after, changes).and_then(|cs| {
+        let touched: BTreeSet<BlockId> = cs
+            .iter()
+            .flat_map(|c| &c.ops)
+            .map(|o| o.block_id().clone())
+            .collect();
+        coverage_change(before, scope, after, scope, &touched)
+    });
+    match change {
+        Ok(c) => {
+            v["coverage"] = serde_json::to_value(&c)
+                .expect("coverage change serializes: numbers and strings only");
+        }
+        Err(e) => v["coverage_error"] = coverage_error_text(&e).into(),
+    }
 }
 
 /// FW-EN5: when the changes create decisions, `related_decisions` lists the decisions related

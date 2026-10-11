@@ -193,9 +193,13 @@ fn sug1_metadata_fields_never_mention_an_entity() {
         rs.lexicon(&scope).unwrap().literal_blocks("ops_bot"),
         vec![]
     );
-    assert_eq!(
-        rs.graph_coverage(&scope, None).unwrap().grounded.mentions,
-        0
+    // the literal is no mention: the structural layer names it in no block, and no entity is
+    // named, so the issues hold no unlinked mention
+    let issues = rs.coverage_issues(&scope).unwrap();
+    assert!(
+        issues.mentions.is_empty(),
+        "{:?}",
+        issues.mentions.iter().collect::<Vec<_>>()
     );
 }
 

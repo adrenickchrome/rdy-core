@@ -423,12 +423,13 @@ pub fn plain(v: &Value) -> String {
 
 /// A write reply's extras as text to append to its one-line summary: empty when there are none,
 /// else `\nconsequences:` and one line per entry (with a line for what a cut left out), then the
-/// intents on the written blocks, the tension changes, the suggestions and the related
-/// decisions in the same way, and last a line for each part rdy could not work out.
+/// intents on the written blocks, the tension changes, the coverage change, the suggestions and
+/// the related decisions in the same way, and last a line for each part rdy could not work out.
 pub fn consequences_text(reply: &Value) -> String {
     let mut t = consequences_part(reply);
     t.push_str(&intents_part(reply));
     t.push_str(&on_change_part(reply));
+    t.push_str(&coverage_part(reply));
     t.push_str(&suggestions_part(reply));
     t.push_str(&related_part(reply));
     t.push_str(&errors_part(reply));
@@ -459,12 +460,42 @@ fn intents_part(reply: &Value) -> String {
     t
 }
 
+/// The coverage change a write made (FW-CH3): `coverage: <before> → <after>` and, per page that
+/// moved, `  <path>: <before> → <after>`. Nothing when every number is unchanged, or when the
+/// reply's `coverage` is not a change (an import reply's is the baseline report).
+fn coverage_part(reply: &Value) -> String {
+    let c = &reply["coverage"];
+    let (Some(before), Some(after)) = (c["before"].as_u64(), c["after"].as_u64()) else {
+        return String::new();
+    };
+    let moved: Vec<&Value> = c["pages"]
+        .as_array()
+        .map_or(&[][..], |a| a)
+        .iter()
+        .filter(|p| p["before"] != p["after"])
+        .collect();
+    if before == after && moved.is_empty() {
+        return String::new();
+    }
+    let mut t = format!("\ncoverage: {before} → {after}");
+    for p in moved {
+        t.push_str(&format!(
+            "\n  {}: {} → {}",
+            s(p, "path"),
+            p["before"],
+            p["after"]
+        ));
+    }
+    t
+}
+
 /// The parts of the reply rdy could not work out, each with its error.
 fn errors_part(reply: &Value) -> String {
-    const PARTS: [(&str, &str); 5] = [
+    const PARTS: [(&str, &str); 6] = [
         ("consequences_error", "consequences"),
         ("consequences_tension_error", "the tension consequences"),
         ("on_change_error", "the tension changes"),
+        ("coverage_error", "the coverage change"),
         ("suggestions_error", "suggestions"),
         ("related_decisions_error", "related decisions"),
     ];
@@ -801,6 +832,41 @@ mod tests {
             "{h}"
         );
         assert!(h.contains("  tensions not read: E_INTERNAL: boom\n"), "{h}");
+    }
+
+    #[test]
+    fn cc16_the_consequences_text_prints_the_change() {
+        let reply = json!({
+            "coverage": {"before": 80, "after": 85, "pages": [
+                {"doc": "d-1", "path": "ops", "before": 70, "after": 90},
+                {"doc": "d-2", "path": "fees", "before": 100, "after": 100}
+            ]}
+        });
+        assert_eq!(
+            consequences_text(&reply),
+            "\ncoverage: 80 → 85\n  ops: 70 → 90"
+        );
+        // nothing when every number is unchanged
+        let same = json!({"coverage": {"before": 80, "after": 80, "pages": [
+            {"doc": "d-1", "path": "ops", "before": 70, "after": 70}
+        ]}});
+        assert_eq!(consequences_text(&same), "");
+        // an import reply's coverage is the baseline report: no before or after, nothing printed
+        let baseline = json!({"coverage": {"score": 60, "dimensions": {}}});
+        assert_eq!(consequences_text(&baseline), "");
+        // a page that moved under an unchanged corpus score still prints
+        let page = json!({"coverage": {"before": 80, "after": 80, "pages": [
+            {"doc": "d-1", "path": "ops", "before": 70, "after": 71}
+        ]}});
+        assert_eq!(
+            consequences_text(&page),
+            "\ncoverage: 80 → 80\n  ops: 70 → 71"
+        );
+        let err = json!({"coverage_error": "E_INTERNAL: boom"});
+        assert_eq!(
+            consequences_text(&err),
+            "\nnot worked out: the coverage change (E_INTERNAL: boom)"
+        );
     }
 
     #[test]

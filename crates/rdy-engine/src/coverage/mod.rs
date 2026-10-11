@@ -2,8 +2,8 @@
 //! state, never stored (D-NMGD2). Each failed check is a coverage issue that names its block,
 //! its dimension and the fix (D-XQVM1).
 mod carry;
+mod change;
 mod confidence;
-mod graph;
 mod kinds;
 mod model;
 mod onboarding;
@@ -13,8 +13,8 @@ mod structural;
 
 pub(crate) use carry::carry;
 pub use carry::carry_for_perf;
+pub use change::{CoverageChange, PageChange, coverage_change};
 pub use confidence::*;
-pub use graph::*;
 pub use kinds::KindCount;
 pub use model::{
     BlockEntry, CoverageIssue, CoverageIssues, Dimension, Dismissal, IssueCode, Structural,
@@ -24,4 +24,5 @@ pub use onboarding::*;
 pub use score::{AreaScore, CoverageReport, PAGES_CAP, PageScore, Rollup, report_builds, rollup};
 pub(crate) use state::CoverageMemo;
 pub use state::{CoverageSummary, coverage_error_text};
+pub(crate) use structural::lands_unapplied;
 pub use structural::{rebuilt_for_tests, structural_builds, structural_for_tests};
