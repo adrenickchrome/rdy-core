@@ -108,3 +108,16 @@ fn cc8_bad_combinations_name_their_fix() {
         assert!(text.contains(msg), "{p}: {text}");
     }
 }
+
+#[test]
+fn cc8_scope_with_a_tension_is_refused_and_names_its_fix() {
+    let (_d, mut c, _s) = mcp_project_with_mention();
+    let r = c.call(
+        "rdy_resolve",
+        json!({"tension": "tn-000000000000", "dismiss": {"reason": "x"}, "scope": "canon"}),
+    );
+    assert!(!r.is_ok(), "{r:?}");
+    let text = format!("{r:?}");
+    assert!(text.contains("E_BAD_INPUT"), "{text}");
+    assert!(text.contains("scope applies to a mention only"), "{text}");
+}

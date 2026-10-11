@@ -142,3 +142,20 @@ fn cc8_rdy_resolve_mention_dismiss_and_restore() {
         "{text}"
     );
 }
+
+#[test]
+fn cc8_rdy_resolve_scope_with_a_tension_is_refused() {
+    let s = Served::new();
+    let (ok, v) = s.json(&[
+        "resolve",
+        "tn-000000000000",
+        "--dismiss",
+        "x",
+        "--scope",
+        "canon",
+        "--json",
+    ]);
+    assert!(!ok, "{v}");
+    assert_eq!(v["code"], "E_BAD_INPUT", "{v}");
+    assert_eq!(v["fix"], "scope applies to a mention only", "{v}");
+}

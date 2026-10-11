@@ -558,6 +558,12 @@ pub fn run_resolve(
     } = req;
     match (tension, mention) {
         (Some(tension), None) => {
+            if scope.is_some() {
+                return Err(bad(
+                    "scope does not apply to a tension".to_string(),
+                    "scope applies to a mention only",
+                ));
+            }
             if restore.is_some() {
                 return Err(bad(
                     "a tension dismissal holds until a side changes; it is not restored"
