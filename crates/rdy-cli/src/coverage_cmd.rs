@@ -20,11 +20,18 @@ pub(crate) struct CoverageArgs {
 
 /// The onboarding line of a reply that carries `onboarding` (FW-CO4a): the score against the
 /// target, and the next phase with its open issues per dimension, or that onboarding is done.
-pub(crate) fn onboarding_line(v: &Value) -> Option<String> {
+/// `corpus` labels the line `corpus coverage` when the report above it covers only a path, so the
+/// two numbers do not carry one label.
+pub(crate) fn onboarding_line(v: &Value, corpus: bool) -> Option<String> {
     let o = v["onboarding"].as_object()?;
     let score = o.get("score")?.as_u64()?;
     let target = o.get("target")?.as_u64()?;
-    let head = format!("coverage {score} of a target {target}");
+    let label = if corpus {
+        "corpus coverage"
+    } else {
+        "coverage"
+    };
+    let head = format!("{label} {score} of a target {target}");
     let Some(next) = o.get("next").and_then(Value::as_str) else {
         return Some(format!("{head}; onboarding is done"));
     };
@@ -56,7 +63,7 @@ pub(crate) fn onboarding_line(v: &Value) -> Option<String> {
 
 /// The text of a `coverage` reply: the score, the dimensions, the lowest pages, the areas and
 /// the issues.
-fn coverage_text(v: &Value) -> String {
+fn coverage_text(v: &Value, narrowed: bool) -> String {
     let mut out = vec![format!(
         "coverage {} ({})",
         v["score"].as_u64().unwrap_or(0),
@@ -122,7 +129,7 @@ fn coverage_text(v: &Value) -> String {
     if cut > 0 {
         out.push(format!("  … {cut} more (pass --max-tokens for more)"));
     }
-    out.extend(onboarding_line(v));
+    out.extend(onboarding_line(v, narrowed));
     out.join("\n")
 }
 
@@ -132,12 +139,13 @@ pub(crate) fn coverage(env: &Env, a: CoverageArgs) -> Result<(Value, String), Er
         path,
         max_tokens,
     } = a;
+    let narrowed = path.is_some();
     let v = call(
         env,
         "coverage",
         json!({"scope": scope, "path": path, "max_tokens": max_tokens}),
     )?;
-    let t = coverage_text(&v);
+    let t = coverage_text(&v, narrowed);
     Ok((v, t))
 }
 
@@ -157,7 +165,7 @@ mod tests {
             "issues_total": 3
         });
         assert_eq!(
-            coverage_text(&v),
+            coverage_text(&v, false),
             "coverage 80 (canon)\n  grounded 70  governed 100\nlowest pages:\n  70  ops\n  … 2 more\nareas:\n  75  ops\nissues (3):\n  c-1  consistent  dismissed_tension  do it  (dismissed by human:a: fine)\n  … 2 more (pass --max-tokens for more)"
         );
     }
@@ -168,14 +176,33 @@ mod tests {
             "phases": [{"phase": "consistency", "dimensions": ["consistent", "current"],
                 "dimension_issues": {"consistent": 2, "current": 1}}]}});
         assert_eq!(
-            onboarding_line(&o).unwrap(),
+            onboarding_line(&o, false).unwrap(),
             "coverage 66 of a target 80; next phase: consistency (consistent 2, current 1)"
         );
         let done = json!({"onboarding": {"target": 80, "score": 91, "done": true, "next": null, "phases": []}});
         assert_eq!(
-            onboarding_line(&done).unwrap(),
+            onboarding_line(&done, false).unwrap(),
             "coverage 91 of a target 80; onboarding is done"
         );
-        assert_eq!(onboarding_line(&json!({})), None);
+        assert_eq!(onboarding_line(&json!({}), false), None);
+    }
+
+    /// cc17 fix 2: with a path the report is the path's, the onboarding line is the corpus's.
+    #[test]
+    fn cc17_a_path_report_labels_the_onboarding_line_as_the_corpus() {
+        let v = json!({"scope": "canon", "score": 60, "issues_total": 0,
+            "onboarding": {"target": 80, "score": 75, "done": false, "next": "entities",
+                "phases": [{"phase": "entities", "dimensions": ["grounded"], "dimension_issues": {"grounded": 3}}]}});
+        let narrowed = coverage_text(&v, true);
+        assert_eq!(narrowed.lines().next().unwrap(), "coverage 60 (canon)");
+        assert_eq!(
+            narrowed.lines().last().unwrap(),
+            "corpus coverage 75 of a target 80; next phase: entities (grounded 3)"
+        );
+        let whole = coverage_text(&v, false);
+        assert_eq!(
+            whole.lines().last().unwrap(),
+            "coverage 75 of a target 80; next phase: entities (grounded 3)"
+        );
     }
 }

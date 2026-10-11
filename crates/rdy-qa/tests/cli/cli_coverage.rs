@@ -65,6 +65,32 @@ fn cc12_rdy_coverage_prints_the_report() {
     s.stop();
 }
 
+/// cc17 fix 2: a path narrows the report, so the corpus line says it is the corpus's.
+#[test]
+fn cc17_a_path_report_labels_the_onboarding_line_as_the_corpus() {
+    let s = Served::new();
+    world(&s);
+    let out = s.rdy(&["coverage", "ops"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(text.starts_with("coverage "), "{text}");
+    let last = text.lines().last().unwrap();
+    assert!(
+        last.starts_with("corpus coverage ") && last.contains(" of a target 80; "),
+        "{text}"
+    );
+    assert_eq!(
+        text.lines().filter(|l| l.starts_with("coverage ")).count(),
+        1,
+        "one line labelled for the path: {text}"
+    );
+    s.stop();
+}
+
 #[test]
 fn cc12_rdy_coverage_json_is_the_report() {
     let s = Served::new();

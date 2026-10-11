@@ -32,6 +32,31 @@ pub(super) fn export(cx: &OpContext, a: OutArgs) -> Result<Value, RdyError> {
     Ok(to_json(&st.export(&scope, &resolve_path(cx.cwd, &a.out))?))
 }
 
+/// Sets `coverage` and `onboarding` on the import reply. Set here, so it replaces any `coverage`
+/// the write reply carries. When either read fails, both keys are left out and the reply stands.
+fn attach_baseline(
+    v: &mut Value,
+    report: Result<rdy_engine::coverage::CoverageReport, RdyError>,
+    onboarding: Result<rdy_engine::coverage::Onboarding, RdyError>,
+) {
+    match (report, onboarding) {
+        (Ok(report), Ok(onboarding)) => {
+            v["coverage"] = json!({
+                "score": report.score,
+                "dimensions": report.dimensions,
+                "pages": report.pages,
+            });
+            v["onboarding"] = to_json(&onboarding);
+        }
+        _ => {
+            if let Some(o) = v.as_object_mut() {
+                o.remove("coverage");
+                o.remove("onboarding");
+            }
+        }
+    }
+}
+
 pub(super) fn import(cx: &OpContext, a: ImportArgs) -> Result<Value, RdyError> {
     let s = approver(cx.session)?;
     let view = view_of(&s, Some(a.view));
@@ -66,14 +91,29 @@ pub(super) fn import(cx: &OpContext, a: ImportArgs) -> Result<Value, RdyError> {
     if !docs.is_empty() {
         v["warning_docs"] = Value::Object(docs);
     }
-    // the import's baseline, page by page (D-C6HHV), and the path to the target (D-F2SRE); set
-    // here, so it replaces any `coverage` the write reply carries
-    let report = st.coverage_report(&scope, None)?;
-    v["coverage"] = json!({
-        "score": report.score,
-        "dimensions": report.dimensions,
-        "pages": report.pages,
-    });
-    v["onboarding"] = to_json(&st.onboarding(&scope)?);
+    // the import's baseline, page by page (D-C6HHV), and the path to the target (D-F2SRE). The
+    // import is committed, so a failure here must not make the reply an error.
+    attach_baseline(
+        &mut v,
+        st.coverage_report(&scope, None),
+        st.onboarding(&scope),
+    );
     Ok(v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// cc17 fix 1: the import is committed before the baseline is read, so a failure there must
+    /// not turn the reply into an error (an agent would import again).
+    #[test]
+    fn cc17_a_failed_baseline_leaves_the_import_reply_whole() {
+        let mut v = json!({"changes": 2, "coverage": {"before": 1, "after": 2}});
+        let boom = || RdyError::new("E_INTERNAL", "boom", "retry");
+        attach_baseline(&mut v, Err(boom()), Err(boom()));
+        assert_eq!(v["changes"], 2, "the import reply stays");
+        assert!(v.get("coverage").is_none(), "{v}");
+        assert!(v.get("onboarding").is_none(), "{v}");
+    }
 }

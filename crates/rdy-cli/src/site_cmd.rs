@@ -86,7 +86,7 @@ pub(crate) fn import(env: &Env, a: ImportArgs) -> Result<(Value, String), ErrorR
             text(&w["message"])
         ));
     }
-    if let Some(line) = crate::coverage_cmd::onboarding_line(&v) {
+    if let Some(line) = crate::coverage_cmd::onboarding_line(&v, false) {
         t.push_str(&format!("\n{line}"));
     }
     t.push_str(&brief_text::consequences_text(&v));
