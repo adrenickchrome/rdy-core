@@ -440,7 +440,7 @@ impl ReadState {
                 reader.merge_checked(&reader.state_of(self.canon_head())?, &changes)?;
             let next = self
                 .built(&Scope::Canon)?
-                .after(&applied_ops(&changes, &applied));
+                .after(&applied_ops(&changes, &applied), self.pack());
             let g = Arc::clone(next.graph.get_or_init(|| {
                 Arc::new(Graph::build_with(
                     next.m.iter(),

@@ -193,6 +193,12 @@ fn spec_target(op: &str) -> Option<String> {
         "coverage_all" => {
             "no spec target: cold graph coverage over a 10k view (recorded for FW-EN4 and FW-EN1a; rdy status and rdy_overview)"
         }
+        "coverage_carry" => {
+            "< 5 ms p95: a read after one write (FW-PF2; reference/performance tb-XBXR4 read budget)"
+        }
+        "coverage_report_cold" => {
+            "no spec target: the cold coverage report over a 10k view, recorded (FW-PF2; rdy coverage)"
+        }
         "context_inflight_1k" | "impact_inflight_1k" | "context_view_1k" | "impact_view_1k" => {
             "< 5 ms p99 with 1k in-flight changes (spec 15.1; the overlays must not regress them)"
         }
@@ -844,7 +850,8 @@ fn prepare_rebased_view(r: &mut Rdy, fx: &Fixture, runs: &Runs) {
 /// FW-EN1, FW-EN3, FW-EN4: the entity ops on view `ve`: the fixture's canon plus 50 entities and
 /// 200 claims that name them and share ten code literals. Run after `tier_views`: the view it
 /// leaves behind would change the numbers of the ops before it. Run before `tier_inflight`,
-/// which closes every open view (`ve` too) and adds 1k in-flight changes.
+/// which closes every open view (`ve` too) and adds 1k in-flight changes. cc11 adds the coverage
+/// report after one write (the structural layer carried) and the cold coverage report.
 fn tier_entities(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, runs: &Runs) {
     let ve = Scope::View("ve".into());
     let section = fx.section.to_string();
@@ -891,6 +898,32 @@ fn tier_entities(out: &mut Vec<Measure>, r: &mut Rdy, fx: &Fixture, sfx: &str, r
         |_| {
             cold(r, |r| {
                 r.read().graph_coverage(&ve, None).expect("coverage");
+            })
+            .1
+        },
+    ));
+    // cc11: the view's coverage built, one single-claim write (outside the timer), then the
+    // report over the structural layer the write carried
+    out.push(measure_timed(
+        &format!("coverage_carry{sfx}"),
+        runs.write,
+        |i| {
+            r.read().coverage_issues(&ve).expect("coverage");
+            write(r, "ve", json!([{"op": "create", "type": "claim", "parent": section, "body": format!("Entity {} is checked ({i}).", i % 50)}]))
+                .expect("write");
+            let s = Instant::now();
+            r.read().coverage_report(&ve, None).expect("coverage report");
+            s.elapsed()
+        },
+    ));
+    out.push(measure_timed(
+        &format!("coverage_report_cold{sfx}"),
+        runs.read,
+        |_| {
+            cold(r, |r| {
+                r.read()
+                    .coverage_report(&ve, None)
+                    .expect("coverage report");
             })
             .1
         },
@@ -3594,7 +3627,9 @@ mod tests {
                 "lexicon_build",
                 "entity_search",
                 "suggestions_after_write",
-                "coverage_all"
+                "coverage_all",
+                "coverage_carry",
+                "coverage_report_cold"
             ]
         );
         for op in ops {
@@ -3612,6 +3647,8 @@ mod tests {
             "entity_search",
             "suggestions_after_write",
             "coverage_all",
+            "coverage_carry",
+            "coverage_report_cold",
         ] {
             let m = ms
                 .iter()

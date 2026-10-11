@@ -1016,3 +1016,66 @@ commit tree from the base files and the staged copies, then lints and diffs the 
 Baseline: `qa-baseline.json` is not changed here.
 
 Deep gate (bench): <orchestrator fills in>
+
+## Coverage and confidence (2026-10)
+
+Coverage has two layers. The structural layer holds the Grounded, Connected, Complete and
+Governed checks of each scored block. The state layer adds the dismissed mentions, the tensions
+and the suspects. Before this work, the structural layer was memoised per build and never
+carried, so the first coverage read after a write paid a full pass over the scope (about 105 ms
+at 10k blocks). The write response carries the coverage change (D-C6HHV), so every write would
+pay it.
+
+The structural layer is now carried across a write (`coverage::carry`, called from
+`Built::after`) when the graph, the lexicon and the layer are built. The carry recomputes only
+the blocks in the dirty set, each with the same per-block function a full build uses
+(`entry_of`). The other blocks keep their entries.
+
+The dirty set (closed):
+
+1. every block an op touches, its parent, and its doc, before and after the ops;
+2. every target of an outgoing edge of a touched block, old or new, and that target's doc;
+3. every source of an incoming edge to a touched block in the new graph (refs that dangle or
+   stop dangling; decisions applied or not; questions answered);
+4. for a touched decision: the targets of its `affects` edges, old and new, and the sources of
+   their incoming `describes` edges; the targets of its `supersedes` and `revokes` edges, with
+   the sources of their incoming `decided_by` and `implements` edges, the targets of their
+   `affects` edges and the sources of those targets' incoming `describes` edges.
+
+"Its doc" is every doc above the block, so a doc nested in a doc is reached too. A deleted
+block leaves the map. The entity-to-blocks map drops each touched block from the entities its
+old text named and adds it back under those its new text names.
+
+The carry gives up, and the next read rebuilds, when an op:
+
+- creates, deletes or renames an entity (a name or an alias changes): every block's mentions
+  can change;
+- changes the `lifecycle` of a block that has children, or moves a block that has children;
+- deletes a block and leaves children under it;
+- changes a doc's `doc_type`;
+- creates, deletes, renames or moves a doc or a folder: the paths of other docs can change, and
+  an unlinked-doc issue names its path.
+
+The carry also does not run when the graph or the lexicon of the build was not carried.
+
+Equality with a rebuild is pinned by `cc11_carried_equals_rebuilt_over_random_writes` (200
+random writes) and `cc11_dangling_refs_and_landed_decisions_carry_exactly`. The counter
+`structural_builds` pins that a plain write builds nothing in full.
+
+The `qa-perf` typical tier gained two ops in `tier_entities`, after `coverage_all`, on view
+`ve`:
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `coverage_carry` | `coverage_report(ve)` after one single-claim write. The view's coverage is built first and the write runs, both outside the timer. The write carries the structural layer | `runs.write` | < 5 ms p95: a read after one write (FW-PF2; reference/performance tb-XBXR4 read budget) |
+| `coverage_report_cold` | `coverage_report(ve)` after the engine caches are dropped (outside the timer): the materialization, the graph, the lexicon, the structural layer and the state layer | `runs.read` | no spec target: the cold coverage report over a 10k view, recorded (FW-PF2; rdy coverage) |
+
+`coverage_carry` grows with the dirty set (the written blocks, their neighbours and their docs)
+and with the state layer and the report, which read every scored block. It does not rebuild the
+structural layer.
+
+No laptop figures are recorded here: the first timing of these ops is the Linux bench's.
+
+Baseline: `qa-baseline.json` is not changed here.
+
+Deep gate (bench): <orchestrator fills in>

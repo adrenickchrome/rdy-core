@@ -74,7 +74,8 @@ pub(crate) struct Built {
     pub(crate) lexicon: OnceLock<Arc<Lexicon>>,
     /// The whole scope's graph coverage (FW-EN4), memoised; never carried.
     pub(crate) coverage: OnceLock<Arc<GraphCoverage>>,
-    /// The structural layer of coverage (FW-CH1), memoised; never carried.
+    /// The structural layer of coverage (FW-CH1), memoised; carried across a write with the
+    /// graph and the lexicon (`coverage::carry`, cc11).
     pub(crate) structural: OnceLock<Arc<Structural>>,
     /// The mention scans briefings made (FW-EN3), most recent first; carried across a write.
     pub(crate) mentions: Mutex<Vec<MentionScan>>,
@@ -108,9 +109,12 @@ impl Built {
     /// gcar1: this state with `ops` applied: the same conflicts and, only if this state's graph is
     /// built, that graph carried across the ops (their blocks' old edges out, their new ones in),
     /// which equals a rebuild. The lexicon is carried the same way when it is built (lex1), and
-    /// so are the mention scans (`MentionScan::carried`). The tree, the coverage and the tension
-    /// index and canon part are not carried.
-    pub(crate) fn after(&self, ops: &[Op]) -> Built {
+    /// so are the mention scans (`MentionScan::carried`). cc11: when the graph, the lexicon and
+    /// the structural layer of coverage are all built, that layer is carried too
+    /// (`coverage::carry`, under `pack`), unless the ops change entries its dirty set does not
+    /// reach; then the next read rebuilds it. The tree, the graph coverage and the tension index
+    /// and canon part are not carried.
+    pub(crate) fn after(&self, ops: &[Op], pack: &Pack) -> Built {
         let m = Arc::new(self.m.with(ops));
         let next = Built::new(Arc::clone(&m), Arc::clone(&self.conflicts));
         {
@@ -132,6 +136,12 @@ impl Built {
         }
         if let Some(l) = lexicon {
             let _ = next.lexicon.set(Arc::new(l.with_changes(old(), new())));
+        }
+        if let (Some(prev), Some(g), Some(lex)) =
+            (self.structural.get(), next.graph.get(), next.lexicon.get())
+            && let Some(s) = crate::coverage::carry(prev, &self.m, &m, g, lex, pack, ops)
+        {
+            let _ = next.structural.set(Arc::new(s));
         }
         next
     }

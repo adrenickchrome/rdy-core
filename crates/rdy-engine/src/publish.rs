@@ -296,7 +296,7 @@ impl Rdy {
                         if let Some(b) = pred.filter(|b| b.conflicts.is_empty())
                             && !self.store.ever_deleted(recreates)?
                         {
-                            next.seed(b.after(&ops));
+                            next.seed(b.after(&ops, self.pack()));
                         }
                         views.insert(view.clone(), Arc::new(next));
                     }
@@ -322,7 +322,7 @@ impl Rdy {
             } => {
                 let mut canon = Entry::new(None, Some(landing), None, Arc::new(vec![]));
                 if let Some(b) = prev.canon.built_ok() {
-                    canon.seed(b.after(&ops));
+                    canon.seed(b.after(&ops, self.pack()));
                 }
                 // the proposing view and every view the landing rebased (it is one of them) start
                 // unbuilt, on the landing: a stale entry would seed the next commit into it from
@@ -706,7 +706,7 @@ impl Rdy {
         if let Some((b, last)) = carry {
             let set = cell.set_ok().expect("set above");
             let mut entry = read_state::inflight_entry(canon_head, set);
-            entry.seed(b.after(ops));
+            entry.seed(b.after(ops, self.pack()));
             let _ = cell.entry.set(Ok(Arc::new(entry)));
             let mut last = last.as_ref().clone();
             for op in ops {

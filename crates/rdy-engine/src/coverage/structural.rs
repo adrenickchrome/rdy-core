@@ -119,6 +119,18 @@ fn missing_sections(cx: &EntryCx<'_>, b: &Block) -> Vec<String> {
         .collect()
 }
 
+/// The entities `b`'s text names, as [`entry_of`] lists them: none for a presentational block
+/// or one that takes no link. A carry reads it for a block's version before the write.
+pub(crate) fn named_in(pack: &Pack, lex: &Lexicon, b: &Block) -> Vec<BlockId> {
+    if pack.is_presentational(&b.block_type) || link_kind_for(pack, b).is_none() {
+        return vec![];
+    }
+    lex.mentions(b)
+        .iter()
+        .filter_map(|m| BlockId::parse(&m.entity).ok())
+        .collect()
+}
+
 /// One block's structural entry and the entities its text names, by the closed table (ledger
 /// Q2): `None` for a block that is absent or presentational (not scored). Reads only local
 /// queries: the block's own edges, its children, its doc's subtree for `unlinked_doc`, and the
@@ -310,4 +322,13 @@ pub(crate) fn structural_of(st: &ReadState, scope: &Scope) -> Result<Structural,
 #[doc(hidden)]
 pub fn rebuilt_for_tests(st: &ReadState, scope: &Scope) -> Result<Structural, RdyError> {
     structural_of(st, scope)
+}
+
+/// Test hook: the memoised structural layer of `scope`, carried across writes or built.
+#[doc(hidden)]
+pub fn structural_for_tests(
+    st: &ReadState,
+    scope: &Scope,
+) -> Result<std::sync::Arc<Structural>, RdyError> {
+    st.structural(&st.coverage_scope(scope)?)
 }

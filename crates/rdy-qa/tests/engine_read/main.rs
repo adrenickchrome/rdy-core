@@ -8,6 +8,7 @@ mod engine_before;
 mod engine_confidence;
 mod engine_coord;
 mod engine_coverage;
+mod engine_coverage_carry;
 mod engine_coverage_issues;
 mod engine_coverage_score;
 mod engine_entity_search;
