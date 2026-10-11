@@ -57,6 +57,7 @@ impl Rdy {
             views: None,
             decisions: None,
             serve: ServeSection::default(),
+            coverage: None,
         })
         .expect("config yaml");
         rdy_store::fsutil::write_durable(&config, cfg.as_bytes()).map_err(io)?;
@@ -92,6 +93,7 @@ impl Rdy {
         let (name, description) = site_identity(project, &cfg);
         let require_up_to_date = cfg.require_up_to_date();
         let idle_days = cfg.idle_days();
+        let coverage_target = cfg.coverage_target();
         let decisions_home = cfg.decisions_home();
         // a placeholder until the first publish below, which replaces all of it
         let state = ArcSwap::from_pointee(ReadState {
@@ -107,6 +109,7 @@ impl Rdy {
             description,
             require_up_to_date,
             idle_days,
+            coverage_target,
             decisions_home,
             reader: store.reader(),
             as_of: Arc::clone(&as_of),

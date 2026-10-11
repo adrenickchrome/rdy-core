@@ -5,5 +5,6 @@ mod io;
 mod io_authors;
 mod io_keys;
 mod io_link_keys;
+mod io_onboarding;
 mod io_reader;
 mod io_tree;

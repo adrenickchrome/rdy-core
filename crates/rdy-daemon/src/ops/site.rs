@@ -3,7 +3,7 @@ use super::*;
 use rdy_engine::consequence::write_and_report_as;
 use rdy_engine::{RdyError, Scope};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,5 +66,14 @@ pub(super) fn import(cx: &OpContext, a: ImportArgs) -> Result<Value, RdyError> {
     if !docs.is_empty() {
         v["warning_docs"] = Value::Object(docs);
     }
+    // the import's baseline, page by page (D-C6HHV), and the path to the target (D-F2SRE); set
+    // here, so it replaces any `coverage` the write reply carries
+    let report = st.coverage_report(&scope, None)?;
+    v["coverage"] = json!({
+        "score": report.score,
+        "dimensions": report.dimensions,
+        "pages": report.pages,
+    });
+    v["onboarding"] = to_json(&st.onboarding(&scope)?);
     Ok(v)
 }

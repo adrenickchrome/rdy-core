@@ -44,6 +44,13 @@ fn cc12_rdy_coverage_over_mcp_defaults_to_the_view() {
     let block = w["suggestions"][0]["block"].as_str().unwrap().to_string();
     let v = c.call("rdy_coverage", json!({})).ok();
     assert_eq!(v["scope"], "view/a1", "{v}");
+    // cc17: the report carries the onboarding path (FW-CO4a)
+    assert_eq!(v["onboarding"]["target"], 80, "{v}");
+    assert_eq!(
+        v["onboarding"]["phases"].as_array().unwrap().len(),
+        4,
+        "{v}"
+    );
     assert!(
         v["issues"]
             .as_array()

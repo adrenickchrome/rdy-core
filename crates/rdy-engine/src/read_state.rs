@@ -577,6 +577,8 @@ pub struct ReadState {
     pub(crate) require_up_to_date: bool,
     /// `views.idle_days` in `.rdy.yaml` (default 14), read by a full publish.
     pub(crate) idle_days: u32,
+    /// `coverage.target` in `.rdy.yaml` (default 80), read by a full publish.
+    pub(crate) coverage_target: u32,
     /// `decisions.home` in `.rdy.yaml`, read by a full publish (FW-PR2).
     pub(crate) decisions_home: Option<Arc<str>>,
     pub(crate) reader: StoreReader,
@@ -671,6 +673,12 @@ impl ReadState {
     /// read when this state was published.
     pub fn idle_days(&self) -> u32 {
         self.idle_days
+    }
+
+    /// The coverage, in percent, at which onboarding is done (`coverage.target`), as the config
+    /// read when this state was published.
+    pub fn coverage_target(&self) -> u32 {
+        self.coverage_target
     }
 
     /// The doc a decision given no parent is recorded in (`decisions.home`: a path, key or id),

@@ -6,6 +6,7 @@ mod confidence;
 mod graph;
 mod kinds;
 mod model;
+mod onboarding;
 mod score;
 mod state;
 mod structural;
@@ -19,6 +20,7 @@ pub use model::{
     BlockEntry, CoverageIssue, CoverageIssues, Dimension, Dismissal, IssueCode, Structural,
     sort_issues,
 };
+pub use onboarding::*;
 pub use score::{AreaScore, CoverageReport, PAGES_CAP, PageScore, Rollup, rollup};
 pub(crate) use state::CoverageMemo;
 pub use structural::{rebuilt_for_tests, structural_builds, structural_for_tests};

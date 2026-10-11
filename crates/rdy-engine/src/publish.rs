@@ -65,6 +65,7 @@ impl Rdy {
                     description: prev.description.clone(),
                     require_up_to_date: prev.require_up_to_date,
                     idle_days: prev.idle_days,
+                    coverage_target: prev.coverage_target,
                     decisions_home: prev.decisions_home.clone(),
                     reader: self.store.reader(),
                     as_of: Arc::clone(&self.as_of),
@@ -158,26 +159,29 @@ impl Rdy {
         // and review rules from the config loaded at open or by the last successful reload, never
         // from the files again: a broken file must not turn the review gate off (#832). Every
         // other publish carries them from the previous state.
-        let (name, description, require_up_to_date, idle_days, decisions_home) = match delta {
-            Delta::Full => {
-                let cfg = &self.config;
-                let (name, description) = site_identity(&prev.root, cfg);
-                (
-                    name,
-                    description,
-                    cfg.require_up_to_date(),
-                    cfg.idle_days(),
-                    cfg.decisions_home(),
-                )
-            }
-            _ => (
-                Arc::clone(&prev.name),
-                prev.description.clone(),
-                prev.require_up_to_date,
-                prev.idle_days,
-                prev.decisions_home.clone(),
-            ),
-        };
+        let (name, description, require_up_to_date, idle_days, coverage_target, decisions_home) =
+            match delta {
+                Delta::Full => {
+                    let cfg = &self.config;
+                    let (name, description) = site_identity(&prev.root, cfg);
+                    (
+                        name,
+                        description,
+                        cfg.require_up_to_date(),
+                        cfg.idle_days(),
+                        cfg.coverage_target(),
+                        cfg.decisions_home(),
+                    )
+                }
+                _ => (
+                    Arc::clone(&prev.name),
+                    prev.description.clone(),
+                    prev.require_up_to_date,
+                    prev.idle_days,
+                    prev.coverage_target,
+                    prev.decisions_home.clone(),
+                ),
+            };
         // the coordination refs: re-read by a publish that may have moved them, else carried. A
         // landing moves them only when it closed members of a set or chose an alternative (its
         // record says so; altg1)
@@ -404,6 +408,7 @@ impl Rdy {
             description,
             require_up_to_date,
             idle_days,
+            coverage_target,
             decisions_home,
             reader: self.store.reader(),
             as_of: Arc::clone(&self.as_of),

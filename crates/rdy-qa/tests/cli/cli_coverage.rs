@@ -43,6 +43,12 @@ fn cc12_rdy_coverage_prints_the_report() {
     assert!(text.lines().any(|l| l.starts_with("  grounded ")), "{text}");
     assert!(text.contains("\nlowest pages:\n"), "{text}");
     assert!(text.contains("\nissues ("), "{text}");
+    // cc17: the last line is the onboarding line
+    let last = text.lines().last().unwrap();
+    assert!(
+        last.starts_with("coverage ") && last.contains(" of a target 80; "),
+        "{text}"
+    );
     let fix = format!(
         "link this mention to Ledger ({}), or dismiss it as a passing mention",
         ids["$t"]
@@ -79,6 +85,9 @@ fn cc12_rdy_coverage_json_is_the_report() {
         assert!(v.get(k).is_some(), "key {k}: {v}");
     }
     assert_eq!(v["scope"], "canon", "{v}");
+    // cc17: the onboarding path (FW-CO4a)
+    assert_eq!(v["onboarding"]["target"], 80, "{v}");
+    assert!(v["onboarding"]["score"].is_u64(), "{v}");
     assert!(v["issues_total"].as_u64().unwrap() >= 1, "{v}");
     s.stop();
 }

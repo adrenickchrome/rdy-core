@@ -18,6 +18,42 @@ pub(crate) struct CoverageArgs {
     max_tokens: Option<usize>,
 }
 
+/// The onboarding line of a reply that carries `onboarding` (FW-CO4a): the score against the
+/// target, and the next phase with its open issues per dimension, or that onboarding is done.
+pub(crate) fn onboarding_line(v: &Value) -> Option<String> {
+    let o = v["onboarding"].as_object()?;
+    let score = o.get("score")?.as_u64()?;
+    let target = o.get("target")?.as_u64()?;
+    let head = format!("coverage {score} of a target {target}");
+    let Some(next) = o.get("next").and_then(Value::as_str) else {
+        return Some(format!("{head}; onboarding is done"));
+    };
+    let phase = o
+        .get("phases")
+        .and_then(Value::as_array)
+        .and_then(|ps| ps.iter().find(|p| p["phase"] == next));
+    let counts = phase.map_or(Vec::new(), |p| {
+        let by = &p["dimension_issues"];
+        let named: Vec<String> = CoverageDimension::ALL
+            .iter()
+            .filter_map(|d| by[d.name()].as_u64().map(|n| format!("{} {n}", d.name())))
+            .collect();
+        if named.is_empty() {
+            // no open issue: the phase still falls short, so name its dimensions
+            let dims = p["dimensions"].as_array().map_or(&[][..], Vec::as_slice);
+            return dims
+                .iter()
+                .map(|d| format!("{} 0", text(d)))
+                .collect::<Vec<_>>();
+        }
+        named
+    });
+    Some(format!(
+        "{head}; next phase: {next} ({})",
+        counts.join(", ")
+    ))
+}
+
 /// The text of a `coverage` reply: the score, the dimensions, the lowest pages, the areas and
 /// the issues.
 fn coverage_text(v: &Value) -> String {
@@ -86,6 +122,7 @@ fn coverage_text(v: &Value) -> String {
     if cut > 0 {
         out.push(format!("  … {cut} more (pass --max-tokens for more)"));
     }
+    out.extend(onboarding_line(v));
     out.join("\n")
 }
 
@@ -123,5 +160,22 @@ mod tests {
             coverage_text(&v),
             "coverage 80 (canon)\n  grounded 70  governed 100\nlowest pages:\n  70  ops\n  … 2 more\nareas:\n  75  ops\nissues (3):\n  c-1  consistent  dismissed_tension  do it  (dismissed by human:a: fine)\n  … 2 more (pass --max-tokens for more)"
         );
+    }
+
+    #[test]
+    fn cc17_the_onboarding_line_names_the_next_phase_or_says_done() {
+        let o = json!({"onboarding": {"target": 80, "score": 66, "done": false, "next": "consistency",
+            "phases": [{"phase": "consistency", "dimensions": ["consistent", "current"],
+                "dimension_issues": {"consistent": 2, "current": 1}}]}});
+        assert_eq!(
+            onboarding_line(&o).unwrap(),
+            "coverage 66 of a target 80; next phase: consistency (consistent 2, current 1)"
+        );
+        let done = json!({"onboarding": {"target": 80, "score": 91, "done": true, "next": null, "phases": []}});
+        assert_eq!(
+            onboarding_line(&done).unwrap(),
+            "coverage 91 of a target 80; onboarding is done"
+        );
+        assert_eq!(onboarding_line(&json!({})), None);
     }
 }

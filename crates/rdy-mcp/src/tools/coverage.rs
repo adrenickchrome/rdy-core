@@ -26,7 +26,9 @@ pub fn coverage_reply(
     max_tokens: Option<usize>,
 ) -> Result<Value, RdyError> {
     let report = st.coverage_report(scope, path)?;
-    let v = serde_json::to_value(report).expect("coverage report json");
+    let mut v = serde_json::to_value(report).expect("coverage report json");
+    // the path to the scope's target (FW-CO4a); `cut_issues` counts it in the budget
+    v["onboarding"] = serde_json::to_value(st.onboarding(scope)?).expect("onboarding json");
     Ok(cut_issues(v, max_tokens))
 }
 
