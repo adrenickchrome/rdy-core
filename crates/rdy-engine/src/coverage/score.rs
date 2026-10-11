@@ -134,6 +134,39 @@ impl ReadState {
             .collect())
     }
 
+    /// The rollup of each of `docs` in `scope`, as `page_rollups` gives it, found by walking
+    /// the docs' own blocks: the cost follows the docs asked for, not the project. A doc that
+    /// is not scored is absent.
+    pub fn doc_rollups(
+        &self,
+        scope: &Scope,
+        docs: &BTreeSet<&BlockId>,
+    ) -> Result<BTreeMap<BlockId, Rollup>, RdyError> {
+        let issues = self.coverage_issues(scope)?;
+        let m = self.materialized(scope)?;
+        let mut out = BTreeMap::new();
+        for d in docs {
+            let mut entries: Vec<&BlockEntry> = vec![];
+            let mut stack = vec![(*d).clone()];
+            while let Some(id) = stack.pop() {
+                if let Some(e) = issues.blocks.get(&id) {
+                    entries.push(e);
+                }
+                // a doc under a doc is its own page
+                stack.extend(
+                    m.children(Some(&id))
+                        .into_iter()
+                        .filter(|b| b.block_type != tree::DOC)
+                        .map(|b| b.id.clone()),
+                );
+            }
+            if !entries.is_empty() {
+                out.insert((*d).clone(), rollup(&self.pack, entries.into_iter()));
+            }
+        }
+        Ok(out)
+    }
+
     /// The coverage report of `scope`, or of the docs at or under `path`. Pages come lowest
     /// score first, then by path; at most [`PAGES_CAP`] are listed. Areas come by name. Issues
     /// come in the closed order; `issues_total` counts them all. An unknown path is

@@ -197,3 +197,20 @@ fn cc9_pages_and_the_corpus_agree_on_the_same_entries() {
     let none = st.coverage_rollup(&Scope::Canon, &BTreeSet::new()).unwrap();
     assert_eq!((none.score, none.dimensions.len()), (100, 0));
 }
+
+#[test]
+fn cc13_doc_rollups_equal_the_page_rollups_of_those_docs() {
+    let (_d, mut r) = rdy_qa::fixtures::project();
+    let _c = cc6_like_world(&mut r);
+    let st = r.read();
+    let all = st.page_rollups(&Scope::Canon).unwrap();
+    let docs: BTreeSet<_> = all.keys().collect();
+    assert_eq!(st.doc_rollups(&Scope::Canon, &docs).unwrap(), all);
+    let one: BTreeSet<_> = all.keys().take(1).collect();
+    let got = st.doc_rollups(&Scope::Canon, &one).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(
+        got.get(*one.iter().next().unwrap()),
+        all.get(*one.iter().next().unwrap())
+    );
+}

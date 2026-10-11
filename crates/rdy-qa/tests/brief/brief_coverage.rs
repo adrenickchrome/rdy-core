@@ -199,3 +199,81 @@ fn cc13_every_page_carries_the_same_section() {
         assert_eq!(p["coverage"], pages[0]["coverage"]);
     }
 }
+
+/// Folder `big` holds `n` docs `d00`.., each with one section and one claim; the doc `zz` (last
+/// by path) also has a claim that names the term Ledger without a link, so it scores lowest; the others describe the term.
+/// Landed.
+fn big_folder(r: &mut Rdy, n: usize) {
+    let mut ops = vec![
+        json!({"op": "create", "type": "folder", "id": "$f", "fields": {"name": "big"}}),
+        json!({"op": "create", "type": "doc", "id": "$ld", "parent": "$f", "fields": {"name": "ledger", "title": "Ledger", "doc_type": "page"}}),
+        json!({"op": "create", "type": "term", "id": "$t", "parent": "$ld", "fields": {"name": "Ledger"}, "body": "Holds balances."}),
+    ];
+    let names: Vec<String> = (0..n)
+        .map(|i| format!("d{i:02}"))
+        .chain(["zz".to_string()])
+        .collect();
+    for name in &names {
+        let (d, s) = (format!("${name}"), format!("$s{name}"));
+        ops.push(json!({"op": "create", "type": "doc", "id": d, "parent": "$f", "fields": {"name": name, "title": name, "doc_type": "page"}}));
+        ops.push(json!({"op": "create", "type": "section", "id": s, "parent": d, "fields": {"title": "S"}}));
+        if name == "zz" {
+            ops.push(json!({"op": "create", "type": "claim", "parent": s, "body": "The Ledger is mentioned here, and the Ledger again."}));
+        } else {
+            ops.push(json!({"op": "create", "type": "claim", "parent": s, "body": format!("Claim of {name}."), "links": {"describes": [{"target": "$t"}]}}));
+        }
+    }
+    write(r, "work", Value::Array(ops)).unwrap();
+    land(r, "work").unwrap();
+}
+
+#[test]
+fn cc13_a_folder_briefing_caps_its_pages() {
+    let (_d, mut r) = project();
+    big_folder(&mut r, 30);
+    let b = r
+        .read()
+        .brief(
+            &Scope::Canon,
+            &Coverage {
+                ids: vec![],
+                path: Some("big".into()),
+            },
+            None,
+        )
+        .unwrap();
+    let v = serde_json::to_value(&b).unwrap();
+    let cov = &v["coverage"];
+    let pages = cov["pages"].as_array().unwrap();
+    let cap = rdy_engine::coverage::PAGES_CAP;
+    assert_eq!(pages.len(), cap, "{cov}");
+    // 30 docs + zz + the ledger doc
+    assert_eq!(
+        cov["pages_omitted"].as_u64().unwrap() as usize,
+        32 - cap,
+        "{cov}"
+    );
+    // lowest score first, ties by path; the lowest page sorts last by path but comes first
+    assert_eq!(pages[0]["path"], "big/zz", "{cov}");
+    let key = |p: &Value| {
+        (
+            p["score"].as_u64().unwrap(),
+            p["path"].as_str().unwrap().to_string(),
+        )
+    };
+    assert!(pages.windows(2).all(|w| key(&w[0]) <= key(&w[1])), "{cov}");
+    // the briefing fits the default budget
+    let tokens = serde_json::to_string(&v).unwrap().len() / 4;
+    assert!(
+        tokens <= rdy_engine::brief::BRIEF_DEFAULT_TOKENS,
+        "{tokens} tokens"
+    );
+}
+
+#[test]
+fn cc13_a_briefing_with_few_pages_omits_the_count() {
+    let (_d, mut r) = project();
+    let c = world(&mut r);
+    let v = serde_json::to_value(brief_ids(&r, &[&c["$c1"]])).unwrap();
+    assert!(v["coverage"].get("pages_omitted").is_none(), "{v}");
+}

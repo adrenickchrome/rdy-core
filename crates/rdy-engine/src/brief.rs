@@ -4,7 +4,7 @@
 //! block or one of their dependencies changes version. Registered briefings live in memory
 //! (`BriefRegistry`), one registry per open project.
 use crate::coverage::{
-    Confidence, CoverageIssue, Dimension, PageScore, confidence_of, sort_issues,
+    Confidence, CoverageIssue, Dimension, PAGES_CAP, PageScore, confidence_of, sort_issues,
 };
 use crate::error::*;
 use crate::inflight::Inflight;
@@ -402,7 +402,11 @@ pub const BRIEF_ISSUES_CAP: usize = 20;
 pub struct BriefCoverage {
     pub score: u32,
     pub dimensions: BTreeMap<Dimension, u32>,
+    /// The pages that hold a covered block, lowest score first, then by path; at most
+    /// `PAGES_CAP` (the cap of the coverage report), the rest counted in `pages_omitted`.
     pub pages: Vec<PageScore>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub pages_omitted: usize,
     pub issues: Vec<CoverageIssue>,
     #[serde(skip_serializing_if = "is_zero")]
     pub issues_omitted: usize,
@@ -1158,7 +1162,7 @@ impl ReadState {
             .iter()
             .filter_map(|id| issues.blocks.get(id)?.doc.as_ref())
             .collect();
-        let page_scores = self.page_rollups(scope)?;
+        let page_scores = self.doc_rollups(scope, &covered_docs)?;
         let mut pages: Vec<PageScore> = covered_docs
             .into_iter()
             .filter_map(|d| {
@@ -1169,7 +1173,10 @@ impl ReadState {
                 })
             })
             .collect();
-        pages.sort_by(|a, b| (&a.path, &a.doc).cmp(&(&b.path, &b.doc)));
+        // lowest score first, then by path, as the coverage report lists its pages
+        pages.sort_by(|a, b| (a.score, &a.path, &a.doc).cmp(&(b.score, &b.path, &b.doc)));
+        let pages_omitted = pages.len().saturating_sub(PAGES_CAP);
+        pages.truncate(PAGES_CAP);
 
         let mut listed: Vec<CoverageIssue> = ids
             .iter()
@@ -1184,6 +1191,7 @@ impl ReadState {
             score: rolled.score,
             dimensions: rolled.dimensions,
             pages,
+            pages_omitted,
             issues: listed,
             issues_omitted,
             confidence: confidence_of(&issues, &neighbourhood, None, &paths),
