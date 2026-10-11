@@ -64,6 +64,9 @@ pub struct McpState {
     pub reported: std::collections::BTreeSet<(String, String, String)>,
     /// The cut reads this session can page on, by token (rpag1). In memory only.
     pub reads: read_page::ReadRegistry,
+    /// Who holds this session's review leases: the daemon's session id (`RdyServer::new` sets it
+    /// from `sid`), else a process-unique owner.
+    pub lease_owner: u64,
 }
 
 impl McpState {
@@ -77,6 +80,7 @@ impl McpState {
             seen_gen,
             reported: Default::default(),
             reads: Default::default(),
+            lease_owner: rdy_engine::semantic::lease::LeaseRegistry::local_owner(),
         }
     }
 }

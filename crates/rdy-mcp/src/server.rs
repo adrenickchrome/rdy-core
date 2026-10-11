@@ -9,6 +9,7 @@ mod instructions;
 mod intent;
 mod propose;
 mod read;
+mod review;
 mod schema;
 mod search;
 mod session;
@@ -57,6 +58,9 @@ impl RdyServer {
     pub fn new(engine: Arc<dyn Engine>, sid: Option<u64>) -> Self {
         let mut st = McpState::new(engine);
         st.sid = sid;
+        if let Some(sid) = sid {
+            st.lease_owner = sid;
+        }
         RdyServer {
             state: Arc::new(Mutex::new(st)),
             tool_router: Self::family_routers()
@@ -67,7 +71,7 @@ impl RdyServer {
 
     /// The tool router of each family (`server/<family>.rs`), once. `new` registers their sum;
     /// a new family adds one line here.
-    fn family_routers() -> [ToolRouter<Self>; 16] {
+    fn family_routers() -> [ToolRouter<Self>; 17] {
         [
             Self::session_router(),
             Self::read_router(),
@@ -85,6 +89,7 @@ impl RdyServer {
             Self::alt_router(),
             Self::tension_router(),
             Self::coverage_router(),
+            Self::review_router(),
         ]
     }
 
