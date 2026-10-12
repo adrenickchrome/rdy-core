@@ -127,11 +127,7 @@ pub(crate) fn reconcile_moves(
         .filter(|t| is_open(next, t))
         .map(|t| (t.id, t))
         .collect();
-    let next_sus: BTreeMap<Hash, Suspect> = next
-        .suspects(&Scope::Inflight)?
-        .into_iter()
-        .map(|s| (suspect_key(&s.block, &s.target, &s.reason), s))
-        .collect();
+    let next_sus = canon_suspects(next)?;
     let opening: Vec<Hash> = next_open
         .keys()
         .filter(|id| !table_t.contains_key(id))
@@ -275,15 +271,20 @@ fn is_open(st: &ReadState, t: &Tension) -> bool {
 }
 
 /// The tensions that `next` opened and the ones it resolved against `base`, each by id: the
-/// candidates of `TensionSet::diff`, plus every tension whose vkey's dismissal differs.
+/// candidates of `TensionSet::diff`, plus every id in both sets whose tension differs (a pack
+/// reload that changes a type's tracking fields keeps the id and moves the vkey, so a
+/// dismissal bound to the old vkey lapses), plus every tension whose vkey's dismissal differs.
 fn tension_moves(
     base: &ReadState,
     bset: &TensionSet,
     next: &ReadState,
     nset: &TensionSet,
 ) -> (Vec<Arc<Tension>>, Vec<Arc<Tension>>) {
-    let (opened, resolved) = bset.diff(nset);
-    let mut ids: BTreeSet<Hash> = opened.iter().chain(&resolved).map(|t| t.id).collect();
+    let mut ids: BTreeSet<Hash> = bset
+        .changed(nset)
+        .into_iter()
+        .filter_map(|(b, n)| b.or(n).map(|t| t.id))
+        .collect();
     if !Arc::ptr_eq(&base.dismissals, &next.dismissals) {
         let vkeys: BTreeSet<Hash> = base
             .dismissals
@@ -357,17 +358,35 @@ fn rekeys(
     (to, from)
 }
 
-/// The suspects `next` made gone and new against `base`, each by key, among the blocks whose
-/// suspects can differ (`Graph::suspect_candidates`).
+/// The suspects `next` made gone and new against `base`, each by key. The suspects are
+/// canon's (task-15 ruling: in canon, a stale citation is a suspect; an in-flight citer of a
+/// changed premise is a premise shift tension), so a batch that cannot change canon moves
+/// none: same canon head, same pack. With the same pack, only the blocks whose suspects can
+/// differ are compared (`Graph::suspect_candidates`); a new pack can change the
+/// presentational trait or the tracking fields without changing a block, so then the whole
+/// sets are compared.
 #[allow(clippy::type_complexity)]
 fn suspect_moves(
     base: &ReadState,
     next: &ReadState,
 ) -> Result<(BTreeMap<Hash, Suspect>, BTreeMap<Hash, Suspect>), RdyError> {
-    let bg = base.graph(&Scope::Inflight)?;
-    let ng = next.graph(&Scope::Inflight)?;
     let mut gone = BTreeMap::new();
     let mut new = BTreeMap::new();
+    let same_pack = Arc::ptr_eq(&base.pack, &next.pack);
+    if same_pack && base.canon_head == next.canon_head {
+        return Ok((gone, new));
+    }
+    if !same_pack {
+        let mut after = canon_suspects(next)?;
+        for (k, s) in canon_suspects(base)? {
+            if after.remove(&k).is_none() {
+                gone.insert(k, s);
+            }
+        }
+        return Ok((gone, after));
+    }
+    let bg = base.graph(&Scope::Canon)?;
+    let ng = next.graph(&Scope::Canon)?;
     if Arc::ptr_eq(&bg, &ng) {
         return Ok((gone, new));
     }
@@ -375,18 +394,9 @@ fn suspect_moves(
     if candidates.is_empty() {
         return Ok((gone, new));
     }
-    let bm = base.materialized(&Scope::Inflight)?;
-    let nm = next.materialized(&Scope::Inflight)?;
+    let bm = base.materialized(&Scope::Canon)?;
+    let nm = next.materialized(&Scope::Canon)?;
     for b in &candidates {
-        let keyed = |st: &ReadState,
-                     m: &crate::Materialized,
-                     list: Vec<Suspect>|
-         -> BTreeMap<Hash, Suspect> {
-            list.into_iter()
-                .filter(|s| !st.is_presentational_source(m, s))
-                .map(|s| (suspect_key(&s.block, &s.target, &s.reason), s))
-                .collect()
-        };
         let before = keyed(base, &bm, bg.suspects_of(b));
         let mut after = keyed(next, &nm, ng.suspects_of(b));
         for (k, s) in before {
@@ -397,6 +407,24 @@ fn suspect_moves(
         new.extend(after);
     }
     Ok((gone, new))
+}
+
+/// The open suspects of `st`: canon's, without those of a presentational source, by key.
+fn canon_suspects(st: &ReadState) -> Result<BTreeMap<Hash, Suspect>, RdyError> {
+    Ok(st
+        .suspects(&Scope::Canon)?
+        .into_iter()
+        .map(|s| (suspect_key(&s.block, &s.target, &s.reason), s))
+        .collect())
+}
+
+/// `list` (suspects of `st`'s canon, materialized as `m`) without those of a presentational
+/// source, by key.
+fn keyed(st: &ReadState, m: &crate::Materialized, list: Vec<Suspect>) -> BTreeMap<Hash, Suspect> {
+    list.into_iter()
+        .filter(|s| !st.is_presentational_source(m, s))
+        .map(|s| (suspect_key(&s.block, &s.target, &s.reason), s))
+        .collect()
 }
 
 /// A suspect move of `s` in `st` (the state that holds it): its writers are the authors of

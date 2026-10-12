@@ -232,8 +232,8 @@ fn perf3_a_commit_beside_an_inflight_conflict_carries() {
         st.materialized(&Scope::Inflight).unwrap().snapshot_id()
     );
     assert_eq!(&carried.1, st.conflicts(&Scope::Inflight).unwrap().as_ref());
-    // onto the conflicted block: rebuilt (plan M2e2: inside the write, which logs its suspect
-    // moves from the in-flight graph)
+    // onto the conflicted block: rebuilt (plan M2e2: inside the write, whose tension moves
+    // read the in-flight scope)
     st.graph(&Scope::Inflight).unwrap();
     let va = version_of(&r, &Scope::View("a".into()), &claim);
     let merges = inflight_builds();

@@ -866,8 +866,9 @@ What each cost grows with:
   and diffing 43,650 all-canon text duplicates.
 - `tension_carry_1k` and `tension_log_close_50_1k` (plan M2e2, founder decision C) hold the
   moves of a write: the diff of the logged set and the new one, by id (the structure a carry
-  shares is skipped), the suspect diff over the graph's changed blocks, and one record in the
-  batch, before its one sync. `tension_settle_1k` is gone: the settle after the reply no longer
+  shares is skipped), the suspect diff of canon's graph (only when the write moves canon or
+  the pack: a commit into a view moves no suspect), and one record in the batch, before its
+  one sync. `tension_settle_1k` is gone: the settle after the reply no longer
   exists, and its diff runs inside every write.
 - `tensions_full_1k` grows with the in-flight changes and the tree; a landing or a structural update
   pays it once per published state, inside the write that logs its moves. A briefing after a carried commit and a proposal never pay it: a proposal lists

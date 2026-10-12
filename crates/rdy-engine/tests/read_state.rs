@@ -148,7 +148,7 @@ fn snap1_a_commit_seeds_the_views_entry_only_when_it_was_built() {
     let s = r.read();
     assert_eq!(s.is_built(&Scope::View("v".into())), (true, false));
     assert_eq!(s.materialized(&Scope::View("v".into())).unwrap().len(), 2);
-    // plan M2e2: the write logs its suspect moves from the in-flight scope, which reads canon
+    // plan M2e2: the write logs its moves, and the tension set it builds reads canon
     assert_eq!(
         s.is_built(&Scope::Canon),
         (true, true),
