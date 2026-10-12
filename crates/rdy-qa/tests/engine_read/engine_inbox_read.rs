@@ -340,3 +340,246 @@ fn ib6_an_area_gained_after_a_cut_delivers_nothing_twice() {
     seen.extend(rest.iter().cloned());
     assert_eq!(seen, all, "each entry once, in order");
 }
+
+/// The persisted cursor of agent `name`'s inbox.
+fn persisted(e: &Local, name: &str) -> rdy_store::inbox::InboxCursor {
+    e.read()
+        .reader()
+        .inbox(&format!("agent:{name}"), Some(name))
+        .unwrap()
+        .unwrap()
+        .cursor
+}
+
+/// Ruling task-6.1 (ledger O5): an ack poll with nothing new writes nothing, however often it
+/// runs. Batches with no raw items (the ack's own ref write) never move `next`.
+#[test]
+fn ib6_idle_ack_polls_write_nothing() {
+    let (_d, r) = qa_project();
+    let e = Local::new(r);
+    subscribe(&e, &ag("a"), None).unwrap();
+    let (seq, cursor) = (e.read().seq(), persisted(&e, "a"));
+    for i in 0..5 {
+        let v = read(&e, &ag("a"), json!({"ack": true}));
+        assert_eq!(v["entries"], json!([]), "poll {i}: {v}");
+        assert_eq!(e.read().seq(), seq, "poll {i} wrote a batch");
+        assert_eq!(persisted(&e, "a"), cursor, "poll {i} moved the cursor");
+    }
+}
+
+/// Ruling task-6.1: another session's ack (a batch of one `inbox/` ref) between two reads leaves
+/// the page and its `next` unchanged.
+#[test]
+fn ib6_a_batch_with_only_ref_writes_does_not_move_next() {
+    let (_d, r) = qa_project();
+    let e = Local::new(r);
+    subscribe(&e, &ag("a"), Some(vec!["payments".into()])).unwrap();
+    subscribe(&e, &ag("b"), Some(vec!["payments".into()])).unwrap();
+    on(&e, |r| payments_landings(r, 1));
+    let before = read(&e, &ag("a"), json!({"max_tokens": 100000}));
+    let seq = e.read().seq();
+    let acked = read(&e, &ag("b"), json!({"ack": true, "max_tokens": 100000}));
+    assert_eq!(acked["acked"], true);
+    assert!(e.read().seq() > seq, "b's ack wrote its ref");
+    let after = read(&e, &ag("a"), json!({"max_tokens": 100000}));
+    assert_eq!(after, before, "the ref batch moves nothing");
+}
+
+/// Every entry from `since` (else the persisted cursor), one entry per page. Fails if the pages
+/// never end.
+fn page_by_one(e: &Local, s: &Session, since: Option<String>) -> Vec<Value> {
+    let mut got = vec![];
+    let mut since = since;
+    for _ in 0..100 {
+        let mut req = json!({"max_tokens": 1});
+        if let Some(c) = &since {
+            req["since"] = json!(c);
+        }
+        let p = read(e, s, req);
+        got.extend(p["entries"].as_array().unwrap().iter().cloned());
+        since = Some(p["cursor"].as_str().unwrap().to_string());
+        if p["more"] == false {
+            return got;
+        }
+    }
+    panic!("the pages never end: {got:?}");
+}
+
+/// Review focus 1 in the moves part of a batch: a page cut between two `tension_opened` moves of
+/// one batch, then a close of the session's view, resumes after the first move.
+#[test]
+fn ib6_a_cut_between_two_moves_of_one_batch_delivers_each_once() {
+    let (_d, mut r) = qa_project();
+    let x = landed_claim(&mut r, "payments/fees");
+    let y = landed_claim(&mut r, "payments/rates");
+    put(&mut r, "a", upd(&x, "a's x"));
+    put(&mut r, "a", upd(&y, "a's y"));
+    let e = Local::new(r);
+    subscribe(&e, &ag("a"), None).unwrap();
+    let start = cursor_text(&persisted(&e, "a"));
+    on(&e, move |r| {
+        put(
+            r,
+            "b",
+            json!([{"op": "update", "id": x.to_string(), "body": "b's x"},
+                   {"op": "update", "id": y.to_string(), "body": "b's y"}]),
+        );
+    });
+    let all = read(&e, &ag("a"), json!({"max_tokens": 100000}))["entries"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(kinds(&all), ["tension_opened", "tension_opened"], "{all:?}");
+    let first = read(&e, &ag("a"), json!({"since": start, "max_tokens": 1}));
+    assert_eq!(first["entries"], json!([all[0]]), "{first}");
+    assert_eq!(first["more"], true);
+    on(&e, |r| {
+        r.view_close(&writer(), &["a".to_string()], "by hand")
+            .unwrap();
+    });
+    let cut = first["cursor"].as_str().unwrap().to_string();
+    let rest = read(&e, &ag("a"), json!({"since": cut, "max_tokens": 100000}));
+    let rest = rest["entries"].as_array().unwrap();
+    assert!(
+        !rest.contains(&all[0]),
+        "the first move came twice: {rest:?}"
+    );
+    assert_eq!(
+        rest.first(),
+        all.get(1),
+        "the second move is next: {rest:?}"
+    );
+}
+
+/// Review focus 1 at re-key folds: a landing batch whose moves fold into two re-key entries,
+/// read one entry per page, gives the full read once, and the pages end. A cut falls between the
+/// two folds, inside the batch's moves.
+#[test]
+fn ib6_a_landing_with_two_rekey_folds_pages_one_entry_at_a_time() {
+    let (_d, mut r) = qa_project();
+    let x = landed_claim(&mut r, "payments/fees");
+    let y = landed_claim(&mut r, "payments/rates");
+    put(&mut r, "a", upd(&x, "a's x"));
+    put(&mut r, "a", upd(&y, "a's y"));
+    let e = Local::new(r);
+    subscribe(&e, &ag("a"), None).unwrap();
+    on(&e, move |r| {
+        put(
+            r,
+            "b",
+            json!([{"op": "update", "id": x.to_string(), "body": "b's x"},
+                   {"op": "update", "id": y.to_string(), "body": "b's y"}]),
+        );
+        land(r, "b").unwrap();
+    });
+    let all = read(&e, &ag("a"), json!({"max_tokens": 100000}))["entries"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let folds: Vec<usize> = all
+        .iter()
+        .enumerate()
+        .filter(|(_, x)| x["line"].as_str().unwrap().contains(" replaces "))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(folds.len(), 2, "two re-key folds: {all:?}");
+    assert_eq!(folds[1], folds[0] + 1, "{all:?}");
+    assert!(
+        kinds(&all[..folds[0]]).contains(&"landed"),
+        "the folds are in the landing batch, after its events: {all:?}"
+    );
+    assert_eq!(page_by_one(&e, &ag("a"), None), all);
+}
+
+/// The location of every frame from the persisted cursor of agent `name` to the head, and
+/// whether it starts a batch.
+fn frames_after(e: &Local, name: &str) -> Vec<(rdy_store::segment::Location, bool)> {
+    let st = e.read();
+    let mut out = vec![];
+    let mut starts = true;
+    st.reader()
+        .for_each_frame_from(persisted(e, name).at, st.seq(), |loc, kind, _, _, _| {
+            out.push((loc, starts));
+            starts = kind == rdy_store::kinds::BATCH_COMMIT;
+            Ok(())
+        })
+        .unwrap();
+    out
+}
+
+/// Brief "Texts": a cursor whose location is a frame inside a batch, not a batch's start, is
+/// refused as a bad cursor; every batch start is a cursor.
+#[test]
+fn ib6_a_cursor_inside_a_batch_is_refused() {
+    let (_d, mut r) = qa_project();
+    let c = landed_claim(&mut r, "payments/fees");
+    put(&mut r, "a", upd(&c, "a's text"));
+    let e = Local::new(r);
+    subscribe(&e, &ag("a"), None).unwrap();
+    on(&e, move |r| {
+        put(r, "b", upd(&c, "b's text"));
+        land(r, "b").unwrap();
+    });
+    let frames = frames_after(&e, "a");
+    assert!(frames.iter().filter(|(_, s)| !*s).count() > 3, "{frames:?}");
+    for (loc, starts) in frames {
+        let t = format!("{}.{}.0", loc.segment, loc.offset);
+        let got = run_inbox(
+            &e,
+            &ag("a"),
+            InboxRequest {
+                since: Some(t.clone()),
+                ..Default::default()
+            },
+        );
+        if starts {
+            assert!(got.is_ok(), "{t} starts a batch: {got:?}");
+        } else {
+            let err = got.expect_err(&t);
+            assert_eq!(
+                (err.code, err.message),
+                (E_BAD_INPUT, format!("{t:?} is not an inbox cursor"))
+            );
+        }
+    }
+}
+
+/// A cursor at the end of a segment names the first batch of the next segment: with small
+/// segments, pages of one entry read the log once, through cursors that end a segment.
+#[test]
+fn ib6_a_cursor_at_a_segment_end_reads_on() {
+    let (_d, mut r) = qa_project();
+    r.store_mut().set_segment_max(2_000);
+    let e = Local::new(r);
+    subscribe(&e, &ag("a"), Some(vec!["payments".into()])).unwrap();
+    on(&e, |r| payments_landings(r, 3));
+    let all = read(&e, &ag("a"), json!({"max_tokens": 100000}))["entries"].clone();
+    assert_eq!(all.as_array().unwrap().len(), 4, "{all}");
+    let (mut got, mut since, mut at_ends) = (vec![], None::<String>, 0);
+    for _ in 0..100 {
+        let mut req = json!({"max_tokens": 1});
+        if let Some(c) = &since {
+            req["since"] = json!(c);
+        }
+        let p = read(&e, &ag("a"), req);
+        got.extend(p["entries"].as_array().unwrap().iter().cloned());
+        let c = parse_cursor(p["cursor"].as_str().unwrap()).unwrap();
+        let st = e.read();
+        let mut first = None;
+        st.reader()
+            .for_each_frame_from(c.at, st.seq(), |loc, _, _, _, _| {
+                first.get_or_insert(loc);
+                Ok(())
+            })
+            .unwrap();
+        if first.is_some_and(|f| f.segment > c.at.segment) {
+            at_ends += 1;
+        }
+        since = Some(cursor_text(&c));
+        if p["more"] == false {
+            break;
+        }
+    }
+    assert!(at_ends > 0, "no cursor ended a segment");
+    assert_eq!(Value::Array(got), all);
+}

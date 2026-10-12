@@ -8,9 +8,10 @@ use super::moves::{MoveRef, transition_entries};
 use crate::events::events_for_batch;
 use crate::{E_BAD_INPUT, Event, EventKind, RdyError, ReadState};
 use rdy_model::Hash;
+use rdy_store::StoreError;
 use rdy_store::inbox::{InboxCursor, InboxSub};
+use rdy_store::kinds::{self, BatchCommit};
 use rdy_store::segment::Location;
-use rdy_store::{StoreError, kinds};
 use serde::Serialize;
 use std::borrow::Cow;
 
@@ -159,9 +160,10 @@ struct Fill {
     entries: Vec<Entry>,
     tokens: usize,
     max_tokens: usize,
-    /// Everything before this cursor is delivered.
+    /// Everything before this cursor is delivered. Only a batch with raw items moves it (ruling
+    /// task-6.1), so batches of ref writes alone, such as an ack's, never move it.
     pos: InboxCursor,
-    /// The end of the batch before the one being walked (or the start).
+    /// The end of the last batch with raw items before the one being walked (or the start).
     prev: Location,
     /// The raw items of the next batch with events to pass over: the start's skip, then 0.
     skip: usize,
@@ -211,8 +213,10 @@ fn walk_error(e: StoreError, start: &InboxCursor) -> RdyError {
 impl ReadState {
     /// One page of the inbox of `sub` from `since` (else its persisted cursor): at most
     /// `MAX_ENTRIES` entries, cut where the next entry would pass `max_tokens` (one entry always
-    /// fits). A cut inside a batch gives the cursor `{the batch before, raw items walked}`;
-    /// at the end of the log, `{seq, 0}` and `more: false`.
+    /// fits). A cut inside a batch gives the cursor `{the batch before, raw items walked}`; at
+    /// the end of the log, the end of the last batch walked with raw items (else the start) and
+    /// `more: false` (ruling task-6.1: a batch with no raw items never moves the cursor, so an
+    /// idle ack writes nothing). A cursor whose location is not the start of a batch is refused.
     pub fn inbox_page(
         &self,
         sub: &InboxSub,
@@ -237,16 +241,27 @@ impl ReadState {
         };
         let mut group: Vec<(u8, Hash)> = Vec::new();
         let mut failure: Option<RdyError> = None;
-        let walk = reader.for_each_frame_from(start.at, end, |_, kind, hash, _, next| {
+        // the first frame walked; the first marker met checks that it opens its batch
+        let (mut first, mut checked) = (None, false);
+        let walk = reader.for_each_frame_from(start.at, end, |loc, kind, hash, payload, next| {
+            let first = *first.get_or_insert(loc);
             if kind != kinds::BATCH_COMMIT {
                 group.push((kind, hash));
                 return Ok(());
             }
+            if !checked {
+                checked = true;
+                // the walk starts at `start.at`, or at the next segment's start when `start.at`
+                // ends its segment: either way the first frame walked must open its batch
+                if BatchCommit::decode(payload).map(|m| m.start) != Some(first) {
+                    failure = Some(bad_cursor(&cursor_text(&start)));
+                    return Err(StoreError::Db("the inbox cursor is inside a batch".into()));
+                }
+            }
             let frames = std::mem::take(&mut group);
             let step = events_for_batch(reader, next, &frames).and_then(|events| {
                 if events.is_empty() {
-                    fill.prev = next;
-                    fill.pos = InboxCursor { at: next, skip: 0 };
+                    // no raw items: the cursor stays where it is (ruling task-6.1)
                     return Ok(true);
                 }
                 let items = batch_walk(self, sub, &infl, &events, fill.skip)?;
@@ -270,7 +285,7 @@ impl ReadState {
             (fill.pos, true)
         } else {
             walk.map_err(|e| walk_error(e, &start))?;
-            (InboxCursor { at: end, skip: 0 }, false)
+            (fill.pos, false)
         };
         Ok(InboxPage {
             entries: fill.entries,

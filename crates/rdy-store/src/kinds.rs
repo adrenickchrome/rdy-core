@@ -52,6 +52,13 @@ pub struct BatchCommit {
     pub digest: Hash,
 }
 
+impl BatchCommit {
+    /// The marker a `BATCH_COMMIT` frame's `payload` holds; None if it does not decode.
+    pub fn decode(payload: &[u8]) -> Option<Self> {
+        postcard::from_bytes(payload).ok()
+    }
+}
+
 /// `Hash::of` over the concatenated 32-byte frame hashes, in batch order.
 pub fn batch_digest<'a>(hashes: impl IntoIterator<Item = &'a Hash>) -> Hash {
     let mut bytes = Vec::new();
