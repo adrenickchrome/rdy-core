@@ -933,6 +933,31 @@ impl SegmentLog {
         if frames.is_empty() {
             return Ok(vec![]);
         }
+        let before = self.current();
+        let placed = self.append_frames(frames, true)?;
+        let start = placed[0].0;
+        self.crash_point(if start.segment != before {
+            CrashPoint::RolledBeforeMarker
+        } else {
+            CrashPoint::BeforeMarker
+        });
+        self.append_marker(start, placed.iter().map(|(_, h)| h))?;
+        Ok(placed)
+    }
+
+    /// Appends `frames` with no batch marker and does not sync; returns where each went and its
+    /// hash. With `may_roll`, the first frames of a batch, the segment rolls first when the frames
+    /// and a marker would not fit in it (as `append_batch` does); without it (a later write of a
+    /// held batch) it never rolls, so a batch stays in one segment and the limit is soft for it.
+    /// On error the caller rolls back with `truncate_to`.
+    pub fn append_frames(
+        &mut self,
+        frames: &[(u8, Vec<u8>)],
+        may_roll: bool,
+    ) -> io::Result<Vec<(Location, Hash)>> {
+        if frames.is_empty() {
+            return Ok(vec![]);
+        }
         if frames.iter().any(|(_, p)| p.len() > u32::MAX as usize) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -945,29 +970,32 @@ impl SegmentLog {
             .sum::<u64>()
             + HEADER
             + MARKER_MAX;
-        let rolled = self.len > 0 && self.len + size > self.max_len;
-        if rolled {
+        if may_roll && self.len > 0 && self.len + size > self.max_len {
             self.roll()?;
         }
-        let start = self.end();
         let mut placed = Vec::with_capacity(frames.len());
         for (kind, payload) in frames {
             placed.push(self.write_frame(*kind, payload)?);
         }
-        self.crash_point(if rolled {
-            CrashPoint::RolledBeforeMarker
-        } else {
-            CrashPoint::BeforeMarker
-        });
+        Ok(placed)
+    }
+
+    /// Writes the `BATCH_COMMIT` marker of the batch whose first data frame is at `start` and
+    /// whose data frames have `hashes`, in order. It does not sync.
+    pub fn append_marker<'a>(
+        &mut self,
+        start: Location,
+        hashes: impl ExactSizeIterator<Item = &'a Hash>,
+    ) -> io::Result<()> {
         let marker = BatchCommit {
             start,
-            frames: frames.len() as u32,
-            digest: kinds::batch_digest(placed.iter().map(|(_, h)| h)),
+            frames: hashes.len() as u32,
+            digest: kinds::batch_digest(hashes),
         };
         let bytes = postcard::to_allocvec(&marker).expect("postcard encoding of a marker");
         debug_assert!(bytes.len() as u64 <= MARKER_MAX);
         self.write_frame(kinds::BATCH_COMMIT, &bytes)?;
-        Ok(placed)
+        Ok(())
     }
 
     /// Test hook: arms `p` (or disarms with None). It stays armed until it fires.

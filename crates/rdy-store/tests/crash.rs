@@ -27,6 +27,10 @@ fn crash_child() {
     let pad: usize = var("RDY_CRASH_PAD").map_or(0, |v| v.parse().unwrap());
     let point = CrashPoint::parse(&var("RDY_CRASH_POINT").unwrap()).expect("a crash point");
     let mut s = Store::create(Path::new(&dir)).unwrap();
+    let held = var("RDY_CRASH_HELD").is_some();
+    if held {
+        s.set_held(true).unwrap();
+    }
     if let Some(m) = var("RDY_CRASH_SEGMENT_MAX") {
         s.set_segment_max(m.parse().unwrap());
     }
@@ -39,6 +43,9 @@ fn crash_child() {
             s.crash_at(point);
         }
         s.put_blob(&payload(i, pad)).unwrap();
+        if held {
+            s.seal(vec![]).unwrap();
+        }
         let end = s.log_end();
         writeln!(out, "ACK {i} {} {}", end.segment, end.offset).unwrap();
         out.flush().unwrap();
@@ -161,6 +168,34 @@ fn kill1_every_write_step_recovers_to_the_acknowledged_writes() {
         assert_eq!(acks.len(), 5, "{point:?}");
         recovered(dir.path(), 5, kept, 0);
     }
+}
+
+/// ib14 (Review Focus 6): a held batch is acknowledged only by its seal. A kill before the
+/// seal's marker loses the whole batch, and the log ends where the last seal left it.
+#[test]
+fn ib14_a_held_batch_killed_before_its_seal_is_not_acknowledged() {
+    let dir = tempfile::tempdir().unwrap();
+    let acks = crash(
+        dir.path(),
+        CrashPoint::BeforeMarker,
+        5,
+        &[("RDY_CRASH_HELD", "1")],
+    );
+    assert_eq!(acks.len(), 5);
+    let s = Store::create(dir.path()).unwrap_or_else(|e| panic!("reopen: {e}"));
+    assert_eq!(
+        s.log_end(),
+        acks[4],
+        "the log ends at the last acknowledged end"
+    );
+    assert_eq!(
+        s.open_report().quarantined.len(),
+        1,
+        "{:?}",
+        s.open_report()
+    );
+    drop(s);
+    recovered(dir.path(), 5, false, 0);
 }
 
 #[test]

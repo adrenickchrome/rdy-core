@@ -1393,6 +1393,7 @@ dependencies = [
  "rdy-model",
  "redb",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

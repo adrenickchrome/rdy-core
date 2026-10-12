@@ -12,6 +12,7 @@ pub mod merge;
 pub mod review;
 pub mod segment;
 mod store;
+pub mod transition;
 pub mod view;
 
 pub use check::StoreCheck;

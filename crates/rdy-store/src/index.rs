@@ -21,6 +21,12 @@ const LANDED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("landed");
 /// a block id's string bytes, a 0x00 byte, then the hash of a change that deletes it -> empty.
 const DELETERS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("deleters");
 const REFS: TableDefinition<&str, &[u8]> = TableDefinition::new("refs");
+/// An open tension's id (32 bytes) -> the hash of the TRANSITION record that opened it: what the
+/// log's tension moves fold to (plan M2e2, D-Z0EMP).
+const OPEN_TENSIONS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("open_tensions");
+/// An open suspect's key (`transition::suspect_key`, 32 bytes) -> the hash of the TRANSITION
+/// record that made it new: what the log's suspect moves fold to.
+const OPEN_SUSPECTS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("open_suspects");
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 
 pub enum IndexEntry {
@@ -52,6 +58,24 @@ pub enum IndexEntry {
         block: BlockId,
         change: Hash,
     },
+    /// TRANSITION record `record` opened tension `id`.
+    TensionOpen {
+        id: Hash,
+        record: Hash,
+    },
+    /// A TRANSITION record resolved tension `id`.
+    TensionShut {
+        id: Hash,
+    },
+    /// TRANSITION record `record` made the suspect with key `key` new.
+    SuspectOpen {
+        key: Hash,
+        record: Hash,
+    },
+    /// A TRANSITION record made the suspect with key `key` gone.
+    SuspectShut {
+        key: Hash,
+    },
 }
 
 pub struct Index {
@@ -79,6 +103,8 @@ pub struct IndexDump {
     pub view_ops: BTreeMap<Vec<u8>, Vec<u8>>,
     pub landed: BTreeMap<Vec<u8>, Vec<u8>>,
     pub deleters: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub open_tensions: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub open_suspects: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
 fn dump_table(
@@ -196,6 +222,8 @@ impl Index {
             w.open_table(LANDED).map_err(db)?;
             w.open_table(DELETERS).map_err(db)?;
             w.open_table(REFS).map_err(db)?;
+            w.open_table(OPEN_TENSIONS).map_err(db)?;
+            w.open_table(OPEN_SUSPECTS).map_err(db)?;
             w.open_table(META).map_err(db)?;
         }
         w.commit().map_err(db)?;
@@ -251,6 +279,8 @@ impl Index {
             let mut landed = w.open_table(LANDED).map_err(db)?;
             let mut deleters = w.open_table(DELETERS).map_err(db)?;
             let mut refs = w.open_table(REFS).map_err(db)?;
+            let mut open_tensions = w.open_table(OPEN_TENSIONS).map_err(db)?;
+            let mut open_suspects = w.open_table(OPEN_SUSPECTS).map_err(db)?;
             let mut meta = w.open_table(META).map_err(db)?;
             for e in entries {
                 match e {
@@ -288,6 +318,20 @@ impl Index {
                         let mut key = name_prefix(block.as_str());
                         key.extend_from_slice(&change.0);
                         deleters.insert(&key[..], &[][..]).map_err(db)?;
+                    }
+                    IndexEntry::TensionOpen { id, record } => {
+                        open_tensions.insert(&id.0[..], &record.0[..]).map_err(db)?;
+                    }
+                    IndexEntry::TensionShut { id } => {
+                        open_tensions.remove(&id.0[..]).map_err(db)?;
+                    }
+                    IndexEntry::SuspectOpen { key, record } => {
+                        open_suspects
+                            .insert(&key.0[..], &record.0[..])
+                            .map_err(db)?;
+                    }
+                    IndexEntry::SuspectShut { key } => {
+                        open_suspects.remove(&key.0[..]).map_err(db)?;
                     }
                 }
             }
@@ -436,7 +480,34 @@ impl Index {
             view_ops: dump_table(&r, VIEW_OPS)?,
             landed: dump_table(&r, LANDED)?,
             deleters: dump_table(&r, DELETERS)?,
+            open_tensions: dump_table(&r, OPEN_TENSIONS)?,
+            open_suspects: dump_table(&r, OPEN_SUSPECTS)?,
         })
+    }
+
+    /// The open tensions: (id, the record that opened it), in id order.
+    pub fn open_tensions(&self) -> Result<Vec<(Hash, Hash)>, StoreError> {
+        self.open_rows(OPEN_TENSIONS, "open tension entry")
+    }
+
+    /// The open suspects: (suspect key, the record that made it new), in key order.
+    pub fn open_suspects(&self) -> Result<Vec<(Hash, Hash)>, StoreError> {
+        self.open_rows(OPEN_SUSPECTS, "open suspect entry")
+    }
+
+    fn open_rows(
+        &self,
+        def: TableDefinition<&'static [u8], &'static [u8]>,
+        what: &str,
+    ) -> Result<Vec<(Hash, Hash)>, StoreError> {
+        let r = self.db.begin_read().map_err(db)?;
+        let t = r.open_table(def).map_err(db)?;
+        let mut out = vec![];
+        for item in t.iter().map_err(db)? {
+            let (k, v) = item.map_err(db)?;
+            out.push((hash_from(k.value(), what)?, hash_from(v.value(), what)?));
+        }
+        Ok(out)
     }
 
     /// Writes one raw `producers` row in a durable commit. No store path calls it: it is the test

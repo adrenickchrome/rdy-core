@@ -4,7 +4,7 @@ use rdy_store::format::{Format, STORE_FORMAT};
 
 #[test]
 fn fmt2_the_format_text_is_one_number() {
-    assert_eq!(STORE_FORMAT, 9);
+    assert_eq!(STORE_FORMAT, 10);
     assert_eq!(
         Format::CURRENT.to_text(),
         format!("rdy store format\nstore_format {STORE_FORMAT}\n")
