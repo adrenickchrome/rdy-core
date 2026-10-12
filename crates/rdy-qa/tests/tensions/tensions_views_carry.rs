@@ -146,8 +146,15 @@ fn ibperf2_an_include_an_exclude_and_a_close_carry_the_set() {
         Some(true),
         "the exclude carried"
     );
+    let reads = rdy_engine::tensions::index::step_change_reads();
     r.view_close(&ag("c"), &["c".to_string()], "done").unwrap();
     assert_eq!(r.read().tensions_carried(), Some(true), "the close carried");
+    // c's change stays in flight in d: its writes are kept, only its views move
+    assert_eq!(
+        rdy_engine::tensions::index::step_change_reads() - reads,
+        0,
+        "a change that only moved between views was read again"
+    );
     assert_eq!(full_builds() - builds, 0, "no view op built the whole set");
     same_as_rebuilt(&r).unwrap();
 }
