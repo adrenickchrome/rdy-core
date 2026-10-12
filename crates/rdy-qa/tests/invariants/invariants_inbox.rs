@@ -121,6 +121,10 @@ fn ib12_reindex_reproduces_the_logged_moves() {
     build_agent(&e);
     let log = on(&e, move |r| r.replay_events(start).unwrap());
     let open = on(&e, |r| r.read().reader().open_tensions().unwrap());
+    assert!(
+        !open.is_empty(),
+        "the scenario leaves the a/b tension and the re-keyed a686 tension open"
+    );
     let kinds: Vec<String> = log
         .iter()
         .map(|ev| serde_json::to_value(ev).unwrap()["kind"]["event"].to_string())
@@ -146,21 +150,35 @@ fn ib12_a_killed_daemon_gives_the_same_page_after_restart() {
     r.close().unwrap();
     let (ok, v) = s.json_as("agent:a", Some("a"), &["--json", "inbox"]);
     assert!(ok && v["started"] == true, "{v}");
-    // two sessions change the spec while no daemon runs, so the page holds a tension
-    s.stop();
-    let mut r = Rdy::open(s.dir.path()).unwrap();
-    put(&mut r, "b", cite(&sp.section, &sp.a));
-    put(&mut r, "a", upd(&sp.a, "A changed."));
-    r.close().unwrap();
+    // two agents change the spec through the running daemon, so the tension is built step by
+    // step in its write path and the kill hits a daemon with live state
+    let write = |actor: &str, run: &str, ops: Value| {
+        let mut c = McpClient::start_proxy(&s);
+        c.call(
+            "rdy_session",
+            json!({"actor": actor, "run": run, "role": "writer"}),
+        )
+        .ok();
+        let w = c.call("rdy_write", json!({"ops": ops}));
+        assert!(
+            w.code().is_none(),
+            "{actor} writes through the daemon: {w:?}"
+        );
+    };
+    write("agent:b", "b", cite(&sp.section, &sp.a));
+    write("agent:a", "a", upd(&sp.a, "A changed."));
     let (ok, before) = s.json_as("agent:a", Some("a"), &["--json", "inbox"]);
     assert!(ok, "{before}");
     assert!(
         events(&before).contains(&"tension_opened"),
         "the page holds a move: {before}"
     );
+    let first = s.daemon_pid().expect("the daemon that took the writes");
     s.kill9();
     let (ok, after) = s.json_as("agent:a", Some("a"), &["--json", "inbox"]);
     assert!(ok, "{after}");
+    let second = s.daemon_pid().expect("a successor");
+    assert_ne!(first, second, "the second page comes from a successor");
     assert_eq!(after, before);
 }
 
