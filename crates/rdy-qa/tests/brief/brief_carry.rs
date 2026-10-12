@@ -164,7 +164,9 @@ fn gcar1_a_landing_carries_canons_graph() {
 }
 
 // FW-IB2 (D-Z0EMP): each write logs its tension and suspect moves, so a cold write builds
-// the in-flight graph once; the next write carries it instead of building it again.
+// the in-flight graph once; the next write carries it instead of building it again. The graph
+// the moves read is the in-flight scope's (an invalidate leaves the in-flight state cold, so
+// it no longer shares the one view's build; M2e2 perf fix).
 #[test]
 fn gcar1_a_cold_write_builds_the_graph_once_and_the_next_write_carries_it() {
     let (_d, mut r) = project();
@@ -182,5 +184,5 @@ fn gcar1_a_cold_write_builds_the_graph_once_and_the_next_write_carries_it() {
         json!([{"op": "update", "id": s.a.to_string(), "body": "Warm."}]),
     )
     .unwrap();
-    assert_carried(&r, &Scope::View("w".into()), "a write after a cold write");
+    assert_carried(&r, &Scope::Inflight, "a write after a cold write");
 }

@@ -814,18 +814,25 @@ impl Rdy {
     /// The publish logs what moved since the last logged state (cause `recheck`). When the
     /// published state is the logged one, no batch is open, and the pack and the detectors are
     /// the ones it was published with, the full publish reads what that state read, so it
-    /// computes nothing: the log already folds to its open sets (plan M2e2).
+    /// computes nothing: the log already folds to its open sets, and the new state takes the
+    /// logged state's tension set (the same set, as a write leaves it built), so the next write
+    /// carries it (plan M2e2). Every other cell starts empty.
     pub fn invalidate(&mut self) {
         let st = self.state.load_full();
         let folded = self.logged.as_ref().is_some_and(|l| Arc::ptr_eq(l, &st))
             && self.store.open_batch().is_none()
             && Arc::ptr_eq(&st.pack, &self.pack)
             && std::ptr::eq(st.detectors, self.detectors);
+        let set = folded.then(|| st.tensions_without_build()).flatten();
         drop(st);
         if !folded {
             self.recheck = Some(Cause::Recheck);
         }
-        let _ = self.publish(Delta::Full);
+        if self.publish(Delta::Full).is_ok()
+            && let Some(set) = set
+        {
+            self.state.load().tensions.keep(set);
+        }
     }
 
     /// Rebuilds the store's index from its log (an open batch is sealed first) and republishes

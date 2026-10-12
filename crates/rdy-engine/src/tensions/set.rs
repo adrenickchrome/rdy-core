@@ -521,6 +521,15 @@ impl TensionCell {
         }
     }
 
+    /// Fills an unbuilt cell with `set`, the set of a state whose every input this cell's state
+    /// shares (an `invalidate` of the logged state); a built cell keeps its own.
+    pub(crate) fn keep(&self, set: Arc<TensionSet>) {
+        let _ = self.set.get_or_init(|| {
+            let _ = self.carried.set(false);
+            Ok(set)
+        });
+    }
+
     /// An unbuilt cell whose first read carries `prev` across a view op on the same canon:
     /// changes that entered or left flight, or moved between views ([`step_carry`]).
     pub(crate) fn after_views(prev: Arc<TensionSet>) -> TensionCell {

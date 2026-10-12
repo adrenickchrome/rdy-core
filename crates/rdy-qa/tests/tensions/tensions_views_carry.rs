@@ -189,7 +189,15 @@ fn ibperf2_invalidate_on_the_logged_state_builds_nothing() {
     let builds = full_builds();
     r.invalidate();
     assert_eq!(full_builds() - builds, 0, "invalidate built the set");
-    assert!(!r.read().tensions_built(), "every cell starts empty");
+    assert!(
+        !r.read().is_built(&rdy_engine::Scope::Canon).0,
+        "canon starts unbuilt"
+    );
+    // the logged set is kept: the next write carries it
+    put(&mut r, "c", upd(&s.b, "B by c."));
+    assert_eq!(r.read().tensions_carried(), Some(true), "the write carried");
+    assert_eq!(full_builds() - builds, 0, "the write built the set");
+    same_as_rebuilt(&r).unwrap();
     assert_eq!(r.fsck().unwrap().unlogged_moves, 0);
 }
 
