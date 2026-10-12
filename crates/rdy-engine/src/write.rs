@@ -1,3 +1,11 @@
+//! The write path: an agent's ops become one change on a view.
+//!
+//! Order keys: `after` and `before` are exact, also inside a run of siblings that share one key
+//! (D-8EH6E; parallel appends under one parent leave such a tie, and M2 does not re-key at
+//! landing, ruling task-2-round2). The fallback in `between` re-keys the smaller side of the run.
+//! Known cost: it writes siblings the agent did not touch, so another view's edit of one of them
+//! conflicts when both land, and a pin on one goes stale (`order` is in the content hash). The
+//! M3 intake item "Order-key ties and the content hash" removes the cost.
 use crate::error::*;
 use crate::keys::{self, Keys};
 use crate::{Delta, Materialized, Rdy, ReadState, Scope, Session, SessionKind, views};
@@ -355,6 +363,9 @@ struct Overlay<'a> {
     /// Ids of pending (not deleted) blocks, by parent.
     pending_kids: BTreeMap<Option<BlockId>, BTreeSet<BlockId>>,
     sibs: RefCell<BTreeMap<Option<BlockId>, Sibs>>,
+    /// The blocks with a recorded conflict in the view. A re-key of a tied run (`between`) does
+    /// not write one this write has not changed: only an edit that names a version resolves it.
+    conflicted: BTreeSet<BlockId>,
 }
 
 impl<'a> Overlay<'a> {
@@ -364,6 +375,7 @@ impl<'a> Overlay<'a> {
             pending: BTreeMap::new(),
             pending_kids: BTreeMap::new(),
             sibs: RefCell::default(),
+            conflicted: BTreeSet::new(),
         }
     }
 
@@ -652,12 +664,19 @@ type Slot = (String, BlockId);
 ///
 /// Siblings created in parallel views may share a key (D-8EH6E). A key cannot go strictly
 /// between two siblings that share one, so the tied run is split: the siblings from `right` on
-/// move up, or the siblings up to `left` move down, whichever side has fewer siblings that can
-/// move (a frozen decision cannot). The block lands directly where it was asked.
+/// move up, or the siblings up to `left` move down. The side with fewer siblings goes first; a
+/// side that holds a sibling that cannot move (a frozen decision, or a block in conflict that this
+/// write has not changed) is not used, and a side with no room under the key-length cap gives way
+/// to the other. The block lands directly where it was asked.
 ///
-/// Cost: this writes siblings the agent did not touch (`apply_rekeys`), so a concurrent edit of
-/// one of them in another view conflicts with the re-key when both land. A tie is a state that
-/// parallel appends under one parent leave, or that an import leaves.
+/// Known cost of this fallback: it writes siblings the agent did not touch (`apply_rekeys`). A
+/// concurrent edit of one of them in another view then conflicts when both land (pinned by
+/// `sg2_an_insert_into_a_tie_conflicts_with_a_concurrent_edit_of_the_re_keyed_sibling`), and,
+/// since `order` is part of a block's content hash, a pin on a re-keyed sibling goes stale and a
+/// tension on it gets a new vkey. A tie is a state that parallel appends under one parent leave,
+/// or that an import leaves; M2 does not re-key at landing (ruling task-2-round2). The M3 intake
+/// item "Order-key ties and the content hash" (leave `order` out of the content hash at the next
+/// store format change) removes the cost.
 fn between(
     ov: &Overlay,
     s: &Sibs,
@@ -681,9 +700,12 @@ fn between(
         .filter(|(o, _)| *o == l.0)
         .map(|(_, id)| id)
         .partition(|id| **id <= l.1);
+    // a sibling this write already changed takes its new key in that op (`apply_rekeys`)
     let movable = |ids: &[&BlockId]| {
-        ids.iter()
-            .all(|id| ov.get(id).is_some_and(|b| !decision::is_frozen(b)))
+        ids.iter().all(|id| {
+            ov.get(id).is_some_and(|b| !decision::is_frozen(b))
+                && (!ov.conflicted.contains(*id) || ov.pending.contains_key(*id))
+        })
     };
     let hi = others
         .iter()
@@ -694,30 +716,47 @@ fn between(
         .rev()
         .find(|(o, _)| *o < l.0)
         .map(|(o, _)| o.as_str());
-    let can_up = movable(&up);
-    let can_down = movable(&down);
-    if can_up && (up.len() <= down.len() || !can_down) {
-        // the new block, then the siblings that were after it, above the run's key
-        let mut keys = rdy_model::order_run(Some(&l.0), hi, up.len() + 1)
-            .map_err(|e| order_error(e, parent))?
-            .into_iter();
-        let new = keys.next().expect("one key more than the siblings");
-        Ok((new, up.into_iter().cloned().zip(keys).collect()))
-    } else if can_down {
-        // the siblings up to the anchor, then the new block, below the run's key
-        let mut keys = rdy_model::order_run(lo, Some(&l.0), down.len() + 1)
-            .map_err(|e| order_error(e, parent))?;
-        let new = keys.pop().expect("one key more than the siblings");
-        Ok((new, down.into_iter().cloned().zip(keys).collect()))
+    let split = |go_up: bool| -> Result<(String, Rekeys), rdy_model::OrderError> {
+        if go_up {
+            // the new block, then the siblings that were after it, above the run's key
+            let mut keys = rdy_model::order_run(Some(&l.0), hi, up.len() + 1)?.into_iter();
+            let new = keys.next().expect("one key more than the siblings");
+            Ok((new, up.iter().map(|id| (*id).clone()).zip(keys).collect()))
+        } else {
+            // the siblings up to the anchor, then the new block, below the run's key
+            let mut keys = rdy_model::order_run(lo, Some(&l.0), down.len() + 1)?;
+            let new = keys.pop().expect("one key more than the siblings");
+            Ok((new, down.iter().map(|id| (*id).clone()).zip(keys).collect()))
+        }
+    };
+    let (can_up, can_down) = (movable(&up), movable(&down));
+    let sides: Vec<bool> = if up.len() <= down.len() {
+        vec![true, false]
     } else {
-        Err(RdyError::new(
+        vec![false, true]
+    };
+    let mut first_err = None;
+    for go_up in sides {
+        if !(if go_up { can_up } else { can_down }) {
+            continue;
+        }
+        match split(go_up) {
+            Ok(found) => return Ok(found),
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    match first_err {
+        Some(e) => Err(order_error(e, parent)),
+        None => Err(RdyError::new(
             E_ORDER_DEPTH,
             format!(
-                "cannot put a block between {} and {}: they share the order key {:?} and frozen decisions stand on both sides of the gap",
+                "cannot put a block between {} and {}: they share the order key {:?}, and frozen decisions or blocks in conflict stand on both sides of the gap",
                 l.1, r.1, l.0
             ),
-            "append the block, or place it after a sibling with its own order key",
-        ))
+            "append the block, place it after a sibling with its own order key, or resolve the conflict first",
+        )),
     }
 }
 
@@ -858,10 +897,8 @@ fn apply_rekeys(
         block.order = k;
         prior.push((true, block.pins.clone())); // like a move: pins unchanged
         touched.insert(block.id.clone());
-        // a conflicted sibling resolves through its own rules: a later op on it stays refused
-        if !conflicts.list.iter().any(|c| c.block == block.id) {
-            rekey_only.insert(block.id.clone(), base_hash);
-        }
+        // `between` never re-keys a conflicted sibling this write has not changed
+        rekey_only.insert(block.id.clone(), base_hash);
         ov.set(block.id.clone(), Some(block.clone()));
         ops.push(Op::Update {
             base: base_hash,
@@ -1515,6 +1552,7 @@ fn build_ops(
     rdy_keys: &BTreeSet<BlockId>,
 ) -> Result<Built, RdyError> {
     let mut ov = Overlay::new(base);
+    ov.conflicted = conflicts.list.iter().map(|c| c.block.clone()).collect();
     let mut res = Resolver::new(base);
     let mut ops = vec![];
     let mut created = BTreeMap::new();

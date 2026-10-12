@@ -2,7 +2,17 @@
 //! parent from one base can end with equal order keys once they land; a tie is harmless when the
 //! order it gives is stable and a later insert still lands where it was asked. Every state
 //! passes the invariant checker, on canon and on each view. The ties that must hold are made on
-//! purpose with `land_with_a_tie`, so they stay a tie whatever the engine's landing does.
+//! purpose with `land_with_a_tie` (or written raw), so they stay a tie whatever the engine's
+//! landing does.
+//!
+//! M2 does not re-key at landing (ruling task-2-round2), so ties stay possible and an `after` or
+//! `before` inside a tie uses the write's fallback: it re-keys the smaller side of the tied run.
+//! Known cost: the fallback writes siblings the agent did not touch, so another view's edit of a
+//! re-keyed sibling conflicts when both land
+//! (`sg2_an_insert_into_a_tie_conflicts_with_a_concurrent_edit_of_the_re_keyed_sibling` pins it);
+//! and since `order` is part of a block's content hash, a pin on a re-keyed sibling goes stale.
+//! The M3 intake item "Order-key ties and the content hash" (leave `order` out of the content
+//! hash at the next store format change, then re-key at landing) removes the cost.
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed, TestRunner};
 use rdy_engine::*;
@@ -348,6 +358,7 @@ fn tied_pair_write(
         .unwrap_or_else(|e| panic!("the write is valid: {e:?}"));
     let new = w.created.get("$n").cloned().unwrap_or_default();
     all_valid(&r, &["c"], "after the write in view c");
+    one_op_per_block(&r, &w);
     (d, r, section, ids, new)
 }
 
@@ -402,6 +413,7 @@ fn sg2_an_insert_into_the_tie_then_an_update_of_the_re_keyed_sibling() {
     .expect("the update of the sibling the insert re-keyed is valid");
     let new = w.created["$n"].clone();
     all_valid(&r, &["c"], "after the write in view c");
+    one_op_per_block(&r, &w);
     assert_eq!(
         view_children(&r, "c", &section),
         vec![ids[0].clone(), x.clone(), new.clone(), y.clone()]
@@ -432,6 +444,7 @@ fn sg2_an_insert_into_the_tie_then_a_delete_of_the_re_keyed_sibling() {
     .expect("the delete of the sibling the insert re-keyed is valid");
     let new = w.created["$n"].clone();
     all_valid(&r, &["c"], "after the write in view c");
+    one_op_per_block(&r, &w);
     assert_eq!(
         view_children(&r, "c", &section),
         vec![ids[0].clone(), x.clone(), new.clone()]
@@ -479,10 +492,10 @@ fn sg2_two_inserts_into_one_tie_in_one_write() {
 
 #[test]
 fn sg2_an_insert_into_a_tie_conflicts_with_a_concurrent_edit_of_the_re_keyed_sibling() {
-    // The fallback for a tie already in a state (an imported tree, a store from before the
-    // landing re-key). The insert re-keys the smaller side of the run, which writes the sibling
-    // the agent did not touch; another view's edit of it then conflicts. This test documents
-    // that cost: it is why ties are stopped at landing, and why the fallback stays rare.
+    // The fallback for a tie in a state (parallel appends, an imported tree). The insert re-keys
+    // the smaller side of the run, which writes the sibling the agent did not touch; another
+    // view's edit of it then conflicts. This test pins that known cost (ruling task-2-round2):
+    // M2 keeps it; the M3 intake item "Order-key ties and the content hash" removes it.
     let (_d, mut r, section, ids) = tied_run(2);
     let (x, y) = (ids[1].clone(), ids[2].clone());
     write_as(
@@ -514,4 +527,301 @@ fn sg2_an_insert_into_a_tie_conflicts_with_a_concurrent_edit_of_the_re_keyed_sib
         land(&mut r, "d").is_err(),
         "d cannot land until the conflict on {y} is resolved"
     );
+}
+
+// Ties written raw in one view (re-review of fix round 2): exact places, one op per block.
+
+/// A child of the section in a raw tie: id, type, order key, decision status (if a decision).
+type RawKid = (
+    &'static str,
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+);
+
+/// View `work` holds a doc, a section `s-AAAAA` and `kids` under it with the given keys,
+/// written straight to the store. Returns the children in view order.
+fn raw_tie(kids: &[RawKid]) -> (tempfile::TempDir, Rdy, Vec<String>) {
+    let (d, mut r) = project();
+    let mut blocks = vec![
+        raw(
+            "d-AAAAA",
+            "doc",
+            None,
+            "a1",
+            &[("name", "tied"), ("title", "T"), ("doc_type", "glossary")],
+            "",
+        ),
+        raw(
+            "s-AAAAA",
+            "section",
+            Some("d-AAAAA"),
+            "a1",
+            &[("title", "S")],
+            "",
+        ),
+    ];
+    for (id, ty, order, status) in kids {
+        let fields: Vec<(&str, &str)> = match status {
+            Some(st) => vec![("status", st), ("statement", id)],
+            None => vec![],
+        };
+        blocks.push(raw(id, ty, Some("s-AAAAA"), order, &fields, id));
+    }
+    raw_commit(&mut r, "work", blocks);
+    let ids = view_children(&r, "work", "s-AAAAA");
+    (d, r, ids)
+}
+
+/// Applies `ops` to `work` and checks: the view order equals `want`, the view passes the
+/// checker, and the change holds one op per block.
+fn write_and_expect(
+    r: &mut Rdy,
+    ops: serde_json::Value,
+    want: &dyn Fn(&WriteResult) -> Vec<String>,
+) {
+    let w = write(r, "work", ops.clone()).unwrap_or_else(|e| panic!("{ops}: {e:?}"));
+    let got = view_children(r, "work", "s-AAAAA");
+    assert_eq!(got, want(&w), "{ops}");
+    if let Err(v) = check(r, &Scope::View("work".into())) {
+        panic!("{ops}: the view broke: {v:?}");
+    }
+    one_op_per_block(r, &w);
+}
+
+/// The change `w` wrote holds at most one op per block.
+fn one_op_per_block(r: &Rdy, w: &WriteResult) {
+    let change = r.store().change(&w.change.parse().unwrap()).unwrap();
+    let mut seen = std::collections::BTreeSet::new();
+    for op in &change.ops {
+        assert!(
+            seen.insert(op.block_id().clone()),
+            "two ops on {}: {:?}",
+            op.block_id(),
+            change.ops
+        );
+    }
+}
+
+const TIE5: [&str; 5] = ["c-AAAAA", "c-BBBBB", "c-CCCCC", "c-DDDDD", "c-EEEEE"];
+
+#[test]
+fn sg2_after_and_before_are_exact_in_runs_of_2_to_5() {
+    for n in 2..=5 {
+        for fenced in [false, true] {
+            for anchor in &TIE5[..n] {
+                for dir in ["after", "before"] {
+                    let mut kids: Vec<RawKid> = vec![];
+                    if fenced {
+                        kids.push(("c-00000", "claim", "a3", None));
+                    }
+                    for id in &TIE5[..n] {
+                        kids.push((id, "claim", "a5", None));
+                    }
+                    if fenced {
+                        kids.push(("c-ZZZZZ", "claim", "a6", None));
+                    }
+                    let (_d, mut r, ids) = raw_tie(&kids);
+                    let anchor = anchor.to_string();
+                    let at = ids.iter().position(|i| *i == anchor).unwrap()
+                        + usize::from(dir == "after");
+                    let ids2 = ids.clone();
+                    write_and_expect(
+                        &mut r,
+                        json!([{"op": "create", "type": "claim", "id": "$n", "parent": "s-AAAAA", dir: anchor, "body": "new"}]),
+                        &|w| {
+                            let mut want = ids2.clone();
+                            want.insert(at, w.created["$n"].clone());
+                            want
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn sg2_inserts_edits_a_delete_and_a_move_in_one_tie_in_one_write() {
+    let kids: Vec<RawKid> = TIE5[..4]
+        .iter()
+        .map(|id| (*id, "claim", "a5", None))
+        .collect();
+    let (_d, mut r, _ids) = raw_tie(&kids);
+    let [x0, x1, x2, x3] = [TIE5[0], TIE5[1], TIE5[2], TIE5[3]];
+    write_and_expect(
+        &mut r,
+        json!([
+            {"op": "create", "type": "claim", "id": "$a", "parent": "s-AAAAA", "after": x0, "body": "a"},
+            {"op": "update", "id": x2, "body": "x2 edited"},
+            {"op": "create", "type": "claim", "id": "$b", "parent": "s-AAAAA", "before": x3, "body": "b"},
+            {"op": "create", "type": "claim", "id": "$c", "parent": "s-AAAAA", "after": x1, "body": "c"},
+            {"op": "delete", "id": x3},
+            {"op": "create", "type": "claim", "id": "$d", "parent": "s-AAAAA", "after": "$a", "body": "d"},
+            {"op": "move", "id": x0, "parent": "s-AAAAA", "after": x2},
+            {"op": "update", "id": x1, "body": "x1 edited"}
+        ]),
+        &|w| {
+            let c = |k: &str| w.created[k].clone();
+            // [x0,x1,x2,x3] -> a after x0 -> b before x3 -> c after x1 -> drop x3 -> d after a
+            // -> x0 after x2
+            vec![
+                c("$a"),
+                c("$d"),
+                x1.into(),
+                c("$c"),
+                x2.into(),
+                x0.into(),
+                c("$b"),
+            ]
+        },
+    );
+    assert_eq!(body_of(&r, &Scope::View("work".into()), x1), "x1 edited");
+    assert_eq!(body_of(&r, &Scope::View("work".into()), x2), "x2 edited");
+}
+
+#[test]
+fn sg2_an_insert_into_a_tie_re_keys_only_a_side_without_a_frozen_decision() {
+    // D-A accepted (frozen), D-B and D-C proposed (movable): the movable side is re-keyed
+    let kids: Vec<RawKid> = vec![
+        ("D-AAAAA", "decision", "a5", Some("accepted")),
+        ("D-BBBBB", "decision", "a5", Some("proposed")),
+        ("D-CCCCC", "decision", "a5", Some("proposed")),
+    ];
+    for (dir, anchor, at) in [
+        ("after", "D-AAAAA", 1),
+        ("after", "D-BBBBB", 2),
+        ("before", "D-BBBBB", 1),
+    ] {
+        let (_d, mut r, ids) = raw_tie(&kids);
+        let ids2 = ids.clone();
+        write_and_expect(
+            &mut r,
+            json!([{"op": "create", "type": "claim", "id": "$n", "parent": "s-AAAAA", dir: anchor, "body": "new"}]),
+            &|w| {
+                let mut want = ids2.clone();
+                want.insert(at, w.created["$n"].clone());
+                want
+            },
+        );
+        assert_eq!(
+            r.read()
+                .block(
+                    &Scope::View("work".into()),
+                    &BlockId::parse("D-AAAAA").unwrap()
+                )
+                .unwrap()
+                .order,
+            "a5",
+            "the frozen decision keeps its key"
+        );
+    }
+    // frozen on both sides of the gap: refused, no panic
+    let kids: Vec<RawKid> = vec![
+        ("D-AAAAA", "decision", "a5", Some("accepted")),
+        ("D-BBBBB", "decision", "a5", Some("proposed")),
+        ("D-CCCCC", "decision", "a5", Some("rejected")),
+    ];
+    let (_d, mut r, _ids) = raw_tie(&kids);
+    let e = write(
+        &mut r,
+        "work",
+        json!([{"op": "create", "type": "claim", "parent": "s-AAAAA", "after": "D-BBBBB", "body": "new"}]),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, "E_ORDER_DEPTH", "{e}");
+}
+
+#[test]
+fn sg2_an_insert_into_a_tie_takes_the_other_side_when_one_has_no_room_under_the_cap() {
+    // up side: no key fits between the tie and the next key within 24 characters; down has room
+    let kids: Vec<RawKid> = vec![
+        ("c-00000", "claim", "V", None),
+        ("c-AAAAA", "claim", "a1", None),
+        ("c-BBBBB", "claim", "a1", None),
+        ("c-ZZZZZ", "claim", "a10000000000000000000001", None),
+    ];
+    let (_d, mut r, ids) = raw_tie(&kids);
+    let ids2 = ids.clone();
+    write_and_expect(
+        &mut r,
+        json!([{"op": "create", "type": "claim", "id": "$n", "parent": "s-AAAAA", "after": "c-AAAAA", "body": "new"}]),
+        &|w| {
+            let mut want = ids2.clone();
+            want.insert(2, w.created["$n"].clone());
+            want
+        },
+    );
+}
+
+#[test]
+fn sg2_an_insert_into_a_tie_does_not_re_key_a_conflicted_sibling() {
+    // canon: [base, x, y] with x and y tied; d and e both edit y; e lands, so d holds a
+    // conflict on y. An insert after x in d must not need y's version: x's side moves instead.
+    let (_d, mut r, section, ids) = tied_run(2);
+    let (x, y) = (ids[1].clone(), ids[2].clone());
+    let read = version_of(&r, &canon(), &y);
+    for v in ["d", "e"] {
+        write_as(
+            &mut r,
+            &as_agent(&format!("agent:{v}"), "r"),
+            v,
+            json!([{"op": "update", "id": y, "base": read, "body": format!("y in {v}")}]),
+        )
+        .unwrap();
+    }
+    land(&mut r, "e").expect("e lands");
+    let conflicts = r.read().conflicts(&Scope::View("d".into())).unwrap();
+    assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+    let w = write_as(
+        &mut r,
+        &as_agent("agent:d", "r"),
+        "d",
+        json!([{"op": "create", "type": "claim", "id": "$n", "parent": section, "after": x, "body": "between"}]),
+    )
+    .unwrap_or_else(|e| panic!("insert after {x} beside a conflicted {y}: {e:?}"));
+    let new = w.created["$n"].clone();
+    assert_eq!(
+        view_children(&r, "d", &section),
+        vec![ids[0].clone(), x, new, y]
+    );
+}
+
+#[test]
+fn sg2_an_insert_into_a_tie_makes_a_pin_on_the_re_keyed_sibling_suspect() {
+    // The second known cost of the fallback: `order` is part of the content hash a pin records,
+    // so a block that cites the re-keyed sibling turns suspect of it (the M3 intake item
+    // "Order-key ties and the content hash" removes this).
+    let (_d, mut r, section, ids) = tied_run(2);
+    let (x, y) = (ids[1].clone(), ids[2].clone());
+    let w = write_as(
+        &mut r,
+        &as_agent("agent:p", "r"),
+        "p",
+        json!([{"op": "create", "type": "claim", "id": "$p", "parent": section, "body": format!("See {{{{{y}}}}}.")}]),
+    )
+    .unwrap();
+    let citer = w.created["$p"].clone();
+    land(&mut r, "p").expect("p lands");
+    let suspects = |r: &Rdy, view: &str| -> Vec<(String, String)> {
+        r.read()
+            .suspects(&Scope::View(view.into()))
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.block.to_string(), s.target.to_string()))
+            .collect()
+    };
+    write_as(
+        &mut r,
+        &as_agent("agent:c", "r"),
+        "c",
+        json!([{"op": "create", "type": "claim", "parent": section, "after": x, "body": "between"}]),
+    )
+    .unwrap();
+    assert_ne!(
+        version_of(&r, &Scope::View("c".into()), &y),
+        version_of(&r, &canon(), &y),
+        "the insert after {x} re-keyed {y}"
+    );
+    assert_eq!(suspects(&r, "c"), vec![(citer, y)]);
 }
