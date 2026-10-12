@@ -267,3 +267,30 @@ fn ibperf2_a_carry_unfiles_only_the_keys_of_the_blocks_it_writes() {
     );
     same_as_rebuilt(&r).unwrap();
 }
+
+#[test]
+fn ibperf2_a_landing_carries_the_canon_part() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    // canon duplicates the landing joins, leaves and keeps
+    put(&mut r, "a", term(&s.section, "Fee"));
+    land(&mut r, "a").unwrap();
+    put(&mut r, "b", term(&s.section, "fee"));
+    put(&mut r, "c", upd(&s.a, "Fees are charged monthly."));
+    put(&mut r, "d", upd(&s.b, "fees ARE charged  monthly."));
+    r.read().tensions().unwrap();
+    for v in ["b", "c", "d"] {
+        let runs = rdy_engine::tensions::set::canon_part_runs();
+        land(&mut r, v).unwrap();
+        assert_eq!(
+            rdy_engine::tensions::set::canon_part_runs() - runs,
+            0,
+            "landing {v} ran the canon part in full"
+        );
+        same_as_rebuilt(&r).unwrap();
+    }
+    assert!(
+        !of_kind(&r, rdy_engine::tensions::TensionKind::DuplicateDefinition).is_empty(),
+        "the canon duplicates are in the set"
+    );
+}

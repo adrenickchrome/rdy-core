@@ -15,8 +15,9 @@
 //! `DetectScope::Canon`. The canon part is memoised per canon build, so a canon-scope run must
 //! read canon only: there `cx.writes` is empty, `DetectCx::inflight_m` and
 //! `DetectCx::inflight_graph` return canon's, and a detector must not read the published
-//! state's in-flight set, views or coordination refs through `cx.st`. The canon part is always
-//! a full run (no seeds). An index a new kind adds to `DetectCx` is lazy (a `OnceLock`), so the
+//! state's in-flight set, views or coordination refs through `cx.st`. The canon part is a full
+//! run (no seeds), except for a kind whose `Detector::canon_seeded` says its canon form runs
+//! around a landing's blocks (plan M2e2: duplicate definition). An index a new kind adds to `DetectCx` is lazy (a `OnceLock`), so the
 //! kinds that do not read it pay nothing. A kind whose tensions come from stored records (the
 //! semantic kind) says so with `Detector::stored` and may give its own severity with
 //! `Detector::own_severity`. A kind that a repin or a change of the usual kind does not resolve
@@ -293,6 +294,13 @@ pub trait Detector: Sync {
     }
     /// Whether this kind's tensions come from stored records rather than from the content alone. Such a kind is re-detected after a verdict or an acceptance, and its all-canon tensions are computed per build, never memoised per canon build.
     fn stored(&self) -> bool {
+        false
+    }
+    /// Whether this kind's canon form runs around seeds: given the blocks a landing wrote (and
+    /// its reach), it finds every all-canon tension of this kind that involves one of them, so a
+    /// landing carries the canon part for this kind instead of a full canon run. Default: false
+    /// (the canon form is a full run).
+    fn canon_seeded(&self) -> bool {
         false
     }
     fn detect(

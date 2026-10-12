@@ -460,6 +460,19 @@ fn count_full_build() {
     FULL_BUILDS.with(|c| c.set(c.get() + 1));
 }
 
+thread_local! {
+    /// This thread's count of full canon-part runs (every non-stored kind over all of canon).
+    static CANON_RUNS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// This thread's count of full canon-part runs so far (a canon build's part found by running
+/// every non-stored kind over all of canon, not carried across a landing). A test reads the
+/// difference over a call.
+#[doc(hidden)]
+pub fn canon_part_runs() -> u64 {
+    CANON_RUNS.with(std::cell::Cell::get)
+}
+
 /// This thread's count of full tension-set builds so far (a state's set built without a
 /// carry). A test reads the difference over a call to check that the call built no whole set.
 #[doc(hidden)]
@@ -833,7 +846,7 @@ fn step_carry(
         return Ok(None);
     }
     let canon = match landed {
-        Some(_) => canon_of(st, st.detectors, true)?,
+        Some(_) => canon_of_landing(st, &prev.canon, &seeds)?,
         None => Arc::clone(&prev.canon),
     };
     let mut next = TensionSet {
@@ -973,6 +986,7 @@ fn verdict_carry(
 /// first). What canon's memo holds: a stored kind's all-canon tensions follow its records, not
 /// canon, so [`stored_canon`] gives them per build.
 fn canon_part(st: &ReadState, detectors: &[&dyn Detector]) -> Result<CanonPart, RdyError> {
+    CANON_RUNS.with(|c| c.set(c.get() + 1));
     let writes = Writes::empty();
     let cx = DetectCx::new(st, &writes, canon_index_of(st)?, DetectScope::Canon);
     let mut out = vec![];
@@ -1000,6 +1014,82 @@ fn stored_canon(
         out.extend(detect_kept(st, &cx, *d, None)?);
     }
     Ok(out)
+}
+
+/// The canon part of `st`'s set after a landing whose blocks (and their decisions' targets) are
+/// `seeds`, carried from `prev` (the state before's canon part): canon's memo, filled by the
+/// carry when nothing built it yet, joined with the stored kinds' all-canon tensions as
+/// [`canon_of`] joins them. A kind whose canon form runs around seeds
+/// ([`Detector::canon_seeded`]) drops its tensions on a seed, on its reach and on every block
+/// of a tension it drops, and re-detects around all of them; every other kind runs in full.
+fn canon_of_landing(
+    st: &ReadState,
+    prev: &CanonPart,
+    seeds: &BTreeSet<BlockId>,
+) -> Result<Arc<CanonPart>, RdyError> {
+    let built = st.built(&crate::Scope::Canon)?;
+    let part = built
+        .tension_canon
+        .get_or_init(|| canon_carry(st, prev, seeds).map(Arc::new))
+        .clone()?;
+    let stored = stored_canon(st, st.detectors)?;
+    Ok(if stored.is_empty() {
+        part
+    } else {
+        Arc::new(part.with(stored))
+    })
+}
+
+/// The non-stored canon part of `st` carried from `prev` across a landing on `seeds` (see
+/// [`canon_of_landing`]).
+fn canon_carry(
+    st: &ReadState,
+    prev: &CanonPart,
+    seeds: &BTreeSet<BlockId>,
+) -> Result<CanonPart, RdyError> {
+    let writes = Writes::empty();
+    let cx = DetectCx::new(st, &writes, canon_index_of(st)?, DetectScope::Canon);
+    // the stored kinds' all-canon tensions follow their records, not canon: they are joined
+    // per build, never carried in the memo
+    let stored: BTreeSet<_> = st
+        .detectors
+        .iter()
+        .filter(|d| d.stored())
+        .map(|d| d.kind())
+        .collect();
+    let mut gone: BTreeSet<Hash> = prev
+        .tensions
+        .values()
+        .filter(|t| stored.contains(&t.kind))
+        .map(|t| t.id)
+        .collect();
+    let mut found = vec![];
+    for d in st.detectors.iter().filter(|d| !d.stored()) {
+        let of_kind = |id: &Hash| prev.tensions.get(id).is_some_and(|t| t.kind == d.kind());
+        if !d.canon_seeded() {
+            gone.extend(
+                prev.tensions
+                    .values()
+                    .filter(|t| t.kind == d.kind())
+                    .map(|t| t.id),
+            );
+            found.extend(detect_kept(st, &cx, *d, None)?);
+            continue;
+        }
+        let mut around = seeds.clone();
+        around.extend(d.reach(&cx, seeds)?);
+        let mut dropped: BTreeSet<BlockId> = BTreeSet::new();
+        for b in &around {
+            for id in prev.by_block.get(b).into_iter().flatten() {
+                if of_kind(id) && gone.insert(*id) {
+                    dropped.extend(prev.tensions[id].blocks());
+                }
+            }
+        }
+        around.extend(dropped);
+        found.extend(detect_kept(st, &cx, *d, Some(&around))?);
+    }
+    Ok(prev.without(&gone).with(found))
 }
 
 /// The canon part of a state's set for `detectors`: canon's memo when `memo` (shared, not

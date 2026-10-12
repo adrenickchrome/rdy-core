@@ -93,8 +93,8 @@ fn keys_of(cx: &DetectCx<'_>, b: &rdy_model::Block, out: &mut BTreeSet<Key>) {
 }
 
 /// The keys to examine: every key of the scope, or in flight with `seeds` every key a seed had
-/// or has: those of every write on a seed (live or not) and of its canon version. The canon
-/// scope always examines every canon key.
+/// or has: those of every write on a seed (live or not) and of its canon version. In canon with
+/// `seeds` (a landing's carry, plan M2e2), the keys of the seeds' canon versions.
 fn keys(cx: &DetectCx<'_>, seeds: Option<&BTreeSet<BlockId>>) -> Result<BTreeSet<Key>, RdyError> {
     let mut out = BTreeSet::new();
     match (seeds, cx.scope()) {
@@ -118,10 +118,16 @@ fn keys(cx: &DetectCx<'_>, seeds: Option<&BTreeSet<BlockId>>) -> Result<BTreeSet
                 }
             }
         }
-        // the canon part is always a full run (no seeds)
-        (Some(_), DetectScope::Canon) => {}
+        (Some(seeds), DetectScope::Canon) => {
+            let canon = cx.canon_m()?;
+            for s in seeds {
+                if let Some(b) = canon.get(s) {
+                    keys_of(cx, b, &mut out);
+                }
+            }
+        }
     }
-    if cx.scope() == DetectScope::Canon {
+    if seeds.is_none() && cx.scope() == DetectScope::Canon {
         let ix = cx.canon_index();
         out.extend(ix.names.keys().cloned().map(Key::Name));
         out.extend(ix.texts.keys().copied().map(Key::Text));
@@ -168,6 +174,12 @@ fn clipped(s: &str, n: usize) -> String {
 impl Detector for DuplicateDefinition {
     fn kind(&self) -> TensionKind {
         TensionKind::DuplicateDefinition
+    }
+
+    /// A canon group is the canon blocks of one key: a landing changes only the groups of the
+    /// keys its blocks had or have, and the carry re-detects around every member of those.
+    fn canon_seeded(&self) -> bool {
+        true
     }
 
     /// FW-TN2: a write on a seed can change the membership of every group the seed was or is
