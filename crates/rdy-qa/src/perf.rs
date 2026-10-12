@@ -224,8 +224,11 @@ fn spec_target(op: &str) -> Option<String> {
         "tension_value_1k" | "tension_drift_1k" => {
             "< 10 ms p95: the tension delta and on_change report of one write, the part tension detection adds to the write reply, with 1k in-flight changes (reference/performance tb-XBXR4)"
         }
-        "tension_on_change_delete_1k" | "tension_on_change_view_op_1k" => {
-            "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change, included in the response); a delete and a view op never carry, so this is the in-flight build plus a diff that skips the shared canon part"
+        "tension_on_change_delete_1k" => {
+            "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change, included in the response); a delete never carries, so this is the in-flight build plus a diff that skips the shared canon part"
+        }
+        "tension_on_change_view_op_1k" => {
+            "< 10 ms p99 with 1k in-flight changes (M2 spec 15.1: on_change, included in the response); the view op's write carries the set (plan M2e2), so this is a diff that skips the structure the two sets share"
         }
         "tensions_full_1k" => {
             "no spec target: the cold build of every tension at 1k in-flight changes, once per landing or structural update (recorded for M2d2)"
@@ -1651,8 +1654,8 @@ fn tier_tensions(
             took
         },
     ));
-    // `on_change` of a view op: one of inf2's changes included into a fresh view (its in-flight
-    // set changes, so the state after builds its in-flight part again)
+    // `on_change` of a view op: one of inf2's changes included into a fresh view (its views
+    // change; the write carries the set across it to log its moves, plan M2e2)
     let human = writer();
     let inf2: Vec<String> = r
         .read()

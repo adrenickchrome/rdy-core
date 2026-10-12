@@ -838,7 +838,7 @@ round, I7):
 | `tension_log_close_50_1k` | outside the timer, as agent `tlog{i}` in view `tlog{i}`, 50 one-op updates of claims that an in-flight view also updates (each opens one `edit_collision`); timed: `view_close` of `tlog{i}`. Asserts that the close's batch ends with one record of at least 50 resolved moves | `runs.incremental` | recorded, no spec target: a view close that resolves 50 tensions, logged as one record (plan M2e2) |
 | `tension_on_change_1k` | one citing claim into `inf1` between two captured states, then `tension_delta` and `delta::on_change` for view `inf1` (what the write response computes; the second state's set was carried inside the write, which logs its moves). The write is outside the timer. Asserts the write opened a tension | `runs.incremental` | < 10 ms p99 with 1k in-flight changes (M2 spec 15.1: `on_change` and tension detection, included in the write response) |
 | `tension_on_change_delete_1k` | one delete of a fresh canon claim into `inf1` between two captured states, then `tension_delta` and `delta::on_change` for `inf1`. A delete never carries, so the in-flight build of the second state's set and the diff ran inside the write (it logs its moves), outside the timer; the timer holds the delta and the report. Asserts the set was rebuilt | `runs.incremental` | same as `tension_on_change_1k` |
-| `tension_on_change_view_op_1k` | one of `inf2`'s changes included into a fresh view between two captured states, then `tension_delta` and `delta::on_change` for that view. A view op never carries; its write builds the in-flight set to log its moves, outside the timer | `runs.incremental` | same as `tension_on_change_1k` |
+| `tension_on_change_view_op_1k` | one of `inf2`'s changes included into a fresh view between two captured states, then `tension_delta` and `delta::on_change` for that view. The view op's write carries the set across the change that moved views and logs its moves, outside the timer; the timer holds the delta (a diff that skips the structure the two sets share) and the report | `runs.incremental` | same as `tension_on_change_1k` |
 | `tensions_full_1k` | cold: `invalidate`, then `tensions_rebuilt()` (every detector over canon and every in-flight change) | `runs.materialize_cold` | no spec target: the cold build of every tension at 1k in-flight changes, once per landing or structural update (recorded for M2d2) |
 | `tensions_canon` | cold: `invalidate`, then `canon_tensions_rebuilt()` (the canon scope only; FW-CH6). It runs once per landing: the canon part is memoised on canon's build, so a commit never pays it | `runs.materialize_cold` | no spec target: the canon-scope build of the tensions (FW-CH6), once per landing; recorded for Coverage and confidence |
 | `gate_tensions_1k` | `proposal_tensions` for `inf2` with its changes, on a built set | `runs.read` | recorded: the land message's tension check on a built set (inside the landing budget, M2 spec 15.1) |
@@ -854,9 +854,10 @@ What each cost grows with:
   next request). A commit whose state before was not read yet carries that state's set first, when
   it is published, so a run of commits that nobody reads in between never leaves the next read a
   full build (the first `brief_doc` run did).
-- `tension_on_change_delete_1k` and `tension_on_change_view_op_1k` grow with the in-flight changes
-  and their writes: a delete, a view op, a structural update, a move or a lifecycle write builds the
-  in-flight part of the set again (`Writes::build` and every detector over the live writes). A
+- `tension_on_change_delete_1k` grows with the in-flight changes and their writes: a delete, a
+  structural update, a move or a lifecycle write builds the in-flight part of the set again
+  (`Writes::build` and every detector over the live writes). `tension_on_change_view_op_1k` grows
+  with the diff of the two sets (the view op carries, see below). A
   delete does not carry by design (a deviation from the plan's carry rule, fix 118991c,
   confirmed in the final review's fix round): it takes a block out of reads that the seeds do not
   cover, for example an `affects` target's path, which gives its deciders their areas. The
@@ -870,6 +871,18 @@ What each cost grows with:
   the pack: a commit into a view moves no suspect), and one record in the batch, before its
   one sync. `tension_settle_1k` is gone: the settle after the reply no longer
   exists, and its diff runs inside every write.
+- Since every write logs its moves, every publish needs its state's set, so each kind of write
+  carries it (M2e2 perf fix): a commit (as above); a view op (`include_200`, `exclude_cold`, a
+  close, `tension_log_close_50_1k`), re-detecting around the changes whose membership or views
+  moved, with their writes updated on their blocks only; and a landing (`land_rebase_50`,
+  `propose_land_500_flat`), re-detecting in flight around the landed blocks and the changes that
+  left flight, with the new canon's part carried for duplicate definition (the other canon kinds
+  run in full) and the in-flight state built on the new canon. A step that takes a delete, a
+  structural or lifecycle update, or a non-fresh create into or out of flight (or onto canon)
+  builds the set in full, as a commit does; so does a step whose seeds are more than 1,000 and
+  outnumber the blocks in flight before it (an import: `export_import` builds the imported set
+  once). `Rdy::init` reconciles the empty project, and `invalidate` computes no moves when the
+  published state is the logged one, so a cold read stays cold.
 - `tensions_full_1k` grows with the in-flight changes and the tree; a landing or a structural update
   pays it once per published state, inside the write that logs its moves. A briefing after a carried commit and a proposal never pay it: a proposal lists
   its changes' tensions from the set when it is built or carried, else from the detectors seeded
