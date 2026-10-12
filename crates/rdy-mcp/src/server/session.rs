@@ -15,7 +15,7 @@ impl RdyServer {
     }
 
     #[tool(
-        description = "Project overview: pack, the folder and doc tree, views, canon history and the version position. Also coverage (the current score, its dimensions and the issue count) and the entity kinds. Coverage is for the current state only, so at a past landing the overview is refused as a whole: read canon or a view."
+        description = "Project overview: pack, the folder and doc tree, views, canon history and the version position. Also coverage (the current score, its dimensions and the issue count) and the entity kinds. Coverage is for the current state only: at a past landing the overview leaves coverage out."
     )]
     async fn rdy_overview(&self, Parameters(p): Parameters<ScopeParams>) -> CallToolResult {
         self.run("rdy_overview", p, tools::rdy_overview).await
