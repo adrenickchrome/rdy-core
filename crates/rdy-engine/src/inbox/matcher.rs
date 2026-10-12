@@ -19,6 +19,25 @@ pub fn effective_areas(sub: &InboxSub, infl: &RunInFlight) -> Vec<String> {
     }
 }
 
+/// The raw items of one batch (`batch`: its events, all of one `seq`, logged moves included, in
+/// frame order) from raw index `skip` on, each with its index in the batch and the entry
+/// `match_event` gives it. The indexes are fixed by the log, so a cursor's `skip` counts raw
+/// items walked, matched or not (ruling task-4.1): a cut stays exact whatever the state does
+/// later. Which items match is read from the state at read time. The walk is lazy.
+pub fn batch_items<'a>(
+    st: &'a ReadState,
+    sub: &'a InboxSub,
+    infl: &'a RunInFlight,
+    batch: &'a [Event],
+    skip: usize,
+) -> impl Iterator<Item = Result<(usize, Option<Entry>), RdyError>> + 'a {
+    batch
+        .iter()
+        .enumerate()
+        .skip(skip)
+        .map(move |(i, ev)| Ok((i, match_event(st, sub, infl, ev)?)))
+}
+
 /// The entry `ev` gives the session, under the closed rules of plan M2e2 (ledger F4); None for every other event.
 pub fn match_event(
     st: &ReadState,

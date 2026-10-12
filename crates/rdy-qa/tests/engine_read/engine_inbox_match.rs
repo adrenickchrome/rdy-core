@@ -1,7 +1,7 @@
 //! ib4: the closed rules that put a log event in a session's inbox.
 use rdy_engine::inbox::Entry;
-use rdy_engine::inbox::matcher::match_event;
-use rdy_engine::{Rdy, Session};
+use rdy_engine::inbox::matcher::{batch_items, match_event};
+use rdy_engine::{EventKind, Rdy, Session};
 use rdy_model::Role;
 use rdy_qa::fixtures::*;
 use rdy_qa::packs::qa_project;
@@ -40,6 +40,27 @@ fn entries(r: &Rdy, sub: &InboxSub) -> Vec<Entry> {
         .iter()
         .filter_map(|e| match_event(&st, sub, &infl, e).unwrap())
         .collect()
+}
+/// The entries of the batch that holds the first landing after the cursor of `sub`, from raw
+/// item `skip` on, each with its raw index in the batch: what a read that resumes inside that
+/// batch at `skip` gets from it.
+fn landing_batch_from(r: &Rdy, sub: &InboxSub, skip: usize) -> Vec<(usize, Entry)> {
+    let st = r.read();
+    let infl = st.run_in_flight(&sub.actor, sub.run.as_deref()).unwrap();
+    let evs = st.replay(sub.cursor.at).unwrap();
+    let batch = evs
+        .chunk_by(|x, y| x.seq == y.seq)
+        .find(|b| b.iter().any(|e| matches!(e.kind, EventKind::Landed { .. })))
+        .unwrap();
+    batch_items(&st, sub, &infl, batch, skip)
+        .filter_map(|x| {
+            let (i, e) = x.unwrap();
+            e.map(|e| (i, e))
+        })
+        .collect()
+}
+fn kinds(es: &[(usize, Entry)]) -> Vec<&str> {
+    es.iter().map(|(_, e)| e.event).collect()
 }
 fn events(es: &[Entry]) -> Vec<&str> {
     es.iter().map(|e| e.event).collect()
@@ -196,4 +217,56 @@ fn ib4_other_kinds_never_match() {
     let p = r.propose(&writer(), "b", "b").unwrap();
     let _ = p;
     assert!(entries(&r, &a).is_empty());
+}
+
+/// Ruling task-4.1: a cut inside a batch counts the batch's raw items, not its matched entries,
+/// so a later close of the session's view (its effective areas become empty) loses no entry.
+#[test]
+fn ib4_a_cut_inside_a_batch_survives_a_later_close() {
+    let (_d, mut r) = qa_project();
+    let c = landed_claim(&mut r, "payments/fees");
+    put(&mut r, "a", upd(&c, "a's text"));
+    let a = sub_at_head(&r, &ag("a"), &[]);
+    put(&mut r, "b", upd(&c, "b's text"));
+    land(&mut r, "b").unwrap();
+    let all = landing_batch_from(&r, &a, 0);
+    assert_eq!(kinds(&all), ["landed", "view_rebased"], "{all:?}");
+    // a page that holds only `landed` ends after its raw item
+    let cut = all[0].0 + 1;
+    r.view_close(&writer(), &["a".to_string()], "by hand")
+        .unwrap();
+    assert_eq!(
+        kinds(&landing_batch_from(&r, &a, 0)),
+        ["view_rebased"],
+        "a has no in-flight blocks left"
+    );
+    let rest = landing_batch_from(&r, &a, cut);
+    assert_eq!(kinds(&rest), ["view_rebased"], "the cut drops nothing");
+}
+
+/// Ruling task-4.1, the reverse: an area the session gains after a cut delivers nothing twice.
+#[test]
+fn ib4_a_cut_inside_a_batch_delivers_nothing_twice_after_an_area_is_gained() {
+    let (_d, mut r) = qa_project();
+    let c = landed_claim(&mut r, "payments/fees");
+    put(&mut r, "a", upd(&c, "a's text"));
+    let mut a = sub_at_head(&r, &ag("a"), &["identity"]);
+    put(&mut r, "b", upd(&c, "b's text"));
+    land(&mut r, "b").unwrap();
+    let all = landing_batch_from(&r, &a, 0);
+    assert_eq!(
+        kinds(&all),
+        ["view_rebased"],
+        "payments is not a declared area"
+    );
+    // a page that holds `view_rebased` ends after its raw item
+    let cut = all[0].0 + 1;
+    a.areas = vec!["identity".into(), "payments".into()];
+    assert_eq!(
+        kinds(&landing_batch_from(&r, &a, 0)),
+        ["landed", "view_rebased"],
+        "payments is now an area"
+    );
+    let rest = landing_batch_from(&r, &a, cut);
+    assert!(rest.is_empty(), "nothing is delivered twice: {rest:?}");
 }
