@@ -163,8 +163,10 @@ fn gcar1_a_landing_carries_canons_graph() {
     assert_carried(&r, &Scope::Canon, "a landing");
 }
 
+// FW-IB2 (D-Z0EMP): each write logs its tension and suspect moves, so a cold write builds
+// the in-flight graph once; the next write carries it instead of building it again.
 #[test]
-fn gcar1_an_unbuilt_graph_is_not_built_by_a_write() {
+fn gcar1_a_cold_write_builds_the_graph_once_and_the_next_write_carries_it() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
     r.invalidate();
@@ -174,8 +176,11 @@ fn gcar1_an_unbuilt_graph_is_not_built_by_a_write() {
         json!([{"op": "update", "id": s.c.to_string(), "body": "Cold."}]),
     )
     .unwrap();
-    assert!(
-        !r.read().is_built(&Scope::View("w".into())).1,
-        "the writer never builds a graph"
-    );
+    write(
+        &mut r,
+        "w",
+        json!([{"op": "update", "id": s.a.to_string(), "body": "Warm."}]),
+    )
+    .unwrap();
+    assert_carried(&r, &Scope::View("w".into()), "a write after a cold write");
 }
