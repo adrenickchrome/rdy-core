@@ -85,13 +85,19 @@ impl McpClient {
     /// `rdy mcp --project <s.dir>` as `s`'s human: the proxy to the project's daemon, which it
     /// starts if none runs (`Served` stops it at drop). Its stderr is kept for `wait_exit`.
     pub fn start_proxy(s: &Served) -> McpClient {
+        McpClient::start_proxy_at(s.dir.path(), &s.env_pairs())
+    }
+
+    /// `start_proxy` for a caller that cannot hold the `Served` (a worker thread that outlives
+    /// its borrow): the project's directory and the human's environment (`Served::env_pairs`).
+    pub fn start_proxy_at(dir: &Path, env: &[(String, String)]) -> McpClient {
         let mut cmd = Command::new(rdy_bin());
         cmd.args(["mcp", "--project"])
-            .arg(s.dir.path())
+            .arg(dir)
             .env_remove("RDY_ACTOR")
             .env_remove("RDY_RUN")
             .env_remove("RDY_NO_DAEMON")
-            .envs(s.env_pairs())
+            .envs(env.iter().map(|(k, v)| (k, v)))
             .stderr(Stdio::piped());
         McpClient::launch(cmd)
     }

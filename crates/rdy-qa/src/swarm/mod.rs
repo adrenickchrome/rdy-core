@@ -10,5 +10,11 @@
 //!
 //! - `script`: the closed lists of acts and the seeded generator.
 //! - `journal`: what each actor did and saw, and the closed table of allowed refusals.
+//! - `project`: the served `rdy-qa` project the actors act on, with one stable doc per area.
+//! - `agent`: the scripted agents, each a thread with its own `rdy mcp` proxy process.
+//! - `people`: the person, acting through a relaying agent and the closed list of commands.
+pub mod agent;
 pub mod journal;
+pub mod people;
+pub mod project;
 pub mod script;

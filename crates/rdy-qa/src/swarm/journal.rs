@@ -45,6 +45,9 @@ pub struct Entry {
     pub seen: Vec<String>,
     /// Set for an inbox read.
     pub inbox: Option<InboxRead>,
+    /// The reply a check reads: for `land`, the `rdy --json approve` reply (its `assurance`,
+    /// `landing` and `chosen`).
+    pub reply: Option<serde_json::Value>,
 }
 
 impl Entry {
@@ -64,6 +67,7 @@ impl Entry {
             epoch: 0,
             seen: Vec::new(),
             inbox: None,
+            reply: None,
         }
     }
 }
