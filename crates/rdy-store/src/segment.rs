@@ -24,10 +24,13 @@ pub enum CrashPoint {
     AfterIndex,
     BeforeCheckpoint,
     AfterCheckpoint,
+    /// The close of a store whose index is stale (after a failed seal), right after the store
+    /// drops its handle on the database.
+    StaleIndexClosed,
 }
 
 impl CrashPoint {
-    pub const ALL: [CrashPoint; 7] = [
+    pub const ALL: [CrashPoint; 8] = [
         CrashPoint::BeforeMarker,
         CrashPoint::RolledBeforeMarker,
         CrashPoint::BeforeSync,
@@ -35,6 +38,7 @@ impl CrashPoint {
         CrashPoint::AfterIndex,
         CrashPoint::BeforeCheckpoint,
         CrashPoint::AfterCheckpoint,
+        CrashPoint::StaleIndexClosed,
     ];
 
     pub fn name(self) -> &'static str {
@@ -46,6 +50,7 @@ impl CrashPoint {
             CrashPoint::AfterIndex => "after_index",
             CrashPoint::BeforeCheckpoint => "before_checkpoint",
             CrashPoint::AfterCheckpoint => "after_checkpoint",
+            CrashPoint::StaleIndexClosed => "stale_index_closed",
         }
     }
 

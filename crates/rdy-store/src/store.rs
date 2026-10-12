@@ -755,11 +755,13 @@ impl Store {
     /// sync per batch, held or not. With no batch open and `last` empty it does nothing; with no
     /// batch open and `last` not empty it opens one first (a reload batch holds only its record).
     ///
-    /// A failure truncates the log to the batch's start and poisons the store: the index already
-    /// holds entries of frames that are gone, so every later write and every checkpoint fails
-    /// until reopen. The error is returned.
+    /// A failure truncates the log to the batch's start. If a batch was open, it also poisons the
+    /// store: the index already holds entries of frames that are gone, so every later write and
+    /// every checkpoint fails until reopen. If no batch was open, the index holds nothing of the
+    /// batch, so the store keeps working, as after a failed write. The error is returned.
     pub fn seal(&mut self, last: Vec<(u8, Vec<u8>)>) -> Result<(), StoreError> {
-        if self.open.is_none() && last.is_empty() {
+        let was_open = self.open.is_some();
+        if !was_open && last.is_empty() {
             return Ok(());
         }
         if self.poisoned {
@@ -781,12 +783,16 @@ impl Store {
             Ok(()) => Ok(()),
             Err(e) => {
                 self.open = None;
-                self.poisoned = true;
-                self.stale_index = true;
-                if std::mem::take(&mut self.faults.rollback) {
-                    return Err(e);
+                if was_open {
+                    self.poisoned = true;
+                    self.stale_index = true;
                 }
-                let _ = self.log.truncate_to(start);
+                // as in `write`: a log that cannot be rolled back poisons the store
+                let rolled_back = !std::mem::take(&mut self.faults.rollback)
+                    && self.log.truncate_to(start).is_ok();
+                if !rolled_back {
+                    self.poisoned = true;
+                }
                 Err(e)
             }
         }
@@ -1198,12 +1204,19 @@ impl Store {
         let sealed = self.seal(vec![]);
         if self.open.is_some() || self.stale_index {
             // The index holds entries of frames the log does not keep (a failed seal, or a batch
-            // left open on a poisoned store), and closing the database would make them durable.
-            // It is removed instead, and the next open rebuilds it from the log; the sentinel
-            // stays.
+            // left open on a poisoned store), and a clean close of the database makes them
+            // durable. So the file is removed first, and the removal is made durable; only then
+            // does the database close, onto a file no name reaches. The next open rebuilds the
+            // index from the log; the sentinel stays. If the removal fails, the database is never
+            // closed cleanly: the next open then sees a kill, which drops those entries.
+            let removed = remove_if_present(&self.dir.join("index.redb"))
+                .and_then(|()| fsutil::sync_dir(&self.dir).map_err(Into::into));
+            if let Err(e) = removed {
+                std::mem::forget(self.reader.take());
+                return Err(e);
+            }
             drop(self.drop_index());
-            remove_if_present(&self.dir.join("index.redb"))?;
-            fsutil::sync_dir(&self.dir)?;
+            self.log.crash_point(CrashPoint::StaleIndexClosed);
             sealed?;
             return Err(poisoned_error());
         }

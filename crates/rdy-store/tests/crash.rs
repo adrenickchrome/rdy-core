@@ -2,8 +2,10 @@
 //! child (`crash_child`) that makes acknowledged writes and is aborted at a chosen point of a later
 //! one; the parent reopens the store and checks it recovered every acknowledged write, with the
 //! index caught up from the log rather than rebuilt.
+use rdy_model::Hash;
 use rdy_store::format::STORE_FORMAT;
 use rdy_store::segment::{CrashPoint, Location};
+use rdy_store::transition::{Cause, Side, TensionMove, Transitions, Why};
 use rdy_store::{OpenReport, Store};
 use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
@@ -14,6 +16,54 @@ fn payload(i: usize, pad: usize) -> Vec<u8> {
     let mut v = format!("crash write {i:05} ").into_bytes();
     v.resize(v.len().max(pad), b'.');
     v
+}
+
+/// The second blob of held batch `i`.
+fn second(i: usize, pad: usize) -> Vec<u8> {
+    let mut v = format!("crash second {i:05} ").into_bytes();
+    v.resize(v.len().max(pad), b'.');
+    v
+}
+
+fn tension_id(i: usize) -> Hash {
+    Hash::of(format!("crash tension {i}").as_bytes())
+}
+
+fn tension_move(i: usize, cause: Cause) -> TensionMove {
+    let side = |c: &str, actor: &str| Side {
+        change: Some(Hash::of(c.as_bytes())),
+        actor: Some(actor.into()),
+        run: None,
+        landing: None,
+    };
+    TensionMove {
+        tension: tension_id(i),
+        kind: "edit_collision".into(),
+        severity: "blocking".into(),
+        sides: vec![side("c1", "agent:a"), side("c2", "agent:b")],
+        rekey: None,
+        why: Why {
+            cause,
+            id: Some(Hash::of(format!("crash cause {i}").as_bytes())),
+            actor: None,
+            run: None,
+        },
+    }
+}
+
+/// The record that seals held batch `i`: it opens tension `i` and resolves tension `i - 1`.
+fn held_record(i: usize) -> Transitions {
+    Transitions {
+        at_ms: i as i64,
+        resolved: if i == 0 {
+            vec![]
+        } else {
+            vec![tension_move(i - 1, Cause::Landed)]
+        },
+        opened: vec![tension_move(i, Cause::Committed)],
+        gone: vec![],
+        new: vec![],
+    }
 }
 
 #[test]
@@ -37,6 +87,7 @@ fn crash_child() {
     if let Some(n) = var("RDY_CRASH_CHECKPOINT_FRAMES") {
         s.set_checkpoint_frames(n.parse().unwrap());
     }
+    let fail_seal = var("RDY_CRASH_FAIL_SEAL").is_some();
     let mut out = std::io::stdout().lock();
     for i in 0..acked + 1000 {
         if i == acked {
@@ -44,7 +95,15 @@ fn crash_child() {
         }
         s.put_blob(&payload(i, pad)).unwrap();
         if held {
-            s.seal(vec![]).unwrap();
+            // a held batch: two writes, then the seal logs the batch's record last
+            s.put_blob(&second(i, pad)).unwrap();
+            if i == acked && fail_seal {
+                s.fail_next_index_apply();
+                assert!(s.seal(vec![held_record(i).frame()]).is_err());
+                drop(s); // the close of the store dies at the armed crash point
+                std::process::exit(3);
+            }
+            s.seal(vec![held_record(i).frame()]).unwrap();
         }
         let end = s.log_end();
         writeln!(out, "ACK {i} {} {}", end.segment, end.offset).unwrap();
@@ -170,32 +229,110 @@ fn kill1_every_write_step_recovers_to_the_acknowledged_writes() {
     }
 }
 
-/// ib14 (Review Focus 6): a held batch is acknowledged only by its seal. A kill before the
-/// seal's marker loses the whole batch, and the log ends where the last seal left it.
+/// Checks the held batches of `s` after a kill in batch `acked`: batches before it read back
+/// whole, and batch `acked` (two blobs and its record) survives whole when `kept`, else not at
+/// all. The open-tension table and fsck agree with the batches kept.
+fn held_batches_kept(s: &Store, acked: usize, kept: bool, pad: usize) {
+    for i in 0..acked {
+        for want in [payload(i, pad), second(i, pad)] {
+            assert_eq!(
+                s.get_blob(&Store::blob_hash(&want)).unwrap(),
+                want,
+                "batch {i}"
+            );
+        }
+    }
+    for b in [payload(acked, pad), second(acked, pad)] {
+        assert_eq!(
+            s.has_blob(&Store::blob_hash(&b)).unwrap(),
+            kept,
+            "a blob of the interrupted batch {acked}"
+        );
+    }
+    let record = Hash::of(&held_record(acked).frame().1);
+    assert_eq!(
+        s.reader().transitions(&record).is_ok(),
+        kept,
+        "the record of the interrupted batch {acked}"
+    );
+    let last = if kept { acked } else { acked - 1 };
+    let open: Vec<Hash> = s
+        .reader()
+        .open_tensions()
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(open, vec![tension_id(last)], "the open tensions");
+    assert_eq!(s.check_objects().unwrap().transitions, last + 1);
+    s.verify().unwrap();
+}
+
+/// ib14 (Review Focus 6): a held batch is acknowledged only by its seal. Each batch is two
+/// writes and a record that moves a tension. A kill before the seal's marker loses the whole
+/// batch, record included, and the log ends where the last seal left it; a kill after the marker
+/// keeps the whole batch. The same holds when the first write of each batch rolls the segment.
 #[test]
 fn ib14_a_held_batch_killed_before_its_seal_is_not_acknowledged() {
+    for rolled in [false, true] {
+        let env: &[(&str, &str)] = if rolled {
+            &[("RDY_CRASH_HELD", "1"), ("RDY_CRASH_SEGMENT_MAX", "64")]
+        } else {
+            &[("RDY_CRASH_HELD", "1")]
+        };
+        for (point, kept) in [
+            (CrashPoint::BeforeMarker, false),
+            (CrashPoint::BeforeSync, true),
+            (CrashPoint::AfterSync, true),
+            (CrashPoint::AfterIndex, true),
+        ] {
+            let what = format!("{point:?}, rolled {rolled}");
+            let dir = tempfile::tempdir().unwrap();
+            let acks = crash(dir.path(), point, 5, env);
+            assert_eq!(acks.len(), 5, "{what}");
+            if rolled {
+                assert!(
+                    acks.windows(2).all(|w| w[1].segment > w[0].segment),
+                    "{what}: each batch rolls: {acks:?}"
+                );
+            }
+            let s = Store::create(dir.path()).unwrap_or_else(|e| panic!("{what}: reopen: {e}"));
+            if !kept {
+                assert_eq!(
+                    s.log_end(),
+                    acks[4],
+                    "{what}: the log ends at the last acknowledged end"
+                );
+                assert_eq!(
+                    s.open_report().quarantined.len(),
+                    1,
+                    "{what}: {:?}",
+                    s.open_report()
+                );
+            }
+            held_batches_kept(&s, 5, kept, 0);
+            drop(s);
+            recovered(dir.path(), 5, kept, 0);
+        }
+    }
+}
+
+/// ib14 fix round 1: a seal fails after its batch was indexed, so the close removes the stale
+/// index. A kill right after the database closes must leave a store that opens, with the whole
+/// batch lost and every acknowledged batch kept.
+#[test]
+fn ib14_a_kill_as_a_failed_seal_closes_its_index_leaves_a_store_that_opens() {
     let dir = tempfile::tempdir().unwrap();
     let acks = crash(
         dir.path(),
-        CrashPoint::BeforeMarker,
+        CrashPoint::StaleIndexClosed,
         5,
-        &[("RDY_CRASH_HELD", "1")],
+        &[("RDY_CRASH_HELD", "1"), ("RDY_CRASH_FAIL_SEAL", "1")],
     );
     assert_eq!(acks.len(), 5);
     let s = Store::create(dir.path()).unwrap_or_else(|e| panic!("reopen: {e}"));
-    assert_eq!(
-        s.log_end(),
-        acks[4],
-        "the log ends at the last acknowledged end"
-    );
-    assert_eq!(
-        s.open_report().quarantined.len(),
-        1,
-        "{:?}",
-        s.open_report()
-    );
-    drop(s);
-    recovered(dir.path(), 5, false, 0);
+    assert_eq!(s.log_end(), acks[4]);
+    held_batches_kept(&s, 5, false, 0);
 }
 
 #[test]

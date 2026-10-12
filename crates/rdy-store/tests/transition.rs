@@ -242,3 +242,77 @@ fn ib14_a_failed_seal_poisons_and_the_reopen_loses_the_whole_batch() {
     st.verify().unwrap();
     st.check_objects().unwrap();
 }
+
+/// ib14 fix round 1: a seal with no batch open fails as a plain write fails. The index holds
+/// nothing of that batch, so the log is truncated, the store keeps working, and the close keeps
+/// the index.
+#[test]
+fn ib14_a_failed_seal_with_no_open_batch_leaves_the_store_working() {
+    let (dir, mut st) = fresh();
+    st.set_held(true).unwrap();
+    let start = st.log_end();
+    let r = rec(
+        vec![],
+        vec![tension(b"t1", why(Cause::Committed, Some(Hash::of(b"c1"))))],
+        vec![],
+        vec![],
+    );
+    st.fail_next_append_after(3);
+    assert!(st.seal(vec![r.frame()]).is_err());
+    assert!(st.open_batch().is_none());
+    assert_eq!(
+        st.log_end(),
+        start,
+        "the log is truncated to the batch's start"
+    );
+    st.set_refs(vec![("t/a".into(), vec![1])]).unwrap();
+    st.seal(vec![r.frame()]).unwrap();
+    st.close().unwrap();
+    assert!(
+        dir.path().join("s").join("index.redb").exists(),
+        "the close keeps the index"
+    );
+    let st = reopen(&dir);
+    assert!(!st.open_report().index_rebuilt, "{:?}", st.open_report());
+    assert_eq!(st.reader().get_ref("t/a").unwrap(), Some(vec![1]));
+    assert_eq!(st.reader().open_tensions().unwrap().len(), 1);
+    assert_eq!(st.check_objects().unwrap().transitions, 1);
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let p = e.unwrap().path();
+        let t = to.join(p.file_name().unwrap());
+        if p.is_dir() {
+            copy_dir(&p, &t)
+        } else if p.file_name().unwrap() != "lock" {
+            std::fs::copy(&p, &t).unwrap();
+        }
+    }
+}
+
+/// ib14 fix round 1: a close that cannot remove a stale index never closes it cleanly, so the
+/// index on disk stays as a kill leaves it. A copy of the store taken after that close (the
+/// state a process exit leaves) opens, and the whole batch is lost.
+#[test]
+fn ib14_a_close_that_cannot_remove_a_stale_index_never_closes_it_cleanly() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, mut st) = fresh();
+    let s = dir.path().join("s");
+    st.set_held(true).unwrap();
+    st.set_refs(vec![("t/a".into(), vec![1])]).unwrap();
+    st.fail_next_index_apply();
+    assert!(st.seal(vec![]).is_err());
+    std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let closed = st.close();
+    std::fs::set_permissions(&s, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(closed.is_err(), "the removal fails");
+    assert!(s.join("index.redb").exists());
+    let copy = tempfile::tempdir().unwrap();
+    copy_dir(&s, copy.path());
+    let st = Store::open(copy.path()).unwrap_or_else(|e| panic!("reopen: {e}"));
+    assert_eq!(st.reader().get_ref("t/a").unwrap(), None);
+    st.verify().unwrap();
+    st.check_objects().unwrap();
+}
