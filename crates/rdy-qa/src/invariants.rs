@@ -1,5 +1,5 @@
 //! The invariant checker (spec §3): what must always hold in canon or a view.
-use rdy_engine::{Rdy, Scope};
+use rdy_engine::{Rdy, ReadState, Scope};
 use rdy_model::{
     Block, BlockId, FieldValue, LandingRecord, StateSnapshot, decision, tree, valid_order_key,
 };
@@ -22,10 +22,47 @@ fn v(rule: &'static str, block: Option<&BlockId>, detail: impl Into<String>) -> 
     }
 }
 
+/// The checker's rules on `scope`, all read from one snapshot of `r` (D-XH24M), then `r.fsck()`.
 pub fn check(r: &Rdy, scope: &Scope) -> Result<(), Vec<Violation>> {
+    let st = r.read();
+    let mut out = match check_in(r, &st, scope) {
+        Ok(()) => vec![],
+        Err(vs) => vs,
+    };
+    if let Err(e) = r.fsck() {
+        out.push(v("fsck", None, e.to_string()));
+    }
+    if out.is_empty() { Ok(()) } else { Err(out) }
+}
+
+/// `check` on canon, then on every open view, all from one snapshot of `r`, then `r.fsck()`
+/// once and the `logged` rule (`reindex_check::logged`): every violation together.
+pub fn check_all(r: &Rdy) -> Result<(), Vec<Violation>> {
+    let st = r.read();
     let mut out = vec![];
-    let m = match r.read().materialized(scope) {
-        Ok(m) => m.clone(),
+    let mut scopes = vec![Scope::Canon];
+    for name in st.view_names() {
+        if st.view_head(&name).is_some_and(|h| !h.closed) {
+            scopes.push(Scope::View(name));
+        }
+    }
+    for scope in &scopes {
+        if let Err(vs) = check_in(r, &st, scope) {
+            out.extend(vs);
+        }
+    }
+    match r.fsck() {
+        Ok(f) => out.extend(crate::reindex_check::logged_in(&st, &f)),
+        Err(e) => out.push(v("fsck", None, e.to_string())),
+    }
+    if out.is_empty() { Ok(()) } else { Err(out) }
+}
+
+/// Every rule of `check` but `fsck`, read from the snapshot `st`; `frozen` reads `r`'s store.
+fn check_in(r: &Rdy, st: &ReadState, scope: &Scope) -> Result<(), Vec<Violation>> {
+    let mut out = vec![];
+    let m = match st.materialized(scope) {
+        Ok(m) => m,
         Err(e) => {
             return Err(vec![v(
                 "fsck",
@@ -34,7 +71,7 @@ pub fn check(r: &Rdy, scope: &Scope) -> Result<(), Vec<Violation>> {
             )]);
         }
     };
-    let pack = r.pack().clone();
+    let pack = st.pack();
     for b in m.iter() {
         // parent exists; walk the chain for cycles and folder depth
         let parent = b.parent.as_ref().and_then(|p| m.get(p));
@@ -126,9 +163,9 @@ pub fn check(r: &Rdy, scope: &Scope) -> Result<(), Vec<Violation>> {
         {
             checked.fields.insert("name".into(), FieldValue::Str(n));
         }
-        for i in validate_prefix(&pack, &checked)
+        for i in validate_prefix(pack, &checked)
             .into_iter()
-            .chain(validate_block(&pack, &checked, parent))
+            .chain(validate_block(pack, &checked, parent))
         {
             if i.severity == Severity::Error && i.code != "E_ORDER_KEY" {
                 out.push(v(
@@ -159,12 +196,9 @@ pub fn check(r: &Rdy, scope: &Scope) -> Result<(), Vec<Violation>> {
     }
     if *scope == Scope::Canon {
         out.extend(frozen(r));
-        if let Err(vs) = check_views(r) {
+        if let Err(vs) = check_views_in(st) {
             out.extend(vs);
         }
-    }
-    if let Err(e) = r.fsck() {
-        out.push(v("fsck", None, e.to_string()));
     }
     if out.is_empty() { Ok(()) } else { Err(out) }
 }
@@ -218,8 +252,12 @@ fn frozen(r: &Rdy) -> Vec<Violation> {
 /// names a stored change and block (`conflict_sides`), and the store's typed objects, view chains
 /// and dependency DAG hold (`chains`). The frame walk of `Rdy::fsck` is left to the caller.
 pub fn check_views(r: &Rdy) -> Result<(), Vec<Violation>> {
+    check_views_in(&r.read())
+}
+
+/// `check_views` on the snapshot `st`.
+fn check_views_in(st: &ReadState) -> Result<(), Vec<Violation>> {
     let mut out = vec![];
-    let st = r.read();
     let store = st.reader();
     let canon = st.canon_head();
     // landings, newest first: a landing's position is its distance from canon's head
