@@ -264,6 +264,9 @@ fn ib11_a_pack_reload_notifies_rdy_pack() {
     );
 }
 
+/// A guard that the daemon keeps serving after a subscribed session goes. It cannot see a dead
+/// session left in the hub (a send to it fails silently): rdy-daemon's
+/// `ib11_a_session_end_removes_it_from_the_hub` pins the session-end hook itself.
 #[test]
 fn ib11_a_closed_session_leaves_the_hub() {
     let s = served();
@@ -293,4 +296,71 @@ fn ib11_a_closed_session_leaves_the_hub() {
         log.lines().all(|l| !l.contains("notify")),
         "the daemon logged a notify error: {log}"
     );
+}
+
+/// Agent `b` writes doc `ops` (path `ops`) with a claim in its view. Returns the ids of the doc
+/// and the claim.
+fn ops_doc(b: &mut McpClient) -> (String, String) {
+    let w = b
+        .call(
+            "rdy_write",
+            json!({"ops": [
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "ops", "title": "Ops", "doc_type": "glossary"}},
+                {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+                {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Ops holds."}
+            ]}),
+        )
+        .ok();
+    let id = |k: &str| w["created"][k].as_str().unwrap().to_string();
+    (id("$d"), id("$c"))
+}
+
+#[test]
+fn ib11_a_doc_subscription_by_id_path_or_claim_hears_its_changes() {
+    let s = served();
+    let (mut b, vb) = agent(&s, "b", None);
+    let (doc, claim) = ops_doc(&mut b);
+    let uris = [
+        format!("rdy://doc/{doc}"),
+        "rdy://doc/ops".to_string(),
+        format!("rdy://doc/{claim}"),
+        format!("rdy://view/{vb}"),
+    ];
+    for uri in &uris {
+        subscribe(&mut b, uri);
+        let read = b.read_resource(uri);
+        assert!(read.get("error").is_none(), "{uri}: {read}");
+    }
+    let w = b
+        .call(
+            "rdy_write",
+            json!({"ops": [{"op": "update", "id": claim, "body": "Ops holds, still."}]}),
+        )
+        .ok();
+    assert!(w["change"].is_string(), "{w}");
+    // the doc by id and by path hear of a change in it; the claim's URI hears of the claim
+    for uri in &uris {
+        assert!(
+            b.wait_notification(uri, WAIT),
+            "b heard no {uri} update: {:?}",
+            b.notifications()
+        );
+    }
+}
+
+#[test]
+fn ib11_an_unresolvable_doc_uri_is_refused_as_its_read_is() {
+    let s = served();
+    let (mut b, _) = agent(&s, "b", None);
+    for uri in ["rdy://doc/no/such/doc", "rdy://doc/c-ZZZZZ"] {
+        let sub = b.subscribe(uri);
+        let read = b.read_resource(uri);
+        assert!(sub.get("error").is_some(), "{uri}: {sub}");
+        assert!(read.get("error").is_some(), "{uri}: {read}");
+        assert_eq!(
+            sub["error"]["code"], read["error"]["code"],
+            "{uri}: {sub} {read}"
+        );
+        assert_eq!(sub["error"]["message"], read["error"]["message"], "{uri}");
+    }
 }

@@ -7,10 +7,12 @@
 //!
 //! After each message's publish (and the reply, for a write), the writer forwards the events of
 //! the batches it sealed to the notifier (ib11), one message per batch: one unbounded channel
-//! send each, so the notifier never slows a write. The notifier reads a state that holds them.
+//! send each, so the notifier never slows a write. Each message carries the inbox subscriptions
+//! of the connected sessions, read from the published state before the next message opens a
+//! batch (ruling task-11.1). The notifier reads a state that holds them.
 use crate::E_DAEMON_GONE;
 use crate::daemon::log;
-use crate::notify::NotifyMsg;
+use crate::notify::{NotifyMsg, inbox_subs};
 use crate::shared::Shared;
 use rdy_engine::engine::WriteFn;
 use rdy_engine::{E_INTERNAL, Event, Rdy, RdyError, ReloadOutcome};
@@ -119,9 +121,17 @@ impl Writer {
             return;
         };
         let sh = self.shared.upgrade();
-        let send = |batch: Vec<Arc<Event>>| {
+        // the inbox subscriptions as of the state just published, read here on the writer where
+        // no batch is open (ruling task-11.1): the notifier never reads them from the live index
+        let subs = Arc::new(
+            sh.as_ref()
+                .map(|sh| inbox_subs(&sh.state.load(), &sh.hub.targets()))
+                .unwrap_or_default(),
+        );
+        let send = |events: Vec<Arc<Event>>| {
             if let Some(sh) = &sh {
-                let _ = sh.notify.send(NotifyMsg::Events(batch));
+                let subs = Arc::clone(&subs);
+                let _ = sh.notify.send(NotifyMsg::Events { events, subs });
             }
         };
         let mut batch = vec![first];

@@ -173,3 +173,28 @@ impl Engine for DaemonEngine {
         self.0.pack_error_lock().clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rdy_mcp::notify::Sink;
+
+    #[test]
+    fn ib11_a_session_end_removes_it_from_the_hub() {
+        let dir = tempfile::tempdir().unwrap();
+        let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
+        sh.hub.connect(5, Sink::None);
+        sh.hub.identify(5, "agent:a", Some("a"));
+        sh.hub.subscribe(5, "rdy://inbox");
+        sh.hub.connect(6, Sink::None);
+        assert_eq!(sh.hub.targets().len(), 2);
+        sh.end_session(SessionId(5));
+        let sids: Vec<u64> = sh.hub.targets().iter().map(|t| t.sid).collect();
+        assert_eq!(
+            sids,
+            vec![6],
+            "the ended session left the hub, the other stays"
+        );
+        sh.shutdown().unwrap();
+    }
+}

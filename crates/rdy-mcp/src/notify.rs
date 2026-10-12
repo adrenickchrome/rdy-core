@@ -5,6 +5,7 @@
 //!
 //! A notification is best effort (spec §10.3): the send runs on the tokio runtime that was current
 //! when the session connected, and a failed send is dropped. The inbox is the reliable path.
+use rdy_model::BlockId;
 use rmcp::model::ResourceUpdatedNotificationParam;
 use rmcp::service::SubscriptionSink;
 use rmcp::{Peer, RoleServer};
@@ -29,6 +30,9 @@ pub struct Target {
     pub actor: Option<String>,
     pub run: Option<String>,
     pub uris: BTreeSet<String>,
+    /// The block each subscribed `rdy://doc/{id}` URI follows, resolved when it subscribed
+    /// (ruling task-11.2): a path or key names its block, so the daemon matches writes by id.
+    pub docs: BTreeMap<String, BlockId>,
 }
 
 struct Conn {
@@ -38,6 +42,7 @@ struct Conn {
     actor: Option<String>,
     run: Option<String>,
     uris: BTreeSet<String>,
+    docs: BTreeMap<String, BlockId>,
 }
 
 impl Conn {
@@ -48,6 +53,7 @@ impl Conn {
             actor: None,
             run: None,
             uris: BTreeSet::new(),
+            docs: BTreeMap::new(),
         }
     }
 }
@@ -91,9 +97,19 @@ impl NotifyHub {
         c.uris.insert(uri.to_string());
     }
 
+    /// Subscribes session `sid` to the doc resource `uri`, which follows block `block` (the
+    /// URI's id, key or path, resolved by the caller).
+    pub fn subscribe_doc(&self, sid: u64, uri: &str, block: BlockId) {
+        let mut conns = self.conns();
+        let c = conns.entry(sid).or_insert_with(Conn::new);
+        c.uris.insert(uri.to_string());
+        c.docs.insert(uri.to_string(), block);
+    }
+
     pub fn unsubscribe(&self, sid: u64, uri: &str) {
         if let Some(c) = self.conns().get_mut(&sid) {
             c.uris.remove(uri);
+            c.docs.remove(uri);
         }
     }
 
@@ -111,6 +127,7 @@ impl NotifyHub {
                 actor: c.actor.clone(),
                 run: c.run.clone(),
                 uris: c.uris.clone(),
+                docs: c.docs.clone(),
             })
             .collect()
     }
@@ -173,5 +190,18 @@ mod tests {
         // a notify to a session with no sink or an unknown session does nothing
         hub.notify(7, "rdy://inbox");
         hub.notify(3, "rdy://pack");
+    }
+
+    #[test]
+    fn ib11_a_doc_subscription_keeps_the_block_it_follows() {
+        let hub = NotifyHub::new();
+        let d = BlockId::parse("d-AAAAA").unwrap();
+        hub.subscribe_doc(4, "rdy://doc/ops", d.clone());
+        let t = hub.targets();
+        assert!(t[0].uris.contains("rdy://doc/ops"));
+        assert_eq!(t[0].docs.get("rdy://doc/ops"), Some(&d));
+        hub.unsubscribe(4, "rdy://doc/ops");
+        let t = hub.targets();
+        assert!(t[0].uris.is_empty() && t[0].docs.is_empty());
     }
 }

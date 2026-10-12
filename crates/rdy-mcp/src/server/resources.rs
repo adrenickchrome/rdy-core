@@ -15,7 +15,8 @@
 use crate::notify::Sink;
 use crate::server::RdyServer;
 use crate::tools::{self, McpState, session};
-use rdy_engine::{E_INTERNAL, E_NOT_FOUND, RdyError};
+use rdy_engine::{E_INTERNAL, E_NOT_FOUND, RdyError, ReadState, Scope};
+use rdy_model::BlockId;
 use rmcp::{
     ErrorData as McpError,
     model::{
@@ -130,6 +131,26 @@ fn params<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, RdyError> {
     })
 }
 
+/// The block a `rdy://doc/{text}` subscription follows (ruling task-11.2): `text` (an id, key or
+/// path) resolved in the in-flight scope, else in canon, when that scope holds the block; a
+/// `<doc>#<heading-slug>` follows its section. `None` when neither scope holds it. A doc's
+/// subscription hears of any block in the doc; any other block's hears of that block only.
+pub(crate) fn followed_block(read: &ReadState, text: &str) -> Option<BlockId> {
+    let (target, slug) = match text.split_once('#') {
+        Some((t, s)) => (t, Some(s)),
+        None => (text, None),
+    };
+    [Scope::Inflight, Scope::Canon].iter().find_map(|scope| {
+        let id = read.resolve_id(scope, target).ok()?;
+        let m = read.materialized(scope).ok()?;
+        let root = m.get(&id)?;
+        match slug {
+            None => Some(id),
+            Some(s) => crate::read_page::section_by_slug(&m, root, s).ok(),
+        }
+    })
+}
+
 /// The refusal for a URI outside the closed set.
 pub(crate) fn unknown(uri: &str) -> McpError {
     McpError::resource_not_found(
@@ -191,16 +212,46 @@ impl RdyServer {
         ]))
     }
 
-    /// Legacy `resources/subscribe`: the session's peer becomes its sink.
-    pub(crate) fn resources_subscribe(
+    /// Legacy `resources/subscribe`: the session's peer becomes its sink. A doc URI is resolved
+    /// to the block it follows now; one that names no block is refused as its read is.
+    pub(crate) async fn resources_subscribe(
         &self,
         uri: &str,
         peer: rmcp::Peer<rmcp::RoleServer>,
     ) -> Result<(), McpError> {
-        Res::parse(uri).ok_or_else(|| unknown(uri))?;
+        let followed = match Res::parse(uri).ok_or_else(|| unknown(uri))? {
+            Res::Doc(text) => Some(self.follow(text).await?),
+            _ => None,
+        };
         self.hub.connect(self.hub_sid, Sink::Legacy(peer));
-        self.hub.subscribe(self.hub_sid, uri);
+        match followed {
+            Some(block) => self.hub.subscribe_doc(self.hub_sid, uri, block),
+            None => self.hub.subscribe(self.hub_sid, uri),
+        }
         Ok(())
+    }
+
+    /// The block `rdy://doc/{text}` follows, on the blocking pool with the state lock:
+    /// [`followed_block`], else the root of the resource's own read, whose error refuses the
+    /// subscription as it refuses the read (ruling task-11.2).
+    async fn follow(&self, text: String) -> Result<BlockId, McpError> {
+        let v = self
+            .blocking("resources/subscribe", false, move |st| {
+                if let Some(b) = followed_block(&st.engine.read(), &text) {
+                    return Ok(Value::String(b.to_string()));
+                }
+                Ok(Res::Doc(text).read(st)?["id"].clone())
+            })
+            .await
+            .map_err(refuse)?;
+        v.as_str()
+            .and_then(|id| BlockId::parse(id).ok())
+            .ok_or_else(|| {
+                McpError::internal_error(
+                    format!("a doc subscription resolved to no block id ({v}): report this as a bug in rdy"),
+                    None,
+                )
+            })
     }
 
     pub(crate) fn resources_unsubscribe(&self, uri: &str) -> Result<(), McpError> {
@@ -209,13 +260,22 @@ impl RdyServer {
         Ok(())
     }
 
-    /// The `subscriptions/listen` filter rdy accepts: the requested resource URIs that are known.
-    pub(crate) fn resources_filter(requested: &SubscriptionFilter) -> SubscriptionFilter {
+    /// The `subscriptions/listen` filter rdy accepts: the requested resource URIs that are known,
+    /// a doc URI only when `follows` resolves its text to a block (the listen form of the
+    /// refusal `resources/subscribe` gives).
+    pub(crate) fn resources_filter(
+        requested: &SubscriptionFilter,
+        follows: impl Fn(&str) -> bool,
+    ) -> SubscriptionFilter {
         let known: Vec<String> = requested
             .resource_subscriptions
             .iter()
             .flatten()
-            .filter(|uri| Res::parse(uri).is_some())
+            .filter(|uri| match Res::parse(uri) {
+                Some(Res::Doc(text)) => follows(&text),
+                Some(_) => true,
+                None => false,
+            })
             .cloned()
             .collect();
         SubscriptionFilter::builder()
@@ -232,7 +292,15 @@ impl RdyServer {
             .clone()
             .unwrap_or_default();
         for uri in &uris {
-            self.hub.subscribe(self.hub_sid, uri);
+            match Res::parse(uri) {
+                // resolved again: a doc deleted since the filter accepted it is left out
+                Some(Res::Doc(text)) => {
+                    if let Ok(block) = self.follow(text).await {
+                        self.hub.subscribe_doc(self.hub_sid, uri, block);
+                    }
+                }
+                _ => self.hub.subscribe(self.hub_sid, uri),
+            }
         }
         self.hub
             .connect(self.hub_sid, Sink::Listen(context.sink().clone()));
@@ -294,7 +362,7 @@ mod tests {
             .tools_list_changed()
             .resource_subscriptions(["rdy://inbox", "file:///etc", "rdy://doc/d-1"])
             .build();
-        let accepted = RdyServer::resources_filter(&requested);
+        let accepted = RdyServer::resources_filter(&requested, |_| true);
         assert_eq!(
             accepted.resource_subscriptions,
             Some(vec!["rdy://inbox".to_string(), "rdy://doc/d-1".to_string()])
@@ -350,5 +418,51 @@ mod tests {
         assert_eq!(refuse(e(E_NOT_FOUND)).code, ErrorCode::RESOURCE_NOT_FOUND);
         assert_eq!(refuse(e("E_NO_SESSION")).code, ErrorCode::INVALID_REQUEST);
         assert_eq!(refuse(e("E_BAD_INPUT")).code, ErrorCode::INVALID_REQUEST);
+    }
+
+    #[test]
+    fn ib11_the_listen_filter_drops_a_doc_uri_that_names_no_block() {
+        let requested = SubscriptionFilter::builder()
+            .resource_subscriptions(["rdy://inbox", "rdy://doc/no/such", "rdy://doc/ops"])
+            .build();
+        let accepted = RdyServer::resources_filter(&requested, |text| text == "ops");
+        assert_eq!(
+            accepted.resource_subscriptions,
+            Some(vec!["rdy://inbox".to_string(), "rdy://doc/ops".to_string()])
+        );
+    }
+
+    #[test]
+    fn ib11_a_doc_uri_follows_the_block_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let human = rdy_engine::Session::human("human:qa".into(), rdy_model::Role::Writer);
+        let w = rdy
+            .write(
+                &human,
+                rdy_engine::WriteRequest {
+                    view: "work".into(),
+                    ops: serde_json::from_value(json!([
+                        {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "ops", "title": "Ops", "doc_type": "glossary"}},
+                        {"op": "create", "type": "section", "id": "$s", "parent": "$d", "fields": {"title": "Rules"}},
+                        {"op": "create", "type": "claim", "id": "$c", "parent": "$s", "body": "Ops holds."}
+                    ]))
+                    .unwrap(),
+                    justification: None,
+                    message: String::new(),
+                },
+            )
+            .unwrap();
+        let id = |k: &str| BlockId::parse(&w.created[k]).unwrap();
+        let (doc, section, claim) = (id("$d"), id("$s"), id("$c"));
+        let read = rdy.read();
+        // in flight (the view is not landed): an id, a path and a heading slug resolve
+        assert_eq!(followed_block(&read, &doc.to_string()), Some(doc.clone()));
+        assert_eq!(followed_block(&read, "ops"), Some(doc));
+        assert_eq!(followed_block(&read, &claim.to_string()), Some(claim));
+        assert_eq!(followed_block(&read, "ops#rules"), Some(section));
+        // a path no scope holds, and a well-formed id of no block, follow nothing
+        assert_eq!(followed_block(&read, "no/such"), None);
+        assert_eq!(followed_block(&read, "c-ZZZZZ"), None);
     }
 }

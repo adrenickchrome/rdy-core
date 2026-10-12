@@ -1260,6 +1260,7 @@ dependencies = [
  "rdy-model",
  "rdy-render",
  "rdy-schema",
+ "rdy-store",
  "rmcp",
  "serde",
  "serde_json",

@@ -55,6 +55,9 @@ pub struct RdyServer {
     hub: Arc<NotifyHub>,
     /// This session's id in `hub`: the daemon's session id, else the process-unique owner.
     hub_sid: u64,
+    /// The engine `state` holds, for the `subscriptions/listen` filter, which resolves doc URIs
+    /// without the state lock.
+    engine: Arc<dyn Engine>,
 }
 
 fn result(r: Result<serde_json::Value, RdyError>) -> CallToolResult {
@@ -66,7 +69,7 @@ fn result(r: Result<serde_json::Value, RdyError>) -> CallToolResult {
 
 impl RdyServer {
     pub fn new(engine: Arc<dyn Engine>, sid: Option<u64>, hub: Arc<NotifyHub>) -> Self {
-        let mut st = McpState::new(engine);
+        let mut st = McpState::new(Arc::clone(&engine));
         st.sid = sid;
         if let Some(sid) = sid {
             st.lease_owner = sid;
@@ -76,6 +79,7 @@ impl RdyServer {
         RdyServer {
             hub,
             hub_sid,
+            engine,
             state: Arc::new(Mutex::new(st)),
             tool_router: Self::family_routers()
                 .into_iter()
@@ -251,7 +255,7 @@ impl ServerHandler for RdyServer {
         request: SubscribeRequestParams,
         context: RequestContext<rmcp::RoleServer>,
     ) -> Result<(), rmcp::ErrorData> {
-        self.resources_subscribe(&request.uri, context.peer)
+        self.resources_subscribe(&request.uri, context.peer).await
     }
 
     #[allow(deprecated)]
@@ -267,7 +271,11 @@ impl ServerHandler for RdyServer {
         &self,
         requested: &SubscriptionFilter,
     ) -> Option<SubscriptionFilter> {
-        Some(Self::resources_filter(requested))
+        // read once, and only when a doc URI asks
+        let read = std::cell::OnceCell::new();
+        Some(Self::resources_filter(requested, |text| {
+            resources::followed_block(read.get_or_init(|| self.engine.read()), text).is_some()
+        }))
     }
 
     async fn listen(&self, context: SubscriptionContext) -> Result<(), rmcp::ErrorData> {
