@@ -8,7 +8,7 @@ use rmcp::{model::CallToolResult, tool, tool_router};
 #[tool_router(router = graph_router, vis = "pub(crate)")]
 impl RdyServer {
     #[tool(
-        description = "By id or path: everything about one block: fields, body, version (use as base for updates), doc, links in and out, decision status, governing decisions, suspects. Also the block's history (newest 20 versions: change, author, justification, landing and approver) and the justification of the change that last wrote it. history_more says the block has older versions than those 20; truncated and omitted say max_tokens cut entries from the reply. `id` may be `id@version` or a ref line `[id@version] …`, read under that version."
+        description = "By id or path: everything about one block: fields, body, version (use as base for updates), doc, links in and out, decision status, governing decisions, suspects. Also the block's history (newest 20 versions: change, author, the importer of an imported change, justification, landing and approver) and the justification of the change that last wrote it. history_more says the block has older versions than those 20; truncated and omitted say max_tokens cut entries from the reply. `id` may be `id@version` or a ref line `[id@version] …`, read under that version."
     )]
     async fn rdy_context(&self, Parameters(p): Parameters<IdParams>) -> CallToolResult {
         self.run("rdy_context", p, tools::rdy_context).await
