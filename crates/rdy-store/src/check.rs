@@ -3,7 +3,7 @@
 //! a landing, recorded conflicts, undo chains, the dependency DAG and closed included sets, and
 //! the version chains of intents and alternative sets and the links that name them (cfmt1), and
 //! the dismissal refs and the reviews they name (rvw1), and the mention review refs and the
-//! reviews they name (cc1).
+//! reviews they name (cc1), and the values of the inbox refs (ib1).
 use crate::StoreReader;
 use crate::coord::{ALT_REF, INTENT_REF, key_hash};
 use crate::error::StoreError;
@@ -38,6 +38,8 @@ pub struct StoreCheck {
     pub reviews: usize,
     /// The `semantic/` refs, each with its version chain checked.
     pub tensions: usize,
+    /// The `inbox/` refs, each holding a subscription that keeps the inbox rules.
+    pub inboxes: usize,
 }
 
 /// What `check_view` found out about one view.
@@ -75,8 +77,8 @@ impl StoreReader {
     /// Checks the view chains, their heads and index entries, canon's landings (relay and evidence
     /// rules included), recorded conflicts, undo chains, the dependency DAG, the closure of every
     /// view's included set, the version chains of intents and alternative sets, the links that
-    /// name them, the dismissal, mention review and verdict refs, and the semantic tension chains;
-    /// the first failure found is a `StoreError::Decode`.
+    /// name them, the dismissal, mention review and verdict refs, the semantic tension chains, and
+    /// the inbox refs; the first failure found is a `StoreError::Decode`.
     pub fn check_objects(&self) -> Result<StoreCheck, StoreError> {
         let mut views = 0;
         let mut view_ops = 0;
@@ -130,6 +132,7 @@ impl StoreReader {
         let reviews =
             self.check_dismissals()? + self.check_mention_reviews()? + self.check_verdicts()?;
         let tensions = self.check_semantic()?;
+        let inboxes = self.check_inboxes()?;
         Ok(StoreCheck {
             views,
             view_ops,
@@ -140,6 +143,7 @@ impl StoreReader {
             alt_sets: alt_sets.len(),
             reviews,
             tensions,
+            inboxes,
         })
     }
 
