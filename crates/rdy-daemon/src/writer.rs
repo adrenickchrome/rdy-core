@@ -8,8 +8,9 @@
 //! After each message's publish (and the reply, for a write), the writer forwards the events of
 //! the batches it sealed to the notifier (ib11), one message per batch: one unbounded channel
 //! send each, so the notifier never slows a write. Each message carries the inbox subscriptions
-//! of the connected sessions, read from the published state before the next message opens a
-//! batch (ruling task-11.1). The notifier reads a state that holds them.
+//! of the connected sessions, read from the published state while no batch is open (ruling
+//! task-11.1). The notifier reads a state that holds them. A write message forwards a pack
+//! reload's batch before the write runs, so a write that fails its seal never decides it.
 use crate::E_DAEMON_GONE;
 use crate::daemon::log;
 use crate::notify::{NotifyMsg, inbox_subs};
@@ -361,7 +362,17 @@ impl Writer {
                     self.retry_republish(&mut rdy);
                     // its outcome is logged and reported in the replies' notices; a reload logs
                     // its moves in a batch of its own, before the write's
-                    let _ = self.maybe_reload(&mut rdy);
+                    if self.maybe_reload(&mut rdy).is_err() {
+                        // a reload that panicked leaves its publish to the caller: the forward
+                        // below reads a state that holds any batch the reload sealed
+                        build_tensions(&rdy);
+                        self.publish(&rdy);
+                    }
+                    // the reload's batch is sealed and published, and `f` has opened no batch
+                    // yet: the reload's batch is forwarded now, with the subscriptions as of its
+                    // publish, so a write that changes them and then fails its seal never decides
+                    // it (ruling task-11.1)
+                    self.forward();
                     let out = match catch_unwind(AssertUnwindSafe(|| f(&mut rdy))) {
                         Ok(out) => out,
                         Err(p) => {
@@ -385,7 +396,7 @@ impl Writer {
                     build_tensions(&rdy);
                     let published = self.publish(&rdy);
                     let _ = reply.send(out);
-                    // after the reply: the reload's batch and the write's, one message each
+                    // after the reply: the write's batches, one message each
                     self.forward();
                     self.log_transition_error(&rdy);
                     published
@@ -654,5 +665,111 @@ mod tests {
             .run(Box::new(|_: &mut Rdy| Ok(serde_json::Value::Null)));
         assert!(out.is_ok(), "{out:?}");
         sh.shutdown().unwrap();
+    }
+
+    /// Fix round 2 of task 11 (ruling task-11.1): in one write message, a pack reload seals and
+    /// publishes its own batch R with a move on a's change; then the write's held batch moves a's
+    /// cursor past R and its seal fails, so the live index keeps that cursor. The decision for R
+    /// reads a's subscription as R's publish left it: a is told.
+    #[test]
+    fn ib11_a_reload_batch_is_decided_before_the_write_in_the_same_message() {
+        use rdy_engine::{Session, WriteRequest};
+        use rdy_mcp::notify::Sink;
+        use rdy_model::Role;
+        use serde_json::{Value, json};
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sh = Shared::new(Rdy::init(dir.path(), "rdy-standard").unwrap());
+        let engine = sh.engine();
+        let write = |s: Session, view: &str, ops: Value, land: bool| {
+            let view = view.to_string();
+            engine
+                .write(Box::new(move |r: &mut Rdy| {
+                    let w = r.write(
+                        &s,
+                        WriteRequest {
+                            view: view.clone(),
+                            ops: serde_json::from_value(ops).unwrap(),
+                            justification: None,
+                            message: String::new(),
+                        },
+                    )?;
+                    if land {
+                        let h = Session::human("human:qa".into(), Role::Approver);
+                        let p = r.propose(&s, &view, "t")?;
+                        r.land(&h, &p.id)?;
+                    }
+                    Ok(serde_json::to_value(w).unwrap())
+                }))
+                .unwrap()
+        };
+        let agent =
+            |n: &str| Session::agent(format!("agent:{n}"), Some(n.into()), Role::Writer).unwrap();
+        // claim A, landed; then agents a and b each update it in their own views: a collision
+        let w = write(
+            Session::human("human:qa".into(), Role::Writer),
+            "work",
+            json!([
+                {"op": "create", "type": "doc", "id": "$d", "fields": {"name": "spec", "title": "Spec", "doc_type": "overview"}},
+                {"op": "create", "type": "claim", "id": "$a", "parent": "$d", "body": "A holds."}
+            ]),
+            true,
+        );
+        let a = w["created"]["$a"].as_str().unwrap().to_string();
+        let upd = |body: &str| json!([{"op": "update", "id": a, "body": body}]);
+        write(agent("a"), "a", upd("A by a."), false);
+        write(agent("b"), "b", upd("A by b."), false);
+        rdy_engine::inbox::sub::subscribe(&*engine, &agent("a"), None).unwrap();
+        // a's MCP session, subscribed to rdy://inbox
+        sh.hub.connect(1, Sink::None);
+        sh.hub.identify(1, "agent:a", Some("a"));
+        sh.hub.subscribe(1, "rdy://inbox");
+        // a pack that makes the collision advisory: the next write reloads it first, in a batch
+        // of its own that re-keys the collision on a's change
+        std::fs::write(
+            dir.path().join(".rdy/packs/soft.yaml"),
+            "name: soft\nversion: \"1\"\nextends: rdy-standard\ntensions:\n  edit_collision: advisory\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join(".rdy.yaml"), "pack: soft\n").unwrap();
+        let before = sh.state.load().seq();
+        let out = sh.writer.run(Box::new(|r: &mut Rdy| {
+            // the write's held batch acks a's inbox past the reload's batch; its seal fails
+            let mut sub = r.read().reader().inbox("agent:a", Some("a"))?.unwrap();
+            sub.cursor.at = r.store().log_end();
+            r.store_mut().put_inbox(&sub)?;
+            r.store_mut().fail_next_append_after(0);
+            Ok(Value::Null)
+        }));
+        assert!(out.is_err(), "the seal must fail: {out:?}");
+        assert_eq!(sh.state.load().pack().name, "soft", "the reload ran");
+        let live = sh
+            .state
+            .load()
+            .reader()
+            .inbox("agent:a", Some("a"))
+            .unwrap()
+            .unwrap();
+        assert!(
+            live.cursor.at > before,
+            "the live index holds the unsealed cursor, past the reload's batch: {live:?}"
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let told = || {
+            sh.delivered
+                .lock()
+                .unwrap()
+                .contains(&(1, "rdy://inbox".to_string()))
+        };
+        while !told() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            told(),
+            "a hears of the reload's move: {:?}",
+            sh.delivered.lock().unwrap()
+        );
+        let _ = sh.shutdown();
     }
 }

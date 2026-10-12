@@ -49,6 +49,9 @@ pub struct Shared {
     /// Test count: the log lines the writer wrote for a failed clean republish.
     #[cfg(test)]
     pub(crate) republish_failure_logs: std::sync::atomic::AtomicUsize,
+    /// Test record: each (session, URI) the notifier told about a batch's events, in order.
+    #[cfg(test)]
+    pub(crate) delivered: Mutex<Vec<(u64, String)>>,
 }
 
 impl Shared {
@@ -93,6 +96,8 @@ impl Shared {
                 after_reload: Mutex::new(None),
                 #[cfg(test)]
                 republish_failure_logs: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(test)]
+                delivered: Mutex::new(Vec::new()),
             }
         })
     }

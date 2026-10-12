@@ -108,6 +108,8 @@ fn deliver(sh: &Shared, msg: &NotifyMsg) {
             let st = sh.state.load_full();
             for t in &targets {
                 for uri in uris_for(&st, t, events, subs) {
+                    #[cfg(test)]
+                    sh.delivered.lock().unwrap().push((t.sid, uri.clone()));
                     sh.hub.notify(t.sid, &uri);
                 }
             }
