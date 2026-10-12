@@ -15,10 +15,11 @@ pub const INSTRUCTION_SENTENCES: &[&str] = &[
     "When a change retires only some of a decision's rules, supersede that part (rdy_supersede with part), not the whole decision.",
     "Before a larger change, post an intent (rdy_intent) on its area or blocks; write responses name other sessions' intents on what you wrote, and nothing is ever locked.",
     "Tensions: rdy_tensions lists disagreements between changes and with canon; resolve one with a change, or dismiss it with rdy_resolve and a reason; a blocking one refuses a landing that has a side in it and would put every side into canon.",
+    "Read rdy_inbox at session start and when rdy://inbox changes, and ack what you have handled; notifications are best effort, the inbox is reliable.",
     "Record decisions in the project's decision home (rdy_decide without parent records there; rdy_schema names it) and link content to them with decided_by; don't put decisions inside content docs.",
     "Search a thing's name, key or alias with rdy_search to get its fact sheet.",
     "Write responses carry suggestions (links to the entities your text names, new entities for literals that recur): accept the right ones with one rdy_accept call; they never block.",
-    "Answers carry a confidence level: act on high; on medium or low, widen the search, fix the coverage issues you can, or ask the person before you act.",
+    "Fact sheets, search hits and briefings carry a confidence level: act on high; on medium or low, widen the search, fix the coverage issues you can, or ask the person before you act.",
     "Link every entity a normative statement names, and elsewhere the entities a block is about; dismiss a passing mention of an everyday word with rdy_resolve (mention, dismiss).",
 ];
 

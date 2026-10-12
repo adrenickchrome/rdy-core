@@ -4,6 +4,7 @@
 //! closure on the writer. Relative paths in args resolve against the session's working
 //! directory.
 use rdy_engine::engine::Engine;
+use rdy_engine::inbox::api::{InboxRequest, run_inbox};
 use rdy_engine::tensions::api::{TensionsRequest, run_resolve, run_tensions};
 use rdy_engine::{
     E_BAD_INPUT, E_LIMIT, E_PERMISSION, RdyError, ReadState, Scope, Session, alt, intent, view_api,
@@ -78,6 +79,7 @@ pub const OPS: &[&str] = &[
     "resolve",
     "wc_put_blob",
     "coverage",
+    "inbox",
 ];
 
 #[derive(Deserialize)]
@@ -293,6 +295,11 @@ pub fn dispatch(cx: &OpContext, op: &str, args: Value) -> Result<Value, RdyError
         ),
         "wc_put_blob" => wc_put_blob(cx, parse(op, args, "{path}")?),
         "coverage" => coverage(cx, parse(op, args, "{scope?, path?, max_tokens?}")?),
+        "inbox" => {
+            let req: InboxRequest = parse(op, args, "{since?, ack?, max_tokens?}")?;
+            check_max_tokens(req.max_tokens)?;
+            run_inbox(cx.engine, cx.session, req)
+        }
         _ => Err(RdyError::new(
             E_BAD_INPUT,
             format!("unknown op {op:?}"),

@@ -5,6 +5,7 @@ mod coverage;
 mod decide;
 mod entity;
 mod graph;
+mod inbox;
 mod instructions;
 mod intent;
 mod propose;
@@ -71,7 +72,7 @@ impl RdyServer {
 
     /// The tool router of each family (`server/<family>.rs`), once. `new` registers their sum;
     /// a new family adds one line here.
-    fn family_routers() -> [ToolRouter<Self>; 17] {
+    fn family_routers() -> [ToolRouter<Self>; 18] {
         [
             Self::session_router(),
             Self::read_router(),
@@ -90,6 +91,7 @@ impl RdyServer {
             Self::tension_router(),
             Self::coverage_router(),
             Self::review_router(),
+            Self::inbox_router(),
         ]
     }
 

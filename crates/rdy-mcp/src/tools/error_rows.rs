@@ -135,6 +135,11 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
         "fix the key's spelling (the fix names the nearest known key), move it to the file the warning names, or remove it",
     ),
     (
+        "W_UNAPPLIED_DECISION",
+        "a proposal creates a decision that no content applies in its view, and the decision does not set needs_content: false; rdy_propose and rdy propose report it, and it never refuses the proposal",
+        "link the content that carries it with decided_by, or set needs_content: false for a process ruling",
+    ),
+    (
         "W_SKELETON_MISSING",
         "a doc lacks a required section of its doc_type; reported once per doc per session, and later writes count the repeats in warnings_repeated",
         "add the section, or give the doc a doc_type without it (page)",
