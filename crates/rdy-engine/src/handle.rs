@@ -61,7 +61,11 @@ impl Rdy {
         })
         .expect("config yaml");
         rdy_store::fsutil::write_durable(&config, cfg.as_bytes()).map_err(io)?;
-        Rdy::open(project)
+        let mut r = Rdy::open(project)?;
+        // plan M2e2: an empty store folds to no move and its state holds none, so the log is
+        // reconciled here at no cost, and the first write logs only its own moves
+        r.reconcile_transitions()?;
+        Ok(r)
     }
 
     pub fn open(project: &Path) -> Result<Rdy, RdyError> {

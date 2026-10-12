@@ -317,6 +317,18 @@ impl Rdy {
             {
                 Arc::clone(&prev.tensions)
             }
+            // plan M2e2: a view op (or a close of alternative members that keeps the sets'
+            // members) moves only which changes are in flight and in which views; a built set
+            // (or one the state before can carry to) is carried, re-detected around the changes
+            // that moved, so the batch's moves follow its delta
+            Delta::View { .. } | Delta::Coord { .. }
+                if coord_heads.alt_members == prev.coord_heads.alt_members =>
+            {
+                match prev.tensions_without_build() {
+                    Some(set) => Arc::new(TensionCell::after_views(set)),
+                    None => Arc::default(),
+                }
+            }
             // tcar1: a commit carries a built set, re-detecting around the blocks it writes. A
             // set the state before has not read yet but can carry is carried now (its cost
             // follows that commit), so a run of commits that nobody reads in between keeps
@@ -566,30 +578,7 @@ impl Rdy {
     /// its id is new (`writes_fresh`, checked once the set before is in hand). An unreadable
     /// base never carries.
     fn carries_tensions(&self, ops: &[rdy_model::Op]) -> bool {
-        use rdy_model::Op;
-        let structural = |ty: Option<&str>| {
-            ty.and_then(|t| self.pack.block_types.get(t))
-                .is_some_and(|d| d.traits.contains(&rdy_schema::Trait::Structural))
-        };
-        let lifecycle = |b: &rdy_model::Block| {
-            b.fields
-                .get("lifecycle")
-                .filter(|v| **v != rdy_model::FieldValue::Null)
-                .cloned()
-        };
-        let reader = self.store.reader();
-        ops.iter().all(|op| match op {
-            Op::Create { .. } => true,
-            Op::Update { base, block } => {
-                !structural(Some(&block.block_type))
-                    && reader.get_block(base).is_ok_and(|old| {
-                        old.parent == block.parent && lifecycle(&old) == lifecycle(block)
-                    })
-            }
-            // a delete takes a block out of other blocks' reads that the seeds do not cover (an
-            // `affects` target's path gives its deciders their areas), so it never carries
-            Op::Delete { .. } => false,
-        })
+        crate::tensions::set::ops_carry(&self.pack, &self.store.reader(), ops)
     }
 
     /// Whether `ops` leave every other block's reads as the seeds' re-detection sees them, by
@@ -811,9 +800,20 @@ impl Rdy {
     /// Republishes a state with every cell empty (`Delta::Full`). Never fails: an error in
     /// reading the heads is kept in the state and returned by its reads. As-of builds are shared
     /// across states and kept. Call it after writing to the store outside the engine.
-    /// The publish logs what moved since the last logged state (cause `recheck`).
+    /// The publish logs what moved since the last logged state (cause `recheck`). When the
+    /// published state is the logged one, no batch is open, and the pack and the detectors are
+    /// the ones it was published with, the full publish reads what that state read, so it
+    /// computes nothing: the log already folds to its open sets (plan M2e2).
     pub fn invalidate(&mut self) {
-        self.recheck = Some(Cause::Recheck);
+        let st = self.state.load_full();
+        let folded = self.logged.as_ref().is_some_and(|l| Arc::ptr_eq(l, &st))
+            && self.store.open_batch().is_none()
+            && Arc::ptr_eq(&st.pack, &self.pack)
+            && std::ptr::eq(st.detectors, self.detectors);
+        drop(st);
+        if !folded {
+            self.recheck = Some(Cause::Recheck);
+        }
         let _ = self.publish(Delta::Full);
     }
 

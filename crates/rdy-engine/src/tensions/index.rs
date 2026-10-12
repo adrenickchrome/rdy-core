@@ -273,6 +273,147 @@ impl Writes {
         Ok(w)
     }
 
+    /// These writes after the in-flight set became `set`, where `changed` are the changes whose
+    /// membership or views differ (each one left flight, entered it, or moved between views):
+    /// their facts and writes, the liveness of every write on the blocks they write (before and
+    /// after), and those blocks' index entries, as [`Writes::build`] over `set` computes them.
+    /// Every other change keeps its facts and writes. Its cost follows the changed changes'
+    /// writes, not the size of the set (plan M2e2: a view op's moves come from its delta).
+    pub(crate) fn with_changes(
+        &self,
+        st: &ReadState,
+        set: &InflightSet,
+        changed: &BTreeSet<Hash>,
+    ) -> Result<Writes, RdyError> {
+        let pack = st.pack();
+        let min_words = pack.duplicate_text_min_words();
+        let mut w = self.clone();
+        // the blocks whose writes move: every block a changed change writes, before and after
+        let mut blocks: BTreeSet<BlockId> = BTreeSet::new();
+        for c in changed {
+            if let Some(f) = w.changes.remove(c) {
+                blocks.extend(f.blocks);
+            }
+            w.by_change.remove(c);
+        }
+        let mut mine: BTreeMap<Hash, ChangeWrites> = BTreeMap::new();
+        for c in changed {
+            let Some(views) = set.views_of.get(c) else {
+                continue;
+            };
+            let read = st.reader().change(c)?;
+            let own = writes_of(&read);
+            blocks.extend(own.keys().cloned());
+            w.changes.insert(
+                *c,
+                ChangeFacts {
+                    id: *c,
+                    deps: read.deps.clone(),
+                    actor: read.provenance.actor.clone(),
+                    run: read.provenance.run.clone(),
+                    justified: read.justification.is_some(),
+                    views: views.clone(),
+                    blocks: own.keys().cloned().collect(),
+                    at_ms: read.provenance.at_ms,
+                },
+            );
+            mine.insert(*c, own);
+        }
+        let mut touched = IndexKeys::default();
+        let mut own: BTreeMap<Hash, Vec<Arc<Write>>> = BTreeMap::new();
+        for b in &blocks {
+            let before = w.by_block.get(b).cloned().unwrap_or_default();
+            // the old live writes on b leave the indexes
+            for x in before.iter().filter(|x| x.live) {
+                touched.add(pack, min_words, x);
+            }
+            w.unindex_block(&touched, b);
+            // the writes on b: the unchanged changes' (kept) and the changed changes' new ones
+            let mut writes: Vec<Arc<Write>> = before
+                .into_iter()
+                .filter(|x| !changed.contains(&x.change))
+                .collect();
+            for (c, cw) in &mine {
+                if let Some((base, new)) = cw.get(b) {
+                    writes.push(Arc::new(Write {
+                        change: *c,
+                        block: b.clone(),
+                        base: *base,
+                        version: new.as_ref().map(Block::version_hash),
+                        new: new.clone().map(Arc::new),
+                        live: true,
+                    }));
+                }
+            }
+            writes.sort_by_key(|x| x.change);
+            // the liveness of every write on b, from the changes that write b
+            let writers: Vec<Hash> = writes.iter().map(|x| x.change).collect();
+            let mut next = Vec::with_capacity(writes.len());
+            for x in &writes {
+                let views = w
+                    .changes
+                    .get(&x.change)
+                    .map(|f| f.views.as_slice())
+                    .unwrap_or(&[]);
+                let gone: BTreeSet<&str> = writers
+                    .iter()
+                    .filter(|r| **r != x.change)
+                    .filter_map(|r| w.changes.get(r))
+                    .filter(|f| f.deps.contains(&x.change))
+                    .flat_map(|f| f.views.iter().map(String::as_str))
+                    .collect();
+                let live = views.iter().any(|v| !gone.contains(v.as_str()));
+                let y = if live == x.live {
+                    Arc::clone(x)
+                } else {
+                    Arc::new(Write {
+                        live,
+                        ..(**x).clone()
+                    })
+                };
+                next.push(y);
+            }
+            for y in &next {
+                if y.live {
+                    touched.add(pack, min_words, y);
+                    w.index_live(pack, min_words, y);
+                }
+                if changed.contains(&y.change) {
+                    own.entry(y.change).or_default().push(Arc::clone(y));
+                } else if let Some(list) = w.by_change.get_mut(&y.change)
+                    && let Some(slot) = list.iter_mut().find(|z| z.block == *b)
+                {
+                    *slot = Arc::clone(y);
+                }
+            }
+            if next.is_empty() {
+                w.by_block.remove(b);
+            } else {
+                w.by_block.insert(b.clone(), next);
+            }
+        }
+        // a changed change's writes, by block (the blocks were walked in order)
+        for c in mine.keys() {
+            w.by_change.insert(*c, own.remove(c).unwrap_or_default());
+        }
+        w.sort_index(&touched);
+        Ok(w)
+    }
+
+    /// Test hook: whether these writes and `other` hold the same writes, facts and indexes (a
+    /// carry's writes against a build's).
+    #[doc(hidden)]
+    pub fn same_as(&self, other: &Writes) -> bool {
+        self.by_block == other.by_block
+            && self.by_change == other.by_change
+            && self.changes == other.changes
+            && self.named == other.named
+            && self.texted == other.texted
+            && self.superseding == other.superseding
+            && self.retiring == other.retiring
+            && self.pointing == other.pointing
+    }
+
     /// Removes every entry of a write on `b` from the index entries `keys` names.
     fn unindex_block(&mut self, keys: &IndexKeys, b: &BlockId) {
         for k in &keys.names {
@@ -364,6 +505,11 @@ impl Writes {
                     .push((Arc::clone(w), e));
             }
         }
+    }
+
+    /// Every write, live or not, by block, then change.
+    pub fn all(&self) -> impl Iterator<Item = &Arc<Write>> {
+        self.by_block.values().flatten()
     }
 
     /// Every live write, by block, then change.

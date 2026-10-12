@@ -1,6 +1,6 @@
 //! The tension set of a published state: the canon part (memoised per canon build for the
 //! state's own detectors) and the in-flight part, built on first read.
-use super::index::{DetectCx, Writes, canon_index_of};
+use super::index::{DetectCx, Write, Writes, canon_index_of};
 use super::{DetectScope, Detector, SideRef, Tension, TensionStatus, tension_from, tension_label};
 use crate::error::*;
 use crate::gate::applied_ops;
@@ -477,6 +477,10 @@ pub(crate) struct TensionCell {
     /// The state before's set and the blocks of the pairs a verdict or an acceptance wrote:
     /// the first read re-detects the stored kinds around them ([`verdict_carry`]).
     verdict: Option<(Arc<TensionSet>, Vec<BlockId>)>,
+    /// The state before's set, when a view op changed the in-flight set on the same canon: the
+    /// first read re-detects around the changes whose membership or views moved
+    /// ([`views_carry`]).
+    views: Option<Arc<TensionSet>>,
     /// Whether the set was carried; set before `set` is.
     carried: OnceLock<bool>,
     /// The blocks a carry re-detected around (its seeds and every detector's reach); set
@@ -502,13 +506,25 @@ impl TensionCell {
         }
     }
 
+    /// An unbuilt cell whose first read carries `prev` across a view op on the same canon:
+    /// changes that entered or left flight, or moved between views ([`views_carry`]).
+    pub(crate) fn after_views(prev: Arc<TensionSet>) -> TensionCell {
+        TensionCell {
+            views: Some(prev),
+            ..TensionCell::default()
+        }
+    }
+
     /// The set this cell's first read carries to, or `None` when it has no carry or its carry
     /// cannot run (another in-flight set) or fails; with the blocks a commit's carry re-detected
-    /// around (none for a verdict's).
+    /// around (none for a verdict's or a view op's).
     fn carried(&self, st: &ReadState) -> Option<(TensionSet, Option<BTreeSet<BlockId>>)> {
         if let Some((prev, change, view)) = &self.carry {
             let (set, around) = carry(st, prev, *change, view).ok()??;
             return Some((set, Some(around)));
+        }
+        if let Some(prev) = &self.views {
+            return Some((views_carry(st, prev).ok()??, None));
         }
         let (prev, blocks) = self.verdict.as_ref()?;
         Some((verdict_carry(st, prev, blocks).ok()??, None))
@@ -599,6 +615,178 @@ fn carry(
         around_all.extend(around);
     }
     Ok(Some((next, around_all)))
+}
+
+/// Whether a step that commits `ops` (or takes them out of flight) may carry the tension set:
+/// no op is a delete, no update writes a structural block (a rename or retitle moves every
+/// descendant's path, and so its areas), and no update moves a block or changes its `lifecycle`
+/// against its base (which every descendant's effective lifecycle reads). An unreadable base
+/// never carries. See `Rdy::carries_tensions`.
+pub(crate) fn ops_carry(
+    pack: &rdy_schema::Pack,
+    reader: &rdy_store::StoreReader,
+    ops: &[Op],
+) -> bool {
+    let structural = |ty: Option<&str>| {
+        ty.and_then(|t| pack.block_types.get(t))
+            .is_some_and(|d| d.traits.contains(&rdy_schema::Trait::Structural))
+    };
+    let lifecycle = |b: &Block| {
+        b.fields
+            .get("lifecycle")
+            .filter(|v| **v != rdy_model::FieldValue::Null)
+            .cloned()
+    };
+    ops.iter().all(|op| match op {
+        Op::Create { .. } => true,
+        Op::Update { base, block } => {
+            !structural(Some(&block.block_type))
+                && reader.get_block(base).is_ok_and(|old| {
+                    old.parent == block.parent && lifecycle(&old) == lifecycle(block)
+                })
+        }
+        // a delete takes a block out of other blocks' reads that the seeds do not cover (an
+        // `affects` target's path gives its deciders their areas), so it never carries
+        Op::Delete { .. } => false,
+    })
+}
+
+/// Whether the view-op step `changed` leaves every block outside its seeds as their
+/// re-detection sees it. A change that only moved between views keeps the in-flight
+/// materialization (it merges the distinct in-flight changes, whatever their views), so it
+/// needs nothing more. A change that entered or left flight must commit ops that carry
+/// ([`ops_carry`]), write no block with an in-flight delete, and create only fresh blocks: canon
+/// does not hold them, no change ever deleted them, no other in-flight change writes them or
+/// writes a block under them. Otherwise the step moves paths, areas or lifecycles of blocks no
+/// seed covers, and the set is built in full. A failed read never carries.
+fn views_step_carries(
+    st: &ReadState,
+    before: &Writes,
+    after: &Writes,
+    set: &InflightSet,
+    changed: &BTreeSet<Hash>,
+) -> Result<bool, RdyError> {
+    let moved: Vec<&Hash> = changed
+        .iter()
+        .filter(|c| before.change(c).is_some() != set.views_of.contains_key(*c))
+        .collect();
+    if moved.is_empty() {
+        return Ok(true);
+    }
+    let reader = st.reader();
+    let canon = st.materialized(&crate::Scope::Canon)?;
+    let others = |w: &Write| !changed.contains(&w.change);
+    let mut created: BTreeSet<BlockId> = BTreeSet::new();
+    for c in moved {
+        let change = reader.change(c)?;
+        if !ops_carry(st.pack(), reader, &change.ops) {
+            return Ok(false);
+        }
+        for op in &change.ops {
+            let b = op.block_id();
+            let on = before.on(b).iter().chain(after.on(b));
+            let mut on = on.peekable();
+            if on.peek().is_some() {
+                let writes: Vec<&Arc<Write>> = on.collect();
+                if writes.iter().any(|w| w.new.is_none()) {
+                    return Ok(false);
+                }
+                if matches!(op, Op::Create { .. }) && writes.iter().any(|w| others(w)) {
+                    return Ok(false);
+                }
+            }
+            if let Op::Create { block } = op {
+                if canon.get(&block.id).is_some() {
+                    return Ok(false);
+                }
+                created.insert(block.id.clone());
+            }
+        }
+    }
+    if created.is_empty() {
+        return Ok(true);
+    }
+    if reader.ever_deleted(created.iter())? {
+        return Ok(false);
+    }
+    // a block under a created one, written by a change outside the step: its path moves
+    let under = |w: &Arc<Write>| {
+        others(w)
+            && w.new
+                .as_ref()
+                .and_then(|b| b.parent.as_ref())
+                .is_some_and(|p| created.contains(p))
+    };
+    Ok(!before.all().any(under) && !after.all().any(under))
+}
+
+/// The view-op carry (plan M2e2: a batch's moves are computed from its delta): `prev` was built
+/// on the same canon, the same coordination refs and the same verdicts, and a view op changed
+/// only which changes are in flight and in which views. The changes whose membership or views
+/// differ are the step; their blocks (and their decisions' targets) are the seeds, as for a
+/// commit. The writes move only on those blocks ([`Writes::with_changes`]); the in-flight part
+/// drops every tension on a seed and each kind's tensions on a block of its reach, and
+/// re-detects around them. The reach is read both before and after the step, so a change that
+/// left flight still names the groups its writes were in. The canon part stays. Its cost
+/// follows the changes that moved, not the size of the set; when none moved, it is `prev`.
+/// `None` when the step does not carry ([`views_step_carries`]): the set is built in full.
+fn views_carry(st: &ReadState, prev: &TensionSet) -> Result<Option<TensionSet>, RdyError> {
+    if let Some(e) = &st.error {
+        return Err(e.clone());
+    }
+    let set = st.inflight_set()?;
+    let mut changed: BTreeSet<Hash> = prev
+        .writes
+        .changes()
+        .filter(|f| set.views_of.get(&f.id) != Some(&f.views))
+        .map(|f| f.id)
+        .collect();
+    changed.extend(
+        set.changes
+            .iter()
+            .filter(|c| prev.writes.change(c).is_none()),
+    );
+    if changed.is_empty() {
+        return Ok(Some(prev.clone()));
+    }
+    let writes = Arc::new(prev.writes.with_changes(st, &set, &changed)?);
+    if !views_step_carries(st, &prev.writes, &writes, &set, &changed)? {
+        return Ok(None);
+    }
+    let reader = st.reader();
+    let mut seeds = BTreeSet::new();
+    for c in &changed {
+        seeds_into(st, &reader.change(c)?, &mut seeds)?;
+    }
+    let mut next = TensionSet {
+        writes: Arc::clone(&writes),
+        ..prev.clone()
+    };
+    for seed in &seeds {
+        for id in prev.by_block.get(seed).into_iter().flatten() {
+            next.remove(id);
+        }
+    }
+    let index = canon_index_of(st)?;
+    let cx = DetectCx::new(st, &writes, Arc::clone(&index), DetectScope::Inflight);
+    let before = DetectCx::new(st, &prev.writes, index, DetectScope::Inflight);
+    for d in st.detectors {
+        let mut reach = d.reach(&cx, &seeds)?;
+        reach.extend(d.reach(&before, &seeds)?);
+        for b in reach.difference(&seeds) {
+            for id in prev.by_block.get(b).into_iter().flatten() {
+                if prev.tensions.get(id).is_some_and(|t| t.kind == d.kind()) {
+                    next.remove(id);
+                }
+            }
+        }
+        let mut around = seeds.clone();
+        around.extend(reach);
+        for t in detect_kept(st, &cx, *d, Some(&around))? {
+            next.insert(t);
+        }
+    }
+    Ok(Some(next))
 }
 
 /// The tensions `d` finds in the scope `cx` reads (with `seeds`, those that involve a seed), as
