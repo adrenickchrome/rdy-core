@@ -8,6 +8,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+/// The MCP-only clause `rdy_schema` adds after the engine's `INBOX_DOC`: the daemon's request has
+/// no `person` field, so the engine's paragraph cannot name it.
+pub const INBOX_PERSON_DOC: &str = "rdy_inbox {person: true} reads the person's inbox (the human actor) so you can show it in chat; ack only when they say they have seen it.";
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InboxParams {

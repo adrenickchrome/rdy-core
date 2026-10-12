@@ -85,7 +85,7 @@ pub fn rdy_schema(st: &mut McpState, p: SchemaParams) -> Result<Value, RdyError>
                 "alternatives": crate::alt_tools::ALT_DOC,
                 "tensions": rdy_engine::tensions::api::TENSIONS_DOC,
                 "reviews": rdy_engine::semantic::api::REVIEWS_DOC,
-                "inbox": rdy_engine::inbox::api::INBOX_DOC,
+                "inbox": format!("{} {}", rdy_engine::inbox::api::INBOX_DOC, super::inbox::INBOX_PERSON_DOC),
                 "decisions": {"home": st_.decisions_home(), "rule": DECISIONS_RULE},
                 "entities": {"types": entity_types, "rule": ENTITY_RULE},
                 "limits": {"ops_per_write": MAX_OPS_PER_WRITE, "request_bytes": MAX_REQUEST_BYTES, "asset_bytes": MAX_ASSET_BYTES, "asset_bytes_stdio": MAX_ASSET_BYTES_STDIO, "max_tokens": MAX_TOKENS_LIMIT, "socket_line_bytes": MAX_REQUEST_BYTES, "transport": TRANSPORT_NOTE},

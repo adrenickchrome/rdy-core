@@ -134,3 +134,44 @@ fn ib7_the_daemon_op_serves_an_agent_from_rdy_actor() {
         assert_eq!(big.unwrap_err().code, "E_LIMIT");
     });
 }
+
+#[test]
+fn ib7_rdy_schema_tells_an_agent_how_to_read_the_persons_inbox() {
+    let s = served();
+    let mut a = agent(&s, None);
+    let sc = a.call("rdy_schema", json!({})).ok();
+    let doc = sc["inbox"].as_str().unwrap();
+    assert!(
+        doc.starts_with("rdy_inbox {since?, ack?, max_tokens?}"),
+        "{doc}"
+    );
+    assert!(doc.contains("rdy_inbox {person: true}"), "{doc}");
+    assert!(doc.contains("the person's inbox"), "{doc}");
+    assert!(
+        doc.contains("ack only when they say they have seen it"),
+        "{doc}"
+    );
+}
+
+#[test]
+fn ib7_an_oversized_budget_is_refused_before_the_session_is_looked_up() {
+    let s = served();
+    // No session yet: the budget check runs first, so E_LIMIT wins over E_NO_SESSION.
+    let mut c = McpClient::start_proxy(&s);
+    for args in [
+        json!({"max_tokens": 1_000_000}),
+        json!({"person": true, "max_tokens": 1_000_000}),
+    ] {
+        let r = c.call("rdy_inbox", args.clone());
+        assert_eq!(r.code(), Some("E_LIMIT"), "{args}: {r:?}");
+    }
+    // With a session the same refusals hold.
+    let mut a = agent(&s, None);
+    for args in [
+        json!({"max_tokens": 1_000_000}),
+        json!({"person": true, "max_tokens": 1_000_000}),
+    ] {
+        let r = a.call("rdy_inbox", args.clone());
+        assert_eq!(r.code(), Some("E_LIMIT"), "{args}: {r:?}");
+    }
+}
