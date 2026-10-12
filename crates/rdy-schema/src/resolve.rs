@@ -125,6 +125,13 @@ impl PackSet {
 
     pub fn resolve(&self, name: &str) -> Result<Pack, SchemaError> {
         let mut pack = self.merged(name, &mut Vec::new())?;
+        // D-2K8Q5, D-WMCFW: a semantic tension blocks only when a person accepts the advice
+        if pack.tensions.contains_key(&TensionKind::Semantic) {
+            return Err(SchemaError::Invalid(format!(
+                "pack {} cannot set the severity of semantic tensions; a person accepts a reviewer's advice to block",
+                pack.name
+            )));
+        }
         check_folder_extension(&pack)?;
         inject_engine_types(&mut pack);
         check(&pack)?;

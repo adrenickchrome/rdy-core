@@ -96,6 +96,7 @@ impl Rdy {
         let idle_days = cfg.idle_days();
         let coverage_target = cfg.coverage_target();
         let decisions_home = cfg.decisions_home();
+        let lease_ttl_ms = i64::from(cfg.lease_ttl_minutes()) * 60_000;
         // a placeholder until the first publish below, which replaces all of it
         let state = ArcSwap::from_pointee(ReadState {
             seq: store.log_end(),
@@ -123,6 +124,8 @@ impl Rdy {
             tensions: Arc::default(),
             dismissals: Arc::default(),
             mention_dismissals: Arc::default(),
+            semantic: Arc::default(),
+            lease_ttl_ms,
             coverage_memo: Default::default(),
             detectors: &tensions::DETECTORS,
             error: None,
@@ -146,6 +149,7 @@ impl Rdy {
             serve: cfg.serve.resolve(),
             config: Arc::new(cfg),
             briefs: Arc::new(brief::BriefRegistry::new(brief::BRIEF_REGISTRY_CAP)),
+            leases: Arc::new(crate::semantic::lease::LeaseRegistry::new()),
             detectors: &tensions::DETECTORS,
             tension_seen: None,
             publish_gen: 0,
@@ -173,6 +177,12 @@ impl Rdy {
     /// The project's briefing registry: the same one for as long as this `Rdy` is open.
     pub fn briefs(&self) -> Arc<brief::BriefRegistry> {
         Arc::clone(&self.briefs)
+    }
+
+    /// The project's lease registry for review requests: the same one for as long as this `Rdy`
+    /// is open.
+    pub fn leases(&self) -> Arc<crate::semantic::lease::LeaseRegistry> {
+        Arc::clone(&self.leases)
     }
 
     /// What the last `Store::open` did (a clone of the store's report).

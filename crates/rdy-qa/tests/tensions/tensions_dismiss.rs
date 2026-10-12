@@ -704,3 +704,144 @@ fn tdis1_the_refusals_say_exactly_why() {
     );
     assert_eq!(blocks, t.blocks());
 }
+
+/// Review Focus 4 (task-6 fix round 1, finding 1): the self-review gate walks back through a
+/// repin or a tracking-field edit to the actor who wrote the text, as the review queue does.
+/// agent:w writes X (it cites A, and its body says "paired") and X lands; A changes and lands;
+/// agent:p only repins X. Returns X.
+fn repin_of_ws_text(r: &mut Rdy) -> BlockId {
+    let s = spec_doc(r);
+    let x = created(
+        &put(
+            r,
+            "w",
+            serde_json::json!([{"op": "create", "type": "claim", "id": "$y",
+                "parent": s.section.to_string(), "body": format!("X paired, builds on {{{{{}}}}}.", s.a)}]),
+        ),
+        "$y",
+    );
+    land(r, "w").unwrap();
+    put(r, "q", upd(&s.a, "A changed."));
+    land(r, "q").unwrap();
+    put(
+        r,
+        "p",
+        serde_json::json!([{"op": "repin", "id": x.to_string()}]),
+    );
+    x
+}
+
+/// Dismissing blocking tension `t` as reviewer agent:w is refused (it wrote the text); agent:p
+/// (it wrote the version) is refused too; agent:r may.
+fn only_an_independent_reviewer_dismisses(r: &mut Rdy, t: &Tension, writer: &Session) {
+    let tn = tension_label(&t.id);
+    let e = r.dismiss_tension(writer, &tn, "mine").unwrap_err();
+    assert_eq!(
+        e.code,
+        rdy_engine::E_SELF_REVIEW,
+        "{} wrote the text: {e}",
+        writer.actor
+    );
+    assert_eq!(
+        r.dismiss_tension(&reviewer("agent:p", "rp2"), &tn, "x")
+            .unwrap_err()
+            .code,
+        rdy_engine::E_SELF_REVIEW
+    );
+    r.dismiss_tension(&reviewer("agent:r", "rr"), &tn, "ok")
+        .unwrap();
+}
+
+#[test]
+fn tdis1_a_repin_of_another_actors_text_keeps_the_text_writer_an_author() {
+    let (_d, mut r) = project();
+    let x = repin_of_ws_text(&mut r);
+    r.set_detectors_for_tests(&DETS);
+    let t = one_involving(&r, TensionKind::EditCollision, &x);
+    assert!(matches!(t.involved[0].side, SideRef::Change(_)), "{t:#?}");
+    only_an_independent_reviewer_dismisses(&mut r, &t, &reviewer("agent:w", "rw2"));
+}
+
+#[test]
+fn tdis1_a_landed_repin_of_another_actors_text_keeps_the_text_writer_an_author() {
+    let (_d, mut r) = project();
+    let x = repin_of_ws_text(&mut r);
+    land(&mut r, "p").unwrap();
+    r.set_detectors_for_tests(&CANON_DETS);
+    let t = pick(&r, TensionKind::EditCollision);
+    assert_eq!(t.blocks(), vec![x]);
+    assert!(has_canon(&t), "{t:#?}");
+    only_an_independent_reviewer_dismisses(&mut r, &t, &reviewer("agent:w", "rw2"));
+}
+
+/// A trk project: agent:w decides "Ship weekly" (body "Weekly, paired.", disposition M2d1) and it lands;
+/// agent:p edits only the tracking field `disposition`. Returns the decision.
+fn tracking_edit_of_ws_decision(dir: &std::path::Path) -> (Rdy, String) {
+    drop(Rdy::init(dir, "rdy-standard").unwrap());
+    std::fs::write(dir.join(".rdy/packs/trk.yaml"), TRK_PACK).unwrap();
+    std::fs::write(dir.join(".rdy.yaml"), "pack: trk\n").unwrap();
+    let mut r = Rdy::open(dir).unwrap();
+    let (_doc, section, _c) = seed_doc(&mut r, "seed");
+    land(&mut r, "seed").unwrap();
+    let dec = r
+        .decide(
+            &ag("w"),
+            "w",
+            rdy_engine::DecisionInput {
+                parent: section,
+                statement: "Ship weekly".into(),
+                body: "Weekly, paired.".into(),
+                fields: [("disposition".to_string(), serde_json::json!("M2d1"))]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .created["$decision"]
+        .clone();
+    land(&mut r, "w").unwrap();
+    r.write(
+        &ag("p"),
+        rdy_engine::WriteRequest {
+            view: "p".into(),
+            ops: serde_json::from_value(
+                serde_json::json!([{"op": "update", "id": dec, "fields": {"disposition": "M2d2"}}]),
+            )
+            .unwrap(),
+            justification: Some(rdy_model::Justification::Editorial {
+                class: rdy_model::EditorialClass::Clarify,
+                reason: "re-sliced".into(),
+            }),
+            message: String::new(),
+        },
+    )
+    .unwrap();
+    (r, dec)
+}
+
+#[test]
+fn tdis1_a_tracking_edit_of_another_actors_text_keeps_the_text_writer_an_author() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, dec) = tracking_edit_of_ws_decision(dir.path());
+    r.set_detectors_for_tests(&DETS);
+    let t = one_involving(
+        &r,
+        TensionKind::EditCollision,
+        &BlockId::parse(&dec).unwrap(),
+    );
+    assert!(matches!(t.involved[0].side, SideRef::Change(_)), "{t:#?}");
+    only_an_independent_reviewer_dismisses(&mut r, &t, &reviewer("agent:w", "rw2"));
+}
+
+#[test]
+fn tdis1_a_landed_tracking_edit_of_another_actors_text_keeps_the_text_writer_an_author() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut r, dec) = tracking_edit_of_ws_decision(dir.path());
+    land(&mut r, "p").unwrap();
+    r.set_detectors_for_tests(&CANON_DETS);
+    let t = pick(&r, TensionKind::EditCollision);
+    assert_eq!(t.blocks(), vec![BlockId::parse(&dec).unwrap()]);
+    assert!(has_canon(&t), "{t:#?}");
+    only_an_independent_reviewer_dismisses(&mut r, &t, &reviewer("agent:w", "rw2"));
+}

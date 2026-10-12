@@ -3,7 +3,8 @@
 //! `tensions` and `resolve` ops share; `rdy_schema`'s paragraph is `TENSIONS_DOC`.
 use super::*;
 use rdy_engine::tensions::api::{
-    DismissRequest, MentionRequest, ResolveRequest, TensionsRequest, run_resolve, run_tensions,
+    AcceptRequest, DismissRequest, MentionRequest, ResolveRequest, TensionsRequest, run_resolve,
+    run_tensions,
 };
 use rdy_engine::*;
 use schemars::JsonSchema;
@@ -17,7 +18,8 @@ pub struct TensionsParams {
     /// view name (tensions with a change side in that view).
     pub scope: Option<String>,
     /// Only this kind: edit_collision, fork, premise_shift, area_overlap, duplicate_definition,
-    /// unjustified_change, deprecated_reference, value_disagreement or restatement_drift.
+    /// unjustified_change, deprecated_reference, value_disagreement, restatement_drift or
+    /// semantic.
     pub kind: Option<String>,
     /// Only this severity: blocking or advisory.
     pub severity: Option<String>,
@@ -53,6 +55,25 @@ pub struct ResolveParams {
     pub restore: Option<DismissParams>,
     /// Where the mention is checked: canon or a view. Defaults to your view.
     pub scope: Option<String>,
+    /// A person's answer to the advice on a proposal's semantic tensions: accept it, relayed with their words. Pass this alone.
+    pub accept: Option<AcceptAdviceParams>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptAdviceParams {
+    /// The exact proposal version the person was shown: P-x@n.
+    pub proposal: String,
+    /// The advised_digest rdy_propose or rdy_read P-x@n gave with the advised tensions the person was shown.
+    pub advised_digest: String,
+    /// Only these advised tensions (tn-…); leave out to accept every advised one of the version.
+    pub tensions: Option<Vec<String>>,
+    /// The person's words, quoted (needed: your session relays them).
+    pub evidence: Option<String>,
+    /// The question the person was asked.
+    pub question: Option<String>,
+    /// Where the person said it, e.g. the chat session (default: mcp).
+    pub session_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -93,7 +114,8 @@ pub fn rdy_tensions(st: &mut McpState, p: TensionsParams) -> Result<Value, RdyEr
 }
 
 /// `rdy_resolve`: dismisses a tension, or dismisses or restores a passing mention, with a reason
-/// (a review).
+/// (a review); or relays a person's acceptance of the advice on a proposal's semantic tensions
+/// (the session is the relay, so there is no `relayed_by`).
 pub fn rdy_resolve(st: &mut McpState, p: ResolveParams) -> Result<Value, RdyError> {
     let s = session(st)?;
     run_resolve(
@@ -108,6 +130,15 @@ pub fn rdy_resolve(st: &mut McpState, p: ResolveParams) -> Result<Value, RdyErro
             dismiss: p.dismiss.map(|d| DismissRequest { reason: d.reason }),
             restore: p.restore.map(|d| DismissRequest { reason: d.reason }),
             scope: p.scope,
+            accept: p.accept.map(|a| AcceptRequest {
+                proposal: a.proposal,
+                advised_digest: a.advised_digest,
+                tensions: a.tensions.unwrap_or_default(),
+                evidence: a.evidence,
+                question: a.question,
+                session_ref: a.session_ref,
+                relayed_by: None,
+            }),
         },
     )
 }

@@ -2,8 +2,9 @@
 
 use crate::config::site_identity;
 use crate::read_state::{self, CoordHeads, Entry, InflightCell};
-use crate::tensions::SideRef;
+use crate::semantic::state::SemanticState;
 use crate::tensions::set::TensionCell;
+use crate::tensions::{SideRef, TensionSeverity, tension_id};
 use crate::{Delta, Event, EventKind, Rdy, RdyError, ReadState, events};
 use rdy_model::{Hash, Op, Verdict};
 use rdy_store::kinds;
@@ -78,6 +79,8 @@ impl Rdy {
                     tensions: Arc::default(),
                     dismissals: Arc::clone(&prev.dismissals),
                     mention_dismissals: Arc::clone(&prev.mention_dismissals),
+                    semantic: Arc::clone(&prev.semantic),
+                    lease_ttl_ms: prev.lease_ttl_ms,
                     coverage_memo: Default::default(),
                     detectors: self.detectors,
                     error: Some(e.clone()),
@@ -166,29 +169,38 @@ impl Rdy {
         // and review rules from the config loaded at open or by the last successful reload, never
         // from the files again: a broken file must not turn the review gate off (#832). Every
         // other publish carries them from the previous state.
-        let (name, description, require_up_to_date, idle_days, coverage_target, decisions_home) =
-            match delta {
-                Delta::Full => {
-                    let cfg = &self.config;
-                    let (name, description) = site_identity(&prev.root, cfg);
-                    (
-                        name,
-                        description,
-                        cfg.require_up_to_date(),
-                        cfg.idle_days(),
-                        cfg.coverage_target(),
-                        cfg.decisions_home(),
-                    )
-                }
-                _ => (
-                    Arc::clone(&prev.name),
-                    prev.description.clone(),
-                    prev.require_up_to_date,
-                    prev.idle_days,
-                    prev.coverage_target,
-                    prev.decisions_home.clone(),
-                ),
-            };
+        let (
+            name,
+            description,
+            require_up_to_date,
+            idle_days,
+            coverage_target,
+            decisions_home,
+            lease_ttl_ms,
+        ) = match delta {
+            Delta::Full => {
+                let cfg = &self.config;
+                let (name, description) = site_identity(&prev.root, cfg);
+                (
+                    name,
+                    description,
+                    cfg.require_up_to_date(),
+                    cfg.idle_days(),
+                    cfg.coverage_target(),
+                    cfg.decisions_home(),
+                    i64::from(cfg.lease_ttl_minutes()) * 60_000,
+                )
+            }
+            _ => (
+                Arc::clone(&prev.name),
+                prev.description.clone(),
+                prev.require_up_to_date,
+                prev.idle_days,
+                prev.coverage_target,
+                prev.decisions_home.clone(),
+                prev.lease_ttl_ms,
+            ),
+        };
         // the coordination refs: re-read by a publish that may have moved them, else carried. A
         // landing moves them only when it closed members of a set or chose an alternative (its
         // record says so; altg1)
@@ -227,7 +239,23 @@ impl Rdy {
                     _ => Arc::default(),
                 }
             }
+            // a verdict or an acceptance: a built set (or one the state before can carry to)
+            // is carried, its stored kinds re-detected around the pairs' blocks; else the next
+            // read builds in full
+            Delta::Verdict { blocks, .. } => match prev.tensions_without_build() {
+                Some(set) => Arc::new(TensionCell::after_verdict(set, blocks.clone())),
+                None => Arc::default(),
+            },
             _ => Arc::default(),
+        };
+        // the verdicts and semantic tensions: re-read by a full publish, the written pairs re-read
+        // by a verdict, else carried
+        let semantic = match &delta {
+            Delta::Full => Arc::new(SemanticState::read(&self.store.reader())?),
+            Delta::Verdict { keys, .. } => {
+                Arc::new(prev.semantic.reread(&self.store.reader(), keys)?)
+            }
+            _ => Arc::clone(&prev.semantic),
         };
         // the dismissals: re-read by a full publish, one added by a dismissal, else carried
         let dismissals = match &delta {
@@ -395,7 +423,10 @@ impl Rdy {
                 Arc::new(self.version_tags()?),
                 Arc::clone(&prev.inflight_cell),
             ),
-            Delta::Seq | Delta::Dismissed { .. } | Delta::MentionReviewed { .. } => (
+            Delta::Seq
+            | Delta::Dismissed { .. }
+            | Delta::MentionReviewed { .. }
+            | Delta::Verdict { .. } => (
                 Arc::clone(&prev.canon),
                 prev.views.clone(),
                 Arc::clone(&prev.tags),
@@ -428,6 +459,8 @@ impl Rdy {
             tensions,
             dismissals,
             mention_dismissals,
+            semantic,
+            lease_ttl_ms,
             coverage_memo,
             detectors: self.detectors,
             error: None,
@@ -514,8 +547,10 @@ impl Rdy {
 
     /// Settles the tension set (tevt1): emits the difference between the last settled set and
     /// the published state's, and records the published one. A resolved tension and an opened
-    /// one of the same vkey are a re-key (paired in id order): `tension_resolved` names the new
-    /// id in `rekeyed_to`, `tension_opened` the old one in `rekeyed_from`. Every resolved
+    /// one of the same vkey are a re-key (paired in id order), and so are a resolved tension
+    /// and an opened one with the same items under the other severity (an acceptance):
+    /// `tension_resolved` names the new id in `rekeyed_to`, `tension_opened` the old one in
+    /// `rekeyed_from`. Every resolved
     /// tension is emitted first, then every opened one; `by` and `at_ms` come from the store's
     /// last batch when a batch was written since the last settle (a pack reload writes none:
     /// its events have no `by`). Before the first settle since open, the set of the state
@@ -567,6 +602,24 @@ impl Rdy {
                 rekeyed_to.insert(t.id, *to);
                 rekeyed_from.insert(*to, t.id);
                 *n += 1;
+            }
+        }
+        // final review M7: the same items under the other severity (a person's acceptance made
+        // a semantic tension blocking; a lifecycle change can soften a kind) are a re-key too:
+        // the id hashes the severity, and a consumer must not read the old one as resolved
+        let opened_ids: std::collections::BTreeSet<Hash> = opened.iter().map(|t| t.id).collect();
+        for t in &resolved {
+            if rekeyed_to.contains_key(&t.id) {
+                continue;
+            }
+            let other = match t.severity {
+                TensionSeverity::Blocking => TensionSeverity::Advisory,
+                TensionSeverity::Advisory => TensionSeverity::Blocking,
+            };
+            let to = tension_id(t.kind, other, &t.involved);
+            if opened_ids.contains(&to) && !rekeyed_from.contains_key(&to) {
+                rekeyed_to.insert(t.id, to);
+                rekeyed_from.insert(to, t.id);
             }
         }
         let (by, at_ms) = if batch_since {

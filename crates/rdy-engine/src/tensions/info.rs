@@ -1,5 +1,6 @@
 //! What a surface shows of a tension: its id and label, kind, severity, status, sides (with each
 //! side's views and provenance) and blocks.
+use super::semantic::pair_of;
 use super::{SideRef, Tension, TensionKind, TensionSeverity, tension_label};
 use crate::ReadState;
 use crate::coord_graph::intent_label;
@@ -120,6 +121,10 @@ pub struct TensionInfo {
     /// landing it describes. The gate judges this form; the in-flight set does not hold it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proposal: Option<String>,
+    /// A semantic tension's verdict: who judged the pair, their findings and advice, and a
+    /// person's acceptance of the advice (D-WMCFW).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judged: Option<JudgedInfo>,
 }
 
 /// One side of a tension: its label, what it is (a change, a landing, an intent), the open views
@@ -164,6 +169,51 @@ pub struct DismissalInfo {
     pub reason: String,
 }
 
+/// The verdict behind a semantic tension, and what became of its advice.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct JudgedInfo {
+    /// The review whose `tension` verdict opened the tension.
+    pub review: String,
+    /// The reviewer.
+    pub actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    pub findings: Vec<FindingInfo>,
+    /// The reviewer's reason that the tension should block, when the verdict advised it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advice: Option<String>,
+    /// A person's acceptance of the advice: the tension blocks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<AcceptanceInfo>,
+}
+
+/// A reviewer's note on one block.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FindingInfo {
+    pub block: String,
+    pub note: String,
+}
+
+/// Who accepted a reviewer's advice: the person, the agent that relayed their words, the words,
+/// the question and where they said it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AcceptanceInfo {
+    pub actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// `actor[/run]` of the agent that relayed the answer at the command line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relayed_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
+    /// RFC 3339 UTC.
+    pub at: String,
+}
+
 impl ReadState {
     /// Whether `t` is open or dismissed in this state. A dismissal binds to the vkey, which
     /// covers the content and the severity: a dismissal made while `t` was advisory does not
@@ -191,6 +241,7 @@ impl ReadState {
     pub fn tension_info_with(&self, t: &Tension, cache: &mut InfoCache) -> TensionInfo {
         let mut info = self.tension_info_bare(t);
         info.sides = self.sides_info(t, cache);
+        info.judged = self.judged_info(t);
         info
     }
 
@@ -225,7 +276,49 @@ impl ReadState {
             refuses: None,
             read_time: t.read_time,
             proposal: None,
+            judged: None,
         }
+    }
+
+    /// The verdict behind `t` when `t` is a semantic tension whose pair has an open record in
+    /// the semantic state: the review's reviewer and findings, the record's advice, and the
+    /// acceptance when the record's latest version is one. `None` when the review cannot be read.
+    pub(crate) fn judged_info(&self, t: &Tension) -> Option<JudgedInfo> {
+        let key = pair_of(t)?;
+        let open = self.semantic().tension(&key)?;
+        let rec = &open.record;
+        let r = self.reader().review(&rec.review).ok()?;
+        let accepted = rec.blocking.then(|| {
+            let p = &rec.provenance;
+            let relay = rec.relay.as_ref();
+            AcceptanceInfo {
+                actor: p.actor.clone(),
+                run: p.run.clone(),
+                relayed_by: rec.relayed_by.as_ref().map(|b| match &b.run {
+                    Some(run) => format!("{}/{run}", b.actor),
+                    None => b.actor.clone(),
+                }),
+                evidence: relay.map(|e| e.quoted.clone()),
+                question: relay.and_then(|e| e.question.clone()),
+                session_ref: relay.map(|e| e.session_ref.clone()),
+                at: rfc3339(p.at_ms),
+            }
+        });
+        Some(JudgedInfo {
+            review: rec.review.to_string(),
+            actor: r.provenance.actor,
+            run: r.provenance.run,
+            findings: r
+                .findings
+                .into_iter()
+                .map(|f| FindingInfo {
+                    block: f.block.to_string(),
+                    note: f.note,
+                })
+                .collect(),
+            advice: rec.advice.clone(),
+            accepted,
+        })
     }
 
     /// The dismissal review `review` as the surfaces show it, if it can be read.

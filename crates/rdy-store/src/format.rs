@@ -13,7 +13,8 @@ use std::path::Path;
 /// 6 (plan M2d1): kinds INTENT and ALT_SET, refs intent/ and alt/.
 /// 7 (plan M2d2): kind REVIEW and refs dismiss/.
 /// 8 (plan Coverage and confidence): REVIEW subject Mention, verdict Restore, refs mention/; ChangeLinks.imported_by.
-pub const STORE_FORMAT: u32 = 8;
+/// 9 (plan M2e1): REVIEW subject Pair, verdicts Tension and NoTension, kind TENSION (with advice and a relayed acceptance), refs pair/ and semantic/.
+pub const STORE_FORMAT: u32 = 9;
 /// The mirror file in the store directory.
 pub const FORMAT_FILE: &str = "FORMAT";
 /// The log ref holding `store_format`, in ASCII decimal.

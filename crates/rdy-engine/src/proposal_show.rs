@@ -6,7 +6,10 @@ use crate::gate::{
     RelayedByRow, blocking_conflicts, changes_of, landed_as, latest_version, resolve_in,
     version_number,
 };
+use crate::semantic::accept_advice::advised_digest;
 use crate::session::rfc3339;
+use crate::tensions::info::FindingInfo;
+use crate::tensions::tension_label;
 use crate::views::{ConflictInfo, conflict_infos};
 use crate::{RdyError, ReadState};
 use rdy_model::Hash;
@@ -69,6 +72,28 @@ pub struct ProposalShow {
     pub blocking: Vec<String>,
     /// The chain, oldest first.
     pub versions: Vec<ProposalVersionRow>,
+    /// The semantic tensions of this version whose reviewer advised blocking, by tension id;
+    /// read only when `open` (D-WMCFW).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub advised: Vec<AdvisedRow>,
+    /// `<code>: <message>` when the tensions could not be read; the rest of the show stands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advised_error: Option<String>,
+    /// The digest of `advised`, which an acceptance passes back (as the propose reply's).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advised_digest: Option<String>,
+}
+
+/// An advised semantic tension of a proposal version: the reviewer, the advice and findings,
+/// and whether a person accepted the advice.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AdvisedRow {
+    /// `tn-<12 hex>`.
+    pub tension: String,
+    pub reviewer: String,
+    pub advice: String,
+    pub findings: Vec<FindingInfo>,
+    pub accepted: bool,
 }
 
 /// Whether `text` is a proposal ref: `P-`, 4 to 64 hex digits, then nothing or `@` and digits.
@@ -161,6 +186,14 @@ impl ReadState {
                 conflicts.len()
             ));
         }
+        let (advised, advised_digest, advised_error) = if state == "open" {
+            match self.advised_rows(&p.view, &p.changes) {
+                Ok((rows, digest)) => (rows, digest, None),
+                Err(e) => (vec![], None, Some(format!("{}: {}", e.code, e.message))),
+            }
+        } else {
+            (vec![], None, None)
+        };
         Ok(ProposalShow {
             r#ref: format!("P-{stable_short}@{}", pref.n),
             id: pref.version.to_string(),
@@ -182,7 +215,43 @@ impl ReadState {
             conflicts,
             blocking,
             versions,
+            advised,
+            advised_error,
+            advised_digest,
         })
+    }
+
+    /// The advised semantic tensions of `changes` as `rdy show P-x@n` lists them, every one: the
+    /// reviewer and findings from each verdict's review; and the digest of the set.
+    fn advised_rows(
+        &self,
+        view: &str,
+        changes: &[Hash],
+    ) -> Result<(Vec<AdvisedRow>, Option<String>), RdyError> {
+        let advised = self.advised_of(view, changes)?;
+        let digest = advised_digest(&advised);
+        let rows = advised
+            .into_iter()
+            .map(|a| {
+                let rec = &a.open.record;
+                let r = self.reader().review(&rec.review)?;
+                Ok(AdvisedRow {
+                    tension: tension_label(&a.tension.id),
+                    reviewer: r.provenance.actor,
+                    advice: rec.advice.clone().unwrap_or_default(),
+                    findings: r
+                        .findings
+                        .into_iter()
+                        .map(|f| FindingInfo {
+                            block: f.block.to_string(),
+                            note: f.note,
+                        })
+                        .collect(),
+                    accepted: rec.blocking,
+                })
+            })
+            .collect::<Result<Vec<_>, RdyError>>()?;
+        Ok((rows, digest))
     }
 }
 
@@ -263,6 +332,35 @@ pub fn proposal_text(v: &Value) -> String {
     } else {
         out.push_str(&format!("blocking: {}\n", blocking.join("; ")));
     }
+    for a in v["advised"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "advised: {} by {}: {}{}\n",
+            s(&a["tension"]),
+            s(&a["reviewer"]),
+            s(&a["advice"]),
+            if a["accepted"].as_bool() == Some(true) {
+                " (accepted)"
+            } else {
+                ""
+            }
+        ));
+    }
+    let open = v["advised"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|a| a.get("accepted").and_then(Value::as_bool) != Some(true));
+    if let Some(d) = v["advised_digest"].as_str()
+        && open
+    {
+        out.push_str(&format!(
+            "accept the advice with: rdy resolve --accept {} --digest {d}\n",
+            s(&v["ref"])
+        ));
+    }
+    if let Some(e) = v["advised_error"].as_str() {
+        out.push_str(&format!("advised: not read ({e})\n"));
+    }
     out
 }
 
@@ -322,5 +420,39 @@ mod tests {
             t.ends_with("approve with: rdy approve P-111111111111@2\n"),
             "{t}"
         );
+    }
+
+    /// D-WMCFW: `rdy show P-x@n` names each advised tension after the blocking line, marks an
+    /// accepted one, and says when the tensions could not be read.
+    #[test]
+    fn se8_proposal_text_names_the_advised_tensions() {
+        let h = |c: char| c.to_string().repeat(64);
+        let mut v = json!({
+            "ref": "P-111111111111@1", "id": h('1'), "stable": h('1'), "version": 1,
+            "title": "T", "summary": null, "view": "a",
+            "proposed_by": {"actor": "agent:a", "run": null}, "proposed_at": "2026-10-06T10:00:00Z",
+            "canon_at": null, "state": "open", "landing": null, "changes": [], "blocks": 0,
+            "conflicts": [], "blocking": [],
+            "versions": [{"ref": "P-111111111111@1", "id": h('1'), "latest": true, "landed": false}],
+            "advised": [
+                {"tension": "tn-aaaaaaaaaaaa", "reviewer": "agent:r", "advice": "no", "findings": [], "accepted": false},
+                {"tension": "tn-bbbbbbbbbbbb", "reviewer": "agent:s", "advice": "yes", "findings": [], "accepted": true}
+            ],
+            "advised_digest": "0123456789ab"
+        });
+        assert!(proposal_text(&v).ends_with(
+            "approve with: rdy approve P-111111111111@1\n\
+             advised: tn-aaaaaaaaaaaa by agent:r: no\n\
+             advised: tn-bbbbbbbbbbbb by agent:s: yes (accepted)\n\
+             accept the advice with: rdy resolve --accept P-111111111111@1 --digest 0123456789ab\n"
+        ));
+        // every advised tension accepted: nothing left to accept
+        v["advised"][0]["accepted"] = json!(true);
+        assert!(
+            proposal_text(&v).ends_with("advised: tn-bbbbbbbbbbbb by agent:s: yes (accepted)\n")
+        );
+        v["advised"] = json!([]);
+        v["advised_error"] = json!("E_IO: busy");
+        assert!(proposal_text(&v).ends_with("advised: not read (E_IO: busy)\n"));
     }
 }

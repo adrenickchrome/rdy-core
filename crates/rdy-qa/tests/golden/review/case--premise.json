@@ -1,0 +1,62 @@
+{
+  "case": {
+    "blocks": [
+      {
+        "doc": "spec",
+        "governing": [],
+        "headings": [
+          "Spec",
+          "Rules"
+        ],
+        "id": "D-FXQB6",
+        "side": "canon@6c65eeac9c425d34ce3fe9319347f81e619a94a1e7284f7cd4c772a33127add9",
+        "text": [
+          {
+            "field": "statement",
+            "text": "Keep A"
+          }
+        ],
+        "type": "decision",
+        "version": "a1b1af4fac8146c199c85ca404aed945c5588ddd65a6a78b3e5fa3e1b83c3289"
+      },
+      {
+        "doc": "spec",
+        "governing": [
+          {
+            "id": "D-FXQB6",
+            "statement": "Keep A"
+          }
+        ],
+        "headings": [
+          "Spec",
+          "Rules"
+        ],
+        "id": "c-6MYYZ",
+        "side": "f086a12270357eba3116435be0afa4b656d6a2316cc45380810663617ec61908",
+        "text": [
+          {
+            "field": "body",
+            "text": "A holds, mostly."
+          }
+        ],
+        "type": "claim",
+        "version": "58c1c95bca1fa5ec130eac18311d7017f16565674b9a2b0f8d1fee3d42492ae0"
+      }
+    ],
+    "entities": [],
+    "kind": "tension",
+    "question": "Do these two blocks disagree? Answer tension when they cannot both hold, else no_tension. A tension names, for each block that takes part, what in it disagrees.",
+    "request": "rq-b76da906d5ac",
+    "rule": "premise",
+    "schema": {
+      "findings": "a list of {block, note}: block is one of the two block ids; note is 1 to 2000 characters; a tension verdict needs 1 to 20 findings, a no_tension verdict 0 to 20",
+      "reason": "with severity blocking only: why the tension should block, 1 to 2000 characters",
+      "severity": "advisory (default) or blocking, on a tension verdict only: blocking advises a person to make the tension block; it gates nothing until a person accepts it",
+      "verdict": [
+        "tension",
+        "no_tension"
+      ]
+    }
+  },
+  "case_hash": "435dbe2b1e21a5febc4bd0bc9dd55651c17008a53ffe4b39e0fb7f626ca1f51c"
+}

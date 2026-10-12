@@ -62,6 +62,14 @@ pub struct ProposalInfo {
     /// The tensions left out past `PROPOSAL_TENSIONS_MAX`.
     #[serde(skip_serializing_if = "is_zero")]
     pub tensions_omitted: usize,
+    /// The digest of every advised semantic tension of the version (D-WMCFW), listed or not:
+    /// an acceptance passes it back, so it answers for the set the person was shown. `None`
+    /// when the version has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advised_digest: Option<String>,
+    /// The advised tensions not yet accepted that `tensions` leaves out past the cut.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub advised_omitted: usize,
     /// Canon's head when the version was written (FW-HB1).
     pub canon_at: Option<String>,
     /// The alternative set the version chooses its own view's member of (altg1).
@@ -750,15 +758,30 @@ impl ReadState {
     }
 }
 
-/// `E_BLOCKING_TENSION` for the refusing tensions of version `pref`: one issue per tension.
+/// `E_BLOCKING_TENSION` for the refusing tensions of version `pref`: one issue per tension. The
+/// fix names what resolves each refusing kind ([`crate::tensions::resolve_hint`]), each distinct
+/// hint once, in the order the tensions come.
 fn blocking_tensions(pref: &ProposalRef, refusing: &[TensionInfo]) -> RdyError {
+    let mut hints: Vec<&str> = vec![];
+    for t in refusing {
+        let h = crate::tensions::resolve_hint(t.kind);
+        if !hints.contains(&h) {
+            hints.push(h);
+        }
+    }
+    if hints.is_empty() {
+        hints.push(crate::tensions::RESOLVE_HINT);
+    }
     let mut e = RdyError::new(
         E_BLOCKING_TENSION,
         format!(
             "landing {pref} would put {} blocking tension(s) into canon",
             refusing.len()
         ),
-        "resolve each with a change, repin the citation, or dismiss it (rdy resolve <tn-…> --dismiss <reason>; a reviewer of another actor or a human); rdy tensions --involving <change> lists them, a form only this landing gives with its proposal",
+        format!(
+            "{} (rdy resolve <tn-…> --dismiss <reason>; a reviewer of another actor or a human); rdy tensions --involving <change> lists them, a form only this landing gives with its proposal",
+            hints.join("; ")
+        ),
     );
     e.issues = refusing
         .iter()
@@ -772,7 +795,10 @@ fn blocking_tensions(pref: &ProposalRef, refusing: &[TensionInfo]) -> RdyError {
                 .and_then(|side| side.blocks.first())
                 .and_then(|b| BlockId::parse(&b.block).ok()),
             message: format!("{} {}: {}", t.id, t.kind, t.summary),
-            fix: format!("resolve, repin or dismiss {}", t.id),
+            fix: match crate::tensions::resolve_hint(t.kind) {
+                crate::tensions::RESOLVE_HINT => format!("resolve, repin or dismiss {}", t.id),
+                h => format!("{}: {h}", t.id),
+            },
         })
         .collect();
     e
@@ -1839,7 +1865,7 @@ impl Rdy {
         // tgat1: the version's tensions, read after a re-key change (if any) was committed. The
         // proposal is stored and published by now: a read error leaves the tensions out and is
         // reported, as a briefing's `tensions_error` is, and the reply keeps the proposal.
-        let (tensions, tensions_omitted, tensions_error) = match self.read().proposal_tensions(
+        let (tensions, tensions_omitted, mut tensions_error) = match self.read().proposal_tensions(
             view,
             &stored.changes,
             &conflicted,
@@ -1851,6 +1877,29 @@ impl Rdy {
                 // coverage reads the same tension set: it is not worked out either
                 coverage_error.get_or_insert_with(|| text.clone());
                 (vec![], 0, Some(text))
+            }
+        };
+        // D-WMCFW: the digest of every advised tension, listed or not, and the advised ones the
+        // list leaves out; a read error is the tensions' (the same set)
+        let (advised_digest, advised_omitted) = match self.read().advised_of(view, &stored.changes)
+        {
+            Ok(advised) => {
+                let listed: BTreeSet<&str> = tensions.iter().map(|t| t.tension.as_str()).collect();
+                let omitted = advised
+                    .iter()
+                    .filter(|a| {
+                        !a.open.record.blocking
+                            && !listed.contains(a.tension.id.to_string().as_str())
+                    })
+                    .count();
+                (
+                    crate::semantic::accept_advice::advised_digest(&advised),
+                    omitted,
+                )
+            }
+            Err(e) => {
+                tensions_error.get_or_insert_with(|| crate::coverage::coverage_error_text(&e));
+                (None, 0)
             }
         };
         let pref = ProposalRef {
@@ -1871,6 +1920,8 @@ impl Rdy {
             blocking,
             tensions,
             tensions_omitted,
+            advised_digest,
+            advised_omitted,
             canon_at: canon_at.map(|h| h.to_string()),
             alternative: chosen,
             keys,

@@ -1,7 +1,7 @@
 //! The event stream (evt1): what a write batch did, derived from the batch's own frames, and the
 //! in-process bus that fans the events out to subscribers.
 use crate::RdyError;
-use rdy_model::{AltSet, AltStatus, Hash, ReviewSubject};
+use rdy_model::{AltSet, AltStatus, Hash, ReviewSubject, Verdict};
 use rdy_store::segment::Location;
 use rdy_store::view::ViewOpKind;
 use rdy_store::{StoreReader, kinds};
@@ -100,9 +100,20 @@ pub enum EventKind {
         actor: String,
         run: Option<String>,
     },
+    /// A reviewer's verdict on a candidate pair (plan M2e1); `pair` is the pair key.
+    ReviewSubmitted {
+        #[serde(serialize_with = "hex::one")]
+        review: Hash,
+        #[serde(serialize_with = "hex::one")]
+        pair: Hash,
+        verdict: String,
+        actor: String,
+        run: Option<String>,
+    },
     /// A tension the settled set did not have (`Rdy::settle_tensions`). `kind` and `severity`
-    /// are their wire names, `sides` the full side labels; `rekeyed_from` is the tension of the
-    /// same vkey it replaces (a side landed or moved, its content did not).
+    /// are their wire names, `sides` the full side labels; `rekeyed_from` is the tension it
+    /// replaces: one of the same vkey (a side landed or moved, its content did not), or one with
+    /// the same items under the other severity (a person accepted a reviewer's advice).
     TensionOpened {
         #[serde(serialize_with = "hex::one")]
         tension: Hash,
@@ -113,8 +124,8 @@ pub enum EventKind {
         rekeyed_from: Option<Hash>,
     },
     /// A tension of the settled set that is gone. `by` is what the last batch did
-    /// (`landing:<hex>`, `change:<hex>` or `op:<hex>`); `rekeyed_to` is the tension of the same
-    /// vkey that replaces it.
+    /// (`landing:<hex>`, `change:<hex>` or `op:<hex>`); `rekeyed_to` is the tension that
+    /// replaces it (see `rekeyed_from` on `TensionOpened`).
     TensionResolved {
         #[serde(serialize_with = "hex::one")]
         tension: Hash,
@@ -256,26 +267,44 @@ pub fn events_for_batch(
             }
             kinds::REVIEW => {
                 let r = reader.review(&hash)?;
-                // a mention review (FW-CV4) is not a tension dismissal; no event names it yet
-                let ReviewSubject::Tension { id, vkey, .. } = r.subject else {
-                    continue;
-                };
-                out.push(Event {
-                    seq,
-                    at_ms: r.provenance.at_ms,
-                    kind: EventKind::TensionDismissed {
+                let kind = match r.subject {
+                    ReviewSubject::Tension { id, vkey, .. } => EventKind::TensionDismissed {
                         tension: id,
                         vkey,
                         review: hash,
                         actor: r.provenance.actor,
                         run: r.provenance.run,
                     },
+                    ReviewSubject::Pair { key, .. } => EventKind::ReviewSubmitted {
+                        review: hash,
+                        pair: key,
+                        verdict: verdict_name(r.verdict).to_string(),
+                        actor: r.provenance.actor,
+                        run: r.provenance.run,
+                    },
+                    // a mention review (FW-CV4) is not a tension dismissal; no event names it yet
+                    ReviewSubject::Mention { .. } => continue,
+                };
+                out.push(Event {
+                    seq,
+                    at_ms: r.provenance.at_ms,
+                    kind,
                 });
             }
             _ => {}
         }
     }
     Ok(out)
+}
+
+/// A verdict's wire name.
+fn verdict_name(v: Verdict) -> &'static str {
+    match v {
+        Verdict::Dismiss => "dismiss",
+        Verdict::Restore => "restore",
+        Verdict::Tension => "tension",
+        Verdict::NoTension => "no_tension",
+    }
 }
 
 /// What a set version changed from `before`, its `prev` (None for a first version).

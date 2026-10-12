@@ -1,5 +1,6 @@
 //! The one door to a project: reads from the published state, writes through a closure that
 //! runs against `&mut Rdy` on a single writer, in arrival order.
+use crate::semantic::lease::LeaseRegistry;
 use crate::{BriefRegistry, OpenReport, Rdy, RdyError, ReadState};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -17,6 +18,8 @@ pub trait Engine: Send + Sync {
     fn root(&self) -> PathBuf;
     /// The project's briefing registry (one per open project).
     fn briefs(&self) -> Arc<BriefRegistry>;
+    /// The project's lease registry for review requests (one per open project).
+    fn leases(&self) -> Arc<LeaseRegistry>;
     /// How many times the loaded pack changed (a reload, or a new or fixed pack error); `0` for
     /// an engine that never reloads.
     fn pack_generation(&self) -> u64 {
@@ -144,6 +147,10 @@ impl Engine for Local {
 
     fn briefs(&self) -> Arc<BriefRegistry> {
         self.lock().briefs()
+    }
+
+    fn leases(&self) -> Arc<LeaseRegistry> {
+        self.lock().leases()
     }
 }
 

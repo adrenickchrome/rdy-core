@@ -39,6 +39,8 @@ pub struct ChangeFacts {
     pub views: Vec<String>,
     /// The blocks the change writes, sorted.
     pub blocks: Vec<BlockId>,
+    /// The change's provenance time, in ms.
+    pub at_ms: i64,
 }
 
 /// A live decision write that supersedes a target, with the part it names (`None`: the whole).
@@ -146,6 +148,7 @@ impl Writes {
                     justified: change.justification.is_some(),
                     views: views.clone(),
                     blocks,
+                    at_ms: change.provenance.at_ms,
                 },
             );
         }
@@ -198,6 +201,7 @@ impl Writes {
                 justified: read.justification.is_some(),
                 views,
                 blocks: mine.keys().cloned().collect(),
+                at_ms: read.provenance.at_ms,
             },
         );
         let mut own = Vec::with_capacity(mine.len());
@@ -415,6 +419,22 @@ impl Writes {
     /// Every in-flight change, by id.
     pub fn changes(&self) -> impl Iterator<Item = &ChangeFacts> {
         self.changes.values()
+    }
+
+    /// Whether some view of change `c` holds no write of block `b` (live or not): in that view,
+    /// `b` is canon's. False for a change that is not in flight.
+    pub fn untouched_in_a_view_of(&self, c: &Hash, b: &BlockId) -> bool {
+        let Some(f) = self.changes.get(c) else {
+            return false;
+        };
+        let on = self.on(b);
+        f.views.iter().any(|v| {
+            !on.iter().any(|w| {
+                self.changes
+                    .get(&w.change)
+                    .is_some_and(|g| g.views.contains(v))
+            })
+        })
     }
 
     /// Whether changes `a` and `b` share an open view.

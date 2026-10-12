@@ -9,6 +9,11 @@ pub enum StoreError {
     Db(String),
     #[error("cannot decode object: {0}")]
     Decode(String),
+    /// A write the store's checks refuse (a verdict or a semantic tension version that breaks a
+    /// rule); nothing was written. Not damage: `Decode` is a stored object or ref that does not
+    /// decode.
+    #[error("{0}")]
+    Refused(String),
     #[error("object {0} not found")]
     NotFound(Hash),
     #[error("store at {0} is locked by another process")]

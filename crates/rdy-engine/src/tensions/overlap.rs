@@ -200,7 +200,8 @@ impl ReadState {
                     involved,
                     stable: true,
                 };
-                if let Some(t) = tension_from(self.pack(), found, true, DetectScope::Inflight) {
+                if let Some(t) = tension_from(self.pack(), None, found, true, DetectScope::Inflight)
+                {
                     out.insert(t.id, t);
                 }
             }

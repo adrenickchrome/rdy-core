@@ -17,7 +17,10 @@
 //! `DetectCx::inflight_graph` return canon's, and a detector must not read the published
 //! state's in-flight set, views or coordination refs through `cx.st`. The canon part is always
 //! a full run (no seeds). An index a new kind adds to `DetectCx` is lazy (a `OnceLock`), so the
-//! kinds that do not read it pay nothing.
+//! kinds that do not read it pay nothing. A kind whose tensions come from stored records (the
+//! semantic kind) says so with `Detector::stored` and may give its own severity with
+//! `Detector::own_severity`. A kind that a repin or a change of the usual kind does not resolve
+//! names what does with `Detector::resolve_hint`, which a landing refusal's fix reads.
 pub mod api;
 pub mod collision;
 pub mod delta;
@@ -30,6 +33,7 @@ pub mod index;
 pub mod info;
 pub mod overlap;
 pub mod premise;
+pub mod semantic;
 pub mod set;
 pub mod unjustified;
 pub mod value;
@@ -214,9 +218,11 @@ pub enum DetectScope {
 
 /// The tension `f` describes, or `None` when the scope does not keep it: in the in-flight scope a
 /// tension needs a change side; in the canon scope every side must be canon. Its involved items
-/// are sorted and deduplicated.
+/// are sorted and deduplicated. Its severity is `own` when the detector gives one (never
+/// `overridden`), else the pack's or the kind's ([`severity_of`]).
 pub(crate) fn tension_from(
     pack: &Pack,
+    own: Option<TensionSeverity>,
     f: Found,
     read_time: bool,
     scope: DetectScope,
@@ -234,7 +240,10 @@ pub(crate) fn tension_from(
     if !keep || f.involved.is_empty() {
         return None;
     }
-    let (severity, overridden) = severity_of(pack, &f);
+    let (severity, overridden) = match own {
+        Some(s) => (s, false),
+        None => severity_of(pack, &f),
+    };
     let mut involved = f.involved;
     involved.sort();
     involved.dedup();
@@ -273,12 +282,37 @@ pub trait Detector: Sync {
     fn judged_on_the_net_change(&self) -> bool {
         false
     }
+    /// A severity this detector gives a tension itself, over the pack and the kind's default. Only a kind whose severity is a recorded judgment uses it (a person's acceptance of a reviewer's advice).
+    fn own_severity(&self, _cx: &DetectCx<'_>, _f: &Found) -> Option<TensionSeverity> {
+        None
+    }
+    /// What resolves a tension of this kind, as a landing refusal's fix names it. A refusal
+    /// never names an action that does not help (FW-LP6b). Default: [`RESOLVE_HINT`].
+    fn resolve_hint(&self) -> &'static str {
+        RESOLVE_HINT
+    }
+    /// Whether this kind's tensions come from stored records rather than from the content alone. Such a kind is re-detected after a verdict or an acceptance, and its all-canon tensions are computed per build, never memoised per canon build.
+    fn stored(&self) -> bool {
+        false
+    }
     fn detect(
         &self,
         cx: &DetectCx<'_>,
         seeds: Option<&BTreeSet<BlockId>>,
         out: &mut Vec<Found>,
     ) -> Result<(), RdyError>;
+}
+
+/// What resolves a tension of most kinds: a change, a repin or a dismissal (see
+/// [`Detector::resolve_hint`]).
+pub const RESOLVE_HINT: &str = "resolve each with a change, repin the citation, or dismiss it";
+
+/// What resolves a tension of `kind` (see [`Detector::resolve_hint`]).
+pub fn resolve_hint(kind: TensionKind) -> &'static str {
+    DETECTORS
+        .iter()
+        .find(|d| d.kind() == kind)
+        .map_or(RESOLVE_HINT, |d| d.resolve_hint())
 }
 
 /// Whether a proposal lists `kind` only in its landing form (see
@@ -290,7 +324,7 @@ pub fn judged_on_the_net_change(kind: TensionKind) -> bool {
 }
 
 /// The registry: one detector per kind, in `TensionKind::ALL` order.
-pub static DETECTORS: [&dyn Detector; 9] = [
+pub static DETECTORS: [&dyn Detector; 10] = [
     &collision::EditCollision,
     &fork::Fork,
     &premise::PremiseShift,
@@ -300,4 +334,5 @@ pub static DETECTORS: [&dyn Detector; 9] = [
     &deprecated::DeprecatedReference,
     &value::ValueDisagreement,
     &drift::RestatementDrift,
+    &semantic::Semantic,
 ];

@@ -111,6 +111,7 @@ fn evt1_a_landing_batch_gives_commit_proposed_landed_and_rebased() {
             EventKind::TensionDismissed { .. } => "tension_dismissed",
             EventKind::TensionOpened { .. } => "tension_opened",
             EventKind::TensionResolved { .. } => "tension_resolved",
+            EventKind::ReviewSubmitted { .. } => "review_submitted",
         })
         .collect();
     // the acceptance change, the final proposal version, the landing, the proposing view's rebase

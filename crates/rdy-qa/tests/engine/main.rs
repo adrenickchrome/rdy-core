@@ -19,6 +19,7 @@ mod engine_priv;
 mod engine_pver;
 mod engine_repin;
 mod engine_retype;
+mod engine_semantic_accept;
 mod engine_session;
 mod engine_splitbrain;
 mod engine_supersede;

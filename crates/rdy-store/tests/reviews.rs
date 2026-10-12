@@ -32,9 +32,9 @@ fn review(vkey: Hash, reason: &str) -> Review {
 }
 
 #[test]
-fn rvw1_kind_17_and_format_8() {
+fn rvw1_kind_17_and_format_9() {
     assert_eq!(kinds::REVIEW, 17);
-    assert_eq!(rdy_store::format::STORE_FORMAT, 8);
+    assert_eq!(rdy_store::format::STORE_FORMAT, 9);
 }
 
 #[test]
@@ -87,8 +87,9 @@ fn rvw1_a_second_dismissal_of_one_vkey_is_refused() {
     let (_d, mut s) = store();
     let k = Hash([6; 32]);
     let h1 = s.put_dismissal(&review(k, "first")).unwrap();
+    // final review M6: a deliberate refusal, not damage
     match s.put_dismissal(&review(k, "second, by someone else")) {
-        Err(StoreError::Decode(m)) => {
+        Err(StoreError::Refused(m)) => {
             assert!(m.contains("already dismissed"), "{m}");
             assert!(m.contains(&h1.to_string()), "{m}");
         }
@@ -207,8 +208,8 @@ fn mention(block: &str, entity: &str, verdict: Verdict, at_ms: i64) -> Review {
 }
 
 #[test]
-fn cc1_format_8() {
-    assert_eq!(rdy_store::format::STORE_FORMAT, 8);
+fn cc1_format_9() {
+    assert_eq!(rdy_store::format::STORE_FORMAT, 9);
 }
 
 #[test]
@@ -392,4 +393,19 @@ fn cc1_fsck_refuses_a_mention_ref_to_an_object_of_another_kind() {
         ),
         other => panic!("{other:?}"),
     }
+}
+
+/// final review M6: put_dismissal and put_mention_review refuse a review of the wrong shape as
+/// StoreError::Refused (a refusal, not damage), and write nothing.
+#[test]
+fn rvw1_a_review_of_the_wrong_shape_is_refused_not_damage() {
+    let (_d, mut s) = store();
+    let writes = s.write_count();
+    let m = mention("c-AAAAA", "t-BBBBB", Verdict::Dismiss, 1);
+    assert!(matches!(s.put_dismissal(&m), Err(StoreError::Refused(_))));
+    assert!(matches!(
+        s.put_mention_review(&review(Hash([20; 32]), "fine")),
+        Err(StoreError::Refused(_))
+    ));
+    assert_eq!(s.write_count(), writes);
 }

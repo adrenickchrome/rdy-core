@@ -8,11 +8,11 @@ use crate::StoreReader;
 use crate::coord::{ALT_REF, INTENT_REF, key_hash};
 use crate::error::StoreError;
 use crate::kinds;
-use crate::review::{DISMISS_REF, MENTION_REF, mention_key};
+use crate::review::{DISMISS_REF, MENTION_REF, PAIR_REF, SEMANTIC_REF, mention_key};
 use crate::view::{ViewHead, ViewOpKind, resolve};
 use rdy_model::{
     AltChoice, AltSet, AltStatus, Assurance, Change, EvidenceKind, Hash, Intent, LandingRecord,
-    Review, ReviewSubject, Verdict,
+    Review, ReviewSubject, SemanticTension, Verdict, pair_key,
 };
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -34,8 +34,10 @@ pub struct StoreCheck {
     pub intents: usize,
     /// The `alt/` refs, each with its version chain checked.
     pub alt_sets: usize,
-    /// The `dismiss/` refs, each naming a review of its own tension.
+    /// The `dismiss/`, `mention/` and `pair/` refs, each naming a review of its own subject.
     pub reviews: usize,
+    /// The `semantic/` refs, each with its version chain checked.
+    pub tensions: usize,
 }
 
 /// What `check_view` found out about one view.
@@ -73,7 +75,8 @@ impl StoreReader {
     /// Checks the view chains, their heads and index entries, canon's landings (relay and evidence
     /// rules included), recorded conflicts, undo chains, the dependency DAG, the closure of every
     /// view's included set, the version chains of intents and alternative sets, the links that
-    /// name them, and the dismissal refs; the first failure found is a `StoreError::Decode`.
+    /// name them, the dismissal, mention review and verdict refs, and the semantic tension chains;
+    /// the first failure found is a `StoreError::Decode`.
     pub fn check_objects(&self) -> Result<StoreCheck, StoreError> {
         let mut views = 0;
         let mut view_ops = 0;
@@ -124,7 +127,9 @@ impl StoreReader {
             alt_sets: alt_sets.iter().map(|(k, _)| *k).collect(),
         };
         self.check_dag(&landings, &sets, &keys)?;
-        let reviews = self.check_dismissals()? + self.check_mention_reviews()?;
+        let reviews =
+            self.check_dismissals()? + self.check_mention_reviews()? + self.check_verdicts()?;
+        let tensions = self.check_semantic()?;
         Ok(StoreCheck {
             views,
             view_ops,
@@ -134,6 +139,7 @@ impl StoreReader {
             intents: intents.len(),
             alt_sets: alt_sets.len(),
             reviews,
+            tensions,
         })
     }
 
@@ -199,9 +205,115 @@ impl StoreReader {
                     return Err(bad(format!("{at}: review {h} is not a mention review")));
                 }
             }
-            // Both verdicts are a mention's; a new verdict must decide here whether it is one.
+            // A new verdict must decide here whether it is a mention's.
             match r.verdict {
                 Verdict::Dismiss | Verdict::Restore => {}
+                Verdict::Tension | Verdict::NoTension => {
+                    return Err(bad(format!("{at}: review {h} is not a mention review")));
+                }
+            }
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// Every `pair/` ref is keyed by a pair key and names a stored review of that pair (two items
+    /// with distinct blocks) with verdict `Tension` or `NoTension`; a `Tension` verdict has its
+    /// `semantic/<key>` ref, as `put_verdict` writes them in one batch. Returns how many refs
+    /// there are.
+    fn check_verdicts(&self) -> Result<usize, StoreError> {
+        let mut n = 0;
+        for (key, value) in self.refs_with_prefix(PAIR_REF)? {
+            let key = key_hash(&key, PAIR_REF, "verdict")?;
+            let h = crate::index::hash_from(&value, &format!("verdict ref {key}"))?;
+            let r: Review = match self.get_typed(kinds::REVIEW, &h) {
+                Err(StoreError::NotFound(_)) => {
+                    return Err(bad(format!("pair {key}: {h} is not a stored review")));
+                }
+                r => r?,
+            };
+            let on_this_pair = matches!(
+                &r.subject,
+                ReviewSubject::Pair { key: k, items }
+                    if *k == key
+                        && items.len() == 2
+                        && items[0].block != items[1].block
+                        && pair_key(items) == key
+            );
+            if !on_this_pair || !matches!(r.verdict, Verdict::Tension | Verdict::NoTension) {
+                return Err(bad(format!(
+                    "pair {key}: review {h} is not a verdict on this pair"
+                )));
+            }
+            if r.verdict == Verdict::Tension
+                && self.get_ref(&format!("{SEMANTIC_REF}{key}"))?.is_none()
+            {
+                return Err(bad(format!(
+                    "pair {key}: tension verdict {h} has no semantic tension record"
+                )));
+            }
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// Every `semantic/` ref is keyed by a pair key and names a version chain of that pair: the
+    /// first version follows from the `tension` verdict `pair/<key>` names (no prev, not blocking,
+    /// no relay), and a second version, if any, is an acceptance of the first (blocking, with its
+    /// pair, verdict and advice). A chain has at most two versions. Returns how many refs there are.
+    fn check_semantic(&self) -> Result<usize, StoreError> {
+        let mut n = 0;
+        for (key, value) in self.refs_with_prefix(SEMANTIC_REF)? {
+            let key = key_hash(&key, SEMANTIC_REF, "semantic tension")?;
+            let latest = crate::index::hash_from(&value, &format!("semantic tension ref {key}"))?;
+            let read = |h: &Hash| -> Result<SemanticTension, StoreError> {
+                match self.get_typed(kinds::TENSION, h) {
+                    Err(StoreError::NotFound(_)) => Err(bad(format!(
+                        "semantic tension {key}: version {h} is not a stored semantic tension"
+                    ))),
+                    r => r,
+                }
+            };
+            let head = read(&latest)?;
+            let (first_h, first) = match head.prev {
+                None => (latest, head.clone()),
+                Some(p) => (p, read(&p)?),
+            };
+            if head.prev.is_some() {
+                let accepts = first.prev.is_none()
+                    && head.key == key
+                    && head.blocking
+                    && head.advice.is_some()
+                    && (&head.items, head.review, &head.advice)
+                        == (&first.items, first.review, &first.advice);
+                if !accepts {
+                    return Err(bad(format!(
+                        "semantic tension {key}: version {latest} is not an acceptance of the first"
+                    )));
+                }
+            }
+            let verdict = match self.get_ref(&format!("{PAIR_REF}{key}"))? {
+                Some(v) => Some(crate::index::hash_from(&v, &format!("verdict ref {key}"))?),
+                None => None,
+            };
+            let follows = first.key == key
+                && verdict == Some(first.review)
+                && !first.blocking
+                && first.relay.is_none()
+                && first.relayed_by.is_none()
+                && match self.get_typed::<Review>(kinds::REVIEW, &first.review) {
+                    Err(StoreError::NotFound(_)) => false,
+                    r => {
+                        let r = r?;
+                        r.verdict == Verdict::Tension
+                            && matches!(&r.subject, ReviewSubject::Pair { items, .. } if *items == first.items)
+                    }
+                };
+            if !follows {
+                return Err(bad(format!(
+                    "semantic tension {key}: version {first_h} does not follow from the pair's \
+                     tension verdict"
+                )));
             }
             n += 1;
         }

@@ -1,0 +1,57 @@
+{
+  "case": {
+    "blocks": [
+      {
+        "doc": "spec",
+        "governing": [],
+        "headings": [
+          "Spec",
+          "Rules"
+        ],
+        "id": "D-FXQB6",
+        "side": "canon@6c65eeac9c425d34ce3fe9319347f81e619a94a1e7284f7cd4c772a33127add9",
+        "text": [
+          {
+            "field": "statement",
+            "text": "Keep A"
+          }
+        ],
+        "type": "decision",
+        "version": "a1b1af4fac8146c199c85ca404aed945c5588ddd65a6a78b3e5fa3e1b83c3289"
+      },
+      {
+        "doc": "spec",
+        "governing": [],
+        "headings": [
+          "Spec",
+          "Rules"
+        ],
+        "id": "c-G07JH",
+        "side": "8833e8794a8745999b9a6740f35be6f522269a87028a412fcb190463b5cb698c",
+        "text": [
+          {
+            "field": "body",
+            "text": "C changed."
+          }
+        ],
+        "type": "claim",
+        "version": "b459f61a236f4f906a3d7373df427c48a9b75d7d67b49655fb4a56352eae7c75"
+      }
+    ],
+    "entities": [],
+    "kind": "tension",
+    "question": "Do these two blocks disagree? Answer tension when they cannot both hold, else no_tension. A tension names, for each block that takes part, what in it disagrees.",
+    "request": "rq-7d078d58c7f4",
+    "rule": "section",
+    "schema": {
+      "findings": "a list of {block, note}: block is one of the two block ids; note is 1 to 2000 characters; a tension verdict needs 1 to 20 findings, a no_tension verdict 0 to 20",
+      "reason": "with severity blocking only: why the tension should block, 1 to 2000 characters",
+      "severity": "advisory (default) or blocking, on a tension verdict only: blocking advises a person to make the tension block; it gates nothing until a person accepts it",
+      "verdict": [
+        "tension",
+        "no_tension"
+      ]
+    }
+  },
+  "case_hash": "7638ab3e87686f4728d069db270d4d25cb31d0c9e06936ad51c2c48544048bfa"
+}

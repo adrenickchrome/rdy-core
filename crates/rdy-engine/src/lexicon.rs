@@ -246,6 +246,23 @@ impl Lexicon {
             .collect()
     }
 
+    /// The blocks whose text holds every word of one of `entity`'s name or alias phrases, sorted
+    /// by id, without `entity`. A superset of the blocks that name it: the caller checks each with
+    /// [`Lexicon::mentions`]. Empty for a block that is no entity.
+    pub fn naming(&self, entity: &BlockId) -> Vec<BlockId> {
+        let Some(names) = self.names.get(entity) else {
+            return vec![];
+        };
+        let mut out: BTreeSet<BlockId> = BTreeSet::new();
+        for (kind, p) in names {
+            if *kind != NameKind::Key {
+                out.extend(self.blocks_with_words(p));
+            }
+        }
+        out.remove(entity);
+        out.into_iter().collect()
+    }
+
     /// The distinct code literals and the distinct folded words of `b`'s text sources.
     fn terms_of(&self, b: &Block) -> (BTreeSet<String>, BTreeSet<String>) {
         let sources = self.sources(b);

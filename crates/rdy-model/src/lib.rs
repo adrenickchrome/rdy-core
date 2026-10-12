@@ -29,3 +29,5 @@ pub use value::FieldValue;
 pub mod reference;
 pub mod review;
 pub use review::{Finding, Review, ReviewSubject, Verdict};
+pub mod semantic;
+pub use semantic::{PairItem, SemanticTension, pair_key};

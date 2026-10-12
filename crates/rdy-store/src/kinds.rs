@@ -10,7 +10,7 @@ pub const BLOB_CHUNK: u8 = 6;
 pub const BLOB_MANIFEST: u8 = 7;
 pub const REF_UPDATE: u8 = 8;
 pub const TAG: u8 = 9;
-// Codes 10-12 and 19 are unassigned. Code 18 is reserved for TENSION (M2e1).
+// Codes 10-12 and 19 are unassigned.
 /// One op of a view's chain (`crate::view::ViewOp`).
 pub const VIEW_OP: u8 = 13;
 /// Ends every write batch: names the batch's first frame, its frame count and a digest of the
@@ -20,8 +20,11 @@ pub const BATCH_COMMIT: u8 = 14;
 pub const INTENT: u8 = 15;
 /// An alternative set version (`rdy_model::AltSet`); ref `alt/<stable>` names the latest.
 pub const ALT_SET: u8 = 16;
-/// A dismissal review (rdy_model::Review); ref dismiss/<vkey> names it.
+/// A review (rdy_model::Review): refs dismiss/<vkey>, mention/<block>/<entity> and pair/<key> name
+/// dismissals, mention reviews and verdicts.
 pub const REVIEW: u8 = 17;
+/// A semantic tension version (rdy_model::SemanticTension); ref semantic/<key> names the latest.
+pub const TENSION: u8 = 18;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefUpdate {

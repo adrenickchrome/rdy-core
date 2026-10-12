@@ -171,6 +171,12 @@ pub const KEY_LEVELS: &[KeyRule] = &[
         default: Some("false"),
     },
     KeyRule {
+        key: "reviews.lease_ttl",
+        levels: PROJECT_ONLY,
+        ty: Ty::U32,
+        default: Some("10"),
+    },
+    KeyRule {
         key: "decisions.home",
         levels: PROJECT_ONLY,
         ty: Ty::Any,
@@ -616,8 +622,13 @@ fn unknown_text(
     if path.starts_with("reviews.")
         || nearest_key(path).is_some_and(|r| r.key.starts_with("reviews."))
     {
+        let consequence = if nearest_key(path).is_some_and(|r| r.key == "reviews.lease_ttl") {
+            "leases keep the default of 10 minutes"
+        } else {
+            "the review gate would stay off"
+        };
         return (
-            format!("unknown review setting {path} in {file}; the review gate would stay off"),
+            format!("unknown review setting {path} in {file}; {consequence}"),
             unknown_fix(path, level, file, user_file),
         );
     }
@@ -662,7 +673,9 @@ fn wrong_file_warnings(level: Level, map: &mut Mapping, user_file: Option<&Path>
             continue;
         };
         let home = home_name(rule.levels, user_file);
-        let gate = if named == "reviews" || named.starts_with("reviews.") {
+        let gate = if named == "reviews.lease_ttl" {
+            ", so leases keep the default of 10 minutes"
+        } else if named == "reviews" || named.starts_with("reviews.") {
             ", so the review gate would stay off"
         } else {
             ""
@@ -1243,5 +1256,65 @@ mod tests {
     fn cfgl1_a_flow_line_holds_a_list_on_one_line() {
         let v: Value = serde_yaml_ng::from_str("[../a, b]").unwrap();
         assert_eq!(flow(&v), "[../a, b]");
+    }
+
+    #[test]
+    fn se2_lease_ttl_is_a_project_key_in_minutes_with_default_10() {
+        let d = project("pack: p\n", None);
+        let e = effective(d.path(), None).unwrap();
+        let o = e
+            .origins
+            .iter()
+            .find(|o| o.key == "reviews.lease_ttl")
+            .unwrap();
+        assert_eq!(o.value_line(), "10");
+        let d = project("pack: p\nreviews:\n  lease_ttl: 3\n", None);
+        assert_eq!(
+            crate::config::read_config(d.path())
+                .unwrap()
+                .lease_ttl_minutes(),
+            3
+        );
+        let d = project("pack: p\nreviews:\n  lease_ttl: 0\n", None);
+        assert_eq!(
+            crate::config::read_config(d.path())
+                .unwrap()
+                .lease_ttl_minutes(),
+            0
+        );
+    }
+
+    #[test]
+    fn se2_a_lease_ttl_that_is_not_a_whole_number_is_e_config() {
+        let d = project("pack: p\nreviews:\n  lease_ttl: soon\n", None);
+        assert_eq!(effective(d.path(), None).unwrap_err().code, E_CONFIG);
+    }
+
+    #[test]
+    fn se2_a_near_miss_of_lease_ttl_warns_about_leases_not_the_gate() {
+        let d = project("pack: p\nreviews:\n  lease_tl: 3\n", None);
+        let w = &effective(d.path(), None).unwrap().warnings[0];
+        assert_eq!(w.code, "W_CONFIG_UNKNOWN");
+        assert_eq!(
+            w.message,
+            "unknown review setting reviews.lease_tl in .rdy.yaml; leases keep the default of 10 minutes"
+        );
+        // guard: a near miss of the gate key keeps today's text
+        let d = project("pack: p\nreviews:\n  require_uptodate: true\n", None);
+        assert!(
+            effective(d.path(), None).unwrap().warnings[0]
+                .message
+                .ends_with("the review gate would stay off")
+        );
+    }
+
+    #[test]
+    fn se2_lease_ttl_in_the_local_file_warns_and_names_its_home() {
+        let d = project("pack: p\n", Some("reviews:\n  lease_ttl: 3\n"));
+        let w = &effective(d.path(), None).unwrap().warnings[0];
+        assert_eq!(
+            w.message,
+            "reviews.lease_ttl in .rdy/local.yaml belongs in .rdy.yaml; rdy ignores it here, so leases keep the default of 10 minutes"
+        );
     }
 }
