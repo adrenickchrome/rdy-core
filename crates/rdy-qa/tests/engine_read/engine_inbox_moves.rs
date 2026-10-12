@@ -408,3 +408,55 @@ fn ib5_a_cut_before_a_rekey_fold_resumes_with_the_whole_fold() {
         rest[0].1.line
     );
 }
+
+#[test]
+fn ib5_a_batch_of_many_rekey_folds_pairs_each_resolution_with_its_opening() {
+    // a pack reload that changes a kind's severity re-keys every tension of that kind: one batch
+    // holds thousands of resolution and opening pairs, all on the session's changes, and each
+    // pair folds into one "replaces" entry (fix round 1: the fold lookup is a map, not a scan)
+    const K: usize = 5000;
+    let a = sub("agent:a", "a");
+    let mine = || vec![side(b"c1", "agent:a", "a"), side(b"c2", "agent:b", "b")];
+    let old = |i: usize| Hash::of(format!("old{i}").as_bytes());
+    let new = |i: usize| Hash::of(format!("new{i}").as_bytes());
+    let resolutions: Vec<TensionMove> = (0..K)
+        .map(|i| {
+            let mut m = tm(b"", mine(), why(Cause::PackReload, None));
+            m.tension = old(i);
+            m.rekey = Some(new(i));
+            m
+        })
+        .collect();
+    // the openings come in reverse order, so a fold must find its partner, not its neighbour
+    let openings: Vec<TensionMove> = (0..K)
+        .rev()
+        .map(|i| {
+            let mut m = tm(b"", mine(), why(Cause::PackReload, None));
+            m.tension = new(i);
+            m.rekey = Some(old(i));
+            m
+        })
+        .collect();
+    let moves: Vec<MoveRef<'_>> = resolutions
+        .iter()
+        .map(MoveRef::Resolved)
+        .chain(openings.iter().map(MoveRef::Opened))
+        .collect();
+    let got = transition_entries(&a, &RunInFlight::default(), &moves, 0, AT);
+    assert_eq!(got.len(), K);
+    for (n, (raw, e)) in got.iter().enumerate() {
+        let i = K - 1 - n;
+        assert_eq!(*raw, K + n);
+        assert_eq!(e.event, "tension_opened");
+        assert_eq!(e.ids[0], new(i).to_string());
+        assert!(
+            e.line.starts_with(&format!(
+                "tension {} replaces {} on your change ",
+                new(i).short(),
+                old(i).short()
+            )),
+            "{}",
+            e.line
+        );
+    }
+}

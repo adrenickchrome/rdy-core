@@ -8,6 +8,7 @@ use rdy_model::Hash;
 use rdy_store::inbox::InboxSub;
 use rdy_store::segment::Location;
 use rdy_store::transition::{Author, Cause, SuspectMove, TensionMove, Why};
+use std::collections::BTreeMap;
 
 /// One logged move of a batch, as Task 6 reads it from the batch's events.
 #[derive(Clone, Copy, Debug)]
@@ -61,6 +62,10 @@ pub fn transition_entries(
         })
         .collect();
     let fold = folds(moves, &mine);
+    let me = Author {
+        actor: sub.actor.clone(),
+        run: sub.run.clone(),
+    };
     let mut out = Vec::new();
     for (i, mv) in moves.iter().enumerate() {
         let made = match (*mv, fold[i]) {
@@ -73,7 +78,7 @@ pub fn transition_entries(
             },
             (MoveRef::Opened(n), None) if !mine[i].is_empty() => Some(opened(n, None, &mine[i])),
             (MoveRef::Resolved(m), None) if !mine[i].is_empty() => Some(resolved(m)),
-            (MoveRef::Gone(m), _) if suspect_concerns(sub, infl, m) => Some((
+            (MoveRef::Gone(m), _) if suspect_concerns(&me, infl, m) => Some((
                 "suspect_gone",
                 vec![m.block.to_string(), m.target.to_string()],
                 format!(
@@ -84,7 +89,7 @@ pub fn transition_entries(
                     why_text(&m.why)
                 ),
             )),
-            (MoveRef::New(m), _) if suspect_concerns(sub, infl, m) => Some((
+            (MoveRef::New(m), _) if suspect_concerns(&me, infl, m) => Some((
                 "suspect_new",
                 vec![m.block.to_string(), m.target.to_string()],
                 format!(
@@ -130,19 +135,26 @@ fn own_changes(sub: &InboxSub, m: &TensionMove) -> Vec<Hash> {
     out
 }
 
-/// A suspect move concerns the session when the session is among its writers at the move, or
+/// A suspect move concerns the session (`me`) when the session is among its writers at the move, or
 /// when the session's in-flight changes write its block now.
-fn suspect_concerns(sub: &InboxSub, infl: &RunInFlight, m: &SuspectMove) -> bool {
-    let me = Author {
-        actor: sub.actor.clone(),
-        run: sub.run.clone(),
-    };
-    m.writers.contains(&me) || infl.blocks.contains(&m.block)
+fn suspect_concerns(me: &Author, infl: &RunInFlight, m: &SuspectMove) -> bool {
+    m.writers.contains(me) || infl.blocks.contains(&m.block)
 }
 
 /// For each move, the index of its fold partner: a resolution (not a dismissal) and an opening of
-/// this batch that re-key onto each other, both on the session's in-flight changes.
+/// this batch that re-key onto each other, both on the session's in-flight changes. One pass
+/// indexes the openings by (tension, re-key), keeping the first, so a batch of `n` moves costs
+/// `O(n log n)`, however many of them re-key (a pack reload can re-key every tension of a kind).
 fn folds(moves: &[MoveRef<'_>], mine: &[Vec<Hash>]) -> Vec<Option<usize>> {
+    let mut openings: BTreeMap<(Hash, Hash), usize> = BTreeMap::new();
+    for (j, mv) in moves.iter().enumerate() {
+        if let MoveRef::Opened(n) = *mv
+            && let Some(back) = n.rekey
+            && !mine[j].is_empty()
+        {
+            openings.entry((n.tension, back)).or_insert(j);
+        }
+    }
     let mut out = vec![None; moves.len()];
     for (i, mv) in moves.iter().enumerate() {
         let MoveRef::Resolved(o) = *mv else { continue };
@@ -150,11 +162,7 @@ fn folds(moves: &[MoveRef<'_>], mine: &[Vec<Hash>]) -> Vec<Option<usize>> {
             continue;
         }
         let Some(next) = o.rekey else { continue };
-        let found = moves.iter().enumerate().position(|(j, mv)| {
-            matches!(*mv, MoveRef::Opened(n)
-                if n.tension == next && n.rekey == Some(o.tension) && !mine[j].is_empty())
-        });
-        if let Some(j) = found
+        if let Some(&j) = openings.get(&(next, o.tension))
             && out[j].is_none()
         {
             out[i] = Some(j);
