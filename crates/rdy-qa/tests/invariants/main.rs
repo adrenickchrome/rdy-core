@@ -5,3 +5,4 @@ mod invariants;
 mod invariants_inbox;
 mod invariants_landing;
 mod invariants_reindex;
+mod invariants_wc;

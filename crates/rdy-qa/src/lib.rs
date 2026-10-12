@@ -18,6 +18,7 @@ pub mod site;
 pub mod skip;
 pub mod tensions;
 pub mod wc;
+pub mod wc_check;
 
 /// The libtest name of the test fn `$f` in the calling file (see `fixtures::libtest_name`):
 /// pass it to `--exact` when a test re-runs its own binary.

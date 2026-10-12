@@ -5,3 +5,4 @@ mod rebase_engine;
 mod rebase_hostile;
 mod rebase_resurrect;
 mod rebase_store;
+mod rebase_ties;
