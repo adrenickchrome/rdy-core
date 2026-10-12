@@ -107,6 +107,8 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
     // ib3: the subscription is written before the session is set, so a refused area leaves the
     // earlier session as it was
     let sub = rdy_engine::inbox::sub::subscribe(&*st.engine, &session, p.areas)?;
+    st.hub
+        .identify(st.hub_sid(), &session.actor, session.run.as_deref());
     st.view = view;
     st.session = Some(session);
     st.reported.clear();

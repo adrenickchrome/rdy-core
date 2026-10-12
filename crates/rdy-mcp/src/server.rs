@@ -10,6 +10,7 @@ mod instructions;
 mod intent;
 mod propose;
 mod read;
+mod resources;
 mod review;
 mod schema;
 mod search;
@@ -18,7 +19,9 @@ mod tension;
 mod views;
 mod write;
 pub use instructions::{INSTRUCTION_SENTENCES, INSTRUCTIONS};
+pub use resources::{RESOURCES, TEMPLATES};
 
+use crate::notify::NotifyHub;
 use crate::order::{Order, Ordered, Stamped};
 use crate::tools::{self, *};
 use rdy_engine::engine::{Engine, Local};
@@ -28,9 +31,11 @@ use rmcp::{
     handler::server::router::tool::ToolRouter,
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-        ServerCapabilities, ServerConfig,
+        ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
+        ReadResourceRequestParams, ReadResourceResponse, ServerCapabilities, ServerConfig,
+        SubscribeRequestParams, SubscriptionFilter, UnsubscribeRequestParams,
     },
-    service::RequestContext,
+    service::{RequestContext, SubscriptionContext},
     tool_handler,
 };
 use std::io::Write as _;
@@ -46,6 +51,10 @@ pub const REQUEST_TOO_LARGE: &str = "rdy_request_too_large";
 pub struct RdyServer {
     state: Arc<Mutex<McpState>>,
     tool_router: ToolRouter<Self>,
+    /// The sessions connected to this server (ib10); shared with `state` for `rdy_session`.
+    hub: Arc<NotifyHub>,
+    /// This session's id in `hub`: the daemon's session id, else the process-unique owner.
+    hub_sid: u64,
 }
 
 fn result(r: Result<serde_json::Value, RdyError>) -> CallToolResult {
@@ -56,13 +65,17 @@ fn result(r: Result<serde_json::Value, RdyError>) -> CallToolResult {
 }
 
 impl RdyServer {
-    pub fn new(engine: Arc<dyn Engine>, sid: Option<u64>) -> Self {
+    pub fn new(engine: Arc<dyn Engine>, sid: Option<u64>, hub: Arc<NotifyHub>) -> Self {
         let mut st = McpState::new(engine);
         st.sid = sid;
         if let Some(sid) = sid {
             st.lease_owner = sid;
         }
+        st.hub = Arc::clone(&hub);
+        let hub_sid = st.hub_sid();
         RdyServer {
+            hub,
+            hub_sid,
             state: Arc::new(Mutex::new(st)),
             tool_router: Self::family_routers()
                 .into_iter()
@@ -193,10 +206,70 @@ impl ServerHandler for RdyServer {
         self.tool_router.call(tcc).await
     }
 
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListResourcesResult, rmcp::ErrorData> {
+        Ok(Self::resources_list())
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, rmcp::ErrorData> {
+        Ok(Self::resource_templates_list())
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<ReadResourceResponse, rmcp::ErrorData> {
+        Ok(self.resources_read(request.uri).await?.into())
+    }
+
+    #[allow(deprecated)]
+    async fn subscribe(
+        &self,
+        request: SubscribeRequestParams,
+        context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<(), rmcp::ErrorData> {
+        self.resources_subscribe(&request.uri, context.peer)
+    }
+
+    #[allow(deprecated)]
+    async fn unsubscribe(
+        &self,
+        request: UnsubscribeRequestParams,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<(), rmcp::ErrorData> {
+        self.resources_unsubscribe(&request.uri)
+    }
+
+    fn accepted_subscription_filter(
+        &self,
+        requested: &SubscriptionFilter,
+    ) -> Option<SubscriptionFilter> {
+        Some(Self::resources_filter(requested))
+    }
+
+    async fn listen(&self, context: SubscriptionContext) -> Result<(), rmcp::ErrorData> {
+        self.resources_listen(context).await;
+        Ok(())
+    }
+
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new("rdy", env!("CARGO_PKG_VERSION")))
-            .with_instructions(INSTRUCTIONS)
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .enable_resources_subscribe()
+                .build(),
+        )
+        .with_server_info(Implementation::new("rdy", env!("CARGO_PKG_VERSION")))
+        .with_instructions(INSTRUCTIONS)
     }
 }
 
@@ -526,7 +599,11 @@ async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
         )
         .await;
     });
-    let server = RdyServer::new(Arc::clone(&local) as Arc<dyn Engine>, None);
+    let server = RdyServer::new(
+        Arc::clone(&local) as Arc<dyn Engine>,
+        None,
+        NotifyHub::new(),
+    );
     let ticker = {
         let local = Arc::clone(&local);
         tokio::spawn(async move {
@@ -617,7 +694,11 @@ where
         );
     };
     let pump = pump_lines(r, to_server, tools::MAX_REQUEST_BYTES, &mut dropped);
-    let served = serve(RdyServer::new(engine, Some(sid)), from_pump, w);
+    let served = serve(
+        RdyServer::new(engine, Some(sid), NotifyHub::new()),
+        from_pump,
+        w,
+    );
     tokio::pin!(served);
     // the session ends when `serve` does (the peer closed, or the session failed to start);
     // when the pump ends first (the peer closed its side), `serve` reads EOF and ends after it
@@ -661,7 +742,11 @@ mod tests {
     async fn msw9_a_failed_republish_after_a_tool_panic_is_reported() {
         let dir = tempfile::tempdir().unwrap();
         let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
-        let server = RdyServer::new(Arc::new(FailingWrite(Local::new(rdy))), None);
+        let server = RdyServer::new(
+            Arc::new(FailingWrite(Local::new(rdy))),
+            None,
+            NotifyHub::new(),
+        );
         let p = SessionParams {
             actor: "__rdy_test_panic__".into(),
             run: None,
@@ -700,7 +785,7 @@ mod tests {
         // leave its tools silently unregistered.
         let dir = tempfile::tempdir().unwrap();
         let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
-        let server = RdyServer::new(Arc::new(Local::new(rdy)), None);
+        let server = RdyServer::new(Arc::new(Local::new(rdy)), None, NotifyHub::new());
         let registered: Vec<String> = server
             .tool_router
             .list_all()
@@ -954,7 +1039,7 @@ mod mcp1_id_tests {
     async fn hook1_the_panic_hook_exists_only_under_cfg_test() {
         let dir = tempfile::tempdir().unwrap();
         let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
-        let server = RdyServer::new(Arc::new(Local::new(rdy)), None);
+        let server = RdyServer::new(Arc::new(Local::new(rdy)), None, NotifyHub::new());
         let p = SessionParams {
             actor: "__rdy_test_panic__".into(),
             run: None,
@@ -990,6 +1075,7 @@ mod mcp1_id_tests {
                 rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap(),
             )),
             None,
+            NotifyHub::new(),
         );
         let bad = SessionParams {
             actor: "__rdy_test_panic__".into(),
