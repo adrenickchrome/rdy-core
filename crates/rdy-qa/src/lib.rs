@@ -16,6 +16,7 @@ pub mod reindex_check;
 pub mod report;
 pub mod site;
 pub mod skip;
+pub mod swarm;
 pub mod tensions;
 pub mod wc;
 pub mod wc_check;
