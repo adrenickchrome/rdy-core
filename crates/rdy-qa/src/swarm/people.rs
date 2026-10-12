@@ -109,7 +109,7 @@ impl Person {
         let err = String::from_utf8_lossy(&out.stderr).into_owned();
         let v = json_of(&err);
         match v["code"].as_str() {
-            Some("E_DAEMON_GONE" | "E_DAEMON_START") => Res::Lost,
+            Some(code @ ("E_DAEMON_GONE" | "E_DAEMON_START")) => self.link.lost(act, code),
             Some(code) => Res::Refused(
                 code.to_string(),
                 v["message"].as_str().unwrap_or_default().to_string(),

@@ -213,9 +213,19 @@ pub struct Script {
     pub person: Vec<PersonAct>,
     /// Pairs of agents whose `Create` texts carry one shared `CONTRA-<k>` marker, where `k`
     /// is the index in this list (the scripted reviewer rule, ledger O4). Each member holds
-    /// one `Create` with `contra: Some(k)`; the two share one area, so one seed section, and
-    /// the reviewer is offered the pair (REVIEWS_DOC, `semantic/api.rs`: same section, then
-    /// same area). Ruling task-3.1.
+    /// one `Create` with `contra: Some(k)`; the two share one area, so one seed section.
+    /// Ruling task-3.1.
+    ///
+    /// A reviewer is offered the pair only when the second claim is written against canon:
+    /// at BASE `pair_now` (`semantic/candidates.rs`) pairs two in-flight blocks only inside
+    /// one view, and whether it should pair them across views is placed with M3 (ruling
+    /// task-4.2). So the pair goes through the real flow, as explicit scripted acts, in this
+    /// order: the first member (`.0`) writes its marked `Create` in the first quarter of its
+    /// steps and holds a `Propose` between the first quarter and the first half; the person
+    /// lands that proposal (the person's `Land`, through the relay); the second member (`.1`)
+    /// writes its marked `Create` in the last quarter of its steps. The positions order the
+    /// acts of one script; the landing between them is up to the run, which paces the person
+    /// (Task 5). The journal shows whether the landing came first.
     pub contra: Vec<(usize, usize)>,
 }
 
@@ -393,8 +403,18 @@ fn make(rng: &mut Rng, kind: Kind, me: usize, agents: usize) -> Act {
     }
 }
 
-/// The script of one actor: random acts, then the required acts put on seeded free places.
-fn actor_script(rng: &mut Rng, cfg: &Config, me: usize, required: Vec<Act>) -> Vec<Act> {
+/// An act put on a seeded free step in `lo..hi`.
+type Placed = (Act, usize, usize);
+
+/// The script of one actor: random acts, then the placed acts on seeded free steps inside their
+/// windows, then the required acts on seeded free steps.
+fn actor_script(
+    rng: &mut Rng,
+    cfg: &Config,
+    me: usize,
+    placed: Vec<Placed>,
+    required: Vec<Act>,
+) -> Vec<Act> {
     let weights = if cfg.is_reviewer(me) {
         REVIEWER_WEIGHTS
     } else {
@@ -408,6 +428,21 @@ fn actor_script(rng: &mut Rng, cfg: &Config, me: usize, required: Vec<Act>) -> V
         acts.push(make(rng, kind, me, cfg.agents));
     }
     let mut free: Vec<usize> = (1..cfg.steps).collect();
+    for (act, lo, hi) in placed {
+        let spots: Vec<usize> = free
+            .iter()
+            .copied()
+            .filter(|at| (lo..hi).contains(at))
+            .collect();
+        assert!(
+            !spots.is_empty(),
+            "a script of {} steps has no free step in {lo}..{hi}",
+            cfg.steps
+        );
+        let at = spots[rng.below(spots.len())];
+        free.retain(|f| *f != at);
+        acts[at] = act;
+    }
     assert!(
         required.len() <= free.len(),
         "a script of {} steps cannot hold {} required acts",
@@ -426,7 +461,8 @@ fn actor_script(rng: &mut Rng, cfg: &Config, me: usize, required: Vec<Act>) -> V
 /// Every actor's first act is `Brief`. Only the reviewers hold `ReviewNext`, at least three
 /// each. Every writer holds at least one `Collide`, `Cite`, `Propose` and `Inbox`; every
 /// reviewer at least one `Inbox`; agents 0 and 1 hold an `AltCreate` with each other. The
-/// person's script holds `steps / 4` acts with at least one of each `PersonAct`.
+/// person's script holds `steps / 4` acts with at least one of each `PersonAct`. The members of
+/// a contradiction pair hold their marked `Create` acts in the order `Script::contra` states.
 ///
 /// Panics when `cfg.steps` is below `MIN_STEPS`.
 pub fn script(cfg: &Config) -> Script {
@@ -449,12 +485,16 @@ pub fn script(cfg: &Config) -> Script {
             let a = writers[master.below(writers.len())];
             let b = writers[master.below(writers.len())];
             let pair = (a.min(b), a.max(b));
-            if a != b && seen.insert(pair) {
+            // agents 0 and 1 are the members of one alternative set: landing one closes the
+            // other's view, so a pair of them could not be written (they pair only when no
+            // other writers exist)
+            let alternatives = writers.len() > 2 && pair == (0, 1);
+            if a != b && !alternatives && seen.insert(pair) {
                 contra.push(pair);
             }
         }
         if contra.is_empty() {
-            contra.push((writers[0], writers[1]));
+            contra.push((writers[0], writers[writers.len().min(3) - 1]));
         }
     }
     // One area per pair, drawn once: both members' marked `Create` acts use it.
@@ -463,6 +503,7 @@ pub fn script(cfg: &Config) -> Script {
     for me in 0..cfg.agents {
         let mut rng = Rng::new(master.next());
         let mut required = Vec::new();
+        let mut placed: Vec<Placed> = Vec::new();
         if cfg.is_reviewer(me) {
             for _ in 0..3 {
                 required.push(Act::ReviewNext);
@@ -476,18 +517,22 @@ pub fn script(cfg: &Config) -> Script {
             if cfg.agents >= 2 && me < 2 {
                 required.push(Act::AltCreate { with: 1 - me });
             }
-            for (k, _) in contra
-                .iter()
-                .enumerate()
-                .filter(|(_, (a, b))| *a == me || *b == me)
-            {
-                required.push(Act::Create {
+            let quarter = cfg.steps / 4;
+            for (k, (first, second)) in contra.iter().enumerate() {
+                let create = Act::Create {
                     area: contra_areas[k],
                     contra: Some(k),
-                });
+                };
+                if *first == me {
+                    placed.push((create.clone(), 1, quarter));
+                    placed.push((Act::Propose, quarter, cfg.steps / 2));
+                }
+                if *second == me {
+                    placed.push((create, cfg.steps - quarter, cfg.steps));
+                }
             }
         }
-        agents.push(actor_script(&mut rng, cfg, me, required));
+        agents.push(actor_script(&mut rng, cfg, me, placed, required));
     }
     Script {
         agents,

@@ -9,10 +9,28 @@ pub enum Outcome {
     Ok,
     /// The daemon refused with this error code.
     Refused(String),
-    /// The daemon died with the call in flight.
+    /// The daemon died with the call in flight, between the kill and the restart. A lost call
+    /// anywhere else fails the run with the seed.
     Lost,
-    /// The pick resolved to nothing, so the actor read a seed block instead.
+    /// The act found nothing to do. A pick that resolved to nothing makes the actor read a seed
+    /// block instead; an act whose precondition does not hold carries `Entry::skip`.
     Skipped,
+}
+
+/// Why an act found nothing to do and was `Skipped` before any call (the closed list of the
+/// ruling on task 4). The executor decides each from the state it read, never from a refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Skip {
+    /// The agent's view holds no change to propose.
+    NothingToPropose,
+    /// No claim of the agent cites a block that changed since it was pinned.
+    NothingToRepin,
+    /// No change of another agent's view is left to include.
+    NothingToInclude,
+    /// No included change of the agent is still in its view.
+    NothingToExclude,
+    /// The agent's view is closed, so a probe of the briefing gate has nowhere to write.
+    NoLiveView,
 }
 
 /// One inbox read: the cursor passed, the cursor returned and the entries as the reply gave them.
@@ -48,6 +66,8 @@ pub struct Entry {
     /// The reply a check reads: for `land`, the `rdy --json approve` reply (its `assurance`,
     /// `landing` and `chosen`).
     pub reply: Option<serde_json::Value>,
+    /// Set on a `Skipped` entry that found nothing to do (see [`Skip`]).
+    pub skip: Option<Skip>,
 }
 
 impl Entry {
@@ -68,6 +88,7 @@ impl Entry {
             seen: Vec::new(),
             inbox: None,
             reply: None,
+            skip: None,
         }
     }
 }

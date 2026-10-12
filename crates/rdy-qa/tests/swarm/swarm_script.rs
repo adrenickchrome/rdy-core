@@ -151,6 +151,75 @@ fn sg3_a_contra_pair_shares_one_area_and_one_marker() {
     }
 }
 
+/// Ruling task-4.2: a contradiction pair goes through the real flow. The first member (`.0`)
+/// creates its claim early and proposes after it; the second member (`.1`) creates its claim in
+/// the last quarter, so the first member's landing can come before it. Agents 0 and 1 (one
+/// alternative set) are not paired while other writers exist.
+#[test]
+fn sg3_a_contra_pair_is_written_through_the_real_flow() {
+    let configs = (1..=20)
+        .flat_map(|seed| {
+            [
+                Config::fast(seed),
+                Config {
+                    seed,
+                    agents: 4,
+                    steps: 24,
+                    kill_at: None,
+                },
+                Config {
+                    seed,
+                    agents: 6,
+                    steps: 30,
+                    kill_at: None,
+                },
+            ]
+        })
+        .collect::<Vec<_>>();
+    for cfg in configs {
+        let s = script(&cfg);
+        let writers = (0..cfg.agents).filter(|&i| !cfg.is_reviewer(i)).count();
+        for (k, (first, second)) in s.contra.iter().enumerate() {
+            let at = |agent: usize, want: &dyn Fn(&Act) -> bool| -> Vec<usize> {
+                (0..cfg.steps)
+                    .filter(|&i| want(&s.agents[agent][i]))
+                    .collect()
+            };
+            let marked = |a: &Act| matches!(a, Act::Create { contra: Some(c), .. } if *c == k);
+            let created_first = at(*first, &marked);
+            let created_second = at(*second, &marked);
+            let ctx = format!(
+                "seed {} agents {} pair {k} {:?}",
+                cfg.seed,
+                cfg.agents,
+                (first, second)
+            );
+            assert_eq!((created_first.len(), created_second.len()), (1, 1), "{ctx}");
+            let (c1, c2) = (created_first[0], created_second[0]);
+            assert!(
+                c1 < cfg.steps / 4,
+                "{ctx}: the first claim comes early ({c1})"
+            );
+            assert!(
+                c2 >= cfg.steps - cfg.steps / 4,
+                "{ctx}: the second claim comes late ({c2})"
+            );
+            let proposes = at(*first, &|a| matches!(a, Act::Propose));
+            assert!(
+                proposes.iter().any(|&p| c1 < p && p < c2),
+                "{ctx}: the first member proposes between the two claims: {proposes:?}"
+            );
+            if writers > 2 {
+                assert_ne!(
+                    (*first, *second),
+                    (0, 1),
+                    "{ctx}: agents 0 and 1 share an alternative set"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn sg3_a_wc_step_name_that_is_not_listed_allows_no_refusal() {
     for step in ["wc_checkout", "wc_commit", "wc_update", "wc_propose"] {
