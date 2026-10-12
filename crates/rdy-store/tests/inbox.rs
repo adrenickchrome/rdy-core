@@ -1,8 +1,8 @@
 //! ib1: the inbox/ ref: one session's cursor, areas, role and seen sets.
 use rdy_model::Hash;
-use rdy_store::Store;
 use rdy_store::inbox::*;
 use rdy_store::segment::Location;
+use rdy_store::{Store, StoreError};
 
 fn fresh() -> (tempfile::TempDir, Store) {
     let d = tempfile::tempdir().unwrap();
@@ -114,4 +114,76 @@ fn ib1_fsck_refuses_an_inbox_that_does_not_decode() {
         e.contains("inbox ref \"inbox/agent:a/r1\": its value does not decode"),
         "{e}"
     );
+}
+
+/// A refused value is a refusal, not damage: `put_inbox` fails with `StoreError::Refused` and
+/// the exact text `inbox ref {name:?}: {what}`, and writes nothing (fix round 1, finding 3).
+#[test]
+fn ib1_a_refused_value_is_a_refusal_not_damage() {
+    let (_dir, mut st) = fresh();
+    let mut bad = sub("agent:a", Some("r1"));
+    bad.role = "approver".into();
+    match st.put_inbox(&bad) {
+        Err(StoreError::Refused(m)) => assert_eq!(
+            m,
+            "inbox ref \"inbox/agent:a/r1\": role \"approver\" is not reader, writer or reviewer"
+        ),
+        other => panic!("expected StoreError::Refused, got {other:?}"),
+    }
+    assert_eq!(st.reader().inboxes().unwrap(), vec![]);
+}
+
+/// The actor is not empty, and a run, when present, is not empty and holds no `/`: so a ref name
+/// names one session only (ruling task-1 §2). `put_inbox` refuses each shape.
+#[test]
+fn ib1_an_empty_actor_or_a_run_that_is_empty_or_holds_a_slash_is_refused() {
+    let (_dir, mut st) = fresh();
+    for (actor, run, name, what) in [
+        (
+            "agent:a",
+            Some(""),
+            "inbox/agent:a/",
+            "its run is empty or holds '/'",
+        ),
+        (
+            "a",
+            Some("b/c"),
+            "inbox/a/b/c",
+            "its run is empty or holds '/'",
+        ),
+        ("", Some("r1"), "inbox//r1", "its actor is empty"),
+    ] {
+        match st.put_inbox(&sub(actor, run)) {
+            Err(StoreError::Refused(m)) => assert_eq!(m, format!("inbox ref {name:?}: {what}")),
+            other => panic!("{actor:?} {run:?}: expected StoreError::Refused, got {other:?}"),
+        }
+    }
+    assert_eq!(st.reader().inboxes().unwrap(), vec![]);
+}
+
+/// fsck applies the same rules to a hand-written ref and reports each shape.
+#[test]
+fn ib1_fsck_reports_an_empty_actor_or_a_run_that_is_empty_or_holds_a_slash() {
+    for (actor, run, name, what) in [
+        (
+            "agent:a",
+            Some(""),
+            "inbox/agent:a/",
+            "its run is empty or holds '/'",
+        ),
+        (
+            "a",
+            Some("b/c"),
+            "inbox/a/b/c",
+            "its run is empty or holds '/'",
+        ),
+        ("", Some("r1"), "inbox//r1", "its actor is empty"),
+    ] {
+        let (_dir, mut st) = fresh();
+        let bytes = postcard::to_allocvec(&sub(actor, run)).unwrap();
+        st.set_refs_unchecked_for_tests(vec![(name.into(), bytes)])
+            .unwrap();
+        let e = st.check_objects().unwrap_err().to_string();
+        assert!(e.contains(&format!("inbox ref {name:?}: {what}")), "{e}");
+    }
 }

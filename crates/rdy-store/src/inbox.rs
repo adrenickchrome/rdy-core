@@ -50,7 +50,8 @@ fn sorted_distinct<T: Ord>(v: &[T]) -> bool {
 }
 
 /// The rule `s`, stored under the ref `name`, breaks, if any: the one rule list `put_inbox` and
-/// fsck apply.
+/// fsck apply. The actor is not empty, and a run, when present, is not empty and holds no `/`
+/// (as `Session::agent` makes them), so one ref name names one session only.
 fn invalid(name: &str, s: &InboxSub) -> Option<String> {
     let what = if inbox_ref(&s.actor, s.run.as_deref()) != name {
         "its value names another session".to_string()
@@ -63,6 +64,14 @@ fn invalid(name: &str, s: &InboxSub) -> Option<String> {
         "its lists are not sorted and distinct".to_string()
     } else if s.seen_tensions.len() > MAX_SEEN || s.seen_suspects.len() > MAX_SEEN {
         format!("more than {MAX_SEEN} seen entries")
+    } else if s.actor.is_empty() {
+        "its actor is empty".to_string()
+    } else if s
+        .run
+        .as_deref()
+        .is_some_and(|r| r.is_empty() || r.contains('/'))
+    {
+        "its run is empty or holds '/'".to_string()
     } else {
         return None;
     };
@@ -85,11 +94,16 @@ fn read_sub(name: &str, bytes: &[u8]) -> Result<InboxSub, StoreError> {
 
 impl Store {
     /// Writes the session's subscription: the ref `inbox/<actor>/<run>`, in one batch. Refuses a
-    /// value that breaks the rule list with a `StoreError::Decode`; nothing is written then.
+    /// value that breaks the rule list with a `StoreError::Refused`; nothing is written then.
+    ///
+    /// Each write appends the whole value, seen sets included, to the append-only log. Old values
+    /// stay in the log, as old block versions do. That is not history (D-TPZ0W, ruling task-1
+    /// §1): no read surface, journal or replay reads a past ack. Reclaiming log space is later
+    /// store work. An ack that changes nothing writes nothing (ledger O5).
     pub fn put_inbox(&mut self, sub: &InboxSub) -> Result<(), StoreError> {
         let name = inbox_ref(&sub.actor, sub.run.as_deref());
         if let Some(m) = invalid(&name, sub) {
-            return Err(StoreError::Decode(m));
+            return Err(StoreError::Refused(m));
         }
         let items = self.ref_items_pub(vec![(name, encode(sub))]);
         self.write(items)?;
