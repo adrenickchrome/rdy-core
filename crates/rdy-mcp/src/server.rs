@@ -21,7 +21,7 @@ mod write;
 pub use instructions::{INSTRUCTION_SENTENCES, INSTRUCTIONS};
 pub use resources::{RESOURCES, TEMPLATES};
 
-use crate::notify::NotifyHub;
+use crate::notify::{NotifyHub, Sink};
 use crate::order::{Order, Ordered, Stamped};
 use crate::tools::{self, *};
 use rdy_engine::engine::{Engine, Local};
@@ -668,28 +668,39 @@ async fn serve_stdio_inner(project: PathBuf) -> anyhow::Result<()> {
 
 /// Serves `server` over `(r, w)` until the peer closes, with the session's tool calls stamped
 /// at the transport, run one at a time in arrival order and answered in that order (see
-/// [`crate::order`]), on whatever runtime polls it.
+/// [`crate::order`]), on whatever runtime polls it. Once the session is up, its peer is the
+/// session's sink in the server's hub (ib11), so resource notifications can reach it.
 pub async fn serve<R, W>(server: RdyServer, r: R, w: W) -> anyhow::Result<()>
 where
     R: AsyncRead + Send + Unpin + 'static,
     W: AsyncWrite + Send + Unpin + 'static,
 {
+    let (hub, sid) = (Arc::clone(&server.hub), server.hub_sid);
     let order = Arc::new(Order::default());
     let transport = Stamped::new(
         rmcp::transport::async_rw::AsyncRwTransport::new_server(r, w),
         Arc::clone(&order),
     );
     let service = Ordered::new(server, order).serve(transport).await?;
+    hub.connect(sid, Sink::Legacy(service.peer().clone()));
     service.waiting().await?;
     Ok(())
 }
 
 /// Serves one MCP session over `(r, w)` against `engine` until the peer closes. The daemon owns
-/// the checkpoint tick and the close, so neither runs here. `sid` is the daemon's session id.
+/// the checkpoint tick and the close, so neither runs here. `sid` is the daemon's session id,
+/// and `hub` the daemon's hub of connected sessions (ib11): the session joins it under `sid`,
+/// and the daemon removes it when the session ends.
 /// It runs on the daemon's runtime: order is explicit (see [`serve`]), not a property of the
 /// runtime. Dropping the returned future ends the session: the service is cancelled and the
 /// stream closed; a tool call already on the blocking pool finishes first.
-pub async fn serve_on<R, W>(engine: Arc<dyn Engine>, sid: u64, r: R, w: W) -> anyhow::Result<()>
+pub async fn serve_on<R, W>(
+    engine: Arc<dyn Engine>,
+    sid: u64,
+    hub: Arc<NotifyHub>,
+    r: R,
+    w: W,
+) -> anyhow::Result<()>
 where
     R: AsyncRead + Send + Unpin + 'static,
     W: AsyncWrite + Send + Unpin + 'static,
@@ -709,11 +720,7 @@ where
         );
     };
     let pump = pump_lines(r, to_server, tools::MAX_REQUEST_BYTES, &mut dropped);
-    let served = serve(
-        RdyServer::new(engine, Some(sid), NotifyHub::new()),
-        from_pump,
-        w,
-    );
+    let served = serve(RdyServer::new(engine, Some(sid), hub), from_pump, w);
     tokio::pin!(served);
     // the session ends when `serve` does (the peer closed, or the session failed to start);
     // when the pump ends first (the peer closed its side), `serve` reads EOF and ends after it

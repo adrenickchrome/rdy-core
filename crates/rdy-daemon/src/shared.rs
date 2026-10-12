@@ -1,5 +1,7 @@
 //! What every connection of the daemon shares: the published state, the writer, the open report,
-//! the pack watch and its generation, and the session-end hooks.
+//! the pack watch and its generation, the hub of connected MCP sessions and its notifier, and
+//! the session-end hooks.
+use crate::notify::{NotifyMsg, spawn_notifier};
 use crate::session::SessionId;
 use crate::watch::PackWatch;
 use crate::writer::{Writer, WriterHandle};
@@ -7,9 +9,11 @@ use arc_swap::ArcSwap;
 use rdy_engine::engine::{Engine, WriteFn};
 use rdy_engine::semantic::lease::LeaseRegistry;
 use rdy_engine::{BriefRegistry, OpenReport, Rdy, RdyError, ReadState};
+use rdy_mcp::notify::NotifyHub;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 type SessionEndHook = Box<dyn Fn(SessionId) + Send + Sync>;
@@ -32,6 +36,12 @@ pub struct Shared {
     pub briefs: Arc<BriefRegistry>,
     /// The project's lease registry for review requests, taken from the `Rdy` the same way.
     pub leases: Arc<LeaseRegistry>,
+    /// The MCP sessions connected to this daemon, who they are and what they subscribed to
+    /// (ib10). A session leaves it when it ends (a session-end hook).
+    pub hub: Arc<NotifyHub>,
+    /// The notifier thread's queue (ib11): the writer forwards each batch's events here, and a
+    /// pack reload, after it publishes. Unbounded, so a forward never blocks the writer.
+    pub(crate) notify: Sender<NotifyMsg>,
     session_end: Mutex<Vec<SessionEndHook>>,
     /// Test hook: run once by the writer right after `reload_pack` returns.
     #[cfg(test)]
@@ -42,7 +52,9 @@ pub struct Shared {
 }
 
 impl Shared {
-    /// Publishes `rdy`'s state and starts the writer that owns it from now on.
+    /// Publishes `rdy`'s state and starts the writer that owns it from now on, and the notifier
+    /// that tells subscribed MCP sessions what the writer's batches changed (ib11). The writer
+    /// receives every event `rdy` emits from now on (`Rdy::subscribe`, before the writer owns it).
     pub fn new(rdy: Rdy) -> Arc<Shared> {
         let open_report = rdy.open_report();
         let root = rdy.root().to_path_buf();
@@ -50,24 +62,38 @@ impl Shared {
         let watch = PackWatch::new(&root, rdy.pack_fingerprint());
         let briefs = rdy.briefs();
         let leases = rdy.leases();
+        let events = rdy.subscribe();
         let owned = Arc::clone(&leases);
-        Arc::new_cyclic(|weak| Shared {
-            state,
-            open_report,
-            root,
-            writer: Writer::spawn(rdy, weak.clone()),
-            watch,
-            pack_gen: AtomicU64::new(0),
-            pack_error: Mutex::new(None),
-            briefs,
-            leases,
-            session_end: Mutex::new(vec![Box::new(move |id: SessionId| {
-                owned.release_owner(id.0);
-            })]),
-            #[cfg(test)]
-            after_reload: Mutex::new(None),
-            #[cfg(test)]
-            republish_failure_logs: std::sync::atomic::AtomicUsize::new(0),
+        let hub = NotifyHub::new();
+        let leaving = Arc::clone(&hub);
+        let (notify, queue) = channel();
+        Arc::new_cyclic(|weak| {
+            // the notifier ends when its queue's sender, held here, is dropped with the last
+            // `Shared`
+            drop(spawn_notifier(weak.clone(), queue));
+            Shared {
+                state,
+                open_report,
+                root,
+                writer: Writer::spawn(rdy, events, weak.clone()),
+                watch,
+                pack_gen: AtomicU64::new(0),
+                pack_error: Mutex::new(None),
+                briefs,
+                leases,
+                hub,
+                notify,
+                session_end: Mutex::new(vec![
+                    Box::new(move |id: SessionId| {
+                        owned.release_owner(id.0);
+                    }),
+                    Box::new(move |id: SessionId| leaving.disconnect(id.0)),
+                ]),
+                #[cfg(test)]
+                after_reload: Mutex::new(None),
+                #[cfg(test)]
+                republish_failure_logs: std::sync::atomic::AtomicUsize::new(0),
+            }
         })
     }
 

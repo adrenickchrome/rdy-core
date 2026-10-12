@@ -4,11 +4,16 @@
 //!
 //! Before each write, and on a reload (a new connection's), the writer reloads the config and
 //! packs if they changed on disk (`maybe_reload`).
+//!
+//! After each message's publish (and the reply, for a write), the writer forwards the events of
+//! the batches it sealed to the notifier (ib11), one message per batch: one unbounded channel
+//! send each, so the notifier never slows a write. The notifier reads a state that holds them.
 use crate::E_DAEMON_GONE;
 use crate::daemon::log;
+use crate::notify::NotifyMsg;
 use crate::shared::Shared;
 use rdy_engine::engine::WriteFn;
-use rdy_engine::{E_INTERNAL, Rdy, RdyError, ReloadOutcome};
+use rdy_engine::{E_INTERNAL, Event, Rdy, RdyError, ReloadOutcome};
 use serde_json::Value;
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -38,6 +43,8 @@ enum Msg {
 pub struct Writer {
     shared: Weak<Shared>,
     rx: Receiver<Msg>,
+    /// Every event the project emits (`Rdy::subscribe`), forwarded to the notifier per batch.
+    events: Receiver<Arc<Event>>,
     queued: Arc<AtomicUsize>,
     /// The idle checkpoint has failed and the failure was logged; cleared by a success.
     checkpoint_failing: bool,
@@ -78,12 +85,15 @@ pub(crate) fn panic_text(p: &(dyn Any + Send)) -> String {
 impl Writer {
     /// Starts the writer thread (`rdy-writer`) owning `rdy`. It publishes into `shared` while
     /// any `Shared` lives; when none does, or every handle is dropped, it closes the store.
-    pub fn spawn(rdy: Rdy, shared: Weak<Shared>) -> WriterHandle {
+    /// `events` is `rdy`'s subscription (`Rdy::subscribe`): the writer forwards what it receives
+    /// to the notifier after each publish.
+    pub fn spawn(rdy: Rdy, events: Receiver<Arc<Event>>, shared: Weak<Shared>) -> WriterHandle {
         let (tx, rx) = mpsc::sync_channel(QUEUE_BOUND);
         let queued = Arc::new(AtomicUsize::new(0));
         let writer = Writer {
             shared,
             rx,
+            events,
             queued: Arc::clone(&queued),
             checkpoint_failing: false,
             transitions_failing: false,
@@ -98,6 +108,30 @@ impl Writer {
             queued,
             thread: Arc::new(Mutex::new(Some(thread))),
         }
+    }
+
+    /// Forwards the events received since the last forward to the notifier, one message per
+    /// batch (events of one batch share their `seq`, and a batch's events arrive together). It
+    /// runs after the publish that holds them. A send never blocks; with no `Shared` or no
+    /// notifier the events are dropped (notifications are best effort).
+    fn forward(&self) {
+        let Ok(first) = self.events.try_recv() else {
+            return;
+        };
+        let sh = self.shared.upgrade();
+        let send = |batch: Vec<Arc<Event>>| {
+            if let Some(sh) = &sh {
+                let _ = sh.notify.send(NotifyMsg::Events(batch));
+            }
+        };
+        let mut batch = vec![first];
+        while let Ok(e) = self.events.try_recv() {
+            if batch[0].seq != e.seq {
+                send(std::mem::take(&mut batch));
+            }
+            batch.push(e);
+        }
+        send(batch);
     }
 
     /// Stores `rdy`'s current state into the shared state. False if every `Shared` is gone.
@@ -242,6 +276,11 @@ impl Writer {
         // a reload publishes a state with its tension set built, as a write does
         build_tensions(rdy);
         sh.state.store(rdy.read());
+        if matches!(out, Ok(ReloadOutcome::Reloaded)) {
+            // after the publish: the notifier tells the sessions subscribed to rdy://pack and
+            // rdy://project; the reply notice (`pack_changed`) stays as it is
+            let _ = sh.notify.send(NotifyMsg::PackReloaded);
+        }
         out
     }
 
@@ -336,6 +375,8 @@ impl Writer {
                     build_tensions(&rdy);
                     let published = self.publish(&rdy);
                     let _ = reply.send(out);
+                    // after the reply: the reload's batch and the write's, one message each
+                    self.forward();
                     self.log_transition_error(&rdy);
                     published
                 }
@@ -344,6 +385,7 @@ impl Writer {
                     let out = self.maybe_reload(&mut rdy);
                     let published = self.publish(&rdy);
                     let _ = reply.send(out);
+                    self.forward();
                     self.log_transition_error(&rdy);
                     published
                 }
@@ -361,6 +403,7 @@ impl Writer {
                     }
                     build_tensions(&rdy);
                     let published = self.publish(&rdy);
+                    self.forward();
                     self.log_transition_error(&rdy);
                     published
                 }
