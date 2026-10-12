@@ -96,3 +96,68 @@ fn sg3_the_outcome_table_is_closed() {
         "Refused(\"E_X\")"
     );
 }
+
+#[test]
+fn sg3_a_contra_pair_shares_one_area_and_one_marker() {
+    for seed in 1..=20 {
+        let s = script(&Config::fast(seed));
+        assert!(!s.contra.is_empty(), "seed {seed}");
+        // Every Create that carries a marker, with its agent and area.
+        let mut marked: Vec<(usize, usize, &'static str)> = Vec::new();
+        for (i, acts) in s.agents.iter().enumerate() {
+            for act in acts {
+                if let Act::Create {
+                    area,
+                    contra: Some(k),
+                } = act
+                {
+                    marked.push((i, *k, *area));
+                }
+            }
+        }
+        for (k, (a, b)) in s.contra.iter().enumerate() {
+            let of_k: Vec<_> = marked.iter().filter(|(_, kk, _)| *kk == k).collect();
+            assert_eq!(
+                of_k.len(),
+                2,
+                "seed {seed}: pair {k} must have exactly two marked Creates"
+            );
+            let agents: BTreeSet<usize> = of_k.iter().map(|(i, _, _)| *i).collect();
+            assert_eq!(agents, BTreeSet::from([*a, *b]), "seed {seed}: pair {k}");
+            assert_eq!(
+                of_k[0].2, of_k[1].2,
+                "seed {seed}: pair {k} must share one area"
+            );
+        }
+        // No marker outside the pair list.
+        assert!(
+            marked.iter().all(|(_, k, _)| *k < s.contra.len()),
+            "seed {seed}"
+        );
+        // One Create per marker per agent: an agent in two pairs holds two Creates, each with its own k.
+        for i in 0..s.agents.len() {
+            let ks: Vec<usize> = marked
+                .iter()
+                .filter(|(a, _, _)| *a == i)
+                .map(|(_, k, _)| *k)
+                .collect();
+            let uniq: BTreeSet<usize> = ks.iter().copied().collect();
+            assert_eq!(
+                ks.len(),
+                uniq.len(),
+                "seed {seed}: agent {i} repeats a marker"
+            );
+        }
+    }
+}
+
+#[test]
+fn sg3_a_wc_step_name_that_is_not_listed_allows_no_refusal() {
+    for step in ["wc_checkout", "wc_commit", "wc_update", "wc_propose"] {
+        assert!(allowed(step, "E_WC_STALE"), "{step}");
+        assert!(allowed(step, "E_WC_CONFLICT"), "{step}");
+        assert!(!allowed(step, "E_NOT_FOUND"), "{step}");
+    }
+    assert!(!allowed("wc_comit", "E_WC_STALE"));
+    assert!(!allowed("wc_", "E_WC_CONFLICT"));
+}

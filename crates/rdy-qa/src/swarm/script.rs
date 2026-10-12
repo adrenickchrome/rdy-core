@@ -84,8 +84,13 @@ pub enum Act {
     WriteNoBrief { target: Pick },
     /// `rdy_write` of the block, then `rdy_write` again with the first token.
     WriteStale { target: Pick },
-    /// `rdy_write` creating a claim under the seed section of that area.
-    Create { area: &'static str },
+    /// `rdy_write` creating a claim under the seed section of that area. `contra` is the
+    /// index `k` into `Script::contra` when this is the act that carries the `CONTRA-<k>`
+    /// marker (the executor writes the marker into this act and no other); else `None`.
+    Create {
+        area: &'static str,
+        contra: Option<usize>,
+    },
     /// `rdy_write` updating a block that agent `with` also updates, from the same base.
     Collide { with: usize, target: Pick },
     /// `rdy_write` creating a claim that references a stable block, pinning its version.
@@ -98,11 +103,12 @@ pub enum Act {
     Include { from: usize },
     /// `rdy_view` exclude.
     Exclude,
-    /// `rdy_undo`.
+    /// `rdy_view {op: "undo"}` on the agent's own view.
     Undo,
     /// `rdy_intent` in that area (`payments`, `identity` or `glossary`).
     Intent { area: &'static str },
-    /// `rdy_write` creating an alternative to a block of agent `with`.
+    /// `rdy_alternatives {op: "create", title, members: [{label, view}]}` with two members:
+    /// the agent's own view and the view of agent `with`.
     AltCreate { with: usize },
     /// `rdy_propose`.
     Propose,
@@ -206,7 +212,10 @@ pub struct Script {
     /// The person's acts: `steps / 4`.
     pub person: Vec<PersonAct>,
     /// Pairs of agents whose `Create` texts carry one shared `CONTRA-<k>` marker, where `k`
-    /// is the index in this list (the scripted reviewer rule, ledger O4).
+    /// is the index in this list (the scripted reviewer rule, ledger O4). Each member holds
+    /// one `Create` with `contra: Some(k)`; the two share one area, so one seed section, and
+    /// the reviewer is offered the pair (REVIEWS_DOC, `semantic/api.rs`: same section, then
+    /// same area). Ruling task-3.1.
     pub contra: Vec<(usize, usize)>,
 }
 
@@ -350,7 +359,10 @@ fn make(rng: &mut Rng, kind: Kind, me: usize, agents: usize) -> Act {
         Kind::WriteStale => Act::WriteStale {
             target: pick(rng, me, agents),
         },
-        Kind::Create => Act::Create { area: area(rng) },
+        Kind::Create => Act::Create {
+            area: area(rng),
+            contra: None,
+        },
         Kind::Collide => Act::Collide {
             with: other_agent(rng, me, agents),
             target: Pick::Seed(rng.below(SEED_BLOCKS)),
@@ -445,6 +457,8 @@ pub fn script(cfg: &Config) -> Script {
             contra.push((writers[0], writers[1]));
         }
     }
+    // One area per pair, drawn once: both members' marked `Create` acts use it.
+    let contra_areas: Vec<&'static str> = contra.iter().map(|_| area(&mut master)).collect();
     let mut agents = Vec::with_capacity(cfg.agents);
     for me in 0..cfg.agents {
         let mut rng = Rng::new(master.next());
@@ -462,8 +476,15 @@ pub fn script(cfg: &Config) -> Script {
             if cfg.agents >= 2 && me < 2 {
                 required.push(Act::AltCreate { with: 1 - me });
             }
-            for _ in contra.iter().filter(|(a, b)| *a == me || *b == me) {
-                required.push(make(&mut rng, Kind::Create, me, cfg.agents));
+            for (k, _) in contra
+                .iter()
+                .enumerate()
+                .filter(|(_, (a, b))| *a == me || *b == me)
+            {
+                required.push(Act::Create {
+                    area: contra_areas[k],
+                    contra: Some(k),
+                });
             }
         }
         agents.push(actor_script(&mut rng, cfg, me, required));

@@ -147,7 +147,7 @@ pub fn allowed(act: &str, code: &str) -> bool {
         "land" => LAND_CODES,
         "dismiss" => &["E_NOT_FOUND"],
         "accept_advice" => &["E_PROPOSAL_MOVED"],
-        a if a.starts_with("wc_") => WC_CODES,
+        "wc_checkout" | "wc_commit" | "wc_update" | "wc_propose" => WC_CODES,
         "inbox_resume" => &["E_BAD_INPUT"],
         // intent, review_next, tensions, inbox, read, brief: no refusal is allowed.
         _ => &[],
