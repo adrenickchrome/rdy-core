@@ -1,12 +1,15 @@
 //! Spec §15.3 invariant 6, the landing audit: no landing put an open blocking tension into
 //! canon, landed over an unresolved conflict, or chose no member of the alternative set its
 //! changes are bound to. The audit re-checks the gate's rules from public data on the state the
-//! landing read (D-CRTJG, D-84QSN, D-VA8DA, D-WMCFW); it never calls the gate.
+//! landing read (D-CRTJG, D-84QSN, D-VA8DA, D-WMCFW); it never calls the gate. The conflict rule
+//! is gconf1's: the landing's own changes merged onto the view's effective base, on the blocks
+//! they write, never the view's current conflict set.
 use crate::invariants::Violation;
 use rdy_engine::tensions::{SideRef, TensionSeverity, TensionStatus, tension_label};
-use rdy_engine::{Rdy, ReadState, Scope};
-use rdy_model::{BlockId, Hash};
-use std::collections::BTreeSet;
+use rdy_engine::{Rdy, ReadState};
+use rdy_model::{BlockId, Change, Hash};
+use rdy_store::merge::{Conflict, MergeChange, merge_on_blocks};
+use std::collections::{BTreeSet, HashMap};
 
 /// One landing as the audit reads it: the view it was proposed from, the changes it landed and
 /// the stable hash of the alternative set it chose (`LandingRecord.chosen`'s `set`).
@@ -76,14 +79,13 @@ pub fn audit(before: &ReadState, landed: &Landed) -> Vec<Violation> {
             )),
         }
     }
-    // conflict_landed: an unresolved conflict of the view on a block one of the changes writes
-    let written: BTreeSet<&BlockId> = read
-        .iter()
-        .flat_map(|(_, ch)| ch.ops.iter().map(|op| op.block_id()))
-        .collect();
-    match before.conflicts(&Scope::View(view.clone())) {
+    // conflict_landed: gconf1 re-checked from public data: the landing's own changes merged
+    // onto the view's effective base, on the blocks they write (never the view's current
+    // conflict set: a subset may leave a conflict out, and a version that predates the view's
+    // resolution still carries it)
+    match carried_conflicts(before, view, &read) {
         Ok(cs) => {
-            for c in cs.iter().filter(|c| written.contains(&c.block)) {
+            for c in &cs {
                 out.push(viol(
                     "conflict_landed",
                     Some(&c.block),
@@ -97,7 +99,7 @@ pub fn audit(before: &ReadState, landed: &Landed) -> Vec<Violation> {
         Err(e) => out.push(viol(
             "conflict_landed",
             None,
-            format!("landing of {view}: cannot read its conflicts: {e}"),
+            format!("landing of {view}: cannot merge its changes: {e}"),
         )),
     }
     // alt_unchosen: a change bound to a set whose member the landing did not choose
@@ -117,6 +119,54 @@ pub fn audit(before: &ReadState, landed: &Landed) -> Vec<Violation> {
         }
     }
     out
+}
+
+/// The conflicts `changes` (one landing's changes, proposed from view `view`) carry on the
+/// blocks they write: their merge onto the view's effective base, restricted to those blocks.
+/// The producer of each touched block's base version is read up front, so a damaged index
+/// entry is an error, never "no producer".
+fn carried_conflicts(
+    st: &ReadState,
+    view: &str,
+    changes: &[(Hash, Change)],
+) -> Result<Vec<Conflict>, String> {
+    let reader = st.reader();
+    let base = st.effective_base(view);
+    let state = reader
+        .state_of(base)
+        .map_err(|e| format!("cannot read the view's base: {e}"))?;
+    let touched: BTreeSet<BlockId> = changes
+        .iter()
+        .flat_map(|(_, ch)| ch.ops.iter().map(|op| op.block_id().clone()))
+        .collect();
+    let input: Vec<MergeChange<'_>> = changes
+        .iter()
+        .map(|(id, ch)| MergeChange {
+            id: *id,
+            deps: &ch.deps,
+            ops: &ch.ops,
+        })
+        .collect();
+    let deleters = reader
+        .merge_deleters(base.as_ref(), &state, &touched)
+        .map_err(|e| format!("cannot read the deleters: {e}"))?;
+    let mut producers: HashMap<Hash, Option<Hash>> = HashMap::new();
+    for v in touched.iter().filter_map(|b| state.blocks.get(b)) {
+        if !producers.contains_key(v) {
+            let p = reader
+                .producer(v)
+                .map_err(|e| format!("cannot read the producer of {}: {e}", v.short()))?;
+            producers.insert(*v, p);
+        }
+    }
+    Ok(merge_on_blocks(
+        &state,
+        &input,
+        &|v| producers.get(v).copied().flatten(),
+        &|b| deleters.get(b).copied(),
+        &touched,
+    )
+    .conflicts)
 }
 
 /// The landing `landing` of `after`'s canon as the audit reads it: the changes and the chosen
