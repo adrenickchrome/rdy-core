@@ -477,10 +477,12 @@ pub(crate) struct TensionCell {
     /// The state before's set and the blocks of the pairs a verdict or an acceptance wrote:
     /// the first read re-detects the stored kinds around them ([`verdict_carry`]).
     verdict: Option<(Arc<TensionSet>, Vec<BlockId>)>,
-    /// The state before's set, when a view op changed the in-flight set on the same canon: the
-    /// first read re-detects around the changes whose membership or views moved
-    /// ([`views_carry`]).
+    /// The state before's set, after a view op (or a landing, with `landed`): the first read
+    /// re-detects around the changes whose membership or views moved ([`step_carry`]).
     views: Option<Arc<TensionSet>>,
+    /// The ops a landing applied to canon, with `views`: the first read also re-detects around
+    /// the blocks they write and builds the canon part of the new canon ([`step_carry`]).
+    landed: Option<Vec<Op>>,
     /// Whether the set was carried; set before `set` is.
     carried: OnceLock<bool>,
     /// The blocks a carry re-detected around (its seeds and every detector's reach); set
@@ -507,10 +509,20 @@ impl TensionCell {
     }
 
     /// An unbuilt cell whose first read carries `prev` across a view op on the same canon:
-    /// changes that entered or left flight, or moved between views ([`views_carry`]).
+    /// changes that entered or left flight, or moved between views ([`step_carry`]).
     pub(crate) fn after_views(prev: Arc<TensionSet>) -> TensionCell {
         TensionCell {
             views: Some(prev),
+            ..TensionCell::default()
+        }
+    }
+
+    /// An unbuilt cell whose first read carries `prev` across a landing that applied `ops` to
+    /// canon (and took its changes out of flight) ([`step_carry`]).
+    pub(crate) fn after_landing(prev: Arc<TensionSet>, ops: Vec<Op>) -> TensionCell {
+        TensionCell {
+            views: Some(prev),
+            landed: Some(ops),
             ..TensionCell::default()
         }
     }
@@ -524,7 +536,7 @@ impl TensionCell {
             return Some((set, Some(around)));
         }
         if let Some(prev) = &self.views {
-            return Some((views_carry(st, prev).ok()??, None));
+            return Some((step_carry(st, prev, self.landed.as_deref()).ok()??, None));
         }
         let (prev, blocks) = self.verdict.as_ref()?;
         Some((verdict_carry(st, prev, blocks).ok()??, None))
@@ -541,6 +553,12 @@ pub(crate) fn seeds_of(st: &ReadState, change: &Hash) -> Result<BTreeSet<BlockId
 
 /// Adds to `seeds` the blocks [`seeds_of`] names for change `c`.
 fn seeds_into(st: &ReadState, c: &Change, seeds: &mut BTreeSet<BlockId>) -> Result<(), RdyError> {
+    seeds_of_ops(st, &c.ops, seeds)
+}
+
+/// Adds to `seeds` the blocks `ops` write and the `supersedes` and `revokes` targets of the
+/// decisions they write (as written, and as they were).
+fn seeds_of_ops(st: &ReadState, ops: &[Op], seeds: &mut BTreeSet<BlockId>) -> Result<(), RdyError> {
     let mut targets = |b: &Block| {
         if b.block_type == decision::DECISION {
             for name in [decision::SUPERSEDES, decision::REVOKES] {
@@ -550,7 +568,7 @@ fn seeds_into(st: &ReadState, c: &Change, seeds: &mut BTreeSet<BlockId>) -> Resu
             }
         }
     };
-    for op in &c.ops {
+    for op in ops {
         if let Op::Create { block } | Op::Update { block, .. } = op {
             targets(block);
         }
@@ -558,7 +576,7 @@ fn seeds_into(st: &ReadState, c: &Change, seeds: &mut BTreeSet<BlockId>) -> Resu
             targets(&st.reader().get_block(&base)?);
         }
     }
-    for op in &c.ops {
+    for op in ops {
         seeds.insert(op.block_id().clone());
     }
     Ok(())
@@ -672,6 +690,7 @@ fn views_step_carries(
     after: &Writes,
     set: &InflightSet,
     changed: &BTreeSet<Hash>,
+    landed: &BTreeSet<BlockId>,
 ) -> Result<bool, RdyError> {
     let moved: Vec<&Hash> = changed
         .iter()
@@ -703,7 +722,8 @@ fn views_step_carries(
                 }
             }
             if let Op::Create { block } = op {
-                if canon.get(&block.id).is_some() {
+                // a landing's own creates are canon's now
+                if canon.get(&block.id).is_some() && !landed.contains(&block.id) {
                     return Ok(false);
                 }
                 created.insert(block.id.clone());
@@ -738,21 +758,30 @@ fn too_many(seeds: &BTreeSet<BlockId>, before: &Writes) -> bool {
     seeds.len() > CARRY_SEEDS_FLOOR && seeds.len() > before.blocks().count()
 }
 
-/// The view-op carry (plan M2e2: a batch's moves are computed from its delta): `prev` was built
-/// on the same canon, the same coordination refs and the same verdicts, and a view op changed
-/// only which changes are in flight and in which views. The changes whose membership or views
-/// differ are the step; their blocks (and their decisions' targets) are the seeds, as for a
-/// commit. The writes move only on those blocks ([`Writes::with_changes`]); the in-flight part
-/// drops every tension on a seed and each kind's tensions on a block of its reach, and
-/// re-detects around them. The reach is read both before and after the step, so a change that
-/// left flight still names the groups its writes were in. The canon part stays. Its cost
-/// follows the changes that moved, not the size of the set; when none moved, it is `prev`.
-/// `None` when the step does not carry ([`views_step_carries`]) or is too large ([`too_many`]):
-/// the set is built in full.
-fn views_carry(st: &ReadState, prev: &TensionSet) -> Result<Option<TensionSet>, RdyError> {
+/// The step carry (plan M2e2: a batch's moves are computed from its delta), after a view op or a
+/// landing. `prev` was built on the state before, with the same coordination refs and the same
+/// verdicts. A view op changed only which changes are in flight and in which views; a landing
+/// (`landed`: the ops it applied to canon) also moved canon. The changes whose membership or
+/// views differ, and the blocks the landed ops write, are the step; their blocks (and their
+/// decisions' targets) are the seeds, as for a commit. The writes move only on the changes'
+/// blocks ([`Writes::with_changes`]). The in-flight part drops every tension on a seed and each
+/// kind's tensions on a block of its reach, read before and after the step (so a change that
+/// left flight still names the groups its writes were in), and re-detects around the seeds,
+/// the reach, and every block of a tension it dropped (a group that loses a member keeps the
+/// rest). A landing's canon part is the new canon's, built as a full build builds it; a view
+/// op's stays. Its in-flight cost follows the step, not the size of the set; when nothing
+/// moved, it is `prev`. `None` when the step does not carry ([`views_step_carries`]; a
+/// landing's ops as a commit's, [`ops_carry`]) or is too large ([`too_many`]): the set is
+/// built in full.
+fn step_carry(
+    st: &ReadState,
+    prev: &TensionSet,
+    landed: Option<&[Op]>,
+) -> Result<Option<TensionSet>, RdyError> {
     if let Some(e) = &st.error {
         return Err(e.clone());
     }
+    let reader = st.reader();
     let set = st.inflight_set()?;
     let mut changed: BTreeSet<Hash> = prev
         .writes
@@ -765,11 +794,27 @@ fn views_carry(st: &ReadState, prev: &TensionSet) -> Result<Option<TensionSet>, 
             .iter()
             .filter(|c| prev.writes.change(c).is_none()),
     );
-    if changed.is_empty() {
+    let mut seeds = BTreeSet::new();
+    let mut landed_blocks = BTreeSet::new();
+    if let Some(ops) = landed {
+        if !ops_carry(st.pack(), reader, ops) {
+            return Ok(None);
+        }
+        let created: Vec<&BlockId> = ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Create { block } => Some(&block.id),
+                _ => None,
+            })
+            .collect();
+        if reader.ever_deleted(created)? {
+            return Ok(None);
+        }
+        landed_blocks.extend(ops.iter().map(|op| op.block_id().clone()));
+        seeds_of_ops(st, ops, &mut seeds)?;
+    } else if changed.is_empty() {
         return Ok(Some(prev.clone()));
     }
-    let reader = st.reader();
-    let mut seeds = BTreeSet::new();
     for c in &changed {
         seeds_into(st, &reader.change(c)?, &mut seeds)?;
     }
@@ -779,34 +824,56 @@ fn views_carry(st: &ReadState, prev: &TensionSet) -> Result<Option<TensionSet>, 
     if too_many(&seeds, &prev.writes) {
         return Ok(None);
     }
-    let writes = Arc::new(prev.writes.with_changes(st, &set, &changed)?);
-    if !views_step_carries(st, &prev.writes, &writes, &set, &changed)? {
+    let writes = if changed.is_empty() {
+        Arc::clone(&prev.writes)
+    } else {
+        Arc::new(prev.writes.with_changes(st, &set, &changed)?)
+    };
+    if !views_step_carries(st, &prev.writes, &writes, &set, &changed, &landed_blocks)? {
         return Ok(None);
     }
+    let canon = match landed {
+        Some(_) => canon_of(st, st.detectors, true)?,
+        None => Arc::clone(&prev.canon),
+    };
     let mut next = TensionSet {
+        canon,
         writes: Arc::clone(&writes),
         ..prev.clone()
     };
+    let mut dropped: BTreeSet<BlockId> = BTreeSet::new();
+    let mut drop_id = |next: &mut TensionSet, id: &Hash| {
+        if let Some(t) = prev.tensions.get(id)
+            && next.remove(id)
+        {
+            dropped.extend(t.blocks());
+        }
+    };
     for seed in &seeds {
         for id in prev.by_block.get(seed).into_iter().flatten() {
-            next.remove(id);
+            drop_id(&mut next, id);
         }
     }
     let index = canon_index_of(st)?;
     let cx = DetectCx::new(st, &writes, Arc::clone(&index), DetectScope::Inflight);
     let before = DetectCx::new(st, &prev.writes, index, DetectScope::Inflight);
+    let mut reaches = Vec::with_capacity(st.detectors.len());
     for d in st.detectors {
         let mut reach = d.reach(&cx, &seeds)?;
         reach.extend(d.reach(&before, &seeds)?);
         for b in reach.difference(&seeds) {
             for id in prev.by_block.get(b).into_iter().flatten() {
                 if prev.tensions.get(id).is_some_and(|t| t.kind == d.kind()) {
-                    next.remove(id);
+                    drop_id(&mut next, id);
                 }
             }
         }
+        reaches.push(reach);
+    }
+    for (d, reach) in st.detectors.iter().zip(reaches) {
         let mut around = seeds.clone();
         around.extend(reach);
+        around.extend(dropped.iter().cloned());
         for t in detect_kept(st, &cx, *d, Some(&around))? {
             next.insert(t);
         }
@@ -935,13 +1002,13 @@ fn stored_canon(
     Ok(out)
 }
 
-/// The full build for `detectors`: the canon part (canon's memo when `memo`, shared, not
-/// copied, joined with the stored kinds' all-canon tensions when there are any) and the
-/// in-flight part.
-fn build(st: &ReadState, detectors: &[&dyn Detector], memo: bool) -> Result<TensionSet, RdyError> {
-    if let Some(e) = &st.error {
-        return Err(e.clone());
-    }
+/// The canon part of a state's set for `detectors`: canon's memo when `memo` (shared, not
+/// copied), joined with the stored kinds' all-canon tensions when there are any.
+fn canon_of(
+    st: &ReadState,
+    detectors: &[&dyn Detector],
+    memo: bool,
+) -> Result<Arc<CanonPart>, RdyError> {
     let canon = if memo {
         let built = st.built(&crate::Scope::Canon)?;
         built
@@ -952,11 +1019,21 @@ fn build(st: &ReadState, detectors: &[&dyn Detector], memo: bool) -> Result<Tens
         Arc::new(canon_part(st, detectors)?)
     };
     let stored = stored_canon(st, detectors)?;
-    let canon = if stored.is_empty() {
+    Ok(if stored.is_empty() {
         canon
     } else {
         Arc::new(canon.with(stored))
-    };
+    })
+}
+
+/// The full build for `detectors`: the canon part (canon's memo when `memo`, shared, not
+/// copied, joined with the stored kinds' all-canon tensions when there are any) and the
+/// in-flight part.
+fn build(st: &ReadState, detectors: &[&dyn Detector], memo: bool) -> Result<TensionSet, RdyError> {
+    if let Some(e) = &st.error {
+        return Err(e.clone());
+    }
+    let canon = canon_of(st, detectors, memo)?;
     let set = st.inflight_set()?;
     let writes = Arc::new(Writes::build(st, &set)?);
     let cx = DetectCx::new(st, &writes, canon_index_of(st)?, DetectScope::Inflight);

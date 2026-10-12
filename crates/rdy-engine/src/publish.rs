@@ -341,6 +341,17 @@ impl Rdy {
                     _ => Arc::default(),
                 }
             }
+            // plan M2e2: a landing moves canon by its ops and takes its changes out of flight;
+            // a built set (or one the state before can carry to) is carried, re-detected around
+            // the blocks the ops write and the changes that moved, with the new canon's part
+            Delta::Landed { ops, .. }
+                if coord_heads.alt_members == prev.coord_heads.alt_members =>
+            {
+                match prev.tensions_without_build() {
+                    Some(set) => Arc::new(TensionCell::after_landing(set, ops.clone())),
+                    None => Arc::default(),
+                }
+            }
             // a verdict or an acceptance: a built set (or one the state before can carry to)
             // is carried, its stored kinds re-detected around the pairs' blocks; else the next
             // read builds in full

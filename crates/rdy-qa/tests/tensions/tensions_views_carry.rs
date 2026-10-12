@@ -1,8 +1,8 @@
 //! ibperf2: a view op carries the tension set across the changes it moves (plan M2e2: each
 //! batch's moves follow its delta, never a full build per write).
 use proptest::prelude::*;
-use rdy_engine::Rdy;
 use rdy_engine::tensions::set::full_builds;
+use rdy_engine::{DecisionInput, Rdy};
 use rdy_qa::edit_loop::spec_doc;
 use rdy_qa::fixtures::*;
 use rdy_qa::tensions::*;
@@ -82,6 +82,38 @@ proptest! {
                     ])).is_ok()
                 }
                 10 => try_put(&mut r, vn, json!([{"op": "delete", "id": target.to_string()}])).is_ok(),
+                _ => land(&mut r, vn).is_ok(),
+            };
+            prop_assert_eq!(same_as_rebuilt(&r), Ok(()), "step {}", i);
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: cases(12), ..ProptestConfig::default() })]
+    #[test]
+    fn ibperf2_a_landing_carries_the_same_set_as_a_rebuild(
+        steps in proptest::collection::vec((0u8..10, 0u8..3, 0u8..3), 1..14)
+    ) {
+        let (_d, mut r) = project();
+        let s = spec_doc(&mut r);
+        let names = ["a", "b", "c"];
+        let claims = [s.a.clone(), s.b.clone(), s.c.clone()];
+        let texts = ["Fees are charged monthly.", "fees ARE charged  monthly.", "Fees are charged yearly."];
+        for (i, (kind, v, k)) in steps.into_iter().enumerate() {
+            let vn = names[v as usize];
+            let target = &claims[k as usize];
+            let _ok = match kind {
+                0 => try_put(&mut r, vn, upd(target, &format!("{vn} {i}"))).is_ok(),
+                1 => try_put(&mut r, vn, cite(&s.section, target)).is_ok(),
+                2 => try_put(&mut r, vn, term(&s.section, ["Fee", "Charge", "fee"][k as usize])).is_ok(),
+                3 => r.supersede(&ag(vn), vn, &s.decision.to_string(), None, DecisionInput {
+                        parent: s.section.to_string(), statement: format!("s{i}"), ..Default::default()
+                    }).is_ok(),
+                4 => try_put(&mut r, vn, json!([{"op": "create", "type": "claim",
+                        "parent": s.section.to_string(), "body": texts[k as usize]}])).is_ok(),
+                5 => try_put(&mut r, vn, json!([{"op": "repin", "id": target.to_string()}])).is_ok(),
+                9 => try_put(&mut r, vn, json!([{"op": "delete", "id": target.to_string()}])).is_ok(),
                 _ => land(&mut r, vn).is_ok(),
             };
             prop_assert_eq!(same_as_rebuilt(&r), Ok(()), "step {}", i);
@@ -175,4 +207,33 @@ fn ibperf2_a_commit_that_writes_more_than_was_in_flight_builds_in_full() {
     put(&mut r, "c", upd(&s.b, "B by c."));
     assert_eq!(r.read().tensions_carried(), Some(true), "carried");
     same_as_rebuilt(&r).unwrap();
+}
+
+#[test]
+fn ibperf2_a_landing_carries_the_set() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.a, "A by a."));
+    put(&mut r, "b", upd(&s.a, "A by b."));
+    put(&mut r, "c", cite(&s.section, &s.b));
+    put(&mut r, "d", upd(&s.b, "B by d."));
+    r.read().tensions().unwrap();
+    let builds = full_builds();
+    // the landing moves canon under b's write (a collision against canon) and c's citation
+    // (a premise shift)
+    land(&mut r, "a").unwrap();
+    assert_eq!(
+        r.read().tensions_carried(),
+        Some(true),
+        "the landing carried"
+    );
+    same_as_rebuilt(&r).unwrap();
+    land(&mut r, "d").unwrap();
+    assert_eq!(
+        r.read().tensions_carried(),
+        Some(true),
+        "the landing carried"
+    );
+    same_as_rebuilt(&r).unwrap();
+    assert_eq!(full_builds() - builds, 0, "no landing built the whole set");
 }
