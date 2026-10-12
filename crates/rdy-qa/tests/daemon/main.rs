@@ -3,6 +3,7 @@
 //! (`tlay1_` checks). Keep the list sorted.
 mod daemon_concurrent;
 mod daemon_crash;
+mod daemon_crash_m2;
 mod daemon_followups;
 mod daemon_notify;
 mod daemon_pack_reads;
