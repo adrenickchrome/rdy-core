@@ -3,6 +3,7 @@
 use rdy_engine::Rdy;
 use rdy_qa::daemon::Served;
 use rdy_qa::edit_loop::spec_doc;
+use rdy_qa::fixtures::rdy_bin;
 use rdy_qa::tensions::*;
 
 fn stdout(out: &std::process::Output) -> String {
@@ -81,4 +82,15 @@ fn ib9_ack_prints_acked_and_empties_the_inbox() {
     let lines: Vec<&str> = again.lines().collect();
     assert_eq!(lines.len(), 1, "{again}");
     assert!(lines[0].starts_with("cursor: "), "{again}");
+}
+
+#[test]
+fn ib9_the_check_help_names_the_manifest_format() {
+    let out = std::process::Command::new(rdy_bin())
+        .args(["check", "--help"])
+        .output()
+        .expect("run rdy");
+    let text = stdout(&out);
+    assert!(text.contains("the export manifest is format 3"), "{text}");
+    assert!(!text.contains("export-format-2"), "{text}");
 }

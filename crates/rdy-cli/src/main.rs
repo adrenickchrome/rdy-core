@@ -114,11 +114,11 @@ enum Cmd {
     Fsck(project_cmd::FsckArgs),
     /// Run the MCP server over stdio.
     Mcp,
-    /// Lint export-format-2 files (a doc file, a _folder.yaml or a directory) without touching the
-    /// store. Inside a checkout, with no path or a path in the working tree, it lints the
-    /// working copy against the bound view: a new entry needs no id, and a file rdy does not
-    /// read is a warning. Commit rewrites the committed files in canonical form and drops their
-    /// YAML comments.
+    /// Lint exported files (a doc file, a _folder.yaml or a directory; the export manifest is
+    /// format 3) without touching the store. Inside a checkout, with no path or a path in the
+    /// working tree, it lints the working copy against the bound view; the working copy carries
+    /// no format number. A new entry needs no id, and a file rdy does not read is a warning.
+    /// Commit rewrites the committed files in canonical form and drops their YAML comments.
     Check(project_cmd::CheckArgs),
     Pack {
         #[command(subcommand)]
