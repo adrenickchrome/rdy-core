@@ -131,6 +131,7 @@ fn ib10_a_read_without_a_session_is_refused() {
         .as_str()
         .unwrap_or_else(|| panic!("{r}"));
     assert!(message.contains("E_NO_SESSION"), "{r}");
+    assert_eq!(r["error"]["code"], -32600, "{r}");
     c.alive();
 }
 

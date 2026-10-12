@@ -81,13 +81,16 @@ impl Res {
             _ => {}
         }
         let named = |prefix: &str| uri.strip_prefix(prefix).filter(|rest| !rest.is_empty());
+        // a proposal id is `P-…`: it is read only as a proposal, and a proposal URI takes nothing else
         if let Some(id) = named("rdy://doc/") {
-            return Some(Res::Doc(id.to_string()));
+            return (!id.starts_with("P-")).then(|| Res::Doc(id.to_string()));
         }
         if let Some(name) = named("rdy://view/") {
             return Some(Res::View(name.to_string()));
         }
-        named("rdy://proposal/").map(|id| Res::Proposal(id.to_string()))
+        named("rdy://proposal/")
+            .filter(|id| id.starts_with("P-"))
+            .map(|id| Res::Proposal(id.to_string()))
     }
 
     /// The tool call behind the resource, run for the session in `st`.
@@ -101,10 +104,17 @@ impl Res {
             Res::Doc(id) | Res::Proposal(id) => {
                 tools::rdy_read(st, params(json!({"id": id, "max_tokens": BUDGET}))?)
             }
-            Res::View(name) => crate::view_tools::rdy_view(
-                st,
-                params(json!({"op": "show", "view": name, "max_tokens": BUDGET}))?,
-            ),
+            Res::View(name) => {
+                // compiled only for this crate's own tests: a release binary has no hook
+                #[cfg(test)]
+                if name == "__rdy_test_panic__" {
+                    panic!("test hook: deliberate panic in a read")
+                }
+                crate::view_tools::rdy_view(
+                    st,
+                    params(json!({"op": "show", "view": name, "max_tokens": BUDGET}))?,
+                )
+            }
         }
     }
 }
@@ -130,14 +140,15 @@ pub(crate) fn unknown(uri: &str) -> McpError {
     )
 }
 
-/// A tool error as a protocol error. A missing session is an invalid request; a missing doc,
-/// view or proposal is a missing resource.
+/// A tool error as a protocol error. A missing doc, view or proposal is a missing resource; a
+/// fault in rdy is an internal error; any other error (a missing session, bad input) is an
+/// invalid request.
 fn refuse(e: RdyError) -> McpError {
     let data = serde_json::to_value(&e).ok();
-    if e.code == E_NOT_FOUND {
-        McpError::resource_not_found(e.to_string(), data)
-    } else {
-        McpError::invalid_request(e.to_string(), data)
+    match e.code {
+        E_NOT_FOUND => McpError::resource_not_found(e.to_string(), data),
+        E_INTERNAL => McpError::internal_error(e.to_string(), data),
+        _ => McpError::invalid_request(e.to_string(), data),
     }
 }
 
@@ -171,22 +182,10 @@ impl RdyServer {
     /// `resources/read`: the tool behind `uri`, on the blocking pool with the state lock.
     pub(crate) async fn resources_read(&self, uri: String) -> Result<ReadResourceResult, McpError> {
         let res = Res::parse(&uri).ok_or_else(|| unknown(&uri))?;
-        let state = std::sync::Arc::clone(&self.state);
-        let joined = tokio::task::spawn_blocking(move || {
-            let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
-            res.read(&mut st)
-        })
-        .await;
-        let value = match joined {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => return Err(refuse(e)),
-            Err(_) => {
-                return Err(McpError::internal_error(
-                    format!("internal error reading {uri}: the read was cancelled"),
-                    None,
-                ));
-            }
-        };
+        let value = self
+            .blocking("resources/read", false, move |st| res.read(st))
+            .await
+            .map_err(refuse)?;
         Ok(ReadResourceResult::new(vec![
             ResourceContents::text(value.to_string(), uri).with_mime_type(MIME),
         ]))
@@ -269,6 +268,11 @@ mod tests {
             "rdy://proposal/",
             "rdy://nope",
             "rdy://inbox/x",
+            // a proposal URI takes a proposal id only, a doc URI never takes one
+            "rdy://proposal/d-XXXX",
+            "rdy://proposal/p-1",
+            "rdy://doc/P-1@2",
+            "rdy://doc/P-1",
             "file:///etc",
             "",
         ] {
@@ -288,5 +292,55 @@ mod tests {
             Some(vec!["rdy://inbox".to_string(), "rdy://doc/d-1".to_string()])
         );
         assert_eq!(accepted.tools_list_changed, None);
+    }
+
+    fn server() -> (tempfile::TempDir, RdyServer) {
+        let dir = tempfile::tempdir().unwrap();
+        let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let engine = std::sync::Arc::new(rdy_engine::engine::Local::new(rdy));
+        (
+            dir,
+            RdyServer::new(engine, None, crate::notify::NotifyHub::new()),
+        )
+    }
+
+    async fn open_session(server: &RdyServer) {
+        let p = crate::tools::SessionParams {
+            actor: "agent:a".into(),
+            run: Some("r".into()),
+            role: "writer".into(),
+            view: None,
+            areas: None,
+        };
+        let out = server.run("rdy_session", Ok(p), tools::rdy_session).await;
+        assert_ne!(out.is_error, Some(true), "{out:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ib10_a_panic_in_a_read_is_an_internal_error_and_the_server_lives() {
+        let (_d, server) = server();
+        open_session(&server).await;
+        let e = server
+            .resources_read("rdy://view/__rdy_test_panic__".into())
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, rmcp::model::ErrorCode::INTERNAL_ERROR, "{e:?}");
+        assert!(
+            e.message.contains("E_INTERNAL") && e.message.contains("deliberate panic"),
+            "{e:?}"
+        );
+        // the state lock is usable and the next read answers
+        let ok = server.resources_read("rdy://project".into()).await;
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    #[test]
+    fn ib10_an_internal_error_is_an_internal_error_not_an_invalid_request() {
+        use rmcp::model::ErrorCode;
+        let e = |code: &'static str| RdyError::new(code, "m", "f");
+        assert_eq!(refuse(e(E_INTERNAL)).code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(refuse(e(E_NOT_FOUND)).code, ErrorCode::RESOURCE_NOT_FOUND);
+        assert_eq!(refuse(e("E_NO_SESSION")).code, ErrorCode::INVALID_REQUEST);
+        assert_eq!(refuse(e("E_BAD_INPUT")).code, ErrorCode::INVALID_REQUEST);
     }
 }

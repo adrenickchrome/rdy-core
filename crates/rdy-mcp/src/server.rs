@@ -125,14 +125,30 @@ impl RdyServer {
             Ok(p) => p,
             Err(e) => return result(Err(e)),
         };
+        result(self.blocking(tool, true, move |st| f(st, p)).await)
+    }
+
+    /// The blocking body shared by tool runs and resource reads: `f` runs on the blocking pool
+    /// under the state lock. A panic in `f` becomes an `E_INTERNAL` error and republishes a clean
+    /// state (the invalidate runs on the writer, where `Rdy` is); if that fails, the error says
+    /// so. With `notice` set, a pack notice rides on an object result; a resource read leaves
+    /// the notice for the next tool reply.
+    pub(crate) async fn blocking<F>(
+        &self,
+        tool: &'static str,
+        notice: bool,
+        f: F,
+    ) -> Result<serde_json::Value, RdyError>
+    where
+        F: FnOnce(&mut McpState) -> Result<serde_json::Value, RdyError> + Send + 'static,
+    {
         let state = Arc::clone(&self.state);
         let joined = tokio::task::spawn_blocking(move || {
             let mut st = state.lock().unwrap_or_else(|p| p.into_inner());
-            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut st, p)));
+            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut st)));
             match out {
                 Ok(mut r) => {
-                    // the pack notice rides on an object result; otherwise it waits for one
-                    if let Ok(serde_json::Value::Object(m)) = &mut r {
+                    if notice && let Ok(serde_json::Value::Object(m)) = &mut r {
                         let generation = st.engine.pack_generation();
                         let error = st.engine.pack_error();
                         if let Some(n) =
@@ -141,10 +157,9 @@ impl RdyServer {
                             m.insert("notice".into(), serde_json::Value::String(n));
                         }
                     }
-                    result(r)
+                    r
                 }
                 Err(panic) => {
-                    // the invalidate runs on the writer, where `Rdy` is
                     let republished = st.engine.write(Box::new(|r| {
                         r.invalidate();
                         Ok(serde_json::Value::Null)
@@ -167,21 +182,21 @@ impl RdyServer {
                             e.code, e.message
                         ));
                     }
-                    result(Err(RdyError::new(
+                    Err(RdyError::new(
                         E_INTERNAL,
                         message,
                         "this is a bug in rdy; the request may or may not have been applied: re-read before retrying",
-                    )))
+                    ))
                 }
             }
         })
         .await;
         joined.unwrap_or_else(|_| {
-            result(Err(RdyError::new(
+            Err(RdyError::new(
                 E_INTERNAL,
                 format!("internal error in {tool}: the call was cancelled"),
                 "this is a bug in rdy; the request may or may not have been applied: re-read before retrying",
-            )))
+            ))
         })
     }
 }
@@ -763,6 +778,34 @@ mod tests {
                 && out.contains("E_DAEMON_GONE"),
             "{out}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ib10_a_panic_in_a_blocking_body_republishes_or_says_it_did_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let rdy = rdy_engine::Rdy::init(dir.path(), "rdy-standard").unwrap();
+        let server = RdyServer::new(
+            Arc::new(FailingWrite(Local::new(rdy))),
+            None,
+            NotifyHub::new(),
+        );
+        let e = server
+            .blocking("a_read", false, |_| panic!("boom"))
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, E_INTERNAL, "{e:?}");
+        assert!(
+            e.message.contains("boom")
+                && e.message.contains("not republished")
+                && e.message.contains("E_DAEMON_GONE"),
+            "{e:?}"
+        );
+        // a body that does not panic passes its value through, with no notice added
+        let ok = server
+            .blocking("a_read", false, |_| Ok(serde_json::json!({"a": 1})))
+            .await
+            .unwrap();
+        assert_eq!(ok, serde_json::json!({"a": 1}));
     }
 
     #[test]
