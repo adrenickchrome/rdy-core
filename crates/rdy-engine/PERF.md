@@ -1220,3 +1220,47 @@ No laptop figures are judged here: the first timing of these ops is the Linux be
 Baseline: `qa-baseline.json` is not changed here.
 
 Deep gate (bench): <orchestrator fills in>
+
+## M2e2: inbox (2026-10-12)
+
+The `qa-perf` tier gained `tier_inbox`, run right after `tier_reviews` in both tiers, on the same
+project: the 1,000 in-flight changes in 20 views, the citing claims and the tension set
+`tier_tensions` leaves behind. The pack is `rdy-standard`, which declares no areas, so no landing
+matches by area. Each large-tier twin carries a `_50k` suffix. The op names keep `1k` whatever
+the fixture's size.
+
+Outside every timer, the tier writes the subscription that `subscribe` writes for a new session
+(`agent:perf-inbox`, run `perf-inbox`, cursor at the head, no areas, role `writer`). That agent
+then commits 20 one-op changes in view `perf-inbox`: updates of 20 canon claims that the in-flight
+views also update, so the log holds `tension_opened` moves on the session's changes. Agent
+`agent:perf-other` then posts 200 intents on one block those changes write, so the log holds 200
+`intent_posted` events. The 20 changes and the intents stay in the project; `tier_mcp` reopens the
+same project after the tier.
+
+Three ops:
+
+| op | what it times | runs | target |
+|---|---|---|---|
+| `inbox_fetch_200_1k` | `inbox_page(&sub, None, usize::MAX)` on a fresh state: the run's in-flight changes, then the log walked from the cursor. Asserts a page of 200 entries and `more`, with the logged `tension_opened` entries among them | `runs.read` | < 5 ms p99 (M2 spec 15.1: inbox fetch, 200 entries), at 1k in-flight changes |
+| `inbox_in_flight_1k` | `run_in_flight` for the session: its in-flight changes, their blocks, citations, views and areas. Every page read pays this before it matches. Asserts the 20 changes | `runs.read` | recorded, no spec target |
+| `inbox_ack_1k` | `ack_inbox` with a cursor one batch further each run (the batch ends are read from the log outside the timer). Asserts that the cursor moved | `runs.incremental` | recorded, no spec target: one inbox ack, a ref write with its fsync |
+
+What each cost grows with:
+
+- `inbox_fetch_200_1k` grows with the entries on the page and the batches walked to fill it, plus
+  one `run_in_flight`. A page reads each batch's events and logged moves from the log; it keeps no
+  cache. If the bench shows it over target, the remedy is an in-memory replay cache keyed by batch
+  `seq`, held by the engine and dropped on reindex. It is a follow-up the orchestrator places
+  (ledger O10); it is not built here.
+- `inbox_in_flight_1k` grows with the changes in flight, since it walks the set's writes and
+  keeps those of the run, and with the views of the project, since it checks each view's owner.
+- `inbox_ack_1k` is one ref write: an append, a sync and a publish. It does not grow with the
+  project. It moves with the drive's sync cost, as the write ops do.
+
+No laptop figures are judged here: the first timing of these ops is the Linux bench's. The ops
+are PASS-NEW until the baseline holds them. Because the tier leaves 20 changes and 200 intents in
+the 1k project, compare the `tier_mcp` ops that reopen it with the baseline.
+
+Baseline: `qa-baseline.json` is not changed here.
+
+Deep gate (bench): <orchestrator fills in>

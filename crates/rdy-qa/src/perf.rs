@@ -260,6 +260,15 @@ fn spec_target(op: &str) -> Option<String> {
         "review_accept_1k" => {
             "recorded, no spec target: a person's acceptance of one advised tension of a proposal at 1k in-flight changes, carry and settle included (plan M2e1)"
         }
+        "inbox_fetch_200_1k" => {
+            "< 5 ms p99 (M2 spec 15.1: inbox fetch, 200 entries), at 1k in-flight changes"
+        }
+        "inbox_in_flight_1k" => {
+            "recorded, no spec target: one run's in-flight changes, their blocks, citations, views and areas at 1k in-flight changes (plan M2e2)"
+        }
+        "inbox_ack_1k" => {
+            "recorded, no spec target: one inbox ack, a ref write with its fsync (plan M2e2)"
+        }
         "gate_tensions_1k" => {
             "recorded: the land message's tension check on a built set (inside the landing budget, M2 spec 15.1)"
         }
@@ -2055,6 +2064,146 @@ fn tier_reviews(out: &mut Vec<Measure>, r: &mut Rdy, sfx: &str, runs: &Runs, are
     ));
 }
 
+/// The inbox ops (M2e2): one page of 200 entries, one run's in-flight changes, and one ack, with
+/// `1k` in-flight changes in 20 views (the names say `1k` as in [`tier_inflight`]). Run right after
+/// `tier_reviews`, on the same project. Outside every timer: `agent:perf-inbox` (run `perf-inbox`)
+/// gets the subscription `subscribe` writes for a new session, then commits 20 one-op updates of
+/// claims the in-flight views also update (each opens a tension, so the log holds the moves as
+/// entries), and `agent:perf-other` posts `entries` intents on one block those changes write. The
+/// changes and the intents stay in the project. The page holds the tension entries and the
+/// intents, so it is at least `min(200, entries)` entries long, and cut at 200 with `more` when
+/// `entries` is 200. The ack op moves the cursor one batch further each run.
+fn tier_inbox(
+    out: &mut Vec<Measure>,
+    r: &mut Rdy,
+    fx: &Fixture,
+    sfx: &str,
+    runs: &Runs,
+    entries: usize,
+) {
+    use rdy_engine::inbox::read::MAX_ENTRIES;
+    use rdy_store::inbox::{InboxCursor, InboxSub};
+    let (actor, run) = ("agent:perf-inbox", "perf-inbox");
+    let sub = InboxSub {
+        actor: actor.into(),
+        run: Some(run.into()),
+        cursor: InboxCursor {
+            at: r.read().seq(),
+            skip: 0,
+        },
+        areas: vec![],
+        role: "writer".into(),
+    };
+    r.put_subscription(&sub).expect("subscription");
+    // the claims `inflight_views` updated are the first by id (besides the fixture's)
+    let ids: Vec<BlockId> = {
+        let canon = r.read().materialized(&Scope::Canon).expect("canon");
+        let mut v: Vec<BlockId> = canon
+            .iter()
+            .filter(|b| b.block_type == "claim" && b.id != fx.claim)
+            .map(|b| b.id.clone())
+            .collect();
+        v.sort();
+        v
+    };
+    let changes = ids.len().min(INFLIGHT_VIEWS);
+    assert!(changes > 0, "canon has claims the in-flight views update");
+    let me = crate::tensions::ag(run);
+    for id in ids.iter().take(changes) {
+        crate::fixtures::write_as(
+            r,
+            &me,
+            run,
+            json!([{"op": "update", "id": id.to_string(), "body": format!("Inbox {id}.")}]),
+        )
+        .expect("an inbox write");
+    }
+    let other = crate::tensions::ag("perf-other");
+    let block = ids[0].to_string();
+    for i in 0..entries {
+        r.intent_post(
+            &other,
+            None,
+            None,
+            std::slice::from_ref(&block),
+            &format!("perf {i}"),
+            None,
+        )
+        .expect("an intent");
+    }
+    // the batch ends past the subscription's cursor: the ack op moves the cursor to one more each run
+    let ends: Vec<InboxCursor> = {
+        let st = r.read();
+        let mut ends = vec![];
+        st.reader()
+            .for_each_frame_from(sub.cursor.at, st.seq(), |_, kind, _, _, next| {
+                if kind == rdy_store::kinds::BATCH_COMMIT {
+                    ends.push(InboxCursor { at: next, skip: 0 });
+                }
+                Ok(())
+            })
+            .expect("walk the log");
+        ends
+    };
+    assert!(
+        ends.len() >= runs.incremental,
+        "{} batches, wanted {}",
+        ends.len(),
+        runs.incremental
+    );
+    out.push(measure_timed(
+        &format!("inbox_fetch_200_1k{sfx}"),
+        runs.read,
+        |_| {
+            let st = r.read();
+            let s = Instant::now();
+            let page = st.inbox_page(&sub, None, usize::MAX).expect("inbox page");
+            let took = s.elapsed();
+            let held = page.entries.len();
+            assert!(held <= MAX_ENTRIES, "{held} entries");
+            assert!(
+                held >= entries.min(MAX_ENTRIES),
+                "{held} entries, wanted {}",
+                entries.min(MAX_ENTRIES)
+            );
+            assert!(
+                page.entries.iter().any(|e| e.event == "tension_opened"),
+                "the page holds no tension_opened entry"
+            );
+            if entries >= MAX_ENTRIES {
+                assert_eq!(held, MAX_ENTRIES);
+                assert!(page.more, "the page is cut at 200 entries");
+            }
+            took
+        },
+    ));
+    out.push(measure_timed(
+        &format!("inbox_in_flight_1k{sfx}"),
+        runs.read,
+        |_| {
+            let st = r.read();
+            let s = Instant::now();
+            let held = st.run_in_flight(actor, Some(run)).expect("in flight");
+            let took = s.elapsed();
+            assert_eq!(held.changes.len(), changes, "the run's in-flight changes");
+            took
+        },
+    ));
+    let mut ends = ends.into_iter();
+    out.push(measure_timed(
+        &format!("inbox_ack_1k{sfx}"),
+        runs.incremental,
+        |_| {
+            let next = ends.next().expect("a batch end");
+            let s = Instant::now();
+            let wrote = r.ack_inbox(actor, Some(run), next).expect("ack");
+            let took = s.elapsed();
+            assert!(wrote, "the ack moved the cursor");
+            took
+        },
+    ));
+}
+
 /// `review_requests_sparse_area`'s fixture in the typical tier: docs of 20 claims outside any
 /// area, and in-flight changes that edit the claims of a sparse area.
 pub const SPARSE_AREA: (usize, usize) = (100, 50);
@@ -3014,6 +3163,7 @@ pub fn run_workload() -> Vec<Measure> {
         TENSION_CITING,
     );
     tier_reviews(&mut out, &mut r, "", &TYPICAL_RUNS, SPARSE_AREA);
+    tier_inbox(&mut out, &mut r, &fx, "", &TYPICAL_RUNS, 200);
     drop(r);
     // on projects of their own: the records they add move nothing above
     tier_coord(&mut out, dir.path(), "", &TYPICAL_RUNS, COORD_N);
@@ -3542,6 +3692,7 @@ fn run_large_tier(parent: &std::path::Path) -> Vec<Measure> {
         TENSION_CITING,
     );
     tier_reviews(&mut out, &mut r, sfx, &LARGE_RUNS, SPARSE_AREA_LARGE);
+    tier_inbox(&mut out, &mut r, &fx, sfx, &LARGE_RUNS, 200);
     out
 }
 
@@ -4051,6 +4202,57 @@ mod tests {
                 "review_accept_1k",
                 "review_requests_sparse_area"
             ]
+        );
+    }
+
+    #[test]
+    fn ibperf1_the_inbox_ops_run_on_a_small_tree() {
+        rdy_model::seed_ids_for_tests(0x6962_7066);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let proj = dir.path().join("p");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let docs = testkit::generate_tree(&proj, 2, 3, 12);
+        let mut r = Rdy::open(&proj).expect("open");
+        land(&mut r, "work").expect("land work");
+        let fx = fixture(&r, &docs);
+        let runs = Runs {
+            write: 1,
+            read: 2,
+            tree: 1,
+            materialize_cold: 2,
+            incremental: 2,
+            view_ops: 2,
+            landing: 2,
+            view_changes: 12,
+            landing_views: 8,
+        };
+        let mut scratch = vec![];
+        tier_inflight(&mut scratch, &mut r, &fx, "", &runs, 40);
+        tier_tensions(&mut scratch, &mut r, &fx, "", &runs, 40, 10);
+        let mut out = vec![];
+        tier_inbox(&mut out, &mut r, &fx, "", &runs, 12);
+        rdy_model::unseed_ids_for_tests();
+        let names: Vec<&str> = out.iter().map(|m| m.op.as_str()).collect();
+        assert_eq!(
+            names,
+            ["inbox_fetch_200_1k", "inbox_in_flight_1k", "inbox_ack_1k"]
+        );
+    }
+
+    #[test]
+    fn ibperf1_the_inbox_ops_state_their_targets() {
+        for op in ["inbox_fetch_200_1k", "inbox_in_flight_1k", "inbox_ack_1k"] {
+            assert!(spec_target(op).is_some(), "{op} has no target");
+        }
+        assert!(
+            spec_target("inbox_fetch_200_1k")
+                .unwrap()
+                .contains("< 5 ms p99")
+        );
+        assert!(
+            spec_target("inbox_ack_1k_50k")
+                .unwrap()
+                .contains("no spec target")
         );
     }
 
