@@ -2,7 +2,7 @@
 use crate::Materialized;
 use rdy_graph::{EdgeKind, Graph};
 use rdy_model::entity::{
-    aliases, code_literals, find_phrases, phrase, source_field, text_sources, words,
+    aliases, code_literals, find_phrases, phrase, shown_sources, source_field, text_sources, words,
 };
 use rdy_model::{Block, BlockId, decision};
 use rdy_schema::{FieldKind, Pack, Trait};
@@ -360,6 +360,17 @@ pub fn text_in(pack: &Pack, b: &Block) -> Vec<(String, String)> {
     count_scan();
     let def = pack.block_types.get(&b.block_type);
     without(text_sources(b), |f| {
+        def.and_then(|d| d.fields.get(f))
+            .is_some_and(|fd| fd.kind == FieldKind::Enum)
+    })
+}
+
+/// The text of `b` as a reader sees it, under `pack`: the fields of [`text_in`], with each
+/// reference shown the way `rdy_read` shows it (its bare token), never blanked. Not for a
+/// mention scan.
+pub fn shown_text_in(pack: &Pack, b: &Block) -> Vec<(String, String)> {
+    let def = pack.block_types.get(&b.block_type);
+    without(shown_sources(b), |f| {
         def.and_then(|d| d.fields.get(f))
             .is_some_and(|fd| fd.kind == FieldKind::Enum)
     })

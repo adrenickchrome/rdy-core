@@ -1,0 +1,65 @@
+{
+  "case": {
+    "blocks": [
+      {
+        "doc": "spec",
+        "governing": [
+          {
+            "id": "D-REKH0",
+            "statement": "Keep A"
+          }
+        ],
+        "headings": [
+          "Spec",
+          "Rules"
+        ],
+        "id": "c-CFPE0",
+        "side": "592ccd6c6f77fbb28bbd1415b4184c94b42c23eda5c394d6aa2103bd9f2ef240",
+        "text": [
+          {
+            "field": "body",
+            "text": "A holds, by a."
+          }
+        ],
+        "type": "claim",
+        "version": "459b9670e0f24752d508abfa0787f712a1bee7844629782ddc4505263064890a"
+      },
+      {
+        "doc": "spec",
+        "governing": [],
+        "headings": [
+          "Spec",
+          "Rules"
+        ],
+        "id": "c-WKHEZ",
+        "side": "canon@cf2568b670d6cb9111d617fa665fa43f498955d3f8cb721b45a7018ccc2aea1f",
+        "text": [
+          {
+            "field": "body",
+            "text": "B builds on c-CFPE0."
+          }
+        ],
+        "type": "claim",
+        "version": "d08882353685daf9502ef16d7a2b38d179aad7e539d16929886873c6df447a79"
+      }
+    ],
+    "entities": [],
+    "kind": "tension",
+    "question": "Do these two blocks disagree? Answer tension when they cannot both hold, else no_tension. A tension names, for each block that takes part, what in it disagrees.",
+    "request": "rq-5607f5767811",
+    "rule": "premise",
+    "schema": {
+      "findings": "a list of {block, note}: block is one of the two block ids; note is 1 to 2000 characters; a tension verdict needs 1 to 20 findings, a no_tension verdict 0 to 20",
+      "reason": "with severity blocking only: why the tension should block, 1 to 2000 characters",
+      "severity": "advisory (default) or blocking, on a tension verdict only: blocking advises a person to make the tension block; it gates nothing until a person accepts it",
+      "verdict": [
+        "tension",
+        "no_tension"
+      ]
+    }
+  },
+  "case_hash": "71503bf6827d4bd6db3ac7bf6e1fc620081786fe9e6b156cef0482386f4b68d0",
+  "kind": "tension",
+  "lease_expires_at": "2025-10-09T09:03:20Z",
+  "request": "rq-5607f5767811"
+}

@@ -67,7 +67,10 @@ impl Replies {
             self.0.iter().all(|(n, _)| n != name),
             "{name} is recorded twice"
         );
-        self.0.push((name.to_string(), pretty(v)));
+        let text = pretty(v);
+        // a NUL byte marks text the mention scan masked: it must never reach a reply
+        assert!(!text.contains("\\u0000"), "{name} holds a NUL byte");
+        self.0.push((name.to_string(), text));
     }
     /// Records the reply of a call that must succeed.
     fn ok(&mut self, name: &str, r: Result<Value, RdyError>) -> Value {
@@ -107,6 +110,46 @@ fn str_of(v: &Value, what: &str) -> String {
     v.as_str()
         .unwrap_or_else(|| panic!("{what} is not a string in {v}"))
         .to_string()
+}
+
+/// The text of the QA pack's block B as a review case shows it: its reference is its bare id.
+const REF_TEXT_PREFIX: &str = "B builds on ";
+
+/// The case block that holds a reference, if the request has one.
+fn ref_block(request: &Value) -> Option<&Value> {
+    request["case"]["blocks"].as_array()?.iter().find(|x| {
+        x["text"].as_array().is_some_and(|ts| {
+            ts.iter()
+                .any(|t| str_of_opt(&t["text"]).starts_with(REF_TEXT_PREFIX))
+        })
+    })
+}
+
+fn str_of_opt(v: &Value) -> &str {
+    v.as_str().unwrap_or_default()
+}
+
+/// The case shows the block holding a reference as `rdy_read` shows it: every text of the block
+/// is in the compact read's text for the block, and none holds a NUL byte.
+fn check_case_text_matches_read(st: &mut McpState, request: &Value) {
+    let b = ref_block(request).expect("a block with a reference");
+    let id = str_of(&b["id"], "the case block id");
+    let read = must(
+        "rdy_read of the case block",
+        rdy_read(st, p(json!({"id": id, "scope": "canon"}))),
+    );
+    let shown = str_of(&read["text"], "the read's text");
+    for t in b["text"].as_array().expect("the block's texts") {
+        let text = str_of(&t["text"], "a case text");
+        assert!(
+            !text.contains('\0'),
+            "the case text holds a NUL byte: {text:?}"
+        );
+        assert!(
+            text.starts_with("B builds on c-") && shown.contains(&text),
+            "the case text {text:?} is not what rdy_read shows: {shown:?}"
+        );
+    }
 }
 
 /// Runs the scripted session and returns its replies. The human's name is fixed in the project's
@@ -297,6 +340,7 @@ fn run_session() -> Vec<(String, String)> {
     // the reviewer takes requests until one asks about b's C against the decision (a request is
     // leased to the reviewer once it is taken, so the others stay with it)
     let mut next = None;
+    let mut seen = vec![];
     for _ in 0..16 {
         let n = must(
             "review next",
@@ -314,8 +358,18 @@ fn run_session() -> Vec<(String, String)> {
             next = Some(n);
             break;
         }
+        seen.push(n);
     }
     let next = next.expect("a request about C and the decision");
+    // a case whose block holds a reference shows it as rdy_read does (the reference's id), never
+    // as the NUL bytes the mention scan masks it with
+    seen.push(next.clone());
+    let with_ref = seen
+        .iter()
+        .find(|n| ref_block(n).is_some())
+        .unwrap_or_else(|| panic!("no review case holds the block with a reference"));
+    out.push("rdy_review_next--request-with-reference", with_ref);
+    check_case_text_matches_read(&mut a, with_ref);
     out.push("rdy_review_next--request", &next);
     let block = spec.c.to_string();
     out.ok(
