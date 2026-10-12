@@ -81,15 +81,15 @@ impl Res {
             _ => {}
         }
         let named = |prefix: &str| uri.strip_prefix(prefix).filter(|rest| !rest.is_empty());
-        // a proposal id is `P-…`: it is read only as a proposal, and a proposal URI takes nothing else
+        // a proposal ref is what `rdy_read` routes as one: it is read only as a proposal, and a proposal URI takes nothing else
         if let Some(id) = named("rdy://doc/") {
-            return (!id.starts_with("P-")).then(|| Res::Doc(id.to_string()));
+            return (!rdy_engine::is_proposal_ref(id)).then(|| Res::Doc(id.to_string()));
         }
         if let Some(name) = named("rdy://view/") {
             return Some(Res::View(name.to_string()));
         }
         named("rdy://proposal/")
-            .filter(|id| id.starts_with("P-"))
+            .filter(|id| rdy_engine::is_proposal_ref(id))
             .map(|id| Res::Proposal(id.to_string()))
     }
 
@@ -259,9 +259,15 @@ mod tests {
             Some(Res::View("work".into()))
         );
         assert_eq!(
-            Res::parse("rdy://proposal/P-1@2"),
-            Some(Res::Proposal("P-1@2".into()))
+            Res::parse("rdy://proposal/P-1a2b@2"),
+            Some(Res::Proposal("P-1a2b@2".into()))
         );
+        // a doc path may start with `P-`: only a real proposal ref (`P-`, 4 to 64 hex digits) is a proposal
+        assert_eq!(
+            Res::parse("rdy://doc/P-plan"),
+            Some(Res::Doc("P-plan".into()))
+        );
+        assert_eq!(Res::parse("rdy://doc/P-1"), Some(Res::Doc("P-1".into())));
         for no in [
             "rdy://doc/",
             "rdy://view/",
@@ -271,8 +277,10 @@ mod tests {
             // a proposal URI takes a proposal id only, a doc URI never takes one
             "rdy://proposal/d-XXXX",
             "rdy://proposal/p-1",
-            "rdy://doc/P-1@2",
-            "rdy://doc/P-1",
+            "rdy://proposal/P-plan",
+            "rdy://proposal/P-1",
+            "rdy://doc/P-1a2b",
+            "rdy://doc/P-1a2b@2",
             "file:///etc",
             "",
         ] {
