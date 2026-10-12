@@ -15,6 +15,7 @@ mod engine_events;
 mod engine_graph;
 mod engine_history;
 mod engine_impact;
+mod engine_inbox_golden;
 mod engine_inbox_inflight;
 mod engine_inbox_match;
 mod engine_inbox_moves;
