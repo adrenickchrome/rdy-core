@@ -32,12 +32,7 @@ impl Rdy {
         let chain: Vec<rdy_model::Hash> = landings.iter().map(|(h, _)| *h).collect();
         let versions = self.check_tags(&chain)?;
         let objects = self.store.check_objects()?;
-        let unlogged = crate::transitions::reconcile_moves(
-            &self.read(),
-            None,
-            &[],
-            rdy_store::transition::Cause::Reopened,
-        )?;
+        let unlogged = crate::transitions::reconcile_moves(&self.read(), None, &[], None)?;
         Ok(FsckReport {
             frames,
             landings: landings.len(),

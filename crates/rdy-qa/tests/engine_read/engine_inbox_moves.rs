@@ -250,6 +250,35 @@ fn ib5_a_suspect_reaches_its_writers_and_the_writers_of_its_block_now() {
     );
 }
 
+/// D-TPZ0W ("the blocks they write or cite") and ruling task-15: a suspect reaches a session whose
+/// in-flight changes only cite its block, though the session never wrote it.
+#[test]
+fn ib5_a_suspect_reaches_a_session_whose_in_flight_changes_cite_its_block() {
+    let k = sub("agent:k", "k");
+    let cited = sm("c-XXXXX", &[("agent:m", "m")]);
+    let cited_gone = sm("c-XXXXX", &[]);
+    let elsewhere = sm("c-CCCCC", &[("agent:m", "m")]);
+    let mut infl = RunInFlight::default();
+    infl.cited.insert("c-XXXXX".parse::<BlockId>().unwrap());
+    let es = entries(
+        &k,
+        &infl,
+        &[
+            MoveRef::Gone(&cited_gone),
+            MoveRef::New(&cited),
+            MoveRef::New(&elsewhere),
+        ],
+    );
+    assert_eq!(events(&es), ["suspect_gone", "suspect_new"], "{es:?}");
+    assert!(
+        es[1]
+            .line
+            .starts_with("c-XXXXX is suspect: c-TTTTT changed: landing "),
+        "{}",
+        es[1].line
+    );
+}
+
 #[test]
 fn ib5_every_cause_has_a_text() {
     // guard of the closed list: why_text has one arm per cause and no wildcard

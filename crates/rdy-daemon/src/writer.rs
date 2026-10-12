@@ -13,7 +13,7 @@
 //! reload's batch before the write runs, so a write that fails its seal never decides it.
 use crate::E_DAEMON_GONE;
 use crate::daemon::log;
-use crate::notify::{NotifyMsg, inbox_subs};
+use crate::notify::{INBOX_URI, InboxSubs, NotifyMsg, inbox_subs};
 use crate::shared::Shared;
 use rdy_engine::engine::WriteFn;
 use rdy_engine::{E_INTERNAL, Event, Rdy, RdyError, ReloadOutcome};
@@ -117,16 +117,33 @@ impl Writer {
     /// batch (events of one batch share their `seq`, and a batch's events arrive together). It
     /// runs after the publish that holds them. A send never blocks; with no `Shared` or no
     /// notifier the events are dropped (notifications are best effort).
+    ///
+    /// The inbox subscriptions are read once per message, from the state published after the
+    /// whole message ran (ruling task-11.1). A message that sealed two batches, X1 then X2,
+    /// decides X1 from the subscriptions as of X2; and if a later seal of the message failed,
+    /// from the state left by the failure, whose index may hold the removed batch. Every
+    /// `WriteFn` today seals at most one batch that can change a subscription, and no
+    /// notification is ever more than best effort; snapshotting per seal would need a hook
+    /// between the batches of one message.
     fn forward(&self) {
         let Ok(first) = self.events.try_recv() else {
             return;
         };
         let sh = self.shared.upgrade();
         // the inbox subscriptions as of the state just published, read here on the writer where
-        // no batch is open (ruling task-11.1): the notifier never reads them from the live index
+        // no batch is open (ruling task-11.1): the notifier never reads them from the live index.
+        // Only the identified subscribers of rdy://inbox are listed, so a write with no inbox
+        // subscriber clones nothing from the hub.
         let subs = Arc::new(
             sh.as_ref()
-                .map(|sh| inbox_subs(&sh.state.load(), &sh.hub.targets()))
+                .map(|sh| {
+                    let sessions = sh.hub.subscribers(INBOX_URI);
+                    if sessions.is_empty() {
+                        InboxSubs::new()
+                    } else {
+                        inbox_subs(&sh.state.load(), &sessions)
+                    }
+                })
                 .unwrap_or_default(),
         );
         let send = |events: Vec<Arc<Event>>| {

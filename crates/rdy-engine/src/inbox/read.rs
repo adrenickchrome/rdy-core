@@ -194,15 +194,18 @@ impl Fill {
     }
 }
 
-/// A walk error of the log from a cursor: a location that does not start a frame reads as a
-/// corrupt frame, which is the cursor's fault.
-fn walk_error(e: StoreError, start: &InboxCursor) -> RdyError {
+/// A walk error of the log from a cursor. Only a frame that does not read at the cursor itself
+/// (`walked` false: no frame was read) is the cursor's fault: a location that does not start a
+/// frame reads as a corrupt frame. A frame that does not read after one that did is damage to
+/// the log, reported as the store's error.
+fn walk_error(e: StoreError, start: &InboxCursor, walked: bool) -> RdyError {
     match e {
         StoreError::Io(io)
-            if matches!(
-                io.kind(),
-                std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
-            ) =>
+            if !walked
+                && matches!(
+                    io.kind(),
+                    std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+                ) =>
         {
             bad_cursor(&cursor_text(start))
         }
@@ -284,7 +287,7 @@ impl ReadState {
         let (next, more) = if fill.full {
             (fill.pos, true)
         } else {
-            walk.map_err(|e| walk_error(e, &start))?;
+            walk.map_err(|e| walk_error(e, &start, first.is_some()))?;
             (fill.pos, false)
         };
         Ok(InboxPage {

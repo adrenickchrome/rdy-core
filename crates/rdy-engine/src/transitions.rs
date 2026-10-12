@@ -108,15 +108,21 @@ pub(crate) fn moves(
 }
 
 /// The moves between the open sets the log folds to (the store's open-move tables) and `next`:
-/// what a batch logs when nothing was logged since open. A move that `moves(prev, next, …)`
-/// also holds takes its cause (the batch's, or `cause` for a batch that moves nothing) and its
-/// re-key; every other move takes `cause`. A resolution read from the tables takes its kind,
-/// severity, sides and writers from the record that opened it.
+/// what a batch logs when nothing was logged since open. A move that `moves(prev, next, frames,
+/// cause)` also holds (the batch's own: `cause` is `None` for a write batch of `frames`, else
+/// the cause of a batch that moves nothing itself, such as a pack reload) takes its cause and
+/// its re-key. Every other move was made while no rdy ran and takes `reopened`. Those moves
+/// re-key by the second rule of `rekeys`: an opening and a resolution with the same kind and
+/// items under the other severity (a pack or rdy change of severity). The first rule (same
+/// vkey) needs the resolved tension's vkey, which no record holds; only a write re-keys by it
+/// (a landing, a repin, a tracking-field edit), and a write's moves are its batch's own. A
+/// resolution read from the tables takes its kind, severity, sides and writers from the record
+/// that opened it.
 pub(crate) fn reconcile_moves(
     next: &ReadState,
     prev: Option<&ReadState>,
     frames: &[(u8, Hash)],
-    cause: Cause,
+    cause: Option<Cause>,
 ) -> Result<Transitions, RdyError> {
     let reader = next.reader();
     let table_t: BTreeMap<Hash, Hash> = reader.open_tensions()?.into_iter().collect();
@@ -153,14 +159,7 @@ pub(crate) fn reconcile_moves(
     }
     // the moves the batch itself made, with their causes and re-keys
     let made = match prev {
-        Some(p) => {
-            let batch = if can_move(reader, frames) {
-                None
-            } else {
-                Some(cause)
-            };
-            Some(moves(p, next, frames, batch)?)
-        }
+        Some(p) => Some(moves(p, next, frames, cause)?),
         None => None,
     };
     let made_t = |list: fn(&Transitions) -> &Vec<TensionMove>, id: &Hash| {
@@ -171,9 +170,40 @@ pub(crate) fn reconcile_moves(
         made.as_ref()
             .and_then(|m| list(m).iter().find(|s| s.key() == *key).cloned())
     };
-    let other = why(cause, None);
+    // a move the batch did not make was made while no rdy ran
+    let other = why(Cause::Reopened, None);
     let opening_set: BTreeSet<Hash> = opening.iter().copied().collect();
     let resolving_set: BTreeSet<Hash> = resolving.iter().map(|(id, _)| *id).collect();
+    // the re-keys: the batch's own first, then the second rule of `rekeys` for the rest
+    let mut rekey_to: BTreeMap<Hash, Hash> = BTreeMap::new();
+    let mut rekey_from: BTreeMap<Hash, Hash> = BTreeMap::new();
+    let mut pair = |o: Hash, n: Hash| {
+        if !rekey_to.contains_key(&o) && !rekey_from.contains_key(&n) {
+            rekey_to.insert(o, n);
+            rekey_from.insert(n, o);
+        }
+    };
+    for (id, _) in &resolving {
+        if let Some(n) = made_t(|m| &m.resolved, id).and_then(|m| m.rekey)
+            && opening_set.contains(&n)
+        {
+            pair(*id, n);
+        }
+    }
+    for id in &opening {
+        if let Some(o) = made_t(|m| &m.opened, id).and_then(|m| m.rekey)
+            && resolving_set.contains(&o)
+        {
+            pair(o, *id);
+        }
+    }
+    for id in &opening {
+        let t = next_open[id];
+        let o = tension_id(t.kind, other_severity(t.severity), &t.involved);
+        if resolving_set.contains(&o) {
+            pair(o, *id);
+        }
+    }
     let mut records: BTreeMap<Hash, Transitions> = BTreeMap::new();
     let mut record = |h: Hash| -> Result<Transitions, RdyError> {
         if let Some(r) = records.get(&h) {
@@ -190,28 +220,22 @@ pub(crate) fn reconcile_moves(
             .into_iter()
             .find(|t| t.tension == *id)
             .ok_or_else(|| unknown_move(*opened_by, &format!("tension {id}")))?;
-        let (why, rekey) = match made_t(|m| &m.resolved, id) {
-            Some(m) => (m.why, m.rekey.filter(|r| opening_set.contains(r))),
-            None => (other.clone(), None),
-        };
+        let why = made_t(|m| &m.resolved, id).map_or_else(|| other.clone(), |m| m.why);
         rec.resolved.push(TensionMove {
-            rekey,
+            rekey: rekey_to.get(id).copied(),
             why,
             ..opened
         });
     }
     for id in &opening {
         let t = next_open[id];
-        let (why, rekey) = match made_t(|m| &m.opened, id) {
-            Some(m) => (m.why, m.rekey.filter(|r| resolving_set.contains(r))),
-            None => (other.clone(), None),
-        };
+        let why = made_t(|m| &m.opened, id).map_or_else(|| other.clone(), |m| m.why);
         rec.opened.push(TensionMove {
             tension: t.id,
             kind: t.kind.name().to_string(),
             severity: t.severity.to_string(),
             sides: sides(next, &nset, t)?,
-            rekey,
+            rekey: rekey_from.get(id).copied(),
             why,
         });
     }
@@ -345,17 +369,21 @@ fn rekeys(
         if to.contains_key(&t.id) {
             continue;
         }
-        let other = match t.severity {
-            TensionSeverity::Blocking => TensionSeverity::Advisory,
-            TensionSeverity::Advisory => TensionSeverity::Blocking,
-        };
-        let o = tension_id(t.kind, other, &t.involved);
+        let o = tension_id(t.kind, other_severity(t.severity), &t.involved);
         if opened_ids.contains(&o) && !from.contains_key(&o) {
             to.insert(t.id, o);
             from.insert(o, t.id);
         }
     }
     (to, from)
+}
+
+/// The other severity: what the second re-key rule pairs across.
+fn other_severity(s: TensionSeverity) -> TensionSeverity {
+    match s {
+        TensionSeverity::Blocking => TensionSeverity::Advisory,
+        TensionSeverity::Advisory => TensionSeverity::Blocking,
+    }
 }
 
 /// The suspects `next` made gone and new against `base`, each by key. The suspects are

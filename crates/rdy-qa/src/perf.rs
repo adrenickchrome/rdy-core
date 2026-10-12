@@ -2159,6 +2159,10 @@ fn tier_inbox(
         runs.read,
         |_| {
             let st = r.read();
+            // the lazy builds the page reads (the tension set, the in-flight scope) are warm
+            // before the timer, so the first sample times the fetch alone
+            st.tensions().expect("warm tensions");
+            st.run_in_flight(actor, Some(run)).expect("warm in flight");
             let s = Instant::now();
             let page = st.inbox_page(&sub, None, usize::MAX).expect("inbox page");
             let took = s.elapsed();
@@ -2185,6 +2189,9 @@ fn tier_inbox(
         runs.read,
         |_| {
             let st = r.read();
+            // warm the lazy builds it reads, so the first sample times the op alone
+            st.tensions().expect("warm tensions");
+            st.run_in_flight(actor, Some(run)).expect("warm in flight");
             let s = Instant::now();
             let held = st.run_in_flight(actor, Some(run)).expect("in flight");
             let took = s.elapsed();

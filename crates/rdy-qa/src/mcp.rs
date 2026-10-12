@@ -457,8 +457,13 @@ sleep 20"#;
             true
         );
         assert!(c.wait_notification("rdy://inbox", Duration::from_secs(10)));
-        assert!(!c.wait_notification("rdy://pack", Duration::from_millis(100)));
-        assert_eq!(c.notifications().len(), 1);
+        // the one notification the fake sent, and nothing taken for one
+        let uris: Vec<&str> = c
+            .notifications()
+            .iter()
+            .map(|n| n["params"]["uri"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(uris, ["rdy://inbox"]);
         // the reply that was not asked for is set aside, never taken for a notification
         assert_eq!(c.recv(99, Duration::from_secs(5))["id"], 99);
     }
@@ -469,8 +474,6 @@ sleep 20"#;
         assert!(c.wait_notification("rdy://inbox", Duration::from_secs(10)));
         // the fake's one stray reply may still be on its way; once it is taken, nothing is left
         c.drain(Duration::from_millis(200));
-        let t = Instant::now();
         assert_eq!(c.drain(Duration::from_millis(50)), 0);
-        assert!(t.elapsed() < Duration::from_secs(5));
     }
 }

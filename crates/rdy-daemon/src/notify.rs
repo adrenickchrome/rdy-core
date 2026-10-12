@@ -5,10 +5,11 @@
 //! D-V4NZX for the inbox rule).
 //!
 //! The rule is closed (ledger O8, O9). For each batch, for each session with a known actor:
-//! - `rdy://inbox` when the batch gives the session at least one inbox entry (`batch_entries`,
-//!   the rule the inbox read applies: matched events and the batch's logged moves), or a
-//!   `change_committed` or `landed` writes a block its in-flight changes cite. A session with
-//!   no persisted subscription, or whose cursor is already past the batch, gets none.
+//! - `rdy://inbox` exactly when the batch gives the session at least one inbox entry
+//!   (`batch_entries`, the rule the inbox read applies: matched events and the batch's logged
+//!   moves; founder decision C, D-Z0EMP: "notifies exactly when the batch gives the session an
+//!   entry"). A session with no persisted subscription, or whose cursor is already past the
+//!   batch, gets none.
 //! - `rdy://view/{name}` when an event names view `name`.
 //! - `rdy://doc/{id}` when a `change_committed` or `landed` writes the block the URI follows, or,
 //!   when that block is a doc, any block in it (ruling task-11.2). `rdy-mcp` resolves the URI's
@@ -39,6 +40,7 @@ use rdy_engine::{Event, EventKind, RdyError, ReadState, Scope};
 use rdy_mcp::notify::Target;
 use rdy_model::{BlockId, Hash, Op};
 use rdy_store::inbox::InboxSub;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::Receiver;
@@ -46,6 +48,8 @@ use std::sync::{Arc, Weak};
 use std::thread::JoinHandle;
 
 const INBOX: &str = "rdy://inbox";
+/// The inbox resource's URI, as the writer lists its subscribers.
+pub(crate) const INBOX_URI: &str = INBOX;
 const PACK: &str = "rdy://pack";
 const PROJECT: &str = "rdy://project";
 const DOC: &str = "rdy://doc/";
@@ -106,8 +110,9 @@ fn deliver(sh: &Shared, msg: &NotifyMsg) {
                 return;
             }
             let st = sh.state.load_full();
+            let batch = Batch::new(&st, events, subs);
             for t in &targets {
-                for uri in uris_for(&st, t, events, subs) {
+                for uri in batch.uris_for(t) {
                     #[cfg(test)]
                     sh.delivered.lock().unwrap().push((t.sid, uri.clone()));
                     sh.hub.notify(t.sid, &uri);
@@ -117,66 +122,133 @@ fn deliver(sh: &Shared, msg: &NotifyMsg) {
     }
 }
 
-/// The URIs that one batch's `events` (all of one `seq`) changed for session `t`, among those
-/// it subscribed to, by the closed rule of this module. Reads `st` and `subs` (the inbox
-/// subscriptions as of the batch's publish) and nothing else; an error leaves out the URI it
-/// concerns.
+/// One batch as the notifier reads it, for every target in turn. What depends only on the
+/// batch is computed once, on first use: the blocks it writes and their docs, and its events
+/// as the inbox rule takes them. The inbox decision is computed once per (actor, run), so two
+/// connections of one session cost one.
+pub(crate) struct Batch<'a> {
+    st: &'a ReadState,
+    events: &'a [Arc<Event>],
+    subs: &'a InboxSubs,
+    written: OnceCell<Written>,
+    docs: OnceCell<BTreeSet<BlockId>>,
+    owned: OnceCell<Vec<Event>>,
+    inbox: RefCell<BTreeMap<(String, Option<String>), bool>>,
+}
+
+impl<'a> Batch<'a> {
+    /// `events`: one batch's events, all of one `seq`; `subs`: the inbox subscriptions as of
+    /// the batch's publish.
+    pub(crate) fn new(st: &'a ReadState, events: &'a [Arc<Event>], subs: &'a InboxSubs) -> Self {
+        Batch {
+            st,
+            events,
+            subs,
+            written: OnceCell::new(),
+            docs: OnceCell::new(),
+            owned: OnceCell::new(),
+            inbox: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    /// The URIs the batch changed for session `t`, among those it subscribed to, by the closed
+    /// rule of this module. Reads the published state and the subscriptions and nothing else;
+    /// an error leaves out the URI it concerns.
+    pub(crate) fn uris_for(&self, t: &Target) -> BTreeSet<String> {
+        let Some(actor) = t.actor.as_deref() else {
+            return BTreeSet::new();
+        };
+        if t.uris.is_empty() || self.events.is_empty() {
+            return BTreeSet::new();
+        }
+        let subscribed = |prefix: &str| t.uris.iter().any(|u| u.starts_with(prefix));
+        let mut out = BTreeSet::new();
+        for e in self.events {
+            if let Some(view) = view_of(&e.kind) {
+                out.insert(format!("{VIEW}{view}"));
+            }
+            if matches!(e.kind, EventKind::Landed { .. }) {
+                out.insert(PROJECT.to_string());
+            }
+        }
+        if subscribed(PROPOSAL) {
+            out.extend(proposal_uris(self.st, t, self.events));
+        }
+        if subscribed(DOC) {
+            out.extend(self.doc_uris(t));
+        }
+        if t.uris.contains(INBOX) && self.inbox_moved(actor, t.run.as_deref()) {
+            out.insert(INBOX.to_string());
+        }
+        out.retain(|u| t.uris.contains(u));
+        out
+    }
+
+    fn written(&self) -> &Written {
+        self.written
+            .get_or_init(|| written_blocks(self.st, self.events).unwrap_or_default())
+    }
+
+    /// The `rdy://doc/` URIs of `t` whose followed block the batch writes, or, for a doc, whose
+    /// doc holds a block the batch writes.
+    fn doc_uris(&self, t: &Target) -> BTreeSet<String> {
+        if t.docs.is_empty() || self.written().is_empty() {
+            return BTreeSet::new();
+        }
+        let written = self.written();
+        let docs = self.docs.get_or_init(|| written_docs(self.st, written));
+        t.docs
+            .iter()
+            .filter(|(_, b)| written.contains_key(*b) || docs.contains(*b))
+            .map(|(uri, _)| uri.clone())
+            .collect()
+    }
+
+    /// Whether the batch gives the session (`actor`, `run`) an inbox entry under its persisted
+    /// subscription (as of the batch's publish): the inbox read's own rule. False with no
+    /// subscription, when the cursor is already past the batch, or on an error.
+    fn inbox_moved(&self, actor: &str, run: Option<&str>) -> bool {
+        let key = (actor.to_string(), run.map(str::to_string));
+        if let Some(moved) = self.inbox.borrow().get(&key) {
+            return *moved;
+        }
+        let moved = self
+            .subs
+            .get(&key)
+            .is_some_and(|sub| inbox_moved(self.st, sub, self.owned()).unwrap_or(false));
+        self.inbox.borrow_mut().insert(key, moved);
+        moved
+    }
+
+    fn owned(&self) -> &[Event] {
+        self.owned
+            .get_or_init(|| self.events.iter().map(|e| (**e).clone()).collect())
+    }
+}
+
+/// The URIs that one batch's `events` (all of one `seq`) changed for session `t` (see
+/// [`Batch::uris_for`]).
+#[cfg(test)]
 pub(crate) fn uris_for(
     st: &ReadState,
     t: &Target,
     events: &[Arc<Event>],
     subs: &InboxSubs,
 ) -> BTreeSet<String> {
-    let Some(actor) = t.actor.as_deref() else {
-        return BTreeSet::new();
-    };
-    if t.uris.is_empty() || events.is_empty() {
-        return BTreeSet::new();
-    }
-    let subscribed = |prefix: &str| t.uris.iter().any(|u| u.starts_with(prefix));
-    let mut out = BTreeSet::new();
-    for e in events {
-        if let Some(view) = view_of(&e.kind) {
-            out.insert(format!("{VIEW}{view}"));
-        }
-        if matches!(e.kind, EventKind::Landed { .. }) {
-            out.insert(PROJECT.to_string());
-        }
-    }
-    if subscribed(PROPOSAL) {
-        out.extend(proposal_uris(st, t, events));
-    }
-    let inbox = t.uris.contains(INBOX);
-    if subscribed(DOC) || inbox {
-        let written = written_blocks(st, events).unwrap_or_default();
-        if subscribed(DOC) {
-            out.extend(doc_uris(st, t, &written));
-        }
-        let sub = subs.get(&(actor.to_string(), t.run.clone()));
-        if inbox
-            && let Some(sub) = sub
-            && inbox_moved(st, sub, events, &written).unwrap_or(false)
-        {
-            out.insert(INBOX.to_string());
-        }
-    }
-    out.retain(|u| t.uris.contains(u));
-    out
+    Batch::new(st, events, subs).uris_for(t)
 }
 
-/// The persisted inbox subscription of each session in `targets` with a known actor that
-/// subscribed to `rdy://inbox`, read from `st`. The writer calls it right after it publishes a
-/// sealed state, so no open batch is read (ruling task-11.1). A read that fails leaves its
-/// session out: that session hears of no inbox entry for these batches (best effort).
-pub(crate) fn inbox_subs(st: &ReadState, targets: &[Target]) -> InboxSubs {
+/// The persisted inbox subscription of each session in `sessions` (the identified subscribers
+/// of `rdy://inbox`, by (actor, run)), read from `st`. The writer calls it right after it
+/// publishes a sealed state, so no open batch is read (ruling task-11.1). A read that fails
+/// leaves its session out: that session hears of no inbox entry for these batches (best effort).
+pub(crate) fn inbox_subs(st: &ReadState, sessions: &[(String, Option<String>)]) -> InboxSubs {
     let reader = st.reader();
-    targets
+    sessions
         .iter()
-        .filter(|t| t.uris.contains(INBOX))
-        .filter_map(|t| {
-            let actor = t.actor.as_deref()?;
-            let sub = reader.inbox(actor, t.run.as_deref()).ok()??;
-            Some(((actor.to_string(), t.run.clone()), sub))
+        .filter_map(|(actor, run)| {
+            let sub = reader.inbox(actor, run.as_deref()).ok()??;
+            Some(((actor.clone(), run.clone()), sub))
         })
         .collect()
 }
@@ -264,20 +336,6 @@ fn written_docs(st: &ReadState, written: &Written) -> BTreeSet<BlockId> {
     written.keys().filter_map(doc_of).collect()
 }
 
-/// The `rdy://doc/` URIs of `t` whose followed block the batch writes, or, for a doc, whose
-/// doc holds a block the batch writes.
-fn doc_uris(st: &ReadState, t: &Target, written: &Written) -> BTreeSet<String> {
-    if written.is_empty() || t.docs.is_empty() {
-        return BTreeSet::new();
-    }
-    let docs = written_docs(st, written);
-    t.docs
-        .iter()
-        .filter(|(_, b)| written.contains_key(*b) || docs.contains(*b))
-        .map(|(uri, _)| uri.clone())
-        .collect()
-}
-
 /// `rdy://proposal/{id}` URIs `t` subscribed to whose proposal a `proposed` or `landed` of the
 /// batch names a version of. A subscribed id is `P-<prefix>` or `P-<prefix>@<n>`; it names the
 /// proposal whose stable id starts with the prefix.
@@ -314,25 +372,15 @@ fn proposal_uris(st: &ReadState, t: &Target, events: &[Arc<Event>]) -> BTreeSet<
         .collect()
 }
 
-/// Whether the batch moves the inbox of the session whose persisted subscription is `sub` (as
-/// of the batch's publish): it gives an entry under `sub` (the inbox read's own rule), or it
-/// writes a block the session's in-flight changes cite. False when the subscription's cursor is
-/// already past the batch.
-fn inbox_moved(
-    st: &ReadState,
-    sub: &InboxSub,
-    events: &[Arc<Event>],
-    written: &Written,
-) -> Result<bool, RdyError> {
+/// Whether the batch (`events`, not empty) gives the session whose persisted subscription is
+/// `sub` (as of the batch's publish) an inbox entry: the inbox read's own rule, and nothing
+/// else. False when the subscription's cursor is already past the batch.
+fn inbox_moved(st: &ReadState, sub: &InboxSub, events: &[Event]) -> Result<bool, RdyError> {
     if events[0].seq <= sub.cursor.at {
         return Ok(false);
     }
     let infl = st.run_in_flight(&sub.actor, sub.run.as_deref())?;
-    if written.keys().any(|b| infl.cited.contains(b)) {
-        return Ok(true);
-    }
-    let batch: Vec<Event> = events.iter().map(|e| (**e).clone()).collect();
-    Ok(!batch_entries(st, sub, &infl, &batch)?.is_empty())
+    Ok(!batch_entries(st, sub, &infl, events)?.is_empty())
 }
 
 #[cfg(test)]
@@ -478,6 +526,22 @@ mod tests {
         t
     }
 
+    /// The inbox subscriptions the writer would read for `targets`.
+    fn subs_of(st: &ReadState, targets: &[Target]) -> InboxSubs {
+        let hub = rdy_mcp::notify::NotifyHub::new();
+        // one hub session per target (the helper `target` gives every target sid 1)
+        for (sid, t) in (0u64..).zip(targets) {
+            hub.connect(sid, rdy_mcp::notify::Sink::None);
+            if let Some(actor) = &t.actor {
+                hub.identify(sid, actor, t.run.as_deref());
+            }
+            for uri in &t.uris {
+                hub.subscribe(sid, uri);
+            }
+        }
+        inbox_subs(st, &hub.subscribers(INBOX))
+    }
+
     fn sorted(set: BTreeSet<String>) -> Vec<String> {
         set.into_iter().collect()
     }
@@ -496,7 +560,7 @@ mod tests {
         batch.push(landed);
         let st = e.read();
         let t = target("a", &[INBOX, PROJECT, PACK]);
-        let subs = inbox_subs(&st, std::slice::from_ref(&t));
+        let subs = subs_of(&st, std::slice::from_ref(&t));
         let got = sorted(uris_for(&st, &t, &batch, &subs));
         assert_eq!(got, vec![INBOX.to_string(), PROJECT.to_string()]);
     }
@@ -509,7 +573,7 @@ mod tests {
         let st = e.read();
         // agent b subscribed to rdy://inbox on its connection, but has no persisted subscription
         let (a, b) = (target("a", &[INBOX]), target("b", &[INBOX]));
-        let subs = inbox_subs(&st, &[a.clone(), b.clone()]);
+        let subs = subs_of(&st, &[a.clone(), b.clone()]);
         assert!(uris_for(&st, &b, &batch, &subs).is_empty());
         // the same batch reaches agent a, whose subscription names the area
         assert_eq!(
@@ -526,7 +590,7 @@ mod tests {
         let x = land(&e, "payments/fees");
         let st = e.read();
         let t = target("a", &[INBOX]);
-        let subs = inbox_subs(&st, std::slice::from_ref(&t));
+        let subs = subs_of(&st, std::slice::from_ref(&t));
         // the next write is a held batch that moves a's areas to identity; its seal fails
         let sealed = e.write(Box::new(|r| {
             let mut sub = r.read().reader().inbox("agent:a", Some("a"))?.unwrap();
@@ -545,6 +609,51 @@ mod tests {
             sorted(uris_for(&st, &t, &x, &subs)),
             vec![INBOX.to_string()]
         );
+    }
+
+    /// Founder decision C (D-Z0EMP; ledger: Task 11 notifies `rdy://inbox` exactly when the
+    /// batch gives the session an entry): a commit that writes a block the session's in-flight
+    /// change cites, but gives the session no entry, sends no `rdy://inbox`.
+    #[test]
+    fn ib11_a_write_to_a_cited_block_with_no_entry_sends_no_inbox_update() {
+        let (_d, e) = project();
+        let (_doc, c1, _c2) = ops_doc(&e);
+        let parent = e.read().block(&Scope::Canon, &c1).unwrap().parent.unwrap();
+        let k = agent("k");
+        subscribe(&e, &k, None).unwrap();
+        // k's claim links to c1 with `describes`: a citation, not a premise
+        let ops = json!([{"op": "create", "type": "claim", "id": "$y", "parent": parent.to_string(),
+            "body": "Y holds.", "links": {"describes": [{"target": c1.to_string()}]}}]);
+        e.write(Box::new(move |r| {
+            r.write(
+                &k,
+                WriteRequest {
+                    view: "k".into(),
+                    ops: serde_json::from_value(ops).unwrap(),
+                    justification: None,
+                    message: String::new(),
+                },
+            )?;
+            Ok(serde_json::Value::Null)
+        }))
+        .unwrap();
+        let from = e.read().seq();
+        write(
+            &e,
+            "w2",
+            json!([{"op": "update", "id": c1.to_string(), "body": "One holds, still."}]),
+            false,
+        );
+        let batch = batch_since(&e, from, is_committed);
+        let st = e.read();
+        let infl = st.run_in_flight("agent:k", Some("k")).unwrap();
+        assert!(infl.cited.contains(&c1), "{infl:?}");
+        let t = target("k", &[INBOX]);
+        let subs = subs_of(&st, std::slice::from_ref(&t));
+        let sub = &subs[&("agent:k".to_string(), Some("k".to_string()))];
+        let evs: Vec<Event> = batch.iter().map(|e| (**e).clone()).collect();
+        assert!(batch_entries(&st, sub, &infl, &evs).unwrap().is_empty());
+        assert!(uris_for(&st, &t, &batch, &subs).is_empty());
     }
 
     #[test]

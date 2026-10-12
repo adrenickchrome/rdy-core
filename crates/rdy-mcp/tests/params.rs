@@ -307,3 +307,43 @@ fn hd7_the_serde_probe_catches_a_schema_key_serde_does_not_know() {
     assert_eq!(refused.len(), 1, "{refused:?}");
     assert!(refused[0].contains("unknown field `shown`"), "{refused:?}");
 }
+
+/// The keys serde's `deny_unknown_fields` lists for `T`: the "expected one of" part of the error
+/// an unknown key gives.
+fn serde_keys<T: serde::de::DeserializeOwned>() -> Vec<String> {
+    let probe = json!({ "__no_such_key__": null });
+    let Err(e) = T::deserialize(&probe) else {
+        panic!("{} accepts an unknown key", std::any::type_name::<T>());
+    };
+    let text = e.to_string();
+    let (_, list) = text
+        .split_once("expected one of ")
+        .or_else(|| text.split_once("expected "))
+        .unwrap_or_else(|| panic!("no key list in {text:?}"));
+    let mut keys: Vec<String> = list
+        .split(", ")
+        .filter_map(|k| k.trim().strip_prefix('`')?.split('`').next())
+        .map(str::to_string)
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// Final review fix round 1 (Minor 10): `InboxParams` copies the engine's `InboxRequest` by hand,
+/// so every request key must be a published key of the tool, and the tool adds only `person`.
+#[test]
+fn ib7_every_inbox_request_key_is_an_inbox_params_key() {
+    let schema =
+        rmcp::handler::server::common::schema_for_input::<InboxParams>().expect("an input schema");
+    let mut params: Vec<String> = schema["properties"]
+        .as_object()
+        .expect("properties")
+        .keys()
+        .filter(|k| k.as_str() != "person")
+        .cloned()
+        .collect();
+    params.sort();
+    let request = serde_keys::<rdy_engine::inbox::api::InboxRequest>();
+    assert_eq!(request.len(), 3, "{request:?}");
+    assert_eq!(request, params);
+}

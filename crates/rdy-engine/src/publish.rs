@@ -132,14 +132,8 @@ impl Rdy {
         let logged = self.logged.as_deref();
         let computed = catch_unwind(AssertUnwindSafe(|| match logged {
             Some(base) => transitions::moves(base, next, &frames, cause),
-            None => {
-                let other = match cause {
-                    Some(c) => c,
-                    None if recheck == Some(Cause::PackReload) => Cause::PackReload,
-                    None => Cause::Reopened,
-                };
-                transitions::reconcile_moves(next, Some(prev), &frames, other)
-            }
+            // the batch's own moves take `cause`; the moves since open, `reopened`
+            None => transitions::reconcile_moves(next, Some(prev), &frames, cause),
         }));
         let rec = match computed {
             Ok(Ok(rec)) => rec,

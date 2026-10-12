@@ -689,8 +689,10 @@ where
         rmcp::transport::async_rw::AsyncRwTransport::new_server(r, w),
         Arc::clone(&order),
     );
+    // the session is known to the hub before its first request (`NotifyHub::connect`)
+    hub.connect(sid, Sink::None);
     let service = Ordered::new(server, order).serve(transport).await?;
-    hub.connect(sid, Sink::Legacy(service.peer().clone()));
+    hub.set_sink(sid, Sink::Legacy(service.peer().clone()));
     service.waiting().await?;
     Ok(())
 }

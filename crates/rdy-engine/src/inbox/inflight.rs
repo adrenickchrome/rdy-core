@@ -41,9 +41,10 @@ impl ReadState {
             actor: actor.to_string(),
             run: run.map(str::to_string),
         };
-        for name in self.view_names() {
-            if self.view_head(&name).and_then(|h| h.owner.as_ref()) == Some(&me) {
-                out.views.insert(name);
+        // the views map by reference: no name is cloned but the run's own
+        for (name, entry) in &self.views {
+            if entry.head.as_ref().and_then(|h| h.owner.as_ref()) == Some(&me) {
+                out.views.insert(name.clone());
             }
         }
         let mut areas = BTreeSet::new();

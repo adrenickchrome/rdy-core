@@ -4,6 +4,7 @@ use rdy_engine::{EventKind, Rdy};
 use rdy_qa::edit_loop::spec_doc;
 use rdy_qa::fixtures::*;
 use rdy_qa::tensions::*;
+use rdy_store::inbox::{InboxCursor, InboxSub};
 use rdy_store::kinds;
 use rdy_store::segment::Location;
 use rdy_store::transition::{Cause, Transitions};
@@ -233,15 +234,77 @@ fn ib15_a_project_reopened_under_another_pack_logs_reopened_moves() {
     std::fs::write(d.path().join(".rdy.yaml"), "pack: soft\n").unwrap();
     let mut r = Rdy::open(d.path()).unwrap();
     assert!(r.fsck().unwrap().unlogged_moves > 0);
+    let at = r.read().seq();
     assert!(r.reconcile_transitions().unwrap() > 0);
+    let rec = last_record(&r).unwrap();
     assert!(
-        last_record(&r)
-            .unwrap()
-            .opened
-            .iter()
-            .all(|m| m.why.cause == Cause::Reopened)
+        rec.opened.iter().all(|m| m.why.cause == Cause::Reopened),
+        "{rec:?}"
+    );
+    // final review fix round 1 (Important 2): the severity change re-keys each tension, as the
+    // live reload does; the reconcile pairs them by the second re-key rule
+    assert!(!rec.opened.is_empty(), "{rec:?}");
+    assert_eq!(rec.opened.len(), rec.resolved.len(), "{rec:?}");
+    for m in &rec.opened {
+        let back = m.rekey.expect("every opening re-keys a resolved tension");
+        let o = rec.resolved.iter().find(|o| o.tension == back);
+        assert_eq!(o.and_then(|o| o.rekey), Some(m.tension), "{rec:?}");
+    }
+    // the inbox says `replaces`, never that the tension left a's in-flight changes
+    let sub = InboxSub {
+        actor: "agent:a".into(),
+        run: Some("a".into()),
+        cursor: InboxCursor { at, skip: 0 },
+        areas: vec![],
+        role: "writer".into(),
+    };
+    let page = r.read().inbox_page(&sub, None, usize::MAX).unwrap();
+    let kinds: Vec<&str> = page.entries.iter().map(|e| e.event).collect();
+    assert_eq!(kinds, ["tension_opened"], "{page:?}");
+    assert!(
+        page.entries[0].line.contains(" replaces ")
+            && page.entries[0].line.ends_with(
+                "(edit_collision, advisory): the pack or rdy changed while the project was closed"
+            ),
+        "{}",
+        page.entries[0].line
     );
     assert_eq!(r.reconcile_transitions().unwrap(), 0);
+    assert_eq!(r.fsck().unwrap().unlogged_moves, 0);
+}
+
+/// Final review fix round 1 (Minor 8): a pack reload before anything is logged since open logs
+/// the moves made while the project was closed as `reopened`, not as the reload's.
+#[test]
+fn ib15_a_reload_before_the_first_logged_batch_keeps_the_reopened_cause() {
+    let (d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.a, "A by a."));
+    put(&mut r, "b", upd(&s.a, "A by b."));
+    r.close().unwrap();
+    let soft = |v: &str| {
+        format!(
+            "name: soft\nversion: \"{v}\"\nextends: rdy-standard\ntensions:\n  edit_collision: advisory\n"
+        )
+    };
+    std::fs::write(d.path().join(".rdy/packs/soft.yaml"), soft("1")).unwrap();
+    std::fs::write(d.path().join(".rdy.yaml"), "pack: soft\n").unwrap();
+    let mut r = Rdy::open(d.path()).unwrap();
+    // the pack changes again before the reconcile, in a way that moves no tension
+    std::fs::write(d.path().join(".rdy/packs/soft.yaml"), soft("2")).unwrap();
+    assert!(matches!(
+        r.reload_pack().unwrap(),
+        rdy_engine::ReloadOutcome::Reloaded
+    ));
+    let rec = last_record(&r).expect("the reload's batch logs the moves since open");
+    assert!(!rec.opened.is_empty(), "{rec:?}");
+    assert!(
+        rec.resolved
+            .iter()
+            .chain(&rec.opened)
+            .all(|m| m.why.cause == Cause::Reopened),
+        "{rec:?}"
+    );
     assert_eq!(r.fsck().unwrap().unlogged_moves, 0);
 }
 

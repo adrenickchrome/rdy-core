@@ -223,11 +223,11 @@ impl RdyServer {
             Res::Doc(text) => Some(self.follow(text).await?),
             _ => None,
         };
-        self.hub.connect(self.hub_sid, Sink::Legacy(peer));
+        self.hub.set_sink(self.hub_sid, Sink::Legacy(peer));
         match followed {
             Some(block) => self.hub.subscribe_doc(self.hub_sid, uri, block),
             None => self.hub.subscribe(self.hub_sid, uri),
-        }
+        };
         Ok(())
     }
 
@@ -284,31 +284,31 @@ impl RdyServer {
     }
 
     /// `subscriptions/listen`: records the accepted URIs and the stream's sink, waits for the
-    /// client to cancel, then forgets both.
+    /// client to cancel, then undoes what the stream changed: the URIs it added and its sink (the
+    /// sink before it, such as the legacy peer, is back).
     pub(crate) async fn resources_listen(&self, context: SubscriptionContext) {
-        let uris = context
+        let accepted = context
             .accepted()
             .resource_subscriptions
             .clone()
             .unwrap_or_default();
-        for uri in &uris {
-            match Res::parse(uri) {
+        let mut uris = Vec::new();
+        for uri in accepted {
+            match Res::parse(&uri) {
                 // resolved again: a doc deleted since the filter accepted it is left out
                 Some(Res::Doc(text)) => {
                     if let Ok(block) = self.follow(text).await {
-                        self.hub.subscribe_doc(self.hub_sid, uri, block);
+                        uris.push((uri, Some(block)));
                     }
                 }
-                _ => self.hub.subscribe(self.hub_sid, uri),
+                _ => uris.push((uri, None)),
             }
         }
-        self.hub
-            .connect(self.hub_sid, Sink::Listen(context.sink().clone()));
+        let listening = self
+            .hub
+            .listen(self.hub_sid, Sink::Listen(context.sink().clone()), uris);
         context.cancelled().await;
-        for uri in &uris {
-            self.hub.unsubscribe(self.hub_sid, uri);
-        }
-        self.hub.connect(self.hub_sid, Sink::None);
+        self.hub.end_listen(self.hub_sid, listening);
     }
 }
 

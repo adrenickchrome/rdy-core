@@ -204,6 +204,25 @@ fn ib4_review_requests_reach_reviewers_only() {
     );
 }
 
+/// Guard (final review, Minor 10): a reviewer whose actor wrote an item of the request gets no
+/// `review_requested` for it, as `rdy_review_next` skips it; another reviewer gets the entry.
+#[test]
+fn ib4_a_reviewer_who_wrote_the_items_gets_no_review_request() {
+    let (_d, mut r) = rdy_qa::fixtures::project();
+    let spec = rdy_qa::edit_loop::spec_doc(&mut r);
+    let rv = Session::agent("agent:rv".into(), Some("rv".into()), Role::Reviewer).unwrap();
+    let rvs = sub_at_head(&r, &rv, &[]);
+    // human:qa wrote the canon side of every request (the spec)
+    let qa = Session::human("human:qa".into(), Role::Reviewer);
+    let qas = sub_at_head(&r, &qa, &[]);
+    put(&mut r, "a", upd(&spec.c, "C contradicts B."));
+    assert_eq!(events(&entries(&r, &rvs)), ["review_requested"]);
+    assert!(
+        entries(&r, &qas).is_empty(),
+        "the author of the items is never asked to review them"
+    );
+}
+
 #[test]
 fn ib4_other_kinds_never_match() {
     let (_d, mut r) = qa_project();

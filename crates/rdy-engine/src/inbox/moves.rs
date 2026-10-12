@@ -37,8 +37,8 @@ pub fn why_text(w: &Why) -> String {
 }
 
 /// The entries one batch's logged moves give the session (plan M2e2, founder decision C; F3,
-/// F4): tensions on its in-flight changes, suspects on its blocks, dismissals. Every move is read:
-/// no cap, no seen set.
+/// F4): tensions on its in-flight changes, suspects on the blocks they write or cite,
+/// dismissals. Every move is read: no cap, no seen set.
 ///
 /// `moves` is every move of the batch, in record order, and `first` is the raw index of
 /// `moves[0]` in its batch (the batch's other events come first, numbered as `batch_items`
@@ -136,9 +136,10 @@ fn own_changes(sub: &InboxSub, m: &TensionMove) -> Vec<Hash> {
 }
 
 /// A suspect move concerns the session (`me`) when the session is among its writers at the move, or
-/// when the session's in-flight changes write its block now.
+/// when the session's in-flight changes write or cite its block now (D-TPZ0W "the blocks they
+/// write or cite"; ruling task-15).
 fn suspect_concerns(me: &Author, infl: &RunInFlight, m: &SuspectMove) -> bool {
-    m.writers.contains(me) || infl.blocks.contains(&m.block)
+    m.writers.contains(me) || infl.blocks.contains(&m.block) || infl.cited.contains(&m.block)
 }
 
 /// For each move, the index of its fold partner: a resolution (not a dismissal) and an opening of

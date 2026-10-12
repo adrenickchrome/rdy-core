@@ -583,3 +583,34 @@ fn ib6_a_cursor_at_a_segment_end_reads_on() {
     assert!(at_ends > 0, "no cursor ended a segment");
     assert_eq!(Value::Array(got), all);
 }
+
+/// Final review fix round 1 (Minor 2): damage to the log after a valid cursor is a store error,
+/// never "not an inbox cursor": only the first frame walked can be the cursor's fault.
+#[test]
+fn ib6_damage_after_a_valid_cursor_is_a_store_error() {
+    let (d, mut r) = qa_project();
+    let c = landed_claim(&mut r, "payments/fees");
+    put(&mut r, "a", upd(&c, "a's text"));
+    let e = Local::new(r);
+    subscribe(&e, &ag("a"), None).unwrap();
+    on(&e, move |r| {
+        put(r, "b", upd(&c, "b's text"));
+        land(r, "b").unwrap();
+    });
+    // the last frame of the second batch after the cursor: the walk reads one batch, then fails
+    let frames = frames_after(&e, "a");
+    let starts: Vec<usize> = (0..frames.len()).filter(|i| frames[*i].1).collect();
+    assert!(starts.len() > 2, "{frames:?}");
+    let (end, _) = frames[starts[2]];
+    let (last, _) = frames[starts[2] - 1];
+    assert_eq!(last.segment, end.segment, "{frames:?}");
+    let seg = d
+        .path()
+        .join(format!(".rdy/store/segments/seg-{:06}.log", end.segment));
+    let mut bytes = std::fs::read(&seg).unwrap();
+    bytes[end.offset as usize - 1] ^= 0xff;
+    std::fs::write(&seg, bytes).unwrap();
+    let err = run_inbox(&e, &ag("a"), InboxRequest::default()).unwrap_err();
+    assert_ne!(err.code, E_BAD_INPUT, "{err:?}");
+    assert!(!err.message.contains("is not an inbox cursor"), "{err:?}");
+}
