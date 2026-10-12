@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 const SRC_CHANGES: usize = 2_000;
 /// The unpinned, non-empty views the landing rebases.
 const VIEWS: usize = 20;
+/// How many of those views also edit the seed claim the person edits.
+const COLLIDING: usize = 3;
 /// A hang guard for one child command, not a speed check.
 const CHILD_BUDGET: Duration = Duration::from_secs(120);
 
@@ -71,10 +73,20 @@ impl Window {
 }
 
 /// `rdy --json fsck` through the daemon (the next client restarts it): clean, no unlogged move.
-fn fsck_clean(s: &Served, what: &str) {
+/// Returns the report.
+fn fsck_clean(s: &Served, what: &str) -> Value {
     let (ok, f) = s.json(&["--json", "fsck"]);
     assert!(ok, "{what}: fsck failed: {f}");
     assert_eq!(f["unlogged_moves"], 0, "{what}: {f}");
+    f
+}
+
+/// The `transitions` count of a clean `rdy --json fsck`.
+fn transitions(s: &Served, what: &str) -> u64 {
+    let f = fsck_clean(s, what);
+    f["transitions"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{what}: {f}"))
 }
 
 /// Stops the daemon, opens the project in-process, runs `f` and `check_all`, and closes it.
@@ -210,22 +222,25 @@ struct Landing {
 }
 
 /// A served project: canon holds the seed doc; `VIEWS` agent views (unpinned, each with one
-/// claim) read on canon's head; the person's view `work` edits the seed claim and is proposed.
-/// Seeded in-process, then the daemon is started.
+/// claim; the first `COLLIDING` also edit the seed claim) read on canon's head; the person's
+/// view `work` edits the seed claim and is proposed. Seeded in-process, then the daemon is
+/// started.
 fn rebasing_landing() -> (Served, Landing) {
     let s = Served::new();
     let mut r = Rdy::open(s.dir.path()).unwrap();
     let (_doc, section, claim) = seed_doc(&mut r, "seed");
     land(&mut r, "seed").unwrap();
     let views: Vec<String> = (0..VIEWS).map(|i| format!("v{i:02}")).collect();
-    for v in &views {
-        write_as(
-            &mut r,
-            &ag(v),
-            v,
-            json!([{"op": "create", "type": "claim", "parent": section, "body": format!("{v} adds this.")}]),
-        )
-        .unwrap();
+    for (i, v) in views.iter().enumerate() {
+        let mut ops = vec![
+            json!({"op": "create", "type": "claim", "parent": section, "body": format!("{v} adds this.")}),
+        ];
+        // these views also edit the seed claim: each edit collides with the person's, so the
+        // landing moves the open tensions and logs a TRANSITION record in its batch
+        if i < COLLIDING {
+            ops.push(json!({"op": "update", "id": claim, "body": format!("{v}'s edit.")}));
+        }
+        write_as(&mut r, &ag(v), v, Value::Array(ops)).unwrap();
     }
     write(
         &mut r,
@@ -299,17 +314,42 @@ fn approve(s: &Served, l: &Landing, delay: Option<u64>) -> (Hit, Value, Duration
         };
         return (hit, v, took);
     }
+    (killed_hit(&v), v, took)
+}
+
+/// Where the kill fell, from the error a killed `rdy approve` exits with. The CLI sends a
+/// `session` op before `approve`, and a kill during either one gives `E_DAEMON_GONE`; only the
+/// one that names `approve` fell while the landing was in flight.
+fn killed_hit(v: &Value) -> Hit {
+    let message = v["message"].as_str().unwrap_or("");
     match v["code"].as_str() {
-        Some("E_DAEMON_GONE") => (Hit::InFlight, v, took),
-        Some("E_DAEMON_START") => (Hit::Early, v, took),
+        Some("E_DAEMON_GONE") if message.contains("during approve") => Hit::InFlight,
+        Some("E_DAEMON_GONE") if message.contains("closed the connection during ") => Hit::Early,
+        Some("E_DAEMON_START") => Hit::Early,
         _ => panic!("the killed approve failed with another error: {v}"),
     }
 }
 
+#[test]
+fn sg6_only_a_kill_during_the_approve_op_counts_as_in_flight() {
+    // the CLI sends `session` before `approve`: a kill during `session` is before the landing
+    let gone = |op: &str| {
+        json!({"code": "E_DAEMON_GONE",
+            "message": format!("the daemon closed the connection during {op}")})
+    };
+    assert_eq!(killed_hit(&gone("approve")), Hit::InFlight);
+    assert_eq!(killed_hit(&gone("session")), Hit::Early);
+    assert_eq!(
+        killed_hit(&json!({"code": "E_DAEMON_START", "message": "x"})),
+        Hit::Early
+    );
+}
+
 /// After the kill: the landing is in the log and every view reads on the new head, or it is
-/// absent and every view keeps the old base. Returns whether it landed.
-fn all_or_nothing(s: &Served, l: &Landing, what: &str) -> bool {
-    fsck_clean(s, what);
+/// absent and every view keeps the old base. Returns whether it landed and fsck's count of
+/// TRANSITION records.
+fn all_or_nothing(s: &Served, l: &Landing, what: &str) -> (bool, u64) {
+    let moves = transitions(s, what);
     let (ok, log) = s.json(&["--json", "log"]);
     assert!(ok, "{what}: {log}");
     let in_log = log
@@ -338,7 +378,7 @@ fn all_or_nothing(s: &Served, l: &Landing, what: &str) -> bool {
         let read = st.materialized(&Scope::Canon).unwrap();
         let edited = read.iter().any(|b| b.body == "The person's edit.");
         assert_eq!(edited, landed, "{what}: canon's content and head disagree");
-        landed
+        (landed, moves)
     })
 }
 
@@ -346,7 +386,14 @@ fn all_or_nothing(s: &Served, l: &Landing, what: &str) -> bool {
 fn sg6_a_kill_during_a_landing_with_rebases_is_all_or_nothing() {
     // an approve with no kill: it lands and rebases every view, and it times the window
     let (s, l) = rebasing_landing();
+    let before = transitions(&s, "before the approve");
     let (_, v, took) = approve(&s, &l, None);
+    let after = transitions(&s, "after the approve");
+    assert!(
+        after > before,
+        "the landing logs no TRANSITION record ({before} before, {after} after), so the fold \
+         check after a kill checks nothing"
+    );
     let rebased: Vec<&str> = v["rebased"]
         .as_array()
         .unwrap()
@@ -359,7 +406,7 @@ fn sg6_a_kill_during_a_landing_with_rebases_is_all_or_nothing() {
             "the landing rebases {view}: {v}"
         );
     }
-    assert!(all_or_nothing(&s, &l, "no kill"));
+    assert_eq!(all_or_nothing(&s, &l, "no kill"), (true, after));
     drop(s);
     let mut w = Window {
         lo: 0,
@@ -380,14 +427,24 @@ fn sg6_a_kill_during_a_landing_with_rebases_is_all_or_nothing() {
         let (hit, v, _) = approve(&s, &l, Some(d));
         let what =
             format!("attempt {attempt}, killed {d} ms after the approve started ({hit:?}: {v})");
-        let landed = all_or_nothing(&s, &l, &what);
+        let (landed, moves) = all_or_nothing(&s, &l, &what);
         if v.get("landing").is_some() {
             assert!(landed, "{what}: an acknowledged landing is lost");
         }
+        // the landing's TRANSITION record is logged with it, in its batch, or not at all
+        let want = if landed { after } else { before };
+        assert_eq!(
+            moves, want,
+            "{what}: {moves} TRANSITION records (landed: {landed}; {before} before the landing, \
+             {after} after)"
+        );
         if hit == Hit::InFlight {
             hits += 1;
         }
-        eprintln!("sg6 landing: attempt {attempt}, killed at {d} ms: {hit:?}, landed: {landed}");
+        eprintln!(
+            "sg6 landing: attempt {attempt}, killed at {d} ms: {hit:?}, landed: {landed}, \
+             transitions: {moves}"
+        );
         w.narrow(d, &hit);
         attempt += 1;
     }
