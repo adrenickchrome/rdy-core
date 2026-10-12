@@ -421,6 +421,22 @@ impl Writes {
         self.changes.values()
     }
 
+    /// Whether some view of change `c` holds no write of block `b` (live or not): in that view,
+    /// `b` is canon's. False for a change that is not in flight.
+    pub fn untouched_in_a_view_of(&self, c: &Hash, b: &BlockId) -> bool {
+        let Some(f) = self.changes.get(c) else {
+            return false;
+        };
+        let on = self.on(b);
+        f.views.iter().any(|v| {
+            !on.iter().any(|w| {
+                self.changes
+                    .get(&w.change)
+                    .is_some_and(|g| g.views.contains(v))
+            })
+        })
+    }
+
     /// Whether changes `a` and `b` share an open view.
     pub fn common_view(&self, a: &Hash, b: &Hash) -> bool {
         match (self.changes.get(a), self.changes.get(b)) {

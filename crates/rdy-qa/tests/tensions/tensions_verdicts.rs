@@ -505,3 +505,35 @@ fn se7_a_pair_that_changes_after_the_lookup_is_e_review_stale() {
     );
     assert!(of_kind(&r, TensionKind::Semantic).is_empty());
 }
+
+/// final ruling 2: view a's change pairs C with B as canon holds it while view b edits B; a
+/// reviewer judges that request and the tension it opens is view a's form (C@a, B@canon).
+#[test]
+fn se7_a_request_on_a_canon_side_another_view_edits_can_be_judged() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let wa = put(&mut r, "a", upd(&s.c, "C contradicts B."));
+    put(&mut r, "b", upd(&s.b, "B in view b."));
+    let st = r.read();
+    let q = st
+        .requests_from(&change_of(&wa))
+        .unwrap()
+        .into_iter()
+        .find(|q| q.items.iter().any(|i| i.block == s.b))
+        .expect("C pairs with B");
+    let h = case_hash(&st.case_of(&q.key, &q.items).unwrap());
+    drop(st);
+    let info = submit(
+        &mut r,
+        &reviewer("agent:r"),
+        &request_label(&q.key),
+        &h.to_string(),
+        "tension",
+        std::slice::from_ref(&s.c),
+    )
+    .unwrap();
+    let t = one(&r, TensionKind::Semantic);
+    assert_eq!(info.tension, Some(tension_label(&t.id)));
+    assert_eq!(change_sides(&t), vec![change_of(&wa)]);
+    assert!(has_canon(&t), "B is canon's in view a: {t:?}");
+}

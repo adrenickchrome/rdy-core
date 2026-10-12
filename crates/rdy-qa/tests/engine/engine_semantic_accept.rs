@@ -3,7 +3,8 @@
 use rdy_engine::tensions::api::AcceptRequest;
 use rdy_engine::tensions::*;
 use rdy_engine::{
-    E_BAD_INPUT, E_PERMISSION, E_PROPOSAL_MOVED, ProposalInfo, Rdy, Scope, Session, proposal_text,
+    E_BAD_INPUT, E_PERMISSION, E_PROPOSAL_MOVED, E_SELF_REVIEW, ProposalInfo, Rdy, Scope, Session,
+    proposal_text,
 };
 use rdy_model::*;
 use rdy_qa::edit_loop::{Spec, spec_doc};
@@ -209,9 +210,11 @@ fn se8_accepted_and_dismissed_tensions_are_not_accepted_again() {
         e.message,
         format!("{}: the advice is accepted already", p.r#ref)
     );
-    // an advised tension someone dismissed is out of the set
+    // an advised tension a person dismissed is out of the set (final ruling 1: a writer agent
+    // may not dismiss advice to block)
     let (_d2, mut r2, _s2, tn2, p2) = judged(true);
-    r2.dismiss_tension(&ag("x"), &tn2, "they agree after all")
+    let pat = Session::human("human:pat".into(), Role::Writer);
+    r2.dismiss_tension(&pat, &tn2, "they agree after all")
         .unwrap();
     let e = r2.accept_advice(&writer(), direct(&p2)).unwrap_err();
     assert_eq!(
@@ -535,5 +538,141 @@ fn se8_a_retry_after_an_acceptance_says_it_is_accepted_already() {
     assert_eq!(
         r.read().proposal_show(&p.r#ref).unwrap().advised_digest,
         p.advised_digest
+    );
+}
+
+/// final ruling 1 (P1): a tension a reviewer advised to block is dismissed only as a blocking
+/// one is: by the reviewer role or a person, of another actor than every side's author. So the
+/// author of the judged text cannot take the advice off the person's card.
+#[test]
+fn se8_an_advised_tension_is_dismissed_only_as_a_blocking_one_is() {
+    let (_d, mut r, _s, tn, p) = judged(true);
+    // agent:a wrote C in view a
+    let e = r
+        .dismiss_tension(&ag("a"), &tn, "I disagree with the reviewer")
+        .unwrap_err();
+    assert_eq!(
+        (e.code, e.message.as_str()),
+        (
+            E_PERMISSION,
+            "dismissing a tension a reviewer advised to block needs the reviewer role or a human session"
+        )
+    );
+    let author = Session::agent("agent:a".into(), Some("other".into()), Role::Reviewer).unwrap();
+    assert_eq!(
+        r.dismiss_tension(&author, &tn, "fine").unwrap_err().code,
+        E_SELF_REVIEW,
+        "another run of the author is not independent"
+    );
+    // human:qa wrote B
+    assert_eq!(
+        r.dismiss_tension(&writer(), &tn, "fine").unwrap_err().code,
+        E_SELF_REVIEW,
+        "a person who wrote a side is not independent either"
+    );
+    let still = r.propose(&writer(), "a", "a").unwrap();
+    assert_eq!(
+        still.advised_digest, p.advised_digest,
+        "the advice is still on the card"
+    );
+    let pat = Session::human("human:pat".into(), Role::Writer);
+    r.dismiss_tension(&pat, &tn, "they agree after all")
+        .unwrap();
+    // a reviewer of another actor may dismiss it too
+    let (_d2, mut r2, _s2, tn2, _p2) = judged(true);
+    let z = Session::agent("agent:z".into(), Some("z".into()), Role::Reviewer).unwrap();
+    r2.dismiss_tension(&z, &tn2, "checked: they agree").unwrap();
+    // a semantic tension without advice stays dismissable as advisory
+    let (_d3, mut r3, _s3, tn3, _p3) = judged(false);
+    r3.dismiss_tension(&ag("a"), &tn3, "they agree").unwrap();
+}
+
+/// final ruling 2 (P12): view b edits C, which view a's advised tension holds as canon. P(a)
+/// still lists the advice and its digest, rdy show lists it, the acceptance works, and P(a)'s
+/// landing is then refused.
+#[test]
+fn se8_advice_stays_on_the_card_while_another_view_edits_the_canon_side() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.b, "B contradicts C."));
+    verdict_on(&mut r, &Scope::Inflight, &s.b, &s.c, "agent:r", true);
+    put(&mut r, "b", upd(&s.c, "C in view b."));
+    let p = r.propose(&writer(), "a", "a").unwrap();
+    assert!(p.advised_digest.is_some(), "{:?}", p.tensions);
+    assert!(
+        p.tensions
+            .iter()
+            .any(|t| t.kind == TensionKind::Semantic && t.judged.is_some()),
+        "{:?}",
+        p.tensions
+    );
+    let show = r.read().proposal_show(&p.r#ref).unwrap();
+    assert_eq!(show.advised.len(), 1);
+    let a = r.accept_advice(&writer(), direct(&p)).unwrap();
+    assert_eq!(a.accepted.len(), 1);
+    assert_eq!(
+        land(&mut r, "a").unwrap_err().code,
+        rdy_engine::E_BLOCKING_TENSION
+    );
+}
+
+/// final review M7 (P4): an acceptance re-keys the tension under its new severity: the
+/// resolved advisory tension names the blocking one in rekeyed_to, and the opened blocking one
+/// names the advisory one in rekeyed_from.
+#[test]
+fn se8_an_acceptance_links_the_advisory_and_the_blocking_tension_in_its_events() {
+    use rdy_engine::EventKind;
+    let (_d, mut r, _s, tn, p) = judged(true);
+    r.settle_tensions().unwrap();
+    let rx = r.subscribe();
+    let a = r.accept_advice(&writer(), direct(&p)).unwrap();
+    r.settle_tensions().unwrap();
+    let kinds: Vec<_> = rx.try_iter().map(|e| e.kind.clone()).collect();
+    let was = kinds
+        .iter()
+        .find_map(|k| match k {
+            EventKind::TensionResolved {
+                tension,
+                rekeyed_to,
+                ..
+            } if tension_label(tension) == tn => Some(*rekeyed_to),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{kinds:?}"));
+    let now = kinds
+        .iter()
+        .find_map(|k| match k {
+            EventKind::TensionOpened {
+                tension,
+                rekeyed_from,
+                ..
+            } if tension_label(tension) == a.accepted[0].id => Some((*tension, *rekeyed_from)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{kinds:?}"));
+    assert_eq!(was, Some(now.0));
+    assert_eq!(now.1.map(|h| tension_label(&h)), Some(tn));
+}
+
+/// final review M1 (FW-LP6b): a tension given without dismiss is told what resolves its kind;
+/// a repin never resolves a semantic tension.
+#[test]
+fn se8_rdy_resolve_without_dismiss_names_what_resolves_the_kind() {
+    use rdy_engine::tensions::api::{ResolveRequest, run_resolve};
+    let (_d, r, _s, tn, _p) = judged(false);
+    let e = rdy_engine::engine::Local::new(r);
+    let err = run_resolve(
+        &e,
+        &writer(),
+        ResolveRequest {
+            tension: Some(tn),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code, E_BAD_INPUT);
+    assert_eq!(
+        err.fix,
+        "change the text of a side, or dismiss it with dismiss: {reason}"
     );
 }

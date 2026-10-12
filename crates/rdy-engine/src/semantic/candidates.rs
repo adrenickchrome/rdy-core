@@ -1,6 +1,6 @@
 //! Candidate pairs (spec §9.3 step 1, D-KJ71P): for each block an in-flight change writes, the blocks most likely to disagree with it, by five fixed rules, at most 20 per change. Deterministic; settled pairs are left to the queue.
 use crate::lexicon::{Lexicon, is_content};
-use crate::tensions::index::{DetectCx, Writes, canon_index_of, is_normative, premise_edge};
+use crate::tensions::index::{DetectCx, Write, Writes, canon_index_of, is_normative, premise_edge};
 use crate::tensions::{DetectScope, SideRef};
 use crate::{Materialized, RdyError, ReadState};
 use rdy_graph::{EdgeKind, Graph};
@@ -95,10 +95,15 @@ pub fn takes_part(pack: &Pack, b: &Block) -> bool {
 }
 
 impl ReadState {
-    /// The in-flight write of `block` that holds `content` (the smallest change id first), as an
-    /// item on that change's side. When no in-flight write touches `block`, canon's version when
-    /// its content is `content`. Else `None`.
-    pub fn item_now(&self, block: &BlockId, content: Hash) -> Result<Option<Item>, RdyError> {
+    /// The items of the pair `pair` (two blocks, each at a content) now, sorted by block, as a
+    /// request carries them; `None` when no view holds the pair (final ruling 2). A form is
+    /// anchored on a live in-flight write of one block at its content: the other block is a live
+    /// write at its content in a view the anchor's change shares, else canon's when canon holds
+    /// that content and a view of the anchor's change does not touch that block. The first form
+    /// by (change id, block) wins, so a request and a submit name the same items. With no such
+    /// form, canon's items when canon holds both contents and no in-flight write touches either
+    /// block (an all-canon pair, which is never a request).
+    pub fn pair_now(&self, pair: &[(BlockId, Hash)]) -> Result<Option<Vec<Item>>, RdyError> {
         let set = self.tensions()?;
         let cx = DetectCx::new(
             self,
@@ -106,7 +111,7 @@ impl ReadState {
             canon_index_of(self)?,
             DetectScope::Inflight,
         );
-        item_now_in(&cx, block, content)
+        pair_now_in(&cx, pair)
     }
 
     /// The best rule that holds now between `a` and `b` in the in-flight scope, or `None` when
@@ -143,9 +148,7 @@ impl ReadState {
                 continue;
             }
             let content = ctx.cx.content_of(&block);
-            if let Some(item) = item_now_in(&ctx.cx, &block.id, content)? {
-                subjects.push(Subject { block, item });
-            }
+            subjects.push(Subject { block, content });
         }
         subjects.sort_by(|a, b| a.block.id.cmp(&b.block.id));
         let mut b = Builder {
@@ -182,28 +185,21 @@ impl Rule {
     ];
 }
 
-/// The item of `block` for the in-flight write that holds `content`, else canon's.
-fn item_now_in(
-    cx: &DetectCx<'_>,
-    block: &BlockId,
-    content: Hash,
-) -> Result<Option<Item>, RdyError> {
-    for w in cx.writes.live_on(block) {
-        if let (Some(b), Some(version)) = (w.new.as_deref(), w.version)
-            && cx.content_of(b) == content
-        {
-            return Ok(Some(Item {
-                block: block.clone(),
-                side: SideRef::Change(w.change),
-                version,
-                content,
-            }));
-        }
-    }
-    if cx.writes.on(block).is_empty()
-        && let Some((side, version)) = cx.canon_side(block)?
-        && let Some(b) = cx.canon_m()?.get(block)
+/// The item of `w`, a write that holds a block, at content `content`.
+fn write_item(w: &Write, content: Hash) -> Option<Item> {
+    Some(Item {
+        block: w.block.clone(),
+        side: SideRef::Change(w.change),
+        version: w.version?,
+        content,
+    })
+}
+
+/// Canon's item of `block` when canon holds it at `content`.
+fn canon_item(cx: &DetectCx<'_>, block: &BlockId, content: Hash) -> Result<Option<Item>, RdyError> {
+    if let Some(b) = cx.canon_m()?.get(block)
         && cx.content_of(b) == content
+        && let Some((side, version)) = cx.canon_side(block)?
     {
         return Ok(Some(Item {
             block: block.clone(),
@@ -215,10 +211,90 @@ fn item_now_in(
     Ok(None)
 }
 
-/// A block the change writes, with its item.
+/// The live in-flight writes of `block` at `content`, by change id.
+fn writes_at(cx: &DetectCx<'_>, block: &BlockId, content: Hash) -> Vec<Arc<Write>> {
+    cx.writes
+        .live_on(block)
+        .into_iter()
+        .filter(|w| {
+            w.new
+                .as_deref()
+                .is_some_and(|b| cx.content_of(b) == content)
+        })
+        .collect()
+}
+
+/// A write a form may be anchored on, with the other block's writes at its content, that block
+/// and that content.
+type Anchor<'w> = (&'w Arc<Write>, &'w Vec<Arc<Write>>, &'w BlockId, Hash);
+
+/// [`ReadState::pair_now`] in the scope `cx` reads.
+fn pair_now_in(cx: &DetectCx<'_>, pair: &[(BlockId, Hash)]) -> Result<Option<Vec<Item>>, RdyError> {
+    let [(a, ca), (b, cb)] = pair else {
+        return Ok(None);
+    };
+    let (on_a, on_b) = (writes_at(cx, a, *ca), writes_at(cx, b, *cb));
+    let mut anchors: Vec<Anchor<'_>> = on_a
+        .iter()
+        .map(|w| (w, &on_b, b, *cb))
+        .chain(on_b.iter().map(|w| (w, &on_a, a, *ca)))
+        .collect();
+    anchors.sort_by(|x, y| (x.0.change, &x.0.block).cmp(&(y.0.change, &y.0.block)));
+    for (w, others, other, oc) in anchors {
+        let Some(mine) = write_item(w, if other == b { *ca } else { *cb }) else {
+            continue;
+        };
+        let theirs = match others
+            .iter()
+            .find(|o| o.change == w.change || cx.writes.common_view(&o.change, &w.change))
+        {
+            Some(o) => write_item(o, oc),
+            None if cx.writes.untouched_in_a_view_of(&w.change, other) => {
+                canon_item(cx, other, oc)?
+            }
+            None => None,
+        };
+        if let Some(theirs) = theirs {
+            let mut items = vec![mine, theirs];
+            items.sort();
+            return Ok(Some(items));
+        }
+    }
+    if !cx.writes.on(a).is_empty() || !cx.writes.on(b).is_empty() {
+        return Ok(None);
+    }
+    match (canon_item(cx, a, *ca)?, canon_item(cx, b, *cb)?) {
+        (Some(x), Some(y)) => {
+            let mut items = vec![x, y];
+            items.sort();
+            Ok(Some(items))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The content `x` has as change `c`'s views hold it: a live write of `x` in a view `c` shares
+/// (`c`'s own first; then by change id), else canon's when a view of `c` does not touch `x`.
+/// `None` when that write deletes `x`, or canon has no `x`.
+fn content_in_view_of(cx: &DetectCx<'_>, c: &Hash, x: &BlockId) -> Result<Option<Hash>, RdyError> {
+    let live = cx.writes.live_on(x);
+    let shared = live
+        .iter()
+        .find(|w| w.change == *c)
+        .or_else(|| live.iter().find(|w| cx.writes.common_view(&w.change, c)));
+    if let Some(w) = shared {
+        return Ok(w.new.as_deref().map(|b| cx.content_of(b)));
+    }
+    if !cx.writes.untouched_in_a_view_of(c, x) {
+        return Ok(None);
+    }
+    Ok(cx.canon_m()?.get(x).map(|b| cx.content_of(b)))
+}
+
+/// A block the change writes, at the content its write gives it.
 struct Subject {
     block: Arc<Block>,
-    item: Item,
+    content: Hash,
 }
 
 /// What one candidate run reads: the in-flight scope, read once.
@@ -232,6 +308,9 @@ struct Ctx<'a> {
     /// The blocks under a doc, by id; lazy.
     subtrees: RefCell<HashMap<BlockId, Rc<Vec<BlockId>>>>,
     paths: RefCell<HashMap<BlockId, String>>,
+    /// The areas of each block read so far (final review M5: the area rule tests every block of
+    /// every doc for each subject when an area holds fewer than 20 blocks).
+    areas: RefCell<HashMap<BlockId, Rc<Vec<String>>>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -245,6 +324,7 @@ impl<'a> Ctx<'a> {
             docs: OnceCell::new(),
             subtrees: RefCell::new(HashMap::new()),
             paths: RefCell::new(HashMap::new()),
+            areas: RefCell::new(HashMap::new()),
         })
     }
 
@@ -265,8 +345,14 @@ impl<'a> Ctx<'a> {
         self.lex.mentions(b).into_iter().map(|m| m.entity).collect()
     }
 
-    fn areas(&self, b: &Block) -> Vec<String> {
-        self.cx.st.areas_in(&self.m, b)
+    /// The areas `b` is in, read once per run.
+    fn areas(&self, b: &Block) -> Rc<Vec<String>> {
+        if let Some(a) = self.areas.borrow().get(&b.id) {
+            return Rc::clone(a);
+        }
+        let a = Rc::new(self.cx.st.areas_in(&self.m, b));
+        self.areas.borrow_mut().insert(b.id.clone(), Rc::clone(&a));
+        a
     }
 
     /// Whether `rule` holds between `a` and `b`.
@@ -389,18 +475,21 @@ impl Builder<'_, '_> {
         self.push(rule, s, x)
     }
 
-    /// Adds the pair (`s`, `x`) under `rule`, with `x` as `item_now` names it: the item of the
-    /// content `x` has in the in-flight scope. Skipped when that item does not resolve.
+    /// Adds the pair (`s`, `x`) under `rule`, with `x` at the content the change's own views
+    /// give it (final ruling 2: canon's where they do not touch it) and the items `pair_now`
+    /// names. Skipped when the pair does not resolve, or resolves all-canon.
     fn push(&mut self, rule: Rule, s: &Subject, x: &BlockId) -> Result<(), RdyError> {
         let cx = &self.ctx.cx;
-        let Some(block) = self.ctx.m.get(x) else {
+        let Some(theirs) = content_in_view_of(cx, &self.change, x)? else {
             return Ok(());
         };
-        let Some(theirs) = item_now_in(cx, x, cx.content_of(block))? else {
+        let pair = [(s.block.id.clone(), s.content), (x.clone(), theirs)];
+        let Some(items) = pair_now_in(cx, &pair)? else {
             return Ok(());
         };
-        let mut items = vec![s.item.clone(), theirs];
-        items.sort();
+        if !items.iter().any(|i| matches!(i.side, SideRef::Change(_))) {
+            return Ok(());
+        }
         let key = pair_key(
             &items
                 .iter()

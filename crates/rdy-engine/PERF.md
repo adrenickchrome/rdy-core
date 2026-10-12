@@ -1179,28 +1179,39 @@ the tension set `tier_tensions` leaves behind. The writer is `human:qa`. The rev
 `agent:perf-reviewer` with the reviewer role. Each large-tier twin carries a `_50k` suffix. The op
 names keep `1k` whatever the fixture's size.
 
-Four ops:
+Seven ops:
 
 | op | what it times | runs | target |
 |---|---|---|---|
 | `review_requests_all_1k` | `review_requests()` on a state whose tension set is built (outside the timer): every request of every in-flight change, cold. Asserts at least one request | `runs.read` | recorded, no spec target: the worst case of a queue scan |
 | `review_next_1k` | `next_request` for the reviewer, then `case_of` and `case_hash` of that request: the first `rdy_review_next` | `runs.read` | recorded, no spec target |
-| `review_submit_1k` | `submit_verdict` with a `tension` verdict, one finding and `severity: blocking` with a reason, then the read of the new state's tension set, then `settle_tensions()`. The request, its case hash and the built tension set are read outside the timer. Asserts that `full_builds()` did not move (the verdict carried the set) and that the state holds one more semantic tension | `runs.incremental` | < 10 ms p99 with 1k in-flight changes (the tension-detection budget of M2 spec 15.1, applied to a verdict, carry and settle included) |
-| `review_accept_1k` | `accept_advice` as `human:qa` with no relay, for the one tension a submit run opened, then the read of the tension set, then `settle_tensions()`. The view of the advised change is proposed outside the timer. Asserts that `full_builds()` did not move and that the accepted tension blocks. Each run accepts a tension a submit run opened | `runs.incremental` | recorded, no spec target: a person's acceptance of one advised tension of a proposal |
+| `review_submit_lookup_1k` | `find_request` for a request no lease and no settled pair holds: the read-side lookup of a lease-less `rdy_review_submit`, which walks the queue. The daemon runs it on a read, outside the writer | `runs.read` | recorded, no spec target |
+| `review_submit_1k` | `submit_verdict` with a `tension` verdict, one finding and `severity: blocking` with a reason, then the read of the new state's tension set, then `settle_tensions()`. The request is leased to the reviewer outside the timer, as `rdy_review_next` leaves it, so the submit finds it from the lease; its case hash and the built tension set are also read outside the timer. Asserts that `full_builds()` did not move (the verdict carried the set) and that the state holds one more semantic tension | `runs.incremental` | < 10 ms p99 with 1k in-flight changes (the tension-detection budget of M2 spec 15.1, applied to a verdict, carry and settle included) |
+| `review_submit_nolease_1k` | The writer part of a lease-less `rdy_review_submit`, as the daemon runs it (`run_review_submit`): `submit_found` (it re-proves the pair on the writer), then the read of the tension set, then `settle_tensions()`. The request is found with `find_request` outside the timer (`review_submit_lookup_1k` times that). Same asserts as `review_submit_1k` | `runs.incremental` | < 10 ms p99 with 1k in-flight changes (the `review_submit_1k` target; task-7 ruling) |
+| `review_accept_1k` | `accept_advice` as `human:qa` with no relay, for the one tension a `review_submit_1k` run opened, then the read of the tension set, then `settle_tensions()`. The view of the advised change is proposed outside the timer. Asserts that `full_builds()` did not move and that the accepted tension blocks | `runs.incremental` | recorded, no spec target: a person's acceptance of one advised tension of a proposal |
+| `review_requests_sparse_area` | `review_requests()` on a project of its own, with the `rdy-qa` pack's areas: three docs under `payments` hold one claim each, 100 docs of 20 claims (400 in the large tier) are in no area, and 50 changes (100) in views of their own edit the three claims. The area holds fewer than 20 blocks, so the area rule walks every doc for each edited claim | `runs.read` | recorded, no spec target: the area rule's walk over every doc (final review M5) |
 
 What each cost grows with:
 
 - The semantic detector costs nothing measurable when the project holds no records. It returns at
   once, so `tension_carry_1k`, `tension_on_change_1k`, `tensions_full_1k` and `tensions_canon`
-  stay where they were. With records it is O(seeds) on the writer's pre-publish build: it reads
-  `SemanticState::involving(seed)` for each seed block and walks only the open records.
-- `review_requests_all_1k` grows with the in-flight changes and the candidate pairs of each. The
-  daemon never computes requests on the writer; they run on reads only.
+  stay where they were. With records it reads them by item (a block at a content, then the
+  other item), only at the contents the blocks hold now: on the writer's pre-publish build it is
+  O(the live records on the seed blocks), and a full build reads only the records whose two
+  texts some side still holds. Records on texts a block no longer holds are never visited
+  (final ruling 3, FW-SW3).
+- `review_requests_all_1k` and `review_requests_sparse_area` grow with the in-flight changes and
+  the candidate pairs of each; the second also with the corpus, for each edited block of a
+  sparse area. The area of each block is read once per queue walk. The daemon never computes
+  requests on the writer; they run on reads only.
 - `review_next_1k` reads the requests of a change only when the walk reaches that change, and
   stops at the first request the reviewer may take. It also builds the case file of that request
   from the in-flight state.
-- `review_submit_1k` and `review_accept_1k` pay for the verdict carry: the new tension set is
-  carried from the state before, with the pair's tension re-detected around its blocks.
+- `review_submit_lookup_1k` is the whole queue walk. It runs on a read, never on the writer.
+- `review_submit_1k`, `review_submit_nolease_1k` and `review_accept_1k` pay for the verdict
+  carry: the new tension set is carried from the state before, with the pair's tension
+  re-detected around its blocks. None of them walks the queue on the writer. `review_accept_1k`
+  also reads the landing form of the proposal's semantic tensions (the stored kinds only).
 
 No laptop figures are judged here: the first timing of these ops is the Linux bench's.
 

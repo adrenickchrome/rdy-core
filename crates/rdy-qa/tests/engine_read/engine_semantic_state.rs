@@ -55,6 +55,19 @@ fn first(r: &Review, items: Vec<PairItem>) -> SemanticTension {
     }
 }
 
+/// The item of block `b` in the semantic tension of key `key`.
+fn items_of(st: &rdy_engine::ReadState, key: &Hash, b: &BlockId) -> PairItem {
+    st.semantic()
+        .tension(key)
+        .unwrap()
+        .record
+        .items
+        .iter()
+        .find(|i| &i.block == b)
+        .unwrap()
+        .clone()
+}
+
 #[test]
 fn se3_a_recorded_verdict_is_in_the_next_state_and_after_reopen_and_reindex() {
     let (d, mut r) = project();
@@ -70,8 +83,10 @@ fn se3_a_recorded_verdict_is_in_the_next_state_and_after_reopen_and_reindex() {
         Verdict::Tension
     );
     assert_eq!(st.semantic().tension(&key).unwrap().version, t.unwrap());
-    assert_eq!(st.semantic().involving(&s.a).len(), 1);
-    assert!(st.semantic().involving(&s.b).is_empty());
+    // final ruling 3: the records are indexed by item (a block at a content)
+    let a_item = items_of(&st, &key, &s.a);
+    assert_eq!(st.semantic().partners(&a_item).unwrap()[&s.c].len(), 1);
+    assert!(st.semantic().has_block(&s.a) && !st.semantic().has_block(&s.b));
     drop(st);
     r.close().unwrap();
     let mut r = Rdy::open(d.path()).unwrap();

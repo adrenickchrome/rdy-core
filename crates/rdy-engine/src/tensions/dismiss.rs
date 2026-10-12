@@ -217,8 +217,9 @@ impl Rdy {
     /// Dismisses tension `tension` with `reason`: writes the review and the `dismiss/<vkey>` ref,
     /// and publishes the dismissal. Checks, in order: the session may write; the reason is 1 to
     /// [`MAX_REASON`] characters after trimming; the tension resolves; it is not dismissed yet;
-    /// a blocking tension needs the reviewer role or a human session, of an actor that wrote
-    /// none of its items (see `authors`).
+    /// a blocking tension, and a semantic tension a reviewer advised to block (final ruling 1),
+    /// needs the reviewer role or a human session, of an actor that wrote none of its items (see
+    /// `authors`).
     pub fn dismiss_tension(
         &mut self,
         s: &Session,
@@ -258,11 +259,21 @@ impl Rdy {
                 "a dismissal holds until a side changes; nothing more to do",
             ));
         }
-        if t.severity == TensionSeverity::Blocking {
+        // final ruling 1 (D-PRT67 refined, D-WMCFW, D-QGEE3): a tension a reviewer advised to
+        // block is dismissed only as a blocking one is, so the advice reaches the person's card
+        let advised = super::semantic::pair_of(&t)
+            .and_then(|k| st.semantic().tension(&k))
+            .is_some_and(|o| o.record.advice.is_some());
+        if t.severity == TensionSeverity::Blocking || advised {
             if s.role != Role::Reviewer && !s.is_human() {
+                let what = if t.severity == TensionSeverity::Blocking {
+                    "a blocking tension"
+                } else {
+                    "a tension a reviewer advised to block"
+                };
                 return Err(RdyError::new(
                     E_PERMISSION,
-                    "dismissing a blocking tension needs the reviewer role or a human session",
+                    format!("dismissing {what} needs the reviewer role or a human session"),
                     "start a session with role reviewer, or ask a human",
                 ));
             }

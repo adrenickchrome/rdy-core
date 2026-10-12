@@ -183,3 +183,46 @@ fn se9_rdy_schema_has_the_reviews_topic() {
         "{doc}"
     );
 }
+
+/// final ruling 1 (MP2): through the daemon, the author of the judged text cannot dismiss the
+/// reviewer's advice to block, so the advice stays on the card; a reviewer of another actor can.
+#[test]
+fn se9_the_author_of_a_judged_text_cannot_dismiss_the_advice_over_mcp() {
+    let (s, _sp) = seeded();
+    let mut r = client(&s, "agent:r", "reviewer");
+    let n = r.call("rdy_review_next", json!({"kind": "tension"})).ok();
+    let sub = r
+        .call(
+            "rdy_review_submit",
+            json!({
+                "request": n["request"], "case_hash": n["case_hash"], "verdict": "tension",
+                "findings": [{"block": n["case"]["blocks"][0]["id"], "note": "these two cannot both hold"}],
+                "severity": "blocking", "reason": "it contradicts the gate rule"
+            }),
+        )
+        .ok();
+    // view a is agent:a's, run a: the author of C
+    let mut a = McpClient::start_proxy(&s);
+    a.call(
+        "rdy_session",
+        json!({"actor": "agent:a", "run": "a", "role": "writer"}),
+    )
+    .ok();
+    let e = a.call(
+        "rdy_resolve",
+        json!({"tension": sub["tension"], "dismiss": {"reason": "I disagree"}}),
+    );
+    assert_eq!(e.code(), Some("E_PERMISSION"));
+    let p = a
+        .call("rdy_propose", json!({"view": "a", "title": "C"}))
+        .ok();
+    assert!(p["advised_digest"].is_string(), "{p}");
+    let mut z = client(&s, "agent:z", "reviewer");
+    let d = z
+        .call(
+            "rdy_resolve",
+            json!({"tension": sub["tension"], "dismiss": {"reason": "checked: they agree"}}),
+        )
+        .ok();
+    assert_eq!(d["status"], "dismissed");
+}

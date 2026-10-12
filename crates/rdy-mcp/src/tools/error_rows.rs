@@ -37,12 +37,12 @@ pub const ERROR_ROWS: &[(&str, &str, &str)] = &[
     (
         "E_BLOCKING_TENSION",
         "a landing would put a blocking tension into canon: a side of the tension is in the proposal, every side would be in canon after it, and the tension is not dismissed (each is an issue)",
-        "resolve each with a change (edit or repin a side), or dismiss it with rdy_resolve {tension, dismiss: {reason}} (a reviewer of another actor, or a human); rdy_tensions {involving: <change>} lists them, a form only this landing gives with its proposal",
+        "resolve each as the fix names for its kind (a change to a side; a repin helps a stale citation, never a semantic tension), or dismiss it with rdy_resolve {tension, dismiss: {reason}} (a reviewer of another actor, or a human); rdy_tensions {involving: <change>} lists them, a form only this landing gives with its proposal",
     ),
     (
         "E_SELF_REVIEW",
-        "rdy_resolve dismisses a blocking tension, or rdy_review_submit judges a pair, and the session's actor wrote a side of it (another run of the same actor is not independent)",
-        "a reviewer of another actor, or a human, dismisses it",
+        "rdy_resolve dismisses a blocking tension or one a reviewer advised to block, or rdy_review_submit judges a pair, and the session's actor wrote a side of it (another run of the same actor is not independent)",
+        "a reviewer of another actor, or a human, dismisses the tension; a reviewer of another actor judges the pair",
     ),
     (
         "E_REVIEW_INVALID",

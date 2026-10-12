@@ -82,17 +82,22 @@ pub(crate) fn advised_digest(advised: &[Advised]) -> Option<String> {
 }
 
 impl ReadState {
-    /// The advised semantic tensions with one of `changes` as a side, by tension id: each open
-    /// (not dismissed) tension whose pair (`pair_of`) has an open record with the reviewer's
+    /// The advised semantic tensions of a version of view `view` with changes `changes`, by
+    /// tension id: each open (not dismissed) tension of the version's landing form, as the gate
+    /// judges it (final ruling 2), whose pair (`pair_of`) has an open record with the reviewer's
     /// advice. Accepted ones are in the list (their record is blocking).
-    pub(crate) fn advised_of(&self, changes: &[Hash]) -> Result<Vec<Advised>, RdyError> {
+    pub(crate) fn advised_of(
+        &self,
+        view: &str,
+        changes: &[Hash],
+    ) -> Result<Vec<Advised>, RdyError> {
         let sem = self.semantic();
-        // no record, nothing advised: the tensions of the changes are not read
+        // no record, nothing advised: the landing form is not read
         if !sem.has_tensions() {
             return Ok(vec![]);
         }
         let mut out = vec![];
-        for t in self.tensions_of_changes(changes)? {
+        for t in self.landing_stored_tensions(view, changes)? {
             let Some(open) = pair_of(&t).and_then(|k| sem.tension(&k)) else {
                 continue;
             };
@@ -221,8 +226,8 @@ fn actor_run(text: &str) -> Result<ActorRun, RdyError> {
     Ok(ActorRun { actor, run })
 }
 
-/// The exact proposal version `text` names, open and latest.
-fn open_version(st: &ReadState, text: &str) -> Result<(ProposalRef, Vec<Hash>), RdyError> {
+/// The exact proposal version `text` names, open and latest, with its view and changes.
+fn open_version(st: &ReadState, text: &str) -> Result<(ProposalRef, String, Vec<Hash>), RdyError> {
     let exact = (text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit()))
         || (is_proposal_ref(text) && text.contains('@'));
     if !exact {
@@ -240,7 +245,7 @@ fn open_version(st: &ReadState, text: &str) -> Result<(ProposalRef, Vec<Hash>), 
             "propose again and show the person the new version",
         ));
     }
-    Ok((pref, p.changes))
+    Ok((pref, p.view, p.changes))
 }
 
 /// The advised tensions `texts` names, by tension id; every one not yet accepted when `texts` is
@@ -316,8 +321,8 @@ impl Rdy {
     ) -> Result<AcceptInfo, RdyError> {
         let (relay, relayed_by) = relay_of(s, &req)?;
         let st = self.read();
-        let (pref, changes) = open_version(&st, &req.proposal)?;
-        let advised = st.advised_of(&changes)?;
+        let (pref, view, changes) = open_version(&st, &req.proposal)?;
+        let advised = st.advised_of(&view, &changes)?;
         // D-WMCFW: the person answers for the advised set they were shown, and only for it. With
         // no advice at all, `chosen` says so whatever the digest
         let given = req.advised_digest.trim().to_ascii_lowercase();

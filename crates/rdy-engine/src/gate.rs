@@ -1881,7 +1881,8 @@ impl Rdy {
         };
         // D-WMCFW: the digest of every advised tension, listed or not, and the advised ones the
         // list leaves out; a read error is the tensions' (the same set)
-        let (advised_digest, advised_omitted) = match self.read().advised_of(&stored.changes) {
+        let (advised_digest, advised_omitted) = match self.read().advised_of(view, &stored.changes)
+        {
             Ok(advised) => {
                 let listed: BTreeSet<&str> = tensions.iter().map(|t| t.tension.as_str()).collect();
                 let omitted = advised

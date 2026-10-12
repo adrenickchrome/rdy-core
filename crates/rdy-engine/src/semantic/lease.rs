@@ -128,10 +128,15 @@ mod tests {
         let k = Hash([5; 32]);
         assert!(r.claim(k, pair(), 7, 0, 600_000));
         assert!(!r.claim(k, pair(), 8, 1, 600_000));
-        assert!(r.leased(599_999).contains(&k));
-        assert!(r.leased(600_000).is_empty());
-        assert!(r.claim(k, pair(), 8, 600_000, 600_000));
-        assert_eq!(r.get(&k, 600_001).unwrap().owner, 8);
+        // final review M4: the owner's own claim renews its live lease and replaces the pair
+        let other = vec![(BlockId::parse("c-BBBBB").unwrap(), Hash([2; 32]))];
+        assert!(r.claim(k, other.clone(), 7, 1, 600_000));
+        let renewed = r.get(&k, 1).unwrap();
+        assert_eq!((renewed.until_ms, renewed.pair), (600_001, other));
+        assert!(r.leased(600_000).contains(&k));
+        assert!(r.leased(600_001).is_empty());
+        assert!(r.claim(k, pair(), 8, 600_001, 600_000));
+        assert_eq!(r.get(&k, 600_002).unwrap().owner, 8);
     }
 
     #[test]

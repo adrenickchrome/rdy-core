@@ -806,6 +806,35 @@ impl ReadState {
             .map_or_else(|_| (0..read.len()).collect(), |(_, at)| at)
     }
 
+    /// The landing form ([`ReadState::landing_tensions`]) of the stored kinds' tensions
+    /// ([`Detector::stored`]) only: what the gate judges of the semantic tensions, at the cost of
+    /// the records on the proposal's blocks (final ruling 2).
+    pub(crate) fn landing_stored_tensions(
+        &self,
+        view: &str,
+        changes: &[Hash],
+    ) -> Result<Vec<Arc<Tension>>, RdyError> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        let stored: Vec<&dyn Detector> = self
+            .detectors
+            .iter()
+            .copied()
+            .filter(|d| d.stored())
+            .collect();
+        if stored.is_empty() {
+            return Ok(vec![]);
+        }
+        let reader = self.reader();
+        let read: Vec<Change> = changes
+            .iter()
+            .map(|c| reader.change(c))
+            .collect::<Result<_, _>>()?;
+        let applied = self.landing_order(&read);
+        self.landing_detect(view, changes, &read, &applied, &stored)
+    }
+
     /// [`ReadState::landing_tensions`] for `changes`, read (`read`) and applied in the order
     /// `applied` ([`ReadState::landing_order`]).
     pub(crate) fn landing_tensions_applied(
@@ -814,6 +843,18 @@ impl ReadState {
         changes: &[Hash],
         read: &[Change],
         applied: &[usize],
+    ) -> Result<Vec<Arc<Tension>>, RdyError> {
+        self.landing_detect(view, changes, read, applied, self.detectors)
+    }
+
+    /// The landing run of `detectors` (see [`ReadState::landing_tensions_applied`]).
+    fn landing_detect(
+        &self,
+        view: &str,
+        changes: &[Hash],
+        read: &[Change],
+        applied: &[usize],
+        detectors: &[&dyn Detector],
     ) -> Result<Vec<Arc<Tension>>, RdyError> {
         if let Some(e) = &self.error {
             return Err(e.clone());
@@ -848,7 +889,7 @@ impl ReadState {
             touched.into_iter().cloned().collect(),
         );
         let mut out = BTreeMap::new();
-        for d in self.detectors {
+        for d in detectors {
             for t in detect_kept(self, &cx, *d, Some(&seeds))? {
                 out.entry(t.id).or_insert(t);
             }

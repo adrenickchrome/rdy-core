@@ -1,7 +1,7 @@
 //! rdy_review_submit (spec §9.3 step 4): a reviewer's verdict on a review request. The schema,
 //! the case hash, precedence (D-TF2W6, D-RF315), actor independence, and the advice to block
 //! (D-WMCFW), which gates nothing.
-use crate::semantic::candidates::{Item, request_hex, request_label};
+use crate::semantic::candidates::{request_hex, request_label};
 use crate::semantic::case::case_hash;
 use crate::semantic::lease::LeaseRegistry;
 use crate::tensions::semantic::pair_of;
@@ -254,15 +254,10 @@ impl Rdy {
         let st = self.read();
         let leases = self.leases();
         let label = request_label(&key);
-        // 6. the items now
-        let mut items: Vec<Item> = vec![];
-        for (block, content) in &pair {
-            match st.item_now(block, *content)? {
-                Some(i) => items.push(i),
-                None => return Err(not_current(&label)),
-            }
-        }
-        items.sort();
+        // 6. the items now (final ruling 2: as the queue names them, per view)
+        let Some(items) = st.pair_now(&pair)? else {
+            return Err(not_current(&label));
+        };
         if !items.iter().any(|i| matches!(i.side, SideRef::Change(_))) {
             return Err(stale(format!(
                 "request {label} ended: both blocks are in canon now"
@@ -421,8 +416,10 @@ impl Rdy {
         };
         if verdict == Verdict::Tension {
             // the verdict is stored: a failed lookup gives no label and never fails the reply
+            // final review M8: the tensions of one of the pair's blocks, not the whole set
             let open = self.read().tensions().ok().and_then(|set| {
-                set.iter()
+                set.involving_block(&items[0].block)
+                    .into_iter()
                     .find(|t| pair_of(t) == Some(key))
                     .map(|t| (tension_label(&t.id), t.severity))
             });

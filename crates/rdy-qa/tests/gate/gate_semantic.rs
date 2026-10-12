@@ -124,36 +124,68 @@ fn se11_an_advised_semantic_tension_never_refuses_and_an_accepted_one_does() {
     approve(&mut r, &p).unwrap();
 }
 
+/// final ruling 2: with B edited in view a and C in view b, each view's change is paired with
+/// the other block as its own landing would leave it, canon's: (B@a, C@canon) and
+/// (B@canon, C@b), never (B@a, C@b). An accepted tension refuses only the landing of the view
+/// that holds its change side; once the other view lands C, the judged text of C is gone from
+/// canon and the tension with it.
 #[test]
-fn se11_an_accepted_tension_between_two_views_refuses_neither_until_one_lands() {
+fn se11_each_view_is_judged_on_its_own_landing_form() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
-    put(&mut r, "a", upd(&s.b, "B changed."));
-    put(&mut r, "b", upd(&s.c, "C contradicts B."));
-    judge_pair(&mut r, Some((&s.b, &s.c)), true);
-    let pb = propose(&mut r, "b");
-    accept(&mut r, &pb);
-    let (pa, pb) = (propose(&mut r, "a"), propose(&mut r, "b"));
-    for p in [&pa, &pb] {
-        let t = p
-            .tensions
-            .iter()
-            .find(|t| t.kind == TensionKind::Semantic)
-            .unwrap_or_else(|| panic!("{:?}", p.tensions));
-        assert_eq!(t.refuses, Some(false), "a canon side is missing");
-    }
-    approve(&mut r, &pa).unwrap();
-    let pb = propose(&mut r, "b");
-    let t = pb
-        .tensions
-        .iter()
-        .find(|t| t.kind == TensionKind::Semantic)
-        .unwrap();
-    assert_eq!(
-        t.refuses,
-        Some(true),
-        "the re-keyed tension has a canon side"
+    let wa = put(&mut r, "a", upd(&s.b, "B changed."));
+    let wb = put(&mut r, "b", upd(&s.c, "C contradicts B."));
+    let pairs: Vec<Vec<bool>> = r
+        .read()
+        .review_requests()
+        .unwrap()
+        .into_iter()
+        .filter(|q| {
+            let b: BTreeSet<_> = q.items.iter().map(|i| &i.block).collect();
+            b == BTreeSet::from([&s.b, &s.c])
+        })
+        .map(|q| {
+            q.items
+                .iter()
+                .map(|i| matches!(i.side, SideRef::Change(_)))
+                .collect()
+        })
+        .collect();
+    assert_eq!(pairs.len(), 2, "one request per view's landing form");
+    assert!(
+        pairs.iter().all(|p| p.iter().filter(|c| **c).count() == 1),
+        "each pairs one change with canon: {pairs:?}"
     );
+    judge_pair(&mut r, Some((&s.b, &s.c)), true);
+    let t = one(&r, TensionKind::Semantic);
+    let mine = change_sides(&t);
+    assert!(mine == vec![change_of(&wa)] || mine == vec![change_of(&wb)]);
+    let (held, other) = if mine == vec![change_of(&wa)] {
+        ("a", "b")
+    } else {
+        ("b", "a")
+    };
+    let p = propose(&mut r, held);
+    accept(&mut r, &p);
+    let p = propose(&mut r, held);
+    assert_eq!(
+        approve(&mut r, &p).unwrap_err().code,
+        E_BLOCKING_TENSION,
+        "the accepted form refuses its own view"
+    );
+    let q = propose(&mut r, other);
+    assert!(
+        !q.tensions.iter().any(|t| t.kind == TensionKind::Semantic),
+        "the other view's landing form was never judged: {:?}",
+        q.tensions
+    );
+    approve(&mut r, &q).unwrap();
+    assert!(
+        of_kind(&r, TensionKind::Semantic).is_empty(),
+        "the judged canon text is gone"
+    );
+    let p = propose(&mut r, held);
+    approve(&mut r, &p).unwrap();
 }
 
 /// F6 (RULING, D-VA8DA): a landed semantic tension stays in canon, and an all-canon one never

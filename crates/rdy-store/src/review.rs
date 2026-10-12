@@ -55,13 +55,14 @@ pub(crate) fn mention_key(key: &str) -> Result<(BlockId, BlockId), StoreError> {
 impl Store {
     /// Writes a dismissal: the review and the ref `dismiss/<vkey>` to it, in one batch. Refuses a
     /// review whose verdict is not `Dismiss` or whose subject has no vkey. Refuses a vkey that
-    /// another review already dismissed (FW-CH7: the ref is never rewritten). The same review again
+    /// another review already dismissed (FW-CH7: the ref is never rewritten). A refusal is
+    /// `StoreError::Refused`. The same review again
     /// is an idempotent retry: it returns the id and writes nothing.
     pub fn put_dismissal(&mut self, r: &Review) -> Result<Hash, StoreError> {
         let vkey = match (r.verdict, r.vkey()) {
             (Verdict::Dismiss, Some(k)) => k,
             _ => {
-                return Err(StoreError::Decode(
+                return Err(StoreError::Refused(
                     "a dismissal is a review with verdict dismiss of a tension".into(),
                 ));
             }
@@ -74,7 +75,7 @@ impl Store {
             if held == id {
                 return Ok(id);
             }
-            return Err(StoreError::Decode(format!(
+            return Err(StoreError::Refused(format!(
                 "tension vkey {vkey} is already dismissed by review {held}"
             )));
         }
@@ -94,7 +95,7 @@ impl Store {
                 mention_ref(block, entity)
             }
             _ => {
-                return Err(StoreError::Decode(
+                return Err(StoreError::Refused(
                     "a mention review is a review with verdict dismiss or restore of a mention"
                         .into(),
                 ));

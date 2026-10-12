@@ -187,7 +187,7 @@ impl ReadState {
             ));
         }
         let (advised, advised_digest, advised_error) = if state == "open" {
-            match self.advised_rows(&p.changes) {
+            match self.advised_rows(&p.view, &p.changes) {
                 Ok((rows, digest)) => (rows, digest, None),
                 Err(e) => (vec![], None, Some(format!("{}: {}", e.code, e.message))),
             }
@@ -225,9 +225,10 @@ impl ReadState {
     /// reviewer and findings from each verdict's review; and the digest of the set.
     fn advised_rows(
         &self,
+        view: &str,
         changes: &[Hash],
     ) -> Result<(Vec<AdvisedRow>, Option<String>), RdyError> {
-        let advised = self.advised_of(changes)?;
+        let advised = self.advised_of(view, changes)?;
         let digest = advised_digest(&advised);
         let rows = advised
             .into_iter()

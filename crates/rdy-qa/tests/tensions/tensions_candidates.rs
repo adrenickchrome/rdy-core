@@ -110,9 +110,37 @@ fn se4_at_most_twenty_per_change_closest_first() {
     let w = put(&mut r, "a", json!(ops));
     let got = pairs(&r, &change_of(&w));
     assert_eq!(got.len(), MAX_CANDIDATES);
+    // final review M2: sorted, so a repeated pair would sit next to its twin
     let mut keys: Vec<_> = got.iter().map(|(b, _)| b.clone()).collect();
+    keys.sort();
     keys.dedup();
     assert_eq!(keys.len(), got.len(), "a pair counts once");
+    // the new claims follow D in the section; the first subject (by id) pairs with its nearest
+    // siblings first, so the steps from it never shrink
+    let st = r.read();
+    let m = st.materialized(&Scope::Inflight).unwrap();
+    let kids: Vec<BlockId> = m
+        .children(Some(&s.section))
+        .iter()
+        .map(|k| k.id.clone())
+        .collect();
+    let first = got[0]
+        .0
+        .iter()
+        .find(|b| got.iter().all(|(p, _)| p.contains(b)))
+        .expect("the first subject is in every pair")
+        .clone();
+    let at = |b: &BlockId| kids.iter().position(|k| k == b).unwrap();
+    let steps: Vec<usize> = got
+        .iter()
+        .map(|(p, rule)| {
+            assert_eq!(*rule, Rule::Section);
+            let other = p.iter().find(|b| **b != first).unwrap();
+            at(other).abs_diff(at(&first))
+        })
+        .collect();
+    assert!(steps.windows(2).all(|w| w[0] <= w[1]), "{steps:?}");
+    assert_eq!(steps[0], 1, "the nearest sibling comes first");
 }
 
 #[test]
@@ -203,47 +231,51 @@ fn se4_pair_rule_names_the_best_rule_that_holds_now() {
 }
 
 #[test]
-fn se4_item_now_finds_the_in_flight_write_else_canon() {
+fn se4_pair_now_finds_the_in_flight_write_else_canon() {
     let (_d, mut r) = project();
     let s = spec_doc(&mut r);
     let w = put(&mut r, "a", upd(&s.a, "A holds, mostly."));
     let st = r.read();
     let items = st.requests_from(&change_of(&w)).unwrap()[0].items.clone();
+    let pair: Vec<_> = items.iter().map(|i| (i.block.clone(), i.content)).collect();
+    assert_eq!(st.pair_now(&pair).unwrap().as_ref(), Some(&items));
     let mine = items.iter().find(|i| i.block == s.a).unwrap();
-    assert_eq!(
-        st.item_now(&s.a, mine.content).unwrap().as_ref(),
-        Some(mine),
+    assert!(
+        matches!(mine.side, rdy_engine::tensions::SideRef::Change(_)),
         "A's content is the change's write"
     );
-    let theirs = items
-        .iter()
-        .find(|i| i.block == s.b || i.block == s.decision)
-        .unwrap();
-    let got = st.item_now(&theirs.block, theirs.content).unwrap().unwrap();
+    let theirs = items.iter().find(|i| i.block != s.a).unwrap();
     assert!(
-        matches!(got.side, rdy_engine::tensions::SideRef::Canon { .. }),
+        matches!(theirs.side, rdy_engine::tensions::SideRef::Canon { .. }),
         "no write touches it"
     );
     assert_eq!(
-        st.item_now(&s.a, theirs.content).unwrap(),
+        st.pair_now(&[
+            (s.a.clone(), theirs.content),
+            (theirs.block.clone(), theirs.content)
+        ])
+        .unwrap(),
         None,
         "no version of A has that content"
     );
 }
 
-/// Every item of every request equals what `item_now` returns for its block and content.
+/// Every request's items are what `pair_now` returns for its pair (final ruling 2: a submit
+/// re-proves a request with it).
 fn assert_items_current(r: &Rdy, change: &rdy_model::Hash) {
     let rs = r.read().requests_from(change).unwrap();
     for q in &rs {
-        for i in &q.items {
-            assert_eq!(
-                r.read().item_now(&i.block, i.content).unwrap().as_ref(),
-                Some(i),
-                "request {} item {} must be what item_now returns",
-                request_label(&q.key),
-                i.block
-            );
-        }
+        let pair: Vec<_> = q
+            .items
+            .iter()
+            .map(|i| (i.block.clone(), i.content))
+            .collect();
+        assert_eq!(
+            r.read().pair_now(&pair).unwrap().as_ref(),
+            Some(&q.items),
+            "request {} must be what pair_now returns",
+            request_label(&q.key)
+        );
     }
 }
 
@@ -251,7 +283,7 @@ fn assert_items_current(r: &Rdy, change: &rdy_model::Hash) {
 /// with equal content and two versions). Which write the in-flight scope keeps follows the
 /// change ids, which are random, so the scenario runs on several projects.
 #[test]
-fn se4_the_other_item_is_what_item_now_returns_or_the_pair_is_skipped() {
+fn se4_the_items_are_what_pair_now_returns_or_the_pair_is_skipped() {
     for _ in 0..12 {
         let (_d, mut r) = project();
         let s = spec_doc(&mut r);
@@ -289,4 +321,63 @@ fn se4_items_are_current_after_an_earlier_change_in_the_same_view_rewrote_the_bl
     put(&mut r, "a", upd(&s.c, "C second."));
     let w = put(&mut r, "a", upd(&s.a, "A holds, mostly."));
     assert_items_current(&r, &change_of(&w));
+}
+
+/// final ruling 2: a request pairs the change's block with the other block as the change's own
+/// view holds it: canon's when that view does not touch it, even while another view edits it.
+#[test]
+fn se4_a_request_takes_canon_where_the_changes_view_does_not_touch_the_block() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let w = put(&mut r, "a", upd(&s.c, "C changed."));
+    put(&mut r, "b", upd(&s.b, "B in view b."));
+    let st = r.read();
+    let qs = st.requests_from(&change_of(&w)).unwrap();
+    let with_b = qs
+        .iter()
+        .find(|q| q.items.iter().any(|i| i.block == s.b))
+        .expect("C pairs with B by section");
+    let b = with_b.items.iter().find(|i| i.block == s.b).unwrap();
+    assert!(
+        matches!(b.side, rdy_engine::tensions::SideRef::Canon { .. }),
+        "view a holds B as canon: {b:?}"
+    );
+    let canon = st.materialized(&Scope::Canon).unwrap();
+    assert_eq!(
+        b.content,
+        canon
+            .get(&s.b)
+            .unwrap()
+            .content_hash_with(r.store().tracking())
+    );
+}
+
+/// final review M3 (F3): a change edited again in its view makes no request; the change that
+/// edited it makes them.
+#[test]
+fn se4_requests_end_when_their_side_is_edited_again() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let c1 = change_of(&put(&mut r, "a", upd(&s.c, "C changed.")));
+    assert_eq!(pairs(&r, &c1).len(), 3, "B, D and A by section");
+    let c2 = change_of(&put(&mut r, "a", upd(&s.c, "C changed again.")));
+    assert!(
+        pairs(&r, &c1).is_empty(),
+        "an edit again ends c1's requests"
+    );
+    assert_eq!(pairs(&r, &c2).len(), 3);
+    assert_eq!(r.read().review_requests().unwrap().len(), 3);
+}
+
+/// final review M3 (F3): a change excluded from every view makes no request.
+#[test]
+fn se4_requests_end_when_their_change_is_excluded() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let c = change_of(&put(&mut r, "a", upd(&s.c, "C changed.")));
+    assert_eq!(pairs(&r, &c).len(), 3);
+    r.view_exclude(&ag("a"), "a", &[c.to_string()], false)
+        .unwrap();
+    assert!(pairs(&r, &c).is_empty(), "an excluded change makes none");
+    assert!(r.read().review_requests().unwrap().is_empty());
 }

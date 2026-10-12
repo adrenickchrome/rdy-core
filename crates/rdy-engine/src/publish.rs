@@ -3,8 +3,8 @@
 use crate::config::site_identity;
 use crate::read_state::{self, CoordHeads, Entry, InflightCell};
 use crate::semantic::state::SemanticState;
-use crate::tensions::SideRef;
 use crate::tensions::set::TensionCell;
+use crate::tensions::{SideRef, TensionSeverity, tension_id};
 use crate::{Delta, Event, EventKind, Rdy, RdyError, ReadState, events};
 use rdy_model::{Hash, Op, Verdict};
 use rdy_store::kinds;
@@ -547,8 +547,10 @@ impl Rdy {
 
     /// Settles the tension set (tevt1): emits the difference between the last settled set and
     /// the published state's, and records the published one. A resolved tension and an opened
-    /// one of the same vkey are a re-key (paired in id order): `tension_resolved` names the new
-    /// id in `rekeyed_to`, `tension_opened` the old one in `rekeyed_from`. Every resolved
+    /// one of the same vkey are a re-key (paired in id order), and so are a resolved tension
+    /// and an opened one with the same items under the other severity (an acceptance):
+    /// `tension_resolved` names the new id in `rekeyed_to`, `tension_opened` the old one in
+    /// `rekeyed_from`. Every resolved
     /// tension is emitted first, then every opened one; `by` and `at_ms` come from the store's
     /// last batch when a batch was written since the last settle (a pack reload writes none:
     /// its events have no `by`). Before the first settle since open, the set of the state
@@ -600,6 +602,24 @@ impl Rdy {
                 rekeyed_to.insert(t.id, *to);
                 rekeyed_from.insert(*to, t.id);
                 *n += 1;
+            }
+        }
+        // final review M7: the same items under the other severity (a person's acceptance made
+        // a semantic tension blocking; a lifecycle change can soften a kind) are a re-key too:
+        // the id hashes the severity, and a consumer must not read the old one as resolved
+        let opened_ids: std::collections::BTreeSet<Hash> = opened.iter().map(|t| t.id).collect();
+        for t in &resolved {
+            if rekeyed_to.contains_key(&t.id) {
+                continue;
+            }
+            let other = match t.severity {
+                TensionSeverity::Blocking => TensionSeverity::Advisory,
+                TensionSeverity::Advisory => TensionSeverity::Blocking,
+            };
+            let to = tension_id(t.kind, other, &t.involved);
+            if opened_ids.contains(&to) && !rekeyed_from.contains_key(&to) {
+                rekeyed_to.insert(t.id, to);
+                rekeyed_from.insert(to, t.id);
             }
         }
         let (by, at_ms) = if batch_since {

@@ -272,7 +272,9 @@ fn se5_records_on_old_contents_give_nothing_and_a_carry_matches_a_full_build() {
         2,
         "only the records on C's current content: {now:?}"
     );
-    put(&mut r, "b", upd(&s.b, "B moves on."));
+    // final ruling 2: B moves on in view a, which holds C (another view's edit of B would
+    // leave view a's form with canon's B)
+    put(&mut r, "a", upd(&s.b, "B moves on."));
     put(&mut r, "a", upd(&s.c, "C contradicts A, take 2."));
     let carried: Vec<_> = open(&r).iter().map(|t| t.id).collect();
     assert_eq!(of_kind(&r, TensionKind::Semantic).len(), 1, "B moved on");
@@ -330,4 +332,97 @@ fn se5_an_existing_kinds_refusal_text_is_unchanged() {
     assert_eq!(e.issues.len(), 1);
     let fix = &e.issues[0].fix;
     assert!(fix.starts_with("resolve, repin or dismiss tn-"), "{fix}");
+}
+
+/// Records a tension verdict on `a` and `b` at the given contents.
+fn judge_at(r: &mut Rdy, a: (&BlockId, Hash), b: (&BlockId, Hash)) {
+    let mut items = vec![
+        PairItem {
+            block: a.0.clone(),
+            content: a.1,
+        },
+        PairItem {
+            block: b.0.clone(),
+            content: b.1,
+        },
+    ];
+    items.sort();
+    let rv = verdict(items.clone(), Verdict::Tension);
+    r.record_verdict(&rv, Some(&first(&rv, items))).unwrap();
+}
+
+/// final ruling 3 (FW-SW3): records on contents a block no longer holds are never visited, by a
+/// commit's carry or by a full build, however many there are. Only the record on the texts the
+/// sides hold now is read.
+#[test]
+fn se5_stale_records_on_a_block_are_visited_by_no_carry_and_no_full_build() {
+    use rdy_engine::tensions::semantic::records_visited;
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.c, "C contradicts A."));
+    judge(&mut r, &s.a, &s.c);
+    let a_now = content(&r, &s.a);
+    // forty records on texts C held once (and no longer holds), each judged against A as it is now
+    for i in 0..40u8 {
+        judge_at(&mut r, (&s.a, a_now), (&s.c, Hash([i; 32])));
+    }
+    assert_eq!(of_kind(&r, TensionKind::Semantic).len(), 1);
+    r.read().tensions().unwrap();
+    let before = records_visited();
+    let builds = full_builds();
+    put(&mut r, "b", upd(&s.c, "C in view b."));
+    r.read().tensions().unwrap();
+    assert_eq!(full_builds(), builds, "the commit carried the set");
+    let carry = records_visited() - before;
+    assert!(carry <= 1, "the carry visited {carry} records");
+    r.invalidate();
+    let before = records_visited();
+    let all = r.read().tensions().unwrap();
+    let full = records_visited() - before;
+    assert!(full <= 2, "the full build visited {full} records");
+    assert_eq!(
+        all.iter()
+            .filter(|t| t.kind == TensionKind::Semantic)
+            .count(),
+        1
+    );
+}
+
+/// final ruling 2 (P11, P12): a canon side is resolved per view. B is edited in view a and judged
+/// against C as canon holds it; then view b edits C. View a does not touch C, so the form
+/// (B@a, C@canon) stays in the in-flight set, advised and then accepted, and a carry matches a
+/// full build. The accepted form refuses view a's landing.
+#[test]
+fn se5_another_views_edit_of_the_canon_side_keeps_the_tension() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    let wa = put(&mut r, "a", upd(&s.b, "B contradicts C."));
+    let key = judge(&mut r, &s.b, &s.c);
+    let before = one(&r, TensionKind::Semantic);
+    put(&mut r, "b", upd(&s.c, "C in view b."));
+    let t = one(&r, TensionKind::Semantic);
+    assert_eq!(t.id, before.id, "view a's form stays");
+    assert_eq!(change_sides(&t), vec![change_of(&wa)]);
+    assert!(has_canon(&t));
+    let carried: Vec<_> = open(&r).iter().map(|t| t.id).collect();
+    r.invalidate();
+    let full: Vec<_> = open(&r).iter().map(|t| t.id).collect();
+    assert_eq!(carried, full);
+    accept(&mut r, &key);
+    let t = one(&r, TensionKind::Semantic);
+    assert_eq!(t.severity, TensionSeverity::Blocking);
+    assert_eq!(change_sides(&t), vec![change_of(&wa)]);
+    assert_eq!(land(&mut r, "a").unwrap_err().code, "E_BLOCKING_TENSION");
+}
+
+/// guard (final ruling 2): a view that edits the canon side itself holds its own text there, so
+/// the form with canon's text is not its own.
+#[test]
+fn se5_a_view_that_edits_the_other_side_has_no_canon_form_of_it() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.b, "B contradicts C."));
+    judge(&mut r, &s.b, &s.c);
+    put(&mut r, "a", upd(&s.c, "C in view a."));
+    assert!(of_kind(&r, TensionKind::Semantic).is_empty());
 }
