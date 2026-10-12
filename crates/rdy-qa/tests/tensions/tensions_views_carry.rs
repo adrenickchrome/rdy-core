@@ -201,6 +201,30 @@ fn ibperf2_invalidate_on_the_logged_state_builds_nothing() {
     assert_eq!(r.fsck().unwrap().unlogged_moves, 0);
 }
 
+/// A run of invalidates on the logged state builds nothing and logs nothing: the state a folded
+/// invalidate publishes is the logged one, so the next invalidate folds too (view_ls_50_50k
+/// regression: every second `cold()` read built the whole set and logged a recheck).
+#[test]
+fn ibperf2_invalidates_in_a_row_on_the_logged_state_build_nothing() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.a, "A by a."));
+    put(&mut r, "b", upd(&s.a, "A by b."));
+    let builds = full_builds();
+    let end = r.store().log_end();
+    for i in 0..4 {
+        r.invalidate();
+        assert_eq!(full_builds() - builds, 0, "invalidate {i} built the set");
+        assert_eq!(r.store().log_end(), end, "invalidate {i} logged a batch");
+    }
+    // the logged set is still kept: the next write carries it
+    put(&mut r, "c", upd(&s.b, "B by c."));
+    assert_eq!(r.read().tensions_carried(), Some(true), "the write carried");
+    assert_eq!(full_builds() - builds, 0, "the write built the set");
+    same_as_rebuilt(&r).unwrap();
+    assert_eq!(r.fsck().unwrap().unlogged_moves, 0);
+}
+
 #[test]
 fn ibperf2_a_commit_that_writes_more_than_was_in_flight_builds_in_full() {
     let (_d, mut r) = project();

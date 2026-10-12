@@ -810,7 +810,8 @@ impl Rdy {
     /// the ones it was published with, the full publish reads what that state read, so it
     /// computes nothing: the log already folds to its open sets, and the new state takes the
     /// logged state's tension set (the same set, as a write leaves it built), so the next write
-    /// carries it (plan M2e2). Every other cell starts empty.
+    /// carries it (plan M2e2), and becomes the logged state, so a run of invalidates computes
+    /// nothing. Every other cell starts empty.
     pub fn invalidate(&mut self) {
         let st = self.state.load_full();
         let folded = self.logged.as_ref().is_some_and(|l| Arc::ptr_eq(l, &st))
@@ -822,11 +823,16 @@ impl Rdy {
         if !folded {
             self.recheck = Some(Cause::Recheck);
         }
-        if self.publish(Delta::Full).is_ok()
-            && let Some(set) = set
-        {
-            self.state.load().tensions.keep(set);
+        if self.publish(Delta::Full).is_err() || !folded {
+            return;
         }
+        // the new state reads what the logged one read, so it is the logged state now: the next
+        // invalidate folds too, instead of logging a recheck that builds the whole set
+        let next = self.state.load_full();
+        if let Some(set) = set {
+            next.tensions.keep(set);
+        }
+        self.logged = Some(next);
     }
 
     /// Rebuilds the store's index from its log (an open batch is sealed first) and republishes
