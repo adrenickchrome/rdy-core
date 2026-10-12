@@ -158,6 +158,40 @@ mod hex {
     }
 }
 
+/// The events of every committed batch in the log from `from` to `upto`, in log order: what a
+/// subscriber would have received had it been listening since `from`. The first batch whose
+/// events cannot be read ends the walk with its error.
+pub fn replay(
+    reader: &StoreReader,
+    from: Location,
+    upto: Location,
+) -> Result<Vec<Event>, RdyError> {
+    let mut out = Vec::new();
+    let mut group: Vec<(u8, Hash)> = Vec::new();
+    let mut failure: Option<RdyError> = None;
+    let walk = reader.for_each_frame_from(from, upto, |_, kind, hash, _, next| {
+        if kind == kinds::BATCH_COMMIT {
+            match events_for_batch(reader, next, &group) {
+                Ok(events) => out.extend(events),
+                Err(e) => {
+                    failure = Some(e);
+                    // stops the walk; the batch's own error is returned below
+                    return Err(rdy_store::StoreError::Db("replay stopped".into()));
+                }
+            }
+            group.clear();
+        } else {
+            group.push((kind, hash));
+        }
+        Ok(())
+    });
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    walk?;
+    Ok(out)
+}
+
 /// The events of one batch, in frame order. A frame whose object cannot be read is an error.
 pub fn events_for_batch(
     reader: &StoreReader,

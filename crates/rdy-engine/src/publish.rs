@@ -115,32 +115,7 @@ impl Rdy {
     /// a subscriber would have received had it been listening since `from`. The first batch
     /// whose events cannot be read ends the walk with its error.
     pub fn replay_events(&self, from: Location) -> Result<Vec<Event>, RdyError> {
-        let reader = self.store.reader();
-        let mut out = Vec::new();
-        let mut group: Vec<(u8, rdy_model::Hash)> = Vec::new();
-        let mut failure: Option<RdyError> = None;
-        let walk =
-            reader.for_each_frame_from(from, self.store.log_end(), |_, kind, hash, _, next| {
-                if kind == kinds::BATCH_COMMIT {
-                    match events::events_for_batch(&reader, next, &group) {
-                        Ok(events) => out.extend(events),
-                        Err(e) => {
-                            failure = Some(e);
-                            // stops the walk; the batch's own error is returned below
-                            return Err(rdy_store::StoreError::Db("replay stopped".into()));
-                        }
-                    }
-                    group.clear();
-                } else {
-                    group.push((kind, hash));
-                }
-                Ok(())
-            });
-        if let Some(e) = failure {
-            return Err(e);
-        }
-        walk?;
-        Ok(out)
+        events::replay(&self.store.reader(), from, self.store.log_end())
     }
 
     /// The error of the latest batch since open whose events could not be read and so were never

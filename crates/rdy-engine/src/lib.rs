@@ -19,6 +19,7 @@ mod fsck;
 mod gate;
 mod handle;
 mod history;
+pub mod inbox;
 pub mod inflight;
 pub mod intent;
 mod io;
