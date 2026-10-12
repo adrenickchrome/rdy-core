@@ -3,6 +3,7 @@
 use crate::engine::write_typed;
 use crate::{E_BAD_INPUT, E_INTERNAL, Engine, Rdy, RdyError, Session};
 use rdy_model::Role;
+use rdy_store::StoreError;
 use rdy_store::inbox::{InboxCursor, InboxSub};
 
 /// The role text a subscription stores. An approver session reads the human's inbox as a writer.
@@ -17,12 +18,13 @@ pub fn role_name(r: Role) -> &'static str {
 impl Rdy {
     /// Writes one session's inbox ref. Only subscribe and ack call it outside tests.
     pub fn put_subscription(&mut self, sub: &InboxSub) -> Result<(), RdyError> {
-        self.store_mut().put_inbox(sub).map_err(|e| {
-            RdyError::new(
-                E_INTERNAL,
-                format!("the inbox ref was not written: {e}"),
-                "report this as a bug in rdy",
-            )
+        // a refusal means a caller built a subscription the store's rules reject: a bug in rdy,
+        // not bad input; any other store error maps as it does everywhere (damage stays `E_IO`)
+        self.store_mut().put_inbox(sub).map_err(|e| match e {
+            StoreError::Refused(message) => {
+                RdyError::new(E_INTERNAL, message, "report this as a bug in rdy")
+            }
+            e => e.into(),
         })?;
         self.publish(crate::Delta::Seq)
     }

@@ -70,3 +70,25 @@ fn ib3_an_unknown_area_is_refused_with_the_pack_areas() {
     let err = subscribe(&e2, &ag("a"), Some(vec!["x".into()])).unwrap_err();
     assert_eq!(err.fix, "the pack declares no areas: pass none");
 }
+
+#[test]
+fn ib3_a_store_refusal_is_an_internal_error_with_the_stores_text() {
+    use rdy_engine::E_INTERNAL;
+    use rdy_store::inbox::{InboxCursor, InboxSub};
+    let (_d, mut r) = qa_project();
+    let at = r.read().seq();
+    let sub = InboxSub {
+        actor: "agent:a".into(),
+        run: Some("r1".into()),
+        cursor: InboxCursor { at, skip: 0 },
+        areas: vec![],
+        role: "approver".into(),
+    };
+    let err = r.put_subscription(&sub).unwrap_err();
+    assert_eq!(err.code, E_INTERNAL);
+    assert_eq!(
+        err.message,
+        "inbox ref \"inbox/agent:a/r1\": role \"approver\" is not reader, writer or reviewer"
+    );
+    assert_eq!(err.fix, "report this as a bug in rdy");
+}
