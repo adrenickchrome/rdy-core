@@ -5,6 +5,7 @@ use serde::Serialize;
 
 pub mod inflight;
 pub mod matcher;
+pub mod moves;
 pub mod sub;
 
 /// One inbox entry: its kind, the full ids it names, one line for a person or an agent, and the batch it came from (not serialized).
