@@ -153,3 +153,26 @@ fn ibperf2_invalidate_on_the_logged_state_builds_nothing() {
     assert!(!r.read().tensions_built(), "every cell starts empty");
     assert_eq!(r.fsck().unwrap().unlogged_moves, 0);
 }
+
+#[test]
+fn ibperf2_a_commit_that_writes_more_than_was_in_flight_builds_in_full() {
+    let (_d, mut r) = project();
+    let s = spec_doc(&mut r);
+    put(&mut r, "a", upd(&s.a, "A by a."));
+    r.read().tensions().unwrap();
+    // more claims than the floor in one change, against one block in flight: re-detecting
+    // around every seed reads more than one full build does
+    let n = rdy_engine::tensions::set::CARRY_SEEDS_FLOOR + 1;
+    let mut ops: Vec<_> = (0..n)
+        .map(|i| json!({"op": "create", "type": "claim", "parent": s.section.to_string(), "body": format!("Fee {i}.")}))
+        .collect();
+    ops.push(json!({"op": "create", "type": "term", "parent": s.section.to_string(), "fields": {"name": "Fee"}, "body": "A fee."}));
+    ops.push(json!({"op": "create", "type": "term", "parent": s.section.to_string(), "fields": {"name": "fee"}, "body": "A fee again."}));
+    put(&mut r, "b", json!(ops));
+    assert_eq!(r.read().tensions_carried(), Some(false), "built in full");
+    same_as_rebuilt(&r).unwrap();
+    // a small commit after it carries again
+    put(&mut r, "c", upd(&s.b, "B by c."));
+    assert_eq!(r.read().tensions_carried(), Some(true), "carried");
+    same_as_rebuilt(&r).unwrap();
+}

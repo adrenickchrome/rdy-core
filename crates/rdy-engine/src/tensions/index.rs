@@ -1053,12 +1053,14 @@ impl<'a> DetectCx<'a> {
 
     /// The content of `block`'s version `v` (see [`DetectCx::involved`]).
     fn content_at(&self, side: &SideRef, block: &BlockId, v: &Hash) -> Result<Hash, RdyError> {
+        // the writes on the block, not the change's: a change that writes many blocks (an
+        // import) must not be copied once per block it writes
         if let SideRef::Change(c) = side
             && let Some(b) = self
                 .writes
-                .of_change(c)
+                .on(block)
                 .iter()
-                .find(|w| &w.block == block && w.version.as_ref() == Some(v))
+                .find(|w| &w.change == c && w.version.as_ref() == Some(v))
                 .and_then(|w| w.new.clone())
         {
             return Ok(self.content_of(&b));

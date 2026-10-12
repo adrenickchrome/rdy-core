@@ -568,7 +568,8 @@ fn seeds_into(st: &ReadState, c: &Change, seeds: &mut BTreeSet<BlockId>) -> Resu
 /// tension that involves a seed, and less each kind's tensions that involve a block of its
 /// [`Detector::reach`]; and what the state's detectors find in flight around the seeds and the
 /// reach that involves one of them. With the blocks it re-detected around (seeds and every
-/// reach). `None` when the state's in-flight set is not `prev`'s plus `change`. It starts from a
+/// reach). `None` when the state's in-flight set is not `prev`'s plus `change`, or when the
+/// change writes more blocks than were in flight ([`too_many`]: a full build costs less). It starts from a
 /// clone of `prev` (structure shared), so its cost follows the seeds' tensions, not the size of
 /// the set.
 fn carry(
@@ -584,8 +585,14 @@ fn carry(
     if !prev.writes.extends_to(&set, &change) {
         return Ok(None);
     }
-    let writes = Arc::new(prev.writes.with_change(st, change, view)?);
     let seeds = seeds_of(st, &change)?;
+    // a change that writes more blocks than were in flight (an import into an empty flight)
+    // re-detects nearly everything, and a seeded run over many seeds costs more than one full
+    // run: build it in full
+    if too_many(&seeds, &prev.writes) {
+        return Ok(None);
+    }
+    let writes = Arc::new(prev.writes.with_change(st, change, view)?);
     let mut next = TensionSet {
         writes: Arc::clone(&writes),
         ..prev.clone()
@@ -720,6 +727,17 @@ fn views_step_carries(
     Ok(!before.all().any(under) && !after.all().any(under))
 }
 
+/// Below this many seeds a step always carries: a seeded run that small costs little, whatever
+/// the size of the set.
+pub const CARRY_SEEDS_FLOOR: usize = 1_000;
+
+/// Whether a step's `seeds` are more than [`CARRY_SEEDS_FLOOR`] and outnumber the blocks the
+/// writes before it write (an import, a bulk include into a near-empty flight): re-detecting
+/// around them reads nearly everything, and one full build costs less than the carry.
+fn too_many(seeds: &BTreeSet<BlockId>, before: &Writes) -> bool {
+    seeds.len() > CARRY_SEEDS_FLOOR && seeds.len() > before.blocks().count()
+}
+
 /// The view-op carry (plan M2e2: a batch's moves are computed from its delta): `prev` was built
 /// on the same canon, the same coordination refs and the same verdicts, and a view op changed
 /// only which changes are in flight and in which views. The changes whose membership or views
@@ -729,7 +747,8 @@ fn views_step_carries(
 /// re-detects around them. The reach is read both before and after the step, so a change that
 /// left flight still names the groups its writes were in. The canon part stays. Its cost
 /// follows the changes that moved, not the size of the set; when none moved, it is `prev`.
-/// `None` when the step does not carry ([`views_step_carries`]): the set is built in full.
+/// `None` when the step does not carry ([`views_step_carries`]) or is too large ([`too_many`]):
+/// the set is built in full.
 fn views_carry(st: &ReadState, prev: &TensionSet) -> Result<Option<TensionSet>, RdyError> {
     if let Some(e) = &st.error {
         return Err(e.clone());
@@ -749,14 +768,20 @@ fn views_carry(st: &ReadState, prev: &TensionSet) -> Result<Option<TensionSet>, 
     if changed.is_empty() {
         return Ok(Some(prev.clone()));
     }
-    let writes = Arc::new(prev.writes.with_changes(st, &set, &changed)?);
-    if !views_step_carries(st, &prev.writes, &writes, &set, &changed)? {
-        return Ok(None);
-    }
     let reader = st.reader();
     let mut seeds = BTreeSet::new();
     for c in &changed {
         seeds_into(st, &reader.change(c)?, &mut seeds)?;
+    }
+    // a step that touches more blocks than were in flight (an import, a bulk include into an
+    // empty flight) re-detects nearly everything around its seeds, and a seeded run over many
+    // seeds costs more than one full run: build it in full
+    if too_many(&seeds, &prev.writes) {
+        return Ok(None);
+    }
+    let writes = Arc::new(prev.writes.with_changes(st, &set, &changed)?);
+    if !views_step_carries(st, &prev.writes, &writes, &set, &changed)? {
+        return Ok(None);
     }
     let mut next = TensionSet {
         writes: Arc::clone(&writes),
