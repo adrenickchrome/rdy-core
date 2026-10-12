@@ -18,6 +18,7 @@ mod engine_impact;
 mod engine_inbox_inflight;
 mod engine_inbox_match;
 mod engine_inbox_moves;
+mod engine_inbox_read;
 mod engine_inbox_sub;
 mod engine_inflight;
 mod engine_intents;
