@@ -19,6 +19,8 @@ pub struct SessionParams {
     pub role: String,
     /// Override the default view for writes. A reader may pass "canon" to read canon by default.
     pub view: Option<String>,
+    /// Areas this session watches for landings, persisted with its inbox cursor; [] clears them (the areas of the blocks you change apply).
+    pub areas: Option<Vec<String>>,
 }
 
 fn depth_of(nodes: &[TreeNode]) -> usize {
@@ -102,10 +104,13 @@ pub fn rdy_session(st: &mut McpState, p: SessionParams) -> Result<Value, RdyErro
             "pick another view name; only a reader session may use canon",
         ));
     }
+    // ib3: the subscription is written before the session is set, so a refused area leaves the
+    // earlier session as it was
+    let sub = rdy_engine::inbox::sub::subscribe(&*st.engine, &session, p.areas)?;
     st.view = view;
     st.session = Some(session);
     st.reported.clear();
-    let mut out = json!({ "view": st.view, "role": p.role });
+    let mut out = json!({ "view": st.view, "role": p.role, "areas": sub.areas });
     // R-P6: a config key rdy does not know is a warning, never silence
     let warnings = rdy_engine::config_levels::config_warnings_for_env(&st.engine.root());
     if !warnings.is_empty() {

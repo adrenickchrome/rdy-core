@@ -665,6 +665,7 @@ mod tests {
             run: None,
             role: "writer".into(),
             view: None,
+            areas: None,
         };
         let out = serde_json::to_value(server.run("rdy_session", Ok(p), tools::rdy_session).await)
             .unwrap()
@@ -957,6 +958,7 @@ mod mcp1_id_tests {
             run: None,
             role: "writer".into(),
             view: None,
+            areas: None,
         };
         let out = serde_json::to_value(server.run("rdy_session", Ok(p), tools::rdy_session).await)
             .unwrap()
@@ -971,6 +973,7 @@ mod mcp1_id_tests {
             run: Some("r".into()),
             role: "writer".into(),
             view: None,
+            areas: None,
         };
         let out = serde_json::to_value(server.run("rdy_session", Ok(p), tools::rdy_session).await)
             .unwrap();
@@ -991,6 +994,7 @@ mod mcp1_id_tests {
             run: Some("x".into()),
             role: "writer".into(),
             view: None,
+            areas: None,
         };
         let out =
             serde_json::to_value(server.run("rdy_session", Ok(bad), tools::rdy_session).await)
@@ -1005,6 +1009,7 @@ mod mcp1_id_tests {
             run: Some("x".into()),
             role: "writer".into(),
             view: None,
+            areas: None,
         };
         let out = serde_json::to_value(server.run("rdy_session", Ok(ok), tools::rdy_session).await)
             .unwrap();

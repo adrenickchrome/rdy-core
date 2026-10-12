@@ -16,6 +16,7 @@ mod engine_graph;
 mod engine_history;
 mod engine_impact;
 mod engine_inbox_inflight;
+mod engine_inbox_sub;
 mod engine_inflight;
 mod engine_intents;
 mod engine_lexicon;

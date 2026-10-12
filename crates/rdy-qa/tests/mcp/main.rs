@@ -8,6 +8,7 @@ mod mcp_compact;
 mod mcp_coverage;
 mod mcp_decision_home;
 mod mcp_history;
+mod mcp_inbox_session;
 mod mcp_instructions;
 mod mcp_intents;
 mod mcp_log;

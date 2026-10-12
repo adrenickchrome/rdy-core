@@ -8,7 +8,7 @@ use rmcp::{model::CallToolResult, tool, tool_router};
 #[tool_router(router = session_router, vis = "pub(crate)")]
 impl RdyServer {
     #[tool(
-        description = "Start a session: who you are (actor), your run, and role (reader, writer, reviewer). Required before other tools. Your writes go to a view named after your run, or work-<actor> without one; a reader may pass view \"canon\" to read canon by default."
+        description = "Start a session: who you are (actor), your run, and role (reader, writer, reviewer). Required before other tools. Your writes go to a view named after your run, or work-<actor> without one; a reader may pass view \"canon\" to read canon by default. areas: the pack areas whose landings reach your inbox (rdy_inbox); [] clears them."
     )]
     async fn rdy_session(&self, Parameters(p): Parameters<SessionParams>) -> CallToolResult {
         self.run("rdy_session", p, tools::rdy_session).await
