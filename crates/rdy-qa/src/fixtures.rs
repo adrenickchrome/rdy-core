@@ -132,6 +132,28 @@ pub fn land(r: &mut Rdy, view: &str) -> Result<String, RdyError> {
     r.land(&approver(), &p.id)
 }
 
+/// Lands `view` straight through the store, with no acceptance change: the way a store lands
+/// that holds no rule about order keys. A tie in an order key gets into canon this way by hand
+/// (an imported tree or an older store holds one the same way).
+pub fn land_with_a_tie(r: &mut Rdy, view: &str) {
+    let by = approver().provenance();
+    let store = r.store_mut();
+    let p = store
+        .propose(view, view, by.clone())
+        .unwrap_or_else(|e| panic!("propose {view}: {e}"));
+    store
+        .land_atomic(rdy_store::LandRequest {
+            proposal: p,
+            accept: None,
+            approver: by,
+            alt: None,
+            relay: None,
+            evidence: None,
+        })
+        .unwrap_or_else(|e| panic!("landing {view}: {e}"));
+    r.invalidate();
+}
+
 pub fn raw(
     id: &str,
     ty: &str,

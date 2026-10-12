@@ -27,7 +27,7 @@ fn children(r: &mut Rdy, scope: &Scope, parent: &str) -> Vec<(String, String)> {
 }
 
 #[test]
-fn ord1_append_after_a_tie_goes_after_the_whole_tie() {
+fn ord1_an_insert_after_a_tied_claim_lands_directly_after_it() {
     let (_d, mut r, s) = section_project();
     for (view, body) in [("va", "from a"), ("vb", "from b")] {
         write(
@@ -37,14 +37,16 @@ fn ord1_append_after_a_tie_goes_after_the_whole_tie() {
         )
         .unwrap();
     }
-    land(&mut r, "va").unwrap();
-    land(&mut r, "vb").unwrap();
+    // the two claims share an order key (made by hand: see `land_with_a_tie`)
+    land_with_a_tie(&mut r, "va");
+    land_with_a_tie(&mut r, "vb");
     let kids = children(&mut r, &Scope::Canon, &s);
     assert_eq!(
         kids[1].0, kids[2].0,
         "the two views produced tied keys: {kids:?}"
     );
-    // insert after the first twin (by (order, id)) — must not panic, must land after both twins
+    // insert after the first twin (by (order, id)): it lands directly after it, between the
+    // twins (an exact `after`, also under a tie; ruling of 2026-10-12 on D-8EH6E)
     let first_twin = {
         let p = rdy_model::BlockId::parse(&s).unwrap();
         r.read()
@@ -54,9 +56,18 @@ fn ord1_append_after_a_tie_goes_after_the_whole_tie() {
             .id
             .to_string()
     };
+    let twins: Vec<String> = children(&mut r, &Scope::Canon, &s)
+        .into_iter()
+        .map(|(_, body)| body)
+        .collect();
     write(&mut r, "vc", json!([{"op": "create", "type": "claim", "parent": s, "after": first_twin, "body": "after twin"}])).unwrap();
-    let kids = children(&mut r, &Scope::View("vc".into()), &s);
-    assert_eq!(kids.last().unwrap().1, "after twin", "{kids:?}");
+    let kids: Vec<String> = children(&mut r, &Scope::View("vc".into()), &s)
+        .into_iter()
+        .map(|(_, body)| body)
+        .collect();
+    let mut want = twins;
+    want.insert(2, "after twin".to_string());
+    assert_eq!(kids, want);
     check(&r, &Scope::View("vc".into())).unwrap();
 }
 

@@ -654,6 +654,10 @@ type Slot = (String, BlockId);
 /// between two siblings that share one, so the tied run is split: the siblings from `right` on
 /// move up, or the siblings up to `left` move down, whichever side has fewer siblings that can
 /// move (a frozen decision cannot). The block lands directly where it was asked.
+///
+/// Cost: this writes siblings the agent did not touch (`apply_rekeys`), so a concurrent edit of
+/// one of them in another view conflicts with the re-key when both land. A tie is a state that
+/// parallel appends under one parent leave, or that an import leaves.
 fn between(
     ov: &Overlay,
     s: &Sibs,
@@ -803,18 +807,46 @@ fn place(
     }
 }
 
-/// Gives the siblings `place` named their new keys, as updates in this write.
+/// The blocks whose only op in this write is an order re-key of `place`: block → the version
+/// the view held before the write. A later op on such a block replaces the re-key op and starts
+/// from the re-keyed block (`drop_rekey_op`).
+type RekeyOnly = BTreeMap<BlockId, Hash>;
+
+/// Gives the siblings `place` named their new keys.
+///
+/// A sibling that an earlier op of this write already changed takes its new key in that op: the
+/// op's block and the overlay change, and no op is added. Any other sibling gets an update of its
+/// own, which a later op on it replaces (`drop_rekey_op`); so a valid write is never refused
+/// because `place` moved a sibling the write also edits, in either order.
+#[allow(clippy::too_many_arguments)]
 fn apply_rekeys(
     ov: &mut Overlay,
     rekeys: Rekeys,
     touched: &mut BTreeSet<BlockId>,
+    rekey_only: &mut RekeyOnly,
     conflicts: &ViewConflicts<'_>,
     store: &rdy_store::Store,
     ops: &mut Vec<Op>,
     prior: &mut Vec<Prior>,
 ) -> Result<(), RdyError> {
     for (id, k) in rekeys {
-        let (base_hash, cur) = current_for_edit(ov, &id, &None, touched, conflicts, store, false)?;
+        if touched.contains(&id) {
+            let Some(mut block) = ov.get(&id).cloned() else {
+                continue;
+            };
+            block.order = k.clone();
+            let pending = ops.iter_mut().rev().find_map(|op| match op {
+                Op::Create { block } | Op::Update { block, .. } if block.id == id => Some(block),
+                _ => None,
+            });
+            if let Some(pending) = pending {
+                pending.order = k;
+            }
+            ov.set(id, Some(block));
+            continue;
+        }
+        let (base_hash, cur) =
+            current_for_edit(ov, &id, &None, touched, rekey_only, conflicts, store, false)?;
         let mut block: Block = cur.into_owned();
         // like a move, a doc from M1 stores the name readers already use for it
         if block.block_type == tree::DOC
@@ -826,6 +858,10 @@ fn apply_rekeys(
         block.order = k;
         prior.push((true, block.pins.clone())); // like a move: pins unchanged
         touched.insert(block.id.clone());
+        // a conflicted sibling resolves through its own rules: a later op on it stays refused
+        if !conflicts.list.iter().any(|c| c.block == block.id) {
+            rekey_only.insert(block.id.clone(), base_hash);
+        }
         ov.set(block.id.clone(), Some(block.clone()));
         ops.push(Op::Update {
             base: base_hash,
@@ -833,6 +869,27 @@ fn apply_rekeys(
         });
     }
     Ok(())
+}
+
+/// A later op of this write is about to change `id`, which only an order re-key had changed so
+/// far: the re-key op goes, and the later op (which starts from the re-keyed block and records the
+/// version the view held) carries the new key. Call it before the op's own `prior` and `ops` push.
+fn drop_rekey_op(
+    id: &BlockId,
+    rekey_only: &mut RekeyOnly,
+    ops: &mut Vec<Op>,
+    prior: &mut Vec<Prior>,
+) {
+    if rekey_only.remove(id).is_none() {
+        return;
+    }
+    if let Some(at) = ops
+        .iter()
+        .position(|op| matches!(op, Op::Update { block, .. } if block.id == *id))
+    {
+        ops.remove(at);
+        prior.remove(at);
+    }
 }
 
 /// The conflicts of the view a write goes to, and the changes it includes: an `E_FROZEN` hint
@@ -851,16 +908,21 @@ pub(crate) struct ViewConflicts<'a> {
 ///
 /// A frozen decision is refused, except that with `update` a clean one is returned: the update
 /// path refuses it once it has built the new block, unless only tracking fields changed (trk1).
+#[allow(clippy::too_many_arguments)]
 fn current_for_edit<'b>(
     ov: &'b Overlay,
     id: &BlockId,
     base: &Option<String>,
     touched: &BTreeSet<BlockId>,
+    rekey_only: &RekeyOnly,
     conflicts: &ViewConflicts<'_>,
     store: &rdy_store::Store,
     update: bool,
 ) -> Result<(Hash, Cow<'b, Block>), RdyError> {
-    if touched.contains(id) {
+    // a block that only an order re-key changed so far: the edit starts from the re-keyed block
+    // and names the version the view held, which the agent read
+    let rekeyed_from = rekey_only.get(id).copied();
+    if touched.contains(id) && rekeyed_from.is_none() {
         return Err(bad(
             format!("{id} is changed more than once in this write"),
             "combine the edits into one op",
@@ -878,7 +940,7 @@ fn current_for_edit<'b>(
             "check the id with rdy_read",
         )
     })?;
-    let cur_hash = cur.version_hash();
+    let cur_hash = rekeyed_from.unwrap_or_else(|| cur.version_hash());
     if let Some(b) = parse_base(base)?
         && b != cur_hash
     {
@@ -1458,6 +1520,7 @@ fn build_ops(
     let mut created = BTreeMap::new();
     let mut names = BTreeMap::new();
     let mut touched = BTreeSet::new();
+    let mut rekey_only = RekeyOnly::new();
     let mut prior: Vec<Prior> = vec![];
     let mut noop_rebalances: Vec<String> = vec![];
     let mut repinned: Vec<BlockId> = vec![];
@@ -1570,6 +1633,7 @@ fn build_ops(
                     &mut ov,
                     rekeys,
                     &mut touched,
+                    &mut rekey_only,
                     conflicts,
                     store,
                     &mut ops,
@@ -1624,7 +1688,7 @@ fn build_ops(
                 let id = res.id(&id)?;
                 refuse_key_auto(&fields, id.as_str())?;
                 let (base_hash, cur) =
-                    current_for_edit(&ov, &id, &b, &touched, conflicts, store, true)?;
+                    current_for_edit(&ov, &id, &b, &touched, &rekey_only, conflicts, store, true)?;
                 let cur: &Block = &cur;
                 let mut block = cur.clone();
                 // a doc from M1 stores the name readers already use for it on its first write
@@ -1695,12 +1759,14 @@ fn build_ops(
                     &mut ov,
                     rekeys,
                     &mut touched,
+                    &mut rekey_only,
                     conflicts,
                     store,
                     &mut ops,
                     &mut prior,
                 )?;
                 // the re-keyed siblings come first, so `prior` stays in step with `ops`
+                drop_rekey_op(&id, &mut rekey_only, &mut ops, &mut prior);
                 prior.push(own_prior);
                 touched.insert(id.clone());
                 ov.set(id, Some(block.clone()));
@@ -1718,7 +1784,7 @@ fn build_ops(
             } => {
                 let id = res.id(&id)?;
                 let (base_hash, cur) =
-                    current_for_edit(&ov, &id, &b, &touched, conflicts, store, false)?;
+                    current_for_edit(&ov, &id, &b, &touched, &rekey_only, conflicts, store, false)?;
                 let mut block = cur.into_owned();
                 if block.block_type == tree::DOC
                     && !block.fields.contains_key("name")
@@ -1732,11 +1798,13 @@ fn build_ops(
                     &mut ov,
                     rekeys,
                     &mut touched,
+                    &mut rekey_only,
                     conflicts,
                     store,
                     &mut ops,
                     &mut prior,
                 )?;
+                drop_rekey_op(&id, &mut rekey_only, &mut ops, &mut prior);
                 prior.push((true, block.pins.clone()));
                 touched.insert(id.clone());
                 ov.set(id, Some(block.clone()));
@@ -1748,7 +1816,7 @@ fn build_ops(
             OpInput::Delete { id, base: b } => {
                 let id = res.id(&id)?;
                 let (base_hash, cur) =
-                    current_for_edit(&ov, &id, &b, &touched, conflicts, store, false)?;
+                    current_for_edit(&ov, &id, &b, &touched, &rekey_only, conflicts, store, false)?;
                 let cur: &Block = &cur;
                 if cur.block_type == decision::QUESTION {
                     return Err(bad(
@@ -1769,6 +1837,7 @@ fn build_ops(
                 if ov.get(&id).and_then(keys::key_of).is_some() {
                     res.note_key(&id, None);
                 }
+                drop_rekey_op(&id, &mut rekey_only, &mut ops, &mut prior);
                 touched.insert(id.clone());
                 ov.set(id.clone(), None);
                 prior.push((false, BTreeMap::new()));
@@ -1844,8 +1913,16 @@ fn build_ops(
                     if decision::is_frozen(b) || b.order == k {
                         continue;
                     }
-                    let (base_hash, cur) =
-                        current_for_edit(&ov, &b.id, &None, &touched, conflicts, store, false)?;
+                    let (base_hash, cur) = current_for_edit(
+                        &ov,
+                        &b.id,
+                        &None,
+                        &touched,
+                        &rekey_only,
+                        conflicts,
+                        store,
+                        false,
+                    )?;
                     let cur: &Block = &cur;
                     let mut block = cur.clone();
                     // like a move, a doc from M1 stores the name readers already use for it
@@ -1875,7 +1952,7 @@ fn build_ops(
             } => {
                 let id = res.id(&id)?;
                 let (base_hash, cur) =
-                    current_for_edit(&ov, &id, &b, &touched, conflicts, store, false)?;
+                    current_for_edit(&ov, &id, &b, &touched, &rekey_only, conflicts, store, false)?;
                 let cur: &Block = &cur;
                 let cited: BTreeSet<BlockId> = cur
                     .ref_tokens()
@@ -1945,6 +2022,7 @@ fn build_ops(
                 }
                 res.check_rekey(&block, was, false)?;
                 repinned.extend(wanted);
+                drop_rekey_op(&id, &mut rekey_only, &mut ops, &mut prior);
                 prior.push((true, block.pins.clone())); // pins set here; the second pass keeps them
                 touched.insert(id.clone());
                 ov.set(id, Some(block.clone()));

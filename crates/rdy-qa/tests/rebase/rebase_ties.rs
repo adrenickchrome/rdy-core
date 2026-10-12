@@ -1,7 +1,8 @@
 //! sg2: order keys under rebase (spec §15.3 `rebase`, D-8EH6E). Views that append under one
 //! parent from one base can end with equal order keys once they land; a tie is harmless when the
 //! order it gives is stable and a later insert still lands where it was asked. Every state
-//! passes the invariant checker, on canon and on each view.
+//! passes the invariant checker, on canon and on each view. The ties that must hold are made on
+//! purpose with `land_with_a_tie`, so they stay a tie whatever the engine's landing does.
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed, TestRunner};
 use rdy_engine::*;
@@ -75,8 +76,8 @@ fn sg2_a_tie_then_an_insert_between_stays_valid() {
     let (_d, mut r, section, base) = seeded();
     let a = append(&mut r, "a", &section, "from a");
     let b = append(&mut r, "b", &section, "from b");
-    land(&mut r, "a").unwrap();
-    land(&mut r, "b").unwrap();
+    land_with_a_tie(&mut r, "a");
+    land_with_a_tie(&mut r, "b");
     let section_id = BlockId::parse(&section).unwrap();
     let order_of = |r: &Rdy| -> Vec<String> {
         let st = r.read();
@@ -120,9 +121,20 @@ fn sg2_a_tie_then_an_insert_between_stays_valid() {
     assert_eq!(order_of(&r), after, "the order is stable");
 }
 
+/// The order keys of the children of `section` in canon, in canon order.
+fn keys_of(r: &Rdy, section: &str) -> Vec<(String, String)> {
+    let section_id = BlockId::parse(section).unwrap();
+    let st = r.read();
+    let m = st.materialized(&canon()).unwrap();
+    m.children(Some(&section_id))
+        .iter()
+        .map(|c| (c.id.to_string(), c.order.clone()))
+        .collect()
+}
+
 /// A project whose section holds the seeded claim and `n` claims that tie on one order key
-/// (n views appended from the same base; all landed). Returns the section and the children in
-/// canon order.
+/// (n views appended from the same base; all landed by hand, see `land_with_a_tie`). Returns the
+/// section and the children in canon order.
 fn tied_run(n: usize) -> (tempfile::TempDir, Rdy, String, Vec<String>) {
     let (d, mut r, section, _base) = seeded();
     let names: Vec<String> = (0..n).map(|i| format!("t{i}")).collect();
@@ -130,9 +142,14 @@ fn tied_run(n: usize) -> (tempfile::TempDir, Rdy, String, Vec<String>) {
         append(&mut r, name, &section, &format!("from {name}"));
     }
     for name in &names {
-        land(&mut r, name).unwrap_or_else(|e| panic!("landing {name}: {e:?}"));
+        land_with_a_tie(&mut r, name);
     }
     let ids = children_of(&r, &section);
+    let keys = keys_of(&r, &section);
+    assert!(
+        keys[1..].iter().all(|(_, k)| *k == keys[1].1),
+        "the run is a tie: {keys:?}"
+    );
     (d, r, section, ids)
 }
 
@@ -317,4 +334,184 @@ fn sg2_rebase_preserves_relative_order_of_many_appends() {
     if let Err(e) = result {
         panic!("{e}");
     }
+}
+
+/// A write that edits a sibling of a tied run and asks for a gap inside the run (finding 1 of
+/// fix round 2). The insert re-keys the smaller side of the run; the sibling the write also
+/// edits takes the new key in the same op, in either order of the two ops.
+fn tied_pair_write(
+    ops: impl FnOnce(&[String], &str) -> serde_json::Value,
+) -> (tempfile::TempDir, Rdy, String, Vec<String>, String) {
+    let (d, mut r, section, ids) = tied_run(2);
+    assert_eq!(ids.len(), 3, "{ids:?}");
+    let w = write_as(&mut r, &as_agent("agent:c", "r"), "c", ops(&ids, &section))
+        .unwrap_or_else(|e| panic!("the write is valid: {e:?}"));
+    let new = w.created.get("$n").cloned().unwrap_or_default();
+    all_valid(&r, &["c"], "after the write in view c");
+    (d, r, section, ids, new)
+}
+
+fn view_children(r: &Rdy, view: &str, section: &str) -> Vec<String> {
+    let section_id = BlockId::parse(section).unwrap();
+    let st = r.read();
+    let m = st.materialized(&Scope::View(view.into())).unwrap();
+    m.children(Some(&section_id))
+        .iter()
+        .map(|c| c.id.to_string())
+        .collect()
+}
+
+#[test]
+fn sg2_an_update_of_a_tied_sibling_then_an_insert_into_the_tie() {
+    // [base, x, y], x and y tie; the up side of an insert after x is [y], which the write edited
+    let (_d, mut r, section, ids, new) = tied_pair_write(|ids, section| {
+        json!([
+            {"op": "update", "id": ids[2], "body": "y edited"},
+            {"op": "create", "type": "claim", "id": "$n", "parent": section, "after": ids[1], "body": "between"}
+        ])
+    });
+    let (x, y) = (&ids[1], &ids[2]);
+    assert_eq!(
+        view_children(&r, "c", &section),
+        vec![ids[0].clone(), x.clone(), new.clone(), y.clone()]
+    );
+    assert_eq!(body_of(&r, &Scope::View("c".into()), y), "y edited");
+    land(&mut r, "c").expect("c lands");
+    all_valid(&r, &[], "after the write landed");
+    assert_eq!(
+        children_of(&r, &section),
+        vec![ids[0].clone(), x.clone(), new, y.clone()]
+    );
+    assert_eq!(body_of(&r, &canon(), y), "y edited");
+}
+
+#[test]
+fn sg2_an_insert_into_the_tie_then_an_update_of_the_re_keyed_sibling() {
+    let (_d, mut r, section, ids) = tied_run(2);
+    let (x, y) = (ids[1].clone(), ids[2].clone());
+    let read = version_of(&r, &canon(), &y);
+    let w = write_as(
+        &mut r,
+        &as_agent("agent:c", "r"),
+        "c",
+        json!([
+            {"op": "create", "type": "claim", "id": "$n", "parent": section, "after": x, "body": "between"},
+            {"op": "update", "id": y, "base": read, "body": "y edited"}
+        ]),
+    )
+    .expect("the update of the sibling the insert re-keyed is valid");
+    let new = w.created["$n"].clone();
+    all_valid(&r, &["c"], "after the write in view c");
+    assert_eq!(
+        view_children(&r, "c", &section),
+        vec![ids[0].clone(), x.clone(), new.clone(), y.clone()]
+    );
+    assert_eq!(body_of(&r, &Scope::View("c".into()), &y), "y edited");
+    land(&mut r, "c").expect("c lands");
+    all_valid(&r, &[], "after the write landed");
+    assert_eq!(
+        children_of(&r, &section),
+        vec![ids[0].clone(), x, new, y.clone()]
+    );
+    assert_eq!(body_of(&r, &canon(), &y), "y edited");
+}
+
+#[test]
+fn sg2_an_insert_into_the_tie_then_a_delete_of_the_re_keyed_sibling() {
+    let (_d, mut r, section, ids) = tied_run(2);
+    let (x, y) = (ids[1].clone(), ids[2].clone());
+    let w = write_as(
+        &mut r,
+        &as_agent("agent:c", "r"),
+        "c",
+        json!([
+            {"op": "create", "type": "claim", "id": "$n", "parent": section, "after": x, "body": "between"},
+            {"op": "delete", "id": y}
+        ]),
+    )
+    .expect("the delete of the sibling the insert re-keyed is valid");
+    let new = w.created["$n"].clone();
+    all_valid(&r, &["c"], "after the write in view c");
+    assert_eq!(
+        view_children(&r, "c", &section),
+        vec![ids[0].clone(), x.clone(), new.clone()]
+    );
+    land(&mut r, "c").expect("c lands");
+    all_valid(&r, &[], "after the write landed");
+    assert_eq!(children_of(&r, &section), vec![ids[0].clone(), x, new]);
+}
+
+#[test]
+fn sg2_an_insert_into_the_tie_after_both_tied_siblings_were_edited() {
+    // both sides of the gap are touched: nothing is left to refuse, since the re-key folds into
+    // the op that already changes the block
+    let (_d, r, section, ids, new) = tied_pair_write(|ids, section| {
+        json!([
+            {"op": "update", "id": ids[1], "body": "x edited"},
+            {"op": "update", "id": ids[2], "body": "y edited"},
+            {"op": "create", "type": "claim", "id": "$n", "parent": section, "after": ids[1], "body": "between"}
+        ])
+    });
+    assert_eq!(
+        view_children(&r, "c", &section),
+        vec![ids[0].clone(), ids[1].clone(), new, ids[2].clone()]
+    );
+    assert_eq!(body_of(&r, &Scope::View("c".into()), &ids[1]), "x edited");
+    assert_eq!(body_of(&r, &Scope::View("c".into()), &ids[2]), "y edited");
+}
+
+#[test]
+fn sg2_two_inserts_into_one_tie_in_one_write() {
+    // the second insert re-keys a sibling the first one already re-keyed
+    let (_d, r, section, ids, new) = tied_pair_write(|ids, section| {
+        json!([
+            {"op": "create", "type": "claim", "id": "$n", "parent": section, "after": ids[1], "body": "first"},
+            {"op": "create", "type": "claim", "id": "$m", "parent": section, "after": ids[1], "body": "second"}
+        ])
+    });
+    let kids = view_children(&r, "c", &section);
+    assert_eq!(kids.len(), 5, "{kids:?}");
+    assert_eq!(kids[0], ids[0]);
+    assert_eq!(kids[1], ids[1]);
+    assert_eq!(kids[4], ids[2]);
+    assert!(kids.contains(&new));
+}
+
+#[test]
+fn sg2_an_insert_into_a_tie_conflicts_with_a_concurrent_edit_of_the_re_keyed_sibling() {
+    // The fallback for a tie already in a state (an imported tree, a store from before the
+    // landing re-key). The insert re-keys the smaller side of the run, which writes the sibling
+    // the agent did not touch; another view's edit of it then conflicts. This test documents
+    // that cost: it is why ties are stopped at landing, and why the fallback stays rare.
+    let (_d, mut r, section, ids) = tied_run(2);
+    let (x, y) = (ids[1].clone(), ids[2].clone());
+    write_as(
+        &mut r,
+        &as_agent("agent:c", "r"),
+        "c",
+        json!([{"op": "create", "type": "claim", "parent": section, "after": x, "body": "between"}]),
+    )
+    .unwrap();
+    let read = version_of(&r, &canon(), &y);
+    write_as(
+        &mut r,
+        &as_agent("agent:d", "r"),
+        "d",
+        json!([{"op": "update", "id": y, "base": read, "body": "y edited in d"}]),
+    )
+    .unwrap();
+    land(&mut r, "c").expect("c lands");
+    let conflicts = r.read().conflicts(&Scope::View("d".into())).unwrap();
+    assert_eq!(
+        conflicts
+            .iter()
+            .map(|c| c.block.to_string())
+            .collect::<Vec<_>>(),
+        vec![y.clone()],
+        "d's edit of {y} conflicts with c's re-key of it"
+    );
+    assert!(
+        land(&mut r, "d").is_err(),
+        "d cannot land until the conflict on {y} is resolved"
+    );
 }
