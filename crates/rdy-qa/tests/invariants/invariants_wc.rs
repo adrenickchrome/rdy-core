@@ -3,7 +3,11 @@
 //! by hand on purpose.
 use rdy_engine::Rdy;
 use rdy_qa::wc::*;
-use rdy_qa::wc_check::matches_export;
+use rdy_qa::wc_check::{
+    STORE_ONLY_FIELDS, STORE_ONLY_LINK_KINDS, STORE_ONLY_TARGET_TYPES, SUPPORTING_TYPES,
+    matches_export,
+};
+use rdy_schema::{PackSet, TypeClass};
 use serde_json::json;
 
 #[test]
@@ -90,4 +94,37 @@ fn sg2_checkout_then_commit_with_no_edits_is_a_no_op() {
     if let Err(v) = matches_export(&s, "work", s.dir.path()) {
         panic!("the checkout differs from the export: {v:?}");
     }
+}
+
+/// The oracle holds its own closed lists, from the spec's metadata split (working-copy page,
+/// "The metadata split") and not from the product, so a field or kind the product wrongly marks
+/// store-only fails here instead of vanishing on both sides of the comparison.
+#[test]
+fn sg2_the_oracles_store_only_lists_equal_the_products() {
+    assert_eq!(
+        STORE_ONLY_FIELDS,
+        rdy_schema::STORE_ONLY_FIELDS,
+        "store-only fields"
+    );
+    assert_eq!(
+        STORE_ONLY_LINK_KINDS,
+        rdy_schema::STORE_ONLY_LINK_KINDS,
+        "store-only link kinds"
+    );
+    assert_eq!(
+        STORE_ONLY_TARGET_TYPES,
+        rdy_schema::STORE_ONLY_TARGET_TYPES,
+        "link target types that are store-only"
+    );
+    let pack = PackSet::with_builtin().resolve("rdy-standard").unwrap();
+    let mut supporting: Vec<&str> = pack
+        .block_types
+        .keys()
+        .filter(|t| pack.class_of(t) == TypeClass::Supporting)
+        .map(String::as_str)
+        .collect();
+    supporting.sort_unstable();
+    let mut want = SUPPORTING_TYPES.to_vec();
+    want.sort_unstable();
+    assert_eq!(supporting, want, "supporting block types");
 }

@@ -106,13 +106,148 @@ fn sg2_a_tie_then_an_insert_between_stays_valid() {
     all_valid(&r, &[], "after the insert landed");
     let after = order_of(&r);
     assert_eq!(after.len(), 4, "{after:?}");
-    // the insert is after the claim it names; the claims that were there keep their order
+    // the insert is directly after the claim it names (an exact `after`, also under a tie: the
+    // ruling of 2026-10-12 on D-8EH6E); the claims that were there keep their order
     let at = after.iter().position(|id| *id == between).unwrap();
     let place = after.iter().position(|id| *id == first_tied).unwrap();
-    assert!(at > place, "the insert follows {first_tied}: {after:?}");
+    assert_eq!(
+        at,
+        place + 1,
+        "the insert lands directly after {first_tied}, not after the whole tie: {after:?}"
+    );
     let others: Vec<String> = after.iter().filter(|id| **id != between).cloned().collect();
     assert_eq!(others, before, "nothing else moved (base {base})");
     assert_eq!(order_of(&r), after, "the order is stable");
+}
+
+/// A project whose section holds the seeded claim and `n` claims that tie on one order key
+/// (n views appended from the same base; all landed). Returns the section and the children in
+/// canon order.
+fn tied_run(n: usize) -> (tempfile::TempDir, Rdy, String, Vec<String>) {
+    let (d, mut r, section, _base) = seeded();
+    let names: Vec<String> = (0..n).map(|i| format!("t{i}")).collect();
+    for name in &names {
+        append(&mut r, name, &section, &format!("from {name}"));
+    }
+    for name in &names {
+        land(&mut r, name).unwrap_or_else(|e| panic!("landing {name}: {e:?}"));
+    }
+    let ids = children_of(&r, &section);
+    (d, r, section, ids)
+}
+
+fn children_of(r: &Rdy, section: &str) -> Vec<String> {
+    let section_id = BlockId::parse(section).unwrap();
+    let st = r.read();
+    let m = st.materialized(&canon()).unwrap();
+    m.children(Some(&section_id))
+        .iter()
+        .map(|c| c.id.to_string())
+        .collect()
+}
+
+/// Inserts a claim in view "c" with `anchor_op` (`after` or `before`) naming `anchor`, lands
+/// it, and returns the new id.
+fn insert_at(r: &mut Rdy, section: &str, anchor_op: &str, anchor: &str) -> String {
+    let w = write_as(
+        r,
+        &as_agent("agent:c", "r"),
+        "c",
+        json!([{"op": "create", "type": "claim", "id": "$n", "parent": section, anchor_op: anchor, "body": "placed"}]),
+    )
+    .unwrap_or_else(|e| panic!("insert {anchor_op} {anchor}: {e:?}"));
+    let id = w.created["$n"].clone();
+    all_valid(r, &["c"], "after the insert in view c");
+    land(r, "c").expect("c lands");
+    all_valid(r, &[], "after the insert landed");
+    id
+}
+
+#[test]
+fn sg2_after_and_before_are_exact_anywhere_in_a_tied_run() {
+    // run of 3 tied claims after the seeded one: every position, both directions
+    for pos in 1..=3 {
+        for dir in ["after", "before"] {
+            let (_d, mut r, section, ids) = tied_run(3);
+            assert_eq!(ids.len(), 4, "{ids:?}");
+            let anchor = ids[pos].clone();
+            let new = insert_at(&mut r, &section, dir, &anchor);
+            let now = children_of(&r, &section);
+            let mut want = ids.clone();
+            let at = if dir == "after" { pos + 1 } else { pos };
+            want.insert(at, new);
+            assert_eq!(now, want, "{dir} {anchor} (position {pos}) in a tied run");
+            assert_eq!(children_of(&r, &section), want, "the order is stable");
+        }
+    }
+}
+
+#[test]
+fn sg2_a_move_after_a_tied_claim_lands_directly_after_it() {
+    // (moved index, anchor index) in the canon order [base, x, y, z] where x, y, z tie
+    for (moved, anchor) in [(0usize, 2usize), (3, 1), (1, 3), (2, 1)] {
+        let (_d, mut r, section, ids) = tied_run(3);
+        write_as(
+            &mut r,
+            &as_agent("agent:c", "r"),
+            "c",
+            json!([{"op": "move", "id": ids[moved], "parent": section, "after": ids[anchor]}]),
+        )
+        .unwrap_or_else(|e| panic!("move {moved} after {anchor}: {e:?}"));
+        all_valid(&r, &["c"], "after the move in view c");
+        land(&mut r, "c").expect("c lands");
+        all_valid(&r, &[], "after the move landed");
+        let mut want = ids.clone();
+        let m = want.remove(moved);
+        let at = want.iter().position(|id| *id == ids[anchor]).unwrap() + 1;
+        want.insert(at, m);
+        assert_eq!(
+            children_of(&r, &section),
+            want,
+            "move {moved} after {anchor}"
+        );
+    }
+}
+
+#[test]
+fn sg2_order_run_gives_short_increasing_keys_strictly_between_two_bounds() {
+    use rdy_model::{MAX_ORDER_KEY_LEN, OrderError, order_run, valid_order_key};
+    let bounds: [(Option<&str>, Option<&str>); 6] = [
+        (Some("a1"), Some("a2")),
+        (Some("a1"), Some("a1V")),
+        (Some("a9"), Some("b01")),
+        (None, Some("a1")),
+        (Some("a1"), None),
+        (None, None),
+    ];
+    for (lo, hi) in bounds {
+        for n in [0usize, 1, 2, 3, 7] {
+            let keys = order_run(lo, hi, n).unwrap_or_else(|e| panic!("{lo:?}..{hi:?} x{n}: {e}"));
+            assert_eq!(keys.len(), n, "{lo:?}..{hi:?}");
+            let mut prev: Option<String> = lo.map(|s| s.to_string());
+            for k in &keys {
+                assert!(valid_order_key(k), "{k:?} is not a valid key");
+                assert!(k.len() <= MAX_ORDER_KEY_LEN);
+                if let Some(p) = &prev {
+                    assert!(p < k, "{p:?} < {k:?} ({lo:?}..{hi:?} x{n})");
+                }
+                prev = Some(k.clone());
+            }
+            if let (Some(last), Some(hi)) = (keys.last(), hi) {
+                assert!(last.as_str() < hi, "{last:?} < {hi:?}");
+            }
+        }
+    }
+    // no room between equal or reversed bounds: an error, never a panic
+    assert!(matches!(
+        order_run(Some("a1"), Some("a1"), 2),
+        Err(OrderError::NoRoom(..))
+    ));
+    assert!(order_run(Some("a2"), Some("a1"), 1).is_err());
+    assert!(matches!(
+        order_run(Some("a1\u{0}"), None, 1),
+        Err(OrderError::Malformed(_))
+    ));
 }
 
 #[test]

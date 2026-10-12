@@ -5,18 +5,38 @@
 //! module is the QA gate's; the product's `rdy check` lint of a working copy is
 //! `rdy_engine::wc_check`.
 //!
-//! The split is applied here to the parsed export, from the pack and the split's public
-//! constants, and not by calling the checkout's projection: a projection checked against itself
-//! proves nothing.
+//! Invariant 7 reads: the working copy equals the export of its view *less the metadata split*.
+//! A byte-for-byte compare with the whole export fails by design, because the export holds
+//! supporting blocks, pins and rdy's own fields that the checkout never shows. The orchestrator
+//! accepted this reading on 2026-10-12 (task 2 ruling).
+//!
+//! The split is applied here to the parsed export, and not by calling the checkout's projection:
+//! a projection checked against itself proves nothing. The lists of what is store-only are this
+//! module's own, written from the spec's "The metadata split" (the working-copy page) and the
+//! M2f-b plan, and not taken from the product's `STORE_ONLY_*` constants. A test in
+//! `invariants_wc.rs` pins the product's constants to these, so a field or link kind the product
+//! wrongly marks store-only fails there instead of vanishing on both sides of the comparison.
 use crate::daemon::Served;
 use crate::invariants::Violation;
-use rdy_schema::{
-    Pack, PackSet, STORE_ONLY_FIELDS, STORE_ONLY_LINK_KINDS, STORE_ONLY_TARGET_TYPES, TypeClass,
-};
+use rdy_schema::{Pack, PackSet};
 use rdy_store::Store;
 use serde_yaml_ng::{Mapping, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+
+/// Fields rdy sets and keeps in the store: a working-copy file never shows them.
+pub const STORE_ONLY_FIELDS: &[&str] = &["key_auto"];
+
+/// Link kinds that live only in the store (justification links).
+pub const STORE_ONLY_LINK_KINDS: &[&str] = &["decided_by", "implements"];
+
+/// A link of any other kind whose target has one of these types is store-only too.
+pub const STORE_ONLY_TARGET_TYPES: &[&str] = &["decision", "question"];
+
+/// The supporting block types of the standard pack: never written into the tree, with their
+/// subtrees. The spec also lists reviews, tensions and intents as supporting; those are store
+/// records and not block types, so no export entry has them.
+pub const SUPPORTING_TYPES: &[&str] = &["decision", "question", "rationale"];
 
 fn violation(rule: &'static str, detail: impl Into<String>) -> Violation {
     Violation {
@@ -97,7 +117,7 @@ fn type_of(id: &str, types: &BTreeMap<String, String>, pack: &Pack) -> Option<St
     })
 }
 
-/// Takes the store-only parts out of one exported entry. `None` for an entry the working copy
+/// Takes the store-only parts (the lists above) out of one exported entry. `None` for an entry the working copy
 /// does not show: a supporting block, or anything under one.
 fn split_entry(
     mut e: Value,
@@ -107,7 +127,7 @@ fn split_entry(
 ) -> Option<Value> {
     let id = text(&e, "id")?;
     let parent_hidden = text(&e, "parent").is_some_and(|p| hidden.contains(&p));
-    let supporting = text(&e, "type").is_some_and(|t| pack.class_of(&t) == TypeClass::Supporting);
+    let supporting = text(&e, "type").is_some_and(|t| SUPPORTING_TYPES.contains(&t.as_str()));
     if parent_hidden || supporting {
         hidden.insert(id);
         return None;
@@ -170,7 +190,7 @@ fn shown(file: &str, types: &BTreeMap<String, String>, pack: &Pack) -> Option<St
 }
 
 /// Runs `rdy export --scope view:<view> --out <tmp>` as the person and compares it with
-/// `checkout`: every file under `<tmp>/docs/`, less the store-only parts, with the same path
+/// `checkout`: every file under `<tmp>/docs/`, less the metadata split, with the same path
 /// under `checkout` (bytes equal; rule `wc_tree`), and the content hashes under `<tmp>/blobs/` with those under
 /// `checkout/_blobs/` (rule `wc_blobs`). A failed export is one `wc_export` violation.
 pub fn matches_export(s: &Served, view: &str, checkout: &Path) -> Result<(), Vec<Violation>> {

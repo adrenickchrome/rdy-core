@@ -641,11 +641,88 @@ fn parse_base(s: &Option<String>) -> Result<Option<Hash>, RdyError> {
         .transpose()
 }
 
+/// Siblings that must get new keys so a block fits where it was asked: `(id, new key)`.
+type Rekeys = Vec<(BlockId, String)>;
+
+/// A sibling in order: its key and id.
+type Slot = (String, BlockId);
+
+/// The order key for a block that goes between two neighbours in (key, id) order, `left` before
+/// `right` (either may be missing at the ends), and the siblings that must be re-keyed for it.
+///
+/// Siblings created in parallel views may share a key (D-8EH6E). A key cannot go strictly
+/// between two siblings that share one, so the tied run is split: the siblings from `right` on
+/// move up, or the siblings up to `left` move down, whichever side has fewer siblings that can
+/// move (a frozen decision cannot). The block lands directly where it was asked.
+fn between(
+    ov: &Overlay,
+    s: &Sibs,
+    me: Option<&BlockId>,
+    left: Option<&Slot>,
+    right: Option<&Slot>,
+    parent: Option<&BlockId>,
+) -> Result<(String, Rekeys), RdyError> {
+    let (l, r) = match (left, right) {
+        (Some(l), Some(r)) if l.0 == r.0 => (l, r),
+        _ => {
+            let k = order_between(left.map(|l| l.0.as_str()), right.map(|r| r.0.as_str()))
+                .map_err(|e| order_error(e, parent))?;
+            return Ok((k, vec![]));
+        }
+    };
+    // the siblings but the block being moved: the tied run, and the keys just outside it
+    let others: Vec<&Slot> = s.order.iter().filter(|(_, id)| Some(id) != me).collect();
+    let (down, up): (Vec<&BlockId>, Vec<&BlockId>) = others
+        .iter()
+        .filter(|(o, _)| *o == l.0)
+        .map(|(_, id)| id)
+        .partition(|id| **id <= l.1);
+    let movable = |ids: &[&BlockId]| {
+        ids.iter()
+            .all(|id| ov.get(id).is_some_and(|b| !decision::is_frozen(b)))
+    };
+    let hi = others
+        .iter()
+        .find(|(o, _)| *o > l.0)
+        .map(|(o, _)| o.as_str());
+    let lo = others
+        .iter()
+        .rev()
+        .find(|(o, _)| *o < l.0)
+        .map(|(o, _)| o.as_str());
+    let can_up = movable(&up);
+    let can_down = movable(&down);
+    if can_up && (up.len() <= down.len() || !can_down) {
+        // the new block, then the siblings that were after it, above the run's key
+        let mut keys = rdy_model::order_run(Some(&l.0), hi, up.len() + 1)
+            .map_err(|e| order_error(e, parent))?
+            .into_iter();
+        let new = keys.next().expect("one key more than the siblings");
+        Ok((new, up.into_iter().cloned().zip(keys).collect()))
+    } else if can_down {
+        // the siblings up to the anchor, then the new block, below the run's key
+        let mut keys = rdy_model::order_run(lo, Some(&l.0), down.len() + 1)
+            .map_err(|e| order_error(e, parent))?;
+        let new = keys.pop().expect("one key more than the siblings");
+        Ok((new, down.into_iter().cloned().zip(keys).collect()))
+    } else {
+        Err(RdyError::new(
+            E_ORDER_DEPTH,
+            format!(
+                "cannot put a block between {} and {}: they share the order key {:?} and frozen decisions stand on both sides of the gap",
+                l.1, r.1, l.0
+            ),
+            "append the block, or place it after a sibling with its own order key",
+        ))
+    }
+}
+
 fn order_after(
     ov: &Overlay,
     parent: Option<&BlockId>,
     after: Option<&BlockId>,
-) -> Result<String, RdyError> {
+    me: Option<&BlockId>,
+) -> Result<(String, Rekeys), RdyError> {
     let parent_name = parent
         .map(|p| p.to_string())
         .unwrap_or_else(|| "the document root".to_string());
@@ -663,26 +740,27 @@ fn order_after(
     let key = key.transpose()?;
     ov.with_sibs(parent, |s| match &key {
         None => order_between(s.order.last().map(|(o, _)| o.as_str()), None)
+            .map(|k| (k, vec![]))
             .map_err(|e| order_error(e, parent)),
         Some(k) => {
-            // siblings created in parallel views may share a key: insert after the whole tie
+            // the sibling right behind the anchor: it may share the anchor's key
             let next = s
                 .order
                 .range((Bound::Excluded(k), Bound::Unbounded))
-                .find(|(o, _)| *o != k.0);
-            order_between(Some(&k.0), next.map(|(o, _)| o.as_str()))
-                .map_err(|e| order_error(e, parent))
+                .find(|(_, id)| Some(id) != me);
+            between(ov, s, me, Some(k), next, parent)
         }
     })
 }
 
 /// first1: a key just before sibling `before`. Siblings created in parallel views may share a
-/// key, so the new block goes before the whole tie.
+/// key; the new block still goes directly before `before`.
 fn order_before(
     ov: &Overlay,
     parent: Option<&BlockId>,
     before: &BlockId,
-) -> Result<String, RdyError> {
+    me: Option<&BlockId>,
+) -> Result<(String, Rekeys), RdyError> {
     let parent_name = parent
         .map(|p| p.to_string())
         .unwrap_or_else(|| "the document root".to_string());
@@ -701,27 +779,60 @@ fn order_before(
             .order
             .range((Bound::Unbounded, Bound::Excluded(&anchor)))
             .rev()
-            .find(|(o, _)| *o != anchor.0);
-        order_between(prev.map(|(o, _)| o.as_str()), Some(&anchor.0))
-            .map_err(|e| order_error(e, parent))
+            .find(|(_, id)| Some(id) != me);
+        between(ov, s, me, prev, Some(&anchor), parent)
     })
 }
 
-/// The order key for a block placed after or before a sibling, or appended.
+/// The order key for a block placed after or before a sibling, or appended, and the siblings
+/// that need new keys so it fits there. `me` is the block being moved, if any.
 fn place(
     ov: &Overlay,
     parent: Option<&BlockId>,
     after: Option<&BlockId>,
     before: Option<&BlockId>,
-) -> Result<String, RdyError> {
+    me: Option<&BlockId>,
+) -> Result<(String, Rekeys), RdyError> {
     match (after, before) {
         (Some(_), Some(_)) => Err(bad(
             "give after or before, not both",
             "after puts the block behind a sibling, before ahead of one",
         )),
-        (None, Some(b)) => order_before(ov, parent, b),
-        (after, None) => order_after(ov, parent, after),
+        (None, Some(b)) => order_before(ov, parent, b, me),
+        (after, None) => order_after(ov, parent, after, me),
     }
+}
+
+/// Gives the siblings `place` named their new keys, as updates in this write.
+fn apply_rekeys(
+    ov: &mut Overlay,
+    rekeys: Rekeys,
+    touched: &mut BTreeSet<BlockId>,
+    conflicts: &ViewConflicts<'_>,
+    store: &rdy_store::Store,
+    ops: &mut Vec<Op>,
+    prior: &mut Vec<Prior>,
+) -> Result<(), RdyError> {
+    for (id, k) in rekeys {
+        let (base_hash, cur) = current_for_edit(ov, &id, &None, touched, conflicts, store, false)?;
+        let mut block: Block = cur.into_owned();
+        // like a move, a doc from M1 stores the name readers already use for it
+        if block.block_type == tree::DOC
+            && !block.fields.contains_key("name")
+            && let Some(n) = ov.base.name_of(&block.id)
+        {
+            block.fields.insert("name".into(), FieldValue::Str(n));
+        }
+        block.order = k;
+        prior.push((true, block.pins.clone())); // like a move: pins unchanged
+        touched.insert(block.id.clone());
+        ov.set(block.id.clone(), Some(block.clone()));
+        ops.push(Op::Update {
+            base: base_hash,
+            block,
+        });
+    }
+    Ok(())
 }
 
 /// The conflicts of the view a write goes to, and the changes it includes: an `E_FROZEN` hint
@@ -1231,7 +1342,7 @@ fn retype(pack: &Pack, ov: &Overlay, block: &mut Block, t: String) -> Result<(),
 
 /// Places `block` (the edit of `id`) under `parent`, after or before a sibling (none: appended;
 /// no parent: the top level), with a move's checks in a move's order. Returns whether its parent
-/// or order key changed.
+/// or order key changed, and the siblings that need new keys for it to fit (see `between`).
 #[allow(clippy::too_many_arguments)]
 fn relocate(
     ov: &Overlay,
@@ -1242,7 +1353,7 @@ fn relocate(
     after: Option<String>,
     before: Option<String>,
     i: usize,
-) -> Result<bool, RdyError> {
+) -> Result<(bool, Rekeys), RdyError> {
     let parent = parent.as_deref().map(|p| res.id(p)).transpose()?;
     let after = after.as_deref().map(|a| res.id(a)).transpose()?;
     let before = before.as_deref().map(|b| res.id(b)).transpose()?;
@@ -1284,7 +1395,14 @@ fn relocate(
     }
     let was = (block.parent.take(), std::mem::take(&mut block.order));
     block.parent = parent;
-    block.order = place(ov, block.parent.as_ref(), after.as_ref(), before.as_ref())?;
+    let (order, rekeys) = place(
+        ov,
+        block.parent.as_ref(),
+        after.as_ref(),
+        before.as_ref(),
+        Some(id),
+    )?;
+    block.order = order;
     check_name(ov, block, i, Some("move"))?;
     res.check_rekey(block, ov.get(id), false)?;
     if block.block_type == tree::FOLDER {
@@ -1292,7 +1410,7 @@ fn relocate(
     } else {
         check_depth(ov, block, 0)?;
     }
-    Ok(block.parent != was.0 || block.order != was.1)
+    Ok((block.parent != was.0 || block.order != was.1, rekeys))
 }
 
 /// rkey1: `key_auto` marks a key rdy chose (a create without a key, an import, `rdy keys
@@ -1446,7 +1564,17 @@ fn build_ops(
                 }
                 let after = after.as_deref().map(|a| res.id(a)).transpose()?;
                 let before = before.as_deref().map(|b| res.id(b)).transpose()?;
-                let order = place(&ov, parent.as_ref(), after.as_ref(), before.as_ref())?;
+                let (order, rekeys) =
+                    place(&ov, parent.as_ref(), after.as_ref(), before.as_ref(), None)?;
+                apply_rekeys(
+                    &mut ov,
+                    rekeys,
+                    &mut touched,
+                    conflicts,
+                    store,
+                    &mut ops,
+                    &mut prior,
+                )?;
                 let body = res.text(&body, RefMode::for_body(&block_type))?;
                 refuse_key_auto(&fields, &format!("op {i}"))?;
                 let sets_key = fields.contains_key("key");
@@ -1543,10 +1671,12 @@ fn build_ops(
                     }
                 }
                 let moves = move_to.is_some();
+                let mut rekeys = Rekeys::new();
                 if let Some(m) = move_to {
-                    relocate(
+                    rekeys = relocate(
                         &ov, &mut res, &mut block, &id, m.parent, m.after, m.before, i,
-                    )?;
+                    )?
+                    .1;
                 }
                 // after the move: a frozen decision that moves is not a tracking-only edit
                 if check_tracking_edit(&id, cur, &block, store.tracking(), justification)? {
@@ -1554,13 +1684,24 @@ fn build_ops(
                 }
                 check_decided_at(session, &block, Some(cur))?;
                 // a move-only update keeps the pins, as a move does
-                prior.push((moves && !edits, cur.pins.clone()));
+                let own_prior = (moves && !edits, cur.pins.clone());
                 // names and keys against what the view held, not the side an edit starts from
                 let was = ov.get(&id);
                 if block.field_str("name") != was.and_then(|w| w.field_str("name")) {
                     check_name(&ov, &block, i, None)?;
                 }
                 res.check_rekey(&block, was, sets_key)?;
+                apply_rekeys(
+                    &mut ov,
+                    rekeys,
+                    &mut touched,
+                    conflicts,
+                    store,
+                    &mut ops,
+                    &mut prior,
+                )?;
+                // the re-keyed siblings come first, so `prior` stays in step with `ops`
+                prior.push(own_prior);
                 touched.insert(id.clone());
                 ov.set(id, Some(block.clone()));
                 ops.push(Op::Update {
@@ -1585,7 +1726,17 @@ fn build_ops(
                 {
                     block.fields.insert("name".into(), FieldValue::Str(n));
                 }
-                relocate(&ov, &mut res, &mut block, &id, parent, after, before, i)?;
+                let (_, rekeys) =
+                    relocate(&ov, &mut res, &mut block, &id, parent, after, before, i)?;
+                apply_rekeys(
+                    &mut ov,
+                    rekeys,
+                    &mut touched,
+                    conflicts,
+                    store,
+                    &mut ops,
+                    &mut prior,
+                )?;
                 prior.push((true, block.pins.clone()));
                 touched.insert(id.clone());
                 ov.set(id, Some(block.clone()));
